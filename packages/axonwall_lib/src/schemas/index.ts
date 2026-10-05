@@ -146,6 +146,63 @@ export const SystemSettingsSchema = z.object({
   }),
 });
 
+export const DhcpStaticMappingSchema = z.object({
+  id: z.string().uuid().optional(),
+  mac: z.string().refine(isValidMAC, { message: 'Invalid MAC address' }),
+  ip: z.string().refine(isValidIPv4, { message: 'Invalid IPv4 address' }),
+  hostname: z.string().optional(),
+  description: z.string().max(255).default(''),
+});
+export type DhcpStaticMapping = z.infer<typeof DhcpStaticMappingSchema>;
+
+export const DhcpSubnetSchema = z.object({
+  id: z.string().uuid().optional(),
+  interface: z.string().min(1),
+  subnet: z.string().refine(isValidCIDR, { message: 'Invalid subnet CIDR' }),
+  poolStart: z.string().refine(isValidIPv4, { message: 'Invalid pool start IPv4' }),
+  poolEnd: z.string().refine(isValidIPv4, { message: 'Invalid pool end IPv4' }),
+  routers: z.array(z.string()).default([]),
+  dnsServers: z.array(z.string()).default([]),
+  staticMappings: z.array(DhcpStaticMappingSchema).default([]),
+  enabled: z.boolean().default(true),
+});
+export type DhcpSubnet = z.infer<typeof DhcpSubnetSchema>;
+
+export const DhcpConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  subnets: z.array(DhcpSubnetSchema).default([]),
+});
+export type DhcpConfig = z.infer<typeof DhcpConfigSchema>;
+
+export const DnsHostOverrideSchema = z.object({
+  id: z.string().uuid().optional(),
+  hostname: z.string().min(1),
+  domain: z.string().min(1),
+  ip: z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: 'Invalid IP address' }),
+  description: z.string().max(255).default(''),
+});
+export type DnsHostOverride = z.infer<typeof DnsHostOverrideSchema>;
+
+export const DnsConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  listenPort: z.number().int().min(1).max(65535).default(53),
+  dnssec: z.boolean().default(true),
+  dotEnabled: z.boolean().default(true),
+  dotUpstreams: z.array(z.string()).default(['1.1.1.1@853#cloudflare-dns.com', '9.9.9.9@853#dns.quad9.net']),
+  hostOverrides: z.array(DnsHostOverrideSchema).default([]),
+});
+export type DnsConfig = z.infer<typeof DnsConfigSchema>;
+
+export const StaticRouteSchema = z.object({
+  id: z.string().uuid().optional(),
+  network: z.string().refine(isValidCIDR, { message: 'Invalid route network CIDR' }),
+  gateway: z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: 'Invalid route gateway IP' }),
+  interface: z.string().optional(),
+  description: z.string().max(255).default(''),
+  enabled: z.boolean().default(true),
+});
+export type StaticRoute = z.infer<typeof StaticRouteSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -154,6 +211,10 @@ export const DesiredStateSchema = z.object({
   rules: z.array(FirewallRuleSchema).default([]),
   nat: z.array(NatRuleSchema).default([]),
   gateways: z.array(GatewaySchema).default([]),
+  dhcp: DhcpConfigSchema.default({ enabled: true, subnets: [] }),
+  dns: DnsConfigSchema.default({ enabled: true, hostOverrides: [] }),
+  routes: z.array(StaticRouteSchema).default([]),
   wireguard: WireGuardConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
+

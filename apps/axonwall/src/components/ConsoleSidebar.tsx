@@ -26,6 +26,10 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'Interfaces', href: '/interfaces', icon: Network },
   { name: 'Firewall Rules & NAT', href: '/firewall', icon: Flame },
   { name: 'Routing & Gateways', href: '/routing', icon: Route },
+  { name: 'DHCP Server (Kea)', href: '/services/dhcp', icon: Server },
+  { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
+  { name: 'Diagnostics', href: '/diagnostics', icon: Activity },
+  { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
   { name: 'System & Revisions', href: '/system', icon: Settings },
 ];
 

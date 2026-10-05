@@ -18,6 +18,22 @@
       "types": "./dist/compile/nft/index.d.ts",
       "default": "./dist/compile/nft/index.js"
     },
+    "./compile/kea": {
+      "types": "./dist/compile/kea/index.d.ts",
+      "default": "./dist/compile/kea/index.js"
+    },
+    "./compile/unbound": {
+      "types": "./dist/compile/unbound/index.d.ts",
+      "default": "./dist/compile/unbound/index.js"
+    },
+    "./compile/wireguard": {
+      "types": "./dist/compile/wireguard/index.d.ts",
+      "default": "./dist/compile/wireguard/index.js"
+    },
+    "./import/opnsense": {
+      "types": "./dist/import/opnsense/index.d.ts",
+      "default": "./dist/import/opnsense/index.js"
+    },
     "./rbac": {
       "types": "./dist/rbac/index.d.ts",
       "default": "./dist/rbac/index.js"
@@ -42,9 +58,10 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "zod": "^3.24.2",
+    "fast-xml-parser": "^5.4.1",
+    "jose": "^6.0.8",
     "ldapts": "^8.0.0",
-    "jose": "^6.0.8"
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.9",

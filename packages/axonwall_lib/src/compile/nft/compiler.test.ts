@@ -133,6 +133,9 @@ describe('Axonwall nftables Compiler', () => {
       },
     ],
     gateways: [],
+    dhcp: { enabled: true, subnets: [] },
+    dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
+    routes: [],
   };
 
   it('compiles valid nftables ruleset with anti-lockout, aliases, flowtable, and chains', () => {

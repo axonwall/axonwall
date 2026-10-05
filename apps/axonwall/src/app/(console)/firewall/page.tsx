@@ -102,6 +102,9 @@ const INITIAL_STATE: DesiredState = {
     },
   ],
   gateways: [],
+  dhcp: { enabled: true, subnets: [] },
+  dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
+  routes: [],
 };
 
 export default function FirewallPage() {
