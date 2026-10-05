@@ -1,0 +1,52 @@
+# Axonwall OpenLDAP Bootstrap Data
+dn: ou=users,dc=axonwall,dc=local
+objectClass: organizationalUnit
+ou: users
+
+dn: ou=groups,dc=axonwall,dc=local
+objectClass: organizationalUnit
+ou: groups
+
+# Admin User
+dn: uid=admin,ou=users,dc=axonwall,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+cn: Administrator
+sn: Admin
+uid: admin
+uidNumber: 10001
+gidNumber: 10001
+homeDirectory: /home/admin
+loginShell: /bin/bash
+mail: admin@axonwall.local
+userPassword: axonwalladmin
+
+# Operator User
+dn: uid=operator,ou=users,dc=axonwall,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+cn: Network Operator
+sn: Operator
+uid: operator
+uidNumber: 10002
+gidNumber: 10002
+homeDirectory: /home/operator
+loginShell: /bin/bash
+mail: operator@axonwall.local
+userPassword: axonwalloperator
+
+# Admins Group
+dn: cn=admins,ou=groups,dc=axonwall,dc=local
+objectClass: groupOfNames
+cn: admins
+description: Axonwall Full Administrators Group
+member: uid=admin,ou=users,dc=axonwall,dc=local
+
+# Operators Group
+dn: cn=operators,ou=groups,dc=axonwall,dc=local
+objectClass: groupOfNames
+cn: operators
+description: Axonwall Network Operators Group
+member: uid=operator,ou=users,dc=axonwall,dc=local

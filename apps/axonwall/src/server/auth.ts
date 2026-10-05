@@ -1,0 +1,83 @@
+'use server';
+
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+import {
+  authenticateLdap,
+  authenticateLocalAdmin,
+  mintSupabaseToken,
+  verifyToken,
+  type LdapConfig,
+} from '@axonwall/lib/ldap';
+import type { UserSession } from '@axonwall/lib/rbac';
+
+const SESSION_COOKIE = 'axonwall_session';
+const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-axonwall-jwt-signing-key-32-bytes!';
+
+const LDAP_CONFIG: LdapConfig = {
+  url: process.env.LDAP_URL || 'ldap://127.0.0.1:389',
+  baseDn: process.env.LDAP_BASE_DN || 'dc=axonwall,dc=local',
+  bindDn: process.env.LDAP_BIND_DN || 'cn=admin,dc=axonwall,dc=local',
+  bindPassword: process.env.LDAP_BIND_PASSWORD || 'axonwalladmin',
+  userSearchFilter: process.env.LDAP_USER_FILTER || '(&(objectClass=inetOrgPerson)(uid={{username}}))',
+  groupSearchFilter: process.env.LDAP_GROUP_FILTER || '(&(objectClass=groupOfNames)(member={{userDn}}))',
+  groupRoleMap: {
+    admins: 'admin',
+    operators: 'operator',
+    auditors: 'readonly',
+  },
+};
+
+export async function getSession(): Promise<UserSession | null> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  if (!token) return null;
+  return verifyToken(token, JWT_SECRET);
+}
+
+export async function loginAction(prevState: any, formData: FormData) {
+  const username = formData.get('username') as string;
+  const password = formData.get('password') as string;
+
+  if (!username || !password) {
+    return { error: 'Username and password are required' };
+  }
+
+  // 1. Check local break-glass admin first
+  const localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
+  const localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || 'axonwalladmin';
+
+  let authRes = authenticateLocalAdmin(username, password, localAdminUser, localAdminPass);
+
+  // 2. Fall back to LDAP if local admin did not match
+  if (!authRes.success) {
+    try {
+      authRes = await authenticateLdap(LDAP_CONFIG, username, password);
+    } catch (err: any) {
+      authRes = { success: false, error: err.message };
+    }
+  }
+
+  if (!authRes.success || !authRes.session) {
+    return { error: authRes.error || 'Authentication failed' };
+  }
+
+  // 3. Mint JWT and set secure session cookie
+  const token = await mintSupabaseToken(authRes.session, JWT_SECRET);
+  const cookieStore = await cookies();
+  cookieStore.set(SESSION_COOKIE, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 8 * 3600, // 8 hours
+  });
+
+  redirect('/lobby');
+}
+
+export async function logoutAction() {
+  const cookieStore = await cookies();
+  cookieStore.delete(SESSION_COOKIE);
+  redirect('/login');
+}

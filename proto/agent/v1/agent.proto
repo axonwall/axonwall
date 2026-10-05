@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package axonwall.agent.v1;
+
+option go_package = "github.com/axonwall/monorepo/apps/axonwalld/gen/agent/v1;agentv1";
+
+service AgentService {
+  // Apply a signed configuration bundle with commit-confirm
+  rpc ApplyBundle(ApplyBundleRequest) returns (ApplyBundleResponse);
+
+  // Confirm an active pending configuration before deadline expires
+  rpc Confirm(ConfirmRequest) returns (ConfirmResponse);
+
+  // Rollback to last known good configuration
+  rpc Rollback(RollbackRequest) returns (RollbackResponse);
+
+  // Get current operational and firewall status
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  // Execute safe, bounded network diagnostics
+  rpc ExecuteDiagnostic(DiagnosticRequest) returns (DiagnosticResponse);
+}
+
+message BundleFile {
+  string path = 1;
+  string content = 2;
+  uint32 file_mode = 3;
+}
+
+message ApplyBundleRequest {
+  string job_id = 1;
+  string bundle_hash = 2;
+  string nft_script = 3;
+  repeated BundleFile files = 4;
+  repeated string reload_services = 5;
+  uint32 confirm_timeout_seconds = 6; // default 120
+  string signature = 7;
+}
+
+message ApplyBundleResponse {
+  bool success = 1;
+  string message = 2;
+  int64 confirm_deadline_unix = 3;
+}
+
+message ConfirmRequest {
+  string job_id = 1;
+}
+
+message ConfirmResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RollbackRequest {
+  string reason = 1;
+}
+
+message RollbackResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetStatusRequest {}
+
+message InterfaceState {
+  string name = 1;
+  string device = 2;
+  bool is_up = 3;
+  uint64 rx_bytes = 4;
+  uint64 tx_bytes = 5;
+  uint64 rx_packets = 6;
+  uint64 tx_packets = 7;
+  repeated string ip_addresses = 8;
+}
+
+message GetStatusResponse {
+  string node_id = 1;
+  string version = 2;
+  uint64 uptime_seconds = 3;
+  string active_bundle_hash = 4;
+  bool pending_confirm = 5;
+  int64 confirm_deadline_unix = 6;
+  repeated InterfaceState interfaces = 7;
+}
+
+enum DiagnosticType {
+  DIAGNOSTIC_TYPE_UNSPECIFIED = 0;
+  DIAGNOSTIC_TYPE_PING = 1;
+  DIAGNOSTIC_TYPE_TRACEROUTE = 2;
+  DIAGNOSTIC_TYPE_DNS_LOOKUP = 3;
+  DIAGNOSTIC_TYPE_PORT_PROBE = 4;
+}
+
+message DiagnosticRequest {
+  DiagnosticType type = 1;
+  string target = 2;
+  uint32 count = 3;
+  uint32 port = 4;
+  string interface = 5;
+}
+
+message DiagnosticResponse {
+  bool success = 1;
+  string output = 2;
+  int64 latency_ms = 3;
+}

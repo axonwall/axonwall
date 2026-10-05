@@ -1,0 +1,28 @@
+services:
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: axonwall-ldap-dev
+    environment:
+      LDAP_ORGANISATION: "Axonwall"
+      LDAP_DOMAIN: "axonwall.local"
+      LDAP_ADMIN_PASSWORD: "axonwalladmin"
+      LDAP_CONFIG_PASSWORD: "axonwallconfig"
+    ports:
+      - "389:389"
+      - "636:636"
+    volumes:
+      - ./deploy/ldap/bootstrap.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-bootstrap.ldif:ro
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: axonwall-postgres-dev
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: axonwallpostgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./supabase/migrations/20261005000000_init_axonwall_schema.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    restart: unless-stopped
