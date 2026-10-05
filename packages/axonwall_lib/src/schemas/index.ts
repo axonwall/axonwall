@@ -556,6 +556,177 @@ export const CrowdSecConfigSchema = z.object({
 });
 export type CrowdSecConfig = z.infer<typeof CrowdSecConfigSchema>;
 
+export const VrrpInstanceSchema = z.object({
+  name: z.string().min(1).default('VI_WAN'),
+  vrid: z.number().int().min(1).max(255).default(1),
+  interface: z.string().min(1).default('eth0'),
+  priority: z.number().int().min(1).max(255).default(100),
+  virtualIps: z.array(z.string()).default([]),
+  authPassword: z.string().optional(),
+});
+export type VrrpInstance = z.infer<typeof VrrpInstanceSchema>;
+
+export const ConntrackSyncSchema = z.object({
+  enabled: z.boolean().default(false),
+  interface: z.string().default('eth0'),
+  protocol: z.enum(['multicast', 'unicast']).default('unicast'),
+  peerAddress: z.string().optional(),
+  port: z.number().int().default(3780),
+});
+export type ConntrackSync = z.infer<typeof ConntrackSyncSchema>;
+
+export const HaSyncSectionsSchema = z.object({
+  interfaces: z.boolean().default(false),
+  firewall: z.boolean().default(true),
+  dhcp: z.boolean().default(true),
+  dns: z.boolean().default(true),
+  aliases: z.boolean().default(true),
+  vpn: z.boolean().default(true),
+});
+export type HaSyncSections = z.infer<typeof HaSyncSectionsSchema>;
+
+export const HighAvailabilityConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  nodeRole: z.enum(['master', 'backup']).default('master'),
+  peerAddress: z.string().default(''),
+  peerPort: z.number().int().default(8443),
+  mtlsCert: z.string().optional(),
+  mtlsKey: z.string().optional(),
+  vrrpInstances: z.array(VrrpInstanceSchema).default([]),
+  conntrackSync: ConntrackSyncSchema.default({ enabled: false }),
+  syncSections: HaSyncSectionsSchema.default({
+    interfaces: false,
+    firewall: true,
+    dhcp: true,
+    dns: true,
+    aliases: true,
+    vpn: true,
+  }),
+  maintenanceMode: z.boolean().default(false),
+});
+export type HighAvailabilityConfig = z.infer<typeof HighAvailabilityConfigSchema>;
+
+export const ObservabilityConfigSchema = z.object({
+  metrics: z.object({
+    enabled: z.boolean().default(true),
+    port: z.number().int().default(9090),
+    retentionDays: z.number().int().default(30),
+    scrapeIntervalSeconds: z.number().int().default(10),
+  }).default({ enabled: true, port: 9090, retentionDays: 30, scrapeIntervalSeconds: 10 }),
+  flowExport: z.object({
+    enabled: z.boolean().default(false),
+    version: z.enum(['ipfix', 'netflow9']).default('ipfix'),
+    collectorHost: z.string().optional(),
+    collectorPort: z.number().int().default(2055),
+    interfaces: z.array(z.string()).default([]),
+  }).default({ enabled: false, version: 'ipfix', collectorPort: 2055, interfaces: [] }),
+  alerting: z.object({
+    enabled: z.boolean().default(false),
+    webhookUrl: z.string().optional(),
+    emailRecipient: z.string().optional(),
+    notifyOnFailover: z.boolean().default(true),
+    notifyOnThreshold: z.boolean().default(true),
+  }).default({ enabled: false, notifyOnFailover: true, notifyOnThreshold: true }),
+});
+export type ObservabilityConfig = z.infer<typeof ObservabilityConfigSchema>;
+
+export const NutUpsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  name: z.string().default('axonups'),
+  driver: z.string().default('usbhid-ups'),
+  port: z.string().default('auto'),
+  shutdownBatteryPct: z.number().int().min(1).max(50).default(20),
+  lowBatteryRuntimeSec: z.number().int().default(300),
+});
+export type NutUpsConfig = z.infer<typeof NutUpsConfigSchema>;
+
+export const HaProxyFrontendSchema = z.object({
+  name: z.string().min(1),
+  bindPort: z.number().int().min(1).max(65535),
+  ssl: z.boolean().default(false),
+  defaultBackend: z.string().min(1),
+  certName: z.string().optional(),
+});
+export type HaProxyFrontend = z.infer<typeof HaProxyFrontendSchema>;
+
+export const HaProxyBackendServerSchema = z.object({
+  name: z.string().min(1),
+  address: z.string().min(1),
+  port: z.number().int().min(1).max(65535),
+  check: z.boolean().default(true),
+});
+export type HaProxyBackendServer = z.infer<typeof HaProxyBackendServerSchema>;
+
+export const HaProxyBackendSchema = z.object({
+  name: z.string().min(1),
+  mode: z.enum(['http', 'tcp']).default('http'),
+  balance: z.enum(['roundrobin', 'leastconn', 'source']).default('roundrobin'),
+  servers: z.array(HaProxyBackendServerSchema).default([]),
+});
+export type HaProxyBackend = z.infer<typeof HaProxyBackendSchema>;
+
+export const HaProxyPluginConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(['http', 'tcp']).default('http'),
+  frontends: z.array(HaProxyFrontendSchema).default([]),
+  backends: z.array(HaProxyBackendSchema).default([]),
+});
+export type HaProxyPluginConfig = z.infer<typeof HaProxyPluginConfigSchema>;
+
+export const FreeRadiusClientSchema = z.object({
+  name: z.string().min(1),
+  ipAddress: z.string().min(1),
+  secret: z.string().min(1),
+});
+export type FreeRadiusClient = z.infer<typeof FreeRadiusClientSchema>;
+
+export const FreeRadiusPluginConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  authPort: z.number().int().default(1812),
+  acctPort: z.number().int().default(1813),
+  clients: z.array(FreeRadiusClientSchema).default([]),
+  ldapSync: z.boolean().default(true),
+});
+export type FreeRadiusPluginConfig = z.infer<typeof FreeRadiusPluginConfigSchema>;
+
+export const SnmpPluginConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  community: z.string().default('public'),
+  sysLocation: z.string().default('Axonwall Gateway'),
+  sysContact: z.string().default('admin@local'),
+  listenPort: z.number().int().default(161),
+});
+export type SnmpPluginConfig = z.infer<typeof SnmpPluginConfigSchema>;
+
+export const PluginManifestSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  version: z.string().min(1),
+  description: z.string().default(''),
+  author: z.string().default('Axonwall Community'),
+  systemdUnits: z.array(z.string()).default([]),
+  privileges: z.array(z.string()).default([]),
+  nftHooks: z.array(z.object({
+    table: z.string(),
+    chain: z.string(),
+    priority: z.number().int(),
+  })).optional(),
+  menuEntry: z.object({
+    title: z.string(),
+    path: z.string(),
+    icon: z.string().optional(),
+  }).optional(),
+});
+export type PluginManifest = z.infer<typeof PluginManifestSchema>;
+
+export const InstalledPluginRecordSchema = z.object({
+  id: z.string(),
+  enabled: z.boolean().default(true),
+  installedAt: z.string().optional(),
+  config: z.record(z.string(), z.any()).optional(),
+});
+export type InstalledPluginRecord = z.infer<typeof InstalledPluginRecordSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -582,6 +753,13 @@ export const DesiredStateSchema = z.object({
   captivePortal: CaptivePortalConfigSchema.optional(),
   acme: AcmeConfigSchema.optional(),
   crowdsec: CrowdSecConfigSchema.optional(),
+  ha: HighAvailabilityConfigSchema.optional(),
+  observability: ObservabilityConfigSchema.optional(),
+  ups: NutUpsConfigSchema.optional(),
+  haproxy: HaProxyPluginConfigSchema.optional(),
+  freeradius: FreeRadiusPluginConfigSchema.optional(),
+  snmp: SnmpPluginConfigSchema.optional(),
+  plugins: z.array(InstalledPluginRecordSchema).optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
 

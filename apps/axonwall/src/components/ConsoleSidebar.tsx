@@ -23,6 +23,9 @@ import {
   Lock,
   Globe,
   Radio,
+  ArrowRightLeft,
+  Boxes,
+  BatteryCharging,
 } from 'lucide-react';
 
 interface NavItem {
@@ -49,6 +52,12 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
   { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },
   { name: 'ACME / Let\'s Encrypt', href: '/security/acme', icon: Lock },
+  { name: 'High Availability (HA)', href: '/ha', icon: ArrowRightLeft },
+  { name: 'System Telemetry', href: '/reporting/health', icon: Activity },
+  { name: 'Insight Flow Analytics', href: '/reporting/insight', icon: Compass },
+  { name: 'Plugin Store', href: '/system/plugins', icon: Boxes },
+  { name: 'Service Supervisor', href: '/system/services', icon: Server },
+  { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
   { name: 'Network Diagnostics', href: '/diagnostics', icon: Activity },
   { name: 'Packet Tracer (E5)', href: '/diagnostics/packet-tracer', icon: Layers },
   { name: 'OPNsense Importer', href: '/system/import', icon: FileText },

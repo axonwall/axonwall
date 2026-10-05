@@ -58,6 +58,34 @@
       "types": "./dist/compile/crowdsec/index.d.ts",
       "default": "./dist/compile/crowdsec/index.js"
     },
+    "./compile/ha": {
+      "types": "./dist/compile/ha/index.d.ts",
+      "default": "./dist/compile/ha/index.js"
+    },
+    "./compile/haproxy": {
+      "types": "./dist/compile/haproxy/index.d.ts",
+      "default": "./dist/compile/haproxy/index.js"
+    },
+    "./compile/freeradius": {
+      "types": "./dist/compile/freeradius/index.d.ts",
+      "default": "./dist/compile/freeradius/index.js"
+    },
+    "./compile/snmp": {
+      "types": "./dist/compile/snmp/index.d.ts",
+      "default": "./dist/compile/snmp/index.js"
+    },
+    "./compile/nut": {
+      "types": "./dist/compile/nut/index.d.ts",
+      "default": "./dist/compile/nut/index.js"
+    },
+    "./plugins": {
+      "types": "./dist/plugins/index.d.ts",
+      "default": "./dist/plugins/index.js"
+    },
+    "./telemetry": {
+      "types": "./dist/telemetry/index.d.ts",
+      "default": "./dist/telemetry/index.js"
+    },
     "./captive": {
       "types": "./dist/captive/index.d.ts",
       "default": "./dist/captive/index.js"
