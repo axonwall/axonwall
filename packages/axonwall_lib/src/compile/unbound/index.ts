@@ -40,6 +40,23 @@ export function compileUnbound(dns: DnsConfig): UnboundCompileResult {
     lines.push('');
   }
 
+  // DNS Blocklist / RPZ (AdBlock & Malware Sinkholing)
+  if (dns.blocklist && dns.blocklist.enabled) {
+    const action = dns.blocklist.action || 'always_null';
+    lines.push('  # AdBlock and Malware Domain Sinkholing');
+
+    // Whitelisted domains are set to transparent so they are resolved normally
+    for (const domain of dns.blocklist.whitelist) {
+      lines.push(`  local-zone: "${domain}." transparent`);
+    }
+
+    // Blacklisted domains are sinkholed
+    for (const domain of dns.blocklist.blacklist) {
+      lines.push(`  local-zone: "${domain}." ${action}`);
+    }
+    lines.push('');
+  }
+
   // Upstream Forwarding (DNS-over-TLS or standard)
   if (dns.dotEnabled && dns.dotUpstreams.length > 0) {
     lines.push('forward-zone:');

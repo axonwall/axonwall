@@ -34,13 +34,15 @@ export const InterfaceSchema = z.object({
 });
 export type Interface = z.infer<typeof InterfaceSchema>;
 
-export const AliasTypeSchema = z.enum(['host', 'network', 'port', 'mac', 'urltable']);
+export const AliasTypeSchema = z.enum(['host', 'network', 'port', 'mac', 'urltable', 'geoip', 'asn', 'fqdn']);
 
 export const AliasSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().regex(/^[a-zA-Z0-9_]+$/, 'Alias name must be alphanumeric or underscore'),
   type: AliasTypeSchema,
   entries: z.array(z.string().min(1)),
+  url: z.string().optional(),
+  refreshIntervalHours: z.number().int().optional(),
   description: z.string().max(255).default(''),
   enabled: z.boolean().default(true),
 });
@@ -184,6 +186,24 @@ export const DnsHostOverrideSchema = z.object({
 });
 export type DnsHostOverride = z.infer<typeof DnsHostOverrideSchema>;
 
+export const DnsBlocklistFeedSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  url: z.string(),
+  entriesCount: z.number().int().default(0),
+  enabled: z.boolean().default(true),
+});
+export type DnsBlocklistFeed = z.infer<typeof DnsBlocklistFeedSchema>;
+
+export const DnsBlocklistConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  feeds: z.array(DnsBlocklistFeedSchema).default([]),
+  whitelist: z.array(z.string()).default([]),
+  blacklist: z.array(z.string()).default([]),
+  action: z.enum(['always_null', 'always_nxdomain']).default('always_null'),
+});
+export type DnsBlocklistConfig = z.infer<typeof DnsBlocklistConfigSchema>;
+
 export const DnsConfigSchema = z.object({
   enabled: z.boolean().default(true),
   listenPort: z.number().int().min(1).max(65535).default(53),
@@ -191,6 +211,7 @@ export const DnsConfigSchema = z.object({
   dotEnabled: z.boolean().default(true),
   dotUpstreams: z.array(z.string()).default(['1.1.1.1@853#cloudflare-dns.com', '9.9.9.9@853#dns.quad9.net']),
   hostOverrides: z.array(DnsHostOverrideSchema).default([]),
+  blocklist: DnsBlocklistConfigSchema.optional(),
 });
 export type DnsConfig = z.infer<typeof DnsConfigSchema>;
 
@@ -443,6 +464,98 @@ export const PacketTracerQuerySchema = z.object({
 });
 export type PacketTracerQuery = z.infer<typeof PacketTracerQuerySchema>;
 
+export const SuricataModeSchema = z.enum(['ids', 'ips']);
+export const SuricataRuleSourceSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  url: z.string(),
+  enabled: z.boolean().default(true),
+});
+export type SuricataRuleSource = z.infer<typeof SuricataRuleSourceSchema>;
+
+export const SuricataConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: SuricataModeSchema.default('ips'),
+  interfaces: z.array(z.string()).default(['wan']),
+  nfqueueFailOpen: z.boolean().default(true),
+  nfqueueBypass: z.boolean().default(true),
+  ruleSources: z.array(SuricataRuleSourceSchema).default([
+    {
+      name: 'ET Open Ruleset',
+      url: 'https://rules.emergingthreats.net/open/suricata-7.0/emerging.rules.tar.gz',
+      enabled: true,
+    },
+  ]),
+  homeNet: z.array(z.string()).default(['192.168.0.0/16', '10.0.0.0/8', '172.16.0.0/12']),
+});
+export type SuricataConfig = z.infer<typeof SuricataConfigSchema>;
+
+export const CaptivePortalZoneSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  interface: z.string().min(1),
+  listenPort: z.number().int().default(8999),
+  authServers: z.array(z.string()).default(['ldap_internal']),
+  sessionTimeoutMinutes: z.number().int().min(1).default(720),
+  idleTimeoutMinutes: z.number().int().min(1).default(60),
+  passThroughMacs: z.array(z.string()).default([]),
+  passThroughIps: z.array(z.string()).default([]),
+  enableBandwidthQuotas: z.boolean().default(false),
+  downloadLimitKbps: z.number().int().default(10000),
+  uploadLimitKbps: z.number().int().default(5000),
+  enabled: z.boolean().default(true),
+});
+export type CaptivePortalZone = z.infer<typeof CaptivePortalZoneSchema>;
+
+export const CaptivePortalConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  zones: z.array(CaptivePortalZoneSchema).default([]),
+});
+export type CaptivePortalConfig = z.infer<typeof CaptivePortalConfigSchema>;
+
+export const AcmeAccountSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  email: z.string().email(),
+  caDirectoryUrl: z.string().default('https://acme-v02.api.letsencrypt.org/directory'),
+  eabKid: z.string().optional(),
+  eabHmacKey: z.string().optional(),
+  enabled: z.boolean().default(true),
+});
+export type AcmeAccount = z.infer<typeof AcmeAccountSchema>;
+
+export const AcmeCertificateSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  domain: z.string().min(1),
+  altNames: z.array(z.string()).default([]),
+  challengeType: z.enum(['http-01', 'dns-01']).default('http-01'),
+  dnsProvider: z.string().optional(),
+  autoRenew: z.boolean().default(true),
+  renewDaysBeforeExpiry: z.number().int().default(30),
+  deployServices: z.array(z.enum(['webgui', 'openvpn', 'ipsec', 'haproxy'])).default(['webgui']),
+  status: z.enum(['pending', 'valid', 'expired', 'error']).default('pending'),
+  expiresAt: z.string().optional(),
+});
+export type AcmeCertificate = z.infer<typeof AcmeCertificateSchema>;
+
+export const AcmeConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  accounts: z.array(AcmeAccountSchema).default([]),
+  certificates: z.array(AcmeCertificateSchema).default([]),
+});
+export type AcmeConfig = z.infer<typeof AcmeConfigSchema>;
+
+export const CrowdSecConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  lapiUrl: z.string().default('http://127.0.0.1:8080/'),
+  apiKey: z.string().optional(),
+  remediationSetName: z.string().default('set_crowdsec_blacklists'),
+  action: z.enum(['drop', 'reject']).default('drop'),
+  logBanned: z.boolean().default(true),
+});
+export type CrowdSecConfig = z.infer<typeof CrowdSecConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -465,6 +578,11 @@ export const DesiredStateSchema = z.object({
   ipsec: IpsecConfigSchema.optional(),
   openvpn: OpenVpnConfigSchema.optional(),
   frr: FrrConfigSchema.optional(),
+  suricata: SuricataConfigSchema.optional(),
+  captivePortal: CaptivePortalConfigSchema.optional(),
+  acme: AcmeConfigSchema.optional(),
+  crowdsec: CrowdSecConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
+
 

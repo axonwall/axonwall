@@ -46,6 +46,26 @@
       "types": "./dist/compile/frr/index.d.ts",
       "default": "./dist/compile/frr/index.js"
     },
+    "./compile/suricata": {
+      "types": "./dist/compile/suricata/index.d.ts",
+      "default": "./dist/compile/suricata/index.js"
+    },
+    "./compile/acme": {
+      "types": "./dist/compile/acme/index.d.ts",
+      "default": "./dist/compile/acme/index.js"
+    },
+    "./compile/crowdsec": {
+      "types": "./dist/compile/crowdsec/index.d.ts",
+      "default": "./dist/compile/crowdsec/index.js"
+    },
+    "./captive": {
+      "types": "./dist/captive/index.d.ts",
+      "default": "./dist/captive/index.js"
+    },
+    "./alias": {
+      "types": "./dist/alias/index.d.ts",
+      "default": "./dist/alias/index.js"
+    },
     "./sim": {
       "types": "./dist/sim/index.d.ts",
       "default": "./dist/sim/index.js"

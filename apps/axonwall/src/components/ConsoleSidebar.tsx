@@ -17,6 +17,12 @@ import {
   Layers,
   ShieldCheck,
   Compass,
+  ShieldAlert,
+  Users,
+  Ban,
+  Lock,
+  Globe,
+  Radio,
 } from 'lucide-react';
 
 interface NavItem {
@@ -30,6 +36,11 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'Interfaces', href: '/interfaces', icon: Network },
   { name: 'Advanced Topologies', href: '/interfaces/advanced', icon: Layers },
   { name: 'Firewall Rules & NAT', href: '/firewall', icon: Flame },
+  { name: 'Threat Feeds & Aliases', href: '/security/aliases', icon: Globe },
+  { name: 'Suricata IDS/IPS', href: '/security/ids', icon: ShieldAlert },
+  { name: 'CrowdSec Bouncer', href: '/security/crowdsec', icon: Radio },
+  { name: 'DNS Sinkhole (RPZ)', href: '/security/dns-blocklist', icon: Ban },
+  { name: 'Captive Portal', href: '/security/captive-portal', icon: Users },
   { name: 'Routing & Multi-WAN', href: '/routing/gateways', icon: Route },
   { name: 'Dynamic Routing (FRR)', href: '/routing/dynamic', icon: Compass },
   { name: 'Smart QoS & Shaper', href: '/traffic/shaper', icon: Gauge },
@@ -37,6 +48,7 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
   { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
   { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },
+  { name: 'ACME / Let\'s Encrypt', href: '/security/acme', icon: Lock },
   { name: 'Network Diagnostics', href: '/diagnostics', icon: Activity },
   { name: 'Packet Tracer (E5)', href: '/diagnostics/packet-tracer', icon: Layers },
   { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
