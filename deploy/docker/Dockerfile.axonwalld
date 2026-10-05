@@ -1,0 +1,26 @@
+# Multi-stage build for axonwalld (Privileged Go Daemon)
+FROM golang:1.24-bookworm AS builder
+
+WORKDIR /src
+COPY apps/axonwalld/go.mod apps/axonwalld/go.sum* ./
+RUN go mod download
+
+COPY apps/axonwalld ./
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/axonwalld .
+
+FROM debian:13-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nftables \
+    iproute2 \
+    procps \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /bin/axonwalld /usr/sbin/axonwalld
+COPY packaging/debian/lockdown.nft /usr/share/axonwall/lockdown.nft
+
+RUN mkdir -p /run/axonwalld /var/lib/axonwall /var/log/axonwall
+
+ENTRYPOINT ["/usr/sbin/axonwalld"]
+CMD ["--socket", "/run/axonwalld/axonwalld.sock", "--boot-apply"]

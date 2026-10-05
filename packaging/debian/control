@@ -1,0 +1,28 @@
+Source: axonwall
+Section: net
+Priority: optional
+Maintainer: Axonwall Core Team <ops@axonwall.io>
+Build-Depends: debhelper-compat (= 13), golang-go (>= 1.24), nodejs (>= 22), pnpm (>= 9)
+Standards-Version: 4.6.2
+Homepage: https://github.com/axonwall/axonwall
+
+Package: axonwall
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends},
+ nftables (>= 1.1.0),
+ iproute2,
+ wireguard-tools,
+ keepalived,
+ conntrackd,
+ nodejs (>= 22.0.0)
+Recommends:
+ unbound,
+ kea-dhcp4-server,
+ frr,
+ suricata,
+ strongswan,
+ openvpn
+Description: Modern Linux Router & Next-Gen Firewall
+ Axonwall replaces legacy BSD/PHP firewalls (OPNsense/pfSense) with a
+ modern reactive architecture built on Linux nftables, Next.js, Supabase,
+ OpenLDAP, and a privileged Go daemon with commit-confirm transaction safety.

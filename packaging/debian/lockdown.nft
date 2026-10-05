@@ -1,0 +1,33 @@
+#!/usr/sbin/nft -f
+# /usr/share/axonwall/lockdown.nft - Fail-safe emergency boot ruleset
+# Axonwall owns ONLY 'table inet axonwall'. Never flushes other tables.
+
+table inet axonwall {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Allow established / related state
+        ct state established,related accept
+        ct state invalid drop
+
+        # Loopback
+        iif "lo" accept
+
+        # Standard ICMP
+        icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
+        icmpv6 type { echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded } accept
+
+        # Emergency Anti-Lockout on any non-wan interface
+        tcp dport { 22, 80, 443, 3000 } accept comment "emergency-anti-lockout"
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept
+        ct state invalid drop
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}

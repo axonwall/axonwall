@@ -1,0 +1,26 @@
+[Unit]
+Description=Axonwall Web Console & API Server
+Documentation=https://github.com/axonwall/axonwall
+After=network.target axonwalld.service
+Wants=axonwalld.service
+
+[Service]
+Type=simple
+User=axonwall
+Group=axonwall
+WorkingDirectory=/opt/axonwall/apps/axonwall
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=0.0.0.0
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5s
+
+# Sandboxing
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

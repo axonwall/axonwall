@@ -1,0 +1,17 @@
+apiVersion: v2
+name: axonwall
+description: Modern Linux Router & Next-Gen Firewall on Kubernetes
+type: application
+version: 0.1.0
+appVersion: 0.1.0
+keywords:
+  - firewall
+  - router
+  - nftables
+  - security
+home: https://github.com/axonwall/axonwall
+sources:
+  - https://github.com/axonwall/axonwall
+maintainers:
+  - name: Axonwall Team
+    email: ops@axonwall.io

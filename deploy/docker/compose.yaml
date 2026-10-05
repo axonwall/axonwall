@@ -1,0 +1,95 @@
+services:
+  axonwalld:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.axonwalld
+    container_name: axonwalld
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    volumes:
+      - /run/axonwalld:/run/axonwalld
+      - /var/lib/axonwall:/var/lib/axonwall
+      - /etc/nftables.d:/etc/nftables.d
+
+  axonwall-ui:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.ui
+    container_name: axonwall-ui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - SUPABASE_URL=http://supabase-db:54321
+      - SUPABASE_ANON_KEY=local-dev-anon-key
+      - LDAP_URL=ldap://openldap:389
+      - LDAP_BIND_DN=cn=admin,dc=axonwall,dc=internal
+      - LDAP_BIND_PASSWORD=adminpassword
+      - AXONWALLD_SOCKET=/run/axonwalld/axonwalld.sock
+    volumes:
+      - /run/axonwalld:/run/axonwalld:ro
+    depends_on:
+      - openldap
+      - supabase-db
+
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: axonwall-ldap
+    restart: unless-stopped
+    ports:
+      - "389:389"
+    environment:
+      - LDAP_ORGANISATION=Axonwall
+      - LDAP_DOMAIN=axonwall.internal
+      - LDAP_ADMIN_PASSWORD=adminpassword
+    volumes:
+      - openldap_data:/var/lib/ldap
+      - openldap_config:/etc/ldap/slapd.d
+
+  supabase-db:
+    image: supabase/postgres:17.2.0.1
+    container_name: axonwall-supabase
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_PASSWORD=postgrespassword
+      - POSTGRES_DB=postgres
+    volumes:
+      - supabase_data:/var/lib/postgresql/data
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.108.0
+    container_name: axonwall-vm
+    restart: unless-stopped
+    ports:
+      - "8428:8428"
+    command:
+      - "-retentionPeriod=30d"
+      - "-storageDataPath=/vm-data"
+    volumes:
+      - vm_data:/vm-data
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:v0.38.0-victorialogs
+    container_name: axonwall-vl
+    restart: unless-stopped
+    ports:
+      - "9428:9428"
+    command:
+      - "-retentionPeriod=14d"
+      - "-storageDataPath=/vl-data"
+    volumes:
+      - vl_data:/vl-data
+
+volumes:
+  openldap_data:
+  openldap_config:
+  supabase_data:
+  vm_data:
+  vl_data:
