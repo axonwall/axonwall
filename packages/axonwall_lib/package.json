@@ -30,6 +30,26 @@
       "types": "./dist/compile/wireguard/index.d.ts",
       "default": "./dist/compile/wireguard/index.js"
     },
+    "./compile/tc": {
+      "types": "./dist/compile/tc/index.d.ts",
+      "default": "./dist/compile/tc/index.js"
+    },
+    "./compile/ipsec": {
+      "types": "./dist/compile/ipsec/index.d.ts",
+      "default": "./dist/compile/ipsec/index.js"
+    },
+    "./compile/openvpn": {
+      "types": "./dist/compile/openvpn/index.d.ts",
+      "default": "./dist/compile/openvpn/index.js"
+    },
+    "./compile/frr": {
+      "types": "./dist/compile/frr/index.d.ts",
+      "default": "./dist/compile/frr/index.js"
+    },
+    "./sim": {
+      "types": "./dist/sim/index.d.ts",
+      "default": "./dist/sim/index.js"
+    },
     "./import/opnsense": {
       "types": "./dist/import/opnsense/index.d.ts",
       "default": "./dist/import/opnsense/index.js"

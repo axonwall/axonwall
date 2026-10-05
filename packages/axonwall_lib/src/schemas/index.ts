@@ -66,6 +66,7 @@ export const FirewallRuleSchema = z.object({
     message: 'Invalid destination port range or alias',
   }).default(''),
   gateway: z.string().optional(), // for policy routing
+  gatewayGroup: z.string().optional(), // for multi-WAN policy routing
   log: z.boolean().default(false),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),
@@ -203,18 +204,267 @@ export const StaticRouteSchema = z.object({
 });
 export type StaticRoute = z.infer<typeof StaticRouteSchema>;
 
+export const GatewayGroupMemberSchema = z.object({
+  gatewayName: z.string().min(1),
+  tier: z.number().int().min(1).max(5).default(1),
+  weight: z.number().int().min(1).max(30).default(1),
+});
+export type GatewayGroupMember = z.infer<typeof GatewayGroupMemberSchema>;
+
+export const GatewayGroupSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  trigger: z.enum(['down', 'loss', 'latency', 'both']).default('down'),
+  members: z.array(GatewayGroupMemberSchema).min(1),
+  description: z.string().max(255).default(''),
+});
+export type GatewayGroup = z.infer<typeof GatewayGroupSchema>;
+
+export const VlanSchema = z.object({
+  id: z.string().uuid().optional(),
+  tag: z.number().int().min(1).max(4094),
+  parentInterface: z.string().min(1),
+  vlanInterface: z.string().min(1),
+  priority: z.number().int().min(0).max(7).default(0),
+  description: z.string().max(255).default(''),
+});
+export type Vlan = z.infer<typeof VlanSchema>;
+
+export const BridgeMemberSchema = z.object({
+  interface: z.string().min(1),
+  stp: z.boolean().default(true),
+  cost: z.number().int().default(100),
+  priority: z.number().int().default(32),
+});
+export type BridgeMember = z.infer<typeof BridgeMemberSchema>;
+
+export const BridgeSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  members: z.array(BridgeMemberSchema).default([]),
+  vlanFiltering: z.boolean().default(true),
+  stp: z.boolean().default(false),
+  description: z.string().max(255).default(''),
+});
+export type Bridge = z.infer<typeof BridgeSchema>;
+
+export const BondModeSchema = z.enum([
+  '802.3ad',
+  'active-backup',
+  'balance-rr',
+  'balance-xor',
+  'broadcast',
+  'balance-tlb',
+  'balance-alb',
+]);
+export type BondMode = z.infer<typeof BondModeSchema>;
+
+export const BondSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  members: z.array(z.string()).min(1),
+  mode: BondModeSchema.default('802.3ad'),
+  lacpRate: z.enum(['slow', 'fast']).default('fast'),
+  xmitHashPolicy: z.enum(['layer2', 'layer2+3', 'layer3+4']).default('layer2+3'),
+  miimon: z.number().int().default(100),
+  description: z.string().max(255).default(''),
+});
+export type Bond = z.infer<typeof BondSchema>;
+
+export const VirtualIpTypeSchema = z.enum(['alias', 'carp', 'proxyarp']);
+export type VirtualIpType = z.infer<typeof VirtualIpTypeSchema>;
+
+export const VirtualIpSchema = z.object({
+  id: z.string().uuid().optional(),
+  interface: z.string().min(1),
+  ip: z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: 'Invalid IP address' }),
+  subnetBits: z.number().int().min(1).max(128).default(32),
+  type: VirtualIpTypeSchema.default('alias'),
+  vhid: z.number().int().min(1).max(255).optional(),
+  password: z.string().optional(),
+  description: z.string().max(255).default(''),
+});
+export type VirtualIp = z.infer<typeof VirtualIpSchema>;
+
+export const VrfSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  tableId: z.number().int().min(1).max(65535),
+  interfaces: z.array(z.string()).default([]),
+  description: z.string().max(255).default(''),
+});
+export type Vrf = z.infer<typeof VrfSchema>;
+
+export const IpsecTunnelSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  enabled: z.boolean().default(true),
+  routeBased: z.boolean().default(true),
+  xfrmInterfaceId: z.number().int().min(1).max(65535).default(1),
+  localAddress: z.string().default('%any'),
+  remoteAddress: z.string().min(1),
+  authMethod: z.enum(['psk', 'pubkey']).default('psk'),
+  presharedKey: z.string().optional(),
+  ikeProposals: z.array(z.string()).default(['aes256-sha256-modp2048', 'aes256gcm16-prfsha256-ecp256']),
+  espProposals: z.array(z.string()).default(['aes256gcm16-ecp256', 'aes256-sha256']),
+  localTs: z.array(z.string()).default(['0.0.0.0/0']),
+  remoteTs: z.array(z.string()).default(['0.0.0.0/0']),
+  dpdDelay: z.number().int().default(30),
+  dpdAction: z.enum(['restart', 'clear', 'hold']).default('restart'),
+  description: z.string().max(255).default(''),
+});
+export type IpsecTunnel = z.infer<typeof IpsecTunnelSchema>;
+
+export const IpsecConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  tunnels: z.array(IpsecTunnelSchema).default([]),
+});
+export type IpsecConfig = z.infer<typeof IpsecConfigSchema>;
+
+export const OpenVpnCsoSchema = z.object({
+  id: z.string().uuid().optional(),
+  commonName: z.string().min(1),
+  assignedIp: z.string().refine(isValidIPv4, { message: 'Invalid IPv4' }).optional(),
+  pushRoutes: z.array(z.string()).default([]),
+  description: z.string().max(255).default(''),
+});
+export type OpenVpnCso = z.infer<typeof OpenVpnCsoSchema>;
+
+export const OpenVpnServerSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  enabled: z.boolean().default(true),
+  protocol: z.enum(['udp', 'tcp']).default('udp'),
+  port: z.number().int().min(1).max(65535).default(1194),
+  deviceType: z.enum(['tun', 'tap']).default('tun'),
+  devName: z.string().default('ovpn-dco0'),
+  dcoEnabled: z.boolean().default(true),
+  tunnelNetwork: z.string().refine(isValidCIDR, { message: 'Invalid tunnel CIDR' }).default('10.8.0.0/24'),
+  localNetwork: z.string().optional(),
+  cipher: z.string().default('AES-256-GCM'),
+  authDigest: z.string().default('SHA256'),
+  caCert: z.string().optional(),
+  serverCert: z.string().optional(),
+  serverKey: z.string().optional(),
+  dhParams: z.string().optional(),
+  clientToClient: z.boolean().default(false),
+  duplicateCn: z.boolean().default(false),
+  cso: z.array(OpenVpnCsoSchema).default([]),
+  description: z.string().max(255).default(''),
+});
+export type OpenVpnServer = z.infer<typeof OpenVpnServerSchema>;
+
+export const OpenVpnConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  servers: z.array(OpenVpnServerSchema).default([]),
+});
+export type OpenVpnConfig = z.infer<typeof OpenVpnConfigSchema>;
+
+export const TrafficShaperQueueSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  priority: z.number().int().min(1).max(7).default(3),
+  bandwidthPercent: z.number().min(1).max(100).default(20),
+  burst: z.string().default('15k'),
+  codel: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type TrafficShaperQueue = z.infer<typeof TrafficShaperQueueSchema>;
+
+export const TrafficShaperInterfaceSchema = z.object({
+  id: z.string().uuid().optional(),
+  interface: z.string().min(1),
+  downloadBandwidthMbps: z.number().min(0).default(100),
+  uploadBandwidthMbps: z.number().min(0).default(50),
+  scheduler: z.enum(['cake', 'fq_codel', 'htb']).default('cake'),
+  cakeDiffserv: z.enum(['diffserv3', 'diffserv4', 'besteffort']).default('diffserv4'),
+  cakeAckFilter: z.boolean().default(true),
+  enabled: z.boolean().default(true),
+  queues: z.array(TrafficShaperQueueSchema).default([]),
+});
+export type TrafficShaperInterface = z.infer<typeof TrafficShaperInterfaceSchema>;
+
+export const TrafficShaperConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  interfaces: z.array(TrafficShaperInterfaceSchema).default([]),
+});
+export type TrafficShaperConfig = z.infer<typeof TrafficShaperConfigSchema>;
+
+export const BgpNeighborSchema = z.object({
+  peerIp: z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: 'Invalid peer IP' }),
+  remoteAs: z.number().int().min(1).max(4294967295),
+  description: z.string().max(255).default(''),
+  password: z.string().optional(),
+  bfd: z.boolean().default(true),
+  nextHopSelf: z.boolean().default(false),
+  softReconfiguration: z.boolean().default(true),
+});
+export type BgpNeighbor = z.infer<typeof BgpNeighborSchema>;
+
+export const BgpConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  asNumber: z.number().int().min(1).max(4294967295).default(64512),
+  routerId: z.string().refine(isValidIPv4, { message: 'Invalid router ID' }).default('1.1.1.1'),
+  networks: z.array(z.string()).default([]),
+  neighbors: z.array(BgpNeighborSchema).default([]),
+});
+export type BgpConfig = z.infer<typeof BgpConfigSchema>;
+
+export const OspfAreaSchema = z.object({
+  areaId: z.string().default('0.0.0.0'),
+  interfaces: z.array(z.string()).default([]),
+  networks: z.array(z.string()).default([]),
+});
+export type OspfArea = z.infer<typeof OspfAreaSchema>;
+
+export const OspfConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  routerId: z.string().refine(isValidIPv4, { message: 'Invalid router ID' }).default('1.1.1.1'),
+  redistributeConnected: z.boolean().default(true),
+  redistributeDefault: z.boolean().default(false),
+  areas: z.array(OspfAreaSchema).default([]),
+});
+export type OspfConfig = z.infer<typeof OspfConfigSchema>;
+
+export const FrrConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  bgp: BgpConfigSchema.default({}),
+  ospf: OspfConfigSchema.default({}),
+});
+export type FrrConfig = z.infer<typeof FrrConfigSchema>;
+
+export const PacketTracerQuerySchema = z.object({
+  inInterface: z.string().min(1),
+  srcIp: z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: 'Invalid source IP' }),
+  dstIp: z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: 'Invalid destination IP' }),
+  protocol: z.enum(['tcp', 'udp', 'icmp']).default('tcp'),
+  srcPort: z.number().int().min(1).max(65535).default(12345),
+  dstPort: z.number().int().min(1).max(65535).default(80),
+});
+export type PacketTracerQuery = z.infer<typeof PacketTracerQuerySchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
   interfaces: z.array(InterfaceSchema).default([]),
+  vlans: z.array(VlanSchema).default([]),
+  bridges: z.array(BridgeSchema).default([]),
+  bonds: z.array(BondSchema).default([]),
+  virtualIps: z.array(VirtualIpSchema).default([]),
+  vrfs: z.array(VrfSchema).default([]),
   aliases: z.array(AliasSchema).default([]),
   rules: z.array(FirewallRuleSchema).default([]),
   nat: z.array(NatRuleSchema).default([]),
   gateways: z.array(GatewaySchema).default([]),
+  gatewayGroups: z.array(GatewayGroupSchema).default([]),
   dhcp: DhcpConfigSchema.default({ enabled: true, subnets: [] }),
   dns: DnsConfigSchema.default({ enabled: true, hostOverrides: [] }),
   routes: z.array(StaticRouteSchema).default([]),
+  trafficShaper: TrafficShaperConfigSchema.optional(),
   wireguard: WireGuardConfigSchema.optional(),
+  ipsec: IpsecConfigSchema.optional(),
+  openvpn: OpenVpnConfigSchema.optional(),
+  frr: FrrConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
 

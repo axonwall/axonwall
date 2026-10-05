@@ -13,6 +13,10 @@ import {
   FileText,
   Activity,
   Settings,
+  Gauge,
+  Layers,
+  ShieldCheck,
+  Compass,
 } from 'lucide-react';
 
 interface NavItem {
@@ -24,11 +28,17 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { name: 'Lobby / Dashboard', href: '/lobby', icon: LayoutDashboard },
   { name: 'Interfaces', href: '/interfaces', icon: Network },
+  { name: 'Advanced Topologies', href: '/interfaces/advanced', icon: Layers },
   { name: 'Firewall Rules & NAT', href: '/firewall', icon: Flame },
-  { name: 'Routing & Gateways', href: '/routing', icon: Route },
+  { name: 'Routing & Multi-WAN', href: '/routing/gateways', icon: Route },
+  { name: 'Dynamic Routing (FRR)', href: '/routing/dynamic', icon: Compass },
+  { name: 'Smart QoS & Shaper', href: '/traffic/shaper', icon: Gauge },
   { name: 'DHCP Server (Kea)', href: '/services/dhcp', icon: Server },
   { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
-  { name: 'Diagnostics', href: '/diagnostics', icon: Activity },
+  { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
+  { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },
+  { name: 'Network Diagnostics', href: '/diagnostics', icon: Activity },
+  { name: 'Packet Tracer (E5)', href: '/diagnostics/packet-tracer', icon: Layers },
   { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
   { name: 'System & Revisions', href: '/system', icon: Settings },
 ];

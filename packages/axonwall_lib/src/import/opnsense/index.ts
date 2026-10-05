@@ -246,6 +246,12 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     rules,
     nat,
     gateways: [],
+    gatewayGroups: [],
+    vlans: [],
+    bridges: [],
+    bonds: [],
+    virtualIps: [],
+    vrfs: [],
     dhcp: {
       enabled: subnets.length > 0,
       subnets,

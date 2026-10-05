@@ -257,6 +257,17 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
     parts.push(`log prefix "axonwall-rule:${rule.id?.slice(0, 8) || 'log'}: " group 0`);
   }
 
+  // Policy Routing: Mark packets for Linux ip rule / multi-WAN routing tables
+  if (rule.action === 'pass') {
+    if (rule.gatewayGroup) {
+      const markHex = `0x${hashStringToInt(rule.gatewayGroup, 0x1000, 0x7fff).toString(16)}`;
+      parts.push(`meta mark set ${markHex}`);
+    } else if (rule.gateway) {
+      const markHex = `0x${hashStringToInt(rule.gateway, 0x100, 0xfff).toString(16)}`;
+      parts.push(`meta mark set ${markHex}`);
+    }
+  }
+
   // Action
   const actionMap: Record<string, string> = {
     pass: 'accept',
@@ -272,4 +283,14 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   }
 
   return parts.join(' ');
+}
+
+function hashStringToInt(str: string, min: number, max: number): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  const span = max - min + 1;
+  return min + (Math.abs(hash) % span);
 }
