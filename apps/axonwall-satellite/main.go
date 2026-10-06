@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"log/slog"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/axonwall/axonwall_monorepo/apps/axonwall-satellite/engine"
 )
 
 var (
@@ -66,9 +68,19 @@ func main() {
 	}
 	defer c.Close()
 
+	// Initialize Nftables engine
+	nftEngine := engine.NewNftablesEngine()
 	slog.Info("Successfully connected to Axonwall Core. Awaiting config...")
 
 	done := make(chan struct{})
+
+	// Message struct
+	type SyncMessage struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Script string `json:"script"`
+		} `json:"payload"`
+	}
 
 	// Read loop (receiving DesiredState configs)
 	go func() {
@@ -79,8 +91,23 @@ func main() {
 				slog.Error("Read error from core", "error", err)
 				return
 			}
-			slog.Info("Received configuration payload", "size", len(message))
-			// TODO: Parse desired state, apply via nftables / iproute2
+			slog.Info("Received message payload", "size", len(message))
+			
+			var msg SyncMessage
+			if err := json.Unmarshal(message, &msg); err != nil {
+				slog.Error("Failed to parse message", "error", err)
+				continue
+			}
+
+			if msg.Type == "SYNC_NFTABLES" && msg.Payload.Script != "" {
+				slog.Info("Applying new nftables script from Core...")
+				if err := nftEngine.Apply(msg.Payload.Script); err != nil {
+					slog.Error("Failed to apply nftables script", "error", err)
+					// In a real scenario we might send a NACK back to the Core here
+				} else {
+					slog.Info("Nftables configuration applied successfully")
+				}
+			}
 		}
 	}()
 

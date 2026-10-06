@@ -53,13 +53,25 @@ async function main() {
     });
     wss.on('connection', (ws, request, satId) => {
         console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId}`);
-        // Simulate pushing an initial desired state
+        // Simulate pushing an initial compiled nftables script
         ws.send(JSON.stringify({
-            type: 'SYNC_STATE',
+            type: 'SYNC_NFTABLES',
             payload: {
-                version: 1,
-                system: { hostname: `sat-${satId}` },
-                // ... abbreviated DesiredState
+                script: `
+flush ruleset
+table inet axonwall {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif "lo" accept
+    ct state established,related accept
+    # Allow inbound WireGuard/SSH for management
+    tcp dport 22 accept
+  }
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+  }
+}
+        `
             }
         }));
         ws.on('message', (message) => {
