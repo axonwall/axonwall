@@ -16,6 +16,7 @@ if [[ $EUID -ne 0 ]]; then
    echo "    In CI/CD, this executes inside an unprivileged Docker container with CAP_SYS_ADMIN."
 fi
 
+rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
 
 # 1. Install prerequisites if missing
@@ -24,6 +25,7 @@ if ! command -v lb &>/dev/null; then
   apt-get update && apt-get install -y --no-install-recommends \
     live-build \
     debootstrap \
+    debian-archive-keyring \
     xorriso \
     isolinux \
     syslinux-efi \
@@ -37,7 +39,15 @@ cd "${WORK_DIR}"
 # 2. Configure live-build for Debian 13 (Trixie)
 echo "[+] Configuring live-build for Debian 13 (Trixie)..."
 lb config \
+  --mode debian \
   --distribution trixie \
+  --mirror-bootstrap "http://deb.debian.org/debian/" \
+  --mirror-chroot "http://deb.debian.org/debian/" \
+  --mirror-chroot-security "http://deb.debian.org/debian-security/" \
+  --mirror-binary "http://deb.debian.org/debian/" \
+  --mirror-binary-security "http://deb.debian.org/debian-security/" \
+  --mirror-debian-installer "http://deb.debian.org/debian/" \
+  --keyring-packages debian-archive-keyring \
   --architectures amd64 \
   --archive-areas "main contrib non-free non-free-firmware" \
   --binary-images iso-hybrid \

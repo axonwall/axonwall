@@ -48,6 +48,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             live-build \
             debootstrap \
+            debian-archive-keyring \
             xorriso \
             isolinux \
             syslinux-efi \
