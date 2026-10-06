@@ -9,10 +9,12 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@axonwall/lib": "workspace:*"
+    "@axonwall/lib": "workspace:*",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.9",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.8.2"
   }
 }

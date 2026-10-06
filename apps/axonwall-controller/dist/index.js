@@ -17,13 +17,64 @@ export function buildArtifactBundle(jobId, state) {
         generatedAt: new Date().toISOString(),
     };
 }
+import { WebSocketServer } from 'ws';
+import * as http from 'node:http';
 async function main() {
     console.log('[Axonwall Controller] Starting Axonwall Control Plane Worker...');
     console.log('[Axonwall Controller] Monitoring config changes and apply pipeline.');
-    // Heartbeat loop
-    setInterval(() => {
-        // Keep-alive heartbeat
-    }, 10000);
+    // Set up an HTTP server for WebSocket upgrades
+    const server = http.createServer((req, res) => {
+        res.writeHead(200);
+        res.end('Axonwall Control Plane\\n');
+    });
+    const wss = new WebSocketServer({ noServer: true });
+    server.on('upgrade', (request, socket, head) => {
+        const { pathname } = new URL(request.url || '', `http://${request.headers.host}`);
+        if (pathname === '/ws/satellite') {
+            // Basic ZTP token validation
+            const satId = request.headers['x-axonwall-satellite-id'];
+            const token = request.headers['x-axonwall-ztp-token'];
+            if (!satId || !token) {
+                console.log(`[Fleet Manager] Rejected connection: missing ZTP headers`);
+                socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n');
+                socket.destroy();
+                return;
+            }
+            // TODO: Validate token against a Supabase DB or config file
+            console.log(`[Fleet Manager] Authenticating Satellite ID: ${satId} with token: ${token}`);
+            wss.handleUpgrade(request, socket, head, (ws) => {
+                wss.emit('connection', ws, request, satId);
+            });
+        }
+        else {
+            socket.write('HTTP/1.1 404 Not Found\\r\\n\\r\\n');
+            socket.destroy();
+        }
+    });
+    wss.on('connection', (ws, request, satId) => {
+        console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId}`);
+        // Simulate pushing an initial desired state
+        ws.send(JSON.stringify({
+            type: 'SYNC_STATE',
+            payload: {
+                version: 1,
+                system: { hostname: `sat-${satId}` },
+                // ... abbreviated DesiredState
+            }
+        }));
+        ws.on('message', (message) => {
+            // Handle telemetry and heartbeats
+            const size = Array.isArray(message) ? message[0].length : message.length;
+            console.log(`[Fleet Manager] Received telemetry from ${satId}: ${size} bytes`);
+        });
+        ws.on('close', () => {
+            console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
+        });
+    });
+    const port = process.env.CONTROLLER_PORT || 8443;
+    server.listen(port, () => {
+        console.log(`[Axonwall Controller] Fleet Manager listening on port ${port}`);
+    });
 }
 if (process.env.NODE_ENV !== 'test') {
     main().catch((err) => {
