@@ -1,0 +1,12 @@
+[Unit]
+Description=Axonwall Firstboot Appliance Provisioner
+After=network.target
+ConditionPathExists=/etc/axonwall/.firstboot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/axonwall-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

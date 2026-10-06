@@ -1,0 +1,79 @@
+name: Build Axonwall Appliance ISO
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    name: Build Debian 13 Appliance ISO
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node & PNPM
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Axonwall Monorepo Artifacts
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Cross-Compile Satellite Binaries
+        run: |
+          cd apps/axonwall-satellite
+          make all
+
+      - name: Install ISO Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            live-build \
+            debootstrap \
+            xorriso \
+            isolinux \
+            syslinux-efi \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            mtools
+
+      - name: Build Hybrid Appliance ISO
+        run: |
+          sudo ./packaging/iso/build-iso.sh
+
+      - name: Compute Checksums
+        run: |
+          cd packaging/iso/output
+          sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256
+
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: axonwall-debian13-amd64-iso
+          path: |
+            packaging/iso/output/axonwall-debian13-amd64.iso
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+          retention-days: 14
+
+      - name: Release ISO (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaging/iso/output/axonwall-debian13-amd64.iso
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
