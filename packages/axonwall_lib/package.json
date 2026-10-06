@@ -86,6 +86,10 @@
       "types": "./dist/telemetry/index.d.ts",
       "default": "./dist/telemetry/index.js"
     },
+    "./ai": {
+      "types": "./dist/ai/index.d.ts",
+      "default": "./dist/ai/index.js"
+    },
     "./captive": {
       "types": "./dist/captive/index.d.ts",
       "default": "./dist/captive/index.js"

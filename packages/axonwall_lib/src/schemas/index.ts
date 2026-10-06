@@ -727,6 +727,69 @@ export const InstalledPluginRecordSchema = z.object({
 });
 export type InstalledPluginRecord = z.infer<typeof InstalledPluginRecordSchema>;
 
+export const AiProviderTypeSchema = z.enum([
+  'antigravity',
+  'ollama',
+  'claude-code',
+  'codex',
+  'vllm',
+]);
+export type AiProviderType = z.infer<typeof AiProviderTypeSchema>;
+
+export const AntigravitySettingsSchema = z.object({
+  endpoint: z.string().default('https://generativelanguage.googleapis.com/v1beta'),
+  apiKey: z.string().optional(),
+  model: z.string().default('gemini-2.5-pro'),
+  thinkingBudget: z.number().int().default(1024),
+});
+export type AntigravitySettings = z.infer<typeof AntigravitySettingsSchema>;
+
+export const OllamaSettingsSchema = z.object({
+  endpoint: z.string().default('http://127.0.0.1:11434'),
+  model: z.string().default('llama3.3:latest'),
+  temperature: z.number().min(0).max(2).default(0.2),
+});
+export type OllamaSettings = z.infer<typeof OllamaSettingsSchema>;
+
+export const ClaudeCodeSettingsSchema = z.object({
+  endpoint: z.string().default('https://api.anthropic.com/v1'),
+  apiKey: z.string().optional(),
+  model: z.string().default('claude-3-7-sonnet-20250219'),
+  extendedThinking: z.boolean().default(true),
+});
+export type ClaudeCodeSettings = z.infer<typeof ClaudeCodeSettingsSchema>;
+
+export const CodexSettingsSchema = z.object({
+  endpoint: z.string().default('https://api.openai.com/v1'),
+  apiKey: z.string().optional(),
+  model: z.string().default('gpt-4o'),
+  temperature: z.number().min(0).max(2).default(0.2),
+});
+export type CodexSettings = z.infer<typeof CodexSettingsSchema>;
+
+export const VllmSettingsSchema = z.object({
+  endpoint: z.string().default('http://127.0.0.1:8000/v1'),
+  apiKey: z.string().optional(),
+  model: z.string().default('qwen2.5-coder-32b-instruct'),
+  maxTokens: z.number().int().default(4096),
+});
+export type VllmSettings = z.infer<typeof VllmSettingsSchema>;
+
+export const AiConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  activeProvider: AiProviderTypeSchema.default('antigravity'),
+  systemContextInference: z.boolean().default(true),
+  autoAuditOnSave: z.boolean().default(false),
+  providers: z.object({
+    antigravity: AntigravitySettingsSchema.default({}),
+    ollama: OllamaSettingsSchema.default({}),
+    claudeCode: ClaudeCodeSettingsSchema.default({}),
+    codex: CodexSettingsSchema.default({}),
+    vllm: VllmSettingsSchema.default({}),
+  }).default({}),
+});
+export type AiConfig = z.infer<typeof AiConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -760,6 +823,7 @@ export const DesiredStateSchema = z.object({
   freeradius: FreeRadiusPluginConfigSchema.optional(),
   snmp: SnmpPluginConfigSchema.optional(),
   plugins: z.array(InstalledPluginRecordSchema).optional(),
+  ai: AiConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
 

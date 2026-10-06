@@ -24,4 +24,5 @@ export * from './compile/snmp/index.js';
 export * from './compile/nut/index.js';
 export * from './plugins/index.js';
 export * from './telemetry/index.js';
+export * from './ai/index.js';
 export * from './lint/index.js';
