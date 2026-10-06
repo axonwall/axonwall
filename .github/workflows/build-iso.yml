@@ -19,10 +19,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Node & PNPM
-        uses: pnpm/action-setup@v3
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          version: 9
+          node-version: 22
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v4
 
       - name: Setup Go
         uses: actions/setup-go@v5
