@@ -790,6 +790,50 @@ export const AiConfigSchema = z.object({
 });
 export type AiConfig = z.infer<typeof AiConfigSchema>;
 
+export const SatelliteNodeSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  arch: z.enum(['mipsle', 'arm64', 'amd64', 'armv7', 'unknown']).default('unknown'),
+  os: z.string().default('Linux'),
+  ip: z.string().default('127.0.0.1'),
+  lastSeen: z.string().optional(),
+  status: z.enum(['online', 'offline', 'enrolling', 'degraded']).default('enrolling'),
+  ztpToken: z.string().optional(),
+  wireguard: z.object({
+    tunnelIp: z.string().default('10.99.0.2/24'),
+    publicKey: z.string().optional(),
+    endpoint: z.string().optional(),
+    connected: z.boolean().default(false),
+  }).default({}),
+  wifi: z.array(z.object({
+    radio: z.string(),
+    ssid: z.string(),
+    channel: z.number().int().optional(),
+    security: z.enum(['wpa2-psk', 'wpa3-sae', 'wpa3-enterprise', 'open']).default('wpa3-sae'),
+    clientsCount: z.number().int().default(0),
+    enabled: z.boolean().default(true),
+  })).optional(),
+  metrics: z.object({
+    cpuUsagePercent: z.number().default(0),
+    memUsagePercent: z.number().default(0),
+    uptimeSeconds: z.number().int().default(0),
+    activeConns: z.number().int().default(0),
+    rxBytesTotal: z.number().int().default(0),
+    txBytesTotal: z.number().int().default(0),
+  }).optional(),
+  activePolicyVersion: z.number().int().default(1),
+});
+export type SatelliteNode = z.infer<typeof SatelliteNodeSchema>;
+
+export const SatelliteFleetConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  listenPort: z.number().int().default(8443),
+  defaultHeartbeatIntervalSec: z.number().int().default(30),
+  watchdogTimeoutSec: z.number().int().default(60),
+  nodes: z.array(SatelliteNodeSchema).default([]),
+});
+export type SatelliteFleetConfig = z.infer<typeof SatelliteFleetConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -824,7 +868,9 @@ export const DesiredStateSchema = z.object({
   snmp: SnmpPluginConfigSchema.optional(),
   plugins: z.array(InstalledPluginRecordSchema).optional(),
   ai: AiConfigSchema.optional(),
+  fleet: SatelliteFleetConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
+
 
 

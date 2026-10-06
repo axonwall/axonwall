@@ -1,0 +1,521 @@
+'use client';
+
+import React, { useState } from 'react';
+import {
+  Radio,
+  Cpu,
+  Server,
+  Wifi,
+  Shield,
+  ShieldAlert,
+  RefreshCw,
+  Plus,
+  Terminal,
+  Activity,
+  CheckCircle2,
+  XCircle,
+  Copy,
+  ExternalLink,
+  Download,
+  Flame,
+  Search,
+} from 'lucide-react';
+
+interface MockSatellite {
+  id: string;
+  name: string;
+  location: string;
+  arch: 'mipsle' | 'arm64' | 'amd64';
+  os: string;
+  ip: string;
+  tunnelIp: string;
+  status: 'online' | 'offline' | 'degraded';
+  cpuPercent: number;
+  memPercent: number;
+  activeConns: number;
+  uptime: string;
+  wifiClients: number;
+  lastSeen: string;
+}
+
+const INITIAL_SATELLITES: MockSatellite[] = [
+  {
+    id: 'sat-branch-london',
+    name: 'London Branch Edge Router',
+    location: 'London, UK (Branch #1)',
+    arch: 'arm64',
+    os: 'Debian 13 (Bookworm Appliance)',
+    ip: '198.51.100.12',
+    tunnelIp: '10.99.0.2/24',
+    status: 'online',
+    cpuPercent: 14.2,
+    memPercent: 32.5,
+    activeConns: 418,
+    uptime: '19d 4h 12m',
+    wifiClients: 0,
+    lastSeen: 'Just now',
+  },
+  {
+    id: 'sat-retail-berlin',
+    name: 'Berlin Store Wi-Fi & POS AP',
+    location: 'Berlin, DE (Retail Store)',
+    arch: 'mipsle',
+    os: 'OpenWrt 23.05 (GL.iNet MT3000)',
+    ip: '203.0.113.88',
+    tunnelIp: '10.99.0.3/24',
+    status: 'online',
+    cpuPercent: 28.6,
+    memPercent: 58.1,
+    activeConns: 164,
+    uptime: '4d 18h 03m',
+    wifiClients: 34,
+    lastSeen: '3s ago',
+  },
+  {
+    id: 'sat-warehouse-nyc',
+    name: 'NYC Logistics Gateway',
+    location: 'New York, US (Warehouse B)',
+    arch: 'amd64',
+    os: 'Ubuntu 24.04 LTS (Protectli 6-Port)',
+    ip: '192.0.2.45',
+    tunnelIp: '10.99.0.4/24',
+    status: 'online',
+    cpuPercent: 8.4,
+    memPercent: 22.0,
+    activeConns: 890,
+    uptime: '42d 11h 55m',
+    wifiClients: 12,
+    lastSeen: '1s ago',
+  },
+  {
+    id: 'sat-kiosk-tokyo',
+    name: 'Tokyo Kiosk Smart Edge',
+    location: 'Tokyo, JP (Shibuya Station)',
+    arch: 'arm64',
+    os: 'OpenWrt 23.05 (Raspberry Pi CM4)',
+    ip: '198.51.100.201',
+    tunnelIp: '10.99.0.5/24',
+    status: 'degraded',
+    cpuPercent: 89.1,
+    memPercent: 78.4,
+    activeConns: 1210,
+    uptime: '1d 08h 19m',
+    wifiClients: 8,
+    lastSeen: '45s ago',
+  },
+];
+
+export default function FleetPage() {
+  const [satellites, setSatellites] = useState<MockSatellite[]>(INITIAL_SATELLITES);
+  const [search, setSearch] = useState('');
+  const [selectedSat, setSelectedSat] = useState<MockSatellite | null>(INITIAL_SATELLITES[1]);
+  const [isZtpModalOpen, setIsZtpModalOpen] = useState(false);
+  const [generatedToken, setGeneratedToken] = useState('ztp_axon_98f4c1e20a4b77');
+  const [copied, setCopied] = useState(false);
+
+  const filtered = satellites.filter(
+    (s) =>
+      s.name.toLowerCase().includes(search.toLowerCase()) ||
+      s.location.toLowerCase().includes(search.toLowerCase()) ||
+      s.id.toLowerCase().includes(search.toLowerCase()) ||
+      s.ip.includes(search)
+  );
+
+  const onlineCount = satellites.filter((s) => s.status === 'online').length;
+  const totalWifiClients = satellites.reduce((acc, s) => acc + s.wifiClients, 0);
+
+  const handleCopyZtp = () => {
+    navigator.clipboard.writeText(
+      `./axonwall-satellite -core wss://hub.axonwall.corp:8443/ws/satellite -id sat-node-01 -token ${generatedToken}`
+    );
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handlePushPolicy = (id: string) => {
+    alert(`Pushed updated atomic nftables ruleset & WireGuard routes to satellite [${id}]`);
+  };
+
+  const handleQuarantine = (id: string) => {
+    alert(`Triggered Zero-Trust emergency quarantine on satellite [${id}]. Dropping non-management traffic.`);
+  };
+
+  return (
+    <div className="p-8 space-y-8 max-w-7xl mx-auto">
+      {/* Top Banner */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2.5">
+              <Radio className="w-6 h-6 text-emerald-400" />
+              Fleet & Satellites (SD-Branch)
+            </h1>
+            <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              OpenWrt & Linux Ready
+            </span>
+          </div>
+          <p className="text-sm text-slate-400 mt-1">
+            Centralized orchestration, zero-touch provisioning (ZTP), and distributed nftables microsegmentation across remote edge routers and access points.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsZtpModalOpen(true)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-sm hover:bg-emerald-400 transition shadow-lg shadow-emerald-500/20"
+          >
+            <Plus className="w-4 h-4" />
+            Enroll Satellite (ZTP)
+          </button>
+          <button
+            onClick={() => alert('Broadcasting compiled DesiredState rulesets to all active satellites...')}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-medium text-sm hover:bg-slate-700 transition"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Sync All Nodes
+          </button>
+        </div>
+      </div>
+
+      {/* Overview Stat Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Total Edge Nodes</div>
+            <div className="text-2xl font-bold text-white mt-1">{satellites.length}</div>
+            <div className="text-xs text-emerald-400 mt-0.5">{onlineCount} Online & Active</div>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+            <Server className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">WireGuard SD-WAN</div>
+            <div className="text-2xl font-bold text-white mt-1">4 / 4</div>
+            <div className="text-xs text-slate-400 mt-0.5">Full Hub-and-Spoke Mesh</div>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
+            <Radio className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Edge Wi-Fi Clients</div>
+            <div className="text-2xl font-bold text-white mt-1">{totalWifiClients}</div>
+            <div className="text-xs text-slate-400 mt-0.5">Roaming across 2 APs</div>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+            <Wifi className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+          <div>
+            <div className="text-xs font-medium text-slate-400 uppercase tracking-wider">Edge Watchdog</div>
+            <div className="text-2xl font-bold text-white mt-1">60s</div>
+            <div className="text-xs text-emerald-400 mt-0.5">Autonomous Rollback Arm</div>
+          </div>
+          <div className="w-10 h-10 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+            <Shield className="w-5 h-5" />
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content Area: Search & Satellites Table */}
+      <div className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-500" />
+            <input
+              type="text"
+              placeholder="Search by satellite ID, location, IP or architecture..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-900 border-b border-slate-800 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                <tr>
+                  <th className="px-4 py-3">Satellite Node</th>
+                  <th className="px-4 py-3">Architecture & OS</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">WireGuard Tunnel</th>
+                  <th className="px-4 py-3">Telemetry (CPU / RAM)</th>
+                  <th className="px-4 py-3">Edge Clients</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {filtered.map((sat) => {
+                  const isSelected = selectedSat?.id === sat.id;
+                  return (
+                    <tr
+                      key={sat.id}
+                      onClick={() => setSelectedSat(sat)}
+                      className={`cursor-pointer transition hover:bg-slate-800/40 ${
+                        isSelected ? 'bg-slate-800/60' : ''
+                      }`}
+                    >
+                      <td className="px-4 py-3.5">
+                        <div className="font-medium text-white flex items-center gap-2">
+                          {sat.name}
+                        </div>
+                        <div className="text-xs text-slate-400 font-mono flex items-center gap-1.5 mt-0.5">
+                          <span>{sat.id}</span>
+                          <span className="text-slate-600">•</span>
+                          <span>{sat.location}</span>
+                        </div>
+                      </td>
+
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-800 border border-slate-700 text-slate-300 uppercase">
+                            {sat.arch}
+                          </span>
+                          <span className="text-xs text-slate-300">{sat.os}</span>
+                        </div>
+                        <div className="text-xs text-slate-500 font-mono mt-0.5">{sat.ip}</div>
+                      </td>
+
+                      <td className="px-4 py-3.5">
+                        {sat.status === 'online' ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            Online
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                            Degraded
+                          </span>
+                        )}
+                        <div className="text-[11px] text-slate-500 mt-0.5">{sat.lastSeen}</div>
+                      </td>
+
+                      <td className="px-4 py-3.5">
+                        <div className="font-mono text-xs text-cyan-400 font-medium">{sat.tunnelIp}</div>
+                        <div className="text-xs text-slate-500 mt-0.5">Mesh: wg-axon0</div>
+                      </td>
+
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-3">
+                          <div>
+                            <div className="text-xs text-slate-300">CPU {sat.cpuPercent}%</div>
+                            <div className="w-16 h-1.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${
+                                  sat.cpuPercent > 80 ? 'bg-red-500' : 'bg-emerald-500'
+                                }`}
+                                style={{ width: `${sat.cpuPercent}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-slate-300">RAM {sat.memPercent}%</div>
+                            <div className="w-16 h-1.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-cyan-500"
+                                style={{ width: `${sat.memPercent}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-1">{sat.activeConns} flows</div>
+                      </td>
+
+                      <td className="px-4 py-3.5">
+                        {sat.wifiClients > 0 ? (
+                          <div className="flex items-center gap-1.5 text-xs text-purple-400 font-medium">
+                            <Wifi className="w-3.5 h-3.5" />
+                            {sat.wifiClients} Wi-Fi Clients
+                          </div>
+                        ) : (
+                          <span className="text-xs text-slate-500">Wired Only</span>
+                        )}
+                      </td>
+
+                      <td className="px-4 py-3.5 text-right">
+                        <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            title="Push Policy"
+                            onClick={() => handlePushPolicy(sat.id)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800 transition"
+                          >
+                            <RefreshCw className="w-4 h-4" />
+                          </button>
+                          <button
+                            title="Quarantine"
+                            onClick={() => handleQuarantine(sat.id)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition"
+                          >
+                            <ShieldAlert className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* Selected Satellite Detail Inspector */}
+      {selectedSat && (
+        <div className="p-6 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Radio className="w-5 h-5 text-emerald-400" />
+                Edge Node Inspector: {selectedSat.name}
+              </h2>
+              <p className="text-xs text-slate-400 font-mono mt-0.5">
+                ID: {selectedSat.id} | Arch: {selectedSat.arch} | Tunnel: {selectedSat.tunnelIp}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handlePushPolicy(selectedSat.id)}
+                className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 rounded-lg text-xs font-semibold transition"
+              >
+                Sync nftables
+              </button>
+              <button
+                onClick={() => handleQuarantine(selectedSat.id)}
+                className="px-3 py-1.5 bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 rounded-lg text-xs font-semibold transition"
+              >
+                Isolate Node
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+            <div className="p-3.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
+              <div className="text-xs font-medium text-slate-400 flex items-center gap-1.5">
+                <Flame className="w-3.5 h-3.5 text-orange-400" />
+                Active nftables Ruleset
+              </div>
+              <div className="text-sm font-semibold text-white mt-1">v4.1.8-atomic</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">Watchdog Timer: 60s (Armed)</div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
+              <div className="text-xs font-medium text-slate-400 flex items-center gap-1.5">
+                <Wifi className="w-3.5 h-3.5 text-purple-400" />
+                Wireless Radios (mac80211)
+              </div>
+              <div className="text-sm font-semibold text-white mt-1">
+                {selectedSat.wifiClients > 0 ? '2 SSIDs Active (WPA3)' : 'No Wi-Fi Radios'}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                {selectedSat.wifiClients} Connected Clients
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
+              <div className="text-xs font-medium text-slate-400 flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                Kernel Uptime & Health
+              </div>
+              <div className="text-sm font-semibold text-white mt-1">{selectedSat.uptime}</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">{selectedSat.activeConns} conntrack sessions</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ZTP Enrollment Modal */}
+      {isZtpModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full p-6 space-y-6 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                  <Plus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Enroll New Satellite (ZTP)</h3>
+                  <p className="text-xs text-slate-400">Zero-Touch Provisioning bootstrap for OpenWrt or Linux</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsZtpModalOpen(false)}
+                className="text-slate-400 hover:text-white text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-1.5">
+                  One-Time Enrollment Token
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={generatedToken}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm font-mono text-emerald-400"
+                  />
+                  <button
+                    onClick={() => {
+                      setGeneratedToken('ztp_axon_' + Math.random().toString(36).substring(2, 16));
+                    }}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700"
+                  >
+                    Regenerate
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-1.5">
+                  Bootstrapping Command (Run on edge device)
+                </label>
+                <div className="relative">
+                  <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto">
+{`./axonwall-satellite \\
+  -core wss://hub.axonwall.corp:8443/ws/satellite \\
+  -id sat-node-$(cat /sys/class/net/eth0/address | tr -d ':') \\
+  -token ${generatedToken}`}
+                  </pre>
+                  <button
+                    onClick={handleCopyZtp}
+                    className="absolute top-2 right-2 p-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs flex items-center gap-1 border border-slate-700"
+                  >
+                    {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copied ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-lg bg-emerald-500/5 border border-emerald-500/20 text-xs text-slate-300 space-y-1">
+                <div className="font-semibold text-emerald-400">Pre-compiled Firmware Available:</div>
+                <div>You can flash your OpenWrt router directly using our custom ImageBuilder feed with `axonwall-satellite` embedded.</div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setIsZtpModalOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-lg"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

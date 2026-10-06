@@ -27,6 +27,7 @@ import {
   Boxes,
   BatteryCharging,
   Sparkles,
+  Wifi,
 } from 'lucide-react';
 
 interface NavItem {
@@ -38,6 +39,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { name: 'Lobby / Dashboard', href: '/lobby', icon: LayoutDashboard },
   { name: 'AI Copilot', href: '/ai', icon: Sparkles },
+  { name: 'Fleet & Satellites', href: '/fleet', icon: Wifi },
   { name: 'Interfaces', href: '/interfaces', icon: Network },
   { name: 'Advanced Topologies', href: '/interfaces/advanced', icon: Layers },
   { name: 'Firewall Rules & NAT', href: '/firewall', icon: Flame },

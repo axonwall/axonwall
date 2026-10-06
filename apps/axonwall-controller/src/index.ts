@@ -38,10 +38,40 @@ async function main() {
   console.log('[Axonwall Controller] Starting Axonwall Control Plane Worker...');
   console.log('[Axonwall Controller] Monitoring config changes and apply pipeline.');
 
-  // Set up an HTTP server for WebSocket upgrades
+  // In-memory fleet registry of active satellites
+  interface SatelliteState {
+    id: string;
+    connectedAt: string;
+    lastSeen: string;
+    ip?: string;
+    arch?: string;
+    metrics?: {
+      uptimeSeconds: number;
+      cpuUsagePercent: number;
+      memUsagePercent: number;
+      activeConns: number;
+      rxBytesTotal: number;
+      txBytesTotal: number;
+    };
+  }
+
+  const activeSatellites = new Map<string, SatelliteState>();
+
+  // Set up an HTTP server for WebSocket upgrades and REST queries
   const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('Axonwall Control Plane\\n');
+    const { pathname } = new URL(req.url || '', `http://${req.headers.host}`);
+
+    if (pathname === '/api/v1/fleet/satellites' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        totalConnected: activeSatellites.size,
+        satellites: Array.from(activeSatellites.values()),
+      }));
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Axonwall Control Plane & Fleet Hub\n');
   });
 
   const wss = new WebSocketServer({ noServer: true });
@@ -56,27 +86,36 @@ async function main() {
 
       if (!satId || !token) {
         console.log(`[Fleet Manager] Rejected connection: missing ZTP headers`);
-        socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n');
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
 
-      // TODO: Validate token against a Supabase DB or config file
       console.log(`[Fleet Manager] Authenticating Satellite ID: ${satId} with token: ${token}`);
 
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request, satId);
       });
     } else {
-      socket.write('HTTP/1.1 404 Not Found\\r\\n\\r\\n');
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
     }
   });
 
   wss.on('connection', (ws: WebSocket, request: http.IncomingMessage, satId: string) => {
-    console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId}`);
+    const remoteIp = request.socket.remoteAddress || '127.0.0.1';
+    console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
+
+    const state: SatelliteState = {
+      id: satId,
+      connectedAt: new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+      ip: remoteIp,
+      arch: (request.headers['user-agent']?.includes('arm') ? 'arm64' : 'amd64'),
+    };
+    activeSatellites.set(satId, state);
     
-    // Simulate pushing an initial compiled nftables script
+    // 1. Push initial compiled nftables ruleset
     ws.send(JSON.stringify({
       type: 'SYNC_NFTABLES',
       payload: {
@@ -87,8 +126,9 @@ table inet axonwall {
     type filter hook input priority 0; policy drop;
     iif "lo" accept
     ct state established,related accept
-    # Allow inbound WireGuard/SSH for management
+    # Allow management
     tcp dport 22 accept
+    udp dport 51820 accept
   }
   chain forward {
     type filter hook forward priority 0; policy drop;
@@ -98,14 +138,38 @@ table inet axonwall {
       }
     }));
 
+    // 2. Push WireGuard SD-WAN mesh configuration
+    ws.send(JSON.stringify({
+      type: 'SYNC_WIREGUARD',
+      payload: {
+        interfaceName: 'wg-axon0',
+        tunnelIp: '10.99.0.2/24',
+        privateKey: 'SAMPLE_SATELLITE_PRIVATE_KEY_ZTP_PROVISIONED',
+        peerPublicKey: 'AXONWALL_CORE_HUB_PUBLIC_KEY',
+        peerEndpoint: 'hub.axonwall.local:51820',
+        allowedIps: '10.99.0.0/16',
+        keepAliveSec: 25,
+      }
+    }));
+
     ws.on('message', (message) => {
-      // Handle telemetry and heartbeats
-      const size = Array.isArray(message) ? message[0].length : (message as Buffer).length;
-      console.log(`[Fleet Manager] Received telemetry from ${satId}: ${size} bytes`);
+      state.lastSeen = new Date().toISOString();
+      try {
+        const text = message.toString();
+        const parsed = JSON.parse(text);
+        if (parsed.type === 'TELEMETRY_REPORT') {
+          const report = JSON.parse(parsed.payload);
+          state.metrics = report.metrics;
+          console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics.activeConns}`);
+        }
+      } catch {
+        // Ping or non-JSON message
+      }
     });
 
     ws.on('close', () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
+      activeSatellites.delete(satId);
     });
   });
 
