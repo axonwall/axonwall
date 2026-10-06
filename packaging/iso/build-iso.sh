@@ -65,7 +65,9 @@ cp "${SCRIPT_DIR}/../debian/axonwall-ui.service" config/includes.chroot/etc/syst
 mkdir -p config/includes.chroot/usr/share/axonwall/
 cp "${SCRIPT_DIR}/../debian/lockdown.nft" config/includes.chroot/usr/share/axonwall/ || true
 
-chmod +x config/includes.chroot/usr/local/bin/axonwall-firstboot
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-firstboot ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-firstboot
+fi
 
 # 4. Define package list to install in image
 mkdir -p config/package-lists

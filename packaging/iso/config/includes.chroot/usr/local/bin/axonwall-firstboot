@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Axonwall Appliance Firstboot Provisioner
+# ==============================================================================
+set -euo pipefail
+
+MARKER="/etc/axonwall/.firstboot"
+
+if [[ ! -f "$MARKER" ]]; then
+  exit 0
+fi
+
+echo "[Axonwall Firstboot] Initializing network appliance..."
+
+# 1. Apply kernel performance tuning
+sysctl --system
+
+# 2. Identify Primary LAN & WAN NICs
+INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | grep -v 'lo' | head -n 2))
+WAN_IF="${INTERFACES[0]:-eth0}"
+LAN_IF="${INTERFACES[1]:-eth1}"
+
+echo "[Axonwall Firstboot] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF}"
+
+# 3. Configure default LAN static IP (192.168.1.1/24)
+ip addr add 192.168.1.1/24 dev "$LAN_IF" || true
+ip link set up dev "$LAN_IF" || true
+
+# 4. Bootstrap baseline lockdown nftables ruleset
+if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
+  nft -f /usr/share/axonwall/lockdown.nft
+fi
+
+# 5. Enable and start Axonwall Daemons
+systemctl enable --now axonwalld || true
+systemctl enable --now axonwall-controller || true
+systemctl enable --now axonwall-ui || true
+
+# Remove marker once complete
+rm -f "$MARKER"
+echo "[Axonwall Firstboot] Provisioning complete. Access web console at https://192.168.1.1:3000"
