@@ -33,6 +33,7 @@ type FlowTrackerFlowVal struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	FlowTrackerMapBlocklistMap    = "blocklist_map"
 	FlowTrackerMapFlowMap         = "flow_map"
 	FlowTrackerProgXdpFlowTracker = "xdp_flow_tracker"
 )
@@ -86,7 +87,8 @@ type FlowTrackerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type FlowTrackerMapSpecs struct {
-	FlowMap *ebpf.MapSpec `ebpf:"flow_map"`
+	BlocklistMap *ebpf.MapSpec `ebpf:"blocklist_map"`
+	FlowMap      *ebpf.MapSpec `ebpf:"flow_map"`
 }
 
 // FlowTrackerVariableSpecs contains global variables before they are loaded into the kernel.
@@ -115,11 +117,13 @@ func (o *FlowTrackerObjects) Close() error {
 //
 // It can be passed to LoadFlowTrackerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type FlowTrackerMaps struct {
-	FlowMap *ebpf.Map `ebpf:"flow_map"`
+	BlocklistMap *ebpf.Map `ebpf:"blocklist_map"`
+	FlowMap      *ebpf.Map `ebpf:"flow_map"`
 }
 
 func (m *FlowTrackerMaps) Close() error {
 	return _FlowTrackerClose(
+		m.BlocklistMap,
 		m.FlowMap,
 	)
 }

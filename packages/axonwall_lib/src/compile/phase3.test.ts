@@ -201,6 +201,7 @@ describe('Phase 3: ACME Client & CrowdSec Integration', () => {
           status: 'valid',
         },
       ],
+      internalCAs: [],
     });
 
     expect(res.renewScript).toContain('certbot certonly --webroot -w /var/www/acme-challenge');

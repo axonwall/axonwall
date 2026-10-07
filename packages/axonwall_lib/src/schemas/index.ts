@@ -473,12 +473,21 @@ export const SuricataRuleSourceSchema = z.object({
 });
 export type SuricataRuleSource = z.infer<typeof SuricataRuleSourceSchema>;
 
+export const TlsDecryptionSchema = z.object({
+  enabled: z.boolean().default(false),
+  caCertificateId: z.string().uuid().optional(),
+  transparentProxyPort: z.number().int().default(3129),
+  bypassedDomains: z.array(z.string()).default([]), // Don't intercept banks, healthcare
+});
+export type TlsDecryptionConfig = z.infer<typeof TlsDecryptionSchema>;
+
 export const SuricataConfigSchema = z.object({
   enabled: z.boolean().default(false),
   mode: SuricataModeSchema.default('ips'),
   interfaces: z.array(z.string()).default(['wan']),
   nfqueueFailOpen: z.boolean().default(true),
   nfqueueBypass: z.boolean().default(true),
+  tlsDecryption: TlsDecryptionSchema.optional(),
   ruleSources: z.array(SuricataRuleSourceSchema).default([
     {
       name: 'ET Open Ruleset',
@@ -539,10 +548,22 @@ export const AcmeCertificateSchema = z.object({
 });
 export type AcmeCertificate = z.infer<typeof AcmeCertificateSchema>;
 
+export const InternalCASchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  commonName: z.string(),
+  organization: z.string().optional(),
+  privateKeyBase64: z.string().optional(),
+  certificateBase64: z.string().optional(),
+  isDecryptionRoot: z.boolean().default(false),
+});
+export type InternalCA = z.infer<typeof InternalCASchema>;
+
 export const AcmeConfigSchema = z.object({
   enabled: z.boolean().default(false),
   accounts: z.array(AcmeAccountSchema).default([]),
   certificates: z.array(AcmeCertificateSchema).default([]),
+  internalCAs: z.array(InternalCASchema).default([]),
 });
 export type AcmeConfig = z.infer<typeof AcmeConfigSchema>;
 

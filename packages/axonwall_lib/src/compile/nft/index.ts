@@ -71,6 +71,18 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Prerouting (DNAT)
   lines.push('  chain prerouting {');
   lines.push('    type nat hook prerouting priority dstnat - 10; policy accept;');
+  
+  if (state.suricata?.tlsDecryption?.enabled) {
+    const tlsConfig = state.suricata.tlsDecryption;
+    lines.push(`    # TLS Decryption Interception`);
+    for (const iface of state.interfaces) {
+      if (iface.enabled && iface.name !== 'wan') {
+        const dev = iface.device;
+        lines.push(`    iifname "${dev}" tcp dport 443 redirect to :${tlsConfig.transparentProxyPort} comment "tls-decryption-intercept"`);
+      }
+    }
+  }
+
   for (const nat of state.nat) {
     if (!nat.enabled || nat.type !== 'dnat') continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;

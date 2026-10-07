@@ -29,6 +29,13 @@ struct {
     __type(value, struct flow_val);
 } flow_map SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 100000);
+    __type(key, __u32);
+    __type(value, __u8);
+} blocklist_map SEC(".maps");
+
 SEC("xdp")
 int xdp_flow_tracker(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
@@ -44,6 +51,12 @@ int xdp_flow_tracker(struct xdp_md *ctx) {
     struct iphdr *ip = data + sizeof(struct ethhdr);
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
+
+    __u32 src_ip = ip->saddr;
+    __u8 *is_blocked = bpf_map_lookup_elem(&blocklist_map, &src_ip);
+    if (is_blocked && *is_blocked == 1) {
+        return XDP_DROP;
+    }
 
     struct flow_key key = {};
     key.src_ip = ip->saddr;

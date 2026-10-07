@@ -128,20 +128,27 @@ func (m *EBPFManager) monitorFlows() {
 				dstIP[i] = byte(key.DstIp >> (i * 8))
 			}
 
-			err := batch.Append(
-				now,
-				srcIP.String(),
-				dstIP.String(),
-				key.Protocol,
-				val.Packets,
-				val.Bytes,
-			)
-			if err == nil {
-				count++
+			if val.Packets > 10000 {
+				log.Printf("DDoS Mitigation: Threshold exceeded (%d packets). Blocking IP %s via XDP", val.Packets, srcIP.String())
+				m.objs.BlocklistMap.Put(key.SrcIp, uint8(1))
+				
+				// Optional: push to CrowdSec or alert here
+			} else {
+				err := batch.Append(
+					now,
+					srcIP.String(),
+					dstIP.String(),
+					key.Protocol,
+					val.Packets,
+					val.Bytes,
+				)
+				if err == nil {
+					count++
+				}
 			}
 			
-			// Optional: reset stats after flushing
-			// m.objs.FlowMap.Delete(&key)
+			// Reset stats after flushing/blocking
+			m.objs.FlowMap.Delete(&key)
 		}
 
 		if count == 0 {
