@@ -60,6 +60,23 @@ export default function LoginPage() {
             </div>
           </div>
 
+          
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+              MFA / Authenticator Code
+            </label>
+            <div className="relative">
+              <Key className="absolute left-3 top-3 w-5 h-5 text-slate-500" />
+              <input
+                type="text"
+                name="totpCode"
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
+                placeholder="Optional (6-digit code)"
+                pattern="\d{6}"
+              />
+            </div>
+          </div>
+
           <button
             type="submit"
             disabled={isPending}

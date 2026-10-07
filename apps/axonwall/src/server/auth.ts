@@ -2,6 +2,7 @@
 
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
+
 import {
   authenticateLdap,
   authenticateLocalAdmin,
@@ -45,6 +46,7 @@ export async function getSession(): Promise<UserSession | null> {
 export async function loginAction(prevState: any, formData: FormData) {
   const username = formData.get('username') as string;
   const password = formData.get('password') as string;
+  const totpCode = formData.get('totpCode') as string;
 
   if (!username || !password) {
     return { error: 'Username and password are required' };
@@ -55,6 +57,20 @@ export async function loginAction(prevState: any, formData: FormData) {
   const localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || 'axonwalladmin';
 
   let authRes = authenticateLocalAdmin(username, password, localAdminUser, localAdminPass);
+
+  
+  // 1.5 Enforce MFA if required
+  const mfaSecret = process.env.LOCAL_ADMIN_MFA_SECRET;
+  if (mfaSecret && authRes.success) {
+    if (!totpCode) {
+      return { error: 'MFA Code (TOTP) is required for this account' };
+    }
+    const { authenticator } = require('otplib');
+    const isValid = authenticator.verify({ token: totpCode, secret: mfaSecret });
+    if (!isValid) {
+      return { error: 'Invalid MFA Code' };
+    }
+  }
 
   // 2. Fall back to LDAP if local admin did not match
   if (!authRes.success) {
