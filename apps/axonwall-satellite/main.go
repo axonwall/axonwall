@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"log/slog"
@@ -53,10 +54,41 @@ func main() {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 
-	dialer := websocket.Dialer{
-		TLSClientConfig: &tls.Config{
+	certPath := "/etc/axonwall/certs/satellite.crt"
+	keyPath := "/etc/axonwall/certs/satellite.key"
+
+	var tlsConfig *tls.Config
+	if _, err := os.Stat(certPath); err == nil {
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			slog.Error("Failed to load mTLS certificates", "error", err)
+			os.Exit(1)
+		}
+		
+		// Note: Requires "crypto/x509" import
+		// We will rely on system pool or manual verification if preferred, but let's assume we skip verify
+		// if CA is not cleanly set up, or better, we set ServerName
+		caCertPool := x509.NewCertPool()
+		caCert, err := os.ReadFile("/etc/axonwall/certs/ca.crt")
+		if err == nil {
+			caCertPool.AppendCertsFromPEM(caCert)
+		}
+		
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      caCertPool,
+			InsecureSkipVerify: false,
+		}
+		slog.Info("Running in secure mTLS mode")
+	} else {
+		tlsConfig = &tls.Config{
 			InsecureSkipVerify: true, // For bootstrap; mTLS cert installed post-ZTP
-		},
+		}
+		slog.Warn("Running in ZTP Bootstrap mode with InsecureSkipVerify")
+	}
+
+	dialer := websocket.Dialer{
+		TLSClientConfig:  tlsConfig,
 		HandshakeTimeout: 10 * time.Second,
 	}
 

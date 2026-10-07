@@ -41,7 +41,9 @@ export async function authenticateLdap(
     }
 
     // 2. Search for the user DN
-    const filter = config.userSearchFilter.replace(/{{username}}/g, username);
+    const escapeLdapFilter = (str: string) => str.replace(/[*()\\NUL]/g, (c) => '\\' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+    const safeUsername = escapeLdapFilter(username);
+    const filter = config.userSearchFilter.replace(/{{username}}/g, safeUsername);
     const searchRes = await client.search(config.baseDn, {
       filter,
       scope: 'sub',
@@ -80,7 +82,9 @@ export async function authenticateLdap(
       });
     } else {
       // Query groupOfNames by member
-      const groupFilter = config.groupSearchFilter.replace(/{{userDn}}/g, userDn);
+      const escapeLdapFilter = (str: string) => str.replace(/[*()\\NUL]/g, (c) => '\\' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+      const safeUserDn = escapeLdapFilter(userDn);
+      const groupFilter = config.groupSearchFilter.replace(/{{userDn}}/g, safeUserDn);
       const groupSearch = await client.search(config.baseDn, {
         filter: groupFilter,
         scope: 'sub',

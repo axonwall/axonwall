@@ -33,6 +33,9 @@ export function buildArtifactBundle(jobId: string, state: DesiredState): Compile
 
 import { WebSocketServer, WebSocket } from 'ws';
 import * as http from 'node:http';
+import * as https from 'node:https';
+import * as fs from 'node:fs';
+
 
 async function main() {
   console.log('[Axonwall Controller] Starting Axonwall Control Plane Worker...');
@@ -58,7 +61,14 @@ async function main() {
   const activeSatellites = new Map<string, SatelliteState>();
 
   // Set up an HTTP server for WebSocket upgrades and REST queries
-  const server = http.createServer((req, res) => {
+  
+  
+  const certPath = '/etc/axonwall/certs/hub.crt';
+  const keyPath = '/etc/axonwall/certs/hub.key';
+  const caPath = '/etc/axonwall/certs/ca.crt';
+
+  let server;
+  const requestHandler = (req: any, res: any) => {
     const { pathname } = new URL(req.url || '', `http://${req.headers.host}`);
 
     if (pathname === '/api/v1/fleet/satellites' && req.method === 'GET') {
@@ -72,9 +82,23 @@ async function main() {
 
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Axonwall Control Plane & Fleet Hub\n');
-  });
+  };
 
-  const wss = new WebSocketServer({ noServer: true });
+  if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+    console.log('[Axonwall Controller] Starting in SECURE mTLS mode');
+    server = https.createServer({
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(keyPath),
+      ca: fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined,
+      requestCert: true,
+      rejectUnauthorized: false
+    }, requestHandler);
+  } else {
+    console.log('[Axonwall Controller] Starting in INSECURE HTTP mode');
+    server = http.createServer(requestHandler);
+  }
+
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1048576 });
 
   server.on('upgrade', (request, socket, head) => {
     const { pathname } = new URL(request.url || '', `http://${request.headers.host}`);
@@ -86,6 +110,14 @@ async function main() {
 
       if (!satId || !token) {
         console.log(`[Fleet Manager] Rejected connection: missing ZTP headers`);
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      const expectedToken = process.env.AXONWALL_ZTP_TOKEN || 'dev-ztp-token';
+      if (token !== expectedToken) {
+        console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;

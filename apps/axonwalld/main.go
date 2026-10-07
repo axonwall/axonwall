@@ -89,9 +89,17 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		if mode == 0 {
 			mode = 0644
 		}
-		if err := os.WriteFile(cleanPath, []byte(f.Content), mode); err != nil {
+		
+		// Use syscall.O_NOFOLLOW to prevent symlink TOCTOU attacks
+		file, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to open file %s: %v", cleanPath, err)
+		}
+		if _, err := file.Write([]byte(f.Content)); err != nil {
+			file.Close()
 			return nil, status.Errorf(codes.Internal, "failed to write file %s: %v", cleanPath, err)
 		}
+		file.Close()
 	}
 
 	// 3. Backup current script for rollback
@@ -109,6 +117,11 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 
 	// 5. Reload any changed systemd units requested
 	for _, svc := range req.ReloadServices {
+		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
+		if strings.Contains(svc, "/") || strings.Contains(svc, "\\") || strings.HasPrefix(svc, ".") {
+			log.Printf("[Agent] Rejected malformed/malicious service reload request: %s", svc)
+			continue
+		}
 		log.Printf("[Agent] Reloading system service: %s", svc)
 		_ = exec.Command("systemctl", "try-reload-or-restart", svc).Run()
 	}
@@ -298,6 +311,12 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 	target := strings.TrimSpace(req.Target)
 	if target == "" {
 		return nil, status.Error(codes.InvalidArgument, "target cannot be empty")
+	}
+	
+	// Validate target to prevent flag injection (starts with '-') or command injection
+	// Only allow valid hostnames or IP addresses.
+	if strings.HasPrefix(target, "-") || strings.ContainsAny(target, ";&|\\$*{}[]()<>\"'") {
+		return nil, status.Error(codes.InvalidArgument, "invalid target formatting")
 	}
 
 	count := req.Count

@@ -17,5 +17,14 @@
     "@biomejs/biome": "1.9.4",
     "turbo": "^2.4.4",
     "typescript": "^5.8.2"
+  },
+  "resolutions": {
+    "postcss": ">=8.5.23"
+  },
+  "overrides": {
+    "postcss": ">=8.5.23"
+  },
+  "dependencies": {
+    "postcss": "^8.5.29"
   }
 }

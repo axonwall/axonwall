@@ -34,6 +34,13 @@ func (w *WireGuardEngine) ConfigureMesh(cfg WireGuardConfig) error {
 		cfg.KeepAliveSec = 25
 	}
 
+	importStrings := []string{cfg.InterfaceName, cfg.TunnelIP, cfg.PrivateKey, cfg.PublicKey, cfg.PeerPublicKey, cfg.PeerEndpoint, cfg.AllowedIPs}
+	for _, s := range importStrings {
+		if bytes.Contains([]byte(s), []byte("\n")) || bytes.Contains([]byte(s), []byte("\r")) {
+			return fmt.Errorf("invalid wireguard configuration: newlines are not allowed")
+		}
+	}
+
 	slog.Info("Configuring WireGuard SD-Branch mesh...", "interface", cfg.InterfaceName, "tunnelIp", cfg.TunnelIP, "endpoint", cfg.PeerEndpoint)
 
 	confContent := fmt.Sprintf(`[Interface]

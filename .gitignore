@@ -31,3 +31,11 @@ next-env.d.ts
 .env
 .vercel
 
+
+# Locally generated mTLS certs
+certs/
+
+# Go daemon built binaries
+apps/axonwalld/axonwalld
+apps/axonwall-satellite/axonwall-satellite
+package.json.tmp

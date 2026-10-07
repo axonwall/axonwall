@@ -4,6 +4,9 @@ import { compileNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import net from 'net';
+import { getSession } from './auth';
+import { headers } from 'next/headers';
+
 
 const AGENT_SOCKET_PATH = process.env.AGENT_SOCKET_PATH || '/run/axonwall/agent.sock';
 
@@ -27,7 +30,40 @@ let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
 
+const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
+
+async function enforceRateLimit(maxRequests = 20, windowMs = 60000) {
+  const reqHeaders = await headers();
+  const ip = reqHeaders.get('x-forwarded-for') || '127.0.0.1';
+  const now = Date.now();
+  const record = actionRateLimit.get(ip);
+
+  // Clean up old entries occasionally to prevent memory leaks
+  if (Math.random() < 0.05) {
+    for (const [key, val] of actionRateLimit.entries()) {
+      if (now > val.resetAt) actionRateLimit.delete(key);
+    }
+  }
+
+  if (record) {
+    if (now > record.resetAt) {
+      actionRateLimit.set(ip, { count: 1, resetAt: now + windowMs });
+    } else {
+      if (record.count >= maxRequests) {
+        throw new Error('Too Many Requests');
+      }
+      record.count += 1;
+    }
+  } else {
+    actionRateLimit.set(ip, { count: 1, resetAt: now + windowMs });
+  }
+}
+
+
 export async function getAgentStatus(): Promise<AgentStatus> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   return {
     nodeId: 'axonwall-core-node',
     version: '0.1.0',
@@ -56,6 +92,12 @@ export async function applyDesiredState(
   state: DesiredState,
   confirmTimeoutSeconds = 120
 ): Promise<{ success: boolean; message: string; nftScript: string; warnings: string[] }> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000); // Max 10 applies per minute per IP
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin privileges required to apply firewall state');
+  }
+
   // 1. Run linter
   const lintIssues = lintRuleset(state);
   const warnings = lintIssues.map((i) => i.message);
@@ -76,6 +118,10 @@ export async function applyDesiredState(
 }
 
 export async function confirmActiveRuleset(): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
   mockPendingConfirm = false;
   mockDeadline = 0;
   return {
@@ -85,6 +131,10 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
 }
 
 export async function rollbackActiveRuleset(): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
   mockPendingConfirm = false;
   mockDeadline = 0;
   return {
@@ -98,9 +148,18 @@ export async function runDiagnostic(
   target: string,
   port = 80
 ): Promise<{ success: boolean; output: string }> {
+  const session = await getSession();
+  await enforceRateLimit(5, 60000); // Max 5 diagnostics per minute per IP
+  if (!session) throw new Error('Unauthorized');
+
   const cleanTarget = target.trim();
   if (!cleanTarget) {
     return { success: false, output: 'Target cannot be empty' };
+  }
+
+  // Basic sanitation against command injection in case this ever shells out
+  if (/^[a-zA-Z0-9.-]+$/.test(cleanTarget) === false) {
+    return { success: false, output: 'Invalid target format' };
   }
 
   if (type === 'port_probe') {

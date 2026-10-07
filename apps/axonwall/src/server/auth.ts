@@ -12,7 +12,14 @@ import {
 import type { UserSession } from '@axonwall/lib/rbac';
 
 const SESSION_COOKIE = 'axonwall_session';
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-axonwall-jwt-signing-key-32-bytes!';
+
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (process.env.NODE_ENV === 'production' && !secret) {
+    throw new Error('JWT_SECRET environment variable is required in production');
+  }
+  return secret || 'super-secret-axonwall-jwt-signing-key-32-bytes!';
+}
 
 const LDAP_CONFIG: LdapConfig = {
   url: process.env.LDAP_URL || 'ldap://127.0.0.1:389',
@@ -32,7 +39,7 @@ export async function getSession(): Promise<UserSession | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   if (!token) return null;
-  return verifyToken(token, JWT_SECRET);
+  return verifyToken(token, getJwtSecret());
 }
 
 export async function loginAction(prevState: any, formData: FormData) {
@@ -63,7 +70,7 @@ export async function loginAction(prevState: any, formData: FormData) {
   }
 
   // 3. Mint JWT and set secure session cookie
-  const token = await mintSupabaseToken(authRes.session, JWT_SECRET);
+  const token = await mintSupabaseToken(authRes.session, getJwtSecret());
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
