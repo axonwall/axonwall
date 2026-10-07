@@ -54,9 +54,13 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/*
           sudo mkdir -p /var/lib/apt/lists/partial
           
-          # Retry update up to 5 times with exponential backoff and more aggressive cleanup
+          # Retry update up to 5 times with exponential backoff
           for attempt in {1..5}; do
-            sudo apt-get update -y && break
+            echo "Update attempt $attempt..."
+            if sudo apt-get update -y; then
+              echo "Update successful"
+              break
+            fi
             if [ $attempt -lt 5 ]; then
               echo "Update attempt $attempt failed, retrying..."
               sudo rm -rf /var/lib/apt/lists/*
