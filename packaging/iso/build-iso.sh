@@ -79,6 +79,13 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-firstboot ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-firstboot
 fi
 
+# Copy compiled daemon binaries if present
+mkdir -p config/includes.chroot/usr/sbin/
+if [[ -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then
+  cp "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" config/includes.chroot/usr/sbin/
+  chmod +x config/includes.chroot/usr/sbin/axonwalld
+fi
+
 # 4. Define package list to install in image
 mkdir -p config/package-lists
 cat << 'EOF' > config/package-lists/axonwall.list.chroot
