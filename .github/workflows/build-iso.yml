@@ -51,10 +51,12 @@ jobs:
       - name: Install ISO Build Dependencies
         run: |
           sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*
-          sudo apt-get update --fix-missing || sudo apt-get update
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo mkdir -p /var/lib/apt/lists/partial
+          sudo apt-get update -y || { sleep 10; sudo apt-get update -y; }
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             -o APT::Immediate-Configure=false \
+            -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
             debootstrap \
             debian-archive-keyring \
             xorriso \
@@ -62,7 +64,7 @@ jobs:
             syslinux-efi \
             grub-pc-bin \
             grub-efi-amd64-bin \
-            mtools
+            mtools || sudo apt-get install -fy
           if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o APT::Immediate-Configure=false live-build; then
             echo "live-build not in runner package index, fetching official Debian package..."
             curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb || \
