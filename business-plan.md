@@ -87,7 +87,7 @@ Axonwall hardware appliances are precision-engineered, fanless or rackmount x86/
 
 | Feature / Entitlement | Community Edition (Free) | Business Edition ($249/yr per appliance) | Enterprise HA Cluster ($1,499/yr per pair) |
 |---|---|---|---|
-| **Software License** | Open Source (Apache 2.0) | Open Source Core + Commercial Repos | Open Source Core + Commercial Repos |
+| **Software License** | Open Source (GPL-2.0-or-later) | Open Source Core + Commercial Repos | Open Source Core + Commercial Repos |
 | **Release Cadence** | Continuous / Rolling (Bi-weekly) | Hardened Quarterly Releases (LTS) | Hardened Quarterly Releases (LTS) |
 | **Automated Regression QA** | Community testing | Full hardware test farm validation | Full hardware test farm validation |
 | **Commercial Threat Feeds** | Community Open Source Feeds | MaxMind GeoIP2 + CrowdSec CTI | ET Pro (Proofpoint) + CrowdSec Enterprise |

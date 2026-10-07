@@ -2,7 +2,7 @@
   "name": "axonwall-monorepo",
   "version": "0.1.0",
   "private": true,
-  "license": "Apache-2.0",
+  "license": "GPL-2.0-or-later",
   "packageManager": "pnpm@12.9.1",
   "scripts": {
     "build": "turbo run build",

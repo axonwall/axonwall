@@ -6,7 +6,7 @@
 
 *Reimagining open-source perimeter security: from FreeBSD `pf` & legacy PHP to **Linux `nftables`**, **Next.js**, **Go**, and **Autonomous AI**.*
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-GPLv2-blue.svg)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Linux_6.12+_LTS-orange.svg)](https://www.kernel.org/)
 [![Engine](https://img.shields.io/badge/Firewall-nftables_1.1+-red.svg)](https://netfilter.org/projects/nftables/)
 [![Frontend](https://img.shields.io/badge/Console-Next.js_16_React_19-black.svg)](https://nextjs.org/)
@@ -203,7 +203,7 @@ Axonwall includes an integrated AI Copilot with plug-and-play support for five m
 
 Axonwall adapts and scales the proven **Deciso / OPNsense** commercial flywheel:
 
-* **100% Open Source Community Core:** Free forever under the Apache 2.0 License.
+* **100% Open Source Community Core:** Free forever under the GNU General Public License v2 (GPL-2.0-or-later).
 * **Turnkey Hardware Appliances:** Pre-burned, factory-certified fanless and 1U rackmount appliances with 45–55% hardware gross margins.
 * **Business Edition Subscriptions:** Hardened quarterly release channels, regression test certification, and enterprise SLAs.
 * **Commercial Threat Intelligence:** Turnkey integrations with Proofpoint ET Pro, MaxMind GeoIP2, and CrowdSec Enterprise.
@@ -224,13 +224,13 @@ We welcome contributions from network engineers, security researchers, and devel
 5. Push to your branch (`git push origin feature/my-new-feature`).
 6. Open a Pull Request.
 
-*Axonwall requires no Contributor License Agreement (CLA); all contributions are licensed under the Apache 2.0 License.*
+*Axonwall requires no Contributor License Agreement (CLA); all contributions are licensed under the GNU General Public License v2 (GPL-2.0).*
 
 ---
 
 ## 📄 License & Trademarks
 
-* **Source Code:** Licensed under the [Apache License, Version 2.0](LICENSE).
+* **Source Code:** Licensed under the [GNU General Public License, Version 2 (GPL-2.0)](LICENSE).
 * **Trademarks:** The name **Axonwall**, logo, and brand assets are protected trademarks. Review our [Trademark Policy](TRADEMARKS.md) for guidelines on acceptable usage, forks, and commercial hardware distribution.
 
 ---

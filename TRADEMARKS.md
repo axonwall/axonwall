@@ -6,9 +6,9 @@ This document outlines the policy regarding the use of the **Axonwall** name, wo
 
 ## 1. Purpose of This Policy
 
-The **Axonwall** codebase is licensed under the permissive **Apache License, Version 2.0**. Section 6 of the Apache 2.0 License explicitly states:
+The **Axonwall** codebase is licensed under the **GNU General Public License, Version 2 (GPL-2.0)**. 
 
-> *"This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor, except as required for reasonable and customary use in describing the origin of the Work and reproducing the content of the NOTICE file."*
+Copyright law and the GPL govern your rights regarding the source code, but they do not grant rights to the **Axonwall** trademarks, logos, or brand identity.
 
 The purpose of this trademark policy is to ensure that users, developers, and commercial hardware buyers know with certainty whether a network security appliance or software image is an **official, tested, and certified Axonwall release**, or a community fork/third-party derivative.
 
@@ -45,11 +45,11 @@ To protect community members from security risks and counterfeits, the following
 
 ## 4. Guidelines for Community Forks & Derivatives
 
-We actively encourage community experimentation, customization, and forking under the Apache 2.0 License:
+We actively encourage community experimentation, customization, and forking under the GPL-2.0 License:
 
 - When releasing a fork, please choose a distinct name (for example, *"ApexWall - A fork of Axonwall"* or *"NovaRouter - Based on Axonwall technology"*).
 - Remove the official Axonwall logo and wordmark from the UI splash screen and installer.
-- Retain the original copyright notices and `LICENSE` file as required by Apache 2.0 Section 4.
+- Comply with all GPL-2.0 requirements, including retaining copyright notices and making complete corresponding source code available under GPL-2.0.
 
 ---
 
