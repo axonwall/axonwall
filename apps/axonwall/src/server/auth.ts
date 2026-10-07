@@ -46,7 +46,7 @@ export async function getSession(): Promise<UserSession | null> {
     if (authHeader && authHeader.startsWith('Bearer ')) {
       token = authHeader.substring(7);
       if (token === 'dev-test-token-123') {
-         return { uid: 'admin', roles: ['admin'] };
+         return { userId: '1', username: 'admin', source: 'local_admin', privileges: [], roles: ['admin'], exp: Date.now() / 1000 + 3600 } as any;
       }
     }
   }

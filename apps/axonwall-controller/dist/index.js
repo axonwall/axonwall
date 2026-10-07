@@ -17,7 +17,7 @@ export function buildArtifactBundle(jobId, state) {
         generatedAt: new Date().toISOString(),
     };
 }
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
@@ -34,9 +34,14 @@ async function main() {
         const { pathname } = new URL(req.url || '', `http://${req.headers.host}`);
         if (pathname === '/api/v1/fleet/satellites' && req.method === 'GET') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
+            // Exclude ws from JSON
+            const satellitesData = Array.from(activeSatellites.values()).map(s => {
+                const { ws, ...rest } = s;
+                return rest;
+            });
             res.end(JSON.stringify({
                 totalConnected: activeSatellites.size,
-                satellites: Array.from(activeSatellites.values()),
+                satellites: satellitesData,
             }));
             return;
         }
@@ -87,15 +92,49 @@ async function main() {
             socket.destroy();
         }
     });
+    let ipCounter = 2; // Start from 10.99.0.2
+    function broadcastMeshTopology() {
+        console.log('[Fleet Manager] Computing and broadcasting full-mesh SD-WAN topology...');
+        const allSats = Array.from(activeSatellites.values());
+        for (const sat of allSats) {
+            if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN)
+                continue;
+            const peers = allSats
+                .filter(p => p.id !== sat.id)
+                .map(p => ({
+                publicKey: p.wgPublicKey,
+                endpoint: `${p.ip}:51820`, // Assuming they are reachable on their public IP on 51820
+                allowedIps: `${p.tunnelIp.split('/')[0]}/32`, // Only route their tunnel IP for the mesh
+                keepAliveSec: 25,
+            }));
+            sat.ws.send(JSON.stringify({
+                type: 'SYNC_WIREGUARD',
+                payload: {
+                    interfaceName: 'wg-axon0',
+                    tunnelIp: sat.tunnelIp,
+                    listenPort: 51820,
+                    privateKey: sat.wgPrivateKey,
+                    peers: peers,
+                }
+            }));
+        }
+    }
     wss.on('connection', (ws, request, satId) => {
         const remoteIp = request.socket.remoteAddress || '127.0.0.1';
         console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
+        // In a real app we'd use libsodium, here we mock standard length base64 keys
+        const mockPrivKey = crypto.randomBytes(32).toString('base64');
+        const mockPubKey = crypto.randomBytes(32).toString('base64');
         const state = {
             id: satId,
             connectedAt: new Date().toISOString(),
             lastSeen: new Date().toISOString(),
-            ip: remoteIp,
+            ip: remoteIp.replace(/^::ffff:/, ''),
             arch: (request.headers['user-agent']?.includes('arm') ? 'arm64' : 'amd64'),
+            wgPrivateKey: mockPrivKey,
+            wgPublicKey: mockPubKey,
+            tunnelIp: `10.99.0.${ipCounter++}/24`,
+            ws: ws,
         };
         activeSatellites.set(satId, state);
         // 1. Push initial compiled nftables ruleset
@@ -120,19 +159,8 @@ table inet axonwall {
         `
             }
         }));
-        // 2. Push WireGuard SD-WAN mesh configuration
-        ws.send(JSON.stringify({
-            type: 'SYNC_WIREGUARD',
-            payload: {
-                interfaceName: 'wg-axon0',
-                tunnelIp: '10.99.0.2/24',
-                privateKey: 'SAMPLE_SATELLITE_PRIVATE_KEY_ZTP_PROVISIONED',
-                peerPublicKey: 'AXONWALL_CORE_HUB_PUBLIC_KEY',
-                peerEndpoint: 'hub.axonwall.local:51820',
-                allowedIps: '10.99.0.0/16',
-                keepAliveSec: 25,
-            }
-        }));
+        // 2. Broadcast mesh update to all satellites (including the new one)
+        broadcastMeshTopology();
         ws.on('message', (message) => {
             state.lastSeen = new Date().toISOString();
             try {
@@ -151,6 +179,7 @@ table inet axonwall {
         ws.on('close', () => {
             console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
             activeSatellites.delete(satId);
+            broadcastMeshTopology();
         });
     });
     const port = process.env.CONTROLLER_PORT || 8443;

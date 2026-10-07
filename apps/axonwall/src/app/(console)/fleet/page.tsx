@@ -20,6 +20,7 @@ import {
   Flame,
   Search,
 } from 'lucide-react';
+import { MeshGraph } from './MeshGraph';
 
 interface MockSatellite {
   id: string;
@@ -222,6 +223,12 @@ export default function FleetPage() {
             <Shield className="w-5 h-5" />
           </div>
         </div>
+      </div>
+
+      {/* SD-WAN Topology Visualization */}
+      <div className="p-6 rounded-xl bg-slate-900 border border-slate-800">
+        <h2 className="text-lg font-bold text-white mb-4">WireGuard SD-WAN Full Mesh Topology</h2>
+        <MeshGraph nodes={satellites.map(s => ({ id: s.id, label: s.name, isDegraded: s.status === 'degraded' }))} />
       </div>
 
       {/* Main Content Area: Search & Satellites Table */}

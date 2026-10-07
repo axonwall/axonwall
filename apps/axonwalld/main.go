@@ -34,14 +34,16 @@ type AgentServer struct {
 	rollbackTimer   *time.Timer
 	nodeId          string
 	startTime       time.Time
+	iapManager      *engine.IAPManager
 }
 
-func NewAgentServer(bundleDir string) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager) *AgentServer {
 	hostname, _ := os.Hostname()
 	return &AgentServer{
-		bundleDir: bundleDir,
-		nodeId:    fmt.Sprintf("axonwall-%s", hostname),
-		startTime: time.Now(),
+		bundleDir:  bundleDir,
+		nodeId:     fmt.Sprintf("axonwall-%s", hostname),
+		startTime:  time.Now(),
+		iapManager: iapManager,
 	}
 }
 
@@ -101,6 +103,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			return nil, status.Errorf(codes.Internal, "failed to write file %s: %v", cleanPath, err)
 		}
 		file.Close()
+
+		if filepath.Base(cleanPath) == "zero_trust_apps.json" {
+			log.Printf("[Agent] Applying Zero Trust IAP configuration")
+			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {
+				log.Printf("[Agent] Warning: Failed to apply IAP config: %v", err)
+			}
+		}
 	}
 
 	// 3. Backup current script for rollback
@@ -410,7 +419,9 @@ func main() {
 	_ = os.Chmod(*socketPath, 0660)
 
 	grpcServer := grpc.NewServer()
-	agentServer := NewAgentServer(*bundleDir)
+	
+	iapManager := engine.NewIAPManager()
+	agentServer := NewAgentServer(*bundleDir, iapManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -425,6 +436,7 @@ func main() {
 	go func() {
 		<-sigChan
 		log.Println("[Agent] Shutting down agent daemon...")
+		iapManager.Stop()
 		ebpfManager.Stop()
 		grpcServer.GracefulStop()
 		_ = os.Remove(*socketPath)

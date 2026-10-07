@@ -834,6 +834,22 @@ export const SatelliteFleetConfigSchema = z.object({
 });
 export type SatelliteFleetConfig = z.infer<typeof SatelliteFleetConfigSchema>;
 
+export const ZeroTrustAppSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1),
+  publicHostname: z.string().min(1),
+  internalUpstream: z.string().min(1), // e.g. "http://10.0.0.5:8080"
+  allowedRoles: z.array(z.string()).default(['admin', 'user']),
+  enabled: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type ZeroTrustApp = z.infer<typeof ZeroTrustAppSchema>;
+
+export const ZeroTrustConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  apps: z.array(ZeroTrustAppSchema).default([]),
+});
+export type ZeroTrustConfig = z.infer<typeof ZeroTrustConfigSchema>;
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -869,6 +885,7 @@ export const DesiredStateSchema = z.object({
   plugins: z.array(InstalledPluginRecordSchema).optional(),
   ai: AiConfigSchema.optional(),
   fleet: SatelliteFleetConfigSchema.optional(),
+  zeroTrust: ZeroTrustConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
 
