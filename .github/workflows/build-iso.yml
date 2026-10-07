@@ -96,8 +96,8 @@ jobs:
 
       - name: Compute Checksums
         run: |
-          cd packaging/iso/output
-          sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256
+          sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
+          sudo chown -R $USER:$USER packaging/iso/output
 
       - name: Upload ISO Artifact
         uses: actions/upload-artifact@v4
