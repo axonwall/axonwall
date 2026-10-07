@@ -85,7 +85,10 @@ jobs:
             grub-efi-amd64-bin \
             mtools || sudo apt-get install -fy --fix-broken
             
-
+          # Download and install live-build directly
+          curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
+          sudo dpkg -i /tmp/live-build.deb
+          rm -f /tmp/live-build.deb
 
       - name: Build Hybrid Appliance ISO
         run: |
