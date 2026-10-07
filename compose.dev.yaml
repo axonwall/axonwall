@@ -26,3 +26,20 @@ services:
     volumes:
       - ./supabase/migrations/20261005000000_init_axonwall_schema.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: axonwall-clickhouse-dev
+    environment:
+      CLICKHOUSE_DB: axonwall
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: axonwallclickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    restart: unless-stopped
+    
+volumes:
+  clickhouse_data:

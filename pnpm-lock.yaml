@@ -185,6 +185,9 @@ importers:
       '@axonwall/lib':
         specifier: workspace:*
         version: link:../../packages/axonwall_lib
+      '@clickhouse/client':
+        specifier: ^1.24.0
+        version: 1.24.0
       '@supabase/ssr':
         specifier: ^0.5.2
         version: 0.5.2(@supabase/supabase-js@2.117.2)
@@ -353,6 +356,10 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
+
+  '@clickhouse/client@1.24.0':
+    resolution: {integrity: sha512-1s/c/Fp9NFOWDJz+Zv363nVKH9ScaraZK6e+f/Ee3kwlt7egThT+KJSdYhd3OVCw+z0MzMktSjK+8Am1I5f/Hg==}
+    engines: {node: '>=20'}
 
   '@emnapi/runtime@1.11.3':
     resolution: {integrity: sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==}
@@ -1700,6 +1707,8 @@ snapshots:
 
   '@biomejs/cli-win32-x64@1.9.4':
     optional: true
+
+  '@clickhouse/client@1.24.0': {}
 
   '@emnapi/runtime@1.11.3':
     dependencies:

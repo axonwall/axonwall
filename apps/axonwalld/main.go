@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/axonwall/monorepo/apps/axonwalld/engine"
 	pb "github.com/axonwall/monorepo/apps/axonwalld/gen/agent/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -412,12 +413,19 @@ func main() {
 	agentServer := NewAgentServer(*bundleDir)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
+	// Start eBPF Manager
+	ebpfManager := engine.NewEBPFManager()
+	if err := ebpfManager.Start([]string{"eth0", "lo"}); err != nil {
+		log.Printf("[Agent] Warning: Failed to start eBPF manager: %v", err)
+	}
+
 	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
 		log.Println("[Agent] Shutting down agent daemon...")
+		ebpfManager.Stop()
 		grpcServer.GracefulStop()
 		_ = os.Remove(*socketPath)
 		os.Exit(0)
