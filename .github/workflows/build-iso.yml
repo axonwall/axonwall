@@ -51,10 +51,10 @@ jobs:
       - name: Install ISO Build Dependencies
         run: |
           sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo apt-get update --fix-missing
-          sudo apt-get install -y --no-install-recommends \
-            live-build \
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+          sudo apt-get update --fix-missing || sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            -o APT::Immediate-Configure=false \
             debootstrap \
             debian-archive-keyring \
             xorriso \
@@ -63,6 +63,13 @@ jobs:
             grub-pc-bin \
             grub-efi-amd64-bin \
             mtools
+          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o APT::Immediate-Configure=false live-build; then
+            echo "live-build not in runner package index, fetching official Debian package..."
+            curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb || \
+            curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20230502_all.deb
+            sudo dpkg -i /tmp/live-build.deb || sudo apt-get install -fy
+            rm -f /tmp/live-build.deb
+          fi
 
       - name: Build Hybrid Appliance ISO
         run: |
