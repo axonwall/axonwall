@@ -648,6 +648,13 @@ export const ObservabilityConfigSchema = z.object({
     notifyOnFailover: z.boolean().default(true),
     notifyOnThreshold: z.boolean().default(true),
   }).default({ enabled: false, notifyOnFailover: true, notifyOnThreshold: true }),
+  clickhouse: z.object({
+    enabled: z.boolean().default(false),
+    url: z.string().default('http://127.0.0.1:8123'),
+    database: z.string().default('axonwall'),
+    username: z.string().default('admin'),
+    password: z.string().optional(),
+  }).default({ enabled: false, url: 'http://127.0.0.1:8123', database: 'axonwall', username: 'admin' }),
 });
 export type ObservabilityConfig = z.infer<typeof ObservabilityConfigSchema>;
 
