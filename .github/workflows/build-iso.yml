@@ -54,14 +54,21 @@ jobs:
           sudo rm -rf /var/lib/apt/lists/*
           sudo mkdir -p /var/lib/apt/lists/partial
           
-          # Retry update up to 3 times with exponential backoff
-          for attempt in {1..3}; do
+          # Retry update up to 5 times with exponential backoff and more aggressive cleanup
+          for attempt in {1..5}; do
             sudo apt-get update -y && break
-            echo "Update attempt $attempt failed, retrying..."
-            sleep $((attempt * 10))
+            if [ $attempt -lt 5 ]; then
+              echo "Update attempt $attempt failed, retrying..."
+              sudo rm -rf /var/lib/apt/lists/*
+              sudo mkdir -p /var/lib/apt/lists/partial
+              sleep $((attempt * 15))
+            else
+              echo "All update attempts failed"
+              exit 1
+            fi
           done
           
-          # Install with auto-fix for broken dependencies
+          # Install basic dependencies first
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             -o APT::Immediate-Configure=false \
             -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
@@ -72,8 +79,16 @@ jobs:
             syslinux-efi \
             grub-pc-bin \
             grub-efi-amd64-bin \
-            mtools \
-            live-build || sudo apt-get install -fy --fix-broken
+            mtools || sudo apt-get install -fy --fix-broken
+            
+          # Handle live-build separately since it's frequently missing in ubuntu-24.04 repos
+          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o APT::Immediate-Configure=false live-build; then
+            echo "live-build not in runner package index, fetching official Debian package..."
+            curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb || \
+            curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20230502_all.deb
+            sudo dpkg -i /tmp/live-build.deb || sudo apt-get install -fy
+            rm -f /tmp/live-build.deb
+          fi
 
       - name: Build Hybrid Appliance ISO
         run: |
