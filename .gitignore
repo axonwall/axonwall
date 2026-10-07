@@ -39,3 +39,9 @@ certs/
 apps/axonwalld/axonwalld
 apps/axonwall-satellite/axonwall-satellite
 package.json.tmp
+
+# ISO build artifacts
+packaging/iso/output/
+packaging/iso/build/
+*.iso
+*.iso.sha256

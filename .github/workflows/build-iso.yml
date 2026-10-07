@@ -115,3 +115,20 @@ jobs:
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+
+      - name: Publish Rolling Latest Pre-Release (on main)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rolling-latest
+          name: "Axonwall Appliance ISO (Rolling Latest)"
+          body: |
+            ### Automated Continuous Build
+            - **Commit**: ${{ github.sha }}
+            - **Branch**: `main`
+            - **Distribution**: Debian 13 (Trixie) amd64
+            - **Components**: Axonwalld Core Daemon + Axonwall Web UI + Satellite Agents + Preconfigured Network Engine
+          prerelease: true
+          files: |
+            packaging/iso/output/axonwall-debian13-amd64.iso
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
