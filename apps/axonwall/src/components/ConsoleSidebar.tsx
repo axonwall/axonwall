@@ -53,6 +53,7 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'Smart QoS & Shaper', href: '/traffic/shaper', icon: Gauge },
   { name: 'DHCP Server (Kea)', href: '/services/dhcp', icon: Server },
   { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
+  { name: 'Mesh VPN (Headscale)', href: '/vpn/mesh', icon: Network },
   { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
   { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },
   { name: 'ACME / Let\'s Encrypt', href: '/security/acme', icon: Lock },
