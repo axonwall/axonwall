@@ -1,4 +1,4 @@
-import { compileNftables } from '@axonwall/lib/compile/nft';
+import { compileNftables, compileSatelliteNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
 import * as crypto from 'node:crypto';
 export function buildArtifactBundle(jobId, state) {
@@ -21,6 +21,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
+import { listUsers, createUser, createPreAuthKey } from './headscale.js';
 async function main() {
     console.log('[Axonwall Controller] Starting Axonwall Control Plane Worker...');
     console.log('[Axonwall Controller] Monitoring config changes and apply pipeline.');
@@ -119,7 +120,7 @@ async function main() {
             }));
         }
     }
-    wss.on('connection', (ws, request, satId) => {
+    wss.on('connection', async (ws, request, satId) => {
         const remoteIp = request.socket.remoteAddress || '127.0.0.1';
         console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
         // In a real app we'd use libsodium, here we mock standard length base64 keys
@@ -137,29 +138,38 @@ async function main() {
             ws: ws,
         };
         activeSatellites.set(satId, state);
-        // 1. Push initial compiled nftables ruleset
+        // 1. Headscale ZTP Identity Provisioning
+        try {
+            console.log(`[Fleet Manager] Provisioning Headscale PreAuthKey for ${satId}...`);
+            let users = await listUsers();
+            let satelliteUser = users.find((u) => u.name === 'satellites');
+            if (!satelliteUser) {
+                satelliteUser = await createUser('satellites');
+            }
+            // Generate a 1-hour ephemeral key
+            const expiration = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+            const preAuthKey = await createPreAuthKey('satellites', false, true, expiration);
+            ws.send(JSON.stringify({
+                type: 'SYNC_HEADSCALE',
+                payload: {
+                    serverUrl: process.env.HEADSCALE_EXTERNAL_URL || 'https://hub.axonwall.local',
+                    authKey: preAuthKey.key
+                }
+            }));
+            console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
+        }
+        catch (err) {
+            console.error(`[Fleet Manager] Failed to provision Headscale key for ${satId}: ${err.message}`);
+        }
+        // 2. Push initial compiled nftables ruleset
+        const { nftScript } = compileSatelliteNftables(state);
         ws.send(JSON.stringify({
             type: 'SYNC_NFTABLES',
             payload: {
-                script: `
-flush ruleset
-table inet axonwall {
-  chain input {
-    type filter hook input priority 0; policy drop;
-    iif "lo" accept
-    ct state established,related accept
-    # Allow management
-    tcp dport 22 accept
-    udp dport 51820 accept
-  }
-  chain forward {
-    type filter hook forward priority 0; policy drop;
-  }
-}
-        `
+                script: nftScript
             }
         }));
-        // 2. Broadcast mesh update to all satellites (including the new one)
+        // 3. Broadcast mesh update to all satellites (including the new one)
         broadcastMeshTopology();
         ws.on('message', (message) => {
             state.lastSeen = new Date().toISOString();

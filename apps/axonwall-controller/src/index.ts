@@ -1,4 +1,4 @@
-import { compileNftables } from '@axonwall/lib/compile/nft';
+import { compileNftables, compileSatelliteNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import * as crypto from 'node:crypto';
@@ -222,25 +222,11 @@ async function main() {
     }
 
     // 2. Push initial compiled nftables ruleset
+    const { nftScript } = compileSatelliteNftables(state);
     ws.send(JSON.stringify({
       type: 'SYNC_NFTABLES',
       payload: {
-        script: `
-flush ruleset
-table inet axonwall {
-  chain input {
-    type filter hook input priority 0; policy drop;
-    iif "lo" accept
-    ct state established,related accept
-    # Allow management
-    tcp dport 22 accept
-    udp dport 51820 accept
-  }
-  chain forward {
-    type filter hook forward priority 0; policy drop;
-  }
-}
-        `
+        script: nftScript
       }
     }));
 

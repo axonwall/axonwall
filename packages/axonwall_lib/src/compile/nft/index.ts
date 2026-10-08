@@ -245,6 +245,60 @@ export function compileNftables(state: DesiredState): CompileResult {
   };
 }
 
+export function compileSatelliteNftables(node: any): CompileResult {
+  const lines: string[] = [];
+  const warnings: string[] = [];
+
+  lines.push('#!/usr/sbin/nft -f');
+  lines.push('# Axonwall Auto-Generated Satellite nftables configuration');
+  lines.push(`# Node: ${node.id} | Generated: ${new Date().toISOString()}`);
+  lines.push('');
+  lines.push('flush ruleset');
+  lines.push('table inet axonwall {');
+  lines.push('  chain input {');
+  lines.push('    type filter hook input priority filter; policy drop;');
+  lines.push('    ct state established,related accept');
+  lines.push('    ct state invalid drop');
+  lines.push('    iif "lo" accept');
+  
+  lines.push('    # Allow management protocols');
+  lines.push('    tcp dport 22 accept comment "allow-ssh"');
+  
+  if (node.wireguard?.tunnelIp) {
+    lines.push('    udp dport 51820 accept comment "allow-wireguard"');
+    lines.push('    iifname "wg-axon0" accept comment "allow-wg-mesh-traffic"');
+  }
+  
+  // Headscale listener (WireGuard hole punching)
+  lines.push('    udp dport 41641 accept comment "headscale-mesh"');
+  lines.push('    iifname "tailscale0" accept comment "allow-tailscale-mesh-traffic"');
+  
+  lines.push('  }');
+  lines.push('');
+  
+  lines.push('  chain forward {');
+  lines.push('    type filter hook forward priority filter; policy drop;');
+  lines.push('    ct state established,related accept');
+  lines.push('    ct state invalid drop');
+  lines.push('    iifname "wg-axon0" accept');
+  lines.push('    iifname "tailscale0" accept');
+  lines.push('  }');
+  lines.push('');
+  
+  lines.push('  chain output {');
+  lines.push('    type filter hook output priority filter; policy accept;');
+  lines.push('  }');
+  
+  lines.push('}');
+  lines.push('');
+
+  return {
+    nftScript: lines.join('\n'),
+    warnings,
+  };
+}
+
+
 function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   const parts: string[] = [];
 

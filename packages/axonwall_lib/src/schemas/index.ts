@@ -838,6 +838,10 @@ export const SatelliteNodeSchema = z.object({
     ssid: z.string(),
     channel: z.number().int().optional(),
     security: z.enum(['wpa2-psk', 'wpa3-sae', 'wpa3-enterprise', 'open']).default('wpa3-sae'),
+    fastRoaming: z.object({
+      enabled: z.boolean().default(false),
+      mobilityDomain: z.string().optional(), // 4 hex digits, e.g. "a1b2"
+    }).optional(),
     clientsCount: z.number().int().default(0),
     enabled: z.boolean().default(true),
   })).optional(),
