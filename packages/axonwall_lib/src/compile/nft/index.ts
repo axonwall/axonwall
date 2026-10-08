@@ -117,11 +117,19 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push(`    udp dport ${state.wireguard.listenPort} accept comment "wireguard-service"`);
   }
 
+  // Headscale listener (WireGuard hole punching)
+  if (state.headscale?.enabled) {
+    lines.push(`    udp dport 41641 accept comment "headscale-mesh"`);
+  }
+
   // Interface dispatcher for input
   for (const iface of state.interfaces) {
     if (!iface.enabled) continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump input_${iface.name}`);
+  }
+  if (state.headscale?.enabled) {
+    lines.push(`    iifname "tailscale0" jump input_tailscale`);
   }
   lines.push('  }');
   lines.push('');
@@ -140,6 +148,9 @@ export function compileNftables(state: DesiredState): CompileResult {
     if (!iface.enabled) continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump forward_${iface.name}`);
+  }
+  if (state.headscale?.enabled) {
+    lines.push(`    iifname "tailscale0" jump forward_tailscale`);
   }
   lines.push('  }');
   lines.push('');
@@ -193,6 +204,31 @@ export function compileNftables(state: DesiredState): CompileResult {
     // Forward chain for interface
     lines.push(`  chain forward_${iface.name} {`);
     for (const rule of ifaceRules) {
+      const stmt = formatRuleStatement(rule, state.aliases);
+      if (stmt) lines.push(`    ${stmt}`);
+    }
+    lines.push('  }');
+    lines.push('');
+  }
+
+  // Tailscale pseudo-interface chains
+  if (state.headscale?.enabled) {
+    const tsRules = state.rules
+      .filter((r) => r.enabled && (r.interface === 'tailscale' || r.interface === 'any'))
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+
+    lines.push(`  chain input_tailscale {`);
+    for (const rule of tsRules) {
+      if (rule.direction === 'in') {
+        const stmt = formatRuleStatement(rule, state.aliases);
+        if (stmt) lines.push(`    ${stmt}`);
+      }
+    }
+    lines.push('  }');
+    lines.push('');
+
+    lines.push(`  chain forward_tailscale {`);
+    for (const rule of tsRules) {
       const stmt = formatRuleStatement(rule, state.aliases);
       if (stmt) lines.push(`    ${stmt}`);
     }

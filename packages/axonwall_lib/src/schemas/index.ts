@@ -878,6 +878,13 @@ export const ZeroTrustConfigSchema = z.object({
   apps: z.array(ZeroTrustAppSchema).default([]),
 });
 export type ZeroTrustConfig = z.infer<typeof ZeroTrustConfigSchema>;
+
+export const HeadscaleConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  magicDnsDomain: z.string().default('tailnet.axonwall.local'),
+});
+export type HeadscaleConfig = z.infer<typeof HeadscaleConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -899,6 +906,7 @@ export const DesiredStateSchema = z.object({
   wireguard: WireGuardConfigSchema.optional(),
   ipsec: IpsecConfigSchema.optional(),
   openvpn: OpenVpnConfigSchema.optional(),
+  headscale: HeadscaleConfigSchema.optional(),
   frr: FrrConfigSchema.optional(),
   suricata: SuricataConfigSchema.optional(),
   captivePortal: CaptivePortalConfigSchema.optional(),

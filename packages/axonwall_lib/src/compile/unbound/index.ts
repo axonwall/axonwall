@@ -1,10 +1,10 @@
-import type { DnsConfig } from '../../schemas/index.js';
+import type { DnsConfig, HeadscaleConfig } from '../../schemas/index.js';
 
 export interface UnboundCompileResult {
   unboundConfig: string;
 }
 
-export function compileUnbound(dns: DnsConfig): UnboundCompileResult {
+export function compileUnbound(dns: DnsConfig, headscale?: HeadscaleConfig): UnboundCompileResult {
   const lines: string[] = [];
 
   lines.push('# Axonwall Unbound DNS Configuration');
@@ -72,6 +72,17 @@ export function compileUnbound(dns: DnsConfig): UnboundCompileResult {
       const plain = upstream.split('@')[0];
       lines.push(`  forward-addr: ${plain}`);
     }
+  }
+
+  // Headscale MagicDNS integration
+  if (headscale?.enabled && headscale.magicDnsDomain) {
+    lines.push('');
+    lines.push('# Headscale MagicDNS Forwarding');
+    lines.push('server:');
+    lines.push(`  local-zone: "${headscale.magicDnsDomain}." transparent`);
+    lines.push('forward-zone:');
+    lines.push(`  name: "${headscale.magicDnsDomain}."`);
+    lines.push('  forward-addr: 127.0.0.1@5353'); // Assuming Headscale is configured to listen for DNS on 5353, or unbound can route to tailscale's local DNS
   }
 
   return {
