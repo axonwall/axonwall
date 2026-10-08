@@ -81,8 +81,10 @@ jobs:
             xorriso \
             isolinux \
             syslinux-efi \
+            syslinux-common \
             grub-pc-bin \
             grub-efi-amd64-bin \
+            dosfstools \
             mtools || sudo apt-get install -fy --fix-broken
             
           # Download and install live-build directly

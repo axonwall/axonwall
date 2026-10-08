@@ -49,10 +49,14 @@ lb config \
   --mirror-debian-installer "http://deb.debian.org/debian/" \
   --keyring-packages debian-archive-keyring \
   --architectures amd64 \
+  --linux-flavours amd64 \
   --archive-areas "main contrib non-free non-free-firmware" \
   --binary-images iso-hybrid \
-  --bootloader grub-efi \
+  --bootloaders "syslinux,grub-efi" \
+  --bootappend-live "boot=live components hostname=axonwall username=axonwall user-fullname=\"Axonwall Administrator\" live-config.user-default-groups=sudo,adm,dialout live-config.user-password=axonwall live-config.root-password=axonwall console=tty0 console=ttyS0,115200" \
   --debian-installer live \
+  --debian-installer-distribution trixie \
+  --debian-installer-gui false \
   --debian-installer-preseedfile "${SCRIPT_DIR}/config/includes.installer/preseed.cfg" \
   --iso-application "Axonwall Firewall & Router Appliance" \
   --iso-publisher "Axonwall Core Team <ops@axonwall.io>" \
@@ -63,7 +67,22 @@ lb config \
 # 3. Copy customized overlays (sysctl, firstboot service, systemd units)
 echo "[+] Copying Axonwall system includes & overlays..."
 mkdir -p config/includes.chroot
-cp -r "${SCRIPT_DIR}/config/includes.chroot/"* config/includes.chroot/
+if [[ -d "${SCRIPT_DIR}/config/includes.chroot" ]]; then
+  cp -r "${SCRIPT_DIR}/config/includes.chroot/"* config/includes.chroot/
+fi
+
+mkdir -p config/includes.installer
+if [[ -d "${SCRIPT_DIR}/config/includes.installer" ]]; then
+  cp -r "${SCRIPT_DIR}/config/includes.installer/"* config/includes.installer/
+fi
+
+# Ensure firstboot marker directory and service enable symlink exist
+mkdir -p config/includes.chroot/etc/axonwall/
+touch config/includes.chroot/etc/axonwall/.firstboot
+mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants/
+if [[ -f config/includes.chroot/etc/systemd/system/axonwall-firstboot.service ]]; then
+  ln -sf /etc/systemd/system/axonwall-firstboot.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-firstboot.service
+fi
 
 # Copy Debian packaging systemd units
 mkdir -p config/includes.chroot/etc/systemd/system/
@@ -86,16 +105,37 @@ if [[ -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then
   chmod +x config/includes.chroot/usr/sbin/axonwalld
 fi
 
+if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
+  cp "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" config/includes.chroot/usr/sbin/axonwall-satellite
+  chmod +x config/includes.chroot/usr/sbin/axonwall-satellite
+fi
+
+mkdir -p config/includes.chroot/usr/share/axonwall/satellites/
+if [[ -d "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin" ]]; then
+  cp -r "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/"* config/includes.chroot/usr/share/axonwall/satellites/ 2>/dev/null || true
+fi
+
 # 4. Define package list to install in image
 mkdir -p config/package-lists
 cat << 'EOF' > config/package-lists/axonwall.list.chroot
 linux-image-amd64
 linux-headers-amd64
+live-boot
+live-boot-initramfs-tools
+live-config
+live-config-systemd
+user-setup
+sudo
 firmware-linux
 firmware-misc-nonfree
 systemd
 systemd-sysv
-grub-efi-amd64
+grub-pc-bin
+grub-efi-amd64-bin
+grub-efi-amd64-signed
+shim-signed
+isolinux
+syslinux-common
 nftables
 iproute2
 wireguard-tools
