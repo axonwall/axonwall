@@ -1,0 +1,30 @@
+[Unit]
+Description=headscale coordination server for Tailscale clients
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=axonwall
+Group=axonwall
+Environment="HEADSCALE_CONFIG=/etc/headscale/config.yaml"
+ExecStart=/usr/sbin/headscale serve
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+LimitNPROC=65536
+
+# Sandbox capabilities
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+# headscale requires capability to bind ports, etc. or we can just run it under standard user and allow high ports, 
+# but it might need to interact with wg tunnels if derp is configured, though mostly it's just HTTP/gRPC API.
+# Axonwall data is stored in /var/lib/axonwall
+ReadWritePaths=/var/lib/axonwall/headscale /run/headscale
+
+[Install]
+WantedBy=multi-user.target

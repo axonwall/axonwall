@@ -31,10 +31,17 @@ if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
   nft -f /usr/share/axonwall/lockdown.nft
 fi
 
-# 5. Enable and start Axonwall Daemons
+# 5. Initialize Headscale Environment
+echo "[Axonwall Firstboot] Initializing Headscale..."
+mkdir -p /var/lib/axonwall/headscale /run/headscale
+chown -R axonwall:axonwall /var/lib/axonwall/headscale /run/headscale
+chmod 770 /var/lib/axonwall/headscale /run/headscale
+
+# 6. Enable and start Axonwall Daemons
 systemctl enable --now axonwalld || true
 systemctl enable --now axonwall-controller || true
 systemctl enable --now axonwall-ui || true
+systemctl enable --now headscale || true
 
 # Remove marker once complete
 rm -f "$MARKER"

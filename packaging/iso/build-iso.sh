@@ -89,6 +89,11 @@ mkdir -p config/includes.chroot/etc/systemd/system/
 cp "${SCRIPT_DIR}/../debian/axonwalld.service" config/includes.chroot/etc/systemd/system/ || true
 cp "${SCRIPT_DIR}/../debian/axonwall-controller.service" config/includes.chroot/etc/systemd/system/ || true
 cp "${SCRIPT_DIR}/../debian/axonwall-ui.service" config/includes.chroot/etc/systemd/system/ || true
+cp "${SCRIPT_DIR}/../debian/headscale.service" config/includes.chroot/etc/systemd/system/ || true
+ln -sf /etc/systemd/system/headscale.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/headscale.service
+
+mkdir -p config/includes.chroot/etc/headscale
+cp "${SCRIPT_DIR}/../debian/headscale-config.yaml" config/includes.chroot/etc/headscale/config.yaml || true
 
 # Copy default baseline lockdown ruleset
 mkdir -p config/includes.chroot/usr/share/axonwall/
@@ -100,6 +105,15 @@ fi
 
 # Copy compiled daemon binaries if present
 mkdir -p config/includes.chroot/usr/sbin/
+
+# Fetch Headscale binary
+HEADSCALE_VERSION="0.29.4"
+if [[ ! -f config/includes.chroot/usr/sbin/headscale ]]; then
+  echo "[+] Fetching Headscale v${HEADSCALE_VERSION}..."
+  curl -fsSL -o config/includes.chroot/usr/sbin/headscale "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
+  chmod +x config/includes.chroot/usr/sbin/headscale
+fi
+
 if [[ -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then
   cp "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" config/includes.chroot/usr/sbin/
   chmod +x config/includes.chroot/usr/sbin/axonwalld
