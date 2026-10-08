@@ -54,7 +54,7 @@ lb config \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
   --bootappend-live "boot=live components hostname=axonwall username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.user-password=axonwall live-config.root-password=axonwall console=tty0 console=ttyS0,115200" \
-  --bootappend-install "auto=true priority=critical file=/preseed.cfg" \
+  --bootappend-install "auto=true priority=critical preseed/file=/cdrom/preseed.cfg" \
   --debian-installer live \
   --debian-installer-distribution trixie \
   --debian-installer-gui false \
