@@ -19,13 +19,19 @@ const (
 	SecurityOpen          WiFiSecurity = "open"
 )
 
+type FastRoamingConfig struct {
+	Enabled        bool   `json:"enabled"`
+	MobilityDomain string `json:"mobilityDomain,omitempty"`
+}
+
 type WiFiConfig struct {
-	Radio    string       `json:"radio"`
-	SSID     string       `json:"ssid"`
-	Channel  int          `json:"channel"`
-	Security WiFiSecurity `json:"security"`
-	Password string       `json:"password,omitempty"` // Added for provisioning
-	Enabled  bool         `json:"enabled"`
+	Radio       string            `json:"radio"`
+	SSID        string            `json:"ssid"`
+	Channel     int               `json:"channel"`
+	Security    WiFiSecurity      `json:"security"`
+	Password    string            `json:"password,omitempty"`
+	Enabled     bool              `json:"enabled"`
+	FastRoaming FastRoamingConfig `json:"fastRoaming,omitempty"`
 }
 
 type WiFiEngine struct {
@@ -74,17 +80,25 @@ channel={{.Channel}}
 ieee80211n=1
 wmm_enabled=1
 
+{{if .FastRoaming.Enabled}}
+# 802.11r Fast BSS Transition
+ieee80211r=1
+mobility_domain={{.FastRoaming.MobilityDomain}}
+ft_over_ds=1
+ft_psk_generate_local=1
+{{end}}
+
 {{if eq .Security "wpa2-psk"}}
 wpa=2
 wpa_passphrase={{.Password}}
-wpa_key_mgmt=WPA-PSK
+{{if .FastRoaming.Enabled}}wpa_key_mgmt=WPA-PSK FT-PSK{{else}}wpa_key_mgmt=WPA-PSK{{end}}
 rsn_pairwise=CCMP
 {{end}}
 
 {{if eq .Security "wpa3-sae"}}
 wpa=2
 wpa_passphrase={{.Password}}
-wpa_key_mgmt=SAE
+{{if .FastRoaming.Enabled}}wpa_key_mgmt=SAE FT-SAE{{else}}wpa_key_mgmt=SAE{{end}}
 rsn_pairwise=CCMP
 ieee80211w=2
 {{end}}
