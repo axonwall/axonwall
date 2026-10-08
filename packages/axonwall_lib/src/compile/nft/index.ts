@@ -97,6 +97,19 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Input chain (traffic to the firewall host itself)
   lines.push('  chain input {');
   lines.push('    type filter hook input priority filter; policy drop;');
+  lines.push('  set blocked_ips {');
+  lines.push('    type ipv4_addr');
+  lines.push('    flags interval');
+  lines.push('    elements = { 198.51.100.1 }');
+  lines.push('  }');
+  lines.push('  set blocked_macs {');
+  lines.push('    type ether_addr');
+  lines.push('  }');
+  lines.push('');
+  lines.push('  chain input {');
+  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
+
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
   lines.push('    iif "lo" accept');
@@ -135,8 +148,13 @@ export function compileNftables(state: DesiredState): CompileResult {
   lines.push('');
 
   // Forward chain (routed traffic between interfaces)
+
   lines.push('  chain forward {');
   lines.push('    type filter hook forward priority filter; policy drop;');
+  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
+
   if (state.system.flowtableOffload && enabledDevices.length > 0) {
     lines.push('    ip protocol { tcp, udp } flow add @ft_fastpath');
   }
@@ -257,6 +275,19 @@ export function compileSatelliteNftables(node: any): CompileResult {
   lines.push('table inet axonwall {');
   lines.push('  chain input {');
   lines.push('    type filter hook input priority filter; policy drop;');
+  lines.push('  set blocked_ips {');
+  lines.push('    type ipv4_addr');
+  lines.push('    flags interval');
+  lines.push('    elements = { 198.51.100.1 }');
+  lines.push('  }');
+  lines.push('  set blocked_macs {');
+  lines.push('    type ether_addr');
+  lines.push('  }');
+  lines.push('');
+  lines.push('  chain input {');
+  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
+
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
   lines.push('    iif "lo" accept');
@@ -276,8 +307,13 @@ export function compileSatelliteNftables(node: any): CompileResult {
   lines.push('  }');
   lines.push('');
   
+
   lines.push('  chain forward {');
   lines.push('    type filter hook forward priority filter; policy drop;');
+  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
+
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
   lines.push('    iifname "wg-axon0" accept');

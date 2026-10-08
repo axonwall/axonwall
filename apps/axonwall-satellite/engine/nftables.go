@@ -93,3 +93,27 @@ func (e *NftablesEngine) Flush() error {
 	}
 	return nil
 }
+
+// BlockTarget adds an IP or MAC address to the blocked dynamic sets
+func (e *NftablesEngine) BlockTarget(target string, isMac bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var setName string
+	if isMac {
+		setName = "blocked_macs"
+	} else {
+		setName = "blocked_ips"
+	}
+
+	cmd := exec.Command("nft", "add", "element", "inet", "axonwall", setName, "{", target, "}")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to add element %s to set %s: %w (stderr: %s)", target, setName, err, stderr.String())
+	}
+
+	slog.Info("Micro-segmentation active: target blocked", "target", target, "set", setName)
+	return nil
+}

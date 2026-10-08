@@ -1,3 +1,4 @@
+import promClient from 'prom-client';
 import { compileNftables, compileSatelliteNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
 import type { DesiredState } from '@axonwall/lib/schemas';
@@ -65,6 +66,56 @@ async function main() {
 
   const activeSatellites = new Map<string, SatelliteState>();
 
+// Prometheus Metrics Definition
+const prometheusRegistry = new promClient.Registry();
+promClient.collectDefaultMetrics({ register: prometheusRegistry });
+
+const satUptimeGauge = new promClient.Gauge({
+  name: 'axonwall_satellite_uptime_seconds',
+  help: 'Uptime of the satellite node in seconds',
+  labelNames: ['satellite_id'],
+  registers: [prometheusRegistry]
+});
+
+const satCpuGauge = new promClient.Gauge({
+  name: 'axonwall_satellite_cpu_usage_percent',
+  help: 'CPU usage of the satellite node',
+  labelNames: ['satellite_id'],
+  registers: [prometheusRegistry]
+});
+
+const satMemGauge = new promClient.Gauge({
+  name: 'axonwall_satellite_memory_usage_percent',
+  help: 'Memory usage of the satellite node',
+  labelNames: ['satellite_id'],
+  registers: [prometheusRegistry]
+});
+
+const satConnsGauge = new promClient.Gauge({
+  name: 'axonwall_satellite_active_connections',
+  help: 'Number of active netfilter tracked connections',
+  labelNames: ['satellite_id'],
+  registers: [prometheusRegistry]
+});
+
+const satRxBytesGauge = new promClient.Counter({
+  name: 'axonwall_satellite_rx_bytes_total',
+  help: 'Total received bytes on the satellite',
+  labelNames: ['satellite_id'],
+  registers: [prometheusRegistry]
+});
+
+const satTxBytesGauge = new promClient.Counter({
+  name: 'axonwall_satellite_tx_bytes_total',
+  help: 'Total transmitted bytes on the satellite',
+  labelNames: ['satellite_id'],
+  registers: [prometheusRegistry]
+});
+
+// A local tracker to help track monotonic counters without errors when re-setting
+const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
+
+
   // Set up an HTTP server for WebSocket upgrades and REST queries
   
   
@@ -75,6 +126,53 @@ async function main() {
   let server;
   const requestHandler = (req: any, res: any) => {
     const { pathname } = new URL(req.url || '', `http://${req.headers.host}`);
+
+    
+    if (pathname === '/metrics' && req.method === 'GET') {
+      prometheusRegistry.metrics().then((metricsStr) => {
+        res.writeHead(200, { 'Content-Type': prometheusRegistry.contentType });
+        res.end(metricsStr);
+      });
+      return;
+    }
+
+    
+    if (pathname === '/api/v1/fleet/block' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (chunk: any) => body += chunk.toString());
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body);
+          const target = payload.target;
+          const isMac = payload.isMac || false;
+          
+          if (!target) {
+            res.writeHead(400);
+            return res.end(JSON.stringify({ error: 'Missing target' }));
+          }
+
+          console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
+
+          let count = 0;
+          for (const sat of activeSatellites.values()) {
+            if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
+              sat.ws.send(JSON.stringify({
+                type: 'BLOCK_TARGET',
+                payload: { target, isMac }
+              }));
+              count++;
+            }
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, notifiedSatellites: count }));
+        } catch (err) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+      });
+      return;
+    }
 
     if (pathname === '/api/v1/fleet/satellites' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -239,9 +337,36 @@ async function main() {
         const text = message.toString();
         const parsed = JSON.parse(text);
         if (parsed.type === 'TELEMETRY_REPORT') {
-          const report = JSON.parse(parsed.payload);
+          // payload was marshaled by Go, so parsed.payload is an array of bytes or object? Wait.
+          // Wait, if Go does payloadBytes, err := json.Marshal(report)
+          // and then msg := EnvelopeMessage { ... Payload: payloadBytes }
+          // then env.Payload is actually a raw JSON object string or embedded object?
+          // Since EnvelopeMessage.Payload is json.RawMessage, it writes literally as JSON object!
+          // So parsed.payload is NOT a string. It's the parsed object itself.
+          let report: any;
+          if (typeof parsed.payload === 'string') {
+              report = JSON.parse(parsed.payload);
+          } else {
+              report = parsed.payload;
+          }
           state.metrics = report.metrics;
           console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics.activeConns}`);
+          
+          // Update Prometheus metrics
+          satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
+          satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
+          satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
+          satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
+          
+          // Handle counter increments safely
+          const currentRx = report.metrics.rxBytesTotal || 0;
+          const currentTx = report.metrics.txBytesTotal || 0;
+          const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
+          
+          if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
+          if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
+          
+          lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
         }
       } catch {
         // Ping or non-JSON message
@@ -250,6 +375,11 @@ async function main() {
 
     ws.on('close', () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
+      satUptimeGauge.remove({ satellite_id: satId });
+      satCpuGauge.remove({ satellite_id: satId });
+      satMemGauge.remove({ satellite_id: satId });
+      satConnsGauge.remove({ satellite_id: satId });
+      lastRxTxBytes.delete(satId);
       activeSatellites.delete(satId);
       broadcastMeshTopology();
     });

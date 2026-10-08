@@ -43,6 +43,12 @@ type SyncWiFiPayload struct {
 	Configs []engine.WiFiConfig `json:"configs"`
 }
 
+
+type BlockTargetPayload struct {
+	Target string `json:"target"`
+	IsMac  bool   `json:"isMac"`
+}
+
 type TelemetryReportPayload struct {
 	SatelliteID string                  `json:"satelliteId"`
 	Metrics     engine.SatelliteMetrics `json:"metrics"`
@@ -216,6 +222,16 @@ func main() {
 						slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
 					} else {
 						slog.Info("Successfully joined Headscale mesh!")
+					}
+				}
+
+
+			case "BLOCK_TARGET":
+				var bp BlockTargetPayload
+				if err := json.Unmarshal(env.Payload, &bp); err == nil && bp.Target != "" {
+					slog.Info("Received AI Copilot block request...", "target", bp.Target)
+					if err := nftEngine.BlockTarget(bp.Target, bp.IsMac); err != nil {
+						slog.Error("Failed to apply micro-segmentation block", "error", err)
 					}
 				}
 
