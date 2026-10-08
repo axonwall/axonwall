@@ -39,6 +39,10 @@ type HeadscaleSyncPayload struct {
 	AuthKey   string `json:"authKey"`
 }
 
+type SyncWiFiPayload struct {
+	Configs []engine.WiFiConfig `json:"configs"`
+}
+
 type TelemetryReportPayload struct {
 	SatelliteID string                  `json:"satelliteId"`
 	Metrics     engine.SatelliteMetrics `json:"metrics"`
@@ -119,6 +123,7 @@ func main() {
 
 	nftEngine := engine.NewNftablesEngine()
 	wgEngine := engine.NewWireGuardEngine()
+	wifiEngine := engine.NewWiFiEngine()
 
 	slog.Info("Connected to Axonwall Core Hub. Engines initialized.")
 
@@ -185,6 +190,19 @@ func main() {
 					slog.Info("Applying WireGuard mesh tunnel configuration...")
 					if err := wgEngine.ConfigureMesh(wgCfg); err != nil {
 						slog.Error("Failed to configure WireGuard mesh", "error", err)
+					}
+				}
+
+			case "SYNC_WIFI":
+				var wfCfg SyncWiFiPayload
+				if err := json.Unmarshal(env.Payload, &wfCfg); err == nil {
+					slog.Info("Applying Wi-Fi radio configurations...")
+					for _, c := range wfCfg.Configs {
+						if err := wifiEngine.Configure(c); err != nil {
+							slog.Error("Failed to configure Wi-Fi radio", "radio", c.Radio, "error", err)
+						} else {
+							slog.Info("Wi-Fi configured successfully", "radio", c.Radio, "ssid", c.SSID)
+						}
 					}
 				}
 
