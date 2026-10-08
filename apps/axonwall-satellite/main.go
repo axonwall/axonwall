@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync/atomic"
 	"syscall"
@@ -31,6 +32,11 @@ type EnvelopeMessage struct {
 
 type NftablesSyncPayload struct {
 	Script string `json:"script"`
+}
+
+type HeadscaleSyncPayload struct {
+	ServerURL string `json:"serverUrl"`
+	AuthKey   string `json:"authKey"`
 }
 
 type TelemetryReportPayload struct {
@@ -179,6 +185,19 @@ func main() {
 					slog.Info("Applying WireGuard mesh tunnel configuration...")
 					if err := wgEngine.ConfigureMesh(wgCfg); err != nil {
 						slog.Error("Failed to configure WireGuard mesh", "error", err)
+					}
+				}
+
+			case "SYNC_HEADSCALE":
+				var hsCfg HeadscaleSyncPayload
+				if err := json.Unmarshal(env.Payload, &hsCfg); err == nil && hsCfg.AuthKey != "" {
+					slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsCfg.ServerURL)
+					cmd := exec.Command("tailscale", "up", "--login-server="+hsCfg.ServerURL, "--authkey="+hsCfg.AuthKey, "--reset")
+					out, err := cmd.CombinedOutput()
+					if err != nil {
+						slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
+					} else {
+						slog.Info("Successfully joined Headscale mesh!")
 					}
 				}
 

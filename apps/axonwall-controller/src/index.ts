@@ -35,6 +35,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
+import { listUsers, createUser, createPreAuthKey } from './headscale.js';
 
 
 async function main() {
@@ -174,7 +175,7 @@ async function main() {
     }
   }
 
-  wss.on('connection', (ws: WebSocket, request: http.IncomingMessage, satId: string) => {
+  wss.on('connection', async (ws: WebSocket, request: http.IncomingMessage, satId: string) => {
     const remoteIp = request.socket.remoteAddress || '127.0.0.1';
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
 
@@ -194,8 +195,33 @@ async function main() {
       ws: ws,
     };
     activeSatellites.set(satId, state);
-    
-    // 1. Push initial compiled nftables ruleset
+
+    // 1. Headscale ZTP Identity Provisioning
+    try {
+      console.log(`[Fleet Manager] Provisioning Headscale PreAuthKey for ${satId}...`);
+      let users = await listUsers();
+      let satelliteUser = users.find((u: any) => u.name === 'satellites');
+      if (!satelliteUser) {
+        satelliteUser = await createUser('satellites');
+      }
+
+      // Generate a 1-hour ephemeral key
+      const expiration = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const preAuthKey = await createPreAuthKey('satellites', false, true, expiration);
+
+      ws.send(JSON.stringify({
+        type: 'SYNC_HEADSCALE',
+        payload: {
+          serverUrl: process.env.HEADSCALE_EXTERNAL_URL || 'https://hub.axonwall.local',
+          authKey: preAuthKey.key
+        }
+      }));
+      console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
+    } catch (err: any) {
+      console.error(`[Fleet Manager] Failed to provision Headscale key for ${satId}: ${err.message}`);
+    }
+
+    // 2. Push initial compiled nftables ruleset
     ws.send(JSON.stringify({
       type: 'SYNC_NFTABLES',
       payload: {
@@ -218,7 +244,7 @@ table inet axonwall {
       }
     }));
 
-    // 2. Broadcast mesh update to all satellites (including the new one)
+    // 3. Broadcast mesh update to all satellites (including the new one)
     broadcastMeshTopology();
 
     ws.on('message', (message) => {
