@@ -53,7 +53,7 @@ lb config \
   --archive-areas "main contrib non-free non-free-firmware" \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
-  --bootappend-live "boot=live components hostname=axonwall username=axonwall user-fullname=\"Axonwall Administrator\" live-config.user-default-groups=sudo,adm,dialout live-config.user-password=axonwall live-config.root-password=axonwall console=tty0 console=ttyS0,115200" \
+  --bootappend-live "boot=live components hostname=axonwall username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.user-password=axonwall live-config.root-password=axonwall console=tty0 console=ttyS0,115200" \
   --debian-installer live \
   --debian-installer-distribution trixie \
   --debian-installer-gui false \
