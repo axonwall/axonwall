@@ -103,6 +103,10 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-firstboot ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-firstboot
 fi
 
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-ha-notify ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-ha-notify
+fi
+
 # Copy compiled daemon binaries if present
 mkdir -p config/includes.chroot/usr/sbin/
 
@@ -112,6 +116,18 @@ if [[ ! -f config/includes.chroot/usr/sbin/headscale ]]; then
   echo "[+] Fetching Headscale v${HEADSCALE_VERSION}..."
   curl -fsSL -o config/includes.chroot/usr/sbin/headscale "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
   chmod +x config/includes.chroot/usr/sbin/headscale
+fi
+
+# Fetch Litestream binary for distributed SQLite replication
+LITESTREAM_VERSION="0.3.13"
+if [[ ! -f config/includes.chroot/usr/sbin/litestream ]]; then
+  echo "[+] Fetching Litestream v${LITESTREAM_VERSION}..."
+  curl -fsSL -o /tmp/litestream.tar.gz "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" || true
+  if [[ -f /tmp/litestream.tar.gz ]]; then
+    tar -xzf /tmp/litestream.tar.gz -C config/includes.chroot/usr/sbin/ litestream 2>/dev/null || true
+    chmod +x config/includes.chroot/usr/sbin/litestream 2>/dev/null || true
+    rm -f /tmp/litestream.tar.gz
+  fi
 fi
 
 if [[ -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then
@@ -153,6 +169,7 @@ syslinux-common
 nftables
 iproute2
 wireguard-tools
+sqlite3
 suricata
 kea-dhcp4-server
 unbound

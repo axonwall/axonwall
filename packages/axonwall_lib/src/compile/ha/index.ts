@@ -54,9 +54,9 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
     lines.push('        chk_axonwalld');
     lines.push('    }');
 
-    lines.push('    notify_master "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c"');
-    lines.push('    notify_backup "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f"');
-    lines.push('    notify_fault  "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t"');
+    lines.push('    notify_master "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER"');
+    lines.push('    notify_backup "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP"');
+    lines.push('    notify_fault  "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT"');
     lines.push('}');
     lines.push('');
   }
@@ -173,6 +173,10 @@ export function filterHaSyncState(state: DesiredState, sync: HaSyncSections): Pa
     filtered.gatewayGroups = state.gatewayGroups;
   }
 
+  if (sync.sqlite) {
+    filtered.headscale = state.headscale;
+  }
+
   return filtered;
 }
 
@@ -211,5 +215,69 @@ export function compileKeaHaHook(ha: HighAvailabilityConfig, localIp: string): R
         },
       ],
     },
+  };
+}
+
+/**
+ * Compiles Litestream configuration (/etc/litestream.yml) for SQLite database replication.
+ */
+export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
+  const sync = ha.sqliteSync;
+  const lines: string[] = [];
+
+  lines.push('# /etc/litestream.yml - Managed by Axonwall High Availability');
+  lines.push('# Documentation: https://litestream.io/reference/config/');
+  lines.push('');
+  lines.push('dbs:');
+
+  for (const dbPath of sync.databases) {
+    lines.push(`  - path: ${dbPath}`);
+    lines.push('    replicas:');
+    if (sync.litestreamBucket) {
+      lines.push(`      - type: s3`);
+      lines.push(`        bucket: ${sync.litestreamBucket}`);
+      lines.push(`        path: ${dbPath.replace(/\//g, '_')}`);
+      if (sync.litestreamEndpoint) {
+        lines.push(`        endpoint: ${sync.litestreamEndpoint}`);
+      }
+      if (sync.litestreamAccessKeyId) {
+        lines.push(`        access-key-id: ${sync.litestreamAccessKeyId}`);
+      }
+      if (sync.litestreamSecretAccessKey) {
+        lines.push(`        secret-access-key: ${sync.litestreamSecretAccessKey}`);
+      }
+    } else {
+      // Local/peer directory replica
+      const replicaDir = dbPath.replace('.sqlite', '.replica');
+      lines.push(`      - type: file`);
+      lines.push(`        path: ${replicaDir}`);
+    }
+    lines.push(`        sync-interval: ${sync.syncIntervalSeconds}s`);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Compiles native Axonwall SQLite sync daemon configuration (/etc/axonwall/sqlite_sync.json).
+ */
+export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: string = '127.0.0.1'): Record<string, any> {
+  const sync = ha.sqliteSync;
+  const isMaster = ha.nodeRole === 'master' && !ha.maintenanceMode;
+
+  return {
+    enabled: sync.enabled && ha.enabled,
+    nodeRole: isMaster ? 'master' : 'backup',
+    mode: sync.mode,
+    databases: sync.databases,
+    syncIntervalSeconds: sync.syncIntervalSeconds,
+    listenPort: sync.listenPort,
+    peerAddress: sync.peerAddress || ha.peerAddress,
+    peerPort: sync.peerPort || sync.listenPort,
+    authToken: sync.authToken || ha.vrrpInstances[0]?.authPassword || '',
+    localAddress: localIp,
+    autoPromoteHeadscale: true,
+    checkpointOnSync: true,
   };
 }

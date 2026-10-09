@@ -1,36 +1,108 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/axonwall/monorepo/apps/axonwalld/engine"
 )
 
 type HAConfig struct {
-	Enabled       bool
-	Role          string
-	Vrid          int
-	SyncInterface string
-	PeerIp        string
-	SyncPassword  string
+	Enabled       bool                    `json:"enabled"`
+	Role          string                  `json:"role"` // "master" or "secondary" / "backup"
+	Vrid          int                     `json:"vrid"`
+	SyncInterface string                  `json:"syncInterface"`
+	PeerIp        string                  `json:"peerIp"`
+	SyncPassword  string                  `json:"syncPassword"`
+	SqliteSync    engine.SqliteSyncConfig `json:"sqliteSync"`
 }
 
 type HAEngine struct {
-	config HAConfig
+	mu         sync.Mutex
+	config     HAConfig
+	sqliteSync *engine.SqliteSyncManager
+	listener   net.Listener
+	sockPath   string
 }
 
 func NewHAEngine() *HAEngine {
-	return &HAEngine{}
+	return &HAEngine{
+		sqliteSync: engine.NewSqliteSyncManager(),
+		sockPath:   "/run/axonwall/ha.sock",
+	}
+}
+
+func (e *HAEngine) StartSocketListener() error {
+	_ = os.MkdirAll(filepath.Dir(e.sockPath), 0755)
+	_ = os.Remove(e.sockPath)
+
+	l, err := net.Listen("unix", e.sockPath)
+	if err != nil {
+		return fmt.Errorf("failed to listen on ha socket %s: %w", e.sockPath, err)
+	}
+	_ = os.Chmod(e.sockPath, 0660)
+	e.listener = l
+
+	slog.Info("HA Engine state transition socket listening", "path", e.sockPath)
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go e.handleNotificationConn(conn)
+		}
+	}()
+
+	return nil
+}
+
+func (e *HAEngine) handleNotificationConn(conn net.Conn) {
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	if scanner.Scan() {
+		state := strings.ToUpper(strings.TrimSpace(scanner.Text()))
+		if state == "MASTER" || state == "BACKUP" || state == "FAULT" {
+			slog.Info("Received HA state transition from notify socket", "state", state)
+			e.OnTransition(state)
+			_, _ = conn.Write([]byte("OK\n"))
+		} else {
+			slog.Warn("Ignoring unrecognized state transition", "state", state)
+			_, _ = conn.Write([]byte("ERR: invalid state\n"))
+		}
+	}
+}
+
+func (e *HAEngine) OnTransition(state string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	slog.Info("HAEngine handling transition", "state", state)
+	e.sqliteSync.OnStateChange(state)
 }
 
 func (e *HAEngine) Apply(cfg HAConfig) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	e.config = cfg
 
 	if !cfg.Enabled {
-		slog.Info("High Availability is disabled. Stopping Keepalived and Conntrackd.")
-		exec.Command("systemctl", "stop", "keepalived").Run()
-		exec.Command("systemctl", "stop", "conntrackd").Run()
+		slog.Info("High Availability is disabled. Stopping Keepalived, Conntrackd, and SQLite sync.")
+		_ = exec.Command("systemctl", "stop", "keepalived").Run()
+		_ = exec.Command("systemctl", "stop", "conntrackd").Run()
+		e.sqliteSync.Stop()
 		return nil
 	}
 
@@ -53,19 +125,45 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		slog.Warn("Failed to reload conntrackd", "error", err, "output", string(out))
 	}
 
+	// Apply Distributed SQLite Sync
+	if cfg.SqliteSync.Enabled {
+		if cfg.SqliteSync.NodeRole == "" {
+			if cfg.Role == "master" || cfg.Role == "primary" {
+				cfg.SqliteSync.NodeRole = "master"
+			} else {
+				cfg.SqliteSync.NodeRole = "backup"
+			}
+		}
+		if err := e.sqliteSync.ApplyConfig(cfg.SqliteSync); err != nil {
+			slog.Error("Failed to apply SQLite sync config", "error", err)
+		}
+	} else {
+		e.sqliteSync.Stop()
+	}
+
 	return nil
+}
+
+func (e *HAEngine) ApplyFromJSON(content []byte) error {
+	var cfg HAConfig
+	if err := json.Unmarshal(content, &cfg); err != nil {
+		return fmt.Errorf("failed to parse HA config json: %w", err)
+	}
+	return e.Apply(cfg)
 }
 
 func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 	state := "MASTER"
 	priority := 100
-	if cfg.Role == "secondary" {
+	if cfg.Role == "secondary" || cfg.Role == "backup" {
 		state = "BACKUP"
 		priority = 50
 	}
 
 	conf := fmt.Sprintf(`global_defs {
     router_id AXONWALL_HA_NODE
+    script_user root
+    enable_script_security
 }
 
 vrrp_sync_group VG1 {
@@ -86,18 +184,21 @@ vrrp_instance VI_1 {
         auth_pass %s
     }
 
-    # Virtual IPs would be dynamically populated here based on DesiredState
     virtual_ipaddress {
         10.0.99.1/24 dev %s
     }
+
+    notify_master "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER"
+    notify_backup "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP"
+    notify_fault  "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT"
 }
 `, state, cfg.SyncInterface, cfg.Vrid, priority, cfg.SyncPassword, cfg.SyncInterface)
 
 	if err := os.MkdirAll("/etc/keepalived", 0755); err != nil {
 		return err
 	}
-	
-	f, err := os.OpenFile("/etc/keepalived/keepalived.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|0x20000, 0600) // O_NOFOLLOW = 0x20000 on Linux
+
+	f, err := os.OpenFile("/etc/keepalived/keepalived.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open keepalived.conf safely: %w", err)
 	}
@@ -152,12 +253,42 @@ General {
 	if err := os.MkdirAll("/etc/conntrackd", 0755); err != nil {
 		return err
 	}
-	
-	f, err := os.OpenFile("/etc/conntrackd/conntrackd.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|0x20000, 0600)
+
+	f, err := os.OpenFile("/etc/conntrackd/conntrackd.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open conntrackd.conf safely: %w", err)
 	}
 	defer f.Close()
 	_, err = f.Write([]byte(conf))
 	return err
+}
+
+func (e *HAEngine) Stop() {
+	if e.listener != nil {
+		_ = e.listener.Close()
+		_ = os.Remove(e.sockPath)
+	}
+	e.sqliteSync.Stop()
+}
+
+func sendHANotification(state string) error {
+	conn, err := net.DialTimeout("unix", "/run/axonwall/ha.sock", 3*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to axonwalld ha socket: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := fmt.Fprintf(conn, "%s\n", state); err != nil {
+		return fmt.Errorf("failed to send notification: %w", err)
+	}
+
+	scanner := bufio.NewScanner(conn)
+	if scanner.Scan() {
+		reply := scanner.Text()
+		if strings.HasPrefix(reply, "OK") {
+			return nil
+		}
+		return fmt.Errorf("server reply: %s", reply)
+	}
+	return nil
 }

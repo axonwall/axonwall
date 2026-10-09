@@ -35,15 +35,17 @@ type AgentServer struct {
 	nodeId          string
 	startTime       time.Time
 	iapManager      *engine.IAPManager
+	haEngine        *HAEngine
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine) *AgentServer {
 	hostname, _ := os.Hostname()
 	return &AgentServer{
 		bundleDir:  bundleDir,
 		nodeId:     fmt.Sprintf("axonwall-%s", hostname),
 		startTime:  time.Now(),
 		iapManager: iapManager,
+		haEngine:   haEngine,
 	}
 }
 
@@ -108,6 +110,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			log.Printf("[Agent] Applying Zero Trust IAP configuration")
 			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {
 				log.Printf("[Agent] Warning: Failed to apply IAP config: %v", err)
+			}
+		}
+
+		if filepath.Base(cleanPath) == "ha_config.json" {
+			log.Printf("[Agent] Applying High Availability & SQLite Sync configuration")
+			if err := s.haEngine.ApplyFromJSON([]byte(f.Content)); err != nil {
+				log.Printf("[Agent] Warning: Failed to apply HA config: %v", err)
 			}
 		}
 	}
@@ -381,10 +390,19 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 }
 
 func main() {
+	notifyState := flag.String("notify", "", "Send state change notification to running axonwalld HA engine (MASTER/BACKUP/FAULT)")
 	socketPath := flag.String("socket", "/run/axonwall/agent.sock", "Path to agent Unix socket")
 	bundleDir := flag.String("bundle-dir", "/var/lib/axonwall/bundles", "Directory for storing last-known-good bundles")
 	bootApply := flag.Bool("boot-apply", false, "Apply last-known-good configuration immediately on boot")
 	flag.Parse()
+
+	if *notifyState != "" {
+		if err := sendHANotification(*notifyState); err != nil {
+			log.Fatalf("Failed to send HA notification: %v", err)
+		}
+		log.Printf("Successfully notified axonwalld of HA state: %s", *notifyState)
+		os.Exit(0)
+	}
 
 	log.Printf("Starting Axonwall Privileged Agent (axonwalld)")
 
@@ -421,7 +439,12 @@ func main() {
 	grpcServer := grpc.NewServer()
 	
 	iapManager := engine.NewIAPManager()
-	agentServer := NewAgentServer(*bundleDir, iapManager)
+	haEngine := NewHAEngine()
+	if err := haEngine.StartSocketListener(); err != nil {
+		log.Printf("[Agent] Warning: Failed to start HA socket listener: %v", err)
+	}
+
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -437,6 +460,7 @@ func main() {
 		<-sigChan
 		log.Println("[Agent] Shutting down agent daemon...")
 		iapManager.Stop()
+		haEngine.Stop()
 		ebpfManager.Stop()
 		grpcServer.GracefulStop()
 		_ = os.Remove(*socketPath)

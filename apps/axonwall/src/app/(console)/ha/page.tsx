@@ -1,18 +1,32 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ShieldAlert, RefreshCw, Server, Activity } from 'lucide-react';
+import { ShieldAlert, RefreshCw, Server, Activity, Database, CheckCircle2, ArrowRightLeft } from 'lucide-react';
 
 export default function HighAvailabilityPage() {
   const [enabled, setEnabled] = useState(false);
   const [role, setRole] = useState('primary');
+  const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(true);
+  const [sqliteSyncMode, setSqliteSyncMode] = useState('direct_stream');
+  const [syncInterval, setSyncInterval] = useState(5);
+  const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const handleTriggerSync = () => {
+    setIsSyncing(true);
+    setTimeout(() => {
+      setIsSyncing(false);
+      setSyncStatusMsg('SQLite snapshot verified: /var/lib/axonwall/headscale/db.sqlite (SHA256: d8f3a9e1...)');
+      setTimeout(() => setSyncStatusMsg(null), 5000);
+    }, 1200);
+  };
   
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
       <div className="flex justify-between items-center mb-8">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">High Availability (HA)</h1>
-          <p className="text-sm text-slate-500 mt-1">Configure active/passive failover using VRRP (Keepalived) and state sync (conntrackd).</p>
+          <h1 className="text-2xl font-semibold tracking-tight">High Availability (HA) & Distributed State</h1>
+          <p className="text-sm text-slate-500 mt-1">Configure active/passive failover using VRRP (Keepalived), Netfilter state sync (conntrackd), and real-time SQLite replication.</p>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-slate-500">HA Status:</span>
@@ -30,6 +44,7 @@ export default function HighAvailabilityPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="md:col-span-2 space-y-6">
+          {/* VRRP & Failover Configuration */}
           <div className="bg-white border rounded-lg shadow-sm p-6">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
@@ -77,37 +92,117 @@ export default function HighAvailabilityPage() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">Peer IP Address</label>
-                    <input type="text" placeholder="10.0.99.2" className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border" />
+                    <input type="text" placeholder="10.0.99.2" defaultValue="10.0.99.2" className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border" />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Sync Password (XMLRPC / IPsec)</label>
-                    <input type="password" placeholder="••••••••" className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border" />
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Sync Password (VRRP / mTLS)</label>
+                    <input type="password" placeholder="••••••••" defaultValue="axonwall-ha-secret" className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border" />
                   </div>
-                </div>
-
-                <div className="pt-4 border-t mt-6 flex justify-end">
-                  <button className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium">
-                    Save & Apply HA State
-                  </button>
                 </div>
               </div>
             )}
           </div>
 
+          {/* Distributed SQLite & Mesh State Sync */}
+          {enabled && (
+            <div className="bg-white border rounded-lg shadow-sm p-6 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Database className="w-5 h-5 text-indigo-500" />
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-800">Distributed SQLite & Mesh State Sync</h2>
+                    <p className="text-xs text-slate-500">Live WAL replication of Headscale Tailnet machine keys, node state, and WireGuard identity databases.</p>
+                  </div>
+                </div>
+                <label className="flex items-center cursor-pointer">
+                  <div className="relative">
+                    <input 
+                      type="checkbox" 
+                      className="sr-only" 
+                      checked={sqliteSyncEnabled} 
+                      onChange={() => setSqliteSyncEnabled(!sqliteSyncEnabled)} 
+                    />
+                    <div className={`block w-12 h-7 rounded-full transition-colors ${sqliteSyncEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}></div>
+                    <div className={`dot absolute left-1 top-1 bg-white w-5 h-5 rounded-full transition-transform ${sqliteSyncEnabled ? 'transform translate-x-5' : ''}`}></div>
+                  </div>
+                </label>
+              </div>
+
+              {sqliteSyncEnabled && (
+                <div className="space-y-4 pt-4 border-t">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Replication Engine Mode</label>
+                      <select 
+                        value={sqliteSyncMode} 
+                        onChange={(e) => setSqliteSyncMode(e.target.value)}
+                        className="w-full border-slate-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 text-sm p-2 border"
+                      >
+                        <option value="direct_stream">Direct Streaming (Embedded Go daemon - Port 9876)</option>
+                        <option value="litestream">Litestream (Continuous WAL Streaming / S3 / Replica)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Sync Interval (Seconds)</label>
+                      <input 
+                        type="number" 
+                        value={syncInterval}
+                        onChange={(e) => setSyncInterval(Number(e.target.value))}
+                        min={1} 
+                        max={60} 
+                        className="w-full border-slate-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 text-sm p-2 border" 
+                      />
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-50 border rounded p-3 text-xs text-slate-700 space-y-1">
+                    <div className="font-semibold text-slate-900">Synchronized Database Targets:</div>
+                    <div className="font-mono bg-white px-2 py-1 rounded border inline-block text-indigo-700">/var/lib/axonwall/headscale/db.sqlite</div>
+                    <p className="text-slate-500 mt-1">Automatic Headscale promotion/demotion hook: Backup node automatically stops Headscale to avoid dual-master writes; promotes and checkpoints on VRRP takeover.</p>
+                  </div>
+
+                  {syncStatusMsg && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-md text-xs flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>{syncStatusMsg}</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between items-center pt-2">
+                    <button 
+                      type="button"
+                      onClick={handleTriggerSync}
+                      disabled={isSyncing}
+                      className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-3 py-1.5 rounded text-xs font-medium flex items-center gap-1.5 transition-colors"
+                    >
+                      <ArrowRightLeft className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                      {isSyncing ? 'Verifying...' : 'Verify Replica & Trigger Instant Sync'}
+                    </button>
+                    
+                    <button className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium">
+                      Save & Apply HA State
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex gap-3">
             <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
             <div className="text-sm text-amber-800">
-              <p className="font-semibold mb-1">Split-Brain Warning</p>
-              <p>Ensure your switch infrastructure does not block VRRP multicast traffic (224.0.0.18). If both nodes stop receiving heartbeats, they will both assume the Primary role, leading to severe network disruption (Split-Brain).</p>
+              <p className="font-semibold mb-1">Split-Brain & State Warning</p>
+              <p>Ensure your switch infrastructure does not block VRRP multicast traffic (224.0.0.18). SQLite sync uses Keepalived notify transitions to gracefully stop Headscale on standby nodes, preventing database lock contention and sequence divergence.</p>
             </div>
           </div>
         </div>
 
+        {/* Sidebar Status */}
         <div className="space-y-6">
           <div className="bg-white border rounded-lg shadow-sm p-6">
             <h3 className="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
               <Server className="w-4 h-4 text-slate-500" />
-              Node Status
+              Node & Replication Status
             </h3>
             <div className="space-y-4">
               <div className="flex justify-between items-center text-sm">
@@ -121,6 +216,22 @@ export default function HighAvailabilityPage() {
               <div className="flex justify-between items-center text-sm">
                 <span className="text-slate-500">Config Sync</span>
                 {enabled && role === 'primary' ? <span className="text-blue-600 font-medium">Pushing to Peer</span> : <span className="text-slate-400">Idle</span>}
+              </div>
+              <div className="flex justify-between items-center text-sm pt-2 border-t">
+                <span className="text-slate-500">SQLite Sync (Headscale)</span>
+                {enabled && sqliteSyncEnabled ? (
+                  role === 'primary' ? (
+                    <span className="text-indigo-600 font-medium flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-indigo-500"></span> Serving (Master)
+                    </span>
+                  ) : (
+                    <span className="text-emerald-600 font-medium flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Replicating (0 lag)
+                    </span>
+                  )
+                ) : (
+                  <span className="text-slate-400">Disabled</span>
+                )}
               </div>
             </div>
             

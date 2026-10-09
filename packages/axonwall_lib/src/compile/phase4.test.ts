@@ -55,6 +55,13 @@ describe('Phase 4: High Availability Compilers', () => {
       peerAddress: '192.168.1.2',
       port: 3780,
     },
+    sqliteSync: {
+      enabled: false,
+      mode: 'direct_stream',
+      databases: ['/var/lib/axonwall/headscale/db.sqlite'],
+      syncIntervalSeconds: 5,
+      listenPort: 9876,
+    },
     syncSections: {
       interfaces: false,
       firewall: true,
@@ -62,6 +69,7 @@ describe('Phase 4: High Availability Compilers', () => {
       dns: true,
       aliases: true,
       vpn: true,
+      sqlite: true,
     },
     maintenanceMode: false,
   };
@@ -158,6 +166,7 @@ describe('Phase 4: High Availability Compilers', () => {
       dns: false,
       aliases: true,
       vpn: false,
+      sqlite: false,
     });
 
     expect(filtered.rules).toHaveLength(1);

@@ -603,8 +603,27 @@ export const HaSyncSectionsSchema = z.object({
   dns: z.boolean().default(true),
   aliases: z.boolean().default(true),
   vpn: z.boolean().default(true),
+  sqlite: z.boolean().optional().default(true),
 });
 export type HaSyncSections = z.infer<typeof HaSyncSectionsSchema>;
+
+export const HaSqliteSyncConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(['direct_stream', 'litestream']).default('direct_stream'),
+  databases: z.array(z.string()).default([
+    '/var/lib/axonwall/headscale/db.sqlite',
+  ]),
+  syncIntervalSeconds: z.number().int().min(1).default(5),
+  listenPort: z.number().int().min(1).max(65535).default(9876),
+  peerAddress: z.string().optional(),
+  peerPort: z.number().int().min(1).max(65535).optional(),
+  authToken: z.string().optional(),
+  litestreamBucket: z.string().optional(),
+  litestreamEndpoint: z.string().optional(),
+  litestreamAccessKeyId: z.string().optional(),
+  litestreamSecretAccessKey: z.string().optional(),
+});
+export type HaSqliteSyncConfig = z.infer<typeof HaSqliteSyncConfigSchema>;
 
 export const HighAvailabilityConfigSchema = z.object({
   enabled: z.boolean().default(false),
@@ -615,6 +634,13 @@ export const HighAvailabilityConfigSchema = z.object({
   mtlsKey: z.string().optional(),
   vrrpInstances: z.array(VrrpInstanceSchema).default([]),
   conntrackSync: ConntrackSyncSchema.default({ enabled: false }),
+  sqliteSync: HaSqliteSyncConfigSchema.optional().default({
+    enabled: false,
+    mode: 'direct_stream',
+    databases: ['/var/lib/axonwall/headscale/db.sqlite'],
+    syncIntervalSeconds: 5,
+    listenPort: 9876,
+  }),
   syncSections: HaSyncSectionsSchema.default({
     interfaces: false,
     firewall: true,
@@ -622,6 +648,7 @@ export const HighAvailabilityConfigSchema = z.object({
     dns: true,
     aliases: true,
     vpn: true,
+    sqlite: true,
   }),
   maintenanceMode: z.boolean().default(false),
 });
