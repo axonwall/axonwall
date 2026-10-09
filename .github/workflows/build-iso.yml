@@ -103,12 +103,13 @@ jobs:
 
       - name: Upload ISO Artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: axonwall-debian13-amd64-iso
           path: |
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-          retention-days: 14
+          retention-days: 1
 
       - name: Release ISO (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
