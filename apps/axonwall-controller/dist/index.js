@@ -7,13 +7,15 @@ export function buildArtifactBundle(jobId, state) {
     const issues = lintRuleset(state);
     const warnings = issues.map((i) => `[${i.severity.toUpperCase()}] ${i.message}`);
     // 2. Compile to atomic nftables ruleset
-    const { nftScript } = compileNftables(state);
+    const { nftScript, files, reloadServices } = compileNftables(state);
     // 3. Compute deterministic bundle hash
     const hash = crypto.createHash('sha256').update(nftScript).digest('hex');
     return {
         jobId,
         bundleHash: hash,
         nftScript,
+        files,
+        reloadServices,
         warnings,
         generatedAt: new Date().toISOString(),
     };

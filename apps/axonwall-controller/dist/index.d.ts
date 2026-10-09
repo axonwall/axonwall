@@ -3,6 +3,12 @@ export interface CompiledBundle {
     jobId: string;
     bundleHash: string;
     nftScript: string;
+    files: {
+        path: string;
+        content: string;
+        fileMode: number;
+    }[];
+    reloadServices: string[];
     warnings: string[];
     generatedAt: string;
 }

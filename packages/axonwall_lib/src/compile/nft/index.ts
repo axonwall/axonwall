@@ -1,14 +1,41 @@
 import type { DesiredState, FirewallRule, NatRule, Alias } from '../../schemas/index.js';
 import { sanitizeIdentifier } from '../../util/index.js';
+import { compileSuricata } from '../suricata/index.js';
+import { compileCrowdSec } from '../crowdsec/index.js';
 
 export interface CompileResult {
   nftScript: string;
+  files: { path: string; content: string; fileMode: number }[];
+  reloadServices: string[];
   warnings: string[];
 }
 
 export function compileNftables(state: DesiredState): CompileResult {
   const lines: string[] = [];
   const warnings: string[] = [];
+  const files: { path: string; content: string; fileMode: number }[] = [];
+  const reloadServices: string[] = [];
+
+  const suricataCompiled = compileSuricata(state.suricata);
+  const crowdsecCompiled = compileCrowdSec(state.crowdsec);
+
+  if (state.suricata?.enabled) {
+    files.push({
+      path: '/etc/suricata/suricata.yaml',
+      content: suricataCompiled.suricataYaml,
+      fileMode: 0o644,
+    });
+    reloadServices.push('suricata');
+  }
+
+  if (state.crowdsec?.enabled) {
+    files.push({
+      path: '/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml',
+      content: crowdsecCompiled.bouncerYaml,
+      fileMode: 0o644,
+    });
+    reloadServices.push('crowdsec-firewall-bouncer');
+  }
 
   lines.push('#!/usr/sbin/nft -f');
   lines.push('# Axonwall Auto-Generated nftables configuration');
@@ -19,6 +46,12 @@ export function compileNftables(state: DesiredState): CompileResult {
   lines.push('table inet axonwall {');
 
   // 2. Named sets for Aliases
+  if (state.crowdsec?.enabled) {
+    lines.push('  # CrowdSec integration');
+    lines.push(crowdsecCompiled.nftSetDefinition.split('\n').map(l => '  ' + l).join('\n'));
+    lines.push('');
+  }
+
   if (state.aliases.length > 0) {
     lines.push('  # Aliases & Dynamic Sets');
     for (const alias of state.aliases) {
@@ -97,6 +130,9 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Input chain (traffic to the firewall host itself)
   lines.push('  chain input {');
   lines.push('    type filter hook input priority filter; policy drop;');
+  if (state.crowdsec?.enabled) {
+    lines.push(`    ${crowdsecCompiled.nftRule} comment "crowdsec-drop"`);
+  }
   lines.push('  set blocked_ips {');
   lines.push('    type ipv4_addr');
   lines.push('    flags interval');
@@ -150,6 +186,8 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Forward chain (routed traffic between interfaces)
 
   lines.push('  chain forward {');
+  // Suricata IPS rules
+  lines.push(...suricataCompiled.nftRules.map(r => '    ' + r));
   lines.push('    type filter hook forward priority filter; policy drop;');
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
@@ -267,6 +305,8 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   return {
     nftScript: lines.join('\n'),
+    files,
+    reloadServices,
     warnings,
   };
 }
@@ -274,6 +314,8 @@ export function compileNftables(state: DesiredState): CompileResult {
 export function compileSatelliteNftables(node: any): CompileResult {
   const lines: string[] = [];
   const warnings: string[] = [];
+  const files: { path: string; content: string; fileMode: number }[] = [];
+  const reloadServices: string[] = [];
 
   lines.push('#!/usr/sbin/nft -f');
   lines.push('# Axonwall Auto-Generated Satellite nftables configuration');
@@ -338,6 +380,8 @@ export function compileSatelliteNftables(node: any): CompileResult {
 
   return {
     nftScript: lines.join('\n'),
+    files,
+    reloadServices,
     warnings,
   };
 }

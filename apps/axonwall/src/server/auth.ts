@@ -116,3 +116,32 @@ export async function logoutAction() {
   cookieStore.delete(SESSION_COOKIE);
   redirect('/login');
 }
+
+export async function generateMfaSetup() {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
+  const { authenticator } = require('otplib');
+  const secret = authenticator.generateSecret();
+  const otpauth = authenticator.keyuri(session.username, 'Axonwall', secret);
+
+  const QRCode = require('qrcode');
+  const qrDataUrl = await QRCode.toDataURL(otpauth);
+
+  return { secret, qrDataUrl };
+}
+
+export async function verifyMfaSetup(secret: string, token: string) {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
+  const { authenticator } = require('otplib');
+  const isValid = authenticator.verify({ token, secret });
+  
+  if (!isValid) {
+    return { success: false, error: 'Invalid TOTP code.' };
+  }
+
+  // In a real app, save the secret to the user's LDAP/DB profile here.
+  return { success: true };
+}
