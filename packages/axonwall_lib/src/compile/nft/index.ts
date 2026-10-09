@@ -191,10 +191,18 @@ export function compileNftables(state: DesiredState): CompileResult {
       lines.push(`    oifname "${ifaceDev}" snat to ${nat.targetIp} comment "outbound-snat"`);
     }
   }
-  // Default WAN masquerade if no outbound rules configured
-  const wanIface = state.interfaces.find((i) => i.name === 'wan');
-  if (wanIface && !state.nat.some((n) => n.type === 'masquerade' || n.type === 'snat')) {
-    lines.push(`    oifname "${wanIface.device}" masquerade comment "default-wan-masquerade"`);
+  // Default WAN/Gateway masquerade if no outbound rules configured
+  if (!state.nat.some((n) => n.type === 'masquerade' || n.type === 'snat')) {
+    const gatewayIfaces = new Set(state.gateways.filter((g) => g.enabled).map((g) => g.interface));
+    if (gatewayIfaces.size === 0) {
+      gatewayIfaces.add('wan');
+    }
+    for (const gwIfaceName of gatewayIfaces) {
+      const iface = state.interfaces.find((i) => i.name === gwIfaceName);
+      if (iface) {
+        lines.push(`    oifname "${iface.device}" masquerade comment "default-gateway-masquerade"`);
+      }
+    }
   }
   lines.push('  }');
   lines.push('');

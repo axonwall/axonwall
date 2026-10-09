@@ -36,16 +36,18 @@ type AgentServer struct {
 	startTime       time.Time
 	iapManager      *engine.IAPManager
 	haEngine        *HAEngine
+	sdwanProber     *SDWanProber
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber) *AgentServer {
 	hostname, _ := os.Hostname()
 	return &AgentServer{
-		bundleDir:  bundleDir,
-		nodeId:     fmt.Sprintf("axonwall-%s", hostname),
-		startTime:  time.Now(),
-		iapManager: iapManager,
-		haEngine:   haEngine,
+		bundleDir:   bundleDir,
+		nodeId:      fmt.Sprintf("axonwall-%s", hostname),
+		startTime:   time.Now(),
+		iapManager:  iapManager,
+		haEngine:    haEngine,
+		sdwanProber: sdwanProber,
 	}
 }
 
@@ -110,6 +112,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			log.Printf("[Agent] Applying Zero Trust IAP configuration")
 			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {
 				log.Printf("[Agent] Warning: Failed to apply IAP config: %v", err)
+			}
+		}
+
+		if filepath.Base(cleanPath) == "sdwan_config.json" {
+			log.Printf("[Agent] Applying SD-WAN Gateway routing configuration")
+			if err := s.sdwanProber.ReloadConfig(cleanPath); err != nil {
+				log.Printf("[Agent] Warning: Failed to apply SD-WAN config: %v", err)
 			}
 		}
 
@@ -444,7 +453,9 @@ func main() {
 		log.Printf("[Agent] Warning: Failed to start HA socket listener: %v", err)
 	}
 
-	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine)
+	sdwanProber := NewSDWanProber()
+
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -461,6 +472,7 @@ func main() {
 		log.Println("[Agent] Shutting down agent daemon...")
 		iapManager.Stop()
 		haEngine.Stop()
+		sdwanProber.stop()
 		ebpfManager.Stop()
 		grpcServer.GracefulStop()
 		_ = os.Remove(*socketPath)
