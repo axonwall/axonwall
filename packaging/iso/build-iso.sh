@@ -54,7 +54,7 @@ lb config \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
   --bootappend-live "boot=live components hostname=axonwall username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.user-password=axonwall live-config.root-password=axonwall console=tty0 console=ttyS0,115200" \
-  --bootappend-install "auto=true priority=critical preseed/file=/cdrom/preseed.cfg" \
+  --bootappend-install "auto=true priority=critical preseed/file=/preseed.cfg" \
   --debian-installer live \
   --debian-installer-distribution trixie \
   --debian-installer-gui false \
@@ -74,6 +74,11 @@ fi
 mkdir -p config/includes.installer
 if [[ -d "${SCRIPT_DIR}/config/includes.installer" ]]; then
   cp -r "${SCRIPT_DIR}/config/includes.installer/"* config/includes.installer/
+fi
+
+mkdir -p config/includes.binary
+if [[ -d "${SCRIPT_DIR}/config/includes.binary" ]]; then
+  cp -r "${SCRIPT_DIR}/config/includes.binary/"* config/includes.binary/
 fi
 
 # Ensure firstboot marker directory and service enable symlink exist
