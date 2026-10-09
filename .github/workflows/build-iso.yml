@@ -41,7 +41,7 @@ jobs:
       - name: Compile Axonwalld Core Daemon
         run: |
           cd apps/axonwalld
-          go build -ldflags="-s -w" -o bin/axonwalld main.go
+          go build -ldflags="-s -w" -o bin/axonwalld .
 
       - name: Cross-Compile Satellite Binaries
         run: |
