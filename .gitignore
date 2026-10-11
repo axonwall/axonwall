@@ -38,6 +38,7 @@ certs/
 # Go daemon built binaries
 apps/axonwalld/axonwalld
 apps/axonwall-satellite/axonwall-satellite
+apps/axonwall-console/axonwall-console
 package.json.tmp
 
 # ISO build artifacts

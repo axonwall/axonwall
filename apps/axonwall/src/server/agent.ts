@@ -197,3 +197,19 @@ export async function runDiagnostic(
     output: `PING ${cleanTarget} - 3 packets transmitted, 3 received, 0% packet loss, avg 1.2ms`,
   };
 }
+
+import { runLivePacketCapture as executeCapture, type CaptureResult, type CapturedPacket } from './pcap';
+export type { CaptureResult, CapturedPacket };
+
+export async function startPacketCapture(
+  iface: string,
+  filter: string,
+  count = 50
+): Promise<CaptureResult> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  if (!session) throw new Error('Unauthorized');
+
+  return executeCapture({ iface, filter, count });
+}
+

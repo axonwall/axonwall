@@ -28,6 +28,7 @@ import {
   BatteryCharging,
   Sparkles,
   Wifi,
+  Binary,
 } from 'lucide-react';
 
 interface NavItem {
@@ -64,6 +65,7 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'Service Supervisor', href: '/system/services', icon: Server },
   { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
   { name: 'Network Diagnostics', href: '/diagnostics', icon: Activity },
+  { name: 'Live Packet Capture', href: '/diagnostics/packet-capture', icon: Binary },
   { name: 'Packet Tracer (E5)', href: '/diagnostics/packet-tracer', icon: Layers },
   { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
   { name: 'System & Revisions', href: '/system', icon: Settings },

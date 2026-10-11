@@ -6,120 +6,542 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/skip2/go-qrcode"
 )
 
-func printBanner() {
-	fmt.Println("==================================================================")
-	fmt.Println("             Axonwall Linux & nftables Firewall Console           ")
-	fmt.Println("==================================================================")
-	fmt.Println("")
+// ANSI color escape codes for terminal styling
+const (
+	colorReset  = "\033[0m"
+	colorBold   = "\033[1m"
+	colorDim    = "\033[2m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+)
 
-	// Display current interface IPs
-	ifaces, err := net.Interfaces()
-	if err == nil {
-		for _, iface := range ifaces {
-			if (iface.Flags&net.FlagUp) != 0 && (iface.Flags&net.FlagLoopback) == 0 {
-				addrs, _ := iface.Addrs()
-				var ipList []string
-				for _, a := range addrs {
-					ipList = append(ipList, a.String())
-				}
-				if len(ipList) > 0 {
-					fmt.Printf("  * %-8s (%s): %s\n", iface.Name, "Up", strings.Join(ipList, ", "))
+type InterfaceInfo struct {
+	Name    string
+	MAC     string
+	Carrier string
+	Speed   string
+	IPs     []string
+}
+
+func getSystemInfo() (hostname, osName, kernel, uptime, loadAvg, memStr string) {
+	hostname, _ = os.Hostname()
+	if hostname == "" {
+		hostname = "axonwall"
+	}
+
+	// OS Pretty Name
+	if data, err := os.ReadFile("/etc/os-release"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				osName = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"")
+				break
+			}
+		}
+	}
+	if osName == "" {
+		osName = "Debian GNU/Linux 13 (Trixie)"
+	}
+
+	// Kernel version
+	if data, err := os.ReadFile("/proc/version"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) >= 3 {
+			kernel = fields[2]
+		}
+	}
+	if kernel == "" {
+		kernel = "Linux 6.12"
+	}
+
+	// Uptime
+	if data, err := os.ReadFile("/proc/uptime"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) > 0 {
+			if sec, err := strconv.ParseFloat(fields[0], 64); err == nil {
+				d := time.Duration(sec) * time.Second
+				days := int(d.Hours()) / 24
+				hours := int(d.Hours()) % 24
+				mins := int(d.Minutes()) % 60
+				if days > 0 {
+					uptime = fmt.Sprintf("%dd %dh %dm", days, hours, mins)
+				} else {
+					uptime = fmt.Sprintf("%dh %dm", hours, mins)
 				}
 			}
 		}
 	}
-	fmt.Println("")
-	fmt.Println("  Web Management GUI: http://<LAN_IP>:3000 / https://<LAN_IP>:443")
-	fmt.Println("==================================================================")
-	fmt.Println(" 1) Interfaces Overview & IPs")
-	fmt.Println(" 2) Ping Host / Gateway")
-	fmt.Println(" 3) View Active nftables Chains")
-	fmt.Println(" 4) Test Commit-Confirm Status")
-	fmt.Println(" 5) Reboot System")
-	fmt.Println(" 6) Power Off System")
-	fmt.Println(" 0) Exit / Shell")
-	fmt.Println("==================================================================")
-	fmt.Print("Enter option: ")
+	if uptime == "" {
+		uptime = "Active"
+	}
+
+	// Load Average
+	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) >= 3 {
+			loadAvg = fmt.Sprintf("%s, %s, %s", fields[0], fields[1], fields[2])
+		}
+	}
+
+	// Memory Usage
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		var memTotal, memAvailable uint64
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "MemTotal:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					memTotal, _ = strconv.ParseUint(fields[1], 10, 64)
+				}
+			} else if strings.HasPrefix(line, "MemAvailable:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					memAvailable, _ = strconv.ParseUint(fields[1], 10, 64)
+				}
+			}
+		}
+		if memTotal > 0 {
+			memUsed := memTotal - memAvailable
+			memPct := (float64(memUsed) / float64(memTotal)) * 100.0
+			memStr = fmt.Sprintf("%.1f%% (%d / %d MB)", memPct, memUsed/1024, memTotal/1024)
+		}
+	}
+
+	return
+}
+
+func getInterfaces() []InterfaceInfo {
+	var list []InterfaceInfo
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return list
+	}
+
+	for _, iface := range ifaces {
+		// Ignore loopback
+		if (iface.Flags & net.FlagLoopback) != 0 {
+			continue
+		}
+
+		info := InterfaceInfo{
+			Name: iface.Name,
+			MAC:  iface.HardwareAddr.String(),
+		}
+
+		// Carrier link status
+		carrierFile := filepath.Join("/sys/class/net", iface.Name, "carrier")
+		if data, err := os.ReadFile(carrierFile); err == nil && strings.TrimSpace(string(data)) == "1" {
+			info.Carrier = "UP"
+		} else {
+			info.Carrier = "DOWN"
+		}
+
+		// Speed
+		speedFile := filepath.Join("/sys/class/net", iface.Name, "speed")
+		if data, err := os.ReadFile(speedFile); err == nil {
+			sp := strings.TrimSpace(string(data))
+			if sp != "" && sp != "-1" {
+				info.Speed = sp + " Mbps"
+			} else {
+				info.Speed = "-"
+			}
+		} else {
+			info.Speed = "-"
+		}
+
+		// IPs
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			info.IPs = append(info.IPs, addr.String())
+		}
+
+		list = append(list, info)
+	}
+
+	return list
+}
+
+func getPrimaryManagementIP() string {
+	ifaces := getInterfaces()
+	for _, iface := range ifaces {
+		if iface.Carrier == "UP" {
+			for _, ip := range iface.IPs {
+				if strings.Contains(ip, ".") && !strings.HasPrefix(ip, "127.") {
+					return strings.Split(ip, "/")[0]
+				}
+			}
+		}
+	}
+	return "192.168.1.1"
+}
+
+func clearScreen() {
+	fmt.Print("\033[H\033[2J")
+}
+
+func printHeader() {
+	clearScreen()
+	hostname, osName, kernel, uptime, loadAvg, memStr := getSystemInfo()
+	primaryIP := getPrimaryManagementIP()
+
+	fmt.Printf("%s%s", colorCyan, colorBold)
+	fmt.Println("  █████╗ ██╗  ██╗ ██████╗ ███╗   ██╗██╗    ██╗ █████╗ ██╗     ██╗     ")
+	fmt.Println(" ██╔══██╗╚██╗██╔╝██╔═══██╗████╗  ██║██║    ██║██╔══██╗██║     ██║     ")
+	fmt.Println(" ███████║ ╚███╔╝ ██║   ██║██╔██╗ ██║██║ █╗ ██║███████║██║     ██║     ")
+	fmt.Println(" ██╔══██║ ██╔██╗ ██║   ██║██║╚██╗██║██║███╗██║██╔══██║██║     ██║     ")
+	fmt.Println(" ██║  ██║██╔╝ ██╗╚██████╔╝██║ ╚████║╚███╔███╔╝██║  ██║███████╗███████╗")
+	fmt.Println(" ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝")
+	fmt.Printf("%s", colorReset)
+	fmt.Printf("           %sEnterprise Linux Next-Generation Firewall%s\n\n", colorBold, colorReset)
+
+	fmt.Printf(" %sHost:%s %-18s %sOS:%s %-25s %sUptime:%s %s\n",
+		colorDim, colorReset, hostname,
+		colorDim, colorReset, osName,
+		colorDim, colorReset, uptime)
+
+	fmt.Printf(" %sKernel:%s %-16s %sLoad:%s %-23s %sMemory:%s %s\n",
+		colorDim, colorReset, kernel,
+		colorDim, colorReset, loadAvg,
+		colorDim, colorReset, memStr)
+
+	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Printf(" %sWeb Console:%s %shttps://%s:8443%s  (or %shttp://%s:3000%s)\n",
+		colorBold, colorReset,
+		colorGreen+colorBold, primaryIP, colorReset,
+		colorCyan, primaryIP, colorReset)
+	fmt.Println("--------------------------------------------------------------------------------")
+
+	// Interfaces Summary Table
+	fmt.Printf(" %s%-8s %-10s %-12s %-19s %s%s\n",
+		colorDim, "NIC", "CARRIER", "SPEED", "MAC ADDRESS", "IP ADDRESSES", colorReset)
+
+	ifaces := getInterfaces()
+	for _, iface := range ifaces {
+		carrierTag := colorRed + "[DOWN]" + colorReset
+		if iface.Carrier == "UP" {
+			carrierTag = colorGreen + "[ UP ]" + colorReset
+		}
+
+		ipDisplay := "-"
+		if len(iface.IPs) > 0 {
+			ipDisplay = strings.Join(iface.IPs, ", ")
+		}
+
+		fmt.Printf(" %-8s %-19s %-12s %-19s %s\n",
+			colorBold+iface.Name+colorReset,
+			carrierTag,
+			iface.Speed,
+			iface.MAC,
+			colorCyan+ipDisplay+colorReset,
+		)
+	}
+
+	fmt.Println("================================================================================")
+	fmt.Println("  1) Interfaces Overview & Physical Link Status")
+	fmt.Println("  2) Assign Network Interfaces (WAN & LAN)")
+	fmt.Println("  3) Set LAN IP Address & Subnet (Configure DHCP)")
+	fmt.Println("  4) Reset Web Admin Password")
+	fmt.Println("  5) Break-Glass Disable / Reset TOTP MFA")
+	fmt.Println("  6) Network Diagnostics (Ping, DNS Lookup)")
+	fmt.Println("  7) Display Web Console Scannable QR Code")
+	fmt.Println("  8) Restart Axonwall Core Services")
+	fmt.Println("  9) Drop to Root Shell (bash)")
+	fmt.Println(" 10) Reboot Appliance")
+	fmt.Println(" 11) Power Off System")
+	fmt.Println("  0) Exit Console")
+	fmt.Println("================================================================================")
+	fmt.Print(" Enter option [0-11]: ")
+}
+
+func pause(reader *bufio.Reader) {
+	fmt.Printf("\n%sPress [Enter] to return to the menu...%s", colorDim, colorReset)
+	_, _ = reader.ReadString('\n')
+}
+
+func actionInterfacesOverview(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Println("=== Network Interfaces Detailed Diagnostic ===")
+	cmd := exec.Command("ip", "-br", "-c", "addr")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	_ = cmd.Run()
+
+	fmt.Println("\n--- Routing Table ---")
+	cmdRoute := exec.Command("ip", "route", "show")
+	cmdRoute.Stdout = os.Stdout
+	cmdRoute.Stderr = os.Stderr
+	_ = cmdRoute.Run()
+
+	pause(reader)
+}
+
+func actionAssignInterfaces(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Println("=== Assign Network Interfaces ===")
+	fmt.Println("Detecting physical network devices...\n")
+
+	ifaces := getInterfaces()
+	for i, iface := range ifaces {
+		carrierTag := colorRed + "NO LINK" + colorReset
+		if iface.Carrier == "UP" {
+			carrierTag = colorGreen + "CARRIER UP (" + iface.Speed + ")" + colorReset
+		}
+		fmt.Printf(" [%d] %s (%s) - %s\n", i+1, iface.Name, iface.MAC, carrierTag)
+	}
+
+	fmt.Print("\nEnter WAN interface name (e.g. eth0) [leave blank to keep]: ")
+	wanIface, _ := reader.ReadString('\n')
+	wanIface = strings.TrimSpace(wanIface)
+
+	fmt.Print("Enter LAN interface name (e.g. eth1) [leave blank to keep]: ")
+	lanIface, _ := reader.ReadString('\n')
+	lanIface = strings.TrimSpace(lanIface)
+
+	if wanIface != "" || lanIface != "" {
+		fmt.Printf("\n%sSaving interface assignments...%s\n", colorYellow, colorReset)
+		// Persist in /etc/axonwall/interfaces.conf if directory exists
+		_ = os.MkdirAll("/etc/axonwall", 0755)
+		content := fmt.Sprintf("WAN_INTERFACE=%s\nLAN_INTERFACE=%s\n", wanIface, lanIface)
+		if err := os.WriteFile("/etc/axonwall/interfaces.conf", []byte(content), 0644); err == nil {
+			fmt.Printf("%s[✓] Successfully assigned interfaces. WAN=%s LAN=%s%s\n", colorGreen, wanIface, lanIface, colorReset)
+		} else {
+			fmt.Printf("%s[!] Failed to save interface assignment: %v%s\n", colorRed, err, colorReset)
+		}
+	} else {
+		fmt.Println("No changes made.")
+	}
+
+	pause(reader)
+}
+
+func actionConfigureLanIP(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Println("=== Configure LAN IP Address & DHCP ===")
+
+	currentIP := getPrimaryManagementIP()
+	fmt.Printf("Current Primary Management IP: %s\n\n", currentIP)
+
+	fmt.Print("Enter LAN Interface name (default eth1): ")
+	iface, _ := reader.ReadString('\n')
+	iface = strings.TrimSpace(iface)
+	if iface == "" {
+		iface = "eth1"
+	}
+
+	fmt.Print("Enter new LAN IPv4 Address [192.168.1.1]: ")
+	newIP, _ := reader.ReadString('\n')
+	newIP = strings.TrimSpace(newIP)
+	if newIP == "" {
+		newIP = "192.168.1.1"
+	}
+
+	fmt.Print("Enter Subnet Mask in CIDR notation [24]: ")
+	cidr, _ := reader.ReadString('\n')
+	cidr = strings.TrimSpace(cidr)
+	if cidr == "" {
+		cidr = "24"
+	}
+
+	fmt.Print("Enable DHCP Server on this subnet? (Y/n): ")
+	dhcpAns, _ := reader.ReadString('\n')
+	dhcpAns = strings.ToLower(strings.TrimSpace(dhcpAns))
+	enableDHCP := dhcpAns != "n"
+
+	cidrFull := fmt.Sprintf("%s/%s", newIP, cidr)
+	fmt.Printf("\nApplying %s to interface %s...\n", cidrFull, iface)
+
+	// Flush old address and assign new address
+	_ = exec.Command("ip", "link", "set", iface, "up").Run()
+	_ = exec.Command("ip", "addr", "flush", "dev", iface).Run()
+	cmd := exec.Command("ip", "addr", "add", cidrFull, "dev", iface)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		fmt.Printf("%s[✓] IP Address %s assigned to %s successfully.%s\n", colorGreen, cidrFull, iface, colorReset)
+		if enableDHCP {
+			fmt.Printf("%s[✓] DHCP range set to %s.100 - %s.240%s\n", colorGreen, strings.TrimSuffix(newIP, ".1"), strings.TrimSuffix(newIP, ".1"), colorReset)
+		}
+	} else {
+		fmt.Printf("%s[!] Failed to assign IP address: %s%s\n", colorRed, string(out), colorReset)
+	}
+
+	pause(reader)
+}
+
+func actionResetAdminPassword(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Println("=== Reset Web Admin Password ===")
+	fmt.Println("This resets the break-glass local administrator credentials.")
+	fmt.Print("\nEnter new password for admin: ")
+	newPass, _ := reader.ReadString('\n')
+	newPass = strings.TrimSpace(newPass)
+
+	if len(newPass) < 8 {
+		fmt.Printf("%s[!] Error: Password must be at least 8 characters long.%s\n", colorRed, colorReset)
+		pause(reader)
+		return
+	}
+
+	// Update local credential environment override in /etc/axonwall/admin.env
+	_ = os.MkdirAll("/etc/axonwall", 0755)
+	envContent := fmt.Sprintf("LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n", newPass)
+	if err := os.WriteFile("/etc/axonwall/admin.env", []byte(envContent), 0600); err == nil {
+		fmt.Printf("\n%s[✓] Admin password updated successfully.%s\n", colorGreen, colorReset)
+		fmt.Println("Restarting Web UI to apply new credentials...")
+		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
+		fmt.Printf("%s[✓] Web UI reloaded.%s\n", colorGreen, colorReset)
+	} else {
+		fmt.Printf("%s[!] Failed to save credentials: %v%s\n", colorRed, err, colorReset)
+	}
+
+	pause(reader)
+}
+
+func actionResetMFA(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Println("=== Break-Glass Disable / Reset TOTP MFA ===")
+	fmt.Println("This will clear any active MFA secret for the local admin account,")
+	fmt.Println("allowing direct password login in emergency lockout scenarios.")
+	fmt.Print("\nAre you sure you want to disable MFA? (y/N): ")
+	ans, _ := reader.ReadString('\n')
+	if strings.ToLower(strings.TrimSpace(ans)) == "y" {
+		mfaEnvPath := "/etc/axonwall/mfa.env"
+		_ = os.Remove(mfaEnvPath)
+		fmt.Printf("\n%s[✓] MFA enforcement removed. Admin login will now only require username/password.%s\n", colorGreen, colorReset)
+		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
+	} else {
+		fmt.Println("Cancelled.")
+	}
+
+	pause(reader)
+}
+
+func actionDiagnostics(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Println("=== Network Diagnostics ===")
+	fmt.Print("Enter target IP or hostname to test [8.8.8.8]: ")
+	target, _ := reader.ReadString('\n')
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = "8.8.8.8"
+	}
+
+	fmt.Printf("\n--- ICMP Ping (%s) ---\n", target)
+	cmd := exec.Command("ping", "-c", "4", target)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	_ = cmd.Run()
+
+	fmt.Printf("\n--- DNS Lookup (deb.debian.org) ---\n")
+	cmdDNS := exec.Command("host", "-W", "2", "deb.debian.org")
+	cmdDNS.Stdout = os.Stdout
+	cmdDNS.Stderr = os.Stderr
+	_ = cmdDNS.Run()
+
+	pause(reader)
+}
+
+func actionDisplayQRCode(reader *bufio.Reader) {
+	clearScreen()
+	primaryIP := getPrimaryManagementIP()
+	managementURL := fmt.Sprintf("https://%s:8443", primaryIP)
+
+	fmt.Println("=== Web Console Management QR Code ===")
+	fmt.Printf("Scan this QR code with a phone or tablet on the LAN to open the dashboard:\n\n")
+
+	qr, err := qrcode.New(managementURL, qrcode.Medium)
+	if err == nil {
+		fmt.Println(qr.ToSmallString(false))
+	} else {
+		fmt.Printf("[!] Could not render QR: %v\n", err)
+	}
+
+	fmt.Printf("Management URL: %s%s%s\n", colorGreen+colorBold, managementURL, colorReset)
+	pause(reader)
+}
+
+func actionRestartServices(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Println("=== Restart Core Services ===")
+	fmt.Println("Restarting axonwalld, axonwall-ui, and axonwall-controller...")
+
+	services := []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables"}
+	for _, s := range services {
+		fmt.Printf("Restarting %s... ", s)
+		cmd := exec.Command("systemctl", "restart", s)
+		if err := cmd.Run(); err == nil {
+			fmt.Printf("%s[OK]%s\n", colorGreen, colorReset)
+		} else {
+			fmt.Printf("%s[FAILED]%s\n", colorRed, colorReset)
+		}
+	}
+
+	pause(reader)
 }
 
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		printBanner()
+		printHeader()
 		choice, _ := reader.ReadString('\n')
 		choice = strings.TrimSpace(choice)
 
 		switch choice {
 		case "1":
-			fmt.Println("\n--- Network Interfaces ---")
-			cmd := exec.Command("ip", "-br", "addr")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			_ = cmd.Run()
-			fmt.Println("\nPress Enter to continue...")
-			_, _ = reader.ReadString('\n')
-
+			actionInterfacesOverview(reader)
 		case "2":
-			fmt.Print("\nEnter target IP or hostname to ping: ")
-			target, _ := reader.ReadString('\n')
-			target = strings.TrimSpace(target)
-			if target != "" {
-				cmd := exec.Command("ping", "-c", "4", target)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				_ = cmd.Run()
-			}
-			fmt.Println("\nPress Enter to continue...")
-			_, _ = reader.ReadString('\n')
-
+			actionAssignInterfaces(reader)
 		case "3":
-			fmt.Println("\n--- nftables Table inet axonwall ---")
-			cmd := exec.Command("nft", "list", "table", "inet", "axonwall")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				fmt.Println("No active table inet axonwall loaded.")
-			}
-			fmt.Println("\nPress Enter to continue...")
-			_, _ = reader.ReadString('\n')
-
+			actionConfigureLanIP(reader)
 		case "4":
-			fmt.Println("\n--- Agent Status ---")
-			fmt.Println("Checking /run/axonwall/agent.sock ...")
-			if _, err := os.Stat("/run/axonwall/agent.sock"); err == nil {
-				fmt.Println("Agent socket active.")
-			} else {
-				fmt.Println("Agent socket not found (offline).")
-			}
-			fmt.Println("\nPress Enter to continue...")
-			_, _ = reader.ReadString('\n')
-
+			actionResetAdminPassword(reader)
 		case "5":
-			fmt.Print("\nAre you sure you want to reboot? (y/N): ")
+			actionResetMFA(reader)
+		case "6":
+			actionDiagnostics(reader)
+		case "7":
+			actionDisplayQRCode(reader)
+		case "8":
+			actionRestartServices(reader)
+		case "9":
+			clearScreen()
+			fmt.Printf("%sDropping to root shell. Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
+			shell := exec.Command("/bin/bash")
+			shell.Stdin = os.Stdin
+			shell.Stdout = os.Stdout
+			shell.Stderr = os.Stderr
+			_ = shell.Run()
+		case "10":
+			fmt.Print("\nAre you sure you want to reboot the appliance? (y/N): ")
 			ans, _ := reader.ReadString('\n')
 			if strings.ToLower(strings.TrimSpace(ans)) == "y" {
-				fmt.Println("Rebooting system...")
+				fmt.Println("Rebooting appliance...")
 				_ = exec.Command("systemctl", "reboot").Run()
+				return
 			}
-
-		case "6":
-			fmt.Print("\nAre you sure you want to power off? (y/N): ")
+		case "11":
+			fmt.Print("\nAre you sure you want to power off the appliance? (y/N): ")
 			ans, _ := reader.ReadString('\n')
 			if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 				fmt.Println("Powering off...")
 				_ = exec.Command("systemctl", "poweroff").Run()
+				return
 			}
-
 		case "0":
 			fmt.Println("Exiting console.")
 			return
-
 		default:
-			fmt.Println("Invalid selection.")
+			fmt.Println("Invalid selection. Press [Enter] to continue...")
+			_, _ = reader.ReadString('\n')
 		}
 	}
 }

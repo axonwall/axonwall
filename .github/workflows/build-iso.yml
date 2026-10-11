@@ -43,6 +43,11 @@ jobs:
           cd apps/axonwalld
           go build -ldflags="-s -w" -o bin/axonwalld .
 
+      - name: Compile Axonwall Console TUI
+        run: |
+          cd apps/axonwall-console
+          go build -ldflags="-s -w" -o bin/axonwall-console .
+
       - name: Cross-Compile Satellite Binaries
         run: |
           cd apps/axonwall-satellite

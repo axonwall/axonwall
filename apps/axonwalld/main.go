@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -37,9 +38,10 @@ type AgentServer struct {
 	iapManager      *engine.IAPManager
 	haEngine        *HAEngine
 	sdwanProber     *SDWanProber
+	pcapManager     *engine.PacketCaptureManager
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager) *AgentServer {
 	hostname, _ := os.Hostname()
 	return &AgentServer{
 		bundleDir:   bundleDir,
@@ -48,6 +50,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		iapManager:  iapManager,
 		haEngine:    haEngine,
 		sdwanProber: sdwanProber,
+		pcapManager: pcapManager,
 	}
 }
 
@@ -337,8 +340,45 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 
 	// Safe argument sanitation
 	target := strings.TrimSpace(req.Target)
-	if target == "" {
+	if target == "" && int32(req.Type) != 5 {
 		return nil, status.Error(codes.InvalidArgument, "target cannot be empty")
+	}
+
+	start := time.Now()
+
+	// Special handling for Packet Capture diagnostic (Type 5 or target prefixed with pcap:)
+	if int32(req.Type) == 5 || strings.HasPrefix(target, "pcap:") {
+		filter := strings.TrimPrefix(target, "pcap:")
+		if filter == "all" || filter == "any" {
+			filter = ""
+		}
+		// Validate BPF filter against shell command injection
+		if strings.ContainsAny(filter, ";|&$`\n\r<>(){}") {
+			return nil, status.Error(codes.InvalidArgument, "invalid characters in packet capture filter")
+		}
+		captureCount := int(req.Count)
+		if captureCount <= 0 || captureCount > 500 {
+			captureCount = 50
+		}
+		iface := req.Interface
+		if iface == "" {
+			iface = "any"
+		}
+		res, err := s.pcapManager.RunCapture(ctx, iface, filter, captureCount)
+		latency := time.Since(start).Milliseconds()
+		if err != nil {
+			return &pb.DiagnosticResponse{
+				Success:   false,
+				Output:    fmt.Sprintf("Packet capture failed: %v", err),
+				LatencyMs: latency,
+			}, nil
+		}
+		data, _ := json.Marshal(res)
+		return &pb.DiagnosticResponse{
+			Success:   true,
+			Output:    string(data),
+			LatencyMs: latency,
+		}, nil
 	}
 	
 	// Validate target to prevent flag injection (starts with '-') or command injection
@@ -353,7 +393,6 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 	}
 
 	var cmd *exec.Cmd
-	start := time.Now()
 
 	switch req.Type {
 	case pb.DiagnosticType_DIAGNOSTIC_TYPE_PING:
@@ -454,8 +493,9 @@ func main() {
 	}
 
 	sdwanProber := NewSDWanProber()
+	pcapManager := engine.NewPacketCaptureManager()
 
-	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber)
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
