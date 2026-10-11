@@ -32,6 +32,7 @@ import {
   MapPin,
   Building2,
   HardDrive,
+  RefreshCw,
 } from 'lucide-react';
 
 interface NavItem {
@@ -74,6 +75,7 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
   { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
   { name: 'Backup & Recovery', href: '/system/backup', icon: HardDrive },
+  { name: 'A/B System Updates', href: '/system/updates', icon: RefreshCw },
   { name: 'System & Revisions', href: '/system', icon: Settings },
 ];
 

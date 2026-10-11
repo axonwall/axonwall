@@ -39,9 +39,10 @@ type AgentServer struct {
 	haEngine        *HAEngine
 	sdwanProber     *SDWanProber
 	pcapManager     *engine.PacketCaptureManager
+	watchdog        *engine.WatchdogEngine
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine) *AgentServer {
 	hostname, _ := os.Hostname()
 	return &AgentServer{
 		bundleDir:   bundleDir,
@@ -51,6 +52,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		haEngine:    haEngine,
 		sdwanProber: sdwanProber,
 		pcapManager: pcapManager,
+		watchdog:    watchdog,
 	}
 }
 
@@ -494,8 +496,10 @@ func main() {
 
 	sdwanProber := NewSDWanProber()
 	pcapManager := engine.NewPacketCaptureManager()
+	watchdog := engine.NewWatchdogEngine()
+	watchdog.Start()
 
-	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager)
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -510,6 +514,7 @@ func main() {
 	go func() {
 		<-sigChan
 		log.Println("[Agent] Shutting down agent daemon...")
+		watchdog.Stop()
 		iapManager.Stop()
 		haEngine.Stop()
 		sdwanProber.stop()
