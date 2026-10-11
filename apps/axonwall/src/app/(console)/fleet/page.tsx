@@ -37,6 +37,8 @@ interface MockSatellite {
   uptime: string;
   wifiClients: number;
   lastSeen: string;
+  tags: string[];
+  inheritedProfile: string;
 }
 
 const INITIAL_SATELLITES: MockSatellite[] = [
@@ -55,6 +57,8 @@ const INITIAL_SATELLITES: MockSatellite[] = [
     uptime: '19d 4h 12m',
     wifiClients: 0,
     lastSeen: 'Just now',
+    tags: ['tier:branch', 'env:prod', 'region:eu'],
+    inheritedProfile: 'branch-office',
   },
   {
     id: 'sat-retail-berlin',
@@ -71,6 +75,8 @@ const INITIAL_SATELLITES: MockSatellite[] = [
     uptime: '4d 18h 03m',
     wifiClients: 34,
     lastSeen: '3s ago',
+    tags: ['tier:retail', 'env:prod', 'region:eu'],
+    inheritedProfile: 'retail-store',
   },
   {
     id: 'sat-warehouse-nyc',
@@ -87,6 +93,8 @@ const INITIAL_SATELLITES: MockSatellite[] = [
     uptime: '42d 11h 55m',
     wifiClients: 12,
     lastSeen: '1s ago',
+    tags: ['tier:warehouse', 'env:prod', 'region:us'],
+    inheritedProfile: 'logistics-hub',
   },
   {
     id: 'sat-kiosk-tokyo',
@@ -103,24 +111,35 @@ const INITIAL_SATELLITES: MockSatellite[] = [
     uptime: '1d 08h 19m',
     wifiClients: 8,
     lastSeen: '45s ago',
+    tags: ['tier:kiosk', 'env:staging', 'region:apac'],
+    inheritedProfile: 'kiosk-isolated',
   },
 ];
 
 export default function FleetPage() {
   const [satellites, setSatellites] = useState<MockSatellite[]>(INITIAL_SATELLITES);
+  const [selectedTag, setSelectedTag] = useState('ALL');
   const [search, setSearch] = useState('');
   const [selectedSat, setSelectedSat] = useState<MockSatellite | null>(INITIAL_SATELLITES[1]);
   const [isZtpModalOpen, setIsZtpModalOpen] = useState(false);
   const [generatedToken, setGeneratedToken] = useState('ztp_axon_98f4c1e20a4b77');
   const [copied, setCopied] = useState(false);
 
-  const filtered = satellites.filter(
-    (s) =>
+  const allTags = ['ALL', ...Array.from(new Set(satellites.flatMap((s) => s.tags)))];
+
+  const filtered = satellites.filter((s) => {
+    if (selectedTag !== 'ALL' && !s.tags.includes(selectedTag)) {
+      return false;
+    }
+    return (
       s.name.toLowerCase().includes(search.toLowerCase()) ||
       s.location.toLowerCase().includes(search.toLowerCase()) ||
       s.id.toLowerCase().includes(search.toLowerCase()) ||
-      s.ip.includes(search)
-  );
+      s.ip.includes(search) ||
+      s.inheritedProfile.toLowerCase().includes(search.toLowerCase()) ||
+      s.tags.some((t) => t.toLowerCase().includes(search.toLowerCase()))
+    );
+  });
 
   const onlineCount = satellites.filter((s) => s.status === 'online').length;
   const totalWifiClients = satellites.reduce((acc, s) => acc + s.wifiClients, 0);
@@ -238,11 +257,28 @@ export default function FleetPage() {
             <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-500" />
             <input
               type="text"
-              placeholder="Search by satellite ID, location, IP or architecture..."
+              placeholder="Search by satellite ID, location, IP or tag..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
             />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-slate-400 font-medium mr-1">Tag Filter:</span>
+            {allTags.map((tag) => (
+              <button
+                key={tag}
+                onClick={() => setSelectedTag(tag)}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium transition cursor-pointer ${
+                  selectedTag === tag
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                    : 'bg-slate-800/80 text-slate-400 border border-slate-700/60 hover:text-slate-200'
+                }`}
+              >
+                {tag}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -274,11 +310,28 @@ export default function FleetPage() {
                       <td className="px-4 py-3.5">
                         <div className="font-medium text-white flex items-center gap-2">
                           {sat.name}
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            {sat.inheritedProfile}
+                          </span>
                         </div>
                         <div className="text-xs text-slate-400 font-mono flex items-center gap-1.5 mt-0.5">
                           <span>{sat.id}</span>
                           <span className="text-slate-600">•</span>
                           <span>{sat.location}</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {sat.tags.map((tag) => (
+                            <span
+                              key={tag}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedTag(tag);
+                              }}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800/90 text-slate-400 border border-slate-700/60 hover:border-slate-500 cursor-pointer"
+                            >
+                              {tag}
+                            </span>
+                          ))}
                         </div>
                       </td>
 
@@ -385,9 +438,24 @@ export default function FleetPage() {
                 <Radio className="w-5 h-5 text-emerald-400" />
                 Edge Node Inspector: {selectedSat.name}
               </h2>
-              <p className="text-xs text-slate-400 font-mono mt-0.5">
-                ID: {selectedSat.id} | Arch: {selectedSat.arch} | Tunnel: {selectedSat.tunnelIp}
-              </p>
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                <span className="text-xs text-slate-400 font-mono">
+                  ID: {selectedSat.id} | Arch: {selectedSat.arch} | Tunnel: {selectedSat.tunnelIp}
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  Profile: {selectedSat.inheritedProfile}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {selectedSat.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <button

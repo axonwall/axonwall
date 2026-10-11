@@ -31,6 +31,7 @@ import {
   Binary,
   MapPin,
   Building2,
+  HardDrive,
 } from 'lucide-react';
 
 interface NavItem {
@@ -72,6 +73,7 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'Packet Tracer (E5)', href: '/diagnostics/packet-tracer', icon: Layers },
   { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
   { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
+  { name: 'Backup & Recovery', href: '/system/backup', icon: HardDrive },
   { name: 'System & Revisions', href: '/system', icon: Settings },
 ];
 
