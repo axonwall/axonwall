@@ -916,6 +916,46 @@ export const HeadscaleConfigSchema = z.object({
 });
 export type HeadscaleConfig = z.infer<typeof HeadscaleConfigSchema>;
 
+export const GeoIpModeSchema = z.enum(['block', 'allow']);
+export const GeoIpDirectionSchema = z.enum(['in', 'out', 'both']);
+
+export const GeoIpConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: GeoIpModeSchema.default('block'),
+  direction: GeoIpDirectionSchema.default('in'),
+  countries: z.array(z.string().length(2)).default([]),
+  excludedSubnets: z.array(z.string()).default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']),
+  log: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type GeoIpConfig = z.infer<typeof GeoIpConfigSchema>;
+
+export const SsoProviderSchema = z.enum(['oidc', 'entra', 'okta', 'google']);
+
+export const SsoRoleMappingSchema = z.object({
+  idpGroup: z.string().min(1),
+  role: z.enum(['admin', 'operator', 'readonly']),
+});
+export type SsoRoleMapping = z.infer<typeof SsoRoleMappingSchema>;
+
+export const SsoConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: SsoProviderSchema.default('oidc'),
+  displayName: z.string().default('Enterprise SSO'),
+  issuerUrl: z.string().default(''),
+  clientId: z.string().default(''),
+  clientSecret: z.string().default(''),
+  redirectUri: z.string().default(''),
+  scopes: z.array(z.string()).default(['openid', 'profile', 'email', 'groups']),
+  groupClaim: z.string().default('groups'),
+  roleMappings: z.array(SsoRoleMappingSchema).default([
+    { idpGroup: 'Axonwall-Admins', role: 'admin' },
+    { idpGroup: 'Axonwall-Operators', role: 'operator' },
+    { idpGroup: 'Axonwall-Auditors', role: 'readonly' },
+  ]),
+});
+export type SsoConfig = z.infer<typeof SsoConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   system: SystemSettingsSchema.default({}),
@@ -943,6 +983,8 @@ export const DesiredStateSchema = z.object({
   captivePortal: CaptivePortalConfigSchema.optional(),
   acme: AcmeConfigSchema.optional(),
   crowdsec: CrowdSecConfigSchema.optional(),
+  geoip: GeoIpConfigSchema.optional(),
+  sso: SsoConfigSchema.optional(),
   ha: HighAvailabilityConfigSchema.optional(),
   observability: ObservabilityConfigSchema.optional(),
   ups: NutUpsConfigSchema.optional(),

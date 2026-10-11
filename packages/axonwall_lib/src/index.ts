@@ -27,3 +27,4 @@ export * from './telemetry/index.js';
 export * from './ai/index.js';
 export * from './lint/index.js';
 export * from './compile/sdwan/index.js';
+export * from './compile/geoip/index.js';

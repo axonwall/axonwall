@@ -29,6 +29,8 @@ import {
   Sparkles,
   Wifi,
   Binary,
+  MapPin,
+  Building2,
 } from 'lucide-react';
 
 interface NavItem {
@@ -45,6 +47,7 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'Advanced Topologies', href: '/interfaces/advanced', icon: Layers },
   { name: 'Firewall Rules & NAT', href: '/firewall', icon: Flame },
   { name: 'Threat Feeds & Aliases', href: '/security/aliases', icon: Globe },
+  { name: 'GeoIP Location Filter', href: '/security/geoip', icon: MapPin },
   { name: 'Suricata IDS/IPS', href: '/security/ids', icon: ShieldAlert },
   { name: 'CrowdSec Bouncer', href: '/security/crowdsec', icon: Radio },
   { name: 'DNS Sinkhole (RPZ)', href: '/security/dns-blocklist', icon: Ban },
@@ -68,6 +71,7 @@ const NAV_ITEMS: NavItem[] = [
   { name: 'Live Packet Capture', href: '/diagnostics/packet-capture', icon: Binary },
   { name: 'Packet Tracer (E5)', href: '/diagnostics/packet-tracer', icon: Layers },
   { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
+  { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
   { name: 'System & Revisions', href: '/system', icon: Settings },
 ];
 

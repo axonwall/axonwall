@@ -1,7 +1,7 @@
 'use client';
 
 import { useActionState } from 'react';
-import { Shield, Lock, User, AlertCircle, Key } from 'lucide-react';
+import { Shield, Lock, User, AlertCircle, Key, Building2 } from 'lucide-react';
 import { loginAction } from '../../../server/auth';
 
 export default function LoginPage() {
@@ -87,9 +87,26 @@ export default function LoginPage() {
           </button>
         </form>
 
+        <div className="relative my-6">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-slate-800"></div>
+          </div>
+          <div className="relative flex justify-center text-xs uppercase">
+            <span className="bg-slate-900 px-2 text-slate-500 font-medium">Or continue with</span>
+          </div>
+        </div>
+
+        <a
+          href="/api/auth/sso/login"
+          className="w-full bg-slate-950 hover:bg-slate-800/80 text-slate-200 border border-slate-800 font-medium py-2.5 rounded-lg transition flex items-center justify-center gap-2.5 cursor-pointer shadow-sm text-sm"
+        >
+          <Building2 className="w-4 h-4 text-emerald-400" />
+          <span>Single Sign-On (Entra ID / Okta / OIDC)</span>
+        </a>
+
         <div className="mt-8 pt-6 border-t border-slate-800/80 text-center">
           <p className="text-xs text-slate-500">
-            Authentication verified against internal/external LDAP with local root break-glass fallback.
+            Authentication verified against internal/external LDAP, OIDC SSO, or local root break-glass fallback.
           </p>
         </div>
       </div>

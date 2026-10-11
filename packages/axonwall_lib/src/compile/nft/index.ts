@@ -2,6 +2,7 @@ import type { DesiredState, FirewallRule, NatRule, Alias } from '../../schemas/i
 import { sanitizeIdentifier } from '../../util/index.js';
 import { compileSuricata } from '../suricata/index.js';
 import { compileCrowdSec } from '../crowdsec/index.js';
+import { compileGeoIp } from '../geoip/index.js';
 
 export interface CompileResult {
   nftScript: string;
@@ -18,6 +19,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   const suricataCompiled = compileSuricata(state.suricata);
   const crowdsecCompiled = compileCrowdSec(state.crowdsec);
+  const geoipCompiled = compileGeoIp(state.geoip);
 
   if (state.suricata?.enabled) {
     files.push({
@@ -49,6 +51,12 @@ export function compileNftables(state: DesiredState): CompileResult {
   if (state.crowdsec?.enabled) {
     lines.push('  # CrowdSec integration');
     lines.push(crowdsecCompiled.nftSetDefinition.split('\n').map(l => '  ' + l).join('\n'));
+    lines.push('');
+  }
+
+  if (state.geoip?.enabled && geoipCompiled.nftSetDefinitions.length > 0) {
+    lines.push('  # GeoIP Location-based Sets');
+    lines.push(...geoipCompiled.nftSetDefinitions);
     lines.push('');
   }
 
@@ -133,6 +141,11 @@ export function compileNftables(state: DesiredState): CompileResult {
   if (state.crowdsec?.enabled) {
     lines.push(`    ${crowdsecCompiled.nftRule} comment "crowdsec-drop"`);
   }
+  if (state.geoip?.enabled && geoipCompiled.inputRules.length > 0) {
+    for (const rule of geoipCompiled.inputRules) {
+      lines.push(`    ${rule}`);
+    }
+  }
   lines.push('  set blocked_ips {');
   lines.push('    type ipv4_addr');
   lines.push('    flags interval');
@@ -189,6 +202,11 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Suricata IPS rules
   lines.push(...suricataCompiled.nftRules.map(r => '    ' + r));
   lines.push('    type filter hook forward priority filter; policy drop;');
+  if (state.geoip?.enabled && geoipCompiled.forwardRules.length > 0) {
+    for (const rule of geoipCompiled.forwardRules) {
+      lines.push(`    ${rule}`);
+    }
+  }
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');

@@ -59,6 +59,10 @@
       "types": "./dist/compile/crowdsec/index.d.ts",
       "default": "./dist/compile/crowdsec/index.js"
     },
+    "./compile/geoip": {
+      "types": "./dist/compile/geoip/index.d.ts",
+      "default": "./dist/compile/geoip/index.js"
+    },
     "./compile/ha": {
       "types": "./dist/compile/ha/index.d.ts",
       "default": "./dist/compile/ha/index.js"
