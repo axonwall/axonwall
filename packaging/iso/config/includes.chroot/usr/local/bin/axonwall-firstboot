@@ -13,36 +13,122 @@ fi
 echo "[Axonwall Firstboot] Initializing network appliance..."
 
 # 1. Apply kernel performance tuning
-sysctl --system
+# sysctl --system exits non-zero on unknown keys (e.g. nf_conntrack_* before the
+# module is loaded); under `set -e` that previously aborted the whole script.
+modprobe nf_conntrack 2>/dev/null || true
+modprobe tcp_bbr 2>/dev/null || true
+sysctl --system || true
 
 # 2. Identify Primary LAN & WAN NICs
-INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | grep -v 'lo' | head -n 2))
+INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | head -n 2 || true))
 WAN_IF="${INTERFACES[0]:-eth0}"
-LAN_IF="${INTERFACES[1]:-eth1}"
+LAN_IF="${INTERFACES[1]:-}"
 
-echo "[Axonwall Firstboot] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF}"
+echo "[Axonwall Firstboot] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF:-<none>}"
 
-# 3. Configure default LAN static IP (192.168.1.1/24)
-ip addr add 192.168.1.1/24 dev "$LAN_IF" || true
-ip link set up dev "$LAN_IF" || true
+# 3. Configure default LAN static IP (192.168.1.1/24) only on a real second NIC
+if [[ -n "$LAN_IF" ]] && ip link show "$LAN_IF" &>/dev/null; then
+  ip addr add 192.168.1.1/24 dev "$LAN_IF" || true
+  ip link set up dev "$LAN_IF" || true
+fi
 
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
-  nft -f /usr/share/axonwall/lockdown.nft
+  nft -f /usr/share/axonwall/lockdown.nft || true
 fi
 
-# 5. Initialize Headscale Environment
-echo "[Axonwall Firstboot] Initializing Headscale..."
+# 5. Initialize Axonwall System User & Environment
+echo "[Axonwall Firstboot] Setting up permissions and environment..."
+if ! id -u axonwall &>/dev/null; then
+  groupadd -r axonwall 2>/dev/null || true
+  useradd -r -g axonwall -s /usr/sbin/nologin -d /var/lib/axonwall -m axonwall 2>/dev/null || true
+fi
+
+# Generate a per-appliance TLS certificate (never ship a shared private key in the ISO)
+mkdir -p /etc/axonwall/certs
+if [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; then
+  echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
+  SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
+  for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout /etc/axonwall/certs/hub.key \
+    -out /etc/axonwall/certs/hub.crt \
+    -days 3650 \
+    -subj "/O=Axonwall/OU=Appliance/CN=$(hostname)" \
+    -addext "subjectAltName=${SAN}" || true
+fi
+# Always fix ownership: the controller runs as User=axonwall and must read the key
+chown root:axonwall /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
+chown root:axonwall /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+chmod 750 /etc/axonwall/certs 2>/dev/null || true
+chmod 640 /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+
+# Initialize Headscale directories
 mkdir -p /var/lib/axonwall/headscale /run/headscale
-chown -R axonwall:axonwall /var/lib/axonwall/headscale /run/headscale
-chmod 770 /var/lib/axonwall/headscale /run/headscale
+chown -R axonwall:axonwall /var/lib/axonwall /run/headscale 2>/dev/null || true
+chmod 770 /var/lib/axonwall/headscale /run/headscale 2>/dev/null || true
 
-# 6. Enable and start Axonwall Daemons
-systemctl enable --now axonwalld || true
-systemctl enable --now axonwall-controller || true
-systemctl enable --now axonwall-ui || true
-systemctl enable --now headscale || true
+# Generate secure random appliance secrets if absent
+if [[ ! -s /etc/axonwall/axonwall.env ]]; then
+  echo "[Axonwall Firstboot] Generating unique appliance security tokens and credentials..."
+  JWT_SECRET=$(openssl rand -hex 32)
+  ZTP_TOKEN=$(openssl rand -hex 16)
+  
+  INSTALL_PASS=""
+  if [[ -f /etc/axonwall/admin.env ]]; then
+    INSTALL_PASS=$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)
+  fi
+  ADMIN_PASS="${INSTALL_PASS:-${LOCAL_ADMIN_PASSWORD:-axonwall}}"
 
-# Remove marker once complete
+  cat << ENV_EOF > /etc/axonwall/axonwall.env
+JWT_SECRET=${JWT_SECRET}
+AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
+LOCAL_ADMIN_USER=admin
+LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
+AGENT_SOCKET_PATH=/run/axonwall/agent.sock
+AGENT_API_SOCKET=/run/axonwall/agent-api.sock
+ENV_EOF
+
+  if [[ ! -f /etc/axonwall/.password_changed ]]; then
+    echo "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
+    chmod 0600 /etc/axonwall/initial-admin-password
+    chown root:root /etc/axonwall/initial-admin-password
+  else
+    echo "[Axonwall Firstboot] Administrator credentials established during installation."
+  fi
+fi
+
+chmod 0640 /etc/axonwall/axonwall.env 2>/dev/null || true
+chown root:axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
+
+# Ensure proper ownership of Axonwall application directory (Next.js writes .next/cache)
+chown -R axonwall:axonwall /opt/axonwall 2>/dev/null || true
+
+# 6. Remove marker and trigger services
+# Marker is removed first so ConditionPathExists doesn't loop or block
 rm -f "$MARKER"
-echo "[Axonwall Firstboot] Provisioning complete. Access web console at https://192.168.1.1:3000"
+
+systemctl daemon-reload
+systemctl enable axonwalld axonwall-controller axonwall-ui headscale || true
+# Use non-blocking restarts so firstboot does not deadlock with services ordered After=axonwall-firstboot.service
+systemctl try-restart --no-block axonwalld || true
+systemctl start --no-block axonwall-ui axonwall-controller headscale || true
+
+PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+
+cat << ISSUE_EOF > /etc/issue
+================================================================================
+Axonwall Appliance (Debian 13)
+Web Console: https://${PRIMARY_IP:-<appliance-ip>}:8443
+Appliance Console: Login with administrator credentials
+================================================================================
+\n \l
+
+ISSUE_EOF
+
+echo "================================================================================"
+echo "[Axonwall Firstboot] Provisioning complete."
+echo "  Web Management Console: https://${PRIMARY_IP:-<appliance-ip>}:8443"
+echo "  Default Administrator : admin"
+echo "  Appliance Console     : Login authentication enabled"
+echo "================================================================================"

@@ -14,6 +14,7 @@ const cspHeader = `
 `;
 
 const nextConfig: NextConfig = {
+  output: 'standalone',
   reactStrictMode: true,
   experimental: {
     serverActions: {

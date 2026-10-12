@@ -151,7 +151,7 @@ describe('Axonwall nftables Compiler', () => {
     expect(res.nftScript).toContain('192.168.100.10, 192.168.100.11');
     expect(res.nftScript).toContain('flowtable ft_fastpath {');
     expect(res.nftScript).toContain('iifname "eth1" tcp dport { 22, 80, 443, 3000 } accept comment "anti-lockout"');
-    expect(res.nftScript).toContain('ip daddr @set_web_servers dport 80');
+    expect(res.nftScript).toContain('ip daddr @set_web_servers tcp dport 80');
     expect(res.nftScript).toContain('oifname "eth0" masquerade');
   });
 

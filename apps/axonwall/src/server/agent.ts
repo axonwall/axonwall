@@ -2,13 +2,16 @@
 
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
-import type { DesiredState } from '@axonwall/lib/schemas';
-import net from 'net';
+import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import http from 'node:http';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import net from 'node:net';
 import { getSession } from './auth';
 import { headers } from 'next/headers';
 
-
-const AGENT_SOCKET_PATH = process.env.AGENT_SOCKET_PATH || '/run/axonwall/agent.sock';
+const AGENT_API_SOCKET = process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
 
 export interface AgentStatus {
   nodeId: string;
@@ -29,6 +32,57 @@ export interface AgentStatus {
 let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
+
+async function callAgentApi<T>(path: string, method = 'GET', body?: any): Promise<T | null> {
+  return new Promise((resolve) => {
+    const postData = body ? JSON.stringify(body) : undefined;
+    const req = http.request(
+      {
+        socketPath: AGENT_API_SOCKET,
+        path,
+        method,
+        headers: postData
+          ? {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData),
+            }
+          : undefined,
+        timeout: 4000,
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve(JSON.parse(data) as T);
+            } catch {
+              resolve(null);
+            }
+          } else {
+            resolve(null);
+          }
+        });
+      }
+    );
+
+    req.on('error', () => {
+      resolve(null);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+
+    if (postData) {
+      req.write(postData);
+    }
+    req.end();
+  });
+}
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
@@ -59,33 +113,119 @@ async function enforceRateLimit(maxRequests = 20, windowMs = 60000) {
   }
 }
 
-
 export async function getAgentStatus(): Promise<AgentStatus> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
 
+  // Try live communication with root daemon over Unix socket first
+  const daemonStatus = await callAgentApi<any>('/v1/status');
+  if (daemonStatus) {
+    return {
+      nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
+      version: daemonStatus.version || '0.1.0',
+      uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
+      activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
+      pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
+      confirmDeadlineUnix: Number(daemonStatus.confirm_deadline_unix || daemonStatus.confirmDeadlineUnix || 0),
+      interfaces: (daemonStatus.interfaces || []).map((iface: any) => ({
+        name: iface.name || iface.device,
+        device: iface.device || iface.name,
+        isUp: Boolean(iface.is_up ?? iface.isUp),
+        ipAddresses: iface.ip_addresses || iface.ipAddresses || [],
+      })),
+    };
+  }
+
+  // Fallback: Gather real OS interfaces and system uptime directly
+  const ifaces = os.networkInterfaces();
+  const interfaceList: Array<{
+    name: string;
+    device: string;
+    isUp: boolean;
+    ipAddresses: string[];
+  }> = [];
+
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    if (!addrs) continue;
+    const ipAddresses = addrs.map((a) => a.cidr || `${a.address}/${a.family === 'IPv4' ? '24' : '64'}`);
+    interfaceList.push({
+      name,
+      device: name,
+      isUp: true,
+      ipAddresses,
+    });
+  }
+
   return {
-    nodeId: 'axonwall-core-node',
+    nodeId: `axonwall-${os.hostname()}`,
     version: '0.1.0',
-    uptimeSeconds: Math.floor(process.uptime()),
+    uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
     confirmDeadlineUnix: mockDeadline,
-    interfaces: [
+    interfaces: interfaceList.length > 0 ? interfaceList : [
       {
         name: 'wan',
         device: 'eth0',
         isUp: true,
         ipAddresses: ['192.168.1.150/24'],
       },
-      {
-        name: 'lan',
-        device: 'eth1',
-        isUp: true,
-        ipAddresses: ['192.168.100.1/24'],
-      },
     ],
   };
+}
+
+const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
+  version: 1,
+  system: {
+    hostname: 'axonwall-core',
+    domain: 'axonwall.local',
+    dnsServers: ['1.1.1.1', '8.8.8.8'],
+    timezone: 'UTC',
+    flowtableOffload: true,
+    antiLockout: {
+      enabled: true,
+      interface: 'lan',
+      ports: [22, 80, 443, 8443, 3000],
+    },
+  },
+  interfaces: [
+    { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Gateway' },
+    { name: 'lan', device: 'eth1', type: 'static', enabled: true, ipv4Address: '192.168.100.1/24', mtu: 1500, description: 'LAN Network' },
+  ],
+  aliases: [],
+  rules: [],
+  nat: [],
+  gateways: [],
+  gatewayGroups: [],
+  vlans: [],
+  bridges: [],
+  bonds: [],
+  virtualIps: [],
+  vrfs: [],
+  dhcp: { enabled: true, subnets: [] },
+  dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
+  routes: [],
+});
+
+let cachedDesiredState: DesiredState | null = null;
+
+export async function getCurrentDesiredState(): Promise<DesiredState> {
+  if (cachedDesiredState) {
+    return cachedDesiredState;
+  }
+
+  for (const path of ['/var/lib/axonwall/state.json', '/etc/axonwall/state.json', './state.json']) {
+    try {
+      if (fs.existsSync(path)) {
+        const raw = fs.readFileSync(path, 'utf8');
+        const parsed = JSON.parse(raw);
+        cachedDesiredState = DesiredStateSchema.parse(parsed);
+        return cachedDesiredState;
+      }
+    } catch {}
+  }
+
+  return BASELINE_STATE;
 }
 
 export async function applyDesiredState(
@@ -103,8 +243,40 @@ export async function applyDesiredState(
   const warnings = lintIssues.map((i) => i.message);
 
   // 2. Compile to nftables
-  const { nftScript } = compileNftables(state);
+  const { nftScript, files, reloadServices } = compileNftables(state);
+  const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
 
+  // 3. Delegate to root axonwalld daemon if active
+  const daemonResp = await callAgentApi<any>('/v1/apply', 'POST', {
+    job_id: `ui-${Date.now()}`,
+    bundle_hash: bundleHash,
+    nft_script: nftScript,
+    files,
+    reload_services: reloadServices,
+    confirm_timeout_seconds: confirmTimeoutSeconds,
+  });
+
+  cachedDesiredState = state;
+  try {
+    if (!fs.existsSync('/var/lib/axonwall')) {
+      fs.mkdirSync('/var/lib/axonwall', { recursive: true, mode: 0o755 });
+    }
+    fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
+  } catch {}
+
+  if (daemonResp) {
+    if (!daemonResp.success) {
+      throw new Error(daemonResp.message || 'Ruleset validation failed on daemon');
+    }
+    return {
+      success: true,
+      message: daemonResp.message,
+      nftScript,
+      warnings,
+    };
+  }
+
+  // Fallback for dev mode
   mockPendingConfirm = true;
   mockDeadline = Math.floor(Date.now() / 1000) + confirmTimeoutSeconds;
   mockActiveRuleset = nftScript;
@@ -122,6 +294,15 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
   if (!session || !session.roles.includes('admin')) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+
+  const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
+  if (daemonResp) {
+    return {
+      success: daemonResp.success,
+      message: daemonResp.message,
+    };
+  }
+
   mockPendingConfirm = false;
   mockDeadline = 0;
   return {
@@ -135,6 +316,15 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
   if (!session || !session.roles.includes('admin')) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+
+  const daemonResp = await callAgentApi<any>('/v1/rollback', 'POST', { reason: 'operator rollback' });
+  if (daemonResp) {
+    return {
+      success: daemonResp.success,
+      message: daemonResp.message,
+    };
+  }
+
   mockPendingConfirm = false;
   mockDeadline = 0;
   return {

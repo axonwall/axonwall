@@ -1,6 +1,6 @@
 [Unit]
 Description=headscale coordination server for Tailscale clients
-After=network-online.target
+After=network-online.target axonwall-firstboot.service
 Wants=network-online.target
 
 [Service]

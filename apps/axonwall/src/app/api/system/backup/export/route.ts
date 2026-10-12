@@ -1,28 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { createEncryptedBackup } from '@/server/backup';
-import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
-
-// Sample baseline appliance state if not yet loaded from DB
-const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
-  version: 1,
-  system: {
-    hostname: 'axonwall-core',
-    domain: 'axonwall.local',
-    dnsServers: ['1.1.1.1', '8.8.8.8'],
-    timezone: 'UTC',
-    flowtableOffload: true,
-    antiLockout: {
-      enabled: true,
-      interface: 'lan',
-      ports: [22, 80, 443, 8443, 3000],
-    },
-  },
-  interfaces: [
-    { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Gateway' },
-    { name: 'lan', device: 'eth1', type: 'static', enabled: true, ipv4Address: '192.168.100.1/24', mtu: 1500, description: 'LAN Network' },
-  ],
-});
+import { getCurrentDesiredState } from '@/server/agent';
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
@@ -37,10 +16,14 @@ export async function POST(request: NextRequest) {
     body = {};
   }
 
-  const passphrase = body.passphrase || 'axonwall-default-recovery-passphrase';
+  const passphrase = body.passphrase;
+  if (!passphrase || typeof passphrase !== 'string' || passphrase.length < 8) {
+    return new NextResponse('Passphrase is required and must be at least 8 characters long', { status: 400 });
+  }
 
   try {
-    const { id, buffer } = await createEncryptedBackup(BASELINE_STATE, passphrase);
+    const liveState = await getCurrentDesiredState();
+    const { id, buffer } = await createEncryptedBackup(liveState, passphrase);
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,
@@ -54,3 +37,4 @@ export async function POST(request: NextRequest) {
     return new NextResponse(err?.message || 'Failed to generate backup', { status: 500 });
   }
 }
+

@@ -127,6 +127,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
   const keyPath = '/etc/axonwall/certs/hub.key';
   const caPath = '/etc/axonwall/certs/ca.crt';
 
+  const uiPort = parseInt(process.env.UI_PORT || '3000', 10);
   let server;
   const requestHandler = (req: any, res: any) => {
     const { pathname } = new URL(req.url || '', `http://${req.headers.host}`);
@@ -192,8 +193,57 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       return;
     }
 
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Axonwall Control Plane & Fleet Hub\n');
+    // Reverse proxy all other HTTP traffic to the Axonwall Web Console on port 3000
+    const uiReq = http.request({
+      hostname: '127.0.0.1',
+      port: uiPort,
+      path: req.url,
+      method: req.method,
+      headers: {
+        ...req.headers,
+        'x-forwarded-proto': req.socket?.encrypted ? 'https' : 'http',
+        'x-forwarded-host': req.headers.host,
+        'x-forwarded-for': req.socket?.remoteAddress || '127.0.0.1',
+      },
+    }, (uiRes) => {
+      res.writeHead(uiRes.statusCode || 200, uiRes.headers);
+      uiRes.pipe(res);
+    });
+
+    req.on('aborted', () => uiReq.destroy());
+
+    uiReq.on('error', () => {
+      // If the upstream died mid-response, headers are already sent: writeHead would throw
+      // and crash the whole controller (and every satellite connection with it).
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!DOCTYPE html>
+<html>
+<head><title>Axonwall Appliance - Initializing</title>
+<meta http-equiv="refresh" content="3">
+<style>
+body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+.card { background: #1e293b; padding: 2.5rem; border-radius: 12px; border: 1px solid #334155; text-align: center; max-width: 480px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
+h1 { color: #38bdf8; margin: 0 0 1rem 0; font-size: 1.5rem; }
+p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; }
+.spinner { border: 3px solid #334155; border-top: 3px solid #38bdf8; border-radius: 50%; width: 28px; height: 28px; animation: spin 1s linear infinite; margin: 0 auto; }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Axonwall Web Console</h1>
+  <p>The web management console is initializing. This page will refresh automatically...</p>
+  <div class="spinner"></div>
+</div>
+</body>
+</html>`);
+    });
+
+    req.pipe(uiReq);
   };
 
   if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
@@ -202,7 +252,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       cert: fs.readFileSync(certPath),
       key: fs.readFileSync(keyPath),
       ca: fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined,
-      requestCert: true,
+      requestCert: fs.existsSync(caPath),
       rejectUnauthorized: false
     }, requestHandler);
   } else {
@@ -227,22 +277,75 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         return;
       }
 
-      const expectedToken = process.env.AXONWALL_ZTP_TOKEN || 'dev-ztp-token';
-      if (token !== expectedToken) {
+      const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
+      if (!expectedToken && process.env.NODE_ENV === 'production') {
+        console.log(`[Fleet Manager] Rejected connection: AXONWALL_ZTP_TOKEN not configured`);
+        socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      const tokenToMatch = expectedToken || 'dev-ztp-token';
+      const isTokenValid = token.length === tokenToMatch.length &&
+        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(tokenToMatch));
+
+      if (!isTokenValid) {
         console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
 
-      console.log(`[Fleet Manager] Authenticating Satellite ID: ${satId} with token: ${token}`);
+      // If a CA certificate is configured, enforce valid client certificate
+      if (fs.existsSync(caPath)) {
+        const tlsSocket = socket as any;
+        if (!tlsSocket.authorized) {
+          console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      }
+
+      console.log(`[Fleet Manager] Satellite authenticated successfully: ${satId}`);
 
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request, satId);
       });
     } else {
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-      socket.destroy();
+      const uiWsReq = http.request({
+        hostname: '127.0.0.1',
+        port: uiPort,
+        path: request.url,
+        method: request.method,
+        headers: request.headers,
+      });
+
+      uiWsReq.on('upgrade', (uiRes, uiSocket, uiHead) => {
+        const headerLines: string[] = [];
+        for (let i = 0; i < uiRes.rawHeaders.length; i += 2) {
+          headerLines.push(`${uiRes.rawHeaders[i]}: ${uiRes.rawHeaders[i + 1]}`);
+        }
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\n${headerLines.join('\r\n')}\r\n\r\n`);
+        if (uiHead && uiHead.length) socket.write(uiHead);
+        if (head && head.length) uiSocket.write(head);
+        uiSocket.on('error', () => socket.destroy());
+        socket.on('error', () => uiSocket.destroy());
+        uiSocket.pipe(socket);
+        socket.pipe(uiSocket);
+      });
+
+      // Upstream refused the upgrade (e.g. 404): don't leave the client socket hanging
+      uiWsReq.on('response', (uiRes) => {
+        socket.end(`HTTP/1.1 ${uiRes.statusCode || 502} ${uiRes.statusMessage || 'Bad Gateway'}\r\n\r\n`);
+        uiRes.resume();
+      });
+
+      uiWsReq.on('error', () => {
+        socket.destroy();
+      });
+
+      uiWsReq.end();
     }
   });
 
@@ -389,9 +492,9 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     });
   });
 
-  const port = process.env.CONTROLLER_PORT || 8443;
-  server.listen(port, () => {
-    console.log(`[Axonwall Controller] Fleet Manager listening on port ${port}`);
+  const port = parseInt(process.env.CONTROLLER_PORT || '8443', 10);
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`[Axonwall Controller] Fleet Manager listening on 0.0.0.0:${port}`);
   });
 }
 

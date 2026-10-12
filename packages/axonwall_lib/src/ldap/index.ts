@@ -1,5 +1,6 @@
 import { Client } from 'ldapts';
 import { SignJWT, jwtVerify } from 'jose';
+import * as crypto from 'node:crypto';
 import { type Privilege, type UserSession, DEFAULT_ROLES } from '../rbac/index.js';
 
 export interface LdapConfig {
@@ -17,6 +18,10 @@ export interface AuthResult {
   success: boolean;
   error?: string;
   session?: UserSession;
+}
+
+export function escapeLdapFilter(str: string): string {
+  return str.replace(/[*()\\\x00]/g, (c) => '\\' + c.charCodeAt(0).toString(16).padStart(2, '0'));
 }
 
 export async function authenticateLdap(
@@ -41,7 +46,6 @@ export async function authenticateLdap(
     }
 
     // 2. Search for the user DN
-    const escapeLdapFilter = (str: string) => str.replace(/[*()\\NUL]/g, (c) => '\\' + c.charCodeAt(0).toString(16).padStart(2, '0'));
     const safeUsername = escapeLdapFilter(username);
     const filter = config.userSearchFilter.replace(/{{username}}/g, safeUsername);
     const searchRes = await client.search(config.baseDn, {
@@ -82,7 +86,6 @@ export async function authenticateLdap(
       });
     } else {
       // Query groupOfNames by member
-      const escapeLdapFilter = (str: string) => str.replace(/[*()\\NUL]/g, (c) => '\\' + c.charCodeAt(0).toString(16).padStart(2, '0'));
       const safeUserDn = escapeLdapFilter(userDn);
       const groupFilter = config.groupSearchFilter.replace(/{{userDn}}/g, safeUserDn);
       const groupSearch = await client.search(config.baseDn, {
@@ -152,9 +155,34 @@ export function authenticateLocalAdmin(
   username: string,
   pass: string,
   expectedUser: string,
-  expectedPassHash: string
+  expectedPassOrHash: string
 ): AuthResult {
-  if (username === expectedUser && pass === expectedPassHash) {
+  if (!username || !pass || !expectedUser || !expectedPassOrHash) {
+    return { success: false, error: 'Invalid local administrator credentials' };
+  }
+
+  const uBuf = Buffer.from(username);
+  const expUBuf = Buffer.from(expectedUser);
+  const userMatch = uBuf.length === expUBuf.length && crypto.timingSafeEqual(uBuf, expUBuf);
+
+  let passMatch = false;
+  if (expectedPassOrHash.startsWith('scrypt$')) {
+    const parts = expectedPassOrHash.split('$');
+    if (parts.length === 3) {
+      const salt = parts[1];
+      const expectedHash = parts[2];
+      const derived = crypto.scryptSync(pass, salt, 64).toString('hex');
+      const dBuf = Buffer.from(derived);
+      const eBuf = Buffer.from(expectedHash);
+      passMatch = dBuf.length === eBuf.length && crypto.timingSafeEqual(dBuf, eBuf);
+    }
+  } else {
+    const pBuf = Buffer.from(pass);
+    const expPBuf = Buffer.from(expectedPassOrHash);
+    passMatch = pBuf.length === expPBuf.length && crypto.timingSafeEqual(pBuf, expPBuf);
+  }
+
+  if (userMatch && passMatch) {
     const adminRole = DEFAULT_ROLES.admin;
     return {
       success: true,

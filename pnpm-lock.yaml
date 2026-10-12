@@ -271,6 +271,9 @@ importers:
       '@types/ws':
         specifier: ^8.18.2
         version: 8.18.2
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
       typescript:
         specifier: ^5.8.2
         version: 5.9.3

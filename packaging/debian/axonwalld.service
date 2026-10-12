@@ -7,18 +7,18 @@ Wants=network-pre.target
 DefaultDependencies=no
 
 [Service]
-Type=notify
+Type=simple
 ExecStartPre=/usr/sbin/nft -f /usr/share/axonwall/lockdown.nft
-ExecStart=/usr/sbin/axonwalld --socket /run/axonwalld/axonwalld.sock --boot-apply
+ExecStart=/usr/sbin/axonwalld --socket /run/axonwall/agent.sock --boot-apply
 Restart=always
 RestartSec=3s
 KillMode=process
 
 # Privilege Separation & Sandboxing
 User=root
-Group=root
-RuntimeDirectory=axonwalld
-RuntimeDirectoryMode=0750
+Group=axonwall
+RuntimeDirectory=axonwall
+RuntimeDirectoryMode=0770
 StateDirectory=axonwall
 LogsDirectory=axonwall
 

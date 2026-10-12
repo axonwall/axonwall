@@ -2,7 +2,11 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -12,7 +16,10 @@ import (
 	"time"
 
 	"github.com/skip2/go-qrcode"
+	"golang.org/x/crypto/scrypt"
 )
+
+var currentSessionUser = "admin"
 
 // ANSI color escape codes for terminal styling
 const (
@@ -189,6 +196,156 @@ func clearScreen() {
 	fmt.Print("\033[H\033[2J")
 }
 
+func getAdminCredentials() (string, string) {
+	adminUser := "admin"
+	adminPass := "axonwall"
+
+	// 1. Check /etc/axonwall/admin.env first
+	if data, err := os.ReadFile("/etc/axonwall/admin.env"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "LOCAL_ADMIN_USER=") {
+				adminUser = strings.TrimPrefix(line, "LOCAL_ADMIN_USER=")
+			} else if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") {
+				adminPass = strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD=")
+			}
+		}
+		return adminUser, adminPass
+	}
+
+	// 2. Check /etc/axonwall/axonwall.env
+	if data, err := os.ReadFile("/etc/axonwall/axonwall.env"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "LOCAL_ADMIN_USER=") {
+				adminUser = strings.TrimPrefix(line, "LOCAL_ADMIN_USER=")
+			} else if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") {
+				adminPass = strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD=")
+			}
+		}
+		return adminUser, adminPass
+	}
+
+	// 3. Fallback to /etc/axonwall/initial-admin-password
+	if data, err := os.ReadFile("/etc/axonwall/initial-admin-password"); err == nil {
+		p := strings.TrimSpace(string(data))
+		if p != "" {
+			adminPass = p
+		}
+	}
+
+	return adminUser, adminPass
+}
+
+func hashPassword(pass string) (string, error) {
+	saltBytes := make([]byte, 16)
+	if _, err := rand.Read(saltBytes); err != nil {
+		return "", err
+	}
+	saltHex := hex.EncodeToString(saltBytes)
+	// scrypt N=16384, r=8, p=1, keyLen=64 to match Node.js crypto.scryptSync(pass, salt, 64)
+	dk, err := scrypt.Key([]byte(pass), []byte(saltHex), 16384, 8, 1, 64)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("scrypt$%s$%s", saltHex, hex.EncodeToString(dk)), nil
+}
+
+func verifyPassword(inputPass, expectedPassOrHash string) bool {
+	if strings.HasPrefix(expectedPassOrHash, "scrypt$") {
+		parts := strings.Split(expectedPassOrHash, "$")
+		if len(parts) == 3 {
+			salt := parts[1]
+			expectedHash := parts[2]
+			dk, err := scrypt.Key([]byte(inputPass), []byte(salt), 16384, 8, 1, 64)
+			if err != nil {
+				return false
+			}
+			derivedHex := hex.EncodeToString(dk)
+			return subtle.ConstantTimeCompare([]byte(derivedHex), []byte(expectedHash)) == 1
+		}
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(inputPass), []byte(expectedPassOrHash)) == 1
+}
+
+func readPassword(reader *bufio.Reader, prompt string) (string, error) {
+	fmt.Print(prompt)
+	cmd := exec.Command("stty", "-echo")
+	cmd.Stdin = os.Stdin
+	_ = cmd.Run()
+	defer func() {
+		restore := exec.Command("stty", "echo")
+		restore.Stdin = os.Stdin
+		_ = restore.Run()
+		fmt.Println()
+	}()
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func authenticateConsole(reader *bufio.Reader) (string, bool) {
+	clearScreen()
+	hostname, osName, _, _, _, _ := getSystemInfo()
+	primaryIP := getPrimaryManagementIP()
+
+	fmt.Printf("%s%s", colorCyan, colorBold)
+	fmt.Println("================================================================================")
+	fmt.Println("                       Axonwall Appliance Console Login                         ")
+	fmt.Println("================================================================================")
+	fmt.Printf("%s", colorReset)
+	fmt.Printf(" Hostname: %s\n", hostname)
+	fmt.Printf(" Platform: %s\n", osName)
+	fmt.Printf(" Web Management Console: https://%s:8443\n", primaryIP)
+	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
+	fmt.Println("--------------------------------------------------------------------------------\n")
+
+	fmt.Print(" Username: ")
+	username, err := reader.ReadString('\n')
+	if err != nil {
+		if err == io.EOF {
+			os.Exit(0)
+		}
+		time.Sleep(1 * time.Second)
+		return "", false
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return "", false
+	}
+
+	password, err := readPassword(reader, " Password: ")
+	if err != nil {
+		if err == io.EOF {
+			os.Exit(0)
+		}
+		time.Sleep(1 * time.Second)
+		return "", false
+	}
+
+	expectedUser, expectedPass := getAdminCredentials()
+
+	// Verify constant-time match for configured administrator account
+	userMatches := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) == 1
+	passMatches := verifyPassword(password, expectedPass)
+
+	if userMatches && passMatches {
+		fmt.Printf("\n%s[✓] Access granted. Initializing console session...%s\n", colorGreen, colorReset)
+		time.Sleep(300 * time.Millisecond)
+		return username, true
+	}
+
+	time.Sleep(1500 * time.Millisecond) // Throttling brute-force attempts
+	fmt.Printf("\n%s[!] Login incorrect.%s\n\n", colorRed, colorReset)
+	time.Sleep(1 * time.Second)
+	return "", false
+}
+
 func printHeader() {
 	clearScreen()
 	hostname, osName, kernel, uptime, loadAvg, memStr := getSystemInfo()
@@ -215,10 +372,12 @@ func printHeader() {
 		colorDim, colorReset, memStr)
 
 	fmt.Println("--------------------------------------------------------------------------------")
-	fmt.Printf(" %sWeb Console:%s %shttps://%s:8443%s  (or %shttp://%s:3000%s)\n",
+	fmt.Printf(" %sWeb Console:%s %shttps://%s:8443%s\n",
 		colorBold, colorReset,
-		colorGreen+colorBold, primaryIP, colorReset,
-		colorCyan, primaryIP, colorReset)
+		colorGreen+colorBold, primaryIP, colorReset)
+	fmt.Printf(" %sConsole User:%s %s%s%s (Authenticated)\n",
+		colorBold, colorReset,
+		colorCyan+colorBold, currentSessionUser, colorReset)
 	fmt.Println("--------------------------------------------------------------------------------")
 
 	// Interfaces Summary Table
@@ -258,7 +417,7 @@ func printHeader() {
 	fmt.Println("  9) Drop to Root Shell (bash)")
 	fmt.Println(" 10) Reboot Appliance")
 	fmt.Println(" 11) Power Off System")
-	fmt.Println("  0) Exit Console")
+	fmt.Println("  0) Logout / Lock Console")
 	fmt.Println("================================================================================")
 	fmt.Print(" Enter option [0-11]: ")
 }
@@ -306,6 +465,26 @@ func actionAssignInterfaces(reader *bufio.Reader) {
 	fmt.Print("Enter LAN interface name (e.g. eth1) [leave blank to keep]: ")
 	lanIface, _ := reader.ReadString('\n')
 	lanIface = strings.TrimSpace(lanIface)
+
+	currentWan := "eth0"
+	currentLan := "eth1"
+	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "WAN_INTERFACE=") {
+				currentWan = strings.TrimPrefix(line, "WAN_INTERFACE=")
+			} else if strings.HasPrefix(line, "LAN_INTERFACE=") {
+				currentLan = strings.TrimPrefix(line, "LAN_INTERFACE=")
+			}
+		}
+	}
+
+	if wanIface == "" {
+		wanIface = currentWan
+	}
+	if lanIface == "" {
+		lanIface = currentLan
+	}
 
 	if wanIface != "" || lanIface != "" {
 		fmt.Printf("\n%sSaving interface assignments...%s\n", colorYellow, colorReset)
@@ -390,11 +569,24 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 		return
 	}
 
+	hashed, err := hashPassword(newPass)
+	if err != nil {
+		fmt.Printf("%s[!] Error generating password hash: %v%s\n", colorRed, err, colorReset)
+		pause(reader)
+		return
+	}
+
 	// Update local credential environment override in /etc/axonwall/admin.env
 	_ = os.MkdirAll("/etc/axonwall", 0755)
-	envContent := fmt.Sprintf("LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n", newPass)
+	_ = os.MkdirAll("/var/lib/axonwall", 0755)
+	envContent := fmt.Sprintf("LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n", hashed)
 	if err := os.WriteFile("/etc/axonwall/admin.env", []byte(envContent), 0600); err == nil {
-		fmt.Printf("\n%s[✓] Admin password updated successfully.%s\n", colorGreen, colorReset)
+		_ = os.Remove("/etc/axonwall/initial-admin-password")
+		timestamp := []byte(time.Now().UTC().Format(time.RFC3339))
+		_ = os.WriteFile("/etc/axonwall/.password_changed", timestamp, 0644)
+		_ = os.WriteFile("/var/lib/axonwall/.password_changed", timestamp, 0644)
+
+		fmt.Printf("\n%s[✓] Admin password updated successfully (hashed with scrypt).%s\n", colorGreen, colorReset)
 		fmt.Println("Restarting Web UI to apply new credentials...")
 		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
 		fmt.Printf("%s[✓] Web UI reloaded.%s\n", colorGreen, colorReset)
@@ -415,6 +607,23 @@ func actionResetMFA(reader *bufio.Reader) {
 	if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 		mfaEnvPath := "/etc/axonwall/mfa.env"
 		_ = os.Remove(mfaEnvPath)
+
+		stripMfaFromEnv := func(path string) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return
+			}
+			var lines []string
+			for _, l := range strings.Split(string(data), "\n") {
+				if !strings.HasPrefix(strings.TrimSpace(l), "LOCAL_ADMIN_MFA_SECRET=") {
+					lines = append(lines, l)
+				}
+			}
+			_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600)
+		}
+		stripMfaFromEnv("/etc/axonwall/admin.env")
+		stripMfaFromEnv("/etc/axonwall/axonwall.env")
+
 		fmt.Printf("\n%s[✓] MFA enforcement removed. Admin login will now only require username/password.%s\n", colorGreen, colorReset)
 		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
 	} else {
@@ -491,57 +700,76 @@ func main() {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		printHeader()
-		choice, _ := reader.ReadString('\n')
-		choice = strings.TrimSpace(choice)
+		// Require authentication before entering console menu
+		user, ok := authenticateConsole(reader)
+		if !ok {
+			continue
+		}
+		currentSessionUser = user
 
-		switch choice {
-		case "1":
-			actionInterfacesOverview(reader)
-		case "2":
-			actionAssignInterfaces(reader)
-		case "3":
-			actionConfigureLanIP(reader)
-		case "4":
-			actionResetAdminPassword(reader)
-		case "5":
-			actionResetMFA(reader)
-		case "6":
-			actionDiagnostics(reader)
-		case "7":
-			actionDisplayQRCode(reader)
-		case "8":
-			actionRestartServices(reader)
-		case "9":
-			clearScreen()
-			fmt.Printf("%sDropping to root shell. Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
-			shell := exec.Command("/bin/bash")
-			shell.Stdin = os.Stdin
-			shell.Stdout = os.Stdout
-			shell.Stderr = os.Stderr
-			_ = shell.Run()
-		case "10":
-			fmt.Print("\nAre you sure you want to reboot the appliance? (y/N): ")
-			ans, _ := reader.ReadString('\n')
-			if strings.ToLower(strings.TrimSpace(ans)) == "y" {
-				fmt.Println("Rebooting appliance...")
-				_ = exec.Command("systemctl", "reboot").Run()
-				return
+		sessionActive := true
+		for sessionActive {
+			printHeader()
+			choice, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					os.Exit(0)
+				}
+				time.Sleep(1 * time.Second)
+				sessionActive = false
+				break
 			}
-		case "11":
-			fmt.Print("\nAre you sure you want to power off the appliance? (y/N): ")
-			ans, _ := reader.ReadString('\n')
-			if strings.ToLower(strings.TrimSpace(ans)) == "y" {
-				fmt.Println("Powering off...")
-				_ = exec.Command("systemctl", "poweroff").Run()
-				return
+			choice = strings.TrimSpace(choice)
+
+			switch choice {
+			case "1":
+				actionInterfacesOverview(reader)
+			case "2":
+				actionAssignInterfaces(reader)
+			case "3":
+				actionConfigureLanIP(reader)
+			case "4":
+				actionResetAdminPassword(reader)
+			case "5":
+				actionResetMFA(reader)
+			case "6":
+				actionDiagnostics(reader)
+			case "7":
+				actionDisplayQRCode(reader)
+			case "8":
+				actionRestartServices(reader)
+			case "9":
+				clearScreen()
+				fmt.Printf("%sDropping to root shell. Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
+				shell := exec.Command("/bin/bash")
+				shell.Stdin = os.Stdin
+				shell.Stdout = os.Stdout
+				shell.Stderr = os.Stderr
+				_ = shell.Run()
+			case "10":
+				fmt.Print("\nAre you sure you want to reboot the appliance? (y/N): ")
+				ans, _ := reader.ReadString('\n')
+				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
+					fmt.Println("Rebooting appliance...")
+					_ = exec.Command("systemctl", "reboot").Run()
+					return
+				}
+			case "11":
+				fmt.Print("\nAre you sure you want to power off the appliance? (y/N): ")
+				ans, _ := reader.ReadString('\n')
+				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
+					fmt.Println("Powering off...")
+					_ = exec.Command("systemctl", "poweroff").Run()
+					return
+				}
+			case "0":
+				fmt.Printf("\n%s[✓] Logged out. Locking console...%s\n", colorYellow, colorReset)
+				time.Sleep(500 * time.Millisecond)
+				sessionActive = false
+			default:
+				fmt.Println("Invalid selection. Press [Enter] to continue...")
+				_, _ = reader.ReadString('\n')
 			}
-		case "0":
-			fmt.Println("Exiting console.")
-			return
-		default:
-			fmt.Println("Invalid selection. Press [Enter] to continue...")
-			_, _ = reader.ReadString('\n')
 		}
 	}
 }

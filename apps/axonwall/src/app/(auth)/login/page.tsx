@@ -53,7 +53,6 @@ export default function LoginPage() {
                 type="password"
                 name="password"
                 required
-                defaultValue="axonwalladmin"
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
                 placeholder="••••••••••••"
               />

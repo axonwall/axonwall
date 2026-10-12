@@ -47,7 +47,21 @@ export function compileNftables(state: DesiredState): CompileResult {
   // 1. Table definition (isolated namespace, never flushes other tables)
   lines.push('table inet axonwall {');
 
-  // 2. Named sets for Aliases
+  // 2. Named sets for Aliases & Dynamic Quarantine
+  lines.push('  # Dynamic quarantine sets');
+  lines.push('  set blocked_ips {');
+  lines.push('    type ipv4_addr;');
+  lines.push('    flags interval;');
+  lines.push('  }');
+  lines.push('  set blocked_ips6 {');
+  lines.push('    type ipv6_addr;');
+  lines.push('    flags interval;');
+  lines.push('  }');
+  lines.push('  set blocked_macs {');
+  lines.push('    type ether_addr;');
+  lines.push('  }');
+  lines.push('');
+
   if (state.crowdsec?.enabled) {
     lines.push('  # CrowdSec integration');
     lines.push(crowdsecCompiled.nftSetDefinition.split('\n').map(l => '  ' + l).join('\n'));
@@ -146,17 +160,8 @@ export function compileNftables(state: DesiredState): CompileResult {
       lines.push(`    ${rule}`);
     }
   }
-  lines.push('  set blocked_ips {');
-  lines.push('    type ipv4_addr');
-  lines.push('    flags interval');
-  lines.push('    elements = { 198.51.100.1 }');
-  lines.push('  }');
-  lines.push('  set blocked_macs {');
-  lines.push('    type ether_addr');
-  lines.push('  }');
-  lines.push('');
-  lines.push('  chain input {');
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
 
   lines.push('    ct state established,related accept');
@@ -199,9 +204,9 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Forward chain (routed traffic between interfaces)
 
   lines.push('  chain forward {');
+  lines.push('    type filter hook forward priority filter; policy drop;');
   // Suricata IPS rules
   lines.push(...suricataCompiled.nftRules.map(r => '    ' + r));
-  lines.push('    type filter hook forward priority filter; policy drop;');
   if (state.geoip?.enabled && geoipCompiled.forwardRules.length > 0) {
     for (const rule of geoipCompiled.forwardRules) {
       lines.push(`    ${rule}`);
@@ -209,10 +214,12 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 daddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
 
   if (state.system.flowtableOffload && enabledDevices.length > 0) {
-    lines.push('    ip protocol { tcp, udp } flow add @ft_fastpath');
+    lines.push('    meta l4proto { tcp, udp } flow add @ft_fastpath');
   }
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
@@ -249,7 +256,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
   // Default WAN/Gateway masquerade if no outbound rules configured
   if (!state.nat.some((n) => n.type === 'masquerade' || n.type === 'snat')) {
-    const gatewayIfaces = new Set(state.gateways.filter((g) => g.enabled).map((g) => g.interface));
+    const gatewayIfaces = new Set((state.gateways || []).filter((g) => g.enabled).map((g) => g.interface));
     if (gatewayIfaces.size === 0) {
       gatewayIfaces.add('wan');
     }
@@ -341,19 +348,22 @@ export function compileSatelliteNftables(node: any): CompileResult {
   lines.push('');
   lines.push('flush ruleset');
   lines.push('table inet axonwall {');
-  lines.push('  chain input {');
-  lines.push('    type filter hook input priority filter; policy drop;');
   lines.push('  set blocked_ips {');
-  lines.push('    type ipv4_addr');
-  lines.push('    flags interval');
-  lines.push('    elements = { 198.51.100.1 }');
+  lines.push('    type ipv4_addr;');
+  lines.push('    flags interval;');
+  lines.push('  }');
+  lines.push('  set blocked_ips6 {');
+  lines.push('    type ipv6_addr;');
+  lines.push('    flags interval;');
   lines.push('  }');
   lines.push('  set blocked_macs {');
-  lines.push('    type ether_addr');
+  lines.push('    type ether_addr;');
   lines.push('  }');
   lines.push('');
   lines.push('  chain input {');
+  lines.push('    type filter hook input priority filter; policy drop;');
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
 
   lines.push('    ct state established,related accept');
@@ -408,13 +418,6 @@ export function compileSatelliteNftables(node: any): CompileResult {
 function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   const parts: string[] = [];
 
-  // Protocol
-  if (rule.protocol === 'tcp_udp') {
-    parts.push('meta l4proto { tcp, udp }');
-  } else if (rule.protocol !== 'any') {
-    parts.push(`ip protocol ${rule.protocol}`);
-  }
-
   // Source Address
   if (rule.source && rule.source !== 'any') {
     if (rule.source.startsWith('$')) {
@@ -435,29 +438,28 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
     }
   }
 
-  // Ports
-  const isTcpOrUdp = rule.protocol === 'tcp' || rule.protocol === 'udp' || rule.protocol === 'tcp_udp';
-  if (isTcpOrUdp) {
-    if (rule.sourcePort && rule.sourcePort !== 'any') {
-      if (rule.sourcePort.startsWith('$')) {
-        const aliasName = sanitizeIdentifier(rule.sourcePort.slice(1));
-        parts.push(`sport @set_${aliasName}`);
-      } else if (rule.sourcePort.includes('-')) {
-        parts.push(`sport ${rule.sourcePort}`);
-      } else {
-        parts.push(`sport ${rule.sourcePort}`);
-      }
+  // Protocol & Ports
+  const hasSport = Boolean(rule.sourcePort && rule.sourcePort !== 'any');
+  const hasDport = Boolean(rule.destinationPort && rule.destinationPort !== 'any');
+
+  const formatPort = (val: string) => {
+    if (val.startsWith('$')) return `@set_${sanitizeIdentifier(val.slice(1))}`;
+    return val;
+  };
+
+  if (rule.protocol === 'tcp' || rule.protocol === 'udp') {
+    if (hasSport || hasDport) {
+      if (hasSport) parts.push(`${rule.protocol} sport ${formatPort(rule.sourcePort!)}`);
+      if (hasDport) parts.push(`${rule.protocol} dport ${formatPort(rule.destinationPort!)}`);
+    } else {
+      parts.push(`ip protocol ${rule.protocol}`);
     }
-    if (rule.destinationPort && rule.destinationPort !== 'any') {
-      if (rule.destinationPort.startsWith('$')) {
-        const aliasName = sanitizeIdentifier(rule.destinationPort.slice(1));
-        parts.push(`dport @set_${aliasName}`);
-      } else if (rule.destinationPort.includes('-')) {
-        parts.push(`dport ${rule.destinationPort}`);
-      } else {
-        parts.push(`dport ${rule.destinationPort}`);
-      }
-    }
+  } else if (rule.protocol === 'tcp_udp') {
+    parts.push('meta l4proto { tcp, udp }');
+    if (hasSport) parts.push(`th sport ${formatPort(rule.sourcePort!)}`);
+    if (hasDport) parts.push(`th dport ${formatPort(rule.destinationPort!)}`);
+  } else if (rule.protocol !== 'any') {
+    parts.push(`ip protocol ${rule.protocol}`);
   }
 
   // Logging

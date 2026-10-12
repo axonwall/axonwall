@@ -14,12 +14,17 @@ export async function POST(req: Request) {
       data: result,
     });
   } catch (err: any) {
+    const statusCode = err.message?.includes('Unauthorized')
+      ? 401
+      : err.message?.includes('Admin')
+        ? 403
+        : 400;
     return NextResponse.json(
       {
         status: 'error',
         error: err.message,
       },
-      { status: 400 }
+      { status: statusCode }
     );
   }
 }

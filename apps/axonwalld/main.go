@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -44,8 +47,19 @@ type AgentServer struct {
 
 func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine) *AgentServer {
 	hostname, _ := os.Hostname()
+
+	initHash := ""
+	for _, checkPath := range []string{"/etc/nftables.conf", filepath.Join(bundleDir, "last-known-good.nft")} {
+		if data, err := os.ReadFile(checkPath); err == nil && len(data) > 0 {
+			h := sha256.Sum256(data)
+			initHash = hex.EncodeToString(h[:])
+			break
+		}
+	}
+
 	return &AgentServer{
 		bundleDir:   bundleDir,
+		activeHash:  initHash,
 		nodeId:      fmt.Sprintf("axonwall-%s", hostname),
 		startTime:   time.Now(),
 		iapManager:  iapManager,
@@ -508,12 +522,110 @@ func main() {
 		log.Printf("[Agent] Warning: Failed to start eBPF manager: %v", err)
 	}
 
+	// Start HTTP REST listener over Unix socket for local UI and management tooling
+	apiSocketPath := filepath.Join(sockDir, "agent-api.sock")
+	_ = os.Remove(apiSocketPath)
+	apiListener, err := net.Listen("unix", apiSocketPath)
+	var apiServer *http.Server
+	if err != nil {
+		log.Printf("[Agent] Warning: Failed to listen on API unix socket %s: %v", apiSocketPath, err)
+	} else {
+		_ = os.Chmod(apiSocketPath, 0660)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
+			resp, err := agentServer.GetStatus(r.Context(), &pb.GetStatusRequest{})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		})
+		mux.HandleFunc("/v1/apply", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req pb.ApplyBundleRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			resp, err := agentServer.ApplyBundle(r.Context(), &req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		})
+		mux.HandleFunc("/v1/confirm", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req pb.ConfirmRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			resp, err := agentServer.Confirm(r.Context(), &req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		})
+		mux.HandleFunc("/v1/rollback", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req pb.RollbackRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			resp, err := agentServer.Rollback(r.Context(), &req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		})
+		mux.HandleFunc("/v1/diagnostic", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req pb.DiagnosticRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			resp, err := agentServer.ExecuteDiagnostic(r.Context(), &req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		})
+		apiServer = &http.Server{Handler: mux}
+		go func() {
+			log.Printf("[Agent] Listening on REST Unix socket: %s", apiSocketPath)
+			if err := apiServer.Serve(apiListener); err != nil && err != http.ErrServerClosed {
+				log.Printf("[Agent] REST Unix socket server stopped: %v", err)
+			}
+		}()
+	}
+
 	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
 		log.Println("[Agent] Shutting down agent daemon...")
+		if apiServer != nil {
+			_ = apiServer.Close()
+			_ = os.Remove(apiSocketPath)
+		}
 		watchdog.Stop()
 		iapManager.Stop()
 		haEngine.Stop()

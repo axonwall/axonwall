@@ -1,7 +1,7 @@
 [Unit]
 Description=Axonwall Web Console & API Server
 Documentation=https://github.com/axonwall/axonwall
-After=network.target axonwalld.service
+After=network.target axonwalld.service axonwall-firstboot.service
 Wants=axonwalld.service
 
 [Service]
@@ -9,9 +9,11 @@ Type=simple
 User=axonwall
 Group=axonwall
 WorkingDirectory=/opt/axonwall/apps/axonwall
+EnvironmentFile=-/etc/axonwall/axonwall.env
+EnvironmentFile=-/etc/axonwall/admin.env
 Environment=NODE_ENV=production
 Environment=PORT=3000
-Environment=HOSTNAME=0.0.0.0
+Environment=HOSTNAME=127.0.0.1
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5s
@@ -21,6 +23,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
+ReadWritePaths=/opt/axonwall /var/lib/axonwall /etc/axonwall /run/axonwall
 
 [Install]
 WantedBy=multi-user.target

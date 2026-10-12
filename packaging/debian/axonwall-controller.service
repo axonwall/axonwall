@@ -1,7 +1,7 @@
 [Unit]
 Description=Axonwall Changeset & Policy Compiler Controller
 Documentation=https://github.com/axonwall/axonwall
-After=network.target axonwalld.service
+After=network.target axonwalld.service axonwall-firstboot.service
 Wants=axonwalld.service
 
 [Service]
@@ -9,6 +9,7 @@ Type=simple
 User=axonwall
 Group=axonwall
 WorkingDirectory=/opt/axonwall/apps/axonwall-controller
+EnvironmentFile=-/etc/axonwall/axonwall.env
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
@@ -17,6 +18,7 @@ RestartSec=5s
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/opt/axonwall /var/lib/axonwall /etc/axonwall
 
 [Install]
 WantedBy=multi-user.target

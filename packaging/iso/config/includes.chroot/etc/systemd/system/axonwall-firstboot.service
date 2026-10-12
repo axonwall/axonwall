@@ -1,6 +1,7 @@
 [Unit]
 Description=Axonwall Firstboot Appliance Provisioner
 After=network.target
+Before=axonwall-controller.service axonwall-ui.service headscale.service
 ConditionPathExists=/etc/axonwall/.firstboot
 
 [Service]

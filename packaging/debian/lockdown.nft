@@ -2,6 +2,11 @@
 # /usr/share/axonwall/lockdown.nft - Fail-safe emergency boot ruleset
 # Axonwall owns ONLY 'table inet axonwall'. Never flushes other tables.
 
+# Idempotent: create-if-missing then flush, so re-applying (e.g. on every
+# axonwalld restart via ExecStartPre) doesn't append duplicate rules.
+table inet axonwall {}
+flush table inet axonwall
+
 table inet axonwall {
     chain input {
         type filter hook input priority filter; policy drop;
@@ -18,7 +23,7 @@ table inet axonwall {
         icmpv6 type { echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded } accept
 
         # Emergency Anti-Lockout on any non-wan interface
-        tcp dport { 22, 80, 443, 3000 } accept comment "emergency-anti-lockout"
+        tcp dport { 22, 80, 443, 8443 } accept comment "emergency-anti-lockout"
     }
 
     chain forward {

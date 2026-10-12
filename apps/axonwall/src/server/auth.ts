@@ -2,6 +2,8 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 
 import {
   authenticateLdap,
@@ -9,18 +11,11 @@ import {
   mintSupabaseToken,
   verifyToken,
   type LdapConfig,
+  type AuthResult,
 } from '@axonwall/lib/ldap';
 import type { UserSession } from '@axonwall/lib/rbac';
 
-const SESSION_COOKIE = 'axonwall_session';
-
-function getJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
-  if (process.env.NODE_ENV === 'production' && !secret) {
-    throw new Error('JWT_SECRET environment variable is required in production');
-  }
-  return secret || 'super-secret-axonwall-jwt-signing-key-32-bytes!';
-}
+import { SESSION_COOKIE, getJwtSecret } from './auth-constants';
 
 const LDAP_CONFIG: LdapConfig = {
   url: process.env.LDAP_URL || 'ldap://127.0.0.1:389',
@@ -46,7 +41,9 @@ export async function getSession(): Promise<UserSession | null> {
     if (authHeader && authHeader.startsWith('Bearer ')) {
       token = authHeader.substring(7);
       if (token === 'dev-test-token-123') {
-         return { userId: '1', username: 'admin', source: 'local_admin', privileges: [], roles: ['admin'], exp: Date.now() / 1000 + 3600 } as any;
+        if (process.env.NODE_ENV !== 'production') {
+          return { userId: '1', username: 'admin', source: 'local_admin', privileges: [], roles: ['admin'], exp: Date.now() / 1000 + 3600 } as any;
+        }
       }
     }
   }
@@ -55,44 +52,89 @@ export async function getSession(): Promise<UserSession | null> {
   return verifyToken(token, getJwtSecret());
 }
 
-export async function loginAction(prevState: any, formData: FormData) {
-  const username = formData.get('username') as string;
-  const password = formData.get('password') as string;
-  const totpCode = formData.get('totpCode') as string;
-
+export async function performAuthentication(
+  username: string,
+  password: string,
+  totpCode?: string
+): Promise<AuthResult> {
   if (!username || !password) {
-    return { error: 'Username and password are required' };
+    return { success: false, error: 'Username and password are required' };
   }
 
   // 1. Check local break-glass admin first
-  const localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
-  const localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || 'axonwalladmin';
+  let localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
+  let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || 'axonwall';
 
-  let authRes = authenticateLocalAdmin(username, password, localAdminUser, localAdminPass);
-
-  
-  // 1.5 Enforce MFA if required
-  const mfaSecret = process.env.LOCAL_ADMIN_MFA_SECRET;
-  if (mfaSecret && authRes.success) {
-    if (!totpCode) {
-      return { error: 'MFA Code (TOTP) is required for this account' };
+  try {
+    if (fs.existsSync('/etc/axonwall/admin.env')) {
+      const content = fs.readFileSync('/etc/axonwall/admin.env', 'utf-8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('LOCAL_ADMIN_USER=')) {
+          localAdminUser = trimmed.substring('LOCAL_ADMIN_USER='.length);
+        } else if (trimmed.startsWith('LOCAL_ADMIN_PASSWORD=')) {
+          localAdminPass = trimmed.substring('LOCAL_ADMIN_PASSWORD='.length);
+        }
+      }
     }
-    const { authenticator } = require('otplib');
-    const isValid = authenticator.verify({ token: totpCode, secret: mfaSecret });
-    if (!isValid) {
-      return { error: 'Invalid MFA Code' };
-    }
+  } catch {
+    // fallback to env
   }
 
-  // 2. Fall back to LDAP if local admin did not match
-  if (!authRes.success) {
+  // If attempting to authenticate as local admin
+  if (username === localAdminUser) {
+    const authRes = authenticateLocalAdmin(username, password, localAdminUser, localAdminPass);
+    if (!authRes.success) {
+      return { success: false, error: 'Invalid username or password' };
+    }
+
+    // 1.5 Enforce MFA if required
+    const mfaSecret = process.env.LOCAL_ADMIN_MFA_SECRET;
+    if (mfaSecret && authRes.success) {
+      if (!totpCode) {
+        return { success: false, error: 'MFA Code (TOTP) is required for this account' };
+      }
+      const { authenticator } = require('otplib');
+      const isValid = authenticator.verify({ token: totpCode, secret: mfaSecret });
+      if (!isValid) {
+        return { success: false, error: 'Invalid MFA Code' };
+      }
+    }
+    return authRes;
+  }
+
+  // 2. Fall back to LDAP ONLY if explicitly enabled/configured
+  const isLdapEnabled =
+    process.env.LDAP_ENABLED === 'true' ||
+    (process.env.LDAP_URL ? !process.env.LDAP_URL.includes('127.0.0.1:389') : false);
+
+  if (isLdapEnabled) {
     try {
-      authRes = await authenticateLdap(LDAP_CONFIG, username, password);
+      return await authenticateLdap(LDAP_CONFIG, username, password);
     } catch (err: any) {
-      authRes = { success: false, error: err.message };
+      return { success: false, error: `LDAP authentication failed: ${err.message}` };
     }
   }
 
+  return { success: false, error: 'Invalid username or password' };
+}
+
+export async function loginAction(arg1: any, arg2?: any) {
+  const formData = (arg2 && typeof arg2.get === 'function')
+    ? (arg2 as FormData)
+    : (arg1 && typeof arg1.get === 'function')
+      ? (arg1 as FormData)
+      : null;
+
+  if (!formData) {
+    return { error: 'Invalid form submission' };
+  }
+
+  const username = formData.get('username') as string;
+  const password = formData.get('password') as string;
+  const totpCode = (formData.get('totpCode') as string) || undefined;
+
+  const authRes = await performAuthentication(username, password, totpCode);
   if (!authRes.success || !authRes.session) {
     return { error: authRes.error || 'Authentication failed' };
   }
@@ -145,3 +187,115 @@ export async function verifyMfaSetup(secret: string, token: string) {
   // In a real app, save the secret to the user's LDAP/DB profile here.
   return { success: true };
 }
+
+export async function isPasswordChangeRequired(): Promise<boolean> {
+  const session = await getSession();
+  if (!session || session.source !== 'local_admin') {
+    return false;
+  }
+
+  try {
+    if (
+      fs.existsSync('/var/lib/axonwall/.password_changed') ||
+      fs.existsSync('/etc/axonwall/.password_changed') ||
+      fs.existsSync('./.password_changed')
+    ) {
+      return false;
+    }
+  } catch {}
+
+  // In development/test environments, only enforce if explicit or if using default password
+  if (process.env.NODE_ENV !== 'production' && process.env.FORCE_PASSWORD_CHANGE !== 'true') {
+    return false;
+  }
+
+  return true;
+}
+
+export async function changeAdminPasswordAction(formData: FormData) {
+  const session = await getSession();
+  if (!session || session.source !== 'local_admin') {
+    return { error: 'Unauthorized: only local administrator can perform this action' };
+  }
+
+  const currentPassword = formData.get('currentPassword') as string;
+  const newPassword = formData.get('newPassword') as string;
+  const confirmPassword = formData.get('confirmPassword') as string;
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    return { error: 'All fields are required' };
+  }
+
+  if (newPassword !== confirmPassword) {
+    return { error: 'New password and confirmation do not match' };
+  }
+
+  if (newPassword.length < 8) {
+    return { error: 'New password must be at least 8 characters long' };
+  }
+
+  if (newPassword === 'axonwall') {
+    return { error: 'You cannot reuse the default password' };
+  }
+
+  // Verify current password
+  let localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
+  let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || 'axonwall';
+
+  try {
+    if (fs.existsSync('/etc/axonwall/admin.env')) {
+      const content = fs.readFileSync('/etc/axonwall/admin.env', 'utf-8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('LOCAL_ADMIN_USER=')) {
+          localAdminUser = trimmed.substring('LOCAL_ADMIN_USER='.length);
+        } else if (trimmed.startsWith('LOCAL_ADMIN_PASSWORD=')) {
+          localAdminPass = trimmed.substring('LOCAL_ADMIN_PASSWORD='.length);
+        }
+      }
+    }
+  } catch {}
+
+  const authRes = authenticateLocalAdmin(session.username, currentPassword, localAdminUser, localAdminPass);
+  if (!authRes.success) {
+    return { error: 'Current password is incorrect' };
+  }
+
+  // Hash new password using scrypt (N=16384, r=8, p=1, keyLen=64)
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(newPassword, salt, 64).toString('hex');
+  const hashedSecret = `scrypt$${salt}$${hash}`;
+
+  try {
+    if (!fs.existsSync('/etc/axonwall')) {
+      fs.mkdirSync('/etc/axonwall', { recursive: true, mode: 0o755 });
+    }
+    if (!fs.existsSync('/var/lib/axonwall')) {
+      fs.mkdirSync('/var/lib/axonwall', { recursive: true, mode: 0o755 });
+    }
+
+    const envContent = `LOCAL_ADMIN_USER=${localAdminUser}\nLOCAL_ADMIN_PASSWORD=${hashedSecret}\n`;
+    fs.writeFileSync('/etc/axonwall/admin.env', envContent, { mode: 0o600 });
+
+    const now = new Date().toISOString();
+    fs.writeFileSync('/etc/axonwall/.password_changed', now, { mode: 0o644 });
+    fs.writeFileSync('/var/lib/axonwall/.password_changed', now, { mode: 0o644 });
+
+    if (fs.existsSync('/etc/axonwall/initial-admin-password')) {
+      fs.unlinkSync('/etc/axonwall/initial-admin-password');
+    }
+
+    process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
+    return { success: true };
+  } catch (err: any) {
+    // Development fallback if lacking root permissions
+    try {
+      fs.writeFileSync('./.password_changed', new Date().toISOString());
+      process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
+      return { success: true };
+    } catch {
+      return { error: `Failed to persist new credentials: ${err.message}` };
+    }
+  }
+}
+
