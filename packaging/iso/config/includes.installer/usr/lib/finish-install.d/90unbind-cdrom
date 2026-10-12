@@ -1,0 +1,3 @@
+#!/bin/sh
+umount /target/media/cdrom0 2>/dev/null || true
+umount /target/media/cdrom 2>/dev/null || true

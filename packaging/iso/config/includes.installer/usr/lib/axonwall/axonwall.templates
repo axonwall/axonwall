@@ -1,0 +1,14 @@
+Template: passwd/root-password
+Type: password
+Description: Axonwall Administrator Password:
+ Please enter the administrator password for Axonwall. This password will be
+ used to log into the Web Console (https://<ip>:8443) and Appliance Console as
+ 'admin', as well as the underlying system root account.
+ .
+ Note that you will not be able to see the password as you type it.
+
+Template: passwd/root-password-again
+Type: password
+Description: Re-enter Axonwall Administrator Password:
+ Please enter the administrator password again to verify that you have typed it
+ correctly.

@@ -68,7 +68,7 @@ export default function SystemPage() {
           <div className="text-xs text-slate-300 space-y-2">
             <div className="flex justify-between">
               <span className="text-slate-400">Kernel Firewall:</span>
-              <span>Linux nftables v1.1.3</span>
+              <span className="text-emerald-400 font-medium">Linux nftables (Active)</span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-400">Table Ownership:</span>

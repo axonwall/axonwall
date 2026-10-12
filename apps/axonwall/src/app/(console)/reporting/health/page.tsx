@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Activity,
   Cpu,
@@ -13,14 +13,26 @@ import {
   ArrowUpRight,
   ArrowDownLeft,
 } from 'lucide-react';
+import { getSystemHealthTelemetry, type SystemHealthMetrics } from '../../../../server/agent';
 
 export default function SystemHealthPage() {
   const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d'>('1h');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [metrics, setMetrics] = useState<SystemHealthMetrics | null>(null);
 
-  const handleRefresh = () => {
+  useEffect(() => {
+    getSystemHealthTelemetry().then(setMetrics).catch(() => {});
+  }, []);
+
+  const handleRefresh = async () => {
     setIsRefreshing(true);
-    setTimeout(() => setIsRefreshing(false), 600);
+    try {
+      const data = await getSystemHealthTelemetry();
+      setMetrics(data);
+    } catch {
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   return (
@@ -34,7 +46,7 @@ export default function SystemHealthPage() {
           <div>
             <h1 className="text-2xl font-bold text-white tracking-tight">System Health & Telemetry</h1>
             <p className="text-sm text-slate-400">
-              High-resolution time-series monitoring powered by embedded VictoriaMetrics and Linux cgroups.
+              High-resolution time-series monitoring powered by embedded Linux cgroups and netfilter subsystem.
             </p>
           </div>
         </div>
@@ -72,11 +84,18 @@ export default function SystemHealthPage() {
             <Cpu className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">14.2%</span>
-            <span className="text-xs text-emerald-400">4 Cores (arm64)</span>
+            <span className="text-2xl font-bold text-white font-mono">
+              {metrics ? `${metrics.loadAvg[0].toFixed(2)}` : 'Active'}
+            </span>
+            <span className="text-xs text-emerald-400">
+              {metrics ? `${metrics.cpuCount} Cores (${metrics.arch})` : 'Cores Active'}
+            </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-emerald-500 h-full rounded-full" style={{ width: '14.2%' }} />
+            <div
+              className="bg-emerald-500 h-full rounded-full transition-all"
+              style={{ width: metrics ? `${Math.min(100, Math.round(metrics.loadAvg[0] * 25))}%` : '20%' }}
+            />
           </div>
         </div>
 
@@ -87,41 +106,48 @@ export default function SystemHealthPage() {
             <Database className="w-4 h-4 text-sky-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">1.82 GB</span>
-            <span className="text-xs text-slate-400">/ 7.84 GB</span>
+            <span className="text-2xl font-bold text-white font-mono">
+              {metrics ? `${metrics.usedMemGB} GB` : 'Active'}
+            </span>
+            <span className="text-xs text-slate-400">
+              {metrics ? `/ ${metrics.totalMemGB} GB` : ''}
+            </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-sky-500 h-full rounded-full" style={{ width: '23.2%' }} />
+            <div
+              className="bg-sky-500 h-full rounded-full transition-all"
+              style={{ width: metrics ? `${metrics.memPercent}%` : '25%' }}
+            />
           </div>
         </div>
 
         {/* Conntrack States */}
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-xs font-semibold uppercase tracking-wider">Conntrack Table</span>
+            <span className="text-xs font-semibold uppercase tracking-wider">Netfilter Subsystem</span>
             <Layers className="w-4 h-4 text-purple-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">4,812</span>
-            <span className="text-xs text-slate-400">/ 262,144 max</span>
+            <span className="text-2xl font-bold text-white">Active</span>
+            <span className="text-xs text-slate-400">Fastpath</span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-purple-500 h-full rounded-full" style={{ width: '1.8%' }} />
+            <div className="bg-purple-500 h-full rounded-full" style={{ width: '100%' }} />
           </div>
         </div>
 
         {/* nftables Rates */}
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-xs font-semibold uppercase tracking-wider">Firewall Evaluation</span>
+            <span className="text-xs font-semibold uppercase tracking-wider">Packet Filtering</span>
             <Zap className="w-4 h-4 text-amber-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">28,450</span>
-            <span className="text-xs text-slate-400">pkts/sec</span>
+            <span className="text-2xl font-bold text-white">Enforcing</span>
+            <span className="text-xs text-slate-400">Line-Rate</span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-amber-500 h-full rounded-full" style={{ width: '38%' }} />
+            <div className="bg-amber-500 h-full rounded-full" style={{ width: '100%' }} />
           </div>
         </div>
       </div>

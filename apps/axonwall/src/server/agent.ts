@@ -122,7 +122,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   if (daemonStatus) {
     return {
       nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
-      version: daemonStatus.version || '0.1.0',
+      version: daemonStatus.version || '0.1.3',
       uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
@@ -158,7 +158,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.1.0',
+    version: '0.1.3',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
@@ -401,5 +401,36 @@ export async function startPacketCapture(
   if (!session) throw new Error('Unauthorized');
 
   return executeCapture({ iface, filter, count });
+}
+
+export interface SystemHealthMetrics {
+  cpuCount: number;
+  arch: string;
+  loadAvg: number[];
+  totalMemGB: number;
+  usedMemGB: number;
+  freeMemGB: number;
+  memPercent: number;
+  uptimeSeconds: number;
+}
+
+export async function getSystemHealthTelemetry(): Promise<SystemHealthMetrics> {
+  const cpus = os.cpus();
+  const arch = process.arch === 'x64' ? 'amd64' : process.arch;
+  const loadAvg = os.loadavg();
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = Math.max(0, totalMem - freeMem);
+
+  return {
+    cpuCount: cpus.length || 1,
+    arch,
+    loadAvg: [Number(loadAvg[0]?.toFixed(2) || '0.00'), Number(loadAvg[1]?.toFixed(2) || '0.00'), Number(loadAvg[2]?.toFixed(2) || '0.00')],
+    totalMemGB: Number((totalMem / (1024 ** 3)).toFixed(2)),
+    usedMemGB: Number((usedMem / (1024 ** 3)).toFixed(2)),
+    freeMemGB: Number((freeMem / (1024 ** 3)).toFixed(2)),
+    memPercent: Number(((usedMem / (totalMem || 1)) * 100).toFixed(1)),
+    uptimeSeconds: Math.floor(os.uptime()),
+  };
 }
 

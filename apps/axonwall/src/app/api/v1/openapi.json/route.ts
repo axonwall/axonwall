@@ -5,7 +5,7 @@ export async function GET() {
     openapi: '3.1.0',
     info: {
       title: 'Axonwall Firewall REST API',
-      version: '1.0.0',
+      version: '0.1.3',
       description: 'Declarative REST API for managing Axonwall Linux nftables firewalls, routing, services, and commit-confirm apply pipeline.',
     },
     servers: [

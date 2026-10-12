@@ -1,0 +1,5 @@
+#!/bin/sh
+# Ensure CD-ROM pool is accessible inside /target so in-target apt-get never prompts for media change
+mkdir -p /target/media/cdrom /target/media/cdrom0
+mount --bind /cdrom /target/media/cdrom 2>/dev/null || true
+mount --bind /cdrom /target/media/cdrom0 2>/dev/null || true

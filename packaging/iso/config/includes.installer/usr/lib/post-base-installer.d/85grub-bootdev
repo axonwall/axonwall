@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+# Detect the real disk where /target was partitioned and installed
+TARGET_DEV=$(df /target 2>/dev/null | tail -n1 | awk '{print $1}')
+TARGET_DISK=$(echo "$TARGET_DEV" | sed -E 's/p?[0-9]+$//')
+
+if [ -b "$TARGET_DISK" ]; then
+  debconf-set grub-installer/bootdev "$TARGET_DISK" 2>/dev/null || true
+  debconf-set grub-installer/choose_bootdev "$TARGET_DISK" 2>/dev/null || true
+  echo "grub-installer grub-installer/bootdev string $TARGET_DISK" | debconf-set-selections 2>/dev/null || true
+  echo "grub-installer grub-installer/choose_bootdev select $TARGET_DISK" | debconf-set-selections 2>/dev/null || true
+fi

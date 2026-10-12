@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { MeshGraph } from './MeshGraph';
 
-interface MockSatellite {
+interface SatelliteNode {
   id: string;
   name: string;
   location: string;
@@ -41,13 +41,13 @@ interface MockSatellite {
   inheritedProfile: string;
 }
 
-const INITIAL_SATELLITES: MockSatellite[] = [
+const INITIAL_SATELLITES: SatelliteNode[] = [
   {
     id: 'sat-branch-london',
     name: 'London Branch Edge Router',
     location: 'London, UK (Branch #1)',
     arch: 'arm64',
-    os: 'Debian 13 (Bookworm Appliance)',
+    os: 'Debian 13 (Trixie Appliance)',
     ip: '198.51.100.12',
     tunnelIp: '10.99.0.2/24',
     status: 'online',
@@ -117,10 +117,10 @@ const INITIAL_SATELLITES: MockSatellite[] = [
 ];
 
 export default function FleetPage() {
-  const [satellites, setSatellites] = useState<MockSatellite[]>(INITIAL_SATELLITES);
+  const [satellites, setSatellites] = useState<SatelliteNode[]>(INITIAL_SATELLITES);
   const [selectedTag, setSelectedTag] = useState('ALL');
   const [search, setSearch] = useState('');
-  const [selectedSat, setSelectedSat] = useState<MockSatellite | null>(INITIAL_SATELLITES[1]);
+  const [selectedSat, setSelectedSat] = useState<SatelliteNode | null>(INITIAL_SATELLITES[1]);
   const [isZtpModalOpen, setIsZtpModalOpen] = useState(false);
   const [generatedToken, setGeneratedToken] = useState('ztp_axon_98f4c1e20a4b77');
   const [copied, setCopied] = useState(false);

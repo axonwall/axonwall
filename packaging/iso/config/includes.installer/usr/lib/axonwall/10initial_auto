@@ -1,0 +1,137 @@
+#!/bin/sh
+
+. /lib/partman/lib/base.sh
+
+# Only run the first time
+if [ -f /var/lib/partman/initial_auto ]; then
+	exit 0
+fi
+
+. /lib/partman/lib/auto-shared.sh
+
+# Skip if no disks detected and don't run on S/390
+if [ -z "$(get_auto_disks)" ] || \
+   [ "$(udpkg --print-architecture)" = s390 ]; then
+	exit 0
+fi
+
+mkdir -p /var/lib/partman
+touch /var/lib/partman/initial_auto
+
+# See if any autopartition method has been set
+method=""
+if db_get partman-auto/method && [ "$RET" ]; then
+	method="$RET"
+fi
+
+# See if any autopartition disks have been set
+disks=""
+if db_get partman-auto/disk && [ "$RET" ]; then
+	disks="$RET"
+fi
+
+# Axonwall: Always prompt user to select the target installation disk
+if [ "$method" ] && [ -z "$disks" ]; then
+	disk=$(select_auto_disk) || exit 99
+	disks="$disk"
+	dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+	if [ -n "$dev_name" ]; then
+		echo "grub-installer grub-installer/bootdev string $dev_name" | debconf-set-selections 2>/dev/null || true
+		echo "grub-installer grub-installer/choose_bootdev select $dev_name" | debconf-set-selections 2>/dev/null || true
+	fi
+fi
+
+# If both are set, let's try to do a completely automatic partitioning
+if [ "$method" ] && [ "$disks" ]; then
+	case "$method" in
+	    regular)
+		for disk in $disks; do
+			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+			id=$(dev_to_partman "$dev_name") || true
+			if [ -z "$id" ]; then
+				id=$(dev_to_partman "$disk") || true
+			fi
+			if [ -z "$id" ]; then
+				id="$disk"
+			fi
+			if [ "$id" ]; then
+				autopartition "$id"
+				exit 0
+			fi
+		done
+		exit 1
+		;;
+	    lvm)
+		search-path autopartition-lvm || exit 1
+		ids=""
+		for disk in $disks; do
+			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+			id=$(dev_to_partman "$dev_name") || true
+			if [ -z "$id" ]; then
+				id=$(dev_to_partman "$disk") || true
+			fi
+			if [ -z "$id" ]; then
+				id="$disk"
+			fi
+			ids="${ids:+$ids }$id"
+		done
+		if [ "$ids" ]; then
+			autopartition-lvm "$ids"
+			exit 0
+		fi
+		exit 1
+		;;
+	    crypto)
+		search-path autopartition-crypto || exit 1
+		for disk in $disks; do
+			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+			id=$(dev_to_partman "$dev_name") || true
+			if [ -z "$id" ]; then
+				id=$(dev_to_partman "$disk") || true
+			fi
+			if [ -z "$id" ]; then
+				id="$disk"
+			fi
+			if [ "$id" ]; then
+				autopartition-crypto "$id"
+				exit 0
+			fi
+		done
+		exit 1
+		;;
+	    raid)
+		ids=""
+		for disk in $disks; do
+			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+			id=$(dev_to_partman "$dev_name") || true
+			if [ -z "$id" ]; then
+				id=$(dev_to_partman "$disk") || true
+			fi
+			if [ -z "$id" ]; then
+				id="$disk"
+			fi
+			ids="${ids:+$ids }$id"
+		done
+		auto_init_disks $ids || exit $?
+		autopartition "$ids"
+		exit 0
+		;;
+	    *)
+		logger -t partman-auto "Unsupported method '$method'"
+		exit 1
+		;;
+	esac
+fi
+
+qfile=/lib/partman/automatically_partition/question
+echo "partman-auto/init_automatically_partition" >$qfile
+code=99 # signals a retry
+while [ $code = 99 ]; do
+	ask_user /lib/partman/automatically_partition
+	code=$?
+done
+if [ $code -gt 0 ] && [ $code -lt 100 ]; then
+	rm -f /var/lib/partman/initial_auto # try again
+fi
+echo "partman-auto/automatically_partition" >$qfile
+exit $code

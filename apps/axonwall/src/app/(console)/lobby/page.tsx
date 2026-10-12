@@ -13,6 +13,7 @@ import { getAgentStatus } from '../../../server/agent';
 
 export default async function LobbyPage() {
   const status = await getAgentStatus();
+  const arch = process.arch === 'x64' ? 'amd64' : process.arch;
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -28,7 +29,7 @@ export default async function LobbyPage() {
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
           <div>
             <span className="text-xs text-slate-400 block font-medium">Data Plane Engine</span>
-            <span className="text-lg font-bold text-white mt-1 block">nftables v1.1</span>
+            <span className="text-lg font-bold text-white mt-1 block">nftables</span>
             <span className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1">
               <CheckCircle2 className="w-3.5 h-3.5" /> Fastpath Active
             </span>
@@ -44,7 +45,7 @@ export default async function LobbyPage() {
             <span className="text-lg font-bold text-white mt-1 block">
               {Math.floor(status.uptimeSeconds / 3600)}h {Math.floor((status.uptimeSeconds % 3600) / 60)}m
             </span>
-            <span className="text-[11px] text-slate-400 mt-1 block">Debian 13 Linux (arm64)</span>
+            <span className="text-[11px] text-slate-400 mt-1 block font-mono">Debian 13 Linux ({arch})</span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
             <Activity className="w-5 h-5" />
@@ -112,15 +113,16 @@ export default async function LobbyPage() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-4 text-xs font-mono text-slate-300">
-                  <div className="flex items-center gap-1 text-emerald-400">
-                    <ArrowDownLeft className="w-3.5 h-3.5" />
-                    <span>1.2 MB/s</span>
-                  </div>
-                  <div className="flex items-center gap-1 text-cyan-400">
-                    <ArrowUpRight className="w-3.5 h-3.5" />
-                    <span>420 KB/s</span>
-                  </div>
+                <div className="flex items-center gap-2 text-xs font-mono">
+                  <span
+                    className={`px-2.5 py-0.5 rounded text-[11px] font-semibold border ${
+                      iface.isUp
+                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                        : 'bg-slate-800 text-slate-500 border-slate-700'
+                    }`}
+                  >
+                    {iface.isUp ? 'Carrier UP' : 'Carrier DOWN'}
+                  </span>
                 </div>
               </div>
             ))}
