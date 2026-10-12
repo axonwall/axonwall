@@ -106,14 +106,12 @@ jobs:
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
           sudo chown -R $USER:$USER packaging/iso/output
 
-      - name: Upload ISO Artifact
+      - name: Upload Build Checksum Artifact
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: axonwall-debian13-amd64-iso
-          path: |
-            packaging/iso/output/axonwall-debian13-amd64.iso
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+          name: axonwall-debian13-amd64-checksum
+          path: packaging/iso/output/axonwall-debian13-amd64.iso.sha256
           retention-days: 1
 
       - name: Release ISO (on tag)
