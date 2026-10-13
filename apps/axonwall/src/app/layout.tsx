@@ -12,8 +12,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className="bg-slate-950 text-slate-100 antialiased selection:bg-emerald-500 selection:text-slate-950">
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              try {
+                var tid = localStorage.getItem('axonwall_theme_id') || 'axonwall-emerald';
+                document.documentElement.setAttribute('data-theme', tid);
+              } catch (e) {}
+            `,
+          }}
+        />
+      </head>
+      <body className="text-slate-100 antialiased selection:bg-emerald-500 selection:text-slate-950">
         {children}
       </body>
     </html>

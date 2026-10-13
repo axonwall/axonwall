@@ -4,6 +4,7 @@ import { Shield, Clock, RotateCcw, CheckCircle2, LogOut, UserCheck } from 'lucid
 import { logoutAction } from '../server/auth';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { useState, useEffect } from 'react';
+import { ThemeSwitcher } from './ThemeSwitcher';
 
 interface ConsoleHeaderProps {
   session: UserSession | null;
@@ -75,7 +76,9 @@ export function ConsoleHeader({
           )}
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          <ThemeSwitcher />
+
           {session && (
             <div className="flex items-center gap-2 text-xs text-slate-300">
               <UserCheck className="w-4 h-4 text-emerald-400" />
