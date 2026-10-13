@@ -1,0 +1,34 @@
+#!/bin/sh
+set -e
+
+echo "[Hook] Pruning non-networking hardware blobs, GPU drivers, documentation and APT cache..."
+
+# 1. Clean APT cache to avoid bloating SquashFS, but preserve offline bootloader packages if staged
+if [ -d /var/cache/apt/archives ]; then
+  mkdir -p /tmp/bootloader-debs
+  mv /var/cache/apt/archives/grub*.deb /var/cache/apt/archives/shim*.deb /var/cache/apt/archives/efiboot*.deb /var/cache/apt/archives/ucf*.deb /tmp/bootloader-debs/ 2>/dev/null || true
+  rm -rf /var/cache/apt/archives/*.deb || true
+  mv /tmp/bootloader-debs/* /var/cache/apt/archives/ 2>/dev/null || true
+  rm -rf /tmp/bootloader-debs
+fi
+rm -rf /var/lib/apt/lists/* || true
+
+# 2. Prune heavy non-router/display/audio firmware if any package brought them in
+if [ -d /usr/lib/firmware ]; then
+  # Graphics & GPU blobs
+  rm -rf /usr/lib/firmware/amdgpu /usr/lib/firmware/radeon /usr/lib/firmware/nvidia*
+  rm -rf /usr/lib/firmware/i915 /usr/lib/firmware/xe /usr/lib/firmware/cirrus
+  # SmartNIC / enterprise accelerator blobs not needed for standard NICs / VMs
+  rm -rf /usr/lib/firmware/netronome /usr/lib/firmware/liquidio /usr/lib/firmware/qlogic
+  # Audio, TV, camera & modem blobs
+  rm -rf /usr/lib/firmware/intel/sof* /usr/lib/firmware/intel/avs*
+  rm -rf /usr/lib/firmware/amdnpu /usr/lib/firmware/arm /usr/lib/firmware/siano
+fi
+
+# 3. Strip manual and documentation
+rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/* 2>/dev/null || true
+
+# 4. Remove temporary build files
+rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
+
+echo "[Hook] Image pruning completed."

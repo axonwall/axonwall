@@ -17,6 +17,9 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
+if [[ -d "${WORK_DIR}" ]]; then
+  (cd "${WORK_DIR}" && lb clean --purge 2>/dev/null || true)
+fi
 find "${WORK_DIR}" -mindepth 1 -not -path "${WORK_DIR}/cache*" -delete 2>/dev/null || true
 
 # 1. Install prerequisites if missing
@@ -55,6 +58,8 @@ lb config \
   --architectures amd64 \
   --linux-flavours amd64 \
   --archive-areas "main contrib non-free non-free-firmware" \
+  --apt-recommends false \
+  --chroot-squashfs-compression-type xz \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
   --bootappend-live "boot=live components hostname=axonwall username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.user-password=axonwall live-config.root-password=axonwall console=tty0 console=ttyS0,115200" \
@@ -68,8 +73,8 @@ lb config \
   --memtest none \
   --system live
 
-# 3. Copy customized overlays (sysctl, firstboot service, systemd units)
-echo "[+] Copying Axonwall system includes & overlays..."
+# 3. Copy customized overlays (sysctl, firstboot service, systemd units, hooks)
+echo "[+] Copying Axonwall system includes, overlays & chroot hooks..."
 mkdir -p config/includes.chroot
 if [[ -d "${SCRIPT_DIR}/config/includes.chroot" ]]; then
   cp -r "${SCRIPT_DIR}/config/includes.chroot/"* config/includes.chroot/
@@ -84,6 +89,12 @@ mkdir -p config/includes.binary
 if [[ -d "${SCRIPT_DIR}/config/includes.binary" ]]; then
   cp -r "${SCRIPT_DIR}/config/includes.binary/"* config/includes.binary/
 fi
+
+mkdir -p config/hooks/live config/hooks/normal
+if [[ -d "${SCRIPT_DIR}/config/hooks" ]]; then
+  cp -r "${SCRIPT_DIR}/config/hooks/"* config/hooks/
+fi
+chmod +x config/hooks/live/* config/hooks/normal/* 2>/dev/null || true
 
 # Ensure firstboot marker directory and service enable symlink exist
 mkdir -p config/includes.chroot/etc/axonwall/
@@ -224,15 +235,20 @@ cp /var/cache/apt/archives/*.deb config/includes.chroot/var/cache/apt/archives/ 
 mkdir -p config/package-lists
 cat << 'EOF' > config/package-lists/axonwall.list.chroot
 linux-image-amd64
-linux-headers-amd64
 live-boot
 live-boot-initramfs-tools
 live-config
 live-config-systemd
 user-setup
 sudo
-firmware-linux
-firmware-misc-nonfree
+firmware-linux-free
+firmware-realtek
+firmware-atheros
+firmware-bnx2
+firmware-bnx2x
+firmware-iwlwifi
+intel-microcode
+amd64-microcode
 systemd
 systemd-sysv
 grub-pc
@@ -264,6 +280,11 @@ ca-certificates
 nodejs
 net-tools
 openssl
+kmod
+procps
+iputils-ping
+nano
+locales
 EOF
 
 # 5. Build ISO
@@ -273,6 +294,7 @@ lb build
 # 6. Move output image
 if [[ -f live-image-amd64.hybrid.iso ]]; then
   mv live-image-amd64.hybrid.iso "${OUTPUT_DIR}/${ISO_NAME}"
+  (cd "${OUTPUT_DIR}" && sha256sum "${ISO_NAME}" > "${ISO_NAME}.sha256")
   echo "=================================================="
   echo "[✓] Successfully built Axonwall Appliance ISO:"
   echo "    ${OUTPUT_DIR}/${ISO_NAME}"
