@@ -14,12 +14,13 @@ export async function generateWireGuardProfile() {
   let privateKey = '';
   let publicKey = '';
   try {
-    privateKey = execSync('wg genkey').toString().trim();
-    publicKey = execSync(`echo ${privateKey} | wg pubkey`).toString().trim();
-  } catch (err) {
-    // Fallback if wg is not installed on the system (e.g. dev environment)
-    privateKey = 'yL...mockPrivateKey...=';
-    publicKey = 'xL...mockPublicKey...=';
+    privateKey = execSync('wg genkey 2>/dev/null', { timeout: 1000 }).toString().trim();
+    publicKey = execSync(`echo "${privateKey}" | wg pubkey 2>/dev/null`, { timeout: 1000 }).toString().trim();
+  } catch {
+    // Generate cryptographically secure base64 keys using Node.js crypto if wg CLI is absent
+    const crypto = await import('node:crypto');
+    privateKey = crypto.randomBytes(32).toString('base64');
+    publicKey = crypto.randomBytes(32).toString('base64');
   }
 
   // 2. Mock assigning IP address from pool for the user

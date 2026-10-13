@@ -6,44 +6,7 @@ import { compileIpsec } from '@axonwall/lib/compile/ipsec';
 import type { IpsecTunnel } from '@axonwall/lib/schemas';
 
 export default function IpsecPage() {
-  const [tunnels, setTunnels] = useState<IpsecTunnel[]>([
-    {
-      id: 'ipsec-hq',
-      name: 'HQ_DataCenter_SiteToSite',
-      enabled: true,
-      routeBased: true,
-      xfrmInterfaceId: 10,
-      localAddress: '%any',
-      remoteAddress: '198.51.100.250',
-      authMethod: 'psk',
-      presharedKey: 'c8f18471b0e0081d68a2bf6d140f82',
-      ikeProposals: ['aes256-sha256-modp2048'],
-      espProposals: ['aes256gcm16-ecp256'],
-      localTs: ['10.100.0.0/16'],
-      remoteTs: ['10.200.0.0/16'],
-      dpdDelay: 30,
-      dpdAction: 'restart',
-      description: 'Route-based XFRM tunnel to Frankfurt Data Center',
-    },
-    {
-      id: 'ipsec-cloud',
-      name: 'AWS_VPC_DirectConnect',
-      enabled: true,
-      routeBased: true,
-      xfrmInterfaceId: 20,
-      localAddress: '%any',
-      remoteAddress: '52.94.76.1',
-      authMethod: 'psk',
-      presharedKey: '9e7b2319fcae890c294116c90d81fa',
-      ikeProposals: ['aes256-sha256-modp2048'],
-      espProposals: ['aes256gcm16-ecp256'],
-      localTs: ['0.0.0.0/0'],
-      remoteTs: ['0.0.0.0/0'],
-      dpdDelay: 10,
-      dpdAction: 'restart',
-      description: 'AWS Transit Gateway IPsec BGP Peering',
-    },
-  ]);
+  const [tunnels, setTunnels] = useState<IpsecTunnel[]>([]);
 
   const [newName, setNewName] = useState('');
   const [newRemote, setNewRemote] = useState('');
@@ -51,7 +14,7 @@ export default function IpsecPage() {
   const [newDesc, setNewDesc] = useState('');
 
   const compiled = compileIpsec({
-    enabled: true,
+    enabled: tunnels.length > 0,
     tunnels,
   });
 
@@ -108,51 +71,61 @@ export default function IpsecPage() {
               </div>
             </div>
 
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-950/60 text-slate-400 uppercase text-xs border-b border-slate-800">
-                <tr>
-                  <th className="px-4 py-3">Tunnel Name</th>
-                  <th className="px-4 py-3">Mode</th>
-                  <th className="px-4 py-3">Remote Gateway</th>
-                  <th className="px-4 py-3">Traffic Selectors</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {tunnels.map((t) => (
-                  <tr key={t.id} className="hover:bg-slate-800/30">
-                    <td className="px-4 py-3 font-semibold text-white font-mono text-xs">{t.name}</td>
-                    <td className="px-4 py-3">
-                      {t.routeBased ? (
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono text-xs border border-emerald-500/20 font-semibold">
-                          xfrm{t.xfrmInterfaceId}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-slate-400">Policy</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs">{t.remoteAddress}</td>
-                    <td className="px-4 py-3 font-mono text-[11px] text-slate-400">
-                      {t.localTs.join(', ')} ➔ {t.remoteTs.join(', ')}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
-                        <CheckCircle2 className="w-3.5 h-3.5" /> ESTABLISHED
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => setTunnels(tunnels.filter((x) => x.id !== t.id))}
-                        className="text-slate-500 hover:text-red-400 transition"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
+            {tunnels.length === 0 ? (
+              <div className="p-8 text-center text-slate-400">
+                <ShieldCheck className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                <p className="font-semibold text-slate-300">No Configured IPsec Tunnels</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Add a tunnel below to establish secure IKEv2 site-to-site connectivity.
+                </p>
+              </div>
+            ) : (
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-950/60 text-slate-400 uppercase text-xs border-b border-slate-800">
+                  <tr>
+                    <th className="px-4 py-3">Tunnel Name</th>
+                    <th className="px-4 py-3">Mode</th>
+                    <th className="px-4 py-3">Remote Gateway</th>
+                    <th className="px-4 py-3">Traffic Selectors</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                  {tunnels.map((t) => (
+                    <tr key={t.id} className="hover:bg-slate-800/30">
+                      <td className="px-4 py-3 font-semibold text-white font-mono text-xs">{t.name}</td>
+                      <td className="px-4 py-3">
+                        {t.routeBased ? (
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono text-xs border border-emerald-500/20 font-semibold">
+                            xfrm{t.xfrmInterfaceId}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-slate-400">Policy</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs">{t.remoteAddress}</td>
+                      <td className="px-4 py-3 font-mono text-[11px] text-slate-400">
+                        {t.localTs.join(', ')} ➔ {t.remoteTs.join(', ')}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> ESTABLISHED
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => setTunnels(tunnels.filter((x) => x.id !== t.id))}
+                          className="text-slate-500 hover:text-red-400 transition"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
 
           {/* Add Tunnel */}

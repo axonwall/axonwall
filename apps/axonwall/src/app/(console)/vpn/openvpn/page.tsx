@@ -6,52 +6,27 @@ import { compileOpenVpn, generateClientOvpnProfile } from '@axonwall/lib/compile
 import type { OpenVpnServer } from '@axonwall/lib/schemas';
 
 export default function OpenVpnPage() {
-  const [servers] = useState<OpenVpnServer[]>([
-    {
-      id: 'ovpn-roadwarrior',
-      name: 'Corporate_RemoteAccess',
-      enabled: true,
-      protocol: 'udp',
-      port: 1194,
-      deviceType: 'tun',
-      devName: 'ovpn-dco0',
-      dcoEnabled: true,
-      tunnelNetwork: '10.8.0.0/24',
-      localNetwork: '192.168.100.0/24',
-      cipher: 'AES-256-GCM',
-      authDigest: 'SHA256',
-      clientToClient: true,
-      duplicateCn: false,
-      cso: [
-        {
-          id: 'cso-admin',
-          commonName: 'secops-laptop',
-          assignedIp: '10.8.0.10',
-          pushRoutes: ['192.168.200.0/24'],
-          description: 'Security Admin Static IP and DMZ Route',
-        },
-      ],
-      description: 'High-speed remote worker gateway accelerated by Linux ovpn-dco',
-    },
-  ]);
-
+  const [servers] = useState<OpenVpnServer[]>([]);
   const [copied, setCopied] = useState(false);
-  const [selectedServer] = useState(servers[0]);
+  const selectedServer = servers[0];
 
   const compiled = compileOpenVpn({
-    enabled: true,
+    enabled: servers.length > 0,
     servers,
   });
 
-  const clientProfile = generateClientOvpnProfile({
-    serverHost: 'vpn.axonwall.example.com',
-    serverPort: selectedServer?.port || 1194,
-    protocol: selectedServer?.protocol || 'udp',
-    cipher: selectedServer?.cipher || 'AES-256-GCM',
-    caCert: '-----BEGIN CERTIFICATE-----\nMIIB/zCCAaWgAwIBAgIU...\n-----END CERTIFICATE-----',
-  });
+  const clientProfile = selectedServer
+    ? generateClientOvpnProfile({
+        serverHost: 'vpn.axonwall.example.com',
+        serverPort: selectedServer.port || 1194,
+        protocol: selectedServer.protocol || 'udp',
+        cipher: selectedServer.cipher || 'AES-256-GCM',
+        caCert: '-----BEGIN CERTIFICATE-----\n# Provisioned CA Certificate\n-----END CERTIFICATE-----',
+      })
+    : '# No OpenVPN server instance selected or configured.';
 
   const handleCopy = () => {
+    if (!selectedServer) return;
     navigator.clipboard.writeText(clientProfile);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -80,38 +55,48 @@ export default function OpenVpnPage() {
               </div>
             </div>
 
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-950/60 text-slate-400 uppercase text-xs border-b border-slate-800">
-                <tr>
-                  <th className="px-4 py-3">Server Instance</th>
-                  <th className="px-4 py-3">Port / Proto</th>
-                  <th className="px-4 py-3">Tunnel Subnet</th>
-                  <th className="px-4 py-3">DCO Offload</th>
-                  <th className="px-4 py-3">Overrides (CSO)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {servers.map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-800/30">
-                    <td className="px-4 py-3 font-semibold text-white font-mono text-xs">{s.name}</td>
-                    <td className="px-4 py-3 font-mono text-xs uppercase text-emerald-400">
-                      {s.port} / {s.protocol}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs">{s.tunnelNetwork}</td>
-                    <td className="px-4 py-3">
-                      {s.dcoEnabled ? (
-                        <span className="inline-flex items-center gap-1 text-xs text-emerald-400 font-mono">
-                          <Cpu className="w-3.5 h-3.5" /> Kernel DCO
-                        </span>
-                      ) : (
-                        <span className="text-xs text-slate-500">Userspace tun</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-400">{s.cso?.length || 0} Clients</td>
+            {servers.length === 0 ? (
+              <div className="p-8 text-center text-slate-400">
+                <KeyRound className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                <p className="font-semibold text-slate-300">No OpenVPN Servers Configured</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Create an OpenVPN server instance to accept encrypted remote client connections.
+                </p>
+              </div>
+            ) : (
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-950/60 text-slate-400 uppercase text-xs border-b border-slate-800">
+                  <tr>
+                    <th className="px-4 py-3">Server Instance</th>
+                    <th className="px-4 py-3">Port / Proto</th>
+                    <th className="px-4 py-3">Tunnel Subnet</th>
+                    <th className="px-4 py-3">DCO Offload</th>
+                    <th className="px-4 py-3">Overrides (CSO)</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                  {servers.map((s) => (
+                    <tr key={s.id} className="hover:bg-slate-800/30">
+                      <td className="px-4 py-3 font-semibold text-white font-mono text-xs">{s.name}</td>
+                      <td className="px-4 py-3 font-mono text-xs uppercase text-emerald-400">
+                        {s.port} / {s.protocol}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs">{s.tunnelNetwork}</td>
+                      <td className="px-4 py-3">
+                        {s.dcoEnabled ? (
+                          <span className="inline-flex items-center gap-1 text-xs text-emerald-400 font-mono">
+                            <Cpu className="w-3.5 h-3.5" /> Kernel DCO
+                          </span>
+                        ) : (
+                          <span className="text-xs text-slate-500">Userspace tun</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-slate-400">{s.cso?.length || 0} Clients</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
 
           {/* Client Specific Overrides (CSO) */}
@@ -123,28 +108,34 @@ export default function OpenVpnPage() {
               </div>
             </div>
 
-            <table className="w-full text-sm text-left">
-              <thead className="bg-slate-950/60 text-slate-400 uppercase text-xs border-b border-slate-800">
-                <tr>
-                  <th className="px-4 py-3">Client Common Name (CN)</th>
-                  <th className="px-4 py-3">Assigned Static IP</th>
-                  <th className="px-4 py-3">Pushed Subnets</th>
-                  <th className="px-4 py-3">Description</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {selectedServer?.cso?.map((c) => (
-                  <tr key={c.id || c.commonName} className="hover:bg-slate-800/30">
-                    <td className="px-4 py-3 font-mono font-semibold text-white text-xs">{c.commonName}</td>
-                    <td className="px-4 py-3 font-mono text-emerald-400 text-xs">{c.assignedIp || 'Dynamic'}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-400">
-                      {c.pushRoutes?.join(', ') || 'None'}
-                    </td>
-                    <td className="px-4 py-3 text-slate-400 text-xs">{c.description}</td>
+            {!selectedServer || !selectedServer.cso || selectedServer.cso.length === 0 ? (
+              <div className="p-6 text-center text-slate-500 text-xs">
+                No Client-Specific Overrides (CSO) configured.
+              </div>
+            ) : (
+              <table className="w-full text-sm text-left">
+                <thead className="bg-slate-950/60 text-slate-400 uppercase text-xs border-b border-slate-800">
+                  <tr>
+                    <th className="px-4 py-3">Client Common Name (CN)</th>
+                    <th className="px-4 py-3">Assigned Static IP</th>
+                    <th className="px-4 py-3">Pushed Subnets</th>
+                    <th className="px-4 py-3">Description</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                  {selectedServer.cso.map((c) => (
+                    <tr key={c.id || c.commonName} className="hover:bg-slate-800/30">
+                      <td className="px-4 py-3 font-mono font-semibold text-white text-xs">{c.commonName}</td>
+                      <td className="px-4 py-3 font-mono text-emerald-400 text-xs">{c.assignedIp || 'Dynamic'}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-slate-400">
+                        {c.pushRoutes?.join(', ') || 'None'}
+                      </td>
+                      <td className="px-4 py-3 text-slate-400 text-xs">{c.description}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
 
           {/* Client Profile Exporter */}
@@ -157,16 +148,18 @@ export default function OpenVpnPage() {
                 </h4>
                 <p className="text-xs text-slate-400">Pre-configured client bundle ready for OpenVPN Connect or Linux NetworkManager</p>
               </div>
-              <button
-                type="button"
-                onClick={handleCopy}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-white transition flex items-center gap-1.5 border border-slate-700"
-              >
-                {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                {copied ? 'Copied!' : 'Copy .ovpn'}
-              </button>
+              {selectedServer && (
+                <button
+                  type="button"
+                  onClick={handleCopy}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-white transition flex items-center gap-1.5 border border-slate-700"
+                >
+                  {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? 'Copied!' : 'Copy .ovpn'}
+                </button>
+              )}
             </div>
-            <pre className="p-3 bg-slate-950 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap border border-slate-800">
+            <pre className="p-3 bg-slate-950 rounded-lg text-xs font-mono text-slate-400 overflow-x-auto whitespace-pre-wrap border border-slate-800">
               {clientProfile}
             </pre>
           </div>

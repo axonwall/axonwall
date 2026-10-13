@@ -8,12 +8,17 @@ import {
   Server,
   Terminal,
   CheckCircle2,
+  XCircle,
 } from 'lucide-react';
-import { getAgentStatus } from '../../../server/agent';
+import { getAgentStatus, getSystemServicesStatus } from '../../../server/agent';
 
 export default async function LobbyPage() {
   const status = await getAgentStatus();
+  const services = await getSystemServicesStatus();
   const arch = process.arch === 'x64' ? 'amd64' : process.arch;
+
+  const runningServicesCount = services.filter((s) => s.status === 'active').length;
+  const slapdRunning = services.some((s) => s.unit === 'slapd.service' && s.status === 'active');
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -55,9 +60,16 @@ export default async function LobbyPage() {
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
           <div>
             <span className="text-xs text-slate-400 block font-medium">Identity & Auth</span>
-            <span className="text-lg font-bold text-white mt-1 block">OpenLDAP</span>
-            <span className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1">
-              <CheckCircle2 className="w-3.5 h-3.5" /> Directory Synced
+            <span className="text-lg font-bold text-white mt-1 block">
+              {slapdRunning ? 'OpenLDAP' : 'Local Auth'}
+            </span>
+            <span
+              className={`text-[11px] flex items-center gap-1 mt-1 ${
+                slapdRunning ? 'text-emerald-400' : 'text-slate-400'
+              }`}
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              {slapdRunning ? 'Directory Synced' : 'Unix Shadow DB'}
             </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
@@ -85,89 +97,87 @@ export default async function LobbyPage() {
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-base font-semibold text-white">Interfaces Status</h2>
-            <span className="text-xs text-slate-400">Auto-Refreshed</span>
+            <span className="text-xs text-slate-400">{status.interfaces.length} Detected</span>
           </div>
 
-          <div className="space-y-3">
-            {status.interfaces.map((iface) => (
-              <div
-                key={iface.name}
-                className="bg-slate-950 border border-slate-800/80 rounded-lg p-3 flex items-center justify-between"
-              >
-                <div className="flex items-center gap-3">
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full ${
-                      iface.isUp ? 'bg-emerald-500' : 'bg-red-500'
-                    }`}
-                  />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold text-sm text-white uppercase">
-                        {iface.name}
+          {status.interfaces.length === 0 ? (
+            <div className="p-6 text-center text-slate-500 text-xs">
+              No physical or virtual network interfaces detected by host kernel.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {status.interfaces.map((iface) => (
+                <div
+                  key={iface.name}
+                  className="bg-slate-950 border border-slate-800/80 rounded-lg p-3 flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`w-2.5 h-2.5 rounded-full ${
+                        iface.isUp ? 'bg-emerald-500' : 'bg-red-500'
+                      }`}
+                    />
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-sm text-white uppercase">
+                          {iface.name}
+                        </span>
+                        <span className="text-xs text-slate-400 font-mono">({iface.device})</span>
+                      </div>
+                      <span className="text-xs text-slate-400 font-mono">
+                        {iface.ipAddresses.join(', ') || 'No IP configured'}
                       </span>
-                      <span className="text-xs text-slate-400 font-mono">({iface.device})</span>
                     </div>
-                    <span className="text-xs text-slate-400 font-mono">
-                      {iface.ipAddresses.join(', ') || 'No IP configured'}
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs font-mono">
+                    <span
+                      className={`px-2.5 py-0.5 rounded text-[11px] font-semibold border ${
+                        iface.isUp
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                          : 'bg-slate-800 text-slate-500 border-slate-700'
+                      }`}
+                    >
+                      {iface.isUp ? 'Carrier UP' : 'Carrier DOWN'}
                     </span>
                   </div>
                 </div>
-
-                <div className="flex items-center gap-2 text-xs font-mono">
-                  <span
-                    className={`px-2.5 py-0.5 rounded text-[11px] font-semibold border ${
-                      iface.isUp
-                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                        : 'bg-slate-800 text-slate-500 border-slate-700'
-                    }`}
-                  >
-                    {iface.isUp ? 'Carrier UP' : 'Carrier DOWN'}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Managed Daemons & Services */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-base font-semibold text-white">Core Services</h2>
-            <span className="text-xs text-emerald-400 font-medium">All Running</span>
+            <h2 className="text-base font-semibold text-white">Core System Daemons</h2>
+            <span className="text-xs text-slate-400 font-medium">
+              {runningServicesCount} / {services.length} Active
+            </span>
           </div>
 
           <div className="grid grid-cols-2 gap-3 text-sm">
-            <div className="bg-slate-950 border border-slate-800/80 p-3 rounded-lg flex items-center justify-between">
-              <div>
-                <span className="font-medium text-white block">axonwalld</span>
-                <span className="text-xs text-slate-400">Privileged Data Agent</span>
+            {services.slice(0, 8).map((svc) => (
+              <div
+                key={svc.unit}
+                className="bg-slate-950 border border-slate-800/80 p-3 rounded-lg flex items-center justify-between"
+              >
+                <div>
+                  <span className="font-medium text-white block text-xs">{svc.name}</span>
+                  <span className="text-[11px] text-slate-500 font-mono">{svc.unit.replace('.service', '')}</span>
+                </div>
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    svc.status === 'active'
+                      ? 'bg-emerald-500 shadow-sm shadow-emerald-500/50'
+                      : svc.status === 'failed'
+                      ? 'bg-red-500'
+                      : 'bg-slate-600'
+                  }`}
+                  title={`Status: ${svc.status}`}
+                />
               </div>
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            </div>
-
-            <div className="bg-slate-950 border border-slate-800/80 p-3 rounded-lg flex items-center justify-between">
-              <div>
-                <span className="font-medium text-white block">OpenLDAP</span>
-                <span className="text-xs text-slate-400">slapd Directory Service</span>
-              </div>
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            </div>
-
-            <div className="bg-slate-950 border border-slate-800/80 p-3 rounded-lg flex items-center justify-between">
-              <div>
-                <span className="font-medium text-white block">Supabase Postgres</span>
-                <span className="text-xs text-slate-400">Configuration & RLS Store</span>
-              </div>
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            </div>
-
-            <div className="bg-slate-950 border border-slate-800/80 p-3 rounded-lg flex items-center justify-between">
-              <div>
-                <span className="font-medium text-white block">WireGuard</span>
-                <span className="text-xs text-slate-400">Kernel VPN Subsystem</span>
-              </div>
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            </div>
+            ))}
           </div>
         </div>
       </div>

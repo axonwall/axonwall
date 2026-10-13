@@ -5,7 +5,7 @@ import { Server, Plus, CheckCircle2, FileCode } from 'lucide-react';
 import { compileKeaDhcp4 } from '@axonwall/lib/compile/kea';
 import type { DhcpConfig, Interface } from '@axonwall/lib/schemas';
 
-const SAMPLE_DHCP: DhcpConfig = {
+const DEFAULT_DHCP: DhcpConfig = {
   enabled: true,
   subnets: [
     {
@@ -15,28 +15,21 @@ const SAMPLE_DHCP: DhcpConfig = {
       poolEnd: '192.168.100.200',
       routers: ['192.168.100.1'],
       dnsServers: ['192.168.100.1'],
-      staticMappings: [
-        {
-          mac: '52:54:00:11:22:33',
-          ip: '192.168.100.50',
-          hostname: 'office-nas',
-          description: 'Synology Storage Server',
-        },
-      ],
+      staticMappings: [],
       enabled: true,
     },
   ],
 };
 
-const SAMPLE_INTERFACES: Interface[] = [
+const DEFAULT_INTERFACES: Interface[] = [
   { name: 'lan', device: 'eth1', type: 'static', enabled: true, description: 'LAN', mtu: 1500 },
 ];
 
 export default function DhcpPage() {
-  const [dhcp] = useState<DhcpConfig>(SAMPLE_DHCP);
+  const [dhcp] = useState<DhcpConfig>(DEFAULT_DHCP);
   const [showKeaConfig, setShowKeaConfig] = useState(false);
 
-  const { keaDhcp4Config } = compileKeaDhcp4(dhcp, SAMPLE_INTERFACES);
+  const { keaDhcp4Config } = compileKeaDhcp4(dhcp, DEFAULT_INTERFACES);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -107,26 +100,32 @@ export default function DhcpPage() {
                 Static DHCP Reservations
               </span>
               <div className="bg-slate-950 border border-slate-800/80 rounded-lg overflow-hidden">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="bg-slate-900/60 text-slate-400 uppercase border-b border-slate-800">
-                    <tr>
-                      <th className="px-4 py-2.5">MAC Address</th>
-                      <th className="px-4 py-2.5">IP Address</th>
-                      <th className="px-4 py-2.5">Hostname</th>
-                      <th className="px-4 py-2.5">Description</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {sub.staticMappings.map((m) => (
-                      <tr key={m.mac} className="hover:bg-slate-900/40">
-                        <td className="px-4 py-2.5 text-slate-300">{m.mac}</td>
-                        <td className="px-4 py-2.5 text-emerald-400">{m.ip}</td>
-                        <td className="px-4 py-2.5 text-white font-sans">{m.hostname || '-'}</td>
-                        <td className="px-4 py-2.5 text-slate-400 font-sans">{m.description || '-'}</td>
+                {sub.staticMappings.length === 0 ? (
+                  <div className="p-6 text-center text-slate-500 text-xs">
+                    No static IP reservations configured for {sub.interface}.
+                  </div>
+                ) : (
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-slate-900/60 text-slate-400 uppercase border-b border-slate-800">
+                      <tr>
+                        <th className="px-4 py-2.5">MAC Address</th>
+                        <th className="px-4 py-2.5">IP Address</th>
+                        <th className="px-4 py-2.5">Hostname</th>
+                        <th className="px-4 py-2.5">Description</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {sub.staticMappings.map((m) => (
+                        <tr key={m.mac} className="hover:bg-slate-900/40">
+                          <td className="px-4 py-2.5 text-slate-300">{m.mac}</td>
+                          <td className="px-4 py-2.5 text-emerald-400">{m.ip}</td>
+                          <td className="px-4 py-2.5 text-white font-sans">{m.hostname || '-'}</td>
+                          <td className="px-4 py-2.5 text-slate-400 font-sans">{m.description || '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           </div>

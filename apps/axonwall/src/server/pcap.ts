@@ -159,10 +159,9 @@ export async function runLivePacketCapture({
     // Attempt live execution using tcpdump
     packets = await executeTcpdump(cleanIface, cleanFilter, boundedCount, pcapFilePath);
   } catch {
-    // Fall back to synthetic mock packets if running in development mode or non-root
-    packets = generateMockPackets(cleanIface, boundedCount);
-    // Write synthetic binary PCAP file
-    const binary = buildPcapBinary(packets);
+    // Return empty list if tcpdump fails or interface is uncapturable
+    packets = [];
+    const binary = buildPcapBinary([]);
     fs.writeFileSync(pcapFilePath, binary);
   }
 
@@ -282,43 +281,6 @@ function parseTcpdumpText(raw: string): CapturedPacket[] {
         info,
       });
     }
-  }
-
-  return packets;
-}
-
-function generateMockPackets(iface: string, count: number): CapturedPacket[] {
-  const mockTemplates = [
-    { proto: 'DNS', src: '192.168.100.45', sPort: '58210', dst: '192.168.100.1', dPort: '53', info: 'Standard query 0x8a3f A debian.org' },
-    { proto: 'DNS', src: '192.168.100.1', sPort: '53', dst: '192.168.100.45', dPort: '58210', info: 'Standard query response 0x8a3f A 151.101.2.132' },
-    { proto: 'TLS/HTTPS', src: '192.168.100.45', sPort: '49202', dst: '151.101.2.132', dPort: '443', info: 'Client Hello (TLS 1.3), SNI: debian.org' },
-    { proto: 'TLS/HTTPS', src: '151.101.2.132', sPort: '443', dst: '192.168.100.45', dPort: '49202', info: 'Server Hello, Change Cipher Spec, Encrypted Extensions' },
-    { proto: 'TCP', src: '192.168.100.45', sPort: '49202', dst: '151.101.2.132', dPort: '443', info: 'Flags [P.], seq 1:512, ack 1, win 502, length 511' },
-    { proto: 'ICMP', src: '192.168.100.12', sPort: '-', dst: '1.1.1.1', dPort: '-', info: 'echo request, id 0x0042, seq 1, ttl 64, length 64' },
-    { proto: 'ICMP', src: '1.1.1.1', sPort: '-', dst: '192.168.100.12', dPort: '-', info: 'echo reply, id 0x0042, seq 1, ttl 58, length 64' },
-    { proto: 'WireGuard', src: '192.168.100.1', sPort: '51820', dst: '198.51.100.22', dPort: '51820', info: 'Transport Data (Packet 42, receiver index 0x7c9a), length 128' },
-    { proto: 'SSH', src: '192.168.100.80', sPort: '54210', dst: '192.168.100.1', dPort: '22', info: 'SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3' },
-  ];
-
-  const now = Date.now();
-  const packets: CapturedPacket[] = [];
-
-  for (let i = 0; i < count; i++) {
-    const tmpl = mockTemplates[i % mockTemplates.length];
-    const d = new Date(now + i * 45);
-    const timeStr = d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds() * 1000).padStart(6, '0');
-
-    packets.push({
-      index: i + 1,
-      timestamp: timeStr,
-      srcIp: tmpl.src,
-      srcPort: tmpl.sPort,
-      dstIp: tmpl.dst,
-      dstPort: tmpl.dPort,
-      protocol: tmpl.proto,
-      length: 64 + ((i * 37) % 1400),
-      info: tmpl.info,
-    });
   }
 
   return packets;

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   BatteryCharging,
   Zap,
@@ -9,19 +9,49 @@ import {
   RefreshCw,
   Power,
   Settings,
+  HelpCircle,
 } from 'lucide-react';
 import { compileNutUps } from '@axonwall/lib/compile/nut';
 import type { NutUpsConfig } from '@axonwall/lib/schemas';
+import { getUpsStatus, type UpsStatus } from '@/server/agent';
 
 export default function UpsMonitoringPage() {
+  const [upsStatus, setUpsStatus] = useState<UpsStatus | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [upsConfig, setUpsConfig] = useState<NutUpsConfig>({
-    enabled: true,
+    enabled: false,
     name: 'axonups',
     driver: 'usbhid-ups',
     port: 'auto',
     shutdownBatteryPct: 20,
     lowBatteryRuntimeSec: 300,
   });
+
+  const fetchStatus = async () => {
+    setIsRefreshing(true);
+    try {
+      const data = await getUpsStatus();
+      setUpsStatus(data);
+    } catch {
+      setUpsStatus({
+        connected: false,
+        status: 'DISCONNECTED',
+        chargePct: null,
+        runtimeSeconds: null,
+        loadPct: null,
+        inputVoltage: null,
+        model: null,
+        isVirtual: false,
+        message: 'Unable to query NUT daemon',
+      });
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchStatus();
+  }, []);
 
   const { upsConf, nutConf } = compileNutUps(upsConfig);
 
@@ -41,11 +71,47 @@ export default function UpsMonitoringPage() {
           </div>
         </div>
 
-        <span className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          Status: OL (On Line Utility Power)
-        </span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={fetchStatus}
+            disabled={isRefreshing}
+            className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+            title="Refresh UPS Telemetry"
+          >
+            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+          </button>
+
+          {upsStatus?.connected ? (
+            <span className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              Status: {upsStatus.status} (Online Utility Power)
+            </span>
+          ) : (
+            <span className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800/80 text-slate-400 border border-slate-700 flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-slate-500" />
+              Status: Disconnected {upsStatus?.isVirtual ? '(Virtual Machine)' : '(No UPS Detected)'}
+            </span>
+          )}
+        </div>
       </div>
+
+      {/* Disconnected / Virtual Machine Info Callout */}
+      {!upsStatus?.connected && (
+        <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 flex items-start gap-3 text-xs text-slate-400">
+          <HelpCircle className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold text-slate-200 block mb-0.5">
+              {upsStatus?.isVirtual
+                ? 'Virtual Machine Environment Detected'
+                : 'No Battery Hardware or NUT Daemon Detected'}
+            </span>
+            <span>
+              {upsStatus?.message ||
+                'This system is operating in a virtualized or containerized environment without attached physical UPS hardware. To monitor a UPS, pass through a USB/serial device to this VM or configure a remote NUT server below.'}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Metrics Grid */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -56,11 +122,18 @@ export default function UpsMonitoringPage() {
             <BatteryCharging className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">100%</span>
-            <span className="text-xs text-emerald-400">Normal</span>
+            <span className="text-3xl font-bold text-white font-mono">
+              {upsStatus?.chargePct != null ? `${upsStatus.chargePct}%` : '--'}
+            </span>
+            <span className="text-xs text-slate-500">
+              {upsStatus?.chargePct != null ? 'Normal' : 'No Hardware'}
+            </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-emerald-500 h-full rounded-full" style={{ width: '100%' }} />
+            <div
+              className="bg-emerald-500 h-full rounded-full transition-all"
+              style={{ width: upsStatus?.chargePct != null ? `${upsStatus.chargePct}%` : '0%' }}
+            />
           </div>
         </div>
 
@@ -71,11 +144,25 @@ export default function UpsMonitoringPage() {
             <Clock className="w-4 h-4 text-sky-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">48 min</span>
-            <span className="text-xs text-slate-400">under current load</span>
+            <span className="text-3xl font-bold text-white font-mono">
+              {upsStatus?.runtimeSeconds != null
+                ? `${Math.round(upsStatus.runtimeSeconds / 60)} min`
+                : '--'}
+            </span>
+            <span className="text-xs text-slate-500">
+              {upsStatus?.runtimeSeconds != null ? 'under current load' : 'N/A'}
+            </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-sky-500 h-full rounded-full" style={{ width: '80%' }} />
+            <div
+              className="bg-sky-500 h-full rounded-full transition-all"
+              style={{
+                width:
+                  upsStatus?.runtimeSeconds != null
+                    ? `${Math.min(100, Math.round((upsStatus.runtimeSeconds / 3600) * 100))}%`
+                    : '0%',
+              }}
+            />
           </div>
         </div>
 
@@ -86,11 +173,18 @@ export default function UpsMonitoringPage() {
             <Zap className="w-4 h-4 text-amber-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">22%</span>
-            <span className="text-xs text-slate-400">185 Watts</span>
+            <span className="text-3xl font-bold text-white font-mono">
+              {upsStatus?.loadPct != null ? `${upsStatus.loadPct}%` : '--'}
+            </span>
+            <span className="text-xs text-slate-500">
+              {upsStatus?.loadPct != null ? 'Active' : 'N/A'}
+            </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-amber-500 h-full rounded-full" style={{ width: '22%' }} />
+            <div
+              className="bg-amber-500 h-full rounded-full transition-all"
+              style={{ width: upsStatus?.loadPct != null ? `${upsStatus.loadPct}%` : '0%' }}
+            />
           </div>
         </div>
 
@@ -101,11 +195,18 @@ export default function UpsMonitoringPage() {
             <Power className="w-4 h-4 text-purple-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-bold text-white">120.4 V</span>
-            <span className="text-xs text-slate-400">60 Hz</span>
+            <span className="text-3xl font-bold text-white font-mono">
+              {upsStatus?.inputVoltage != null ? `${upsStatus.inputVoltage} V` : '--'}
+            </span>
+            <span className="text-xs text-slate-500">
+              {upsStatus?.inputVoltage != null ? 'Grid' : 'N/A'}
+            </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-            <div className="bg-purple-500 h-full rounded-full" style={{ width: '100%' }} />
+            <div
+              className="bg-purple-500 h-full rounded-full transition-all"
+              style={{ width: upsStatus?.inputVoltage != null ? '100%' : '0%' }}
+            />
           </div>
         </div>
       </div>
@@ -113,7 +214,19 @@ export default function UpsMonitoringPage() {
       {/* Settings & Configuration */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
-          <h2 className="text-base font-semibold text-white">NUT Daemon Configuration</h2>
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h2 className="text-base font-semibold text-white">NUT Daemon Configuration</h2>
+            <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+              <span>Enable NUT</span>
+              <input
+                type="checkbox"
+                checked={upsConfig.enabled}
+                onChange={(e) => setUpsConfig({ ...upsConfig, enabled: e.target.checked })}
+                className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-emerald-500"
+              />
+            </label>
+          </div>
+
           <div className="space-y-4 text-xs font-mono">
             <div>
               <label className="text-slate-400 block mb-1">UPS IDENTIFIER NAME</label>

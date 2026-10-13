@@ -8,33 +8,22 @@ export default function WireGuardPage() {
   const [copied, setCopied] = useState(false);
   const [selectedClientConf, setSelectedClientConf] = useState<string | null>(null);
 
-  const serverConfig = {
-    enabled: true,
+  const [serverConfig] = useState({
+    enabled: false,
     address: '10.50.0.1/24',
     listenPort: 51820,
-    publicKey: 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=',
-    privateKey: 'W1234567890abcdef1234567890abcdef1234567890=',
-    peers: [
-      {
-        id: 'peer-1',
-        name: 'admin-roadwarrior',
-        publicKey: 'YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=',
-        allowedIps: ['10.50.0.2/32'],
-        endpoint: '',
-        persistentKeepalive: 25,
-        enabled: true,
-      },
-      {
-        id: 'peer-2',
-        name: 'branch-office-gw',
-        publicKey: 'Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2I=',
-        allowedIps: ['10.50.0.10/32', '192.168.200.0/24'],
-        endpoint: '203.0.113.50:51820',
-        persistentKeepalive: 25,
-        enabled: true,
-      },
-    ],
-  };
+    publicKey: 'Not Generated (Unconfigured)',
+    privateKey: '',
+    peers: [] as Array<{
+      id: string;
+      name: string;
+      publicKey: string;
+      allowedIps: string[];
+      endpoint: string;
+      persistentKeepalive: number;
+      enabled: boolean;
+    }>,
+  });
 
   const { wgConfig } = compileWireGuard(serverConfig);
 
@@ -74,10 +63,10 @@ PersistentKeepalive = 25
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <KeyRound className="w-5 h-5 text-emerald-400" />
+            <KeyRound className="w-5 h-5 text-slate-400" />
             <h2 className="text-base font-bold text-white">Server Interface (wg0)</h2>
-            <span className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded font-medium">
-              Listening :51820
+            <span className="text-xs bg-slate-800 text-slate-400 border border-slate-700 px-2 py-0.5 rounded font-medium">
+              Disabled
             </span>
           </div>
           <span className="text-xs font-mono text-slate-400">Tunnel IP: {serverConfig.address}</span>
@@ -86,7 +75,7 @@ PersistentKeepalive = 25
         <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 font-mono text-xs text-slate-300 flex items-center justify-between">
           <div>
             <span className="text-slate-500 block font-sans text-[11px]">Server Public Key</span>
-            <span className="text-emerald-400 select-all">{serverConfig.publicKey}</span>
+            <span className="text-slate-400 select-all">{serverConfig.publicKey}</span>
           </div>
         </div>
       </div>
@@ -98,38 +87,48 @@ PersistentKeepalive = 25
           <span className="text-xs text-slate-400">{serverConfig.peers.length} active peers</span>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
-            <thead className="bg-slate-950 text-slate-400 uppercase border-b border-slate-800 font-sans">
-              <tr>
-                <th className="px-4 py-3">Peer Name</th>
-                <th className="px-4 py-3">Allowed IPs</th>
-                <th className="px-4 py-3">Endpoint</th>
-                <th className="px-4 py-3">Keepalive</th>
-                <th className="px-4 py-3 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60">
-              {serverConfig.peers.map((peer) => (
-                <tr key={peer.id} className="hover:bg-slate-800/40 transition">
-                  <td className="px-4 py-3 font-semibold text-white font-sans">{peer.name}</td>
-                  <td className="px-4 py-3 text-emerald-400">{peer.allowedIps.join(', ')}</td>
-                  <td className="px-4 py-3 text-slate-400">{peer.endpoint || 'Dynamic / Roadwarrior'}</td>
-                  <td className="px-4 py-3 text-slate-300">{peer.persistentKeepalive}s</td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      type="button"
-                      onClick={() => generateClientProfile(peer.name, peer.allowedIps[0])}
-                      className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1 rounded text-[11px] font-sans transition cursor-pointer border border-slate-700"
-                    >
-                      Export Client Conf
-                    </button>
-                  </td>
+        {serverConfig.peers.length === 0 ? (
+          <div className="p-8 text-center text-slate-400 border border-slate-800/80 rounded-lg">
+            <KeyRound className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+            <p className="font-semibold text-slate-300">No Configured Peers</p>
+            <p className="text-xs text-slate-500 mt-1">
+              No tunnel endpoints or road-warrior clients have been configured.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs font-mono">
+              <thead className="bg-slate-950 text-slate-400 uppercase border-b border-slate-800 font-sans">
+                <tr>
+                  <th className="px-4 py-3">Peer Name</th>
+                  <th className="px-4 py-3">Allowed IPs</th>
+                  <th className="px-4 py-3">Endpoint</th>
+                  <th className="px-4 py-3">Keepalive</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {serverConfig.peers.map((peer) => (
+                  <tr key={peer.id} className="hover:bg-slate-800/40 transition">
+                    <td className="px-4 py-3 font-semibold text-white font-sans">{peer.name}</td>
+                    <td className="px-4 py-3 text-emerald-400">{peer.allowedIps.join(', ')}</td>
+                    <td className="px-4 py-3 text-slate-400">{peer.endpoint || 'Dynamic / Roadwarrior'}</td>
+                    <td className="px-4 py-3 text-slate-300">{peer.persistentKeepalive}s</td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        type="button"
+                        onClick={() => generateClientProfile(peer.name, peer.allowedIps[0])}
+                        className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1 rounded text-[11px] font-sans transition cursor-pointer border border-slate-700"
+                      >
+                        Export Client Conf
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Generated Client Conf Modal/Card */}

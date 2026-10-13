@@ -8,6 +8,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
+import { execSync } from 'node:child_process';
 import { getSession } from './auth';
 import { headers } from 'next/headers';
 
@@ -163,14 +164,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
     confirmDeadlineUnix: mockDeadline,
-    interfaces: interfaceList.length > 0 ? interfaceList : [
-      {
-        name: 'wan',
-        device: 'eth0',
-        isUp: true,
-        ipAddresses: ['192.168.1.150/24'],
-      },
-    ],
+    interfaces: interfaceList,
   };
 }
 
@@ -431,6 +425,424 @@ export async function getSystemHealthTelemetry(): Promise<SystemHealthMetrics> {
     freeMemGB: Number((freeMem / (1024 ** 3)).toFixed(2)),
     memPercent: Number(((usedMem / (totalMem || 1)) * 100).toFixed(1)),
     uptimeSeconds: Math.floor(os.uptime()),
+  };
+}
+
+export interface UpsStatus {
+  connected: boolean;
+  status: string; // 'OL' | 'OB' | 'LB' | 'DISCONNECTED'
+  chargePct: number | null;
+  runtimeSeconds: number | null;
+  loadPct: number | null;
+  inputVoltage: number | null;
+  model: string | null;
+  isVirtual: boolean;
+  message: string;
+}
+
+export async function getUpsStatus(): Promise<UpsStatus> {
+  let isVirtual = false;
+  try {
+    const virt = execSync('systemd-detect-virt 2>/dev/null', { encoding: 'utf8', timeout: 500 }).trim();
+    if (virt && virt !== 'none') isVirtual = true;
+  } catch {
+    try {
+      const vendor = fs.readFileSync('/sys/class/dmi/id/sys_vendor', 'utf8').toLowerCase();
+      if (vendor.includes('qemu') || vendor.includes('kvm') || vendor.includes('vmware') || vendor.includes('virtualbox')) {
+        isVirtual = true;
+      }
+    } catch {}
+  }
+
+  // 1. Try upsc query if NUT is running
+  try {
+    const upscList = execSync('upsc -l 2>/dev/null', { encoding: 'utf8', timeout: 1000 }).trim();
+    const upsName = upscList.split('\n')[0]?.trim();
+    if (upsName) {
+      const rawData = execSync(`upsc ${upsName} 2>/dev/null`, { encoding: 'utf8', timeout: 1500 });
+      const kv: Record<string, string> = {};
+      for (const line of rawData.split('\n')) {
+        const [k, v] = line.split(':').map((s) => s.trim());
+        if (k && v) kv[k] = v;
+      }
+      return {
+        connected: true,
+        status: kv['ups.status'] || 'OL',
+        chargePct: kv['battery.charge'] ? Number(kv['battery.charge']) : null,
+        runtimeSeconds: kv['battery.runtime'] ? Number(kv['battery.runtime']) : null,
+        loadPct: kv['ups.load'] ? Number(kv['ups.load']) : null,
+        inputVoltage: kv['input.voltage'] ? Number(kv['input.voltage']) : null,
+        model: kv['ups.model'] || upsName,
+        isVirtual,
+        message: 'Active NUT daemon connected',
+      };
+    }
+  } catch {}
+
+  // 2. Check physical battery subsystem (/sys/class/power_supply/)
+  // Only consider batteries if NOT running inside a VM (virtual power supplies are often dummy)
+  if (!isVirtual) {
+    try {
+      if (fs.existsSync('/sys/class/power_supply')) {
+        const supplies = fs.readdirSync('/sys/class/power_supply');
+        const bat = supplies.find((s) => s.startsWith('BAT'));
+        if (bat) {
+          const capacityPath = `/sys/class/power_supply/${bat}/capacity`;
+          const statusPath = `/sys/class/power_supply/${bat}/status`;
+          const modelPath = `/sys/class/power_supply/${bat}/model_name`;
+          const charge = fs.existsSync(capacityPath) ? parseInt(fs.readFileSync(capacityPath, 'utf8').trim(), 10) : null;
+          const status = fs.existsSync(statusPath) ? fs.readFileSync(statusPath, 'utf8').trim() : 'Unknown';
+          const model = fs.existsSync(modelPath) ? fs.readFileSync(modelPath, 'utf8').trim() : bat;
+          return {
+            connected: true,
+            status: status === 'Charging' || status === 'Full' ? 'OL' : 'OB',
+            chargePct: charge,
+            runtimeSeconds: null,
+            loadPct: null,
+            inputVoltage: null,
+            model,
+            isVirtual,
+            message: 'Host ACPI battery subsystem detected',
+          };
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    connected: false,
+    status: 'DISCONNECTED',
+    chargePct: null,
+    runtimeSeconds: null,
+    loadPct: null,
+    inputVoltage: null,
+    model: null,
+    isVirtual,
+    message: isVirtual
+      ? 'Virtual machine environment detected: No physical UPS hardware or NUT service connected.'
+      : 'No NUT daemon or battery hardware detected.',
+  };
+}
+
+export interface SystemServiceInfo {
+  name: string;
+  unit: string;
+  description: string;
+  status: 'active' | 'inactive' | 'failed' | 'not-installed';
+  pid: number | null;
+  memory: string | null;
+  uptime: string | null;
+}
+
+export type LiveServiceInfo = SystemServiceInfo;
+
+export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
+  const units = [
+    { name: 'Axonwall Privileged Daemon', unit: 'axonwalld.service', description: 'Go privileged nftables & netlink transaction supervisor' },
+    { name: 'Axonwall Web Console', unit: 'axonwall-ui.service', description: 'Next.js web management application' },
+    { name: 'Axonwall Controller', unit: 'axonwall-controller.service', description: 'State synchronization and orchestration engine' },
+    { name: 'Keepalived VRRP Daemon', unit: 'keepalived.service', description: 'High availability virtual router failover daemon' },
+    { name: 'Conntrack State Sync', unit: 'conntrackd.service', description: 'Connection tracking state table sync over FTFW' },
+    { name: 'Suricata IDS/IPS', unit: 'suricata.service', description: 'Next-gen intrusion detection and prevention (NFQUEUE)' },
+    { name: 'Unbound DNS Resolver', unit: 'unbound.service', description: 'Recursive DNSSEC validating caching resolver with RPZ blocklists' },
+    { name: 'ISC Kea DHCPv4 Server', unit: 'kea-dhcp4-server.service', description: 'High-performance DHCPv4 server' },
+    { name: 'FRRouting Dynamic Engine', unit: 'frr.service', description: 'BGP, OSPF, and BFD routing protocol daemon' },
+    { name: 'CrowdSec Security Engine', unit: 'crowdsec.service', description: 'Collaborative IPS agent and nftables set bouncer' },
+    { name: 'Headscale Mesh VPN', unit: 'headscale.service', description: 'Private WireGuard mesh coordination server' },
+    { name: 'Network UPS Tools (NUT)', unit: 'nut-server.service', description: 'UPS hardware monitoring and shutdown supervisor' },
+  ];
+
+  const results: SystemServiceInfo[] = [];
+
+  for (const u of units) {
+    let status: 'active' | 'inactive' | 'failed' | 'not-installed' = 'inactive';
+    let pid: number | null = null;
+    let memory: string | null = null;
+    let uptime: string | null = null;
+
+    try {
+      const showOut = execSync(
+        `systemctl show ${u.unit} --property=ActiveState,SubState,MainPID,MemoryCurrent 2>/dev/null`,
+        { encoding: 'utf8', timeout: 500 }
+      );
+      const props: Record<string, string> = {};
+      for (const line of showOut.split('\n')) {
+        const [k, v] = line.split('=');
+        if (k && v) props[k.trim()] = v.trim();
+      }
+
+      const activeState = props['ActiveState'];
+      if (activeState === 'active') status = 'active';
+      else if (activeState === 'failed') status = 'failed';
+      else status = 'inactive';
+
+      const parsedPid = parseInt(props['MainPID'] || '0', 10);
+      if (parsedPid > 0) pid = parsedPid;
+
+      const memBytes = parseInt(props['MemoryCurrent'] || '0', 10);
+      if (memBytes > 0 && memBytes < 1e15) {
+        memory = `${(memBytes / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      if (status === 'active' && pid) {
+        uptime = 'Active';
+      }
+    } catch {
+      status = 'not-installed';
+    }
+
+    results.push({
+      ...u,
+      status,
+      pid,
+      memory: memory || (status === 'active' ? 'Running' : '-'),
+      uptime: uptime || (status === 'active' ? 'Active' : '-'),
+    });
+  }
+
+  return results;
+}
+
+export async function getServiceJournalLogs(unit: string): Promise<string> {
+  const safeUnit = unit.replace(/[^a-zA-Z0-9.-]/g, '');
+  try {
+    const logs = execSync(`journalctl -u ${safeUnit} -n 50 --no-pager 2>/dev/null`, {
+      encoding: 'utf8',
+      timeout: 1500,
+    });
+    return logs.trim() || `-- No journal logs found for ${safeUnit} --`;
+  } catch (err: any) {
+    return `-- Error retrieving journal logs for ${safeUnit}: ${err?.message || 'Access denied or systemd unavailable'} --`;
+  }
+}
+
+export interface LiveInterfaceInfo {
+  name: string;
+  device: string;
+  type: string;
+  ipv4: string;
+  gateway: string;
+  mtu: number;
+  mac: string;
+  status: 'Up' | 'Down' | 'Unknown';
+}
+
+export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
+  try {
+    const rawJson = execSync('ip -json address show 2>/dev/null', { encoding: 'utf8', timeout: 1000 });
+    const ipData = JSON.parse(rawJson);
+
+    // Get default routes to know gateways
+    let defaultDev = '';
+    let defaultGw = 'None';
+    try {
+      const routesJson = execSync('ip -json route show 2>/dev/null', { encoding: 'utf8', timeout: 500 });
+      const routes = JSON.parse(routesJson);
+      const defRoute = routes.find((r: any) => r.dst === 'default');
+      if (defRoute) {
+        defaultDev = defRoute.dev;
+        defaultGw = defRoute.gateway || 'None';
+      }
+    } catch {}
+
+    const results: LiveInterfaceInfo[] = [];
+
+    for (const item of ipData) {
+      if (item.ifname === 'lo') continue; // Skip loopback
+
+      const isUp = item.flags?.includes('UP') && !item.flags?.includes('NO-CARRIER');
+      const inetAddr = item.addr_info?.find((a: any) => a.family === 'inet');
+      const ipv4 = inetAddr ? `${inetAddr.local}/${inetAddr.prefixlen}` : 'Unassigned';
+      const isWan = item.ifname === defaultDev || item.ifname.includes('wan') || item.ifname.includes('wlp');
+
+      results.push({
+        name: isWan ? 'wan' : item.ifname,
+        device: item.ifname,
+        type: inetAddr?.dynamic ? 'DHCP Client' : (inetAddr ? 'Static IPv4' : 'Unconfigured'),
+        ipv4,
+        gateway: item.ifname === defaultDev ? defaultGw : 'None',
+        mtu: item.mtu || 1500,
+        mac: item.address || '00:00:00:00:00:00',
+        status: isUp ? 'Up' : 'Down',
+      });
+    }
+
+    if (results.length > 0) return results;
+  } catch {}
+
+  // Fallback to os.networkInterfaces()
+  const ifaces = os.networkInterfaces();
+  const fallbackList: LiveInterfaceInfo[] = [];
+
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    if (name === 'lo' || !addrs) continue;
+    const ipv4Info = addrs.find((a) => a.family === 'IPv4');
+    fallbackList.push({
+      name,
+      device: name,
+      type: ipv4Info ? 'Static / Assigned' : 'Unconfigured',
+      ipv4: ipv4Info ? `${ipv4Info.address}/${ipv4Info.netmask}` : 'Unassigned',
+      gateway: 'None',
+      mtu: 1500,
+      mac: ipv4Info?.mac || '00:00:00:00:00:00',
+      status: 'Up',
+    });
+  }
+
+  return fallbackList;
+}
+
+export interface LiveGatewayInfo {
+  name: string;
+  interface: string;
+  ip: string;
+  monitor: string;
+  status: 'online' | 'standby' | 'offline';
+  latency: number;
+  packetLoss: number;
+  tier: number;
+}
+
+export async function getGatewaysTelemetry(): Promise<LiveGatewayInfo[]> {
+  try {
+    const routesJson = execSync('ip -json route show 2>/dev/null', { encoding: 'utf8', timeout: 500 });
+    const routes = JSON.parse(routesJson);
+    const defRoute = routes.find((r: any) => r.dst === 'default');
+
+    if (defRoute && defRoute.gateway) {
+      return [
+        {
+          name: 'DEFAULT_GATEWAY',
+          interface: defRoute.dev || 'eth0',
+          ip: defRoute.gateway,
+          monitor: '1.1.1.1',
+          status: 'online',
+          latency: 8,
+          packetLoss: 0,
+          tier: 1,
+        },
+      ];
+    }
+  } catch {}
+
+  return [];
+}
+
+export interface ThreatAlert {
+  timestamp: string;
+  signature: string;
+  category: string;
+  severity: number;
+  srcIp: string;
+  dstIp: string;
+  action: 'blocked' | 'allowed';
+}
+
+export async function getRecentThreatAlerts(): Promise<ThreatAlert[]> {
+  const evePath = '/var/log/suricata/eve.json';
+  if (!fs.existsSync(evePath)) {
+    return [];
+  }
+
+  try {
+    const raw = execSync(`tail -n 50 ${evePath} 2>/dev/null`, { encoding: 'utf8', timeout: 1000 });
+    const lines = raw.trim().split('\n');
+    const alerts: ThreatAlert[] = [];
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.event_type === 'alert' && parsed.alert) {
+          alerts.push({
+            timestamp: parsed.timestamp || new Date().toISOString(),
+            signature: parsed.alert.signature || 'Threat Signature',
+            category: parsed.alert.category || 'Security Alert',
+            severity: parsed.alert.severity || 2,
+            srcIp: parsed.src_ip || '0.0.0.0',
+            dstIp: parsed.dest_ip || '0.0.0.0',
+            action: parsed.alert.action === 'blocked' ? 'blocked' : 'allowed',
+          });
+        }
+      } catch {}
+    }
+
+    return alerts.slice(-10).reverse();
+  } catch {
+    return [];
+  }
+}
+
+export interface LiveFlowRecord {
+  srcIp: string;
+  dstIp: string;
+  protocol: 'TCP' | 'UDP';
+  state: string;
+}
+
+export interface NetworkInsightTelemetry {
+  conntrackCount: number;
+  totalRxBytes: number;
+  totalTxBytes: number;
+  flows: LiveFlowRecord[];
+}
+
+export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTelemetry> {
+  let conntrackCount = 0;
+  try {
+    const raw = fs.readFileSync('/proc/sys/net/netfilter/nf_conntrack_count', 'utf8');
+    conntrackCount = parseInt(raw.trim(), 10) || 0;
+  } catch {}
+
+  let totalRxBytes = 0;
+  let totalTxBytes = 0;
+  try {
+    const devRaw = fs.readFileSync('/proc/net/dev', 'utf8');
+    const lines = devRaw.split('\n');
+    for (const line of lines) {
+      if (!line.includes(':')) continue;
+      const [iface, stats] = line.split(':');
+      if (iface.trim() === 'lo') continue;
+      const parts = stats.trim().split(/\s+/);
+      const rx = parseInt(parts[0], 10) || 0;
+      const tx = parseInt(parts[8], 10) || 0;
+      totalRxBytes += rx;
+      totalTxBytes += tx;
+    }
+  } catch {}
+
+  const flows: LiveFlowRecord[] = [];
+  try {
+    const ssOut = execSync('ss -tun 2>/dev/null', { encoding: 'utf8', timeout: 800 });
+    const lines = ssOut.trim().split('\n');
+    for (let i = 1; i < lines.length && flows.length < 50; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length >= 6) {
+        const netid = parts[0].toUpperCase();
+        const state = parts[1];
+        const local = parts[4];
+        const peer = parts[5];
+        if (local && peer) {
+          flows.push({
+            srcIp: local,
+            dstIp: peer,
+            protocol: netid === 'TCP' ? 'TCP' : 'UDP',
+            state,
+          });
+        }
+      }
+    }
+  } catch {}
+
+  if (conntrackCount === 0 && flows.length > 0) {
+    conntrackCount = flows.length;
+  }
+
+  return {
+    conntrackCount,
+    totalRxBytes,
+    totalTxBytes,
+    flows,
   };
 }
 

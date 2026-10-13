@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Server,
   Play,
@@ -12,113 +12,58 @@ import {
   Search,
   Shield,
   Activity,
+  RefreshCw,
 } from 'lucide-react';
-
-interface ManagedService {
-  name: string;
-  unit: string;
-  description: string;
-  status: 'active' | 'inactive' | 'failed';
-  pid: number;
-  memory: string;
-  uptime: string;
-}
+import {
+  getSystemServicesStatus,
+  getServiceJournalLogs,
+  type SystemServiceInfo,
+} from '@/server/agent';
 
 export default function ServicesSupervisorPage() {
-  const [services, setServices] = useState<ManagedService[]>([
-    {
-      name: 'Axonwall Privileged Daemon',
-      unit: 'axonwalld.service',
-      description: 'Go privileged nftables & netlink transaction supervisor',
-      status: 'active',
-      pid: 612,
-      memory: '24.1 MB',
-      uptime: '4d 18h',
-    },
-    {
-      name: 'Keepalived VRRP Daemon',
-      unit: 'keepalived.service',
-      description: 'High availability virtual router failover daemon',
-      status: 'active',
-      pid: 745,
-      memory: '8.4 MB',
-      uptime: '4d 18h',
-    },
-    {
-      name: 'Conntrack State Sync',
-      unit: 'conntrackd.service',
-      description: 'Connection tracking state table sync over FTFW',
-      status: 'active',
-      pid: 802,
-      memory: '14.2 MB',
-      uptime: '4d 18h',
-    },
-    {
-      name: 'Suricata IDS/IPS',
-      unit: 'suricata.service',
-      description: 'Next-gen intrusion detection and prevention (NFQUEUE fail-open)',
-      status: 'active',
-      pid: 914,
-      memory: '312.0 MB',
-      uptime: '2d 06h',
-    },
-    {
-      name: 'Unbound DNS Resolver',
-      unit: 'unbound.service',
-      description: 'Recursive DNSSEC validating caching resolver with RPZ blocklists',
-      status: 'active',
-      pid: 530,
-      memory: '42.8 MB',
-      uptime: '4d 18h',
-    },
-    {
-      name: 'ISC Kea DHCPv4 Server',
-      unit: 'kea-dhcp4.service',
-      description: 'High-performance DHCPv4 server with HA hooks',
-      status: 'active',
-      pid: 588,
-      memory: '18.9 MB',
-      uptime: '4d 18h',
-    },
-    {
-      name: 'FRRouting Dynamic Engine',
-      unit: 'frr.service',
-      description: 'BGP, OSPF, and BFD routing protocol daemon',
-      status: 'active',
-      pid: 1044,
-      memory: '38.6 MB',
-      uptime: '3d 11h',
-    },
-    {
-      name: 'HAProxy Reverse Proxy',
-      unit: 'haproxy.service',
-      description: 'L4/L7 load balancer and SSL/TLS termination',
-      status: 'active',
-      pid: 1120,
-      memory: '22.4 MB',
-      uptime: '1d 04h',
-    },
-    {
-      name: 'CrowdSec Security Engine',
-      unit: 'crowdsec.service',
-      description: 'Collaborative IPS agent and nftables set bouncer',
-      status: 'active',
-      pid: 1205,
-      memory: '64.5 MB',
-      uptime: '4d 18h',
-    },
-  ]);
-
+  const [services, setServices] = useState<SystemServiceInfo[]>([]);
+  const [loading, setLoading] = useState(true);
   const [selectedLogs, setSelectedLogs] = useState<string | null>(null);
+  const [loadingLogs, setLoadingLogs] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+
+  const loadServices = async () => {
+    setLoading(true);
+    try {
+      const data = await getSystemServicesStatus();
+      setServices(data);
+    } catch {
+      setServices([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadServices();
+  }, []);
 
   const handleAction = (unit: string, action: 'restart' | 'stop' | 'start') => {
     setActionNotice(`Executing systemctl ${action} ${unit}...`);
     setTimeout(() => {
-      setActionNotice(`Successfully completed ${action} for ${unit}.`);
+      setActionNotice(`Requested ${action} for ${unit}.`);
+      loadServices();
       setTimeout(() => setActionNotice(null), 3000);
     }, 800);
+  };
+
+  const handleViewLogs = async (unit: string) => {
+    setLoadingLogs(true);
+    setSelectedLogs(`Loading journal logs for ${unit}...`);
+    try {
+      const logs = await getServiceJournalLogs(unit);
+      setSelectedLogs(logs);
+    } catch (err: any) {
+      setSelectedLogs(`Failed to fetch logs: ${err?.message || 'Access error'}`);
+    } finally {
+      setLoadingLogs(false);
+    }
   };
 
   const filteredServices = services.filter(
@@ -143,15 +88,26 @@ export default function ServicesSupervisorPage() {
           </div>
         </div>
 
-        <div className="relative">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search service units..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 w-64"
-          />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={loadServices}
+            disabled={loading}
+            className="p-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+            title="Refresh services"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search service units..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-9 pr-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 w-64"
+            />
+          </div>
         </div>
       </div>
 
@@ -178,53 +134,79 @@ export default function ServicesSupervisorPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
-              {filteredServices.map((svc) => (
-                <tr key={svc.unit} className="hover:bg-slate-800/30">
-                  <td className="py-4">
-                    <span className="font-sans font-semibold text-white block">{svc.name}</span>
-                    <span className="text-[11px] font-sans text-slate-400">{svc.description}</span>
-                  </td>
-                  <td className="py-4 text-emerald-400">{svc.unit}</td>
-                  <td className="py-4">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Active (running)
-                    </span>
-                  </td>
-                  <td className="py-4 text-slate-300">{svc.pid}</td>
-                  <td className="py-4 text-slate-300">{svc.memory}</td>
-                  <td className="py-4 text-slate-400">{svc.uptime}</td>
-                  <td className="py-4 text-right">
-                    <div className="flex items-center justify-end gap-1.5">
-                      <button
-                        title="Restart"
-                        onClick={() => handleAction(svc.unit, 'restart')}
-                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
-                      >
-                        <RotateCw className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        title="Stop"
-                        onClick={() => handleAction(svc.unit, 'stop')}
-                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-400 transition"
-                      >
-                        <Square className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        title="Journal Logs"
-                        onClick={() =>
-                          setSelectedLogs(
-                            `journalctl -u ${svc.unit} -n 50 --no-pager\n-- Logs begin at Mon 2026-10-05 02:00:01 UTC --\n[INFO] [${svc.unit}] Service entered running state\n[INFO] [${svc.unit}] Initialization completed without warnings.\n[INFO] [${svc.unit}] Listening on unix socket /run/${svc.unit.replace('.service', '')}.sock`
-                          )
-                        }
-                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-emerald-400 transition"
-                      >
-                        <FileText className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+              {loading && services.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-8 text-center text-slate-500">
+                    Querying systemctl daemon status...
                   </td>
                 </tr>
-              ))}
+              ) : filteredServices.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-8 text-center text-slate-500">
+                    No matching service units found.
+                  </td>
+                </tr>
+              ) : (
+                filteredServices.map((svc) => (
+                  <tr key={svc.unit} className="hover:bg-slate-800/30">
+                    <td className="py-4">
+                      <span className="font-sans font-semibold text-white block">{svc.name}</span>
+                      <span className="text-[11px] font-sans text-slate-400">{svc.description}</span>
+                    </td>
+                    <td className="py-4 text-emerald-400">{svc.unit}</td>
+                    <td className="py-4">
+                      {svc.status === 'active' ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          Active (running)
+                        </span>
+                      ) : svc.status === 'failed' ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-red-500/10 text-red-400 border border-red-500/20">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+                          Failed
+                        </span>
+                      ) : svc.status === 'not-installed' ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-slate-800/60 text-slate-500 border border-slate-700/50">
+                          Not Installed
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                          Inactive (stopped)
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-4 text-slate-300">{svc.pid || '-'}</td>
+                    <td className="py-4 text-slate-300">{svc.memory || '-'}</td>
+                    <td className="py-4 text-slate-400">{svc.uptime || '-'}</td>
+                    <td className="py-4 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          title="Restart"
+                          onClick={() => handleAction(svc.unit, 'restart')}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer"
+                        >
+                          <RotateCw className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          title={svc.status === 'active' ? 'Stop' : 'Start'}
+                          onClick={() => handleAction(svc.unit, svc.status === 'active' ? 'stop' : 'start')}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-400 transition cursor-pointer"
+                        >
+                          {svc.status === 'active' ? <Square className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                        </button>
+                        <button
+                          title="Journal Logs"
+                          onClick={() => handleViewLogs(svc.unit)}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-emerald-400 transition cursor-pointer"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
