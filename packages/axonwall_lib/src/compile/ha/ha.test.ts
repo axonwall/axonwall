@@ -14,7 +14,7 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     enabled: true,
     nodeRole: 'master',
     peerAddress: '10.0.99.2',
-    peerPort: 8443,
+    peerPort: 2966,
     vrrpInstances: [
       {
         name: 'VI_LAN',

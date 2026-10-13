@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	coreURL         = flag.String("core", "wss://axonwall.local:8443/ws/satellite", "URL of the Axonwall Core Hub")
+	coreURL         = flag.String("core", "wss://axonwall.local:2966/ws/satellite", "URL of the Axonwall Core Hub")
 	token           = flag.String("token", "", "Zero-Touch Provisioning (ZTP) Token")
 	satID           = flag.String("id", "", "Satellite Hardware ID (MAC or Serial)")
 	watchdogTimeout = flag.Int("watchdog", 60, "Watchdog timeout in seconds before rolling back nftables")

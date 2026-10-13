@@ -300,7 +300,7 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	fmt.Printf("%s", colorReset)
 	fmt.Printf(" Hostname: %s\n", hostname)
 	fmt.Printf(" Platform: %s\n", osName)
-	fmt.Printf(" Web Management Console: https://%s:8443\n", primaryIP)
+	fmt.Printf(" Web Management Console: https://%s:2966\n", primaryIP)
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
 	fmt.Println("--------------------------------------------------------------------------------\n")
@@ -372,7 +372,7 @@ func printHeader() {
 		colorDim, colorReset, memStr)
 
 	fmt.Println("--------------------------------------------------------------------------------")
-	fmt.Printf(" %sWeb Console:%s %shttps://%s:8443%s\n",
+	fmt.Printf(" %sWeb Console:%s %shttps://%s:2966%s\n",
 		colorBold, colorReset,
 		colorGreen+colorBold, primaryIP, colorReset)
 	fmt.Printf(" %sConsole User:%s %s%s%s (Authenticated)\n",
@@ -661,7 +661,7 @@ func actionDiagnostics(reader *bufio.Reader) {
 func actionDisplayQRCode(reader *bufio.Reader) {
 	clearScreen()
 	primaryIP := getPrimaryManagementIP()
-	managementURL := fmt.Sprintf("https://%s:8443", primaryIP)
+	managementURL := fmt.Sprintf("https://%s:2966", primaryIP)
 
 	fmt.Println("=== Web Console Management QR Code ===")
 	fmt.Printf("Scan this QR code with a phone or tablet on the LAN to open the dashboard:\n\n")

@@ -179,7 +179,7 @@ const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
     antiLockout: {
       enabled: true,
       interface: 'lan',
-      ports: [22, 80, 443, 8443, 3000],
+      ports: [22, 80, 443, 2966, 3000],
     },
   },
   interfaces: [

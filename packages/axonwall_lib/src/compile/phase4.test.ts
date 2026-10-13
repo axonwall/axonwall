@@ -30,7 +30,7 @@ describe('Phase 4: High Availability Compilers', () => {
     enabled: true,
     nodeRole: 'master',
     peerAddress: '192.168.1.2',
-    peerPort: 8443,
+    peerPort: 2966,
     vrrpInstances: [
       {
         name: 'VI_WAN',

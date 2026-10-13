@@ -119,7 +119,7 @@ PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 cat << ISSUE_EOF > /etc/issue
 ================================================================================
 Axonwall Appliance (Debian 13)
-Web Console: https://${PRIMARY_IP:-<appliance-ip>}:8443
+Web Console: https://${PRIMARY_IP:-<appliance-ip>}:2966
 Appliance Console: Login with administrator credentials
 ================================================================================
 \n \l
@@ -128,7 +128,7 @@ ISSUE_EOF
 
 echo "================================================================================"
 echo "[Axonwall Firstboot] Provisioning complete."
-echo "  Web Management Console: https://${PRIMARY_IP:-<appliance-ip>}:8443"
+echo "  Web Management Console: https://${PRIMARY_IP:-<appliance-ip>}:2966"
 echo "  Default Administrator : admin"
 echo "  Appliance Console     : Login authentication enabled"
 echo "================================================================================"

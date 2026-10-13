@@ -133,7 +133,7 @@ export const WireGuardConfigSchema = z.object({
 export const AntiLockoutSchema = z.object({
   enabled: z.boolean().default(true),
   interface: z.string().default('lan'),
-  ports: z.array(z.number()).default([80, 443, 22, 3000, 8443]),
+  ports: z.array(z.number()).default([80, 443, 22, 3000, 2966]),
 });
 
 export const SystemSettingsSchema = z.object({
@@ -145,7 +145,7 @@ export const SystemSettingsSchema = z.object({
   antiLockout: AntiLockoutSchema.default({
     enabled: true,
     interface: 'lan',
-    ports: [80, 443, 22, 3000, 8443],
+    ports: [80, 443, 22, 3000, 2966],
   }),
 });
 
@@ -633,7 +633,7 @@ export const HighAvailabilityConfigSchema = z.object({
   enabled: z.boolean().default(false),
   nodeRole: z.enum(['master', 'backup']).default('master'),
   peerAddress: z.string().default(''),
-  peerPort: z.number().int().default(8443),
+  peerPort: z.number().int().default(2966),
   mtlsCert: z.string().optional(),
   mtlsKey: z.string().optional(),
   vrrpInstances: z.array(VrrpInstanceSchema).default([]),
@@ -890,7 +890,7 @@ export type SatelliteNode = z.infer<typeof SatelliteNodeSchema>;
 
 export const SatelliteFleetConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  listenPort: z.number().int().default(8443),
+  listenPort: z.number().int().default(2966),
   defaultHeartbeatIntervalSec: z.number().int().default(30),
   watchdogTimeoutSec: z.number().int().default(60),
   nodes: z.array(SatelliteNodeSchema).default([]),

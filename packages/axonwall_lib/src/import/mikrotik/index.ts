@@ -333,7 +333,7 @@ export function importMikrotikConfig(rscContent: string): ImportReport {
       antiLockout: {
         enabled: true,
         interface: 'lan',
-        ports: [22, 80, 443, 3000, 8443],
+        ports: [22, 80, 443, 3000, 2966],
       },
     },
     interfaces,

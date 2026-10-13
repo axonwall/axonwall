@@ -146,7 +146,7 @@ export default function FleetPage() {
 
   const handleCopyZtp = () => {
     navigator.clipboard.writeText(
-      `./axonwall-satellite -core wss://hub.axonwall.corp:8443/ws/satellite -id sat-node-01 -token ${generatedToken}`
+      `./axonwall-satellite -core wss://hub.axonwall.corp:2966/ws/satellite -id sat-node-01 -token ${generatedToken}`
     );
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -560,7 +560,7 @@ export default function FleetPage() {
                 <div className="relative">
                   <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto">
 {`./axonwall-satellite \\
-  -core wss://hub.axonwall.corp:8443/ws/satellite \\
+  -core wss://hub.axonwall.corp:2966/ws/satellite \\
   -id sat-node-$(cat /sys/class/net/eth0/address | tr -d ':') \\
   -token ${generatedToken}`}
                   </pre>

@@ -49,6 +49,7 @@ const COMMON_SERVICES: Record<number, string> = {
   1194: 'OpenVPN',
   1812: 'RADIUS-Auth',
   1813: 'RADIUS-Acct',
+  2966: 'Axonwall-Admin',
   3000: 'Axonwall-GUI',
   51820: 'WireGuard',
   8080: 'HTTP-Alt',

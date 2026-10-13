@@ -51,7 +51,7 @@ export default function SsoSettingsPage() {
     issuerUrl: 'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0',
     clientId: 'axonwall-firewall-console-app-id',
     clientSecret: '••••••••••••••••••••••••••••',
-    redirectUri: 'https://firewall.corp.local:8443/api/auth/callback/oidc',
+    redirectUri: 'https://firewall.corp.local:2966/api/auth/callback/oidc',
     scopes: ['openid', 'profile', 'email', 'groups'],
     groupClaim: 'groups',
     roleMappings: [

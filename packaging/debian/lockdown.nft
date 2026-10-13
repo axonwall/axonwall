@@ -23,7 +23,7 @@ table inet axonwall {
         icmpv6 type { echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded } accept
 
         # Emergency Anti-Lockout on any non-wan interface
-        tcp dport { 22, 80, 443, 8443 } accept comment "emergency-anti-lockout"
+        tcp dport { 22, 80, 443, 2966 } accept comment "emergency-anti-lockout"
     }
 
     chain forward {

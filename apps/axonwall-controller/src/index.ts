@@ -492,7 +492,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     });
   });
 
-  const port = parseInt(process.env.CONTROLLER_PORT || '8443', 10);
+  const port = parseInt(process.env.CONTROLLER_PORT || '2966', 10);
   server.listen(port, '0.0.0.0', () => {
     console.log(`[Axonwall Controller] Fleet Manager listening on 0.0.0.0:${port}`);
   });

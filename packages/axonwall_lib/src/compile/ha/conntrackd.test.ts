@@ -8,7 +8,7 @@ describe('compileConntrackd', () => {
       enabled: true,
       nodeRole: 'master',
       peerAddress: '192.168.100.2',
-      peerPort: 8443,
+      peerPort: 2966,
       vrrpInstances: [],
       conntrackSync: {
         enabled: true,
@@ -58,7 +58,7 @@ describe('compileConntrackd', () => {
       enabled: true,
       nodeRole: 'backup',
       peerAddress: '',
-      peerPort: 8443,
+      peerPort: 2966,
       vrrpInstances: [],
       conntrackSync: {
         enabled: true,

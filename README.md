@@ -175,7 +175,7 @@ scp bin/axonwall-satellite-mipsle root@192.168.8.1:/usr/bin/axonwall-satellite
 Start the satellite with Zero-Touch Provisioning (ZTP):
 ```bash
 axonwall-satellite \
-  -core wss://firewall.yourcorp.com:8443/ws/satellite \
+  -core wss://firewall.yourcorp.com:2966/ws/satellite \
   -id sat-branch-01 \
   -token ztp_sec_token_here
 ```
