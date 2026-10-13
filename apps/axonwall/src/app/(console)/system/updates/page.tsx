@@ -37,7 +37,7 @@ export default function SystemUpdatesPage() {
       name: 'Slot A (Primary Rootfs)',
       isActive: true,
       isHealthy: true,
-      version: '0.1.9',
+      version: '0.2.0',
       kernel: 'Linux 6.12.111+deb13-amd64',
       device: '/dev/sda2',
       label: 'axon_root_a',
@@ -135,7 +135,7 @@ export default function SystemUpdatesPage() {
         );
       }
     } catch {
-      alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.1.9.');
+      alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.2.0.');
     } finally {
       setIsCheckingCloud(false);
     }

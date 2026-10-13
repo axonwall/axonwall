@@ -8,6 +8,12 @@ table inet axonwall {}
 flush table inet axonwall
 
 table inet axonwall {
+    # WAN interface set for lockdown isolation (default: eth0, wan0; dynamically expandable)
+    set wan_interfaces {
+        type ifname
+        elements = { "eth0", "wan0" }
+    }
+
     chain input {
         type filter hook input priority filter; policy drop;
 
@@ -22,7 +28,10 @@ table inet axonwall {
         icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
         icmpv6 type { echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded } accept
 
-        # Emergency Anti-Lockout on any non-wan interface
+        # Drop incoming management access from WAN interfaces (mirrors OPNsense default deny on WAN)
+        iifname @wan_interfaces tcp dport { 22, 80, 443, 2966, 3000 } drop comment "block-wan-management"
+
+        # Emergency Anti-Lockout on internal interfaces only
         tcp dport { 22, 80, 443, 2966 } accept comment "emergency-anti-lockout"
     }
 

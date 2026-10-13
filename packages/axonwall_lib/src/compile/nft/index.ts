@@ -173,10 +173,14 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Anti-Lockout Rule
   if (state.system.antiLockout?.enabled) {
     const lanIface = state.system.antiLockout.interface;
-    const lanDev = ifDeviceMap.get(lanIface) || lanIface;
-    const ports = state.system.antiLockout.ports.join(', ');
-    lines.push(`    # Anti-Lockout: Allow management access from ${lanIface}`);
-    lines.push(`    iifname "${lanDev}" tcp dport { ${ports} } accept comment "anti-lockout"`);
+    if (lanIface !== 'wan') {
+      const lanDev = ifDeviceMap.get(lanIface) || lanIface;
+      const ports = state.system.antiLockout.ports.join(', ');
+      lines.push(`    # Anti-Lockout: Allow management access from ${lanIface}`);
+      lines.push(`    iifname "${lanDev}" tcp dport { ${ports} } accept comment "anti-lockout"`);
+    } else {
+      warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
+    }
   }
 
   // WireGuard listener
@@ -274,14 +278,20 @@ export function compileNftables(state: DesiredState): CompileResult {
   for (const iface of state.interfaces) {
     if (!iface.enabled) continue;
 
-    // Filter rules belonging to this interface or 'any'
-    const ifaceRules = state.rules
+    // For WAN interfaces, local input rules MUST be explicitly assigned to the WAN interface.
+    // Floating ('any') rules apply to forwarded transit traffic, but do not open local host input on WAN.
+    const inputRules = state.rules
+      .filter((r) => r.enabled && (r.interface === iface.name || (iface.name !== 'wan' && r.interface === 'any')))
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+
+    // Forward chain evaluates interface-specific and floating transit rules
+    const forwardRules = state.rules
       .filter((r) => r.enabled && (r.interface === iface.name || r.interface === 'any'))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     // Input chain for interface
     lines.push(`  chain input_${iface.name} {`);
-    for (const rule of ifaceRules) {
+    for (const rule of inputRules) {
       if (rule.direction === 'in') {
         const stmt = formatRuleStatement(rule, state.aliases);
         if (stmt) lines.push(`    ${stmt}`);
@@ -292,7 +302,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
     // Forward chain for interface
     lines.push(`  chain forward_${iface.name} {`);
-    for (const rule of ifaceRules) {
+    for (const rule of forwardRules) {
       const stmt = formatRuleStatement(rule, state.aliases);
       if (stmt) lines.push(`    ${stmt}`);
     }

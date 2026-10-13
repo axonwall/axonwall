@@ -178,17 +178,88 @@ func getInterfaces() []InterfaceInfo {
 	return list
 }
 
-func getPrimaryManagementIP() string {
+func getInterfaceAssignments() (wan, lan, opt1, opt2 string) {
+	wan = "eth0"
+	lan = "eth1"
+	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "WAN_INTERFACE=") {
+				wan = strings.TrimPrefix(line, "WAN_INTERFACE=")
+			} else if strings.HasPrefix(line, "LAN_INTERFACE=") {
+				lan = strings.TrimPrefix(line, "LAN_INTERFACE=")
+			} else if strings.HasPrefix(line, "OPT1_INTERFACE=") {
+				opt1 = strings.TrimPrefix(line, "OPT1_INTERFACE=")
+			} else if strings.HasPrefix(line, "OPT2_INTERFACE=") {
+				opt2 = strings.TrimPrefix(line, "OPT2_INTERFACE=")
+			}
+		}
+	}
+	return
+}
+
+func getWanIP() (string, string) {
+	wan, _, _, _ := getInterfaceAssignments()
 	ifaces := getInterfaces()
 	for _, iface := range ifaces {
-		if iface.Carrier == "UP" {
+		if iface.Name == wan {
 			for _, ip := range iface.IPs {
 				if strings.Contains(ip, ".") && !strings.HasPrefix(ip, "127.") {
-					return strings.Split(ip, "/")[0]
+					return wan, strings.Split(ip, "/")[0]
+				}
+			}
+			return wan, ""
+		}
+	}
+	return wan, ""
+}
+
+func getPrimaryManagementIP() string {
+	wan, lan, opt1, opt2 := getInterfaceAssignments()
+	ifaces := getInterfaces()
+
+	extractIPv4 := func(info InterfaceInfo) string {
+		for _, ip := range info.IPs {
+			if strings.Contains(ip, ".") && !strings.HasPrefix(ip, "127.") {
+				return strings.Split(ip, "/")[0]
+			}
+		}
+		return ""
+	}
+
+	// 1. Search LAN interface first (management is strictly allowed on LAN)
+	for _, iface := range ifaces {
+		if iface.Name == lan {
+			if ip := extractIPv4(iface); ip != "" {
+				return ip
+			}
+		}
+	}
+
+	// 2. Search OPT1 or OPT2 interfaces if assigned and UP
+	for _, target := range []string{opt1, opt2} {
+		if target == "" {
+			continue
+		}
+		for _, iface := range ifaces {
+			if iface.Name == target && iface.Carrier == "UP" {
+				if ip := extractIPv4(iface); ip != "" {
+					return ip
 				}
 			}
 		}
 	}
+
+	// 3. Fallback to any non-WAN interface with an IPv4 address
+	for _, iface := range ifaces {
+		if iface.Name != wan && iface.Carrier == "UP" {
+			if ip := extractIPv4(iface); ip != "" {
+				return ip
+			}
+		}
+	}
+
+	// 4. Default LAN IP when no interface has an active lease/address yet
 	return "192.168.1.1"
 }
 
@@ -300,7 +371,11 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	fmt.Printf("%s", colorReset)
 	fmt.Printf(" Hostname: %s\n", hostname)
 	fmt.Printf(" Platform: %s\n", osName)
-	fmt.Printf(" Web Management Console: https://%s:2966\n", primaryIP)
+	fmt.Printf(" Web Management Console (LAN): https://%s:2966\n", primaryIP)
+	wanDev, wanIP := getWanIP()
+	if wanIP != "" {
+		fmt.Printf(" WAN Status (%s): %s (Web/SSH Inbound Blocked)\n", wanDev, wanIP)
+	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
 	fmt.Println("--------------------------------------------------------------------------------\n")
@@ -372,18 +447,26 @@ func printHeader() {
 		colorDim, colorReset, memStr)
 
 	fmt.Println("--------------------------------------------------------------------------------")
-	fmt.Printf(" %sWeb Console:%s %shttps://%s:2966%s\n",
+	fmt.Printf(" %sWeb Console (LAN):%s %shttps://%s:2966%s\n",
 		colorBold, colorReset,
 		colorGreen+colorBold, primaryIP, colorReset)
+	wanDev, wanIP := getWanIP()
+	if wanIP != "" {
+		fmt.Printf(" %sWAN Interface (%s):%s %s  %s[Inbound Web/SSH Blocked]%s\n",
+			colorBold, wanDev, colorReset,
+			wanIP,
+			colorRed+colorBold, colorReset)
+	}
 	fmt.Printf(" %sConsole User:%s %s%s%s (Authenticated)\n",
 		colorBold, colorReset,
 		colorCyan+colorBold, currentSessionUser, colorReset)
 	fmt.Println("--------------------------------------------------------------------------------")
 
 	// Interfaces Summary Table
-	fmt.Printf(" %s%-8s %-10s %-12s %-19s %s%s\n",
-		colorDim, "NIC", "CARRIER", "SPEED", "MAC ADDRESS", "IP ADDRESSES", colorReset)
+	fmt.Printf(" %s%-14s %-10s %-12s %-19s %s%s\n",
+		colorDim, "INTERFACE", "CARRIER", "SPEED", "MAC ADDRESS", "IP ADDRESSES", colorReset)
 
+	wan, lan, opt1, opt2 := getInterfaceAssignments()
 	ifaces := getInterfaces()
 	for _, iface := range ifaces {
 		carrierTag := colorRed + "[DOWN]" + colorReset
@@ -396,8 +479,20 @@ func printHeader() {
 			ipDisplay = strings.Join(iface.IPs, ", ")
 		}
 
-		fmt.Printf(" %-8s %-19s %-12s %-19s %s\n",
-			colorBold+iface.Name+colorReset,
+		role := ""
+		switch iface.Name {
+		case wan:
+			role = " (WAN)"
+		case lan:
+			role = " (LAN)"
+		case opt1:
+			role = " (OPT1)"
+		case opt2:
+			role = " (OPT2)"
+		}
+
+		fmt.Printf(" %-14s %-19s %-12s %-19s %s\n",
+			colorBold+iface.Name+role+colorReset,
 			carrierTag,
 			iface.Speed,
 			iface.MAC,

@@ -1,7 +1,13 @@
 import type { DesiredState, FirewallRule } from '../schemas/index.js';
 
 export interface LintIssue {
-  type: 'shadowed_rule' | 'duplicate_rule' | 'unused_alias' | 'missing_interface';
+  type:
+    | 'shadowed_rule'
+    | 'duplicate_rule'
+    | 'unused_alias'
+    | 'missing_interface'
+    | 'wan_management_exposed'
+    | 'anti_lockout_on_wan';
   severity: 'error' | 'warning' | 'info';
   message: string;
   ruleId?: string;
@@ -107,6 +113,39 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
             ruleId: current.id,
           });
           break;
+        }
+      }
+    }
+  }
+
+  // 4. Anti-Lockout Interface Safety Check
+  if (state.system?.antiLockout?.enabled) {
+    if (state.system.antiLockout.interface === 'wan') {
+      issues.push({
+        type: 'anti_lockout_on_wan',
+        severity: 'error',
+        message: "Anti-Lockout rule cannot be bound to the 'wan' interface. Management services must be isolated to LAN/internal networks.",
+      });
+    }
+  }
+
+  // 5. Detect Exposure of Management Services on WAN
+  const mgmtPorts = new Set(['22', '80', '443', '2966', '3000']);
+  for (const rule of state.rules) {
+    if (!rule.enabled || rule.action !== 'pass' || rule.direction !== 'in') continue;
+    if (rule.interface === 'wan' || rule.interface === 'any') {
+      const isWildcardSrc = !rule.source || rule.source === 'any' || rule.source === '0.0.0.0/0';
+      if (isWildcardSrc) {
+        const dport = rule.destinationPort?.toLowerCase() || '';
+        const ports = dport.split(/[\s,]+/).map((p) => p.trim());
+        const touchesMgmt = ports.some((p) => mgmtPorts.has(p) || p === 'any' || p === '');
+        if (touchesMgmt && (dport === '' || ports.some((p) => mgmtPorts.has(p)))) {
+          issues.push({
+            type: 'wan_management_exposed',
+            severity: 'warning',
+            message: `Rule '${rule.description || rule.id || 'unnamed'}' exposes Web Console / SSH management port(s) on ${rule.interface} to the public internet (source: any).`,
+            ruleId: rule.id,
+          });
         }
       }
     }

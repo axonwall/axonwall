@@ -26,7 +26,7 @@ const INITIAL_STATE: DesiredState = {
     antiLockout: {
       enabled: true,
       interface: 'lan',
-      ports: [22, 80, 443, 3000],
+      ports: [22, 80, 443, 2966, 3000],
     },
   },
   interfaces: [
@@ -49,7 +49,7 @@ const INITIAL_STATE: DesiredState = {
       source: 'any',
       sourcePort: '',
       destination: 'any',
-      destinationPort: '22, 80, 443, 3000',
+      destinationPort: '22, 80, 443, 2966, 3000',
       log: false,
       enabled: true,
       description: 'Anti-Lockout Rule: Web GUI & SSH',
@@ -202,6 +202,35 @@ export default function FirewallPage() {
           </button>
         ))}
       </div>
+
+      {/* Interface Security Context Callouts */}
+      {selectedInterface === 'wan' && (
+        <div className="p-4 bg-sky-950/40 border border-sky-500/30 rounded-xl flex items-start gap-3">
+          <Shield className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <h4 className="text-sm font-semibold text-sky-300">
+              Default Deny WAN Policy & Management Isolation
+            </h4>
+            <p className="text-xs text-sky-200/80 leading-relaxed">
+              By default, all unsolicited inbound connections from the WAN to the Axonwall host and Web Management Console (ports 2966, 3000, 80, 443) and SSH (port 22) are strictly blocked. Inbound management is restricted to LAN and internal networks to protect the appliance from internet scanning and unauthorized access.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {selectedInterface === 'lan' && (
+        <div className="p-3 bg-emerald-950/30 border border-emerald-500/20 rounded-xl flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2 text-emerald-300">
+            <Shield className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>
+              <strong>System Anti-Lockout Protected:</strong> Web Console (ports 2966, 443, 80) and SSH (port 22) are permitted from LAN to prevent administrator lockout.
+            </span>
+          </div>
+          <span className="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded font-mono text-[10px] uppercase font-semibold">
+            LAN Anti-Lockout Active
+          </span>
+        </div>
+      )}
 
       {/* Rules Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">

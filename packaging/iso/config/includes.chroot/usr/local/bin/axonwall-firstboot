@@ -56,6 +56,9 @@ fi
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
   nft -f /usr/share/axonwall/lockdown.nft || true
+  if [[ -n "$WAN_IF" ]]; then
+    nft add element inet axonwall wan_interfaces "{ \"$WAN_IF\" }" 2>/dev/null || true
+  fi
 fi
 
 # 5. Initialize Axonwall System User & Environment
@@ -135,12 +138,17 @@ systemctl enable axonwalld axonwall-controller axonwall-ui headscale || true
 systemctl try-restart --no-block axonwalld || true
 systemctl start --no-block axonwall-ui axonwall-controller headscale || true
 
-PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+LAN_IP=""
+if [[ -n "$LAN_IF" ]]; then
+  LAN_IP=$(ip -4 addr show dev "$LAN_IF" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
+fi
+PRIMARY_IP="${LAN_IP:-192.168.1.1}"
 
 cat << ISSUE_EOF > /etc/issue
 ================================================================================
 Axonwall Appliance (Debian 13)
-Web Console: https://${PRIMARY_IP:-<appliance-ip>}:2966
+Web Console (LAN): https://${PRIMARY_IP}:2966
+WAN Inbound      : Blocked by default (Anti-Lockout enabled on LAN only)
 Appliance Console: Login with administrator credentials
 ================================================================================
 \n \l
@@ -149,7 +157,8 @@ ISSUE_EOF
 
 echo "================================================================================"
 echo "[Axonwall Firstboot] Provisioning complete."
-echo "  Web Management Console: https://${PRIMARY_IP:-<appliance-ip>}:2966"
-echo "  Default Administrator : admin"
-echo "  Appliance Console     : Login authentication enabled"
+echo "  Web Management Console (LAN): https://${PRIMARY_IP}:2966"
+echo "  WAN Inbound Access          : BLOCKED by default"
+echo "  Default Administrator       : admin"
+echo "  Appliance Console           : Login authentication enabled"
 echo "================================================================================"
