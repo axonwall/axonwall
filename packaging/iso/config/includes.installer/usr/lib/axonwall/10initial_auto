@@ -36,11 +36,14 @@ if db_get partman-auto/disk && [ "$RET" ]; then
 	disks="$RET"
 fi
 
-# Axonwall: Always prompt user to select the target installation disk
+# Axonwall: Prompt user to select target disk if not set
 if [ "$method" ] && [ -z "$disks" ]; then
 	disk=$(select_auto_disk) || exit 99
-	disks="$disk"
+	# In partman, disk returned from select_auto_disk is a directory (/var/lib/partman/devices/=dev=sda)
 	dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+	disks="$dev_name"
+	db_set partman-auto/disk "$dev_name"
+
 	if [ -n "$dev_name" ]; then
 		echo "grub-installer grub-installer/bootdev string $dev_name" | debconf-set-selections 2>/dev/null || true
 		echo "grub-installer grub-installer/choose_bootdev select $dev_name" | debconf-set-selections 2>/dev/null || true
@@ -137,77 +140,81 @@ SWAP_MB=${swap_mb}
 TARGET_DISK=${dev_name}
 EOF
 
-	# 6. Dynamically construct A/B Dual-Root recipe
-	mkdir -p /lib/partman/recipes
-	recipe_file="/lib/partman/recipes/30axonwall-ab"
-
-	cat << RECIPE_HEADER > "$recipe_file"
+	# 6. Dynamically construct A/B Dual-Root recipe matching official debian-installer syntax
+	cat << RECIPE_CONTENT > /tmp/axonwall-ab-recipe
 axonwall-ab ::
-  1 1 1 free
-    \$bios_boot{ }
-    method{ biosgrub }
-  .
-  512 512 512 fat32
-    \$primary{ }
-    \$bootable{ }
-    method{ efi }
-    format{ }
-  .
-  ${root_mb} ${root_mb} ${root_mb} ext4
-    \$primary{ }
-    method{ format }
-    format{ }
-    use_filesystem{ }
-    filesystem{ ext4 }
-    mountpoint{ / }
-  .
-  ${root_mb} ${root_mb} ${root_mb} ext4
-    \$primary{ }
-    method{ format }
-    format{ }
-    use_filesystem{ }
-    filesystem{ ext4 }
-    mountpoint{ /mnt/standby }
-  .
-RECIPE_HEADER
+	1 1 1 free
+		\$iflabel{ gpt }
+		\$reusemethod{ }
+		method{ biosgrub } .
+	512 512 512 fat32
+		\$primary{ }
+		\$iflabel{ msdos gpt }
+		\$reusemethod{ }
+		method{ efi }
+		format{ } .
+	${root_mb} ${root_mb} ${root_mb} ext4
+		\$primary{ }
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 }
+		mountpoint{ / } .
+	${root_mb} ${root_mb} ${root_mb} ext4
+		\$primary{ }
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 }
+		mountpoint{ /mnt/standby } .
+RECIPE_CONTENT
 
 	if [ "$swap_mb" -gt 0 ]; then
-		cat << SWAP_BLOCK >> "$recipe_file"
-  ${swap_mb} ${swap_mb} ${swap_mb} linux-swap
-    method{ swap }
-    format{ }
-  .
+		cat << SWAP_BLOCK >> /tmp/axonwall-ab-recipe
+	${swap_mb} ${swap_mb} ${swap_mb} linux-swap
+		method{ swap }
+		format{ } .
 SWAP_BLOCK
 	fi
 
-	cat << DATA_BLOCK >> "$recipe_file"
-  1024 10000 -1 ext4
-    \$primary{ }
-    method{ format }
-    format{ }
-    use_filesystem{ }
-    filesystem{ ext4 }
-    mountpoint{ /var/lib/axonwall }
-  .
+	cat << DATA_BLOCK >> /tmp/axonwall-ab-recipe
+	1024 10000 -1 ext4
+		\$primary{ }
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 }
+		mountpoint{ /var/lib/axonwall } .
 DATA_BLOCK
 
-	recipe_str="$(cat "$recipe_file")"
+	for rdir in /lib/partman/recipes /lib/partman/recipes-amd64 /lib/partman/recipes-amd64-efi; do
+		mkdir -p "$rdir"
+		cp /tmp/axonwall-ab-recipe "${rdir}/30axonwall-ab" 2>/dev/null || true
+	done
+
+	recipe_str="$(cat /tmp/axonwall-ab-recipe)"
 	db_set partman-auto/expert_recipe "$recipe_str"
+	db_set partman-auto/expert_recipe_file "/tmp/axonwall-ab-recipe"
 	db_set partman-auto/choose_recipe "axonwall-ab"
 	echo "partman-auto partman-auto/expert_recipe string $recipe_str" | debconf-set-selections 2>/dev/null || true
+	echo "partman-auto partman-auto/expert_recipe_file string /tmp/axonwall-ab-recipe" | debconf-set-selections 2>/dev/null || true
 	echo "partman-auto partman-auto/choose_recipe select axonwall-ab" | debconf-set-selections 2>/dev/null || true
+
+	# Perform autopartitioning directly on the user's chosen disk
+	autopartition "$disk"
+	exit 0
 fi
 
-# If both are set, let's try to do a completely automatic partitioning
+# If both method and disks are already preseeded, proceed with autopartition
 if [ "$method" ] && [ "$disks" ]; then
 	case "$method" in
 	    regular)
 		for disk in $disks; do
-			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
-			id=$(dev_to_partman "$dev_name") || true
-			if [ -z "$id" ]; then
-				id=$(dev_to_partman "$disk") || true
+			if [ -d "$disk" ] && [ -f "$disk/device" ]; then
+				autopartition "$disk"
+				exit 0
 			fi
+			id=$(dev_to_partman "$disk") || true
 			if [ -z "$id" ]; then
 				id="$disk"
 			fi
@@ -222,11 +229,7 @@ if [ "$method" ] && [ "$disks" ]; then
 		search-path autopartition-lvm || exit 1
 		ids=""
 		for disk in $disks; do
-			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
-			id=$(dev_to_partman "$dev_name") || true
-			if [ -z "$id" ]; then
-				id=$(dev_to_partman "$disk") || true
-			fi
+			id=$(dev_to_partman "$disk") || true
 			if [ -z "$id" ]; then
 				id="$disk"
 			fi
@@ -241,11 +244,7 @@ if [ "$method" ] && [ "$disks" ]; then
 	    crypto)
 		search-path autopartition-crypto || exit 1
 		for disk in $disks; do
-			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
-			id=$(dev_to_partman "$dev_name") || true
-			if [ -z "$id" ]; then
-				id=$(dev_to_partman "$disk") || true
-			fi
+			id=$(dev_to_partman "$disk") || true
 			if [ -z "$id" ]; then
 				id="$disk"
 			fi
@@ -259,11 +258,7 @@ if [ "$method" ] && [ "$disks" ]; then
 	    raid)
 		ids=""
 		for disk in $disks; do
-			dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
-			id=$(dev_to_partman "$dev_name") || true
-			if [ -z "$id" ]; then
-				id=$(dev_to_partman "$disk") || true
-			fi
+			id=$(dev_to_partman "$disk") || true
 			if [ -z "$id" ]; then
 				id="$disk"
 			fi
