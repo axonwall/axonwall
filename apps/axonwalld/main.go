@@ -342,7 +342,7 @@ func (s *AgentServer) GetStatus(ctx context.Context, req *pb.GetStatusRequest) (
 
 	return &pb.GetStatusResponse{
 		NodeId:              s.nodeId,
-		Version:             "0.1.7",
+		Version:             "0.1.8",
 		UptimeSeconds:       uptime,
 		ActiveBundleHash:    s.activeHash,
 		PendingConfirm:      s.pendingConfirm,
