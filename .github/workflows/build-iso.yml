@@ -53,6 +53,19 @@ jobs:
           cd apps/axonwall-satellite
           make all
 
+      - name: Build Debian (.deb) Package
+        run: |
+          ./packaging/debian/build-deb.sh
+
+      - name: Upload Debian Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: axonwall-debian-package
+          path: |
+            packaging/debian/output/*.deb
+            packaging/debian/output/*.deb.sha256
+          retention-days: 7
+
       - name: Install ISO Build Dependencies
         run: |
           sudo apt-get clean
@@ -104,9 +117,9 @@ jobs:
       - name: Compute Checksums
         run: |
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
-          sudo chown -R $USER:$USER packaging/iso/output
+          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output
 
-      - name: Upload Build Checksum Artifact
+      - name: Upload ISO Checksum Artifact
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
@@ -114,27 +127,32 @@ jobs:
           path: packaging/iso/output/axonwall-debian13-amd64.iso.sha256
           retention-days: 1
 
-      - name: Release ISO (on tag)
+      - name: Release Distribution Artifacts (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+            packaging/debian/output/*.deb
+            packaging/debian/output/*.deb.sha256
 
       - name: Publish Rolling Latest Pre-Release (on main)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: rolling-latest
-          name: "Axonwall Appliance ISO (Rolling Latest)"
+          name: "Axonwall Appliance ISO & Debian Packages (Rolling Latest)"
           body: |
             ### Automated Continuous Build
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
             - **Distribution**: Debian 13 (Trixie) amd64
+            - **Artifacts**: Bare-metal Hybrid ISO Installer + Standalone Debian (.deb) Package
             - **Components**: Axonwalld Core Daemon + Axonwall Web UI + Satellite Agents + Preconfigured Network Engine
           prerelease: true
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+            packaging/debian/output/*.deb
+            packaging/debian/output/*.deb.sha256
