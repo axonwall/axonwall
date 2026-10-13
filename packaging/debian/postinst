@@ -1,0 +1,77 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # 1. Create axonwall system user and group if not already present
+        if ! getent group axonwall >/dev/null 2>&1; then
+            groupadd --system axonwall
+        fi
+        if ! getent passwd axonwall >/dev/null 2>&1; then
+            useradd --system --gid axonwall --home-dir /var/lib/axonwall \
+                --no-create-home --shell /usr/sbin/nologin \
+                --comment "Axonwall Firewall System User" axonwall
+        fi
+
+        # 2. Ensure directories exist with strict permissions
+        mkdir -p /var/lib/axonwall /var/log/axonwall /run/axonwall /etc/axonwall/certs /opt/axonwall
+        mkdir -p /var/lib/axonwall/headscale /run/headscale
+
+        chown -R axonwall:axonwall /var/lib/axonwall /var/log/axonwall /opt/axonwall
+        chown -R axonwall:axonwall /var/lib/axonwall/headscale /run/headscale
+        chmod 750 /var/lib/axonwall /var/log/axonwall /opt/axonwall
+        chmod 770 /var/lib/axonwall/headscale /run/headscale
+
+        chown root:axonwall /etc/axonwall /etc/axonwall/certs
+        chmod 750 /etc/axonwall /etc/axonwall/certs
+
+        # 3. Generate baseline TLS certificates if absent
+        if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
+            if command -v openssl >/dev/null 2>&1; then
+                SAN="DNS:$(hostname 2>/dev/null || echo axonwall),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
+                openssl req -x509 -newkey rsa:2048 -nodes \
+                    -keyout /etc/axonwall/certs/hub.key \
+                    -out /etc/axonwall/certs/hub.crt \
+                    -days 3650 \
+                    -subj "/O=Axonwall/OU=Appliance/CN=$(hostname 2>/dev/null || echo axonwall)" \
+                    -addext "subjectAltName=${SAN}" >/dev/null 2>&1 || true
+            fi
+        fi
+
+        if [ -f /etc/axonwall/certs/hub.key ]; then
+            chown root:axonwall /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+            chmod 640 /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+        fi
+
+        # 4. Generate default environment secrets if absent
+        if [ ! -s /etc/axonwall/axonwall.env ]; then
+            JWT_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || echo "axonwall-secret-token")
+            ZTP_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || echo "axonwall-ztp")
+            ADMIN_PASS="axonwall"
+
+            cat << ENV_EOF > /etc/axonwall/axonwall.env
+JWT_SECRET=${JWT_SECRET}
+AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
+LOCAL_ADMIN_USER=admin
+LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
+AGENT_SOCKET_PATH=/run/axonwall/agent.sock
+AGENT_API_SOCKET=/run/axonwall/agent-api.sock
+ENV_EOF
+            chmod 0640 /etc/axonwall/axonwall.env
+            chown root:axonwall /etc/axonwall/axonwall.env
+        fi
+
+        # 5. Reload systemd daemon and enable services if systemd is running
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service || true
+            systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service || true
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        ;;
+esac
+
+exit 0

@@ -46,3 +46,9 @@ packaging/iso/output/
 packaging/iso/build/
 *.iso
 *.iso.sha256
+
+# Debian package build artifacts
+packaging/debian/output/
+packaging/debian/build/
+*.deb
+*.deb.sha256

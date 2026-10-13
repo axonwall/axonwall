@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop axonwall-ui.service axonwall-controller.service axonwalld.service || true
+            systemctl disable axonwall-ui.service axonwall-controller.service axonwalld.service || true
+        fi
+        ;;
+    failed-upgrade)
+        ;;
+    *)
+        ;;
+esac
+
+exit 0
