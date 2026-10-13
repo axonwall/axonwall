@@ -3,28 +3,74 @@
 ## 1. Overview
 Axonwall implements an enterprise-grade **A/B Dual-Root System Partitioning** scheme combined with an autonomous **Health Quorum Watchdog**. This guarantees zero-downtime, unbrickable operating system upgrades across physical hardware appliances, virtual machine deployments, and remote edge satellites.
 
+During installation, the installer guides the administrator through target disk selection, explains the dual-root mechanism, and allows customizing the partition sizing per slot based on available hardware storage.
+
 ---
 
-## 2. Partition Layout
+## 2. Why Two Identical System Partitions?
+
+### The Problem with Single-Partition Firewalls
+In traditional operating systems and firewalls (such as pfSense® or OPNsense®), updates are applied directly to the running root partition (`/`). If a firmware update fails midway, encounters a kernel panic, or breaks network driver compatibility, the appliance is left in an unbootable state ("bricked"), requiring physical serial console or on-site manual recovery.
+
+### The Axonwall A/B Solution
+Axonwall maintains two identical, independent system partitions:
+1. **Slot A (Primary Active):** Formatted as ext4 with filesystem label `axon_root_a`.
+2. **Slot B (Alternate Standby):** Formatted as ext4 with filesystem label `axon_root_b`.
+3. **Persistent Data (`/var/lib/axonwall`):** Formatted as ext4 with filesystem label `axon_data`.
+
+When updates are deployed:
+- The system writes all kernel, daemon, and UI updates directly into the **inactive standby slot** in the background while network routing and filtering continue uninterrupted.
+- Upon scheduled reboot, GRUB boots into the newly staged slot under watchdog supervision.
+- If the new image passes interface carrier, nftables, and control-plane health checks within 180 seconds, it is marked active and healthy.
+- If boot fails 3 consecutive times, GRUB automatically falls back to the previous healthy slot.
+
+Because both system slots are identical, the root partition size configured during installation is **allocated twice**.
+
+---
+
+## 3. Interactive Partition Sizing Options
+
+During installation, the administrator is presented with partition configuration options tailored to the detected storage capacity:
+
+| Option | Size per Slot | Total System Allocated | Best Suited For |
+|---|---|---|---|
+| **Compact** | 8 GB per slot | 16 GB total | Embedded devices, eMMC, CFast cards (16 GB - 32 GB disks) |
+| **Standard (Recommended)** | 16 GB per slot | 32 GB total | Default appliance profile, ample room for packages & Suricata DPI |
+| **Expanded** | 32 GB per slot | 64 GB total | Enterprise appliances with 128 GB+ NVMe SSDs & container engines |
+| **Custom** | User-defined (min 6 GB) | 2 × Custom GB | Specialized deployments with specific storage requirements |
+
+### Swap Allocation Options
+- **2 GB Swap (Standard):** Balanced profile for general router workloads.
+- **No Swap Partition:** Recommended for high-end NVMe drives and systems with ZRAM.
+- **4 GB / 8 GB Swap:** Extended swap for intensive Suricata deep packet inspection and large memory dumps.
+
+### Persistent Volume Allocation
+All remaining unallocated disk capacity is automatically formatted as ext4 (`LABEL=axon_data`) and mounted to `/var/lib/axonwall`. This volume preserves cryptographic certificates, Headscale WireGuard mesh databases, VictoriaMetrics time-series flows, Suricata logs, and user identities across all OS updates.
+
+---
+
+## 4. Partition Layout Diagram
 
 ```text
 +-----------------------------------------------------------------------------------------+
-| Partition 1: EFI System Partition (ESP)  | /boot/efi       | FAT32 | 512 MB             |
+| Partition 1: BIOS Boot (1 MB) / EFI ESP (512 MB) | /boot/efi       | FAT32 | 512 MB     |
 +-----------------------------------------------------------------------------------------+
-| Partition 2: rootfsA (Active / Standby)   | /               | ext4  | 16 GB [LABEL: axon_root_a] |
+| Partition 2: rootfsA (Active System Slot)        | /               | ext4  | 8-32 GB    |
+|                                                  |                 |       | [axon_root_a]|
 +-----------------------------------------------------------------------------------------+
-| Partition 3: rootfsB (Active / Standby)   | /               | ext4  | 16 GB [LABEL: axon_root_b] |
+| Partition 3: rootfsB (Standby Fallback Slot)     | /mnt/standby    | ext4  | 8-32 GB    |
+|                                                  | (for staging)   |       | [axon_root_b]|
 +-----------------------------------------------------------------------------------------+
-| Partition 4: Persistent Data & Logs      | /var/lib/axonwall| ext4  | Rest of Disk       |
+| Partition 4: Swap (Optional)                     | [SWAP]          | swap  | 0-8 GB     |
++-----------------------------------------------------------------------------------------+
+| Partition 5: Persistent Data & Logs              | /var/lib/axonwall| ext4  | Remainder  |
+|                                                  |                 |       | [axon_data]|
 +-----------------------------------------------------------------------------------------+
 ```
 
-* **rootfsA & rootfsB:** Contain identical Debian/Axonwall OS environments. One slot is active (read-only or state-isolated), while the other receives system image updates.
-* **Persistent Partition (`/var/lib/axonwall`):** Houses cryptographic certificates, Headscale SQLite databases, configuration bundles (`bundles/last-known-good.nft`), and user identities. This partition is mounted consistently regardless of which rootfs slot is booted.
-
 ---
 
-## 3. GRUB Boot-Counting Lifecycle
+## 5. GRUB Boot-Counting Lifecycle
 
 1. **Next-Boot Staging:**
    When an update is flashed to the inactive slot (e.g., Slot B), `axonwalld` sets:
@@ -40,7 +86,7 @@ Axonwall implements an enterprise-grade **A/B Dual-Root System Partitioning** sc
 
 ---
 
-## 4. Watchdog Health Quorum Verification (`axonwalld`)
+## 6. Watchdog Health Quorum Verification (`axonwalld`)
 
 Immediately after boot, the privileged daemon `axonwalld` initiates an autonomous 3-step verification sequence:
 

@@ -1,0 +1,122 @@
+#!/bin/sh
+set -e
+
+. /usr/share/debconf/confmodule
+
+echo "================================================================================"
+echo "[Axonwall Installer] Finalizing A/B Dual-Root System Setup..."
+echo "================================================================================"
+
+# 1. Identify installed block devices
+ROOT_A_DEV=$(df /target | tail -n1 | awk '{print $1}')
+ROOT_B_DEV=$(df /target/mnt/standby 2>/dev/null | tail -n1 | awk '{print $1}')
+DATA_DEV=$(df /target/var/lib/axonwall 2>/dev/null | tail -n1 | awk '{print $1}')
+
+TARGET_DISK=$(echo "$ROOT_A_DEV" | sed -E 's/p?[0-9]+$//')
+
+# Fallback detection for Slot B device if not mounted at /target/mnt/standby
+if [ -z "$ROOT_B_DEV" ] || [ "$ROOT_B_DEV" = "$ROOT_A_DEV" ]; then
+  PART_NUM=$(echo "$ROOT_A_DEV" | grep -oE '[0-9]+$')
+  NEXT_NUM=$(( PART_NUM + 1 ))
+  if echo "$ROOT_A_DEV" | grep -q 'nvme\|mmcblk'; then
+    ROOT_B_DEV="${TARGET_DISK}p${NEXT_NUM}"
+  else
+    ROOT_B_DEV="${TARGET_DISK}${NEXT_NUM}"
+  fi
+fi
+
+# Fallback detection for Persistent Data device
+if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
+  # Find last partition on target disk
+  DATA_DEV=$(ls "${TARGET_DISK}"* 2>/dev/null | grep -E "${TARGET_DISK}(p?[0-9]+)$" | tail -n1 || true)
+fi
+
+echo "[+] Target Disk       : ${TARGET_DISK}"
+echo "[+] Slot A (Primary)  : ${ROOT_A_DEV}"
+echo "[+] Slot B (Standby)  : ${ROOT_B_DEV}"
+echo "[+] Persistent Data   : ${DATA_DEV:-<embedded>}"
+
+# 2. Label filesystems
+if [ -b "$ROOT_A_DEV" ]; then
+  echo "[+] Setting filesystem label: ${ROOT_A_DEV} -> axon_root_a"
+  e2label "$ROOT_A_DEV" axon_root_a 2>/dev/null || tune2fs -L axon_root_a "$ROOT_A_DEV" 2>/dev/null || true
+fi
+
+if [ -b "$ROOT_B_DEV" ]; then
+  if ! blkid "$ROOT_B_DEV" 2>/dev/null | grep -q 'ext4'; then
+    echo "[+] Formatting Slot B standby partition: ${ROOT_B_DEV} as ext4..."
+    mkfs.ext4 -F -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+  else
+    echo "[+] Setting filesystem label: ${ROOT_B_DEV} -> axon_root_b"
+    e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+  fi
+fi
+
+if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && [ "$DATA_DEV" != "$ROOT_B_DEV" ]; then
+  echo "[+] Setting filesystem label: ${DATA_DEV} -> axon_data"
+  e2label "$DATA_DEV" axon_data 2>/dev/null || tune2fs -L axon_data "$DATA_DEV" 2>/dev/null || true
+fi
+
+# 3. Synchronize Slot A to Slot B for instant standby readiness
+if [ -b "$ROOT_B_DEV" ]; then
+  STAGE_B="/tmp/stage_slot_b"
+  mkdir -p "$STAGE_B"
+  IS_MOUNTED=0
+
+  if mountpoint -q /target/mnt/standby 2>/dev/null; then
+    STAGE_B="/target/mnt/standby"
+    IS_MOUNTED=1
+  else
+    mount "$ROOT_B_DEV" "$STAGE_B" 2>/dev/null || true
+    if mountpoint -q "$STAGE_B" 2>/dev/null; then
+      IS_MOUNTED=2
+    fi
+  fi
+
+  if [ $IS_MOUNTED -gt 0 ]; then
+    echo "[+] Replicating base system from Slot A to Slot B..."
+    rsync -aAX --delete \
+      --exclude=/mnt/standby \
+      --exclude=/var/lib/axonwall \
+      --exclude=/proc/* \
+      --exclude=/sys/* \
+      --exclude=/dev/* \
+      --exclude=/run/* \
+      --exclude=/tmp/* \
+      /target/ "$STAGE_B/" 2>/dev/null || true
+
+    # Configure Slot B's /etc/fstab for independent booting
+    if [ -f "$STAGE_B/etc/fstab" ]; then
+      sed -i 's/axon_root_a/axon_root_b/g' "$STAGE_B/etc/fstab"
+      sed -i '\#/mnt/standby#d' "$STAGE_B/etc/fstab"
+    fi
+
+    # Unmount standby staging
+    if [ $IS_MOUNTED -eq 1 ]; then
+      umount /target/mnt/standby 2>/dev/null || true
+    elif [ $IS_MOUNTED -eq 2 ]; then
+      umount "$STAGE_B" 2>/dev/null || true
+    fi
+  fi
+fi
+
+# Clean up /mnt/standby mountpoint in Slot A fstab
+if [ -f /target/etc/fstab ]; then
+  sed -i '\#/mnt/standby#d' /target/etc/fstab
+  # Ensure /var/lib/axonwall is mounted by label axon_data
+  if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -q 'axon_data' /target/etc/fstab; then
+    echo "LABEL=axon_data  /var/lib/axonwall  ext4  defaults,noatime  0  2" >> /target/etc/fstab
+  fi
+fi
+
+# 4. Initialize GRUB environment for A/B boot counting & automated watchdog rollback
+mkdir -p /target/boot/grub
+in-target grub-editenv /boot/grub/grubenv create 2>/dev/null || true
+in-target grub-editenv /boot/grub/grubenv set active_slot=A 2>/dev/null || true
+in-target grub-editenv /boot/grub/grubenv set bootcount=0 2>/dev/null || true
+in-target grub-editenv /boot/grub/grubenv set bootlimit=3 2>/dev/null || true
+
+# 5. Refresh GRUB configuration
+in-target update-grub 2>/dev/null || true
+
+echo "[✓] Axonwall A/B Dual-Root Partition Setup successfully finished."

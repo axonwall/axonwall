@@ -12,3 +12,58 @@ Type: password
 Description: Re-enter Axonwall Administrator Password:
  Please enter the administrator password again to verify that you have typed it
  correctly.
+
+Template: axonwall/ab_explanation
+Type: note
+Description: Axonwall A/B Dual-Root Partition Architecture:
+ To ensure zero-downtime, unbrickable operating system and firmware upgrades,
+ Axonwall implements an enterprise A/B Dual-Root Partition Scheme with an
+ autonomous watchdog.
+ .
+ The target drive is partitioned into two identical system slots:
+  - Slot A: Primary Active System [axon_root_a]
+  - Slot B: Alternate Standby System [axon_root_b]
+  - Persistent Data Volume: /var/lib/axonwall [axon_data]
+ .
+ WHY TWO IDENTICAL SYSTEM SLOTS?
+ When software or firmware updates are applied, Axonwall installs them onto
+ the inactive standby slot in the background while your network remains live.
+ Upon reboot, the system verifies hardware health, kernel netfilter readiness,
+ and control plane quorum. If a kernel panic occurs or connectivity is lost,
+ the watchdog autonomously reverts to the alternate slot within 3 boot attempts.
+ .
+ Because both system slots are identical, the partition size you select
+ in the next step will be allocated TWICE (once for Slot A and once for Slot B).
+ The remainder of the disk is assigned to /var/lib/axonwall for configuration,
+ logs, and telemetry databases.
+
+Template: axonwall/root_size
+Type: select
+Choices: 16 GB per slot (Recommended - Standard 32 GB+ drive), 8 GB per slot (Compact - 16-32 GB embedded/eMMC), 32 GB per slot (Expanded - 128 GB+ enterprise SSD), Custom (Enter specific size in GB)
+Default: 16 GB per slot (Recommended - Standard 32 GB+ drive)
+Description: Select system root partition size (per slot):
+ Please choose the partition size for each system slot. Remember that Axonwall
+ will allocate this size twice (for Slot A and Slot B):
+ .
+  - 16 GB per slot: Recommended for most firewall deployments with IDS/IPS.
+  - 8 GB per slot: Compact layout for smaller SSDs, CF cards, or eMMC drives.
+  - 32 GB per slot: High-capacity layout for heavy container and plugin use.
+  - Custom: Enter a specific size in gigabytes.
+
+Template: axonwall/custom_root_size
+Type: string
+Default: 16
+Description: Custom system root partition size (per slot, in GB):
+ Enter the desired size in gigabytes for each system slot. Minimum recommended
+ size is 6 GB.
+
+Template: axonwall/swap_size
+Type: select
+Choices: 2 GB Swap (Standard), No swap partition (ZRAM / High-End NVMe), 4 GB Swap (Extended), 8 GB Swap (Large Memory Dump)
+Default: 2 GB Swap (Standard)
+Description: Select swap space allocation:
+ Choose swap partition size for this appliance:
+ .
+  - 2 GB Swap: Standard allocation for general routing and caching.
+  - No swap partition: Recommended when using high-speed NVMe or ZRAM.
+  - 4 GB / 8 GB Swap: Extended swap for heavy Suricata DPI or memory buffering.

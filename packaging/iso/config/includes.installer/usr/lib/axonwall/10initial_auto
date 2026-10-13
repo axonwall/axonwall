@@ -18,6 +18,12 @@ fi
 mkdir -p /var/lib/partman
 touch /var/lib/partman/initial_auto
 
+# Load Axonwall debconf templates if available
+if [ -f /usr/lib/axonwall/axonwall.templates ]; then
+	debconf-loadtemplate axonwall /usr/lib/axonwall/axonwall.templates 2>/dev/null || true
+	debconf-loadtemplate partman /usr/lib/axonwall/axonwall.templates 2>/dev/null || true
+fi
+
 # See if any autopartition method has been set
 method=""
 if db_get partman-auto/method && [ "$RET" ]; then
@@ -39,6 +45,157 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		echo "grub-installer grub-installer/bootdev string $dev_name" | debconf-set-selections 2>/dev/null || true
 		echo "grub-installer grub-installer/choose_bootdev select $dev_name" | debconf-set-selections 2>/dev/null || true
 	fi
+
+	# 1. Display A/B Dual-Root architecture explanation
+	db_input critical axonwall/ab_explanation || true
+	db_go || true
+
+	# 2. Detect disk capacity
+	dev_base="$(basename "$dev_name")"
+	disk_sectors="$(cat "/sys/block/${dev_base}/size" 2>/dev/null || echo 0)"
+	disk_size_gb=$(( disk_sectors * 512 / 1024 / 1024 / 1024 ))
+	if [ "$disk_size_gb" -le 0 ]; then
+		disk_size_gb=32
+	fi
+
+	# Set sensible default root size based on detected disk capacity
+	if [ "$disk_size_gb" -lt 30 ]; then
+		db_set axonwall/root_size "8 GB per slot (Compact - 16-32 GB embedded/eMMC)"
+	fi
+
+	# 3. Prompt user for system root partition size per slot
+	db_input critical axonwall/root_size || true
+	db_go || true
+	db_get axonwall/root_size || true
+	root_choice="$RET"
+
+	root_gb=16
+	case "$root_choice" in
+		8*|"Compact"*)
+			root_gb=8
+			;;
+		32*|"Expanded"*)
+			root_gb=32
+			;;
+		"Custom"*)
+			db_input critical axonwall/custom_root_size || true
+			db_go || true
+			db_get axonwall/custom_root_size || true
+			val="$(echo "$RET" | tr -dc '0-9')"
+			if [ -n "$val" ] && [ "$val" -ge 6 ]; then
+				root_gb="$val"
+			else
+				root_gb=16
+			fi
+			;;
+		*)
+			root_gb=16
+			;;
+	esac
+
+	# Safety clamp: Ensure two slots plus overhead fit on disk
+	max_allowed_gb=$(( (disk_size_gb - 4) / 2 ))
+	if [ "$max_allowed_gb" -lt 6 ]; then
+		max_allowed_gb=6
+	fi
+	if [ "$root_gb" -gt "$max_allowed_gb" ] && [ "$disk_size_gb" -ge 16 ]; then
+		root_gb="$max_allowed_gb"
+	fi
+
+	# 4. Prompt user for swap space allocation
+	db_input critical axonwall/swap_size || true
+	db_go || true
+	db_get axonwall/swap_size || true
+	swap_choice="$RET"
+
+	swap_gb=2
+	case "$swap_choice" in
+		"No swap"*)
+			swap_gb=0
+			;;
+		"4 GB"*)
+			swap_gb=4
+			;;
+		"8 GB"*)
+			swap_gb=8
+			;;
+		*)
+			swap_gb=2
+			;;
+	esac
+
+	root_mb=$(( root_gb * 1024 ))
+	swap_mb=$(( swap_gb * 1024 ))
+
+	# 5. Persist installer partition choices for finish-install hook
+	mkdir -p /var/lib/partman
+	cat << EOF > /var/lib/partman/axonwall-choices
+ROOT_GB=${root_gb}
+ROOT_MB=${root_mb}
+SWAP_GB=${swap_gb}
+SWAP_MB=${swap_mb}
+TARGET_DISK=${dev_name}
+EOF
+
+	# 6. Dynamically construct A/B Dual-Root recipe
+	mkdir -p /lib/partman/recipes
+	recipe_file="/lib/partman/recipes/30axonwall-ab"
+
+	cat << RECIPE_HEADER > "$recipe_file"
+axonwall-ab ::
+  1 1 1 free
+    \$bios_boot{ }
+    method{ biosgrub }
+  .
+  512 512 512 fat32
+    \$primary{ }
+    \$bootable{ }
+    method{ efi }
+    format{ }
+  .
+  ${root_mb} ${root_mb} ${root_mb} ext4
+    \$primary{ }
+    method{ format }
+    format{ }
+    use_filesystem{ }
+    filesystem{ ext4 }
+    mountpoint{ / }
+  .
+  ${root_mb} ${root_mb} ${root_mb} ext4
+    \$primary{ }
+    method{ format }
+    format{ }
+    use_filesystem{ }
+    filesystem{ ext4 }
+    mountpoint{ /mnt/standby }
+  .
+RECIPE_HEADER
+
+	if [ "$swap_mb" -gt 0 ]; then
+		cat << SWAP_BLOCK >> "$recipe_file"
+  ${swap_mb} ${swap_mb} ${swap_mb} linux-swap
+    method{ swap }
+    format{ }
+  .
+SWAP_BLOCK
+	fi
+
+	cat << DATA_BLOCK >> "$recipe_file"
+  1024 10000 -1 ext4
+    \$primary{ }
+    method{ format }
+    format{ }
+    use_filesystem{ }
+    filesystem{ ext4 }
+    mountpoint{ /var/lib/axonwall }
+  .
+DATA_BLOCK
+
+	recipe_str="$(cat "$recipe_file")"
+	db_set partman-auto/expert_recipe "$recipe_str"
+	db_set partman-auto/choose_recipe "axonwall-ab"
+	echo "partman-auto partman-auto/expert_recipe string $recipe_str" | debconf-set-selections 2>/dev/null || true
+	echo "partman-auto partman-auto/choose_recipe select axonwall-ab" | debconf-set-selections 2>/dev/null || true
 fi
 
 # If both are set, let's try to do a completely automatic partitioning
