@@ -59,6 +59,8 @@ lb config \
   --linux-flavours amd64 \
   --archive-areas "main contrib non-free non-free-firmware" \
   --apt-recommends false \
+  --firmware-chroot false \
+  --firmware-binary false \
   --chroot-squashfs-compression-type xz \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
