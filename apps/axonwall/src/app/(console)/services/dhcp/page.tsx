@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Server, Plus, CheckCircle2, FileCode } from 'lucide-react';
+import { Server, Plus, CheckCircle2, FileCode, ShieldCheck } from 'lucide-react';
 import { compileKeaDhcp4 } from '@axonwall/lib/compile/kea';
 import type { DhcpConfig, Interface } from '@axonwall/lib/schemas';
 
@@ -49,6 +49,19 @@ export default function DhcpPage() {
           <FileCode className="w-3.5 h-3.5" />
           <span>{showKeaConfig ? 'Hide Kea JSON' : 'View Kea JSON'}</span>
         </button>
+      </div>
+
+      {/* Non-Authoritative Safeguard Banner for Attached Networks */}
+      <div className="p-4 bg-cyan-950/40 border border-cyan-800/40 rounded-xl flex items-start gap-3 text-xs text-cyan-200">
+        <ShieldCheck className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
+        <div className="space-y-1">
+          <span className="font-semibold text-cyan-300 block text-sm">
+            DHCP Server Authority Policy & Attached Networks
+          </span>
+          <p className="text-slate-300 leading-relaxed">
+            Axonwall operates as an authoritative DHCP server solely on configured internal subnets (e.g. <strong>LAN</strong>). Optional interfaces (<strong>OPT1</strong> and <strong>OPT2</strong>) are designated for attached networks (corporate LANs, guest networks, upstream router subnets) and run strictly in non-authoritative mode without Kea DHCP listening to prevent rogue DHCP offer collisions.
+          </p>
+        </div>
       </div>
 
       {showKeaConfig && (

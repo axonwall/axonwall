@@ -185,6 +185,8 @@ const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
   interfaces: [
     { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Gateway' },
     { name: 'lan', device: 'eth1', type: 'static', enabled: true, ipv4Address: '192.168.100.1/24', mtu: 1500, description: 'LAN Network' },
+    { name: 'opt1', device: 'eth2', type: 'dhcp', enabled: false, mtu: 1500, description: 'OPT1 (Attached Network / Non-authoritative)' },
+    { name: 'opt2', device: 'eth3', type: 'dhcp', enabled: false, mtu: 1500, description: 'OPT2 (Attached Network / Non-authoritative)' },
   ],
   aliases: [],
   rules: [],
@@ -638,7 +640,26 @@ export interface LiveInterfaceInfo {
   status: 'Up' | 'Down' | 'Unknown';
 }
 
+function getLogicalInterfaceMappings(): { wan?: string; lan?: string; opt1?: string; opt2?: string } {
+  const mapping: { wan?: string; lan?: string; opt1?: string; opt2?: string } = {};
+  try {
+    if (fs.existsSync('/etc/axonwall/interfaces.conf')) {
+      const content = fs.readFileSync('/etc/axonwall/interfaces.conf', 'utf8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('WAN_INTERFACE=')) mapping.wan = trimmed.substring(14).trim();
+        if (trimmed.startsWith('LAN_INTERFACE=')) mapping.lan = trimmed.substring(14).trim();
+        if (trimmed.startsWith('OPT1_INTERFACE=')) mapping.opt1 = trimmed.substring(15).trim();
+        if (trimmed.startsWith('OPT2_INTERFACE=')) mapping.opt2 = trimmed.substring(15).trim();
+      }
+    }
+  } catch {}
+  return mapping;
+}
+
 export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
+  const confMap = getLogicalInterfaceMappings();
+
   try {
     const rawJson = execSync('ip -json address show 2>/dev/null', { encoding: 'utf8', timeout: 1000 });
     const ipData = JSON.parse(rawJson);
@@ -664,12 +685,26 @@ export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
       const isUp = item.flags?.includes('UP') && !item.flags?.includes('NO-CARRIER');
       const inetAddr = item.addr_info?.find((a: any) => a.family === 'inet');
       const ipv4 = inetAddr ? `${inetAddr.local}/${inetAddr.prefixlen}` : 'Unassigned';
-      const isWan = item.ifname === defaultDev || item.ifname.includes('wan') || item.ifname.includes('wlp');
+
+      let logicalName = item.ifname;
+      if (confMap.wan && item.ifname === confMap.wan) logicalName = 'wan';
+      else if (confMap.lan && item.ifname === confMap.lan) logicalName = 'lan';
+      else if (confMap.opt1 && item.ifname === confMap.opt1) logicalName = 'opt1';
+      else if (confMap.opt2 && item.ifname === confMap.opt2) logicalName = 'opt2';
+      else if (item.ifname === defaultDev || item.ifname.includes('wan') || item.ifname.includes('wlp')) logicalName = 'wan';
+
+      const isOpt = logicalName === 'opt1' || logicalName === 'opt2';
+      let typeLabel = inetAddr?.dynamic ? 'DHCP Client' : (inetAddr ? 'Static IPv4' : 'Unconfigured');
+      if (isOpt) {
+        typeLabel = inetAddr?.dynamic
+          ? 'DHCP Client (Attached / Non-authoritative)'
+          : (inetAddr ? 'Static IPv4 (Non-authoritative)' : 'Unconfigured (Non-authoritative)');
+      }
 
       results.push({
-        name: isWan ? 'wan' : item.ifname,
+        name: logicalName,
         device: item.ifname,
-        type: inetAddr?.dynamic ? 'DHCP Client' : (inetAddr ? 'Static IPv4' : 'Unconfigured'),
+        type: typeLabel,
         ipv4,
         gateway: item.ifname === defaultDev ? defaultGw : 'None',
         mtu: item.mtu || 1500,
@@ -688,10 +723,22 @@ export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
   for (const [name, addrs] of Object.entries(ifaces)) {
     if (name === 'lo' || !addrs) continue;
     const ipv4Info = addrs.find((a) => a.family === 'IPv4');
+
+    let logicalName = name;
+    if (confMap.wan && name === confMap.wan) logicalName = 'wan';
+    else if (confMap.lan && name === confMap.lan) logicalName = 'lan';
+    else if (confMap.opt1 && name === confMap.opt1) logicalName = 'opt1';
+    else if (confMap.opt2 && name === confMap.opt2) logicalName = 'opt2';
+
+    const isOpt = logicalName === 'opt1' || logicalName === 'opt2';
+    const typeLabel = isOpt
+      ? (ipv4Info ? 'DHCP Client (Attached / Non-authoritative)' : 'Unconfigured (Non-authoritative)')
+      : (ipv4Info ? 'Static / Assigned' : 'Unconfigured');
+
     fallbackList.push({
-      name,
+      name: logicalName,
       device: name,
-      type: ipv4Info ? 'Static / Assigned' : 'Unconfigured',
+      type: typeLabel,
       ipv4: ipv4Info ? `${ipv4Info.address}/${ipv4Info.netmask}` : 'Unassigned',
       gateway: 'None',
       mtu: 1500,
@@ -701,6 +748,155 @@ export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
   }
 
   return fallbackList;
+}
+
+export interface LogicalInterfaceView {
+  name: string; // 'wan' | 'lan' | 'opt1' | 'opt2'
+  label: string;
+  device: string;
+  enabled: boolean;
+  type: 'dhcp' | 'static';
+  ipv4Address?: string;
+  ipv4Gateway?: string;
+  description: string;
+  mtu: number;
+  isAuthoritativeDhcp: boolean;
+  isOpt: boolean;
+  liveStatus: {
+    isUp: boolean;
+    carrier: string;
+    currentIp: string;
+    currentGateway: string;
+    mac: string;
+  };
+}
+
+export async function getLogicalInterfacesView(): Promise<LogicalInterfaceView[]> {
+  const state = await getCurrentDesiredState();
+  const liveIfaces = await getSystemInterfaces();
+  const confMap = getLogicalInterfaceMappings();
+
+  const standardSlots: Array<{ name: string; label: string; defaultDev: string; defaultDesc: string; isOpt: boolean }> = [
+    { name: 'wan', label: 'WAN (Gateway)', defaultDev: confMap.wan || 'eth0', defaultDesc: 'Primary Internet Uplink', isOpt: false },
+    { name: 'lan', label: 'LAN (Internal)', defaultDev: confMap.lan || 'eth1', defaultDesc: 'Trusted Local Network (Authoritative DHCP)', isOpt: false },
+    { name: 'opt1', label: 'OPT1 (Attached Network)', defaultDev: confMap.opt1 || 'eth2', defaultDesc: 'Attached Network (Non-authoritative DHCP client)', isOpt: true },
+    { name: 'opt2', label: 'OPT2 (Attached Network)', defaultDev: confMap.opt2 || 'eth3', defaultDesc: 'Attached Network (Non-authoritative DHCP client)', isOpt: true },
+  ];
+
+  return standardSlots.map((slot) => {
+    const existing = state.interfaces.find((i) => i.name === slot.name);
+    const assignedDev = existing?.device || slot.defaultDev;
+    const live = liveIfaces.find((l) => l.device === assignedDev || l.name === slot.name);
+
+    return {
+      name: slot.name,
+      label: slot.label,
+      device: assignedDev,
+      enabled: existing?.enabled ?? (slot.name === 'wan' || slot.name === 'lan'),
+      type: (existing?.type === 'static' ? 'static' : 'dhcp') as 'dhcp' | 'static',
+      ipv4Address: existing?.ipv4Address || (slot.name === 'lan' ? '192.168.100.1/24' : ''),
+      ipv4Gateway: existing?.ipv4Gateway || '',
+      description: existing?.description || slot.defaultDesc,
+      mtu: existing?.mtu || 1500,
+      isAuthoritativeDhcp: slot.name === 'lan',
+      isOpt: slot.isOpt,
+      liveStatus: {
+        isUp: live?.status === 'Up',
+        carrier: live?.status || 'Unknown',
+        currentIp: live?.ipv4 || 'Unassigned',
+        currentGateway: live?.gateway || 'None',
+        mac: live?.mac || '00:00:00:00:00:00',
+      },
+    };
+  });
+}
+
+export async function getPhysicalNetworkDevices(): Promise<string[]> {
+  try {
+    const raw = execSync("ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' 2>/dev/null", { encoding: 'utf8' });
+    const devs = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (devs.length > 0) return Array.from(new Set(devs));
+  } catch {}
+
+  const ifaces = os.networkInterfaces();
+  const list = Object.keys(ifaces).filter((k) => k !== 'lo');
+  return list.length > 0 ? list : ['eth0', 'eth1', 'eth2', 'eth3'];
+}
+
+export async function saveInterfaceAssignment(data: {
+  name: string;
+  device: string;
+  enabled: boolean;
+  type: 'dhcp' | 'static';
+  ipv4Address?: string;
+  ipv4Gateway?: string;
+  description?: string;
+  mtu?: number;
+}): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized');
+  }
+
+  const state = await getCurrentDesiredState();
+  const idx = state.interfaces.findIndex((i) => i.name === data.name);
+  const updatedIface = {
+    name: data.name,
+    device: data.device,
+    enabled: data.enabled,
+    type: data.type,
+    ipv4Address: data.type === 'static' ? data.ipv4Address : undefined,
+    ipv4Gateway: data.type === 'static' ? data.ipv4Gateway : undefined,
+    description: data.description || `${data.name.toUpperCase()} Network`,
+    mtu: data.mtu || 1500,
+  };
+
+  if (idx >= 0) {
+    state.interfaces[idx] = updatedIface;
+  } else {
+    state.interfaces.push(updatedIface);
+  }
+
+  // OPT1 and OPT2 are strictly non-authoritative: ensure they are NOT in Kea DHCP subnets
+  if (data.name === 'opt1' || data.name === 'opt2') {
+    state.dhcp.subnets = state.dhcp.subnets.filter((s) => s.interface !== data.name);
+  }
+
+  cachedDesiredState = state;
+
+  try {
+    if (!fs.existsSync('/var/lib/axonwall')) {
+      fs.mkdirSync('/var/lib/axonwall', { recursive: true });
+    }
+    fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
+  } catch {}
+
+  // Persist device mappings into /etc/axonwall/interfaces.conf
+  try {
+    const wanDev = state.interfaces.find((i) => i.name === 'wan')?.device || 'eth0';
+    const lanDev = state.interfaces.find((i) => i.name === 'lan')?.device || 'eth1';
+    const opt1Dev = state.interfaces.find((i) => i.name === 'opt1')?.device || '';
+    const opt2Dev = state.interfaces.find((i) => i.name === 'opt2')?.device || '';
+    const conf = `WAN_INTERFACE=${wanDev}\nLAN_INTERFACE=${lanDev}\nOPT1_INTERFACE=${opt1Dev}\nOPT2_INTERFACE=${opt2Dev}\n`;
+    fs.mkdirSync('/etc/axonwall', { recursive: true });
+    fs.writeFileSync('/etc/axonwall/interfaces.conf', conf, 'utf8');
+  } catch {}
+
+  // Apply basic network state if active
+  if (data.enabled && data.device) {
+    try {
+      execSync(`ip link set ${data.device} up 2>/dev/null || true`);
+      if (data.type === 'static' && data.ipv4Address) {
+        execSync(`ip addr flush dev ${data.device} 2>/dev/null || true`);
+        execSync(`ip addr add ${data.ipv4Address} dev ${data.device} 2>/dev/null || true`);
+      }
+    } catch {}
+  }
+
+  return {
+    success: true,
+    message: `Interface ${data.name.toUpperCase()} successfully updated and assigned to ${data.device || '<none>'}.`,
+  };
 }
 
 export interface LiveGatewayInfo {

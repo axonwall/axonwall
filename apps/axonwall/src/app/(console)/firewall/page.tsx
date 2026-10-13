@@ -32,6 +32,8 @@ const INITIAL_STATE: DesiredState = {
   interfaces: [
     { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, description: 'WAN', mtu: 1500 },
     { name: 'lan', device: 'eth1', type: 'static', enabled: true, description: 'LAN', ipv4Address: '192.168.1.1/24', mtu: 1500 },
+    { name: 'opt1', device: 'eth2', type: 'dhcp', enabled: false, description: 'OPT1 (Attached)', mtu: 1500 },
+    { name: 'opt2', device: 'eth3', type: 'dhcp', enabled: false, description: 'OPT2 (Attached)', mtu: 1500 },
   ],
   aliases: [
     { name: 'web_servers', type: 'host', entries: ['192.168.1.10', '192.168.1.20'], description: 'Internal Web Servers', enabled: true },
@@ -115,7 +117,7 @@ const INITIAL_STATE: DesiredState = {
 
 export default function FirewallPage() {
   const [state, setState] = useState<DesiredState>(INITIAL_STATE);
-  const [selectedInterface, setSelectedInterface] = useState<'lan' | 'wan' | 'all'>('lan');
+  const [selectedInterface, setSelectedInterface] = useState<string>('lan');
   const [compiledScript, setCompiledScript] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<{ message: string; warnings: string[] } | null>(null);
   const [isApplying, setIsApplying] = useState(false);
@@ -185,7 +187,7 @@ export default function FirewallPage() {
 
       {/* Interface Tabs */}
       <div className="flex border-b border-slate-800">
-        {(['lan', 'wan', 'all'] as const).map((iface) => (
+        {(['lan', 'wan', 'opt1', 'opt2', 'all'] as const).map((iface) => (
           <button
             key={iface}
             type="button"

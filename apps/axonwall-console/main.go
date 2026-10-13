@@ -407,8 +407,8 @@ func printHeader() {
 
 	fmt.Println("================================================================================")
 	fmt.Println("  1) Interfaces Overview & Physical Link Status")
-	fmt.Println("  2) Assign Network Interfaces (WAN & LAN)")
-	fmt.Println("  3) Set LAN IP Address & Subnet (Configure DHCP)")
+	fmt.Println("  2) Assign Network Interfaces (WAN, LAN, OPT1, OPT2)")
+	fmt.Println("  3) Configure Interface IP & DHCP (WAN, LAN, OPT1, OPT2)")
 	fmt.Println("  4) Reset Web Admin Password")
 	fmt.Println("  5) Break-Glass Disable / Reset TOTP MFA")
 	fmt.Println("  6) Network Diagnostics (Ping, DNS Lookup)")
@@ -446,7 +446,7 @@ func actionInterfacesOverview(reader *bufio.Reader) {
 
 func actionAssignInterfaces(reader *bufio.Reader) {
 	clearScreen()
-	fmt.Println("=== Assign Network Interfaces ===")
+	fmt.Println("=== Assign Network Interfaces (WAN, LAN, OPT1, OPT2) ===")
 	fmt.Println("Detecting physical network devices...\n")
 
 	ifaces := getInterfaces()
@@ -458,16 +458,10 @@ func actionAssignInterfaces(reader *bufio.Reader) {
 		fmt.Printf(" [%d] %s (%s) - %s\n", i+1, iface.Name, iface.MAC, carrierTag)
 	}
 
-	fmt.Print("\nEnter WAN interface name (e.g. eth0) [leave blank to keep]: ")
-	wanIface, _ := reader.ReadString('\n')
-	wanIface = strings.TrimSpace(wanIface)
-
-	fmt.Print("Enter LAN interface name (e.g. eth1) [leave blank to keep]: ")
-	lanIface, _ := reader.ReadString('\n')
-	lanIface = strings.TrimSpace(lanIface)
-
 	currentWan := "eth0"
 	currentLan := "eth1"
+	currentOpt1 := ""
+	currentOpt2 := ""
 	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
@@ -475,24 +469,62 @@ func actionAssignInterfaces(reader *bufio.Reader) {
 				currentWan = strings.TrimPrefix(line, "WAN_INTERFACE=")
 			} else if strings.HasPrefix(line, "LAN_INTERFACE=") {
 				currentLan = strings.TrimPrefix(line, "LAN_INTERFACE=")
+			} else if strings.HasPrefix(line, "OPT1_INTERFACE=") {
+				currentOpt1 = strings.TrimPrefix(line, "OPT1_INTERFACE=")
+			} else if strings.HasPrefix(line, "OPT2_INTERFACE=") {
+				currentOpt2 = strings.TrimPrefix(line, "OPT2_INTERFACE=")
 			}
 		}
 	}
 
+	fmt.Printf("\nEnter WAN interface name [%s]: ", currentWan)
+	wanIface, _ := reader.ReadString('\n')
+	wanIface = strings.TrimSpace(wanIface)
 	if wanIface == "" {
 		wanIface = currentWan
 	}
+
+	fmt.Printf("Enter LAN interface name [%s]: ", currentLan)
+	lanIface, _ := reader.ReadString('\n')
+	lanIface = strings.TrimSpace(lanIface)
 	if lanIface == "" {
 		lanIface = currentLan
 	}
 
-	if wanIface != "" || lanIface != "" {
+	opt1Prompt := "none"
+	if currentOpt1 != "" {
+		opt1Prompt = currentOpt1
+	}
+	fmt.Printf("Enter OPT1 interface name (Attached / Non-authoritative) [%s]: ", opt1Prompt)
+	opt1Iface, _ := reader.ReadString('\n')
+	opt1Iface = strings.TrimSpace(opt1Iface)
+	if opt1Iface == "" {
+		opt1Iface = currentOpt1
+	} else if strings.ToLower(opt1Iface) == "none" || opt1Iface == "-" {
+		opt1Iface = ""
+	}
+
+	opt2Prompt := "none"
+	if currentOpt2 != "" {
+		opt2Prompt = currentOpt2
+	}
+	fmt.Printf("Enter OPT2 interface name (Attached / Non-authoritative) [%s]: ", opt2Prompt)
+	opt2Iface, _ := reader.ReadString('\n')
+	opt2Iface = strings.TrimSpace(opt2Iface)
+	if opt2Iface == "" {
+		opt2Iface = currentOpt2
+	} else if strings.ToLower(opt2Iface) == "none" || opt2Iface == "-" {
+		opt2Iface = ""
+	}
+
+	if wanIface != "" || lanIface != "" || opt1Iface != "" || opt2Iface != "" {
 		fmt.Printf("\n%sSaving interface assignments...%s\n", colorYellow, colorReset)
-		// Persist in /etc/axonwall/interfaces.conf if directory exists
 		_ = os.MkdirAll("/etc/axonwall", 0755)
-		content := fmt.Sprintf("WAN_INTERFACE=%s\nLAN_INTERFACE=%s\n", wanIface, lanIface)
+		content := fmt.Sprintf("WAN_INTERFACE=%s\nLAN_INTERFACE=%s\nOPT1_INTERFACE=%s\nOPT2_INTERFACE=%s\n", wanIface, lanIface, opt1Iface, opt2Iface)
 		if err := os.WriteFile("/etc/axonwall/interfaces.conf", []byte(content), 0644); err == nil {
-			fmt.Printf("%s[✓] Successfully assigned interfaces. WAN=%s LAN=%s%s\n", colorGreen, wanIface, lanIface, colorReset)
+			fmt.Printf("%s[✓] Successfully assigned interfaces.%s\n", colorGreen, colorReset)
+			fmt.Printf("    WAN:  %s\n    LAN:  %s\n    OPT1: %s\n    OPT2: %s\n",
+				wanIface, lanIface, valueOrNone(opt1Iface), valueOrNone(opt2Iface))
 		} else {
 			fmt.Printf("%s[!] Failed to save interface assignment: %v%s\n", colorRed, err, colorReset)
 		}
@@ -503,25 +535,203 @@ func actionAssignInterfaces(reader *bufio.Reader) {
 	pause(reader)
 }
 
-func actionConfigureLanIP(reader *bufio.Reader) {
+func valueOrNone(s string) string {
+	if s == "" {
+		return "<none>"
+	}
+	return s
+}
+
+func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	clearScreen()
-	fmt.Println("=== Configure LAN IP Address & DHCP ===")
+	fmt.Println("=== Configure Interface IP Address & DHCP ===")
 
 	currentIP := getPrimaryManagementIP()
 	fmt.Printf("Current Primary Management IP: %s\n\n", currentIP)
 
-	fmt.Print("Enter LAN Interface name (default eth1): ")
+	fmt.Println("Select interface to configure:")
+	fmt.Println("  1) WAN  (Internet Uplink - DHCP Client or Static IPv4 & Default Gateway)")
+	fmt.Println("  2) LAN  (Primary Internal Network with Authoritative DHCP)")
+	fmt.Println("  3) OPT1 (Attached Network - NON-authoritative DHCP client/static)")
+	fmt.Println("  4) OPT2 (Attached Network - NON-authoritative DHCP client/static)")
+	fmt.Print("\nEnter choice [1-4] (default 1): ")
+	ifChoice, _ := reader.ReadString('\n')
+	ifChoice = strings.TrimSpace(ifChoice)
+
+	ifName := "wan"
+	defaultDevice := "eth0"
+	isWan := true
+	isOpt := false
+	if ifChoice == "2" {
+		ifName = "lan"
+		defaultDevice = "eth1"
+		isWan = false
+	} else if ifChoice == "3" {
+		ifName = "opt1"
+		defaultDevice = "eth2"
+		isWan = false
+		isOpt = true
+	} else if ifChoice == "4" {
+		ifName = "opt2"
+		defaultDevice = "eth3"
+		isWan = false
+		isOpt = true
+	}
+
+	// Try reading device mapping from interfaces.conf
+	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if ifName == "wan" && strings.HasPrefix(line, "WAN_INTERFACE=") {
+				val := strings.TrimPrefix(line, "WAN_INTERFACE=")
+				if val != "" {
+					defaultDevice = val
+				}
+			} else if ifName == "lan" && strings.HasPrefix(line, "LAN_INTERFACE=") {
+				val := strings.TrimPrefix(line, "LAN_INTERFACE=")
+				if val != "" {
+					defaultDevice = val
+				}
+			} else if ifName == "opt1" && strings.HasPrefix(line, "OPT1_INTERFACE=") {
+				val := strings.TrimPrefix(line, "OPT1_INTERFACE=")
+				if val != "" {
+					defaultDevice = val
+				}
+			} else if ifName == "opt2" && strings.HasPrefix(line, "OPT2_INTERFACE=") {
+				val := strings.TrimPrefix(line, "OPT2_INTERFACE=")
+				if val != "" {
+					defaultDevice = val
+				}
+			}
+		}
+	}
+
+	fmt.Printf("\nEnter %s physical network device [%s]: ", strings.ToUpper(ifName), defaultDevice)
 	iface, _ := reader.ReadString('\n')
 	iface = strings.TrimSpace(iface)
 	if iface == "" {
-		iface = "eth1"
+		iface = defaultDevice
 	}
 
-	fmt.Print("Enter new LAN IPv4 Address [192.168.1.1]: ")
+	if isWan {
+		fmt.Printf("\n%s=== Configure WAN Interface (%s) ===%s\n", colorCyan, iface, colorReset)
+		fmt.Println("Select IPv4 configuration mode:")
+		fmt.Println("  1) DHCP Client (Dynamic IP from ISP / upstream router - Default)")
+		fmt.Println("  2) Static IPv4 (Fixed IP, Subnet Mask, Gateway & DNS)")
+		fmt.Print("\nEnter mode [1-2] (default 1): ")
+		modeChoice, _ := reader.ReadString('\n')
+		modeChoice = strings.TrimSpace(modeChoice)
+
+		if modeChoice != "2" {
+			// DHCP Client
+			fmt.Printf("\nConfiguring WAN (%s) as DHCP client...\n", iface)
+			_ = exec.Command("ip", "link", "set", iface, "up").Run()
+			_ = exec.Command("dhclient", "-v", iface).Start()
+			fmt.Printf("%s[✓] WAN interface %s set to UP in DHCP client mode.%s\n", colorGreen, iface, colorReset)
+			pause(reader)
+			return
+		}
+
+		// Static IPv4 for WAN
+		fmt.Print("\nEnter Static WAN IPv4 Address (e.g. 203.0.113.10): ")
+		wanIP, _ := reader.ReadString('\n')
+		wanIP = strings.TrimSpace(wanIP)
+		if wanIP == "" {
+			fmt.Println("IP address cannot be empty.")
+			pause(reader)
+			return
+		}
+
+		fmt.Print("Enter Subnet Mask in CIDR notation [24]: ")
+		cidr, _ := reader.ReadString('\n')
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			cidr = "24"
+		}
+
+		fmt.Print("Enter Upstream Default Gateway IPv4 (e.g. 203.0.113.1): ")
+		gateway, _ := reader.ReadString('\n')
+		gateway = strings.TrimSpace(gateway)
+
+		fmt.Print("Enter Primary DNS Server [1.1.1.1]: ")
+		dns1, _ := reader.ReadString('\n')
+		dns1 = strings.TrimSpace(dns1)
+		if dns1 == "" {
+			dns1 = "1.1.1.1"
+		}
+
+		fmt.Print("Enter Secondary DNS Server [8.8.8.8]: ")
+		dns2, _ := reader.ReadString('\n')
+		dns2 = strings.TrimSpace(dns2)
+		if dns2 == "" {
+			dns2 = "8.8.8.8"
+		}
+
+		cidrFull := fmt.Sprintf("%s/%s", wanIP, cidr)
+		fmt.Printf("\nApplying Static WAN %s with Gateway %s to %s...\n", cidrFull, gateway, iface)
+
+		_ = exec.Command("ip", "link", "set", iface, "up").Run()
+		_ = exec.Command("ip", "addr", "flush", "dev", iface).Run()
+		cmd := exec.Command("ip", "addr", "add", cidrFull, "dev", iface)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			fmt.Printf("%s[!] Failed to assign IP address: %s%s\n", colorRed, string(out), colorReset)
+			pause(reader)
+			return
+		}
+
+		if gateway != "" {
+			_ = exec.Command("ip", "route", "del", "default", "dev", iface).Run()
+			cmdGw := exec.Command("ip", "route", "add", "default", "via", gateway, "dev", iface)
+			if _, err := cmdGw.CombinedOutput(); err != nil {
+				_ = exec.Command("ip", "route", "replace", "default", "via", gateway, "dev", iface).Run()
+			}
+		}
+
+		resolvContent := fmt.Sprintf("# Generated by Axonwall Console\nnameserver %s\nnameserver %s\n", dns1, dns2)
+		_ = os.WriteFile("/etc/resolv.conf", []byte(resolvContent), 0644)
+
+		fmt.Printf("%s[✓] Static WAN IP %s assigned to %s successfully.%s\n", colorGreen, cidrFull, iface, colorReset)
+		if gateway != "" {
+			fmt.Printf("%s[✓] Default gateway set to %s via %s.%s\n", colorGreen, gateway, iface, colorReset)
+		}
+		fmt.Printf("%s[✓] DNS resolvers configured: %s, %s.%s\n", colorGreen, dns1, dns2, colorReset)
+		fmt.Printf("%s[✓] DHCP Server is DISABLED on WAN interface.%s\n", colorGreen, colorReset)
+		pause(reader)
+		return
+	}
+
+	if isOpt {
+		fmt.Printf("\n%s[!] NOTE: %s is an attached network interface.%s\n", colorYellow, strings.ToUpper(ifName), colorReset)
+		fmt.Println("    To prevent network conflicts, Axonwall does NOT serve DHCP on attached networks by default.")
+		fmt.Println("\nSelect IP configuration mode:")
+		fmt.Println("  1) DHCP Client (Get IP from existing upstream network DHCP server)")
+		fmt.Println("  2) Static IPv4")
+		fmt.Print("Enter mode [1-2] (default 1): ")
+		modeChoice, _ := reader.ReadString('\n')
+		modeChoice = strings.TrimSpace(modeChoice)
+
+		if modeChoice != "2" {
+			// DHCP Client mode
+			fmt.Printf("\nConfiguring %s (%s) as DHCP client on attached network...\n", strings.ToUpper(ifName), iface)
+			_ = exec.Command("ip", "link", "set", iface, "up").Run()
+			_ = exec.Command("dhclient", "-v", iface).Start()
+			fmt.Printf("%s[✓] Interface %s set to UP in DHCP client mode.%s\n", colorGreen, iface, colorReset)
+			fmt.Printf("%s[✓] Authoritative DHCP Server is DISABLED for %s.%s\n", colorGreen, strings.ToUpper(ifName), colorReset)
+			pause(reader)
+			return
+		}
+	}
+
+	defaultIP := "192.168.1.1"
+	if isOpt {
+		defaultIP = "10.0.50.1"
+	}
+
+	fmt.Printf("Enter new IPv4 Address [%s]: ", defaultIP)
 	newIP, _ := reader.ReadString('\n')
 	newIP = strings.TrimSpace(newIP)
 	if newIP == "" {
-		newIP = "192.168.1.1"
+		newIP = defaultIP
 	}
 
 	fmt.Print("Enter Subnet Mask in CIDR notation [24]: ")
@@ -531,10 +741,18 @@ func actionConfigureLanIP(reader *bufio.Reader) {
 		cidr = "24"
 	}
 
-	fmt.Print("Enable DHCP Server on this subnet? (Y/n): ")
-	dhcpAns, _ := reader.ReadString('\n')
-	dhcpAns = strings.ToLower(strings.TrimSpace(dhcpAns))
-	enableDHCP := dhcpAns != "n"
+	enableDHCP := false
+	if !isOpt {
+		fmt.Print("Enable authoritative DHCP Server on this subnet? (Y/n): ")
+		dhcpAns, _ := reader.ReadString('\n')
+		dhcpAns = strings.ToLower(strings.TrimSpace(dhcpAns))
+		enableDHCP = dhcpAns != "n"
+	} else {
+		fmt.Printf("%sEnable authoritative DHCP Server on %s? (y/N) [Default: N for attached networks]: %s", colorYellow, strings.ToUpper(ifName), colorReset)
+		dhcpAns, _ := reader.ReadString('\n')
+		dhcpAns = strings.ToLower(strings.TrimSpace(dhcpAns))
+		enableDHCP = dhcpAns == "y"
+	}
 
 	cidrFull := fmt.Sprintf("%s/%s", newIP, cidr)
 	fmt.Printf("\nApplying %s to interface %s...\n", cidrFull, iface)
@@ -546,7 +764,9 @@ func actionConfigureLanIP(reader *bufio.Reader) {
 	if out, err := cmd.CombinedOutput(); err == nil {
 		fmt.Printf("%s[✓] IP Address %s assigned to %s successfully.%s\n", colorGreen, cidrFull, iface, colorReset)
 		if enableDHCP {
-			fmt.Printf("%s[✓] DHCP range set to %s.100 - %s.240%s\n", colorGreen, strings.TrimSuffix(newIP, ".1"), strings.TrimSuffix(newIP, ".1"), colorReset)
+			fmt.Printf("%s[✓] DHCP range enabled for %s.%s\n", colorGreen, iface, colorReset)
+		} else {
+			fmt.Printf("%s[✓] Authoritative DHCP Server is DISABLED for %s (Safe for attached networks).%s\n", colorGreen, strings.ToUpper(ifName), colorReset)
 		}
 	} else {
 		fmt.Printf("%s[!] Failed to assign IP address: %s%s\n", colorRed, string(out), colorReset)
@@ -727,7 +947,7 @@ func main() {
 			case "2":
 				actionAssignInterfaces(reader)
 			case "3":
-				actionConfigureLanIP(reader)
+				actionConfigureInterfaceIP(reader)
 			case "4":
 				actionResetAdminPassword(reader)
 			case "5":

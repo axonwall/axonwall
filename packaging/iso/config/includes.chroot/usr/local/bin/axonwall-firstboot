@@ -19,17 +19,38 @@ modprobe nf_conntrack 2>/dev/null || true
 modprobe tcp_bbr 2>/dev/null || true
 sysctl --system || true
 
-# 2. Identify Primary LAN & WAN NICs
-INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | head -n 2 || true))
+# 2. Identify Primary LAN & WAN NICs, plus optional OPT1 & OPT2 NICs
+INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | head -n 4 || true))
 WAN_IF="${INTERFACES[0]:-eth0}"
 LAN_IF="${INTERFACES[1]:-}"
+OPT1_IF="${INTERFACES[2]:-}"
+OPT2_IF="${INTERFACES[3]:-}"
 
-echo "[Axonwall Firstboot] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF:-<none>}"
+echo "[Axonwall Firstboot] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF:-<none>}, OPT1: ${OPT1_IF:-<none>}, OPT2: ${OPT2_IF:-<none>}"
+
+mkdir -p /etc/axonwall
+cat << CONF_EOF > /etc/axonwall/interfaces.conf
+WAN_INTERFACE=${WAN_IF}
+LAN_INTERFACE=${LAN_IF}
+OPT1_INTERFACE=${OPT1_IF}
+OPT2_INTERFACE=${OPT2_IF}
+CONF_EOF
 
 # 3. Configure default LAN static IP (192.168.1.1/24) only on a real second NIC
 if [[ -n "$LAN_IF" ]] && ip link show "$LAN_IF" &>/dev/null; then
   ip addr add 192.168.1.1/24 dev "$LAN_IF" || true
   ip link set up dev "$LAN_IF" || true
+fi
+
+# Configure OPT1 and OPT2 as non-authoritative interfaces (link up, NO Kea DHCP server)
+if [[ -n "$OPT1_IF" ]] && ip link show "$OPT1_IF" &>/dev/null; then
+  ip link set up dev "$OPT1_IF" || true
+  echo "[Axonwall Firstboot] OPT1 interface ($OPT1_IF) brought UP (Non-authoritative / attached network)"
+fi
+
+if [[ -n "$OPT2_IF" ]] && ip link show "$OPT2_IF" &>/dev/null; then
+  ip link set up dev "$OPT2_IF" || true
+  echo "[Axonwall Firstboot] OPT2 interface ($OPT2_IF) brought UP (Non-authoritative / attached network)"
 fi
 
 # 4. Bootstrap baseline lockdown nftables ruleset
