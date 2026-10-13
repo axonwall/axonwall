@@ -49,6 +49,12 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		echo "grub-installer grub-installer/choose_bootdev select $dev_name" | debconf-set-selections 2>/dev/null || true
 	fi
 
+	# Default to modern GPT partition table layout (supports 128 partitions, UEFI & BIOS via biosgrub)
+	db_set partman-partitioning/default_label "gpt"
+	db_set partman-partitioning/choose_label "gpt"
+	echo "partman-partitioning partman-partitioning/default_label string gpt" | debconf-set-selections 2>/dev/null || true
+	echo "partman-partitioning partman-partitioning/choose_label select gpt" | debconf-set-selections 2>/dev/null || true
+
 	# 1. Display A/B Dual-Root architecture explanation
 	db_input critical axonwall/ab_explanation || true
 	db_go || true
@@ -147,27 +153,29 @@ EOF
 	# We set min to a modest baseline (4096 MB for root, 512 MB for swap) so recipes
 	# comfortably fit within 20 GB (and smaller) drives, while factor & max expand to
 	# the user's selected sizes ($root_mb, $swap_mb).
+	#
+	# IMPORTANT: Only EFI has $primary{} because forcing $primary{} on 4 partitions
+	# exceeds the MBR limit of 4 primary partitions (preventing swap from ever being created).
+	# On GPT, all partitions are native GPT partitions without primary/logical restrictions.
 	cat << RECIPE_CONTENT > /tmp/axonwall-ab-recipe
 axonwall-ab ::
 	1 1 1 free
 		\$iflabel{ gpt }
 		\$reusemethod{ }
 		method{ biosgrub } .
-	512 512 512 fat32
+	512 512 512 free
 		\$primary{ }
 		\$iflabel{ msdos gpt }
 		\$reusemethod{ }
 		method{ efi }
 		format{ } .
 	4096 ${root_mb} ${root_mb} ext4
-		\$primary{ }
 		method{ format }
 		format{ }
 		use_filesystem{ }
 		filesystem{ ext4 }
 		mountpoint{ / } .
 	4096 ${root_mb} ${root_mb} ext4
-		\$primary{ }
 		method{ format }
 		format{ }
 		use_filesystem{ }
@@ -185,7 +193,6 @@ SWAP_BLOCK
 
 	cat << DATA_BLOCK >> /tmp/axonwall-ab-recipe
 	512 10000 -1 ext4
-		\$primary{ }
 		method{ format }
 		format{ }
 		use_filesystem{ }
@@ -193,16 +200,20 @@ SWAP_BLOCK
 		mountpoint{ /var/lib/axonwall } .
 DATA_BLOCK
 
+	cp /tmp/axonwall-ab-recipe /tmp/expert_recipe 2>/dev/null || true
 	for rdir in /lib/partman/recipes /lib/partman/recipes-amd64 /lib/partman/recipes-amd64-efi; do
 		mkdir -p "$rdir"
 		cp /tmp/axonwall-ab-recipe "${rdir}/30axonwall-ab" 2>/dev/null || true
 	done
 
-	recipe_str="$(cat /tmp/axonwall-ab-recipe)"
-	db_set partman-auto/expert_recipe "$recipe_str"
+	# CRITICAL: Do NOT store the multi-line recipe string into debconf partman-auto/expert_recipe!
+	# In the cdebconf text protocol, unescaped newlines terminate the SET command early,
+	# truncating the recipe to just 'axonwall-ab ::' and destroying all partition definitions.
+	# We clear expert_recipe and point expert_recipe_file directly to /tmp/axonwall-ab-recipe.
+	db_reset partman-auto/expert_recipe 2>/dev/null || true
+	db_set partman-auto/expert_recipe "" 2>/dev/null || true
 	db_set partman-auto/expert_recipe_file "/tmp/axonwall-ab-recipe"
 	db_set partman-auto/choose_recipe "axonwall-ab"
-	echo "partman-auto partman-auto/expert_recipe string $recipe_str" | debconf-set-selections 2>/dev/null || true
 	echo "partman-auto partman-auto/expert_recipe_file string /tmp/axonwall-ab-recipe" | debconf-set-selections 2>/dev/null || true
 	echo "partman-auto partman-auto/choose_recipe select axonwall-ab" | debconf-set-selections 2>/dev/null || true
 
@@ -215,6 +226,7 @@ DATA_BLOCK
 	if [ $status -eq 0 ]; then
 		exit 100
 	fi
+	rm -f /var/lib/partman/initial_auto
 	exit $status
 fi
 
