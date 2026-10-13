@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 import { Shield, Lock, User, AlertCircle, Key, Building2 } from 'lucide-react';
 import { loginAction } from '../../../server/auth';
+import { Logo } from '../../../components/Logo';
 
 export default function LoginPage() {
   const [state, formAction, isPending] = useActionState(loginAction, null);
@@ -11,11 +12,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
       <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-8">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center mb-4 text-emerald-400">
-            <Shield className="w-10 h-10" />
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Axonwall</h1>
-          <p className="text-sm text-slate-400 mt-1">Linux & nftables Next-Generation Firewall</p>
+          <Logo variant="full" size="lg" className="mb-2" />
         </div>
 
         {state?.error && (

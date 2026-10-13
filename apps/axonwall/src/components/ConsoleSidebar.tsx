@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { Logo } from './Logo';
 import {
   Shield,
   LayoutDashboard,
@@ -239,9 +240,7 @@ export function ConsoleSidebar() {
       {/* Brand Header */}
       <div className="p-4 border-b border-slate-800 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-            <Shield className="w-5 h-5" />
-          </div>
+          <Logo variant="badge" size="sm" showSubtext={false} />
           <div>
             <span className="font-bold text-base tracking-tight text-white block">Axonwall</span>
             <span className="text-[10px] text-emerald-400 font-mono tracking-wider uppercase">

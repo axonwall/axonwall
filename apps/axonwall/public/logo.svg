@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 52" fill="none" width="100%" height="100%">
+  <defs>
+    <linearGradient id="shieldGradFull" x1="6" y1="4" x2="44" y2="46" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#061c18" />
+      <stop offset="100%" stop-color="#022c22" />
+    </linearGradient>
+    <linearGradient id="shieldBorderFull" x1="6" y1="4" x2="44" y2="46" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="50%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#06b6d4" />
+    </linearGradient>
+    <linearGradient id="axonLineFull" x1="12" y1="12" x2="38" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+    <linearGradient id="textGrad" x1="120" y1="16" x2="210" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#06b6d4" />
+    </linearGradient>
+    <radialGradient id="centerGlowFull" cx="24" cy="25" r="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.5" />
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Ambient Glow Behind Shield -->
+  <circle cx="25" cy="26" r="18" fill="url(#centerGlowFull)" />
+
+  <!-- Outer Cyber Shield Body -->
+  <path
+    d="M25 6 L42 11.5 C42 11.5 42.5 27.5 25 47 C7.5 27.5 8 11.5 8 11.5 L25 6 Z"
+    fill="url(#shieldGradFull)"
+    stroke="url(#shieldBorderFull)"
+    stroke-width="2"
+    stroke-linejoin="round"
+  />
+
+  <!-- Inner Inset Shield Border -->
+  <path
+    d="M25 10.5 L38.5 14.5 C38.5 14.5 39 26.5 25 41.5 C11 26.5 11.5 14.5 11.5 14.5 L25 10.5 Z"
+    stroke="#10b981"
+    stroke-opacity="0.25"
+    stroke-width="1.2"
+    fill="none"
+  />
+
+  <!-- Axon Synaptic Pathways -->
+  <g>
+    <!-- Circuit Lines -->
+    <path d="M25 15 L25 26" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
+    <path d="M25 26 L16 20.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
+    <path d="M25 26 L34 20.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
+    <path d="M25 26 L17.5 34.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
+    <path d="M25 26 L32.5 34.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
+
+    <!-- Branching Sub-circuits -->
+    <path d="M16 20.5 L12 24" stroke="url(#axonLineFull)" stroke-width="1.2" stroke-linecap="round" />
+    <path d="M34 20.5 L38 24" stroke="url(#axonLineFull)" stroke-width="1.2" stroke-linecap="round" />
+
+    <!-- Synapse Nodes -->
+    <circle cx="25" cy="15" r="2.4" fill="#34d399" />
+    <circle cx="16" cy="20.5" r="2.2" fill="#38bdf8" />
+    <circle cx="34" cy="20.5" r="2.2" fill="#38bdf8" />
+    <circle cx="17.5" cy="34.5" r="2.2" fill="#10b981" />
+    <circle cx="32.5" cy="34.5" r="2.2" fill="#10b981" />
+
+    <!-- Core Nerve Center (nftables processor) -->
+    <circle cx="25" cy="26" r="3.5" fill="#042f2e" stroke="#34d399" stroke-width="2" />
+    <circle cx="25" cy="26" r="1.5" fill="#ffffff" />
+  </g>
+
+  <!-- Typography -->
+  <text x="56" y="32" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="26" fill="#ffffff" letter-spacing="-0.03em">
+    Axon<tspan fill="url(#textGrad)">wall</tspan>
+  </text>
+  <text x="57" y="44" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="700" font-size="8.5" fill="#10b981" letter-spacing="0.16em">
+    ENTERPRISE LINUX FIREWALL
+  </text>
+</svg>
