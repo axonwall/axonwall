@@ -607,6 +607,42 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
 		})
+		mux.HandleFunc("/v1/system/partitions", func(w http.ResponseWriter, r *http.Request) {
+			status := watchdog.GetStatus()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(status)
+		})
+		mux.HandleFunc("/v1/system/slot/activate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Slot string `json:"slot"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := watchdog.ActivateSlot(req.Slot); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Slot %s armed as active slot for next boot", req.Slot),
+			})
+		})
+		mux.HandleFunc("/v1/system/health/verify", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			status := watchdog.RunVerification()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(status)
+		})
 		apiServer = &http.Server{Handler: mux}
 		go func() {
 			log.Printf("[Agent] Listening on REST Unix socket: %s", apiSocketPath)

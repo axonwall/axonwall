@@ -121,7 +121,28 @@ func (we *WatchdogEngine) detectInitialState() {
 		kernelVer = strings.TrimSpace(string(buf[:]))
 	}
 
-	osVer := "Axonwall OS 2.4-enterprise (Debian 13 Bookworm)"
+	appVer := "0.1.4"
+	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json"} {
+		if data, err := os.ReadFile(vpath); err == nil {
+			trimmed := strings.TrimSpace(string(data))
+			if strings.HasPrefix(trimmed, "{") {
+				// Crude package.json version extract
+				if idx := strings.Index(trimmed, `"version":`); idx != -1 {
+					sub := trimmed[idx+10:]
+					sub = strings.Trim(strings.Split(sub, ",")[0], ` "`)
+					if sub != "" {
+						appVer = sub
+						break
+					}
+				}
+			} else if trimmed != "" {
+				appVer = strings.Split(trimmed, "\n")[0]
+				break
+			}
+		}
+	}
+
+	osVer := fmt.Sprintf("Axonwall OS v%s", appVer)
 
 	we.status = PartitionStatus{
 		ActiveSlot:       activeSlot,
@@ -132,8 +153,8 @@ func (we *WatchdogEngine) detectInitialState() {
 		HealthVerified:   false,
 		KernelVersion:    kernelVer,
 		OsVersion:        osVer,
-		SlotAVersion:     "2.4.0-stable",
-		SlotBVersion:     "2.4.1-rc1",
+		SlotAVersion:     appVer,
+		SlotBVersion:     appVer,
 		Checks:           []HealthCheckResult{},
 	}
 }
@@ -142,6 +163,12 @@ func (we *WatchdogEngine) detectInitialState() {
 func (we *WatchdogEngine) Start() {
 	log.Println("[Watchdog] Starting A/B system partition health verification...")
 	go we.runVerificationSequence()
+}
+
+// RunVerification triggers the health quorum check on demand.
+func (we *WatchdogEngine) RunVerification() PartitionStatus {
+	we.runVerificationSequence()
+	return we.GetStatus()
 }
 
 // Stop shuts down background watchdog routines.

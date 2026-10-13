@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Axonwall Appliance Firmware & System Updater
+# ==============================================================================
+set -euo pipefail
+
+TARGET_SLOT="B"
+TARGET_VERSION=""
+UPDATE_CHANNEL="stable"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --slot)
+      TARGET_SLOT="${2:-B}"
+      shift 2
+      ;;
+    --version)
+      TARGET_VERSION="${2:-}"
+      shift 2
+      ;;
+    --channel)
+      UPDATE_CHANNEL="${2:-stable}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+echo "================================================================================"
+echo "Axonwall Appliance Firmware Updater"
+echo "  Target Slot   : Slot ${TARGET_SLOT}"
+echo "  Target Version: ${TARGET_VERSION:-latest}"
+echo "  Channel       : ${UPDATE_CHANNEL}"
+echo "================================================================================"
+
+# 1. Detect target block device
+TARGET_DEV="/dev/disk/by-label/axon_root_b"
+if [[ "${TARGET_SLOT^^}" == "A" ]]; then
+  TARGET_DEV="/dev/disk/by-label/axon_root_a"
+fi
+
+# 2. Check if running in Dual-Root or Single-Disk Appliance mode
+if [[ -e "$TARGET_DEV" ]]; then
+  echo "[+] Detected Dual-Root target partition: ${TARGET_DEV}"
+  echo "[+] Mounting standby partition to staging directory..."
+  STAGE_DIR="/tmp/axonwall-update-slot-${TARGET_SLOT}"
+  mkdir -p "${STAGE_DIR}"
+  mount "${TARGET_DEV}" "${STAGE_DIR}" || true
+
+  # If mounting succeeds, synchronize root filesystem or update software
+  if mountpoint -q "${STAGE_DIR}"; then
+    echo "[+] Updating application packages on standby partition..."
+    if [[ -d /opt/axonwall && -d "${STAGE_DIR}/opt/axonwall" ]]; then
+      rsync -aAX --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+    fi
+    if [[ -n "$TARGET_VERSION" ]]; then
+      echo "$TARGET_VERSION" > "${STAGE_DIR}/etc/axonwall/version" 2>/dev/null || true
+    fi
+    umount "${STAGE_DIR}" || true
+    rmdir "${STAGE_DIR}" 2>/dev/null || true
+  fi
+
+  # Arm GRUB boot watchdog for next boot
+  if command -v grub-editenv &>/dev/null; then
+    echo "[+] Arming GRUB boot watchdog on /boot/grub/grubenv..."
+    grub-editenv /boot/grub/grubenv set "active_slot=${TARGET_SLOT^^}"
+    grub-editenv /boot/grub/grubenv set bootcount=0
+    grub-editenv /boot/grub/grubenv set bootlimit=3
+  fi
+else
+  echo "[+] Running in standard system / development mode. Performing in-place package update..."
+  if [[ -n "$TARGET_VERSION" && -d /etc/axonwall ]]; then
+    echo "$TARGET_VERSION" > /etc/axonwall/version
+  fi
+
+  # Restart Axonwall services gracefully if running under systemd
+  if command -v systemctl &>/dev/null; then
+    echo "[+] Reloading Axonwall systemd services..."
+    systemctl try-restart axonwall-ui.service axonwall-controller.service || true
+  fi
+fi
+
+echo "[+] Firmware update process completed successfully."

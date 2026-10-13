@@ -121,6 +121,10 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-ha-notify ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-ha-notify
 fi
 
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-update ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-update
+fi
+
 # Copy compiled daemon binaries if present
 mkdir -p config/includes.chroot/usr/sbin/
 
