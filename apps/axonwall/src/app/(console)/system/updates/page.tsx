@@ -40,7 +40,7 @@ export default function SystemUpdatesPage() {
       name: 'Slot A (Primary Rootfs)',
       isActive: true,
       isHealthy: true,
-      version: '0.1.3',
+      version: '0.1.4',
       kernel: 'Linux 6.12.111+deb13-amd64',
       device: '/dev/sda2',
       label: 'axon_root_a',
@@ -52,7 +52,7 @@ export default function SystemUpdatesPage() {
       name: 'Slot B (Alternate Standby)',
       isActive: false,
       isHealthy: true,
-      version: '0.1.3 (Standby)',
+      version: '0.1.4 (Standby)',
       kernel: 'Linux 6.12.111+deb13-amd64',
       device: '/dev/sda3',
       label: 'axon_root_b',
@@ -95,7 +95,7 @@ export default function SystemUpdatesPage() {
     setIsCheckingCloud(true);
     setTimeout(() => {
       setIsCheckingCloud(false);
-      alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.1.3.');
+      alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.1.4.');
     }, 1500);
   };
 
@@ -119,7 +119,7 @@ export default function SystemUpdatesPage() {
       setUpgradePhase('Arming GRUB boot-counting watchdog (bootcount=0, bootlimit=3)...');
       setTimeout(() => {
         setIsUpgrading(false);
-        setAlertMessage(`Firmware v0.1.3 successfully flashed to Slot ${standbySlot.slot}! System will boot Slot ${standbySlot.slot} on next reboot with Watchdog supervision.`);
+        setAlertMessage(`Firmware v0.1.4 successfully flashed to Slot ${standbySlot.slot}! System will boot Slot ${standbySlot.slot} on next reboot with Watchdog supervision.`);
       }, 800);
     }, 3600);
   };
