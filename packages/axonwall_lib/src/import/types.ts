@@ -1,6 +1,6 @@
 import type { DesiredState } from '../schemas/index.js';
 
-export type FirewallVendor = 'pfsense' | 'opnsense' | 'vyos' | 'mikrotik' | 'iptables';
+export type FirewallVendor = 'pfsense' | 'opnsense' | 'vyos' | 'mikrotik' | 'iptables' | 'cisco';
 
 export interface ImportReport {
   success: boolean;

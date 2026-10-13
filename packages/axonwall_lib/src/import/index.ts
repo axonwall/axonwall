@@ -4,6 +4,7 @@ import { importOpnsenseConfig } from './opnsense/index.js';
 import { importVyosConfig } from './vyos/index.js';
 import { importMikrotikConfig } from './mikrotik/index.js';
 import { importIptablesConfig } from './iptables/index.js';
+import { importCiscoAsaConfig } from './cisco/index.js';
 
 export * from './types.js';
 export * from './pfsense/index.js';
@@ -11,6 +12,9 @@ export * from './opnsense/index.js';
 export * from './vyos/index.js';
 export * from './mikrotik/index.js';
 export * from './iptables/index.js';
+export * from './cisco/index.js';
+export * from './analyzer.js';
+export * from './merge.js';
 
 export function detectFirewallType(content: string): FirewallVendor {
   const trimmed = content.trim();
@@ -25,7 +29,17 @@ export function detectFirewallType(content: string): FirewallVendor {
     return 'opnsense';
   }
 
-  // 3. MikroTik RouterOS (.rsc)
+  // 3. Cisco ASA / FTD
+  if (
+    trimmed.includes('access-list') ||
+    trimmed.includes('nameif ') ||
+    trimmed.includes('security-level ') ||
+    trimmed.includes('object-group network')
+  ) {
+    return 'cisco';
+  }
+
+  // 4. MikroTik RouterOS (.rsc)
   if (
     trimmed.includes('/ip firewall') ||
     trimmed.includes('/interface ethernet') ||
@@ -35,7 +49,7 @@ export function detectFirewallType(content: string): FirewallVendor {
     return 'mikrotik';
   }
 
-  // 4. Linux iptables / nftables
+  // 5. Linux iptables / nftables
   if (
     trimmed.includes('*filter') ||
     trimmed.includes('*nat') ||
@@ -47,7 +61,7 @@ export function detectFirewallType(content: string): FirewallVendor {
     return 'iptables';
   }
 
-  // 5. VyOS / EdgeOS
+  // 6. VyOS / EdgeOS
   if (
     trimmed.includes('interfaces {') ||
     trimmed.includes('firewall {') ||
@@ -81,6 +95,8 @@ export function importFirewallConfig(content: string, forcedVendor?: FirewallVen
       return importMikrotikConfig(content);
     case 'iptables':
       return importIptablesConfig(content);
+    case 'cisco':
+      return importCiscoAsaConfig(content);
     default:
       throw new Error(`Unsupported firewall vendor: ${vendor}`);
   }

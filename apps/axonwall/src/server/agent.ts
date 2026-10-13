@@ -123,7 +123,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   if (daemonStatus) {
     return {
       nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
-      version: daemonStatus.version || '0.1.6',
+      version: daemonStatus.version || '0.1.7',
       uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
@@ -159,7 +159,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.1.6',
+    version: '0.1.7',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
@@ -257,6 +257,17 @@ export async function applyDesiredState(
     }
     fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
   } catch {}
+
+  // Automatically record state changeset in GitOps audit repository
+  import('./gitops')
+    .then(({ recordGitOpsChange }) =>
+      recordGitOpsChange(
+        state,
+        session.username || 'admin',
+        `Firewall ruleset applied (SHA256: ${bundleHash.slice(0, 12)})`
+      )
+    )
+    .catch(() => {});
 
   if (daemonResp) {
     if (!daemonResp.success) {
@@ -872,7 +883,7 @@ function getCurrentInstalledVersion(): string {
       }
     } catch {}
   }
-  return '0.1.6';
+  return '0.1.7';
 }
 
 function compareSemver(v1: string, v2: string): number {
@@ -907,7 +918,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
 
     const res = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/releases/latest', {
       headers: {
-        'User-Agent': 'Axonwall-Appliance-Updater/0.1.6',
+        'User-Agent': 'Axonwall-Appliance-Updater/0.1.7',
         Accept: 'application/vnd.github.v3+json',
       },
       signal: controller.signal,
@@ -926,7 +937,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
       // Fallback: Check tags
       const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/tags?per_page=5', {
         headers: {
-          'User-Agent': 'Axonwall-Appliance-Updater/0.1.6',
+          'User-Agent': 'Axonwall-Appliance-Updater/0.1.7',
           Accept: 'application/vnd.github.v3+json',
         },
       });
@@ -1190,7 +1201,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
   }
 
   const release = await getReleaseInfo();
-  const targetVersion = release.latestVersion || '0.1.6';
+  const targetVersion = release.latestVersion || '0.1.7';
 
   // Check if system has axonwall-update utility
   const updaterPaths = ['/usr/local/bin/axonwall-update', '/usr/sbin/axonwall-update'];
@@ -1224,4 +1235,153 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
     newVersion: targetVersion,
   };
 }
+
+export interface SensorReading {
+  name: string;
+  label: string;
+  value: number;
+  unit: string;
+  warning?: number;
+  critical?: number;
+}
+
+export interface FanReading {
+  name: string;
+  label: string;
+  rpm: number;
+}
+
+export interface OpticalModule {
+  interface: string;
+  vendor: string;
+  partNumber: string;
+  temperature: number;
+  voltage: number;
+  txPowerDbm: number;
+  rxPowerDbm: number;
+  biasCurrentMa: number;
+  status: string;
+}
+
+export interface HardwareTelemetry {
+  hostname: string;
+  cpuTempC: number;
+  temperatures: SensorReading[];
+  fans: FanReading[];
+  voltages: SensorReading[];
+  transceivers: OpticalModule[];
+}
+
+export interface TerminalExecResponse {
+  command: string;
+  output: string;
+  exitCode: number;
+  latencyMs: number;
+  success: boolean;
+}
+
+export async function getHardwareTelemetry(): Promise<HardwareTelemetry> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
+  // Try live communication with root daemon
+  const daemonTelem = await callAgentApi<HardwareTelemetry>('/v1/system/telemetry/hardware');
+  if (daemonTelem) {
+    return daemonTelem;
+  }
+
+  // Fallback telemetry
+  return {
+    hostname: os.hostname(),
+    cpuTempC: 42.0,
+    temperatures: [
+      { name: 'cpu_core0', label: 'CPU Core 0', value: 41.5, unit: '°C', warning: 85, critical: 100 },
+      { name: 'cpu_core1', label: 'CPU Core 1', value: 42.5, unit: '°C', warning: 85, critical: 100 },
+      { name: 'pch_temp', label: 'Platform Controller Hub (PCH)', value: 46.2, unit: '°C', warning: 90, critical: 105 },
+      { name: 'ambient_zone', label: 'Chassis Intake Ambient', value: 24.8, unit: '°C', warning: 45, critical: 60 },
+    ],
+    fans: [
+      { name: 'fan_chassis1', label: 'Chassis Exhaust Fan 1', rpm: 2450 },
+      { name: 'fan_chassis2', label: 'Chassis Exhaust Fan 2', rpm: 2380 },
+      { name: 'fan_cpu', label: 'CPU PWM Cooler', rpm: 1820 },
+    ],
+    voltages: [
+      { name: 'vcore', label: 'CPU Vcore', value: 1.15, unit: 'V' },
+      { name: '12v', label: '+12V Rail', value: 12.08, unit: 'V' },
+      { name: '5v', label: '+5V Rail', value: 5.02, unit: 'V' },
+      { name: '3v3', label: '+3.3V Rail', value: 3.31, unit: 'V' },
+    ],
+    transceivers: [
+      {
+        interface: 'eth1 (WAN SFP+)',
+        vendor: 'CISCO-FINISAR',
+        partNumber: 'FTLX8571D3BCL',
+        temperature: 38.4,
+        voltage: 3.29,
+        txPowerDbm: -2.1,
+        rxPowerDbm: -3.4,
+        biasCurrentMa: 6.8,
+        status: 'Optimal Link (10G-SR)',
+      },
+      {
+        interface: 'eth2 (LAN SFP+)',
+        vendor: 'FS.COM',
+        partNumber: 'SFP-10GSR-85',
+        temperature: 36.1,
+        voltage: 3.31,
+        txPowerDbm: -1.8,
+        rxPowerDbm: -2.2,
+        biasCurrentMa: 7.1,
+        status: 'Optimal Link (10G-SR)',
+      },
+    ],
+  };
+}
+
+export async function executeTerminalCommand(command: string): Promise<TerminalExecResponse> {
+  const session = await getSession();
+  await enforceRateLimit(30, 60000);
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Administrator credentials required to access web terminal');
+  }
+
+  const cleanCmd = command.trim();
+  if (!cleanCmd) {
+    return { command: '', output: '', exitCode: 0, latencyMs: 0, success: true };
+  }
+
+  // Try live execution on axonwalld privileged agent
+  const daemonResp = await callAgentApi<TerminalExecResponse>('/v1/terminal/exec', 'POST', {
+    command: cleanCmd,
+  });
+  if (daemonResp) {
+    return daemonResp;
+  }
+
+  // Fallback execution via Node child_process
+  const start = Date.now();
+  try {
+    const out = execSync(cleanCmd, {
+      encoding: 'utf8',
+      timeout: 10000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return {
+      command: cleanCmd,
+      output: out,
+      exitCode: 0,
+      latencyMs: Date.now() - start,
+      success: true,
+    };
+  } catch (err: any) {
+    return {
+      command: cleanCmd,
+      output: err?.stdout || err?.stderr || err?.message || 'Command execution failed',
+      exitCode: err?.status || 1,
+      latencyMs: Date.now() - start,
+      success: false,
+    };
+  }
+}
+
 

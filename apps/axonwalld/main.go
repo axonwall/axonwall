@@ -342,7 +342,7 @@ func (s *AgentServer) GetStatus(ctx context.Context, req *pb.GetStatusRequest) (
 
 	return &pb.GetStatusResponse{
 		NodeId:              s.nodeId,
-		Version:             "0.1.6",
+		Version:             "0.1.7",
 		UptimeSeconds:       uptime,
 		ActiveBundleHash:    s.activeHash,
 		PendingConfirm:      s.pendingConfirm,
@@ -510,6 +510,9 @@ func main() {
 
 	sdwanProber := NewSDWanProber()
 	pcapManager := engine.NewPacketCaptureManager()
+	packetStreamMgr := engine.NewPacketStreamManager(pcapManager)
+	hardwareMgr := engine.NewHardwareManager()
+	terminalMgr := engine.NewTerminalManager()
 	watchdog := engine.NewWatchdogEngine()
 	watchdog.Start()
 
@@ -642,6 +645,34 @@ func main() {
 			status := watchdog.RunVerification()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(status)
+		})
+		mux.HandleFunc("/v1/events/packets", packetStreamMgr.HandleStreamSSE)
+		mux.HandleFunc("/v1/system/telemetry/hardware", func(w http.ResponseWriter, r *http.Request) {
+			telem, err := hardwareMgr.CollectTelemetry()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telem)
+		})
+		mux.HandleFunc("/v1/terminal/exec", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.TerminalExecRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			resp, err := terminalMgr.Execute(r.Context(), req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
 		})
 		apiServer = &http.Server{Handler: mux}
 		go func() {

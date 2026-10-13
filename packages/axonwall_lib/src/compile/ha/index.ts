@@ -70,10 +70,12 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
 export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = '127.0.0.1'): string {
   const sync = ha.conntrackSync;
   const lines: string[] = [];
+  const mode = sync.mode || 'FTFW';
+  const bufSize = sync.bufferSize || 12492800;
 
   lines.push('# conntrackd.conf - Axonwall High Availability State Synchronization');
   lines.push('Sync {');
-  lines.push('    Mode FTFW {');
+  lines.push(`    Mode ${mode} {`);
   lines.push('        ResendQueueSize 131072');
   lines.push('        CommitTimeout 180');
   lines.push('        PurgeTimeout 60');
@@ -83,12 +85,12 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
 
   if (sync.protocol === 'multicast') {
     lines.push('    Multicast {');
-    lines.push(`        IPv4_address 225.0.0.50`);
-    lines.push(`        Group 3780`);
+    lines.push(`        IPv4_address ${sync.multicastGroup || '225.0.0.50'}`);
+    lines.push(`        Group ${sync.port || 3780}`);
     lines.push(`        IPv4_interface ${localIp}`);
     lines.push(`        Interface ${sync.interface}`);
-    lines.push('        SndSocketBuffer 12492800');
-    lines.push('        RcvSocketBuffer 12492800');
+    lines.push(`        SndSocketBuffer ${bufSize}`);
+    lines.push(`        RcvSocketBuffer ${bufSize}`);
     lines.push('        Checksum on');
     lines.push('    }');
   } else {
@@ -98,8 +100,8 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
     lines.push(`        IPv4_Destination_Address ${sync.peerAddress || ha.peerAddress || '192.168.1.2'}`);
     lines.push(`        Port ${sync.port}`);
     lines.push(`        Interface ${sync.interface}`);
-    lines.push('        SndSocketBuffer 12492800');
-    lines.push('        RcvSocketBuffer 12492800');
+    lines.push(`        SndSocketBuffer ${bufSize}`);
+    lines.push(`        RcvSocketBuffer ${bufSize}`);
     lines.push('        Checksum on');
     lines.push('    }');
   }
@@ -122,9 +124,19 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
   lines.push('        Protocol Accept {');
   lines.push('            TCP');
   lines.push('            UDP');
+  lines.push('            ICMP');
   lines.push('        }');
   lines.push('        Address Ignore {');
   lines.push('            IPv4_address 127.0.0.1');
+
+  if (sync.filterIgnoreIps && sync.filterIgnoreIps.length > 0) {
+    for (const ip of sync.filterIgnoreIps) {
+      if (ip !== '127.0.0.1') {
+        lines.push(`            IPv4_address ${ip}`);
+      }
+    }
+  }
+
   lines.push('        }');
   lines.push('    }');
   lines.push('}');

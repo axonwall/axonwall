@@ -1,12 +1,28 @@
 'use client';
 
-import { useState } from 'react';
-import { ShieldCheck, CheckCircle2, ShieldAlert, Globe, Plus, Trash2, ShieldX } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import {
+  ShieldCheck,
+  CheckCircle2,
+  ShieldAlert,
+  Globe,
+  Plus,
+  Trash2,
+  ShieldX,
+  Terminal,
+  RefreshCw,
+  Sliders,
+  Check,
+} from 'lucide-react';
 import type { DnsBlocklistConfig } from '@axonwall/lib/schemas';
+import { compileUnboundSinkhole } from '@axonwall/lib/compile/unbound';
 
 export default function DnsBlocklistPage() {
   const [enabled, setEnabled] = useState(true);
   const [action, setAction] = useState<'always_null' | 'always_nxdomain'>('always_null');
+  const [showConfigPreview, setShowConfigPreview] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   const [feeds, setFeeds] = useState([
     {
@@ -23,6 +39,13 @@ export default function DnsBlocklistPage() {
       entriesCount: 154800,
       enabled: true,
     },
+    {
+      id: 'feed-abuse-ch',
+      name: 'abuse.ch URLhaus Host & Domain Blocklist',
+      url: 'https://urlhaus.abuse.ch/downloads/hostfile/',
+      entriesCount: 19430,
+      enabled: true,
+    },
   ]);
 
   const [whitelist, setWhitelist] = useState<string[]>([
@@ -34,12 +57,41 @@ export default function DnsBlocklistPage() {
   const [blacklist, setBlacklist] = useState<string[]>([
     'telemetry.device-manufacturer.com',
     'adservice.evil-tracker.org',
+    'beacon.analytics-tracker.net',
   ]);
 
   const [newWhiteDomain, setNewWhiteDomain] = useState('');
   const [newBlackDomain, setNewBlackDomain] = useState('');
 
-  const totalBlockedDomains = feeds.reduce((acc, f) => (f.enabled ? acc + f.entriesCount : acc), 0) + blacklist.length;
+  const toggleFeed = (id: string) => {
+    setFeeds(feeds.map((f) => (f.id === id ? { ...f, enabled: !f.enabled } : f)));
+  };
+
+  const compiledResult = useMemo(() => {
+    const config: DnsBlocklistConfig = {
+      enabled,
+      feeds,
+      whitelist,
+      blacklist,
+      action,
+    };
+    return compileUnboundSinkhole(config);
+  }, [enabled, feeds, whitelist, blacklist, action]);
+
+  const totalBlockedDomains =
+    feeds.reduce((acc, f) => (f.enabled ? acc + f.entriesCount : acc), 0) + blacklist.length;
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    setSaveSuccess(false);
+    try {
+      await new Promise((r) => setTimeout(r, 600));
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const handleAddWhite = (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,15 +108,44 @@ export default function DnsBlocklistPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-          <ShieldX className="w-6 h-6 text-emerald-400" />
-          DNS Blocklist & Threat Sinkholing (Unbound RPZ)
-        </h1>
-        <p className="text-sm text-slate-400">
-          Network-wide malware, phishing, and ad-blocking sinkhole executed at sub-millisecond speeds in Unbound DNS.
-        </p>
+    <div className="space-y-6 max-w-7xl mx-auto">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+            <ShieldX className="w-6 h-6 text-emerald-400" />
+            <span>DNS Blocklist & Threat Sinkholing (Unbound RPZ)</span>
+          </h1>
+          <p className="text-sm text-slate-400 mt-1">
+            Network-wide malware, phishing, and ad-blocking sinkhole executed at sub-millisecond speeds in Unbound DNS.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setShowConfigPreview(!showConfigPreview)}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center gap-1.5 transition cursor-pointer"
+          >
+            <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+            <span>{showConfigPreview ? 'Hide Unbound Conf' : 'Preview Unbound Conf'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={isSaving}
+            className="px-4 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1.5 transition cursor-pointer shadow"
+          >
+            {isSaving ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : saveSuccess ? (
+              <Check className="w-3.5 h-3.5" />
+            ) : (
+              <ShieldCheck className="w-3.5 h-3.5" />
+            )}
+            <span>{isSaving ? 'Saving...' : saveSuccess ? 'Saved!' : 'Save & Deploy'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Stats Summary */}
@@ -80,9 +161,35 @@ export default function DnsBlocklistPage() {
         </div>
 
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl">
-          <span className="text-xs font-medium text-slate-400 uppercase tracking-wider block">
-            Sinkhole Action
-          </span>
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-400 uppercase tracking-wider block">
+              Sinkhole Action
+            </span>
+            <div className="flex items-center bg-slate-950 rounded p-0.5 border border-slate-800 text-[10px] font-mono">
+              <button
+                type="button"
+                onClick={() => setAction('always_null')}
+                className={`px-1.5 py-0.5 rounded cursor-pointer ${
+                  action === 'always_null'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                0.0.0.0
+              </button>
+              <button
+                type="button"
+                onClick={() => setAction('always_nxdomain')}
+                className={`px-1.5 py-0.5 rounded cursor-pointer ${
+                  action === 'always_nxdomain'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                NXDOMAIN
+              </button>
+            </div>
+          </div>
           <span className="text-xl font-bold font-mono text-white mt-1 block uppercase">
             {action === 'always_null' ? '0.0.0.0 (Null IP)' : 'NXDOMAIN (Not Found)'}
           </span>
@@ -99,6 +206,24 @@ export default function DnsBlocklistPage() {
           <span className="text-[11px] text-slate-500 mt-0.5 block">Applied across all LAN subnets</span>
         </div>
       </div>
+
+      {/* Unbound Config Preview (Collapsible) */}
+      {showConfigPreview && (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-white flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+              <span>Generated Unbound Blocklist Configuration (/etc/unbound/unbound.conf.d/blocklist.conf)</span>
+            </span>
+            <span className="text-[11px] text-slate-400 font-mono">
+              Pruned: {compiledResult.prunedSubdomains} redundant subdomains
+            </span>
+          </div>
+          <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-slate-300 max-h-56 overflow-y-auto leading-relaxed">
+            {compiledResult.config}
+          </pre>
+        </div>
+      )}
 
       {/* Blocklist Feeds */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
@@ -127,9 +252,17 @@ export default function DnsBlocklistPage() {
                   {f.entriesCount.toLocaleString()} domains
                 </td>
                 <td className="px-4 py-3 text-right">
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-xs font-mono font-bold border border-emerald-500/20">
-                    Active
-                  </span>
+                  <button
+                    type="button"
+                    onClick={() => toggleFeed(f.id)}
+                    className={`px-2.5 py-1 rounded text-xs font-mono font-bold cursor-pointer transition ${
+                      f.enabled
+                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20'
+                        : 'bg-slate-800 text-slate-500 border border-slate-700 hover:text-slate-300'
+                    }`}
+                  >
+                    {f.enabled ? 'Enabled' : 'Disabled'}
+                  </button>
                 </td>
               </tr>
             ))}

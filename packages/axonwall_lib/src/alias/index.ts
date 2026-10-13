@@ -1,4 +1,5 @@
 import { isValidCIDR, isValidIPv4 } from '../util/index.js';
+export * from './threat_feeds.js';
 
 export interface SetDiff {
   toAdd: string[];

@@ -593,6 +593,10 @@ export const ConntrackSyncSchema = z.object({
   protocol: z.enum(['multicast', 'unicast']).default('unicast'),
   peerAddress: z.string().optional(),
   port: z.number().int().default(3780),
+  multicastGroup: z.string().optional(),
+  bufferSize: z.number().int().optional(),
+  filterIgnoreIps: z.array(z.string()).optional(),
+  mode: z.enum(['FTFW', 'NOTRACK', 'ALARM']).optional(),
 });
 export type ConntrackSync = z.infer<typeof ConntrackSyncSchema>;
 
@@ -650,7 +654,7 @@ export const HighAvailabilityConfigSchema = z.object({
     vpn: true,
     sqlite: true,
   }),
-  maintenanceMode: z.boolean().default(false),
+  maintenanceMode: z.boolean().optional(),
 });
 export type HighAvailabilityConfig = z.infer<typeof HighAvailabilityConfigSchema>;
 

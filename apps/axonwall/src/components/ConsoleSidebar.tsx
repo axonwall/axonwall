@@ -40,6 +40,7 @@ import {
   X,
   Eye,
   Wrench,
+  Terminal,
 } from 'lucide-react';
 
 export interface SubItem {
@@ -78,6 +79,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'Plugin Store', href: '/system/plugins', icon: Boxes },
       { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
       { name: 'Firewall Importer', href: '/system/import', icon: FileText },
+      { name: 'Web Shell & Sensors', href: '/system/terminal', icon: Terminal },
     ],
   },
   {
@@ -388,7 +390,7 @@ export function ConsoleSidebar() {
 
       {/* Footer Info */}
       <div className="p-3 border-t border-slate-800 text-[11px] text-slate-500 flex items-center justify-between shrink-0">
-        <span className="font-mono">Axonwall v0.1.6</span>
+        <span className="font-mono">Axonwall v0.1.7</span>
         <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           Active

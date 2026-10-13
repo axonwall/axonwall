@@ -1,4 +1,5 @@
 import type { DnsConfig, HeadscaleConfig } from '../../schemas/index.js';
+export * from './sinkhole.js';
 
 export interface UnboundCompileResult {
   unboundConfig: string;

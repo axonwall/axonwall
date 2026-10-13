@@ -17,8 +17,10 @@ import {
 import {
   importFirewallConfig,
   detectFirewallType,
+  analyzeRuleShadowing,
   type FirewallVendor,
   type ImportReport,
+  type RuleAnalysisReport,
 } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 
@@ -35,6 +37,7 @@ const VENDOR_OPTIONS: VendorOption[] = [
   { id: 'opnsense', label: 'OPNsense', badge: 'XML', filename: 'config.xml' },
   { id: 'vyos', label: 'VyOS / EdgeOS', badge: 'boot/json', filename: 'config.boot' },
   { id: 'mikrotik', label: 'MikroTik RouterOS', badge: 'RSC', filename: 'export.rsc' },
+  { id: 'cisco', label: 'Cisco ASA / FTD', badge: 'ACL', filename: 'running-config.cfg' },
   { id: 'iptables', label: 'Linux iptables', badge: 'save', filename: 'rules.v4' },
 ];
 
@@ -323,8 +326,41 @@ COMMIT
 :PREROUTING ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
 -A PREROUTING -i eth0 -p tcp --dport 80 -j DNAT --to-destination 192.168.1.100:80
--A POSTROUTING -o eth0 -j MASQUERADE
 COMMIT`,
+
+  cisco: `interface GigabitEthernet0/0
+ nameif outside
+ security-level 0
+ ip address dhcp
+!
+interface GigabitEthernet0/1
+ nameif inside
+ security-level 100
+ ip address 192.168.10.1 255.255.255.0
+!
+interface GigabitEthernet0/1.50
+ vlan 50
+ nameif dmz
+ security-level 50
+ ip address 172.16.50.1 255.255.255.0
+!
+object network WebServer
+ host 172.16.50.10
+ description Production Web Server
+!
+object-group network AdminHosts
+ network-object host 192.168.10.5
+ network-object 192.168.10.64 255.255.255.192
+!
+access-list outside_in extended permit tcp any host 172.16.50.10 eq 443
+access-list outside_in extended permit icmp any any
+access-list outside_in extended deny ip any any
+access-list inside_in extended permit ip any any
+!
+nat (inside,outside) source dynamic any interface
+nat (outside,dmz) source static any any destination static interface WebServer
+!
+route inside 10.0.0.0 255.0.0.0 192.168.10.254 1`,
 };
 
 export default function ImportPage() {
@@ -332,6 +368,7 @@ export default function ImportPage() {
   const [detectedVendor, setDetectedVendor] = useState<FirewallVendor | null>(null);
   const [configInput, setConfigInput] = useState(SAMPLE_CONFIGS.pfsense);
   const [report, setReport] = useState<ImportReport | null>(null);
+  const [ruleAnalysis, setRuleAnalysis] = useState<RuleAnalysisReport | null>(null);
   const [compiledNft, setCompiledNft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
@@ -376,11 +413,15 @@ export default function ImportPage() {
       setReport(res);
       setDetectedVendor(res.vendor);
 
+      const analysis = analyzeRuleShadowing(res.state.rules || []);
+      setRuleAnalysis(analysis);
+
       const { nftScript } = compileNftables(res.state);
       setCompiledNft(nftScript);
     } catch (err: any) {
       setError(err?.message || 'Failed to parse configuration');
       setReport(null);
+      setRuleAnalysis(null);
       setCompiledNft(null);
     }
   }
@@ -627,6 +668,69 @@ export default function ImportPage() {
                   <span className="text-base font-bold text-white">{report.routesCount}</span>
                 </div>
               </div>
+
+              {/* Rule Optimization & Shadowing Analysis */}
+              {ruleAnalysis && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Rule Analysis & Shadow Detection</span>
+                    </span>
+                    <span
+                      className={`text-[11px] font-mono px-2 py-0.5 rounded-full ${
+                        ruleAnalysis.issues.length > 0
+                          ? 'bg-amber-950 text-amber-300 border border-amber-800/60'
+                          : 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
+                      }`}
+                    >
+                      {ruleAnalysis.issues.length > 0
+                        ? `${ruleAnalysis.issues.length} Optimization Notice${ruleAnalysis.issues.length > 1 ? 's' : ''}`
+                        : 'All Rules Clean'}
+                    </span>
+                  </div>
+
+                  {ruleAnalysis.issues.length > 0 ? (
+                    <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2 max-h-48 overflow-y-auto text-xs">
+                      {ruleAnalysis.issues.map((issue, idx) => (
+                        <div
+                          key={idx}
+                          className="p-2 rounded bg-slate-900 border border-slate-800 space-y-1"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded font-mono ${
+                                issue.type === 'shadowed'
+                                  ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                  : issue.type === 'redundant'
+                                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                                  : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                              }`}
+                            >
+                              {issue.type}
+                            </span>
+                            <span className="text-slate-300 font-medium">
+                              Rule #{issue.ruleIndex}
+                            </span>
+                            <span className="text-slate-500">
+                              (shadowed by #{issue.shadowedByIndex})
+                            </span>
+                          </div>
+                          <p className="text-slate-400 text-[11px]">{issue.description}</p>
+                          <p className="text-emerald-400/90 text-[11px] font-mono">
+                            ↳ Suggestion: {issue.suggestion}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-400 flex items-center gap-2">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>Zero shadowed, redundant, or dead rules detected in ruleset.</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Warnings List */}
               {report.warnings && report.warnings.length > 0 && (

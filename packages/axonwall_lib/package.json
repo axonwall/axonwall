@@ -1,6 +1,6 @@
 {
   "name": "@axonwall/lib",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "license": "GPL-2.0-or-later",
   "type": "module",
@@ -130,6 +130,10 @@
     "./import/iptables": {
       "types": "./dist/import/iptables/index.d.ts",
       "default": "./dist/import/iptables/index.js"
+    },
+    "./import/cisco": {
+      "types": "./dist/import/cisco/index.d.ts",
+      "default": "./dist/import/cisco/index.js"
     },
     "./rbac": {
       "types": "./dist/rbac/index.d.ts",
