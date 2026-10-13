@@ -107,9 +107,29 @@
       "types": "./dist/sim/index.d.ts",
       "default": "./dist/sim/index.js"
     },
+    "./import": {
+      "types": "./dist/import/index.d.ts",
+      "default": "./dist/import/index.js"
+    },
+    "./import/pfsense": {
+      "types": "./dist/import/pfsense/index.d.ts",
+      "default": "./dist/import/pfsense/index.js"
+    },
     "./import/opnsense": {
       "types": "./dist/import/opnsense/index.d.ts",
       "default": "./dist/import/opnsense/index.js"
+    },
+    "./import/vyos": {
+      "types": "./dist/import/vyos/index.d.ts",
+      "default": "./dist/import/vyos/index.js"
+    },
+    "./import/mikrotik": {
+      "types": "./dist/import/mikrotik/index.d.ts",
+      "default": "./dist/import/mikrotik/index.js"
+    },
+    "./import/iptables": {
+      "types": "./dist/import/iptables/index.d.ts",
+      "default": "./dist/import/iptables/index.js"
     },
     "./rbac": {
       "types": "./dist/rbac/index.d.ts",

@@ -1,11 +1,145 @@
 'use client';
 
-import { useState } from 'react';
-import { UploadCloud, CheckCircle2, AlertTriangle, FileText, ArrowRight, ShieldCheck, Play } from 'lucide-react';
-import { importOpnsenseConfig, type ImportReport } from '@axonwall/lib/import/opnsense';
+import { useState, useRef } from 'react';
+import {
+  UploadCloud,
+  CheckCircle2,
+  AlertTriangle,
+  FileText,
+  Play,
+  Download,
+  Terminal,
+  Layers,
+  FileCode,
+  Check,
+  RefreshCw,
+} from 'lucide-react';
+import {
+  importFirewallConfig,
+  detectFirewallType,
+  type FirewallVendor,
+  type ImportReport,
+} from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 
-const SAMPLE_XML_PLACEHOLDER = `<?xml version="1.0"?>
+interface VendorOption {
+  id: FirewallVendor | 'auto';
+  label: string;
+  badge: string;
+  filename: string;
+}
+
+const VENDOR_OPTIONS: VendorOption[] = [
+  { id: 'auto', label: 'Auto-Detect', badge: 'Smart', filename: 'Auto' },
+  { id: 'pfsense', label: 'pfSense', badge: 'XML', filename: 'config.xml' },
+  { id: 'opnsense', label: 'OPNsense', badge: 'XML', filename: 'config.xml' },
+  { id: 'vyos', label: 'VyOS / EdgeOS', badge: 'boot/json', filename: 'config.boot' },
+  { id: 'mikrotik', label: 'MikroTik RouterOS', badge: 'RSC', filename: 'export.rsc' },
+  { id: 'iptables', label: 'Linux iptables', badge: 'save', filename: 'rules.v4' },
+];
+
+const SAMPLE_CONFIGS: Record<FirewallVendor, string> = {
+  pfsense: `<?xml version="1.0"?>
+<pfsense>
+  <version>23.09</version>
+  <system>
+    <hostname>pfsense-gateway</hostname>
+    <domain>corp.internal</domain>
+  </system>
+  <interfaces>
+    <wan><if>vtnet0</if><ipaddr>dhcp</ipaddr><descr>WAN_Uplink</descr></wan>
+    <lan><if>vtnet1</if><ipaddr>192.168.10.1</ipaddr><subnet>24</subnet><descr>Corp_LAN</descr></lan>
+    <opt1><if>vtnet2</if><ipaddr>172.16.50.1</ipaddr><subnet>24</subnet><descr>DMZ</descr></opt1>
+  </interfaces>
+  <vlans>
+    <tag>
+      <if>vtnet1</if>
+      <tag>20</tag>
+      <vlanif>vtnet1.20</vlanif>
+      <descr>Guest_WiFi</descr>
+    </tag>
+  </vlans>
+  <aliases>
+    <alias>
+      <name>WebServers</name>
+      <type>host</type>
+      <address>172.16.50.10 172.16.50.11</address>
+      <descr>DMZ Web Cluster</descr>
+    </alias>
+    <alias>
+      <name>AdminSubnet</name>
+      <type>network</type>
+      <address>192.168.10.0/28</address>
+      <descr>Management Workstations</descr>
+    </alias>
+  </aliases>
+  <filter>
+    <rule>
+      <type>pass</type>
+      <interface>lan</interface>
+      <protocol>tcp</protocol>
+      <destination><port>443</port></destination>
+      <descr>Allow Outbound HTTPS</descr>
+    </rule>
+    <rule>
+      <type>pass</type>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <destination><network>WebServers</network><port>443</port></destination>
+      <descr>Inbound HTTPS to DMZ Web</descr>
+    </rule>
+    <rule>
+      <type>block</type>
+      <interface>lan</interface>
+      <protocol>any</protocol>
+      <destination><network>10.0.0.0/8</network></destination>
+      <descr>Block Access to Legacy Intranet</descr>
+    </rule>
+  </filter>
+  <nat>
+    <rule>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <target>172.16.50.10</target>
+      <local-port>8443</local-port>
+      <destination><port>443</port></destination>
+      <descr>Port Forward WAN:443 to DMZ:8443</descr>
+    </rule>
+  </nat>
+  <dhcpd>
+    <lan>
+      <enable/>
+      <range><from>192.168.10.100</from><to>192.168.10.200</to></range>
+      <gateway>192.168.10.1</gateway>
+      <staticmap>
+        <mac>00:11:22:33:44:55</mac>
+        <ipaddr>192.168.10.50</ipaddr>
+        <hostname>nas01</hostname>
+      </staticmap>
+    </lan>
+  </dhcpd>
+  <unbound>
+    <hosts>
+      <host>gateway</host>
+      <domain>corp.internal</domain>
+      <ip>192.168.10.1</ip>
+    </hosts>
+    <hosts>
+      <host>dc1</host>
+      <domain>corp.internal</domain>
+      <ip>192.168.10.5</ip>
+    </hosts>
+  </unbound>
+  <staticroutes>
+    <route>
+      <network>10.50.0.0/16</network>
+      <gateway>172.16.50.254</gateway>
+      <descr>Site-to-Site Branch Tunnel</descr>
+    </route>
+  </staticroutes>
+</pfsense>`,
+
+  opnsense: `<?xml version="1.0"?>
 <opnsense version="24.7">
   <system>
     <hostname>opnsense-core</hostname>
@@ -15,6 +149,14 @@ const SAMPLE_XML_PLACEHOLDER = `<?xml version="1.0"?>
     <wan><if>eth0</if><ipaddr>dhcp</ipaddr><descr>WAN</descr></wan>
     <lan><if>eth1</if><ipaddr>192.168.1.1</ipaddr><subnet>24</subnet><descr>LAN</descr></lan>
   </interfaces>
+  <aliases>
+    <alias>
+      <name>DNS_Servers</name>
+      <type>host</type>
+      <content>1.1.1.1&#10;8.8.8.8</content>
+      <descr>Upstream Resolvers</descr>
+    </alias>
+  </aliases>
   <filter>
     <rule>
       <type>pass</type>
@@ -23,133 +165,543 @@ const SAMPLE_XML_PLACEHOLDER = `<?xml version="1.0"?>
       <destination><port>443</port></destination>
       <descr>Allow HTTPS</descr>
     </rule>
+    <rule>
+      <type>pass</type>
+      <interface>lan</interface>
+      <protocol>udp</protocol>
+      <destination><network>DNS_Servers</network><port>53</port></destination>
+      <descr>Allow DNS to Upstream</descr>
+    </rule>
   </filter>
-</opnsense>`;
+  <nat>
+    <rule>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <target>192.168.1.50</target>
+      <local-port>22</local-port>
+      <destination><port>2222</port></destination>
+      <descr>SSH Port Forward</descr>
+    </rule>
+  </nat>
+  <dhcpd>
+    <lan>
+      <enable>1</enable>
+      <range><from>192.168.1.100</from><to>192.168.1.200</to></range>
+      <gateway>192.168.1.1</gateway>
+    </lan>
+  </dhcpd>
+</opnsense>`,
+
+  vyos: `interfaces {
+    ethernet eth0 {
+        address dhcp
+        description "Internet WAN"
+    }
+    ethernet eth1 {
+        address 192.168.100.1/24
+        description "Corporate LAN"
+        vif 30 {
+            address 10.30.0.1/24
+            description "VoIP VLAN"
+        }
+    }
+}
+firewall {
+    group {
+        address-group BOGONS {
+            address 100.64.0.0/10
+            address 198.18.0.0/15
+        }
+    }
+    name WAN_IN {
+        default-action drop
+        rule 10 {
+            action accept
+            state {
+                established enable
+                related enable
+            }
+            description "Allow Established/Related"
+        }
+        rule 20 {
+            action accept
+            protocol tcp
+            destination {
+                port 443
+            }
+            description "Allow HTTPS Inbound"
+        }
+        rule 30 {
+            action drop
+            source {
+                group {
+                    address-group BOGONS
+                }
+            }
+            description "Drop Bogon Sources"
+        }
+    }
+}
+nat {
+    destination {
+        rule 100 {
+            inbound-interface eth0
+            protocol tcp
+            destination {
+                port 8443
+            }
+            translation {
+                address 192.168.100.50
+                port 443
+            }
+        }
+    }
+    source {
+        rule 100 {
+            outbound-interface eth0
+            translation {
+                address masquerade
+            }
+        }
+    }
+}
+service {
+    dhcp-server {
+        shared-network-name LAN_POOL {
+            subnet 192.168.100.0/24 {
+                default-router 192.168.100.1
+                range 0 {
+                    start 192.168.100.100
+                    stop 192.168.100.200
+                }
+            }
+        }
+    }
+}
+protocols {
+    static {
+        route 172.16.0.0/16 {
+            next-hop 192.168.100.254 {
+            }
+        }
+    }
+}`,
+
+  mikrotik: `# RouterOS export
+/system identity set name="Mikrotik-HQ"
+/interface vlan add interface=ether2 name=vlan20-guest vlan-id=20
+/ip address add address=192.168.88.1/24 interface=ether2 network=192.168.88.0
+/ip address add address=10.20.0.1/24 interface=vlan20-guest network=10.20.0.0
+/ip pool add name=dhcp-pool-lan ranges=192.168.88.100-192.168.88.200
+/ip dhcp-server add address-pool=dhcp-pool-lan interface=ether2 name=dhcp-lan
+/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1
+/ip firewall address-list add address=192.168.88.50 list=TrustedAdmins
+/ip firewall filter add chain=input action=accept protocol=tcp dst-port=22,443 src-address-list=TrustedAdmins comment="Allow Admin Management"
+/ip firewall filter add chain=forward action=accept connection-state=established,related comment="Accept Established"
+/ip firewall filter add chain=forward action=drop connection-state=invalid comment="Drop Invalid"
+/ip firewall filter add chain=forward action=drop in-interface=vlan20-guest out-interface=ether2 comment="Isolate Guest from LAN"
+/ip firewall nat add chain=srcnat action=masquerade out-interface=ether1 comment="WAN Outbound NAT"
+/ip firewall nat add chain=dstnat action=dst-nat protocol=tcp dst-port=8080 to-addresses=192.168.88.50 to-ports=80 comment="Port Forward HTTP"
+/ip dns static add address=192.168.88.1 name=router.lan
+/ip route add dst-address=172.16.0.0/12 gateway=192.168.88.254 comment="Core Route"`,
+
+  iptables: `# Generated by iptables-save
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "Accept established connections"
+-A INPUT -i lo -j ACCEPT -m comment --comment "Allow loopback"
+-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT -m comment --comment "Allow SSH management"
+-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT -m comment --comment "Allow Web UI"
+-A INPUT -p icmp -j ACCEPT -m comment --comment "Allow ping"
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A FORWARD -i eth1 -o eth0 -j ACCEPT -m comment --comment "Allow LAN outbound to WAN"
+-A FORWARD -i eth0 -o eth1 -p tcp --dport 80 -d 192.168.1.100 -j ACCEPT -m comment --comment "Forward HTTP to Web Server"
+COMMIT
+*nat
+:PREROUTING ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+-A PREROUTING -i eth0 -p tcp --dport 80 -j DNAT --to-destination 192.168.1.100:80
+-A POSTROUTING -o eth0 -j MASQUERADE
+COMMIT`,
+};
 
 export default function ImportPage() {
-  const [xmlInput, setXmlInput] = useState(SAMPLE_XML_PLACEHOLDER);
+  const [selectedVendor, setSelectedVendor] = useState<FirewallVendor | 'auto'>('auto');
+  const [detectedVendor, setDetectedVendor] = useState<FirewallVendor | null>(null);
+  const [configInput, setConfigInput] = useState(SAMPLE_CONFIGS.pfsense);
   const [report, setReport] = useState<ImportReport | null>(null);
   const [compiledNft, setCompiledNft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isApplying, setIsApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function handleSelectVendor(vendor: FirewallVendor | 'auto') {
+    setSelectedVendor(vendor);
+    if (vendor !== 'auto') {
+      setConfigInput(SAMPLE_CONFIGS[vendor]);
+      setDetectedVendor(vendor);
+    }
+  }
+
+  function handleLoadSample() {
+    const target = selectedVendor === 'auto' ? 'pfsense' : selectedVendor;
+    setConfigInput(SAMPLE_CONFIGS[target]);
+  }
+
+  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content) {
+        setConfigInput(content);
+        const auto = detectFirewallType(content);
+        setDetectedVendor(auto);
+      }
+    };
+    reader.readAsText(file);
+  }
 
   function handleImport() {
     setError(null);
+    setApplyResult(null);
     try {
-      const res = importOpnsenseConfig(xmlInput);
+      const targetVendor = selectedVendor === 'auto' ? undefined : selectedVendor;
+      const res = importFirewallConfig(configInput, targetVendor);
       setReport(res);
+      setDetectedVendor(res.vendor);
+
       const { nftScript } = compileNftables(res.state);
       setCompiledNft(nftScript);
     } catch (err: any) {
-      setError(err.message);
+      setError(err?.message || 'Failed to parse configuration');
       setReport(null);
       setCompiledNft(null);
     }
   }
 
+  function handleDownloadJson() {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify(report.state, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `axonwall-state-${report.vendor}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function handleDownloadNft() {
+    if (!compiledNft) return;
+    const blob = new Blob([compiledNft], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `axonwall-ruleset-${report?.vendor || 'migrated'}.nft`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleApplyLive() {
+    if (!report) return;
+    const confirm = window.confirm(
+      `Apply this converted configuration directly to the live Axonwall system?\n\nSafety rollback is automatically armed for 120 seconds.`
+    );
+    if (!confirm) return;
+
+    setIsApplying(true);
+    setApplyResult(null);
+    try {
+      const res = await fetch('/api/v1/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          state: report.state,
+          confirmTimeoutSeconds: 120,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to apply configuration to live firewall');
+      }
+
+      setApplyResult(
+        'Configuration applied successfully! Watchdog rollback is armed for 120s.'
+      );
+    } catch (err: any) {
+      setError(err.message || 'Error applying configuration');
+    } finally {
+      setIsApplying(false);
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
+      {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold tracking-tight text-white">OPNsense Migration Importer</h1>
+        <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2.5">
+          <Layers className="w-6 h-6 text-emerald-400" />
+          <span>Firewall Migration Studio</span>
+        </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Import existing OPNsense or pfSense <code className="text-emerald-400 font-mono">config.xml</code> files directly into modern Axonwall Linux nftables configurations.
+          Import and translate existing firewall configurations (pfSense, OPNsense, VyOS / EdgeOS, MikroTik RouterOS, Linux iptables) directly into Axonwall DesiredState and production Linux nftables.
         </p>
       </div>
 
+      {/* Vendor Selector Bar */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-4">
+        {VENDOR_OPTIONS.map((vendor) => {
+          const isActive = selectedVendor === vendor.id;
+          return (
+            <button
+              key={vendor.id}
+              type="button"
+              onClick={() => handleSelectVendor(vendor.id)}
+              className={`px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition cursor-pointer ${
+                isActive
+                  ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/40 shadow-sm'
+                  : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <span>{vendor.label}</span>
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                  isActive ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-500'
+                }`}
+              >
+                {vendor.badge}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Main Conversion Split View */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* XML Input Editor */}
+        {/* Input Configuration Editor */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-white flex items-center gap-2">
+            <div className="flex items-center gap-2">
               <UploadCloud className="w-4 h-4 text-emerald-400" />
-              <span>OPNsense config.xml Input</span>
-            </span>
-            <button
-              type="button"
-              onClick={handleImport}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
-            >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              <span>Parse & Convert</span>
-            </button>
+              <span className="text-sm font-semibold text-white">Source Configuration</span>
+              {detectedVendor && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-950 border border-cyan-800/60 text-cyan-400 font-mono">
+                  {detectedVendor}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileUpload}
+                className="hidden"
+                accept=".xml,.boot,.rsc,.v4,.conf,.txt"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer"
+                title="Upload config file from disk"
+              >
+                Upload File
+              </button>
+              <button
+                type="button"
+                onClick={handleLoadSample}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer"
+                title="Load sample configuration for current vendor"
+              >
+                Load Sample
+              </button>
+              <button
+                type="button"
+                onClick={handleImport}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer shadow"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Parse & Convert</span>
+              </button>
+            </div>
           </div>
 
           <textarea
-            value={xmlInput}
-            onChange={(e) => setXmlInput(e.target.value)}
-            rows={14}
-            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-            placeholder="Paste OPNsense or pfSense config.xml here..."
+            value={configInput}
+            onChange={(e) => {
+              setConfigInput(e.target.value);
+              if (selectedVendor === 'auto') {
+                setDetectedVendor(detectFirewallType(e.target.value));
+              }
+            }}
+            rows={16}
+            className="w-full bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500 leading-relaxed resize-y"
+            placeholder="Paste firewall configuration (XML, config.boot, RouterOS script, or iptables-save)..."
           />
 
           {error && (
-            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              <span>{error}</span>
+            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold block">Conversion Error</span>
+                <span>{error}</span>
+              </div>
+            </div>
+          )}
+
+          {applyResult && (
+            <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>{applyResult}</span>
             </div>
           )}
         </div>
 
-        {/* Migration Report */}
+        {/* Migration Report & Metrics */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
-          <span className="text-sm font-semibold text-white flex items-center gap-2">
-            <FileText className="w-4 h-4 text-cyan-400" />
-            <span>Compatibility & Extraction Summary</span>
-          </span>
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold text-white flex items-center gap-2">
+              <FileText className="w-4 h-4 text-cyan-400" />
+              <span>Translation & Compatibility Summary</span>
+            </span>
+            {report && (
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-800/60 text-emerald-400 font-mono">
+                {report.vendor.toUpperCase()} {report.version ? `v${report.version}` : ''}
+              </span>
+            )}
+          </div>
 
           {report ? (
             <div className="space-y-4">
               <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg flex items-center gap-2 text-xs text-emerald-300">
                 <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
                 <span>
-                  Successfully translated OPNsense {report.version} configuration into Axonwall DesiredState!
+                  Successfully translated {report.vendor.toUpperCase()} configuration into modern Axonwall DesiredState!
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs font-mono">
+              {/* Counters Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
                 <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 block font-sans">Interfaces</span>
+                  <span className="text-slate-400 block font-sans text-[11px]">Interfaces</span>
                   <span className="text-base font-bold text-white">{report.interfacesCount}</span>
                 </div>
                 <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 block font-sans">Aliases</span>
+                  <span className="text-slate-400 block font-sans text-[11px]">VLANs</span>
+                  <span className="text-base font-bold text-cyan-400">{report.vlansCount}</span>
+                </div>
+                <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-slate-400 block font-sans text-[11px]">Aliases / Groups</span>
                   <span className="text-base font-bold text-white">{report.aliasesCount}</span>
                 </div>
                 <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 block font-sans">Filter Rules</span>
+                  <span className="text-slate-400 block font-sans text-[11px]">Filter Rules</span>
                   <span className="text-base font-bold text-emerald-400">{report.rulesCount}</span>
                 </div>
                 <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 block font-sans">NAT Rules</span>
-                  <span className="text-base font-bold text-white">{report.natRulesCount}</span>
+                  <span className="text-slate-400 block font-sans text-[11px]">NAT Rules</span>
+                  <span className="text-base font-bold text-amber-400">{report.natRulesCount}</span>
                 </div>
                 <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 block font-sans">DHCP Pools</span>
+                  <span className="text-slate-400 block font-sans text-[11px]">DHCP Pools</span>
                   <span className="text-base font-bold text-white">{report.dhcpSubnetsCount}</span>
                 </div>
                 <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 block font-sans">DNS Overrides</span>
+                  <span className="text-slate-400 block font-sans text-[11px]">DNS Overrides</span>
                   <span className="text-base font-bold text-white">{report.dnsOverridesCount}</span>
                 </div>
+                <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-slate-400 block font-sans text-[11px]">Static Routes</span>
+                  <span className="text-base font-bold text-white">{report.routesCount}</span>
+                </div>
+              </div>
+
+              {/* Warnings List */}
+              {report.warnings && report.warnings.length > 0 && (
+                <div className="space-y-2">
+                  <span className="text-xs font-semibold text-amber-400 flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>Vendor Compatibility Notices ({report.warnings.length})</span>
+                  </span>
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 space-y-1.5 max-h-36 overflow-y-auto text-xs text-amber-300">
+                    {report.warnings.map((warn, idx) => (
+                      <div key={idx} className="flex items-start gap-2">
+                        <span className="text-amber-500 select-none">•</span>
+                        <span>{warn}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="pt-2 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleDownloadJson}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download State JSON</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadNft}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download nftables Script</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApplyLive}
+                  disabled={isApplying}
+                  className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer ml-auto shadow"
+                >
+                  {isApplying ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Check className="w-3.5 h-3.5" />
+                  )}
+                  <span>{isApplying ? 'Applying...' : 'Apply to Live Firewall'}</span>
+                </button>
               </div>
             </div>
           ) : (
-            <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-xs">
-              <ShieldCheck className="w-12 h-12 text-slate-700 mb-2" />
-              <span>Click "Parse & Convert" to analyze configuration compatibility.</span>
+            <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-xs text-center p-6">
+              <FileCode className="w-12 h-12 text-slate-700 mb-3" />
+              <span className="font-medium text-slate-400">Ready to Parse Configuration</span>
+              <span className="mt-1 text-slate-600 max-w-sm">
+                Select your source firewall vendor or use Auto-Detect, paste your configuration, and click "Parse & Convert".
+              </span>
             </div>
           )}
         </div>
       </div>
 
-      {/* Real-time Generated nftables Preview */}
+      {/* Generated nftables Ruleset Preview */}
       {compiledNft && (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-sm font-semibold text-white flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              <span>Converted Linux nftables Ruleset Preview</span>
+              <Terminal className="w-4 h-4 text-emerald-400" />
+              <span>Converted Linux nftables Ruleset (table inet axonwall)</span>
             </span>
-            <span className="text-xs text-slate-400 font-mono">pf → nftables translation</span>
+            <span className="text-xs text-slate-400 font-mono">
+              Direct Linux kernel representation
+            </span>
           </div>
           <pre className="bg-slate-950 border border-slate-800/80 rounded-lg p-4 font-mono text-xs text-slate-300 overflow-x-auto max-h-96 leading-relaxed">
             {compiledNft}

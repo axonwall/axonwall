@@ -1,18 +1,8 @@
 import { XMLParser } from 'fast-xml-parser';
-import type { DesiredState, Interface, Alias, FirewallRule, NatRule, DhcpSubnet, DnsHostOverride } from '../../schemas/index.js';
+import type { DesiredState, Interface, Vlan, Alias, FirewallRule, NatRule, DhcpSubnet, DnsHostOverride } from '../../schemas/index.js';
+import type { ImportReport } from '../types.js';
 
-export interface ImportReport {
-  success: boolean;
-  version?: string;
-  interfacesCount: number;
-  aliasesCount: number;
-  rulesCount: number;
-  natRulesCount: number;
-  dhcpSubnetsCount: number;
-  dnsOverridesCount: number;
-  warnings: string[];
-  state: DesiredState;
-}
+export type { ImportReport } from '../types.js';
 
 export function importOpnsenseConfig(xmlContent: string): ImportReport {
   const warnings: string[] = [];
@@ -269,13 +259,17 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
 
   return {
     success: true,
+    vendor: 'opnsense',
     version: root['@_version'] || 'unknown',
+    sourceFormat: 'OPNsense XML (config.xml)',
     interfacesCount: interfaces.length,
+    vlansCount: 0,
     aliasesCount: aliases.length,
     rulesCount: rules.length,
     natRulesCount: nat.length,
     dhcpSubnetsCount: subnets.length,
     dnsOverridesCount: hostOverrides.length,
+    routesCount: 0,
     warnings,
     state,
   };

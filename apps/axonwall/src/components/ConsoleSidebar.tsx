@@ -77,7 +77,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'Service Supervisor', href: '/system/services', icon: Server },
       { name: 'Plugin Store', href: '/system/plugins', icon: Boxes },
       { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
-      { name: 'OPNsense Importer', href: '/system/import', icon: FileText },
+      { name: 'Firewall Importer', href: '/system/import', icon: FileText },
     ],
   },
   {

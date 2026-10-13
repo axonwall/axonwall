@@ -15,7 +15,7 @@ export * from './compile/crowdsec/index.js';
 export * from './captive/index.js';
 export * from './alias/index.js';
 export * from './sim/index.js';
-export * from './import/opnsense/index.js';
+export * from './import/index.js';
 export * from './ldap/index.js';
 export * from './compile/ha/index.js';
 export * from './compile/haproxy/index.js';
