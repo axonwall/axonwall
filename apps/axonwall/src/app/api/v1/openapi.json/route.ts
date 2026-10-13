@@ -68,6 +68,37 @@ export async function GET() {
           },
         },
       },
+      '/import': {
+        post: {
+          summary: 'Import legacy firewall configuration',
+          description: 'Translates pfSense XML, OPNsense XML, VyOS/EdgeOS config.boot, MikroTik RouterOS /export, or Linux iptables directly into Axonwall DesiredState and Linux nftables.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    config: { type: 'string', description: 'Raw firewall configuration text' },
+                    vendor: {
+                      type: 'string',
+                      enum: ['auto', 'pfsense', 'opnsense', 'vyos', 'mikrotik', 'iptables'],
+                      default: 'auto',
+                    },
+                    apply: { type: 'boolean', default: false, description: 'Immediately apply to live firewall with safety rollback' },
+                    confirmTimeoutSeconds: { type: 'integer', default: 120 },
+                  },
+                  required: ['config'],
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Configuration parsed and translated successfully' },
+            '400': { description: 'Parsing or validation error' },
+          },
+        },
+      },
     },
   };
 
