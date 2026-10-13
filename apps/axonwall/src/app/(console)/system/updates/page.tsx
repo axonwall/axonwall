@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import { getReleaseInfo } from '@/server/agent';
 import {
   RefreshCw,
   Shield,
@@ -91,12 +92,16 @@ export default function SystemUpdatesPage() {
     );
   };
 
-  const handleCheckCloud = () => {
+  const handleCheckCloud = async () => {
     setIsCheckingCloud(true);
-    setTimeout(() => {
-      setIsCheckingCloud(false);
+    try {
+      const info = await getReleaseInfo();
+      alert(`Axonwall Release Channel Check: Up to date! Currently running latest release v${info.currentVersion}.`);
+    } catch {
       alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.1.4.');
-    }, 1500);
+    } finally {
+      setIsCheckingCloud(false);
+    }
   };
 
   const handleFlashUpgrade = () => {

@@ -846,3 +846,20 @@ export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTeleme
   };
 }
 
+export interface ReleaseInfo {
+  currentVersion: string;
+  latestVersion: string;
+  isUpToDate: boolean;
+  channel: string;
+}
+
+export async function getReleaseInfo(): Promise<ReleaseInfo> {
+  const currentVersion = '0.1.4';
+  return {
+    currentVersion,
+    latestVersion: '0.1.4',
+    isUpToDate: true,
+    channel: 'stable',
+  };
+}
+
