@@ -72,6 +72,16 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
   // OSPF Section
   if (config.ospf && config.ospf.enabled) {
     daemons.ospfd = true;
+
+    // Interface-level OSPF configurations
+    for (const area of config.ospf.areas) {
+      for (const iface of area.interfaces) {
+        lines.push(`interface ${iface}`);
+        lines.push(` ip ospf area ${area.areaId}`);
+        lines.push('!');
+      }
+    }
+
     lines.push('router ospf');
     lines.push(` ospf router-id ${config.ospf.routerId}`);
 
@@ -85,9 +95,6 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
     for (const area of config.ospf.areas) {
       for (const net of area.networks) {
         lines.push(` network ${net} area ${area.areaId}`);
-      }
-      for (const iface of area.interfaces) {
-        lines.push(` network interface ${iface} area ${area.areaId}`);
       }
     }
     lines.push('!');

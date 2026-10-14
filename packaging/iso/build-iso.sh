@@ -158,12 +158,13 @@ fi
 LITESTREAM_VERSION="0.3.13"
 if [[ ! -f config/includes.chroot/usr/sbin/litestream ]]; then
   echo "[+] Fetching Litestream v${LITESTREAM_VERSION}..."
-  curl -fsSL -o /tmp/litestream.tar.gz "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" || true
-  if [[ -f /tmp/litestream.tar.gz ]]; then
-    tar -xzf /tmp/litestream.tar.gz -C config/includes.chroot/usr/sbin/ litestream 2>/dev/null || true
+  LITE_TAR="$(mktemp -t litestream-XXXXXX.tar.gz)"
+  curl -fsSL -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" || true
+  if [[ -s "${LITE_TAR}" ]]; then
+    tar -xzf "${LITE_TAR}" -C config/includes.chroot/usr/sbin/ litestream 2>/dev/null || true
     chmod +x config/includes.chroot/usr/sbin/litestream 2>/dev/null || true
-    rm -f /tmp/litestream.tar.gz
   fi
+  rm -f "${LITE_TAR}"
 fi
 
 if [[ -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then

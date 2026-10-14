@@ -18,7 +18,14 @@ type NftablesEngine struct {
 }
 
 func NewNftablesEngine() *NftablesEngine {
-	return &NftablesEngine{}
+	baseline := ""
+	if data, err := os.ReadFile("/etc/nftables.conf"); err == nil && len(data) > 0 {
+		baseline = string(data)
+	}
+	return &NftablesEngine{
+		lastKnownGood: baseline,
+		currentScript: baseline,
+	}
 }
 
 // Apply compiles and atomically loads the nftables script.
@@ -26,15 +33,20 @@ func (e *NftablesEngine) Apply(scriptContent string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	tmpFile := "/tmp/axonwall-satellite-rules.nft"
-
-	// Create a temp file to hold the script
-	if err := os.WriteFile(tmpFile, []byte(scriptContent), 0600); err != nil {
-		return fmt.Errorf("failed to write temporary nft script: %w", err)
+	tmp, err := os.CreateTemp("", "axonwall-sat-apply-*.nft")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary nft script: %w", err)
 	}
+	tmpFile := tmp.Name()
 	defer os.Remove(tmpFile)
 
-	// Execute nft -f /tmp/axonwall-satellite-rules.nft
+	if _, err := tmp.Write([]byte(scriptContent)); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to write temporary nft script: %w", err)
+	}
+	_ = tmp.Close()
+
+	// Execute nft -f <tmpFile>
 	cmd := exec.Command("nft", "-f", tmpFile)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -45,9 +57,11 @@ func (e *NftablesEngine) Apply(scriptContent string) error {
 
 	slog.Info("Successfully applied nftables ruleset.")
 
-	// If it succeeds, update currentScript
+	// If it succeeds, update currentScript and lastKnownGood
 	if e.currentScript != "" {
 		e.lastKnownGood = e.currentScript
+	} else if e.lastKnownGood == "" {
+		e.lastKnownGood = scriptContent
 	}
 	e.currentScript = scriptContent
 
@@ -66,11 +80,18 @@ func (e *NftablesEngine) Rollback() error {
 
 	slog.Info("Initiating nftables rollback...")
 
-	tmpFile := "/tmp/axonwall-satellite-rollback.nft"
-	if err := os.WriteFile(tmpFile, []byte(e.lastKnownGood), 0600); err != nil {
+	tmp, err := os.CreateTemp("", "axonwall-sat-rollback-*.nft")
+	if err != nil {
+		return fmt.Errorf("failed to create rollback script: %w", err)
+	}
+	tmpFile := tmp.Name()
+	defer os.Remove(tmpFile)
+
+	if _, err := tmp.Write([]byte(e.lastKnownGood)); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("failed to write rollback script: %w", err)
 	}
-	defer os.Remove(tmpFile)
+	_ = tmp.Close()
 
 	cmd := exec.Command("nft", "-f", tmpFile)
 	var stderr bytes.Buffer

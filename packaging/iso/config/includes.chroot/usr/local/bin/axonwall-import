@@ -120,9 +120,9 @@ print(json.dumps(data))
 ' "$VENDOR" "$DO_APPLY" <<< "$CONFIG_CONTENT")
 
 echo "[+] Parsing and converting configuration..."
-RESPONSE=$(curl -s -S -X POST "${API_HOST}/api/v1/import" \
+RESPONSE=$(printf '%s' "$JSON_PAYLOAD" | curl -s -S -X POST "${API_HOST}/api/v1/import" \
   -H "Content-Type: application/json" \
-  -d "$JSON_PAYLOAD")
+  --data-binary @-)
 
 STATUS=$(python3 -c "import json, sys; res = json.loads(sys.stdin.read()); print(res.get('status', 'error'))" <<< "$RESPONSE" 2>/dev/null || echo "error")
 

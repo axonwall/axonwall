@@ -9,6 +9,7 @@ function headscaleRequest(method, path, body) {
             socketPath: HEADSCALE_SOCKET_PATH,
             path: path,
             method: method,
+            timeout: 5000,
             headers: {
                 'Content-Type': 'application/json',
             },
@@ -31,6 +32,10 @@ function headscaleRequest(method, path, body) {
                     reject(new Error(`Headscale API error ${res.statusCode}: ${data}`));
                 }
             });
+        });
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error(`Headscale request timed out after 5000ms: ${path}`));
         });
         req.on('error', (e) => {
             reject(new Error(`Failed to connect to Headscale: ${e.message}`));

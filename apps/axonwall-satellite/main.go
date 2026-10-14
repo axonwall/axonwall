@@ -117,184 +117,215 @@ func main() {
 	headers["X-Axonwall-Satellite-ID"] = []string{*satID}
 	headers["X-Axonwall-ZTP-Token"] = []string{*token}
 
-	slog.Info("Connecting to Axonwall Core Hub...", "url", u.String())
-
-	c, _, err := dialer.Dial(u.String(), headers)
-	if err != nil {
-		slog.Error("Failed to connect to core hub", "error", err)
-		os.Exit(1)
-	}
-	defer c.Close()
-
 	nftEngine := engine.NewNftablesEngine()
 	wgEngine := engine.NewWireGuardEngine()
 	wifiEngine := engine.NewWiFiEngine()
 
-	slog.Info("Connected to Axonwall Core Hub. Engines initialized.")
-
-	done := make(chan struct{})
-	var lastHeardUnix atomic.Int64
-	lastHeardUnix.Store(time.Now().Unix())
-
-	var writeMu sync.Mutex
-	writeWS := func(messageType int, data []byte) error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		return c.WriteMessage(messageType, data)
-	}
-
-	c.SetPongHandler(func(appData string) error {
-		lastHeardUnix.Store(time.Now().Unix())
-		return nil
-	})
-
-	// Watchdog routine: triggers rollback if connectivity to Core is lost
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				elapsed := time.Now().Unix() - lastHeardUnix.Load()
-				if elapsed > int64(*watchdogTimeout) {
-					slog.Warn("Watchdog triggered: no heartbeat from Core Hub!", "elapsedSeconds", elapsed, "timeout", *watchdogTimeout)
-					if err := nftEngine.Rollback(); err != nil {
-						slog.Error("Watchdog rollback error", "error", err)
-					}
-					// Reset lastHeard to prevent continuous rollbacks
-					lastHeardUnix.Store(time.Now().Unix())
-				}
-			}
-		}
-	}()
-
-	// Incoming message processing loop
-	go func() {
-		defer close(done)
-		for {
-			_, rawMsg, err := c.ReadMessage()
-			if err != nil {
-				slog.Error("Disconnected from Core Hub", "error", err)
-				return
-			}
-
-			lastHeardUnix.Store(time.Now().Unix())
-
-			var env EnvelopeMessage
-			if err := json.Unmarshal(rawMsg, &env); err != nil {
-				slog.Error("Malformed envelope received", "error", err)
-				continue
-			}
-
-			switch env.Type {
-			case "SYNC_NFTABLES":
-				var p NftablesSyncPayload
-				if err := json.Unmarshal(env.Payload, &p); err == nil && p.Script != "" {
-					slog.Info("Applying updated nftables ruleset from Core Hub...")
-					if err := nftEngine.Apply(p.Script); err != nil {
-						slog.Error("Failed to apply nftables script", "error", err)
-					} else {
-						slog.Info("nftables ruleset applied successfully")
-					}
-				}
-
-			case "SYNC_WIREGUARD":
-				var wgCfg engine.WireGuardConfig
-				if err := json.Unmarshal(env.Payload, &wgCfg); err == nil {
-					slog.Info("Applying WireGuard mesh tunnel configuration...")
-					if err := wgEngine.ConfigureMesh(wgCfg); err != nil {
-						slog.Error("Failed to configure WireGuard mesh", "error", err)
-					}
-				}
-
-			case "SYNC_WIFI":
-				var wfCfg SyncWiFiPayload
-				if err := json.Unmarshal(env.Payload, &wfCfg); err == nil {
-					slog.Info("Applying Wi-Fi radio configurations...")
-					for _, c := range wfCfg.Configs {
-						if err := wifiEngine.Configure(c); err != nil {
-							slog.Error("Failed to configure Wi-Fi radio", "radio", c.Radio, "error", err)
-						} else {
-							slog.Info("Wi-Fi configured successfully", "radio", c.Radio, "ssid", c.SSID)
-						}
-					}
-				}
-
-			case "SYNC_HEADSCALE":
-				var hsCfg HeadscaleSyncPayload
-				if err := json.Unmarshal(env.Payload, &hsCfg); err == nil && hsCfg.AuthKey != "" {
-					slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsCfg.ServerURL)
-					cmd := exec.Command("tailscale", "up", "--login-server="+hsCfg.ServerURL, "--authkey="+hsCfg.AuthKey, "--reset")
-					out, err := cmd.CombinedOutput()
-					if err != nil {
-						slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
-					} else {
-						slog.Info("Successfully joined Headscale mesh!")
-					}
-				}
-
-			case "BLOCK_TARGET":
-				var bp BlockTargetPayload
-				if err := json.Unmarshal(env.Payload, &bp); err == nil && bp.Target != "" {
-					slog.Info("Received AI Copilot block request...", "target", bp.Target)
-					if err := nftEngine.BlockTarget(bp.Target, bp.IsMac); err != nil {
-						slog.Error("Failed to apply micro-segmentation block", "error", err)
-					}
-				}
-
-			case "PING":
-				// Heartbeat ack from Hub
-				lastHeardUnix.Store(time.Now().Unix())
-
-			default:
-				slog.Debug("Unhandled message type", "type", env.Type)
-			}
-		}
-	}()
-
-	// Telemetry & Keepalive loop
-	telemetryTicker := time.NewTicker(15 * time.Second)
-	defer telemetryTicker.Stop()
+	backoff := 2 * time.Second
+	const maxBackoff = 60 * time.Second
 
 	for {
 		select {
-		case <-done:
-			slog.Warn("Core connection closed. Satellite entering autonomous edge mode.")
-			return
-
-		case <-telemetryTicker.C:
-			// 1. Send Ping
-			_ = writeWS(websocket.PingMessage, []byte{})
-
-			// 2. Gather kernel telemetry and push to Core
-			metrics := engine.CollectMetrics()
-			report := TelemetryReportPayload{
-				SatelliteID: *satID,
-				Metrics:     metrics,
-			}
-
-			payloadBytes, err := json.Marshal(report)
-			if err == nil {
-				msg := EnvelopeMessage{
-					Type:    "TELEMETRY_REPORT",
-					Payload: payloadBytes,
-				}
-				if msgBytes, err := json.Marshal(msg); err == nil {
-					_ = writeWS(websocket.TextMessage, msgBytes)
-				}
-			}
-
 		case <-interrupt:
-			slog.Info("Interrupt received, cleanly disconnecting satellite...")
-			_ = writeWS(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"))
+			slog.Info("Interrupt received, shutting down satellite...")
+			return
+		default:
+		}
+
+		slog.Info("Connecting to Axonwall Core Hub...", "url", u.String())
+		c, _, err := dialer.Dial(u.String(), headers)
+		if err != nil {
+			slog.Warn("Failed to connect to core hub, retrying...", "error", err, "backoff", backoff)
+			select {
+			case <-interrupt:
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		// Connected successfully: reset backoff
+		backoff = 2 * time.Second
+		slog.Info("Connected to Axonwall Core Hub. Engines initialized.")
+
+		done := make(chan struct{})
+		var lastHeardUnix atomic.Int64
+		lastHeardUnix.Store(time.Now().Unix())
+
+		var writeMu sync.Mutex
+		writeWS := func(messageType int, data []byte) error {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			return c.WriteMessage(messageType, data)
+		}
+
+		c.SetPongHandler(func(appData string) error {
+			lastHeardUnix.Store(time.Now().Unix())
+			return nil
+		})
+
+		// Watchdog routine: triggers rollback if connectivity to Core is lost
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					elapsed := time.Now().Unix() - lastHeardUnix.Load()
+					if elapsed > int64(*watchdogTimeout) {
+						slog.Warn("Watchdog triggered: no heartbeat from Core Hub!", "elapsedSeconds", elapsed, "timeout", *watchdogTimeout)
+						if err := nftEngine.Rollback(); err != nil {
+							slog.Error("Watchdog rollback error", "error", err)
+						}
+						// Reset lastHeard to prevent continuous rollbacks
+						lastHeardUnix.Store(time.Now().Unix())
+					}
+				}
+			}
+		}()
+
+		// Incoming message processing loop
+		go func() {
+			defer close(done)
+			for {
+				_, rawMsg, err := c.ReadMessage()
+				if err != nil {
+					slog.Error("Disconnected from Core Hub", "error", err)
+					return
+				}
+
+				lastHeardUnix.Store(time.Now().Unix())
+
+				var env EnvelopeMessage
+				if err := json.Unmarshal(rawMsg, &env); err != nil {
+					slog.Error("Malformed envelope received", "error", err)
+					continue
+				}
+
+				switch env.Type {
+				case "SYNC_NFTABLES":
+					var p NftablesSyncPayload
+					if err := json.Unmarshal(env.Payload, &p); err == nil && p.Script != "" {
+						slog.Info("Applying updated nftables ruleset from Core Hub...")
+						if err := nftEngine.Apply(p.Script); err != nil {
+							slog.Error("Failed to apply nftables script", "error", err)
+						} else {
+							slog.Info("nftables ruleset applied successfully")
+						}
+					}
+
+				case "SYNC_WIREGUARD":
+					var wgCfg engine.WireGuardConfig
+					if err := json.Unmarshal(env.Payload, &wgCfg); err == nil {
+						slog.Info("Applying WireGuard mesh tunnel configuration...")
+						if err := wgEngine.ConfigureMesh(wgCfg); err != nil {
+							slog.Error("Failed to configure WireGuard mesh", "error", err)
+						}
+					}
+
+				case "SYNC_WIFI":
+					var wfCfg SyncWiFiPayload
+					if err := json.Unmarshal(env.Payload, &wfCfg); err == nil {
+						slog.Info("Applying Wi-Fi radio configurations...")
+						for _, c := range wfCfg.Configs {
+							if err := wifiEngine.Configure(c); err != nil {
+								slog.Error("Failed to configure Wi-Fi radio", "radio", c.Radio, "error", err)
+							} else {
+								slog.Info("Wi-Fi configured successfully", "radio", c.Radio, "ssid", c.SSID)
+							}
+						}
+					}
+
+				case "SYNC_HEADSCALE":
+					var hsCfg HeadscaleSyncPayload
+					if err := json.Unmarshal(env.Payload, &hsCfg); err == nil && hsCfg.AuthKey != "" {
+						slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsCfg.ServerURL)
+						cmd := exec.Command("tailscale", "up", "--login-server="+hsCfg.ServerURL, "--authkey="+hsCfg.AuthKey, "--reset")
+						out, err := cmd.CombinedOutput()
+						if err != nil {
+							slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
+						} else {
+							slog.Info("Successfully joined Headscale mesh!")
+						}
+					}
+
+				case "BLOCK_TARGET":
+					var bp BlockTargetPayload
+					if err := json.Unmarshal(env.Payload, &bp); err == nil && bp.Target != "" {
+						slog.Info("Received AI Copilot block request...", "target", bp.Target)
+						if err := nftEngine.BlockTarget(bp.Target, bp.IsMac); err != nil {
+							slog.Error("Failed to apply micro-segmentation block", "error", err)
+						}
+					}
+
+				case "PING":
+					// Heartbeat ack from Hub
+					lastHeardUnix.Store(time.Now().Unix())
+
+				default:
+					slog.Debug("Unhandled message type", "type", env.Type)
+				}
+			}
+		}()
+
+		// Telemetry & Keepalive loop
+		telemetryTicker := time.NewTicker(15 * time.Second)
+
+		sessionActive := true
+		for sessionActive {
 			select {
 			case <-done:
-			case <-time.After(time.Second):
+				slog.Warn("Core connection closed. Entering autonomous edge mode and scheduling reconnect...")
+				sessionActive = false
+
+			case <-telemetryTicker.C:
+				// 1. Send Ping
+				_ = writeWS(websocket.PingMessage, []byte{})
+
+				// 2. Gather kernel telemetry and push to Core
+				metrics := engine.CollectMetrics()
+				report := TelemetryReportPayload{
+					SatelliteID: *satID,
+					Metrics:     metrics,
+				}
+
+				payloadBytes, err := json.Marshal(report)
+				if err == nil {
+					msg := EnvelopeMessage{
+						Type:    "TELEMETRY_REPORT",
+						Payload: payloadBytes,
+					}
+					if msgBytes, err := json.Marshal(msg); err == nil {
+						_ = writeWS(websocket.TextMessage, msgBytes)
+					}
+				}
+
+			case <-interrupt:
+				slog.Info("Interrupt received, cleanly disconnecting satellite...")
+				_ = writeWS(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"))
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+				}
+				_ = c.Close()
+				telemetryTicker.Stop()
+				return
 			}
+		}
+
+		telemetryTicker.Stop()
+		_ = c.Close()
+		select {
+		case <-interrupt:
 			return
+		case <-time.After(3 * time.Second):
 		}
 	}
 }

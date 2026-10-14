@@ -10,9 +10,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/skip2/go-qrcode"
@@ -345,11 +347,24 @@ func readPassword(reader *bufio.Reader, prompt string) (string, error) {
 	cmd := exec.Command("stty", "-echo")
 	cmd.Stdin = os.Stdin
 	_ = cmd.Run()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	defer func() {
+		signal.Stop(sigChan)
 		restore := exec.Command("stty", "echo")
 		restore.Stdin = os.Stdin
 		_ = restore.Run()
 		fmt.Println()
+	}()
+
+	go func() {
+		<-sigChan
+		restore := exec.Command("stty", "echo")
+		restore.Stdin = os.Stdin
+		_ = restore.Run()
+		fmt.Println()
+		os.Exit(130)
 	}()
 
 	line, err := reader.ReadString('\n')

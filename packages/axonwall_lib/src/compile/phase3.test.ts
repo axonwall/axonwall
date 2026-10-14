@@ -249,6 +249,7 @@ describe('Phase 3: ACME Client & CrowdSec Integration', () => {
       action: 'reject',
       logBanned: false,
     });
-    expect(rejectRes.nftRule).toBe('ip saddr @set_crowdsec_blacklists reject');
+    expect(rejectRes.nftRule).toContain('ip saddr @set_crowdsec_blacklists reject');
+    expect(rejectRes.nftRule).toContain('ip6 saddr @set_crowdsec_blacklists_v6 reject');
   });
 });

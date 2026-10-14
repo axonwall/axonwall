@@ -268,15 +268,14 @@ export async function applyDesiredState(
   } catch {}
 
   // Automatically record state changeset in GitOps audit repository
-  import('./gitops')
-    .then(({ recordGitOpsChange }) =>
-      recordGitOpsChange(
-        state,
-        session.username || 'admin',
-        `Firewall ruleset applied (SHA256: ${bundleHash.slice(0, 12)})`
-      )
-    )
-    .catch(() => {});
+  try {
+    const { recordGitOpsChange } = await import('./gitops');
+    await recordGitOpsChange(
+      state,
+      session.username || 'admin',
+      `Firewall ruleset applied (SHA256: ${bundleHash.slice(0, 12)})`
+    );
+  } catch {}
 
   if (daemonResp) {
     if (!daemonResp.success) {
@@ -354,7 +353,9 @@ export async function runDiagnostic(
 ): Promise<{ success: boolean; output: string }> {
   const session = await getSession();
   await enforceRateLimit(5, 60000); // Max 5 diagnostics per minute per IP
-  if (!session) throw new Error('Unauthorized');
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin credentials required for diagnostic tools');
+  }
 
   const cleanTarget = target.trim();
   if (!cleanTarget) {
@@ -412,7 +413,9 @@ export async function startPacketCapture(
 ): Promise<CaptureResult> {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
-  if (!session) throw new Error('Unauthorized');
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin credentials required for packet capture');
+  }
 
   return executeCapture({ iface, filter, count });
 }
@@ -843,7 +846,7 @@ export async function getPhysicalNetworkDevices(): Promise<string[]> {
   if (!session) throw new Error('Unauthorized');
 
   try {
-    const raw = execSync("ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' 2>/dev/null", { encoding: 'utf8' });
+    const raw = execSync("ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' 2>/dev/null", { encoding: 'utf8', timeout: 1000 });
     const devs = raw.split('\n').map((s) => s.trim()).filter(Boolean);
     if (devs.length > 0) return Array.from(new Set(devs));
   } catch {}
@@ -920,31 +923,31 @@ export async function saveInterfaceAssignment(data: {
   if (data.device) {
     if (data.enabled) {
       try {
-        execFileSync('ip', ['link', 'set', data.device, 'up'], { stdio: 'ignore' });
+        execFileSync('ip', ['link', 'set', data.device, 'up'], { stdio: 'ignore', timeout: 2000 });
       } catch {}
       if (data.type === 'static' && data.ipv4Address) {
         try {
-          execFileSync('ip', ['addr', 'flush', 'dev', data.device], { stdio: 'ignore' });
+          execFileSync('ip', ['addr', 'flush', 'dev', data.device], { stdio: 'ignore', timeout: 2000 });
         } catch {}
         try {
-          execFileSync('ip', ['addr', 'add', data.ipv4Address, 'dev', data.device], { stdio: 'ignore' });
+          execFileSync('ip', ['addr', 'add', data.ipv4Address, 'dev', data.device], { stdio: 'ignore', timeout: 2000 });
         } catch {}
         if (data.ipv4Gateway) {
           try {
-            execFileSync('ip', ['route', 'replace', 'default', 'via', data.ipv4Gateway, 'dev', data.device], { stdio: 'ignore' });
+            execFileSync('ip', ['route', 'replace', 'default', 'via', data.ipv4Gateway, 'dev', data.device], { stdio: 'ignore', timeout: 2000 });
           } catch {}
         }
       } else if (data.type === 'dhcp') {
         try {
-          execFileSync('dhclient', ['-r', data.device], { stdio: 'ignore' });
+          execFileSync('dhclient', ['-r', data.device], { stdio: 'ignore', timeout: 3000 });
         } catch {}
         try {
-          execFileSync('dhclient', [data.device], { stdio: 'ignore' });
+          execFileSync('dhclient', [data.device], { stdio: 'ignore', timeout: 5000 });
         } catch {}
       }
     } else {
       try {
-        execFileSync('ip', ['link', 'set', data.device, 'down'], { stdio: 'ignore' });
+        execFileSync('ip', ['link', 'set', data.device, 'down'], { stdio: 'ignore', timeout: 2000 });
       } catch {}
     }
   }

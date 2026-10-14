@@ -28,6 +28,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+TARGET_SLOT="${TARGET_SLOT^^}"
+if [[ "$TARGET_SLOT" != "A" && "$TARGET_SLOT" != "B" ]]; then
+  echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
+  exit 1
+fi
+
 echo "================================================================================"
 echo "Axonwall Appliance Firmware Updater"
 echo "  Target Slot   : Slot ${TARGET_SLOT}"

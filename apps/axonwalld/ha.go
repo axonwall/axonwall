@@ -200,9 +200,9 @@ vrrp_instance VI_1 {
         10.0.99.1/24 dev %s
     }
 
-    notify_master "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER"
-    notify_backup "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP"
-    notify_fault  "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT"
+    notify_master "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER'"
+    notify_backup "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP'"
+    notify_fault  "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT'"
 }
 `, state, cfg.SyncInterface, cfg.Vrid, priority, cfg.SyncPassword, cfg.SyncInterface)
 

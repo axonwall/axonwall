@@ -267,8 +267,8 @@ describe('Axonwall nftables Compiler', () => {
     expect(res.nftScript).toContain('iifname "eth0" queue num 0-3 bypass comment "suricata-ips-inbound"');
     expect(res.nftScript).toContain('ip6 saddr 2001:db8::1/128 ip6 daddr @set_v6_hosts tcp dport { 80, 443 } accept');
     expect(res.nftScript).toContain('meta l4proto ipv6-icmp accept');
-    expect(res.nftScript).toContain('iifname "eth0" meta l4proto { tcp, udp } th dport 8080 dnat to 192.168.100.50:80');
-    expect(res.nftScript).toContain('iifname "eth0" meta l4proto tcp dnat to 192.168.100.51');
+    expect(res.nftScript).toContain('iifname "eth0" meta l4proto { tcp, udp } th dport 8080 dnat ip to 192.168.100.50:80');
+    expect(res.nftScript).toContain('iifname "eth0" meta l4proto tcp dnat ip to 192.168.100.51');
     expect(res.nftScript).not.toContain('dport 9000');
   });
 

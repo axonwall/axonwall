@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
 )
+
+var validGwIfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 type GatewayTarget struct {
 	ID          string `json:"id"`
@@ -143,7 +147,10 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 		if targetIP == "" {
 			targetIP = gw.GatewayIP
 		}
-		if targetIP == "" {
+		if targetIP == "" || net.ParseIP(targetIP) == nil {
+			continue
+		}
+		if !validGwIfaceRegex.MatchString(gw.Interface) {
 			continue
 		}
 
@@ -237,12 +244,20 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 	// Example: ip route replace default nexthop via 192.168.1.1 dev eth0 weight 1 nexthop via 10.0.0.1 dev eth2 weight 1
 	args := []string{"route", "replace", "default"}
 	for _, gw := range activeTargets {
+		if net.ParseIP(gw.GatewayIP) == nil || !validGwIfaceRegex.MatchString(gw.Interface) {
+			continue
+		}
 		weight := gw.Weight
 		weightStr := "1"
 		if weight > 0 {
 			weightStr = strconv.Itoa(weight)
 		}
 		args = append(args, "nexthop", "via", gw.GatewayIP, "dev", gw.Interface, "weight", weightStr)
+	}
+
+	if len(args) == 3 {
+		slog.Error("SD-WAN Prober: No valid IP/interface targets for default route")
+		return
 	}
 
 	cmd := exec.Command("ip", args...)

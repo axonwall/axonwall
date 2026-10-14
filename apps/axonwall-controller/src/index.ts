@@ -155,7 +155,27 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     
+    const verifyFleetAuth = (req: any, res: any): boolean => {
+      const token = (req.headers['x-axonwall-ztp-token'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '')) as string;
+      const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
+      if (!expectedToken && process.env.NODE_ENV === 'production') {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Fleet management authentication unconfigured' }));
+        return false;
+      }
+      const tokenToMatch = expectedToken || 'dev-ztp-token';
+      const isValid = token && token.length === tokenToMatch.length &&
+        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(tokenToMatch));
+      if (!isValid) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized: Valid X-Axonwall-ZTP-Token required' }));
+        return false;
+      }
+      return true;
+    };
+
     if (pathname === '/api/v1/fleet/block' && req.method === 'POST') {
+      if (!verifyFleetAuth(req, res)) return;
       let body = '';
       req.on('data', (chunk: any) => {
         body += chunk.toString();
@@ -199,6 +219,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     if (pathname === '/api/v1/fleet/satellites' && req.method === 'GET') {
+      if (!verifyFleetAuth(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       // Exclude ws and wgPrivateKey from JSON
       const satellitesData = Array.from(activeSatellites.values()).map(s => {
@@ -206,7 +227,8 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         return rest;
       });
       res.end(JSON.stringify({
-        totalConnected: activeSatellites.size,
+        totalConnected: Array.from(activeSatellites.values()).filter(s => s.ws && s.ws.readyState === WebSocket.OPEN).length,
+        totalEnrolled: activeSatellites.size,
         satellites: satellitesData,
       }));
       return;
@@ -431,10 +453,17 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
     let tunnelIp = existing?.tunnelIp;
     if (!tunnelIp) {
-      if (ipCounter > 254) {
-        ipCounter = 2;
+      const usedIps = new Set(Array.from(activeSatellites.values()).map(s => s.tunnelIp?.split('/')[0]).filter(Boolean));
+      for (let i = 2; i <= 254; i++) {
+        const candidate = `10.99.0.${i}`;
+        if (!usedIps.has(candidate)) {
+          tunnelIp = `${candidate}/24`;
+          break;
+        }
       }
-      tunnelIp = `10.99.0.${ipCounter++}/24`;
+      if (!tunnelIp) {
+        tunnelIp = `10.99.0.${ipCounter++ % 250 + 2}/24`;
+      }
     }
 
     const state: SatelliteState = {
@@ -530,13 +559,14 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
     ws.on('close', () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
-      if (activeSatellites.get(satId)?.ws === ws) {
+      const current = activeSatellites.get(satId);
+      if (current?.ws === ws) {
         satUptimeGauge.remove({ satellite_id: satId });
         satCpuGauge.remove({ satellite_id: satId });
         satMemGauge.remove({ satellite_id: satId });
         satConnsGauge.remove({ satellite_id: satId });
         lastRxTxBytes.delete(satId);
-        activeSatellites.delete(satId);
+        current.ws = undefined;
         broadcastMeshTopology();
       }
     });

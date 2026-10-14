@@ -143,6 +143,11 @@ export default function FirewallPage() {
         message: res.message,
         warnings: res.warnings,
       });
+    } catch (err: any) {
+      setApplyResult({
+        message: `Apply Failed: ${err?.message || 'Configuration validation error'}`,
+        warnings: ['State could not be applied to kernel nftables.'],
+      });
     } finally {
       setIsApplying(false);
     }

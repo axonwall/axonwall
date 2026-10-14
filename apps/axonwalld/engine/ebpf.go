@@ -168,6 +168,8 @@ func (m *EBPFManager) monitorFlows() {
 				} else {
 					log.Printf("Exported %d flow records to ClickHouse", count)
 				}
+			} else {
+				_ = batch.Abort()
 			}
 		}
 	}

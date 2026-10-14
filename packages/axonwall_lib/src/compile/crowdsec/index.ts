@@ -61,11 +61,15 @@ nftables:
   const nftSetDefinition = `set ${setName} {
   type ipv4_addr
   flags interval, timeout
+}
+set ${setName}_v6 {
+  type ipv6_addr
+  flags interval, timeout
 }`;
 
   const nftRule = config.logBanned
-    ? `ip saddr @${setName} log prefix "axonwall-crowdsec-${verdict}: " ${verdict}`
-    : `ip saddr @${setName} ${verdict}`;
+    ? `ip saddr @${setName} log prefix "axonwall-crowdsec-${verdict}: " ${verdict}\n    ip6 saddr @${setName}_v6 log prefix "axonwall-crowdsec-${verdict}: " ${verdict}`
+    : `ip saddr @${setName} ${verdict}\n    ip6 saddr @${setName}_v6 ${verdict}`;
 
   return {
     bouncerYaml,

@@ -92,12 +92,13 @@ fi
 LITESTREAM_VERSION="0.3.13"
 if [[ ! -f "${WORK_DIR}/usr/sbin/litestream" ]]; then
   echo "[+] Downloading Litestream v${LITESTREAM_VERSION} binary..."
-  curl -fsSL -o /tmp/litestream.tar.gz "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" || true
-  if [[ -f /tmp/litestream.tar.gz ]]; then
-    tar -xzf /tmp/litestream.tar.gz -C "${WORK_DIR}/usr/sbin/" litestream 2>/dev/null || true
+  LITE_TAR="$(mktemp -t litestream-XXXXXX.tar.gz)"
+  curl -fsSL -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" || true
+  if [[ -s "${LITE_TAR}" ]]; then
+    tar -xzf "${LITE_TAR}" -C "${WORK_DIR}/usr/sbin/" litestream 2>/dev/null || true
     chmod 755 "${WORK_DIR}/usr/sbin/litestream" 2>/dev/null || true
-    rm -f /tmp/litestream.tar.gz
   fi
+  rm -f "${LITE_TAR}"
 fi
 
 # 5. Copy System Scripts

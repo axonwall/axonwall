@@ -8616,8 +8616,14 @@ nftables:
   const nftSetDefinition = `set ${setName} {
   type ipv4_addr
   flags interval, timeout
+}
+set ${setName}_v6 {
+  type ipv6_addr
+  flags interval, timeout
 }`;
-  const nftRule = config.logBanned ? `ip saddr @${setName} log prefix "axonwall-crowdsec-${verdict}: " ${verdict}` : `ip saddr @${setName} ${verdict}`;
+  const nftRule = config.logBanned ? `ip saddr @${setName} log prefix "axonwall-crowdsec-${verdict}: " ${verdict}
+    ip6 saddr @${setName}_v6 log prefix "axonwall-crowdsec-${verdict}: " ${verdict}` : `ip saddr @${setName} ${verdict}
+    ip6 saddr @${setName}_v6 ${verdict}`;
   return {
     bouncerYaml,
     nftSetDefinition,
@@ -8992,8 +8998,11 @@ function compileNftables(state) {
     } else {
       protoMatch = `meta l4proto ${nat.protocol}`;
     }
-    const dnatTarget = nat.targetPort ? `${nat.targetIp}:${nat.targetPort}` : `${nat.targetIp}`;
-    lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat to ${dnatTarget}`);
+    const isV6 = nat.targetIp.includes(":");
+    const family = isV6 ? "ip6" : "ip";
+    const formattedIp = isV6 && nat.targetPort ? `[${nat.targetIp}]` : nat.targetIp;
+    const dnatTarget = nat.targetPort ? `${formattedIp}:${nat.targetPort}` : formattedIp;
+    lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat ${family} to ${dnatTarget}`);
   }
   lines.push("  }");
   lines.push("");
@@ -9085,7 +9094,8 @@ function compileNftables(state) {
     if (nat.type === "masquerade") {
       lines.push(`    oifname "${ifaceDev}" masquerade comment "outbound-nat"`);
     } else if (nat.type === "snat" && nat.targetIp) {
-      lines.push(`    oifname "${ifaceDev}" snat to ${nat.targetIp} comment "outbound-snat"`);
+      const family = nat.targetIp.includes(":") ? "ip6" : "ip";
+      lines.push(`    oifname "${ifaceDev}" snat ${family} to ${nat.targetIp} comment "outbound-snat"`);
     }
   }
   if (!state.nat.some((n) => n.type === "masquerade" || n.type === "snat")) {
@@ -9266,7 +9276,7 @@ function formatRuleStatement(rule, aliases) {
       if (hasDport)
         parts.push(`${rule.protocol} dport ${formatPort(rule.destinationPort)}`);
     } else {
-      parts.push(`ip protocol ${rule.protocol}`);
+      parts.push(`meta l4proto ${rule.protocol}`);
     }
   } else if (rule.protocol === "tcp_udp") {
     parts.push("meta l4proto { tcp, udp }");
@@ -9277,7 +9287,7 @@ function formatRuleStatement(rule, aliases) {
   } else if (rule.protocol === "ipv6-icmp") {
     parts.push("meta l4proto ipv6-icmp");
   } else if (rule.protocol !== "any") {
-    parts.push(`ip protocol ${rule.protocol}`);
+    parts.push(`meta l4proto ${rule.protocol}`);
   }
   if (rule.log) {
     parts.push(`log prefix "axonwall-rule:${rule.id?.slice(0, 8) || "log"}: " group 0`);
@@ -9474,6 +9484,7 @@ function headscaleRequest(method, path, body) {
       socketPath: HEADSCALE_SOCKET_PATH,
       path,
       method,
+      timeout: 5e3,
       headers: {
         "Content-Type": "application/json"
       }
@@ -9494,6 +9505,10 @@ function headscaleRequest(method, path, body) {
           reject(new Error(`Headscale API error ${res.statusCode}: ${data}`));
         }
       });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`Headscale request timed out after 5000ms: ${path}`));
     });
     req.on("error", (e) => {
       reject(new Error(`Failed to connect to Headscale: ${e.message}`));
@@ -9608,7 +9623,25 @@ async function main() {
       });
       return;
     }
+    const verifyFleetAuth = (req2, res2) => {
+      const token = req2.headers["x-axonwall-ztp-token"] || req2.headers["authorization"]?.replace(/^Bearer\s+/i, "");
+      const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
+      if (!expectedToken && process.env.NODE_ENV === "production") {
+        res2.writeHead(503, { "Content-Type": "application/json" });
+        res2.end(JSON.stringify({ error: "Fleet management authentication unconfigured" }));
+        return false;
+      }
+      const tokenToMatch = expectedToken || "dev-ztp-token";
+      const isValid = token && token.length === tokenToMatch.length && crypto.timingSafeEqual(Buffer.from(token), Buffer.from(tokenToMatch));
+      if (!isValid) {
+        res2.writeHead(401, { "Content-Type": "application/json" });
+        res2.end(JSON.stringify({ error: "Unauthorized: Valid X-Axonwall-ZTP-Token required" }));
+        return false;
+      }
+      return true;
+    };
     if (pathname === "/api/v1/fleet/block" && req.method === "POST") {
+      if (!verifyFleetAuth(req, res)) return;
       let body = "";
       req.on("data", (chunk) => {
         body += chunk.toString();
@@ -9647,13 +9680,15 @@ async function main() {
       return;
     }
     if (pathname === "/api/v1/fleet/satellites" && req.method === "GET") {
+      if (!verifyFleetAuth(req, res)) return;
       res.writeHead(200, { "Content-Type": "application/json" });
       const satellitesData = Array.from(activeSatellites.values()).map((s) => {
         const { ws, wgPrivateKey, ...rest } = s;
         return rest;
       });
       res.end(JSON.stringify({
-        totalConnected: activeSatellites.size,
+        totalConnected: Array.from(activeSatellites.values()).filter((s) => s.ws && s.ws.readyState === import_websocket.default.OPEN).length,
+        totalEnrolled: activeSatellites.size,
         satellites: satellitesData
       }));
       return;
@@ -9847,10 +9882,17 @@ ${headerLines.join("\r\n")}\r
     }
     let tunnelIp = existing?.tunnelIp;
     if (!tunnelIp) {
-      if (ipCounter > 254) {
-        ipCounter = 2;
+      const usedIps = new Set(Array.from(activeSatellites.values()).map((s) => s.tunnelIp?.split("/")[0]).filter(Boolean));
+      for (let i = 2; i <= 254; i++) {
+        const candidate = `10.99.0.${i}`;
+        if (!usedIps.has(candidate)) {
+          tunnelIp = `${candidate}/24`;
+          break;
+        }
       }
-      tunnelIp = `10.99.0.${ipCounter++}/24`;
+      if (!tunnelIp) {
+        tunnelIp = `10.99.0.${ipCounter++ % 250 + 2}/24`;
+      }
     }
     const state = {
       id: satId,
@@ -9926,13 +9968,14 @@ ${headerLines.join("\r\n")}\r
     });
     ws.on("close", () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
-      if (activeSatellites.get(satId)?.ws === ws) {
+      const current = activeSatellites.get(satId);
+      if (current?.ws === ws) {
         satUptimeGauge.remove({ satellite_id: satId });
         satCpuGauge.remove({ satellite_id: satId });
         satMemGauge.remove({ satellite_id: satId });
         satConnsGauge.remove({ satellite_id: satId });
         lastRxTxBytes.delete(satId);
-        activeSatellites.delete(satId);
+        current.ws = void 0;
         broadcastMeshTopology();
       }
     });

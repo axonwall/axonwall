@@ -14,6 +14,7 @@ function headscaleRequest<T>(method: string, path: string, body?: any): Promise<
       headers: {
         'Content-Type': 'application/json',
       },
+      timeout: 5000,
     };
 
     const req = http.request(options, (res) => {
@@ -32,6 +33,11 @@ function headscaleRequest<T>(method: string, path: string, body?: any): Promise<
           reject(new Error(`Headscale API error ${res.statusCode}: ${data}`));
         }
       });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Headscale request timed out after 5000ms'));
     });
 
     req.on('error', (e) => {

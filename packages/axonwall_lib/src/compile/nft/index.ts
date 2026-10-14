@@ -161,8 +161,11 @@ export function compileNftables(state: DesiredState): CompileResult {
     } else {
       protoMatch = `meta l4proto ${nat.protocol}`;
     }
-    const dnatTarget = nat.targetPort ? `${nat.targetIp}:${nat.targetPort}` : `${nat.targetIp}`;
-    lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat to ${dnatTarget}`);
+    const isV6 = nat.targetIp.includes(':');
+    const family = isV6 ? 'ip6' : 'ip';
+    const formattedIp = isV6 && nat.targetPort ? `[${nat.targetIp}]` : nat.targetIp;
+    const dnatTarget = nat.targetPort ? `${formattedIp}:${nat.targetPort}` : formattedIp;
+    lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat ${family} to ${dnatTarget}`);
   }
   lines.push('  }');
   lines.push('');
@@ -273,7 +276,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     if (nat.type === 'masquerade') {
       lines.push(`    oifname "${ifaceDev}" masquerade comment "outbound-nat"`);
     } else if (nat.type === 'snat' && nat.targetIp) {
-      lines.push(`    oifname "${ifaceDev}" snat to ${nat.targetIp} comment "outbound-snat"`);
+      const family = nat.targetIp.includes(':') ? 'ip6' : 'ip';
+      lines.push(`    oifname "${ifaceDev}" snat ${family} to ${nat.targetIp} comment "outbound-snat"`);
     }
   }
   // Default WAN/Gateway masquerade if no outbound rules configured
@@ -493,7 +497,7 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
       if (hasSport) parts.push(`${rule.protocol} sport ${formatPort(rule.sourcePort!)}`);
       if (hasDport) parts.push(`${rule.protocol} dport ${formatPort(rule.destinationPort!)}`);
     } else {
-      parts.push(`ip protocol ${rule.protocol}`);
+      parts.push(`meta l4proto ${rule.protocol}`);
     }
   } else if (rule.protocol === 'tcp_udp') {
     parts.push('meta l4proto { tcp, udp }');
@@ -502,7 +506,7 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   } else if (rule.protocol === 'ipv6-icmp') {
     parts.push('meta l4proto ipv6-icmp');
   } else if (rule.protocol !== 'any') {
-    parts.push(`ip protocol ${rule.protocol}`);
+    parts.push(`meta l4proto ${rule.protocol}`);
   }
 
   // Logging
