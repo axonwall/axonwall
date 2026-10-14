@@ -169,9 +169,25 @@ describe('Phase 3: Unbound DNS Blocklist (RPZ AdBlock)', () => {
       },
     });
 
+    expect(res.unboundConfig).toContain('auto-trust-anchor-file: "/var/lib/unbound/root.key"');
     expect(res.unboundConfig).toContain('local-zone: "safe-api.example.com." transparent');
     expect(res.unboundConfig).toContain('local-zone: "adtracker.evil.com." always_null');
     expect(res.unboundConfig).toContain('local-zone: "malware.bad.org." always_null');
+
+    const noDnssec = compileUnbound({
+      enabled: true,
+      listenPort: 53,
+      dnssec: false,
+      dotEnabled: false,
+      dotUpstreams: [],
+      hostOverrides: [
+        { hostname: 'gw6', domain: 'axonwall.local', ip: '2001:db8::1', description: 'IPv6 Gateway' },
+        { hostname: 'gw4', domain: 'axonwall.local', ip: '192.168.1.1', description: 'IPv4 Gateway' },
+      ],
+    });
+    expect(noDnssec.unboundConfig).not.toContain('auto-trust-anchor-file');
+    expect(noDnssec.unboundConfig).toContain('local-data: "gw6.axonwall.local. IN AAAA 2001:db8::1"');
+    expect(noDnssec.unboundConfig).toContain('local-data: "gw4.axonwall.local. IN A 192.168.1.1"');
   });
 });
 
@@ -222,7 +238,17 @@ describe('Phase 3: ACME Client & CrowdSec Integration', () => {
 
     expect(res.bouncerYaml).toContain('api_url: http://127.0.0.1:8080/');
     expect(res.bouncerYaml).toContain('set: set_crowdsec_blacklists');
+    expect(res.bouncerYaml).toContain('set-only: true');
     expect(res.nftSetDefinition).toContain('set set_crowdsec_blacklists {');
-    expect(res.nftRule).toContain('ip saddr @set_crowdsec_blacklists log prefix');
+    expect(res.nftRule).toContain('ip saddr @set_crowdsec_blacklists log prefix "axonwall-crowdsec-drop: " drop');
+
+    const rejectRes = compileCrowdSec({
+      enabled: true,
+      lapiUrl: 'http://127.0.0.1:8080/',
+      remediationSetName: 'set_crowdsec_blacklists',
+      action: 'reject',
+      logBanned: false,
+    });
+    expect(rejectRes.nftRule).toBe('ip saddr @set_crowdsec_blacklists reject');
   });
 });

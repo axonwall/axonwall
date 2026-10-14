@@ -38,16 +38,28 @@ export function isValidCIDR(cidr: string): boolean {
 }
 
 export function isValidPort(port: number | string): boolean {
-  const p = typeof port === 'string' ? Number.parseInt(port, 10) : port;
+  if (typeof port === 'string' && !/^\d+$/.test(port.trim())) return false;
+  const p = typeof port === 'string' ? Number.parseInt(port.trim(), 10) : port;
   return !Number.isNaN(p) && p >= 1 && p <= 65535;
 }
 
 export function isValidPortRange(range: string): boolean {
-  if (range.includes('-')) {
-    const [start, end] = range.split('-').map((s) => Number.parseInt(s.trim(), 10));
-    return isValidPort(start) && isValidPort(end) && start <= end;
+  const items = range.split(',').map((s) => s.trim());
+  if (items.length === 0 || items.some((item) => item === '')) return false;
+  for (const item of items) {
+    if (item.includes('-')) {
+      const parts = item.split('-');
+      if (parts.length !== 2) return false;
+      const [startStr, endStr] = parts.map((s) => s.trim());
+      if (!isValidPort(startStr) || !isValidPort(endStr)) return false;
+      const start = Number.parseInt(startStr, 10);
+      const end = Number.parseInt(endStr, 10);
+      if (start > end) return false;
+    } else {
+      if (!isValidPort(item)) return false;
+    }
   }
-  return isValidPort(range);
+  return true;
 }
 
 export function isValidMAC(mac: string): boolean {

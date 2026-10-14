@@ -10,12 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/axonwall/axonwall_monorepo/apps/axonwall-satellite/engine"
+	"github.com/gorilla/websocket"
 )
 
 var (
@@ -42,7 +43,6 @@ type HeadscaleSyncPayload struct {
 type SyncWiFiPayload struct {
 	Configs []engine.WiFiConfig `json:"configs"`
 }
-
 
 type BlockTargetPayload struct {
 	Target string `json:"target"`
@@ -80,19 +80,18 @@ func main() {
 			slog.Error("Failed to load mTLS certificates", "error", err)
 			os.Exit(1)
 		}
-		
-		// Note: Requires "crypto/x509" import
-		// We will rely on system pool or manual verification if preferred, but let's assume we skip verify
-		// if CA is not cleanly set up, or better, we set ServerName
-		caCertPool := x509.NewCertPool()
-		caCert, err := os.ReadFile("/etc/axonwall/certs/ca.crt")
-		if err == nil {
-			caCertPool.AppendCertsFromPEM(caCert)
+
+		var caCertPool *x509.CertPool
+		if caCert, err := os.ReadFile("/etc/axonwall/certs/ca.crt"); err == nil && len(caCert) > 0 {
+			pool := x509.NewCertPool()
+			if pool.AppendCertsFromPEM(caCert) {
+				caCertPool = pool
+			}
 		}
-		
+
 		tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			RootCAs:      caCertPool,
+			Certificates:       []tls.Certificate{cert},
+			RootCAs:            caCertPool,
 			InsecureSkipVerify: false,
 		}
 		slog.Info("Running in secure mTLS mode")
@@ -136,6 +135,18 @@ func main() {
 	done := make(chan struct{})
 	var lastHeardUnix atomic.Int64
 	lastHeardUnix.Store(time.Now().Unix())
+
+	var writeMu sync.Mutex
+	writeWS := func(messageType int, data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return c.WriteMessage(messageType, data)
+	}
+
+	c.SetPongHandler(func(appData string) error {
+		lastHeardUnix.Store(time.Now().Unix())
+		return nil
+	})
 
 	// Watchdog routine: triggers rollback if connectivity to Core is lost
 	go func() {
@@ -225,7 +236,6 @@ func main() {
 					}
 				}
 
-
 			case "BLOCK_TARGET":
 				var bp BlockTargetPayload
 				if err := json.Unmarshal(env.Payload, &bp); err == nil && bp.Target != "" {
@@ -257,7 +267,7 @@ func main() {
 
 		case <-telemetryTicker.C:
 			// 1. Send Ping
-			_ = c.WriteMessage(websocket.PingMessage, []byte{})
+			_ = writeWS(websocket.PingMessage, []byte{})
 
 			// 2. Gather kernel telemetry and push to Core
 			metrics := engine.CollectMetrics()
@@ -273,13 +283,13 @@ func main() {
 					Payload: payloadBytes,
 				}
 				if msgBytes, err := json.Marshal(msg); err == nil {
-					_ = c.WriteMessage(websocket.TextMessage, msgBytes)
+					_ = writeWS(websocket.TextMessage, msgBytes)
 				}
 			}
 
 		case <-interrupt:
 			slog.Info("Interrupt received, cleanly disconnecting satellite...")
-			_ = c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"))
+			_ = writeWS(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent stopping"))
 			select {
 			case <-done:
 			case <-time.After(time.Second):

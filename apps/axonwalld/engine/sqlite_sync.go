@@ -2,12 +2,14 @@ package engine
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,7 +81,10 @@ func (m *SqliteSyncManager) ApplyConfig(cfg SqliteSyncConfig) error {
 	}
 
 	if cfg.Mode == "litestream" {
-		return m.startLitestream()
+		if cfg.NodeRole == "master" {
+			return m.startLitestream()
+		}
+		return nil
 	}
 
 	if cfg.NodeRole == "master" {
@@ -115,8 +120,14 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 			_ = exec.Command("systemctl", "try-reload-or-restart", "headscale").Run()
 		}
 
-		if err := m.startMasterServer(); err != nil {
-			slog.Error("Failed to start master sync server on transition to MASTER", "error", err)
+		if m.cfg.Mode == "litestream" {
+			if err := m.startLitestream(); err != nil {
+				slog.Error("Failed to start litestream on transition to MASTER", "error", err)
+			}
+		} else {
+			if err := m.startMasterServer(); err != nil {
+				slog.Error("Failed to start master sync server on transition to MASTER", "error", err)
+			}
 		}
 	} else if state == "BACKUP" || state == "FAULT" {
 		m.cfg.NodeRole = "backup"
@@ -127,8 +138,10 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 			_ = exec.Command("systemctl", "stop", "headscale").Run()
 		}
 
-		if err := m.startBackupPoller(); err != nil {
-			slog.Error("Failed to start backup poller on transition to BACKUP", "error", err)
+		if m.cfg.Mode != "litestream" {
+			if err := m.startBackupPoller(); err != nil {
+				slog.Error("Failed to start backup poller on transition to BACKUP", "error", err)
+			}
 		}
 	}
 }
@@ -158,13 +171,19 @@ func (m *SqliteSyncManager) startMasterServer() error {
 }
 
 func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if m.cfg.AuthToken != "" && r.Header.Get("X-Axonwall-Sync-Token") != m.cfg.AuthToken {
+	m.mu.Lock()
+	authToken := m.cfg.AuthToken
+	nodeRole := m.cfg.NodeRole
+	databases := append([]string(nil), m.cfg.Databases...)
+	m.mu.Unlock()
+
+	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var dbStatuses []DatabaseStatus
-	for _, dbPath := range m.cfg.Databases {
+	for _, dbPath := range databases {
 		info, err := os.Stat(dbPath)
 		if err != nil {
 			continue
@@ -180,7 +199,7 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := SyncStatusResponse{
-		NodeRole:  m.cfg.NodeRole,
+		NodeRole:  nodeRole,
 		Timestamp: time.Now().Unix(),
 		Databases: dbStatuses,
 	}
@@ -190,7 +209,12 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 }
 
 func (m *SqliteSyncManager) handleDownloadDb(w http.ResponseWriter, r *http.Request) {
-	if m.cfg.AuthToken != "" && r.Header.Get("X-Axonwall-Sync-Token") != m.cfg.AuthToken {
+	m.mu.Lock()
+	authToken := m.cfg.AuthToken
+	databases := append([]string(nil), m.cfg.Databases...)
+	m.mu.Unlock()
+
+	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -203,7 +227,7 @@ func (m *SqliteSyncManager) handleDownloadDb(w http.ResponseWriter, r *http.Requ
 
 	// Verify requested path is in configured allowed databases
 	allowed := false
-	for _, p := range m.cfg.Databases {
+	for _, p := range databases {
 		if p == targetPath {
 			allowed = true
 			break
@@ -259,6 +283,7 @@ func (m *SqliteSyncManager) startBackupPoller() error {
 
 	slog.Info("Starting SQLite Sync Backup Poller", "intervalSeconds", interval, "peer", m.cfg.PeerAddress)
 
+	stopCh := m.stopPoller
 	go func() {
 		ticker := time.NewTicker(time.Duration(interval) * time.Second)
 		defer ticker.Stop()
@@ -268,7 +293,7 @@ func (m *SqliteSyncManager) startBackupPoller() error {
 
 		for {
 			select {
-			case <-m.stopPoller:
+			case <-stopCh:
 				return
 			case <-ticker.C:
 				m.pollAndSync()
@@ -280,22 +305,26 @@ func (m *SqliteSyncManager) startBackupPoller() error {
 }
 
 func (m *SqliteSyncManager) pollAndSync() {
-	if m.cfg.PeerAddress == "" {
+	m.mu.Lock()
+	cfg := m.cfg
+	m.mu.Unlock()
+
+	if cfg.PeerAddress == "" {
 		return
 	}
 
-	peerPort := m.cfg.PeerPort
+	peerPort := cfg.PeerPort
 	if peerPort == 0 {
-		peerPort = m.cfg.ListenPort
+		peerPort = cfg.ListenPort
 	}
 
-	statusUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/status", m.cfg.PeerAddress, peerPort)
+	statusUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/status", cfg.PeerAddress, peerPort)
 	req, err := http.NewRequest("GET", statusUrl, nil)
 	if err != nil {
 		return
 	}
-	if m.cfg.AuthToken != "" {
-		req.Header.Set("X-Axonwall-Sync-Token", m.cfg.AuthToken)
+	if cfg.AuthToken != "" {
+		req.Header.Set("X-Axonwall-Sync-Token", cfg.AuthToken)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -337,13 +366,18 @@ func (m *SqliteSyncManager) pollAndSync() {
 }
 
 func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int) error {
-	downloadUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/db?path=%s", m.cfg.PeerAddress, peerPort, dbPath)
+	m.mu.Lock()
+	peerAddr := m.cfg.PeerAddress
+	authToken := m.cfg.AuthToken
+	m.mu.Unlock()
+
+	downloadUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/db?path=%s", peerAddr, peerPort, url.QueryEscape(dbPath))
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
 		return err
 	}
-	if m.cfg.AuthToken != "" {
-		req.Header.Set("X-Axonwall-Sync-Token", m.cfg.AuthToken)
+	if authToken != "" {
+		req.Header.Set("X-Axonwall-Sync-Token", authToken)
 	}
 
 	client := &http.Client{Timeout: 60 * time.Second}

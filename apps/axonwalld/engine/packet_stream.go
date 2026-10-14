@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os/exec"
 	"regexp"
@@ -38,23 +39,52 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	filter := PacketStreamFilter{
+		Interface: strings.TrimSpace(r.URL.Query().Get("interface")),
+		SrcIP:     strings.TrimSpace(r.URL.Query().Get("srcIp")),
+		DstIP:     strings.TrimSpace(r.URL.Query().Get("dstIp")),
+		Protocol:  strings.TrimSpace(r.URL.Query().Get("protocol")),
+		Port:      strings.TrimSpace(r.URL.Query().Get("port")),
+	}
+	if filter.Interface == "" {
+		filter.Interface = "any"
+	}
+	if !validIfaceRegex.MatchString(filter.Interface) || strings.Contains(filter.Interface, "..") || strings.HasPrefix(filter.Interface, "-") {
+		http.Error(w, "Invalid interface parameter", http.StatusBadRequest)
+		return
+	}
+	if filter.SrcIP != "" && net.ParseIP(filter.SrcIP) == nil {
+		http.Error(w, "Invalid srcIp parameter", http.StatusBadRequest)
+		return
+	}
+	if filter.DstIP != "" && net.ParseIP(filter.DstIP) == nil {
+		http.Error(w, "Invalid dstIp parameter", http.StatusBadRequest)
+		return
+	}
+	if filter.Port != "" {
+		p, err := strconv.Atoi(filter.Port)
+		if err != nil || p < 1 || p > 65535 {
+			http.Error(w, "Invalid port parameter", http.StatusBadRequest)
+			return
+		}
+	}
+	if filter.Protocol != "" && strings.ToLower(filter.Protocol) != "any" {
+		proto := strings.ToLower(filter.Protocol)
+		switch proto {
+		case "tcp", "udp", "icmp", "icmp6", "arp":
+			filter.Protocol = proto
+		default:
+			http.Error(w, "Invalid protocol parameter", http.StatusBadRequest)
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
-
-	filter := PacketStreamFilter{
-		Interface: r.URL.Query().Get("interface"),
-		SrcIP:     r.URL.Query().Get("srcIp"),
-		DstIP:     r.URL.Query().Get("dstIp"),
-		Protocol:  r.URL.Query().Get("protocol"),
-		Port:      r.URL.Query().Get("port"),
-	}
-	if filter.Interface == "" {
-		filter.Interface = "any"
-	}
 
 	ctx := r.Context()
 
@@ -71,7 +101,7 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 		if filter.Port != "" {
 			bpfArgs = append(bpfArgs, "port", filter.Port)
 		}
-		if filter.Protocol != "" && filter.Protocol != "any" {
+		if filter.Protocol != "" && strings.ToLower(filter.Protocol) != "any" {
 			bpfArgs = append(bpfArgs, strings.ToLower(filter.Protocol))
 		}
 

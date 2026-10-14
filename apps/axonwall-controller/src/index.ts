@@ -57,6 +57,7 @@ async function main() {
     wgPrivateKey?: string;
     wgPublicKey?: string;
     tunnelIp?: string;
+    wireguard?: { tunnelIp: string };
     ws?: WebSocket;
     metrics?: {
       uptimeSeconds: number;
@@ -130,13 +131,25 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
   const uiPort = parseInt(process.env.UI_PORT || '3000', 10);
   let server;
   const requestHandler = (req: any, res: any) => {
-    const { pathname } = new URL(req.url || '', `http://${req.headers.host}`);
+    let pathname: string;
+    try {
+      pathname = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`).pathname;
+    } catch {
+      res.writeHead(400);
+      res.end('Bad Request');
+      return;
+    }
 
     
     if (pathname === '/metrics' && req.method === 'GET') {
       prometheusRegistry.metrics().then((metricsStr) => {
         res.writeHead(200, { 'Content-Type': prometheusRegistry.contentType });
         res.end(metricsStr);
+      }).catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(500);
+          res.end('Internal Server Error');
+        }
       });
       return;
     }
@@ -144,7 +157,13 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     
     if (pathname === '/api/v1/fleet/block' && req.method === 'POST') {
       let body = '';
-      req.on('data', (chunk: any) => body += chunk.toString());
+      req.on('data', (chunk: any) => {
+        body += chunk.toString();
+        if (body.length > 65536) {
+          req.destroy();
+          return;
+        }
+      });
       req.on('end', () => {
         try {
           const payload = JSON.parse(body);
@@ -181,9 +200,9 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
 
     if (pathname === '/api/v1/fleet/satellites' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      // Exclude ws from JSON
+      // Exclude ws and wgPrivateKey from JSON
       const satellitesData = Array.from(activeSatellites.values()).map(s => {
-        const { ws, ...rest } = s;
+        const { ws, wgPrivateKey, ...rest } = s;
         return rest;
       });
       res.end(JSON.stringify({
@@ -263,7 +282,14 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1048576 });
 
   server.on('upgrade', (request, socket, head) => {
-    const { pathname } = new URL(request.url || '', `http://${request.headers.host}`);
+    let pathname: string;
+    try {
+      pathname = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`).pathname;
+    } catch {
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     
     if (pathname === '/ws/satellite') {
       // Basic ZTP token validation
@@ -384,9 +410,32 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     const remoteIp = request.socket.remoteAddress || '127.0.0.1';
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
 
-    // In a real app we'd use libsodium, here we mock standard length base64 keys
-    const mockPrivKey = crypto.randomBytes(32).toString('base64');
-    const mockPubKey = crypto.randomBytes(32).toString('base64');
+    const existing = activeSatellites.get(satId);
+    if (existing?.ws && existing.ws !== ws) {
+      try {
+        existing.ws.terminate();
+      } catch {
+        // Ignore termination errors
+      }
+    }
+
+    let wgPrivateKey = existing?.wgPrivateKey;
+    let wgPublicKey = existing?.wgPublicKey;
+    if (!wgPrivateKey || !wgPublicKey) {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync('x25519');
+      const rawPriv = privateKey.export({ type: 'pkcs8', format: 'der' }).subarray(-32);
+      const rawPub = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
+      wgPrivateKey = rawPriv.toString('base64');
+      wgPublicKey = rawPub.toString('base64');
+    }
+
+    let tunnelIp = existing?.tunnelIp;
+    if (!tunnelIp) {
+      if (ipCounter > 254) {
+        ipCounter = 2;
+      }
+      tunnelIp = `10.99.0.${ipCounter++}/24`;
+    }
 
     const state: SatelliteState = {
       id: satId,
@@ -394,9 +443,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       lastSeen: new Date().toISOString(),
       ip: remoteIp.replace(/^::ffff:/, ''),
       arch: (request.headers['user-agent']?.includes('arm') ? 'arm64' : 'amd64'),
-      wgPrivateKey: mockPrivKey,
-      wgPublicKey: mockPubKey,
-      tunnelIp: `10.99.0.${ipCounter++}/24`,
+      wgPrivateKey,
+      wgPublicKey,
+      tunnelIp,
+      wireguard: { tunnelIp },
       ws: ws,
     };
     activeSatellites.set(satId, state);
@@ -444,12 +494,6 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         const text = message.toString();
         const parsed = JSON.parse(text);
         if (parsed.type === 'TELEMETRY_REPORT') {
-          // payload was marshaled by Go, so parsed.payload is an array of bytes or object? Wait.
-          // Wait, if Go does payloadBytes, err := json.Marshal(report)
-          // and then msg := EnvelopeMessage { ... Payload: payloadBytes }
-          // then env.Payload is actually a raw JSON object string or embedded object?
-          // Since EnvelopeMessage.Payload is json.RawMessage, it writes literally as JSON object!
-          // So parsed.payload is NOT a string. It's the parsed object itself.
           let report: any;
           if (typeof parsed.payload === 'string') {
               report = JSON.parse(parsed.payload);
@@ -474,6 +518,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
           
           lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'PING', payload: {} }));
+          }
         }
       } catch {
         // Ping or non-JSON message
@@ -482,13 +530,15 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
     ws.on('close', () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
-      satUptimeGauge.remove({ satellite_id: satId });
-      satCpuGauge.remove({ satellite_id: satId });
-      satMemGauge.remove({ satellite_id: satId });
-      satConnsGauge.remove({ satellite_id: satId });
-      lastRxTxBytes.delete(satId);
-      activeSatellites.delete(satId);
-      broadcastMeshTopology();
+      if (activeSatellites.get(satId)?.ws === ws) {
+        satUptimeGauge.remove({ satellite_id: satId });
+        satCpuGauge.remove({ satellite_id: satId });
+        satMemGauge.remove({ satellite_id: satId });
+        satConnsGauge.remove({ satellite_id: satId });
+        lastRxTxBytes.delete(satId);
+        activeSatellites.delete(satId);
+        broadcastMeshTopology();
+      }
     });
   });
 

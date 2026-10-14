@@ -168,4 +168,64 @@ describe('Axonwall WAN Isolation & Web Management Security', () => {
     const issues = lintRuleset(safeRemoteState);
     expect(issues.some((i) => i.type === 'wan_management_exposed')).toBe(false);
   });
+
+  it('detects management exposure for port ranges and any port on WAN, but ignores UDP-only or floating rules', () => {
+    const rangeState: DesiredState = {
+      ...baseState,
+      rules: [
+        {
+          id: 'rule-wan-range',
+          action: 'pass',
+          direction: 'in',
+          interface: 'wan',
+          protocol: 'tcp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'any',
+          destinationPort: '20-25',
+          log: false,
+          enabled: true,
+          quick: true,
+          sortOrder: 10,
+          description: 'Expose port range covering SSH',
+        },
+        {
+          id: 'rule-wan-anyport',
+          action: 'pass',
+          direction: 'in',
+          interface: 'wan',
+          protocol: 'tcp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'any',
+          destinationPort: 'any',
+          log: false,
+          enabled: true,
+          quick: true,
+          sortOrder: 20,
+          description: 'Expose any TCP port on WAN',
+        },
+        {
+          id: 'rule-wan-udp',
+          action: 'pass',
+          direction: 'in',
+          interface: 'wan',
+          protocol: 'udp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'any',
+          destinationPort: '443',
+          log: false,
+          enabled: true,
+          quick: true,
+          sortOrder: 30,
+          description: 'UDP 443 is not TCP management',
+        },
+      ],
+    };
+    const issues = lintRuleset(rangeState);
+    const wanIssues = issues.filter((i) => i.type === 'wan_management_exposed');
+    expect(wanIssues).toHaveLength(2);
+    expect(wanIssues.map((i) => i.ruleId)).toEqual(['rule-wan-range', 'rule-wan-anyport']);
+  });
 });

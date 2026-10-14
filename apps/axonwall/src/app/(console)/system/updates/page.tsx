@@ -49,7 +49,7 @@ export default function SystemUpdatesPage() {
       name: 'Slot B (Alternate Standby)',
       isActive: false,
       isHealthy: true,
-      version: '0.1.8 (Standby)',
+      version: '0.2.0 (Standby)',
       kernel: 'Linux 6.12.111+deb13-amd64',
       device: '/dev/sda3',
       label: 'axon_root_b',

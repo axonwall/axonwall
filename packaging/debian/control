@@ -14,7 +14,9 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
  wireguard-tools,
  keepalived,
  conntrackd,
- nodejs (>= 22.0.0)
+ nodejs (>= 22.0.0),
+ rsync,
+ python3
 Recommends:
  unbound,
  kea-dhcp4-server,

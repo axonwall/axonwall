@@ -378,7 +378,8 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
-	fmt.Println("--------------------------------------------------------------------------------\n")
+	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Println()
 
 	fmt.Print(" Username: ")
 	username, err := reader.ReadString('\n')
@@ -491,8 +492,9 @@ func printHeader() {
 			role = " (OPT2)"
 		}
 
-		fmt.Printf(" %-14s %-19s %-12s %-19s %s\n",
-			colorBold+iface.Name+role+colorReset,
+		ifaceLabel := fmt.Sprintf("%-14s", iface.Name+role)
+		fmt.Printf(" %s %-19s %-12s %-19s %s\n",
+			colorBold+ifaceLabel+colorReset,
 			carrierTag,
 			iface.Speed,
 			iface.MAC,
@@ -542,7 +544,8 @@ func actionInterfacesOverview(reader *bufio.Reader) {
 func actionAssignInterfaces(reader *bufio.Reader) {
 	clearScreen()
 	fmt.Println("=== Assign Network Interfaces (WAN, LAN, OPT1, OPT2) ===")
-	fmt.Println("Detecting physical network devices...\n")
+	fmt.Println("Detecting physical network devices...")
+	fmt.Println()
 
 	ifaces := getInterfaces()
 	for i, iface := range ifaces {
@@ -637,6 +640,37 @@ func valueOrNone(s string) string {
 	return s
 }
 
+func parseAndValidateIPv4AndCIDR(rawIP, defaultCIDR string, reader *bufio.Reader) (string, string, bool) {
+	extractedCIDR := ""
+	if strings.Contains(rawIP, "/") {
+		parts := strings.SplitN(rawIP, "/", 2)
+		rawIP = strings.TrimSpace(parts[0])
+		extractedCIDR = strings.TrimSpace(parts[1])
+	}
+	parsedIP := net.ParseIP(rawIP)
+	if parsedIP == nil || parsedIP.To4() == nil {
+		fmt.Printf("%s[!] Invalid IPv4 address: %s%s\n", colorRed, rawIP, colorReset)
+		return "", "", false
+	}
+
+	promptDefault := defaultCIDR
+	if extractedCIDR != "" {
+		promptDefault = extractedCIDR
+	}
+	fmt.Printf("Enter Subnet Mask in CIDR notation [%s]: ", promptDefault)
+	cidr, _ := reader.ReadString('\n')
+	cidr = strings.TrimSpace(cidr)
+	if cidr == "" {
+		cidr = promptDefault
+	}
+	cidrNum, err := strconv.Atoi(cidr)
+	if err != nil || cidrNum < 1 || cidrNum > 32 {
+		fmt.Printf("%s[!] Invalid CIDR prefix length (must be 1..32): %s%s\n", colorRed, cidr, colorReset)
+		return "", "", false
+	}
+	return parsedIP.To4().String(), strconv.Itoa(cidrNum), true
+}
+
 func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	clearScreen()
 	fmt.Println("=== Configure Interface IP Address & DHCP ===")
@@ -721,7 +755,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 			// DHCP Client
 			fmt.Printf("\nConfiguring WAN (%s) as DHCP client...\n", iface)
 			_ = exec.Command("ip", "link", "set", iface, "up").Run()
-			_ = exec.Command("dhclient", "-v", iface).Start()
+			_ = exec.Command("dhclient", "-1", "-v", iface).Run()
 			fmt.Printf("%s[✓] WAN interface %s set to UP in DHCP client mode.%s\n", colorGreen, iface, colorReset)
 			pause(reader)
 			return
@@ -729,24 +763,30 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 
 		// Static IPv4 for WAN
 		fmt.Print("\nEnter Static WAN IPv4 Address (e.g. 203.0.113.10): ")
-		wanIP, _ := reader.ReadString('\n')
-		wanIP = strings.TrimSpace(wanIP)
-		if wanIP == "" {
+		wanIPInput, _ := reader.ReadString('\n')
+		wanIPInput = strings.TrimSpace(wanIPInput)
+		if wanIPInput == "" {
 			fmt.Println("IP address cannot be empty.")
 			pause(reader)
 			return
 		}
 
-		fmt.Print("Enter Subnet Mask in CIDR notation [24]: ")
-		cidr, _ := reader.ReadString('\n')
-		cidr = strings.TrimSpace(cidr)
-		if cidr == "" {
-			cidr = "24"
+		wanIP, cidr, ok := parseAndValidateIPv4AndCIDR(wanIPInput, "24", reader)
+		if !ok {
+			pause(reader)
+			return
 		}
 
 		fmt.Print("Enter Upstream Default Gateway IPv4 (e.g. 203.0.113.1): ")
 		gateway, _ := reader.ReadString('\n')
 		gateway = strings.TrimSpace(gateway)
+		if gateway != "" {
+			if gwIP := net.ParseIP(gateway); gwIP == nil || gwIP.To4() == nil {
+				fmt.Printf("%s[!] Invalid Gateway IPv4 address: %s%s\n", colorRed, gateway, colorReset)
+				pause(reader)
+				return
+			}
+		}
 
 		fmt.Print("Enter Primary DNS Server [1.1.1.1]: ")
 		dns1, _ := reader.ReadString('\n')
@@ -765,6 +805,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		cidrFull := fmt.Sprintf("%s/%s", wanIP, cidr)
 		fmt.Printf("\nApplying Static WAN %s with Gateway %s to %s...\n", cidrFull, gateway, iface)
 
+		_ = exec.Command("dhclient", "-r", iface).Run()
 		_ = exec.Command("ip", "link", "set", iface, "up").Run()
 		_ = exec.Command("ip", "addr", "flush", "dev", iface).Run()
 		cmd := exec.Command("ip", "addr", "add", cidrFull, "dev", iface)
@@ -809,7 +850,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 			// DHCP Client mode
 			fmt.Printf("\nConfiguring %s (%s) as DHCP client on attached network...\n", strings.ToUpper(ifName), iface)
 			_ = exec.Command("ip", "link", "set", iface, "up").Run()
-			_ = exec.Command("dhclient", "-v", iface).Start()
+			_ = exec.Command("dhclient", "-1", "-v", iface).Run()
 			fmt.Printf("%s[✓] Interface %s set to UP in DHCP client mode.%s\n", colorGreen, iface, colorReset)
 			fmt.Printf("%s[✓] Authoritative DHCP Server is DISABLED for %s.%s\n", colorGreen, strings.ToUpper(ifName), colorReset)
 			pause(reader)
@@ -823,17 +864,16 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	}
 
 	fmt.Printf("Enter new IPv4 Address [%s]: ", defaultIP)
-	newIP, _ := reader.ReadString('\n')
-	newIP = strings.TrimSpace(newIP)
-	if newIP == "" {
-		newIP = defaultIP
+	newIPInput, _ := reader.ReadString('\n')
+	newIPInput = strings.TrimSpace(newIPInput)
+	if newIPInput == "" {
+		newIPInput = defaultIP
 	}
 
-	fmt.Print("Enter Subnet Mask in CIDR notation [24]: ")
-	cidr, _ := reader.ReadString('\n')
-	cidr = strings.TrimSpace(cidr)
-	if cidr == "" {
-		cidr = "24"
+	newIP, cidr, ok := parseAndValidateIPv4AndCIDR(newIPInput, "24", reader)
+	if !ok {
+		pause(reader)
+		return
 	}
 
 	enableDHCP := false
@@ -852,7 +892,8 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	cidrFull := fmt.Sprintf("%s/%s", newIP, cidr)
 	fmt.Printf("\nApplying %s to interface %s...\n", cidrFull, iface)
 
-	// Flush old address and assign new address
+	// Release any DHCP lease, flush old address, and assign new address
+	_ = exec.Command("dhclient", "-r", iface).Run()
 	_ = exec.Command("ip", "link", "set", iface, "up").Run()
 	_ = exec.Command("ip", "addr", "flush", "dev", iface).Run()
 	cmd := exec.Command("ip", "addr", "add", cidrFull, "dev", iface)
@@ -874,9 +915,12 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 	clearScreen()
 	fmt.Println("=== Reset Web Admin Password ===")
 	fmt.Println("This resets the break-glass local administrator credentials.")
-	fmt.Print("\nEnter new password for admin: ")
-	newPass, _ := reader.ReadString('\n')
-	newPass = strings.TrimSpace(newPass)
+	newPass, err := readPassword(reader, "\nEnter new password for admin: ")
+	if err != nil {
+		fmt.Printf("%s[!] Error reading password: %v%s\n", colorRed, err, colorReset)
+		pause(reader)
+		return
+	}
 
 	if len(newPass) < 8 {
 		fmt.Printf("%s[!] Error: Password must be at least 8 characters long.%s\n", colorRed, colorReset)
@@ -895,7 +939,9 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 	_ = os.MkdirAll("/etc/axonwall", 0755)
 	_ = os.MkdirAll("/var/lib/axonwall", 0755)
 	envContent := fmt.Sprintf("LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n", hashed)
-	if err := os.WriteFile("/etc/axonwall/admin.env", []byte(envContent), 0600); err == nil {
+	if err := os.WriteFile("/etc/axonwall/admin.env", []byte(envContent), 0640); err == nil {
+		_ = os.Chmod("/etc/axonwall/admin.env", 0640)
+		_ = exec.Command("chown", "root:axonwall", "/etc/axonwall/admin.env").Run()
 		_ = os.Remove("/etc/axonwall/initial-admin-password")
 		timestamp := []byte(time.Now().UTC().Format(time.RFC3339))
 		_ = os.WriteFile("/etc/axonwall/.password_changed", timestamp, 0644)
@@ -934,7 +980,9 @@ func actionResetMFA(reader *bufio.Reader) {
 					lines = append(lines, l)
 				}
 			}
-			_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600)
+			_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0640)
+			_ = os.Chmod(path, 0640)
+			_ = exec.Command("chown", "root:axonwall", path).Run()
 		}
 		stripMfaFromEnv("/etc/axonwall/admin.env")
 		stripMfaFromEnv("/etc/axonwall/axonwall.env")
@@ -957,6 +1005,11 @@ func actionDiagnostics(reader *bufio.Reader) {
 	if target == "" {
 		target = "8.8.8.8"
 	}
+	if strings.HasPrefix(target, "-") || strings.ContainsAny(target, " \t;&|\\$*{}[]()<>\"'`\n\r") {
+		fmt.Printf("%s[!] Invalid target hostname or IP address.%s\n", colorRed, colorReset)
+		pause(reader)
+		return
+	}
 
 	fmt.Printf("\n--- ICMP Ping (%s) ---\n", target)
 	cmd := exec.Command("ping", "-c", "4", target)
@@ -964,8 +1017,8 @@ func actionDiagnostics(reader *bufio.Reader) {
 	cmd.Stderr = os.Stderr
 	_ = cmd.Run()
 
-	fmt.Printf("\n--- DNS Lookup (deb.debian.org) ---\n")
-	cmdDNS := exec.Command("host", "-W", "2", "deb.debian.org")
+	fmt.Printf("\n--- DNS Lookup (%s) ---\n", target)
+	cmdDNS := exec.Command("host", "-W", "2", target)
 	cmdDNS.Stdout = os.Stdout
 	cmdDNS.Stderr = os.Stderr
 	_ = cmdDNS.Run()

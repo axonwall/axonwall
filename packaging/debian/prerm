@@ -2,13 +2,13 @@
 set -e
 
 case "$1" in
-    remove|upgrade|deconfigure)
+    remove|deconfigure)
         if [ -d /run/systemd/system ]; then
-            systemctl stop axonwall-ui.service axonwall-controller.service axonwalld.service || true
-            systemctl disable axonwall-ui.service axonwall-controller.service axonwalld.service || true
+            systemctl stop axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service || true
+            systemctl disable axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service || true
         fi
         ;;
-    failed-upgrade)
+    upgrade|failed-upgrade)
         ;;
     *)
         ;;

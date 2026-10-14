@@ -26,7 +26,9 @@ export function compileUnbound(dns: DnsConfig, headscale?: HeadscaleConfig): Unb
   lines.push('  hide-version: yes');
   lines.push('  harden-glue: yes');
   lines.push('  harden-dnssec-stripped: yes');
-  lines.push(`  auto-trust-anchor-file: "${dns.dnssec ? '/var/lib/unbound/root.key' : ''}"`);
+  if (dns.dnssec) {
+    lines.push('  auto-trust-anchor-file: "/var/lib/unbound/root.key"');
+  }
   lines.push('');
 
   // Host Overrides
@@ -34,7 +36,8 @@ export function compileUnbound(dns: DnsConfig, headscale?: HeadscaleConfig): Unb
     lines.push('  # Local Host Overrides');
     for (const override of dns.hostOverrides) {
       const fqdn = `${override.hostname}.${override.domain}.`;
-      lines.push(`  local-data: "${fqdn} IN A ${override.ip}"`);
+      const recordType = override.ip.includes(':') ? 'IN AAAA' : 'IN A';
+      lines.push(`  local-data: "${fqdn} ${recordType} ${override.ip}"`);
       // Also generate PTR reverse record if needed
       lines.push(`  local-data-ptr: "${override.ip} ${fqdn}"`);
     }

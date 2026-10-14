@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
 CERTS_DIR="certs"
 mkdir -p "$CERTS_DIR"
 cd "$CERTS_DIR"
@@ -26,6 +29,7 @@ cat > hub_ext.cnf << EOF
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
 keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth, clientAuth
 subjectAltName = @alt_names
 
 [alt_names]
@@ -51,6 +55,7 @@ authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
 keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
 extendedKeyUsage = clientAuth
+subjectAltName = DNS:satellite.axonwall.local
 EOF
 
 openssl x509 -req -in satellite.csr -CA ca.crt -CAkey ca.key -CAcreateserial \

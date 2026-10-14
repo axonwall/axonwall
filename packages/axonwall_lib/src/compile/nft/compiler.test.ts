@@ -1,19 +1,30 @@
 import { describe, it, expect } from 'vitest';
-import { compileNftables } from './index.js';
+import { compileNftables, compileSatelliteNftables } from './index.js';
 import { lintRuleset } from '../../lint/index.js';
 import { isValidIPv4, isValidCIDR, isValidPortRange } from '../../util/index.js';
 import { mintSupabaseToken, verifyToken } from '../../ldap/index.js';
-import type { DesiredState } from '../../schemas/index.js';
+import { InterfaceSchema, type DesiredState } from '../../schemas/index.js';
 
-describe('Axonwall Network Utils', () => {
-  it('validates IPv4 and CIDR correctly', () => {
+describe('Axonwall Network Utils & Schemas', () => {
+  it('validates IPv4, CIDR, comma-separated ports, and port ranges correctly', () => {
     expect(isValidIPv4('192.168.1.1')).toBe(true);
     expect(isValidIPv4('999.1.1.1')).toBe(false);
     expect(isValidCIDR('192.168.1.0/24')).toBe(true);
     expect(isValidCIDR('10.0.0.1/33')).toBe(false);
     expect(isValidPortRange('80')).toBe(true);
     expect(isValidPortRange('1000-2000')).toBe(true);
+    expect(isValidPortRange('80, 443')).toBe(true);
+    expect(isValidPortRange('22, 80, 443, 2966, 3000')).toBe(true);
+    expect(isValidPortRange('8000-8080, 9000')).toBe(true);
     expect(isValidPortRange('70000')).toBe(false);
+    expect(isValidPortRange('80, 70000')).toBe(false);
+    expect(isValidPortRange('2000-1000')).toBe(false);
+  });
+
+  it('validates InterfaceSchema device identifier against command injection characters', () => {
+    expect(() => InterfaceSchema.parse({ name: 'wan', device: 'eth0' })).not.toThrow();
+    expect(() => InterfaceSchema.parse({ name: 'vlan10', device: 'enp1s0.10' })).not.toThrow();
+    expect(() => InterfaceSchema.parse({ name: 'bad', device: 'eth0; rm -rf /' })).toThrow('Invalid device identifier');
   });
 });
 
@@ -144,15 +155,128 @@ describe('Axonwall nftables Compiler', () => {
     routes: [],
   };
 
-  it('compiles valid nftables ruleset with anti-lockout, aliases, flowtable, and chains', () => {
+  it('compiles valid nftables ruleset with atomic table flush, anti-lockout, aliases, flowtable, and chains', () => {
     const res = compileNftables(sampleState);
-    expect(res.nftScript).toContain('table inet axonwall {');
+    expect(res.nftScript).toContain('table inet axonwall {}\nflush table inet axonwall\ntable inet axonwall {');
     expect(res.nftScript).toContain('set set_web_servers {');
     expect(res.nftScript).toContain('192.168.100.10, 192.168.100.11');
     expect(res.nftScript).toContain('flowtable ft_fastpath {');
     expect(res.nftScript).toContain('iifname "eth1" tcp dport { 22, 80, 443, 3000 } accept comment "anti-lockout"');
     expect(res.nftScript).toContain('ip daddr @set_web_servers tcp dport 80');
     expect(res.nftScript).toContain('oifname "eth0" masquerade');
+  });
+
+  it('supports IPv6 aliases/rules, ipv6-icmp, comma-separated ports, DNAT edge cases, floating rules, and Suricata physical device mapping', () => {
+    const advState: DesiredState = {
+      ...sampleState,
+      suricata: {
+        enabled: true,
+        mode: 'ips',
+        interfaces: ['wan'],
+        nfqueueFailOpen: true,
+        nfqueueBypass: true,
+        ruleSources: [],
+        homeNet: ['192.168.100.0/24'],
+      },
+      aliases: [
+        { name: 'v6_hosts', type: 'host', entries: ['2001:db8::10'], description: 'v6 host', enabled: true },
+        { name: 'app_ports', type: 'port', entries: ['8000-8080', '8443'], description: 'ports', enabled: true },
+      ],
+      rules: [
+        {
+          action: 'pass',
+          direction: 'in',
+          interface: 'floating',
+          quick: true,
+          protocol: 'tcp',
+          source: '2001:db8::1/128',
+          sourcePort: '',
+          destination: '$v6_hosts',
+          destinationPort: '80, 443',
+          log: false,
+          enabled: true,
+          description: 'IPv6 multi-port rule',
+          sortOrder: 10,
+        },
+        {
+          action: 'pass',
+          direction: 'in',
+          interface: 'lan',
+          quick: true,
+          protocol: 'ipv6-icmp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'any',
+          destinationPort: '',
+          log: false,
+          enabled: true,
+          description: 'Allow ICMPv6',
+          sortOrder: 20,
+        },
+      ],
+      nat: [
+        {
+          type: 'dnat',
+          interface: 'wan',
+          protocol: 'any',
+          source: 'any',
+          sourcePort: '',
+          destination: 'wan_ip',
+          destinationPort: '8080',
+          targetIp: '192.168.100.50',
+          targetPort: '80',
+          enabled: true,
+          description: 'DNAT any proto with port',
+          sortOrder: 10,
+          log: false,
+        },
+        {
+          type: 'dnat',
+          interface: 'wan',
+          protocol: 'tcp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'wan_ip',
+          destinationPort: '',
+          targetIp: '192.168.100.51',
+          enabled: true,
+          description: 'DNAT tcp without port',
+          sortOrder: 20,
+          log: false,
+        },
+        {
+          type: 'dnat',
+          interface: 'wan',
+          protocol: 'tcp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'wan_ip',
+          destinationPort: '9000',
+          targetIp: '',
+          enabled: true,
+          description: 'Skipped DNAT without targetIp',
+          sortOrder: 30,
+          log: false,
+        },
+      ],
+    };
+
+    const res = compileNftables(advState);
+    expect(res.nftScript).toContain('set set_v6_hosts {\n    type ipv6_addr;\n    flags interval;');
+    expect(res.nftScript).toContain('set set_app_ports {\n    type inet_service;\n    flags interval;');
+    expect(res.nftScript).toContain('iifname "eth0" queue num 0-3 bypass comment "suricata-ips-inbound"');
+    expect(res.nftScript).toContain('ip6 saddr 2001:db8::1/128 ip6 daddr @set_v6_hosts tcp dport { 80, 443 } accept');
+    expect(res.nftScript).toContain('meta l4proto ipv6-icmp accept');
+    expect(res.nftScript).toContain('iifname "eth0" meta l4proto { tcp, udp } th dport 8080 dnat to 192.168.100.50:80');
+    expect(res.nftScript).toContain('iifname "eth0" meta l4proto tcp dnat to 192.168.100.51');
+    expect(res.nftScript).not.toContain('dport 9000');
+  });
+
+  it('compiles satellite nftables for both nested and top-level tunnelIp', () => {
+    const sat1 = compileSatelliteNftables({ id: 'sat-1', tunnelIp: '10.99.0.5/24' });
+    expect(sat1.nftScript).toContain('udp dport 51820 accept comment "allow-wireguard"');
+    const sat2 = compileSatelliteNftables({ id: 'sat-2', wireguard: { tunnelIp: '10.99.0.6/24' } });
+    expect(sat2.nftScript).toContain('udp dport 51820 accept comment "allow-wireguard"');
   });
 
   it('detects shadowed rules and unused aliases via linter', () => {
@@ -164,6 +288,65 @@ describe('Axonwall nftables Compiler', () => {
     expect(shadowed?.message).toContain('Shadowed Block Telnet Rule');
     expect(unused).toBeDefined();
     expect(unused?.aliasName).toBe('unused_alias');
+  });
+
+  it('tracks shadowed catch-all per direction, respects quick=false, and normalizes port wildcards in duplicate detection', () => {
+    const state: DesiredState = {
+      ...sampleState,
+      rules: [
+        {
+          id: 'r1',
+          action: 'pass',
+          direction: 'in',
+          interface: 'lan',
+          quick: false,
+          protocol: 'any',
+          source: 'any',
+          sourcePort: '',
+          destination: 'any',
+          destinationPort: '',
+          log: false,
+          enabled: true,
+          description: 'Non-quick catch-all',
+          sortOrder: 10,
+        },
+        {
+          id: 'r2',
+          action: 'pass',
+          direction: 'in',
+          interface: 'lan',
+          quick: true,
+          protocol: 'any',
+          source: 'any',
+          sourcePort: 'any',
+          destination: 'any',
+          destinationPort: 'any',
+          log: false,
+          enabled: true,
+          description: 'Quick inbound catch-all',
+          sortOrder: 20,
+        },
+        {
+          id: 'r3',
+          action: 'block',
+          direction: 'out',
+          interface: 'lan',
+          quick: true,
+          protocol: 'tcp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'any',
+          destinationPort: '25',
+          log: false,
+          enabled: true,
+          description: 'Outbound rule not shadowed by inbound catch-all',
+          sortOrder: 30,
+        },
+      ],
+    };
+    const issues = lintRuleset(state);
+    expect(issues.some((i) => i.type === 'shadowed_rule')).toBe(false);
+    expect(issues.some((i) => i.type === 'duplicate_rule' && i.ruleId === 'r2')).toBe(true);
   });
 });
 

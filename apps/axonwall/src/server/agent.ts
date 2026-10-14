@@ -2,13 +2,13 @@
 
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
-import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, InterfaceSchema, type DesiredState } from '@axonwall/lib/schemas';
 import http from 'node:http';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { getSession } from './auth';
 import { headers } from 'next/headers';
 
@@ -93,10 +93,14 @@ async function enforceRateLimit(maxRequests = 20, windowMs = 60000) {
   const now = Date.now();
   const record = actionRateLimit.get(ip);
 
-  // Clean up old entries occasionally to prevent memory leaks
-  if (Math.random() < 0.05) {
+  // Clean up old entries occasionally or when size reaches 10,000 to prevent memory leaks
+  if (Math.random() < 0.05 || actionRateLimit.size >= 10000) {
     for (const [key, val] of actionRateLimit.entries()) {
       if (now > val.resetAt) actionRateLimit.delete(key);
+    }
+    if (actionRateLimit.size >= 10000) {
+      const oldestKey = actionRateLimit.keys().next().value;
+      if (oldestKey !== undefined) actionRateLimit.delete(oldestKey);
     }
   }
 
@@ -184,7 +188,7 @@ const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
   },
   interfaces: [
     { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Gateway' },
-    { name: 'lan', device: 'eth1', type: 'static', enabled: true, ipv4Address: '192.168.100.1/24', mtu: 1500, description: 'LAN Network' },
+    { name: 'lan', device: 'eth1', type: 'static', enabled: true, ipv4Address: '192.168.1.1/24', mtu: 1500, description: 'LAN Network' },
     { name: 'opt1', device: 'eth2', type: 'dhcp', enabled: false, mtu: 1500, description: 'OPT1 (Attached Network / Non-authoritative)' },
     { name: 'opt2', device: 'eth3', type: 'dhcp', enabled: false, mtu: 1500, description: 'OPT2 (Attached Network / Non-authoritative)' },
   ],
@@ -206,8 +210,11 @@ const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
 let cachedDesiredState: DesiredState | null = null;
 
 export async function getCurrentDesiredState(): Promise<DesiredState> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   if (cachedDesiredState) {
-    return cachedDesiredState;
+    return structuredClone(cachedDesiredState);
   }
 
   for (const path of ['/var/lib/axonwall/state.json', '/etc/axonwall/state.json', './state.json']) {
@@ -216,12 +223,12 @@ export async function getCurrentDesiredState(): Promise<DesiredState> {
         const raw = fs.readFileSync(path, 'utf8');
         const parsed = JSON.parse(raw);
         cachedDesiredState = DesiredStateSchema.parse(parsed);
-        return cachedDesiredState;
+        return structuredClone(cachedDesiredState);
       }
     } catch {}
   }
 
-  return BASELINE_STATE;
+  return structuredClone(BASELINE_STATE);
 }
 
 export async function applyDesiredState(
@@ -422,6 +429,9 @@ export interface SystemHealthMetrics {
 }
 
 export async function getSystemHealthTelemetry(): Promise<SystemHealthMetrics> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   const cpus = os.cpus();
   const arch = process.arch === 'x64' ? 'amd64' : process.arch;
   const loadAvg = os.loadavg();
@@ -454,6 +464,9 @@ export interface UpsStatus {
 }
 
 export async function getUpsStatus(): Promise<UpsStatus> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   let isVirtual = false;
   try {
     const virt = execSync('systemd-detect-virt 2>/dev/null', { encoding: 'utf8', timeout: 500 }).trim();
@@ -550,6 +563,9 @@ export interface SystemServiceInfo {
 export type LiveServiceInfo = SystemServiceInfo;
 
 export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   const units = [
     { name: 'Axonwall Privileged Daemon', unit: 'axonwalld.service', description: 'Go privileged nftables & netlink transaction supervisor' },
     { name: 'Axonwall Web Console', unit: 'axonwall-ui.service', description: 'Next.js web management application' },
@@ -617,6 +633,9 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
 }
 
 export async function getServiceJournalLogs(unit: string): Promise<string> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   const safeUnit = unit.replace(/[^a-zA-Z0-9.-]/g, '');
   try {
     const logs = execSync(`journalctl -u ${safeUnit} -n 50 --no-pager 2>/dev/null`, {
@@ -658,7 +677,11 @@ function getLogicalInterfaceMappings(): { wan?: string; lan?: string; opt1?: str
 }
 
 export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   const confMap = getLogicalInterfaceMappings();
+  const ifConfEntries = Object.values(confMap).filter(Boolean);
 
   try {
     const rawJson = execSync('ip -json address show 2>/dev/null', { encoding: 'utf8', timeout: 1000 });
@@ -691,7 +714,7 @@ export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
       else if (confMap.lan && item.ifname === confMap.lan) logicalName = 'lan';
       else if (confMap.opt1 && item.ifname === confMap.opt1) logicalName = 'opt1';
       else if (confMap.opt2 && item.ifname === confMap.opt2) logicalName = 'opt2';
-      else if (item.ifname === defaultDev || item.ifname.includes('wan') || item.ifname.includes('wlp')) logicalName = 'wan';
+      else if (ifConfEntries.length === 0 && (item.ifname === defaultDev || item.ifname.includes('wan') || item.ifname.includes('wlp'))) logicalName = 'wan';
 
       const isOpt = logicalName === 'opt1' || logicalName === 'opt2';
       let typeLabel = inetAddr?.dynamic ? 'DHCP Client' : (inetAddr ? 'Static IPv4' : 'Unconfigured');
@@ -739,7 +762,7 @@ export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
       name: logicalName,
       device: name,
       type: typeLabel,
-      ipv4: ipv4Info ? `${ipv4Info.address}/${ipv4Info.netmask}` : 'Unassigned',
+      ipv4: ipv4Info ? (ipv4Info.cidr || `${ipv4Info.address}/24`) : 'Unassigned',
       gateway: 'None',
       mtu: 1500,
       mac: ipv4Info?.mac || '00:00:00:00:00:00',
@@ -772,6 +795,9 @@ export interface LogicalInterfaceView {
 }
 
 export async function getLogicalInterfacesView(): Promise<LogicalInterfaceView[]> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   const state = await getCurrentDesiredState();
   const liveIfaces = await getSystemInterfaces();
   const confMap = getLogicalInterfaceMappings();
@@ -785,8 +811,9 @@ export async function getLogicalInterfacesView(): Promise<LogicalInterfaceView[]
 
   return standardSlots.map((slot) => {
     const existing = state.interfaces.find((i) => i.name === slot.name);
-    const assignedDev = existing?.device || slot.defaultDev;
-    const live = liveIfaces.find((l) => l.device === assignedDev || l.name === slot.name);
+    const confDev = (confMap as Record<string, string | undefined>)[slot.name];
+    const assignedDev = confDev || existing?.device || slot.defaultDev;
+    const live = liveIfaces.find((l) => l.device === assignedDev) || liveIfaces.find((l) => l.name === slot.name);
 
     return {
       name: slot.name,
@@ -794,7 +821,7 @@ export async function getLogicalInterfacesView(): Promise<LogicalInterfaceView[]
       device: assignedDev,
       enabled: existing?.enabled ?? (slot.name === 'wan' || slot.name === 'lan'),
       type: (existing?.type === 'static' ? 'static' : 'dhcp') as 'dhcp' | 'static',
-      ipv4Address: existing?.ipv4Address || (slot.name === 'lan' ? '192.168.100.1/24' : ''),
+      ipv4Address: existing?.ipv4Address || (slot.name === 'lan' ? '192.168.1.1/24' : ''),
       ipv4Gateway: existing?.ipv4Gateway || '',
       description: existing?.description || slot.defaultDesc,
       mtu: existing?.mtu || 1500,
@@ -812,6 +839,9 @@ export async function getLogicalInterfacesView(): Promise<LogicalInterfaceView[]
 }
 
 export async function getPhysicalNetworkDevices(): Promise<string[]> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   try {
     const raw = execSync("ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' 2>/dev/null", { encoding: 'utf8' });
     const devs = raw.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -838,9 +868,13 @@ export async function saveInterfaceAssignment(data: {
     throw new Error('Unauthorized');
   }
 
+  if (!/^[a-zA-Z0-9_.:-]+$/.test(data.device)) {
+    throw new Error('Invalid device name');
+  }
+
   const state = await getCurrentDesiredState();
   const idx = state.interfaces.findIndex((i) => i.name === data.name);
-  const updatedIface = {
+  const updatedIface = InterfaceSchema.parse({
     name: data.name,
     device: data.device,
     enabled: data.enabled,
@@ -849,7 +883,7 @@ export async function saveInterfaceAssignment(data: {
     ipv4Gateway: data.type === 'static' ? data.ipv4Gateway : undefined,
     description: data.description || `${data.name.toUpperCase()} Network`,
     mtu: data.mtu || 1500,
-  };
+  });
 
   if (idx >= 0) {
     state.interfaces[idx] = updatedIface;
@@ -883,14 +917,36 @@ export async function saveInterfaceAssignment(data: {
   } catch {}
 
   // Apply basic network state if active
-  if (data.enabled && data.device) {
-    try {
-      execSync(`ip link set ${data.device} up 2>/dev/null || true`);
+  if (data.device) {
+    if (data.enabled) {
+      try {
+        execFileSync('ip', ['link', 'set', data.device, 'up'], { stdio: 'ignore' });
+      } catch {}
       if (data.type === 'static' && data.ipv4Address) {
-        execSync(`ip addr flush dev ${data.device} 2>/dev/null || true`);
-        execSync(`ip addr add ${data.ipv4Address} dev ${data.device} 2>/dev/null || true`);
+        try {
+          execFileSync('ip', ['addr', 'flush', 'dev', data.device], { stdio: 'ignore' });
+        } catch {}
+        try {
+          execFileSync('ip', ['addr', 'add', data.ipv4Address, 'dev', data.device], { stdio: 'ignore' });
+        } catch {}
+        if (data.ipv4Gateway) {
+          try {
+            execFileSync('ip', ['route', 'replace', 'default', 'via', data.ipv4Gateway, 'dev', data.device], { stdio: 'ignore' });
+          } catch {}
+        }
+      } else if (data.type === 'dhcp') {
+        try {
+          execFileSync('dhclient', ['-r', data.device], { stdio: 'ignore' });
+        } catch {}
+        try {
+          execFileSync('dhclient', [data.device], { stdio: 'ignore' });
+        } catch {}
       }
-    } catch {}
+    } else {
+      try {
+        execFileSync('ip', ['link', 'set', data.device, 'down'], { stdio: 'ignore' });
+      } catch {}
+    }
   }
 
   return {
@@ -911,6 +967,9 @@ export interface LiveGatewayInfo {
 }
 
 export async function getGatewaysTelemetry(): Promise<LiveGatewayInfo[]> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   try {
     const routesJson = execSync('ip -json route show 2>/dev/null', { encoding: 'utf8', timeout: 500 });
     const routes = JSON.parse(routesJson);
@@ -946,6 +1005,8 @@ export interface ThreatAlert {
 }
 
 export async function getRecentThreatAlerts(): Promise<ThreatAlert[]> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
   const evePath = '/var/log/suricata/eve.json';
   if (!fs.existsSync(evePath)) {
     return [];
@@ -995,6 +1056,9 @@ export interface NetworkInsightTelemetry {
 }
 
 export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTelemetry> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   let conntrackCount = 0;
   try {
     const raw = fs.readFileSync('/proc/sys/net/netfilter/nf_conntrack_count', 'utf8');
@@ -1096,6 +1160,9 @@ function compareSemver(v1: string, v2: string): number {
 }
 
 export async function getReleaseInfo(): Promise<ReleaseInfo> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
   const currentVersion = getCurrentInstalledVersion();
   const now = Date.now();
 
@@ -1202,6 +1269,8 @@ export interface SystemPartitionsTelemetry {
 }
 
 export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTelemetry> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
   const currentVersion = getCurrentInstalledVersion();
   const kernel = os.release() || 'Linux 6.12.111+deb13-amd64';
 

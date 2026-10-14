@@ -17,7 +17,19 @@ export function compileNftables(state: DesiredState): CompileResult {
   const files: { path: string; content: string; fileMode: number }[] = [];
   const reloadServices: string[] = [];
 
-  const suricataCompiled = compileSuricata(state.suricata);
+  // Helper to map interfaces to system devices
+  const ifDeviceMap = new Map<string, string>();
+  for (const iface of state.interfaces) {
+    ifDeviceMap.set(iface.name, iface.device);
+  }
+
+  const suricataConfig = state.suricata
+    ? {
+        ...state.suricata,
+        interfaces: state.suricata.interfaces.map((i) => ifDeviceMap.get(i) || i),
+      }
+    : undefined;
+  const suricataCompiled = compileSuricata(suricataConfig);
   const crowdsecCompiled = compileCrowdSec(state.crowdsec);
   const geoipCompiled = compileGeoIp(state.geoip);
 
@@ -45,6 +57,8 @@ export function compileNftables(state: DesiredState): CompileResult {
   lines.push('');
 
   // 1. Table definition (isolated namespace, never flushes other tables)
+  lines.push('table inet axonwall {}');
+  lines.push('flush table inet axonwall');
   lines.push('table inet axonwall {');
 
   // 2. Named sets for Aliases & Dynamic Quarantine
@@ -85,14 +99,14 @@ export function compileNftables(state: DesiredState): CompileResult {
         setType = 'inet_service';
       } else if (alias.type === 'mac') {
         setType = 'ether_addr';
-      } else if (alias.type === 'network') {
-        setType = 'ipv4_addr';
+      } else if (alias.type === 'network' || alias.type === 'host') {
+        setType = alias.entries.some((e) => e.includes(':')) ? 'ipv6_addr' : 'ipv4_addr';
       }
 
       const elements = alias.entries.join(', ');
       lines.push(`  set ${setName} {`);
       lines.push(`    type ${setType};`);
-      if (alias.type === 'network' || alias.type === 'host') {
+      if (alias.type === 'network' || alias.type === 'host' || alias.type === 'port') {
         lines.push('    flags interval;');
       }
       lines.push(`    elements = { ${elements} };`);
@@ -115,12 +129,6 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('');
   }
 
-  // Helper to map interfaces to system devices
-  const ifDeviceMap = new Map<string, string>();
-  for (const iface of state.interfaces) {
-    ifDeviceMap.set(iface.name, iface.device);
-  }
-
   // 4. Chains definition
 
   // Prerouting (DNAT)
@@ -139,12 +147,22 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   for (const nat of state.nat) {
-    if (!nat.enabled || nat.type !== 'dnat') continue;
+    if (!nat.enabled || nat.type !== 'dnat' || !nat.targetIp) continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
-    const proto = nat.protocol === 'any' ? 'ip protocol { tcp, udp }' : `${nat.protocol}`;
-    const portMatch = nat.destinationPort ? `dport ${nat.destinationPort}` : '';
+    let protoMatch = '';
+    if (nat.protocol === 'any' || nat.protocol === 'tcp_udp') {
+      protoMatch = nat.destinationPort
+        ? `meta l4proto { tcp, udp } th dport ${formatPort(nat.destinationPort)}`
+        : 'meta l4proto { tcp, udp }';
+    } else if (nat.protocol === 'tcp' || nat.protocol === 'udp') {
+      protoMatch = nat.destinationPort
+        ? `${nat.protocol} dport ${formatPort(nat.destinationPort)}`
+        : `meta l4proto ${nat.protocol}`;
+    } else {
+      protoMatch = `meta l4proto ${nat.protocol}`;
+    }
     const dnatTarget = nat.targetPort ? `${nat.targetIp}:${nat.targetPort}` : `${nat.targetIp}`;
-    lines.push(`    iifname "${ifaceDev}" ${proto} ${portMatch} dnat to ${dnatTarget}`);
+    lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat to ${dnatTarget}`);
   }
   lines.push('  }');
   lines.push('');
@@ -274,19 +292,21 @@ export function compileNftables(state: DesiredState): CompileResult {
   lines.push('  }');
   lines.push('');
 
+  const isFloating = (ifaceName: string) => ifaceName === 'any' || ifaceName === 'floating';
+
   // 5. Per-Interface Input and Forward Chains
   for (const iface of state.interfaces) {
     if (!iface.enabled) continue;
 
     // For WAN interfaces, local input rules MUST be explicitly assigned to the WAN interface.
-    // Floating ('any') rules apply to forwarded transit traffic, but do not open local host input on WAN.
+    // Floating ('any' / 'floating') rules apply to forwarded transit traffic, but do not open local host input on WAN.
     const inputRules = state.rules
-      .filter((r) => r.enabled && (r.interface === iface.name || (iface.name !== 'wan' && r.interface === 'any')))
+      .filter((r) => r.enabled && (r.interface === iface.name || (iface.name !== 'wan' && isFloating(r.interface))))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     // Forward chain evaluates interface-specific and floating transit rules
     const forwardRules = state.rules
-      .filter((r) => r.enabled && (r.interface === iface.name || r.interface === 'any'))
+      .filter((r) => r.enabled && (r.interface === iface.name || isFloating(r.interface)))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     // Input chain for interface
@@ -313,7 +333,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Tailscale pseudo-interface chains
   if (state.headscale?.enabled) {
     const tsRules = state.rules
-      .filter((r) => r.enabled && (r.interface === 'tailscale' || r.interface === 'any'))
+      .filter((r) => r.enabled && (r.interface === 'tailscale' || isFloating(r.interface)))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     lines.push(`  chain input_tailscale {`);
@@ -383,7 +403,8 @@ export function compileSatelliteNftables(node: any): CompileResult {
   lines.push('    # Allow management protocols');
   lines.push('    tcp dport 22 accept comment "allow-ssh"');
   
-  if (node.wireguard?.tunnelIp) {
+  const wgTunnelIp = node.wireguard?.tunnelIp || node.tunnelIp;
+  if (wgTunnelIp) {
     lines.push('    udp dport 51820 accept comment "allow-wireguard"');
     lines.push('    iifname "wg-axon0" accept comment "allow-wg-mesh-traffic"');
   }
@@ -424,6 +445,11 @@ export function compileSatelliteNftables(node: any): CompileResult {
   };
 }
 
+function formatPort(val: string): string {
+  if (val.startsWith('$')) return `@set_${sanitizeIdentifier(val.slice(1))}`;
+  if (val.includes(',') && !val.trim().startsWith('{')) return `{ ${val} }`;
+  return val;
+}
 
 function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   const parts: string[] = [];
@@ -431,8 +457,13 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   // Source Address
   if (rule.source && rule.source !== 'any') {
     if (rule.source.startsWith('$')) {
-      const aliasName = sanitizeIdentifier(rule.source.slice(1));
-      parts.push(`ip saddr @set_${aliasName}`);
+      const rawName = rule.source.slice(1);
+      const aliasName = sanitizeIdentifier(rawName);
+      const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
+      const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
+      parts.push(`${isV6 ? 'ip6' : 'ip'} saddr @set_${aliasName}`);
+    } else if (rule.source.includes(':')) {
+      parts.push(`ip6 saddr ${rule.source}`);
     } else {
       parts.push(`ip saddr ${rule.source}`);
     }
@@ -441,8 +472,13 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   // Destination Address
   if (rule.destination && rule.destination !== 'any') {
     if (rule.destination.startsWith('$')) {
-      const aliasName = sanitizeIdentifier(rule.destination.slice(1));
-      parts.push(`ip daddr @set_${aliasName}`);
+      const rawName = rule.destination.slice(1);
+      const aliasName = sanitizeIdentifier(rawName);
+      const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
+      const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
+      parts.push(`${isV6 ? 'ip6' : 'ip'} daddr @set_${aliasName}`);
+    } else if (rule.destination.includes(':')) {
+      parts.push(`ip6 daddr ${rule.destination}`);
     } else {
       parts.push(`ip daddr ${rule.destination}`);
     }
@@ -451,11 +487,6 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   // Protocol & Ports
   const hasSport = Boolean(rule.sourcePort && rule.sourcePort !== 'any');
   const hasDport = Boolean(rule.destinationPort && rule.destinationPort !== 'any');
-
-  const formatPort = (val: string) => {
-    if (val.startsWith('$')) return `@set_${sanitizeIdentifier(val.slice(1))}`;
-    return val;
-  };
 
   if (rule.protocol === 'tcp' || rule.protocol === 'udp') {
     if (hasSport || hasDport) {
@@ -468,6 +499,8 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
     parts.push('meta l4proto { tcp, udp }');
     if (hasSport) parts.push(`th sport ${formatPort(rule.sourcePort!)}`);
     if (hasDport) parts.push(`th dport ${formatPort(rule.destinationPort!)}`);
+  } else if (rule.protocol === 'ipv6-icmp') {
+    parts.push('meta l4proto ipv6-icmp');
   } else if (rule.protocol !== 'any') {
     parts.push(`ip protocol ${rule.protocol}`);
   }

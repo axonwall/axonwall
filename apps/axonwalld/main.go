@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,6 +32,7 @@ type AgentServer struct {
 	mu              sync.Mutex
 	bundleDir       string
 	activeHash      string
+	lastGoodHash    string
 	lastGoodScript  string
 	candidateScript string
 	pendingConfirm  bool
@@ -49,24 +51,28 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 	hostname, _ := os.Hostname()
 
 	initHash := ""
+	lastGoodScript := ""
 	for _, checkPath := range []string{"/etc/nftables.conf", filepath.Join(bundleDir, "last-known-good.nft")} {
 		if data, err := os.ReadFile(checkPath); err == nil && len(data) > 0 {
 			h := sha256.Sum256(data)
 			initHash = hex.EncodeToString(h[:])
+			lastGoodScript = string(data)
 			break
 		}
 	}
 
 	return &AgentServer{
-		bundleDir:   bundleDir,
-		activeHash:  initHash,
-		nodeId:      fmt.Sprintf("axonwall-%s", hostname),
-		startTime:   time.Now(),
-		iapManager:  iapManager,
-		haEngine:    haEngine,
-		sdwanProber: sdwanProber,
-		pcapManager: pcapManager,
-		watchdog:    watchdog,
+		bundleDir:      bundleDir,
+		activeHash:     initHash,
+		lastGoodHash:   initHash,
+		lastGoodScript: lastGoodScript,
+		nodeId:         fmt.Sprintf("axonwall-%s", hostname),
+		startTime:      time.Now(),
+		iapManager:     iapManager,
+		haEngine:       haEngine,
+		sdwanProber:    sdwanProber,
+		pcapManager:    pcapManager,
+		watchdog:       watchdog,
 	}
 }
 
@@ -88,9 +94,10 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	defer os.Remove(tmpFile.Name())
 
 	if _, err := tmpFile.WriteString(req.NftScript); err != nil {
+		_ = tmpFile.Close()
 		return nil, status.Errorf(codes.Internal, "failed to write candidate script: %v", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	validateCmd := exec.Command("nft", "-c", "-f", tmpFile.Name())
 	if out, err := validateCmd.CombinedOutput(); err != nil {
@@ -162,6 +169,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}, nil
 	}
 
+	if req.BundleHash != "" {
+		s.activeHash = req.BundleHash
+	} else {
+		h := sha256.Sum256([]byte(req.NftScript))
+		s.activeHash = hex.EncodeToString(h[:])
+	}
+
 	// 5. Reload any changed systemd units requested
 	for _, svc := range req.ReloadServices {
 		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
@@ -193,8 +207,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	log.Printf("[Agent] Configuration applied successfully. Pending confirmation for job %s (deadline: %v)", req.JobId, s.confirmDeadline)
 
 	return &pb.ApplyBundleResponse{
-		Success:              true,
-		Message:              "Configuration applied. Pending confirmation before timeout.",
+		Success:             true,
+		Message:             "Configuration applied. Pending confirmation before timeout.",
 		ConfirmDeadlineUnix: s.confirmDeadline.Unix(),
 	}, nil
 }
@@ -209,9 +223,17 @@ func (s *AgentServer) triggerAutoRollback(jobId string) {
 
 	log.Printf("[Agent] WARNING: Commit-confirm deadline expired for job %s! Initiating automatic rollback.", jobId)
 
+	if s.lastGoodScript == "" {
+		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
+		if data, err := os.ReadFile(lkgPath); err == nil {
+			s.lastGoodScript = string(data)
+		}
+	}
+
 	if s.lastGoodScript != "" {
 		tmpFile, err := os.CreateTemp("", "axonwall-rollback-*.nft")
 		if err == nil {
+			_ = tmpFile.Close()
 			_ = os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644)
 			cmd := exec.Command("nft", "-f", tmpFile.Name())
 			out, err := cmd.CombinedOutput()
@@ -219,6 +241,12 @@ func (s *AgentServer) triggerAutoRollback(jobId string) {
 			if err != nil {
 				log.Printf("[Agent] ERROR applying rollback ruleset: %s", string(out))
 			} else {
+				if s.lastGoodHash != "" {
+					s.activeHash = s.lastGoodHash
+				} else {
+					h := sha256.Sum256([]byte(s.lastGoodScript))
+					s.activeHash = hex.EncodeToString(h[:])
+				}
 				log.Printf("[Agent] Successfully rolled back to last known good ruleset.")
 			}
 		}
@@ -240,7 +268,14 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	}
 
 	s.pendingConfirm = false
-	s.lastGoodScript = s.candidateScript
+	if s.candidateScript != "" {
+		s.lastGoodScript = s.candidateScript
+		if s.activeHash == "" {
+			h := sha256.Sum256([]byte(s.lastGoodScript))
+			s.activeHash = hex.EncodeToString(h[:])
+		}
+		s.lastGoodHash = s.activeHash
+	}
 
 	// Save to bundle directory
 	if err := os.MkdirAll(s.bundleDir, 0700); err == nil {
@@ -284,6 +319,7 @@ func (s *AgentServer) Rollback(ctx context.Context, req *pb.RollbackRequest) (*p
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to create rollback temp file: %v", err)
 	}
+	_ = tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
 	if err := os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644); err != nil {
@@ -298,6 +334,12 @@ func (s *AgentServer) Rollback(ctx context.Context, req *pb.RollbackRequest) (*p
 		}, nil
 	}
 
+	if s.lastGoodHash != "" {
+		s.activeHash = s.lastGoodHash
+	} else {
+		h := sha256.Sum256([]byte(s.lastGoodScript))
+		s.activeHash = hex.EncodeToString(h[:])
+	}
 	s.pendingConfirm = false
 	s.candidateScript = ""
 
@@ -424,12 +466,13 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 		}
 		// Probe TCP port directly using net.DialTimeout
 		d := net.Dialer{Timeout: 3 * time.Second}
-		conn, err := d.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", target, port))
+		addr := net.JoinHostPort(target, strconv.Itoa(int(port)))
+		conn, err := d.DialContext(ctx, "tcp", addr)
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
 			return &pb.DiagnosticResponse{
 				Success:   false,
-				Output:    fmt.Sprintf("Failed to connect to %s:%d: %v", target, port, err),
+				Output:    fmt.Sprintf("Failed to connect to %s: %v", addr, err),
 				LatencyMs: latency,
 			}, nil
 		}

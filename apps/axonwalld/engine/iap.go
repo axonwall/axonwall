@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 type ZeroTrustApp struct {
@@ -43,13 +44,23 @@ func (m *IAPManager) ApplyConfig(configJSON []byte) error {
 		return nil
 	}
 
+	for _, app := range config.Apps {
+		if !app.Enabled {
+			continue
+		}
+		if strings.ContainsAny(app.PublicHostname, "\n\r{};") || strings.ContainsAny(app.InternalUpstream, "\n\r{};") {
+			return fmt.Errorf("invalid characters in zero trust app hostname or upstream")
+		}
+	}
+
 	caddyfileContent := m.generateCaddyfile(config)
-	
+
 	caddyfilePath := "/etc/axonwall/Caddyfile"
 	if err := os.MkdirAll(filepath.Dir(caddyfilePath), 0755); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
 	}
-	
+	_ = os.MkdirAll("/run/axonwall", 0755)
+
 	if err := os.WriteFile(caddyfilePath, []byte(caddyfileContent), 0644); err != nil {
 		return fmt.Errorf("failed to write Caddyfile: %w", err)
 	}
@@ -59,16 +70,19 @@ func (m *IAPManager) ApplyConfig(configJSON []byte) error {
 
 func (m *IAPManager) generateCaddyfile(config ZeroTrustConfig) string {
 	var out string
-	
+
 	out += "{\n"
-	out += "\tadmin off\n"
+	out += "\tadmin unix//run/axonwall/caddy-admin.sock\n"
 	out += "}\n\n"
-	
+
 	for _, app := range config.Apps {
 		if !app.Enabled {
 			continue
 		}
-		
+		if strings.ContainsAny(app.PublicHostname, "\n\r{};") || strings.ContainsAny(app.InternalUpstream, "\n\r{};") {
+			continue
+		}
+
 		out += fmt.Sprintf("%s {\n", app.PublicHostname)
 		out += fmt.Sprintf("\tforward_auth http://localhost:3000 {\n")
 		out += fmt.Sprintf("\t\turi /api/auth/gateway\n")
@@ -77,7 +91,7 @@ func (m *IAPManager) generateCaddyfile(config ZeroTrustConfig) string {
 		out += fmt.Sprintf("\treverse_proxy %s\n", app.InternalUpstream)
 		out += "}\n\n"
 	}
-	
+
 	return out
 }
 
@@ -87,7 +101,7 @@ func (m *IAPManager) ReloadCaddy(configPath string) error {
 		m.cmd = exec.Command("caddy", "run", "--config", configPath, "--adapter", "caddyfile")
 		m.cmd.Stdout = os.Stdout
 		m.cmd.Stderr = os.Stderr
-		
+
 		if err := m.cmd.Start(); err != nil {
 			log.Printf("Warning: Failed to start Caddy (IAP): %v", err)
 			return err
@@ -95,11 +109,20 @@ func (m *IAPManager) ReloadCaddy(configPath string) error {
 		log.Printf("Started Caddy IAP proxy on port 443")
 		return nil
 	}
-	
-	// If running, reload
-	reloadCmd := exec.Command("caddy", "reload", "--config", configPath, "--adapter", "caddyfile")
+
+	// If running, reload via unix admin socket; fallback to process restart if reload fails
+	reloadCmd := exec.Command("caddy", "reload", "--config", configPath, "--adapter", "caddyfile", "--address", "unix//run/axonwall/caddy-admin.sock")
 	if out, err := reloadCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to reload caddy: %v, output: %s", err, string(out))
+		log.Printf("Warning: caddy reload failed (%v: %s), restarting process", err, string(out))
+		m.Stop()
+		m.cmd = exec.Command("caddy", "run", "--config", configPath, "--adapter", "caddyfile")
+		m.cmd.Stdout = os.Stdout
+		m.cmd.Stderr = os.Stderr
+		if startErr := m.cmd.Start(); startErr != nil {
+			return fmt.Errorf("failed to restart caddy: %v", startErr)
+		}
+		log.Printf("Restarted Caddy IAP proxy on port 443")
+		return nil
 	}
 	log.Printf("Reloaded Caddy IAP configuration")
 	return nil

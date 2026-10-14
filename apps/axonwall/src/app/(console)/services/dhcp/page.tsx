@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Server, Plus, CheckCircle2, FileCode, ShieldCheck } from 'lucide-react';
 import { compileKeaDhcp4 } from '@axonwall/lib/compile/kea';
+import { getCurrentDesiredState } from '@/server/agent';
 import type { DhcpConfig, Interface } from '@axonwall/lib/schemas';
 
 const DEFAULT_DHCP: DhcpConfig = {
@@ -26,10 +27,24 @@ const DEFAULT_INTERFACES: Interface[] = [
 ];
 
 export default function DhcpPage() {
-  const [dhcp] = useState<DhcpConfig>(DEFAULT_DHCP);
+  const [dhcp, setDhcp] = useState<DhcpConfig>(DEFAULT_DHCP);
+  const [interfaces, setInterfaces] = useState<Interface[]>(DEFAULT_INTERFACES);
   const [showKeaConfig, setShowKeaConfig] = useState(false);
 
-  const { keaDhcp4Config } = compileKeaDhcp4(dhcp, DEFAULT_INTERFACES);
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        if (state?.dhcp?.subnets?.length) {
+          setDhcp(state.dhcp);
+        }
+        if (state?.interfaces?.length) {
+          setInterfaces(state.interfaces);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const { keaDhcp4Config } = compileKeaDhcp4(dhcp, interfaces);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">

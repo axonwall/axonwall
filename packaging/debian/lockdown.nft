@@ -32,7 +32,7 @@ table inet axonwall {
         iifname @wan_interfaces tcp dport { 22, 80, 443, 2966, 3000 } drop comment "block-wan-management"
 
         # Emergency Anti-Lockout on internal interfaces only
-        tcp dport { 22, 80, 443, 2966 } accept comment "emergency-anti-lockout"
+        iifname != @wan_interfaces tcp dport { 22, 80, 443, 2966 } accept comment "emergency-anti-lockout"
     }
 
     chain forward {

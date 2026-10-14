@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -37,7 +38,7 @@ type GatewayGroup struct {
 }
 
 type SDWanConfig struct {
-	Enabled       bool           `json:"enabled"`
+	Enabled       bool            `json:"enabled"`
 	Gateways      []GatewayTarget `json:"gateways"`
 	GatewayGroups []GatewayGroup  `json:"gatewayGroups"`
 }
@@ -72,6 +73,7 @@ func (p *SDWanProber) ReloadConfig(path string) error {
 
 	p.mu.Lock()
 	p.config = &config
+	p.active = make(map[string]bool)
 	p.mu.Unlock()
 
 	if !config.Enabled || len(config.Gateways) == 0 {
@@ -108,19 +110,19 @@ func (p *SDWanProber) run(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Initial probe
-	p.probeAll()
+	p.probeAll(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.probeAll()
+			p.probeAll(ctx)
 		}
 	}
 }
 
-func (p *SDWanProber) probeAll() {
+func (p *SDWanProber) probeAll(ctx context.Context) {
 	p.mu.Lock()
 	if p.config == nil || !p.config.Enabled {
 		p.mu.Unlock()
@@ -146,8 +148,11 @@ func (p *SDWanProber) probeAll() {
 		}
 
 		// Basic ICMP ping with a 1-second timeout, sending 2 packets
-		cmd := exec.Command("ping", "-c", "2", "-W", "1", "-I", gw.Interface, targetIP)
+		cmd := exec.CommandContext(ctx, "ping", "-c", "2", "-W", "1", "-I", gw.Interface, targetIP)
 		err := cmd.Run()
+		if ctx.Err() != nil {
+			return
+		}
 
 		p.mu.Lock()
 		wasActive := p.active[gw.Name]
@@ -183,9 +188,9 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 	if len(groups) > 0 {
 		// Just evaluate the first group for now (usually the default LoadBalance group)
 		group := groups[0]
-		
+
 		bestTier := 999
-		
+
 		// Find the best tier that has at least one active gateway
 		for _, member := range group.Members {
 			if p.active[member.GatewayName] {
@@ -205,7 +210,11 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 			if member.Tier == bestTier && p.active[member.GatewayName] {
 				for _, gw := range gateways {
 					if gw.Name == member.GatewayName {
-						activeTargets = append(activeTargets, gw)
+						gwCopy := gw
+						if member.Weight > 0 {
+							gwCopy.Weight = member.Weight
+						}
+						activeTargets = append(activeTargets, gwCopy)
 					}
 				}
 			}
@@ -228,7 +237,12 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 	// Example: ip route replace default nexthop via 192.168.1.1 dev eth0 weight 1 nexthop via 10.0.0.1 dev eth2 weight 1
 	args := []string{"route", "replace", "default"}
 	for _, gw := range activeTargets {
-		args = append(args, "nexthop", "via", gw.GatewayIP, "dev", gw.Interface, "weight", "1")
+		weight := gw.Weight
+		weightStr := "1"
+		if weight > 0 {
+			weightStr = strconv.Itoa(weight)
+		}
+		args = append(args, "nexthop", "via", gw.GatewayIP, "dev", gw.Interface, "weight", weightStr)
 	}
 
 	cmd := exec.Command("ip", args...)

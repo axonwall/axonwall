@@ -7,16 +7,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"text/template"
 )
+
+var validRadioRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 type WiFiSecurity string
 
 const (
-	SecurityWPA2PSK       WiFiSecurity = "wpa2-psk"
-	SecurityWPA3SAE       WiFiSecurity = "wpa3-sae"
+	SecurityWPA2PSK        WiFiSecurity = "wpa2-psk"
+	SecurityWPA3SAE        WiFiSecurity = "wpa3-sae"
 	SecurityWPA3Enterprise WiFiSecurity = "wpa3-enterprise"
-	SecurityOpen          WiFiSecurity = "open"
+	SecurityOpen           WiFiSecurity = "open"
 )
 
 type FastRoamingConfig struct {
@@ -103,6 +107,14 @@ rsn_pairwise=CCMP
 ieee80211w=2
 {{end}}
 
+{{if eq .Security "wpa3-enterprise"}}
+wpa=2
+ieee80211x=1
+{{if .FastRoaming.Enabled}}wpa_key_mgmt=WPA-EAP-SUITE-B-192 FT-EAP{{else}}wpa_key_mgmt=WPA-EAP-SUITE-B-192 WPA-EAP{{end}}
+rsn_pairwise=CCMP
+ieee80211w=2
+{{end}}
+
 {{if eq .Security "open"}}
 # Open network, no WPA
 {{end}}
@@ -110,6 +122,15 @@ ieee80211w=2
 
 // Configure provisions the SSID on the given radio
 func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
+	if !validRadioRegex.MatchString(cfg.Radio) || strings.Contains(cfg.Radio, "..") || strings.HasPrefix(cfg.Radio, "-") {
+		return fmt.Errorf("invalid radio interface name: %s", cfg.Radio)
+	}
+	for _, field := range []string{cfg.SSID, cfg.Password, cfg.FastRoaming.MobilityDomain} {
+		if strings.ContainsAny(field, "\n\r") {
+			return fmt.Errorf("invalid wifi configuration: newlines are not allowed")
+		}
+	}
+
 	if !cfg.Enabled {
 		return e.Teardown(cfg.Radio)
 	}
@@ -125,7 +146,7 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 	}
 
 	confPath := filepath.Join(e.ConfigDir, fmt.Sprintf("hostapd-%s.conf", cfg.Radio))
-	
+
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, cfg); err != nil {
 		return err
@@ -142,7 +163,7 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 		slog.Warn("Failed to restart hostapd via systemd, trying direct execution", "error", err, "output", string(out))
 		// Fallback for non-systemd environments (like OpenWrt)
 		exec.Command("pkill", "-f", fmt.Sprintf("hostapd %s", confPath)).Run()
-		
+
 		startCmd := exec.Command("hostapd", "-B", confPath)
 		if startOut, startErr := startCmd.CombinedOutput(); startErr != nil {
 			return fmt.Errorf("failed to start hostapd: %v (output: %s)", startErr, startOut)
@@ -154,13 +175,16 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 
 // Teardown stops hostapd for the radio
 func (e *WiFiEngine) Teardown(radio string) error {
+	if !validRadioRegex.MatchString(radio) || strings.Contains(radio, "..") || strings.HasPrefix(radio, "-") {
+		return fmt.Errorf("invalid radio interface name: %s", radio)
+	}
 	confPath := filepath.Join(e.ConfigDir, fmt.Sprintf("hostapd-%s.conf", radio))
-	
+
 	cmd := exec.Command("systemctl", "stop", fmt.Sprintf("hostapd@%s", radio))
 	if err := cmd.Run(); err != nil {
 		exec.Command("pkill", "-f", fmt.Sprintf("hostapd %s", confPath)).Run()
 	}
-	
+
 	_ = os.Remove(confPath)
 	return nil
 }

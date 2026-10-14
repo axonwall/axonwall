@@ -75,15 +75,19 @@ if [ -b "$ROOT_B_DEV" ]; then
 
   if [ $IS_MOUNTED -gt 0 ]; then
     echo "[+] Replicating base system from Slot A to Slot B..."
-    rsync -aAX --delete \
-      --exclude=/mnt/standby \
-      --exclude=/var/lib/axonwall \
-      --exclude=/proc/* \
-      --exclude=/sys/* \
-      --exclude=/dev/* \
-      --exclude=/run/* \
-      --exclude=/tmp/* \
-      /target/ "$STAGE_B/" 2>/dev/null || true
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -aAX --delete \
+        --exclude=/mnt/standby \
+        --exclude=/var/lib/axonwall \
+        --exclude=/proc/* \
+        --exclude=/sys/* \
+        --exclude=/dev/* \
+        --exclude=/run/* \
+        --exclude=/tmp/* \
+        /target/ "$STAGE_B/" 2>/dev/null || true
+    else
+      tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' -cf - . | tar -C "$STAGE_B" -xf - || true
+    fi
 
     # Configure Slot B's /etc/fstab for independent booting
     if [ -f "$STAGE_B/etc/fstab" ]; then

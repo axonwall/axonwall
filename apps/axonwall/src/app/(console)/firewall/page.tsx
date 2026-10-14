@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   CheckCircle2,
   XCircle,
@@ -12,7 +12,7 @@ import {
   Layers,
   ArrowRight,
 } from 'lucide-react';
-import { applyDesiredState, confirmActiveRuleset, rollbackActiveRuleset } from '../../../server/agent';
+import { getCurrentDesiredState, applyDesiredState, confirmActiveRuleset, rollbackActiveRuleset } from '../../../server/agent';
 import type { DesiredState, FirewallRule } from '@axonwall/lib/schemas';
 
 const INITIAL_STATE: DesiredState = {
@@ -40,7 +40,7 @@ const INITIAL_STATE: DesiredState = {
   ],
   rules: [
     {
-      id: 'rule-1',
+      id: '00000000-0000-4000-8000-000000000001',
       action: 'pass',
       direction: 'in',
       interface: 'lan',
@@ -56,7 +56,7 @@ const INITIAL_STATE: DesiredState = {
       sortOrder: 10,
     },
     {
-      id: 'rule-2',
+      id: '00000000-0000-4000-8000-000000000002',
       action: 'pass',
       direction: 'in',
       interface: 'lan',
@@ -72,7 +72,7 @@ const INITIAL_STATE: DesiredState = {
       sortOrder: 20,
     },
     {
-      id: 'rule-3',
+      id: '00000000-0000-4000-8000-000000000003',
       action: 'pass',
       direction: 'in',
       interface: 'lan',
@@ -121,6 +121,14 @@ export default function FirewallPage() {
   const [compiledScript, setCompiledScript] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<{ message: string; warnings: string[] } | null>(null);
   const [isApplying, setIsApplying] = useState(false);
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((s) => {
+        if (s) setState(s);
+      })
+      .catch(() => {});
+  }, []);
 
   const filteredRules = state.rules.filter(
     (r) => selectedInterface === 'all' || r.interface === selectedInterface

@@ -359,8 +359,9 @@ func (we *WatchdogEngine) TriggerRollback() error {
 		return fmt.Errorf("failed to reset bootcount in grubenv: %w", err)
 	}
 
+	oldActive := we.status.ActiveSlot
 	we.status.ActiveSlot = targetSlot
-	we.status.InactiveSlot = we.status.ActiveSlot
+	we.status.InactiveSlot = oldActive
 	we.status.HealthVerified = false
 
 	return nil
@@ -382,6 +383,15 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 		return fmt.Errorf("failed to reset bootcount: %w", err)
 	}
+
+	inactiveSlot := "B"
+	if targetSlot == "B" {
+		inactiveSlot = "A"
+	}
+	we.status.ActiveSlot = targetSlot
+	we.status.InactiveSlot = inactiveSlot
+	we.status.BootCount = 0
+	we.status.HealthVerified = false
 
 	return nil
 }

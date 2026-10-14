@@ -53,7 +53,11 @@ if [[ -e "$TARGET_DEV" ]]; then
   if mountpoint -q "${STAGE_DIR}"; then
     echo "[+] Updating application packages on standby partition..."
     if [[ -d /opt/axonwall && -d "${STAGE_DIR}/opt/axonwall" ]]; then
-      rsync -aAX --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+      if command -v rsync &>/dev/null; then
+        rsync -aAX --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+      else
+        cp -a /opt/axonwall/. "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+      fi
     fi
     if [[ -n "$TARGET_VERSION" ]]; then
       echo "$TARGET_VERSION" > "${STAGE_DIR}/etc/axonwall/version" 2>/dev/null || true

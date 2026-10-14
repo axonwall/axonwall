@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 type WireGuardPeer struct {
@@ -33,6 +34,9 @@ func NewWireGuardEngine() *WireGuardEngine {
 func (w *WireGuardEngine) ConfigureMesh(cfg WireGuardConfig) error {
 	if cfg.InterfaceName == "" {
 		cfg.InterfaceName = "wg-axon0"
+	}
+	if !validRadioRegex.MatchString(cfg.InterfaceName) || strings.Contains(cfg.InterfaceName, "..") || strings.Contains(cfg.InterfaceName, "/") || strings.HasPrefix(cfg.InterfaceName, "-") {
+		return fmt.Errorf("invalid wireguard interface name: %s", cfg.InterfaceName)
 	}
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 51820

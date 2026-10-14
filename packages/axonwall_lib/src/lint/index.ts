@@ -66,14 +66,16 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
 
   for (const [iface, rules] of rulesByIface.entries()) {
     const sorted = [...rules].sort((a, b) => a.sortOrder - b.sortOrder);
-    let catchAllSeen = false;
-    let catchAllRule: FirewallRule | null = null;
+    const catchAllByDirection = new Map<'in' | 'out', FirewallRule>();
+    const normPort = (p?: string) => (!p || p === 'any' ? 'any' : p);
 
     for (let i = 0; i < sorted.length; i++) {
       const current = sorted[i];
+      const dir = current.direction || 'in';
 
-      // Check if previously shadowed by catch-all
-      if (catchAllSeen && catchAllRule) {
+      // Check if previously shadowed by catch-all in the same direction
+      const catchAllRule = catchAllByDirection.get(dir);
+      if (catchAllRule) {
         issues.push({
           type: 'shadowed_rule',
           severity: 'warning',
@@ -82,16 +84,18 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
         });
       }
 
-      // Check if current is catch-all
+      // Check if current is a shadowing catch-all (must have quick !== false)
       if (
+        current.quick !== false &&
         current.protocol === 'any' &&
         (current.source === 'any' || !current.source) &&
         (current.destination === 'any' || !current.destination) &&
         (!current.sourcePort || current.sourcePort === 'any') &&
         (!current.destinationPort || current.destinationPort === 'any')
       ) {
-        catchAllSeen = true;
-        catchAllRule = current;
+        if (!catchAllByDirection.has(dir)) {
+          catchAllByDirection.set(dir, current);
+        }
       }
 
       // Check duplicates against previous rules in same interface
@@ -102,8 +106,8 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
           prev.protocol === current.protocol &&
           prev.source === current.source &&
           prev.destination === current.destination &&
-          prev.sourcePort === current.sourcePort &&
-          prev.destinationPort === current.destinationPort &&
+          normPort(prev.sourcePort) === normPort(current.sourcePort) &&
+          normPort(prev.destinationPort) === normPort(current.destinationPort) &&
           prev.direction === current.direction
         ) {
           issues.push({
@@ -130,23 +134,46 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
   }
 
   // 5. Detect Exposure of Management Services on WAN
-  const mgmtPorts = new Set(['22', '80', '443', '2966', '3000']);
+  const mgmtPortNums = [22, 80, 443, 2966, 3000];
+  const mgmtPorts = new Set(mgmtPortNums.map(String));
   for (const rule of state.rules) {
     if (!rule.enabled || rule.action !== 'pass' || rule.direction !== 'in') continue;
-    if (rule.interface === 'wan' || rule.interface === 'any') {
-      const isWildcardSrc = !rule.source || rule.source === 'any' || rule.source === '0.0.0.0/0';
-      if (isWildcardSrc) {
-        const dport = rule.destinationPort?.toLowerCase() || '';
-        const ports = dport.split(/[\s,]+/).map((p) => p.trim());
-        const touchesMgmt = ports.some((p) => mgmtPorts.has(p) || p === 'any' || p === '');
-        if (touchesMgmt && (dport === '' || ports.some((p) => mgmtPorts.has(p)))) {
-          issues.push({
-            type: 'wan_management_exposed',
-            severity: 'warning',
-            message: `Rule '${rule.description || rule.id || 'unnamed'}' exposes Web Console / SSH management port(s) on ${rule.interface} to the public internet (source: any).`,
-            ruleId: rule.id,
-          });
+    if (rule.interface !== 'wan') continue;
+    if (rule.protocol !== 'tcp' && rule.protocol !== 'tcp_udp' && rule.protocol !== 'any') continue;
+
+    const isWildcardSrc = !rule.source || rule.source === 'any' || rule.source === '0.0.0.0/0' || rule.source === '::/0';
+    if (isWildcardSrc) {
+      const dport = (rule.destinationPort || '').trim().toLowerCase();
+      let touchesMgmt = false;
+
+      if (dport === '' || dport === 'any') {
+        touchesMgmt = true;
+      } else {
+        const ports = dport.split(/[\s,]+/).map((p) => p.trim()).filter(Boolean);
+        for (const p of ports) {
+          if (mgmtPorts.has(p) || p === 'any') {
+            touchesMgmt = true;
+            break;
+          }
+          if (p.includes('-')) {
+            const [startStr, endStr] = p.split('-').map((s) => s.trim());
+            const start = Number.parseInt(startStr, 10);
+            const end = Number.parseInt(endStr, 10);
+            if (!Number.isNaN(start) && !Number.isNaN(end) && mgmtPortNums.some((mp) => mp >= start && mp <= end)) {
+              touchesMgmt = true;
+              break;
+            }
+          }
         }
+      }
+
+      if (touchesMgmt) {
+        issues.push({
+          type: 'wan_management_exposed',
+          severity: 'warning',
+          message: `Rule '${rule.description || rule.id || 'unnamed'}' exposes Web Console / SSH management port(s) on ${rule.interface} to the public internet (source: any).`,
+          ruleId: rule.id,
+        });
       }
     }
   }

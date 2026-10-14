@@ -32,7 +32,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssl, curl, ca-certificates
+Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssl, curl, ca-certificates, rsync, python3
 Recommends: unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
@@ -102,6 +102,10 @@ fi
 
 # 5. Copy System Scripts
 CHROOT_SRC="${ROOT_DIR}/packaging/iso/config/includes.chroot"
+if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-firstboot" ]]; then
+  cp "${CHROOT_SRC}/usr/local/bin/axonwall-firstboot" "${WORK_DIR}/usr/local/bin/"
+  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-firstboot"
+fi
 if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-import" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwall-import" "${WORK_DIR}/usr/local/bin/"
   chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-import"
@@ -114,6 +118,8 @@ if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-update" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwall-update" "${WORK_DIR}/usr/local/bin/"
   chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-update"
 fi
+
+echo "${VERSION}" > "${WORK_DIR}/etc/axonwall/version"
 
 # 6. Copy Configurations, Rulesets, Systemd, Sysusers
 cp "${SCRIPT_DIR}/lockdown.nft" "${WORK_DIR}/usr/share/axonwall/lockdown.nft"

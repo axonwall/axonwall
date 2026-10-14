@@ -55,6 +55,11 @@ fi
 
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
+  if [[ -n "$WAN_IF" && "$WAN_IF" != "eth0" && "$WAN_IF" != "wan0" ]]; then
+    if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
+      sed -i "s/elements = { \"eth0\", \"wan0\" }/elements = { \"eth0\", \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
+    fi
+  fi
   nft -f /usr/share/axonwall/lockdown.nft || true
   if [[ -n "$WAN_IF" ]]; then
     nft add element inet axonwall wan_interfaces "{ \"$WAN_IF\" }" 2>/dev/null || true
@@ -84,6 +89,7 @@ fi
 # Always fix ownership: the controller runs as User=axonwall and must read the key
 chown root:axonwall /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
 chown root:axonwall /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+chmod 0770 /etc/axonwall 2>/dev/null || true
 chmod 750 /etc/axonwall/certs 2>/dev/null || true
 chmod 640 /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
@@ -122,6 +128,10 @@ ENV_EOF
   fi
 fi
 
+if [[ -f /etc/axonwall/admin.env ]]; then
+  chown root:axonwall /etc/axonwall/admin.env 2>/dev/null || true
+  chmod 0660 /etc/axonwall/admin.env 2>/dev/null || true
+fi
 chmod 0640 /etc/axonwall/axonwall.env 2>/dev/null || true
 chown root:axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
 

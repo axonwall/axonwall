@@ -108,16 +108,16 @@ echo "  Live Apply  : ${DO_APPLY}"
 echo "================================================================================"
 
 # Build JSON payload using jq if available or python
-JSON_PAYLOAD=$(python3 -c "
+JSON_PAYLOAD=$(python3 -c '
 import json, sys
 data = {
-    'config': sys.stdin.read(),
-    'vendor': '$VENDOR',
-    'apply': $( $DO_APPLY && echo "True" || echo "False" ),
-    'confirmTimeoutSeconds': 120
+    "config": sys.stdin.read(),
+    "vendor": sys.argv[1],
+    "apply": sys.argv[2].lower() == "true",
+    "confirmTimeoutSeconds": 120
 }
 print(json.dumps(data))
-" <<< "$CONFIG_CONTENT")
+' "$VENDOR" "$DO_APPLY" <<< "$CONFIG_CONTENT")
 
 echo "[+] Parsing and converting configuration..."
 RESPONSE=$(curl -s -S -X POST "${API_HOST}/api/v1/import" \
@@ -159,26 +159,26 @@ if warnings:
 if data.get('applied'):
     print(\"\n[✓] Live Apply: Configuration APPLIED to system!\")
     print(\"    Watchdog safety rollback armed for 120s.\")
-" <<< "$RESPONSE")
+" <<< "$RESPONSE"
 
 # Write out files if requested
 if [[ -n "$OUT_JSON" ]]; then
-  python3 -c "
+  python3 -c '
 import json, sys
 data = json.loads(sys.stdin.read())
-with open('$OUT_JSON', 'w') as f:
-    json.dump(data.get('report', {}).get('state', {}), f, indent=2)
-" <<< "$RESPONSE"
+with open(sys.argv[1], "w") as f:
+    json.dump(data.get("report", {}).get("state", {}), f, indent=2)
+' "$OUT_JSON" <<< "$RESPONSE"
   echo "[+] DesiredState JSON saved to: $OUT_JSON"
 fi
 
 if [[ -n "$OUT_NFT" ]]; then
-  python3 -c "
+  python3 -c '
 import json, sys
 data = json.loads(sys.stdin.read())
-with open('$OUT_NFT', 'w') as f:
-    f.write(data.get('compiledNft', ''))
-" <<< "$RESPONSE"
+with open(sys.argv[1], "w") as f:
+    f.write(data.get("compiledNft", ""))
+' "$OUT_NFT" <<< "$RESPONSE"
   echo "[+] Compiled Linux nftables ruleset saved to: $OUT_NFT"
 fi
 

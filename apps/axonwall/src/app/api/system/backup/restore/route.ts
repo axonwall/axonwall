@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { restoreEncryptedBackup } from '@/server/backup';
+import { applyDesiredState } from '@/server/agent';
+import { DesiredStateSchema } from '@axonwall/lib/schemas';
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
@@ -25,15 +27,17 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(arrayBuffer);
 
     const { metadata, state } = await restoreEncryptedBackup(buffer, passphrase);
+    const parsedState = DesiredStateSchema.parse(state);
+    await applyDesiredState(parsedState, 120);
 
     return NextResponse.json({
       success: true,
-      message: `Successfully decrypted and validated backup ${metadata.id}. Ready to apply.`,
+      message: `Successfully decrypted, validated, and applied backup ${metadata.id}.`,
       metadata,
       stateSummary: {
-        hostname: state.system.hostname,
-        rulesCount: state.rules.length,
-        interfacesCount: state.interfaces.length,
+        hostname: parsedState.system.hostname,
+        rulesCount: parsedState.rules.length,
+        interfacesCount: parsedState.interfaces.length,
       },
     });
   } catch (err: any) {

@@ -138,6 +138,11 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-update ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-update
 fi
 
+chmod +x config/includes.chroot/usr/local/bin/axonwall-import || true
+
+VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || cat "${SCRIPT_DIR}/../../VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.2.0")
+echo "${VERSION}" > config/includes.chroot/etc/axonwall/version
+
 # Copy compiled daemon binaries if present
 mkdir -p config/includes.chroot/usr/sbin/
 
@@ -287,6 +292,8 @@ procps
 iputils-ping
 nano
 locales
+rsync
+python3
 EOF
 
 # 5. Build ISO

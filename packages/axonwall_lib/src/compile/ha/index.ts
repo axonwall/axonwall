@@ -234,7 +234,13 @@ export function compileKeaHaHook(ha: HighAvailabilityConfig, localIp: string): R
  * Compiles Litestream configuration (/etc/litestream.yml) for SQLite database replication.
  */
 export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
-  const sync = ha.sqliteSync;
+  const sync = ha.sqliteSync ?? {
+    enabled: false,
+    mode: 'direct_stream' as const,
+    databases: ['/var/lib/axonwall/headscale/db.sqlite'],
+    syncIntervalSeconds: 5,
+    listenPort: 9876,
+  };
   const lines: string[] = [];
 
   lines.push('# /etc/litestream.yml - Managed by Axonwall High Availability');
@@ -275,11 +281,17 @@ export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
  * Compiles native Axonwall SQLite sync daemon configuration (/etc/axonwall/sqlite_sync.json).
  */
 export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: string = '127.0.0.1'): Record<string, any> {
-  const sync = ha.sqliteSync;
+  const sync = ha.sqliteSync ?? {
+    enabled: false,
+    mode: 'direct_stream' as const,
+    databases: ['/var/lib/axonwall/headscale/db.sqlite'],
+    syncIntervalSeconds: 5,
+    listenPort: 9876,
+  };
   const isMaster = ha.nodeRole === 'master' && !ha.maintenanceMode;
 
   return {
-    enabled: sync.enabled && ha.enabled,
+    enabled: Boolean(sync.enabled && ha.enabled),
     nodeRole: isMaster ? 'master' : 'backup',
     mode: sync.mode,
     databases: sync.databases,
@@ -287,7 +299,7 @@ export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: str
     listenPort: sync.listenPort,
     peerAddress: sync.peerAddress || ha.peerAddress,
     peerPort: sync.peerPort || sync.listenPort,
-    authToken: sync.authToken || ha.vrrpInstances[0]?.authPassword || '',
+    authToken: sync.authToken || ha.vrrpInstances?.[0]?.authPassword || '',
     localAddress: localIp,
     autoPromoteHeadscale: true,
     checkpointOnSync: true,

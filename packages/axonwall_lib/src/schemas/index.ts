@@ -15,7 +15,7 @@ export const InterfaceTypeSchema = z.enum([
 export const InterfaceSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().min(1).max(32), // e.g. "wan", "lan", "opt1"
-  device: z.string().min(1).max(32), // e.g. "eth0", "enp1s0"
+  device: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.:-]+$/, 'Invalid device identifier'), // e.g. "eth0", "enp1s0"
   type: InterfaceTypeSchema.default('static'),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),

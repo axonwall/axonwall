@@ -24,13 +24,13 @@ else
   CURRENT_VERSION=$(cat "${VERSION_FILE}" | tr -d "[:space:]")
 fi
 
-TARGET_ARG="${1:-patch}"
+TARGET_ARG="patch"
 PUSH_FLAG=false
 
 for arg in "$@"; do
   if [ "$arg" == "--push" ] || [ "$arg" == "-p" ]; then
     PUSH_FLAG=true
-  elif [ "$arg" != "patch" ] && [ "$arg" != "minor" ] && [ "$arg" != "major" ]; then
+  else
     TARGET_ARG="$arg"
   fi
 done
@@ -58,7 +58,7 @@ case "${TARGET_ARG}" in
     if [[ "${TARGET_ARG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
       NEW_VERSION="${TARGET_ARG}"
     else
-      echo "Error: Unknown argument "${TARGET_ARG}"."
+      echo "Error: Unknown argument \"${TARGET_ARG}\"."
       echo "Usage: $0 [patch|minor|major|<version>] [--push]"
       exit 1
     fi
@@ -130,7 +130,7 @@ fi
 
 UPDATES_PAGE="apps/axonwall/src/app/(console)/system/updates/page.tsx"
 if [ -f "${UPDATES_PAGE}" ]; then
-  sed -i -E "s/version: '[0-9]+\.[0-9]+\.[0-9]+'/version: '${NEW_VERSION}'/g" "${UPDATES_PAGE}"
+  sed -i -E "s/version: '[0-9]+\.[0-9]+\.[0-9]+( \(Standby\))?'/version: '${NEW_VERSION}\1'/g" "${UPDATES_PAGE}"
   sed -i -E "s/v[0-9]+\.[0-9]+\.[0-9]+/v${NEW_VERSION}/g" "${UPDATES_PAGE}"
 fi
 

@@ -20,7 +20,7 @@ export function compileCrowdSec(config?: CrowdSecConfig): CompiledCrowdSec {
   }
 
   const setName = config.remediationSetName || 'set_crowdsec_blacklists';
-  const action = config.action || 'drop';
+  const verdict = config.action === 'reject' ? 'reject' : 'drop';
 
   const bouncerYaml = `# Axonwall CrowdSec Firewall Bouncer Configuration
 mode: nftables
@@ -42,20 +42,20 @@ disable_ipv6: false
 nftables:
   ipv4:
     enabled: true
-    set-only: false
+    set-only: true
     table: axonwall
     chain: input
     family: inet
     set: ${setName}
-    rule: "ip saddr @${setName} ${action}"
+    rule: "ip saddr @${setName} ${verdict}"
   ipv6:
     enabled: true
-    set-only: false
+    set-only: true
     table: axonwall
     chain: input
     family: inet
     set: ${setName}_v6
-    rule: "ip6 saddr @${setName}_v6 ${action}"
+    rule: "ip6 saddr @${setName}_v6 ${verdict}"
 `;
 
   const nftSetDefinition = `set ${setName} {
@@ -64,8 +64,8 @@ nftables:
 }`;
 
   const nftRule = config.logBanned
-    ? `ip saddr @${setName} log prefix "axonwall-crowdsec-drop: " drop`
-    : `ip saddr @${setName} drop`;
+    ? `ip saddr @${setName} log prefix "axonwall-crowdsec-${verdict}: " ${verdict}`
+    : `ip saddr @${setName} ${verdict}`;
 
   return {
     bouncerYaml,

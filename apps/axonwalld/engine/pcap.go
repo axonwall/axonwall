@@ -53,6 +53,8 @@ func (m *PacketCaptureManager) GetCaptureDir() string {
 	return m.captureDir
 }
 
+var validIfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+
 // RunCapture captures up to `count` packets matching `filter` on `iface`
 func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, filter string, count int) (*CaptureResult, error) {
 	if count <= 0 || count > 1000 {
@@ -60,6 +62,19 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 	}
 	if iface == "" {
 		iface = "any"
+	}
+	if !validIfaceRegex.MatchString(iface) || strings.Contains(iface, "..") || strings.Contains(iface, "/") || strings.HasPrefix(iface, "-") {
+		return nil, fmt.Errorf("invalid interface name: %s", iface)
+	}
+
+	var filterTokens []string
+	if filter != "" {
+		for _, tok := range strings.Fields(filter) {
+			if strings.HasPrefix(tok, "-") {
+				return nil, fmt.Errorf("invalid filter token starting with '-': %s", tok)
+			}
+			filterTokens = append(filterTokens, tok)
+		}
 	}
 
 	captureID := fmt.Sprintf("pcap-%d-%s", time.Now().Unix(), iface)
@@ -74,9 +89,7 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 	}
 
 	args := []string{"-i", iface, "-c", strconv.Itoa(count), "-nn", "-s", "0", "-w", pcapFile}
-	if filter != "" {
-		// Filter expression passed as trailing arguments
-		filterTokens := strings.Fields(filter)
+	if len(filterTokens) > 0 {
 		args = append(args, filterTokens...)
 	}
 

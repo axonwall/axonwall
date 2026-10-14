@@ -23,7 +23,12 @@ case "$1" in
         chmod 770 /var/lib/axonwall/headscale /run/headscale
 
         chown root:axonwall /etc/axonwall /etc/axonwall/certs
-        chmod 750 /etc/axonwall /etc/axonwall/certs
+        chmod 0770 /etc/axonwall
+        chmod 0750 /etc/axonwall/certs
+        if [ -f /etc/axonwall/admin.env ]; then
+            chown root:axonwall /etc/axonwall/admin.env 2>/dev/null || true
+            chmod 0660 /etc/axonwall/admin.env 2>/dev/null || true
+        fi
 
         # 3. Generate baseline TLS certificates if absent
         if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
@@ -64,8 +69,8 @@ ENV_EOF
         # 5. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service || true
-            systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service || true
+            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service || true
+            systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service || true
         fi
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)

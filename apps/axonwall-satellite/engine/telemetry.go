@@ -3,6 +3,7 @@ package engine
 import (
 	"bufio"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,24 @@ func CollectMetrics() SatelliteMetrics {
 		if len(parts) > 0 {
 			if sec, err := strconv.ParseFloat(parts[0], 64); err == nil {
 				metrics.UptimeSeconds = int64(sec)
+			}
+		}
+	}
+
+	// 1b. Read CPU Usage from /proc/loadavg normalized by CPU count
+	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+		parts := strings.Fields(string(data))
+		if len(parts) > 0 {
+			if load1, err := strconv.ParseFloat(parts[0], 64); err == nil {
+				numCPU := float64(runtime.NumCPU())
+				if numCPU < 1 {
+					numCPU = 1
+				}
+				pct := (load1 / numCPU) * 100.0
+				if pct > 100.0 {
+					pct = 100.0
+				}
+				metrics.CpuUsagePercent = pct
 			}
 		}
 	}
@@ -80,7 +99,7 @@ func CollectMetrics() SatelliteMetrics {
 					rx, _ := strconv.ParseInt(fields[0], 10, 64)
 					tx, _ := strconv.ParseInt(fields[8], 10, 64)
 					// Exclude loopback
-					if !strings.HasPrefix(parts[0], "lo") {
+					if strings.TrimSpace(parts[0]) != "lo" {
 						totalRx += rx
 						totalTx += tx
 					}

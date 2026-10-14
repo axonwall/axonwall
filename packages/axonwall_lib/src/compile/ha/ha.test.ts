@@ -114,5 +114,12 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     };
     const maintSqlite = compileSqliteSyncConfig(maintConfig);
     expect(maintSqlite.nodeRole).toBe('backup');
+
+    const undefinedSyncConfig = {
+      ...baseHaConfig,
+      sqliteSync: undefined as any,
+    };
+    expect(() => compileLitestreamConfig(undefinedSyncConfig)).not.toThrow();
+    expect(compileSqliteSyncConfig(undefinedSyncConfig).enabled).toBe(false);
   });
 });

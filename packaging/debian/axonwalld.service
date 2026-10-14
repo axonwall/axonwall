@@ -36,6 +36,7 @@ ProtectControlGroups=true
 MemoryDenyWriteExecute=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
+ReadWritePaths=-/etc/axonwall -/var/lib/axonwall -/run/axonwall -/boot/grub
 
 [Install]
 WantedBy=multi-user.target

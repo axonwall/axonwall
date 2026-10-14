@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -44,6 +45,10 @@ func (m *TerminalManager) Execute(ctx context.Context, req TerminalExecRequest) 
 
 	start := time.Now()
 	cmd := exec.CommandContext(execCtx, "/bin/bash", "-c", cmdStr)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}

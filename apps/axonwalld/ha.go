@@ -108,6 +108,12 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 
 	slog.Info("Applying High Availability (HA) Configuration", "role", cfg.Role, "vrid", cfg.Vrid)
 
+	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword} {
+		if strings.ContainsAny(field, "\n\r\"'{}") {
+			return fmt.Errorf("invalid characters in HA configuration")
+		}
+	}
+
 	if err := e.generateKeepalived(cfg); err != nil {
 		return fmt.Errorf("keepalived: %w", err)
 	}
@@ -153,6 +159,12 @@ func (e *HAEngine) ApplyFromJSON(content []byte) error {
 }
 
 func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
+	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword} {
+		if strings.ContainsAny(field, "\n\r\"'{}") {
+			return fmt.Errorf("invalid characters in keepalived configuration")
+		}
+	}
+
 	state := "MASTER"
 	priority := 100
 	if cfg.Role == "secondary" || cfg.Role == "backup" {
@@ -207,7 +219,42 @@ vrrp_instance VI_1 {
 	return err
 }
 
+func resolveInterfaceIPv4(ifaceName string) string {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return ""
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+			return ip.To4().String()
+		}
+	}
+	return ""
+}
+
 func (e *HAEngine) generateConntrackd(cfg HAConfig) error {
+	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword} {
+		if strings.ContainsAny(field, "\n\r\"'{}") {
+			return fmt.Errorf("invalid characters in conntrackd configuration")
+		}
+	}
+
+	localIP := resolveInterfaceIPv4(cfg.SyncInterface)
+	if localIP == "" {
+		localIP = cfg.PeerIp
+	}
+
 	conf := fmt.Sprintf(`Sync {
     Mode FTFW {
         DisableExternalCache Off
@@ -248,7 +295,7 @@ General {
         }
     }
 }
-`, cfg.PeerIp, cfg.SyncInterface)
+`, localIP, cfg.SyncInterface)
 
 	if err := os.MkdirAll("/etc/conntrackd", 0755); err != nil {
 		return err
