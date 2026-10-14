@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -100,8 +99,8 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 
 	if !cfg.Enabled {
 		slog.Info("High Availability is disabled. Stopping Keepalived, Conntrackd, and SQLite sync.")
-		_ = exec.Command("systemctl", "stop", "keepalived").Run()
-		_ = exec.Command("systemctl", "stop", "conntrackd").Run()
+		_, _ = stopSystemService("keepalived")
+		_, _ = stopSystemService("conntrackd")
 		e.sqliteSync.Stop()
 		return nil
 	}
@@ -123,11 +122,11 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 	}
 
 	slog.Info("Restarting HA services (Keepalived & Conntrackd)")
-	if out, err := exec.Command("systemctl", "try-reload-or-restart", "keepalived").CombinedOutput(); err != nil {
+	if out, err := reloadOrRestartService("keepalived"); err != nil {
 		slog.Warn("Failed to reload keepalived", "error", err, "output", string(out))
 	}
 
-	if out, err := exec.Command("systemctl", "try-reload-or-restart", "conntrackd").CombinedOutput(); err != nil {
+	if out, err := reloadOrRestartService("conntrackd"); err != nil {
 		slog.Warn("Failed to reload conntrackd", "error", err, "output", string(out))
 	}
 

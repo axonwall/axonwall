@@ -117,7 +117,11 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 
 		if m.cfg.AutoPromoteHeadscale {
 			slog.Info("Promoting local Headscale service to Active Master...")
-			_ = exec.Command("systemctl", "try-reload-or-restart", "headscale").Run()
+			if _, err := exec.LookPath("systemctl"); err == nil {
+				_ = exec.Command("systemctl", "try-reload-or-restart", "headscale").Run()
+			} else if _, err := exec.LookPath("rc-service"); err == nil {
+				_ = exec.Command("rc-service", "--ifexists", "headscale", "restart").Run()
+			}
 		}
 
 		if m.cfg.Mode == "litestream" {
@@ -135,7 +139,11 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 
 		if m.cfg.AutoPromoteHeadscale {
 			slog.Info("Demoting local node to Standby: stopping Headscale to prevent split-brain writes...")
-			_ = exec.Command("systemctl", "stop", "headscale").Run()
+			if _, err := exec.LookPath("systemctl"); err == nil {
+				_ = exec.Command("systemctl", "stop", "headscale").Run()
+			} else if _, err := exec.LookPath("rc-service"); err == nil {
+				_ = exec.Command("rc-service", "--ifexists", "headscale", "stop").Run()
+			}
 		}
 
 		if m.cfg.Mode != "litestream" {

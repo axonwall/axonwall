@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+name="axonwall-controller"
+description="Axonwall Changeset & Policy Compiler Controller"
+supervisor="supervise-daemon"
+command="/usr/bin/node"
+command_args="/opt/axonwall/apps/axonwall-controller/dist/index.js"
+command_user="axonwall:axonwall"
+directory="/opt/axonwall/apps/axonwall-controller"
+pidfile="/run/axonwall-controller.pid"
+output_log="/var/log/axonwall/axonwall-controller.log"
+error_log="/var/log/axonwall/axonwall-controller.log"
+respawn_delay=5
+respawn_max=0
+
+depend() {
+    need axonwalld
+    after axonwall-firstboot
+}
+
+start_pre() {
+    checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
+    if [ -f /etc/axonwall/axonwall.env ]; then
+        set -a
+        . /etc/axonwall/axonwall.env
+        set +a
+    fi
+    export NODE_ENV=production
+}

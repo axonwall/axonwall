@@ -1,0 +1,36 @@
+#!/sbin/openrc-run
+
+name="axonwall-ui"
+description="Axonwall Web Console & API Server"
+supervisor="supervise-daemon"
+command="/usr/bin/node"
+command_args="/opt/axonwall/apps/axonwall/server.js"
+command_user="axonwall:axonwall"
+directory="/opt/axonwall/apps/axonwall"
+pidfile="/run/axonwall-ui.pid"
+output_log="/var/log/axonwall/axonwall-ui.log"
+error_log="/var/log/axonwall/axonwall-ui.log"
+respawn_delay=5
+respawn_max=0
+
+depend() {
+    need axonwalld
+    after axonwall-firstboot axonwall-controller
+}
+
+start_pre() {
+    checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
+    if [ -f /etc/axonwall/axonwall.env ]; then
+        set -a
+        . /etc/axonwall/axonwall.env
+        set +a
+    fi
+    if [ -f /etc/axonwall/admin.env ]; then
+        set -a
+        . /etc/axonwall/admin.env
+        set +a
+    fi
+    export NODE_ENV=production
+    export PORT=3000
+    export HOSTNAME=127.0.0.1
+}

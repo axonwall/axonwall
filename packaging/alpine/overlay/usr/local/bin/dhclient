@@ -1,0 +1,43 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall Alpine Linux udhcpc <-> dhclient Compatibility Shim
+# ==============================================================================
+
+RELEASE=0
+IFACE=""
+
+for arg in "$@"; do
+  case "$arg" in
+    -r)
+      RELEASE=1
+      ;;
+    -*)
+      ;;
+    *)
+      IFACE="$arg"
+      ;;
+  esac
+done
+
+if [ -z "$IFACE" ]; then
+  exit 1
+fi
+
+PIDFILE="/var/run/udhcpc.${IFACE}.pid"
+
+if [ "$RELEASE" -eq 1 ]; then
+  if [ -f "$PIDFILE" ]; then
+    kill -USR2 "$(cat "$PIDFILE")" 2>/dev/null || true
+    kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    rm -f "$PIDFILE"
+  fi
+  ip -4 addr flush dev "$IFACE" 2>/dev/null || true
+  exit 0
+fi
+
+if [ -f "$PIDFILE" ]; then
+  kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  rm -f "$PIDFILE"
+fi
+
+exec /sbin/udhcpc -b -i "$IFACE" -p "$PIDFILE" >/dev/null 2>&1

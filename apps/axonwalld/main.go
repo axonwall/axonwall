@@ -184,7 +184,7 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			continue
 		}
 		log.Printf("[Agent] Reloading system service: %s", svc)
-		_ = exec.Command("systemctl", "try-reload-or-restart", svc).Run()
+		_, _ = reloadOrRestartService(svc)
 	}
 
 	// 6. Setup Commit-Confirm deadline

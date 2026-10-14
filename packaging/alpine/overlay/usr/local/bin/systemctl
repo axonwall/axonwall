@@ -1,0 +1,142 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall Alpine Linux OpenRC <-> systemctl Compatibility Shim
+# ==============================================================================
+
+ACTION=""
+UNITS=""
+PROP_FILTER=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-block|--no-pager|-q|--quiet|--system)
+      ;;
+    --property=*)
+      PROP_FILTER="${arg#--property=}"
+      ;;
+    start|stop|restart|try-restart|try-reload-or-restart|reload|status|enable|disable|daemon-reload|reboot|poweroff|show|is-active)
+      if [ -z "$ACTION" ]; then
+        ACTION="$arg"
+      else
+        UNITS="$UNITS $arg"
+      fi
+      ;;
+    -*)
+      ;;
+    *)
+      UNITS="$UNITS $arg"
+      ;;
+  esac
+done
+
+normalize_svc() {
+  svc="${1%.service}"
+  if [ "$svc" = "kea-dhcp4-server" ] && [ -x /etc/init.d/kea-dhcp4 ]; then
+    echo "kea-dhcp4"
+  else
+    echo "$svc"
+  fi
+}
+
+case "$ACTION" in
+  daemon-reload)
+    exit 0
+    ;;
+  reboot)
+    exec /sbin/reboot
+    ;;
+  poweroff)
+    exec /sbin/poweroff
+    ;;
+  enable)
+    for u in $UNITS; do
+      s="$(normalize_svc "$u")"
+      [ -x "/etc/init.d/$s" ] && rc-update add "$s" default >/dev/null 2>&1 || true
+    done
+    exit 0
+    ;;
+  disable)
+    for u in $UNITS; do
+      s="$(normalize_svc "$u")"
+      rc-update del "$s" default >/dev/null 2>&1 || true
+    done
+    exit 0
+    ;;
+  start|stop|restart|reload|status)
+    rc=0
+    for u in $UNITS; do
+      s="$(normalize_svc "$u")"
+      if [ -x "/etc/init.d/$s" ]; then
+        rc-service "$s" "$ACTION" || rc=$?
+      else
+        rc=1
+      fi
+    done
+    exit $rc
+    ;;
+  try-restart|try-reload-or-restart)
+    rc=0
+    for u in $UNITS; do
+      s="$(normalize_svc "$u")"
+      if [ -x "/etc/init.d/$s" ]; then
+        rc-service "$s" restart || rc=$?
+      fi
+    done
+    exit $rc
+    ;;
+  is-active)
+    for u in $UNITS; do
+      s="$(normalize_svc "$u")"
+      if [ -e "/run/openrc/started/$s" ]; then
+        echo "active"
+        exit 0
+      else
+        echo "inactive"
+        exit 3
+      fi
+    done
+    ;;
+  show)
+    for u in $UNITS; do
+      s="$(normalize_svc "$u")"
+      if [ ! -x "/etc/init.d/$s" ]; then
+        exit 1
+      fi
+      ACTIVE="inactive"
+      SUB="dead"
+      PID="0"
+      MEM="0"
+      if [ -e "/run/openrc/started/$s" ]; then
+        ACTIVE="active"
+        SUB="running"
+      elif [ -e "/run/openrc/failed/$s" ]; then
+        ACTIVE="failed"
+        SUB="failed"
+      fi
+      for pf in "/run/${s}.pid" "/run/${s}/${s}.pid" "/var/run/${s}.pid"; do
+        if [ -f "$pf" ]; then
+          PID="$(cat "$pf" 2>/dev/null | tr -d '[:space:]')"
+          break
+        fi
+      done
+      if [ -z "$PID" ] || [ "$PID" = "0" ]; then
+        PID="$(pgrep -f "$s" 2>/dev/null | head -n 1)"
+        [ -z "$PID" ] && PID="0"
+      fi
+      if [ "$PID" != "0" ] && [ -f "/proc/$PID/status" ]; then
+        RSS_KB="$(awk '/VmRSS:/ {print $2}' "/proc/$PID/status" 2>/dev/null)"
+        if [ -n "$RSS_KB" ]; then
+          MEM=$((RSS_KB * 1024))
+        fi
+      fi
+      echo "ActiveState=$ACTIVE"
+      echo "SubState=$SUB"
+      echo "MainPID=$PID"
+      echo "MemoryCurrent=$MEM"
+    done
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

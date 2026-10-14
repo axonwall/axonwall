@@ -20,6 +20,7 @@ dist/
 /bin/
 apps/*/bin/
 !packaging/iso/config/includes.chroot/**/bin/
+!packaging/alpine/overlay/**/bin/
 *.tsbuildinfo
 next-env.d.ts
 
@@ -44,6 +45,8 @@ package.json.tmp
 # ISO build artifacts
 packaging/iso/output/
 packaging/iso/build/
+packaging/alpine/output/
+packaging/alpine/build/
 *.iso
 *.iso.sha256
 

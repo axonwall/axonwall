@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Axonwall Alpine Linux Appliance ISO Builder
+# Supports:
+#   --profile virt   Ultra-compact Virtual/Cloud Appliance (~135 MB)
+#   --profile lts    Bare-Metal & Hardware Appliance with NIC firmware (~165 MB)
+#   --minimal        Exclude heavy IDS/routing packages (Suricata/FRR) (~95 MB)
+# ==============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROFILE="virt"
+MINIMAL=0
+IN_CONTAINER=0
+
+ARGS=("$@")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      PROFILE="${2:-virt}"
+      shift 2
+      ;;
+    --minimal)
+      MINIMAL=1
+      shift
+      ;;
+    --in-container)
+      IN_CONTAINER=1
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+# If not running inside Alpine Linux, automatically delegate to alpine:3.21 Docker container
+if [[ "$IN_CONTAINER" -eq 0 ]] && [[ ! -f /etc/alpine-release ]]; then
+  echo "[+] Host is not Alpine Linux. Launching isolated alpine:3.21 build container..."
+  exec docker run --rm \
+    -v "${REPO_ROOT}:/repo" \
+    -w /repo \
+    alpine:3.21 \
+    /bin/sh -c "apk add --no-cache bash >/dev/null && exec /bin/bash /repo/packaging/alpine/build-alpine-iso.sh --in-container ${ARGS[*]}"
+fi
+
+ALPINE_BRANCH="v3.21"
+ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}"
+WORK_DIR="/tmp/axonwall-alpine-build"
+OUTPUT_DIR="${REPO_ROOT}/packaging/alpine/output"
+if [[ "$MINIMAL" -eq 1 ]]; then
+  ISO_NAME="axonwall-alpine-${PROFILE}-minimal-amd64.iso"
+else
+  ISO_NAME="axonwall-alpine-${PROFILE}-amd64.iso"
+fi
+
+echo "=== Axonwall Alpine Linux ISO Builder (Profile: ${PROFILE}, Minimal: ${MINIMAL}) ==="
+
+# 1. Install ISO build tools inside Alpine
+apk update
+apk add --no-cache \
+  xorriso \
+  syslinux \
+  grub \
+  grub-bios \
+  grub-efi \
+  mtools \
+  dosfstools \
+  squashfs-tools \
+  curl \
+  tar \
+  gzip \
+  xz \
+  openssl \
+  ca-certificates
+
+rm -rf "${WORK_DIR}"
+mkdir -p "${WORK_DIR}/iso/boot/grub" \
+         "${WORK_DIR}/iso/boot/syslinux" \
+         "${WORK_DIR}/iso/apks/x86_64" \
+         "${WORK_DIR}/ovl" \
+         "${OUTPUT_DIR}"
+
+# 2. Fetch official Alpine base ISO for kernel, initramfs, modloop, and EFI boot image
+echo "[+] Fetching Alpine ${ALPINE_BRANCH} (${PROFILE}) kernel, initramfs & modloop..."
+RELEASE_YAML="$(curl -fsSL "${ALPINE_MIRROR}/releases/x86_64/latest-releases.yaml")"
+ISO_FILE="$(echo "$RELEASE_YAML" | awk -v flv="alpine-${PROFILE}-" '$1 == "file:" && $2 ~ flv && $2 ~ "-x86_64.iso" {print $2; exit}')"
+if [[ -z "$ISO_FILE" ]]; then
+  ISO_FILE="alpine-${PROFILE}-3.21.3-x86_64.iso"
+fi
+
+curl -fsSL -o "${WORK_DIR}/base.iso" "${ALPINE_MIRROR}/releases/x86_64/${ISO_FILE}"
+xorriso -osirrox on -indev "${WORK_DIR}/base.iso" -extract / "${WORK_DIR}/iso" 2>/dev/null
+chmod -R u+w "${WORK_DIR}/iso"
+rm -f "${WORK_DIR}/base.iso"
+
+# 3. Populate offline APK repository with Axonwall runtime & networking packages
+CORE_PKGS=(
+  alpine-base
+  openrc
+  busybox
+  busybox-openrc
+  busybox-mdev-openrc
+  kmod
+  nftables
+  iproute2
+  wireguard-tools
+  keepalived
+  conntrack-tools
+  ethtool
+  tcpdump
+  unbound
+  kea-dhcp4
+  nodejs
+  sqlite
+  curl
+  jq
+  openssl
+  ca-certificates
+  parted
+  e2fsprogs
+  dosfstools
+  grub
+  grub-bios
+  grub-efi
+)
+
+if [[ "$MINIMAL" -eq 0 ]]; then
+  CORE_PKGS+=(
+    frr
+    strongswan
+    openvpn
+    suricata
+  )
+fi
+
+if [[ "$PROFILE" == "lts" ]]; then
+  CORE_PKGS+=(
+    linux-firmware-intel
+    linux-firmware-rtl_nic
+    linux-firmware-bnx2
+    linux-firmware-bnx2x
+  )
+fi
+
+echo "[+] Resolving and caching ${#CORE_PKGS[@]} packages and transitive dependencies into /apks/x86_64..."
+apk fetch --recursive --output "${WORK_DIR}/iso/apks/x86_64" "${CORE_PKGS[@]}"
+apk index \
+  --output "${WORK_DIR}/iso/apks/x86_64/APKINDEX.tar.gz" \
+  --rewrite-arch x86_64 \
+  "${WORK_DIR}/iso/apks/x86_64/"*.apk
+
+# Copy official Alpine signing public keys so initramfs verifies APKINDEX offline without warnings
+mkdir -p "${WORK_DIR}/ovl/etc/apk/keys"
+cp -a /etc/apk/keys/* "${WORK_DIR}/ovl/etc/apk/keys/"
+
+# 4. Construct Axonwall APKOVL (Appliance Overlay)
+echo "[+] Building axonwall.apkovl.tar.gz overlay..."
+OVL="${WORK_DIR}/ovl"
+
+mkdir -p \
+  "${OVL}/etc/axonwall" \
+  "${OVL}/etc/headscale" \
+  "${OVL}/etc/init.d" \
+  "${OVL}/etc/runlevels/sysinit" \
+  "${OVL}/etc/runlevels/boot" \
+  "${OVL}/etc/runlevels/default" \
+  "${OVL}/etc/runlevels/shutdown" \
+  "${OVL}/etc/sysctl.d" \
+  "${OVL}/usr/local/bin" \
+  "${OVL}/usr/sbin" \
+  "${OVL}/usr/share/axonwall/satellites" \
+  "${OVL}/opt/axonwall/apps/axonwall" \
+  "${OVL}/opt/axonwall/apps/axonwall-controller/dist" \
+  "${OVL}/var/lib/axonwall" \
+  "${OVL}/var/log/axonwall"
+
+# Write /etc/hostname & /etc/apk/world
+echo "axonwall" > "${OVL}/etc/hostname"
+touch "${OVL}/etc/axonwall/.firstboot"
+
+printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
+
+# Copy Alpine overlay files (OpenRC scripts, inittab, shims, installer)
+cp -a "${SCRIPT_DIR}/overlay/"* "${OVL}/"
+chmod +x "${OVL}/etc/init.d/"* "${OVL}/usr/local/bin/"*
+
+# Copy shared scripts and configs from Debian/ISO packaging
+cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/99-axonwall.conf" "${OVL}/etc/sysctl.d/"
+cp "${REPO_ROOT}/packaging/debian/headscale-config.yaml" "${OVL}/etc/headscale/config.yaml"
+cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
+cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-ha-notify" "${OVL}/usr/local/bin/"
+cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-import" "${OVL}/usr/local/bin/"
+cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update" "${OVL}/usr/local/bin/"
+chmod +x "${OVL}/usr/local/bin/axonwall-"*
+
+# Version stamp
+VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.2.2")"
+echo "${VERSION}" > "${OVL}/etc/axonwall/version"
+
+# Copy compiled Go daemons (axonwalld, axonwall-console, axonwall-satellite)
+if [[ -f "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" ]]; then
+  cp "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" "${OVL}/usr/sbin/axonwalld"
+  strip "${OVL}/usr/sbin/axonwalld" 2>/dev/null || true
+  chmod +x "${OVL}/usr/sbin/axonwalld"
+fi
+
+if [[ -f "${REPO_ROOT}/apps/axonwall-console/bin/axonwall-console" ]]; then
+  cp "${REPO_ROOT}/apps/axonwall-console/bin/axonwall-console" "${OVL}/usr/sbin/axonwall-console"
+  strip "${OVL}/usr/sbin/axonwall-console" 2>/dev/null || true
+  chmod +x "${OVL}/usr/sbin/axonwall-console"
+fi
+
+if [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
+  cp "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" "${OVL}/usr/sbin/axonwall-satellite"
+  strip "${OVL}/usr/sbin/axonwall-satellite" 2>/dev/null || true
+  chmod +x "${OVL}/usr/sbin/axonwall-satellite"
+  ln -sf /usr/sbin/axonwall-satellite "${OVL}/usr/share/axonwall/satellites/axonwall-satellite-amd64"
+fi
+
+# Copy Next.js standalone UI & Controller
+if [[ -d "${REPO_ROOT}/apps/axonwall/.next/standalone" ]]; then
+  cp -a "${REPO_ROOT}/apps/axonwall/.next/standalone/"* "${OVL}/opt/axonwall/"
+  # Strip build-only dependencies and unused glibc native binaries from standalone bundle
+  rm -rf \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"@img+sharp* \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"sharp* \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"typescript* \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"caniuse-lite* \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"postcss* \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/@vercel/og \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/webpack \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/babel* \
+    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/next-devtools \
+    2>/dev/null || true
+  find "${OVL}/opt/axonwall" \( -name "*.map" -o -name "*.d.ts" \) -delete 2>/dev/null || true
+  mkdir -p "${OVL}/opt/axonwall/apps/axonwall/.next" "${OVL}/opt/axonwall/.next"
+  if [[ -d "${REPO_ROOT}/apps/axonwall/.next/static" ]]; then
+    cp -a "${REPO_ROOT}/apps/axonwall/.next/static" "${OVL}/opt/axonwall/apps/axonwall/.next/"
+  fi
+  if [[ -d "${REPO_ROOT}/apps/axonwall/public" ]]; then
+    cp -a "${REPO_ROOT}/apps/axonwall/public" "${OVL}/opt/axonwall/apps/axonwall/"
+  fi
+fi
+
+if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" ]]; then
+  cp "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
+  cp "${REPO_ROOT}/apps/axonwall-controller/package.json" "${OVL}/opt/axonwall/apps/axonwall-controller/"
+fi
+
+# Configure OpenRC runlevel symlinks
+for svc in devfs dmesg mdev hwdrivers; do
+  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
+done
+for svc in modules sysctl hostname bootmisc syslog networking; do
+  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
+done
+for svc in axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
+done
+for svc in mount-ro killprocs savecache; do
+  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/shutdown/${svc}"
+done
+
+# Pack axonwall.apkovl.tar.gz into ISO root with maximum compression
+(cd "${OVL}" && tar -cf - . | gzip -9 > "${WORK_DIR}/iso/axonwall.apkovl.tar.gz")
+
+# 5. Update bootloader configs (SYSLINUX & GRUB EFI) with serial + console support
+if [[ -f "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" ]]; then
+  sed -i 's/TIMEOUT 20/TIMEOUT 10/' "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" 2>/dev/null || true
+fi
+if [[ -f "${WORK_DIR}/iso/boot/grub/grub.cfg" ]]; then
+  sed -i 's/timeout=2/timeout=1/' "${WORK_DIR}/iso/boot/grub/grub.cfg" 2>/dev/null || true
+fi
+
+# 6. Assemble bootable BIOS + UEFI Hybrid ISO
+echo "[+] Generating hybrid BIOS/UEFI ISO image: ${ISO_NAME}..."
+MBR_BIN="/usr/share/syslinux/isohdpfx.bin"
+XORRISO_ARGS=(
+  -as mkisofs
+  -o "${OUTPUT_DIR}/${ISO_NAME}"
+  -V "AXONWALL_ALPINE"
+  -A "Axonwall Alpine Firewall & Router Appliance"
+  -p "Axonwall Core Team"
+  -J -R -l
+)
+
+if [[ -f "${MBR_BIN}" ]]; then
+  XORRISO_ARGS+=(-isohybrid-mbr "${MBR_BIN}")
+fi
+
+if [[ -f "${WORK_DIR}/iso/boot/syslinux/isolinux.bin" ]]; then
+  XORRISO_ARGS+=(
+    -b boot/syslinux/isolinux.bin
+    -c boot/syslinux/boot.cat
+    -no-emul-boot
+    -boot-load-size 4
+    -boot-info-table
+  )
+fi
+
+if [[ -f "${WORK_DIR}/iso/boot/grub/efi.img" ]]; then
+  XORRISO_ARGS+=(
+    -eltorito-alt-boot
+    -e boot/grub/efi.img
+    -no-emul-boot
+    -isohybrid-gpt-basdat
+  )
+fi
+
+XORRISO_ARGS+=("${WORK_DIR}/iso")
+
+xorriso "${XORRISO_ARGS[@]}"
+
+(cd "${OUTPUT_DIR}" && sha256sum "${ISO_NAME}" > "${ISO_NAME}.sha256")
+ISO_SIZE="$(du -sh "${OUTPUT_DIR}/${ISO_NAME}" | awk '{print $1}')"
+
+echo "================================================================================"
+echo "[✓] Successfully built Axonwall Alpine Appliance ISO!"
+echo "    Path : ${OUTPUT_DIR}/${ISO_NAME}"
+echo "    Size : ${ISO_SIZE}"
+echo "    SHA256: $(cat "${OUTPUT_DIR}/${ISO_NAME}.sha256")"
+echo "================================================================================"

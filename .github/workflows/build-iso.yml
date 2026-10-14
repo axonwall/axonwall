@@ -1,4 +1,4 @@
-name: Build Axonwall Appliance ISO
+name: Build Axonwall Packages
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-iso:
-    name: Build Debian 13 Appliance ISO
+  build-packages:
+    name: Build Debian Packages
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -66,74 +66,11 @@ jobs:
             packaging/debian/output/*.deb.sha256
           retention-days: 7
 
-      - name: Install ISO Build Dependencies
-        run: |
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo mkdir -p /var/lib/apt/lists/partial
-          
-          # Retry update up to 5 times with exponential backoff
-          for attempt in {1..5}; do
-            echo "Update attempt $attempt..."
-            if sudo apt-get update -y; then
-              echo "Update successful"
-              break
-            fi
-            if [ $attempt -lt 5 ]; then
-              echo "Update attempt $attempt failed, retrying..."
-              sudo rm -rf /var/lib/apt/lists/*
-              sudo mkdir -p /var/lib/apt/lists/partial
-              sleep $((attempt * 15))
-            else
-              echo "All update attempts failed"
-              exit 1
-            fi
-          done
-          
-          # Install basic dependencies first
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            -o APT::Immediate-Configure=false \
-            -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
-            debootstrap \
-            debian-archive-keyring \
-            xorriso \
-            isolinux \
-            syslinux-efi \
-            syslinux-common \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            dosfstools \
-            mtools || sudo apt-get install -fy --fix-broken
-            
-          # Download and install live-build directly
-          curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
-          sudo dpkg -i /tmp/live-build.deb
-          rm -f /tmp/live-build.deb
-
-      - name: Build Hybrid Appliance ISO
-        run: |
-          sudo ./packaging/iso/build-iso.sh
-
-      - name: Compute Checksums
-        run: |
-          sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
-          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output
-
-      - name: Upload ISO Checksum Artifact
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: axonwall-debian13-amd64-checksum
-          path: packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-          retention-days: 1
-
       - name: Release Distribution Artifacts (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            packaging/iso/output/axonwall-debian13-amd64.iso
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
 
@@ -142,17 +79,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: rolling-latest
-          name: "Axonwall Appliance ISO & Debian Packages (Rolling Latest)"
+          name: "Axonwall Debian Packages (Rolling Latest)"
           body: |
             ### Automated Continuous Build
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
             - **Distribution**: Debian 13 (Trixie) amd64
-            - **Artifacts**: Bare-metal Hybrid ISO Installer + Standalone Debian (.deb) Package
+            - **Artifacts**: Standalone Debian (.deb) Package
             - **Components**: Axonwalld Core Daemon + Axonwall Web UI + Satellite Agents + Preconfigured Network Engine
           prerelease: true
           files: |
-            packaging/iso/output/axonwall-debian13-amd64.iso
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
+

@@ -1,0 +1,151 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall Alpine Linux Firstboot Provisioner
+# ==============================================================================
+set -eu
+
+MARKER="/etc/axonwall/.firstboot"
+
+if [ ! -f "$MARKER" ]; then
+  exit 0
+fi
+
+echo "[Axonwall Firstboot] Initializing Alpine Linux network appliance..."
+
+# 1. Load kernel modules and apply sysctl performance tuning
+modprobe nf_conntrack 2>/dev/null || true
+modprobe nf_tables 2>/dev/null || true
+modprobe nft_chain_nat 2>/dev/null || true
+modprobe nft_MASQUERADE 2>/dev/null || true
+modprobe wireguard 2>/dev/null || true
+modprobe tcp_bbr 2>/dev/null || true
+sysctl -p /etc/sysctl.d/99-axonwall.conf 2>/dev/null || true
+
+# 2. Identify Primary WAN, LAN, OPT1 & OPT2 NICs
+IFACES="$(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | grep -v '^wg' | grep -v '^ tailscale' | head -n 4 || true)"
+WAN_IF="$(echo "$IFACES" | sed -n '1p')"
+LAN_IF="$(echo "$IFACES" | sed -n '2p')"
+OPT1_IF="$(echo "$IFACES" | sed -n '3p')"
+OPT2_IF="$(echo "$IFACES" | sed -n '4p')"
+[ -z "$WAN_IF" ] && WAN_IF="eth0"
+
+echo "[Axonwall Firstboot] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF:-<none>}, OPT1: ${OPT1_IF:-<none>}, OPT2: ${OPT2_IF:-<none>}"
+
+mkdir -p /etc/axonwall /var/lib/axonwall /var/log/axonwall /run/axonwall /run/headscale
+cat << CONF_EOF > /etc/axonwall/interfaces.conf
+WAN_INTERFACE=${WAN_IF}
+LAN_INTERFACE=${LAN_IF}
+OPT1_INTERFACE=${OPT1_IF}
+OPT2_INTERFACE=${OPT2_IF}
+CONF_EOF
+
+# Bring up WAN with DHCP
+if ip link show "$WAN_IF" >/dev/null 2>&1; then
+  ip link set up dev "$WAN_IF" 2>/dev/null || true
+  /sbin/udhcpc -b -i "$WAN_IF" -p "/var/run/udhcpc.${WAN_IF}.pid" >/dev/null 2>&1 || true
+fi
+
+# 3. Configure default LAN static IP (192.168.1.1/24) on second NIC
+if [ -n "$LAN_IF" ] && ip link show "$LAN_IF" >/dev/null 2>&1; then
+  ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
+  ip link set up dev "$LAN_IF" 2>/dev/null || true
+fi
+
+if [ -n "$OPT1_IF" ] && ip link show "$OPT1_IF" >/dev/null 2>&1; then
+  ip link set up dev "$OPT1_IF" 2>/dev/null || true
+fi
+
+if [ -n "$OPT2_IF" ] && ip link show "$OPT2_IF" >/dev/null 2>&1; then
+  ip link set up dev "$OPT2_IF" 2>/dev/null || true
+fi
+
+# 4. Bootstrap baseline lockdown nftables ruleset
+if [ -f /usr/share/axonwall/lockdown.nft ]; then
+  if [ -n "$WAN_IF" ] && [ "$WAN_IF" != "eth0" ] && [ "$WAN_IF" != "wan0" ]; then
+    if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
+      sed -i "s/elements = { \"eth0\", \"wan0\" }/elements = { \"eth0\", \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
+    fi
+  fi
+  nft -f /usr/share/axonwall/lockdown.nft || true
+fi
+
+# 5. Initialize Axonwall System User & Environment
+if ! id -u axonwall >/dev/null 2>&1; then
+  addgroup -S axonwall 2>/dev/null || true
+  adduser -S -D -H -h /var/lib/axonwall -s /sbin/nologin -G axonwall axonwall 2>/dev/null || true
+fi
+
+# Generate per-appliance TLS certificate
+mkdir -p /etc/axonwall/certs
+if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
+  echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
+  HN="$(hostname 2>/dev/null || echo axonwall)"
+  SAN="DNS:${HN},DNS:axonwall.local,DNS:localhost,IP:127.0.0.1,IP:192.168.1.1"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout /etc/axonwall/certs/hub.key \
+    -out /etc/axonwall/certs/hub.crt \
+    -days 3650 \
+    -subj "/O=Axonwall/OU=Appliance/CN=${HN}" \
+    -addext "subjectAltName=${SAN}" >/dev/null 2>&1 || true
+fi
+
+chown root:axonwall /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
+chown root:axonwall /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+chmod 0770 /etc/axonwall 2>/dev/null || true
+chmod 0750 /etc/axonwall/certs 2>/dev/null || true
+chmod 0640 /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+
+mkdir -p /var/lib/axonwall/headscale /run/headscale
+chown -R axonwall:axonwall /var/lib/axonwall /var/log/axonwall /run/headscale /run/axonwall 2>/dev/null || true
+chmod 0770 /var/lib/axonwall/headscale /run/headscale /run/axonwall 2>/dev/null || true
+
+# Generate appliance security tokens
+if [ ! -s /etc/axonwall/axonwall.env ]; then
+  JWT_SECRET="$(openssl rand -hex 32)"
+  ZTP_TOKEN="$(openssl rand -hex 16)"
+  ADMIN_PASS="axonwall"
+  if [ -f /etc/axonwall/admin.env ]; then
+    INSTALL_PASS="$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)"
+    [ -n "$INSTALL_PASS" ] && ADMIN_PASS="$INSTALL_PASS"
+  fi
+
+  cat << ENV_EOF > /etc/axonwall/axonwall.env
+JWT_SECRET=${JWT_SECRET}
+AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
+LOCAL_ADMIN_USER=admin
+LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
+AGENT_SOCKET_PATH=/run/axonwall/agent.sock
+AGENT_API_SOCKET=/run/axonwall/agent-api.sock
+ENV_EOF
+
+  if [ ! -f /etc/axonwall/.password_changed ]; then
+    echo "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
+    chmod 0600 /etc/axonwall/initial-admin-password
+  fi
+fi
+
+chmod 0640 /etc/axonwall/axonwall.env 2>/dev/null || true
+chown root:axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
+chown -R axonwall:axonwall /opt/axonwall 2>/dev/null || true
+
+rm -f "$MARKER"
+
+PRIMARY_IP="192.168.1.1"
+if [ -n "$LAN_IF" ]; then
+  DETECTED_IP="$(ip -4 addr show dev "$LAN_IF" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1 || true)"
+  [ -n "$DETECTED_IP" ] && PRIMARY_IP="$DETECTED_IP"
+fi
+
+cat << ISSUE_EOF > /etc/issue
+================================================================================
+Axonwall Appliance (Alpine Linux Edition)
+Web Console (LAN): https://${PRIMARY_IP}:2966
+WAN Inbound      : Blocked by default (Anti-Lockout enabled on LAN only)
+Appliance Console: Login with administrator credentials
+Install to Disk  : Run 'axonwall-install' from shell or Console TUI
+================================================================================
+\n (\l)
+
+ISSUE_EOF
+
+echo "[Axonwall Firstboot] Provisioning complete."

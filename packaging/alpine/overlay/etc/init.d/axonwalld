@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+
+name="axonwalld"
+description="Axonwall Privileged Firewall & Networking Daemon"
+supervisor="supervise-daemon"
+command="/usr/sbin/axonwalld"
+command_args="--socket /run/axonwall/agent.sock --boot-apply"
+pidfile="/run/axonwalld.pid"
+output_log="/var/log/axonwall/axonwalld.log"
+error_log="/var/log/axonwall/axonwalld.log"
+respawn_delay=3
+respawn_max=0
+
+depend() {
+    need localmount
+    after axonwall-firstboot
+}
+
+start_pre() {
+    checkpath -d -m 0770 -o root:axonwall /run/axonwall
+    checkpath -d -m 0750 -o axonwall:axonwall /var/lib/axonwall
+    checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
+    if [ -f /usr/share/axonwall/lockdown.nft ]; then
+        /usr/sbin/nft -f /usr/share/axonwall/lockdown.nft 2>/dev/null || true
+    fi
+}
