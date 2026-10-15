@@ -121,7 +121,7 @@ func (we *WatchdogEngine) detectInitialState() {
 		kernelVer = strings.TrimSpace(string(buf[:]))
 	}
 
-	appVer := "0.2.8"
+	appVer := "0.2.9"
 	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json"} {
 		if data, err := os.ReadFile(vpath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
