@@ -193,7 +193,7 @@ export default function SystemUpdatesPage() {
     }, 1500);
 
     try {
-      let res: { success: boolean; message: string };
+      let res: { success: boolean; message: string; targetSlot?: 'A' | 'B'; newVersion?: string };
       try {
         const resp = await fetch('/api/system/update', {
           method: 'POST',
@@ -219,6 +219,17 @@ export default function SystemUpdatesPage() {
         setTimeout(() => {
           setIsUpgrading(false);
           setAlertMessage(res.message);
+          setSlots((prev) =>
+            prev.map((s) =>
+              s.slot === standbySlot.slot
+                ? {
+                    ...s,
+                    version: res.newVersion || releaseInfo?.latestVersion || '0.5.0',
+                    lastUpdated: `Updated to v${res.newVersion || releaseInfo?.latestVersion || '0.5.0'} (Pending Reboot)`,
+                  }
+                : s
+            )
+          );
           refreshTelemetryAndRelease().catch(() => {});
         }, 600);
       }, 1200);

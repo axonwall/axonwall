@@ -48,6 +48,7 @@ import {
   Camera,
   Cpu,
   BookOpen,
+  Power,
 } from 'lucide-react';
 
 export interface SubItem {
@@ -88,6 +89,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
       { name: 'Firewall Importer', href: '/system/import', icon: FileText },
       { name: 'Web Shell & Sensors', href: '/system/terminal', icon: Terminal },
+      { name: 'Power & Reboot', href: '/system/power', icon: Power },
     ],
   },
   {

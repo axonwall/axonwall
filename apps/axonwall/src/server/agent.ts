@@ -1461,6 +1461,21 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
     if (countMatch) bootCount = parseInt(countMatch[1], 10);
   } catch {}
 
+  let slotAVersion = activeSlot === 'A' ? currentVersion : '0.5.0';
+  let slotBVersion = activeSlot === 'B' ? currentVersion : '0.5.0';
+  try {
+    for (const svPath of ['/var/lib/axonwall/slot_versions.json', '/etc/axonwall/slot_versions.json']) {
+      if (fs.existsSync(svPath)) {
+        const data = JSON.parse(fs.readFileSync(svPath, 'utf8'));
+        if (data.slotA) slotAVersion = data.slotA;
+        if (data.slotB) slotBVersion = data.slotB;
+        break;
+      }
+    }
+  } catch {}
+  if (activeSlot === 'A') slotAVersion = currentVersion;
+  if (activeSlot === 'B') slotBVersion = currentVersion;
+
   return {
     slots: [
       {
@@ -1468,7 +1483,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
         name: 'Slot A (Primary Rootfs)',
         isActive: activeSlot === 'A',
         isHealthy: true,
-        version: currentVersion,
+        version: slotAVersion,
         kernel,
         device: activeSlot === 'A' ? rootDevice : '/dev/disk/by-label/axon_root_a',
         label: 'axon_root_a',
@@ -1480,7 +1495,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
         name: 'Slot B (Alternate Standby)',
         isActive: activeSlot === 'B',
         isHealthy: true,
-        version: currentVersion,
+        version: slotBVersion,
         kernel,
         device: activeSlot === 'B' ? rootDevice : '/dev/disk/by-label/axon_root_b',
         label: 'axon_root_b',
@@ -1593,6 +1608,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       };
     }
 
+    const currentVersion = getCurrentInstalledVersion();
     const release = await getReleaseInfo();
     const targetVersion = (release.latestVersion || '0.5.0').replace(/[^0-9a-zA-Z._-]/g, '');
 
@@ -1638,10 +1654,45 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       );
     } catch {}
 
-    // Update /etc/axonwall/version if writable
+    // Persist per-slot version metadata
+    try {
+      const svPaths = ['/var/lib/axonwall/slot_versions.json', '/etc/axonwall/slot_versions.json'];
+      let existing: any = {};
+      for (const p of svPaths) {
+        if (fs.existsSync(p)) {
+          try {
+            existing = JSON.parse(fs.readFileSync(p, 'utf8'));
+            break;
+          } catch {}
+        }
+      }
+      if (cleanSlot === 'A') {
+        existing.slotA = targetVersion;
+        if (!existing.slotB) existing.slotB = currentVersion;
+      } else {
+        existing.slotB = targetVersion;
+        if (!existing.slotA) existing.slotA = currentVersion;
+      }
+      existing.updatedAt = new Date().toISOString();
+      const content = JSON.stringify(existing, null, 2);
+      for (const p of svPaths) {
+        try {
+          const dir = p.substring(0, p.lastIndexOf('/'));
+          if (fs.existsSync(dir)) {
+            fs.writeFileSync(p, content, 'utf8');
+          }
+        } catch {}
+      }
+    } catch {}
+
+    // Update /etc/axonwall/version if writing to currently active rootfs
     try {
       if (fs.existsSync('/etc/axonwall')) {
-        fs.writeFileSync('/etc/axonwall/version', targetVersion + '\n', 'utf8');
+        const cmdline = fs.existsSync('/proc/cmdline') ? fs.readFileSync('/proc/cmdline', 'utf8') : '';
+        const currentSlot = cmdline.includes('axon_root_b') || cmdline.includes('slot=B') ? 'B' : 'A';
+        if (cleanSlot === currentSlot) {
+          fs.writeFileSync('/etc/axonwall/version', targetVersion + '\n', 'utf8');
+        }
       }
     } catch {}
 
@@ -1659,6 +1710,111 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       message: err?.message || 'An unexpected error occurred while applying the firmware update.',
       targetSlot: cleanSlot,
       newVersion: getCurrentInstalledVersion(),
+    };
+  }
+}
+
+export interface PowerActionResult {
+  success: boolean;
+  message: string;
+  action: 'reboot' | 'poweroff';
+  slot?: 'A' | 'B';
+}
+
+export async function rebootSystemAction(slot?: 'A' | 'B'): Promise<PowerActionResult> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return {
+      success: false,
+      message: 'Unauthorized: Administrator privileges required to reboot system',
+      action: 'reboot',
+    };
+  }
+
+  const cleanSlot = slot === 'A' || slot === 'B' ? slot : undefined;
+
+  // 1. Try privileged daemon API
+  const daemonResp = await callAgentApi<any>('/v1/system/power', 'POST', {
+    action: 'reboot',
+    slot: cleanSlot,
+  });
+  if (daemonResp && daemonResp.success) {
+    return {
+      success: true,
+      message: daemonResp.message || `System reboot initiated${cleanSlot ? ` into Slot ${cleanSlot}` : ''}.`,
+      action: 'reboot',
+      slot: cleanSlot,
+    };
+  }
+
+  // 2. Direct fallback
+  if (cleanSlot) {
+    try {
+      await activatePartitionSlot(cleanSlot);
+    } catch {}
+  }
+
+  try {
+    setTimeout(() => {
+      try {
+        execSync('systemctl reboot || reboot', { stdio: 'ignore' });
+      } catch {}
+    }, 500);
+    return {
+      success: true,
+      message: `System reboot initiated${cleanSlot ? ` into Slot ${cleanSlot}` : ''}. Cleanly unmounting storage...`,
+      action: 'reboot',
+      slot: cleanSlot,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'Failed to execute system reboot',
+      action: 'reboot',
+      slot: cleanSlot,
+    };
+  }
+}
+
+export async function poweroffSystemAction(): Promise<PowerActionResult> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return {
+      success: false,
+      message: 'Unauthorized: Administrator privileges required to power off system',
+      action: 'poweroff',
+    };
+  }
+
+  // 1. Try privileged daemon API
+  const daemonResp = await callAgentApi<any>('/v1/system/power', 'POST', {
+    action: 'poweroff',
+  });
+  if (daemonResp && daemonResp.success) {
+    return {
+      success: true,
+      message: daemonResp.message || 'System power off initiated.',
+      action: 'poweroff',
+    };
+  }
+
+  // 2. Direct fallback
+  try {
+    setTimeout(() => {
+      try {
+        execSync('systemctl poweroff || poweroff', { stdio: 'ignore' });
+      } catch {}
+    }, 500);
+    return {
+      success: true,
+      message: 'System power off sequence initiated. Cleanly halting system...',
+      action: 'poweroff',
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'Failed to execute system poweroff',
+      action: 'poweroff',
     };
   }
 }

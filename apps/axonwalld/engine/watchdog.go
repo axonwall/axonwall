@@ -3,6 +3,7 @@ package engine
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -47,13 +48,20 @@ type PartitionStatus struct {
 	Checks           []HealthCheckResult `json:"checks"`
 }
 
+type PersistedSlotVersions struct {
+	SlotA     string `json:"slotA"`
+	SlotB     string `json:"slotB"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
 // WatchdogEngine manages A/B partition verification, GRUB boot-counting, and automated recovery.
 type WatchdogEngine struct {
-	mu          sync.RWMutex
-	grubenvPath string
-	cmdlinePath string
-	status      PartitionStatus
-	stopChan    chan struct{}
+	mu               sync.RWMutex
+	grubenvPath      string
+	cmdlinePath      string
+	slotVersionsPath string
+	status           PartitionStatus
+	stopChan         chan struct{}
 }
 
 // NewWatchdogEngine initializes the A/B system watchdog engine with default paths.
@@ -63,13 +71,59 @@ func NewWatchdogEngine() *WatchdogEngine {
 
 // NewWatchdogEngineCustom allows injecting custom paths for unit tests and container environments.
 func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEngine {
+	slotVersionsPath := filepath.Join(filepath.Dir(grubenvPath), "slot_versions.json")
+	if grubenvPath == "/boot/grub/grubenv" {
+		slotVersionsPath = "/var/lib/axonwall/slot_versions.json"
+	}
 	we := &WatchdogEngine{
-		grubenvPath: grubenvPath,
-		cmdlinePath: cmdlinePath,
-		stopChan:    make(chan struct{}),
+		grubenvPath:      grubenvPath,
+		cmdlinePath:      cmdlinePath,
+		slotVersionsPath: slotVersionsPath,
+		stopChan:         make(chan struct{}),
 	}
 	we.detectInitialState()
 	return we
+}
+
+func (we *WatchdogEngine) getSlotVersionsPath() string {
+	if we.slotVersionsPath != "" {
+		return we.slotVersionsPath
+	}
+	return "/var/lib/axonwall/slot_versions.json"
+}
+
+func (we *WatchdogEngine) loadSlotVersions() (string, string) {
+	primaryPath := we.getSlotVersionsPath()
+	for _, p := range []string{primaryPath, "/etc/axonwall/slot_versions.json"} {
+		if data, err := os.ReadFile(p); err == nil {
+			var psv PersistedSlotVersions
+			if err := json.Unmarshal(data, &psv); err == nil {
+				return strings.TrimSpace(psv.SlotA), strings.TrimSpace(psv.SlotB)
+			}
+		}
+	}
+	return "", ""
+}
+
+func (we *WatchdogEngine) saveSlotVersionsLocked() {
+	psv := PersistedSlotVersions{
+		SlotA:     we.status.SlotAVersion,
+		SlotB:     we.status.SlotBVersion,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(psv, "", "  ")
+	if err != nil {
+		return
+	}
+	primaryPath := we.getSlotVersionsPath()
+	paths := []string{primaryPath}
+	if primaryPath != "/etc/axonwall/slot_versions.json" {
+		paths = append(paths, "/etc/axonwall/slot_versions.json")
+	}
+	for _, p := range paths {
+		_ = os.MkdirAll(filepath.Dir(p), 0755)
+		_ = os.WriteFile(p, data, 0644)
+	}
 }
 
 func resolveLabelDevice(label string) string {
@@ -140,7 +194,24 @@ func (we *WatchdogEngine) detectInitialState() {
 	}
 
 	appVer := readInstalledVersion()
-	osVer := fmt.Sprintf("Axonwall OS v%s", appVer)
+	slotAVer, slotBVer := we.loadSlotVersions()
+	if slotAVer == "" {
+		slotAVer = appVer
+	}
+	if slotBVer == "" {
+		slotBVer = appVer
+	}
+	if activeSlot == "A" {
+		slotAVer = appVer
+	} else if activeSlot == "B" {
+		slotBVer = appVer
+	}
+
+	activeVer := slotAVer
+	if activeSlot == "B" {
+		activeVer = slotBVer
+	}
+	osVer := fmt.Sprintf("Axonwall OS v%s", activeVer)
 
 	we.status = PartitionStatus{
 		ActiveSlot:       activeSlot,
@@ -151,10 +222,11 @@ func (we *WatchdogEngine) detectInitialState() {
 		HealthVerified:   false,
 		KernelVersion:    kernelVer,
 		OsVersion:        osVer,
-		SlotAVersion:     appVer,
-		SlotBVersion:     appVer,
+		SlotAVersion:     slotAVer,
+		SlotBVersion:     slotBVer,
 		Checks:           []HealthCheckResult{},
 	}
+	we.saveSlotVersionsLocked()
 }
 
 func readInstalledVersion() string {
@@ -201,16 +273,29 @@ func (we *WatchdogEngine) Stop() {
 func (we *WatchdogEngine) GetStatus() PartitionStatus {
 	we.mu.Lock()
 	defer we.mu.Unlock()
+
+	slotAVer, slotBVer := we.loadSlotVersions()
+	if slotAVer != "" {
+		we.status.SlotAVersion = slotAVer
+	}
+	if slotBVer != "" {
+		we.status.SlotBVersion = slotBVer
+	}
 	if data, err := os.ReadFile("/etc/axonwall/version"); err == nil {
 		if v := strings.TrimSpace(strings.Split(string(data), "\n")[0]); v != "" {
-			we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s", v)
-			if we.status.SlotAVersion == "" {
+			if we.status.ActiveSlot == "A" {
 				we.status.SlotAVersion = v
-			}
-			if we.status.SlotBVersion == "" {
+			} else if we.status.ActiveSlot == "B" {
 				we.status.SlotBVersion = v
 			}
 		}
+	}
+	activeVer := we.status.SlotAVersion
+	if we.status.ActiveSlot == "B" {
+		activeVer = we.status.SlotBVersion
+	}
+	if activeVer != "" {
+		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s", activeVer)
 	}
 	return we.status
 }
@@ -466,16 +551,21 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 	_ = we.writeGrubEnvKey("bootcount", "0")
 	_ = we.writeGrubEnvKey("bootlimit", "3")
 
-	if err := os.MkdirAll("/etc/axonwall", 0770); err == nil {
-		_ = os.WriteFile("/etc/axonwall/version", []byte(targetVersion+"\n"), 0644)
-	}
-
 	if targetSlot == "A" {
 		we.status.SlotAVersion = targetVersion
 	} else {
 		we.status.SlotBVersion = targetVersion
 	}
-	we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s", targetVersion)
+
+	we.saveSlotVersionsLocked()
+
+	// If updating the active slot directly, update /etc/axonwall/version immediately
+	if targetSlot == we.status.ActiveSlot {
+		if err := os.MkdirAll("/etc/axonwall", 0770); err == nil {
+			_ = os.WriteFile("/etc/axonwall/version", []byte(targetVersion+"\n"), 0644)
+		}
+		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s", targetVersion)
+	}
 	we.status.BootCount = 0
 	we.status.BootLimit = 3
 

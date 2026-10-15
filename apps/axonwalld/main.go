@@ -861,6 +861,55 @@ func main() {
 				"newVersion": strings.TrimSpace(strings.TrimPrefix(req.Version, "v")),
 			})
 		})
+		mux.HandleFunc("/v1/system/power", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Action string `json:"action"` // "reboot" | "poweroff" | "shutdown"
+				Slot   string `json:"slot"`   // optional "A" | "B"
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			action := strings.ToLower(strings.TrimSpace(req.Action))
+			if action != "reboot" && action != "poweroff" && action != "shutdown" {
+				http.Error(w, "invalid power action, must be 'reboot' or 'poweroff'", http.StatusBadRequest)
+				return
+			}
+
+			targetSlot := strings.ToUpper(strings.TrimSpace(req.Slot))
+			if targetSlot == "A" || targetSlot == "B" {
+				if err := watchdog.ActivateSlot(targetSlot); err != nil {
+					http.Error(w, fmt.Sprintf("failed to activate target slot %s: %v", targetSlot, err), http.StatusBadRequest)
+					return
+				}
+				log.Printf("[Agent] Armed Slot %s in bootloader before reboot", targetSlot)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("System %s command accepted. Performing clean shutdown...", action),
+				"action":  action,
+				"slot":    targetSlot,
+			})
+
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				if action == "reboot" {
+					log.Printf("[Agent] System reboot initiated via API")
+					_ = exec.Command("systemctl", "reboot").Run()
+					_ = exec.Command("reboot").Run()
+				} else {
+					log.Printf("[Agent] System poweroff initiated via API")
+					_ = exec.Command("systemctl", "poweroff").Run()
+					_ = exec.Command("poweroff").Run()
+				}
+			}()
+		})
 		mux.HandleFunc("/v1/events/packets", packetStreamMgr.HandleStreamSSE)
 		mux.HandleFunc("/v1/system/telemetry/hardware", func(w http.ResponseWriter, r *http.Request) {
 			telem, err := hardwareMgr.CollectTelemetry()
