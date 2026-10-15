@@ -84,10 +84,14 @@ mkdir -p "${WORK_DIR}/iso/boot/grub" \
 
 # 2. Fetch official Alpine base ISO for kernel, initramfs, modloop, and EFI boot image
 echo "[+] Fetching Alpine ${ALPINE_BRANCH} (${PROFILE}) kernel, initramfs & modloop..."
+ALPINE_FLAVOR="${PROFILE}"
+if [[ "$PROFILE" == "lts" || "$PROFILE" == "standard" ]]; then
+  ALPINE_FLAVOR="standard"
+fi
 RELEASE_YAML="$(curl -fsSL "${ALPINE_MIRROR}/releases/x86_64/latest-releases.yaml")"
-ISO_FILE="$(echo "$RELEASE_YAML" | awk -v flv="alpine-${PROFILE}-" '$1 == "file:" && $2 ~ flv && $2 ~ "-x86_64.iso" {print $2; exit}')"
+ISO_FILE="$(echo "$RELEASE_YAML" | awk -v flv="alpine-${ALPINE_FLAVOR}-" '$1 == "file:" && $2 ~ flv && $2 ~ "-x86_64.iso" {print $2; exit}')"
 if [[ -z "$ISO_FILE" ]]; then
-  ISO_FILE="alpine-${PROFILE}-3.21.3-x86_64.iso"
+  ISO_FILE="alpine-${ALPINE_FLAVOR}-3.21.8-x86_64.iso"
 fi
 
 curl -fsSL -o "${WORK_DIR}/base.iso" "${ALPINE_MIRROR}/releases/x86_64/${ISO_FILE}"

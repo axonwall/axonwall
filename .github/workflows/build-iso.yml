@@ -1,4 +1,4 @@
-name: Build Axonwall Appliance ISO
+name: Build Axonwall Appliance ISOs
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-iso:
-    name: Build Debian 13 Appliance ISO
+    name: Build Debian 13 & Alpine Linux Appliance ISOs
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -66,6 +66,22 @@ jobs:
             packaging/debian/output/*.deb.sha256
           retention-days: 7
 
+      - name: Build Alpine Appliance ISOs (Virt, Minimal, LTS)
+        run: |
+          ./packaging/alpine/build-alpine-iso.sh --profile virt
+          ./packaging/alpine/build-alpine-iso.sh --profile virt --minimal
+          ./packaging/alpine/build-alpine-iso.sh --profile lts
+          sudo chown -R $USER:$USER packaging/alpine/output
+
+      - name: Upload Alpine ISO Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: axonwall-alpine-isos
+          path: |
+            packaging/alpine/output/*.iso
+            packaging/alpine/output/*.iso.sha256
+          retention-days: 7
+
       - name: Install ISO Build Dependencies
         run: |
           sudo apt-get clean
@@ -117,7 +133,7 @@ jobs:
       - name: Compute Checksums
         run: |
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
-          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output
+          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/alpine/output
 
       - name: Upload ISO Checksum Artifact
         uses: actions/upload-artifact@v4
@@ -136,19 +152,28 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
+            packaging/alpine/output/*.iso
+            packaging/alpine/output/*.iso.sha256
 
       - name: Publish Rolling Latest Pre-Release (on main)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: rolling-latest
-          name: "Axonwall Appliance ISO & Debian Packages (Rolling Latest)"
+          name: "Axonwall Appliance ISOs & Debian Packages (Rolling Latest)"
           body: |
             ### Automated Continuous Build
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
-            - **Distribution**: Debian 13 (Trixie) amd64
-            - **Artifacts**: Bare-metal Hybrid ISO Installer + Standalone Debian (.deb) Package
+            - **Distributions**:
+              - Debian 13 (Trixie) amd64 (Bare-Metal Hybrid ISO + .deb Package)
+              - Alpine Linux 3.21 amd64 (Virtual/Cloud & Hardware Appliances)
+            - **Artifacts**:
+              - `axonwall-debian13-amd64.iso` (Full Debian 13 Live/Install Hybrid ISO)
+              - `axonwall-alpine-virt-amd64.iso` (Alpine Linux Virtual/Cloud Appliance ISO)
+              - `axonwall-alpine-virt-minimal-amd64.iso` (Alpine Linux Minimal Virtual ISO)
+              - `axonwall-alpine-lts-amd64.iso` (Alpine Linux Bare-Metal Hardware ISO with NIC firmware)
+              - `axonwall_*.deb` (Debian Package)
             - **Components**: Axonwalld Core Daemon + Axonwall Web UI + Satellite Agents + Preconfigured Network Engine
           prerelease: true
           files: |
@@ -156,4 +181,6 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
+            packaging/alpine/output/*.iso
+            packaging/alpine/output/*.iso.sha256
 
