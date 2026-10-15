@@ -193,7 +193,7 @@ export function authenticateLocalAdmin(
         source: 'local_admin',
         roles: ['admin'],
         privileges: [...adminRole.privileges],
-        exp: Math.floor(Date.now() / 1000) + 4 * 3600,
+        exp: Math.floor(Date.now() / 1000) + 8 * 3600,
       },
     };
   }

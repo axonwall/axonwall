@@ -1,26 +1,26 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # ==============================================================================
 # Axonwall HA State Transition Notification Hook
 # Invoked by Keepalived on state transitions (MASTER / BACKUP / FAULT)
 # ==============================================================================
-set -euo pipefail
+set -eu
 
 STATE="${1:-FAULT}"
 
-logger -t axonwall-ha "VRRP transition received: ${STATE}"
+logger -t axonwall-ha "VRRP transition received: ${STATE}" 2>/dev/null || true
 
 # Notify running axonwalld daemon
-if command -v axonwalld &>/dev/null; then
+if command -v axonwalld >/dev/null 2>&1; then
   axonwalld -notify "${STATE}" || true
-elif [[ -x /usr/sbin/axonwalld ]]; then
+elif [ -x /usr/sbin/axonwalld ]; then
   /usr/sbin/axonwalld -notify "${STATE}" || true
 fi
 
 # Fallback: direct service orchestration if daemon is not running
-if [[ "${STATE}" == "MASTER" ]]; then
+if [ "${STATE}" = "MASTER" ]; then
   # Ensure Headscale is running on Active node
   systemctl is-active --quiet headscale || systemctl start headscale || true
-elif [[ "${STATE}" == "BACKUP" || "${STATE}" == "FAULT" ]]; then
+elif [ "${STATE}" = "BACKUP" ] || [ "${STATE}" = "FAULT" ]; then
   # Stop Headscale on Standby/Backup node to avoid split-brain DB conflicts
   systemctl stop headscale || true
 fi

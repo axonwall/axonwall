@@ -235,6 +235,13 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     // Reverse proxy all other HTTP traffic to the Axonwall Web Console on port 3000
+    let forwardedHost = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost';
+    if (typeof req.headers.origin === 'string') {
+      try {
+        const originHost = new URL(req.headers.origin).host;
+        if (originHost) forwardedHost = originHost;
+      } catch {}
+    }
     const uiReq = http.request({
       hostname: '127.0.0.1',
       port: uiPort,
@@ -242,8 +249,8 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       method: req.method,
       headers: {
         ...req.headers,
-        'x-forwarded-proto': req.socket?.encrypted ? 'https' : 'http',
-        'x-forwarded-host': req.headers.host,
+        'x-forwarded-proto': (req.headers['x-forwarded-proto'] as string) || (req.socket?.encrypted ? 'https' : 'http'),
+        'x-forwarded-host': forwardedHost,
         'x-forwarded-for': req.socket?.remoteAddress || '127.0.0.1',
       },
     }, (uiRes) => {

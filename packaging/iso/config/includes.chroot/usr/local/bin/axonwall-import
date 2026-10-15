@@ -1,13 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # ==============================================================================
 # Axonwall Multi-Vendor Firewall Importer CLI
 # Supports pfSense, OPNsense, VyOS/EdgeOS, MikroTik RouterOS, Linux iptables
+# Compatible with both Debian and Alpine Linux
 # ==============================================================================
-set -euo pipefail
+set -eu
 
 CONFIG_FILE=""
 VENDOR="auto"
-DO_APPLY=false
+DO_APPLY="false"
 OUT_JSON=""
 OUT_NFT=""
 API_HOST="http://127.0.0.1:3000"
@@ -37,7 +38,7 @@ Examples:
 EOF
 }
 
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
   case "$1" in
     -f|--file)
       CONFIG_FILE="$2"
@@ -48,7 +49,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -a|--apply)
-      DO_APPLY=true
+      DO_APPLY="true"
       shift
       ;;
     --json)
@@ -68,7 +69,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      if [[ -z "$CONFIG_FILE" && -f "$1" ]]; then
+      if [ -z "$CONFIG_FILE" ] && [ -f "$1" ]; then
         CONFIG_FILE="$1"
         shift
       else
@@ -82,13 +83,13 @@ done
 
 # Read configuration content
 CONFIG_CONTENT=""
-if [[ -n "$CONFIG_FILE" ]]; then
-  if [[ ! -f "$CONFIG_FILE" ]]; then
+if [ -n "$CONFIG_FILE" ]; then
+  if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: Configuration file not found: $CONFIG_FILE" >&2
     exit 1
   fi
   CONFIG_CONTENT="$(cat "$CONFIG_FILE")"
-elif [[ ! -t 0 ]]; then
+elif [ ! -t 0 ]; then
   CONFIG_CONTENT="$(cat)"
 else
   echo "Error: No configuration file provided and no input piped from stdin." >&2
@@ -96,7 +97,7 @@ else
   exit 1
 fi
 
-if [[ -z "$CONFIG_CONTENT" ]]; then
+if [ -z "$CONFIG_CONTENT" ]; then
   echo "Error: Configuration input is empty." >&2
   exit 1
 fi
@@ -107,80 +108,68 @@ echo "  Vendor Mode : ${VENDOR}"
 echo "  Live Apply  : ${DO_APPLY}"
 echo "================================================================================"
 
-# Build JSON payload using jq if available or python
-JSON_PAYLOAD=$(python3 -c '
-import json, sys
-data = {
-    "config": sys.stdin.read(),
-    "vendor": sys.argv[1],
-    "apply": sys.argv[2].lower() == "true",
-    "confirmTimeoutSeconds": 120
-}
-print(json.dumps(data))
-' "$VENDOR" "$DO_APPLY" <<< "$CONFIG_CONTENT")
+JSON_PAYLOAD="$(printf '%s' "$CONFIG_CONTENT" | node -e '
+const fs = require("fs");
+const config = fs.readFileSync(0, "utf8");
+console.log(JSON.stringify({
+  config,
+  vendor: process.argv[1],
+  apply: process.argv[2] === "true",
+  confirmTimeoutSeconds: 120,
+}));
+' "$VENDOR" "$DO_APPLY")"
 
 echo "[+] Parsing and converting configuration..."
-RESPONSE=$(printf '%s' "$JSON_PAYLOAD" | curl -s -S -X POST "${API_HOST}/api/v1/import" \
+RESPONSE="$(printf '%s' "$JSON_PAYLOAD" | curl -s -S -X POST "${API_HOST}/api/v1/import" \
   -H "Content-Type: application/json" \
-  --data-binary @-)
+  --data-binary @-)"
 
-STATUS=$(python3 -c "import json, sys; res = json.loads(sys.stdin.read()); print(res.get('status', 'error'))" <<< "$RESPONSE" 2>/dev/null || echo "error")
-
-if [[ "$STATUS" != "ok" ]]; then
-  ERR=$(python3 -c "import json, sys; res = json.loads(sys.stdin.read()); print(res.get('error', 'Unknown error'))" <<< "$RESPONSE" 2>/dev/null || echo "$RESPONSE")
-  echo "[-] Import Failed: $ERR" >&2
-  exit 1
-fi
-
-# Print translation report
-python3 -c "
-import json, sys
-data = json.loads(sys.stdin.read())
-rep = data.get('report', {})
-
-print(f\"[✓] Detected / Specified Vendor : {rep.get('vendor', '').upper()}\")
-print(f\"[✓] Source Format              : {rep.get('sourceFormat', 'Unknown')}\")
-print(\"\n--- Extraction Metrics ---\")
-print(f\"  • Interfaces        : {rep.get('interfacesCount', 0)}\")
-print(f\"  • VLANs             : {rep.get('vlansCount', 0)}\")
-print(f\"  • Aliases / Groups  : {rep.get('aliasesCount', 0)}\")
-print(f\"  • Filter Rules      : {rep.get('rulesCount', 0)}\")
-print(f\"  • NAT Rules         : {rep.get('natRulesCount', 0)}\")
-print(f\"  • DHCP Pools        : {rep.get('dhcpSubnetsCount', 0)}\")
-print(f\"  • DNS Overrides     : {rep.get('dnsOverridesCount', 0)}\")
-print(f\"  • Static Routes     : {rep.get('routesCount', 0)}\")
-
-warnings = rep.get('warnings', [])
-if warnings:
-    print(f\"\n[!] Vendor Warnings ({len(warnings)}):\")
-    for w in warnings:
-        print(f\"  * {w}\")
-
-if data.get('applied'):
-    print(\"\n[✓] Live Apply: Configuration APPLIED to system!\")
-    print(\"    Watchdog safety rollback armed for 120s.\")
-" <<< "$RESPONSE"
-
-# Write out files if requested
-if [[ -n "$OUT_JSON" ]]; then
-  python3 -c '
-import json, sys
-data = json.loads(sys.stdin.read())
-with open(sys.argv[1], "w") as f:
-    json.dump(data.get("report", {}).get("state", {}), f, indent=2)
-' "$OUT_JSON" <<< "$RESPONSE"
-  echo "[+] DesiredState JSON saved to: $OUT_JSON"
-fi
-
-if [[ -n "$OUT_NFT" ]]; then
-  python3 -c '
-import json, sys
-data = json.loads(sys.stdin.read())
-with open(sys.argv[1], "w") as f:
-    f.write(data.get("compiledNft", ""))
-' "$OUT_NFT" <<< "$RESPONSE"
-  echo "[+] Compiled Linux nftables ruleset saved to: $OUT_NFT"
-fi
+printf '%s' "$RESPONSE" | node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (e) {
+  console.error("[-] Import Failed: Invalid response from server");
+  process.exit(1);
+}
+if (data.status !== "ok") {
+  console.error("[-] Import Failed:", data.error || "Unknown error");
+  process.exit(1);
+}
+const rep = data.report || {};
+console.log(`[✓] Detected / Specified Vendor : ${String(rep.vendor || "").toUpperCase()}`);
+console.log(`[✓] Source Format              : ${rep.sourceFormat || "Unknown"}`);
+console.log("\n--- Extraction Metrics ---");
+console.log(`  • Interfaces        : ${rep.interfacesCount || 0}`);
+console.log(`  • VLANs             : ${rep.vlansCount || 0}`);
+console.log(`  • Aliases / Groups  : ${rep.aliasesCount || 0}`);
+console.log(`  • Filter Rules      : ${rep.rulesCount || 0}`);
+console.log(`  • NAT Rules         : ${rep.natRulesCount || 0}`);
+console.log(`  • DHCP Pools        : ${rep.dhcpSubnetsCount || 0}`);
+console.log(`  • DNS Overrides     : ${rep.dnsOverridesCount || 0}`);
+console.log(`  • Static Routes     : ${rep.routesCount || 0}`);
+if (Array.isArray(rep.warnings) && rep.warnings.length > 0) {
+  console.log(`\n[!] Vendor Warnings (${rep.warnings.length}):`);
+  for (const w of rep.warnings) {
+    console.log(`  * ${w}`);
+  }
+}
+if (data.applied) {
+  console.log("\n[✓] Live Apply: Configuration APPLIED to system!");
+  console.log("    Watchdog safety rollback armed for 120s.");
+}
+const outJson = process.argv[1];
+const outNft = process.argv[2];
+if (outJson) {
+  fs.writeFileSync(outJson, JSON.stringify((rep && rep.state) || {}, null, 2));
+  console.log(`[+] DesiredState JSON saved to: ${outJson}`);
+}
+if (outNft) {
+  fs.writeFileSync(outNft, data.compiledNft || "");
+  console.log(`[+] Compiled Linux nftables ruleset saved to: ${outNft}`);
+}
+' "$OUT_JSON" "$OUT_NFT"
 
 echo "================================================================================"
 echo "Migration conversion complete."

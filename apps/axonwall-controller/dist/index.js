@@ -9693,6 +9693,14 @@ async function main() {
       }));
       return;
     }
+    let forwardedHost = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
+    if (typeof req.headers.origin === "string") {
+      try {
+        const originHost = new URL(req.headers.origin).host;
+        if (originHost) forwardedHost = originHost;
+      } catch {
+      }
+    }
     const uiReq = http2.request({
       hostname: "127.0.0.1",
       port: uiPort,
@@ -9700,8 +9708,8 @@ async function main() {
       method: req.method,
       headers: {
         ...req.headers,
-        "x-forwarded-proto": req.socket?.encrypted ? "https" : "http",
-        "x-forwarded-host": req.headers.host,
+        "x-forwarded-proto": req.headers["x-forwarded-proto"] || (req.socket?.encrypted ? "https" : "http"),
+        "x-forwarded-host": forwardedHost,
         "x-forwarded-for": req.socket?.remoteAddress || "127.0.0.1"
       }
     }, (uiRes) => {

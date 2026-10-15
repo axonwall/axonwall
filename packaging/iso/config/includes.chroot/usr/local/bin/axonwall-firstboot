@@ -146,7 +146,7 @@ systemctl daemon-reload
 systemctl enable axonwalld axonwall-controller axonwall-ui headscale || true
 # Use non-blocking restarts so firstboot does not deadlock with services ordered After=axonwall-firstboot.service
 systemctl try-restart --no-block axonwalld || true
-systemctl start --no-block axonwall-ui axonwall-controller headscale || true
+systemctl restart --no-block axonwall-ui axonwall-controller headscale || true
 
 LAN_IP=""
 if [[ -n "$LAN_IF" ]]; then

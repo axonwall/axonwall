@@ -382,9 +382,16 @@ func (s *AgentServer) GetStatus(ctx context.Context, req *pb.GetStatusRequest) (
 		deadlineUnix = s.confirmDeadline.Unix()
 	}
 
+	ver := "0.2.9"
+	if data, err := os.ReadFile("/etc/axonwall/version"); err == nil {
+		if v := strings.TrimSpace(strings.Split(string(data), "\n")[0]); v != "" {
+			ver = v
+		}
+	}
+
 	return &pb.GetStatusResponse{
 		NodeId:              s.nodeId,
-		Version:             "0.2.9",
+		Version:             ver,
 		UptimeSeconds:       uptime,
 		ActiveBundleHash:    s.activeHash,
 		PendingConfirm:      s.pendingConfirm,
@@ -688,6 +695,37 @@ func main() {
 			status := watchdog.RunVerification()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(status)
+		})
+		mux.HandleFunc("/v1/system/update", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Slot    string `json:"slot"`
+				Version string `json:"version"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			msg, err := watchdog.ApplyFirmwareUpdate(req.Slot, req.Version)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"message": err.Error(),
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":    true,
+				"message":    msg,
+				"targetSlot": strings.ToUpper(strings.TrimSpace(req.Slot)),
+				"newVersion": strings.TrimSpace(strings.TrimPrefix(req.Version, "v")),
+			})
 		})
 		mux.HandleFunc("/v1/events/packets", packetStreamMgr.HandleStreamSSE)
 		mux.HandleFunc("/v1/system/telemetry/hardware", func(w http.ResponseWriter, r *http.Request) {

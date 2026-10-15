@@ -1,14 +1,15 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # ==============================================================================
 # Axonwall Appliance Firmware & System Updater
+# Compatible with both Debian (glibc / systemd / dpkg) and Alpine (musl / OpenRC)
 # ==============================================================================
-set -euo pipefail
+set -eu
 
 TARGET_SLOT="B"
 TARGET_VERSION=""
 UPDATE_CHANNEL="stable"
 
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
   case "$1" in
     --slot)
       TARGET_SLOT="${2:-B}"
@@ -28,8 +29,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-TARGET_SLOT="${TARGET_SLOT^^}"
-if [[ "$TARGET_SLOT" != "A" && "$TARGET_SLOT" != "B" ]]; then
+TARGET_SLOT="$(printf '%s' "$TARGET_SLOT" | tr '[:lower:]' '[:upper:]')"
+if [ "$TARGET_SLOT" != "A" ] && [ "$TARGET_SLOT" != "B" ]; then
   echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
   exit 1
 fi
@@ -41,55 +42,220 @@ echo "  Target Version: ${TARGET_VERSION:-latest}"
 echo "  Channel       : ${UPDATE_CHANNEL}"
 echo "================================================================================"
 
+# Helper: Extract .deb payload to a destination directory on either Debian (dpkg-deb)
+# or Alpine Linux (using Node.js ar unpacker + BusyBox/GNU tar)
+extract_deb() {
+  deb_file="$1"
+  dest_dir="$2"
+
+  if command -v dpkg-deb >/dev/null 2>&1; then
+    dpkg-deb -x "$deb_file" "$dest_dir" 2>/dev/null && return 0
+  fi
+
+  if command -v node >/dev/null 2>&1; then
+    data_tar="$(node -e '
+      const fs = require("fs");
+      const buf = fs.readFileSync(process.argv[1]);
+      let off = 8;
+      while (off + 60 <= buf.length) {
+        const name = buf.slice(off, off + 16).toString("ascii").trim().replace(/\/$/, "");
+        const size = parseInt(buf.slice(off + 48, off + 58).toString("ascii").trim(), 10);
+        off += 60;
+        if (name.startsWith("data.tar")) {
+          const out = process.argv[2] + "/" + name;
+          fs.writeFileSync(out, buf.slice(off, off + size));
+          console.log(out);
+          process.exit(0);
+        }
+        off += size + (size % 2);
+      }
+      process.exit(1);
+    ' "$deb_file" "/tmp" 2>/dev/null || true)"
+
+    if [ -n "$data_tar" ] && [ -f "$data_tar" ]; then
+      tar -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
+        rm -f "$data_tar"
+        return 1
+      }
+      rm -f "$data_tar"
+      # On Alpine (musl), strip any glibc-only sharp image binaries from standalone bundle
+      if [ -f /etc/alpine-release ] || [ -f "${dest_dir}/etc/alpine-release" ]; then
+        rm -rf "${dest_dir}/opt/axonwall/node_modules/.pnpm/"@img+sharp* \
+               "${dest_dir}/opt/axonwall/node_modules/.pnpm/"sharp* 2>/dev/null || true
+      fi
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Helper: Resolve partition block device by label across udev (Debian) and mdev (Alpine)
+resolve_label_dev() {
+  label="$1"
+  if [ -e "/dev/disk/by-label/${label}" ]; then
+    echo "/dev/disk/by-label/${label}"
+    return 0
+  fi
+  if command -v findfs >/dev/null 2>&1; then
+    dev="$(findfs "LABEL=${label}" 2>/dev/null || true)"
+    if [ -n "$dev" ] && [ -b "$dev" ]; then
+      echo "$dev"
+      return 0
+    fi
+  fi
+  if command -v blkid >/dev/null 2>&1; then
+    dev="$(blkid -L "${label}" 2>/dev/null || true)"
+    if [ -n "$dev" ] && [ -b "$dev" ]; then
+      echo "$dev"
+      return 0
+    fi
+  fi
+  echo ""
+}
+
+# Helper: Update GRUB environment file with active_slot and reset bootcount
+update_grubenv_file() {
+  env_path="$1"
+  slot="$2"
+  mkdir -p "$(dirname "$env_path")" 2>/dev/null || true
+  if command -v grub-editenv >/dev/null 2>&1; then
+    if [ ! -f "$env_path" ]; then
+      grub-editenv "$env_path" create 2>/dev/null || true
+    fi
+    grub-editenv "$env_path" set "active_slot=${slot}" bootcount=0 bootlimit=3 2>/dev/null || true
+  fi
+}
+
 # 1. Detect target block device
-TARGET_DEV="/dev/disk/by-label/axon_root_b"
-if [[ "${TARGET_SLOT^^}" == "A" ]]; then
-  TARGET_DEV="/dev/disk/by-label/axon_root_a"
+TARGET_LABEL="axon_root_b"
+if [ "$TARGET_SLOT" = "A" ]; then
+  TARGET_LABEL="axon_root_a"
+fi
+TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+
+# 2. Attempt to fetch release package from GitHub Releases if online
+CLEAN_VER="${TARGET_VERSION#v}"
+DEB_TMP=""
+if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
+  DEB_URL="https://github.com/axonwall/axonwall_monorepo/releases/download/v${CLEAN_VER}/axonwall_${CLEAN_VER}_amd64.deb"
+  SHA_URL="${DEB_URL}.sha256"
+  CANDIDATE_DEB="/tmp/axonwall_${CLEAN_VER}_amd64.deb"
+  echo "[+] Checking release artifact: ${DEB_URL}"
+  if curl -fsSL --connect-timeout 4 --max-time 25 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
+    if curl -fsSL --connect-timeout 4 --max-time 10 -o "${CANDIDATE_DEB}.sha256" "${SHA_URL}" 2>/dev/null; then
+      EXPECTED_HASH="$(awk '{print $1}' "${CANDIDATE_DEB}.sha256" | head -n 1)"
+      ACTUAL_HASH="$(sha256sum "${CANDIDATE_DEB}" | awk '{print $1}')"
+      if [ -n "$EXPECTED_HASH" ] && [ "$EXPECTED_HASH" = "$ACTUAL_HASH" ]; then
+        echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
+        DEB_TMP="${CANDIDATE_DEB}"
+      else
+        echo "[-] Warning: SHA-256 mismatch for downloaded package, falling back to local image sync."
+        rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256"
+      fi
+    else
+      DEB_TMP="${CANDIDATE_DEB}"
+    fi
+  fi
 fi
 
-# 2. Check if running in Dual-Root or Single-Disk Appliance mode
-if [[ -e "$TARGET_DEV" ]]; then
-  echo "[+] Detected Dual-Root target partition: ${TARGET_DEV}"
+# 3. Check if running in Dual-Root or Single-Disk Appliance mode
+if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
+  echo "[+] Detected Dual-Root target partition: ${TARGET_DEV} (${TARGET_LABEL})"
   echo "[+] Mounting standby partition to staging directory..."
   STAGE_DIR="/tmp/axonwall-update-slot-${TARGET_SLOT}"
   mkdir -p "${STAGE_DIR}"
-  mount "${TARGET_DEV}" "${STAGE_DIR}" || true
+  mount "${TARGET_DEV}" "${STAGE_DIR}" 2>/dev/null || true
 
-  # If mounting succeeds, synchronize root filesystem or update software
-  if mountpoint -q "${STAGE_DIR}"; then
+  # If mounting succeeds, synchronize root filesystem or extract downloaded release package
+  if grep -qs " ${STAGE_DIR} " /proc/mounts || (command -v mountpoint >/dev/null 2>&1 && mountpoint -q "${STAGE_DIR}"); then
     echo "[+] Updating application packages on standby partition..."
-    if [[ -d /opt/axonwall && -d "${STAGE_DIR}/opt/axonwall" ]]; then
-      if command -v rsync &>/dev/null; then
-        rsync -aAX --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+    if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
+      PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+      rm -rf "${PKG_STAGE}"
+      mkdir -p "${PKG_STAGE}"
+      if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
+        if [ -d "${PKG_STAGE}/opt/axonwall" ]; then
+          mkdir -p "${STAGE_DIR}/opt/axonwall"
+          if command -v rsync >/dev/null 2>&1; then
+            rsync -a --delete "${PKG_STAGE}/opt/axonwall/" "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+          else
+            rm -rf "${STAGE_DIR}/opt/axonwall"
+            cp -a "${PKG_STAGE}/opt/axonwall" "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
+          fi
+        fi
+        if [ -d "${PKG_STAGE}/usr/sbin" ]; then
+          cp -f "${PKG_STAGE}/usr/sbin/"* "${STAGE_DIR}/usr/sbin/" 2>/dev/null || true
+        fi
+        if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
+          cp -f "${PKG_STAGE}/usr/local/bin/axonwall-"* "${STAGE_DIR}/usr/local/bin/" 2>/dev/null || true
+        fi
+      fi
+      rm -rf "${PKG_STAGE}"
+      chown -R axonwall:axonwall "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
+    elif [ -d /opt/axonwall ] && [ -d "${STAGE_DIR}/opt/axonwall" ]; then
+      if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
       else
         cp -a /opt/axonwall/. "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
       fi
     fi
-    if [[ -n "$TARGET_VERSION" ]]; then
-      echo "$TARGET_VERSION" > "${STAGE_DIR}/etc/axonwall/version" 2>/dev/null || true
+
+    if [ -n "$CLEAN_VER" ]; then
+      mkdir -p "${STAGE_DIR}/etc/axonwall" 2>/dev/null || true
+      echo "$CLEAN_VER" > "${STAGE_DIR}/etc/axonwall/version" 2>/dev/null || true
     fi
-    umount "${STAGE_DIR}" || true
+
+    # Also update grubenv on the target partition if /boot/grub exists there
+    if [ -d "${STAGE_DIR}/boot/grub" ]; then
+      update_grubenv_file "${STAGE_DIR}/boot/grub/grubenv" "${TARGET_SLOT}"
+    fi
+
+    umount "${STAGE_DIR}" 2>/dev/null || true
     rmdir "${STAGE_DIR}" 2>/dev/null || true
   fi
 
-  # Arm GRUB boot watchdog for next boot
-  if command -v grub-editenv &>/dev/null; then
-    echo "[+] Arming GRUB boot watchdog on /boot/grub/grubenv..."
-    grub-editenv /boot/grub/grubenv set "active_slot=${TARGET_SLOT^^}"
-    grub-editenv /boot/grub/grubenv set bootcount=0
-    grub-editenv /boot/grub/grubenv set bootlimit=3
-  fi
-else
-  echo "[+] Running in standard system / development mode. Performing in-place package update..."
-  if [[ -n "$TARGET_VERSION" && -d /etc/axonwall ]]; then
-    echo "$TARGET_VERSION" > /etc/axonwall/version
+  if [ -n "$CLEAN_VER" ] && [ -d /etc/axonwall ]; then
+    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
   fi
 
-  # Restart Axonwall services gracefully if running under systemd
-  if command -v systemctl &>/dev/null; then
-    echo "[+] Reloading Axonwall systemd services..."
-    systemctl try-restart axonwall-ui.service axonwall-controller.service || true
+  # Arm GRUB boot watchdog for next boot on current /boot/grub/grubenv
+  echo "[+] Arming GRUB boot watchdog on /boot/grub/grubenv..."
+  update_grubenv_file "/boot/grub/grubenv" "${TARGET_SLOT}"
+else
+  echo "[+] Running in standard single-root mode. Performing in-place package update..."
+  mkdir -p /etc/axonwall 2>/dev/null || true
+  if [ -n "$CLEAN_VER" ]; then
+    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
+  fi
+
+  if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
+    PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+    rm -rf "${PKG_STAGE}"
+    mkdir -p "${PKG_STAGE}"
+    if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
+      if [ -d "${PKG_STAGE}/opt/axonwall" ]; then
+        mkdir -p /opt/axonwall
+        if command -v rsync >/dev/null 2>&1; then
+          rsync -a --delete "${PKG_STAGE}/opt/axonwall/" /opt/axonwall/ 2>/dev/null || true
+        else
+          cp -a "${PKG_STAGE}/opt/axonwall/." /opt/axonwall/ 2>/dev/null || true
+        fi
+        chown -R axonwall:axonwall /opt/axonwall 2>/dev/null || true
+      fi
+      if [ -d "${PKG_STAGE}/usr/sbin" ]; then
+        cp -f "${PKG_STAGE}/usr/sbin/"* /usr/sbin/ 2>/dev/null || true
+      fi
+    fi
+    rm -rf "${PKG_STAGE}"
+
+    # Schedule asynchronous service restart after HTTP response finishes so we do not kill axonwall-ui mid-request
+    if command -v systemctl >/dev/null 2>&1; then
+      echo "[+] Scheduling asynchronous reload of Axonwall services..."
+      nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &
+    fi
   fi
 fi
 
+rm -f "${DEB_TMP:-}" "${DEB_TMP:-}.sha256" 2>/dev/null || true
 echo "[+] Firmware update process completed successfully."

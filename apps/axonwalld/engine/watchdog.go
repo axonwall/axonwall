@@ -72,22 +72,40 @@ func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEn
 	return we
 }
 
+func resolveLabelDevice(label string) string {
+	byLabel := "/dev/disk/by-label/" + label
+	if _, err := os.Stat(byLabel); err == nil {
+		return byLabel
+	}
+	if out, err := exec.Command("findfs", "LABEL="+label).Output(); err == nil {
+		if dev := strings.TrimSpace(string(out)); dev != "" {
+			return dev
+		}
+	}
+	if out, err := exec.Command("blkid", "-L", label).Output(); err == nil {
+		if dev := strings.TrimSpace(string(out)); dev != "" {
+			return dev
+		}
+	}
+	return byLabel
+}
+
 func (we *WatchdogEngine) detectInitialState() {
 	we.mu.Lock()
 	defer we.mu.Unlock()
 
 	activeSlot := "A"
-	rootDevice := "/dev/disk/by-label/axon_root_a"
+	rootDevice := resolveLabelDevice("axon_root_a")
 
 	// 1. Inspect kernel cmdline if accessible
 	if cmdlineBytes, err := os.ReadFile(we.cmdlinePath); err == nil {
 		cmdline := string(cmdlineBytes)
 		if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
 			activeSlot = "B"
-			rootDevice = "/dev/disk/by-label/axon_root_b"
+			rootDevice = resolveLabelDevice("axon_root_b")
 		} else if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
 			activeSlot = "A"
-			rootDevice = "/dev/disk/by-label/axon_root_a"
+			rootDevice = resolveLabelDevice("axon_root_a")
 		}
 	}
 
@@ -121,27 +139,7 @@ func (we *WatchdogEngine) detectInitialState() {
 		kernelVer = strings.TrimSpace(string(buf[:]))
 	}
 
-	appVer := "0.2.9"
-	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json"} {
-		if data, err := os.ReadFile(vpath); err == nil {
-			trimmed := strings.TrimSpace(string(data))
-			if strings.HasPrefix(trimmed, "{") {
-				// Crude package.json version extract
-				if idx := strings.Index(trimmed, `"version":`); idx != -1 {
-					sub := trimmed[idx+10:]
-					sub = strings.Trim(strings.Split(sub, ",")[0], ` "`)
-					if sub != "" {
-						appVer = sub
-						break
-					}
-				}
-			} else if trimmed != "" {
-				appVer = strings.Split(trimmed, "\n")[0]
-				break
-			}
-		}
-	}
-
+	appVer := readInstalledVersion()
 	osVer := fmt.Sprintf("Axonwall OS v%s", appVer)
 
 	we.status = PartitionStatus{
@@ -157,6 +155,29 @@ func (we *WatchdogEngine) detectInitialState() {
 		SlotBVersion:     appVer,
 		Checks:           []HealthCheckResult{},
 	}
+}
+
+func readInstalledVersion() string {
+	appVer := "0.2.9"
+	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json"} {
+		if data, err := os.ReadFile(vpath); err == nil {
+			trimmed := strings.TrimSpace(string(data))
+			if strings.HasPrefix(trimmed, "{") {
+				if idx := strings.Index(trimmed, `"version":`); idx != -1 {
+					sub := trimmed[idx+10:]
+					sub = strings.Trim(strings.Split(sub, ",")[0], ` "`)
+					if sub != "" {
+						appVer = sub
+						break
+					}
+				}
+			} else if trimmed != "" {
+				appVer = strings.TrimSpace(strings.Split(trimmed, "\n")[0])
+				break
+			}
+		}
+	}
+	return appVer
 }
 
 // Start begins the health verification loop.
@@ -178,8 +199,19 @@ func (we *WatchdogEngine) Stop() {
 
 // GetStatus returns a snapshot of partition health and GRUB variables.
 func (we *WatchdogEngine) GetStatus() PartitionStatus {
-	we.mu.RLock()
-	defer we.mu.RUnlock()
+	we.mu.Lock()
+	defer we.mu.Unlock()
+	if data, err := os.ReadFile("/etc/axonwall/version"); err == nil {
+		if v := strings.TrimSpace(strings.Split(string(data), "\n")[0]); v != "" {
+			we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s", v)
+			if we.status.SlotAVersion == "" {
+				we.status.SlotAVersion = v
+			}
+			if we.status.SlotBVersion == "" {
+				we.status.SlotBVersion = v
+			}
+		}
+	}
 	return we.status
 }
 
@@ -396,6 +428,60 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 	return nil
 }
 
+// ApplyFirmwareUpdate executes the privileged firmware updater for a target slot and version,
+// updates GRUB boot variables, and records the new version on the target slot.
+func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) (string, error) {
+	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
+	if targetSlot != "A" && targetSlot != "B" {
+		targetSlot = "B"
+	}
+	targetVersion = strings.TrimSpace(strings.TrimPrefix(targetVersion, "v"))
+	if targetVersion == "" {
+		targetVersion = readInstalledVersion()
+	}
+	// Sanitize version string to prevent any shell/argument injection
+	for _, r := range targetVersion {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '.' || r == '-' || r == '_') {
+			return "", fmt.Errorf("invalid target version format")
+		}
+	}
+
+	updaterPaths := []string{"/usr/local/bin/axonwall-update", "/usr/sbin/axonwall-update"}
+	for _, up := range updaterPaths {
+		if _, err := os.Stat(up); err == nil {
+			cmd := exec.Command(up, "--slot", targetSlot, "--version", targetVersion)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("[Watchdog] axonwall-update warning (%v): %s", err, string(out))
+			} else {
+				log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s)", targetSlot, targetVersion)
+			}
+			break
+		}
+	}
+
+	we.mu.Lock()
+	defer we.mu.Unlock()
+
+	_ = we.writeGrubEnvKey("active_slot", targetSlot)
+	_ = we.writeGrubEnvKey("bootcount", "0")
+	_ = we.writeGrubEnvKey("bootlimit", "3")
+
+	if err := os.MkdirAll("/etc/axonwall", 0770); err == nil {
+		_ = os.WriteFile("/etc/axonwall/version", []byte(targetVersion+"\n"), 0644)
+	}
+
+	if targetSlot == "A" {
+		we.status.SlotAVersion = targetVersion
+	} else {
+		we.status.SlotBVersion = targetVersion
+	}
+	we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s", targetVersion)
+	we.status.BootCount = 0
+	we.status.BootLimit = 3
+
+	return fmt.Sprintf("Firmware v%s successfully prepared and flashed to Slot %s! Watchdog bootcount armed (bootlimit=3). Reboot when ready.", targetVersion, targetSlot), nil
+}
+
 // readGrubEnvInternal parses GRUB key=value pairs from the environment block.
 func (we *WatchdogEngine) readGrubEnvInternal() map[string]string {
 	res := make(map[string]string)
@@ -420,9 +506,37 @@ func (we *WatchdogEngine) readGrubEnvInternal() map[string]string {
 
 // writeGrubEnvKey updates or appends a key in the grubenv file.
 func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
+	err := writeGrubEnvKeyAtPath(we.grubenvPath, we.readGrubEnvInternal(), key, value)
+
+	// When booted into Slot B on a dual-root disk where GRUB's $prefix lives on Slot A (axon_root_a),
+	// mirror grubenv updates to axon_root_a's /boot/grub/grubenv as well.
+	if we.grubenvPath == "/boot/grub/grubenv" && os.Geteuid() == 0 {
+		slotADev := resolveLabelDevice("axon_root_a")
+		if info, statErr := os.Stat(slotADev); statErr == nil && (info.Mode()&os.ModeDevice) != 0 {
+			if cmdlineBytes, cErr := os.ReadFile(we.cmdlinePath); cErr == nil && strings.Contains(string(cmdlineBytes), "axon_root_b") {
+				mntDir := "/tmp/axonwall-grubsync-a"
+				_ = os.MkdirAll(mntDir, 0700)
+				if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr == nil {
+					targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")
+					_ = writeGrubEnvKeyAtPath(targetEnv, we.readGrubEnvInternal(), key, value)
+					_ = exec.Command("umount", mntDir).Run()
+				}
+				_ = os.Remove(mntDir)
+			}
+		}
+	}
+
+	return err
+}
+
+func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, value string) error {
 	// 1. If grub-editenv is installed on system, use it for standard atomic editing
 	if _, err := exec.LookPath("grub-editenv"); err == nil {
-		cmd := exec.Command("grub-editenv", we.grubenvPath, "set", fmt.Sprintf("%s=%s", key, value))
+		_ = os.MkdirAll(filepath.Dir(envPath), 0755)
+		if _, sErr := os.Stat(envPath); os.IsNotExist(sErr) {
+			_ = exec.Command("grub-editenv", envPath, "create").Run()
+		}
+		cmd := exec.Command("grub-editenv", envPath, "set", fmt.Sprintf("%s=%s", key, value))
 		if out, err := cmd.CombinedOutput(); err == nil {
 			return nil
 		} else {
@@ -431,7 +545,10 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 	}
 
 	// 2. Direct format writing: Standard 1024-byte GRUB environment block
-	env := we.readGrubEnvInternal()
+	env := make(map[string]string, len(currentEnv)+1)
+	for k, v := range currentEnv {
+		env[k] = v
+	}
 	env[key] = value
 
 	var buf bytes.Buffer
@@ -446,6 +563,6 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 	}
 
 	// Ensure parent dir exists
-	_ = os.MkdirAll(filepath.Dir(we.grubenvPath), 0755)
-	return os.WriteFile(we.grubenvPath, buf.Bytes()[:1024], 0644)
+	_ = os.MkdirAll(filepath.Dir(envPath), 0755)
+	return os.WriteFile(envPath, buf.Bytes()[:1024], 0644)
 }

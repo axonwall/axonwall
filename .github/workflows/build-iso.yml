@@ -41,12 +41,12 @@ jobs:
       - name: Compile Axonwalld Core Daemon
         run: |
           cd apps/axonwalld
-          go build -ldflags="-s -w" -o bin/axonwalld .
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/axonwalld .
 
       - name: Compile Axonwall Console TUI
         run: |
           cd apps/axonwall-console
-          go build -ldflags="-s -w" -o bin/axonwall-console .
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/axonwall-console .
 
       - name: Cross-Compile Satellite Binaries
         run: |

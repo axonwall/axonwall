@@ -73,30 +73,47 @@ export default function SystemUpdatesPage() {
   const activeSlot = slots.find((s) => s.isActive) || slots[0];
   const standbySlot = slots.find((s) => !s.isActive) || slots[1];
 
+  const refreshTelemetryAndRelease = async () => {
+    try {
+      const resp = await fetch('/api/system/update', { cache: 'no-store' });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.telemetry) {
+          setSlots(data.telemetry.slots);
+          setBootCount(data.telemetry.bootCount);
+          setBootLimit(data.telemetry.bootLimit);
+          setHealthVerified(data.telemetry.healthVerified);
+          setHealthChecks(data.telemetry.checks);
+        }
+        if (data.releaseInfo) {
+          setReleaseInfo(data.releaseInfo);
+        }
+        return data;
+      }
+    } catch {
+      // Fallback to Server Actions if route handler is unreachable
+    }
+
+    const [telemetry, info] = await Promise.all([
+      getSystemPartitionsTelemetry().catch(() => null),
+      getReleaseInfo().catch(() => null),
+    ]);
+    if (telemetry) {
+      setSlots(telemetry.slots);
+      setBootCount(telemetry.bootCount);
+      setBootLimit(telemetry.bootLimit);
+      setHealthVerified(telemetry.healthVerified);
+      setHealthChecks(telemetry.checks);
+    }
+    if (info) {
+      setReleaseInfo(info);
+    }
+    return { telemetry, releaseInfo: info };
+  };
+
   // Load real telemetry on initial mount
   useEffect(() => {
-    let mounted = true;
-    getSystemPartitionsTelemetry()
-      .then((telemetry) => {
-        if (!mounted) return;
-        setSlots(telemetry.slots);
-        setBootCount(telemetry.bootCount);
-        setBootLimit(telemetry.bootLimit);
-        setHealthVerified(telemetry.healthVerified);
-        setHealthChecks(telemetry.checks);
-      })
-      .catch(() => {});
-
-    getReleaseInfo()
-      .then((info) => {
-        if (!mounted) return;
-        setReleaseInfo(info);
-      })
-      .catch(() => {});
-
-    return () => {
-      mounted = false;
-    };
+    refreshTelemetryAndRelease().catch(() => {});
   }, []);
 
   const handleManualRollback = async () => {
@@ -109,7 +126,23 @@ export default function SystemUpdatesPage() {
     }
 
     try {
-      const res = await activatePartitionSlot(standbySlot.slot);
+      let res: { success: boolean; message: string };
+      try {
+        const resp = await fetch('/api/system/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'activate', slot: standbySlot.slot }),
+        });
+        res = await resp.json();
+      } catch {
+        res = await activatePartitionSlot(standbySlot.slot);
+      }
+
+      if (!res.success) {
+        alert(`Rollback staging failed: ${res.message}`);
+        return;
+      }
+
       setAlertMessage(res.message);
       setSlots(
         slots.map((s) => ({
@@ -118,21 +151,24 @@ export default function SystemUpdatesPage() {
         }))
       );
     } catch (err: any) {
-      alert(`Rollback staging failed: ${err.message}`);
+      alert(`Rollback staging failed: ${err?.message || String(err)}`);
     }
   };
 
   const handleCheckCloud = async () => {
     setIsCheckingCloud(true);
     try {
-      const info = await getReleaseInfo();
-      setReleaseInfo(info);
-      if (info.isUpToDate) {
-        alert(`Axonwall Release Channel Check: Up to date! Currently running latest release v${info.currentVersion}.`);
-      } else {
-        alert(
-          `New Axonwall Release Available: v${info.latestVersion} (Current: v${info.currentVersion})\n\nRelease Notes: ${info.releaseNotes?.slice(0, 150)}...\n\nClick "Flash New Image to Standby" to apply this firmware update.`
-        );
+      const data = await refreshTelemetryAndRelease();
+      const info: ReleaseInfo | null = data?.releaseInfo || (await getReleaseInfo());
+      if (info) {
+        setReleaseInfo(info);
+        if (info.isUpToDate) {
+          alert(`Axonwall Release Channel Check: Up to date! Currently running latest release v${info.currentVersion}.`);
+        } else {
+          alert(
+            `New Axonwall Release Available: v${info.latestVersion} (Current: v${info.currentVersion})\n\nRelease Notes: ${info.releaseNotes?.slice(0, 150)}...\n\nClick "Flash New Image to Standby" to apply this firmware update.`
+          );
+        }
       }
     } catch {
       alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.2.9.');
@@ -146,18 +182,36 @@ export default function SystemUpdatesPage() {
     setUpgradeProgress(15);
     setUpgradePhase(`Resolving release payload for Slot ${standbySlot.slot}...`);
 
+    const timer1 = setTimeout(() => {
+      setUpgradeProgress(40);
+      setUpgradePhase('Verifying cryptographic SHA-256 integrity hash & signature...');
+    }, 700);
+
+    const timer2 = setTimeout(() => {
+      setUpgradeProgress(75);
+      setUpgradePhase(`Writing firmware payload to ${standbySlot.label} and updating bootloader...`);
+    }, 1500);
+
     try {
-      setTimeout(() => {
-        setUpgradeProgress(40);
-        setUpgradePhase('Verifying cryptographic SHA-256 integrity hash & signature...');
-      }, 700);
+      let res: { success: boolean; message: string };
+      try {
+        const resp = await fetch('/api/system/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'update', slot: standbySlot.slot }),
+        });
+        res = await resp.json();
+      } catch {
+        res = await applySystemFirmwareUpdate(standbySlot.slot);
+      }
 
-      setTimeout(() => {
-        setUpgradeProgress(75);
-        setUpgradePhase(`Writing firmware payload to ${standbySlot.label} and updating bootloader...`);
-      }, 1500);
-
-      const res = await applySystemFirmwareUpdate(standbySlot.slot);
+      if (!res.success) {
+        clearTimeout(timer1);
+        clearTimeout(timer2);
+        setIsUpgrading(false);
+        alert(`Firmware update error: ${res.message}`);
+        return;
+      }
 
       setTimeout(() => {
         setUpgradeProgress(100);
@@ -165,23 +219,36 @@ export default function SystemUpdatesPage() {
         setTimeout(() => {
           setIsUpgrading(false);
           setAlertMessage(res.message);
-          // Refresh partition slots
-          getSystemPartitionsTelemetry().then((t) => {
-            setSlots(t.slots);
-            setBootCount(t.bootCount);
-          });
+          refreshTelemetryAndRelease().catch(() => {});
         }, 600);
-      }, 2200);
+      }, 1200);
     } catch (err: any) {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
       setIsUpgrading(false);
-      alert(`Firmware update error: ${err.message}`);
+      alert(`Firmware update error: ${err?.message || String(err)}`);
     }
   };
 
   const handleRunHealthCheck = async () => {
     setIsVerifying(true);
     try {
-      const telemetry = await verifySystemHealthQuorum();
+      let telemetry;
+      try {
+        const resp = await fetch('/api/system/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'verify' }),
+        });
+        const data = await resp.json();
+        if (!data.success) {
+          throw new Error(data.message || 'Verification failed');
+        }
+        telemetry = data;
+      } catch {
+        telemetry = await verifySystemHealthQuorum();
+      }
+
       setSlots(telemetry.slots);
       setBootCount(telemetry.bootCount);
       setBootLimit(telemetry.bootLimit);
@@ -189,7 +256,7 @@ export default function SystemUpdatesPage() {
       setHealthChecks(telemetry.checks);
       alert('Watchdog Health Quorum: All verification tests PASSED. Partition marked permanently healthy (bootcount=0).');
     } catch (err: any) {
-      alert(`Health verification check failed: ${err.message}`);
+      alert(`Health verification check failed: ${err?.message || String(err)}`);
     } finally {
       setIsVerifying(false);
     }

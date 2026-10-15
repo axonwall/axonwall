@@ -88,8 +88,18 @@ for dir in bin etc home lib opt root sbin usr var; do
 done
 mkdir -p /mnt/slot_a/dev /mnt/slot_a/proc /mnt/slot_a/sys /mnt/slot_a/run /mnt/slot_a/tmp /mnt/slot_a/boot
 
-if [ -d /media/cdrom/boot ]; then
-  cp -a /media/cdrom/boot/* /mnt/slot_a/boot/ 2>/dev/null || true
+for boot_src in /media/cdrom/boot /media/usb/boot /media/*/boot /boot; do
+  if [ -d "$boot_src" ] && ls "$boot_src"/vmlinuz-* >/dev/null 2>&1; then
+    cp -a "$boot_src"/* /mnt/slot_a/boot/ 2>/dev/null || true
+    break
+  fi
+done
+
+KERNEL_FLAVOR="virt"
+if [ -f /mnt/slot_a/boot/vmlinuz-lts ]; then
+  KERNEL_FLAVOR="lts"
+elif [ -f /mnt/slot_a/boot/vmlinuz-virt ]; then
+  KERNEL_FLAVOR="virt"
 fi
 
 cat << 'FSTAB_EOF' > /mnt/slot_a/etc/fstab
@@ -99,25 +109,48 @@ LABEL=axon_data     /var/lib/axonwall   ext4    defaults,noatime        0 2
 tmpfs               /tmp                tmpfs   nosuid,nodev            0 0
 FSTAB_EOF
 
-echo "[+] Cloning Slot A into Standby Slot B..."
-mount "${PART_PREFIX}4" /mnt/slot_b
-cp -a /mnt/slot_a/* /mnt/slot_b/ 2>/dev/null || true
-sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
-umount /mnt/slot_b
-
 echo "[+] Installing GRUB bootloader (BIOS + UEFI)..."
 grub-install --target=i386-pc --boot-directory=/mnt/slot_a/boot "$TARGET_DISK" 2>/dev/null || true
 grub-install --target=x86_64-efi --efi-directory=/mnt/slot_a/boot/efi --boot-directory=/mnt/slot_a/boot --removable --no-nvram 2>/dev/null || true
 
-cat << 'GRUB_EOF' > /mnt/slot_a/boot/grub/grub.cfg
+cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
 set default=0
 set timeout=3
 
-if [ -s $prefix/grubenv ]; then
+if [ -s \$prefix/grubenv ]; then
   load_env
 fi
 
-if [ "${active_slot}" = "B" ]; then
+if [ -z "\${active_slot}" ]; then
+  set active_slot="A"
+fi
+if [ -z "\${bootcount}" ]; then
+  set bootcount=0
+fi
+if [ -z "\${bootlimit}" ]; then
+  set bootlimit=3
+fi
+
+if [ "\${bootcount}" -ge "\${bootlimit}" ]; then
+  if [ "\${active_slot}" = "A" ]; then
+    set active_slot="B"
+  else
+    set active_slot="A"
+  fi
+  set bootcount=0
+  save_env active_slot bootcount
+fi
+
+if [ "\${bootcount}" = "0" ]; then
+  set bootcount=1
+elif [ "\${bootcount}" = "1" ]; then
+  set bootcount=2
+else
+  set bootcount=3
+fi
+save_env bootcount
+
+if [ "\${active_slot}" = "B" ]; then
   set default="Axonwall Appliance - Slot B"
 else
   set default="Axonwall Appliance - Slot A"
@@ -125,19 +158,25 @@ fi
 
 menuentry "Axonwall Appliance - Slot A" {
   search --no-floppy --label --set=root axon_root_a
-  linux /boot/vmlinuz-lts root=LABEL=axon_root_a ro modules=sd-mod,usb-storage,ext4 quiet console=tty0 console=ttyS0,115200
-  initrd /boot/initramfs-lts
+  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_a ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${KERNEL_FLAVOR}
 }
 
 menuentry "Axonwall Appliance - Slot B" {
   search --no-floppy --label --set=root axon_root_b
-  linux /boot/vmlinuz-lts root=LABEL=axon_root_b ro modules=sd-mod,usb-storage,ext4 quiet console=tty0 console=ttyS0,115200
-  initrd /boot/initramfs-lts
+  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_b ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${KERNEL_FLAVOR}
 }
 GRUB_EOF
 
 grub-editenv /mnt/slot_a/boot/grub/grubenv create 2>/dev/null || true
 grub-editenv /mnt/slot_a/boot/grub/grubenv set active_slot=A bootcount=0 bootlimit=3 2>/dev/null || true
+
+echo "[+] Cloning Slot A into Standby Slot B..."
+mount "${PART_PREFIX}4" /mnt/slot_b
+cp -a /mnt/slot_a/* /mnt/slot_b/ 2>/dev/null || true
+sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
+umount /mnt/slot_b
 
 umount /mnt/slot_a/boot/efi /mnt/slot_a /mnt/data 2>/dev/null || true
 sync

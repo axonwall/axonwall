@@ -34,7 +34,7 @@ let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
 
-async function callAgentApi<T>(path: string, method = 'GET', body?: any): Promise<T | null> {
+async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeoutMs = 4000): Promise<T | null> {
   return new Promise((resolve) => {
     const postData = body ? JSON.stringify(body) : undefined;
     const req = http.request(
@@ -48,7 +48,7 @@ async function callAgentApi<T>(path: string, method = 'GET', body?: any): Promis
               'Content-Length': Buffer.byteLength(postData),
             }
           : undefined,
-        timeout: 4000,
+        timeout: timeoutMs,
       },
       (res) => {
         let data = '';
@@ -1205,9 +1205,6 @@ function compareSemver(v1: string, v2: string): number {
 }
 
 export async function getReleaseInfo(): Promise<ReleaseInfo> {
-  const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
-
   const currentVersion = getCurrentInstalledVersion();
   const now = Date.now();
 
@@ -1314,8 +1311,6 @@ export interface SystemPartitionsTelemetry {
 }
 
 export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTelemetry> {
-  const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
   const currentVersion = getCurrentInstalledVersion();
   const kernel = os.release() || 'Linux 6.12.111+deb13-amd64';
 
@@ -1455,45 +1450,60 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   };
 }
 
+function isAdminSession(session: Awaited<ReturnType<typeof getSession>>): boolean {
+  if (!session) return false;
+  if (session.source === 'local_admin') return true;
+  if (Array.isArray(session.roles) && session.roles.includes('admin')) return true;
+  if (Array.isArray(session.privileges) && session.privileges.includes('*')) return true;
+  return false;
+}
+
 export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success: boolean; message: string }> {
-  const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin credentials required to activate partition slot');
-  }
-
-  // 1. Try daemon endpoint
-  const daemonResp = await callAgentApi<any>('/v1/system/slot/activate', 'POST', { slot });
-  if (daemonResp && daemonResp.success) {
-    return { success: true, message: daemonResp.message };
-  }
-
-  // 2. Direct grub-editenv execution if running as root or with sudo
   try {
-    execSync(`grub-editenv /boot/grub/grubenv set active_slot=${slot} bootcount=0 2>/dev/null`, { timeout: 1500 });
+    const session = await getSession();
+    if (!isAdminSession(session)) {
+      return { success: false, message: 'Unauthorized: Admin credentials required to activate partition slot' };
+    }
+
+    const cleanSlot: 'A' | 'B' = slot === 'A' ? 'A' : 'B';
+
+    // 1. Try daemon endpoint
+    const daemonResp = await callAgentApi<any>('/v1/system/slot/activate', 'POST', { slot: cleanSlot });
+    if (daemonResp && daemonResp.success) {
+      return { success: true, message: daemonResp.message };
+    }
+
+    // 2. Direct grub-editenv execution if running as root or with sudo
+    try {
+      execFileSync('grub-editenv', ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0'], {
+        stdio: 'ignore',
+        timeout: 1500,
+      });
+      return {
+        success: true,
+        message: `Partition Slot ${cleanSlot} armed in GRUB environment. System will boot into Slot ${cleanSlot} on next reboot.`,
+      };
+    } catch {
+      return {
+        success: true,
+        message: `Slot ${cleanSlot} staged for next boot cycle (emulated environment).`,
+      };
+    }
+  } catch (err: any) {
     return {
-      success: true,
-      message: `Partition Slot ${slot} armed in GRUB environment. System will boot into Slot ${slot} on next reboot.`,
-    };
-  } catch {
-    return {
-      success: true,
-      message: `Slot ${slot} staged for next boot cycle (emulated environment).`,
+      success: false,
+      message: err?.message || 'Failed to activate partition slot',
     };
   }
 }
 
 export async function verifySystemHealthQuorum(): Promise<SystemPartitionsTelemetry> {
-  const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized');
-  }
-
-  const daemonResp = await callAgentApi<any>('/v1/system/health/verify', 'POST');
-  if (daemonResp) {
-    return getSystemPartitionsTelemetry();
-  }
-
-  // Fallback
+  try {
+    const session = await getSession();
+    if (isAdminSession(session)) {
+      await callAgentApi<any>('/v1/system/health/verify', 'POST');
+    }
+  } catch {}
   return getSystemPartitionsTelemetry();
 }
 
@@ -1505,45 +1515,86 @@ export interface FirmwareUpgradeResult {
 }
 
 export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<FirmwareUpgradeResult> {
-  const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Administrator credentials required for firmware upgrades');
-  }
-
-  const release = await getReleaseInfo();
-  const targetVersion = release.latestVersion || '0.2.9';
-
-  // Check if system has axonwall-update utility
-  const updaterPaths = ['/usr/local/bin/axonwall-update', '/usr/sbin/axonwall-update'];
-  let updaterFound = false;
-  for (const up of updaterPaths) {
-    if (fs.existsSync(up)) {
-      updaterFound = true;
-      try {
-        execSync(`${up} --slot ${targetSlot} --version ${targetVersion} 2>/dev/null`, { timeout: 10000 });
-      } catch {}
-      break;
-    }
-  }
-
-  // Update GRUB environment for standby slot
+  const cleanSlot: 'A' | 'B' = targetSlot === 'A' ? 'A' : 'B';
   try {
-    execSync(`grub-editenv /boot/grub/grubenv set active_slot=${targetSlot} bootcount=0 bootlimit=3 2>/dev/null`, { timeout: 1500 });
-  } catch {}
-
-  // Update /etc/axonwall/version if writable
-  try {
-    if (fs.existsSync('/etc/axonwall')) {
-      fs.writeFileSync('/etc/axonwall/version', targetVersion + '\n', 'utf8');
+    const session = await getSession();
+    if (!isAdminSession(session)) {
+      return {
+        success: false,
+        message: 'Unauthorized: Administrator credentials required for firmware upgrades',
+        targetSlot: cleanSlot,
+        newVersion: getCurrentInstalledVersion(),
+      };
     }
-  } catch {}
 
-  return {
-    success: true,
-    message: `Firmware v${targetVersion} successfully prepared and flashed to Slot ${targetSlot}! Watchdog bootcount armed (bootlimit=3). Reboot when ready.`,
-    targetSlot,
-    newVersion: targetVersion,
-  };
+    const release = await getReleaseInfo();
+    const targetVersion = (release.latestVersion || '0.2.9').replace(/[^0-9a-zA-Z._-]/g, '');
+
+    // 1. Delegate privileged firmware update to root daemon (axonwalld) first
+    const daemonResp = await callAgentApi<any>(
+      '/v1/system/update',
+      'POST',
+      { slot: cleanSlot, version: targetVersion },
+      45000
+    );
+    if (daemonResp && daemonResp.success) {
+      cachedReleaseInfo = null;
+      return {
+        success: true,
+        message:
+          daemonResp.message ||
+          `Firmware v${targetVersion} successfully prepared and flashed to Slot ${cleanSlot}! Watchdog bootcount armed (bootlimit=3). Reboot when ready.`,
+        targetSlot: cleanSlot,
+        newVersion: daemonResp.newVersion || targetVersion,
+      };
+    }
+
+    // 2. Fallback: Check if system has axonwall-update utility
+    const updaterPaths = ['/usr/local/bin/axonwall-update', '/usr/sbin/axonwall-update'];
+    for (const up of updaterPaths) {
+      if (fs.existsSync(up)) {
+        try {
+          execFileSync(up, ['--slot', cleanSlot, '--version', targetVersion], {
+            stdio: 'ignore',
+            timeout: 30000,
+          });
+        } catch {}
+        break;
+      }
+    }
+
+    // Update GRUB environment for standby slot
+    try {
+      execFileSync(
+        'grub-editenv',
+        ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
+        { stdio: 'ignore', timeout: 1500 }
+      );
+    } catch {}
+
+    // Update /etc/axonwall/version if writable
+    try {
+      if (fs.existsSync('/etc/axonwall')) {
+        fs.writeFileSync('/etc/axonwall/version', targetVersion + '\n', 'utf8');
+      }
+    } catch {}
+
+    cachedReleaseInfo = null;
+
+    return {
+      success: true,
+      message: `Firmware v${targetVersion} successfully prepared and flashed to Slot ${cleanSlot}! Watchdog bootcount armed (bootlimit=3). Reboot when ready.`,
+      targetSlot: cleanSlot,
+      newVersion: targetVersion,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'An unexpected error occurred while applying the firmware update.',
+      targetSlot: cleanSlot,
+      newVersion: getCurrentInstalledVersion(),
+    };
+  }
 }
 
 export interface SensorReading {

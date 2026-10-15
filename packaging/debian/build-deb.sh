@@ -160,15 +160,16 @@ if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/index.js" ]]; then
 fi
 
 # 8. Build Debian Archive via dpkg-deb (or docker fallback if dpkg-deb is absent)
+# Use -Zxz so the inner data.tar.xz archive is universally extractable on both Debian and Alpine (BusyBox unxz)
 echo "[+] Building deb package: ${PKG_NAME}.deb..."
 if command -v dpkg-deb &>/dev/null; then
-  dpkg-deb --build --root-owner-group "${WORK_DIR}" "${OUTPUT_DIR}/${PKG_NAME}.deb"
+  dpkg-deb -Zxz --build --root-owner-group "${WORK_DIR}" "${OUTPUT_DIR}/${PKG_NAME}.deb"
 elif command -v docker &>/dev/null; then
   echo "[+] Running dpkg-deb inside debian:trixie container..."
   docker run --rm \
     -v "${SCRIPT_DIR}:/workspace" \
     debian:trixie \
-    dpkg-deb --build --root-owner-group "/workspace/build" "/workspace/output/${PKG_NAME}.deb"
+    dpkg-deb -Zxz --build --root-owner-group "/workspace/build" "/workspace/output/${PKG_NAME}.deb"
 else
   echo "[-] Error: Neither dpkg-deb nor docker is available to build .deb" >&2
   exit 1

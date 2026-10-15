@@ -2,16 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { mintSupabaseToken } from '@axonwall/lib/ldap';
 import { DEFAULT_ROLES } from '@axonwall/lib/rbac';
 import type { UserSession } from '@axonwall/lib/rbac';
-
-const SESSION_COOKIE = 'axonwall_session';
-
-function getJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
-  if (process.env.NODE_ENV === 'production' && !secret) {
-    throw new Error('JWT_SECRET environment variable is required in production');
-  }
-  return secret || 'super-secret-axonwall-jwt-signing-key-32-bytes!';
-}
+import { SESSION_COOKIE, getJwtSecret } from '../../../../../server/auth-constants';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
