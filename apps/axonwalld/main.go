@@ -597,9 +597,7 @@ func applyBootInterfaces() {
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", wanDev).CombinedOutput()
 			if !strings.Contains(string(out), "inet ") {
 				log.Printf("[Agent] Boot-apply: starting DHCP client on WAN (%s)", wanDev)
-				go func() {
-					_ = exec.Command("dhclient", "-1", "-v", wanDev).Run()
-				}()
+				triggerDhcpClient(wanDev)
 			}
 		}
 	}
@@ -626,6 +624,12 @@ func applyBootInterfaces() {
 			if !strings.Contains(string(out), strings.Split(opt1IP, "/")[0]) {
 				_ = exec.Command("ip", "addr", "add", opt1IP, "dev", opt1Dev).Run()
 			}
+		} else if opt1Mode == "dhcp" {
+			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", opt1Dev).CombinedOutput()
+			if !strings.Contains(string(out), "inet ") {
+				log.Printf("[Agent] Boot-apply: starting DHCP client on OPT1 (%s)", opt1Dev)
+				triggerDhcpClient(opt1Dev)
+			}
 		}
 	}
 
@@ -636,6 +640,12 @@ func applyBootInterfaces() {
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", opt2Dev).CombinedOutput()
 			if !strings.Contains(string(out), strings.Split(opt2IP, "/")[0]) {
 				_ = exec.Command("ip", "addr", "add", opt2IP, "dev", opt2Dev).Run()
+			}
+		} else if opt2Mode == "dhcp" {
+			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", opt2Dev).CombinedOutput()
+			if !strings.Contains(string(out), "inet ") {
+				log.Printf("[Agent] Boot-apply: starting DHCP client on OPT2 (%s)", opt2Dev)
+				triggerDhcpClient(opt2Dev)
 			}
 		}
 	}

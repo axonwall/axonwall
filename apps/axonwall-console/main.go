@@ -198,7 +198,80 @@ func getInterfaceAssignments() (wan, lan, opt1, opt2 string) {
 			}
 		}
 	}
+	// Fallback to state.json if opt1 or opt2 are empty in interfaces.conf
+	if opt1 == "" || opt2 == "" {
+		for _, p := range []string{"/var/lib/axonwall/state.json", "/etc/axonwall/state.json"} {
+			if data, err := os.ReadFile(p); err == nil {
+				var st map[string]interface{}
+				if err := json.Unmarshal(data, &st); err == nil {
+					if ifaces, ok := st["interfaces"].([]interface{}); ok {
+						for _, item := range ifaces {
+							if m, ok := item.(map[string]interface{}); ok {
+								n, _ := m["name"].(string)
+								d, _ := m["device"].(string)
+								if d != "" {
+									if n == "opt1" && opt1 == "" {
+										opt1 = d
+									} else if n == "opt2" && opt2 == "" {
+										opt2 = d
+									} else if n == "lan" && lan == "" {
+										lan = d
+									} else if n == "wan" && wan == "" {
+										wan = d
+									}
+								}
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+	// Fallback to detecting physical interfaces if still empty
+	if opt1 == "" || opt2 == "" {
+		allIfaces := getInterfaces()
+		var unassigned []string
+		for _, ifc := range allIfaces {
+			if ifc.Name != wan && ifc.Name != lan {
+				unassigned = append(unassigned, ifc.Name)
+			}
+		}
+		if opt1 == "" && len(unassigned) > 0 {
+			opt1 = unassigned[0]
+		}
+		if opt2 == "" && len(unassigned) > 1 {
+			opt2 = unassigned[1]
+		}
+	}
 	return
+}
+
+func triggerDhcpClient(dev string) {
+	if dev == "" {
+		return
+	}
+	_ = exec.Command("ip", "link", "set", dev, "up").Run()
+	if udhcpcPath, err := exec.LookPath("udhcpc"); err == nil {
+		pidFile := "/var/run/udhcpc." + dev + ".pid"
+		_ = exec.Command(udhcpcPath, "-b", "-i", dev, "-p", pidFile).Run()
+		return
+	}
+	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
+		_ = exec.Command(dhclientPath, "-1", "-v", dev).Run()
+		return
+	}
+}
+
+func releaseDhcpLease(dev string) {
+	if dev == "" {
+		return
+	}
+	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
+		_ = exec.Command(dhclientPath, "-r", dev).Run()
+	}
+	pidFile := "/var/run/udhcpc." + dev + ".pid"
+	_ = exec.Command("sh", "-c", "kill $(cat "+pidFile+" 2>/dev/null) 2>/dev/null || pkill -f 'udhcpc.*"+dev+"' 2>/dev/null").Run()
 }
 
 // guessGateway calculates a recommended default gateway IPv4 address given a host IP and CIDR prefix.
@@ -1246,8 +1319,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		if modeChoice != "2" {
 			// DHCP Client
 			fmt.Printf("\nConfiguring WAN (%s) as DHCP client...\n", iface)
-			_ = exec.Command("ip", "link", "set", iface, "up").Run()
-			_ = exec.Command("dhclient", "-1", "-v", iface).Run()
+			triggerDhcpClient(iface)
 			cfg := readCurrentNetworkConfig()
 			cfg.WanDevice = iface
 			cfg.WanMode = "dhcp"
@@ -1322,7 +1394,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		cidrFull := fmt.Sprintf("%s/%s", wanIP, cidr)
 		fmt.Printf("\nApplying Static WAN %s with Gateway %s to %s...\n", cidrFull, gateway, iface)
 
-		_ = exec.Command("dhclient", "-r", iface).Run()
+		releaseDhcpLease(iface)
 		_ = exec.Command("ip", "link", "set", iface, "up").Run()
 		_ = exec.Command("ip", "addr", "flush", "dev", iface).Run()
 		cmd := exec.Command("ip", "addr", "add", cidrFull, "dev", iface)
@@ -1377,8 +1449,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		if modeChoice != "2" {
 			// DHCP Client mode
 			fmt.Printf("\nConfiguring %s (%s) as DHCP client on attached network...\n", strings.ToUpper(ifName), iface)
-			_ = exec.Command("ip", "link", "set", iface, "up").Run()
-			_ = exec.Command("dhclient", "-1", "-v", iface).Run()
+			triggerDhcpClient(iface)
 			cfg := readCurrentNetworkConfig()
 			if ifName == "opt1" {
 				cfg.Opt1Device = iface
@@ -1432,7 +1503,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	fmt.Printf("\nApplying %s to interface %s...\n", cidrFull, iface)
 
 	// Release any DHCP lease, flush old address, and assign new address
-	_ = exec.Command("dhclient", "-r", iface).Run()
+	releaseDhcpLease(iface)
 	_ = exec.Command("ip", "link", "set", iface, "up").Run()
 	_ = exec.Command("ip", "addr", "flush", "dev", iface).Run()
 	cmd := exec.Command("ip", "addr", "add", cidrFull, "dev", iface)
@@ -1695,29 +1766,78 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 	sys["antiLockout"] = al
 	state["system"] = sys
 
-	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
-		_ = os.WriteFile(statePath, out, 0600)
-		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
+	// Ensure all current interfaces are present in NetworkConfig and persisted to interfaces.conf / interfaces.yaml / state.json
+	cfg := readCurrentNetworkConfig()
+	if cfg.LanDevice == "" && lan != "" {
+		cfg.LanDevice = lan
 	}
-
-	// Update /etc/axonwall/system.yaml if present
-	yamlPath := "/etc/axonwall/system.yaml"
-	if yamlData, err := os.ReadFile(yamlPath); err == nil {
-		content := string(yamlData)
-		// Format interfaces list in YAML
-		var yList []string
-		for _, item := range currentIfaces {
-			yList = append(yList, fmt.Sprintf("      - %s", item))
+	if cfg.Opt1Device == "" && opt1 != "" {
+		cfg.Opt1Device = opt1
+		if cfg.Opt1Mode == "" {
+			cfg.Opt1Mode = "dhcp"
 		}
-		// If interfaces key already in antiLockout, replace it or append
-		if strings.Contains(content, "antiLockout:") {
-			if strings.Contains(content, "interfaces:") {
-				// Simple replacement of lines or regenerate via axonwallctl
+	}
+	if cfg.Opt2Device == "" && opt2 != "" {
+		cfg.Opt2Device = opt2
+		if cfg.Opt2Mode == "" {
+			cfg.Opt2Mode = "dhcp"
+		}
+	}
+	persistNetworkInterfaces(cfg)
+
+	// Refresh state from state.json after persistNetworkInterfaces
+	if data, err := os.ReadFile(statePath); err == nil {
+		var refreshed map[string]interface{}
+		if err := json.Unmarshal(data, &refreshed); err == nil {
+			state = refreshed
+			if s, ok := state["system"].(map[string]interface{}); ok {
+				s["antiLockout"] = al
+			} else {
+				state["system"] = sys
 			}
 		}
 	}
 
-	// Also directly append immediate nftables rules for instant access
+	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
+		_ = os.WriteFile(statePath, out, 0600)
+		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
+		_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/state.json", out, 0600)
+	}
+
+	// Update /etc/axonwall/system.yaml if present
+	for _, yamlPath := range []string{"/etc/axonwall/system.yaml", "/var/lib/axonwall/etc-axonwall/system.yaml"} {
+		if yamlData, err := os.ReadFile(yamlPath); err == nil {
+			content := string(yamlData)
+			var yList []string
+			for _, item := range currentIfaces {
+				yList = append(yList, fmt.Sprintf("      - %s", item))
+			}
+			newIfacesYaml := "    interfaces:\n" + strings.Join(yList, "\n")
+			if strings.Contains(content, "interfaces:") {
+				lines := strings.Split(content, "\n")
+				var newLines []string
+				skipInterfaces := false
+				for _, line := range lines {
+					trimmed := strings.TrimSpace(line)
+					if strings.HasPrefix(trimmed, "interfaces:") {
+						skipInterfaces = true
+						newLines = append(newLines, newIfacesYaml)
+						continue
+					}
+					if skipInterfaces {
+						if strings.HasPrefix(line, "      - ") || strings.HasPrefix(line, "    - ") {
+							continue
+						}
+						skipInterfaces = false
+					}
+					newLines = append(newLines, line)
+				}
+				_ = os.WriteFile(yamlPath, []byte(strings.Join(newLines, "\n")), 0644)
+			}
+		}
+	}
+
+	// Also directly insert immediate nftables rules at the top of chain input for instant zero-downtime access
 	devMap := map[string]string{
 		"lan":  lan,
 		"opt1": opt1,
@@ -1726,7 +1846,7 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 	for _, ifName := range currentIfaces {
 		dev := devMap[strings.ToLower(ifName)]
 		if dev != "" {
-			_ = exec.Command("nft", "add", "rule", "inet", "axonwall", "input", "iifname", dev, "tcp", "dport", "{ 22, 80, 443, 2966, 3000 }", "accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", ifName)).Run()
+			_ = exec.Command("nft", "insert", "rule", "inet", "axonwall", "input", "iifname", dev, "tcp", "dport", "{ 22, 80, 443, 2966, 3000 }", "accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", ifName)).Run()
 		}
 	}
 

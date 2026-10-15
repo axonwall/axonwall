@@ -109,10 +109,12 @@ fi
 
 if [ -n "$OPT1_IF" ] && ip link show "$OPT1_IF" >/dev/null 2>&1; then
   ip link set up dev "$OPT1_IF" 2>/dev/null || true
+  /sbin/udhcpc -b -i "$OPT1_IF" -p "/var/run/udhcpc.${OPT1_IF}.pid" >/dev/null 2>&1 || true
 fi
 
 if [ -n "$OPT2_IF" ] && ip link show "$OPT2_IF" >/dev/null 2>&1; then
   ip link set up dev "$OPT2_IF" 2>/dev/null || true
+  /sbin/udhcpc -b -i "$OPT2_IF" -p "/var/run/udhcpc.${OPT2_IF}.pid" >/dev/null 2>&1 || true
 fi
 
 # 4. Bootstrap baseline lockdown nftables ruleset

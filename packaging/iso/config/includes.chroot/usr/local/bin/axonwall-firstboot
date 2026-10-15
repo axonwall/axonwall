@@ -101,11 +101,21 @@ fi
 # Configure OPT1 and OPT2 as non-authoritative interfaces (link up, NO Kea DHCP server)
 if [[ -n "$OPT1_IF" ]] && ip link show "$OPT1_IF" &>/dev/null; then
   ip link set up dev "$OPT1_IF" || true
+  if command -v dhclient &>/dev/null; then
+    dhclient -1 -v "$OPT1_IF" &>/dev/null || true
+  elif command -v udhcpc &>/dev/null; then
+    udhcpc -b -i "$OPT1_IF" -p "/var/run/udhcpc.${OPT1_IF}.pid" &>/dev/null || true
+  fi
   echo "[Axonwall Firstboot] OPT1 interface ($OPT1_IF) brought UP (Non-authoritative / attached network)"
 fi
 
 if [[ -n "$OPT2_IF" ]] && ip link show "$OPT2_IF" &>/dev/null; then
   ip link set up dev "$OPT2_IF" || true
+  if command -v dhclient &>/dev/null; then
+    dhclient -1 -v "$OPT2_IF" &>/dev/null || true
+  elif command -v udhcpc &>/dev/null; then
+    udhcpc -b -i "$OPT2_IF" -p "/var/run/udhcpc.${OPT2_IF}.pid" &>/dev/null || true
+  fi
   echo "[Axonwall Firstboot] OPT2 interface ($OPT2_IF) brought UP (Non-authoritative / attached network)"
 fi
 
