@@ -941,11 +941,15 @@ func main() {
 				if action == "reboot" {
 					log.Printf("[Agent] System reboot initiated via API")
 					_ = exec.Command("systemctl", "reboot").Run()
+					_ = exec.Command("/sbin/reboot").Run()
 					_ = exec.Command("reboot").Run()
 				} else {
 					log.Printf("[Agent] System poweroff initiated via API")
 					_ = exec.Command("systemctl", "poweroff").Run()
+					_ = exec.Command("/sbin/poweroff").Run()
 					_ = exec.Command("poweroff").Run()
+					_ = exec.Command("/sbin/halt", "-p").Run()
+					_ = exec.Command("halt", "-p").Run()
 				}
 			}()
 		})

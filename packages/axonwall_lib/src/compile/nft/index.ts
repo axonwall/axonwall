@@ -143,10 +143,20 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept');
 
     if (state.system.antiLockout?.enabled) {
-      const lanIface = state.system.antiLockout.interface;
-      const lanDev = ifDeviceMap.get(lanIface) || lanIface;
+      const ifaceList = Array.from(
+        new Set([
+          ...(state.system.antiLockout.interfaces || []),
+          state.system.antiLockout.interface || 'lan',
+        ].filter(Boolean))
+      );
       const ports = state.system.antiLockout.ports.join(', ');
-      lines.push(`    iifname "${lanDev}" tcp dport { ${ports} } accept comment "anti-lockout"`);
+      for (const ifaceName of ifaceList) {
+        if (ifaceName !== 'wan') {
+          const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+          const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
+          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        }
+      }
     }
 
     lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
@@ -349,14 +359,22 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Anti-Lockout Rule
   if (state.system.antiLockout?.enabled) {
-    const lanIface = state.system.antiLockout.interface;
-    if (lanIface !== 'wan') {
-      const lanDev = ifDeviceMap.get(lanIface) || lanIface;
-      const ports = state.system.antiLockout.ports.join(', ');
-      lines.push(`    # Anti-Lockout: Allow management access from ${lanIface}`);
-      lines.push(`    iifname "${lanDev}" tcp dport { ${ports} } accept comment "anti-lockout"`);
-    } else {
-      warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
+    const ifaceList = Array.from(
+      new Set([
+        ...(state.system.antiLockout.interfaces || []),
+        state.system.antiLockout.interface || 'lan',
+      ].filter(Boolean))
+    );
+    const ports = state.system.antiLockout.ports.join(', ');
+    for (const ifaceName of ifaceList) {
+      if (ifaceName !== 'wan') {
+        const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+        lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
+        const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
+        lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+      } else {
+        warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
+      }
     }
   }
 

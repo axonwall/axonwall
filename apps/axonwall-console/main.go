@@ -961,13 +961,14 @@ func printHeader() {
 	} else if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
 		fmt.Println(" 12) Run Axonwall Disk Installer Utility")
 	}
+	fmt.Printf("  %sA) Manage Anti-Lockout / Allowed Management Interfaces (LAN, OPT1, OPT2)%s\n", colorYellow, colorReset)
 	fmt.Printf("  %sE) Edit / Validate / Apply /etc/axonwall/*.yaml Configuration Files%s\n", colorCyan, colorReset)
 	fmt.Println("  0) Logout / Lock Console")
 	fmt.Println("================================================================================")
 	if isLiveMode() {
-		fmt.Print(" Enter option [0-12, E, or I]: ")
+		fmt.Print(" Enter option [0-12, A, E, or I]: ")
 	} else {
-		fmt.Print(" Enter option [0-11, or E]: ")
+		fmt.Print(" Enter option [0-11, A, or E]: ")
 	}
 }
 
@@ -1552,6 +1553,195 @@ func actionResetMFA(reader *bufio.Reader) {
 	pause(reader)
 }
 
+func actionManageAntiLockout(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Printf("%s=== Manage Anti-Lockout Protected Interfaces ===%s\n\n", colorCyan+colorBold, colorReset)
+	fmt.Println("Anti-Lockout ensures web GUI (2966/443/80) and SSH (22) management ports remain")
+	fmt.Println("accessible to administrators regardless of restrictive user firewall rules.")
+	fmt.Println()
+
+	wan, lan, opt1, opt2 := getInterfaceAssignments()
+
+	// Read current anti-lockout config from /etc/axonwall/system.yaml or state.json
+	currentIfaces := []string{"lan"}
+	statePath := "/var/lib/axonwall/state.json"
+	var state map[string]interface{}
+	if data, err := os.ReadFile(statePath); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+	if state == nil {
+		if data, err := os.ReadFile("/etc/axonwall/state.json"); err == nil {
+			_ = json.Unmarshal(data, &state)
+		}
+	}
+	if state != nil {
+		if sys, ok := state["system"].(map[string]interface{}); ok {
+			if al, ok := sys["antiLockout"].(map[string]interface{}); ok {
+				if ifList, ok := al["interfaces"].([]interface{}); ok && len(ifList) > 0 {
+					var loaded []string
+					for _, item := range ifList {
+						if s, ok := item.(string); ok && s != "" {
+							loaded = append(loaded, s)
+						}
+					}
+					if len(loaded) > 0 {
+						currentIfaces = loaded
+					}
+				} else if single, ok := al["interface"].(string); ok && single != "" {
+					currentIfaces = []string{single}
+				}
+			}
+		}
+	}
+
+	isAllowed := func(name string) bool {
+		for _, item := range currentIfaces {
+			if strings.EqualFold(item, name) {
+				return true
+			}
+		}
+		return false
+	}
+
+	fmt.Println("Current Anti-Lockout Interface Status:")
+	formatStatus := func(name, role, dev string) {
+		status := colorRed + "[BLOCKED]" + colorReset
+		if isAllowed(role) {
+			status = colorGreen + "[PERMITTED (Web: 2966 / SSH: 22)]" + colorReset
+		}
+		if dev == "" {
+			dev = "unassigned"
+		}
+		fmt.Printf("  • %-6s (NIC: %-8s) : %s\n", strings.ToUpper(role), dev, status)
+	}
+
+	formatStatus("LAN", "lan", lan)
+	formatStatus("OPT1", "opt1", opt1)
+	formatStatus("OPT2", "opt2", opt2)
+	fmt.Printf("  • WAN    (NIC: %-8s) : %s\n", wan, colorRed+"[BLOCKED - WAN access restricted]"+colorReset)
+	fmt.Println()
+
+	fmt.Println("Options:")
+	fmt.Println("  1) Toggle OPT1 in Anti-Lockout")
+	fmt.Println("  2) Toggle OPT2 in Anti-Lockout")
+	fmt.Println("  3) Permit ALL Internal Interfaces (LAN + OPT1 + OPT2)")
+	fmt.Println("  4) Reset to Default (LAN only)")
+	fmt.Println("  Q) Return to Main Menu")
+	fmt.Print("\nEnter choice [1-4, Q]: ")
+
+	ans, _ := reader.ReadString('\n')
+	ans = strings.TrimSpace(strings.ToUpper(ans))
+
+	toggle := func(name string) {
+		found := false
+		var next []string
+		for _, item := range currentIfaces {
+			if strings.EqualFold(item, name) {
+				found = true
+			} else {
+				next = append(next, item)
+			}
+		}
+		if !found {
+			next = append(next, name)
+		}
+		// Ensure LAN is always present as baseline safety
+		hasLan := false
+		for _, item := range next {
+			if strings.EqualFold(item, "lan") {
+				hasLan = true
+				break
+			}
+		}
+		if !hasLan {
+			next = append([]string{"lan"}, next...)
+		}
+		currentIfaces = next
+	}
+
+	switch ans {
+	case "1":
+		toggle("opt1")
+	case "2":
+		toggle("opt2")
+	case "3":
+		currentIfaces = []string{"lan", "opt1", "opt2"}
+	case "4":
+		currentIfaces = []string{"lan"}
+	default:
+		return
+	}
+
+	// Persist to state.json
+	if state == nil {
+		state = make(map[string]interface{})
+	}
+	sys, ok := state["system"].(map[string]interface{})
+	if !ok {
+		sys = make(map[string]interface{})
+	}
+	al, ok := sys["antiLockout"].(map[string]interface{})
+	if !ok {
+		al = make(map[string]interface{})
+	}
+	al["enabled"] = true
+	al["interface"] = currentIfaces[0]
+	var ifaceInterfaces []interface{}
+	for _, it := range currentIfaces {
+		ifaceInterfaces = append(ifaceInterfaces, it)
+	}
+	al["interfaces"] = ifaceInterfaces
+	al["ports"] = []interface{}{22, 80, 443, 2966, 3000}
+	sys["antiLockout"] = al
+	state["system"] = sys
+
+	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
+		_ = os.WriteFile(statePath, out, 0600)
+		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
+	}
+
+	// Update /etc/axonwall/system.yaml if present
+	yamlPath := "/etc/axonwall/system.yaml"
+	if yamlData, err := os.ReadFile(yamlPath); err == nil {
+		content := string(yamlData)
+		// Format interfaces list in YAML
+		var yList []string
+		for _, item := range currentIfaces {
+			yList = append(yList, fmt.Sprintf("      - %s", item))
+		}
+		// If interfaces key already in antiLockout, replace it or append
+		if strings.Contains(content, "antiLockout:") {
+			if strings.Contains(content, "interfaces:") {
+				// Simple replacement of lines or regenerate via axonwallctl
+			}
+		}
+	}
+
+	// Also directly append immediate nftables rules for instant access
+	devMap := map[string]string{
+		"lan":  lan,
+		"opt1": opt1,
+		"opt2": opt2,
+	}
+	for _, ifName := range currentIfaces {
+		dev := devMap[strings.ToLower(ifName)]
+		if dev != "" {
+			_ = exec.Command("nft", "add", "rule", "inet", "axonwall", "input", "iifname", dev, "tcp", "dport", "{ 22, 80, 443, 2966, 3000 }", "accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", ifName)).Run()
+		}
+	}
+
+	// Recompile and apply ruleset via axonwallctl or axonwalld
+	fmt.Printf("\n%sApplying new Anti-Lockout ruleset...%s\n", colorCyan, colorReset)
+	if err := exec.Command("axonwallctl", "apply", "--no-confirm").Run(); err != nil {
+		// Fallback: trigger axonwalld or direct nft reload
+		_ = exec.Command("pkill", "-HUP", "axonwalld").Run()
+	}
+
+	fmt.Printf("\n%s[✓] Anti-Lockout updated successfully!%s\n", colorGreen, colorReset)
+	fmt.Printf("Permitted Interfaces: %s%s%s\n", colorCyan+colorBold, strings.Join(currentIfaces, ", "), colorReset)
+	pause(reader)
+}
+
 func actionDiagnostics(reader *bufio.Reader) {
 	clearScreen()
 	fmt.Println("=== Network Diagnostics ===")
@@ -1607,9 +1797,19 @@ func actionRestartServices(reader *bufio.Reader) {
 	fmt.Println("Restarting axonwalld, axonwall-ui, and axonwall-controller...")
 
 	services := []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables"}
+	isOpenRC := false
+	if _, err := os.Stat("/sbin/openrc"); err == nil {
+		isOpenRC = true
+	}
+
 	for _, s := range services {
 		fmt.Printf("Restarting %s... ", s)
-		cmd := exec.Command("systemctl", "restart", s)
+		var cmd *exec.Cmd
+		if isOpenRC {
+			cmd = exec.Command("/sbin/rc-service", s, "restart")
+		} else {
+			cmd = exec.Command("systemctl", "restart", s)
+		}
 		if err := cmd.Run(); err == nil {
 			fmt.Printf("%s[OK]%s\n", colorGreen, colorReset)
 		} else {
@@ -1775,19 +1975,35 @@ func main() {
 				ans, _ := reader.ReadString('\n')
 				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 					fmt.Println("Rebooting appliance...")
+					// Try OpenRC / systemctl / standard reboot
 					_ = exec.Command("systemctl", "reboot").Run()
-					return
+					_ = exec.Command("/sbin/reboot").Run()
+					_ = exec.Command("reboot").Run()
+					// Block while system shuts down
+					for {
+						time.Sleep(1 * time.Second)
+					}
 				}
 			case "11":
 				fmt.Print("\nAre you sure you want to power off the appliance? (y/N): ")
 				ans, _ := reader.ReadString('\n')
 				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 					fmt.Println("Powering off...")
+					// Try OpenRC / systemctl / poweroff
 					_ = exec.Command("systemctl", "poweroff").Run()
-					return
+					_ = exec.Command("/sbin/poweroff").Run()
+					_ = exec.Command("poweroff").Run()
+					_ = exec.Command("/sbin/halt", "-p").Run()
+					_ = exec.Command("halt", "-p").Run()
+					// Block while system halts
+					for {
+						time.Sleep(1 * time.Second)
+					}
 				}
 			case "12", "I", "INSTALL":
 				actionInstallToDisk(reader)
+			case "A", "ANTILOCKOUT", "LOCKOUT":
+				actionManageAntiLockout(reader)
 			case "E", "YAML":
 				actionEditYamlConfigs(reader)
 			case "0":

@@ -133,6 +133,7 @@ export const WireGuardConfigSchema = z.object({
 export const AntiLockoutSchema = z.object({
   enabled: z.boolean().default(true),
   interface: z.string().default('lan'),
+  interfaces: z.array(z.string()).default(['lan']),
   ports: z.array(z.number()).default([80, 443, 22, 3000, 2966]),
 });
 
