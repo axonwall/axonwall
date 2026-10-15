@@ -206,6 +206,20 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       echo "$CLEAN_VER" > "${STAGE_DIR}/etc/axonwall/version" 2>/dev/null || true
     fi
 
+    # Ensure stable kernel & initrd symlinks exist on target slot
+    if [ -d "${STAGE_DIR}/boot" ]; then
+      LATEST_SLOT_KERN="$(ls -1t "${STAGE_DIR}/boot"/vmlinuz-* 2>/dev/null | head -n1 || true)"
+      if [ -n "$LATEST_SLOT_KERN" ]; then
+        ln -sf "$(basename "$LATEST_SLOT_KERN")" "${STAGE_DIR}/boot/vmlinuz"
+        ln -sf "boot/$(basename "$LATEST_SLOT_KERN")" "${STAGE_DIR}/vmlinuz" 2>/dev/null || true
+      fi
+      LATEST_SLOT_INITRD="$(ls -1t "${STAGE_DIR}/boot"/initrd.img-* 2>/dev/null | head -n1 || true)"
+      if [ -n "$LATEST_SLOT_INITRD" ]; then
+        ln -sf "$(basename "$LATEST_SLOT_INITRD")" "${STAGE_DIR}/boot/initrd.img"
+        ln -sf "boot/$(basename "$LATEST_SLOT_INITRD")" "${STAGE_DIR}/initrd.img" 2>/dev/null || true
+      fi
+    fi
+
     # Also update grubenv on the target partition if /boot/grub exists there
     if [ -d "${STAGE_DIR}/boot/grub" ]; then
       update_grubenv_file "${STAGE_DIR}/boot/grub/grubenv" "${TARGET_SLOT}"

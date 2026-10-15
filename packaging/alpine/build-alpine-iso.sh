@@ -73,7 +73,9 @@ apk add --no-cache \
   gzip \
   xz \
   openssl \
-  ca-certificates
+  ca-certificates \
+  abuild \
+  cpio
 
 rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}/iso/boot/grub" \
@@ -102,6 +104,7 @@ rm -f "${WORK_DIR}/base.iso"
 # 3. Populate offline APK repository with Axonwall runtime & networking packages
 CORE_PKGS=(
   alpine-base
+  alpine-conf
   openrc
   busybox
   busybox-openrc
@@ -157,14 +160,52 @@ fi
 
 echo "[+] Resolving and caching ${#CORE_PKGS[@]} packages and transitive dependencies into /apks/x86_64..."
 apk fetch --recursive --output "${WORK_DIR}/iso/apks/x86_64" "${CORE_PKGS[@]}"
+# Generate RSA keypair and sign APKINDEX so apk verifies it offline
+echo "[+] Generating Axonwall signing key and indexing APK repository..."
+mkdir -p /root/.abuild "${WORK_DIR}/ovl/etc/apk/keys"
+abuild-keygen -a -n -q
+SIGN_KEY_PUB="$(ls /root/.abuild/*.rsa.pub 2>/dev/null | head -n 1)"
+SIGN_KEY_PRIV="$(ls /root/.abuild/*.rsa 2>/dev/null | grep -v '\.pub$' | head -n 1)"
+PUBKEY_NAME="$(basename "${SIGN_KEY_PUB}")"
+
 apk index \
   --output "${WORK_DIR}/iso/apks/x86_64/APKINDEX.tar.gz" \
   --rewrite-arch x86_64 \
+  --description "Axonwall Appliance Offline Repository" \
   "${WORK_DIR}/iso/apks/x86_64/"*.apk
 
-# Copy official Alpine signing public keys so initramfs verifies APKINDEX offline without warnings
-mkdir -p "${WORK_DIR}/ovl/etc/apk/keys"
-cp -a /etc/apk/keys/* "${WORK_DIR}/ovl/etc/apk/keys/"
+abuild-sign -k "${SIGN_KEY_PRIV}" -p "${PUBKEY_NAME}" "${WORK_DIR}/iso/apks/x86_64/APKINDEX.tar.gz"
+
+# Ensure .boot_repository exists so initramfs find_boot_repositories locates it
+touch "${WORK_DIR}/iso/apks/.boot_repository"
+
+# Copy official Alpine and Axonwall signing public keys into overlay
+cp -a /etc/apk/keys/* "${WORK_DIR}/ovl/etc/apk/keys/" 2>/dev/null || true
+cp -a "${SIGN_KEY_PUB}" "${WORK_DIR}/ovl/etc/apk/keys/"
+
+# Patch initramfs to trust local offline APK repository and include signing key
+echo "[+] Patching initramfs with signing keys and offline repository trust..."
+for initrd in "${WORK_DIR}/iso/boot"/initramfs-*; do
+  if [[ -f "${initrd}" ]]; then
+    INITFS_DIR="${WORK_DIR}/initfs_tmp"
+    rm -rf "${INITFS_DIR}"
+    mkdir -p "${INITFS_DIR}"
+    (
+      cd "${INITFS_DIR}"
+      gzip -dc "${initrd}" | cpio -idmv >/dev/null 2>&1
+      mkdir -p etc/apk/keys
+      cp -a /etc/apk/keys/* etc/apk/keys/ 2>/dev/null || true
+      cp -a "${SIGN_KEY_PUB}" etc/apk/keys/
+      if [[ -f init ]]; then
+        sed -i 's/apkflags="--initramfs-diskless-boot/apkflags="--initramfs-diskless-boot --allow-untrusted/' init
+      fi
+      find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -9 > "${initrd}.tmp"
+    )
+    mv "${initrd}.tmp" "${initrd}"
+    rm -rf "${INITFS_DIR}"
+    echo "    Patched and repacked $(basename "${initrd}")"
+  fi
+done
 
 # 4. Construct Axonwall APKOVL (Appliance Overlay)
 echo "[+] Building axonwall.apkovl.tar.gz overlay..."
@@ -179,6 +220,8 @@ mkdir -p \
   "${OVL}/etc/runlevels/default" \
   "${OVL}/etc/runlevels/shutdown" \
   "${OVL}/etc/sysctl.d" \
+  "${OVL}/bin" \
+  "${OVL}/sbin" \
   "${OVL}/usr/local/bin" \
   "${OVL}/usr/sbin" \
   "${OVL}/usr/share/axonwall/satellites" \
@@ -186,6 +229,14 @@ mkdir -p \
   "${OVL}/opt/axonwall/apps/axonwall-controller/dist" \
   "${OVL}/var/lib/axonwall" \
   "${OVL}/var/log/axonwall"
+
+# Ensure basic /bin/busybox and /sbin/init symlink exist in overlay as fail-safe
+if [[ -f /bin/busybox ]]; then
+  cp /bin/busybox "${OVL}/bin/busybox"
+  chmod 755 "${OVL}/bin/busybox"
+  ln -sf /bin/busybox "${OVL}/sbin/init"
+  ln -sf /bin/busybox "${OVL}/bin/sh"
+fi
 
 # Write /etc/hostname & /etc/apk/world
 echo "axonwall" > "${OVL}/etc/hostname"
@@ -277,11 +328,14 @@ done
 # Pack axonwall.apkovl.tar.gz into ISO root with maximum compression
 (cd "${OVL}" && tar -cf - . | gzip -9 > "${WORK_DIR}/iso/axonwall.apkovl.tar.gz")
 
-# 5. Update bootloader configs (SYSLINUX & GRUB EFI) with serial + console support
+# 5. Update bootloader configs (SYSLINUX & GRUB EFI) with comprehensive storage drivers and console support
+STORAGE_MODULES="loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci"
 if [[ -f "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" ]]; then
+  sed -i "s|modules=[^ ]*|modules=${STORAGE_MODULES}|" "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" 2>/dev/null || true
   sed -i 's/TIMEOUT 20/TIMEOUT 10/' "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" 2>/dev/null || true
 fi
 if [[ -f "${WORK_DIR}/iso/boot/grub/grub.cfg" ]]; then
+  sed -i "s|modules=[^ ]*|modules=${STORAGE_MODULES}|" "${WORK_DIR}/iso/boot/grub/grub.cfg" 2>/dev/null || true
   sed -i 's/timeout=2/timeout=1/' "${WORK_DIR}/iso/boot/grub/grub.cfg" 2>/dev/null || true
 fi
 

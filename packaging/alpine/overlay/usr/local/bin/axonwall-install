@@ -294,6 +294,11 @@ elif [ -f /mnt/slot_a/boot/vmlinuz-virt ]; then
   KERNEL_FLAVOR="virt"
 fi
 
+ln -sf "vmlinuz-${KERNEL_FLAVOR}" /mnt/slot_a/boot/vmlinuz
+ln -sf "initramfs-${KERNEL_FLAVOR}" /mnt/slot_a/boot/initrd.img
+ln -sf boot/vmlinuz /mnt/slot_a/vmlinuz 2>/dev/null || true
+ln -sf boot/initrd.img /mnt/slot_a/initrd.img 2>/dev/null || true
+
 cat << 'FSTAB_EOF' > /mnt/slot_a/etc/fstab
 LABEL=axon_root_a   /                   ext4    defaults,noatime        0 1
 LABEL=AXON_EFI      /boot/efi           vfat    umask=0077              0 2

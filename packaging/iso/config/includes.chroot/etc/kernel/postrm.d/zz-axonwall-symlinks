@@ -1,0 +1,21 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall Kernel Post-Remove Hook: Maintain /boot/vmlinuz & /boot/initrd.img
+# ==============================================================================
+set -e
+
+LATEST_KERN="$(ls -1t /boot/vmlinuz-* 2>/dev/null | head -n1 || true)"
+if [ -n "$LATEST_KERN" ]; then
+  ln -sf "$(basename "$LATEST_KERN")" /boot/vmlinuz
+  ln -sf boot/vmlinuz /vmlinuz 2>/dev/null || true
+else
+  rm -f /boot/vmlinuz /vmlinuz 2>/dev/null || true
+fi
+
+LATEST_INITRD="$(ls -1t /boot/initrd.img-* 2>/dev/null | head -n1 || true)"
+if [ -n "$LATEST_INITRD" ]; then
+  ln -sf "$(basename "$LATEST_INITRD")" /boot/initrd.img
+  ln -sf boot/initrd.img /initrd.img 2>/dev/null || true
+else
+  rm -f /boot/initrd.img /initrd.img 2>/dev/null || true
+fi

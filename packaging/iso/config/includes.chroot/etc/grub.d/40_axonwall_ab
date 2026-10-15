@@ -55,18 +55,80 @@ if [ "${active_slot}" = "A" ]; then
         insmod gzio
         insmod part_gpt
         insmod ext2
+        insmod regexp
         search --no-floppy --label --set=root axon_root_a
-        linux /boot/vmlinuz root=LABEL=axon_root_a ro quiet console=tty0 console=ttyS0,115200 slot=A
-        initrd /boot/initrd.img
+        set kfile=""
+        if [ -f /boot/vmlinuz ]; then
+            set kfile="/boot/vmlinuz"
+        elif [ -f /vmlinuz ]; then
+            set kfile="/vmlinuz"
+        else
+            for f in /boot/vmlinuz* /vmlinuz*; do
+                if [ -f "$f" ]; then
+                    set kfile="$f"
+                fi
+            done
+        fi
+        set ifile=""
+        if [ -f /boot/initrd.img ]; then
+            set ifile="/boot/initrd.img"
+        elif [ -f /initrd.img ]; then
+            set ifile="/initrd.img"
+        else
+            for f in /boot/initrd.img* /boot/initramfs* /initrd.img*; do
+                if [ -f "$f" ]; then
+                    set ifile="$f"
+                fi
+            done
+        fi
+        if [ -z "$kfile" ]; then
+            set kfile="/boot/vmlinuz"
+        fi
+        if [ -z "$ifile" ]; then
+            set ifile="/boot/initrd.img"
+        fi
+        linux ${kfile} root=LABEL=axon_root_a ro quiet console=tty0 console=ttyS0,115200 slot=A
+        initrd ${ifile}
     }
 
     menuentry "Axonwall OS (Slot B - Alternate Standby)" --class debian --class gnu-linux --class gnu --class os --id axonwall-slot-b {
         insmod gzio
         insmod part_gpt
         insmod ext2
+        insmod regexp
         search --no-floppy --label --set=root axon_root_b
-        linux /boot/vmlinuz root=LABEL=axon_root_b ro quiet console=tty0 console=ttyS0,115200 slot=B
-        initrd /boot/initrd.img
+        set kfile=""
+        if [ -f /boot/vmlinuz ]; then
+            set kfile="/boot/vmlinuz"
+        elif [ -f /vmlinuz ]; then
+            set kfile="/vmlinuz"
+        else
+            for f in /boot/vmlinuz* /vmlinuz*; do
+                if [ -f "$f" ]; then
+                    set kfile="$f"
+                fi
+            done
+        fi
+        set ifile=""
+        if [ -f /boot/initrd.img ]; then
+            set ifile="/boot/initrd.img"
+        elif [ -f /initrd.img ]; then
+            set ifile="/initrd.img"
+        else
+            for f in /boot/initrd.img* /boot/initramfs* /initrd.img*; do
+                if [ -f "$f" ]; then
+                    set ifile="$f"
+                fi
+            done
+        fi
+        if [ -z "$kfile" ]; then
+            set kfile="/boot/vmlinuz"
+        fi
+        if [ -z "$ifile" ]; then
+            set ifile="/boot/initrd.img"
+        fi
+        linux ${kfile} root=LABEL=axon_root_b ro quiet console=tty0 console=ttyS0,115200 slot=B
+        initrd ${ifile}
     }
 else
     set default="axonwall-slot-b"
@@ -76,18 +138,80 @@ else
         insmod gzio
         insmod part_gpt
         insmod ext2
+        insmod regexp
         search --no-floppy --label --set=root axon_root_b
-        linux /boot/vmlinuz root=LABEL=axon_root_b ro quiet console=tty0 console=ttyS0,115200 slot=B
-        initrd /boot/initrd.img
+        set kfile=""
+        if [ -f /boot/vmlinuz ]; then
+            set kfile="/boot/vmlinuz"
+        elif [ -f /vmlinuz ]; then
+            set kfile="/vmlinuz"
+        else
+            for f in /boot/vmlinuz* /vmlinuz*; do
+                if [ -f "$f" ]; then
+                    set kfile="$f"
+                fi
+            done
+        fi
+        set ifile=""
+        if [ -f /boot/initrd.img ]; then
+            set ifile="/boot/initrd.img"
+        elif [ -f /initrd.img ]; then
+            set ifile="/initrd.img"
+        else
+            for f in /boot/initrd.img* /boot/initramfs* /initrd.img*; do
+                if [ -f "$f" ]; then
+                    set ifile="$f"
+                fi
+            done
+        fi
+        if [ -z "$kfile" ]; then
+            set kfile="/boot/vmlinuz"
+        fi
+        if [ -z "$ifile" ]; then
+            set ifile="/boot/initrd.img"
+        fi
+        linux ${kfile} root=LABEL=axon_root_b ro quiet console=tty0 console=ttyS0,115200 slot=B
+        initrd ${ifile}
     }
 
     menuentry "Axonwall OS (Slot A - Alternate Standby)" --class debian --class gnu-linux --class gnu --class os --id axonwall-slot-a {
         insmod gzio
         insmod part_gpt
         insmod ext2
+        insmod regexp
         search --no-floppy --label --set=root axon_root_a
-        linux /boot/vmlinuz root=LABEL=axon_root_a ro quiet console=tty0 console=ttyS0,115200 slot=A
-        initrd /boot/initrd.img
+        set kfile=""
+        if [ -f /boot/vmlinuz ]; then
+            set kfile="/boot/vmlinuz"
+        elif [ -f /vmlinuz ]; then
+            set kfile="/vmlinuz"
+        else
+            for f in /boot/vmlinuz* /vmlinuz*; do
+                if [ -f "$f" ]; then
+                    set kfile="$f"
+                fi
+            done
+        fi
+        set ifile=""
+        if [ -f /boot/initrd.img ]; then
+            set ifile="/boot/initrd.img"
+        elif [ -f /initrd.img ]; then
+            set ifile="/initrd.img"
+        else
+            for f in /boot/initrd.img* /boot/initramfs* /initrd.img*; do
+                if [ -f "$f" ]; then
+                    set ifile="$f"
+                fi
+            done
+        fi
+        if [ -z "$kfile" ]; then
+            set kfile="/boot/vmlinuz"
+        fi
+        if [ -z "$ifile" ]; then
+            set ifile="/boot/initrd.img"
+        fi
+        linux ${kfile} root=LABEL=axon_root_a ro quiet console=tty0 console=ttyS0,115200 slot=A
+        initrd ${ifile}
     }
 fi
 EOF

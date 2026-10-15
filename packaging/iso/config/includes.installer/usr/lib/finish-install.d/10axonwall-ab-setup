@@ -129,6 +129,20 @@ if [ -b "$ROOT_B_DEV" ]; then
       sed -i '\#/mnt/standby#d' "$STAGE_B/etc/fstab"
     fi
 
+    # Ensure stable kernel & initrd symlinks in /boot for GRUB on Slot B
+    if [ -d "$STAGE_B/boot" ]; then
+      LATEST_B_KERN=$(ls -1t "$STAGE_B/boot"/vmlinuz-* 2>/dev/null | head -n1 || true)
+      if [ -n "$LATEST_B_KERN" ]; then
+        ln -sf "$(basename "$LATEST_B_KERN")" "$STAGE_B/boot/vmlinuz"
+        ln -sf "boot/$(basename "$LATEST_B_KERN")" "$STAGE_B/vmlinuz" 2>/dev/null || true
+      fi
+      LATEST_B_INITRD=$(ls -1t "$STAGE_B/boot"/initrd.img-* 2>/dev/null | head -n1 || true)
+      if [ -n "$LATEST_B_INITRD" ]; then
+        ln -sf "$(basename "$LATEST_B_INITRD")" "$STAGE_B/boot/initrd.img"
+        ln -sf "boot/$(basename "$LATEST_B_INITRD")" "$STAGE_B/initrd.img" 2>/dev/null || true
+      fi
+    fi
+
     # Unmount standby staging
     if [ $IS_MOUNTED -eq 1 ]; then
       umount /target/mnt/standby 2>/dev/null || true
@@ -300,7 +314,28 @@ in-target grub-editenv /boot/grub/grubenv set active_slot=A 2>/dev/null || true
 in-target grub-editenv /boot/grub/grubenv set bootcount=0 2>/dev/null || true
 in-target grub-editenv /boot/grub/grubenv set bootlimit=3 2>/dev/null || true
 
-# 8. Refresh GRUB configuration
+# 8. Ensure stable /boot/vmlinuz and /boot/initrd.img symlinks exist on Slot A
+if [ -d /target/boot ]; then
+  LATEST_A_KERN=$(ls -1t /target/boot/vmlinuz-* 2>/dev/null | head -n1 || true)
+  if [ -n "$LATEST_A_KERN" ]; then
+    ln -sf "$(basename "$LATEST_A_KERN")" /target/boot/vmlinuz
+    ln -sf "boot/$(basename "$LATEST_A_KERN")" /target/vmlinuz 2>/dev/null || true
+  fi
+  LATEST_A_INITRD=$(ls -1t /target/boot/initrd.img-* 2>/dev/null | head -n1 || true)
+  if [ -n "$LATEST_A_INITRD" ]; then
+    ln -sf "$(basename "$LATEST_A_INITRD")" /target/boot/initrd.img
+    ln -sf "boot/$(basename "$LATEST_A_INITRD")" /target/initrd.img 2>/dev/null || true
+  fi
+fi
+
+# Ensure kernel-img.conf exists on /target
+cat << 'KCONF_EOF' > /target/etc/kernel-img.conf
+do_symlinks = yes
+link_in_boot = yes
+relative_links = yes
+KCONF_EOF
+
+# 9. Refresh GRUB configuration
 in-target update-grub 2>/dev/null || true
 
 echo "[✓] Axonwall A/B Dual-Root, System RAID & ZFS Setup successfully finished."

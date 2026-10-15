@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+echo "[Hook] Creating stable /boot/vmlinuz and /boot/initrd.img symlinks in chroot..."
+LATEST_KERN="$(ls -1t /boot/vmlinuz-* 2>/dev/null | head -n1 || true)"
+if [ -n "$LATEST_KERN" ]; then
+  ln -sf "$(basename "$LATEST_KERN")" /boot/vmlinuz
+  ln -sf "boot/$(basename "$LATEST_KERN")" /vmlinuz
+fi
+
+LATEST_INITRD="$(ls -1t /boot/initrd.img-* 2>/dev/null | head -n1 || true)"
+if [ -n "$LATEST_INITRD" ]; then
+  ln -sf "$(basename "$LATEST_INITRD")" /boot/initrd.img
+  ln -sf "boot/$(basename "$LATEST_INITRD")" /initrd.img
+fi

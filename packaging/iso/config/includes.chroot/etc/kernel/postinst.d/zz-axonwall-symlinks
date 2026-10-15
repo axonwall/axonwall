@@ -1,0 +1,36 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall Kernel Post-Install Hook: Maintain /boot/vmlinuz & /boot/initrd.img
+# ==============================================================================
+set -e
+
+KERN_VER="$1"
+KERN_IMG="$2"
+
+if [ -n "$KERN_IMG" ] && [ -f "$KERN_IMG" ]; then
+  ln -sf "$(basename "$KERN_IMG")" /boot/vmlinuz
+elif [ -n "$KERN_VER" ] && [ -f "/boot/vmlinuz-${KERN_VER}" ]; then
+  ln -sf "vmlinuz-${KERN_VER}" /boot/vmlinuz
+else
+  LATEST_KERN="$(ls -1t /boot/vmlinuz-* 2>/dev/null | head -n1 || true)"
+  if [ -n "$LATEST_KERN" ]; then
+    ln -sf "$(basename "$LATEST_KERN")" /boot/vmlinuz
+  fi
+fi
+
+if [ -n "$KERN_VER" ] && [ -f "/boot/initrd.img-${KERN_VER}" ]; then
+  ln -sf "initrd.img-${KERN_VER}" /boot/initrd.img
+else
+  LATEST_INITRD="$(ls -1t /boot/initrd.img-* 2>/dev/null | head -n1 || true)"
+  if [ -n "$LATEST_INITRD" ]; then
+    ln -sf "$(basename "$LATEST_INITRD")" /boot/initrd.img
+  fi
+fi
+
+# Maintain root symlinks for compatibility with legacy tools
+if [ -f /boot/vmlinuz ]; then
+  ln -sf boot/vmlinuz /vmlinuz 2>/dev/null || true
+fi
+if [ -f /boot/initrd.img ]; then
+  ln -sf boot/initrd.img /initrd.img 2>/dev/null || true
+fi
