@@ -328,16 +328,43 @@ done
 # Pack axonwall.apkovl.tar.gz into ISO root with maximum compression
 (cd "${OVL}" && tar -cf - . | gzip -9 > "${WORK_DIR}/iso/axonwall.apkovl.tar.gz")
 
-# 5. Update bootloader configs (SYSLINUX & GRUB EFI) with comprehensive storage drivers and console support
+# 5. Update bootloader configs (SYSLINUX & GRUB EFI) with comprehensive storage drivers, live & install options
 STORAGE_MODULES="loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci"
-if [[ -f "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" ]]; then
-  sed -i "s|modules=[^ ]*|modules=${STORAGE_MODULES}|" "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" 2>/dev/null || true
-  sed -i 's/TIMEOUT 20/TIMEOUT 10/' "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg" 2>/dev/null || true
-fi
-if [[ -f "${WORK_DIR}/iso/boot/grub/grub.cfg" ]]; then
-  sed -i "s|modules=[^ ]*|modules=${STORAGE_MODULES}|" "${WORK_DIR}/iso/boot/grub/grub.cfg" 2>/dev/null || true
-  sed -i 's/timeout=2/timeout=1/' "${WORK_DIR}/iso/boot/grub/grub.cfg" 2>/dev/null || true
-fi
+
+mkdir -p "${WORK_DIR}/iso/boot/syslinux" "${WORK_DIR}/iso/boot/grub"
+
+cat << SYSLINUX_EOF > "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+TIMEOUT 50
+PROMPT 1
+DEFAULT live
+
+LABEL live
+  MENU LABEL Axonwall Appliance (Live Mode)
+  KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
+  INITRD /boot/initramfs-${ALPINE_FLAVOR}
+  APPEND modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
+
+LABEL install
+  MENU LABEL Install Axonwall to Storage Disk (A/B + RAID + ZFS)
+  KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
+  INITRD /boot/initramfs-${ALPINE_FLAVOR}
+  APPEND modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+SYSLINUX_EOF
+
+cat << GRUB_EOF > "${WORK_DIR}/iso/boot/grub/grub.cfg"
+set default=0
+set timeout=5
+
+menuentry "Axonwall Appliance (Live Mode)" {
+  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_FLAVOR}
+}
+
+menuentry "Install Axonwall to Storage Disk (A/B + RAID + ZFS)" {
+  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_FLAVOR}
+}
+GRUB_EOF
 
 # 6. Assemble bootable BIOS + UEFI Hybrid ISO
 echo "[+] Generating hybrid BIOS/UEFI ISO image: ${ISO_NAME}..."

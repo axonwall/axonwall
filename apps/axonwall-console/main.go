@@ -758,6 +758,9 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
+	if isLiveMode() {
+		fmt.Printf(" %s[Live ISO Mode: Default Credentials: admin / axonwall]%s\n", colorYellow, colorReset)
+	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println()
 
@@ -802,6 +805,19 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	return "", false
 }
 
+func isLiveMode() bool {
+	if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
+		if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+			cmd := string(data)
+			if strings.Contains(cmd, "slot=A") || strings.Contains(cmd, "slot=B") || strings.Contains(cmd, "root=LABEL=axon_root") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 func printHeader() {
 	clearScreen()
 	hostname, osName, kernel, uptime, loadAvg, memStr := getSystemInfo()
@@ -842,6 +858,11 @@ func printHeader() {
 		colorBold, colorReset,
 		colorCyan+colorBold, currentSessionUser, colorReset)
 	fmt.Println("--------------------------------------------------------------------------------")
+	if isLiveMode() {
+		fmt.Printf(" %s⚡ LIVE INSTALLATION MEDIA DETECTED%s\n", colorYellow+colorBold, colorReset)
+		fmt.Printf(" %sTo install Axonwall to permanent disk storage, select Option [12] or [I]%s\n", colorCyan+colorBold, colorReset)
+		fmt.Println("--------------------------------------------------------------------------------")
+	}
 
 	// Interfaces Summary Table
 	fmt.Printf(" %s%-14s %-10s %-12s %-19s %s%s\n",
@@ -891,12 +912,55 @@ func printHeader() {
 	fmt.Println("  6) Network Diagnostics (Ping, DNS Lookup)")
 	fmt.Println("  7) Display Web Console Scannable QR Code")
 	fmt.Println("  8) Restart Axonwall Core Services")
-	fmt.Println("  9) Drop to Root Shell (bash)")
+	fmt.Println("  9) Drop to Root Shell")
 	fmt.Println(" 10) Reboot Appliance")
 	fmt.Println(" 11) Power Off System")
+	if isLiveMode() {
+		fmt.Printf(" %s12) Install Axonwall OS to Storage Disk (A/B + RAID + OpenZFS) [Press I]%s\n", colorGreen+colorBold, colorReset)
+	} else if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
+		fmt.Println(" 12) Run Axonwall Disk Installer Utility")
+	}
 	fmt.Println("  0) Logout / Lock Console")
 	fmt.Println("================================================================================")
-	fmt.Print(" Enter option [0-11]: ")
+	if isLiveMode() {
+		fmt.Print(" Enter option [0-12, or I]: ")
+	} else {
+		fmt.Print(" Enter option [0-11]: ")
+	}
+}
+
+func actionInstallToDisk(reader *bufio.Reader) {
+	clearScreen()
+	installerPath := "/usr/local/bin/axonwall-install"
+	if _, err := os.Stat(installerPath); err != nil {
+		fmt.Printf("%s[!] Installer utility '%s' not found on this system.%s\n", colorRed, installerPath, colorReset)
+		fmt.Println("If Axonwall OS is already installed on permanent storage, re-installation is not required.")
+		pause(reader)
+		return
+	}
+
+	fmt.Printf("%s=== Axonwall Appliance Disk Installer ===%s\n\n", colorCyan+colorBold, colorReset)
+	fmt.Println("This interactive utility installs Axonwall OS to permanent storage with:")
+	fmt.Println("  • A/B Dual-Root redundancy (Zero-downtime atomic firmware upgrades)")
+	fmt.Println("  • Multi-Disk System RAID-1 Mirroring (optional)")
+	fmt.Println("  • OpenZFS Storage Pool ('tank') with Mirror / RAIDZ redundancy (optional)")
+	fmt.Printf("\n%sWARNING: All existing data on the chosen target disk(s) will be partitioned!%s\n\n", colorYellow+colorBold, colorReset)
+	fmt.Print("Launch installer now? (y/N): ")
+
+	ans, _ := reader.ReadString('\n')
+	if strings.ToLower(strings.TrimSpace(ans)) != "y" {
+		fmt.Println("Installation cancelled.")
+		pause(reader)
+		return
+	}
+
+	cmd := exec.Command("/bin/sh", installerPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	_ = cmd.Run()
+
+	pause(reader)
 }
 
 func pause(reader *bufio.Reader) {
@@ -1525,6 +1589,16 @@ func main() {
 		}
 		currentSessionUser = user
 
+		// Check for auto-install kernel boot flag
+		if isLiveMode() {
+			if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+				cmd := string(data)
+				if strings.Contains(cmd, "axonwall_install=1") || strings.Contains(cmd, "axonwall.install=1") {
+					actionInstallToDisk(reader)
+				}
+			}
+		}
+
 		sessionActive := true
 		for sessionActive {
 			printHeader()
@@ -1539,7 +1613,7 @@ func main() {
 			}
 			choice = strings.TrimSpace(choice)
 
-			switch choice {
+			switch strings.ToUpper(choice) {
 			case "1":
 				actionInterfacesOverview(reader)
 			case "2":
@@ -1559,7 +1633,11 @@ func main() {
 			case "9":
 				clearScreen()
 				fmt.Printf("%sDropping to root shell. Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
-				shell := exec.Command("/bin/bash")
+				shellPath := "/bin/bash"
+				if _, err := os.Stat(shellPath); err != nil {
+					shellPath = "/bin/sh"
+				}
+				shell := exec.Command(shellPath)
 				shell.Stdin = os.Stdin
 				shell.Stdout = os.Stdout
 				shell.Stderr = os.Stderr
@@ -1580,6 +1658,8 @@ func main() {
 					_ = exec.Command("systemctl", "poweroff").Run()
 					return
 				}
+			case "12", "I", "INSTALL":
+				actionInstallToDisk(reader)
 			case "0":
 				fmt.Printf("\n%s[✓] Logged out. Locking console...%s\n", colorYellow, colorReset)
 				time.Sleep(500 * time.Millisecond)
