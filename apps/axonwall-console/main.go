@@ -423,6 +423,47 @@ func updateStateJSON(cfg NetworkConfig) {
 		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
 	}
+
+	// Also write /etc/axonwall/interfaces.yaml and /var/lib/axonwall/etc-axonwall/interfaces.yaml
+	var yamlBuilder strings.Builder
+	yamlBuilder.WriteString("# ============================================================================\n")
+	yamlBuilder.WriteString("# Axonwall Firewall Configuration — /etc/axonwall/interfaces.yaml\n")
+	yamlBuilder.WriteString("# Physical & Logical Interfaces, VLANs, Bridges, and LACP Bonds\n")
+	yamlBuilder.WriteString("# ============================================================================\n\n")
+	yamlBuilder.WriteString("interfaces:\n")
+
+	writeYamlIface := func(name, device, ifType, ipAddr, gw, desc string) {
+		yamlBuilder.WriteString(fmt.Sprintf("  - name: %s\n", name))
+		yamlBuilder.WriteString(fmt.Sprintf("    device: %s\n", device))
+		yamlBuilder.WriteString(fmt.Sprintf("    type: %s\n", ifType))
+		yamlBuilder.WriteString("    enabled: true\n")
+		if ifType == "static" && ipAddr != "" {
+			yamlBuilder.WriteString(fmt.Sprintf("    ipv4Address: %s\n", ipAddr))
+		}
+		if ifType == "static" && gw != "" {
+			yamlBuilder.WriteString(fmt.Sprintf("    ipv4Gateway: %s\n", gw))
+		}
+		yamlBuilder.WriteString("    mtu: 1500\n")
+		yamlBuilder.WriteString(fmt.Sprintf("    description: %q\n", desc))
+	}
+
+	writeYamlIface("wan", cfg.WanDevice, cfg.WanMode, cfg.WanIP, cfg.WanGateway, "WAN Gateway")
+	writeYamlIface("lan", cfg.LanDevice, cfg.LanMode, cfg.LanIP, "", "LAN Network")
+	if cfg.Opt1Device != "" {
+		writeYamlIface("opt1", cfg.Opt1Device, cfg.Opt1Mode, cfg.Opt1IP, "", "OPT1 (Attached Network / Non-authoritative)")
+	}
+	if cfg.Opt2Device != "" {
+		writeYamlIface("opt2", cfg.Opt2Device, cfg.Opt2Mode, cfg.Opt2IP, "", "OPT2 (Attached Network / Non-authoritative)")
+	}
+	yamlBuilder.WriteString("vlans: []\n")
+	yamlBuilder.WriteString("bridges: []\n")
+	yamlBuilder.WriteString("laggs: []\n")
+
+	yamlBytes := []byte(yamlBuilder.String())
+	_ = os.MkdirAll("/etc/axonwall", 0755)
+	_ = os.WriteFile("/etc/axonwall/interfaces.yaml", yamlBytes, 0644)
+	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0755)
+	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml", yamlBytes, 0644)
 }
 
 func persistNetworkInterfaces(cfg NetworkConfig) {
@@ -920,12 +961,13 @@ func printHeader() {
 	} else if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
 		fmt.Println(" 12) Run Axonwall Disk Installer Utility")
 	}
+	fmt.Printf("  %sE) Edit / Validate / Apply /etc/axonwall/*.yaml Configuration Files%s\n", colorCyan, colorReset)
 	fmt.Println("  0) Logout / Lock Console")
 	fmt.Println("================================================================================")
 	if isLiveMode() {
-		fmt.Print(" Enter option [0-12, or I]: ")
+		fmt.Print(" Enter option [0-12, E, or I]: ")
 	} else {
-		fmt.Print(" Enter option [0-11]: ")
+		fmt.Print(" Enter option [0-11, or E]: ")
 	}
 }
 
@@ -1578,6 +1620,92 @@ func actionRestartServices(reader *bufio.Reader) {
 	pause(reader)
 }
 
+func actionEditYamlConfigs(reader *bufio.Reader) {
+	clearScreen()
+	fmt.Printf("%s=== /etc/axonwall/*.yaml Declarative Configuration ===%s\n\n", colorCyan+colorBold, colorReset)
+	domains := []string{
+		"system",
+		"interfaces",
+		"firewall",
+		"routing",
+		"services",
+		"vpn",
+		"security",
+		"ha",
+		"storage",
+		"k3s",
+	}
+	for i, d := range domains {
+		path := fmt.Sprintf("/etc/axonwall/%s.yaml", d)
+		statusStr := colorDim + "(not initialized yet)" + colorReset
+		if info, err := os.Stat(path); err == nil {
+			statusStr = fmt.Sprintf("%s(%d bytes, modified %s)%s", colorGreen, info.Size(), info.ModTime().Format("15:04:05"), colorReset)
+		}
+		fmt.Printf(" [%2d] %-28s %s\n", i+1, path, statusStr)
+	}
+	fmt.Println()
+	fmt.Println("  [V] Run `axonwallctl validate`")
+	fmt.Println("  [D] Run `axonwallctl diff`")
+	fmt.Println("  [A] Run `axonwallctl apply`")
+	fmt.Println("  [Q] Return to Console Menu")
+	fmt.Print("\nSelect file [1-10] to edit or action [V/D/A/Q]: ")
+
+	choice, _ := reader.ReadString('\n')
+	choice = strings.TrimSpace(choice)
+	upper := strings.ToUpper(choice)
+
+	switch upper {
+	case "Q", "":
+		return
+	case "V":
+		fmt.Println()
+		cmd := exec.Command("axonwallctl", "validate")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+		pause(reader)
+		return
+	case "D":
+		fmt.Println()
+		cmd := exec.Command("axonwallctl", "diff")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+		pause(reader)
+		return
+	case "A":
+		fmt.Println()
+		cmd := exec.Command("axonwallctl", "apply")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+		pause(reader)
+		return
+	}
+
+	idx, err := strconv.Atoi(choice)
+	if err == nil && idx >= 1 && idx <= len(domains) {
+		dom := domains[idx-1]
+		cmd := exec.Command("axonwallctl", "edit", dom)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			// Fallback to direct editor if axonwallctl is not in PATH
+			editor := os.Getenv("EDITOR")
+			if editor == "" {
+				editor = "vi"
+			}
+			edCmd := exec.Command(editor, fmt.Sprintf("/etc/axonwall/%s.yaml", dom))
+			edCmd.Stdin = os.Stdin
+			edCmd.Stdout = os.Stdout
+			edCmd.Stderr = os.Stderr
+			_ = edCmd.Run()
+		}
+		pause(reader)
+	}
+}
+
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -1660,6 +1788,8 @@ func main() {
 				}
 			case "12", "I", "INSTALL":
 				actionInstallToDisk(reader)
+			case "E", "YAML":
+				actionEditYamlConfigs(reader)
 			case "0":
 				fmt.Printf("\n%s[✓] Logged out. Locking console...%s\n", colorYellow, colorReset)
 				time.Sleep(500 * time.Millisecond)

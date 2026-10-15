@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Building2,
   Shield,
@@ -12,9 +12,11 @@ import {
   Trash2,
   RefreshCw,
   ExternalLink,
-  Users
+  Users,
+  Save,
 } from 'lucide-react';
 import type { SsoConfig, SsoRoleMapping } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 
 const PRESET_PROVIDERS = [
   {
@@ -63,8 +65,27 @@ export default function SsoSettingsPage() {
 
   const [testResult, setTestResult] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [newGroup, setNewGroup] = useState('');
   const [newRole, setNewRole] = useState<'admin' | 'operator' | 'readonly'>('operator');
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        if (state.sso) setConfig(state.sso);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleSaveConfig() {
+    setIsSaving(true);
+    try {
+      const state = await getCurrentDesiredState();
+      await applyDesiredState({ ...state, sso: config });
+      setTestResult('Saved SSO configuration to /etc/axonwall/security.yaml');
+    } catch {}
+    setIsSaving(false);
+  }
 
   function handleAddMapping() {
     if (!newGroup.trim()) return;
@@ -110,6 +131,15 @@ export default function SsoSettingsPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={handleSaveConfig}
+            disabled={isSaving}
+            className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium px-3.5 py-2 rounded-lg transition cursor-pointer disabled:opacity-50"
+          >
+            <Save className="w-4 h-4" />
+            <span>{isSaving ? 'Saving...' : 'Save to security.yaml'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleTestIdP}
             disabled={isTesting}
             className="inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium px-3.5 py-2 rounded-lg border border-slate-700 transition cursor-pointer disabled:opacity-50"
@@ -120,7 +150,7 @@ export default function SsoSettingsPage() {
           <a
             href="/api/auth/sso/login"
             target="_blank"
-            className="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition cursor-pointer flex items-center gap-2 shadow-sm"
+            className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition cursor-pointer flex items-center gap-2 shadow-sm"
           >
             <ExternalLink className="w-4 h-4" />
             <span>Simulate SSO Login</span>

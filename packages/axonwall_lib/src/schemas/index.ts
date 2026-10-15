@@ -142,6 +142,9 @@ export const SystemSettingsSchema = z.object({
   dnsServers: z.array(z.string()).default(['1.1.1.1', '8.8.8.8']),
   timezone: z.string().default('UTC'),
   flowtableOffload: z.boolean().default(true),
+  sshEnabled: z.boolean().optional(),
+  sshPort: z.number().int().min(1).max(65535).optional(),
+  webGuiPort: z.number().int().min(1).max(65535).optional(),
   antiLockout: AntiLockoutSchema.default({
     enabled: true,
     interface: 'lan',
@@ -1180,6 +1183,7 @@ export const DesiredStateSchema = z.object({
   crowdsec: CrowdSecConfigSchema.optional(),
   geoip: GeoIpConfigSchema.optional(),
   sso: SsoConfigSchema.optional(),
+  tlsDecryption: TlsDecryptionSchema.optional(),
   ha: HighAvailabilityConfigSchema.optional(),
   observability: ObservabilityConfigSchema.optional(),
   ups: NutUpsConfigSchema.optional(),

@@ -14,13 +14,16 @@ import {
   Clock,
   Shield,
   FileCheck,
-  Key
+  Key,
+  FileCode2,
 } from 'lucide-react';
+import { exportUnifiedYamlConfig } from '@/server/agent';
 
 export default function BackupPage() {
   // Export states
   const [passphrase, setPassphrase] = useState('');
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingYaml, setIsExportingYaml] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
 
   // Restore states
@@ -39,6 +42,28 @@ export default function BackupPage() {
   const [gitOpsEnabled, setGitOpsEnabled] = useState(true);
   const [gitRepo, setGitRepo] = useState('git@github.com:enterprise/axonwall-fleet-gitops.git');
   const [gitBranch, setGitBranch] = useState('main');
+
+  async function handleExportYaml() {
+    setIsExportingYaml(true);
+    setExportMessage(null);
+    try {
+      const yamlContent = await exportUnifiedYamlConfig();
+      const blob = new Blob([yamlContent], { type: 'text/yaml;charset=utf-8' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `axonwall-config-${new Date().toISOString().slice(0, 10)}.yaml`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      setExportMessage('Exported unified /etc/axonwall/*.yaml configuration as YAML.');
+    } catch (err: any) {
+      alert(err?.message || 'YAML export failed');
+    } finally {
+      setIsExportingYaml(false);
+    }
+  }
 
   async function handleExport(e: React.FormEvent) {
     e.preventDefault();
@@ -124,16 +149,28 @@ export default function BackupPage() {
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
       {/* Header */}
-      <div>
-        <div className="flex items-center gap-2">
-          <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-            <HardDrive className="w-5 h-5" />
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <HardDrive className="w-5 h-5" />
+            </div>
+            <h1 className="text-2xl font-bold tracking-tight text-white">Backup & Disaster Recovery</h1>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Backup & Disaster Recovery</h1>
+          <p className="text-sm text-slate-400 mt-1">
+            Automated AES-256-GCM encrypted cloud backups, plaintext YAML export, GitOps continuous delivery, and instant state restoration.
+          </p>
         </div>
-        <p className="text-sm text-slate-400 mt-1">
-          Automated AES-256-GCM encrypted cloud backups, GitOps continuous delivery, and instant state restoration.
-        </p>
+
+        <button
+          type="button"
+          onClick={handleExportYaml}
+          disabled={isExportingYaml}
+          className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-300 text-xs font-semibold flex items-center gap-2 transition cursor-pointer disabled:opacity-50"
+        >
+          <FileCode2 className="w-4 h-4 text-emerald-400" />
+          <span>{isExportingYaml ? 'Generating YAML...' : 'Export Unified YAML (axonwall.yaml)'}</span>
+        </button>
       </div>
 
       {exportMessage && (

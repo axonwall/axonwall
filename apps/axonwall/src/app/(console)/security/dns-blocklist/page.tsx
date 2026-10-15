@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   ShieldCheck,
   CheckCircle2,
@@ -14,10 +14,12 @@ import {
   Sliders,
   Check,
 } from 'lucide-react';
-import type { DnsBlocklistConfig } from '@axonwall/lib/schemas';
+import type { DesiredState, DnsBlocklistConfig } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import { compileUnboundSinkhole } from '@axonwall/lib/compile/unbound';
 
 export default function DnsBlocklistPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [action, setAction] = useState<'always_null' | 'always_nxdomain'>('always_null');
   const [showConfigPreview, setShowConfigPreview] = useState(false);
@@ -63,6 +65,31 @@ export default function DnsBlocklistPage() {
   const [newWhiteDomain, setNewWhiteDomain] = useState('');
   const [newBlackDomain, setNewBlackDomain] = useState('');
 
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.dns?.blocklist) {
+          setEnabled(state.dns.blocklist.enabled);
+          setAction(state.dns.blocklist.action || 'always_null');
+          if (state.dns.blocklist.feeds?.length) {
+            setFeeds(
+              state.dns.blocklist.feeds.map((f, i) => ({
+                id: f.id || `feed-${i}`,
+                name: f.name,
+                url: f.url,
+                entriesCount: f.entriesCount || 0,
+                enabled: f.enabled,
+              }))
+            );
+          }
+          if (state.dns.blocklist.whitelist) setWhitelist(state.dns.blocklist.whitelist);
+          if (state.dns.blocklist.blacklist) setBlacklist(state.dns.blocklist.blacklist);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const toggleFeed = (id: string) => {
     setFeeds(feeds.map((f) => (f.id === id ? { ...f, enabled: !f.enabled } : f)));
   };
@@ -85,7 +112,27 @@ export default function DnsBlocklistPage() {
     setIsSaving(true);
     setSaveSuccess(false);
     try {
-      await new Promise((r) => setTimeout(r, 600));
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        dns: {
+          ...current.dns,
+          blocklist: {
+            enabled,
+            feeds: feeds.map((f) => ({
+              name: f.name,
+              url: f.url,
+              entriesCount: f.entriesCount,
+              enabled: f.enabled,
+            })),
+            whitelist,
+            blacklist,
+            action,
+          },
+        },
+      };
+      setFullState(nextState);
+      await applyDesiredState(nextState);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } finally {

@@ -1,0 +1,18 @@
+#!/bin/sh
+# ==============================================================================
+# axonwallctl — Axonwall Declarative YAML CLI (/etc/axonwall/*.yaml)
+# ==============================================================================
+set -eu
+
+for candidate in \
+  "/opt/axonwall/apps/axonwall-controller/dist/axonwallctl.js" \
+  "$(dirname "$0")/../../../apps/axonwall-controller/dist/axonwallctl.js" \
+  "/home/djehauti/git/axonwall_monorepo/apps/axonwall-controller/dist/axonwallctl.js"
+do
+  if [ -f "$candidate" ]; then
+    exec node "$candidate" "$@"
+  fi
+done
+
+echo "Error: axonwallctl bundle not found (/opt/axonwall/apps/axonwall-controller/dist/axonwallctl.js)" >&2
+exit 1

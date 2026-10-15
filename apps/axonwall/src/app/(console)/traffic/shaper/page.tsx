@@ -1,11 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu } from 'lucide-react';
 import { compileTrafficShaper } from '@axonwall/lib/compile/tc';
-import type { TrafficShaperConfig } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import type { DesiredState, TrafficShaperConfig } from '@axonwall/lib/schemas';
 
 export default function TrafficShaperPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [downloadMbps, setDownloadMbps] = useState(250);
   const [uploadMbps, setUploadMbps] = useState(50);
@@ -13,12 +15,32 @@ export default function TrafficShaperPage() {
   const [cakeDiffserv, setCakeDiffserv] = useState<'diffserv3' | 'diffserv4' | 'besteffort'>('diffserv4');
   const [cakeAckFilter, setCakeAckFilter] = useState(true);
   const [applied, setApplied] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.trafficShaper) {
+          setEnabled(state.trafficShaper.enabled);
+          const first = state.trafficShaper.interfaces?.[0];
+          if (first) {
+            setDownloadMbps(first.downloadBandwidthMbps);
+            setUploadMbps(first.uploadBandwidthMbps);
+            setScheduler(first.scheduler);
+            setCakeDiffserv(first.cakeDiffserv);
+            setCakeAckFilter(first.cakeAckFilter);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const currentConfig: TrafficShaperConfig = {
     enabled,
     interfaces: [
       {
-        id: 'ts-wan',
         interface: 'eth0',
         downloadBandwidthMbps: downloadMbps,
         uploadBandwidthMbps: uploadMbps,
@@ -33,9 +55,25 @@ export default function TrafficShaperPage() {
 
   const compiled = compileTrafficShaper(currentConfig);
 
-  const handleApply = () => {
-    setApplied(true);
-    setTimeout(() => setApplied(false), 3000);
+  const handleApply = async () => {
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        trafficShaper: currentConfig,
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved Traffic Shaper configuration to /etc/axonwall/firewall.yaml');
+      setApplied(true);
+      setTimeout(() => setApplied(false), 3000);
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save Traffic Shaper settings'}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -46,9 +84,17 @@ export default function TrafficShaperPage() {
           Smart QoS & Traffic Shaper
         </h1>
         <p className="text-sm text-slate-400">
-          Bufferbloat mitigation and queue management using modern Linux kernel CAKE, FQ_CoDel, and HTB with IFB ingress shaping.
+          Bufferbloat mitigation using Linux kernel CAKE, FQ_CoDel, and HTB synced with{' '}
+          <code className="text-emerald-400 font-mono">/etc/axonwall/firewall.yaml</code>.
         </p>
       </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Shaper Configuration */}
@@ -214,10 +260,11 @@ export default function TrafficShaperPage() {
               <button
                 type="button"
                 onClick={handleApply}
-                className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2.5 px-6 rounded-lg text-sm transition flex items-center gap-2 shadow-sm"
+                disabled={saving}
+                className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-medium py-2.5 px-6 rounded-lg text-sm transition flex items-center gap-2 shadow-sm cursor-pointer"
               >
                 {applied ? <CheckCircle2 className="w-4 h-4" /> : <Shield className="w-4 h-4" />}
-                {applied ? 'Applied to Linux Kernel' : 'Save & Apply Shaper'}
+                {saving ? 'Saving to firewall.yaml...' : applied ? 'Applied & Saved to firewall.yaml' : 'Save & Apply Shaper'}
               </button>
             </div>
           </div>

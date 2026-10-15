@@ -10,14 +10,16 @@ import {
   Power,
   Settings,
   HelpCircle,
+  Save,
 } from 'lucide-react';
 import { compileNutUps } from '@axonwall/lib/compile/nut';
 import type { NutUpsConfig } from '@axonwall/lib/schemas';
-import { getUpsStatus, type UpsStatus } from '@/server/agent';
+import { getUpsStatus, getCurrentDesiredState, applyDesiredState, type UpsStatus } from '@/server/agent';
 
 export default function UpsMonitoringPage() {
   const [upsStatus, setUpsStatus] = useState<UpsStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [upsConfig, setUpsConfig] = useState<NutUpsConfig>({
     enabled: false,
     name: 'axonups',
@@ -51,7 +53,21 @@ export default function UpsMonitoringPage() {
 
   useEffect(() => {
     fetchStatus();
+    getCurrentDesiredState()
+      .then((state) => {
+        if (state.ups) setUpsConfig(state.ups);
+      })
+      .catch(() => {});
   }, []);
+
+  const handleSaveUps = async () => {
+    setIsSaving(true);
+    try {
+      const state = await getCurrentDesiredState();
+      await applyDesiredState({ ...state, ups: upsConfig });
+    } catch {}
+    setIsSaving(false);
+  };
 
   const { upsConf, nutConf } = compileNutUps(upsConfig);
 
@@ -72,6 +88,14 @@ export default function UpsMonitoringPage() {
         </div>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={handleSaveUps}
+            disabled={isSaving}
+            className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{isSaving ? 'Saving...' : 'Save to system.yaml'}</span>
+          </button>
           <button
             onClick={fetchStatus}
             disabled={isRefreshing}

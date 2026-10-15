@@ -1,12 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Shield, Plus, Copy, Check, Server, Users, Key, Network } from 'lucide-react';
+import { Shield, Plus, Copy, Check, Server, Users, Key, Network, Save, CheckCircle2 } from 'lucide-react';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import type { DesiredState } from '@axonwall/lib/schemas';
 
 type Tab = 'machines' | 'users' | 'keys';
 
 export default function MeshVpnPage() {
   const [activeTab, setActiveTab] = useState<Tab>('machines');
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
+  const [headscaleEnabled, setHeadscaleEnabled] = useState(false);
+  const [magicDnsDomain, setMagicDnsDomain] = useState('tailnet.axonwall.local');
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
   
   // Data states
   const [machines, setMachines] = useState<any[]>([]);
@@ -21,6 +28,40 @@ export default function MeshVpnPage() {
   // Form states
   const [newUserName, setNewUserName] = useState('');
   const [newKeyUser, setNewKeyUser] = useState('');
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.headscale) {
+          setHeadscaleEnabled(state.headscale.enabled);
+          setMagicDnsDomain(state.headscale.magicDnsDomain || 'tailnet.axonwall.local');
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSaveHeadscaleConfig = async () => {
+    setSavingConfig(true);
+    setStatusMsg(null);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        headscale: {
+          enabled: headscaleEnabled,
+          magicDnsDomain: magicDnsDomain.trim() || 'tailnet.axonwall.local',
+        },
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved Headscale configuration to /etc/axonwall/vpn.yaml');
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save Headscale settings'}`);
+    } finally {
+      setSavingConfig(false);
+    }
+  };
 
   useEffect(() => {
     fetchData();
@@ -115,14 +156,59 @@ export default function MeshVpnPage() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-          <Shield className="w-6 h-6 text-emerald-400" />
-          Mesh VPN (Headscale)
-        </h1>
-        <p className="text-sm text-slate-400 mt-1">
-          Private, secure overlay network compatible with Tailscale clients.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+            <Shield className="w-6 h-6 text-emerald-400" />
+            Mesh VPN (Headscale)
+          </h1>
+          <p className="text-sm text-slate-400 mt-1">
+            Private overlay network compatible with Tailscale clients, synced with{' '}
+            <code className="text-emerald-400 font-mono">/etc/axonwall/vpn.yaml</code>.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleSaveHeadscaleConfig}
+          disabled={savingConfig}
+          className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+        >
+          <Save className="w-3.5 h-3.5" />
+          <span>{savingConfig ? 'Saving YAML...' : 'Save to vpn.yaml'}</span>
+        </button>
+      </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
+
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs">
+        <div className="flex items-center gap-3">
+          <span className="font-semibold text-white">Control Plane Status:</span>
+          <button
+            type="button"
+            onClick={() => setHeadscaleEnabled(!headscaleEnabled)}
+            className={`px-2.5 py-1 rounded font-medium border cursor-pointer transition ${
+              headscaleEnabled
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            {headscaleEnabled ? 'Enabled' : 'Disabled'}
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-slate-400">MagicDNS Base Domain:</span>
+          <input
+            type="text"
+            value={magicDnsDomain}
+            onChange={(e) => setMagicDnsDomain(e.target.value)}
+            className="bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-emerald-400 font-mono w-56"
+          />
+        </div>
       </div>
 
       <div className="border-b border-slate-800">

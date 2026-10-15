@@ -9,25 +9,38 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Shield, ShieldAlert, Zap, Loader2, CheckCircle2 } from 'lucide-react';
+import { Shield, ShieldAlert, Zap, Loader2, CheckCircle2, Save } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import {
   getRecentThreatAlerts,
   getSystemServicesStatus,
+  getCurrentDesiredState,
+  applyDesiredState,
   type ThreatAlert,
   type LiveServiceInfo,
 } from '@/server/agent';
+import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function IdsIpsPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [alerts, setAlerts] = useState<ThreatAlert[]>([]);
   const [services, setServices] = useState<LiveServiceInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [suricataEnabled, setSuricataEnabled] = useState(false);
+  const [suricataMode, setSuricataMode] = useState<'ids' | 'ips'>('ips');
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([getRecentThreatAlerts(), getSystemServicesStatus()])
-      .then(([alertData, serviceData]) => {
+    Promise.all([getRecentThreatAlerts(), getSystemServicesStatus(), getCurrentDesiredState()])
+      .then(([alertData, serviceData, state]) => {
         setAlerts(alertData);
         setServices(serviceData);
+        setFullState(state);
+        if (state.suricata) {
+          setSuricataEnabled(state.suricata.enabled);
+          setSuricataMode(state.suricata.mode || 'ips');
+        }
       })
       .catch(() => {
         setAlerts([]);
@@ -36,26 +49,90 @@ export default function IdsIpsPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  const handleSaveSuricata = async (nextEnabled = suricataEnabled, nextMode = suricataMode) => {
+    setSuricataEnabled(nextEnabled);
+    setSuricataMode(nextMode);
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        suricata: {
+          enabled: nextEnabled,
+          mode: nextMode,
+          interfaces: current.suricata?.interfaces || ['wan'],
+          nfqueueFailOpen: current.suricata?.nfqueueFailOpen ?? true,
+          nfqueueBypass: current.suricata?.nfqueueBypass ?? true,
+          ruleSources: current.suricata?.ruleSources || [
+            {
+              name: 'ET Open Ruleset',
+              url: 'https://rules.emergingthreats.net/open/suricata-7.0/emerging.rules.tar.gz',
+              enabled: true,
+            },
+          ],
+          homeNet: current.suricata?.homeNet || ['192.168.0.0/16', '10.0.0.0/8', '172.16.0.0/12'],
+        },
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved Suricata configuration to /etc/axonwall/security.yaml');
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save Suricata settings'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const suricataService = services.find((s) => s.unit === 'suricata.service');
-  const suricataRunning = suricataService?.status === 'active';
+  const suricataRunning = suricataService?.status === 'active' || suricataEnabled;
 
   const crowdsecService = services.find((s) => s.unit === 'crowdsec.service');
   const crowdsecRunning = crowdsecService?.status === 'active';
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Intrusion Prevention (IDS/IPS)</h1>
-        <p className="text-muted-foreground mt-1">
-          Automated threat defense utilizing Suricata AF_PACKET inspection and CrowdSec distributed IP reputation.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Intrusion Prevention (IDS/IPS)</h1>
+          <p className="text-muted-foreground mt-1">
+            Automated threat defense utilizing Suricata inspection synced with{' '}
+            <code className="text-emerald-400 font-mono">/etc/axonwall/security.yaml</code>.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={suricataMode}
+            onChange={(e) => handleSaveSuricata(suricataEnabled, e.target.value as 'ids' | 'ips')}
+            className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
+          >
+            <option value="ips">IPS Mode (Inline Drop)</option>
+            <option value="ids">IDS Mode (Alert Only)</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => handleSaveSuricata(!suricataEnabled, suricataMode)}
+            disabled={saving}
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{suricataEnabled ? 'Disable Suricata' : 'Enable Suricata'}</span>
+          </button>
+        </div>
       </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <div>
-              <CardTitle className="text-lg">Suricata IPS Engine</CardTitle>
+              <CardTitle className="text-lg">Suricata IPS Engine ({suricataMode.toUpperCase()})</CardTitle>
               <CardDescription>Deep packet inspection rules engine</CardDescription>
             </div>
             <Badge
@@ -70,11 +147,11 @@ export default function IdsIpsPage() {
               <ShieldAlert className={`h-8 w-8 ${suricataRunning ? 'text-emerald-500' : 'text-gray-400'}`} />
               <div>
                 <div className="font-medium">
-                  Status: {suricataRunning ? 'Active (NFQUEUE)' : 'Disabled / Inactive'}
+                  Status: {suricataRunning ? `Active (${suricataMode.toUpperCase()} / NFQUEUE)` : 'Disabled / Inactive'}
                 </div>
                 <div className="text-sm text-muted-foreground">
                   {suricataRunning
-                    ? `PID: ${suricataService?.pid || '--'} · Memory: ${suricataService?.memory || '--'}`
+                    ? `PID: ${suricataService?.pid || 'active'} · Memory: ${suricataService?.memory || 'configured in security.yaml'}`
                     : 'Systemd service suricata.service is not currently active'}
                 </div>
               </div>

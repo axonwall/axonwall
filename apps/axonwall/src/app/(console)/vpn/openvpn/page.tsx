@@ -1,13 +1,84 @@
 'use client';
 
-import { useState } from 'react';
-import { KeyRound, Terminal, Download, Cpu, CheckCircle2, Copy } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { KeyRound, Terminal, Download, Cpu, CheckCircle2, Copy, Plus, Trash2 } from 'lucide-react';
 import { compileOpenVpn, generateClientOvpnProfile } from '@axonwall/lib/compile/openvpn';
-import type { OpenVpnServer } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import type { DesiredState, OpenVpnServer } from '@axonwall/lib/schemas';
 
 export default function OpenVpnPage() {
-  const [servers] = useState<OpenVpnServer[]>([]);
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
+  const [servers, setServers] = useState<OpenVpnServer[]>([]);
   const [copied, setCopied] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  // Add server form
+  const [newName, setNewName] = useState('');
+  const [newPort, setNewPort] = useState(1194);
+  const [newProto, setNewProto] = useState<'udp' | 'tcp'>('udp');
+  const [newTunnelNet, setNewTunnelNet] = useState('10.8.0.0/24');
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.openvpn?.servers) {
+          setServers(state.openvpn.servers);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const persistServers = async (nextServers: OpenVpnServer[]) => {
+    setServers(nextServers);
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        openvpn: {
+          enabled: nextServers.length > 0,
+          servers: nextServers,
+        },
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved OpenVPN configuration to /etc/axonwall/vpn.yaml');
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save OpenVPN servers'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAddServer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newName.trim()) return;
+    const nextServers: OpenVpnServer[] = [
+      ...servers,
+      {
+        name: newName.trim(),
+        enabled: true,
+        protocol: newProto,
+        port: Number(newPort) || 1194,
+        deviceType: 'tun',
+        devName: `ovpn-dco${servers.length}`,
+        dcoEnabled: true,
+        tunnelNetwork: newTunnelNet.trim() || '10.8.0.0/24',
+        cipher: 'AES-256-GCM',
+        authDigest: 'SHA256',
+        clientToClient: false,
+        duplicateCn: false,
+        cso: [],
+        description: 'OpenVPN DCO Server',
+      },
+    ];
+    setNewName('');
+    await persistServers(nextServers);
+  };
+
   const selectedServer = servers[0];
 
   const compiled = compileOpenVpn({
@@ -40,9 +111,17 @@ export default function OpenVpnPage() {
           OpenVPN 2.6 with Data Channel Offload (DCO)
         </h1>
         <p className="text-sm text-slate-400">
-          Wire-speed remote access VPN leveraging the Linux kernel <code className="text-emerald-400">ovpn-dco</code> module for in-kernel packet encryption.
+          Wire-speed remote access VPN leveraging <code className="text-emerald-400">ovpn-dco</code> and persisted to{' '}
+          <code className="text-emerald-400 font-mono">/etc/axonwall/vpn.yaml</code>.
         </p>
       </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
@@ -60,7 +139,7 @@ export default function OpenVpnPage() {
                 <KeyRound className="w-8 h-8 text-slate-600 mx-auto mb-2" />
                 <p className="font-semibold text-slate-300">No OpenVPN Servers Configured</p>
                 <p className="text-xs text-slate-500 mt-1">
-                  Create an OpenVPN server instance to accept encrypted remote client connections.
+                  Create an OpenVPN server instance below or edit <code className="text-emerald-400">/etc/axonwall/vpn.yaml</code>.
                 </p>
               </div>
             ) : (
@@ -71,12 +150,12 @@ export default function OpenVpnPage() {
                     <th className="px-4 py-3">Port / Proto</th>
                     <th className="px-4 py-3">Tunnel Subnet</th>
                     <th className="px-4 py-3">DCO Offload</th>
-                    <th className="px-4 py-3">Overrides (CSO)</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
                   {servers.map((s) => (
-                    <tr key={s.id} className="hover:bg-slate-800/30">
+                    <tr key={s.name} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 font-semibold text-white font-mono text-xs">{s.name}</td>
                       <td className="px-4 py-3 font-mono text-xs uppercase text-emerald-400">
                         {s.port} / {s.protocol}
@@ -91,51 +170,62 @@ export default function OpenVpnPage() {
                           <span className="text-xs text-slate-500">Userspace tun</span>
                         )}
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-400">{s.cso?.length || 0} Clients</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          {/* Client Specific Overrides (CSO) */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
-            <div className="p-4 border-b border-slate-800 flex justify-between items-center">
-              <div>
-                <h3 className="font-semibold text-white">Client-Specific Overrides (CSO)</h3>
-                <p className="text-xs text-slate-400">Static IP assignments and customized route pushes per certificate CN</p>
-              </div>
-            </div>
-
-            {!selectedServer || !selectedServer.cso || selectedServer.cso.length === 0 ? (
-              <div className="p-6 text-center text-slate-500 text-xs">
-                No Client-Specific Overrides (CSO) configured.
-              </div>
-            ) : (
-              <table className="w-full text-sm text-left">
-                <thead className="bg-slate-950/60 text-slate-400 uppercase text-xs border-b border-slate-800">
-                  <tr>
-                    <th className="px-4 py-3">Client Common Name (CN)</th>
-                    <th className="px-4 py-3">Assigned Static IP</th>
-                    <th className="px-4 py-3">Pushed Subnets</th>
-                    <th className="px-4 py-3">Description</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                  {selectedServer.cso.map((c) => (
-                    <tr key={c.id || c.commonName} className="hover:bg-slate-800/30">
-                      <td className="px-4 py-3 font-mono font-semibold text-white text-xs">{c.commonName}</td>
-                      <td className="px-4 py-3 font-mono text-emerald-400 text-xs">{c.assignedIp || 'Dynamic'}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-400">
-                        {c.pushRoutes?.join(', ') || 'None'}
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => persistServers(servers.filter((x) => x.name !== s.name))}
+                          className="text-slate-500 hover:text-red-400 transition"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </td>
-                      <td className="px-4 py-3 text-slate-400 text-xs">{c.description}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
+
+            {/* Add Server Form */}
+            <form onSubmit={handleAddServer} className="p-4 border-t border-slate-800 grid grid-cols-1 md:grid-cols-5 gap-2">
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Instance Name (corp-ovpn)"
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
+                required
+              />
+              <input
+                type="number"
+                value={newPort}
+                onChange={(e) => setNewPort(Number(e.target.value))}
+                placeholder="1194"
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
+              />
+              <select
+                value={newProto}
+                onChange={(e) => setNewProto(e.target.value as 'udp' | 'tcp')}
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
+              >
+                <option value="udp">UDP</option>
+                <option value="tcp">TCP</option>
+              </select>
+              <input
+                type="text"
+                value={newTunnelNet}
+                onChange={(e) => setNewTunnelNet(e.target.value)}
+                placeholder="10.8.0.0/24"
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
+              />
+              <button
+                type="submit"
+                disabled={saving}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Instance</span>
+              </button>
+            </form>
           </div>
 
           {/* Client Profile Exporter */}
@@ -159,24 +249,21 @@ export default function OpenVpnPage() {
                 </button>
               )}
             </div>
-            <pre className="p-3 bg-slate-950 rounded-lg text-xs font-mono text-slate-400 overflow-x-auto whitespace-pre-wrap border border-slate-800">
+            <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-slate-300 overflow-x-auto max-h-48">
               {clientProfile}
             </pre>
           </div>
         </div>
 
-        {/* Right 1 Col: Live Server Conf */}
-        <div className="space-y-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm flex flex-col h-full">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                <Terminal className="w-4 h-4 text-emerald-400" />
-                Rendered Server Config
-              </div>
-              <span className="text-[10px] text-emerald-400 font-mono">DCO Enabled</span>
-            </div>
-            <pre className="mt-3 p-3 bg-slate-950 rounded-lg text-xs font-mono text-emerald-300 overflow-x-auto whitespace-pre-wrap flex-1 border border-slate-900">
-              {compiled.servers[0]?.serverConf || '# No servers configured'}
+        {/* Server Config Preview */}
+        <div className="space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
+            <h3 className="font-semibold text-white text-sm flex items-center gap-2 mb-3">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+              Generated Server Config
+            </h3>
+            <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-emerald-300 overflow-x-auto max-h-96">
+              {compiled.servers[0]?.serverConf || '# No OpenVPN server instance configured'}
             </pre>
           </div>
         </div>

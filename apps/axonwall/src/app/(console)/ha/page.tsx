@@ -1,16 +1,111 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ShieldAlert, RefreshCw, Server, Activity, Database, CheckCircle2, ArrowRightLeft } from 'lucide-react';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 
 export default function HighAvailabilityPage() {
   const [enabled, setEnabled] = useState(false);
-  const [role, setRole] = useState('primary');
+  const [role, setRole] = useState<'primary' | 'secondary'>('primary');
+  const [vrid, setVrid] = useState(51);
+  const [syncInterface, setSyncInterface] = useState('eth3');
+  const [peerIp, setPeerIp] = useState('10.0.99.2');
+  const [syncPassword, setSyncPassword] = useState('axonwall-ha-secret');
   const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(true);
-  const [sqliteSyncMode, setSqliteSyncMode] = useState('direct_stream');
+  const [sqliteSyncMode, setSqliteSyncMode] = useState<'direct_stream' | 'litestream'>('direct_stream');
   const [syncInterval, setSyncInterval] = useState(5);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        if (state.ha) {
+          setEnabled(state.ha.enabled);
+          const haRole = state.ha.role || state.ha.nodeRole || 'master';
+          setRole(haRole === 'backup' ? 'secondary' : 'primary');
+          const firstVrrp = state.ha.vrrpInstances?.[0];
+          if (firstVrrp) {
+            setVrid(firstVrrp.vrid);
+            if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
+          }
+          if (state.ha.syncInterface) setSyncInterface(state.ha.syncInterface);
+          if (state.ha.peerIp || state.ha.peerAddress) {
+            setPeerIp(state.ha.peerIp || state.ha.peerAddress);
+          }
+          if (state.ha.sqliteSync) {
+            setSqliteSyncEnabled(state.ha.sqliteSync.enabled);
+            setSqliteSyncMode(state.ha.sqliteSync.mode);
+            setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSaveHa = async () => {
+    setIsSaving(true);
+    try {
+      const state = await getCurrentDesiredState();
+      const mappedRole: 'master' | 'backup' = role === 'primary' ? 'master' : 'backup';
+      const existingVrrp = state.ha?.vrrpInstances || [];
+      await applyDesiredState({
+        ...state,
+        ha: {
+          ...state.ha,
+          enabled,
+          nodeRole: mappedRole,
+          role: mappedRole,
+          syncInterface,
+          peerAddress: peerIp,
+          peerIp,
+          peerPort: state.ha?.peerPort ?? 2966,
+          vrrpInstances:
+            existingVrrp.length > 0
+              ? existingVrrp.map((v, idx) =>
+                  idx === 0 ? { ...v, vrid, authPassword: syncPassword } : v
+                )
+              : [
+                  {
+                    name: 'VI_WAN',
+                    vrid,
+                    interface: syncInterface || 'eth0',
+                    priority: mappedRole === 'master' ? 150 : 100,
+                    virtualIps: ['192.168.1.254/24'],
+                    authPassword: syncPassword,
+                  },
+                ],
+          conntrackSync: state.ha?.conntrackSync ?? {
+            enabled,
+            interface: syncInterface || 'eth0',
+            protocol: 'unicast',
+            peerAddress: peerIp,
+            port: 3780,
+          },
+          syncSections: state.ha?.syncSections ?? {
+            interfaces: false,
+            firewall: true,
+            dhcp: true,
+            dns: true,
+            aliases: true,
+            vpn: true,
+            sqlite: true,
+          },
+          sqliteSync: {
+            enabled: sqliteSyncEnabled,
+            mode: sqliteSyncMode,
+            syncIntervalSeconds: syncInterval,
+            listenPort: state.ha?.sqliteSync?.listenPort || 9876,
+            databases: state.ha?.sqliteSync?.databases || ['/var/lib/axonwall/headscale/db.sqlite'],
+          },
+        },
+      });
+      setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
+      setTimeout(() => setSyncStatusMsg(null), 4000);
+    } catch {}
+    setIsSaving(false);
+  };
 
   const handleTriggerSync = () => {
     setIsSyncing(true);
@@ -28,7 +123,15 @@ export default function HighAvailabilityPage() {
           <h1 className="text-2xl font-semibold tracking-tight">High Availability (HA) & Distributed State</h1>
           <p className="text-sm text-slate-500 mt-1">Configure active/passive failover using VRRP (Keepalived), Netfilter state sync (conntrackd), and real-time SQLite replication.</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSaveHa}
+            disabled={isSaving}
+            className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded text-sm font-medium cursor-pointer disabled:opacity-50"
+          >
+            {isSaving ? 'Saving...' : 'Save to ha.yaml'}
+          </button>
           <span className="text-sm font-medium text-slate-500">HA Status:</span>
           {enabled ? (
             <span className="px-3 py-1 bg-emerald-100 text-emerald-700 text-sm font-semibold rounded-full flex items-center gap-1">
@@ -67,7 +170,7 @@ export default function HighAvailabilityPage() {
                     <label className="block text-sm font-medium text-slate-700 mb-1">Node Role</label>
                     <select 
                       value={role} 
-                      onChange={(e) => setRole(e.target.value)}
+                      onChange={(e) => setRole(e.target.value as 'primary' | 'secondary')}
                       className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
                     >
                       <option value="primary">Primary (MASTER)</option>
@@ -76,13 +179,22 @@ export default function HighAvailabilityPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">Virtual Router ID (VRID)</label>
-                    <input type="number" defaultValue="51" className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border" />
+                    <input
+                      type="number"
+                      value={vrid}
+                      onChange={(e) => setVrid(Number(e.target.value) || 51)}
+                      className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                    />
                   </div>
                 </div>
                 
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Sync Interface (pfsync / conntrackd)</label>
-                  <select className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border">
+                  <select
+                    value={syncInterface}
+                    onChange={(e) => setSyncInterface(e.target.value)}
+                    className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                  >
                     <option value="eth3">eth3 (Dedicated Sync Link)</option>
                     <option value="eth1">eth1 (LAN)</option>
                   </select>
@@ -92,11 +204,23 @@ export default function HighAvailabilityPage() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">Peer IP Address</label>
-                    <input type="text" placeholder="10.0.99.2" defaultValue="10.0.99.2" className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border" />
+                    <input
+                      type="text"
+                      placeholder="10.0.99.2"
+                      value={peerIp}
+                      onChange={(e) => setPeerIp(e.target.value)}
+                      className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                    />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">Sync Password (VRRP / mTLS)</label>
-                    <input type="password" placeholder="••••••••" defaultValue="axonwall-ha-secret" className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border" />
+                    <input
+                      type="password"
+                      placeholder="••••••••"
+                      value={syncPassword}
+                      onChange={(e) => setSyncPassword(e.target.value)}
+                      className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                    />
                   </div>
                 </div>
               </div>
@@ -135,7 +259,7 @@ export default function HighAvailabilityPage() {
                       <label className="block text-sm font-medium text-slate-700 mb-1">Replication Engine Mode</label>
                       <select 
                         value={sqliteSyncMode} 
-                        onChange={(e) => setSqliteSyncMode(e.target.value)}
+                        onChange={(e) => setSqliteSyncMode(e.target.value as 'direct_stream' | 'litestream')}
                         className="w-full border-slate-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 text-sm p-2 border"
                       >
                         <option value="direct_stream">Direct Streaming (Embedded Go daemon - Port 9876)</option>
@@ -179,8 +303,13 @@ export default function HighAvailabilityPage() {
                       {isSyncing ? 'Verifying...' : 'Verify Replica & Trigger Instant Sync'}
                     </button>
                     
-                    <button className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium">
-                      Save & Apply HA State
+                    <button
+                      type="button"
+                      onClick={handleSaveHa}
+                      disabled={isSaving}
+                      className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium cursor-pointer disabled:opacity-50"
+                    >
+                      {isSaving ? 'Saving...' : 'Save & Apply HA State'}
                     </button>
                   </div>
                 </div>

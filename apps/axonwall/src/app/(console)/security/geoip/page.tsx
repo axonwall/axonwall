@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   MapPin,
   Shield,
@@ -17,7 +17,8 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { compileGeoIp, COUNTRY_CIDR_TABLE } from '@axonwall/lib/compile/geoip';
-import type { GeoIpConfig } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import type { DesiredState, GeoIpConfig } from '@axonwall/lib/schemas';
 
 interface CountryItem {
   code: string;
@@ -51,6 +52,7 @@ const COUNTRIES: CountryItem[] = [
 ];
 
 export default function GeoIpPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [config, setConfig] = useState<GeoIpConfig>({
     enabled: true,
     mode: 'block',
@@ -64,6 +66,17 @@ export default function GeoIpPage() {
   const [search, setSearch] = useState('');
   const [showScript, setShowScript] = useState(false);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.geoip) {
+          setConfig(state.geoip);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Compile real-time preview of nftables interval sets
   const compiled = compileGeoIp(config);
@@ -93,8 +106,19 @@ export default function GeoIpPage() {
     }));
   }
 
-  function handleSave() {
-    setSavedMessage('GeoIP configuration updated and scheduled for commit-confirm apply.');
+  async function handleSave() {
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        geoip: config,
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setSavedMessage(res.message || 'GeoIP configuration saved to /etc/axonwall/security.yaml.');
+    } catch (err: any) {
+      setSavedMessage(`Error: ${err?.message || 'Failed to save GeoIP policy'}`);
+    }
     setTimeout(() => setSavedMessage(null), 4000);
   }
 

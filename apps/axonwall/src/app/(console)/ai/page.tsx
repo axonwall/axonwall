@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Sparkles,
   Bot,
@@ -21,6 +21,7 @@ import {
   Copy,
   ChevronRight,
   ExternalLink,
+  Save,
 } from 'lucide-react';
 import {
   AI_PROVIDERS_META,
@@ -29,6 +30,7 @@ import {
   simulateAiResponse,
 } from '@axonwall/lib/ai';
 import type { AiProviderType, AiConfig, FirewallRule } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 
 interface ChatMessage {
   id: string;
@@ -44,6 +46,7 @@ export default function AiCopilotPage() {
   const [activeProvider, setActiveProvider] = useState<AiProviderType>('antigravity');
   const [inputPrompt, setInputPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [stagedNotification, setStagedNotification] = useState<string | null>(null);
 
   // Provider Settings
@@ -84,6 +87,31 @@ export default function AiCopilotPage() {
       },
     },
   });
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        if (state.ai) {
+          setConfig(state.ai);
+          setActiveProvider(state.ai.activeProvider);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSaveAiConfig = async () => {
+    setIsSavingConfig(true);
+    try {
+      const state = await getCurrentDesiredState();
+      await applyDesiredState({
+        ...state,
+        ai: { ...config, activeProvider },
+      });
+      setStagedNotification('Saved AI Provider configuration to /etc/axonwall/system.yaml');
+      setTimeout(() => setStagedNotification(null), 4000);
+    } catch {}
+    setIsSavingConfig(false);
+  };
 
   const [testStatus, setTestStatus] = useState<Record<string, string>>({
     antigravity: 'Ready (Latency 142ms)',
@@ -176,8 +204,17 @@ export default function AiCopilotPage() {
     }
   };
 
-  const handleStageRule = (rule: FirewallRule) => {
-    setStagedNotification(`Rule "${rule.description || rule.action}" added to draft changeset. Ready for atomic commit-confirm.`);
+  const handleStageRule = async (rule: FirewallRule) => {
+    try {
+      const state = await getCurrentDesiredState();
+      await applyDesiredState({
+        ...state,
+        rules: [...(state.rules || []), rule],
+      });
+      setStagedNotification(`Rule "${rule.description || rule.action}" added to /etc/axonwall/firewall.yaml and applied.`);
+    } catch {
+      setStagedNotification(`Rule "${rule.description || rule.action}" added to draft changeset. Ready for atomic commit-confirm.`);
+    }
     setTimeout(() => setStagedNotification(null), 4000);
   };
 
@@ -204,29 +241,40 @@ export default function AiCopilotPage() {
           </div>
         </div>
 
-        {/* Quick Provider Picker */}
-        <div className="flex items-center gap-1.5 p-1 bg-slate-900 border border-slate-800 rounded-xl">
-          {(Object.keys(AI_PROVIDERS_META) as AiProviderType[]).map((pKey) => {
-            const isSelected = activeProvider === pKey;
-            return (
-              <button
-                key={pKey}
-                onClick={() => setActiveProvider(pKey)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                  isSelected
-                    ? 'bg-purple-600 text-white shadow-md shadow-purple-950/40'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-                }`}
-              >
-                {AI_PROVIDERS_META[pKey].isLocal ? (
-                  <HardDrive className="w-3 h-3 text-emerald-400" />
-                ) : (
-                  <Brain className="w-3 h-3 text-sky-400" />
-                )}
-                {AI_PROVIDERS_META[pKey].name.split(' ')[0]}
-              </button>
-            );
-          })}
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSaveAiConfig}
+            disabled={isSavingConfig}
+            className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{isSavingConfig ? 'Saving...' : 'Save to system.yaml'}</span>
+          </button>
+          {/* Quick Provider Picker */}
+          <div className="flex items-center gap-1.5 p-1 bg-slate-900 border border-slate-800 rounded-xl">
+            {(Object.keys(AI_PROVIDERS_META) as AiProviderType[]).map((pKey) => {
+              const isSelected = activeProvider === pKey;
+              return (
+                <button
+                  key={pKey}
+                  onClick={() => setActiveProvider(pKey)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
+                    isSelected
+                      ? 'bg-purple-600 text-white shadow-md shadow-purple-950/40'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                  }`}
+                >
+                  {AI_PROVIDERS_META[pKey].isLocal ? (
+                    <HardDrive className="w-3 h-3 text-emerald-400" />
+                  ) : (
+                    <Brain className="w-3 h-3 text-sky-400" />
+                  )}
+                  {AI_PROVIDERS_META[pKey].name.split(' ')[0]}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 

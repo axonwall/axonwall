@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Database,
   Plus,
@@ -13,13 +13,14 @@ import {
   ExternalLink,
   Flame,
 } from 'lucide-react';
-import type { Alias } from '@axonwall/lib/schemas';
+import type { DesiredState, Alias } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import { COMMUNITY_THREAT_FEEDS, compileThreatFeedNft } from '@axonwall/lib/alias';
 
 export default function DynamicAliasesPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [aliases, setAliases] = useState<Alias[]>([
     {
-      id: 'alias-spamhaus',
       name: 'Spamhaus_DROP_List',
       type: 'urltable',
       url: 'https://www.spamhaus.org/drop/drop.txt',
@@ -29,7 +30,6 @@ export default function DynamicAliasesPage() {
       enabled: true,
     },
     {
-      id: 'alias-ru-geo',
       name: 'Blocked_Countries_GeoIP',
       type: 'geoip',
       entries: ['RU', 'KP'],
@@ -38,7 +38,6 @@ export default function DynamicAliasesPage() {
       enabled: true,
     },
     {
-      id: 'alias-aws-asn',
       name: 'Amazon_AWS_Cloud_Prefixes',
       type: 'asn',
       entries: ['16509'],
@@ -52,13 +51,36 @@ export default function DynamicAliasesPage() {
   const [refreshSuccess, setRefreshSuccess] = useState(false);
   const [showNftPreview, setShowNftPreview] = useState(false);
 
-  const handleRefreshAll = () => {
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.aliases?.length) {
+          setAliases(state.aliases);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const persistAliases = async (nextAliases: Alias[]) => {
+    setAliases(nextAliases);
     setRefreshing(true);
-    setTimeout(() => {
-      setRefreshing(false);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        aliases: nextAliases,
+      };
+      setFullState(nextState);
+      await applyDesiredState(nextState);
       setRefreshSuccess(true);
       setTimeout(() => setRefreshSuccess(false), 3000);
-    }, 1200);
+    } catch {}
+    setRefreshing(false);
+  };
+
+  const handleRefreshAll = () => {
+    persistAliases(aliases);
   };
 
   const handleSubscribeFeed = (feed: (typeof COMMUNITY_THREAT_FEEDS)[0]) => {
@@ -66,7 +88,6 @@ export default function DynamicAliasesPage() {
     if (existing) return;
 
     const newAlias: Alias = {
-      id: `alias-${feed.id}`,
       name: feed.name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 31),
       type: 'urltable',
       url: feed.url,
@@ -76,7 +97,7 @@ export default function DynamicAliasesPage() {
       enabled: true,
     };
 
-    setAliases([...aliases, newAlias]);
+    persistAliases([...aliases, newAlias]);
   };
 
   const compiledNftOutput = useMemo(() => {
@@ -271,7 +292,8 @@ export default function DynamicAliasesPage() {
                 <td className="px-4 py-3 text-slate-400 text-xs">{a.description}</td>
                 <td className="px-4 py-3 text-right">
                   <button
-                    onClick={() => setAliases(aliases.filter((x) => x.id !== a.id))}
+                    type="button"
+                    onClick={() => persistAliases(aliases.filter((x) => x.name !== a.name))}
                     className="text-slate-500 hover:text-red-400 transition cursor-pointer"
                   >
                     <Trash2 className="w-4 h-4" />

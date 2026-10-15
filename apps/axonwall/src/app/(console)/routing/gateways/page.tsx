@@ -10,18 +10,38 @@ import {
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Activity, Plus, ServerCrash, Settings2, ShieldCheck, Wifi, Loader2 } from 'lucide-react';
-import { getGatewaysTelemetry, type LiveGatewayInfo } from '@/server/agent';
+import { Activity, Plus, ServerCrash, Settings2, ShieldCheck, Wifi, Loader2, Trash2 } from 'lucide-react';
+import {
+  getGatewaysTelemetry,
+  getCurrentDesiredState,
+  applyDesiredState,
+  type LiveGatewayInfo,
+} from '@/server/agent';
+import type { DesiredState, Gateway, GatewayGroup } from '@axonwall/lib/schemas';
 
 export default function GatewaysPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [gateways, setGateways] = useState<LiveGatewayInfo[]>([]);
+  const [configuredGateways, setConfiguredGateways] = useState<Gateway[]>([]);
+  const [gatewayGroups, setGatewayGroups] = useState<GatewayGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  // Add gateway form
+  const [newName, setNewName] = useState('');
+  const [newIface, setNewIface] = useState('wan');
+  const [newIp, setNewIp] = useState('');
+  const [newMonitor, setNewMonitor] = useState('1.1.1.1');
 
   const fetchGateways = async () => {
     try {
-      const data = await getGatewaysTelemetry();
+      const [data, state] = await Promise.all([getGatewaysTelemetry(), getCurrentDesiredState()]);
       setGateways(data);
+      setFullState(state);
+      setConfiguredGateways(state.gateways || []);
+      setGatewayGroups(state.gatewayGroups || []);
     } catch {
       setGateways([]);
     } finally {
@@ -39,6 +59,51 @@ export default function GatewaysPage() {
     fetchGateways();
   };
 
+  const handleAddGateway = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newName.trim() || !newIp.trim()) return;
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextGws: Gateway[] = [
+        ...(current.gateways || []),
+        {
+          name: newName.trim(),
+          interface: newIface,
+          gatewayIp: newIp.trim(),
+          monitorIp: newMonitor.trim() || '1.1.1.1',
+          weight: 1,
+          isDefault: (current.gateways || []).length === 0,
+          enabled: true,
+          description: 'Configured upstream gateway',
+        },
+      ];
+      const nextState: DesiredState = { ...current, gateways: nextGws };
+      setFullState(nextState);
+      setConfiguredGateways(nextGws);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved gateway to /etc/axonwall/routing.yaml');
+      setNewName('');
+      setNewIp('');
+      setShowAddForm(false);
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save gateway'}`);
+    }
+  };
+
+  const handleDeleteConfiguredGateway = async (name: string) => {
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextGws = (current.gateways || []).filter((g) => g.name !== name);
+      const nextState: DesiredState = { ...current, gateways: nextGws };
+      setFullState(nextState);
+      setConfiguredGateways(nextGws);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Removed gateway from /etc/axonwall/routing.yaml');
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to delete gateway'}`);
+    }
+  };
+
   const onlineCount = gateways.filter((g) => g.status === 'online').length;
   const avgLatency =
     onlineCount > 0
@@ -51,7 +116,8 @@ export default function GatewaysPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Multi-WAN Gateways</h1>
           <p className="text-muted-foreground mt-1">
-            Configure gateway groups, load balancing, and automated SD-WAN failover.
+            Configure gateway groups, load balancing, and automated SD-WAN failover synced with{' '}
+            <code className="text-emerald-400 font-mono">/etc/axonwall/routing.yaml</code>.
           </p>
         </div>
         <div className="flex gap-2">
@@ -64,11 +130,61 @@ export default function GatewaysPage() {
               'Probe Links'
             )}
           </Button>
-          <Button>
+          <Button onClick={() => setShowAddForm(!showAddForm)}>
             <Plus className="h-4 w-4 mr-2" /> Add Gateway
           </Button>
         </div>
       </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300">
+          {statusMsg}
+        </div>
+      )}
+
+      {showAddForm && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Add Upstream Gateway (/etc/axonwall/routing.yaml)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleAddGateway} className="grid grid-cols-1 md:grid-cols-5 gap-3">
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Name (WAN2_FIBER)"
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                required
+              />
+              <input
+                type="text"
+                value={newIface}
+                onChange={(e) => setNewIface(e.target.value)}
+                placeholder="Interface (wan)"
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                required
+              />
+              <input
+                type="text"
+                value={newIp}
+                onChange={(e) => setNewIp(e.target.value)}
+                placeholder="Gateway IP (203.0.113.1)"
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                required
+              />
+              <input
+                type="text"
+                value={newMonitor}
+                onChange={(e) => setNewMonitor(e.target.value)}
+                placeholder="Monitor IP (1.1.1.1)"
+                className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+              />
+              <Button type="submit">Save to routing.yaml</Button>
+            </form>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
@@ -101,17 +217,19 @@ export default function GatewaysPage() {
             <Settings2 className="h-4 w-4 text-orange-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">0 Active</div>
-            <p className="text-xs text-muted-foreground mt-1">No Multi-WAN groups configured</p>
+            <div className="text-2xl font-bold">{gatewayGroups.length} Active</div>
+            <p className="text-xs text-muted-foreground mt-1">
+              {configuredGateways.length} gateways in routing.yaml
+            </p>
           </CardContent>
         </Card>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Configured Gateways</CardTitle>
+          <CardTitle>Configured & Live Gateways</CardTitle>
           <CardDescription>
-            Real-time link status based on kernel routing table and active ICMP probing.
+            Real-time link status based on kernel routing table, ICMP probing, and /etc/axonwall/routing.yaml.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -120,11 +238,11 @@ export default function GatewaysPage() {
               <Loader2 className="w-5 h-5 animate-spin" />
               <span>Scanning routing table and probing gateways...</span>
             </div>
-          ) : gateways.length === 0 ? (
+          ) : gateways.length === 0 && configuredGateways.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
               <ServerCrash className="h-8 w-8 mx-auto mb-2 opacity-50" />
               <p className="font-medium">No Default Gateway Detected</p>
-              <p className="text-xs mt-1">Configure an interface with a default route or DHCP client to enable gateway monitoring.</p>
+              <p className="text-xs mt-1">Configure an interface with a default route or click Add Gateway above.</p>
             </div>
           ) : (
             <div className="space-y-4">
@@ -192,26 +310,33 @@ export default function GatewaysPage() {
                   </div>
                 </div>
               ))}
+              {configuredGateways.map((cg) => (
+                <div
+                  key={`cfg-${cg.name}`}
+                  className="flex items-center justify-between p-4 border border-emerald-500/20 rounded-lg bg-slate-900/40"
+                >
+                  <div>
+                    <h3 className="font-medium text-white flex items-center gap-2 font-mono text-sm">
+                      {cg.name}
+                      <Badge variant="outline" className="text-[10px]">routing.yaml</Badge>
+                    </h3>
+                    <div className="text-xs text-slate-400 flex gap-3 mt-1 font-mono">
+                      <span>Interface: {cg.interface}</span>
+                      <span>Gateway IP: {cg.gatewayIp}</span>
+                      <span>Monitor: {cg.monitorIp || '1.1.1.1'}</span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteConfiguredGateway(cg.name)}
+                    className="text-slate-400 hover:text-red-400 p-1"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Gateway Groups (Load Balancing / Failover)</CardTitle>
-          <CardDescription>
-            Group multiple gateways together to define tier-based failover or packet load balancing.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="border border-dashed rounded-lg p-6 text-center text-muted-foreground">
-            <Settings2 className="h-8 w-8 mx-auto mb-2 opacity-50" />
-            <h4 className="font-medium text-foreground">No Gateway Groups Configured</h4>
-            <p className="text-xs mt-1 max-w-sm mx-auto">
-              Create a gateway group when you have two or more WAN interfaces to enable automatic failover or round-robin traffic distribution.
-            </p>
-          </div>
         </CardContent>
       </Card>
     </div>

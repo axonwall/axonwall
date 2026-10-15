@@ -150,6 +150,10 @@
     "./lint": {
       "types": "./dist/lint/index.d.ts",
       "default": "./dist/lint/index.js"
+    },
+    "./yaml": {
+      "types": "./dist/yaml/index.d.ts",
+      "default": "./dist/yaml/index.js"
     }
   },
   "scripts": {
@@ -162,6 +166,7 @@
     "fast-xml-parser": "^5.4.1",
     "jose": "^6.0.8",
     "ldapts": "^8.0.0",
+    "yaml": "^2.9.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {

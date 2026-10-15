@@ -5,6 +5,11 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { getSession } from './auth';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import {
+  AXONWALL_YAML_FILENAMES,
+  serializeDesiredStateToYamlFiles,
+  parseDesiredStateFromYamlFiles,
+} from '@axonwall/lib/yaml';
 import { applyDesiredState } from './agent';
 
 const GITOPS_DIR = process.env.GITOPS_DIR || '/var/lib/axonwall/gitops';
@@ -40,7 +45,7 @@ function ensureGitOpsRepo() {
 export async function recordGitOpsChange(
   state: DesiredState,
   author = 'admin',
-  commitMsg = 'Firewall state updated'
+  commitMsg = 'Firewall state updated (/etc/axonwall/*.yaml)'
 ): Promise<string | null> {
   const session = await getSession();
   if (!session || !session.roles.includes('admin')) {
@@ -49,10 +54,15 @@ export async function recordGitOpsChange(
 
   try {
     ensureGitOpsRepo();
+    const yamlFiles = serializeDesiredStateToYamlFiles(state);
+    for (const [filename, content] of Object.entries(yamlFiles)) {
+      fs.writeFileSync(path.join(GITOPS_DIR, filename), content, { mode: 0o640 });
+    }
+
     const stateFile = path.join(GITOPS_DIR, 'state.json');
     fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o640 });
 
-    execFileSync('git', ['add', 'state.json'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+    execFileSync('git', ['add', ...AXONWALL_YAML_FILENAMES, 'state.json'], { cwd: GITOPS_DIR, stdio: 'ignore' });
     const safeAuthor = author.replace(/[^a-zA-Z0-9._-]/g, '') || 'admin';
     execFileSync('git', ['commit', '-m', commitMsg, `--author=${safeAuthor} <${safeAuthor}@axonwall.local>`], {
       cwd: GITOPS_DIR,
@@ -88,7 +98,7 @@ export async function getGitOpsHistory(): Promise<GitOpsHistory> {
             shortHash: 'init',
             author: 'system',
             date: new Date().toISOString(),
-            message: 'Initial baseline firewall state committed',
+            message: 'Initial baseline /etc/axonwall/*.yaml state committed',
           },
         ],
       };
@@ -126,6 +136,15 @@ export async function getCommitDiff(commitHash: string): Promise<string> {
 
   const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
   try {
+    const yamlDiff = execFileSync('git', ['show', safeHash, '--color=never', '--', '*.yaml'], {
+      cwd: GITOPS_DIR,
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (yamlDiff && yamlDiff.includes('diff --git')) {
+      return yamlDiff;
+    }
     const diff = execFileSync('git', ['show', safeHash, '--color=never'], {
       cwd: GITOPS_DIR,
       encoding: 'utf8',
@@ -148,19 +167,36 @@ export async function rollbackToGitOpsCommit(
 
   const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
   try {
-    const rawJson = execFileSync('git', ['show', `${safeHash}:state.json`], {
-      cwd: GITOPS_DIR,
-      encoding: 'utf8',
-      timeout: 2000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const parsed = JSON.parse(rawJson);
-    const state = DesiredStateSchema.parse(parsed);
+    let state: DesiredState | null = null;
+    const yamlMap: Record<string, string> = {};
+    for (const filename of AXONWALL_YAML_FILENAMES) {
+      try {
+        const rawYaml = execFileSync('git', ['show', `${safeHash}:${filename}`], {
+          cwd: GITOPS_DIR,
+          encoding: 'utf8',
+          timeout: 1500,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        if (rawYaml) yamlMap[filename] = rawYaml;
+      } catch {}
+    }
+
+    if (Object.keys(yamlMap).length > 0) {
+      state = parseDesiredStateFromYamlFiles(yamlMap);
+    } else {
+      const rawJson = execFileSync('git', ['show', `${safeHash}:state.json`], {
+        cwd: GITOPS_DIR,
+        encoding: 'utf8',
+        timeout: 2000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      state = DesiredStateSchema.parse(JSON.parse(rawJson));
+    }
 
     const res = await applyDesiredState(state, 120);
     return {
       success: res.success,
-      message: `Successfully rolled back firewall state to commit ${safeHash.slice(0, 8)}. Safety rollback armed for 120s.`,
+      message: `Successfully rolled back /etc/axonwall/*.yaml state to commit ${safeHash.slice(0, 8)}. Safety rollback armed for 120s.`,
     };
   } catch (err: any) {
     return {

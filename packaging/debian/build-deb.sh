@@ -119,6 +119,10 @@ if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-update" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwall-update" "${WORK_DIR}/usr/local/bin/"
   chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-update"
 fi
+if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwallctl" ]]; then
+  cp "${CHROOT_SRC}/usr/local/bin/axonwallctl" "${WORK_DIR}/usr/local/bin/"
+  chmod 755 "${WORK_DIR}/usr/local/bin/axonwallctl"
+fi
 
 echo "${VERSION}" > "${WORK_DIR}/etc/axonwall/version"
 
@@ -157,6 +161,9 @@ fi
 if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/index.js" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-controller/dist/index.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
   cp "${ROOT_DIR}/apps/axonwall-controller/package.json" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/"
+fi
+if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
+  cp "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
 fi
 
 # 8. Build Debian Archive via dpkg-deb (or docker fallback if dpkg-deb is absent)

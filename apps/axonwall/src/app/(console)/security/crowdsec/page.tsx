@@ -1,9 +1,10 @@
 'use client';
 
-import { useState } from 'react';
-import { Shield, ShieldAlert, CheckCircle2, Terminal, RefreshCw, Trash2 } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Shield, ShieldAlert, CheckCircle2, Terminal, RefreshCw, Trash2, Save } from 'lucide-react';
 import { compileCrowdSec } from '@axonwall/lib/compile/crowdsec';
-import type { CrowdSecConfig } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import type { DesiredState, CrowdSecConfig } from '@axonwall/lib/schemas';
 
 interface RemediationDecision {
   id: string;
@@ -14,32 +15,101 @@ interface RemediationDecision {
 }
 
 export default function CrowdSecPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [lapiUrl, setLapiUrl] = useState('http://127.0.0.1:8080/');
   const [decisions, setDecisions] = useState<RemediationDecision[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.crowdsec) {
+          setEnabled(state.crowdsec.enabled);
+          setLapiUrl(state.crowdsec.lapiUrl || 'http://127.0.0.1:8080/');
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const crowdSecConfig: CrowdSecConfig = {
     enabled,
     lapiUrl,
-    apiKey: '9a8b7c6d5e4f3a2b1c0d',
-    remediationSetName: 'set_crowdsec_blacklists',
-    action: 'drop',
-    logBanned: true,
+    apiKey: fullState?.crowdsec?.apiKey || '9a8b7c6d5e4f3a2b1c0d',
+    remediationSetName: fullState?.crowdsec?.remediationSetName || 'set_crowdsec_blacklists',
+    action: fullState?.crowdsec?.action || 'drop',
+    logBanned: fullState?.crowdsec?.logBanned ?? true,
+  };
+
+  const handleSaveCrowdSec = async (nextEnabled = enabled) => {
+    setEnabled(nextEnabled);
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        crowdsec: {
+          ...crowdSecConfig,
+          enabled: nextEnabled,
+        },
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved CrowdSec configuration to /etc/axonwall/security.yaml');
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save CrowdSec settings'}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const compiled = compileCrowdSec(crowdSecConfig);
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-          <Shield className="w-6 h-6 text-emerald-400" />
-          CrowdSec Threat Intelligence & nftables Bouncer
-        </h1>
-        <p className="text-sm text-slate-400">
-          Crowdsourced cyber defense automatically pushing active IP remediations directly into Linux kernel nftables sets.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+            <Shield className="w-6 h-6 text-emerald-400" />
+            CrowdSec Threat Intelligence & nftables Bouncer
+          </h1>
+          <p className="text-sm text-slate-400">
+            Crowdsourced cyber defense synced with <code className="text-emerald-400 font-mono">/etc/axonwall/security.yaml</code>.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => handleSaveCrowdSec(!enabled)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border cursor-pointer transition ${
+              enabled
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            {enabled ? 'Bouncer Enabled' : 'Bouncer Disabled'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSaveCrowdSec(enabled)}
+            disabled={saving}
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{saving ? 'Saving YAML...' : 'Save to security.yaml'}</span>
+          </button>
+        </div>
       </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">

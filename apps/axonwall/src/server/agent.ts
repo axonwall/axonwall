@@ -3,10 +3,18 @@
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
 import { DesiredStateSchema, InterfaceSchema, type DesiredState } from '@axonwall/lib/schemas';
+import {
+  AXONWALL_YAML_FILENAMES,
+  serializeDesiredStateToYamlFiles,
+  serializeDesiredStateToSingleYaml,
+  parseDesiredStateFromYamlFiles,
+  validateYamlConfigFiles,
+} from '@axonwall/lib/yaml';
 import http from 'node:http';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import net from 'node:net';
 import { execSync, execFileSync } from 'node:child_process';
 import { getSession } from './auth';
@@ -207,28 +215,228 @@ const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
   routes: [],
 });
 
+const YAML_CONFIG_DIRS = [
+  process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall',
+  '/var/lib/axonwall/etc-axonwall',
+];
+
 let cachedDesiredState: DesiredState | null = null;
+let lastLoadedYamlMtimeMs = 0;
+
+function getLatestYamlMtimeInDir(dir: string): { maxMtimeMs: number; count: number } {
+  let maxMtimeMs = 0;
+  let count = 0;
+  try {
+    if (!fs.existsSync(dir)) return { maxMtimeMs: 0, count: 0 };
+    for (const filename of AXONWALL_YAML_FILENAMES) {
+      const fullPath = path.join(dir, filename);
+      if (fs.existsSync(fullPath)) {
+        const stat = fs.statSync(fullPath);
+        count++;
+        if (stat.mtimeMs > maxMtimeMs) {
+          maxMtimeMs = stat.mtimeMs;
+        }
+      }
+    }
+    const confD = path.join(dir, 'conf.d');
+    if (fs.existsSync(confD)) {
+      for (const entry of fs.readdirSync(confD)) {
+        if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
+          const stat = fs.statSync(path.join(confD, entry));
+          count++;
+          if (stat.mtimeMs > maxMtimeMs) {
+            maxMtimeMs = stat.mtimeMs;
+          }
+        }
+      }
+    }
+  } catch {}
+  return { maxMtimeMs, count };
+}
+
+function readYamlFilesFromDir(dir: string): Record<string, string> | null {
+  try {
+    if (!fs.existsSync(dir)) return null;
+    const files: Record<string, string> = {};
+    for (const filename of AXONWALL_YAML_FILENAMES) {
+      const fullPath = path.join(dir, filename);
+      if (fs.existsSync(fullPath)) {
+        files[filename] = fs.readFileSync(fullPath, 'utf8');
+      }
+    }
+    const confD = path.join(dir, 'conf.d');
+    if (fs.existsSync(confD)) {
+      for (const entry of fs.readdirSync(confD).sort()) {
+        if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
+          files[`conf.d/${entry}`] = fs.readFileSync(path.join(confD, entry), 'utf8');
+        }
+      }
+    }
+    return Object.keys(files).length > 0 ? files : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistDesiredStateToDisk(state: DesiredState): Record<string, string> {
+  const normalized = DesiredStateSchema.parse(state);
+  const yamlFiles = serializeDesiredStateToYamlFiles(normalized);
+  const daemonFileMap: Record<string, string> = {};
+
+  for (const [filename, content] of Object.entries(yamlFiles)) {
+    daemonFileMap[`/etc/axonwall/${filename}`] = content;
+  }
+
+  for (const dir of YAML_CONFIG_DIRS) {
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+      }
+      for (const [filename, content] of Object.entries(yamlFiles)) {
+        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o640 });
+      }
+    } catch {}
+  }
+
+  const jsonSerialized = JSON.stringify(normalized, null, 2);
+  for (const jsonPath of ['/var/lib/axonwall/state.json', '/etc/axonwall/state.json']) {
+    try {
+      const parent = path.dirname(jsonPath);
+      if (!fs.existsSync(parent)) {
+        fs.mkdirSync(parent, { recursive: true, mode: 0o755 });
+      }
+      fs.writeFileSync(jsonPath, jsonSerialized, { mode: 0o600 });
+    } catch {}
+  }
+
+  let newestMtime = Date.now();
+  for (const dir of YAML_CONFIG_DIRS) {
+    const { maxMtimeMs } = getLatestYamlMtimeInDir(dir);
+    if (maxMtimeMs > newestMtime) newestMtime = maxMtimeMs;
+  }
+  cachedDesiredState = normalized;
+  lastLoadedYamlMtimeMs = newestMtime;
+  return daemonFileMap;
+}
 
 export async function getCurrentDesiredState(): Promise<DesiredState> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
 
+  // 1. Check if /etc/axonwall/*.yaml (or /var/lib/axonwall/etc-axonwall/*.yaml) exists and whether any file was modified on disk
+  for (const dir of YAML_CONFIG_DIRS) {
+    const { maxMtimeMs, count } = getLatestYamlMtimeInDir(dir);
+    if (count > 0) {
+      if (cachedDesiredState && maxMtimeMs <= lastLoadedYamlMtimeMs) {
+        return structuredClone(cachedDesiredState);
+      }
+      const rawYamlMap = readYamlFilesFromDir(dir);
+      if (rawYamlMap) {
+        try {
+          const parsed = parseDesiredStateFromYamlFiles(rawYamlMap);
+          cachedDesiredState = parsed;
+          lastLoadedYamlMtimeMs = maxMtimeMs;
+          return structuredClone(cachedDesiredState);
+        } catch (err) {
+          console.error(`[axonwall] Failed to parse YAML files in ${dir}:`, err);
+        }
+      }
+    }
+  }
+
   if (cachedDesiredState) {
     return structuredClone(cachedDesiredState);
   }
 
-  for (const path of ['/var/lib/axonwall/state.json', '/etc/axonwall/state.json', './state.json']) {
+  // 2. Fallback/migration from legacy state.json if /etc/axonwall/*.yaml was not initialized yet
+  for (const jsonPath of ['/var/lib/axonwall/state.json', '/etc/axonwall/state.json', './state.json']) {
     try {
-      if (fs.existsSync(path)) {
-        const raw = fs.readFileSync(path, 'utf8');
-        const parsed = JSON.parse(raw);
-        cachedDesiredState = DesiredStateSchema.parse(parsed);
-        return structuredClone(cachedDesiredState);
+      if (fs.existsSync(jsonPath)) {
+        const raw = fs.readFileSync(jsonPath, 'utf8');
+        const parsed = DesiredStateSchema.parse(JSON.parse(raw));
+        persistDesiredStateToDisk(parsed);
+        return structuredClone(parsed);
       }
     } catch {}
   }
 
+  // 3. First boot: initialize /etc/axonwall/*.yaml with BASELINE_STATE
+  persistDesiredStateToDisk(BASELINE_STATE);
   return structuredClone(BASELINE_STATE);
+}
+
+export async function getYamlConfigFilesSnapshot(): Promise<{
+  directory: string;
+  files: Record<string, string>;
+}> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+
+  const state = await getCurrentDesiredState();
+  const generated = serializeDesiredStateToYamlFiles(state);
+
+  for (const dir of YAML_CONFIG_DIRS) {
+    const onDisk = readYamlFilesFromDir(dir);
+    if (onDisk && Object.keys(onDisk).length > 0) {
+      return {
+        directory: dir,
+        files: { ...generated, ...onDisk },
+      };
+    }
+  }
+
+  return {
+    directory: '/etc/axonwall',
+    files: generated,
+  };
+}
+
+export async function saveYamlDomainFile(
+  filename: string,
+  yamlContent: string,
+  applyImmediately = true
+): Promise<{ success: boolean; message: string; warnings: string[] }> {
+  const session = await getSession();
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+
+  const currentSnapshot = await getYamlConfigFilesSnapshot();
+  const updatedFiles: Record<string, string> = {
+    ...currentSnapshot.files,
+    [filename]: yamlContent,
+  };
+
+  const validation = validateYamlConfigFiles(updatedFiles);
+  if (!validation.valid || !validation.state) {
+    const details = validation.errors
+      .map((e) => `${e.file}${e.path ? ` (${e.path})` : ''}: ${e.message}`)
+      .join('; ');
+    throw new Error(`YAML validation failed: ${details}`);
+  }
+
+  if (applyImmediately) {
+    const res = await applyDesiredState(validation.state);
+    return {
+      success: res.success,
+      message: `Saved /etc/axonwall/${filename} and applied configuration.`,
+      warnings: res.warnings,
+    };
+  }
+
+  persistDesiredStateToDisk(validation.state);
+  return {
+    success: true,
+    message: `Saved /etc/axonwall/${filename} to disk.`,
+    warnings: [],
+  };
+}
+
+export async function exportUnifiedYamlConfig(): Promise<string> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
+  const state = await getCurrentDesiredState();
+  return serializeDesiredStateToSingleYaml(state);
 }
 
 export async function applyDesiredState(
@@ -241,39 +449,49 @@ export async function applyDesiredState(
     throw new Error('Unauthorized: Admin privileges required to apply firewall state');
   }
 
-  // 1. Run linter
-  const lintIssues = lintRuleset(state);
+  const normalizedState = DesiredStateSchema.parse(state);
 
-  // 2. Compile to nftables
-  const { nftScript, files, reloadServices, warnings: compileWarnings } = compileNftables(state);
+  // 1. Run linter
+  const lintIssues = lintRuleset(normalizedState);
+
+  // 2. Compile to nftables & daemon config files
+  const { nftScript, files, reloadServices, warnings: compileWarnings } = compileNftables(normalizedState);
   const warnings = [...lintIssues.map((i) => i.message), ...(compileWarnings || [])];
   const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
 
-  // 3. Delegate to root axonwalld daemon if active
+  // 3. Persist /etc/axonwall/*.yaml to disk and include them in the daemon bundle
+  const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
+  const allFiles = [
+    ...files,
+    ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
+      path: filePath,
+      content,
+      fileMode: 0o640,
+    })),
+    {
+      path: '/etc/axonwall/state.json',
+      content: JSON.stringify(normalizedState, null, 2),
+      fileMode: 0o640,
+    },
+  ];
+
+  // 4. Delegate to root axonwalld daemon if active
   const daemonResp = await callAgentApi<any>('/v1/apply', 'POST', {
     job_id: `ui-${Date.now()}`,
     bundle_hash: bundleHash,
     nft_script: nftScript,
-    files,
+    files: allFiles,
     reload_services: reloadServices,
     confirm_timeout_seconds: confirmTimeoutSeconds,
   });
 
-  cachedDesiredState = state;
-  try {
-    if (!fs.existsSync('/var/lib/axonwall')) {
-      fs.mkdirSync('/var/lib/axonwall', { recursive: true, mode: 0o755 });
-    }
-    fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
-  } catch {}
-
-  // Automatically record state changeset in GitOps audit repository
+  // Automatically record state changeset (including modular YAML files) in GitOps audit repository
   try {
     const { recordGitOpsChange } = await import('./gitops');
     await recordGitOpsChange(
-      state,
+      normalizedState,
       session.username || 'admin',
-      `Firewall ruleset applied (SHA256: ${bundleHash.slice(0, 12)})`
+      `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
     );
   } catch {}
 
@@ -296,7 +514,7 @@ export async function applyDesiredState(
 
   return {
     success: true,
-    message: `Ruleset compiled and applied. Commit-confirm active for ${confirmTimeoutSeconds}s.`,
+    message: `Configuration saved to /etc/axonwall/*.yaml and applied. Commit-confirm active for ${confirmTimeoutSeconds}s.`,
     nftScript,
     warnings,
   };
@@ -941,13 +1159,15 @@ export async function saveInterfaceAssignment(data: {
     state.dhcp.subnets = state.dhcp.subnets.filter((s) => s.interface !== data.name);
   }
 
-  cachedDesiredState = state;
+  persistDesiredStateToDisk(state);
 
   try {
-    if (!fs.existsSync('/var/lib/axonwall')) {
-      fs.mkdirSync('/var/lib/axonwall', { recursive: true });
-    }
-    fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
+    const { recordGitOpsChange } = await import('./gitops');
+    await recordGitOpsChange(
+      state,
+      session.username || 'admin',
+      `Updated interface assignment ${data.name.toUpperCase()} -> ${data.device}`
+    );
   } catch {}
 
   // Persist device mappings and interface configuration into /etc/axonwall/interfaces.conf and /etc/network/interfaces

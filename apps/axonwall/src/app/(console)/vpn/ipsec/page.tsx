@@ -1,30 +1,67 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ShieldCheck, Plus, Trash2, Terminal, CheckCircle2 } from 'lucide-react';
 import { compileIpsec } from '@axonwall/lib/compile/ipsec';
-import type { IpsecTunnel } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import type { DesiredState, IpsecTunnel } from '@axonwall/lib/schemas';
 
 export default function IpsecPage() {
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [tunnels, setTunnels] = useState<IpsecTunnel[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const [newName, setNewName] = useState('');
   const [newRemote, setNewRemote] = useState('');
   const [newPsk, setNewPsk] = useState('');
   const [newDesc, setNewDesc] = useState('');
 
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.ipsec?.tunnels) {
+          setTunnels(state.ipsec.tunnels);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const persistTunnels = async (nextTunnels: IpsecTunnel[]) => {
+    setTunnels(nextTunnels);
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        ipsec: {
+          enabled: nextTunnels.length > 0,
+          tunnels: nextTunnels,
+        },
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved IPsec configuration to /etc/axonwall/vpn.yaml');
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save IPsec tunnels'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const compiled = compileIpsec({
     enabled: tunnels.length > 0,
     tunnels,
   });
 
-  const handleAdd = (e: React.FormEvent) => {
+  const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName || !newRemote) return;
-    setTunnels([
+    const nextTunnels: IpsecTunnel[] = [
       ...tunnels,
       {
-        id: `ipsec-${Date.now()}`,
         name: newName,
         enabled: true,
         routeBased: true,
@@ -41,11 +78,12 @@ export default function IpsecPage() {
         dpdAction: 'restart',
         description: newDesc,
       },
-    ]);
+    ];
     setNewName('');
     setNewRemote('');
     setNewPsk('');
     setNewDesc('');
+    await persistTunnels(nextTunnels);
   };
 
   return (
@@ -56,9 +94,16 @@ export default function IpsecPage() {
           IPsec VPN (strongSwan swanctl & XFRM)
         </h1>
         <p className="text-sm text-slate-400">
-          Enterprise IKEv2 site-to-site VPN with Linux kernel XFRM route-based interfaces and swanctl VICI configuration.
+          Enterprise IKEv2 site-to-site VPN synced with <code className="text-emerald-400 font-mono">/etc/axonwall/vpn.yaml</code>.
         </p>
       </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
@@ -93,7 +138,7 @@ export default function IpsecPage() {
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
                   {tunnels.map((t) => (
-                    <tr key={t.id} className="hover:bg-slate-800/30">
+                    <tr key={t.name} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 font-semibold text-white font-mono text-xs">{t.name}</td>
                       <td className="px-4 py-3">
                         {t.routeBased ? (
@@ -115,7 +160,8 @@ export default function IpsecPage() {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
-                          onClick={() => setTunnels(tunnels.filter((x) => x.id !== t.id))}
+                          type="button"
+                          onClick={() => persistTunnels(tunnels.filter((x) => x.name !== t.name))}
                           className="text-slate-500 hover:text-red-400 transition"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -163,7 +209,7 @@ export default function IpsecPage() {
                   type="password"
                   value={newPsk}
                   onChange={(e) => setNewPsk(e.target.value)}
-                  placeholder="SecretPSK"
+                  placeholder="••••••••••••"
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono"
                 />
               </div>
@@ -173,35 +219,42 @@ export default function IpsecPage() {
                   type="text"
                   value={newDesc}
                   onChange={(e) => setNewDesc(e.target.value)}
-                  placeholder="Tunnel description"
+                  placeholder="Site-to-site link"
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
                 />
               </div>
-              <div className="md:col-span-2 pt-2">
+              <div className="md:col-span-2 flex justify-end">
                 <button
                   type="submit"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2 px-6 rounded-lg text-sm transition flex items-center gap-2"
+                  disabled={saving}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium transition cursor-pointer"
                 >
-                  <Plus className="w-4 h-4" />
-                  Create Tunnel
+                  {saving ? 'Saving to vpn.yaml...' : 'Provision XFRM & swanctl Tunnel'}
                 </button>
               </div>
             </form>
           </div>
         </div>
 
-        {/* Right 1 Col: Live swanctl.conf */}
-        <div className="space-y-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm flex flex-col h-full">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                <Terminal className="w-4 h-4 text-emerald-400" />
-                Rendered swanctl.conf
-              </div>
-              <span className="text-[10px] text-emerald-400 font-mono">VICI Ready</span>
-            </div>
-            <pre className="mt-3 p-3 bg-slate-950 rounded-lg text-xs font-mono text-emerald-300 overflow-x-auto whitespace-pre-wrap flex-1 border border-slate-900">
+        {/* Generated Config Preview */}
+        <div className="space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
+            <h3 className="font-semibold text-white text-sm flex items-center gap-2 mb-3">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+              Generated swanctl.conf
+            </h3>
+            <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-emerald-300 overflow-x-auto max-h-80">
               {compiled.swanctlConf}
+            </pre>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
+            <h3 className="font-semibold text-white text-sm flex items-center gap-2 mb-3">
+              <Terminal className="w-4 h-4 text-sky-400" />
+              XFRM Setup Script
+            </h3>
+            <pre className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs font-mono text-sky-300 overflow-x-auto max-h-60">
+              {compiled.xfrmSetupCommands.join('\n') || '# No XFRM interfaces configured'}
             </pre>
           </div>
         </div>

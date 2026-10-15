@@ -1,16 +1,18 @@
 'use client';
 
-import { useState } from 'react';
-import { Layers, Network, GitFork, ShieldAlert, Cpu, Plus, Trash2, CheckCircle2 } from 'lucide-react';
-import type { Vlan, Bridge, Bond, VirtualIp, Vrf } from '@axonwall/lib/schemas';
+import { useState, useEffect } from 'react';
+import { Layers, Network, GitFork, ShieldAlert, Cpu, Plus, Trash2, CheckCircle2, Save } from 'lucide-react';
+import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import type { DesiredState, Vlan, Bridge, Bond, VirtualIp, Vrf } from '@axonwall/lib/schemas';
 
 export default function AdvancedInterfacesPage() {
   const [activeTab, setActiveTab] = useState<'vlan' | 'bridge' | 'bond' | 'vip' | 'vrf'>('vlan');
+  const [fullState, setFullState] = useState<DesiredState | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  // Sample initial state
   const [vlans, setVlans] = useState<Vlan[]>([
     {
-      id: 'vlan-10',
       tag: 10,
       parentInterface: 'eth1',
       vlanInterface: 'eth1.10',
@@ -18,26 +20,16 @@ export default function AdvancedInterfacesPage() {
       description: 'Management VLAN',
     },
     {
-      id: 'vlan-20',
       tag: 20,
       parentInterface: 'eth1',
       vlanInterface: 'eth1.20',
       priority: 2,
       description: 'IoT Isolated Network',
     },
-    {
-      id: 'vlan-30',
-      tag: 30,
-      parentInterface: 'eth1',
-      vlanInterface: 'eth1.30',
-      priority: 5,
-      description: 'VoIP Telephony',
-    },
   ]);
 
   const [bridges, setBridges] = useState<Bridge[]>([
     {
-      id: 'br-lan',
       name: 'br0',
       members: [
         { interface: 'eth2', stp: true, cost: 100, priority: 32 },
@@ -51,7 +43,6 @@ export default function AdvancedInterfacesPage() {
 
   const [bonds, setBonds] = useState<Bond[]>([
     {
-      id: 'bond-uplink',
       name: 'bond0',
       members: ['eth4', 'eth5'],
       mode: '802.3ad',
@@ -64,7 +55,6 @@ export default function AdvancedInterfacesPage() {
 
   const [vips, setVips] = useState<VirtualIp[]>([
     {
-      id: 'vip-1',
       interface: 'wan',
       ip: '198.51.100.10',
       subnetBits: 32,
@@ -72,7 +62,6 @@ export default function AdvancedInterfacesPage() {
       description: 'Secondary WAN Public IP for DMZ Mail',
     },
     {
-      id: 'vip-2',
       interface: 'lan',
       ip: '192.168.100.254',
       subnetBits: 24,
@@ -85,7 +74,6 @@ export default function AdvancedInterfacesPage() {
 
   const [vrfs, setVrfs] = useState<Vrf[]>([
     {
-      id: 'vrf-mgmt',
       name: 'vrf_mgmt',
       tableId: 100,
       interfaces: ['eth0.10'],
@@ -93,41 +81,107 @@ export default function AdvancedInterfacesPage() {
     },
   ]);
 
+  useEffect(() => {
+    getCurrentDesiredState()
+      .then((state) => {
+        setFullState(state);
+        if (state.vlans?.length) setVlans(state.vlans);
+        if (state.bridges?.length) setBridges(state.bridges);
+        if (state.bonds?.length) setBonds(state.bonds);
+        if (state.virtualIps?.length) setVips(state.virtualIps);
+        if (state.vrfs?.length) setVrfs(state.vrfs);
+      })
+      .catch(() => {});
+  }, []);
+
+  const persistTopology = async (
+    nextVlans = vlans,
+    nextBridges = bridges,
+    nextBonds = bonds,
+    nextVips = vips,
+    nextVrfs = vrfs
+  ) => {
+    setVlans(nextVlans);
+    setBridges(nextBridges);
+    setBonds(nextBonds);
+    setVips(nextVips);
+    setVrfs(nextVrfs);
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const current = fullState || (await getCurrentDesiredState());
+      const nextState: DesiredState = {
+        ...current,
+        vlans: nextVlans,
+        bridges: nextBridges,
+        bonds: nextBonds,
+        virtualIps: nextVips,
+        vrfs: nextVrfs,
+      };
+      setFullState(nextState);
+      const res = await applyDesiredState(nextState);
+      setStatusMsg(res.message || 'Saved topology to /etc/axonwall/interfaces.yaml');
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save interfaces.yaml'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // Form states for quick add
   const [newVlanTag, setNewVlanTag] = useState('');
   const [newVlanParent, setNewVlanParent] = useState('eth1');
   const [newVlanDesc, setNewVlanDesc] = useState('');
 
-  const handleAddVlan = (e: React.FormEvent) => {
+  const handleAddVlan = async (e: React.FormEvent) => {
     e.preventDefault();
     const tag = Number.parseInt(newVlanTag, 10);
     if (!tag || tag < 1 || tag > 4094) return;
-    setVlans([
+    const nextVlans: Vlan[] = [
       ...vlans,
       {
-        id: `vlan-${Date.now()}`,
         tag,
         parentInterface: newVlanParent,
         vlanInterface: `${newVlanParent}.${tag}`,
         priority: 0,
         description: newVlanDesc,
       },
-    ]);
+    ];
     setNewVlanTag('');
     setNewVlanDesc('');
+    await persistTopology(nextVlans, bridges, bonds, vips, vrfs);
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-          <Layers className="w-6 h-6 text-emerald-400" />
-          Advanced Interfaces & Virtual Topologies
-        </h1>
-        <p className="text-sm text-slate-400">
-          Configure 802.1Q VLANs, Linux VLAN-aware bridges, LAGG 802.3ad LACP bonding, Virtual IPs, and VRFs.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+            <Layers className="w-6 h-6 text-emerald-400" />
+            Advanced Interfaces & Virtual Topologies
+          </h1>
+          <p className="text-sm text-slate-400">
+            Configure 802.1Q VLANs, Linux bridges, LACP bonds, VIPs, and VRFs synced with{' '}
+            <code className="text-emerald-400 font-mono">/etc/axonwall/interfaces.yaml</code>.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => persistTopology()}
+          disabled={saving}
+          className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+        >
+          <Save className="w-3.5 h-3.5" />
+          <span>{saving ? 'Saving YAML...' : 'Save to interfaces.yaml'}</span>
+        </button>
       </div>
+
+      {statusMsg && (
+        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex border-b border-slate-800 gap-1">
@@ -223,7 +277,16 @@ export default function AdvancedInterfacesPage() {
                       <td className="px-4 py-3 text-slate-400">{vlan.description}</td>
                       <td className="px-4 py-3 text-right">
                         <button
-                          onClick={() => setVlans(vlans.filter((v) => v.id !== vlan.id))}
+                          type="button"
+                          onClick={() =>
+                            persistTopology(
+                              vlans.filter((v) => v.tag !== vlan.tag),
+                              bridges,
+                              bonds,
+                              vips,
+                              vrfs
+                            )
+                          }
                           className="text-slate-500 hover:text-red-400 transition"
                         >
                           <Trash2 className="w-4 h-4" />

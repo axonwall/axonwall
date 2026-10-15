@@ -138,6 +138,14 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 		file.Close()
 
+		// Mirror /etc/axonwall/*.yaml (and conf.d/*.yaml) to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence
+		if strings.HasPrefix(cleanPath, "/etc/axonwall/") && (strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml")) {
+			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
+			persistPath := filepath.Join("/var/lib/axonwall/etc-axonwall", relPath)
+			_ = os.MkdirAll(filepath.Dir(persistPath), 0755)
+			_ = os.WriteFile(persistPath, []byte(f.Content), mode)
+		}
+
 		if filepath.Base(cleanPath) == "zero_trust_apps.json" {
 			log.Printf("[Agent] Applying Zero Trust IAP configuration")
 			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {
@@ -633,6 +641,36 @@ func applyBootInterfaces() {
 	}
 }
 
+func syncPersistentYamlConfigs() {
+	srcDir := "/var/lib/axonwall/etc-axonwall"
+	dstDir := "/etc/axonwall"
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(dstDir, 0755)
+	_ = os.MkdirAll(filepath.Join(dstDir, "conf.d"), 0755)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+		srcPath := filepath.Join(srcDir, name)
+		dstPath := filepath.Join(dstDir, name)
+		srcInfo, err1 := os.Stat(srcPath)
+		dstInfo, err2 := os.Stat(dstPath)
+		// Copy if missing in /etc/axonwall or if persistent copy is newer
+		if err1 == nil && (err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime())) {
+			if data, err := os.ReadFile(srcPath); err == nil {
+				_ = os.WriteFile(dstPath, data, 0644)
+			}
+		}
+	}
+}
+
 func main() {
 	notifyState := flag.String("notify", "", "Send state change notification to running axonwalld HA engine (MASTER/BACKUP/FAULT)")
 	socketPath := flag.String("socket", "/run/axonwall/agent.sock", "Path to agent Unix socket")
@@ -649,6 +687,7 @@ func main() {
 	}
 
 	log.Printf("Starting Axonwall Privileged Agent (axonwalld)")
+	syncPersistentYamlConfigs()
 
 	// If boot-apply is requested, load last-known-good configuration and ensure network interfaces are configured
 	if *bootApply {
