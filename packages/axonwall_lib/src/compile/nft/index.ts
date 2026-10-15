@@ -1,4 +1,4 @@
-import type { DesiredState, FirewallRule, NatRule, Alias } from '../../schemas/index.js';
+import { type DesiredState, type FirewallRule, type NatRule, type Alias, normalizeAntiLockoutInterfaces } from '../../schemas/index.js';
 import { sanitizeIdentifier } from '../../util/index.js';
 import { resolveCapabilities } from '../../plugins/index.js';
 import { compileSuricata } from '../suricata/index.js';
@@ -143,12 +143,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept');
 
     if (state.system.antiLockout?.enabled) {
-      const ifaceList = Array.from(
-        new Set([
-          ...(state.system.antiLockout.interfaces || []),
-          state.system.antiLockout.interface || 'lan',
-        ].filter(Boolean))
-      );
+      const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
       const ports = state.system.antiLockout.ports.join(', ');
       for (const ifaceName of ifaceList) {
         if (ifaceName !== 'wan') {
@@ -359,12 +354,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Anti-Lockout Rule
   if (state.system.antiLockout?.enabled) {
-    const ifaceList = Array.from(
-      new Set([
-        ...(state.system.antiLockout.interfaces || []),
-        state.system.antiLockout.interface || 'lan',
-      ].filter(Boolean))
-    );
+    const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
     const ports = state.system.antiLockout.ports.join(', ');
     for (const ifaceName of ifaceList) {
       if (ifaceName !== 'wan') {
