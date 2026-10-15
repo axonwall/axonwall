@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Logo } from './Logo';
+import { getCurrentDesiredState } from '@/server/agent';
 import {
   Shield,
   LayoutDashboard,
@@ -42,6 +43,10 @@ import {
   Eye,
   Wrench,
   Terminal,
+  Database,
+  FolderKanban,
+  Camera,
+  Cpu,
 } from 'lucide-react';
 
 export interface SubItem {
@@ -56,6 +61,7 @@ export interface NavSection {
   name: string;
   icon: any;
   href?: string;
+  capability?: 'firewall' | 'nas' | 'k3s';
   items?: SubItem[];
 }
 
@@ -77,7 +83,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'A/B System Updates', href: '/system/updates', icon: RefreshCw },
       { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
       { name: 'Service Supervisor', href: '/system/services', icon: Server },
-      { name: 'Plugin Store', href: '/system/plugins', icon: Boxes },
+      { name: 'Plugin Store & Roles', href: '/system/plugins', icon: Boxes, badge: 'Core' },
       { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
       { name: 'Firewall Importer', href: '/system/import', icon: FileText },
       { name: 'Web Shell & Sensors', href: '/system/terminal', icon: Terminal },
@@ -96,6 +102,7 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'firewall',
     name: 'Firewall',
     icon: Flame,
+    capability: 'firewall',
     items: [
       { name: 'Rules & NAT', href: '/firewall', icon: Flame },
       { name: 'Threat Feeds & Aliases', href: '/security/aliases', icon: Globe },
@@ -107,6 +114,7 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'security',
     name: 'Threat Defense',
     icon: ShieldAlert,
+    capability: 'firewall',
     items: [
       { name: 'Suricata IDS/IPS', href: '/security/ids', icon: ShieldAlert },
       { name: 'CrowdSec Bouncer', href: '/security/crowdsec', icon: Radio },
@@ -119,6 +127,7 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'routing',
     name: 'Routing',
     icon: Route,
+    capability: 'firewall',
     items: [
       { name: 'Routing Overview', href: '/routing', icon: Route },
       { name: 'Gateways & Multi-WAN', href: '/routing/gateways', icon: Compass },
@@ -129,9 +138,10 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'services',
     name: 'Services',
     icon: Server,
+    capability: 'firewall',
     items: [
       { name: 'DHCP Server (Kea)', href: '/services/dhcp', icon: Server },
-      { name: 'ACME / Let\'s Encrypt', href: '/security/acme', icon: Lock },
+      { name: "ACME / Let's Encrypt", href: '/security/acme', icon: Lock },
       { name: 'Captive Portal', href: '/security/captive-portal', icon: Users },
     ],
   },
@@ -139,11 +149,36 @@ export const NAV_SECTIONS: NavSection[] = [
     id: 'vpn',
     name: 'VPN',
     icon: KeyRound,
+    capability: 'firewall',
     items: [
       { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
       { name: 'Mesh VPN (Headscale)', href: '/vpn/mesh', icon: Network },
       { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
       { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },
+    ],
+  },
+  {
+    id: 'storage',
+    name: 'Storage (ZFS NAS)',
+    icon: Database,
+    capability: 'nas',
+    items: [
+      { name: 'Disks & RAID Inventory', href: '/storage/disks', icon: HardDrive },
+      { name: 'ZFS Pools & RAID-Z', href: '/storage/pools', icon: Database, badge: 'ZFS' },
+      { name: 'Datasets & Zvols', href: '/storage/datasets', icon: Layers },
+      { name: 'Shares (SMB / NFS / iSCSI)', href: '/storage/shares', icon: FolderKanban },
+      { name: 'Snapshots & HA Sync', href: '/storage/snapshots', icon: Camera },
+    ],
+  },
+  {
+    id: 'k3s',
+    name: 'Kubernetes (K3s)',
+    icon: Cpu,
+    capability: 'k3s',
+    items: [
+      { name: 'Cluster & HA Join', href: '/k3s/cluster', icon: Cpu, badge: 'HA' },
+      { name: 'OpenEBS Storage', href: '/k3s/storage', icon: Database },
+      { name: 'Workloads & Apps', href: '/k3s/workloads', icon: Boxes },
     ],
   },
   {
@@ -181,10 +216,50 @@ export function ConsoleSidebar() {
   const pathname = usePathname();
   const [search, setSearch] = useState('');
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  const [capabilities, setCapabilities] = useState<{
+    firewallEnabled: boolean;
+    nasEnabled: boolean;
+    k3sEnabled: boolean;
+  }>({
+    firewallEnabled: true,
+    nasEnabled: true,
+    k3sEnabled: true,
+  });
+
+  useEffect(() => {
+    let mounted = true;
+    const loadCaps = () => {
+      getCurrentDesiredState()
+        .then((st) => {
+          if (!mounted) return;
+          setCapabilities({
+            firewallEnabled: st.capabilities?.firewallEnabled !== false,
+            nasEnabled: Boolean(st.capabilities?.nasEnabled ?? st.nas?.enabled ?? true),
+            k3sEnabled: Boolean(st.capabilities?.k3sEnabled ?? st.k3s?.enabled ?? true),
+          });
+        })
+        .catch(() => {});
+    };
+    loadCaps();
+    window.addEventListener('axonwall-capabilities-updated', loadCaps);
+    return () => {
+      mounted = false;
+      window.removeEventListener('axonwall-capabilities-updated', loadCaps);
+    };
+  }, [pathname]);
+
+  const roleFilteredSections = useMemo(() => {
+    return NAV_SECTIONS.filter((sec) => {
+      if (sec.capability === 'firewall' && !capabilities.firewallEnabled) return false;
+      if (sec.capability === 'nas' && !capabilities.nasEnabled) return false;
+      if (sec.capability === 'k3s' && !capabilities.k3sEnabled) return false;
+      return true;
+    });
+  }, [capabilities]);
 
   // Auto-expand the section containing the active pathname
   useEffect(() => {
-    for (const section of NAV_SECTIONS) {
+    for (const section of roleFilteredSections) {
       if (
         section.items?.some(
           (item) => pathname === item.href || (item.href !== '/' && pathname.startsWith(`${item.href}/`))
@@ -194,7 +269,7 @@ export function ConsoleSidebar() {
         break;
       }
     }
-  }, [pathname]);
+  }, [pathname, roleFilteredSections]);
 
   const toggleSection = (id: string) => {
     setOpenSections((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -204,9 +279,9 @@ export function ConsoleSidebar() {
   const isSearching = search.trim().length > 0;
   const filteredSections = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return NAV_SECTIONS;
+    if (!q) return roleFilteredSections;
 
-    return NAV_SECTIONS.map((section) => {
+    return roleFilteredSections.map((section) => {
       // If direct link matches
       if (section.href && section.name.toLowerCase().includes(q)) {
         return section;
@@ -233,7 +308,15 @@ export function ConsoleSidebar() {
 
       return null;
     }).filter(Boolean) as NavSection[];
-  }, [search]);
+  }, [search, roleFilteredSections]);
+
+  const activeRoleSummary = [
+    capabilities.firewallEnabled ? 'FW' : null,
+    capabilities.nasEnabled ? 'ZFS' : null,
+    capabilities.k3sEnabled ? 'K3s' : null,
+  ]
+    .filter(Boolean)
+    .join(' + ') || 'Host Mode';
 
   return (
     <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0 h-screen sticky top-0">
@@ -244,7 +327,7 @@ export function ConsoleSidebar() {
           <div>
             <span className="font-bold text-base tracking-tight text-white block">Axonwall</span>
             <span className="text-[10px] text-emerald-400 font-mono tracking-wider uppercase">
-              Linux + nftables
+              {activeRoleSummary}
             </span>
           </div>
         </div>

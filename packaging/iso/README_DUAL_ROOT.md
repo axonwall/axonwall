@@ -44,8 +44,16 @@ During installation, the administrator is presented with partition configuration
 - **No Swap Partition:** Recommended for high-end NVMe drives and systems with ZRAM.
 - **4 GB / 8 GB Swap:** Extended swap for intensive Suricata deep packet inspection and large memory dumps.
 
-### Persistent Volume Allocation
-All remaining unallocated disk capacity is automatically formatted as ext4 (`LABEL=axon_data`) and mounted to `/var/lib/axonwall`. This volume preserves cryptographic certificates, Headscale WireGuard mesh databases, VictoriaMetrics time-series flows, Suricata logs, and user identities across all OS updates.
+### Persistent Volume & Dedicated ZFS Storage Allocation
+Remaining disk capacity after the A/B system slots and swap can be partitioned flexibly during installation:
+1. **Reserve Remaining Space for ZFS Pool (`axon_zfs`):** Allocates 16 GB (or 8 GB on compact drives) to `/var/lib/axonwall` (`LABEL=axon_data`) and assigns all remaining capacity on the system disk(s) to a dedicated OpenZFS partition (`PARTLABEL=axon_zfs_1`, GPT type `bf01`) for NAS shares and K3s OpenEBS volumes.
+2. **Split Remaining Space (50/50):** Splits remaining capacity equally between `axon_data` (`ext4`) and `axon_zfs` (OpenZFS).
+3. **Custom ZFS Partition Size (GB):** Carves out an exact user-specified GB size for `axon_zfs`.
+4. **No ZFS Partition on System Disk:** Assigns 100% of remaining space on the system disk to `axon_data` (`ext4`).
+
+### Multi-Disk System RAID-1 Mirroring & ZFS RAID-Z Topologies
+- **System Disk Mirroring (`mdadm` RAID-1):** When 2 or more system disks are selected during installation, Axonwall clones the GPT partition table, EFI System Partition (`AXON_EFI`), and BIOS/UEFI GRUB bootloaders across all selected drives and mirrors `axon_root_a`, `axon_root_b`, and `axon_data` so the appliance survives a complete primary drive failure.
+- **OpenZFS Pool Topologies (`tank`):** Any `axon_zfs_*` partitions carved out of the system disk(s) and/or any additional dedicated secondary disks selected during installation are passed directly as raw VDEVs to OpenZFS (`stripe`, `mirror`, `raidz1`, `raidz2`, `raidz3`, `draid1`, `draid2`).
 
 ---
 
@@ -54,17 +62,22 @@ All remaining unallocated disk capacity is automatically formatted as ext4 (`LAB
 ```text
 +-----------------------------------------------------------------------------------------+
 | Partition 1: BIOS Boot (1 MB) / EFI ESP (512 MB) | /boot/efi       | FAT32 | 512 MB     |
+| (Cloned across all member disks in RAID-1 mode)  |                 |       | [AXON_EFI] |
 +-----------------------------------------------------------------------------------------+
 | Partition 2: rootfsA (Active System Slot)        | /               | ext4  | 8-32 GB    |
-|                                                  |                 |       | [axon_root_a]|
+| (Single or mdadm RAID-1 across system disks)     |                 |       | [axon_root_a]|
 +-----------------------------------------------------------------------------------------+
 | Partition 3: rootfsB (Standby Fallback Slot)     | /mnt/standby    | ext4  | 8-32 GB    |
-|                                                  | (for staging)   |       | [axon_root_b]|
+| (Single or mdadm RAID-1 across system disks)     | (for staging)   |       | [axon_root_b]|
 +-----------------------------------------------------------------------------------------+
 | Partition 4: Swap (Optional)                     | [SWAP]          | swap  | 0-8 GB     |
 +-----------------------------------------------------------------------------------------+
-| Partition 5: Persistent Data & Logs              | /var/lib/axonwall| ext4  | Remainder  |
-|                                                  |                 |       | [axon_data]|
+| Partition 5: Persistent Data & Logs              | /var/lib/axonwall| ext4  | 8-64 GB    |
+| (Single or mdadm RAID-1 across system disks)     |                 |       | [axon_data]|
++-----------------------------------------------------------------------------------------+
+| Partition 6: Dedicated OpenZFS Storage VDEV      | /mnt/tank       | zfs   | Remainder  |
+| (Combined with peer partitions/extra disks into  | (NAS & OpenEBS) | bf01  | or Custom  |
+|  Stripe / Mirror / RAIDZ1 / RAIDZ2 / RAIDZ3)     |                 |       | [axon_zfs] |
 +-----------------------------------------------------------------------------------------+
 ```
 

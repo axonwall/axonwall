@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -160,15 +161,18 @@ func (m *SqliteSyncManager) startMasterServer() error {
 
 	mux.HandleFunc("/api/v1/sync/status", m.handleStatus)
 	mux.HandleFunc("/api/v1/sync/db", m.handleDownloadDb)
+	mux.HandleFunc("/api/v1/sync/state", m.handleDownloadState)
+	mux.HandleFunc("/api/v1/sync/zfs", m.handleZfsSendStream)
+	mux.HandleFunc("/api/v1/sync/k3s-token", m.handleK3sToken)
 
 	m.server = &http.Server{
 		Addr:         listenAddr,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 300 * time.Second,
 	}
 
-	slog.Info("Starting SQLite Sync Master HTTP Server", "addr", listenAddr)
+	slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
 	go func() {
 		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("SQLite Sync server error", "error", err)
@@ -371,6 +375,152 @@ func (m *SqliteSyncManager) pollAndSync() {
 			}
 		}
 	}
+
+	// Synchronize non-K3s appliance state (/var/lib/axonwall/state.json & Samba passdb.tdb)
+	m.syncApplianceStateFromPeer(peerPort)
+
+	// Automatically fetch K3s cluster join token if not yet present on backup node
+	if _, err := os.Stat("/var/lib/axonwall/k3s-join.token"); err != nil {
+		if tok, err := FetchPeerClusterToken(cfg.PeerAddress, peerPort, cfg.AuthToken); err == nil && tok != "" {
+			_ = os.MkdirAll("/var/lib/axonwall", 0755)
+			_ = os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600)
+			slog.Info("HA Backup Poller: Automatically retrieved K3s cluster join token from primary peer")
+			_ = exec.Command("systemctl", "reload-or-restart", "k3s").Run()
+		}
+	}
+}
+
+func (m *SqliteSyncManager) handleDownloadState(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	authToken := m.cfg.AuthToken
+	m.mu.Unlock()
+
+	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	statePath := "/var/lib/axonwall/state.json"
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		http.Error(w, "state.json not found", http.StatusNotFound)
+		return
+	}
+
+	sum := sha256.Sum256(data)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Checksum-SHA256", hex.EncodeToString(sum[:]))
+	_, _ = w.Write(data)
+}
+
+func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	authToken := m.cfg.AuthToken
+	m.mu.Unlock()
+
+	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	dataset := r.URL.Query().Get("dataset")
+	fromSnap := r.URL.Query().Get("from")
+	if dataset == "" || strings.ContainsAny(dataset, ";|&`$() ") {
+		http.Error(w, "Invalid dataset parameter", http.StatusBadRequest)
+		return
+	}
+
+	snapTag := fmt.Sprintf("ha-sync-%d", time.Now().UTC().Unix())
+	targetSnap := fmt.Sprintf("%s@%s", dataset, snapTag)
+
+	if out, err := exec.Command("zfs", "snapshot", targetSnap).CombinedOutput(); err != nil {
+		http.Error(w, fmt.Sprintf("zfs snapshot failed: %s", string(out)), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Zfs-Snapshot", targetSnap)
+
+	var sendArgs []string
+	if fromSnap != "" && !strings.ContainsAny(fromSnap, ";|&`$() ") {
+		sendArgs = []string{"send", "-w", "-I", fromSnap, targetSnap}
+	} else {
+		sendArgs = []string{"send", "-w", targetSnap}
+	}
+
+	cmd := exec.Command("zfs", sendArgs...)
+	cmd.Stdout = w
+	if err := cmd.Run(); err != nil {
+		slog.Warn("zfs send stream finished with error", "dataset", dataset, "error", err)
+	}
+}
+
+func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	authToken := m.cfg.AuthToken
+	m.mu.Unlock()
+
+	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	k3sMgr := NewK3sManager()
+	tok, err := k3sMgr.GetClusterNodeToken()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"token": tok,
+	})
+}
+
+func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
+	m.mu.Lock()
+	peerAddr := m.cfg.PeerAddress
+	authToken := m.cfg.AuthToken
+	m.mu.Unlock()
+
+	if peerAddr == "" {
+		return
+	}
+
+	stateUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/state", peerAddr, peerPort)
+	req, err := http.NewRequest(http.MethodGet, stateUrl, nil)
+	if err != nil {
+		return
+	}
+	if authToken != "" {
+		req.Header.Set("X-Axonwall-Sync-Token", authToken)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	peerSha := resp.Header.Get("X-Checksum-SHA256")
+	localPath := "/var/lib/axonwall/state.json"
+	localSha := computeFileSha256(localPath)
+	if peerSha != "" && peerSha == localSha {
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+	if err != nil || len(body) == 0 {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(localPath), 0755)
+	_ = os.WriteFile(localPath+".ha-replica", body, 0640)
 }
 
 func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int) error {

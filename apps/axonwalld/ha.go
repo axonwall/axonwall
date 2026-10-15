@@ -30,13 +30,15 @@ type HAEngine struct {
 	mu         sync.Mutex
 	config     HAConfig
 	sqliteSync *engine.SqliteSyncManager
+	nasManager *engine.NasManager
 	listener   net.Listener
 	sockPath   string
 }
 
-func NewHAEngine() *HAEngine {
+func NewHAEngine(nasMgr *engine.NasManager) *HAEngine {
 	return &HAEngine{
 		sqliteSync: engine.NewSqliteSyncManager(),
+		nasManager: nasMgr,
 		sockPath:   "/run/axonwall/ha.sock",
 	}
 }
@@ -89,6 +91,13 @@ func (e *HAEngine) OnTransition(state string) {
 
 	slog.Info("HAEngine handling transition", "state", state)
 	e.sqliteSync.OnStateChange(state)
+	if e.nasManager != nil {
+		if state == "MASTER" {
+			e.nasManager.PromoteFailoverMaster()
+		} else if state == "BACKUP" || state == "FAULT" {
+			e.nasManager.DemoteFailoverBackup()
+		}
+	}
 }
 
 func (e *HAEngine) Apply(cfg HAConfig) error {

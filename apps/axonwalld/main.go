@@ -45,9 +45,11 @@ type AgentServer struct {
 	sdwanProber     *SDWanProber
 	pcapManager     *engine.PacketCaptureManager
 	watchdog        *engine.WatchdogEngine
+	nasManager      *engine.NasManager
+	k3sManager      *engine.K3sManager
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager) *AgentServer {
 	hostname, _ := os.Hostname()
 
 	initHash := ""
@@ -73,6 +75,8 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		sdwanProber:    sdwanProber,
 		pcapManager:    pcapManager,
 		watchdog:       watchdog,
+		nasManager:     nasManager,
+		k3sManager:     k3sManager,
 	}
 }
 
@@ -152,6 +156,20 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			log.Printf("[Agent] Applying High Availability & SQLite Sync configuration")
 			if err := s.haEngine.ApplyFromJSON([]byte(f.Content)); err != nil {
 				log.Printf("[Agent] Warning: Failed to apply HA config: %v", err)
+			}
+		}
+
+		if filepath.Base(cleanPath) == "nas_config.json" && s.nasManager != nil {
+			log.Printf("[Agent] Applying OpenZFS Storage & NAS Share configuration")
+			if err := s.nasManager.ApplyConfig([]byte(f.Content)); err != nil {
+				log.Printf("[Agent] Warning: Failed to apply NAS config: %v", err)
+			}
+		}
+
+		if filepath.Base(cleanPath) == "k3s_config.json" && s.k3sManager != nil {
+			log.Printf("[Agent] Applying K3s & OpenEBS cluster configuration")
+			if err := s.k3sManager.ApplyConfig([]byte(f.Content)); err != nil {
+				log.Printf("[Agent] Warning: Failed to apply K3s config: %v", err)
 			}
 		}
 	}
@@ -667,7 +685,9 @@ func main() {
 	grpcServer := grpc.NewServer()
 	
 	iapManager := engine.NewIAPManager()
-	haEngine := NewHAEngine()
+	nasManager := engine.NewNasManager()
+	k3sManager := engine.NewK3sManager()
+	haEngine := NewHAEngine(nasManager)
 	if err := haEngine.StartSocketListener(); err != nil {
 		log.Printf("[Agent] Warning: Failed to start HA socket listener: %v", err)
 	}
@@ -680,7 +700,7 @@ func main() {
 	watchdog := engine.NewWatchdogEngine()
 	watchdog.Start()
 
-	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog)
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -868,6 +888,95 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
+		})
+		mux.HandleFunc("/v1/nas/disks", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"disks": nasManager.DiscoverDisks(),
+			})
+		})
+		mux.HandleFunc("/v1/nas/pools", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pools": nasManager.ListPools(),
+			})
+		})
+		mux.HandleFunc("/v1/nas/snapshots", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					Dataset string `json:"dataset"`
+					Label   string `json:"label"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				snap, err := nasManager.CreateSnapshot(req.Dataset, req.Label)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":  true,
+					"snapshot": snap,
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"snapshots": nasManager.ListSnapshots(),
+			})
+		})
+		mux.HandleFunc("/v1/nas/scrub", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Pool string `json:"pool"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := nasManager.ScrubPool(req.Pool); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Started ZFS scrub on pool %s", req.Pool),
+			})
+		})
+		mux.HandleFunc("/v1/k3s/status", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(k3sManager.GetStatus())
+		})
+		mux.HandleFunc("/v1/k3s/join", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				PeerIp    string `json:"peerIp"`
+				SyncPort  int    `json:"syncPort"`
+				AuthToken string `json:"authToken"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := k3sManager.TriggerAutoJoin(req.PeerIp, req.SyncPort, req.AuthToken); err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Auto-joined K3s cluster at %s:6443", req.PeerIp),
+			})
 		})
 		apiServer = &http.Server{Handler: mux}
 		go func() {

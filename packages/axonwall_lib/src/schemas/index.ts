@@ -608,6 +608,9 @@ export const HaSyncSectionsSchema = z.object({
   aliases: z.boolean().default(true),
   vpn: z.boolean().default(true),
   sqlite: z.boolean().optional().default(true),
+  nas: z.boolean().optional(),
+  zfs: z.boolean().optional(),
+  k3s: z.boolean().optional(),
 });
 export type HaSyncSections = z.infer<typeof HaSyncSectionsSchema>;
 
@@ -632,7 +635,10 @@ export type HaSqliteSyncConfig = z.infer<typeof HaSqliteSyncConfigSchema>;
 export const HighAvailabilityConfigSchema = z.object({
   enabled: z.boolean().default(false),
   nodeRole: z.enum(['master', 'backup']).default('master'),
+  role: z.enum(['master', 'backup']).optional(),
   peerAddress: z.string().default(''),
+  peerIp: z.string().optional(),
+  syncInterface: z.string().optional(),
   peerPort: z.number().int().default(2966),
   mtlsCert: z.string().optional(),
   mtlsKey: z.string().optional(),
@@ -757,10 +763,14 @@ export const SnmpPluginConfigSchema = z.object({
 });
 export type SnmpPluginConfig = z.infer<typeof SnmpPluginConfigSchema>;
 
+export const PluginCategorySchema = z.enum(['core_role', 'extension']);
+export type PluginCategory = z.infer<typeof PluginCategorySchema>;
+
 export const PluginManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   version: z.string().min(1),
+  category: PluginCategorySchema.default('extension').optional(),
   description: z.string().default(''),
   author: z.string().default('Axonwall Community'),
   systemdUnits: z.array(z.string()).default([]),
@@ -960,8 +970,189 @@ export const SsoConfigSchema = z.object({
 });
 export type SsoConfig = z.infer<typeof SsoConfigSchema>;
 
+// =============================================================================
+// Core Appliance Capabilities & Modular Roles (Firewall / NAS / K3s + OpenEBS)
+// =============================================================================
+
+export const CoreCapabilitiesSchema = z.object({
+  firewallEnabled: z.boolean().default(true),
+  nasEnabled: z.boolean().default(false),
+  k3sEnabled: z.boolean().default(false),
+});
+export type CoreCapabilities = z.infer<typeof CoreCapabilitiesSchema>;
+
+export const ZfsTopologySchema = z.enum([
+  'stripe',
+  'mirror',
+  'raidz1',
+  'raidz2',
+  'raidz3',
+  'draid1',
+  'draid2',
+  'draid3',
+]);
+export type ZfsTopology = z.infer<typeof ZfsTopologySchema>;
+
+export const ZfsCompressionSchema = z.enum(['lz4', 'zstd', 'gzip', 'off']);
+export type ZfsCompression = z.infer<typeof ZfsCompressionSchema>;
+
+export const ZfsPoolSchema = z.object({
+  name: z.string().min(1).regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/),
+  topology: ZfsTopologySchema.default('mirror'),
+  dataDisks: z.array(z.string()).min(1),
+  cacheDisks: z.array(z.string()).default([]),
+  logDisks: z.array(z.string()).default([]),
+  spareDisks: z.array(z.string()).default([]),
+  ashift: z.number().int().min(9).max(16).default(12),
+  autotrim: z.boolean().default(true),
+  compression: ZfsCompressionSchema.default('lz4'),
+  scrubScheduleCron: z.string().default('0 2 * * 0'),
+  description: z.string().max(255).default(''),
+});
+export type ZfsPool = z.infer<typeof ZfsPoolSchema>;
+
+export const ZfsDatasetSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1),
+  pool: z.string().min(1).default('tank'),
+  type: z.enum(['filesystem', 'zvol']).default('filesystem'),
+  compression: ZfsCompressionSchema.default('lz4'),
+  dedup: z.enum(['off', 'on']).default('off'),
+  quotaGb: z.number().nonnegative().default(0),
+  recordSize: z.enum(['4K', '16K', '64K', '128K', '512K', '1M']).default('128K'),
+  volSizeGb: z.number().nonnegative().default(10),
+  encryption: z.enum(['off', 'aes-256-gcm']).default('off'),
+  aclMode: z.enum(['passthrough', 'restricted']).default('passthrough'),
+  replicateToHaPeer: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type ZfsDataset = z.infer<typeof ZfsDatasetSchema>;
+
+export const ZfsSnapshotPolicySchema = z.object({
+  id: z.string().optional(),
+  dataset: z.string().min(1),
+  interval: z.enum(['hourly', 'daily', 'weekly']).default('hourly'),
+  keepCount: z.number().int().min(1).max(1000).default(24),
+  replicateToHaPeer: z.boolean().default(true),
+  enabled: z.boolean().default(true),
+});
+export type ZfsSnapshotPolicy = z.infer<typeof ZfsSnapshotPolicySchema>;
+
+export const SmbShareSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1),
+  path: z.string().min(1),
+  comment: z.string().max(255).default(''),
+  readOnly: z.boolean().default(false),
+  guestOk: z.boolean().default(false),
+  browseable: z.boolean().default(true),
+  timeMachine: z.boolean().default(false),
+  shadowCopies: z.boolean().default(true),
+  validUsers: z.array(z.string()).default([]),
+  hostsAllow: z.array(z.string()).default([]),
+  enabled: z.boolean().default(true),
+});
+export type SmbShare = z.infer<typeof SmbShareSchema>;
+
+export const NfsExportSchema = z.object({
+  id: z.string().optional(),
+  path: z.string().min(1),
+  allowedNetworks: z.array(z.string()).default(['192.168.1.0/24']),
+  readOnly: z.boolean().default(false),
+  mapRootUser: z.enum(['root', 'nobody']).default('root'),
+  async: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type NfsExport = z.infer<typeof NfsExportSchema>;
+
+export const IscsiLunSchema = z.object({
+  lunId: z.number().int().min(0).default(0),
+  zvolPath: z.string().min(1),
+  blockSize: z.enum(['512', '4096']).default('4096'),
+  readOnly: z.boolean().default(false),
+});
+export type IscsiLun = z.infer<typeof IscsiLunSchema>;
+
+export const IscsiTargetSchema = z.object({
+  id: z.string().optional(),
+  iqn: z.string().min(1).default('iqn.2026-10.io.axonwall:storage.target0'),
+  portalIp: z.string().default('0.0.0.0'),
+  portalPort: z.number().int().default(3260),
+  allowedInitiators: z.array(z.string()).default([]),
+  chapUser: z.string().default(''),
+  chapSecret: z.string().default(''),
+  luns: z.array(IscsiLunSchema).default([]),
+  enabled: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type IscsiTarget = z.infer<typeof IscsiTargetSchema>;
+
+export const S3ServerConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  listenPort: z.number().int().default(9000),
+  consolePort: z.number().int().default(9001),
+  rootDataset: z.string().default('/mnt/tank/s3'),
+  accessKey: z.string().default('axonwall-admin'),
+  secretKey: z.string().default(''),
+  buckets: z.array(z.string()).default([]),
+});
+export type S3ServerConfig = z.infer<typeof S3ServerConfigSchema>;
+
+export const NasConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  workgroup: z.string().default('WORKGROUP'),
+  serverString: z.string().default('Axonwall Enterprise ZFS NAS'),
+  pools: z.array(ZfsPoolSchema).default([]),
+  datasets: z.array(ZfsDatasetSchema).default([]),
+  snapshotPolicies: z.array(ZfsSnapshotPolicySchema).default([]),
+  smbShares: z.array(SmbShareSchema).default([]),
+  nfsExports: z.array(NfsExportSchema).default([]),
+  iscsiTargets: z.array(IscsiTargetSchema).default([]),
+  s3: S3ServerConfigSchema.optional(),
+});
+export type NasConfig = z.infer<typeof NasConfigSchema>;
+
+export const OpenEbsConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  zfsLocalPvEnabled: z.boolean().default(true),
+  zfsLocalPvPool: z.string().default('tank'),
+  replicatedStorageEnabled: z.boolean().default(true),
+  defaultReplicaCount: z.number().int().min(1).max(5).default(2),
+  replicatedBackingPool: z.string().default('tank/openebs-replicated'),
+});
+export type OpenEbsConfig = z.infer<typeof OpenEbsConfigSchema>;
+
+export const K3sWorkloadSpecSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1),
+  namespace: z.string().default('default'),
+  image: z.string().min(1),
+  replicas: z.number().int().min(1).max(32).default(1),
+  port: z.number().int().min(1).max(65535).default(80),
+  storageClass: z.enum(['axonwall-replicated-ha', 'axonwall-zfs-local', 'none']).default('axonwall-replicated-ha'),
+  storageSizeGb: z.number().int().min(1).default(10),
+  mountPath: z.string().default('/data'),
+  enabled: z.boolean().default(true),
+});
+export type K3sWorkloadSpec = z.infer<typeof K3sWorkloadSpecSchema>;
+
+export const K3sConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  clusterCidr: z.string().default('10.42.0.0/16'),
+  serviceCidr: z.string().default('10.43.0.0/16'),
+  nodeIpInterface: z.string().default('lan'),
+  flannelBackend: z.enum(['wireguard-native', 'vxlan', 'host-gw']).default('wireguard-native'),
+  disableTraefik: z.boolean().default(false),
+  autoJoinHaPeer: z.boolean().default(true),
+  openEbs: OpenEbsConfigSchema.optional(),
+  workloads: z.array(K3sWorkloadSpecSchema).default([]),
+});
+export type K3sConfig = z.infer<typeof K3sConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
+  capabilities: CoreCapabilitiesSchema.optional(),
   system: SystemSettingsSchema.default({}),
   interfaces: z.array(InterfaceSchema).default([]),
   vlans: z.array(VlanSchema).default([]),
@@ -999,8 +1190,11 @@ export const DesiredStateSchema = z.object({
   ai: AiConfigSchema.optional(),
   fleet: SatelliteFleetConfigSchema.optional(),
   zeroTrust: ZeroTrustConfigSchema.optional(),
+  nas: NasConfigSchema.optional(),
+  k3s: K3sConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
+
 
 
 

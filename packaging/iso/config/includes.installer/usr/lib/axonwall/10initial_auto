@@ -36,11 +36,62 @@ if db_get partman-auto/disk && [ "$RET" ]; then
 	disks="$RET"
 fi
 
-# Axonwall: Prompt user to select target disk if not set
+# Axonwall: Prompt user to select target disk(s) and RAID/ZFS topology if not set
 if [ "$method" ] && [ -z "$disks" ]; then
-	disk=$(select_auto_disk) || exit 99
-	# In partman, disk returned from select_auto_disk is a directory (/var/lib/partman/devices/=dev=sda)
-	dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+	# 1. Display A/B Dual-Root & ZFS Storage architecture explanation
+	db_input critical axonwall/ab_explanation || true
+	db_go || true
+
+	# Enumerate all candidate block devices for multi-disk RAID & ZFS selection
+	all_devs=""
+	disk_count=0
+	for d in $(get_auto_disks); do
+		d_dev="$(cat "$d/device" 2>/dev/null || echo "$d")"
+		if [ -n "$d_dev" ]; then
+			disk_count=$(( disk_count + 1 ))
+			if [ -z "$all_devs" ]; then
+				all_devs="$d_dev"
+			else
+				all_devs="${all_devs}, ${d_dev}"
+			fi
+		fi
+	done
+
+	system_raid_mode="single"
+	system_raid_disks=""
+	disk=""
+	dev_name=""
+
+	if [ "$disk_count" -ge 2 ]; then
+		db_input critical axonwall/system_raid_mode || true
+		db_go || true
+		db_get axonwall/system_raid_mode || true
+		case "$RET" in
+			"RAID-1"*)
+				system_raid_mode="mirror"
+				db_subst axonwall/system_raid_disks CHOICES "$all_devs" || true
+				db_input critical axonwall/system_raid_disks || true
+				db_go || true
+				db_get axonwall/system_raid_disks || true
+				# Normalize comma-separated list to space-separated devices
+				system_raid_disks="$(echo "$RET" | tr -d ',' | tr -s ' ')"
+				primary_dev="$(echo "$system_raid_disks" | awk '{print $1}')"
+				if [ -n "$primary_dev" ]; then
+					dev_name="$primary_dev"
+					disk="$(dev_to_partman "$primary_dev" 2>/dev/null || echo "$primary_dev")"
+				fi
+				;;
+		esac
+	fi
+
+	if [ -z "$dev_name" ]; then
+		disk=$(select_auto_disk) || exit 99
+		# In partman, disk returned from select_auto_disk is a directory (/var/lib/partman/devices/=dev=sda)
+		dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+		system_raid_mode="single"
+		system_raid_disks="$dev_name"
+	fi
+
 	disks="$dev_name"
 	db_set partman-auto/disk "$dev_name"
 
@@ -54,10 +105,6 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	db_set partman-partitioning/choose_label "gpt"
 	echo "partman-partitioning partman-partitioning/default_label string gpt" | debconf-set-selections 2>/dev/null || true
 	echo "partman-partitioning partman-partitioning/choose_label select gpt" | debconf-set-selections 2>/dev/null || true
-
-	# 1. Display A/B Dual-Root architecture explanation
-	db_input critical axonwall/ab_explanation || true
-	db_go || true
 
 	# 2. Detect disk capacity
 	dev_base="$(basename "$dev_name")"
@@ -136,27 +183,155 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	root_mb=$(( root_gb * 1024 ))
 	swap_mb=$(( swap_gb * 1024 ))
 
-	# 5. Persist installer partition choices for finish-install hook
+	# 5. Prompt user for ZFS Storage Allocation on the system disk(s)
+	remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - 1 ))
+	if [ "$remaining_gb" -lt 4 ]; then
+		remaining_gb=4
+	fi
+
+	db_input critical axonwall/zfs_allocation || true
+	db_go || true
+	db_get axonwall/zfs_allocation || true
+	zfs_alloc_choice="$RET"
+
+	zfs_alloc_mode="remainder"
+	zfs_gb=0
+	data_gb=16
+	if [ "$remaining_gb" -lt 24 ]; then
+		data_gb=8
+	fi
+
+	case "$zfs_alloc_choice" in
+		"Allocate remaining"*)
+			zfs_alloc_mode="remainder"
+			if [ "$remaining_gb" -gt "$data_gb" ]; then
+				zfs_gb=$(( remaining_gb - data_gb ))
+			else
+				zfs_gb=0
+				zfs_alloc_mode="none"
+			fi
+			;;
+		"Split remaining"*)
+			zfs_alloc_mode="split"
+			data_gb=$(( remaining_gb / 2 ))
+			if [ "$data_gb" -lt 4 ]; then
+				data_gb=4
+			fi
+			zfs_gb=$(( remaining_gb - data_gb ))
+			if [ "$zfs_gb" -lt 2 ]; then
+				zfs_gb=0
+				zfs_alloc_mode="none"
+			fi
+			;;
+		"Custom ZFS"*)
+			zfs_alloc_mode="custom"
+			db_input critical axonwall/custom_zfs_size || true
+			db_go || true
+			db_get axonwall/custom_zfs_size || true
+			c_val="$(echo "$RET" | tr -dc '0-9')"
+			if [ -n "$c_val" ] && [ "$c_val" -ge 1 ]; then
+				max_zfs_gb=$(( remaining_gb - 4 ))
+				if [ "$max_zfs_gb" -lt 1 ]; then
+					max_zfs_gb=1
+				fi
+				if [ "$c_val" -gt "$max_zfs_gb" ]; then
+					zfs_gb="$max_zfs_gb"
+				else
+					zfs_gb="$c_val"
+				fi
+				data_gb=$(( remaining_gb - zfs_gb ))
+			else
+				zfs_gb=0
+				zfs_alloc_mode="none"
+			fi
+			;;
+		*)
+			zfs_alloc_mode="none"
+			zfs_gb=0
+			data_gb="$remaining_gb"
+			;;
+	esac
+
+	data_mb=$(( data_gb * 1024 ))
+	zfs_mb=$(( zfs_gb * 1024 ))
+
+	# 6. Check for additional secondary disks not used as system disks
+	extra_candidates=""
+	for d in $(get_auto_disks); do
+		d_dev="$(cat "$d/device" 2>/dev/null || echo "$d")"
+		is_sys=0
+		for s_dev in $system_raid_disks; do
+			if [ "$d_dev" = "$s_dev" ]; then
+				is_sys=1
+				break
+			fi
+		done
+		if [ "$is_sys" -eq 0 ] && [ -n "$d_dev" ]; then
+			if [ -z "$extra_candidates" ]; then
+				extra_candidates="$d_dev"
+			else
+				extra_candidates="${extra_candidates}, ${d_dev}"
+			fi
+		fi
+	done
+
+	zfs_extra_disks=""
+	if [ -n "$extra_candidates" ]; then
+		db_subst axonwall/zfs_extra_disks CHOICES "$extra_candidates" || true
+		db_input critical axonwall/zfs_extra_disks || true
+		db_go || true
+		db_get axonwall/zfs_extra_disks || true
+		zfs_extra_disks="$(echo "$RET" | tr -d ',' | tr -s ' ')"
+	fi
+
+	# Count total ZFS VDEVs (system disk ZFS partitions + extra whole disks)
+	zfs_vdev_count=0
+	if [ "$zfs_mb" -gt 0 ]; then
+		for _s in $system_raid_disks; do
+			zfs_vdev_count=$(( zfs_vdev_count + 1 ))
+		done
+	fi
+	for _e in $zfs_extra_disks; do
+		zfs_vdev_count=$(( zfs_vdev_count + 1 ))
+	done
+
+	zfs_raid_topology="auto"
+	if [ "$zfs_vdev_count" -ge 1 ]; then
+		db_input critical axonwall/zfs_raid_topology || true
+		db_go || true
+		db_get axonwall/zfs_raid_topology || true
+		case "$RET" in
+			"Stripe"*) zfs_raid_topology="stripe" ;;
+			"Mirror"*) zfs_raid_topology="mirror" ;;
+			"RAID-Z1"*) zfs_raid_topology="raidz1" ;;
+			"RAID-Z2"*) zfs_raid_topology="raidz2" ;;
+			"RAID-Z3"*) zfs_raid_topology="raidz3" ;;
+			"dRAID1"*) zfs_raid_topology="draid1" ;;
+			"dRAID2"*) zfs_raid_topology="draid2" ;;
+			*) zfs_raid_topology="auto" ;;
+		esac
+	fi
+
+	# 7. Persist installer partition & RAID choices for finish-install hook
 	mkdir -p /var/lib/partman
 	cat << EOF > /var/lib/partman/axonwall-choices
 ROOT_GB=${root_gb}
 ROOT_MB=${root_mb}
 SWAP_GB=${swap_gb}
 SWAP_MB=${swap_mb}
+DATA_GB=${data_gb}
+DATA_MB=${data_mb}
+ZFS_ALLOC_MODE=${zfs_alloc_mode}
+ZFS_GB=${zfs_gb}
+ZFS_MB=${zfs_mb}
 TARGET_DISK=${dev_name}
+SYSTEM_RAID_MODE=${system_raid_mode}
+SYSTEM_RAID_DISKS="${system_raid_disks}"
+ZFS_EXTRA_DISKS="${zfs_extra_disks}"
+ZFS_RAID_TOPOLOGY=${zfs_raid_topology}
 EOF
 
-	# 6. Dynamically construct A/B Dual-Root recipe matching official debian-installer syntax
-	# Note: In partman recipes, the 3 numbers are: <min> <factor> <max>.
-	# The <min> is the absolute minimum disk requirement for the recipe to be valid.
-	# If the sum of <min> exceeds disk capacity, choose_recipe skips the recipe entirely!
-	# We set min to a modest baseline (4096 MB for root, 512 MB for swap) so recipes
-	# comfortably fit within 20 GB (and smaller) drives, while factor & max expand to
-	# the user's selected sizes ($root_mb, $swap_mb).
-	#
-	# IMPORTANT: Only EFI has $primary{} because forcing $primary{} on 4 partitions
-	# exceeds the MBR limit of 4 primary partitions (preventing swap from ever being created).
-	# On GPT, all partitions are native GPT partitions without primary/logical restrictions.
+	# 8. Dynamically construct A/B Dual-Root (+ Optional ZFS Partition) recipe
 	cat << RECIPE_CONTENT > /tmp/axonwall-ab-recipe
 axonwall-ab ::
 	1 1 1 free
@@ -191,7 +366,32 @@ RECIPE_CONTENT
 SWAP_BLOCK
 	fi
 
-	cat << DATA_BLOCK >> /tmp/axonwall-ab-recipe
+	if [ "$zfs_mb" -gt 0 ]; then
+		if [ "$zfs_alloc_mode" = "custom" ]; then
+			cat << DATA_ZFS_CUSTOM_BLOCK >> /tmp/axonwall-ab-recipe
+	512 10000 -1 ext4
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 }
+		mountpoint{ /var/lib/axonwall } .
+	1024 ${zfs_mb} ${zfs_mb} ext4
+		method{ keep } .
+DATA_ZFS_CUSTOM_BLOCK
+		else
+			cat << DATA_ZFS_REM_BLOCK >> /tmp/axonwall-ab-recipe
+	512 ${data_mb} ${data_mb} ext4
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 }
+		mountpoint{ /var/lib/axonwall } .
+	1024 10000 -1 ext4
+		method{ keep } .
+DATA_ZFS_REM_BLOCK
+		fi
+	else
+		cat << DATA_BLOCK >> /tmp/axonwall-ab-recipe
 	512 10000 -1 ext4
 		method{ format }
 		format{ }
@@ -199,6 +399,7 @@ SWAP_BLOCK
 		filesystem{ ext4 }
 		mountpoint{ /var/lib/axonwall } .
 DATA_BLOCK
+	fi
 
 	cp /tmp/axonwall-ab-recipe /tmp/expert_recipe 2>/dev/null || true
 	for rdir in /lib/partman/recipes /lib/partman/recipes-amd64 /lib/partman/recipes-amd64-efi; do
@@ -217,7 +418,7 @@ DATA_BLOCK
 	echo "partman-auto partman-auto/expert_recipe_file string /tmp/axonwall-ab-recipe" | debconf-set-selections 2>/dev/null || true
 	echo "partman-auto partman-auto/choose_recipe select axonwall-ab" | debconf-set-selections 2>/dev/null || true
 
-	# Perform autopartitioning directly on the user's chosen disk
+	# Perform autopartitioning directly on the primary chosen disk
 	autopartition "$disk"
 	status=$?
 	# In partman display.d loop:

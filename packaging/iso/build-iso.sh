@@ -295,6 +295,14 @@ nano
 locales
 rsync
 python3
+mdadm
+gdisk
+parted
+smartmontools
+zfsutils-linux
+samba
+nfs-kernel-server
+open-iscsi
 EOF
 
 # 5. Build ISO

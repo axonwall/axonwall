@@ -28,3 +28,5 @@ export * from './ai/index.js';
 export * from './lint/index.js';
 export * from './compile/sdwan/index.js';
 export * from './compile/geoip/index.js';
+export * from './compile/nas/index.js';
+export * from './compile/k3s/index.js';

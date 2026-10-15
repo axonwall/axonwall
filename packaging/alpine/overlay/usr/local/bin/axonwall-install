@@ -1,6 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# Axonwall Alpine Linux Disk Installer (A/B Dual-Root & Compact Sys-Mode)
+# Axonwall Alpine Linux Disk Installer (A/B Dual-Root, System RAID-1 & ZFS RAID)
 # ==============================================================================
 set -eu
 
@@ -9,76 +9,262 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+part_dev() {
+  disk_dev="$1"
+  p_num="$2"
+  case "$disk_dev" in
+    *nvme*|*mmcblk*|*loop*) echo "${disk_dev}p${p_num}" ;;
+    *) echo "${disk_dev}${p_num}" ;;
+  esac
+}
+
 echo "================================================================================"
-echo "  Axonwall Appliance Installer (Alpine Linux Edition)"
+echo "  Axonwall Appliance Installer (Alpine Linux Edition — A/B + RAID + OpenZFS)"
 echo "================================================================================"
 echo ""
 echo "Available block devices:"
 lsblk -d -n -o NAME,SIZE,MODEL,TYPE 2>/dev/null | grep "disk" || fdisk -l 2>/dev/null | grep "^Disk /dev/"
 echo ""
 
-TARGET_DISK="${1:-}"
-if [ -z "$TARGET_DISK" ]; then
-  printf "Enter target disk to install Axonwall (e.g. /dev/vda, /dev/sda, /dev/nvme0n1): "
-  read -r TARGET_DISK
+SYSTEM_DISKS="${1:-}"
+if [ -z "$SYSTEM_DISKS" ]; then
+  printf "Enter system disk(s) to install Axonwall (space-separated for RAID-1 Mirror, e.g. '/dev/vda' or '/dev/nvme0n1 /dev/nvme1n1'): "
+  read -r SYSTEM_DISKS
 fi
 
-if [ ! -b "$TARGET_DISK" ]; then
-  echo "[!] Error: Block device '$TARGET_DISK' does not exist."
+SYSTEM_DISKS=$(echo "$SYSTEM_DISKS" | tr ',' ' ' | tr -s ' ')
+SYS_DISK_COUNT=0
+PRIMARY_DISK=""
+for d in $SYSTEM_DISKS; do
+  if [ ! -b "$d" ]; then
+    echo "[!] Error: Block device '$d' does not exist."
+    exit 1
+  fi
+  if [ -z "$PRIMARY_DISK" ]; then
+    PRIMARY_DISK="$d"
+  fi
+  SYS_DISK_COUNT=$(( SYS_DISK_COUNT + 1 ))
+done
+
+if [ -z "$PRIMARY_DISK" ]; then
+  echo "[!] Error: No target disk specified."
   exit 1
 fi
 
-printf "Select Slot Size for A/B Dual-Root [1=2GB Compact, 2=4GB Standard, 3=8GB Expanded] (default 1): "
+SYSTEM_RAID_MODE="single"
+if [ "$SYS_DISK_COUNT" -ge 2 ]; then
+  SYSTEM_RAID_MODE="mirror"
+  echo "[+] System RAID Mode: RAID-1 Mirror across ${SYS_DISK_COUNT} disks (${SYSTEM_DISKS})"
+else
+  echo "[+] System RAID Mode: Single Disk (${PRIMARY_DISK})"
+fi
+
+printf "Select Slot Size for A/B Dual-Root [1=2GB Compact, 2=4GB Standard, 3=8GB Expanded, 4=16GB Enterprise] (default 2): "
 read -r SLOT_CHOICE
-case "${SLOT_CHOICE:-1}" in
-  2) SLOT_MB=4096 ;;
+case "${SLOT_CHOICE:-2}" in
+  1) SLOT_MB=2048 ;;
   3) SLOT_MB=8192 ;;
-  *) SLOT_MB=2048 ;;
+  4) SLOT_MB=16384 ;;
+  *) SLOT_MB=4096 ;;
 esac
 
-printf "WARNING: All data on %s will be erased! Proceed? (y/N): " "$TARGET_DISK"
+# Detect primary disk capacity in MiB
+DEV_BASE=$(basename "$PRIMARY_DISK")
+DISK_SECTORS=$(cat "/sys/block/${DEV_BASE}/size" 2>/dev/null || echo 0)
+DISK_MB=$(( DISK_SECTORS * 512 / 1024 / 1024 ))
+if [ "$DISK_MB" -le 0 ]; then
+  DISK_MB=32768
+fi
+
+echo ""
+echo "Select ZFS Storage Allocation on System Disk(s):"
+echo "  [1] Reserve remaining space for ZFS Pool (8GB System Data + Remainder ZFS) [Default]"
+echo "  [2] Split remaining space 50/50 between System Data and ZFS Pool"
+echo "  [3] Custom ZFS Partition Size (in GB)"
+echo "  [4] None on system disk (Use 100% of remaining space for ext4 System Data)"
+printf "Choice [1-4] (default 1): "
+read -r ZFS_CHOICE
+
+END_EFI=260
+END_A=$((END_EFI + SLOT_MB))
+END_B=$((END_A + SLOT_MB))
+REM_MB=$((DISK_MB - END_B - 16))
+if [ "$REM_MB" -lt 1024 ]; then
+  REM_MB=1024
+fi
+
+ZFS_MB=0
+DATA_MB="$REM_MB"
+ZFS_ALLOC_MODE="remainder"
+
+case "${ZFS_CHOICE:-1}" in
+  2)
+    ZFS_ALLOC_MODE="split"
+    DATA_MB=$(( REM_MB / 2 ))
+    ZFS_MB=$(( REM_MB - DATA_MB ))
+    ;;
+  3)
+    ZFS_ALLOC_MODE="custom"
+    printf "Enter desired ZFS partition size on system disk(s) in GB: "
+    read -r CUSTOM_ZFS_GB
+    CUSTOM_ZFS_GB=$(echo "${CUSTOM_ZFS_GB:-0}" | tr -dc '0-9')
+    if [ -n "$CUSTOM_ZFS_GB" ] && [ "$CUSTOM_ZFS_GB" -ge 1 ]; then
+      ZFS_MB=$(( CUSTOM_ZFS_GB * 1024 ))
+      if [ "$ZFS_MB" -gt $(( REM_MB - 2048 )) ]; then
+        ZFS_MB=$(( REM_MB - 2048 ))
+      fi
+      DATA_MB=$(( REM_MB - ZFS_MB ))
+    else
+      ZFS_ALLOC_MODE="none"
+      ZFS_MB=0
+    fi
+    ;;
+  4)
+    ZFS_ALLOC_MODE="none"
+    ZFS_MB=0
+    ;;
+  *)
+    ZFS_ALLOC_MODE="remainder"
+    if [ "$REM_MB" -gt 10240 ]; then
+      DATA_MB=8192
+      ZFS_MB=$(( REM_MB - DATA_MB ))
+    elif [ "$REM_MB" -gt 4096 ]; then
+      DATA_MB=2048
+      ZFS_MB=$(( REM_MB - DATA_MB ))
+    else
+      ZFS_ALLOC_MODE="none"
+      ZFS_MB=0
+    fi
+    ;;
+esac
+
+echo ""
+printf "Optional: Enter any additional dedicated whole disks for ZFS pool (space-separated, or press Enter for none): "
+read -r ZFS_EXTRA_DISKS
+ZFS_EXTRA_DISKS=$(echo "${ZFS_EXTRA_DISKS:-}" | tr ',' ' ' | tr -s ' ')
+
+TOTAL_ZFS_VDEVS=0
+if [ "$ZFS_MB" -gt 0 ]; then
+  TOTAL_ZFS_VDEVS=$(( TOTAL_ZFS_VDEVS + SYS_DISK_COUNT ))
+fi
+for xd in $ZFS_EXTRA_DISKS; do
+  if [ -b "$xd" ]; then
+    TOTAL_ZFS_VDEVS=$(( TOTAL_ZFS_VDEVS + 1 ))
+  fi
+done
+
+ZFS_RAID_TOPOLOGY="auto"
+if [ "$TOTAL_ZFS_VDEVS" -ge 1 ]; then
+  echo ""
+  echo "Select OpenZFS Pool ('tank') RAID Topology (${TOTAL_ZFS_VDEVS} VDEV(s) selected):"
+  echo "  [1] Auto (1=Stripe, 2=Mirror, 3-4=RAIDZ1, 5+=RAIDZ2) [Default]"
+  echo "  [2] Stripe (RAID-0 — max capacity, no parity)"
+  echo "  [3] Mirror (RAID-1 / RAID-10 — 2+ VDEVs)"
+  echo "  [4] RAID-Z1 (Single Parity — min 3 VDEVs)"
+  echo "  [5] RAID-Z2 (Dual Parity — min 4 VDEVs)"
+  echo "  [6] RAID-Z3 (Triple Parity — min 5 VDEVs)"
+  echo "  [7] dRAID1 (Distributed RAID-Z1 — min 4 VDEVs)"
+  echo "  [8] dRAID2 (Distributed RAID-Z2 — min 6 VDEVs)"
+  printf "Choice [1-8] (default 1): "
+  read -r TOPO_CHOICE
+  case "${TOPO_CHOICE:-1}" in
+    2) ZFS_RAID_TOPOLOGY="stripe" ;;
+    3) ZFS_RAID_TOPOLOGY="mirror" ;;
+    4) ZFS_RAID_TOPOLOGY="raidz1" ;;
+    5) ZFS_RAID_TOPOLOGY="raidz2" ;;
+    6) ZFS_RAID_TOPOLOGY="raidz3" ;;
+    7) ZFS_RAID_TOPOLOGY="draid1" ;;
+    8) ZFS_RAID_TOPOLOGY="draid2" ;;
+    *) ZFS_RAID_TOPOLOGY="auto" ;;
+  esac
+fi
+
+printf "WARNING: All data on %s %s will be erased! Proceed? (y/N): " "$SYSTEM_DISKS" "$ZFS_EXTRA_DISKS"
 read -r CONFIRM
 if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
   echo "Aborted."
   exit 0
 fi
 
-# Determine partition naming prefix (nvme0n1p1 vs sda1)
-case "$TARGET_DISK" in
-  *nvme*|*mmcblk*|*loop*) PART_PREFIX="${TARGET_DISK}p" ;;
-  *) PART_PREFIX="${TARGET_DISK}" ;;
-esac
+END_DATA=$((END_B + DATA_MB))
+ZFS_VDEVS=""
+DISK_IDX=0
 
-echo "[+] Partitioning $TARGET_DISK (BIOS Boot + EFI + Slot A [${SLOT_MB}MB] + Slot B [${SLOT_MB}MB] + Data)..."
-dd if=/dev/zero of="$TARGET_DISK" bs=1M count=16 conv=notrunc 2>/dev/null || true
+for sys_disk in $SYSTEM_DISKS; do
+  DISK_IDX=$(( DISK_IDX + 1 ))
+  echo "[+] Partitioning $sys_disk (BIOS Boot + EFI + Slot A [${SLOT_MB}MB] + Slot B [${SLOT_MB}MB] + Data [${DATA_MB}MB] + ZFS [${ZFS_MB}MB])..."
+  dd if=/dev/zero of="$sys_disk" bs=1M count=16 conv=notrunc 2>/dev/null || true
 
-END_EFI=260
-END_A=$((END_EFI + SLOT_MB))
-END_B=$((END_A + SLOT_MB))
+  if [ "$ZFS_MB" -gt 0 ]; then
+    parted -s "$sys_disk" \
+      mklabel gpt \
+      mkpart bios_grub 1MiB 4MiB \
+      set 1 bios_grub on \
+      mkpart ESP fat32 4MiB ${END_EFI}MiB \
+      set 2 esp on \
+      mkpart axon_root_a ext4 ${END_EFI}MiB ${END_A}MiB \
+      mkpart axon_root_b ext4 ${END_A}MiB ${END_B}MiB \
+      mkpart axon_data ext4 ${END_B}MiB ${END_DATA}MiB \
+      mkpart "axon_zfs_${DISK_IDX}" ${END_DATA}MiB 100%
 
-parted -s "$TARGET_DISK" \
-  mklabel gpt \
-  mkpart bios_grub 1MiB 4MiB \
-  set 1 bios_grub on \
-  mkpart ESP fat32 4MiB ${END_EFI}MiB \
-  set 2 esp on \
-  mkpart axon_root_a ext4 ${END_EFI}MiB ${END_A}MiB \
-  mkpart axon_root_b ext4 ${END_A}MiB ${END_B}MiB \
-  mkpart axon_data ext4 ${END_B}MiB 100%
+    ZFS_PART=$(part_dev "$sys_disk" 6)
+    ZFS_VDEVS="${ZFS_VDEVS} ${ZFS_PART}"
+  else
+    parted -s "$sys_disk" \
+      mklabel gpt \
+      mkpart bios_grub 1MiB 4MiB \
+      set 1 bios_grub on \
+      mkpart ESP fat32 4MiB ${END_EFI}MiB \
+      set 2 esp on \
+      mkpart axon_root_a ext4 ${END_EFI}MiB ${END_A}MiB \
+      mkpart axon_root_b ext4 ${END_A}MiB ${END_B}MiB \
+      mkpart axon_data ext4 ${END_B}MiB 100%
+  fi
+done
 
 mdev -s 2>/dev/null || true
 sleep 1
 
-mkfs.vfat -F 32 -n AXON_EFI "${PART_PREFIX}2"
-mkfs.ext4 -F -L axon_root_a "${PART_PREFIX}3"
-mkfs.ext4 -F -L axon_root_b "${PART_PREFIX}4"
-mkfs.ext4 -F -L axon_data "${PART_PREFIX}5"
+# Format EFI on all system disks
+for sys_disk in $SYSTEM_DISKS; do
+  EFI_P=$(part_dev "$sys_disk" 2)
+  mkfs.vfat -F 32 -n AXON_EFI "$EFI_P"
+done
 
+ROOT_A_DEV=$(part_dev "$PRIMARY_DISK" 3)
+ROOT_B_DEV=$(part_dev "$PRIMARY_DISK" 4)
+DATA_DEV=$(part_dev "$PRIMARY_DISK" 5)
+
+if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
+  echo "[+] Assembling mdadm RAID-1 mirrors for Slot A, Slot B, and Persistent Data..."
+  RAID_A_MEMBERS=""
+  RAID_B_MEMBERS=""
+  RAID_DATA_MEMBERS=""
+  for sys_disk in $SYSTEM_DISKS; do
+    RAID_A_MEMBERS="${RAID_A_MEMBERS} $(part_dev "$sys_disk" 3)"
+    RAID_B_MEMBERS="${RAID_B_MEMBERS} $(part_dev "$sys_disk" 4)"
+    RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" 5)"
+  done
+
+  mdadm --create /dev/md0 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_A_MEMBERS
+  mdadm --create /dev/md1 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_B_MEMBERS
+  mdadm --create /dev/md2 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_DATA_MEMBERS
+
+  ROOT_A_DEV="/dev/md0"
+  ROOT_B_DEV="/dev/md1"
+  DATA_DEV="/dev/md2"
+fi
+
+mkfs.ext4 -F -L axon_root_a "$ROOT_A_DEV"
+mkfs.ext4 -F -L axon_root_b "$ROOT_B_DEV"
+mkfs.ext4 -F -L axon_data "$DATA_DEV"
+
+PRIMARY_EFI=$(part_dev "$PRIMARY_DISK" 2)
 mkdir -p /mnt/slot_a /mnt/slot_b /mnt/data
-mount "${PART_PREFIX}3" /mnt/slot_a
+mount "$ROOT_A_DEV" /mnt/slot_a
 mkdir -p /mnt/slot_a/boot/efi /mnt/slot_a/var/lib/axonwall
-mount "${PART_PREFIX}2" /mnt/slot_a/boot/efi
-mount "${PART_PREFIX}5" /mnt/data
+mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi
+mount "$DATA_DEV" /mnt/data
 
 echo "[+] Installing Alpine rootfs & Axonwall stack to Slot A..."
 for dir in bin etc home lib opt root sbin usr var; do
@@ -87,6 +273,12 @@ for dir in bin etc home lib opt root sbin usr var; do
   fi
 done
 mkdir -p /mnt/slot_a/dev /mnt/slot_a/proc /mnt/slot_a/sys /mnt/slot_a/run /mnt/slot_a/tmp /mnt/slot_a/boot
+
+if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
+  mkdir -p /mnt/slot_a/etc/mdadm
+  mdadm --detail --scan > /mnt/slot_a/etc/mdadm.conf 2>/dev/null || true
+  cp /mnt/slot_a/etc/mdadm.conf /mnt/slot_a/etc/mdadm/mdadm.conf 2>/dev/null || true
+fi
 
 for boot_src in /media/cdrom/boot /media/usb/boot /media/*/boot /boot; do
   if [ -d "$boot_src" ] && ls "$boot_src"/vmlinuz-* >/dev/null 2>&1; then
@@ -109,9 +301,19 @@ LABEL=axon_data     /var/lib/axonwall   ext4    defaults,noatime        0 2
 tmpfs               /tmp                tmpfs   nosuid,nodev            0 0
 FSTAB_EOF
 
-echo "[+] Installing GRUB bootloader (BIOS + UEFI)..."
-grub-install --target=i386-pc --boot-directory=/mnt/slot_a/boot "$TARGET_DISK" 2>/dev/null || true
+echo "[+] Installing GRUB bootloader (BIOS + UEFI) onto all system disks..."
+for sys_disk in $SYSTEM_DISKS; do
+  grub-install --target=i386-pc --boot-directory=/mnt/slot_a/boot "$sys_disk" 2>/dev/null || true
+done
 grub-install --target=x86_64-efi --efi-directory=/mnt/slot_a/boot/efi --boot-directory=/mnt/slot_a/boot --removable --no-nvram 2>/dev/null || true
+
+# Clone EFI partition onto secondary system disks for redundant UEFI boot
+for sys_disk in $SYSTEM_DISKS; do
+  if [ "$sys_disk" != "$PRIMARY_DISK" ]; then
+    SEC_EFI=$(part_dev "$sys_disk" 2)
+    dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+  fi
+done
 
 cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
 set default=0
@@ -158,13 +360,13 @@ fi
 
 menuentry "Axonwall Appliance - Slot A" {
   search --no-floppy --label --set=root axon_root_a
-  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_a ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_a ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme,raid1,md-mod quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${KERNEL_FLAVOR}
 }
 
 menuentry "Axonwall Appliance - Slot B" {
   search --no-floppy --label --set=root axon_root_b
-  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_b ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_b ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme,raid1,md-mod quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${KERNEL_FLAVOR}
 }
 GRUB_EOF
@@ -173,15 +375,70 @@ grub-editenv /mnt/slot_a/boot/grub/grubenv create 2>/dev/null || true
 grub-editenv /mnt/slot_a/boot/grub/grubenv set active_slot=A bootcount=0 bootlimit=3 2>/dev/null || true
 
 echo "[+] Cloning Slot A into Standby Slot B..."
-mount "${PART_PREFIX}4" /mnt/slot_b
+mount "$ROOT_B_DEV" /mnt/slot_b
 cp -a /mnt/slot_a/* /mnt/slot_b/ 2>/dev/null || true
 sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
 umount /mnt/slot_b
+
+# Add extra dedicated ZFS disks & record / create ZFS pool
+for xd in $ZFS_EXTRA_DISKS; do
+  if [ -b "$xd" ]; then
+    ZFS_VDEVS="${ZFS_VDEVS} ${xd}"
+  fi
+done
+ZFS_VDEVS=$(echo "$ZFS_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+
+if [ -n "$ZFS_VDEVS" ]; then
+  VDEV_COUNT=$(echo "$ZFS_VDEVS" | wc -w | tr -d ' ')
+  RESOLVED_TOPOLOGY="$ZFS_RAID_TOPOLOGY"
+  if [ "$RESOLVED_TOPOLOGY" = "auto" ]; then
+    if [ "$VDEV_COUNT" -le 1 ]; then
+      RESOLVED_TOPOLOGY="stripe"
+    elif [ "$VDEV_COUNT" -eq 2 ]; then
+      RESOLVED_TOPOLOGY="mirror"
+    elif [ "$VDEV_COUNT" -le 4 ]; then
+      RESOLVED_TOPOLOGY="raidz1"
+    else
+      RESOLVED_TOPOLOGY="raidz2"
+    fi
+  fi
+
+  JSON_VDEVS=""
+  for v in $ZFS_VDEVS; do
+    if [ -z "$JSON_VDEVS" ]; then
+      JSON_VDEVS="\"${v}\""
+    else
+      JSON_VDEVS="${JSON_VDEVS}, \"${v}\""
+    fi
+  done
+
+  ZFS_GB=$(( ZFS_MB / 1024 ))
+  cat << ZFS_JSON_EOF > /mnt/data/install-zfs.json
+{
+  "poolName": "tank",
+  "topology": "${RESOLVED_TOPOLOGY}",
+  "vdevs": [${JSON_VDEVS}],
+  "sizeGb": ${ZFS_GB},
+  "systemRaidMode": "${SYSTEM_RAID_MODE}",
+  "systemRaidDisks": "${SYSTEM_DISKS}",
+  "autoCreatePool": true
+}
+ZFS_JSON_EOF
+
+  if command -v zpool >/dev/null 2>&1; then
+    echo "[+] Creating OpenZFS pool 'tank' (topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS})..."
+    ZPOOL_ARGS=""
+    if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
+      ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
+    fi
+    zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O mountpoint=/mnt/tank tank $ZPOOL_ARGS $ZFS_VDEVS 2>/dev/null || true
+  fi
+fi
 
 umount /mnt/slot_a/boot/efi /mnt/slot_a /mnt/data 2>/dev/null || true
 sync
 
 echo "================================================================================"
-echo "[✓] Axonwall Alpine Dual-Root Installation Complete on $TARGET_DISK!"
+echo "[✓] Axonwall Alpine Installation Complete (${SYSTEM_RAID_MODE}: ${SYSTEM_DISKS})!"
 echo "    Remove installation media and run 'reboot'."
 echo "================================================================================"

@@ -189,6 +189,18 @@ export function filterHaSyncState(state: DesiredState, sync: HaSyncSections): Pa
     filtered.headscale = state.headscale;
   }
 
+  if (state.capabilities) {
+    filtered.capabilities = state.capabilities;
+  }
+
+  if (sync.nas !== false && state.nas) {
+    filtered.nas = state.nas;
+  }
+
+  if (sync.k3s !== false && state.k3s) {
+    filtered.k3s = state.k3s;
+  }
+
   return filtered;
 }
 

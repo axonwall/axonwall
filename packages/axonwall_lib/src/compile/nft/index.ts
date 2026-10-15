@@ -1,8 +1,11 @@
 import type { DesiredState, FirewallRule, NatRule, Alias } from '../../schemas/index.js';
 import { sanitizeIdentifier } from '../../util/index.js';
+import { resolveCapabilities } from '../../plugins/index.js';
 import { compileSuricata } from '../suricata/index.js';
 import { compileCrowdSec } from '../crowdsec/index.js';
 import { compileGeoIp } from '../geoip/index.js';
+import { compileNas } from '../nas/index.js';
+import { compileK3s } from '../k3s/index.js';
 
 export interface CompileResult {
   nftScript: string;
@@ -11,16 +14,169 @@ export interface CompileResult {
   warnings: string[];
 }
 
+function buildNasAndK3sInputRules(
+  state: DesiredState,
+  ifDeviceMap: Map<string, string>,
+  nasEnabled: boolean,
+  k3sEnabled: boolean,
+): string[] {
+  const hostRules: string[] = [];
+  const trustedDevs = state.interfaces
+    .filter((i) => i.enabled && i.name !== 'wan' && i.device)
+    .map((i) => `"${i.device}"`);
+
+  if (state.ha?.enabled && state.ha.syncInterface) {
+    const syncDev = ifDeviceMap.get(state.ha.syncInterface) || state.ha.syncInterface;
+    if (!trustedDevs.includes(`"${syncDev}"`)) {
+      trustedDevs.push(`"${syncDev}"`);
+    }
+    hostRules.push(`    iifname "${syncDev}" tcp dport { 8443, 9443 } accept comment "ha-state-and-zfs-sync"`);
+  }
+
+  const devSet = trustedDevs.length > 0 ? `iifname { ${trustedDevs.join(', ')} } ` : '';
+
+  if (nasEnabled) {
+    hostRules.push('    # NAS Plugin (core-nas): SMB, NFSv4, iSCSI, and S3 Service Ports');
+    hostRules.push(`    ${devSet}tcp dport { 139, 445 } accept comment "nas-smb"`);
+    hostRules.push(`    ${devSet}meta l4proto { tcp, udp } th dport { 111, 2049 } accept comment "nas-nfsv4"`);
+    hostRules.push(`    ${devSet}tcp dport 3260 accept comment "nas-iscsi"`);
+    if (state.nas?.s3?.enabled) {
+      const s3Port = state.nas.s3.listenPort || 9000;
+      const s3Console = state.nas.s3.consolePort || 9001;
+      hostRules.push(`    ${devSet}tcp dport { ${s3Port}, ${s3Console} } accept comment "nas-s3-minio"`);
+    }
+  }
+
+  if (k3sEnabled) {
+    hostRules.push('    # Kubernetes Plugin (core-k3s): K3s Control Plane & OpenEBS Distributed Storage');
+    hostRules.push(`    ${devSet}tcp dport { 6443, 10250, 2379, 2380, 10124, 9500 } accept comment "k3s-and-openebs-tcp"`);
+    hostRules.push(`    ${devSet}udp dport { 8472, 51820, 51821 } accept comment "k3s-flannel-mesh"`);
+    hostRules.push('    iifname "cni0" accept comment "k3s-cni0"');
+    hostRules.push('    iifname "flannel*" accept comment "k3s-flannel"');
+  }
+
+  return hostRules;
+}
+
 export function compileNftables(state: DesiredState): CompileResult {
   const lines: string[] = [];
   const warnings: string[] = [];
   const files: { path: string; content: string; fileMode: number }[] = [];
   const reloadServices: string[] = [];
 
+  const capabilities = resolveCapabilities(state);
+
+  // Emit NAS and K3s runtime bundles whenever state is compiled
+  if (state.nas || capabilities.nasEnabled) {
+    const nasCompiled = compileNas(state.nas);
+    files.push({
+      path: '/etc/axonwall/managed/nas_config.json',
+      content: JSON.stringify(
+        {
+          enabled: capabilities.nasEnabled,
+          pools: state.nas?.pools ?? [],
+          datasets: state.nas?.datasets ?? [],
+          snapshotPolicies: state.nas?.snapshotPolicies ?? [],
+          smbConf: nasCompiled.smbConf,
+          nfsExports: nasCompiled.nfsExports,
+          iscsiConf: nasCompiled.iscsiConf,
+        },
+        null,
+        2,
+      ),
+      fileMode: 0o600,
+    });
+  }
+
+  if (state.k3s || capabilities.k3sEnabled) {
+    const k3sCompiled = compileK3s(state);
+    const effectiveRole = state.ha?.role || state.ha?.nodeRole || 'master';
+    const effectivePeer = state.ha?.peerIp || state.ha?.peerAddress || '';
+    files.push({
+      path: '/etc/axonwall/managed/k3s_config.json',
+      content: JSON.stringify(
+        {
+          enabled: capabilities.k3sEnabled,
+          haEnabled: Boolean(state.ha?.enabled),
+          haRole: effectiveRole,
+          haPeerAddress: effectivePeer,
+          haSharedSecret:
+            state.ha?.sqliteSync?.authToken ||
+            state.ha?.vrrpInstances?.[0]?.authPassword ||
+            '',
+          autoJoinHaPeer: state.k3s?.autoJoinHaPeer !== false,
+          zfsLocalPvPool: state.k3s?.openEbs?.zfsLocalPvPool || 'tank',
+          replicatedPool: state.k3s?.openEbs?.replicatedBackingPool || 'tank/openebs-replicated',
+          k3sConfigYaml: k3sCompiled.k3sConfigYaml,
+          openEbsManifestYaml: k3sCompiled.openEbsManifestYaml,
+          workloadsManifestYaml: k3sCompiled.workloadsManifestYaml,
+        },
+        null,
+        2,
+      ),
+      fileMode: 0o600,
+    });
+  }
+
   // Helper to map interfaces to system devices
   const ifDeviceMap = new Map<string, string>();
   for (const iface of state.interfaces) {
     ifDeviceMap.set(iface.name, iface.device);
+  }
+
+  // When core-firewall plugin is disabled, emit a clean Host-Mode Appliance Ruleset
+  if (!capabilities.firewallEnabled) {
+    lines.push('#!/usr/sbin/nft -f');
+    lines.push('# Axonwall Host-Mode Appliance Ruleset (core-firewall plugin disabled)');
+    lines.push(`# Active Roles: NAS=${capabilities.nasEnabled} | K3s=${capabilities.k3sEnabled}`);
+    lines.push(`# Version: ${state.version} | Generated: ${new Date().toISOString()}`);
+    lines.push('');
+    lines.push('table inet axonwall {}');
+    lines.push('flush table inet axonwall');
+    lines.push('table inet axonwall {');
+    lines.push('  chain input {');
+    lines.push('    type filter hook input priority filter; policy drop;');
+    lines.push('    ct state established,related accept');
+    lines.push('    ct state invalid drop');
+    lines.push('    iif "lo" accept');
+    lines.push('    icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept');
+    lines.push('    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept');
+
+    if (state.system.antiLockout?.enabled) {
+      const lanIface = state.system.antiLockout.interface;
+      const lanDev = ifDeviceMap.get(lanIface) || lanIface;
+      const ports = state.system.antiLockout.ports.join(', ');
+      lines.push(`    iifname "${lanDev}" tcp dport { ${ports} } accept comment "anti-lockout"`);
+    }
+
+    lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
+    lines.push('  }');
+    lines.push('');
+    lines.push('  chain forward {');
+    if (capabilities.k3sEnabled) {
+      lines.push('    type filter hook forward priority filter; policy drop;');
+      lines.push('    ct state established,related accept');
+      lines.push('    iifname "cni0" accept comment "k3s-pod-forward"');
+      lines.push('    oifname "cni0" accept comment "k3s-pod-forward"');
+      lines.push('    iifname "flannel*" accept comment "k3s-flannel-forward"');
+      lines.push('    oifname "flannel*" accept comment "k3s-flannel-forward"');
+    } else {
+      lines.push('    type filter hook forward priority filter; policy drop;');
+    }
+    lines.push('  }');
+    lines.push('');
+    lines.push('  chain output {');
+    lines.push('    type filter hook output priority filter; policy accept;');
+    lines.push('  }');
+    lines.push('}');
+    lines.push('');
+
+    return {
+      nftScript: lines.join('\n'),
+      files,
+      reloadServices,
+      warnings,
+    };
   }
 
   const suricataConfig = state.suricata
@@ -203,6 +359,9 @@ export function compileNftables(state: DesiredState): CompileResult {
       warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
     }
   }
+
+  // NAS & K3s Core Role Listeners (when enabled alongside Firewall)
+  lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
 
   // WireGuard listener
   if (state.wireguard?.enabled) {

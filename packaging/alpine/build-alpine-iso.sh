@@ -123,6 +123,9 @@ CORE_PKGS=(
   openssl
   ca-certificates
   parted
+  mdadm
+  sgdisk
+  smartmontools
   e2fsprogs
   dosfstools
   grub
@@ -136,6 +139,10 @@ if [[ "$MINIMAL" -eq 0 ]]; then
     strongswan
     openvpn
     suricata
+    zfs
+    samba
+    nfs-utils
+    open-iscsi
   )
 fi
 

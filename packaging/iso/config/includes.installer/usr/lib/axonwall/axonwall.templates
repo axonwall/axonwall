@@ -15,15 +15,17 @@ Description: Re-enter Axonwall Administrator Password:
 
 Template: axonwall/ab_explanation
 Type: note
-Description: Axonwall A/B Dual-Root Partition Architecture:
+Description: Axonwall A/B Dual-Root & ZFS Storage Partition Architecture:
  To ensure zero-downtime, unbrickable operating system and firmware upgrades,
  Axonwall implements an enterprise A/B Dual-Root Partition Scheme with an
- autonomous watchdog.
+ autonomous watchdog, optional RAID-1 System Disk Mirroring, and integrated
+ OpenZFS Storage Pool provisioning.
  .
- The target drive is partitioned into two identical system slots:
+ The system drive(s) are partitioned into:
   - Slot A: Primary Active System [axon_root_a]
   - Slot B: Alternate Standby System [axon_root_b]
   - Persistent Data Volume: /var/lib/axonwall [axon_data]
+  - Optional ZFS Storage Partition: [axon_zfs] (for NAS & K3s OpenEBS)
  .
  WHY TWO IDENTICAL SYSTEM SLOTS?
  When software or firmware updates are applied, Axonwall installs them onto
@@ -34,8 +36,25 @@ Description: Axonwall A/B Dual-Root Partition Architecture:
  .
  Because both system slots are identical, the partition size you select
  in the next step will be allocated TWICE (once for Slot A and once for Slot B).
- The remainder of the disk is assigned to /var/lib/axonwall for configuration,
- logs, and telemetry databases.
+ You can also mirror the system across multiple drives (RAID-1) and allocate
+ remaining disk space (plus any secondary drives) to an OpenZFS pool.
+
+Template: axonwall/system_raid_mode
+Type: select
+Choices: Single Disk (Standard A/B Dual-Root), RAID-1 Mirror across Multiple Disks (Redundant A/B Dual-Root)
+Default: Single Disk (Standard A/B Dual-Root)
+Description: Select system disk redundancy mode:
+ If your appliance has 2 or more drives, Axonwall can mirror the system
+ partitions (Slot A, Slot B, Swap, /var/lib/axonwall, and UEFI/BIOS bootloaders)
+ across multiple disks using Linux RAID-1 (mdadm) so the appliance survives
+ a complete primary drive failure.
+
+Template: axonwall/system_raid_disks
+Type: multiselect
+Choices: ${CHOICES}
+Description: Select 2 or more disks for the RAID-1 mirrored system volume:
+ Choose the physical drives to mirror for the operating system. All selected
+ drives will receive identical partition layouts and bootloaders.
 
 Template: axonwall/root_size
 Type: select
@@ -67,3 +86,50 @@ Description: Select swap space allocation:
   - 2 GB Swap: Standard allocation for general routing and caching.
   - No swap partition: Recommended when using high-speed NVMe or ZRAM.
   - 4 GB / 8 GB Swap: Extended swap for heavy Suricata DPI or memory buffering.
+
+Template: axonwall/zfs_allocation
+Type: select
+Choices: Allocate remaining space to ZFS storage (16 GB axon_data + Remainder ZFS), Split remaining space (50% axon_data / 50% ZFS storage), Custom ZFS partition size (Enter specific size in GB), No ZFS partition on system disk (100% remaining space to axon_data)
+Default: Allocate remaining space to ZFS storage (16 GB axon_data + Remainder ZFS)
+Description: Select ZFS storage allocation on system disk(s):
+ Axonwall can carve out a dedicated OpenZFS storage partition (axon_zfs) on
+ the system drive(s) for NAS shares (SMB/NFS/iSCSI/S3) and K3s OpenEBS volumes:
+ .
+  - Allocate remaining space to ZFS: Reserves 16 GB (or 8 GB on compact drives)
+    for /var/lib/axonwall and assigns all remaining capacity to OpenZFS.
+  - Split remaining space (50/50): Divides remaining capacity equally between
+    /var/lib/axonwall (ext4) and OpenZFS storage.
+  - Custom ZFS partition size: Specify the exact size in GB for ZFS on the
+    system disk(s).
+  - No ZFS partition on system disk: Assigns 100% of remaining space on the
+    system disk to /var/lib/axonwall (use this for pure firewalls or when using
+    separate secondary disks exclusively for ZFS).
+
+Template: axonwall/custom_zfs_size
+Type: string
+Default: 32
+Description: Custom ZFS partition size on system disk(s) (in GB):
+ Enter the desired size in gigabytes for the dedicated ZFS storage partition
+ (axon_zfs) on each system disk.
+
+Template: axonwall/zfs_extra_disks
+Type: multiselect
+Choices: ${CHOICES}
+Description: Select additional dedicated disks for the ZFS storage pool (Optional):
+ If you have additional dedicated storage drives to include in the 'tank'
+ OpenZFS pool, select them below. Leave unselected to use only the system
+ disk ZFS partition(s).
+
+Template: axonwall/zfs_raid_topology
+Type: select
+Choices: Auto (Recommended based on disk/partition count), Stripe (RAID-0 - Max capacity, no parity), Mirror (RAID-1 / RAID-10 - 2+ VDEVs, 1-drive fault tolerance), RAID-Z1 (Single Parity - min 3 VDEVs, 1-drive fault tolerance), RAID-Z2 (Dual Parity - min 4 VDEVs, 2-drive fault tolerance), RAID-Z3 (Triple Parity - min 5 VDEVs, 3-drive fault tolerance), dRAID1 (Distributed RAID-Z1 - min 4 VDEVs, integrated spare), dRAID2 (Distributed RAID-Z2 - min 6 VDEVs, dual parity + integrated spare)
+Default: Auto (Recommended based on disk/partition count)
+Description: Select OpenZFS pool ('tank') RAID topology:
+ Choose the ZFS redundancy level across your selected ZFS partitions and/or
+ dedicated storage disks:
+ .
+  - Auto: Automatically selects Stripe (1 VDEV), Mirror (2 VDEVs),
+    RAID-Z1 (3-4 VDEVs), or RAID-Z2 (5+ VDEVs).
+  - Mirror: Ideal for 2-disk systems or low-latency IOPS workloads.
+  - RAID-Z1 / RAID-Z2 / RAID-Z3: Single, dual, or triple parity across 3+ VDEVs.
+  - dRAID1 / dRAID2: Next-gen Distributed RAID-Z with rapid rebuild times.

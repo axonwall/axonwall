@@ -4,39 +4,73 @@ set -e
 . /usr/share/debconf/confmodule
 
 echo "================================================================================"
-echo "[Axonwall Installer] Finalizing A/B Dual-Root System Setup..."
+echo "[Axonwall Installer] Finalizing A/B Dual-Root, System RAID & ZFS Setup..."
 echo "================================================================================"
 
-# 1. Identify installed block devices
+# Load installer choices recorded by 10initial_auto
+ZFS_MB=0
+ZFS_GB=0
+ZFS_ALLOC_MODE="none"
+SYSTEM_RAID_MODE="single"
+SYSTEM_RAID_DISKS=""
+ZFS_EXTRA_DISKS=""
+ZFS_RAID_TOPOLOGY="auto"
+
+if [ -f /var/lib/partman/axonwall-choices ]; then
+  . /var/lib/partman/axonwall-choices
+fi
+
+part_dev() {
+  disk_dev="$1"
+  p_num="$2"
+  if echo "$disk_dev" | grep -q 'nvme\|mmcblk\|loop'; then
+    echo "${disk_dev}p${p_num}"
+  else
+    echo "${disk_dev}${p_num}"
+  fi
+}
+
+# 1. Identify installed block devices on primary disk
 ROOT_A_DEV=$(df /target | tail -n1 | awk '{print $1}')
 ROOT_B_DEV=$(df /target/mnt/standby 2>/dev/null | tail -n1 | awk '{print $1}')
 DATA_DEV=$(df /target/var/lib/axonwall 2>/dev/null | tail -n1 | awk '{print $1}')
 
-TARGET_DISK=$(echo "$ROOT_A_DEV" | sed -E 's/p?[0-9]+$//')
+if [ -z "$TARGET_DISK" ]; then
+  TARGET_DISK=$(echo "$ROOT_A_DEV" | sed -E 's/p?[0-9]+$//')
+fi
 
 # Fallback detection for Slot B device if not mounted at /target/mnt/standby
 if [ -z "$ROOT_B_DEV" ] || [ "$ROOT_B_DEV" = "$ROOT_A_DEV" ]; then
   PART_NUM=$(echo "$ROOT_A_DEV" | grep -oE '[0-9]+$')
   NEXT_NUM=$(( PART_NUM + 1 ))
-  if echo "$ROOT_A_DEV" | grep -q 'nvme\|mmcblk'; then
-    ROOT_B_DEV="${TARGET_DISK}p${NEXT_NUM}"
-  else
-    ROOT_B_DEV="${TARGET_DISK}${NEXT_NUM}"
+  ROOT_B_DEV=$(part_dev "$TARGET_DISK" "$NEXT_NUM")
+fi
+
+# Fallback detection for Persistent Data and Optional ZFS partition
+ALL_PARTS=$(ls "${TARGET_DISK}"* 2>/dev/null | grep -E "${TARGET_DISK}(p?[0-9]+)$" | sort -V || true)
+LAST_PART=$(echo "$ALL_PARTS" | tail -n1)
+SECOND_LAST_PART=$(echo "$ALL_PARTS" | tail -n2 | head -n1)
+
+ZFS_DEV=""
+if [ "${ZFS_MB:-0}" -gt 0 ]; then
+  ZFS_DEV="$LAST_PART"
+  if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
+    DATA_DEV="$SECOND_LAST_PART"
+  fi
+else
+  if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
+    DATA_DEV="$LAST_PART"
   fi
 fi
 
-# Fallback detection for Persistent Data device
-if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
-  # Find last partition on target disk
-  DATA_DEV=$(ls "${TARGET_DISK}"* 2>/dev/null | grep -E "${TARGET_DISK}(p?[0-9]+)$" | tail -n1 || true)
-fi
-
 echo "[+] Target Disk       : ${TARGET_DISK}"
+echo "[+] System RAID Mode  : ${SYSTEM_RAID_MODE} (${SYSTEM_RAID_DISKS:-$TARGET_DISK})"
 echo "[+] Slot A (Primary)  : ${ROOT_A_DEV}"
 echo "[+] Slot B (Standby)  : ${ROOT_B_DEV}"
 echo "[+] Persistent Data   : ${DATA_DEV:-<embedded>}"
+echo "[+] ZFS Partition     : ${ZFS_DEV:-<none>} (${ZFS_GB:-0} GB)"
 
-# 2. Label filesystems
+# 2. Label filesystems on Primary Disk
 if [ -b "$ROOT_A_DEV" ]; then
   echo "[+] Setting filesystem label: ${ROOT_A_DEV} -> axon_root_a"
   e2label "$ROOT_A_DEV" axon_root_a 2>/dev/null || tune2fs -L axon_root_a "$ROOT_A_DEV" 2>/dev/null || true
@@ -107,20 +141,166 @@ fi
 # Clean up /mnt/standby mountpoint in Slot A fstab
 if [ -f /target/etc/fstab ]; then
   sed -i '\#/mnt/standby#d' /target/etc/fstab
-  # Ensure /var/lib/axonwall is mounted by label axon_data
   if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -q 'axon_data' /target/etc/fstab; then
     echo "LABEL=axon_data  /var/lib/axonwall  ext4  defaults,noatime  0  2" >> /target/etc/fstab
   fi
 fi
 
-# 4. Initialize GRUB environment for A/B boot counting & automated watchdog rollback
+# 4. Multi-Disk System RAID-1 Mirroring & Secondary Disk Partition Cloning
+ZFS_VDEVS=""
+if [ -b "$ZFS_DEV" ]; then
+  ZFS_PART_NUM=$(echo "$ZFS_DEV" | grep -oE '[0-9]+$')
+  wipefs -a "$ZFS_DEV" 2>/dev/null || true
+  parted -s "$TARGET_DISK" name "$ZFS_PART_NUM" axon_zfs_1 2>/dev/null || true
+  sgdisk -c "${ZFS_PART_NUM}:axon_zfs_1" -t "${ZFS_PART_NUM}:bf01" "$TARGET_DISK" 2>/dev/null || true
+  ZFS_VDEVS="$ZFS_DEV"
+fi
+
+if [ "$SYSTEM_RAID_MODE" = "mirror" ] && [ -n "$SYSTEM_RAID_DISKS" ]; then
+  DISK_IDX=1
+  ROOT_A_NUM=$(echo "$ROOT_A_DEV" | grep -oE '[0-9]+$')
+  ROOT_B_NUM=$(echo "$ROOT_B_DEV" | grep -oE '[0-9]+$')
+  DATA_NUM=$(echo "$DATA_DEV" | grep -oE '[0-9]+$')
+  EFI_DEV=$(part_dev "$TARGET_DISK" 2)
+
+  for sec_disk in $SYSTEM_RAID_DISKS; do
+    if [ "$sec_disk" = "$TARGET_DISK" ] || [ ! -b "$sec_disk" ]; then
+      continue
+    fi
+    DISK_IDX=$(( DISK_IDX + 1 ))
+    echo "[+] Cloning GPT partition table from ${TARGET_DISK} to mirror disk ${sec_disk}..."
+    if command -v sgdisk >/dev/null 2>&1; then
+      sgdisk --replicate="$sec_disk" "$TARGET_DISK" 2>/dev/null || true
+      sgdisk -G "$sec_disk" 2>/dev/null || true
+    elif command -v sfdisk >/dev/null 2>&1; then
+      sfdisk -d "$TARGET_DISK" 2>/dev/null | grep -v '^label-id:' | sfdisk --force "$sec_disk" 2>/dev/null || true
+    fi
+    partprobe "$sec_disk" 2>/dev/null || true
+    sleep 1
+
+    # Clone EFI System Partition & install redundant GRUB bootloader on secondary disk
+    SEC_EFI=$(part_dev "$sec_disk" 2)
+    if [ -b "$EFI_DEV" ] && [ -b "$SEC_EFI" ]; then
+      dd if="$EFI_DEV" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+    fi
+    in-target grub-install --target=i386-pc "$sec_disk" 2>/dev/null || true
+    in-target grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram 2>/dev/null || true
+
+    # Replicate Slot A & Slot B onto secondary disk or assemble mdadm mirror
+    SEC_ROOT_A=$(part_dev "$sec_disk" "$ROOT_A_NUM")
+    SEC_ROOT_B=$(part_dev "$sec_disk" "$ROOT_B_NUM")
+    SEC_DATA=$(part_dev "$sec_disk" "$DATA_NUM")
+    if [ -b "$SEC_ROOT_A" ]; then
+      dd if="$ROOT_A_DEV" of="$SEC_ROOT_A" bs=4M conv=fsync 2>/dev/null || true
+    fi
+    if [ -b "$SEC_ROOT_B" ]; then
+      dd if="$ROOT_B_DEV" of="$SEC_ROOT_B" bs=4M conv=fsync 2>/dev/null || true
+    fi
+    if [ -b "$SEC_DATA" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ]; then
+      dd if="$DATA_DEV" of="$SEC_DATA" bs=4M conv=fsync 2>/dev/null || true
+    fi
+
+    # Label ZFS partition on secondary system disk if ZFS allocation is active
+    if [ "${ZFS_MB:-0}" -gt 0 ] && [ -n "$ZFS_PART_NUM" ]; then
+      SEC_ZFS=$(part_dev "$sec_disk" "$ZFS_PART_NUM")
+      if [ -b "$SEC_ZFS" ]; then
+        wipefs -a "$SEC_ZFS" 2>/dev/null || true
+        parted -s "$sec_disk" name "$ZFS_PART_NUM" "axon_zfs_${DISK_IDX}" 2>/dev/null || true
+        sgdisk -c "${ZFS_PART_NUM}:axon_zfs_${DISK_IDX}" -t "${ZFS_PART_NUM}:bf01" "$sec_disk" 2>/dev/null || true
+        ZFS_VDEVS="${ZFS_VDEVS} ${SEC_ZFS}"
+      fi
+    fi
+  done
+fi
+
+# 5. Add any extra whole ZFS storage disks selected during install
+for extra_d in $ZFS_EXTRA_DISKS; do
+  if [ -b "$extra_d" ] && [ "$extra_d" != "$TARGET_DISK" ]; then
+    wipefs -a "$extra_d" 2>/dev/null || true
+    if [ -z "$ZFS_VDEVS" ]; then
+      ZFS_VDEVS="$extra_d"
+    else
+      ZFS_VDEVS="${ZFS_VDEVS} ${extra_d}"
+    fi
+  fi
+done
+
+# 6. Resolve ZFS RAID Topology & Persist / Bootstrap Initial ZFS Pool ('tank')
+if [ -n "$ZFS_VDEVS" ]; then
+  VDEV_COUNT=$(echo "$ZFS_VDEVS" | wc -w | tr -d ' ')
+  RESOLVED_TOPOLOGY="$ZFS_RAID_TOPOLOGY"
+  if [ "$RESOLVED_TOPOLOGY" = "auto" ] || [ -z "$RESOLVED_TOPOLOGY" ]; then
+    if [ "$VDEV_COUNT" -le 1 ]; then
+      RESOLVED_TOPOLOGY="stripe"
+    elif [ "$VDEV_COUNT" -eq 2 ]; then
+      RESOLVED_TOPOLOGY="mirror"
+    elif [ "$VDEV_COUNT" -le 4 ]; then
+      RESOLVED_TOPOLOGY="raidz1"
+    else
+      RESOLVED_TOPOLOGY="raidz2"
+    fi
+  fi
+
+  # Safety fallback if user picked a parity mode requiring more disks than present
+  if [ "$RESOLVED_TOPOLOGY" = "mirror" ] && [ "$VDEV_COUNT" -lt 2 ]; then
+    RESOLVED_TOPOLOGY="stripe"
+  elif [ "$RESOLVED_TOPOLOGY" = "raidz1" ] && [ "$VDEV_COUNT" -lt 3 ]; then
+    RESOLVED_TOPOLOGY=$( [ "$VDEV_COUNT" -eq 2 ] && echo "mirror" || echo "stripe" )
+  elif [ "$RESOLVED_TOPOLOGY" = "raidz2" ] && [ "$VDEV_COUNT" -lt 4 ]; then
+    RESOLVED_TOPOLOGY=$( [ "$VDEV_COUNT" -ge 3 ] && echo "raidz1" || echo "stripe" )
+  elif [ "$RESOLVED_TOPOLOGY" = "raidz3" ] && [ "$VDEV_COUNT" -lt 5 ]; then
+    RESOLVED_TOPOLOGY="raidz2"
+  fi
+
+  # Construct JSON array of VDEV paths for axonwalld firstboot bootstrap
+  JSON_VDEVS=""
+  for v in $ZFS_VDEVS; do
+    if [ -z "$JSON_VDEVS" ]; then
+      JSON_VDEVS="\"${v}\""
+    else
+      JSON_VDEVS="${JSON_VDEVS}, \"${v}\""
+    fi
+  done
+
+  mkdir -p /target/var/lib/axonwall
+  cat << ZFS_JSON_EOF > /target/var/lib/axonwall/install-zfs.json
+{
+  "poolName": "tank",
+  "topology": "${RESOLVED_TOPOLOGY}",
+  "vdevs": [${JSON_VDEVS}],
+  "sizeGb": ${ZFS_GB:-0},
+  "systemRaidMode": "${SYSTEM_RAID_MODE}",
+  "systemRaidDisks": "${SYSTEM_RAID_DISKS:-$TARGET_DISK}",
+  "autoCreatePool": true
+}
+ZFS_JSON_EOF
+
+  echo "[+] Recorded ZFS pool bootstrap specification in /var/lib/axonwall/install-zfs.json (topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS})"
+
+  # If zpool is already installed in /target, create the pool immediately
+  ZPOOL_ARGS=""
+  if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
+    ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
+  fi
+  in-target zpool create -f \
+    -o ashift=12 \
+    -o autotrim=on \
+    -O compression=lz4 \
+    -O acltype=posixacl \
+    -O xattr=sa \
+    -O normalization=formD \
+    -O mountpoint=/mnt/tank \
+    tank $ZPOOL_ARGS $ZFS_VDEVS 2>/dev/null || true
+fi
+
+# 7. Initialize GRUB environment for A/B boot counting & automated watchdog rollback
 mkdir -p /target/boot/grub
 in-target grub-editenv /boot/grub/grubenv create 2>/dev/null || true
 in-target grub-editenv /boot/grub/grubenv set active_slot=A 2>/dev/null || true
 in-target grub-editenv /boot/grub/grubenv set bootcount=0 2>/dev/null || true
 in-target grub-editenv /boot/grub/grubenv set bootlimit=3 2>/dev/null || true
 
-# 5. Refresh GRUB configuration
+# 8. Refresh GRUB configuration
 in-target update-grub 2>/dev/null || true
 
-echo "[✓] Axonwall A/B Dual-Root Partition Setup successfully finished."
+echo "[✓] Axonwall A/B Dual-Root, System RAID & ZFS Setup successfully finished."
