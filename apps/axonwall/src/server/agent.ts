@@ -127,7 +127,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   if (daemonStatus) {
     return {
       nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
-      version: daemonStatus.version || '0.5.0',
+      version: daemonStatus.version || '0.5.1',
       uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
@@ -163,7 +163,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.5.0',
+    version: '0.5.1',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
@@ -1254,7 +1254,7 @@ function getCurrentInstalledVersion(): string {
       }
     } catch {}
   }
-  return '0.5.0';
+  return '0.5.1';
 }
 
 function compareSemver(v1: string, v2: string): number {
@@ -1289,7 +1289,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
 
     const res = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/releases/latest', {
       headers: {
-        'User-Agent': 'Axonwall-Appliance-Updater/0.5.0',
+        'User-Agent': 'Axonwall-Appliance-Updater/0.5.1',
         Accept: 'application/vnd.github.v3+json',
       },
       signal: controller.signal,
@@ -1308,7 +1308,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
       // Fallback: Check tags
       const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/tags?per_page=5', {
         headers: {
-          'User-Agent': 'Axonwall-Appliance-Updater/0.5.0',
+          'User-Agent': 'Axonwall-Appliance-Updater/0.5.1',
           Accept: 'application/vnd.github.v3+json',
         },
       });
@@ -1610,7 +1610,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
 
     const currentVersion = getCurrentInstalledVersion();
     const release = await getReleaseInfo();
-    const targetVersion = (release.latestVersion || '0.5.0').replace(/[^0-9a-zA-Z._-]/g, '');
+    const targetVersion = (release.latestVersion || '0.5.1').replace(/[^0-9a-zA-Z._-]/g, '');
 
     // 1. Delegate privileged firmware update to root daemon (axonwalld) first
     const daemonResp = await callAgentApi<any>(
