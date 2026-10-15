@@ -47,6 +47,7 @@ import {
   FolderKanban,
   Camera,
   Cpu,
+  BookOpen,
 } from 'lucide-react';
 
 export interface SubItem {
@@ -208,6 +209,25 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { name: 'AI Copilot', href: '/ai', icon: Sparkles },
       { name: 'Fleet & Satellites', href: '/fleet', icon: Wifi },
+    ],
+  },
+  {
+    id: 'docs',
+    name: 'Documentation',
+    icon: BookOpen,
+    items: [
+      { name: 'Docs Home & Quickstart', href: '/docs', icon: BookOpen },
+      { name: 'Modular Architecture', href: '/docs/modular-architecture', icon: Cpu, badge: 'Core' },
+      { name: 'Multi-Disk RAID & ZFS Install', href: '/docs/installer-raid-zfs', icon: HardDrive },
+      { name: 'ZFS Storage Management', href: '/docs/zfs-nas-storage', icon: Database },
+      { name: 'K3s & OpenEBS', href: '/docs/k3s-kubernetes', icon: Layers },
+      { name: 'High Availability (HA)', href: '/docs/high-availability', icon: ArrowRightLeft },
+      { name: 'Threat Defense & RPZ', href: '/docs/threat-defense', icon: ShieldAlert },
+      { name: 'Migration Studio', href: '/docs/migration', icon: FileText },
+      { name: 'Observability & eBPF', href: '/docs/observability', icon: Activity },
+      { name: 'Hardware & Web Shell', href: '/docs/hardware-telemetry', icon: Terminal },
+      { name: 'GitOps Audit Trail', href: '/docs/gitops-audit', icon: RefreshCw },
+      { name: 'API Reference', href: '/docs/api-reference', icon: Server },
     ],
   },
 ];
