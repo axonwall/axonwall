@@ -21,7 +21,7 @@ const LDAP_CONFIG: LdapConfig = {
   url: process.env.LDAP_URL || 'ldap://127.0.0.1:389',
   baseDn: process.env.LDAP_BASE_DN || 'dc=axonwall,dc=local',
   bindDn: process.env.LDAP_BIND_DN || 'cn=admin,dc=axonwall,dc=local',
-  bindPassword: process.env.LDAP_BIND_PASSWORD || 'axonwalladmin',
+  bindPassword: process.env.LDAP_BIND_PASSWORD || '',
   userSearchFilter: process.env.LDAP_USER_FILTER || '(&(objectClass=inetOrgPerson)(uid={{username}}))',
   groupSearchFilter: process.env.LDAP_GROUP_FILTER || '(&(objectClass=groupOfNames)(member={{userDn}}))',
   groupRoleMap: {
@@ -113,6 +113,11 @@ export async function performAuthentication(
     (process.env.LDAP_URL ? !process.env.LDAP_URL.includes('127.0.0.1:389') : false);
 
   if (isLdapEnabled) {
+    if (!LDAP_CONFIG.bindPassword) {
+      // No hardcoded fallback bind password (audit B-13): LDAP stays
+      // unusable until the operator configures one.
+      return { success: false, error: 'LDAP is enabled but LDAP_BIND_PASSWORD is not configured on this appliance' };
+    }
     try {
       return await authenticateLdap(LDAP_CONFIG, username, password);
     } catch (err: any) {
