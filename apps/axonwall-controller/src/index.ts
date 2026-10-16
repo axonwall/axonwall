@@ -141,21 +141,18 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     
-    if (pathname === '/metrics' && req.method === 'GET') {
-      prometheusRegistry.metrics().then((metricsStr) => {
-        res.writeHead(200, { 'Content-Type': prometheusRegistry.contentType });
-        res.end(metricsStr);
-      }).catch(() => {
-        if (!res.headersSent) {
-          res.writeHead(500);
-          res.end('Internal Server Error');
-        }
-      });
-      return;
-    }
-
     
     const verifyFleetAuth = (req: any, res: any): boolean => {
+      if (fs.existsSync(caPath)) {
+        const tlsSocket = req.socket as any;
+        let peerCert: any = null;
+        try { peerCert = tlsSocket?.getPeerCertificate?.(); } catch { peerCert = null; }
+        if (tlsSocket && tlsSocket.authorized === false && peerCert && Object.keys(peerCert).length > 0) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unauthorized: invalid client certificate' }));
+          return false;
+        }
+      }
       const token = (req.headers['x-axonwall-ztp-token'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '')) as string;
       const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
       if (!expectedToken) {
@@ -175,6 +172,23 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       }
       return true;
     };
+
+    if (pathname === '/metrics' && req.method === 'GET') {
+      // Metrics disclose fleet size, versions and traffic counters: they
+      // require the fleet token or a CA-verified client certificate.
+      const tlsSocket = req.socket as any;
+      if (!(tlsSocket && tlsSocket.authorized === true) && !verifyFleetAuth(req, res)) return;
+      prometheusRegistry.metrics().then((metricsStr) => {
+        res.writeHead(200, { 'Content-Type': prometheusRegistry.contentType });
+        res.end(metricsStr);
+      }).catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(500);
+          res.end('Internal Server Error');
+        }
+      });
+      return;
+    }
 
     if (pathname === '/api/v1/fleet/block' && req.method === 'POST') {
       if (!verifyFleetAuth(req, res)) return;
@@ -303,6 +317,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       key: fs.readFileSync(keyPath),
       ca: fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined,
       requestCert: fs.existsSync(caPath),
+      // Client certificates are enforced per-path, not at the TLS layer:
+      // this listener is shared by the web console (browsers have no
+      // client cert) and by satellites that only receive their cert
+      // during ZTP provisioning. Fleet paths verify instead: /ws/satellite
+      // requires socket.authorized when a CA exists, and the fleet HTTP
+      // API rejects presented-but-invalid certificates (verifyFleetAuth).
       rejectUnauthorized: false
     }, requestHandler);
   } else {
