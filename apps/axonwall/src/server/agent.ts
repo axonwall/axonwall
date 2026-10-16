@@ -42,20 +42,45 @@ let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
 
+// axonwalld requires a per-install token on every agent API call
+// (see apps/axonwalld/agent_auth.go). The daemon provisions it at
+// /etc/axonwall/agent.token (0640 root:axonwall, readable by this
+// service); AXONWALL_AGENT_TOKEN overrides for dev/container setups.
+let cachedAgentToken: string | null | undefined;
+function getAgentToken(): string | undefined {
+  if (cachedAgentToken !== undefined) {
+    return cachedAgentToken ?? undefined;
+  }
+  let tok = process.env.AXONWALL_AGENT_TOKEN;
+  if (!tok) {
+    try {
+      tok = fs
+        .readFileSync(process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token', 'utf8')
+        .trim();
+    } catch {}
+  }
+  cachedAgentToken = tok || null;
+  return tok || undefined;
+}
+
 async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeoutMs = 4000): Promise<T | null> {
   return new Promise((resolve) => {
     const postData = body ? JSON.stringify(body) : undefined;
+    const agentToken = getAgentToken();
     const req = http.request(
       {
         socketPath: AGENT_API_SOCKET,
         path,
         method,
-        headers: postData
-          ? {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(postData),
-            }
-          : undefined,
+        headers: {
+          ...(postData
+            ? {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData),
+              }
+            : {}),
+          ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {}),
+        },
         timeout: timeoutMs,
       },
       (res) => {
