@@ -171,6 +171,7 @@ jobs:
           retention-days: 7
 
       - name: Install ISO Build Dependencies
+        shell: bash
         run: |
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
