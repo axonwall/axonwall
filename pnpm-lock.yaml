@@ -186,8 +186,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/axonwall_lib
       '@clickhouse/client':
-        specifier: ^1.24.0
-        version: 1.24.0
+        specifier: ^1.24.1
+        version: 1.24.1
       '@supabase/ssr':
         specifier: ^0.5.2
         version: 0.5.2(@supabase/supabase-js@2.117.2(@opentelemetry/api@1.9.1))
@@ -369,8 +369,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@clickhouse/client@1.24.0':
-    resolution: {integrity: sha512-1s/c/Fp9NFOWDJz+Zv363nVKH9ScaraZK6e+f/Ee3kwlt7egThT+KJSdYhd3OVCw+z0MzMktSjK+8Am1I5f/Hg==}
+  '@clickhouse/client@1.24.1':
+    resolution: {integrity: sha512-1kjKJ4uuD4J9JlRU4CpwEGfecstvtoGreBorhh7CxgB7r7PL54DCLD6gajKZhLCri84XlyD3CUxEm6rYkKC+dA==}
     engines: {node: '>=20'}
 
   '@emnapi/runtime@1.11.3':
@@ -1892,7 +1892,7 @@ snapshots:
   '@biomejs/cli-win32-x64@1.9.4':
     optional: true
 
-  '@clickhouse/client@1.24.0': {}
+  '@clickhouse/client@1.24.1': {}
 
   '@emnapi/runtime@1.11.3':
     dependencies:
