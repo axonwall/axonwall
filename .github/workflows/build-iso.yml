@@ -77,7 +77,7 @@ jobs:
           done
 
       - name: Upload Debian Package Artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: axonwall-debian-package
           path: |
@@ -94,7 +94,7 @@ jobs:
           sudo chown -R $USER:$USER packaging/alpine/output
 
       - name: Upload Alpine ISO Artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: axonwall-alpine-isos
           path: |
@@ -174,7 +174,7 @@ jobs:
           done
 
       - name: Upload ISO Checksum Artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         continue-on-error: true
         with:
           name: axonwall-debian13-amd64-checksum
