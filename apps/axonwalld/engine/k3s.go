@@ -132,6 +132,24 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		return fmt.Errorf("invalid K3s runtime bundle json: %w", err)
 	}
 
+	// Validate free-text config before it can reach privileged paths
+	// (audit D-05): an invalid bundle changes nothing on disk.
+	if bundle.K3sConfigYaml != "" {
+		if err := validateK3sConfig(bundle.K3sConfigYaml); err != nil {
+			return fmt.Errorf("k3s bundle rejected: %w", err)
+		}
+	}
+	if bundle.OpenEbsManifestYaml != "" {
+		if err := validateK3sManifest(bundle.OpenEbsManifestYaml); err != nil {
+			return fmt.Errorf("k3s bundle rejected: %w", err)
+		}
+	}
+	if bundle.WorkloadsManifestYaml != "" {
+		if err := validateK3sManifest(bundle.WorkloadsManifestYaml); err != nil {
+			return fmt.Errorf("k3s bundle rejected: %w", err)
+		}
+	}
+
 	m.mu.Lock()
 	m.cfg = bundle
 	m.mu.Unlock()
