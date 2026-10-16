@@ -112,6 +112,10 @@ CORE_PKGS=(
   kmod
   nftables
   iproute2
+  # Interface management + a real DHCP client for the OpenRC networking
+  # service (stock Alpine ISOs ship both; kea-dhcp4 below is a DHCP *server*)
+  ifupdown-ng
+  dhcpcd
   wireguard-tools
   keepalived
   conntrack-tools
@@ -319,7 +323,7 @@ fi
 for svc in devfs dmesg mdev hwdrivers; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
 done
-for svc in modules sysctl hostname bootmisc syslog networking; do
+for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
 done
 for svc in axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do

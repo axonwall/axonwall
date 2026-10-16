@@ -95,11 +95,27 @@ fi
 
 cp /etc/network/interfaces /etc/network/interfaces.d/axonwall 2>/dev/null || true
 
-# Bring up WAN with DHCP
-if ip link show "$WAN_IF" >/dev/null 2>&1; then
-  ip link set up dev "$WAN_IF" 2>/dev/null || true
-  /sbin/udhcpc -b -i "$WAN_IF" -p "/var/run/udhcpc.${WAN_IF}.pid" >/dev/null 2>&1 || true
-fi
+# Start a DHCPv4 client on $1 only when the interface has no IPv4 address
+# yet. The boot-runlevel networking service (ifup + dhcpcd, configured by
+# axonwall-network-setup before it) normally holds the lease by the time
+# firstboot runs; starting a second client regardless would flush that
+# lease, because every udhcpc start runs its deconfig script
+# (`ip -4 addr flush`). Client output is deliberately NOT discarded:
+# when DHCP fails, the boot log has to say so.
+dhcp_if_missing() {
+  _dhcp_if="$1"
+  [ -n "$_dhcp_if" ] || return 0
+  ip link show "$_dhcp_if" >/dev/null 2>&1 || return 0
+  ip link set up dev "$_dhcp_if" 2>/dev/null || true
+  if ip -4 addr show dev "$_dhcp_if" 2>/dev/null | grep -q 'inet '; then
+    return 0
+  fi
+  echo "[Axonwall Firstboot] No IPv4 address on ${_dhcp_if}; starting DHCPv4 client..."
+  /sbin/udhcpc -b -i "$_dhcp_if" -p "/var/run/udhcpc.${_dhcp_if}.pid" || true
+}
+
+# Bring up WAN with DHCP (fallback; networking normally configured it first)
+dhcp_if_missing "$WAN_IF"
 
 # 3. Configure default LAN static IP (192.168.1.1/24) on second NIC
 if [ -n "$LAN_IF" ] && ip link show "$LAN_IF" >/dev/null 2>&1; then
@@ -107,15 +123,9 @@ if [ -n "$LAN_IF" ] && ip link show "$LAN_IF" >/dev/null 2>&1; then
   ip link set up dev "$LAN_IF" 2>/dev/null || true
 fi
 
-if [ -n "$OPT1_IF" ] && ip link show "$OPT1_IF" >/dev/null 2>&1; then
-  ip link set up dev "$OPT1_IF" 2>/dev/null || true
-  /sbin/udhcpc -b -i "$OPT1_IF" -p "/var/run/udhcpc.${OPT1_IF}.pid" >/dev/null 2>&1 || true
-fi
+dhcp_if_missing "$OPT1_IF"
 
-if [ -n "$OPT2_IF" ] && ip link show "$OPT2_IF" >/dev/null 2>&1; then
-  ip link set up dev "$OPT2_IF" 2>/dev/null || true
-  /sbin/udhcpc -b -i "$OPT2_IF" -p "/var/run/udhcpc.${OPT2_IF}.pid" >/dev/null 2>&1 || true
-fi
+dhcp_if_missing "$OPT2_IF"
 
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [ -f /usr/share/axonwall/lockdown.nft ]; then
