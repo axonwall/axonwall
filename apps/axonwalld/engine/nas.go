@@ -529,6 +529,19 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		return fmt.Errorf("invalid NAS config json: %w", err)
 	}
 
+	// Validate free-text config before it can reach privileged paths
+	// (audit D-05): an invalid bundle changes nothing on disk.
+	if bundle.SmbConf != "" {
+		if err := validateSmbConf(bundle.SmbConf); err != nil {
+			return fmt.Errorf("nas bundle rejected: %w", err)
+		}
+	}
+	if bundle.NfsExports != "" {
+		if err := validateNfsExports(bundle.NfsExports); err != nil {
+			return fmt.Errorf("nas bundle rejected: %w", err)
+		}
+	}
+
 	m.mu.Lock()
 	m.cfg = bundle
 	m.mu.Unlock()
