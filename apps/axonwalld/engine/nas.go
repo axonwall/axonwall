@@ -260,6 +260,10 @@ func (m *NasManager) BootstrapInstallZfsPool() {
 		Autotrim:    true,
 		Compression: "lz4",
 	}
+	if err := ValidateZfsPoolSpec(poolSpec); err != nil {
+		slog.Warn("Refusing install-time ZFS pool: invalid spec", "error", err)
+		return
+	}
 	args := BuildZfsPoolCreateArgs(poolSpec)
 	slog.Info("Creating install-time ZFS pool from installer layout", "pool", spec.PoolName, "topology", spec.Topology, "vdevs", spec.Vdevs)
 	if out, err := exec.Command("zpool", args...).CombinedOutput(); err != nil {
@@ -542,6 +546,10 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 	// 1. Reconcile ZFS pools and datasets if zpool/zfs are available on host
 	if _, err := exec.LookPath("zpool"); err == nil {
 		for _, pool := range bundle.Pools {
+			if err := ValidateZfsPoolSpec(pool); err != nil {
+				slog.Warn("Skipping ZFS pool with invalid spec", "pool", pool.Name, "error", err)
+				continue
+			}
 			if err := exec.Command("zpool", "list", "-H", pool.Name).Run(); err != nil {
 				args := BuildZfsPoolCreateArgs(pool)
 				slog.Info("Provisioning ZFS pool", "name", pool.Name, "topology", pool.Topology)
@@ -552,6 +560,10 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 
 	if _, err := exec.LookPath("zfs"); err == nil {
 		for _, ds := range bundle.Datasets {
+			if err := ValidateZfsDatasetSpec(ds); err != nil {
+				slog.Warn("Skipping ZFS dataset with invalid spec", "dataset", ds.Name, "error", err)
+				continue
+			}
 			for _, cmdArgs := range BuildZfsDatasetCreateArgs(ds) {
 				_ = exec.Command("zfs", cmdArgs...).Run()
 			}
