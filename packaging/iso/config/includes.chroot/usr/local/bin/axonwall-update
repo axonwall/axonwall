@@ -61,7 +61,7 @@ extract_deb() {
         const name = buf.slice(off, off + 16).toString("ascii").trim().replace(/\/$/, "");
         const size = parseInt(buf.slice(off + 48, off + 58).toString("ascii").trim(), 10);
         off += 60;
-        if (name.startsWith("data.tar")) {
+        if (/^data\.tar(\.(gz|xz|zst|bz2))?$/.test(name)) {
           const out = process.argv[2] + "/" + name;
           fs.writeFileSync(out, buf.slice(off, off + size));
           console.log(out);
@@ -73,6 +73,15 @@ extract_deb() {
     ' "$deb_file" "/tmp" 2>/dev/null || true)"
 
     if [ -n "$data_tar" ] && [ -f "$data_tar" ]; then
+      # Tar-slip guard (audit D-S07): refuse archives whose member names
+      # are absolute or climb out of the destination with .. -- the
+      # fallback extractor runs as root and BusyBox tar does not
+      # sanitize these the way GNU tar does.
+      if tar -tf "$data_tar" 2>/dev/null | grep -qE '^/|(^|/)\.\.(/|$)'; then
+        echo "[!] Update package contains unsafe paths; refusing to extract." >&2
+        rm -f "$data_tar"
+        return 1
+      fi
       tar -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
         rm -f "$data_tar"
         return 1

@@ -18,12 +18,37 @@ depend() {
     after axonwall-firstboot
 }
 
+# Parse a KEY=value env file WITHOUT executing it (audit D-S08). These
+# files carry credential material -- firstboot embeds the admin password
+# in axonwall.env -- and sourcing them as root would execute any $(...)
+# or backtick construct in a value at every service start. Values are
+# taken literally; one layer of matching surrounding quotes is stripped.
+load_env_file() {
+    _env_file="$1"
+    [ -f "$_env_file" ] || return 0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            ''|'#'*) continue ;;
+            *=*) ;;
+            *) continue ;;
+        esac
+        _key=${_line%%=*}
+        _val=${_line#*=}
+        case "$_key" in
+            *[!A-Za-z0-9_]*|'') continue ;;
+        esac
+        case "$_val" in
+            \"*\") _val=${_val#?}; _val=${_val%?} ;;
+            \'*\') _val=${_val#?}; _val=${_val%?} ;;
+        esac
+        export "$_key=$_val"
+    done < "$_env_file"
+    unset _env_file _line _key _val
+}
+
+
 start_pre() {
     checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
-    if [ -f /etc/axonwall/axonwall.env ]; then
-        set -a
-        . /etc/axonwall/axonwall.env
-        set +a
-    fi
+    load_env_file /etc/axonwall/axonwall.env
     export NODE_ENV=production
 }
