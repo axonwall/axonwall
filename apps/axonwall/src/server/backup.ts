@@ -2,7 +2,10 @@ import crypto from 'crypto';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
 
-const BACKUP_MAGIC = Buffer.from('AXB1'); // Axonwall Encrypted Backup Version 1
+const BACKUP_MAGIC = Buffer.from('AXB1'); // Axonwall Encrypted Backup Version 1 (PBKDF2 100k)
+const BACKUP_MAGIC_V2 = Buffer.from('AXB2'); // Version 2 (PBKDF2 600k, current OWASP guidance)
+const PBKDF2_ITERATIONS_V1 = 100000;
+const PBKDF2_ITERATIONS = 600000;
 
 export interface BackupMetadata {
   id: string;
@@ -43,9 +46,11 @@ export async function createEncryptedBackup(
 
   const payload = JSON.stringify({ metadata, state }, null, 2);
 
-  // Derive 256-bit key from passphrase using PBKDF2 with 100,000 iterations
+  // Derive 256-bit key from passphrase using PBKDF2 with 600,000
+  // iterations (audit B-16; version 1 backups used 100,000, see the
+  // magic-based dispatch in restoreEncryptedBackup).
   const salt = crypto.randomBytes(16);
-  const key = crypto.pbkdf2Sync(passphrase, salt, 100000, 32, 'sha256');
+  const key = crypto.pbkdf2Sync(passphrase, salt, PBKDF2_ITERATIONS, 32, 'sha256');
   const iv = crypto.randomBytes(12);
 
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
@@ -53,7 +58,7 @@ export async function createEncryptedBackup(
   const tag = cipher.getAuthTag();
 
   // File Layout: [MAGIC: 4B][SALT: 16B][IV: 12B][TAG: 16B][CIPHERTEXT: N B]
-  const buffer = Buffer.concat([BACKUP_MAGIC, salt, iv, tag, encrypted]);
+  const buffer = Buffer.concat([BACKUP_MAGIC_V2, salt, iv, tag, encrypted]);
 
   return { id: backupId, buffer, metadata };
 }
@@ -75,8 +80,13 @@ export async function restoreEncryptedBackup(
   }
 
   const magic = buffer.subarray(0, 4);
-  if (!magic.equals(BACKUP_MAGIC)) {
-    throw new Error('Invalid backup header: unrecognized magic bytes. Expected AXB1.');
+  let iterations: number;
+  if (magic.equals(BACKUP_MAGIC_V2)) {
+    iterations = PBKDF2_ITERATIONS;
+  } else if (magic.equals(BACKUP_MAGIC)) {
+    iterations = PBKDF2_ITERATIONS_V1;
+  } else {
+    throw new Error('Invalid backup header: unrecognized magic bytes. Expected AXB1 or AXB2.');
   }
 
   const salt = buffer.subarray(4, 20);
@@ -84,7 +94,7 @@ export async function restoreEncryptedBackup(
   const tag = buffer.subarray(32, 48);
   const ciphertext = buffer.subarray(48);
 
-  const key = crypto.pbkdf2Sync(passphrase, salt, 100000, 32, 'sha256');
+  const key = crypto.pbkdf2Sync(passphrase, salt, iterations, 32, 'sha256');
 
   try {
     const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);

@@ -609,7 +609,7 @@ export default function FleetPage() {
                   />
                   <button
                     onClick={() => {
-                      setGeneratedToken('ztp_axon_' + Math.random().toString(36).substring(2, 16));
+                      setGeneratedToken('ztp_axon_' + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join(''));
                     }}
                     className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700"
                   >

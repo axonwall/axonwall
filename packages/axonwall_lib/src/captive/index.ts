@@ -64,7 +64,7 @@ export class CaptiveSessionManager {
     clientMac: string,
     username: string
   ): CaptiveSession {
-    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const sessionId = `sess_${Date.now()}_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
     const now = Date.now();
     const durationMs = (zone.sessionTimeoutMinutes || 720) * 60 * 1000;
 
