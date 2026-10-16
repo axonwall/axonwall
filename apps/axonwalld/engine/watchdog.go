@@ -62,6 +62,12 @@ type WatchdogEngine struct {
 	slotVersionsPath string
 	status           PartitionStatus
 	stopChan         chan struct{}
+
+	// Injectable for tests; production values are set by the constructor.
+	updaterPaths      []string
+	checkInterfaces   func() HealthCheckResult
+	checkNftables     func() HealthCheckResult
+	checkControlPlane func() HealthCheckResult
 }
 
 // NewWatchdogEngine initializes the A/B system watchdog engine with default paths.
@@ -80,7 +86,11 @@ func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEn
 		cmdlinePath:      cmdlinePath,
 		slotVersionsPath: slotVersionsPath,
 		stopChan:         make(chan struct{}),
+		updaterPaths:     []string{"/usr/local/bin/axonwall-update", "/usr/sbin/axonwall-update"},
 	}
+	we.checkInterfaces = we.verifyInterfaces
+	we.checkNftables = we.verifyNftables
+	we.checkControlPlane = we.verifyControlPlane
 	we.detectInitialState()
 	return we
 }
@@ -309,7 +319,7 @@ func (we *WatchdogEngine) runVerificationSequence() {
 
 	// Check 1: Network interfaces initialization
 	t1 := time.Now()
-	ifacesCheck := we.verifyInterfaces()
+	ifacesCheck := we.checkInterfaces()
 	ifacesCheck.DurationMs = time.Since(t1).Milliseconds()
 	checks = append(checks, ifacesCheck)
 	if ifacesCheck.Status == CheckStatusFail {
@@ -318,7 +328,7 @@ func (we *WatchdogEngine) runVerificationSequence() {
 
 	// Check 2: Atomic nftables kernel baseline check
 	t2 := time.Now()
-	nftCheck := we.verifyNftables()
+	nftCheck := we.checkNftables()
 	nftCheck.DurationMs = time.Since(t2).Milliseconds()
 	checks = append(checks, nftCheck)
 	if nftCheck.Status == CheckStatusFail {
@@ -327,7 +337,7 @@ func (we *WatchdogEngine) runVerificationSequence() {
 
 	// Check 3: Control plane and management quorum
 	t3 := time.Now()
-	cpCheck := we.verifyControlPlane()
+	cpCheck := we.checkControlPlane()
 	cpCheck.DurationMs = time.Since(t3).Milliseconds()
 	checks = append(checks, cpCheck)
 	if cpCheck.Status == CheckStatusFail {
@@ -342,7 +352,7 @@ func (we *WatchdogEngine) runVerificationSequence() {
 		we.status.HealthVerified = true
 		we.status.BootCount = 0
 		log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s.", we.status.ActiveSlot)
-		
+
 		// Reset bootcount in GRUB environment
 		if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 			log.Printf("[Watchdog] Warning: Failed to commit bootcount to grubenv: %v", err)
@@ -531,17 +541,27 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		}
 	}
 
-	updaterPaths := []string{"/usr/local/bin/axonwall-update", "/usr/sbin/axonwall-update"}
-	for _, up := range updaterPaths {
-		if _, err := os.Stat(up); err == nil {
-			cmd := exec.Command(up, "--slot", targetSlot, "--version", targetVersion)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				log.Printf("[Watchdog] axonwall-update warning (%v): %s", err, string(out))
-			} else {
-				log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s)", targetSlot, targetVersion)
-			}
-			break
+	// The flash must actually happen before anything is armed or
+	// stamped. Previously a failed -- or entirely missing -- updater
+	// was logged as a "warning" and the function went on to arm the
+	// target slot in grubenv, record the new version, and report
+	// success for a flash that never occurred.
+	updaterFound := false
+	for _, up := range we.updaterPaths {
+		if _, err := os.Stat(up); err != nil {
+			continue
 		}
+		updaterFound = true
+		cmd := exec.Command(up, "--slot", targetSlot, "--version", targetVersion)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("axonwall-update failed for slot %s (v%s): %v: %s", targetSlot, targetVersion, err, strings.TrimSpace(string(out)))
+		}
+		log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s)", targetSlot, targetVersion)
+		break
+	}
+	if !updaterFound {
+		return "", fmt.Errorf("axonwall-update binary not found (looked in %s); slot %s was NOT flashed", strings.Join(we.updaterPaths, ", "), targetSlot)
 	}
 
 	we.mu.Lock()
