@@ -1,230 +1,250 @@
-name: Build Axonwall Appliance ISOs
+steps:
+  - name: Checkout Code
+    uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    with:
+      submodules: recursive
 
-on:
-  push:
-    branches: [ main ]
-    tags: [ 'v*' ]
-  workflow_dispatch:
+  - name: Setup Node
+    uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+    with:
+      node-version: 22
 
-# Default token is read-only; the single build job below re-grants
-# contents: write, which only its two release-publish steps need.
-# (Splitting the release steps into their own job so the build itself
-# runs read-only is the remaining step -- audit finding C6.)
-permissions:
-  contents: read
+  - name: Setup PNPM
+    uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
-jobs:
-  build-iso:
-    name: Build Debian 13 & Alpine Linux Appliance ISOs
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+  - name: Cache pnpm store
+    uses: actions/cache@v4
+    with:
+      path: |
+        ~/.pnpm-store
+        node_modules/.pnpm
+      key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+      restore-keys: |
+        ${{ runner.os }}-pnpm-
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: recursive
+  - name: Install JS deps
+    run: pnpm install --frozen-lockfile
 
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
+  - name: Run JavaScript/TypeScript tests
+    run: pnpm test --if-present
 
-      - name: Setup PNPM
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+  - name: Setup Go
+    uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+    with:
+      go-version: '1.25.x'
+      cache: 'true'
+      cache-dependency-path: |
+        go.sum
+        apps/**/go.sum
 
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.24'
-          cache-dependency-path: 'apps/**/*.sum'
+  - name: Verify Go
+    run: go version
 
-      - name: Build Axonwall Monorepo Artifacts
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
+  - name: Cache Go modules and build cache
+    uses: actions/cache@v4
+    with:
+      path: |
+        ~/go/pkg/mod
+        ~/.cache/go-build
+      key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+      restore-keys: |
+        ${{ runner.os }}-go-
 
-      - name: Compile Axonwalld Core Daemon
-        run: |
-          cd apps/axonwalld
-          CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/axonwalld .
+  - name: Run Go tests
+    run: |
+      set -e
+      if [ -d apps/axonwalld ]; then
+        cd apps/axonwalld
+        CGO_ENABLED=0 go test ./... -v
+        cd - >/dev/null
+      fi
+      if [ -d apps/axonwall-console ]; then
+        cd apps/axonwall-console
+        CGO_ENABLED=0 go test ./... -v
+        cd - >/dev/null
+      fi
+      if [ -d apps/axonwall-satellite ]; then
+        cd apps/axonwall-satellite
+        CGO_ENABLED=0 go test ./... -v
+        cd - >/dev/null
+      fi
 
-      - name: Compile Axonwall Console TUI
-        run: |
-          cd apps/axonwall-console
-          CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/axonwall-console .
+  - name: Build Axonwall Monorepo Artifacts
+    run: |
+      pnpm build
 
-      - name: Cross-Compile Satellite Binaries
-        run: |
-          cd apps/axonwall-satellite
-          make all
+  - name: Compile Axonwalld Core Daemon
+    run: |
+      cd apps/axonwalld
+      CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/axonwalld .
 
-      - name: Build Debian (.deb) Package
-        run: |
-          ./packaging/debian/build-deb.sh
+  - name: Compile Axonwall Console TUI
+    run: |
+      cd apps/axonwall-console
+      CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/axonwall-console .
 
-      - name: Sign Debian Package Checksum (if signing key configured)
-        env:
-          AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
-        if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
-        run: |
-          key_file="$(mktemp)"
-          trap 'rm -f "$key_file"' EXIT
-          printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
-          for sha in packaging/debian/output/*.deb.sha256; do
-            openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
-          done
+  - name: Cross-Compile Satellite Binaries
+    run: |
+      cd apps/axonwall-satellite
+      make all
 
-      - name: Upload Debian Package Artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: axonwall-debian-package
-          path: |
-            packaging/debian/output/*.deb
-            packaging/debian/output/*.deb.sha256
-            packaging/debian/output/*.deb.sha256.sig
-          retention-days: 7
+  - name: Build Debian (.deb) Package
+    run: |
+      ./packaging/debian/build-deb.sh
 
-      - name: Build Alpine Appliance ISOs (Virt, Minimal, LTS)
-        run: |
-          ./packaging/alpine/build-alpine-iso.sh --profile virt
-          ./packaging/alpine/build-alpine-iso.sh --profile virt --minimal
-          ./packaging/alpine/build-alpine-iso.sh --profile lts
-          sudo chown -R $USER:$USER packaging/alpine/output
+  - name: Sign Debian Package Checksum (if signing key configured)
+    env:
+      AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
+    if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
+    run: |
+      key_file="$(mktemp)"
+      trap 'rm -f "$key_file"' EXIT
+      printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
+      for sha in packaging/debian/output/*.deb.sha256; do
+        openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
+      done
 
-      - name: Upload Alpine ISO Artifacts
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: axonwall-alpine-isos
-          path: |
-            packaging/alpine/output/*.iso
-            packaging/alpine/output/*.iso.sha256
-          retention-days: 7
+  - name: Upload Debian Package Artifact
+    uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+    with:
+      name: axonwall-debian-package
+      path: |
+        packaging/debian/output/*.deb
+        packaging/debian/output/*.deb.sha256
+        packaging/debian/output/*.deb.sha256.sig
+      retention-days: 7
 
-      - name: Install ISO Build Dependencies
-        run: |
-          sudo apt-get clean
+  - name: Build Alpine Appliance ISOs (Virt, Minimal, LTS)
+    run: |
+      ./packaging/alpine/build-alpine-iso.sh --profile virt
+      ./packaging/alpine/build-alpine-iso.sh --profile virt --minimal
+      ./packaging/alpine/build-alpine-iso.sh --profile lts
+      sudo chown -R $USER:$USER packaging/alpine/output
+
+  - name: Upload Alpine ISO Artifacts
+    uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+    with:
+      name: axonwall-alpine-isos
+      path: |
+        packaging/alpine/output/*.iso
+        packaging/alpine/output/*.iso.sha256
+      retention-days: 7
+
+  - name: Install ISO Build Dependencies
+    run: |
+      sudo apt-get clean
+      sudo rm -rf /var/lib/apt/lists/*
+      sudo mkdir -p /var/lib/apt/lists/partial
+
+      for attempt in {1..5}; do
+        echo "Update attempt $attempt..."
+        if sudo apt-get update -y; then
+          echo "Update successful"
+          break
+        fi
+        if [ $attempt -lt 5 ]; then
+          echo "Update attempt $attempt failed, retrying..."
           sudo rm -rf /var/lib/apt/lists/*
           sudo mkdir -p /var/lib/apt/lists/partial
-          
-          # Retry update up to 5 times with exponential backoff
-          for attempt in {1..5}; do
-            echo "Update attempt $attempt..."
-            if sudo apt-get update -y; then
-              echo "Update successful"
-              break
-            fi
-            if [ $attempt -lt 5 ]; then
-              echo "Update attempt $attempt failed, retrying..."
-              sudo rm -rf /var/lib/apt/lists/*
-              sudo mkdir -p /var/lib/apt/lists/partial
-              sleep $((attempt * 15))
-            else
-              echo "All update attempts failed"
-              exit 1
-            fi
-          done
-          
-          # Install basic dependencies first
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            -o APT::Immediate-Configure=false \
-            -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
-            debootstrap \
-            debian-archive-keyring \
-            xorriso \
-            isolinux \
-            syslinux-efi \
-            syslinux-common \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            dosfstools \
-            mtools || sudo apt-get install -fy --fix-broken
-            
-          # Download and install live-build directly. HTTPS + a pinned
-          # SHA-256 (cross-checked against the hash published for
-          # 1:20250814 in Debian sid's signed Packages index, 2026-10-16):
-          # this .deb is installed as root in the release pipeline.
-          curl -fsSL -o /tmp/live-build.deb https://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
-          echo "a4bffb8e6436ffba260f2e1c37be9dd04a4dacf52c38d7bbe454ec826ba52a4b  /tmp/live-build.deb" | sha256sum -c -
-          sudo dpkg -i /tmp/live-build.deb
-          rm -f /tmp/live-build.deb
+          sleep $((attempt * 15))
+        else
+          echo "All update attempts failed"
+          exit 1
+        fi
+      done
 
-      - name: Build Hybrid Appliance ISO
-        run: |
-          sudo ./packaging/iso/build-iso.sh
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        -o APT::Immediate-Configure=false \
+        -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
+        debootstrap \
+        debian-archive-keyring \
+        xorriso \
+        isolinux \
+        syslinux-efi \
+        syslinux-common \
+        grub-pc-bin \
+        grub-efi-amd64-bin \
+        dosfstools \
+        mtools || sudo apt-get install -fy --fix-broken
 
-      - name: Compute Checksums
-        run: |
-          sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
-          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/alpine/output
+      curl -fsSL -o /tmp/live-build.deb https://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
+      echo "a4bffb8e6436ffba260f2e1c37be9dd04a4dacf52c38d7bbe454ec826ba52a4b  /tmp/live-build.deb" | sha256sum -c -
+      sudo dpkg -i /tmp/live-build.deb
+      rm -f /tmp/live-build.deb
 
-      - name: Sign ISO Checksums (if signing key configured)
-        env:
-          AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
-        if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
-        run: |
-          key_file="$(mktemp)"
-          trap 'rm -f "$key_file"' EXIT
-          printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
-          for sha in packaging/alpine/output/*.iso.sha256 packaging/iso/output/*.iso.sha256; do
-            if [ -f "$sha" ]; then
-              openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
-            fi
-          done
+  - name: Build Hybrid Appliance ISO
+    run: |
+      sudo ./packaging/iso/build-iso.sh
 
-      - name: Upload ISO Checksum Artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        continue-on-error: true
-        with:
-          name: axonwall-debian13-amd64-checksum
-          path: packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-          retention-days: 1
+  - name: Compute Checksums
+    run: |
+      sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
+      sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/alpine/output
 
-      - name: Release Distribution Artifacts (on tag)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: |
-            packaging/iso/output/axonwall-debian13-amd64.iso
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-            packaging/debian/output/*.deb
-            packaging/debian/output/*.deb.sha256
-            packaging/debian/output/*.deb.sha256.sig
-            packaging/alpine/output/*.iso
-            packaging/alpine/output/*.iso.sha256
-            packaging/alpine/output/*.iso.sha256.sig
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
+  - name: Sign ISO Checksums (if signing key configured)
+    env:
+      AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
+    if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
+    run: |
+      key_file="$(mktemp)"
+      trap 'rm -f "$key_file"' EXIT
+      printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
+      for sha in packaging/alpine/output/*.iso.sha256 packaging/iso/output/*.iso.sha256; do
+        if [ -f "$sha" ]; then
+          openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
+        fi
+      done
 
-      - name: Publish Rolling Latest Pre-Release (on main)
-        if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: rolling-latest
-          name: "Axonwall Appliance ISOs & Debian Packages (Rolling Latest)"
-          body: |
-            ### Automated Continuous Build
-            - **Commit**: ${{ github.sha }}
-            - **Branch**: `main`
-            - **Distributions**:
-              - Debian 13 (Trixie) amd64 (Bare-Metal Hybrid ISO + .deb Package)
-              - Alpine Linux 3.21 amd64 (Virtual/Cloud & Hardware Appliances)
-            - **Artifacts**:
-              - `axonwall-debian13-amd64.iso` (Full Debian 13 Live/Install Hybrid ISO)
-              - `axonwall-alpine-virt-amd64.iso` (Alpine Linux Virtual/Cloud Appliance ISO)
-              - `axonwall-alpine-virt-minimal-amd64.iso` (Alpine Linux Minimal Virtual ISO)
-              - `axonwall-alpine-lts-amd64.iso` (Alpine Linux Bare-Metal Hardware ISO with NIC firmware)
-              - `axonwall_*.deb` (Debian Package)
-            - **Components**: Axonwalld Core Daemon + Axonwall Web UI + Satellite Agents + Preconfigured Network Engine
-          prerelease: true
-          files: |
-            packaging/iso/output/axonwall-debian13-amd64.iso
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-            packaging/debian/output/*.deb
-            packaging/debian/output/*.deb.sha256
-            packaging/debian/output/*.deb.sha256.sig
-            packaging/alpine/output/*.iso
-            packaging/alpine/output/*.iso.sha256
-            packaging/alpine/output/*.iso.sha256.sig
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
+  - name: Upload ISO Checksum Artifact
+    uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+    continue-on-error: true
+    with:
+      name: axonwall-debian13-amd64-checksum
+      path: packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+      retention-days: 1
 
+  - name: Release Distribution Artifacts (on tag)
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+    with:
+      files: |
+        packaging/iso/output/axonwall-debian13-amd64.iso
+        packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+        packaging/debian/output/*.deb
+        packaging/debian/output/*.deb.sha256
+        packaging/debian/output/*.deb.sha256.sig
+        packaging/alpine/output/*.iso
+        packaging/alpine/output/*.iso.sha256
+        packaging/alpine/output/*.iso.sha256.sig
+        packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
+
+  - name: Publish Rolling Latest Pre-Release (on main)
+    if: github.ref == 'refs/heads/main'
+    uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+    with:
+      tag_name: rolling-latest
+      name: "Axonwall Appliance ISOs & Debian Packages (Rolling Latest)"
+      body: |
+        ### Automated Continuous Build
+        - **Commit**: ${{ github.sha }}
+        - **Branch**: `main`
+        - **Distributions**:
+          - Debian 13 (Trixie) amd64 (Bare-Metal Hybrid ISO + .deb Package)
+          - Alpine Linux 3.21 amd64 (Virtual/Cloud & Hardware Appliances)
+        - **Artifacts**:
+          - `axonwall-debian13-amd64.iso`
+          - `axonwall-alpine-virt-amd64.iso`
+          - `axonwall-alpine-virt-minimal-amd64.iso`
+          - `axonwall-alpine-lts-amd64.iso`
+          - `axonwall_*.deb`
+      prerelease: true
+      files: |
+        packaging/iso/output/axonwall-debian13-amd64.iso
+        packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+        packaging/debian/output/*.deb
+        packaging/debian/output/*.deb.sha256
+        packaging/debian/output/*.deb.sha256.sig
+        packaging/alpine/output/*.iso
+        packaging/alpine/output/*.iso.sha256
+        packaging/alpine/output/*.iso.sha256.sig
+        packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
