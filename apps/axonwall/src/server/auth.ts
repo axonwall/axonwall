@@ -203,7 +203,7 @@ export async function verifyMfaSetup(secret: string, token: string) {
  * the daemon behind it) happily served a session that had never
  * changed the default password.
  */
-export function passwordChangeRequiredNow(): boolean {
+function passwordChangeRequiredNow(): boolean {
   try {
     if (
       fs.existsSync('/var/lib/axonwall/.password_changed') ||
