@@ -48,7 +48,7 @@ func (m *IAPManager) ApplyConfig(configJSON []byte) error {
 		if !app.Enabled {
 			continue
 		}
-		if strings.ContainsAny(app.PublicHostname, "\n\r{};") || strings.ContainsAny(app.InternalUpstream, "\n\r{};") {
+		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t") {
 			return fmt.Errorf("invalid characters in zero trust app hostname or upstream")
 		}
 	}
@@ -79,7 +79,7 @@ func (m *IAPManager) generateCaddyfile(config ZeroTrustConfig) string {
 		if !app.Enabled {
 			continue
 		}
-		if strings.ContainsAny(app.PublicHostname, "\n\r{};") || strings.ContainsAny(app.InternalUpstream, "\n\r{};") {
+		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t") {
 			continue
 		}
 

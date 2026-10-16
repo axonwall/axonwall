@@ -278,7 +278,10 @@ func (m *SqliteSyncManager) handleDownloadDb(w http.ResponseWriter, r *http.Requ
 	defer os.Remove(tmpBackup)
 
 	// Attempt sqlite3 online backup command
-	backupCmd := exec.Command("sqlite3", targetPath, fmt.Sprintf(".backup '%s'", tmpBackup))
+	// The sqlite3 dot-command argument is a single-quoted string literal;
+	// escape embedded quotes by doubling (audit D-S04) so a configured DB
+	// path containing ' cannot break out into further dot-commands.
+	backupCmd := exec.Command("sqlite3", targetPath, fmt.Sprintf(".backup '%s'", strings.ReplaceAll(tmpBackup, "'", "''")))
 	if err := backupCmd.Run(); err != nil {
 		// Fallback: Checkpoint and copy file
 		_ = exec.Command("sqlite3", targetPath, "PRAGMA wal_checkpoint(PASSIVE);").Run()

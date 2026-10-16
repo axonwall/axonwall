@@ -270,8 +270,16 @@ func releaseDhcpLease(dev string) {
 	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 		_ = exec.Command(dhclientPath, "-r", dev).Run()
 	}
+	// Signal the recorded pid directly instead of interpolating dev
+	// into a root `sh -c` string.
 	pidFile := "/var/run/udhcpc." + dev + ".pid"
-	_ = exec.Command("sh", "-c", "kill $(cat "+pidFile+" 2>/dev/null) 2>/dev/null || pkill -f 'udhcpc.*"+dev+"' 2>/dev/null").Run()
+	if data, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			if proc, err := os.FindProcess(pid); err == nil {
+				_ = proc.Signal(syscall.SIGTERM)
+			}
+		}
+	}
 }
 
 // guessGateway calculates a recommended default gateway IPv4 address given a host IP and CIDR prefix.
