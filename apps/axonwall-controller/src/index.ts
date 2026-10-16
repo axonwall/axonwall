@@ -158,14 +158,16 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     const verifyFleetAuth = (req: any, res: any): boolean => {
       const token = (req.headers['x-axonwall-ztp-token'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '')) as string;
       const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
-      if (!expectedToken && process.env.NODE_ENV === 'production') {
+      if (!expectedToken) {
+        // Fail closed in every environment: there is no hardcoded
+        // fallback token. Developers can set AXONWALL_ZTP_TOKEN to
+        // any value they like in their own environment.
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Fleet management authentication unconfigured' }));
         return false;
       }
-      const tokenToMatch = expectedToken || 'dev-ztp-token';
-      const isValid = token && token.length === tokenToMatch.length &&
-        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(tokenToMatch));
+      const isValid = token && token.length === expectedToken.length &&
+        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
       if (!isValid) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized: Valid X-Axonwall-ZTP-Token required' }));
@@ -333,16 +335,16 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       }
 
       const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
-      if (!expectedToken && process.env.NODE_ENV === 'production') {
+      if (!expectedToken) {
+        // Fail closed in every environment (no hardcoded fallback token).
         console.log(`[Fleet Manager] Rejected connection: AXONWALL_ZTP_TOKEN not configured`);
         socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
         socket.destroy();
         return;
       }
 
-      const tokenToMatch = expectedToken || 'dev-ztp-token';
-      const isTokenValid = token.length === tokenToMatch.length &&
-        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(tokenToMatch));
+      const isTokenValid = token.length === expectedToken.length &&
+        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
 
       if (!isTokenValid) {
         console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
