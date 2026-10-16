@@ -320,7 +320,14 @@ if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
 fi
 
 # Configure OpenRC runlevel symlinks
-for svc in devfs dmesg mdev hwdrivers; do
+# modloop is required on this diskless image: it mounts the modloop squashfs
+# and links /lib/modules into the live system. Stock Alpine adds it via the
+# initramfs default runlevel set, but a hand-pinned apkovl like this one
+# suppresses those defaults. Without it no kernel module can load after the
+# initramfs stage -- notably af_packet, so every DHCPv4 client (dhcpcd and
+# udhcpc alike) fails with "socket(AF_PACKET): Address family not supported
+# by protocol" and the live system never gets an IPv4 lease.
+for svc in devfs dmesg mdev hwdrivers modloop; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
 done
 for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
