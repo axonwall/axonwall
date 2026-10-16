@@ -65,13 +65,28 @@ jobs:
       - name: Verify Go
         run: go version
 
+      - name: Compute Go modules hash
+        id: go-mod-hash
+        run: |
+          set -euo pipefail
+          # Find tracked go.sum files in the repo (root and under apps/)
+          matches=$(git ls-files 'go.sum' 'apps/**/go.sum' || true)
+          if [ -z "$matches" ]; then
+            echo "hash=nogomodfiles" >> "$GITHUB_OUTPUT"
+          else
+            # Combine file contents deterministically and hash them
+            # Use LC_ALL=C to ensure consistent sorting across runners
+            sha=$(LC_ALL=C sh -c "for f in $matches; do printf '%s\0' \"\$f\" && sha256sum \"\$f\"; done" | sha256sum | awk '{print $1}')
+            echo "hash=$sha" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cache Go modules and build cache
         uses: actions/cache@v4
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-${{ steps.go-mod-hash.outputs.hash }}
           restore-keys: |
             ${{ runner.os }}-go-
 
