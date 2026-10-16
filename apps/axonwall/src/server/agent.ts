@@ -1516,6 +1516,8 @@ function compareSemver(v1: string, v2: string): number {
 }
 
 export async function getReleaseInfo(): Promise<ReleaseInfo> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
   const currentVersion = getCurrentInstalledVersion();
   const now = Date.now();
 
@@ -1622,6 +1624,8 @@ export interface SystemPartitionsTelemetry {
 }
 
 export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTelemetry> {
+  const session = await getSession();
+  if (!session) throw new Error('Unauthorized');
   const currentVersion = getCurrentInstalledVersion();
   const kernel = os.release() || 'Linux 6.12.111+deb13-amd64';
 

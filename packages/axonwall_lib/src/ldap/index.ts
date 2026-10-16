@@ -237,7 +237,10 @@ export async function verifyToken(
 ): Promise<UserSession | null> {
   try {
     const secretKey = new TextEncoder().encode(jwtSecret);
-    const { payload } = await jwtVerify(token, secretKey);
+    // Pin the algorithm: these tokens are HS256 (see mintSupabaseToken).
+    // jose already constrains octet keys to HS*, but an explicit
+    // allowlist keeps that true by construction (audit suspect B-S7).
+    const { payload } = await jwtVerify(token, secretKey, { algorithms: ['HS256'] });
 
     return {
       userId: payload.sub as string,

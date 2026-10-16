@@ -2,6 +2,8 @@ import { NextRequest } from 'next/server';
 import http from 'node:http';
 import fs from 'node:fs';
 
+import { getSession } from '@/server/auth';
+
 const AGENT_API_SOCKET = process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
 
 // axonwalld requires the per-install agent token (see server/agent.ts).
@@ -19,6 +21,15 @@ function getAgentToken(): string | undefined {
 }
 
 export async function GET(req: NextRequest) {
+  // Live packet capture is privileged telemetry: require a console
+  // session. This route proxies the daemon directly (it does not go
+  // through a session-checked server/agent.ts helper), so the check
+  // lives here -- it was the one API route missing it (audit A-06/B-10).
+  const session = await getSession();
+  if (!session) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
   const { searchParams } = new URL(req.url);
   const iface = searchParams.get('interface') || 'any';
   const filter = searchParams.get('filter') || '';
