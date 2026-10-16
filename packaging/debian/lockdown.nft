@@ -29,7 +29,7 @@ table inet axonwall {
         icmpv6 type { echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded } accept
 
         # Drop incoming management access from WAN interfaces (mirrors OPNsense default deny on WAN)
-        iifname @wan_interfaces tcp dport { 22, 80, 443, 2966, 3000 } drop comment "block-wan-management"
+        iifname @wan_interfaces tcp dport { 22, 80, 443, 2966, 3000, 9876 } drop comment "block-wan-management"
 
         # Emergency Anti-Lockout on internal interfaces only
         iifname != @wan_interfaces tcp dport { 22, 80, 443, 2966 } accept comment "emergency-anti-lockout"
