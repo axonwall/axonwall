@@ -6,6 +6,13 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
+# Default token is read-only; the single build job below re-grants
+# contents: write, which only its two release-publish steps need.
+# (Splitting the release steps into their own job so the build itself
+# runs read-only is the remaining step -- audit finding C6.)
+permissions:
+  contents: read
+
 jobs:
   build-iso:
     name: Build Debian 13 & Alpine Linux Appliance ISOs
@@ -15,20 +22,20 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
       - name: Setup PNPM
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.24'
           cache-dependency-path: 'apps/**/*.sum'
@@ -70,7 +77,7 @@ jobs:
           done
 
       - name: Upload Debian Package Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: axonwall-debian-package
           path: |
@@ -87,7 +94,7 @@ jobs:
           sudo chown -R $USER:$USER packaging/alpine/output
 
       - name: Upload Alpine ISO Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: axonwall-alpine-isos
           path: |
@@ -134,8 +141,12 @@ jobs:
             dosfstools \
             mtools || sudo apt-get install -fy --fix-broken
             
-          # Download and install live-build directly
-          curl -fsSL -o /tmp/live-build.deb http://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
+          # Download and install live-build directly. HTTPS + a pinned
+          # SHA-256 (cross-checked against the hash published for
+          # 1:20250814 in Debian sid's signed Packages index, 2026-10-16):
+          # this .deb is installed as root in the release pipeline.
+          curl -fsSL -o /tmp/live-build.deb https://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
+          echo "a4bffb8e6436ffba260f2e1c37be9dd04a4dacf52c38d7bbe454ec826ba52a4b  /tmp/live-build.deb" | sha256sum -c -
           sudo dpkg -i /tmp/live-build.deb
           rm -f /tmp/live-build.deb
 
@@ -148,8 +159,22 @@ jobs:
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
           sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/alpine/output
 
+      - name: Sign ISO Checksums (if signing key configured)
+        env:
+          AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
+        if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
+        run: |
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
+          for sha in packaging/alpine/output/*.iso.sha256 packaging/iso/output/*.iso.sha256; do
+            if [ -f "$sha" ]; then
+              openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
+            fi
+          done
+
       - name: Upload ISO Checksum Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         continue-on-error: true
         with:
           name: axonwall-debian13-amd64-checksum
@@ -158,7 +183,7 @@ jobs:
 
       - name: Release Distribution Artifacts (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
@@ -168,10 +193,12 @@ jobs:
             packaging/debian/output/*.deb.sha256.sig
             packaging/alpine/output/*.iso
             packaging/alpine/output/*.iso.sha256
+            packaging/alpine/output/*.iso.sha256.sig
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
 
       - name: Publish Rolling Latest Pre-Release (on main)
         if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: rolling-latest
           name: "Axonwall Appliance ISOs & Debian Packages (Rolling Latest)"
@@ -198,4 +225,6 @@ jobs:
             packaging/debian/output/*.deb.sha256.sig
             packaging/alpine/output/*.iso
             packaging/alpine/output/*.iso.sha256
+            packaging/alpine/output/*.iso.sha256.sig
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
 

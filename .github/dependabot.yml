@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/apps/axonwalld"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/apps/axonwall-console"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/apps/axonwall-satellite"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "gomod"
+    directory: "/apps/terraform-provider-axonwall"
+    schedule:
+      interval: "weekly"
