@@ -4,6 +4,7 @@ import { mintSupabaseToken } from '@axonwall/lib/ldap';
 import { DEFAULT_ROLES } from '@axonwall/lib/rbac';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { SESSION_COOKIE, getJwtSecret } from '../../../../../server/auth-constants';
+import { stampSessionEpoch } from '../../../../../server/session-revocation';
 import {
   OIDC_STATE_COOKIE,
   discoverOidc,
@@ -88,6 +89,7 @@ export async function GET(request: NextRequest) {
       exp: Math.floor(Date.now() / 1000) + 8 * 3600, // 8 hours
     };
 
+    stampSessionEpoch(session);
     const token = await mintSupabaseToken(session, getJwtSecret());
 
     const response = NextResponse.redirect(new URL('/lobby', request.url));

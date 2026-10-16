@@ -36,7 +36,8 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
-      token,
+      // The session token travels only in the httpOnly cookie above;
+      // it is not returned in the body (audit B-09).
       user: {
         userId: authRes.session.userId,
         username: authRes.session.username,

@@ -106,4 +106,10 @@ export interface UserSession {
   /** True while the local admin still uses the never-changed default
    *  password; carried into the session JWT as pwd_change_required. */
   passwordChangeRequired?: boolean;
+  /** Session epoch at mint time (session_epoch claim). A password
+   *  change bumps the appliance epoch and invalidates older tokens. */
+  sessionEpoch?: number;
+  /** The token's jti, when the session was decoded from a JWT. Used
+   *  for per-token revocation at logout. */
+  jti?: string;
 }
