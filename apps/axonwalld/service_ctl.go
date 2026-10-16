@@ -1,8 +1,12 @@
 package main
 
 import (
+	"log"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 )
 
 func normalizeOpenRCService(svc string) string {
@@ -39,8 +43,44 @@ func stopSystemService(svc string) ([]byte, error) {
 	return exec.Command("service", strings.TrimSuffix(svc, ".service"), "stop").CombinedOutput()
 }
 
+// dhcpClientRunning reports whether a DHCP client started by the system
+// networking path (ifup/dhcpcd, ifup/udhcpc, or an earlier boot-apply) is
+// already alive for dev, based on the clients' pidfiles. Starting a second
+// client on the same interface is destructive: a fresh udhcpc runs its
+// deconfig script first, which flushes the IPv4 addresses the running
+// client just configured, and the two clients then fight over the lease.
+func dhcpClientRunning(dev string) bool {
+	pidFiles := []string{
+		"/var/run/udhcpc." + dev + ".pid",
+		"/var/run/dhcpcd/" + dev + ".pid",
+		"/var/run/dhcpcd-" + dev + ".pid",
+	}
+	for _, pidFile := range pidFiles {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		if err := proc.Signal(syscall.Signal(0)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func triggerDhcpClient(dev string) {
 	if dev == "" {
+		return
+	}
+	if dhcpClientRunning(dev) {
+		log.Printf("[Agent] DHCP client already running on %s; not starting another", dev)
 		return
 	}
 	go func() {

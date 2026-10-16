@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+
+name="axonwall-network-setup"
+description="Generate Axonwall network configuration before networking starts"
+
+depend() {
+    need localmount
+    before networking
+}
+
+start() {
+    ebegin "Generating Axonwall network configuration (if missing)"
+    /usr/local/bin/axonwall-generate-interfaces
+    eend 0
+}
