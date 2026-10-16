@@ -96,7 +96,26 @@ if [[ -z "$ISO_FILE" ]]; then
   ISO_FILE="alpine-${ALPINE_FLAVOR}-3.21.8-x86_64.iso"
 fi
 
+# Pinned SHA-256 for the stock Alpine base ISOs this build redistributes:
+# the kernel, initramfs and modloop are taken from the base ISO verbatim,
+# so it is verified before extraction. Values cross-checked against
+# Alpine's published release metadata AND a full download (2026-10-16).
+# An unpinned base ISO fails the build closed -- bump the pin together
+# with the Alpine point release.
+case "${ISO_FILE}" in
+  alpine-virt-3.21.8-x86_64.iso)
+    EXPECTED_ISO_SHA256="478f6629181541a8c24ddcdf4c3f1810cf8deacb47f4e7e2ed367a7b2ef4d80e" ;;
+  alpine-standard-3.21.8-x86_64.iso)
+    EXPECTED_ISO_SHA256="290e9d0f708f60fcd5adeb08553408a0b9fd267e934633dc787c49657922a25b" ;;
+  *)
+    echo "[!] ERROR: no pinned SHA-256 for Alpine base ISO '${ISO_FILE}'." >&2
+    echo "    Verify the new ISO against Alpine's release metadata and pin" >&2
+    echo "    its SHA-256 in build-alpine-iso.sh before building with it." >&2
+    exit 1 ;;
+esac
+
 curl -fsSL -o "${WORK_DIR}/base.iso" "${ALPINE_MIRROR}/releases/x86_64/${ISO_FILE}"
+echo "${EXPECTED_ISO_SHA256}  ${WORK_DIR}/base.iso" | sha256sum -c -
 xorriso -osirrox on -indev "${WORK_DIR}/base.iso" -extract / "${WORK_DIR}/iso" 2>/dev/null
 chmod -R u+w "${WORK_DIR}/iso"
 rm -f "${WORK_DIR}/base.iso"
