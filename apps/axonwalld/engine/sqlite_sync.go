@@ -155,6 +155,22 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 	}
 }
 
+// authorized reports whether a sync request carries the configured shared
+// token. It fails closed: when no auth token is configured, every request
+// is rejected. The sync endpoints serve the headscale database, appliance
+// state, ZFS send streams and the K3s join token, so an unset token must
+// never silently mean "no authentication".
+func (m *SqliteSyncManager) authorized(r *http.Request) bool {
+	m.mu.Lock()
+	authToken := m.cfg.AuthToken
+	m.mu.Unlock()
+	if authToken == "" {
+		return false
+	}
+	provided := r.Header.Get("X-Axonwall-Sync-Token")
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(authToken)) == 1
+}
+
 func (m *SqliteSyncManager) startMasterServer() error {
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", m.cfg.ListenPort)
 	mux := http.NewServeMux()
@@ -172,6 +188,10 @@ func (m *SqliteSyncManager) startMasterServer() error {
 		WriteTimeout: 300 * time.Second,
 	}
 
+	if m.cfg.AuthToken == "" {
+		slog.Error("HA sync master server has NO auth token configured: every sync request will be rejected (fail-closed) until sqliteSync.authToken is set")
+	}
+
 	slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
 	go func() {
 		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -184,12 +204,11 @@ func (m *SqliteSyncManager) startMasterServer() error {
 
 func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
-	authToken := m.cfg.AuthToken
 	nodeRole := m.cfg.NodeRole
 	databases := append([]string(nil), m.cfg.Databases...)
 	m.mu.Unlock()
 
-	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+	if !m.authorized(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -222,11 +241,10 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 
 func (m *SqliteSyncManager) handleDownloadDb(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
-	authToken := m.cfg.AuthToken
 	databases := append([]string(nil), m.cfg.Databases...)
 	m.mu.Unlock()
 
-	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+	if !m.authorized(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -391,11 +409,7 @@ func (m *SqliteSyncManager) pollAndSync() {
 }
 
 func (m *SqliteSyncManager) handleDownloadState(w http.ResponseWriter, r *http.Request) {
-	m.mu.Lock()
-	authToken := m.cfg.AuthToken
-	m.mu.Unlock()
-
-	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+	if !m.authorized(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -414,11 +428,7 @@ func (m *SqliteSyncManager) handleDownloadState(w http.ResponseWriter, r *http.R
 }
 
 func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.Request) {
-	m.mu.Lock()
-	authToken := m.cfg.AuthToken
-	m.mu.Unlock()
-
-	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+	if !m.authorized(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -456,11 +466,7 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 }
 
 func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Request) {
-	m.mu.Lock()
-	authToken := m.cfg.AuthToken
-	m.mu.Unlock()
-
-	if authToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Axonwall-Sync-Token")), []byte(authToken)) != 1 {
+	if !m.authorized(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
