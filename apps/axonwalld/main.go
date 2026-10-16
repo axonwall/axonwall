@@ -126,7 +126,7 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		if mode == 0 {
 			mode = 0644
 		}
-		
+
 		// Use syscall.O_NOFOLLOW to prevent symlink TOCTOU attacks
 		file, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
 		if err != nil {
@@ -471,7 +471,7 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 			LatencyMs: latency,
 		}, nil
 	}
-	
+
 	// Validate target to prevent flag injection (starts with '-') or command injection
 	// Only allow valid hostnames or IP addresses.
 	if strings.HasPrefix(target, "-") || strings.ContainsAny(target, ";&|\\$*{}[]()<>\"'") {
@@ -731,8 +731,16 @@ func main() {
 	// Socket permissions: 0660 so control plane group can access
 	_ = os.Chmod(*socketPath, 0660)
 
-	grpcServer := grpc.NewServer()
-	
+	// Agent API authentication: every gRPC call and every HTTP REST
+	// call must carry the per-install agent token (see agent_auth.go).
+	agentToken, agentTokenSource := resolveAgentToken()
+	log.Printf("[Agent] Agent API token authentication enabled (source: %s)", agentTokenSource)
+
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(agentTokenUnaryInterceptor(agentToken)),
+		grpc.StreamInterceptor(agentTokenStreamInterceptor(agentToken)),
+	)
+
 	iapManager := engine.NewIAPManager()
 	nasManager := engine.NewNasManager()
 	k3sManager := engine.NewK3sManager()
@@ -1080,7 +1088,7 @@ func main() {
 				"message": fmt.Sprintf("Auto-joined K3s cluster at %s:6443", req.PeerIp),
 			})
 		})
-		apiServer = &http.Server{Handler: mux}
+		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}
 		go func() {
 			log.Printf("[Agent] Listening on REST Unix socket: %s", apiSocketPath)
 			if err := apiServer.Serve(apiListener); err != nil && err != http.ErrServerClosed {

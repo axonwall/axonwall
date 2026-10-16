@@ -103,6 +103,22 @@ function ensureInitializedYamlFiles(): void {
   }
 }
 
+// axonwalld requires a per-install token on every agent API call.
+// The daemon provisions it at /etc/axonwall/agent.token (0640
+// root:axonwall); AXONWALL_AGENT_TOKEN overrides for dev setups.
+function getAgentToken(): string | undefined {
+  if (process.env.AXONWALL_AGENT_TOKEN) return process.env.AXONWALL_AGENT_TOKEN;
+  try {
+    return (
+      fs
+        .readFileSync(process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token', 'utf8')
+        .trim() || undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body?: unknown): Promise<T> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(AGENT_API_SOCK)) {
@@ -115,9 +131,12 @@ function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body
         socketPath: AGENT_API_SOCK,
         path: reqPath,
         method,
-        headers: payload
-          ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
-          : undefined,
+        headers: {
+          ...(payload
+            ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+            : {}),
+          ...(getAgentToken() ? { 'X-Axonwall-Agent-Token': getAgentToken() } : {}),
+        },
       },
       (res) => {
         let data = '';
