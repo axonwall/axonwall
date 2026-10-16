@@ -219,9 +219,13 @@ for initrd in "${WORK_DIR}/iso/boot"/initramfs-*; do
       mkdir -p etc/apk/keys
       cp -a /etc/apk/keys/* etc/apk/keys/ 2>/dev/null || true
       cp -a "${SIGN_KEY_PUB}" etc/apk/keys/
-      if [[ -f init ]]; then
-        sed -i 's/apkflags="--initramfs-diskless-boot/apkflags="--initramfs-diskless-boot --allow-untrusted/' init
-      fi
+      # Signature verification stays ON: the initramfs apk must verify
+      # the offline repository. The APKINDEX is signed above with the
+      # build's abuild key and its public half was just copied into
+      # etc/apk/keys (alongside the stock Alpine keys that sign the
+      # fetched packages), so no --allow-untrusted escape hatch is
+      # needed. (Audit finding C3: this patch previously added
+      # --allow-untrusted to apkflags, defeating the signing entirely.)
       find . -print0 | cpio --null -ov --format=newc 2>/dev/null | gzip -9 > "${initrd}.tmp"
     )
     mv "${initrd}.tmp" "${initrd}"
