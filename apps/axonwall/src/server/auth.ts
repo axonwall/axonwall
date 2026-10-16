@@ -99,6 +99,11 @@ export async function performAuthentication(
         return { success: false, error: 'Invalid MFA Code' };
       }
     }
+    // Stamp the session so the minted JWT carries the
+    // pwd_change_required claim the middleware enforces on /api/*.
+    if (authRes.session) {
+      authRes.session.passwordChangeRequired = passwordChangeRequiredNow();
+    }
     return authRes;
   }
 
@@ -187,12 +192,18 @@ export async function verifyMfaSetup(secret: string, token: string) {
   return { success: true };
 }
 
-export async function isPasswordChangeRequired(): Promise<boolean> {
-  const session = await getSession();
-  if (!session || session.source !== 'local_admin') {
-    return false;
-  }
-
+/**
+ * The single source of truth for "the local admin password has never
+ * been changed": no .password_changed marker exists (the change
+ * handler writes one and deletes /etc/axonwall/initial-admin-password).
+ * Used at login time to stamp the session, and by
+ * isPasswordChangeRequired() for the console UI. The middleware
+ * enforces the resulting JWT claim on /api/* server-side -- until
+ * now the only enforcement was a client-side modal, and the API (and
+ * the daemon behind it) happily served a session that had never
+ * changed the default password.
+ */
+export function passwordChangeRequiredNow(): boolean {
   try {
     if (
       fs.existsSync('/var/lib/axonwall/.password_changed') ||
@@ -209,6 +220,14 @@ export async function isPasswordChangeRequired(): Promise<boolean> {
   }
 
   return true;
+}
+
+export async function isPasswordChangeRequired(): Promise<boolean> {
+  const session = await getSession();
+  if (!session || session.source !== 'local_admin') {
+    return false;
+  }
+  return passwordChangeRequiredNow();
 }
 
 export async function changeAdminPasswordAction(formData: FormData) {

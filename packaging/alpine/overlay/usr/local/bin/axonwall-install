@@ -379,6 +379,56 @@ GRUB_EOF
 grub-editenv /mnt/slot_a/boot/grub/grubenv create 2>/dev/null || true
 grub-editenv /mnt/slot_a/boot/grub/grubenv set active_slot=A bootcount=0 bootlimit=3 2>/dev/null || true
 
+# --- Admin credentials for the installed system -------------------------
+# The cloned rootfs carries the live image's credentials (web admin
+# 'admin' and the OS accounts, all with the default password). Offer to
+# set a real password now, stored the same way the Debian installer
+# stores it (scrypt hash in admin.env, 0600). Skipping keeps the
+# default; the installed system then forces a change at first sign-in
+# before its API unlocks.
+echo ""
+printf "Set a new admin password for the installed system (leave empty to keep the default for now): "
+stty -echo 2>/dev/null || true
+read -r NEW_ADMIN_PASS || NEW_ADMIN_PASS=""
+stty echo 2>/dev/null || true
+echo ""
+if [ -n "$NEW_ADMIN_PASS" ]; then
+  PW_TMP="/mnt/slot_a/tmp/.axonwall_pw_install.tmp"
+  printf '%s' "$NEW_ADMIN_PASS" > "$PW_TMP"
+  chmod 600 "$PW_TMP"
+  SCRYPT_HASH=""
+  if command -v node >/dev/null 2>&1; then
+    SCRYPT_HASH="$(node -e '
+      const crypto = require("crypto");
+      const fs = require("fs");
+      try {
+        const pw = fs.readFileSync(process.argv[1], "utf-8");
+        const salt = crypto.randomBytes(16).toString("hex");
+        const hash = crypto.scryptSync(pw, salt, 64, { N: 16384, r: 8, p: 1 }).toString("hex");
+        console.log("scrypt$" + salt + "$" + hash);
+      } catch (e) { process.exit(1); }
+    ' "$PW_TMP" 2>/dev/null || true)"
+  fi
+  rm -f "$PW_TMP"
+  if [ -n "$SCRYPT_HASH" ]; then
+    mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/var/lib/axonwall
+    printf 'LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n' "$SCRYPT_HASH" > /mnt/slot_a/etc/axonwall/admin.env
+    chmod 0600 /mnt/slot_a/etc/axonwall/admin.env
+    rm -f /mnt/slot_a/etc/axonwall/initial-admin-password
+    date -u +%Y-%m-%dT%H:%M:%SZ > /mnt/slot_a/etc/axonwall/.password_changed
+    date -u +%Y-%m-%dT%H:%M:%SZ > /mnt/slot_a/var/lib/axonwall/.password_changed
+    # OS accounts get the same password (best effort).
+    printf 'root:%s\n' "$NEW_ADMIN_PASS" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+    if grep -q '^axonwall:' /mnt/slot_a/etc/passwd 2>/dev/null; then
+      printf 'axonwall:%s\n' "$NEW_ADMIN_PASS" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+    fi
+    echo "[+] Admin password set for the installed system."
+  else
+    echo "[!] Could not hash the new password (node unavailable); keeping the default -- a change will be forced at first sign-in."
+  fi
+  NEW_ADMIN_PASS=""
+fi
+
 echo "[+] Cloning Slot A into Standby Slot B..."
 mount "$ROOT_B_DEV" /mnt/slot_b
 cp -a /mnt/slot_a/* /mnt/slot_b/ 2>/dev/null || true

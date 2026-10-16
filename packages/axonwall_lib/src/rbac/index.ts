@@ -103,4 +103,7 @@ export interface UserSession {
   roles: string[];
   privileges: Privilege[];
   exp: number;
+  /** True while the local admin still uses the never-changed default
+   *  password; carried into the session JWT as pwd_change_required. */
+  passwordChangeRequired?: boolean;
 }

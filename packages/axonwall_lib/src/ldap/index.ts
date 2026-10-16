@@ -215,6 +215,7 @@ export async function mintSupabaseToken(
     role: 'authenticated', // Supabase auth role for RLS
     app_roles: session.roles,
     app_privs: session.privileges,
+    ...(session.passwordChangeRequired ? { pwd_change_required: true } : {}),
     user_metadata: {
       displayName: session.displayName,
       email: session.email,
