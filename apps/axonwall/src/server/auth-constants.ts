@@ -21,5 +21,15 @@ export function getJwtSecret(): string {
       }
     }
   } catch {}
-  return 'super-secret-axonwall-jwt-signing-key-32-bytes!';
+  // Fail closed: a session secret must never fall back to a value
+  // printed in the source tree. Anyone who can read this repository
+  // could otherwise mint admin sessions for any deployment that
+  // forgot to configure one (the shipped Docker compose did exactly
+  // that). Packaged appliances always provision a random per-device
+  // secret into axonwall.env at first boot, so this only fires on
+  // misconfigured deployments -- which should fail loudly, here, at
+  // the first auth request, instead of silently running forgeable.
+  throw new Error(
+    'JWT_SECRET is not configured: set the JWT_SECRET environment variable or provision /etc/axonwall/axonwall.env (packaged appliances generate one at first boot). Refusing to sign or verify sessions with a fallback secret.'
+  );
 }
