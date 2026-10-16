@@ -148,22 +148,31 @@ mkdir -p config/includes.chroot/usr/sbin/
 
 # Fetch Headscale binary
 HEADSCALE_VERSION="0.29.4"
+# Pinned SHA-256 of the upstream release binary (verified from the
+# official GitHub release download, 2026-10-16). Bump with the version.
+HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
 if [[ ! -f config/includes.chroot/usr/sbin/headscale ]]; then
   echo "[+] Fetching Headscale v${HEADSCALE_VERSION}..."
   curl -fsSL -o config/includes.chroot/usr/sbin/headscale "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
+  echo "${HEADSCALE_SHA256}  config/includes.chroot/usr/sbin/headscale" | sha256sum -c -
   chmod +x config/includes.chroot/usr/sbin/headscale
 fi
 
 # Fetch Litestream binary for distributed SQLite replication
 LITESTREAM_VERSION="0.3.13"
+# Pinned SHA-256 of the upstream release tarball (verified from the
+# official GitHub release download, 2026-10-16). Bump with the version.
+# A failed download or checksum mismatch now fails the build (set -e):
+# this binary ships in /usr/sbin of every ISO, so silently shipping
+# without it -- or with an unverified copy -- is not an option.
+LITESTREAM_SHA256="eb75a3de5cab03875cdae9f5f539e6aedadd66607003d9b1e7a9077948818ba0"
 if [[ ! -f config/includes.chroot/usr/sbin/litestream ]]; then
   echo "[+] Fetching Litestream v${LITESTREAM_VERSION}..."
   LITE_TAR="$(mktemp -t litestream-XXXXXX.tar.gz)"
-  curl -fsSL -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" || true
-  if [[ -s "${LITE_TAR}" ]]; then
-    tar -xzf "${LITE_TAR}" -C config/includes.chroot/usr/sbin/ litestream 2>/dev/null || true
-    chmod +x config/includes.chroot/usr/sbin/litestream 2>/dev/null || true
-  fi
+  curl -fsSL -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz"
+  echo "${LITESTREAM_SHA256}  ${LITE_TAR}" | sha256sum -c -
+  tar -xzf "${LITE_TAR}" -C config/includes.chroot/usr/sbin/ litestream
+  chmod +x config/includes.chroot/usr/sbin/litestream
   rm -f "${LITE_TAR}"
 fi
 

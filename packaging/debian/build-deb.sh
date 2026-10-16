@@ -82,22 +82,30 @@ fi
 
 # Fetch Headscale binary if absent
 HEADSCALE_VERSION="0.29.4"
+# Pinned SHA-256 of the upstream release binary (verified from the
+# official GitHub release download, 2026-10-16). Bump with the version.
+HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
 if [[ ! -f "${WORK_DIR}/usr/sbin/headscale" ]]; then
   echo "[+] Downloading Headscale v${HEADSCALE_VERSION} binary..."
-  curl -fsSL -o "${WORK_DIR}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64" || true
-  chmod 755 "${WORK_DIR}/usr/sbin/headscale" 2>/dev/null || true
+  curl -fsSL -o "${WORK_DIR}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
+  echo "${HEADSCALE_SHA256}  ${WORK_DIR}/usr/sbin/headscale" | sha256sum -c -
+  chmod 755 "${WORK_DIR}/usr/sbin/headscale"
 fi
 
 # Fetch Litestream binary if absent
 LITESTREAM_VERSION="0.3.13"
+# Pinned SHA-256 of the upstream release tarball (verified from the
+# official GitHub release download, 2026-10-16). Bump with the version.
+# Download/verify failures abort the build (set -e) instead of silently
+# shipping a package without -- or with an unverified -- /usr/sbin binary.
+LITESTREAM_SHA256="eb75a3de5cab03875cdae9f5f539e6aedadd66607003d9b1e7a9077948818ba0"
 if [[ ! -f "${WORK_DIR}/usr/sbin/litestream" ]]; then
   echo "[+] Downloading Litestream v${LITESTREAM_VERSION} binary..."
   LITE_TAR="$(mktemp -t litestream-XXXXXX.tar.gz)"
-  curl -fsSL -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" || true
-  if [[ -s "${LITE_TAR}" ]]; then
-    tar -xzf "${LITE_TAR}" -C "${WORK_DIR}/usr/sbin/" litestream 2>/dev/null || true
-    chmod 755 "${WORK_DIR}/usr/sbin/litestream" 2>/dev/null || true
-  fi
+  curl -fsSL -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz"
+  echo "${LITESTREAM_SHA256}  ${LITE_TAR}" | sha256sum -c -
+  tar -xzf "${LITE_TAR}" -C "${WORK_DIR}/usr/sbin/" litestream
+  chmod 755 "${WORK_DIR}/usr/sbin/litestream"
   rm -f "${LITE_TAR}"
 fi
 
