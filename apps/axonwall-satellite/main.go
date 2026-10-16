@@ -20,10 +20,11 @@ import (
 )
 
 var (
-	coreURL         = flag.String("core", "wss://axonwall.local:2966/ws/satellite", "URL of the Axonwall Core Hub")
-	token           = flag.String("token", "", "Zero-Touch Provisioning (ZTP) Token")
-	satID           = flag.String("id", "", "Satellite Hardware ID (MAC or Serial)")
-	watchdogTimeout = flag.Int("watchdog", 60, "Watchdog timeout in seconds before rolling back nftables")
+	coreURL           = flag.String("core", "wss://axonwall.local:2966/ws/satellite", "URL of the Axonwall Core Hub")
+	token             = flag.String("token", "", "Zero-Touch Provisioning (ZTP) Token")
+	satID             = flag.String("id", "", "Satellite Hardware ID (MAC or Serial)")
+	watchdogTimeout   = flag.Int("watchdog", 60, "Watchdog timeout in seconds before rolling back nftables")
+	insecureBootstrap = flag.Bool("insecure-bootstrap", false, "INSECURE, provisioning only: skip hub TLS verification when no CA certificate is provisioned. Anyone able to intercept the connection can impersonate the hub, receive the ZTP token, and push arbitrary firewall/WireGuard commands that execute as root.")
 )
 
 type EnvelopeMessage struct {
@@ -73,33 +74,39 @@ func main() {
 	certPath := "/etc/axonwall/certs/satellite.crt"
 	keyPath := "/etc/axonwall/certs/satellite.key"
 
-	var tlsConfig *tls.Config
+	// The hub connection carries the fleet ZTP token and receives
+	// nftables/WireGuard commands that execute as root, so hub TLS is
+	// verified in every mode by default. When the appliance CA has been
+	// provisioned at /etc/axonwall/certs/ca.crt it is pinned as the root
+	// pool; otherwise the system roots are used. Skipping verification
+	// requires the explicit -insecure-bootstrap opt-in and is intended
+	// only for first-boot provisioning on a trusted network: nothing in
+	// the ZTP flow installs the client certificate automatically, so
+	// the old unconditional bootstrap mode was effectively permanent.
+	caCertPool, _ := x509.SystemCertPool()
+	if caCert, err := os.ReadFile("/etc/axonwall/certs/ca.crt"); err == nil && len(caCert) > 0 {
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM(caCert) {
+			caCertPool = pool
+			slog.Info("Pinning hub TLS verification to the appliance CA", "path", "/etc/axonwall/certs/ca.crt")
+		}
+	}
+
+	tlsConfig := &tls.Config{RootCAs: caCertPool}
 	if _, err := os.Stat(certPath); err == nil {
 		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 		if err != nil {
 			slog.Error("Failed to load mTLS certificates", "error", err)
 			os.Exit(1)
 		}
-
-		var caCertPool *x509.CertPool
-		if caCert, err := os.ReadFile("/etc/axonwall/certs/ca.crt"); err == nil && len(caCert) > 0 {
-			pool := x509.NewCertPool()
-			if pool.AppendCertsFromPEM(caCert) {
-				caCertPool = pool
-			}
-		}
-
-		tlsConfig = &tls.Config{
-			Certificates:       []tls.Certificate{cert},
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: false,
-		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
 		slog.Info("Running in secure mTLS mode")
+	} else if *insecureBootstrap {
+		tlsConfig.RootCAs = nil
+		tlsConfig.InsecureSkipVerify = true // explicit operator opt-in, see flag help
+		slog.Warn("Running in INSECURE ZTP bootstrap mode: hub TLS is NOT verified (-insecure-bootstrap). A network attacker can impersonate the hub, capture the ZTP token, and push arbitrary firewall/WireGuard configuration.")
 	} else {
-		tlsConfig = &tls.Config{
-			InsecureSkipVerify: true, // For bootstrap; mTLS cert installed post-ZTP
-		}
-		slog.Warn("Running in ZTP Bootstrap mode with InsecureSkipVerify")
+		slog.Info("Running with verified hub TLS (ZTP token auth; no client certificate provisioned)")
 	}
 
 	dialer := websocket.Dialer{
