@@ -238,14 +238,17 @@ export function ConsoleSidebar() {
   const pathname = usePathname();
   const [search, setSearch] = useState('');
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  // Defaults mirror CoreCapabilitiesSchema (firewall on, NAS/K3s opt-in)
+  // and the pre-fetch state must not advertise menus for roles that are
+  // not enabled.
   const [capabilities, setCapabilities] = useState<{
     firewallEnabled: boolean;
     nasEnabled: boolean;
     k3sEnabled: boolean;
   }>({
     firewallEnabled: true,
-    nasEnabled: true,
-    k3sEnabled: true,
+    nasEnabled: false,
+    k3sEnabled: false,
   });
 
   useEffect(() => {
@@ -254,10 +257,17 @@ export function ConsoleSidebar() {
       getCurrentDesiredState()
         .then((st) => {
           if (!mounted) return;
+          // Derive exactly like the Plugin Store and the server-side
+          // consumers: an unset capability means the role is DISABLED
+          // (CoreCapabilitiesSchema defaults nasEnabled/k3sEnabled to
+          // false, and baseline state carries no capabilities key at
+          // all). The previous `?? true` fallbacks made the sidebar show
+          // the Storage and K3s menus on systems where both roles were
+          // disabled or never enabled.
           setCapabilities({
             firewallEnabled: st.capabilities?.firewallEnabled !== false,
-            nasEnabled: Boolean(st.capabilities?.nasEnabled ?? st.nas?.enabled ?? true),
-            k3sEnabled: Boolean(st.capabilities?.k3sEnabled ?? st.k3s?.enabled ?? true),
+            nasEnabled: Boolean(st.capabilities?.nasEnabled ?? st.nas?.enabled),
+            k3sEnabled: Boolean(st.capabilities?.k3sEnabled ?? st.k3s?.enabled),
           });
         })
         .catch(() => {});
