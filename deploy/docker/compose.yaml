@@ -25,6 +25,10 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
+      # Required: the UI refuses to sign/verify sessions without a real
+      # secret (there is no fallback). Generate one per deployment:
+      #   JWT_SECRET=$(openssl rand -hex 32)
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (see comment above)}
       - SUPABASE_URL=http://supabase-db:54321
       - SUPABASE_ANON_KEY=local-dev-anon-key
       - LDAP_URL=ldap://openldap:389
