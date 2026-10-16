@@ -24,3 +24,19 @@ updates:
     directory: "/apps/terraform-provider-axonwall"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker-compose"
+    directory: "/deploy/docker"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/deploy/docker"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/packaging/iso"
+    schedule:
+      interval: "weekly"
