@@ -40,11 +40,10 @@ export async function getSession(): Promise<UserSession | null> {
     const authHeader = reqHeaders.get('authorization');
     if (authHeader && authHeader.startsWith('Bearer ')) {
       token = authHeader.substring(7);
-      if (token === 'dev-test-token-123') {
-        if (process.env.NODE_ENV !== 'production') {
-          return { userId: '1', username: 'admin', source: 'local_admin', privileges: [], roles: ['admin'], exp: Date.now() / 1000 + 3600 } as any;
-        }
-      }
+      // No development backdoor tokens: a Bearer credential is only
+      // ever a real session JWT verified below. (A hardcoded
+      // 'dev-test-token-123' previously minted an admin session in
+      // any non-production deployment.)
     }
   }
 
