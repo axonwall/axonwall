@@ -70,16 +70,17 @@ jobs:
 
       - name: Compute Go modules hash
         id: go-mod-hash
+        shell: bash
         run: |
           set -euo pipefail
+
           # Find tracked go.sum files in the repo (root and under apps/)
-          matches=$(git ls-files 'go.sum' 'apps/**/go.sum' || true)
-          if [ -z "$matches" ]; then
+          # Use git ls-files -z to produce null-separated output and xargs -0 to handle spaces/newlines safely.
+          if ! git ls-files 'go.sum' 'apps/**/go.sum' | grep -q .; then
             echo "hash=nogomodfiles" >> "$GITHUB_OUTPUT"
           else
-            # Combine file contents deterministically and hash them
-            # Use LC_ALL=C to ensure consistent sorting across runners
-            sha=$(LC_ALL=C sh -c "for f in $matches; do printf '%s\0' \"\$f\" && sha256sum \"\$f\"; done" | sha256sum | awk '{print $1}')
+            # Create a null-separated list and compute sha256 of each file, then hash the combined output.
+            sha=$(git ls-files -z 'go.sum' 'apps/**/go.sum' | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
             echo "hash=$sha" >> "$GITHUB_OUTPUT"
           fi
 
