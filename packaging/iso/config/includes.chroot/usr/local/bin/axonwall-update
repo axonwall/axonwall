@@ -140,21 +140,41 @@ DEB_TMP=""
 if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
   DEB_URL="https://github.com/axonwall/axonwall_monorepo/releases/download/v${CLEAN_VER}/axonwall_${CLEAN_VER}_amd64.deb"
   SHA_URL="${DEB_URL}.sha256"
+  SIG_URL="${SHA_URL}.sig"
+  RELEASE_PUBKEY="/etc/axonwall/release-signing.pub"
   CANDIDATE_DEB="/tmp/axonwall_${CLEAN_VER}_amd64.deb"
   echo "[+] Checking release artifact: ${DEB_URL}"
   if curl -fsSL --connect-timeout 4 --max-time 25 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
-    if curl -fsSL --connect-timeout 4 --max-time 10 -o "${CANDIDATE_DEB}.sha256" "${SHA_URL}" 2>/dev/null; then
+    # Fail closed: the .deb is only ever used after verification. A
+    # checksum that cannot be fetched discards the download -- a
+    # missing checksum must never mean "unverified is fine" for code
+    # that will run as root.
+    if ! curl -fsSL --connect-timeout 4 --max-time 10 -o "${CANDIDATE_DEB}.sha256" "${SHA_URL}" 2>/dev/null; then
+      echo "[-] ERROR: could not fetch SHA-256 checksum for ${DEB_URL}; discarding unverified download."
+      rm -f "${CANDIDATE_DEB}"
+    else
       EXPECTED_HASH="$(awk '{print $1}' "${CANDIDATE_DEB}.sha256" | head -n 1)"
       ACTUAL_HASH="$(sha256sum "${CANDIDATE_DEB}" | awk '{print $1}')"
-      if [ -n "$EXPECTED_HASH" ] && [ "$EXPECTED_HASH" = "$ACTUAL_HASH" ]; then
-        echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
-        DEB_TMP="${CANDIDATE_DEB}"
-      else
+      if [ -z "$EXPECTED_HASH" ] || [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
         echo "[-] Warning: SHA-256 mismatch for downloaded package, falling back to local image sync."
         rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256"
+      elif [ -s "$RELEASE_PUBKEY" ]; then
+        # A release signing key is provisioned: the checksum itself
+        # must carry a valid detached signature (${SHA_URL}.sig, made
+        # by the release workflow) before the package is accepted.
+        if curl -fsSL --connect-timeout 4 --max-time 10 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null \
+          && openssl dgst -sha256 -verify "$RELEASE_PUBKEY" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
+          echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
+          DEB_TMP="${CANDIDATE_DEB}"
+        else
+          echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download."
+          rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
+        fi
+      else
+        echo "[!] Warning: no release signing key at ${RELEASE_PUBKEY}; relying on SHA-256 + TLS only."
+        echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
+        DEB_TMP="${CANDIDATE_DEB}"
       fi
-    else
-      DEB_TMP="${CANDIDATE_DEB}"
     fi
   fi
 fi

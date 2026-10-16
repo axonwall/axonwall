@@ -57,6 +57,18 @@ jobs:
         run: |
           ./packaging/debian/build-deb.sh
 
+      - name: Sign Debian Package Checksum (if signing key configured)
+        env:
+          AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
+        if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
+        run: |
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
+          for sha in packaging/debian/output/*.deb.sha256; do
+            openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
+          done
+
       - name: Upload Debian Package Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -64,6 +76,7 @@ jobs:
           path: |
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
+            packaging/debian/output/*.deb.sha256.sig
           retention-days: 7
 
       - name: Build Alpine Appliance ISOs (Virt, Minimal, LTS)
@@ -152,6 +165,7 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
+            packaging/debian/output/*.deb.sha256.sig
             packaging/alpine/output/*.iso
             packaging/alpine/output/*.iso.sha256
 
@@ -181,6 +195,7 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
+            packaging/debian/output/*.deb.sha256.sig
             packaging/alpine/output/*.iso
             packaging/alpine/output/*.iso.sha256
 
