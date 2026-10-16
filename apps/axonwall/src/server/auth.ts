@@ -16,6 +16,12 @@ import {
 import type { UserSession } from '@axonwall/lib/rbac';
 
 import { SESSION_COOKIE, getJwtSecret } from './auth-constants';
+import {
+  bumpSessionEpoch,
+  isSessionRevoked,
+  revokeTokenJti,
+  stampSessionEpoch,
+} from './session-revocation';
 
 const LDAP_CONFIG: LdapConfig = {
   url: process.env.LDAP_URL || 'ldap://127.0.0.1:389',
@@ -48,7 +54,13 @@ export async function getSession(): Promise<UserSession | null> {
   }
 
   if (!token) return null;
-  return verifyToken(token, getJwtSecret());
+  const session = await verifyToken(token, getJwtSecret());
+  if (!session) return null;
+  // Server-side revocation (audit B-09): logout denylists the token's
+  // jti and a password change bumps the session epoch; either one ends
+  // the session here instead of at JWT expiry.
+  if (isSessionRevoked(session)) return null;
+  return session;
 }
 
 export async function performAuthentication(
@@ -103,6 +115,7 @@ export async function performAuthentication(
     // pwd_change_required claim the middleware enforces on /api/*.
     if (authRes.session) {
       authRes.session.passwordChangeRequired = passwordChangeRequiredNow();
+      stampSessionEpoch(authRes.session);
     }
     return authRes;
   }
@@ -119,7 +132,9 @@ export async function performAuthentication(
       return { success: false, error: 'LDAP is enabled but LDAP_BIND_PASSWORD is not configured on this appliance' };
     }
     try {
-      return await authenticateLdap(LDAP_CONFIG, username, password);
+      const ldapRes = await authenticateLdap(LDAP_CONFIG, username, password);
+      if (ldapRes.session) stampSessionEpoch(ldapRes.session);
+      return ldapRes;
     } catch (err: any) {
       return { success: false, error: `LDAP authentication failed: ${err.message}` };
     }
@@ -164,6 +179,11 @@ export async function loginAction(arg1: any, arg2?: any) {
 
 export async function logoutAction() {
   const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE)?.value;
+  if (token) {
+    const session = await verifyToken(token, getJwtSecret());
+    if (session?.jti) revokeTokenJti(session.jti);
+  }
   cookieStore.delete(SESSION_COOKIE);
   redirect('/login');
 }
@@ -307,6 +327,9 @@ export async function changeAdminPasswordAction(formData: FormData) {
     if (fs.existsSync('/etc/axonwall/initial-admin-password')) {
       fs.unlinkSync('/etc/axonwall/initial-admin-password');
     }
+
+    // A password change ends every outstanding session (audit B-09).
+    bumpSessionEpoch();
 
     process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
     return { success: true };

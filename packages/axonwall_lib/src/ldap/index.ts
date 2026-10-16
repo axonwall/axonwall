@@ -216,6 +216,7 @@ export async function mintSupabaseToken(
     app_roles: session.roles,
     app_privs: session.privileges,
     ...(session.passwordChangeRequired ? { pwd_change_required: true } : {}),
+    session_epoch: session.sessionEpoch ?? 0,
     user_metadata: {
       displayName: session.displayName,
       email: session.email,
@@ -223,6 +224,7 @@ export async function mintSupabaseToken(
     },
   })
     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+    .setJti(crypto.randomUUID())
     .setIssuedAt()
     .setExpirationTime(session.exp)
     .sign(secretKey);
@@ -248,6 +250,8 @@ export async function verifyToken(
       roles: (payload.app_roles as string[]) || [],
       privileges: (payload.app_privs as Privilege[]) || [],
       exp: (payload.exp as number) || 0,
+      sessionEpoch: (payload.session_epoch as number) || 0,
+      jti: payload.jti as string | undefined,
     };
   } catch {
     return null;
