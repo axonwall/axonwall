@@ -51,7 +51,96 @@ export async function getSession(): Promise<UserSession | null> {
   return verifyToken(token, getJwtSecret());
 }
 
+
+// --- Local-admin MFA (TOTP) state -------------------------------------
+// The enrolled secret lives in /etc/axonwall/mfa.env (mode 0600) -- the
+// file the console's MFA reset removes -- with LOCAL_ADMIN_MFA_SECRET in
+// the process environment as an operator override. Until enrollment
+// actually persisted the secret (audit B-08), MFA could never be on.
+const MFA_ENV_PATH = '/etc/axonwall/mfa.env';
+
+function readMfaEnv(): Map<string, string> {
+  const values = new Map<string, string>();
+  try {
+    for (const line of fs.readFileSync(MFA_ENV_PATH, 'utf-8').split('\n')) {
+      const trimmed = line.trim();
+      const eq = trimmed.indexOf('=');
+      if (eq > 0) values.set(trimmed.substring(0, eq), trimmed.substring(eq + 1));
+    }
+  } catch {}
+  return values;
+}
+
+function getMfaSecret(): string | undefined {
+  return process.env.LOCAL_ADMIN_MFA_SECRET || readMfaEnv().get('LOCAL_ADMIN_MFA_SECRET') || undefined;
+}
+
+function writeMfaEnv(updates: Record<string, string>): void {
+  const values = readMfaEnv();
+  for (const [k, v] of Object.entries(updates)) values.set(k, v);
+  const content = [...values.entries()].map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+  fs.writeFileSync(MFA_ENV_PATH, content, { mode: 0o600 });
+  try { fs.chmodSync(MFA_ENV_PATH, 0o600); } catch {}
+}
+
+// otplib v13 is plugin-based; the v12 'authenticator' export the MFA
+// code used to call no longer exists (setup threw at runtime).
+function totpPlugins() {
+  const { NobleCryptoPlugin, ScureBase32Plugin } = require('otplib');
+  return { crypto: new NobleCryptoPlugin(), base32: new ScureBase32Plugin() };
+}
+
+// Verifies a login TOTP code with replay protection: the accepted time
+// step is recorded in mfa.env and passed as afterTimeStep on the next
+// check, so a code can never be used twice (audit B-07).
+async function verifyTotpCode(secret: string, token: string): Promise<boolean> {
+  const { verify } = require('otplib');
+  const lastStep = Number(readMfaEnv().get('LOCAL_ADMIN_MFA_LAST_STEP') || 0);
+  const options: Record<string, unknown> = { secret, token, ...totpPlugins(), epochTolerance: 30 };
+  if (lastStep > 0) options.afterTimeStep = lastStep;
+  const result = await verify(options);
+  if (!result.valid) return false;
+  if (typeof result.timeStep === 'number' && result.timeStep > lastStep) {
+    try { writeMfaEnv({ LOCAL_ADMIN_MFA_LAST_STEP: String(result.timeStep) }); } catch {}
+  }
+  return true;
+}
+
+// --- Login throttling (audit B-07) -------------------------------------
+// performAuthentication is the single choke point for password and
+// TOTP logins (login action and /api/auth/login both call it). Five
+// consecutive failures lock the account for five minutes; a success
+// clears the counter. In-memory only -- a UI restart clears lockouts --
+// and the tty1 console break-glass is unaffected.
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
+const loginFailures = new Map<string, { count: number; lockedUntil: number }>();
+
 export async function performAuthentication(
+  username: string,
+  password: string,
+  totpCode?: string
+): Promise<AuthResult> {
+  const key = (username || '').toLowerCase();
+  const now = Date.now();
+  const record = loginFailures.get(key);
+  if (record && record.lockedUntil > now) {
+    return { success: false, error: 'Too many failed sign-in attempts. Try again in a few minutes.' };
+  }
+  const result = await performAuthenticationInner(username, password, totpCode);
+  if (result.success) {
+    loginFailures.delete(key);
+  } else {
+    const count = (record && record.lockedUntil <= now ? record.count : 0) + 1;
+    loginFailures.set(key, {
+      count,
+      lockedUntil: count >= LOGIN_MAX_FAILURES ? now + LOGIN_LOCKOUT_MS : 0,
+    });
+  }
+  return result;
+}
+
+async function performAuthenticationInner(
   username: string,
   password: string,
   totpCode?: string
@@ -88,14 +177,12 @@ export async function performAuthentication(
     }
 
     // 1.5 Enforce MFA if required
-    const mfaSecret = process.env.LOCAL_ADMIN_MFA_SECRET;
+    const mfaSecret = getMfaSecret();
     if (mfaSecret && authRes.success) {
       if (!totpCode) {
         return { success: false, error: 'MFA Code (TOTP) is required for this account' };
       }
-      const { authenticator } = require('otplib');
-      const isValid = authenticator.verify({ token: totpCode, secret: mfaSecret });
-      if (!isValid) {
+      if (!(await verifyTotpCode(mfaSecret, totpCode))) {
         return { success: false, error: 'Invalid MFA Code' };
       }
     }
@@ -167,9 +254,10 @@ export async function generateMfaSetup() {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
 
-  const { authenticator } = require('otplib');
-  const secret = authenticator.generateSecret();
-  const otpauth = authenticator.keyuri(session.username, 'Axonwall', secret);
+  const { generateSecret, generateURI } = require('otplib');
+  const plugins = totpPlugins();
+  const secret = generateSecret(plugins);
+  const otpauth = generateURI({ issuer: 'Axonwall', label: session.username, secret, ...plugins });
 
   const QRCode = require('qrcode');
   const qrDataUrl = await QRCode.toDataURL(otpauth);
@@ -181,14 +269,27 @@ export async function verifyMfaSetup(secret: string, token: string) {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
 
-  const { authenticator } = require('otplib');
-  const isValid = authenticator.verify({ token, secret });
-  
-  if (!isValid) {
+  const { verify } = require('otplib');
+  const result = await verify({ secret, token, ...totpPlugins(), epochTolerance: 30 });
+
+  if (!result.valid) {
     return { success: false, error: 'Invalid TOTP code.' };
   }
 
-  // In a real app, save the secret to the user's LDAP/DB profile here.
+  // Persist the enrollment (audit B-08): the secret is written to
+  // /etc/axonwall/mfa.env -- the same file the console's MFA reset
+  // removes -- together with the accepted time step, so the enrollment
+  // code cannot be replayed at login. Until this was written, setup
+  // saved nothing anywhere and the advertised MFA was inert.
+  try {
+    writeMfaEnv({
+      LOCAL_ADMIN_MFA_SECRET: secret,
+      LOCAL_ADMIN_MFA_LAST_STEP: String(result.timeStep ?? 0),
+    });
+    process.env.LOCAL_ADMIN_MFA_SECRET = secret;
+  } catch {
+    return { success: false, error: 'Could not save the MFA configuration on this appliance.' };
+  }
   return { success: true };
 }
 
