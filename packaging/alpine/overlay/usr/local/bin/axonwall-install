@@ -274,6 +274,26 @@ for dir in bin etc home lib opt root sbin usr var; do
 done
 mkdir -p /mnt/slot_a/dev /mnt/slot_a/proc /mnt/slot_a/sys /mnt/slot_a/run /mnt/slot_a/tmp /mnt/slot_a/boot
 
+# Install the REAL kernel module tree. On the live system /lib/modules is
+# a symlink into the modloop mount (/.modloop/modules); the cp -a above
+# preserves that symlink, and on the installed disk nothing ever mounts
+# modloop, so the symlink dangles and the installed system has NO loadable
+# kernel modules at all -- most visibly af_packet, without which dhcpcd
+# and udhcpc both die ("Address family not supported by protocol") and
+# IPv4 never gets a DHCP lease (IPv6 SLAAC keeps working, which masks the
+# failure). Replace the copied symlink with the mounted tree itself; a tar
+# pipe is used because it reads file contents through the mount instead
+# of copying the link. The Slot B clone below copies this real directory.
+if [ -e /lib/modules ] && { [ -L /mnt/slot_a/lib/modules ] || [ ! -d /mnt/slot_a/lib/modules ]; }; then
+  echo "[+] Installing kernel modules to Slot A..."
+  rm -rf /mnt/slot_a/lib/modules
+  mkdir -p /mnt/slot_a/lib/modules
+  ( cd /lib/modules && tar cf - . ) | ( cd /mnt/slot_a/lib/modules && tar xf - ) || true
+  if ! ls /mnt/slot_a/lib/modules/*/modules.dep >/dev/null 2>&1; then
+    echo "[!] WARNING: kernel modules did not copy cleanly; the installed system may lack loadable modules."
+  fi
+fi
+
 if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
   mkdir -p /mnt/slot_a/etc/mdadm
   mdadm --detail --scan > /mnt/slot_a/etc/mdadm.conf 2>/dev/null || true
@@ -387,11 +407,38 @@ grub-editenv /mnt/slot_a/boot/grub/grubenv set active_slot=A bootcount=0 bootlim
 # default; the installed system then forces a change at first sign-in
 # before its API unlocks.
 echo ""
-printf "Set a new admin password for the installed system (leave empty to keep the default for now): "
-stty -echo 2>/dev/null || true
-read -r NEW_ADMIN_PASS || NEW_ADMIN_PASS=""
-stty echo 2>/dev/null || true
-echo ""
+# Ask twice and require a match before anything is set: a typo here would
+# otherwise lock the operator out of the freshly installed system. Three
+# mismatched attempts fall back to keeping the default password (with the
+# forced change at first sign-in, same as skipping).
+NEW_ADMIN_PASS=""
+PW_ATTEMPT=0
+while [ $PW_ATTEMPT -lt 3 ]; do
+  PW_ATTEMPT=$((PW_ATTEMPT + 1))
+  printf "Set a new admin password for the installed system (leave empty to keep the default for now): "
+  stty -echo 2>/dev/null || true
+  read -r PW_FIRST || PW_FIRST=""
+  stty echo 2>/dev/null || true
+  echo ""
+  if [ -z "$PW_FIRST" ]; then
+    break
+  fi
+  printf "Confirm the new admin password: "
+  stty -echo 2>/dev/null || true
+  read -r PW_SECOND || PW_SECOND=""
+  stty echo 2>/dev/null || true
+  echo ""
+  if [ "$PW_FIRST" = "$PW_SECOND" ]; then
+    NEW_ADMIN_PASS="$PW_FIRST"
+    PW_FIRST=""; PW_SECOND=""
+    break
+  fi
+  PW_FIRST=""; PW_SECOND=""
+  echo "[!] Passwords do not match -- please try again."
+done
+if [ -z "$NEW_ADMIN_PASS" ] && [ $PW_ATTEMPT -ge 3 ]; then
+  echo "[!] No matching password after 3 attempts; keeping the default -- a change will be forced at first sign-in."
+fi
 if [ -n "$NEW_ADMIN_PASS" ]; then
   PW_TMP="/mnt/slot_a/tmp/.axonwall_pw_install.tmp"
   printf '%s' "$NEW_ADMIN_PASS" > "$PW_TMP"
