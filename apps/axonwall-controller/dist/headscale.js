@@ -1,115 +1,162 @@
-import http from 'http';
+import { execFile } from 'child_process';
+import fs from 'fs';
 const HEADSCALE_SOCKET_PATH = process.env.HEADSCALE_SOCKET_PATH || '/run/headscale/headscale.sock';
-/**
- * Make a request to the Headscale UNIX socket REST API.
- */
-function headscaleRequest(method, path, body) {
+const HEADSCALE_CONFIG_PATH = process.env.HEADSCALE_CONFIG_PATH || '/etc/headscale/config.yaml';
+const HEADSCALE_BIN = process.env.HEADSCALE_BIN || '/usr/sbin/headscale';
+function getHeadscaleBin() {
+    if (fs.existsSync(HEADSCALE_BIN))
+        return HEADSCALE_BIN;
+    if (fs.existsSync('/usr/local/bin/headscale'))
+        return '/usr/local/bin/headscale';
+    return 'headscale';
+}
+function runHeadscale(args) {
     return new Promise((resolve, reject) => {
-        const options = {
-            socketPath: HEADSCALE_SOCKET_PATH,
-            path: path,
-            method: method,
-            timeout: 5000,
-            headers: {
-                'Content-Type': 'application/json',
-            },
-        };
-        const req = http.request(options, (res) => {
-            let data = '';
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            res.on('end', () => {
-                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                    try {
-                        resolve(JSON.parse(data));
-                    }
-                    catch (e) {
-                        resolve(data);
-                    }
-                }
-                else {
-                    reject(new Error(`Headscale API error ${res.statusCode}: ${data}`));
-                }
-            });
-        });
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error(`Headscale request timed out after 5000ms: ${path}`));
-        });
-        req.on('error', (e) => {
-            reject(new Error(`Failed to connect to Headscale: ${e.message}`));
-        });
-        if (body) {
-            req.write(JSON.stringify(body));
+        if (!fs.existsSync(HEADSCALE_SOCKET_PATH)) {
+            return reject(new Error(`Headscale service is not running (${HEADSCALE_SOCKET_PATH} not found). Ensure the headscale service is started.`));
         }
-        req.end();
+        const bin = getHeadscaleBin();
+        const fullArgs = fs.existsSync(HEADSCALE_CONFIG_PATH)
+            ? ['--config', HEADSCALE_CONFIG_PATH, ...args]
+            : args;
+        execFile(bin, fullArgs, { timeout: 10000 }, (err, stdout, stderr) => {
+            if (err) {
+                return reject(new Error(stderr?.trim() || err.message));
+            }
+            const trimmed = stdout.trim();
+            if (!trimmed || trimmed === 'null') {
+                return resolve(null);
+            }
+            try {
+                resolve(JSON.parse(trimmed));
+            }
+            catch {
+                resolve(trimmed);
+            }
+        });
     });
 }
 // -----------------------------------------------------------------------------
 // Users
 // -----------------------------------------------------------------------------
 export async function listUsers() {
-    const data = await headscaleRequest('GET', '/api/v1/user');
-    return data.users || [];
+    const data = await runHeadscale(['users', 'list', '-o', 'json']);
+    if (!Array.isArray(data))
+        return [];
+    return data.map((u) => ({
+        id: u.id,
+        name: u.name,
+        createdAt: u.created_at ? new Date((u.created_at.seconds || 0) * 1000).toISOString() : new Date().toISOString(),
+    }));
 }
 export async function createUser(name) {
-    const data = await headscaleRequest('POST', '/api/v1/user', { name });
-    return data.user;
+    const data = await runHeadscale(['users', 'create', name, '-o', 'json']);
+    return {
+        id: data?.id,
+        name: data?.name || name,
+        createdAt: data?.created_at ? new Date((data.created_at.seconds || 0) * 1000).toISOString() : new Date().toISOString(),
+    };
 }
 export async function deleteUser(name) {
-    return headscaleRequest('DELETE', `/api/v1/user/${encodeURIComponent(name)}`);
+    return runHeadscale(['users', 'destroy', name, '--force']);
 }
 // -----------------------------------------------------------------------------
 // PreAuthKeys
 // -----------------------------------------------------------------------------
 export async function createPreAuthKey(user, reusable, ephemeral, expiration) {
-    const data = await headscaleRequest('POST', '/api/v1/preauthkey', {
-        user,
-        reusable,
-        ephemeral,
-        expiration, // e.g., '2023-12-31T23:59:59Z'
-    });
-    return data.preAuthKey;
+    let userId = user;
+    if (typeof user === 'string' && isNaN(Number(user))) {
+        const users = await listUsers();
+        const found = users.find((u) => u.name === user);
+        if (found) {
+            userId = found.id;
+        }
+        else {
+            const created = await createUser(user);
+            userId = created.id;
+        }
+    }
+    const args = ['preauthkeys', 'create', '--user', String(userId), '-o', 'json'];
+    if (reusable)
+        args.push('--reusable');
+    if (ephemeral)
+        args.push('--ephemeral');
+    if (expiration) {
+        const ms = new Date(expiration).getTime() - Date.now();
+        if (ms > 0) {
+            const hours = Math.max(1, Math.round(ms / (1000 * 60 * 60)));
+            args.push('--expiration', `${hours}h`);
+        }
+    }
+    const data = await runHeadscale(args);
+    return {
+        id: data?.id,
+        key: data?.key,
+        reusable: data?.reusable,
+        ephemeral: data?.ephemeral,
+        expiration: data?.expiration ? new Date((data.expiration.seconds || 0) * 1000).toISOString() : undefined,
+        user: data?.user || { id: userId, name: String(user) },
+    };
 }
 export async function listPreAuthKeys(user) {
-    const params = user ? `?user=${encodeURIComponent(user)}` : '';
-    const data = await headscaleRequest('GET', `/api/v1/preauthkey${params}`);
-    return data.preAuthKeys || [];
+    const data = await runHeadscale(['preauthkeys', 'list', '-o', 'json']);
+    if (!Array.isArray(data))
+        return [];
+    const keys = data.map((k) => ({
+        id: k.id,
+        key: k.key,
+        reusable: k.reusable,
+        ephemeral: k.ephemeral,
+        used: k.used,
+        expiration: k.expiration ? new Date((k.expiration.seconds || 0) * 1000).toISOString() : undefined,
+        createdAt: k.created_at ? new Date((k.created_at.seconds || 0) * 1000).toISOString() : undefined,
+        user: k.user,
+    }));
+    if (user) {
+        return keys.filter((k) => k.user?.name === user || String(k.user?.id) === String(user));
+    }
+    return keys;
 }
 export async function expirePreAuthKey(user, key) {
-    const data = await headscaleRequest('POST', '/api/v1/preauthkey/expire', {
-        user,
-        key,
-    });
-    return data;
+    return runHeadscale(['preauthkeys', 'expire', key]);
 }
 // -----------------------------------------------------------------------------
-// Machines
+// Machines / Nodes
 // -----------------------------------------------------------------------------
 export async function listMachines(user) {
-    const params = user ? `?user=${encodeURIComponent(user)}` : '';
-    const data = await headscaleRequest('GET', `/api/v1/machine${params}`);
-    return data.machines || [];
+    const data = await runHeadscale(['nodes', 'list', '-o', 'json']);
+    if (!Array.isArray(data))
+        return [];
+    const nodes = data.map((n) => ({
+        id: n.id,
+        name: n.given_name || n.name,
+        ipAddresses: n.ip_addresses || [],
+        user: n.user,
+        lastSeen: n.last_seen ? new Date(n.last_seen).toISOString() : null,
+        online: n.online ?? false,
+        routes: n.approved_routes || [],
+    }));
+    if (user) {
+        return nodes.filter((n) => n.user?.name === user || String(n.user?.id) === String(user));
+    }
+    return nodes;
 }
 export async function deleteMachine(machineId) {
-    return headscaleRequest('DELETE', `/api/v1/machine/${machineId}`);
+    return runHeadscale(['nodes', 'delete', '-i', String(machineId), '--force']);
 }
 export async function renameMachine(machineId, newName) {
-    return headscaleRequest('POST', `/api/v1/machine/${machineId}/rename/${encodeURIComponent(newName)}`);
+    return runHeadscale(['nodes', 'rename', newName, '-i', String(machineId)]);
 }
 export async function expireMachine(machineId) {
-    return headscaleRequest('POST', `/api/v1/machine/${machineId}/expire`);
+    return runHeadscale(['nodes', 'expire', '-i', String(machineId)]);
 }
 // -----------------------------------------------------------------------------
 // Routes
 // -----------------------------------------------------------------------------
 export async function getMachineRoutes(machineId) {
-    const data = await headscaleRequest('GET', `/api/v1/machine/${machineId}/routes`);
-    return data.routes || [];
+    const data = await runHeadscale(['nodes', 'list-routes', '-i', String(machineId), '-o', 'json']);
+    return Array.isArray(data) ? data : [];
 }
 export async function enableMachineRoutes(machineId, routes) {
-    // Routes should be an array of string CIDRs, e.g. ["10.0.0.0/24"]
-    const data = await headscaleRequest('POST', `/api/v1/machine/${machineId}/routes`, { routes });
-    return data.routes || [];
+    return runHeadscale(['nodes', 'approve-routes', '-i', String(machineId), '--routes', routes.join(',')]);
 }

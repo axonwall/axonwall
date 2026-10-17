@@ -312,6 +312,18 @@ if [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]];
   ln -sf /usr/sbin/axonwall-satellite "${OVL}/usr/share/axonwall/satellites/axonwall-satellite-amd64"
 fi
 
+HEADSCALE_VERSION="0.29.4"
+HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" ]]; then
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" "${OVL}/usr/sbin/headscale"
+  chmod +x "${OVL}/usr/sbin/headscale"
+elif [[ ! -f "${OVL}/usr/sbin/headscale" ]]; then
+  echo "[+] Fetching Headscale v${HEADSCALE_VERSION} for Alpine overlay..."
+  curl -fsSL -o "${OVL}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
+  echo "${HEADSCALE_SHA256}  ${OVL}/usr/sbin/headscale" | sha256sum -c -
+  chmod +x "${OVL}/usr/sbin/headscale"
+fi
+
 # Copy Next.js standalone UI & Controller
 if [[ -d "${REPO_ROOT}/apps/axonwall/.next/standalone" ]]; then
   cp -a "${REPO_ROOT}/apps/axonwall/.next/standalone/"* "${OVL}/opt/axonwall/"
@@ -359,7 +371,7 @@ done
 for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
 done
-for svc in sshd axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+for svc in sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
 done
 for svc in mount-ro killprocs savecache; do

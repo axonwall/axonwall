@@ -23,7 +23,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
-ReadWritePaths=/opt/axonwall /var/lib/axonwall /etc/axonwall /run/axonwall
+ReadWritePaths=/opt/axonwall /var/lib/axonwall /etc/axonwall -/run/headscale /run/axonwall
 
 [Install]
 WantedBy=multi-user.target

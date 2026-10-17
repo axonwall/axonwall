@@ -11,11 +11,12 @@ prefixes:
   v6: fd7a:115c:a1e0::/48
 derp:
   server:
-    enabled: false
+    enabled: true
     region_id: 999
     region_code: "headscale"
     region_name: "Headscale Embedded DERP"
-    stun_listen_addr: "0.0.0.0:3478"
+    stun_listen_addr: "127.0.0.1:3478"
+    private_key_path: /var/lib/axonwall/headscale/derp_server_private.key
   urls: []
   paths: []
   auto_update_enabled: false
