@@ -80,7 +80,7 @@ services:
       - vm_data:/vm-data
 
   victorialogs:
-    image: victoriametrics/victoria-logs:v0.38.0-victorialogs@sha256:75dd7f671019c5969aafb8d635880192237a80eac802602577b3d8025ebafa8f
+    image: victoriametrics/victoria-logs:v1.24.0-victorialogs@sha256:1ec31ddccc39dc9ead2607cddbf2829be1eb5ad39890e72bba26b359be20801d
     container_name: axonwall-vl
     restart: unless-stopped
     ports:
