@@ -6,3 +6,6 @@ packages:
 allowBuilds:
   '@biomejs/biome': true
   esbuild: true
+
+overrides:
+  postcss: '>=8.5.23'
