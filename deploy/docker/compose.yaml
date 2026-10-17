@@ -56,7 +56,7 @@ services:
       - openldap_config:/etc/ldap/slapd.d
 
   supabase-db:
-    image: supabase/postgres:17.11.0.003
+    image: supabase/postgres:17.11.0.003@sha256:7374d196da7e301512cc5329e18040e0f7bb856287b323777cdadecccbc6c7e4
     container_name: axonwall-supabase
     restart: unless-stopped
     ports:
