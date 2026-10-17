@@ -313,7 +313,7 @@ jobs:
           path: packaging/iso/output
       - name: Release Distribution Artifacts (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
@@ -328,7 +328,7 @@ jobs:
 
       - name: Publish Rolling Latest Pre-Release (on main)
         if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: rolling-latest
           name: "Axonwall Appliance ISOs & Debian Packages (Rolling Latest)"
