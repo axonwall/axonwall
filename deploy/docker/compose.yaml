@@ -42,7 +42,7 @@ services:
       - supabase-db
 
   openldap:
-    image: osixia/openldap:1.5.0
+    image: osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
     container_name: axonwall-ldap
     restart: unless-stopped
     ports:
@@ -68,7 +68,7 @@ services:
       - supabase_data:/var/lib/postgresql/data
 
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.108.0
+    image: victoriametrics/victoria-metrics:v1.108.0@sha256:6a0455ed68c1877cd6d9a81b12f51ca1855ee92d34ff4645cd9d9d2a403deb32
     container_name: axonwall-vm
     restart: unless-stopped
     ports:
@@ -80,7 +80,7 @@ services:
       - vm_data:/vm-data
 
   victorialogs:
-    image: victoriametrics/victoria-logs:v0.38.0-victorialogs
+    image: victoriametrics/victoria-logs:v0.38.0-victorialogs@sha256:75dd7f671019c5969aafb8d635880192237a80eac802602577b3d8025ebafa8f
     container_name: axonwall-vl
     restart: unless-stopped
     ports:

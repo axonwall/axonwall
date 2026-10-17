@@ -1,6 +1,6 @@
 services:
   openldap:
-    image: osixia/openldap:1.5.0
+    image: osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
     container_name: axonwall-ldap-dev
     environment:
       LDAP_ORGANISATION: "Axonwall"
@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     container_name: axonwall-postgres-dev
     environment:
       POSTGRES_DB: postgres
@@ -28,7 +28,7 @@ services:
     restart: unless-stopped
 
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:latest@sha256:bdb5c911a23d92fd364e246ab20b5a0a485f00112f3663fa626b083fb46c146b
     container_name: axonwall-clickhouse-dev
     environment:
       CLICKHOUSE_DB: axonwall
