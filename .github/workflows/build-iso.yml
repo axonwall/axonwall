@@ -20,8 +20,11 @@ jobs:
     defaults:
       run:
         shell: bash
+    # Least privilege: the ~25-minute build only reads the repo and
+    # uploads artifacts. Publishing releases (the only step needing
+    # contents: write) lives in the separate `release` job below (C6).
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Checkout Code
@@ -188,6 +191,7 @@ jobs:
           path: |
             packaging/alpine/output/*.iso
             packaging/alpine/output/*.iso.sha256
+            packaging/alpine/output/*.iso.sha256.sig
           retention-days: 7
 
       - name: Install ISO Build Dependencies
@@ -270,6 +274,43 @@ jobs:
           path: packaging/iso/output/axonwall-debian13-amd64.iso.sha256
           retention-days: 1
 
+      - name: Upload Debian ISO Artifact (release handoff)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: axonwall-debian-iso
+          path: |
+            packaging/iso/output/axonwall-debian13-amd64.iso
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
+          retention-days: 1
+
+
+  release:
+    name: Publish Release Artifacts
+    needs: build-iso
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Alpine ISO Artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: axonwall-alpine-isos
+          path: packaging/alpine/output
+
+      - name: Download Debian Package Artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: axonwall-debian-package
+          path: packaging/debian/output
+
+      - name: Download Debian ISO Artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: axonwall-debian-iso
+          path: packaging/iso/output
       - name: Release Distribution Artifacts (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
