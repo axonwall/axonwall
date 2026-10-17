@@ -33,6 +33,8 @@ normalize_svc() {
   svc="${1%.service}"
   if [ "$svc" = "kea-dhcp4-server" ] && [ -x /etc/init.d/kea-dhcp4 ]; then
     echo "kea-dhcp4"
+  elif [ "$svc" = "ssh" ] && [ -x /etc/init.d/sshd ]; then
+    echo "sshd"
   else
     echo "$svc"
   fi

@@ -19,6 +19,13 @@ func normalizeOpenRCService(svc string) string {
 			}
 		}
 	}
+	if s == "ssh" {
+		if _, err := exec.LookPath("rc-service"); err == nil {
+			if exec.Command("rc-service", "--exists", "sshd").Run() == nil {
+				return "sshd"
+			}
+		}
+	}
 	return s
 }
 
@@ -34,6 +41,7 @@ var managedServices = map[string]bool{
 	"kea-dhcp4-server": true, "kea-dhcp-ddns-server": true,
 	"unbound": true, "frr": true, "caddy": true, "headscale": true,
 	"keepalived": true, "conntrackd": true, "nftables": true,
+	"ssh": true, "sshd": true,
 }
 
 func validServiceName(svc string) bool {

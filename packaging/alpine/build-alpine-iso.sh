@@ -157,6 +157,7 @@ CORE_PKGS=(
   grub
   grub-bios
   grub-efi
+  openssh
 )
 
 if [[ "$MINIMAL" -eq 0 ]]; then
@@ -246,6 +247,7 @@ mkdir -p \
   "${OVL}/etc/runlevels/boot" \
   "${OVL}/etc/runlevels/default" \
   "${OVL}/etc/runlevels/shutdown" \
+  "${OVL}/etc/ssh/sshd_config.d" \
   "${OVL}/etc/sysctl.d" \
   "${OVL}/bin" \
   "${OVL}/sbin" \
@@ -277,6 +279,7 @@ chmod +x "${OVL}/etc/init.d/"* "${OVL}/usr/local/bin/"*
 
 # Copy shared scripts and configs from Debian/ISO packaging
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/99-axonwall.conf" "${OVL}/etc/sysctl.d/"
+cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/ssh/sshd_config.d/axonwall.conf" "${OVL}/etc/ssh/sshd_config.d/"
 cp "${REPO_ROOT}/packaging/debian/headscale-config.yaml" "${OVL}/etc/headscale/config.yaml"
 cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-ha-notify" "${OVL}/usr/local/bin/"
@@ -356,7 +359,7 @@ done
 for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
 done
-for svc in axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+for svc in sshd axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
 done
 for svc in mount-ro killprocs savecache; do
