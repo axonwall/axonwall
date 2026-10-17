@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -21,7 +22,28 @@ func normalizeOpenRCService(svc string) string {
 	return s
 }
 
+// managedServices is the allowlist of units the daemon may reload,
+// restart, or stop on behalf of bundle/API callers (audit D-S03). Before
+// this list existed, any name surviving a "/" check reached systemctl as
+// argv, so a name like "--all" was parsed as a systemctl OPTION and any
+// unit on the box could be bounced by a socket caller. The compiler only
+// ever requests suricata and crowdsec-firewall-bouncer; the rest are the
+// daemons whose configuration this daemon writes or supervises.
+var managedServices = map[string]bool{
+	"suricata": true, "crowdsec": true, "crowdsec-firewall-bouncer": true,
+	"kea-dhcp4-server": true, "kea-dhcp-ddns-server": true,
+	"unbound": true, "frr": true, "caddy": true, "headscale": true,
+	"keepalived": true, "conntrackd": true, "nftables": true,
+}
+
+func validServiceName(svc string) bool {
+	return managedServices[strings.TrimSuffix(svc, ".service")]
+}
+
 func reloadOrRestartService(svc string) ([]byte, error) {
+	if !validServiceName(svc) {
+		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
+	}
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		return exec.Command("systemctl", "try-reload-or-restart", svc).CombinedOutput()
 	}
@@ -33,6 +55,9 @@ func reloadOrRestartService(svc string) ([]byte, error) {
 }
 
 func stopSystemService(svc string) ([]byte, error) {
+	if !validServiceName(svc) {
+		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
+	}
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		return exec.Command("systemctl", "stop", svc).CombinedOutput()
 	}
@@ -105,6 +130,16 @@ func releaseDhcpLease(dev string) {
 	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 		_ = exec.Command(dhclientPath, "-r", dev).Run()
 	}
+	// Signal the recorded pid directly. The previous implementation
+	// interpolated dev into a root `sh -c` string (audit D-S01 note);
+	// the pidfile is written by triggerDhcpClient, so no shell and no
+	// pkill pattern are needed.
 	pidFile := "/var/run/udhcpc." + dev + ".pid"
-	_ = exec.Command("sh", "-c", "kill $(cat "+pidFile+" 2>/dev/null) 2>/dev/null || pkill -f 'udhcpc.*"+dev+"' 2>/dev/null").Run()
+	if data, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			if proc, err := os.FindProcess(pid); err == nil {
+				_ = proc.Signal(syscall.SIGTERM)
+			}
+		}
+	}
 }

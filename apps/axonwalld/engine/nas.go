@@ -499,9 +499,32 @@ func (m *NasManager) ListSnapshots() []ZfsSnapshotInfo {
 	return snaps
 }
 
+// ZFS names are single argv to the zfs/zpool CLIs; keep them to the
+// characters ZFS itself allows in dataset/pool/snapshot names so a
+// caller-supplied value can never become an extra option or a second
+// name token (audit D-S04).
+func validZfsPath(name string, allowSlash bool) bool {
+	if name == "" || strings.HasPrefix(name, "-") || strings.Contains(name, "@") {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '.' || r == '-' || r == ':':
+		case r == '/' && allowSlash:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (m *NasManager) CreateSnapshot(dataset string, label string) (string, error) {
-	if dataset == "" || strings.ContainsAny(dataset, ";|&`$()") {
+	if !validZfsPath(dataset, true) {
 		return "", fmt.Errorf("invalid dataset name")
+	}
+	if label != "" && !validZfsPath(label, false) {
+		return "", fmt.Errorf("invalid snapshot label")
 	}
 	if label == "" {
 		label = fmt.Sprintf("auto-%s", time.Now().UTC().Format("20060102-150405"))
@@ -516,7 +539,7 @@ func (m *NasManager) CreateSnapshot(dataset string, label string) (string, error
 }
 
 func (m *NasManager) ScrubPool(poolName string) error {
-	if poolName == "" || strings.ContainsAny(poolName, ";|&`$()") {
+	if !validZfsPath(poolName, false) {
 		return fmt.Errorf("invalid pool name")
 	}
 	if _, err := exec.LookPath("zpool"); err == nil {

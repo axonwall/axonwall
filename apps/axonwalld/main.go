@@ -119,13 +119,40 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		if !strings.HasPrefix(cleanPath, "/etc/axonwall/") && !strings.HasPrefix(cleanPath, "/tmp/") {
 			return nil, status.Errorf(codes.PermissionDenied, "disallowed destination file path: %s", cleanPath)
 		}
+		// Reject symlinked intermediate directories (audit D-S02): the
+		// prefix check and O_NOFOLLOW leaf open do not stop a planted
+		// symlink one level up from redirecting the write outside the
+		// allowed tree.
+		for _, prefix := range []string{"/etc/axonwall/", "/tmp/"} {
+			if strings.HasPrefix(cleanPath, prefix) {
+				rel, _ := filepath.Rel(strings.TrimSuffix(prefix, "/"), filepath.Dir(cleanPath))
+				cur := strings.TrimSuffix(prefix, "/")
+				unsafe := false
+				if rel != "." {
+					for _, part := range strings.Split(rel, string(filepath.Separator)) {
+						cur = filepath.Join(cur, part)
+						if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+							unsafe = true
+							break
+						}
+					}
+				}
+				if unsafe {
+					return nil, status.Errorf(codes.PermissionDenied, "destination path traverses a symlink: %s", cleanPath)
+				}
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(cleanPath), 0755); err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to create directories for %s: %v", cleanPath, err)
 		}
-		mode := os.FileMode(f.FileMode)
+		// Sanitize the caller-chosen mode (audit D-S02): plain permission
+		// bits only (drops setuid/setgid/sticky), and never group- or
+		// world-writable under the config tree.
+		mode := os.FileMode(f.FileMode).Perm()
 		if mode == 0 {
 			mode = 0644
 		}
+		mode &^= 0o022
 
 		// Use syscall.O_NOFOLLOW to prevent symlink TOCTOU attacks
 		file, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
@@ -546,23 +573,53 @@ func applyBootInterfaces() {
 		config[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
 
-	wanDev := config["WAN_INTERFACE"]
+	// Validate the file's values before they reach `ip` argv or
+	// /etc/resolv.conf (audit D-S10): interface names follow the same
+	// shape the packet-capture path enforces, DNS servers and the
+	// gateway must be real IPs, static addresses must parse.
+	validDev := func(dev string) string {
+		if dev == "" || strings.HasPrefix(dev, "-") {
+			return ""
+		}
+		for _, r := range dev {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-') {
+				return ""
+			}
+		}
+		return dev
+	}
+	validIP := func(ip string) string {
+		if net.ParseIP(ip) == nil {
+			return ""
+		}
+		return ip
+	}
+	validCIDR := func(cidr string) string {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			if net.ParseIP(cidr) == nil {
+				return ""
+			}
+		}
+		return cidr
+	}
+
+	wanDev := validDev(config["WAN_INTERFACE"])
 	wanMode := config["WAN_MODE"]
-	wanIP := config["WAN_IPV4_ADDRESS"]
-	wanGw := config["WAN_IPV4_GATEWAY"]
-	wanDNS1 := config["WAN_DNS1"]
-	wanDNS2 := config["WAN_DNS2"]
+	wanIP := validCIDR(config["WAN_IPV4_ADDRESS"])
+	wanGw := validIP(config["WAN_IPV4_GATEWAY"])
+	wanDNS1 := validIP(config["WAN_DNS1"])
+	wanDNS2 := validIP(config["WAN_DNS2"])
 
-	lanDev := config["LAN_INTERFACE"]
-	lanIP := config["LAN_IPV4_ADDRESS"]
+	lanDev := validDev(config["LAN_INTERFACE"])
+	lanIP := validCIDR(config["LAN_IPV4_ADDRESS"])
 
-	opt1Dev := config["OPT1_INTERFACE"]
+	opt1Dev := validDev(config["OPT1_INTERFACE"])
 	opt1Mode := config["OPT1_MODE"]
-	opt1IP := config["OPT1_IPV4_ADDRESS"]
+	opt1IP := validCIDR(config["OPT1_IPV4_ADDRESS"])
 
-	opt2Dev := config["OPT2_INTERFACE"]
+	opt2Dev := validDev(config["OPT2_INTERFACE"])
 	opt2Mode := config["OPT2_MODE"]
-	opt2IP := config["OPT2_IPV4_ADDRESS"]
+	opt2IP := validCIDR(config["OPT2_IPV4_ADDRESS"])
 
 	// 1. WAN configuration
 	if wanDev != "" {
