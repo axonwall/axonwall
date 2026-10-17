@@ -68,7 +68,7 @@ services:
       - supabase_data:/var/lib/postgresql/data
 
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.108.0@sha256:6a0455ed68c1877cd6d9a81b12f51ca1855ee92d34ff4645cd9d9d2a403deb32
+    image: victoriametrics/victoria-metrics:v1.154.0@sha256:4bd592341587d669b7f57d54bbb82bd21ac8675f4e24234b7703a7c0f85197d8
     container_name: axonwall-vm
     restart: unless-stopped
     ports:
