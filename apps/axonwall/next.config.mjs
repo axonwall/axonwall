@@ -1,5 +1,3 @@
-import type { NextConfig } from 'next';
-
 const cspHeader = `
   default-src 'self';
   script-src 'self' 'unsafe-eval' 'unsafe-inline';
@@ -13,7 +11,7 @@ const cspHeader = `
   upgrade-insecure-requests;
 `;
 
-const nextConfig: NextConfig = {
+const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
   experimental: {

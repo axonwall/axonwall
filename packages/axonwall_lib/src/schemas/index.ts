@@ -461,8 +461,8 @@ export type OspfConfig = z.infer<typeof OspfConfigSchema>;
 
 export const FrrConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  bgp: BgpConfigSchema.default({}),
-  ospf: OspfConfigSchema.default({}),
+  bgp: BgpConfigSchema.prefault({}),
+  ospf: OspfConfigSchema.prefault({}),
 });
 export type FrrConfig = z.infer<typeof FrrConfigSchema>;
 
@@ -655,7 +655,7 @@ export const HighAvailabilityConfigSchema = z.object({
   mtlsCert: z.string().optional(),
   mtlsKey: z.string().optional(),
   vrrpInstances: z.array(VrrpInstanceSchema).default([]),
-  conntrackSync: ConntrackSyncSchema.default({ enabled: false }),
+  conntrackSync: ConntrackSyncSchema.prefault({ enabled: false }),
   sqliteSync: HaSqliteSyncConfigSchema.optional().default({
     enabled: false,
     mode: 'direct_stream',
@@ -862,12 +862,12 @@ export const AiConfigSchema = z.object({
   systemContextInference: z.boolean().default(true),
   autoAuditOnSave: z.boolean().default(false),
   providers: z.object({
-    antigravity: AntigravitySettingsSchema.default({}),
-    ollama: OllamaSettingsSchema.default({}),
-    claudeCode: ClaudeCodeSettingsSchema.default({}),
-    codex: CodexSettingsSchema.default({}),
-    vllm: VllmSettingsSchema.default({}),
-  }).default({}),
+    antigravity: AntigravitySettingsSchema.prefault({}),
+    ollama: OllamaSettingsSchema.prefault({}),
+    claudeCode: ClaudeCodeSettingsSchema.prefault({}),
+    codex: CodexSettingsSchema.prefault({}),
+    vllm: VllmSettingsSchema.prefault({}),
+  }).prefault({}),
 });
 export type AiConfig = z.infer<typeof AiConfigSchema>;
 
@@ -885,7 +885,7 @@ export const SatelliteNodeSchema = z.object({
     publicKey: z.string().optional(),
     endpoint: z.string().optional(),
     connected: z.boolean().default(false),
-  }).default({}),
+  }).prefault({}),
   wifi: z.array(z.object({
     radio: z.string(),
     ssid: z.string(),
@@ -1165,7 +1165,7 @@ export type K3sConfig = z.infer<typeof K3sConfigSchema>;
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
-  system: SystemSettingsSchema.default({}),
+  system: SystemSettingsSchema.prefault({}),
   interfaces: z.array(InterfaceSchema).default([]),
   vlans: z.array(VlanSchema).default([]),
   bridges: z.array(BridgeSchema).default([]),
@@ -1178,7 +1178,7 @@ export const DesiredStateSchema = z.object({
   gateways: z.array(GatewaySchema).default([]),
   gatewayGroups: z.array(GatewayGroupSchema).default([]),
   dhcp: DhcpConfigSchema.default({ enabled: true, subnets: [] }),
-  dns: DnsConfigSchema.default({ enabled: true, hostOverrides: [] }),
+  dns: DnsConfigSchema.prefault({ enabled: true, hostOverrides: [] }),
   routes: z.array(StaticRouteSchema).default([]),
   trafficShaper: TrafficShaperConfigSchema.optional(),
   wireguard: WireGuardConfigSchema.optional(),
