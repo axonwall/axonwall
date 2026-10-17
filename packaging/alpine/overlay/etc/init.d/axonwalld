@@ -4,6 +4,12 @@ name="axonwalld"
 description="Axonwall Privileged Firewall & Networking Daemon"
 supervisor="supervise-daemon"
 command="/usr/sbin/axonwalld"
+# Run with the axonwall group (root user, like the Debian systemd unit's
+# User=root/Group=axonwall) so the sockets created in /run/axonwall are
+# group axonwall and the UI/controller processes can connect to them.
+# Without this the daemon runs root:root on Alpine and its sockets are
+# root:root 0660 -- unreachable for the axonwall-group services (A-S01).
+command_user="root:axonwall"
 command_args="--socket /run/axonwall/agent.sock --boot-apply"
 pidfile="/run/axonwalld.pid"
 output_log="/var/log/axonwall/axonwalld.log"
