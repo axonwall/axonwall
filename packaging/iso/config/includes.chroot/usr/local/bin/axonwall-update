@@ -258,7 +258,12 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     rmdir "${STAGE_DIR}" 2>/dev/null || true
   fi
 
-  if [ -n "$CLEAN_VER" ] && [ -d /etc/axonwall ]; then
+  # Only update /etc/axonwall/version on the running rootfs if the target slot is the currently active slot
+  ACTIVE_SLOT="A"
+  if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
+    ACTIVE_SLOT="B"
+  fi
+  if [ "$TARGET_SLOT" = "$ACTIVE_SLOT" ] && [ -n "$CLEAN_VER" ] && [ -d /etc/axonwall ]; then
     echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
   fi
 
