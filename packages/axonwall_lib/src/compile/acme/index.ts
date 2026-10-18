@@ -3,7 +3,10 @@ import type { AcmeConfig, AcmeCertificate } from '../../schemas/index.js';
 export interface CompiledAcme {
   renewScript: string;
   hookScripts: Record<string, string>; // service -> reload command
+  deployHooks: { path: string; content: string }[];
 }
+
+const DOMAIN_REGEX = /^(?:\*\.)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
 
 /**
  * Compiles AcmeConfig into automated certificate issuance and post-renewal deployment scripts.
@@ -14,6 +17,7 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
     return {
       renewScript: '#!/bin/bash\n# ACME automated certificates disabled\nexit 0\n',
       hookScripts: {},
+      deployHooks: [],
     };
   }
 
@@ -34,9 +38,26 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
     haproxy: 'systemctl reload haproxy || true',
   };
 
+  const deployHooks: { path: string; content: string }[] = [];
+
   for (const cert of config.certificates) {
+    const safeName = cert.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeDns = (cert.dnsProvider || 'cloudflare').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    if (!DOMAIN_REGEX.test(cert.domain)) {
+      throw new Error(`Invalid domain name in certificate config: ${cert.domain}`);
+    }
+
+    const domainArgs = [cert.domain];
+    for (const alt of cert.altNames || []) {
+      if (!DOMAIN_REGEX.test(alt)) {
+        throw new Error(`Invalid altName in certificate config: ${alt}`);
+      }
+      domainArgs.push(alt);
+    }
+
     lines.push(`### Certificate: ${cert.domain} ###`);
-    const allDomains = [cert.domain, ...cert.altNames].map((d) => `-d ${d}`).join(' ');
+    const allDomains = domainArgs.map((d) => `-d ${d}`).join(' ');
 
     if (cert.challengeType === 'http-01') {
       lines.push(
@@ -44,25 +65,36 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
         `certbot certonly --webroot -w /var/www/acme-challenge \\`,
         `  ${allDomains} \\`,
         `  --non-interactive --agree-tos \\`,
-        `  --deploy-hook "/var/lib/axonwall/certs/deploy-${cert.name}.sh" || true`
+        `  --deploy-hook "/var/lib/axonwall/certs/deploy-${safeName}.sh" || true`
       );
     } else {
       lines.push(
-        `# DNS-01 API challenge via ${cert.dnsProvider || 'manual'}`,
-        `certbot certonly --dns-${cert.dnsProvider || 'cloudflare'} \\`,
+        `# DNS-01 API challenge via ${safeDns}`,
+        `certbot certonly --dns-${safeDns} \\`,
         `  ${allDomains} \\`,
         `  --non-interactive --agree-tos \\`,
-        `  --deploy-hook "/var/lib/axonwall/certs/deploy-${cert.name}.sh" || true`
+        `  --deploy-hook "/var/lib/axonwall/certs/deploy-${safeName}.sh" || true`
       );
     }
 
     // Deploy hook commands for this certificate
-    const reloadCommands = cert.deployServices.map((svc) => hookScripts[svc] || '# unknown svc');
+    const reloadCommands = (cert.deployServices || []).map((svc) => hookScripts[svc] || `# unknown svc: ${svc}`);
+    deployHooks.push({
+      path: `/var/lib/axonwall/certs/deploy-${safeName}.sh`,
+      content: [
+        '#!/bin/bash',
+        `# Auto-generated deploy hook for ${safeName}`,
+        'set -e',
+        ...reloadCommands,
+        '',
+      ].join('\n'),
+    });
     lines.push('');
   }
 
   return {
     renewScript: lines.join('\n') + '\n',
     hookScripts,
+    deployHooks,
   };
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,13 +17,34 @@ import (
 	"github.com/axonwall/monorepo/apps/axonwalld/engine"
 )
 
+type VRRPInstanceConfig struct {
+	Name         string   `json:"name"`
+	Vrid         int      `json:"vrid"`
+	Interface    string   `json:"interface"`
+	Priority     int      `json:"priority"`
+	VirtualIps   []string `json:"virtualIps"`
+	AuthPassword string   `json:"authPassword"`
+}
+
+type ConntrackSyncConfig struct {
+	Enabled     bool   `json:"enabled"`
+	Interface   string `json:"interface"`
+	Protocol    string `json:"protocol"`
+	PeerAddress string `json:"peerAddress"`
+	Port        int    `json:"port"`
+}
+
 type HAConfig struct {
 	Enabled       bool                    `json:"enabled"`
-	Role          string                  `json:"role"` // "master" or "secondary" / "backup"
+	Role          string                  `json:"role"`     // "master" or "secondary" / "backup"
+	NodeRole      string                  `json:"nodeRole"` // "master" or "backup"
 	Vrid          int                     `json:"vrid"`
 	SyncInterface string                  `json:"syncInterface"`
 	PeerIp        string                  `json:"peerIp"`
+	PeerAddress   string                  `json:"peerAddress"`
 	SyncPassword  string                  `json:"syncPassword"`
+	VRRPInstances []VRRPInstanceConfig    `json:"vrrpInstances"`
+	ConntrackSync ConntrackSyncConfig     `json:"conntrackSync"`
 	SqliteSync    engine.SqliteSyncConfig `json:"sqliteSync"`
 }
 
@@ -40,6 +62,12 @@ func NewHAEngine(nasMgr *engine.NasManager) *HAEngine {
 		sqliteSync: engine.NewSqliteSyncManager(),
 		nasManager: nasMgr,
 		sockPath:   "/run/axonwall/ha.sock",
+	}
+}
+
+func (e *HAEngine) SetK3sManager(km *engine.K3sManager) {
+	if e.sqliteSync != nil {
+		e.sqliteSync.SetK3sManager(km)
 	}
 }
 
@@ -139,11 +167,32 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		return nil
 	}
 
-	slog.Info("Applying High Availability (HA) Configuration", "role", cfg.Role, "vrid", cfg.Vrid)
+	slog.Info("Applying High Availability (HA) Configuration", "role", cfg.Role, "nodeRole", cfg.NodeRole, "vrid", cfg.Vrid)
 
-	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword} {
-		if strings.ContainsAny(field, "\n\r\"'{}") {
-			return fmt.Errorf("invalid characters in HA configuration")
+	// Normalize Role / NodeRole
+	role := strings.ToLower(cfg.Role)
+	if role == "" {
+		role = strings.ToLower(cfg.NodeRole)
+	}
+	if role == "" {
+		role = "master"
+	}
+	cfg.Role = role
+
+	// Normalize PeerIp / PeerAddress
+	if cfg.PeerIp == "" && cfg.PeerAddress != "" {
+		cfg.PeerIp = cfg.PeerAddress
+	}
+	if cfg.ConntrackSync.PeerAddress == "" && cfg.PeerIp != "" {
+		cfg.ConntrackSync.PeerAddress = cfg.PeerIp
+	}
+	if cfg.ConntrackSync.Interface == "" && cfg.SyncInterface != "" {
+		cfg.ConntrackSync.Interface = cfg.SyncInterface
+	}
+
+	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword, cfg.ConntrackSync.Interface, cfg.ConntrackSync.PeerAddress} {
+		if strings.ContainsAny(field, "\n\r\"'{};#") {
+			return fmt.Errorf("invalid characters in HA configuration: %q", field)
 		}
 	}
 
@@ -192,32 +241,98 @@ func (e *HAEngine) ApplyFromJSON(content []byte) error {
 }
 
 func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
-	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword} {
-		if strings.ContainsAny(field, "\n\r\"'{}") {
-			return fmt.Errorf("invalid characters in keepalived configuration")
+	state := "MASTER"
+	defaultPriority := 100
+	if cfg.Role == "secondary" || cfg.Role == "backup" {
+		state = "BACKUP"
+		defaultPriority = 50
+	}
+
+	instances := cfg.VRRPInstances
+	if len(instances) == 0 {
+		vrid := cfg.Vrid
+		if vrid <= 0 {
+			vrid = 1
+		}
+		iface := cfg.SyncInterface
+		if iface == "" {
+			iface = "eth0"
+		}
+		instances = []VRRPInstanceConfig{
+			{
+				Name:         "VI_1",
+				Vrid:         vrid,
+				Interface:    iface,
+				Priority:     defaultPriority,
+				VirtualIps:   []string{"10.0.99.1/24"},
+				AuthPassword: cfg.SyncPassword,
+			},
 		}
 	}
 
-	state := "MASTER"
-	priority := 100
-	if cfg.Role == "secondary" || cfg.Role == "backup" {
-		state = "BACKUP"
-		priority = 50
-	}
-
-	conf := fmt.Sprintf(`global_defs {
+	var conf strings.Builder
+	conf.WriteString(`global_defs {
     router_id AXONWALL_HA_NODE
     script_user root
     enable_script_security
 }
 
-vrrp_sync_group VG1 {
-    group {
-        VI_1
-    }
-}
+`)
 
-vrrp_instance VI_1 {
+	var groupInstances []string
+	for i, inst := range instances {
+		instName := inst.Name
+		if instName == "" {
+			instName = fmt.Sprintf("VI_%d", i+1)
+		}
+		instName = regexp.MustCompile(`[^a-zA-Z0-9_]`).ReplaceAllString(instName, "_")
+		groupInstances = append(groupInstances, instName)
+	}
+
+	conf.WriteString("vrrp_sync_group VG1 {\n    group {\n")
+	for _, name := range groupInstances {
+		conf.WriteString(fmt.Sprintf("        %s\n", name))
+	}
+	conf.WriteString("    }\n}\n\n")
+
+	for i, inst := range instances {
+		instName := groupInstances[i]
+		iface := inst.Interface
+		if iface == "" {
+			iface = cfg.SyncInterface
+		}
+		if iface == "" {
+			iface = "eth0"
+		}
+		vrid := inst.Vrid
+		if vrid <= 0 {
+			vrid = cfg.Vrid
+		}
+		if vrid <= 0 {
+			vrid = i + 1
+		}
+		prio := inst.Priority
+		if prio <= 0 {
+			prio = defaultPriority
+		} else if cfg.Role == "secondary" || cfg.Role == "backup" {
+			if prio >= 100 {
+				prio = 50
+			}
+		}
+		pass := inst.AuthPassword
+		if pass == "" {
+			pass = cfg.SyncPassword
+		}
+		if strings.ContainsAny(iface+pass, "\n\r\"'{};#") {
+			return fmt.Errorf("invalid characters in VRRP instance %s", instName)
+		}
+
+		vips := inst.VirtualIps
+		if len(vips) == 0 {
+			vips = []string{"10.0.99.1/24"}
+		}
+
+		conf.WriteString(fmt.Sprintf(`vrrp_instance %s {
     state %s
     interface %s
     virtual_router_id %d
@@ -230,14 +345,29 @@ vrrp_instance VI_1 {
     }
 
     virtual_ipaddress {
-        10.0.99.1/24 dev %s
-    }
+`, instName, state, iface, vrid, prio, pass))
+
+		for _, vip := range vips {
+			vip = strings.TrimSpace(vip)
+			if vip == "" || strings.ContainsAny(vip, "\n\r\"'{};#") {
+				continue
+			}
+			if strings.Contains(vip, " ") {
+				conf.WriteString(fmt.Sprintf("        %s\n", vip))
+			} else {
+				conf.WriteString(fmt.Sprintf("        %s dev %s\n", vip, iface))
+			}
+		}
+
+		conf.WriteString(fmt.Sprintf(`    }
 
     notify_master "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER'"
     notify_backup "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP'"
     notify_fault  "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT'"
 }
-`, state, cfg.SyncInterface, cfg.Vrid, priority, cfg.SyncPassword, cfg.SyncInterface)
+
+`))
+	}
 
 	if err := os.MkdirAll("/etc/keepalived", 0755); err != nil {
 		return err
@@ -248,7 +378,7 @@ vrrp_instance VI_1 {
 		return fmt.Errorf("failed to open keepalived.conf safely: %w", err)
 	}
 	defer f.Close()
-	_, err = f.Write([]byte(conf))
+	_, err = f.WriteString(conf.String())
 	return err
 }
 
@@ -277,15 +407,27 @@ func resolveInterfaceIPv4(ifaceName string) string {
 }
 
 func (e *HAEngine) generateConntrackd(cfg HAConfig) error {
-	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword} {
-		if strings.ContainsAny(field, "\n\r\"'{}") {
-			return fmt.Errorf("invalid characters in conntrackd configuration")
+	syncIface := cfg.ConntrackSync.Interface
+	if syncIface == "" {
+		syncIface = cfg.SyncInterface
+	}
+	if syncIface == "" {
+		syncIface = "eth0"
+	}
+	peerIp := cfg.ConntrackSync.PeerAddress
+	if peerIp == "" {
+		peerIp = cfg.PeerIp
+	}
+
+	for _, field := range []string{syncIface, peerIp} {
+		if strings.ContainsAny(field, "\n\r\"'{};# \t") {
+			return fmt.Errorf("invalid characters in conntrackd configuration: %q", field)
 		}
 	}
 
-	localIP := resolveInterfaceIPv4(cfg.SyncInterface)
+	localIP := resolveInterfaceIPv4(syncIface)
 	if localIP == "" {
-		localIP = cfg.PeerIp
+		localIP = peerIp
 	}
 
 	conf := fmt.Sprintf(`Sync {
@@ -328,7 +470,7 @@ General {
         }
     }
 }
-`, localIP, cfg.SyncInterface)
+`, localIP, syncIface)
 
 	if err := os.MkdirAll("/etc/conntrackd", 0755); err != nil {
 		return err

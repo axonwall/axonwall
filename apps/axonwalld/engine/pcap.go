@@ -77,7 +77,8 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 		}
 	}
 
-	captureID := fmt.Sprintf("pcap-%d-%s", time.Now().Unix(), iface)
+	safeIface := strings.ReplaceAll(iface, ".", "_")
+	captureID := fmt.Sprintf("pcap-%d-%s", time.Now().Unix(), safeIface)
 	pcapFile := filepath.Join(m.captureDir, fmt.Sprintf("%s.pcap", captureID))
 	startedAt := time.Now().UTC().Format(time.RFC3339)
 

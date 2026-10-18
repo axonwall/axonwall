@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type AgentServer struct {
@@ -112,18 +114,26 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}, nil
 	}
 
-	// 2. Write optional bundle configuration files (e.g. kea, unbound)
+	// 2. Write optional bundle configuration files (e.g. kea, unbound, suricata, crowdsec)
+	allowedPrefixes := []string{"/etc/axonwall/", "/tmp/", "/etc/suricata/", "/etc/crowdsec/"}
 	for _, f := range req.Files {
-		// Enforce safety: paths must reside within /etc/axonwall/ or /tmp/
+		// Enforce safety: paths must reside within allowed system config locations or /tmp/
 		cleanPath := filepath.Clean(f.Path)
-		if !strings.HasPrefix(cleanPath, "/etc/axonwall/") && !strings.HasPrefix(cleanPath, "/tmp/") {
+		allowed := false
+		for _, prefix := range allowedPrefixes {
+			if strings.HasPrefix(cleanPath, prefix) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
 			return nil, status.Errorf(codes.PermissionDenied, "disallowed destination file path: %s", cleanPath)
 		}
 		// Reject symlinked intermediate directories (audit D-S02): the
 		// prefix check and O_NOFOLLOW leaf open do not stop a planted
 		// symlink one level up from redirecting the write outside the
 		// allowed tree.
-		for _, prefix := range []string{"/etc/axonwall/", "/tmp/"} {
+		for _, prefix := range allowedPrefixes {
 			if strings.HasPrefix(cleanPath, prefix) {
 				rel, _ := filepath.Rel(strings.TrimSuffix(prefix, "/"), filepath.Dir(cleanPath))
 				cur := strings.TrimSuffix(prefix, "/")
@@ -150,7 +160,11 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		// world-writable under the config tree.
 		mode := os.FileMode(f.FileMode).Perm()
 		if mode == 0 {
-			mode = 0644
+			if strings.HasPrefix(cleanPath, "/etc/axonwall/") && (strings.HasSuffix(cleanPath, ".json") || strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml")) {
+				mode = 0600
+			} else {
+				mode = 0644
+			}
 		}
 		mode &^= 0o022
 
@@ -163,6 +177,7 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			file.Close()
 			return nil, status.Errorf(codes.Internal, "failed to write file %s: %v", cleanPath, err)
 		}
+		_ = file.Chmod(mode)
 		file.Close()
 
 		// Mirror /etc/axonwall/*.yaml (and conf.d/*.yaml) to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence
@@ -732,7 +747,7 @@ func syncPersistentYamlConfigs() {
 		// Copy if missing in /etc/axonwall or if persistent copy is newer
 		if err1 == nil && (err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime())) {
 			if data, err := os.ReadFile(srcPath); err == nil {
-				_ = os.WriteFile(dstPath, data, 0644)
+				_ = os.WriteFile(dstPath, data, 0600)
 			}
 		}
 	}
@@ -802,6 +817,7 @@ func main() {
 	nasManager := engine.NewNasManager()
 	k3sManager := engine.NewK3sManager()
 	haEngine := NewHAEngine(nasManager)
+	haEngine.SetK3sManager(k3sManager)
 	if err := haEngine.StartSocketListener(); err != nil {
 		log.Printf("[Agent] Warning: Failed to start HA socket listener: %v", err)
 	}
@@ -847,10 +863,31 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			var req pb.ApplyBundleRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
 				return
+			}
+			var req pb.ApplyBundleRequest
+			unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+			if err := unmarshaler.Unmarshal(bodyBytes, &req); err != nil {
+				if errJson := json.Unmarshal(bodyBytes, &req); errJson != nil {
+					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					return
+				}
+			}
+			var rawPayload struct {
+				Files []struct {
+					Path     string `json:"path"`
+					FileMode uint32 `json:"fileMode"`
+				} `json:"files"`
+			}
+			if err := json.Unmarshal(bodyBytes, &rawPayload); err == nil && len(rawPayload.Files) > 0 {
+				for i, rawF := range rawPayload.Files {
+					if i < len(req.Files) && req.Files[i].FileMode == 0 && rawF.FileMode != 0 {
+						req.Files[i].FileMode = rawF.FileMode
+					}
+				}
 			}
 			resp, err := agentServer.ApplyBundle(r.Context(), &req)
 			if err != nil {

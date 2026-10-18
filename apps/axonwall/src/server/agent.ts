@@ -18,6 +18,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { execSync, execFileSync } from 'node:child_process';
 import { getSession } from './auth';
+import { assertActionPermitted } from './auth-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
 
@@ -121,21 +122,6 @@ async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeout
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
-function assertActionPermitted(
-  session: UserSession | null,
-  requiredRole?: string
-): asserts session is UserSession {
-  if (!session) {
-    throw new Error('Unauthorized');
-  }
-  if (session.passwordChangeRequired) {
-    throw new Error('Forbidden: Password change required before performing this action');
-  }
-  if (requiredRole && (!session.roles || !session.roles.includes(requiredRole))) {
-    throw new Error(`Forbidden: ${requiredRole} role required`);
-  }
-}
-
 async function enforceRateLimit(maxRequests = 20, windowMs = 60000, keySuffix = '') {
   let clientIp = '127.0.0.1';
   try {
@@ -194,7 +180,7 @@ async function enforceRateLimit(maxRequests = 20, windowMs = 60000, keySuffix = 
 
 export async function getAgentStatus(): Promise<AgentStatus> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   // Try live communication with root daemon over Unix socket first
   const daemonStatus = await callAgentApi<any>('/v1/status');
@@ -385,10 +371,7 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
   return daemonFileMap;
 }
 
-export async function getCurrentDesiredState(): Promise<DesiredState> {
-  const session = await getSession();
-  assertActionPermitted(session);
-
+export async function getDesiredStateInternal(): Promise<DesiredState> {
   // 1. Check if /etc/axonwall/*.yaml (or /var/lib/axonwall/etc-axonwall/*.yaml) exists and whether any file was modified on disk
   for (const dir of YAML_CONFIG_DIRS) {
     const { maxMtimeMs, count } = getLatestYamlMtimeInDir(dir);
@@ -429,6 +412,12 @@ export async function getCurrentDesiredState(): Promise<DesiredState> {
   // 3. First boot: initialize /etc/axonwall/*.yaml with BASELINE_STATE
   persistDesiredStateToDisk(BASELINE_STATE);
   return structuredClone(BASELINE_STATE);
+}
+
+export async function getCurrentDesiredState(): Promise<DesiredState> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  return getDesiredStateInternal();
 }
 
 export async function getYamlConfigFilesSnapshot(): Promise<{
@@ -524,16 +513,22 @@ export async function applyDesiredState(
   // 3. Persist /etc/axonwall/*.yaml to disk and include them in the daemon bundle
   const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
   const allFiles = [
-    ...files,
+    ...files.map((f: any) => ({
+      ...f,
+      fileMode: f.fileMode ?? f.file_mode ?? 0o600,
+      file_mode: f.file_mode ?? f.fileMode ?? 0o600,
+    })),
     ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
       path: filePath,
       content,
-      fileMode: 0o640,
+      fileMode: 0o600,
+      file_mode: 0o600,
     })),
     {
       path: '/etc/axonwall/state.json',
       content: JSON.stringify(normalizedState, null, 2),
-      fileMode: 0o640,
+      fileMode: 0o600,
+      file_mode: 0o600,
     },
   ];
 
@@ -705,7 +700,7 @@ export interface SystemHealthMetrics {
 
 export async function getSystemHealthTelemetry(): Promise<SystemHealthMetrics> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const cpus = os.cpus();
   const arch = process.arch === 'x64' ? 'amd64' : process.arch;
@@ -740,7 +735,7 @@ export interface UpsStatus {
 
 export async function getUpsStatus(): Promise<UpsStatus> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   let isVirtual = false;
   try {
@@ -839,7 +834,7 @@ export type LiveServiceInfo = SystemServiceInfo;
 
 export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const units = [
     { name: 'Axonwall Privileged Daemon', unit: 'axonwalld.service', description: 'Go privileged nftables & netlink transaction supervisor' },
@@ -941,7 +936,7 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
 
 export async function getServiceJournalLogs(unit: string): Promise<string> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const trimmed = unit.trim();
   if (!trimmed || trimmed.startsWith('-') || !/^[a-zA-Z0-9_@.-]+$/.test(trimmed)) {
@@ -1000,7 +995,7 @@ function getLogicalInterfaceMappings(): { wan?: string; lan?: string; opt1?: str
 
 export async function getSystemInterfaces(): Promise<LiveInterfaceInfo[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const confMap = getLogicalInterfaceMappings();
   const ifConfEntries = Object.values(confMap).filter(Boolean);
@@ -1118,7 +1113,7 @@ export interface LogicalInterfaceView {
 
 export async function getLogicalInterfacesView(): Promise<LogicalInterfaceView[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const state = await getCurrentDesiredState();
   const liveIfaces = await getSystemInterfaces();
@@ -1162,7 +1157,7 @@ export async function getLogicalInterfacesView(): Promise<LogicalInterfaceView[]
 
 export async function getPhysicalNetworkDevices(): Promise<string[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   try {
     const raw = execSync("ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' 2>/dev/null", { encoding: 'utf8', timeout: 1000 });
@@ -1356,7 +1351,7 @@ export interface LiveGatewayInfo {
 
 export async function getGatewaysTelemetry(): Promise<LiveGatewayInfo[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   try {
     const routesJson = execSync('ip -json route show 2>/dev/null', { encoding: 'utf8', timeout: 500 });
@@ -1394,7 +1389,7 @@ export interface ThreatAlert {
 
 export async function getRecentThreatAlerts(): Promise<ThreatAlert[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
   const evePath = '/var/log/suricata/eve.json';
   if (!fs.existsSync(evePath)) {
     return [];
@@ -1445,7 +1440,7 @@ export interface NetworkInsightTelemetry {
 
 export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTelemetry> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   let conntrackCount = 0;
   try {
@@ -2149,7 +2144,7 @@ export interface TerminalExecResponse {
 
 export async function getHardwareTelemetry(): Promise<HardwareTelemetry> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   // Try live communication with root daemon
   const daemonTelem = await callAgentApi<HardwareTelemetry>('/v1/system/telemetry/hardware');
@@ -2473,9 +2468,26 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
   const session = await getSession();
   assertActionPermitted(session);
 
-  const daemonResp = await callAgentApi<K3sRuntimeStatus>('/v1/k3s/status');
+  const daemonResp = await callAgentApi<any>('/v1/k3s/status');
   if (daemonResp) {
-    return daemonResp;
+    return {
+      enabled: Boolean(daemonResp.enabled ?? daemonResp.service_active ?? daemonResp.serviceActive),
+      installed: Boolean(daemonResp.installed ?? true),
+      serviceActive: Boolean(daemonResp.service_active ?? daemonResp.serviceActive),
+      clusterJoined: Boolean(daemonResp.cluster_joined ?? daemonResp.clusterJoined),
+      role: daemonResp.role || (daemonResp.is_server || daemonResp.isServer ? 'primary-server' : 'agent-worker'),
+      nodes: (daemonResp.nodes || []).map((n: any) => ({
+        name: n.name || '',
+        status: n.status || 'Ready',
+        roles: n.roles || n.role || '',
+        version: n.version || '',
+        internalIp: n.internal_ip || n.internalIp || '',
+      })),
+      storageClasses: daemonResp.storage_classes || daemonResp.storageClasses || [],
+      podsRunning: Number(daemonResp.pods_running ?? daemonResp.podsRunning ?? 0),
+      podsTotal: Number(daemonResp.pods_total ?? daemonResp.podsTotal ?? 0),
+      openEbsHealthy: Boolean(daemonResp.openebs_healthy ?? daemonResp.openEbsHealthy),
+    };
   }
 
   const state = await getCurrentDesiredState();

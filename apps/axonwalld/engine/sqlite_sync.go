@@ -55,12 +55,19 @@ type SqliteSyncManager struct {
 	stopPoller    chan struct{}
 	pollerRunning bool
 	litestreamCmd *exec.Cmd
+	k3sManager    *K3sManager
 }
 
 func NewSqliteSyncManager() *SqliteSyncManager {
 	return &SqliteSyncManager{
 		stopPoller: make(chan struct{}),
 	}
+}
+
+func (m *SqliteSyncManager) SetK3sManager(km *K3sManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.k3sManager = km
 }
 
 func (m *SqliteSyncManager) ApplyConfig(cfg SqliteSyncConfig) error {
@@ -434,11 +441,15 @@ func (m *SqliteSyncManager) handleDownloadState(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	statePath := "/var/lib/axonwall/state.json"
+	statePath := "/etc/axonwall/state.json"
 	data, err := os.ReadFile(statePath)
 	if err != nil {
-		http.Error(w, "state.json not found", http.StatusNotFound)
-		return
+		statePath = "/var/lib/axonwall/state.json"
+		data, err = os.ReadFile(statePath)
+		if err != nil {
+			http.Error(w, "state.json not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	sum := sha256.Sum256(data)
@@ -506,8 +517,13 @@ func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	k3sMgr := NewK3sManager()
-	tok, err := k3sMgr.GetClusterNodeToken()
+	m.mu.Lock()
+	km := m.k3sManager
+	m.mu.Unlock()
+	if km == nil {
+		km = NewK3sManager()
+	}
+	tok, err := km.GetClusterNodeToken()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -550,9 +566,16 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
 	}
 
 	peerSha := resp.Header.Get("X-Checksum-SHA256")
-	localPath := "/var/lib/axonwall/state.json"
+	localPath := "/etc/axonwall/state.json"
+	if _, err := os.Stat(localPath); err != nil {
+		if _, errVar := os.Stat("/var/lib/axonwall/state.json"); errVar == nil {
+			localPath = "/var/lib/axonwall/state.json"
+		}
+	}
 	localSha := computeFileSha256(localPath)
-	if peerSha != "" && peerSha == localSha {
+	replicaPath := localPath + ".ha-replica"
+	replicaSha := computeFileSha256(replicaPath)
+	if peerSha != "" && (peerSha == localSha || peerSha == replicaSha) {
 		return
 	}
 
@@ -560,15 +583,36 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
 	if err != nil || len(body) == 0 {
 		return
 	}
+	actualSum := sha256.Sum256(body)
+	actualSha := hex.EncodeToString(actualSum[:])
+	if peerSha != "" && actualSha != peerSha {
+		slog.Warn("Peer state checksum mismatch, skipping sync", "peerSha", peerSha, "actualSha", actualSha)
+		return
+	}
 	_ = os.MkdirAll(filepath.Dir(localPath), 0755)
-	_ = os.WriteFile(localPath+".ha-replica", body, 0640)
+	_ = os.WriteFile(replicaPath, body, 0600)
 }
 
 func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int) error {
 	m.mu.Lock()
 	peerAddr := m.cfg.PeerAddress
 	authToken := m.cfg.AuthToken
+	allowedDbs := append([]string(nil), m.cfg.Databases...)
 	m.mu.Unlock()
+
+	// Verify target dbPath is within local allowlist (cfg.Databases) and resides strictly within /var/lib/axonwall/
+	cleanDbPath := filepath.Clean(dbPath)
+	isAllowed := false
+	for _, p := range allowedDbs {
+		if filepath.Clean(p) == cleanDbPath {
+			isAllowed = true
+			break
+		}
+	}
+	if !isAllowed || !strings.HasPrefix(cleanDbPath, "/var/lib/axonwall/") {
+		return fmt.Errorf("refusing to apply database to unallowed or unsafe path: %s", cleanDbPath)
+	}
+	dbPath = cleanDbPath
 
 	downloadUrl := fmt.Sprintf("http://%s/api/v1/sync/db?path=%s", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)), url.QueryEscape(dbPath))
 	req, err := http.NewRequest("GET", downloadUrl, nil)

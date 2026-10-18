@@ -127,22 +127,30 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     '',
   ].join('\n');
 
+  const sanitizeK8sId = (v: string) => v.replace(/[^a-z0-9-.]/gi, '-').toLowerCase();
+  const sanitizeScalar = (v: string) => v.replace(/[\r\n]/g, '').trim();
+
   const workloadDocs: string[] = [];
   for (const wl of k3s.workloads ?? []) {
     if (!wl.enabled) continue;
-    const ns = wl.namespace || 'default';
+    const safeName = sanitizeK8sId(wl.name);
+    const ns = sanitizeK8sId(wl.namespace || 'default');
+    const safeSc = sanitizeK8sId(wl.storageClass);
+    const safeImage = sanitizeScalar(wl.image);
+    const safeMount = sanitizeScalar(wl.mountPath);
+
     if (wl.storageClass !== 'none') {
       workloadDocs.push(
         [
           'apiVersion: v1',
           'kind: PersistentVolumeClaim',
           'metadata:',
-          `  name: ${wl.name}-pvc`,
+          `  name: ${safeName}-pvc`,
           `  namespace: ${ns}`,
           'spec:',
           '  accessModes:',
           '    - ReadWriteOnce',
-          `  storageClassName: ${wl.storageClass}`,
+          `  storageClassName: ${safeSc}`,
           '  resources:',
           '    requests:',
           `      storage: ${wl.storageSizeGb}Gi`,
@@ -154,21 +162,21 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
       'apiVersion: apps/v1',
       'kind: Deployment',
       'metadata:',
-      `  name: ${wl.name}`,
+      `  name: ${safeName}`,
       `  namespace: ${ns}`,
       'spec:',
       `  replicas: ${wl.replicas}`,
       '  selector:',
       '    matchLabels:',
-      `      app: ${wl.name}`,
+      `      app: ${safeName}`,
       '  template:',
       '    metadata:',
       '      labels:',
-      `        app: ${wl.name}`,
+      `        app: ${safeName}`,
       '    spec:',
       '      containers:',
-      `        - name: ${wl.name}`,
-      `          image: ${wl.image}`,
+      `        - name: ${safeName}`,
+      `          image: ${safeImage}`,
       '          ports:',
       `            - containerPort: ${wl.port}`,
     ];
@@ -177,11 +185,11 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
       deployLines.push(
         '          volumeMounts:',
         `            - name: data`,
-        `              mountPath: ${wl.mountPath}`,
+        `              mountPath: ${safeMount}`,
         '      volumes:',
         '        - name: data',
         '          persistentVolumeClaim:',
-        `            claimName: ${wl.name}-pvc`,
+        `            claimName: ${safeName}-pvc`,
       );
     }
 

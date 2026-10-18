@@ -59,6 +59,7 @@ async function main() {
     tunnelIp?: string;
     wireguard?: { tunnelIp: string };
     ws?: WebSocket;
+    headscaleEnrolled?: boolean;
     metrics?: {
       uptimeSeconds: number;
       cpuUsagePercent: number;
@@ -269,13 +270,8 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     // Reverse proxy all other HTTP traffic to the Axonwall Web Console on port 3000
-    let forwardedHost = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost';
-    if (typeof req.headers.origin === 'string') {
-      try {
-        const originHost = new URL(req.headers.origin).host;
-        if (originHost) forwardedHost = originHost;
-      } catch {}
-    }
+    // Use the actual Host requested on this reverse proxy; never overwrite with client-supplied Origin
+    const forwardedHost = req.headers.host || (req.headers['x-forwarded-host'] as string) || 'localhost';
     const uiReq = http.request({
       hostname: '127.0.0.1',
       port: uiPort,
@@ -570,46 +566,11 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       tunnelIp,
       wireguard: { tunnelIp },
       ws: ws,
+      headscaleEnrolled: existing?.headscaleEnrolled || false,
     };
     activeSatellites.set(satId, state);
 
-    // 1. Headscale ZTP Identity Provisioning
-    try {
-      console.log(`[Fleet Manager] Provisioning Headscale PreAuthKey for ${satId}...`);
-      let users = await listUsers();
-      let satelliteUser = users.find((u: any) => u.name === 'satellites');
-      if (!satelliteUser) {
-        satelliteUser = await createUser('satellites');
-      }
-
-      // Generate a 1-hour ephemeral key
-      const expiration = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-      const preAuthKey = await createPreAuthKey('satellites', false, true, expiration);
-
-      ws.send(JSON.stringify({
-        type: 'SYNC_HEADSCALE',
-        payload: {
-          serverUrl: process.env.HEADSCALE_EXTERNAL_URL || 'https://hub.axonwall.local',
-          authKey: preAuthKey.key
-        }
-      }));
-      console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
-    } catch (err: any) {
-      console.error(`[Fleet Manager] Failed to provision Headscale key for ${satId}: ${err.message}`);
-    }
-
-    // 2. Push initial compiled nftables ruleset
-    const { nftScript } = compileSatelliteNftables(state);
-    ws.send(JSON.stringify({
-      type: 'SYNC_NFTABLES',
-      payload: {
-        script: nftScript
-      }
-    }));
-
-    // 3. Broadcast mesh update to all satellites (including the new one)
-    broadcastMeshTopology();
-
+    // Register event listeners immediately before any async provisioning
     ws.on('message', (message) => {
       state.lastSeen = new Date().toISOString();
       try {
@@ -663,6 +624,50 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         broadcastMeshTopology();
       }
     });
+
+    // 1. Headscale ZTP Identity Provisioning (only on initial enrollment / if not already enrolled)
+    if (!state.headscaleEnrolled) {
+      try {
+        console.log(`[Fleet Manager] Provisioning Headscale PreAuthKey for ${satId}...`);
+        let users = await listUsers();
+        let satelliteUser = users.find((u: any) => u.name === 'satellites');
+        if (!satelliteUser) {
+          satelliteUser = await createUser('satellites');
+        }
+
+        // Generate a 1-hour ephemeral key
+        const expiration = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const preAuthKey = await createPreAuthKey('satellites', false, true, expiration);
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'SYNC_HEADSCALE',
+            payload: {
+              serverUrl: process.env.HEADSCALE_EXTERNAL_URL || 'https://hub.axonwall.local',
+              authKey: preAuthKey.key
+            }
+          }));
+          state.headscaleEnrolled = true;
+          console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
+        }
+      } catch (err: any) {
+        console.error(`[Fleet Manager] Failed to provision Headscale key for ${satId}: ${err.message}`);
+      }
+    }
+
+    // 2. Push initial compiled nftables ruleset
+    if (ws.readyState === WebSocket.OPEN) {
+      const { nftScript } = compileSatelliteNftables(state);
+      ws.send(JSON.stringify({
+        type: 'SYNC_NFTABLES',
+        payload: {
+          script: nftScript
+        }
+      }));
+    }
+
+    // 3. Broadcast mesh update to all satellites (including the new one)
+    broadcastMeshTopology();
   });
 
   const port = parseInt(process.env.CONTROLLER_PORT || '2966', 10);

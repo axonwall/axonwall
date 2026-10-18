@@ -66,12 +66,22 @@ export function compileZfsDatasetCommands(dataset: ZfsDataset): string[] {
   return cmds;
 }
 
+function sanitizeIniVal(v?: string): string {
+  if (!v) return '';
+  return v.replace(/[\r\n]/g, '').trim();
+}
+
+function sanitizeIniSection(v?: string): string {
+  if (!v) return '';
+  return v.replace(/[\r\n[\]]/g, '_').trim();
+}
+
 export function compileSmbConf(nas?: NasConfig): string {
   const lines: string[] = [
     '# Axonwall Auto-Generated Samba (SMB3) Configuration',
     '[global]',
-    `  workgroup = ${nas?.workgroup || 'WORKGROUP'}`,
-    `  server string = ${nas?.serverString || 'Axonwall Enterprise ZFS NAS'}`,
+    `  workgroup = ${sanitizeIniVal(nas?.workgroup) || 'WORKGROUP'}`,
+    `  server string = ${sanitizeIniVal(nas?.serverString) || 'Axonwall Enterprise ZFS NAS'}`,
     '  security = user',
     '  map to guest = Bad User',
     '  server min protocol = SMB2_10',
@@ -88,10 +98,10 @@ export function compileSmbConf(nas?: NasConfig): string {
 
   for (const share of nas?.smbShares ?? []) {
     if (!share.enabled) continue;
-    lines.push(`[${share.name}]`);
-    lines.push(`  path = ${share.path}`);
+    lines.push(`[${sanitizeIniSection(share.name)}]`);
+    lines.push(`  path = ${sanitizeIniVal(share.path)}`);
     if (share.comment) {
-      lines.push(`  comment = ${share.comment}`);
+      lines.push(`  comment = ${sanitizeIniVal(share.comment)}`);
     }
     lines.push(`  browseable = ${share.browseable !== false ? 'yes' : 'no'}`);
     lines.push(`  read only = ${share.readOnly ? 'yes' : 'no'}`);
@@ -119,10 +129,10 @@ export function compileSmbConf(nas?: NasConfig): string {
     }
 
     if (share.validUsers && share.validUsers.length > 0) {
-      lines.push(`  valid users = ${share.validUsers.join(' ')}`);
+      lines.push(`  valid users = ${share.validUsers.map(sanitizeIniVal).join(' ')}`);
     }
     if (share.hostsAllow && share.hostsAllow.length > 0) {
-      lines.push(`  hosts allow = ${share.hostsAllow.join(' ')}`);
+      lines.push(`  hosts allow = ${share.hostsAllow.map(sanitizeIniVal).join(' ')}`);
     }
     lines.push('');
   }
@@ -140,11 +150,12 @@ export function compileNfsExports(nas?: NasConfig): string {
     const mode = exp.readOnly ? 'ro' : 'rw';
     const syncMode = exp.async ? 'async' : 'sync';
     const squash = exp.mapRootUser === 'root' ? 'no_root_squash' : 'root_squash';
-    const nets = exp.allowedNetworks && exp.allowedNetworks.length > 0
+    const rawNets = exp.allowedNetworks && exp.allowedNetworks.length > 0
       ? exp.allowedNetworks
       : ['*'];
+    const nets = rawNets.map(sanitizeIniVal).filter(Boolean);
     const clientSpecs = nets.map((net) => `${net}(${mode},${syncMode},no_subtree_check,${squash})`).join(' ');
-    lines.push(`${exp.path} ${clientSpecs}`);
+    lines.push(`${sanitizeIniVal(exp.path)} ${clientSpecs}`);
   }
 
   lines.push('');

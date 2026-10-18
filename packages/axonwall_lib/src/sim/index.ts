@@ -1,3 +1,4 @@
+import { normalizeAntiLockoutInterfaces } from '../schemas/index.js';
 import type { Alias, DesiredState, FirewallRule, NatRule, PacketTracerQuery } from '../schemas/index.js';
 
 export interface TraceStep {
@@ -64,7 +65,8 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
   });
 
   // 2. Anti-Lockout check
-  if (state.system.antiLockout?.enabled && state.system.antiLockout.interface === inIface.name) {
+  const antiLockoutIfaces = normalizeAntiLockoutInterfaces(state.system.antiLockout);
+  if (state.system.antiLockout?.enabled && antiLockoutIfaces.includes(inIface.name)) {
     if (
       query.protocol === 'tcp' &&
       state.system.antiLockout.ports.includes(query.dstPort) &&
@@ -116,7 +118,12 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
   // 4. Firewall Filter Rules Evaluation
   // In nftables/Axonwall: rules are evaluated in sortOrder.
   const applicableRules = state.rules
-    .filter((r) => r.enabled && (r.interface === inIface.name || r.interface === 'any' || r.interface === 'floating'))
+    .filter(
+      (r) =>
+        r.enabled &&
+        (r.interface === inIface.name || r.interface === 'any' || r.interface === 'floating') &&
+        r.direction !== 'out'
+    )
     .sort((a, b) => a.sortOrder - b.sortOrder);
 
   let matchedRule: FirewallRule | undefined;
@@ -251,6 +258,19 @@ function isIpInCidr(ip: string, cidr: string): boolean {
   try {
     const [rangeIp, prefixStr] = cidr.split('/');
     const prefix = Number.parseInt(prefixStr, 10);
+    if (Number.isNaN(prefix)) return false;
+
+    if (ip.includes(':') || rangeIp.includes(':')) {
+      const ipBig = ipv6ToBigInt(ip);
+      const rangeBig = ipv6ToBigInt(rangeIp);
+      if (ipBig === null || rangeBig === null || prefix < 0 || prefix > 128) return false;
+      if (prefix === 0) return true;
+      const shift = 128n - BigInt(prefix);
+      const mask = ((1n << BigInt(prefix)) - 1n) << shift;
+      return (ipBig & mask) === (rangeBig & mask);
+    }
+
+    if (prefix < 0 || prefix > 32) return false;
     const ipNum = ipToInt(ip);
     const rangeNum = ipToInt(rangeIp);
     const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
@@ -258,6 +278,30 @@ function isIpInCidr(ip: string, cidr: string): boolean {
   } catch {
     return false;
   }
+}
+
+function ipv6ToBigInt(ip: string): bigint | null {
+  const parts = ip.split('::');
+  if (parts.length > 2) return null;
+  let head: string[] = parts[0] ? parts[0].split(':') : [];
+  let tail: string[] = parts.length === 2 && parts[1] ? parts[1].split(':') : [];
+
+  if (parts.length === 2) {
+    const missing = 8 - (head.length + tail.length);
+    if (missing < 0) return null;
+    const zeros = new Array(missing).fill('0');
+    head = head.concat(zeros).concat(tail);
+  } else if (head.length !== 8) {
+    return null;
+  }
+
+  let result = 0n;
+  for (const part of head) {
+    const val = Number.parseInt(part || '0', 16);
+    if (Number.isNaN(val) || val < 0 || val > 0xffff) return null;
+    result = (result << 16n) + BigInt(val);
+  }
+  return result;
 }
 
 function ipToInt(ip: string): number {

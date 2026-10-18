@@ -36059,11 +36059,11 @@ var AcmeAccountSchema = external_exports.object({
 });
 var AcmeCertificateSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
-  name: external_exports.string().min(1),
-  domain: external_exports.string().min(1),
-  altNames: external_exports.array(external_exports.string()).default([]),
+  name: external_exports.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/, "Certificate name must contain only alphanumeric, dot, dash, or underscore characters"),
+  domain: external_exports.string().min(1).regex(/^(?:\*\.)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/, "Invalid domain name"),
+  altNames: external_exports.array(external_exports.string().regex(/^(?:\*\.)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/, "Invalid altName")).default([]),
   challengeType: external_exports.enum(["http-01", "dns-01"]).default("http-01"),
-  dnsProvider: external_exports.string().optional(),
+  dnsProvider: external_exports.string().regex(/^[a-zA-Z0-9_-]+$/).optional(),
   autoRenew: external_exports.boolean().default(true),
   renewDaysBeforeExpiry: external_exports.number().int().default(30),
   deployServices: external_exports.array(external_exports.enum(["webgui", "openvpn", "ipsec", "haproxy"])).default(["webgui"]),
@@ -37083,12 +37083,22 @@ function compileZfsDatasetCommands(dataset) {
   }
   return cmds;
 }
+function sanitizeIniVal(v) {
+  if (!v)
+    return "";
+  return v.replace(/[\r\n]/g, "").trim();
+}
+function sanitizeIniSection(v) {
+  if (!v)
+    return "";
+  return v.replace(/[\r\n[\]]/g, "_").trim();
+}
 function compileSmbConf(nas) {
   const lines = [
     "# Axonwall Auto-Generated Samba (SMB3) Configuration",
     "[global]",
-    `  workgroup = ${nas?.workgroup || "WORKGROUP"}`,
-    `  server string = ${nas?.serverString || "Axonwall Enterprise ZFS NAS"}`,
+    `  workgroup = ${sanitizeIniVal(nas?.workgroup) || "WORKGROUP"}`,
+    `  server string = ${sanitizeIniVal(nas?.serverString) || "Axonwall Enterprise ZFS NAS"}`,
     "  security = user",
     "  map to guest = Bad User",
     "  server min protocol = SMB2_10",
@@ -37105,10 +37115,10 @@ function compileSmbConf(nas) {
   for (const share of nas?.smbShares ?? []) {
     if (!share.enabled)
       continue;
-    lines.push(`[${share.name}]`);
-    lines.push(`  path = ${share.path}`);
+    lines.push(`[${sanitizeIniSection(share.name)}]`);
+    lines.push(`  path = ${sanitizeIniVal(share.path)}`);
     if (share.comment) {
-      lines.push(`  comment = ${share.comment}`);
+      lines.push(`  comment = ${sanitizeIniVal(share.comment)}`);
     }
     lines.push(`  browseable = ${share.browseable !== false ? "yes" : "no"}`);
     lines.push(`  read only = ${share.readOnly ? "yes" : "no"}`);
@@ -37132,10 +37142,10 @@ function compileSmbConf(nas) {
       lines.push("  fruit:time machine = yes");
     }
     if (share.validUsers && share.validUsers.length > 0) {
-      lines.push(`  valid users = ${share.validUsers.join(" ")}`);
+      lines.push(`  valid users = ${share.validUsers.map(sanitizeIniVal).join(" ")}`);
     }
     if (share.hostsAllow && share.hostsAllow.length > 0) {
-      lines.push(`  hosts allow = ${share.hostsAllow.join(" ")}`);
+      lines.push(`  hosts allow = ${share.hostsAllow.map(sanitizeIniVal).join(" ")}`);
     }
     lines.push("");
   }
@@ -37151,9 +37161,10 @@ function compileNfsExports(nas) {
     const mode = exp.readOnly ? "ro" : "rw";
     const syncMode = exp.async ? "async" : "sync";
     const squash = exp.mapRootUser === "root" ? "no_root_squash" : "root_squash";
-    const nets = exp.allowedNetworks && exp.allowedNetworks.length > 0 ? exp.allowedNetworks : ["*"];
+    const rawNets = exp.allowedNetworks && exp.allowedNetworks.length > 0 ? exp.allowedNetworks : ["*"];
+    const nets = rawNets.map(sanitizeIniVal).filter(Boolean);
     const clientSpecs = nets.map((net) => `${net}(${mode},${syncMode},no_subtree_check,${squash})`).join(" ");
-    lines.push(`${exp.path} ${clientSpecs}`);
+    lines.push(`${sanitizeIniVal(exp.path)} ${clientSpecs}`);
   }
   lines.push("");
   return lines.join("\n");
@@ -37299,22 +37310,28 @@ function compileK3s(state, joinToken) {
     "volumeBindingMode: Immediate",
     ""
   ].join("\n");
+  const sanitizeK8sId = (v) => v.replace(/[^a-z0-9-.]/gi, "-").toLowerCase();
+  const sanitizeScalar = (v) => v.replace(/[\r\n]/g, "").trim();
   const workloadDocs = [];
   for (const wl of k3s.workloads ?? []) {
     if (!wl.enabled)
       continue;
-    const ns = wl.namespace || "default";
+    const safeName = sanitizeK8sId(wl.name);
+    const ns = sanitizeK8sId(wl.namespace || "default");
+    const safeSc = sanitizeK8sId(wl.storageClass);
+    const safeImage = sanitizeScalar(wl.image);
+    const safeMount = sanitizeScalar(wl.mountPath);
     if (wl.storageClass !== "none") {
       workloadDocs.push([
         "apiVersion: v1",
         "kind: PersistentVolumeClaim",
         "metadata:",
-        `  name: ${wl.name}-pvc`,
+        `  name: ${safeName}-pvc`,
         `  namespace: ${ns}`,
         "spec:",
         "  accessModes:",
         "    - ReadWriteOnce",
-        `  storageClassName: ${wl.storageClass}`,
+        `  storageClassName: ${safeSc}`,
         "  resources:",
         "    requests:",
         `      storage: ${wl.storageSizeGb}Gi`
@@ -37324,26 +37341,26 @@ function compileK3s(state, joinToken) {
       "apiVersion: apps/v1",
       "kind: Deployment",
       "metadata:",
-      `  name: ${wl.name}`,
+      `  name: ${safeName}`,
       `  namespace: ${ns}`,
       "spec:",
       `  replicas: ${wl.replicas}`,
       "  selector:",
       "    matchLabels:",
-      `      app: ${wl.name}`,
+      `      app: ${safeName}`,
       "  template:",
       "    metadata:",
       "      labels:",
-      `        app: ${wl.name}`,
+      `        app: ${safeName}`,
       "    spec:",
       "      containers:",
-      `        - name: ${wl.name}`,
-      `          image: ${wl.image}`,
+      `        - name: ${safeName}`,
+      `          image: ${safeImage}`,
       "          ports:",
       `            - containerPort: ${wl.port}`
     ];
     if (wl.storageClass !== "none") {
-      deployLines.push("          volumeMounts:", `            - name: data`, `              mountPath: ${wl.mountPath}`, "      volumes:", "        - name: data", "          persistentVolumeClaim:", `            claimName: ${wl.name}-pvc`);
+      deployLines.push("          volumeMounts:", `            - name: data`, `              mountPath: ${safeMount}`, "      volumes:", "        - name: data", "          persistentVolumeClaim:", `            claimName: ${safeName}-pvc`);
     }
     workloadDocs.push(deployLines.join("\n"));
   }
@@ -37953,6 +37970,15 @@ function lintRuleset(state) {
       }
     }
   }
+  if (state.nat) {
+    for (const nat of state.nat) {
+      for (const val of [nat.source, nat.destination, nat.sourcePort, nat.destinationPort, nat.targetIp, nat.targetPort]) {
+        if (val && val.startsWith("$")) {
+          referencedAliases.add(val.slice(1).toLowerCase());
+        }
+      }
+    }
+  }
   for (const alias of state.aliases) {
     if (!referencedAliases.has(alias.name.toLowerCase())) {
       issues.push({
@@ -38009,7 +38035,8 @@ function lintRuleset(state) {
     }
   }
   if (state.system?.antiLockout?.enabled) {
-    if (state.system.antiLockout.interface === "wan") {
+    const antiLockoutIfaces = normalizeAntiLockoutInterfaces(state.system.antiLockout);
+    if (antiLockoutIfaces.includes("wan")) {
       issues.push({
         type: "anti_lockout_on_wan",
         severity: "error",
@@ -38502,14 +38529,7 @@ async function main() {
       }));
       return;
     }
-    let forwardedHost = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
-    if (typeof req.headers.origin === "string") {
-      try {
-        const originHost = new URL(req.headers.origin).host;
-        if (originHost) forwardedHost = originHost;
-      } catch {
-      }
-    }
+    const forwardedHost = req.headers.host || req.headers["x-forwarded-host"] || "localhost";
     const uiReq = http.request({
       hostname: "127.0.0.1",
       port: uiPort,
@@ -38765,37 +38785,10 @@ ${headerLines.join("\r\n")}\r
       wgPublicKey,
       tunnelIp,
       wireguard: { tunnelIp },
-      ws
+      ws,
+      headscaleEnrolled: existing?.headscaleEnrolled || false
     };
     activeSatellites.set(satId, state);
-    try {
-      console.log(`[Fleet Manager] Provisioning Headscale PreAuthKey for ${satId}...`);
-      let users = await listUsers();
-      let satelliteUser = users.find((u) => u.name === "satellites");
-      if (!satelliteUser) {
-        satelliteUser = await createUser("satellites");
-      }
-      const expiration = new Date(Date.now() + 60 * 60 * 1e3).toISOString();
-      const preAuthKey = await createPreAuthKey("satellites", false, true, expiration);
-      ws.send(JSON.stringify({
-        type: "SYNC_HEADSCALE",
-        payload: {
-          serverUrl: process.env.HEADSCALE_EXTERNAL_URL || "https://hub.axonwall.local",
-          authKey: preAuthKey.key
-        }
-      }));
-      console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
-    } catch (err) {
-      console.error(`[Fleet Manager] Failed to provision Headscale key for ${satId}: ${err.message}`);
-    }
-    const { nftScript } = compileSatelliteNftables(state);
-    ws.send(JSON.stringify({
-      type: "SYNC_NFTABLES",
-      payload: {
-        script: nftScript
-      }
-    }));
-    broadcastMeshTopology();
     ws.on("message", (message) => {
       state.lastSeen = (/* @__PURE__ */ new Date()).toISOString();
       try {
@@ -38840,6 +38833,41 @@ ${headerLines.join("\r\n")}\r
         broadcastMeshTopology();
       }
     });
+    if (!state.headscaleEnrolled) {
+      try {
+        console.log(`[Fleet Manager] Provisioning Headscale PreAuthKey for ${satId}...`);
+        let users = await listUsers();
+        let satelliteUser = users.find((u) => u.name === "satellites");
+        if (!satelliteUser) {
+          satelliteUser = await createUser("satellites");
+        }
+        const expiration = new Date(Date.now() + 60 * 60 * 1e3).toISOString();
+        const preAuthKey = await createPreAuthKey("satellites", false, true, expiration);
+        if (ws.readyState === import_websocket.default.OPEN) {
+          ws.send(JSON.stringify({
+            type: "SYNC_HEADSCALE",
+            payload: {
+              serverUrl: process.env.HEADSCALE_EXTERNAL_URL || "https://hub.axonwall.local",
+              authKey: preAuthKey.key
+            }
+          }));
+          state.headscaleEnrolled = true;
+          console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
+        }
+      } catch (err) {
+        console.error(`[Fleet Manager] Failed to provision Headscale key for ${satId}: ${err.message}`);
+      }
+    }
+    if (ws.readyState === import_websocket.default.OPEN) {
+      const { nftScript } = compileSatelliteNftables(state);
+      ws.send(JSON.stringify({
+        type: "SYNC_NFTABLES",
+        payload: {
+          script: nftScript
+        }
+      }));
+    }
+    broadcastMeshTopology();
   });
   const port = parseInt(process.env.CONTROLLER_PORT || "2966", 10);
   server.listen(port, "0.0.0.0", () => {

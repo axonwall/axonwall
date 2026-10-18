@@ -3,15 +3,11 @@
 import { execFileSync } from 'node:child_process';
 import QRCode from 'qrcode';
 import { getSession } from './auth';
+import { assertActionPermitted } from './auth-guard';
 
 export async function generateWireGuardProfile() {
   const session = await getSession();
-  if (!session) {
-    throw new Error('Unauthorized');
-  }
-  if (session.passwordChangeRequired) {
-    throw new Error('Forbidden: Password change required before generating VPN profile');
-  }
+  assertActionPermitted(session);
 
   const hasAccess =
     session.roles.includes('admin') ||

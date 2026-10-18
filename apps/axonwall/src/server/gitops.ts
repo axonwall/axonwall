@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { getSession } from './auth';
+import { assertActionPermitted } from './auth-guard';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import {
   AXONWALL_YAML_FILENAMES,
@@ -48,9 +49,7 @@ export async function recordGitOpsChange(
   commitMsg = 'Firewall state updated (/etc/axonwall/*.yaml)'
 ): Promise<string | null> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin') || session.passwordChangeRequired) {
-    throw new Error('Unauthorized');
-  }
+  assertActionPermitted(session, 'admin');
 
   try {
     ensureGitOpsRepo();
@@ -79,7 +78,7 @@ export async function recordGitOpsChange(
 
 export async function getGitOpsHistory(): Promise<GitOpsHistory> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   ensureGitOpsRepo();
   try {
@@ -133,7 +132,7 @@ export async function getGitOpsHistory(): Promise<GitOpsHistory> {
 
 export async function getCommitDiff(commitHash: string): Promise<string> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
   try {
@@ -162,9 +161,7 @@ export async function rollbackToGitOpsCommit(
   commitHash: string
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin') || session.passwordChangeRequired) {
-    throw new Error('Unauthorized: Admin privileges required to rollback configuration');
-  }
+  assertActionPermitted(session, 'admin');
 
   const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
   try {

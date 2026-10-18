@@ -16,6 +16,7 @@ import {
 import type { UserSession } from '@axonwall/lib/rbac';
 
 import { SESSION_COOKIE, getJwtSecret } from './auth-constants';
+import { assertActionPermitted } from './auth-guard';
 import {
   bumpSessionEpoch,
   isSessionRevoked,
@@ -277,7 +278,7 @@ export async function logoutAction() {
 
 export async function generateMfaSetup() {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const { generateSecret, generateURI } = require('otplib');
   const plugins = totpPlugins();
@@ -292,7 +293,7 @@ export async function generateMfaSetup() {
 
 export async function verifyMfaSetup(secret: string, token: string) {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const { verify } = require('otplib');
   const result = await verify({ secret, token, ...totpPlugins(), epochTolerance: 30 });

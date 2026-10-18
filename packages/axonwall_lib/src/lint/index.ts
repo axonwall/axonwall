@@ -1,3 +1,4 @@
+import { normalizeAntiLockoutInterfaces } from '../schemas/index.js';
 import type { DesiredState, FirewallRule } from '../schemas/index.js';
 
 export interface LintIssue {
@@ -39,6 +40,15 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
     for (const val of [rule.source, rule.destination, rule.sourcePort, rule.destinationPort]) {
       if (val && val.startsWith('$')) {
         referencedAliases.add(val.slice(1).toLowerCase());
+      }
+    }
+  }
+  if (state.nat) {
+    for (const nat of state.nat) {
+      for (const val of [nat.source, nat.destination, nat.sourcePort, nat.destinationPort, nat.targetIp, nat.targetPort]) {
+        if (val && val.startsWith('$')) {
+          referencedAliases.add(val.slice(1).toLowerCase());
+        }
       }
     }
   }
@@ -124,7 +134,8 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
 
   // 4. Anti-Lockout Interface Safety Check
   if (state.system?.antiLockout?.enabled) {
-    if (state.system.antiLockout.interface === 'wan') {
+    const antiLockoutIfaces = normalizeAntiLockoutInterfaces(state.system.antiLockout);
+    if (antiLockoutIfaces.includes('wan')) {
       issues.push({
         type: 'anti_lockout_on_wan',
         severity: 'error',

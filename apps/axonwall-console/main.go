@@ -434,12 +434,15 @@ func readCurrentNetworkConfig() NetworkConfig {
 }
 
 func updateStateJSON(cfg NetworkConfig) {
-	statePath := "/var/lib/axonwall/state.json"
+	statePath := "/etc/axonwall/state.json"
+	_ = os.MkdirAll("/etc/axonwall", 0755)
 	_ = os.MkdirAll("/var/lib/axonwall", 0755)
 
 	var state map[string]interface{}
 	if data, err := os.ReadFile(statePath); err == nil {
 		_ = json.Unmarshal(data, &state)
+	} else if dataVar, errVar := os.ReadFile("/var/lib/axonwall/state.json"); errVar == nil {
+		_ = json.Unmarshal(dataVar, &state)
 	}
 	if state == nil {
 		state = make(map[string]interface{})
@@ -450,10 +453,12 @@ func updateStateJSON(cfg NetworkConfig) {
 
 	rawIfaces, _ := state["interfaces"].([]interface{})
 	ifacesMap := make(map[string]map[string]interface{})
+	var originalOrder []string
 	for _, raw := range rawIfaces {
 		if ifaceMap, ok := raw.(map[string]interface{}); ok {
 			if name, ok := ifaceMap["name"].(string); ok {
 				ifacesMap[name] = ifaceMap
+				originalOrder = append(originalOrder, name)
 			}
 		}
 	}
@@ -492,17 +497,26 @@ func updateStateJSON(cfg NetworkConfig) {
 	}
 
 	var updatedList []interface{}
+	seen := make(map[string]bool)
 	for _, name := range []string{"wan", "lan", "opt1", "opt2"} {
 		if entry, ok := ifacesMap[name]; ok {
 			updatedList = append(updatedList, entry)
+			seen[name] = true
+		}
+	}
+	for _, name := range originalOrder {
+		if !seen[name] {
+			if entry, ok := ifacesMap[name]; ok {
+				updatedList = append(updatedList, entry)
+				seen[name] = true
+			}
 		}
 	}
 	state["interfaces"] = updatedList
 
 	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
-		_ = os.WriteFile(statePath, out, 0600)
-		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
+		_ = os.WriteFile("/var/lib/axonwall/state.json", out, 0600)
 	}
 
 	// Also write /etc/axonwall/interfaces.yaml and /var/lib/axonwall/etc-axonwall/interfaces.yaml
@@ -536,9 +550,31 @@ func updateStateJSON(cfg NetworkConfig) {
 	if cfg.Opt2Device != "" {
 		writeYamlIface("opt2", cfg.Opt2Device, cfg.Opt2Mode, cfg.Opt2IP, "", "OPT2 (Attached Network / Non-authoritative)")
 	}
-	yamlBuilder.WriteString("vlans: []\n")
-	yamlBuilder.WriteString("bridges: []\n")
-	yamlBuilder.WriteString("laggs: []\n")
+
+	// Preserve existing VLANs, bridges, bonds/laggs, and VRFs from existing file
+	existingYaml, _ := os.ReadFile("/etc/axonwall/interfaces.yaml")
+	if len(existingYaml) == 0 {
+		existingYaml, _ = os.ReadFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml")
+	}
+	extraSections := ""
+	if len(existingYaml) > 0 {
+		str := string(existingYaml)
+		for _, sec := range []string{"\nvlans:", "\nbridges:", "\nbonds:", "\nlaggs:", "\nvirtualIps:", "\nvrfs:"} {
+			idx := strings.Index(str, sec)
+			if idx != -1 {
+				extraSections = strings.TrimSpace(str[idx+1:])
+				break
+			}
+		}
+	}
+	if extraSections != "" {
+		yamlBuilder.WriteString(extraSections)
+		yamlBuilder.WriteString("\n")
+	} else {
+		yamlBuilder.WriteString("vlans: []\n")
+		yamlBuilder.WriteString("bridges: []\n")
+		yamlBuilder.WriteString("laggs: []\n")
+	}
 
 	yamlBytes := []byte(yamlBuilder.String())
 	_ = os.MkdirAll("/etc/axonwall", 0755)
@@ -759,6 +795,7 @@ func clearScreen() {
 func getAdminCredentials() (string, string) {
 	adminUser := "admin"
 	adminPass := "axonwall"
+	foundPass := false
 
 	// 1. Check /etc/axonwall/admin.env first
 	if data, err := os.ReadFile("/etc/axonwall/admin.env"); err == nil {
@@ -768,9 +805,12 @@ func getAdminCredentials() (string, string) {
 				adminUser = strings.TrimPrefix(line, "LOCAL_ADMIN_USER=")
 			} else if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") {
 				adminPass = strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD=")
+				foundPass = true
 			}
 		}
-		return adminUser, adminPass
+		if foundPass {
+			return adminUser, adminPass
+		}
 	}
 
 	// 2. Check /etc/axonwall/axonwall.env
@@ -781,9 +821,12 @@ func getAdminCredentials() (string, string) {
 				adminUser = strings.TrimPrefix(line, "LOCAL_ADMIN_USER=")
 			} else if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") {
 				adminPass = strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD=")
+				foundPass = true
 			}
 		}
-		return adminUser, adminPass
+		if foundPass {
+			return adminUser, adminPass
+		}
 	}
 
 	// 3. Fallback to /etc/axonwall/initial-admin-password
@@ -837,7 +880,9 @@ func readPassword(reader *bufio.Reader, prompt string) (string, error) {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	stopSig := make(chan struct{})
 	defer func() {
+		close(stopSig)
 		signal.Stop(sigChan)
 		restore := exec.Command("stty", "echo")
 		restore.Stdin = os.Stdin
@@ -846,12 +891,16 @@ func readPassword(reader *bufio.Reader, prompt string) (string, error) {
 	}()
 
 	go func() {
-		<-sigChan
-		restore := exec.Command("stty", "echo")
-		restore.Stdin = os.Stdin
-		_ = restore.Run()
-		fmt.Println()
-		os.Exit(130)
+		select {
+		case <-sigChan:
+			restore := exec.Command("stty", "echo")
+			restore.Stdin = os.Stdin
+			_ = restore.Run()
+			fmt.Println()
+			os.Exit(130)
+		case <-stopSig:
+			return
+		}
 	}()
 
 	line, err := reader.ReadString('\n')

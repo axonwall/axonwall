@@ -319,13 +319,14 @@ async function cmdApply(autoConfirm = true) {
   const jobId = `cli-${Date.now()}`;
 
   const filesPayload = [
-    ...files,
+    ...files.map((f) => ({ ...f, file_mode: f.fileMode })),
     ...Object.entries(yamlFiles).map(([filename, content]) => ({
       path: `/etc/axonwall/${filename}`,
       content,
-      fileMode: 0o644,
+      fileMode: 0o600,
+      file_mode: 0o600,
     })),
-    { path: '/etc/axonwall/state.json', content: serializedJson, fileMode: 0o600 },
+    { path: '/etc/axonwall/state.json', content: serializedJson, fileMode: 0o600, file_mode: 0o600 },
   ];
 
   try {

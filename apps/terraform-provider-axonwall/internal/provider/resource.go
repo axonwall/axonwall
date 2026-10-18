@@ -140,5 +140,28 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 		respBody, _ := io.ReadAll(httpResp.Body)
 		return fmt.Errorf("API error %d: %s", httpResp.StatusCode, string(respBody))
 	}
+
+	// Confirm the configuration so it does not auto-rollback after the timeout
+	confirmUrl := r.client.Endpoint + "/confirm"
+	confirmReq, err := http.NewRequest("POST", confirmUrl, bytes.NewReader([]byte(`{"jobId":"terraform"}`)))
+	if err != nil {
+		return fmt.Errorf("failed to create confirm request: %w", err)
+	}
+	confirmReq.Header.Set("Content-Type", "application/json")
+	if r.client.Token != "" {
+		confirmReq.Header.Set("Authorization", "Bearer "+r.client.Token)
+	}
+
+	confirmResp, err := r.client.Client.Do(confirmReq)
+	if err != nil {
+		return fmt.Errorf("failed to send confirm request: %w", err)
+	}
+	defer confirmResp.Body.Close()
+
+	if confirmResp.StatusCode < 200 || confirmResp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(confirmResp.Body)
+		return fmt.Errorf("confirm error %d: %s", confirmResp.StatusCode, string(respBody))
+	}
+
 	return nil
 }

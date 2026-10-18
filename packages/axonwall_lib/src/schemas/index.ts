@@ -561,11 +561,11 @@ export type AcmeAccount = z.infer<typeof AcmeAccountSchema>;
 
 export const AcmeCertificateSchema = z.object({
   id: z.string().uuid().optional(),
-  name: z.string().min(1),
-  domain: z.string().min(1),
-  altNames: z.array(z.string()).default([]),
+  name: z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/, 'Certificate name must contain only alphanumeric, dot, dash, or underscore characters'),
+  domain: z.string().min(1).regex(/^(?:\*\.)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/, 'Invalid domain name'),
+  altNames: z.array(z.string().regex(/^(?:\*\.)?[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/, 'Invalid altName')).default([]),
   challengeType: z.enum(['http-01', 'dns-01']).default('http-01'),
-  dnsProvider: z.string().optional(),
+  dnsProvider: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional(),
   autoRenew: z.boolean().default(true),
   renewDaysBeforeExpiry: z.number().int().default(30),
   deployServices: z.array(z.enum(['webgui', 'openvpn', 'ipsec', 'haproxy'])).default(['webgui']),

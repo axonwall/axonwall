@@ -280,28 +280,36 @@ export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
   lines.push('dbs:');
 
   for (const dbPath of sync.databases) {
-    lines.push(`  - path: ${dbPath}`);
+    const safeDbPath = (dbPath || '').replace(/[\r\n\0]/g, '').trim();
+    if (!safeDbPath) continue;
+    lines.push(`  - path: ${safeDbPath}`);
     lines.push('    replicas:');
     if (sync.litestreamBucket) {
+      const safeBucket = (sync.litestreamBucket || '').replace(/[\r\n\0]/g, '').trim();
+      const safeS3Path = safeDbPath.replace(/\//g, '_');
       lines.push(`      - type: s3`);
-      lines.push(`        bucket: ${sync.litestreamBucket}`);
-      lines.push(`        path: ${dbPath.replace(/\//g, '_')}`);
+      lines.push(`        bucket: ${safeBucket}`);
+      lines.push(`        path: ${safeS3Path}`);
       if (sync.litestreamEndpoint) {
-        lines.push(`        endpoint: ${sync.litestreamEndpoint}`);
+        const safeEndpoint = (sync.litestreamEndpoint || '').replace(/[\r\n\0]/g, '').trim();
+        lines.push(`        endpoint: ${safeEndpoint}`);
       }
       if (sync.litestreamAccessKeyId) {
-        lines.push(`        access-key-id: ${sync.litestreamAccessKeyId}`);
+        const safeKeyId = (sync.litestreamAccessKeyId || '').replace(/[\r\n\0]/g, '').trim();
+        lines.push(`        access-key-id: ${safeKeyId}`);
       }
       if (sync.litestreamSecretAccessKey) {
-        lines.push(`        secret-access-key: ${sync.litestreamSecretAccessKey}`);
+        const safeSecret = (sync.litestreamSecretAccessKey || '').replace(/[\r\n\0]/g, '').trim();
+        lines.push(`        secret-access-key: ${safeSecret}`);
       }
     } else {
       // Local/peer directory replica
-      const replicaDir = dbPath.replace('.sqlite', '.replica');
+      const replicaDir = safeDbPath.replace('.sqlite', '.replica');
       lines.push(`      - type: file`);
       lines.push(`        path: ${replicaDir}`);
     }
-    lines.push(`        sync-interval: ${sync.syncIntervalSeconds}s`);
+    const safeInterval = Math.max(1, Math.min(86400, Number(sync.syncIntervalSeconds) || 5));
+    lines.push(`        sync-interval: ${safeInterval}s`);
     lines.push('');
   }
 

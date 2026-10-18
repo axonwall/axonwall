@@ -19,7 +19,11 @@ export async function GET(request: NextRequest) {
     return new NextResponse('Missing capture id', { status: 400 });
   }
 
-  const cleanId = rawId.replace(/[^a-zA-Z0-9_-]/g, '');
+  if (rawId.includes('..') || rawId.includes('/') || rawId.includes('\\')) {
+    return new NextResponse('Invalid capture id', { status: 400 });
+  }
+
+  const cleanId = rawId.replace(/[^a-zA-Z0-9_.-]/g, '');
   if (!cleanId || cleanId !== rawId) {
     return new NextResponse('Invalid capture id', { status: 400 });
   }

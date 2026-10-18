@@ -309,14 +309,23 @@ function parseTcpdumpText(raw: string): CapturedPacket[] {
 }
 
 export function getCaptureFile(id: string): { filePath: string; exists: boolean } {
-  const sanitizedId = (id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!id || id.includes('..') || id.includes('/') || id.includes('\\')) {
+    return { filePath: '', exists: false };
+  }
+  const sanitizedId = (id || '').replace(/[^a-zA-Z0-9_.-]/g, '');
   if (!sanitizedId || sanitizedId !== id) {
     return { filePath: '', exists: false };
   }
   const captureDir = getCaptureDir();
-  const filePath = path.resolve(captureDir, `${sanitizedId}.pcap`);
+  let filePath = path.resolve(captureDir, `${sanitizedId}.pcap`);
   if (!filePath.startsWith(path.resolve(captureDir))) {
     return { filePath: '', exists: false };
+  }
+  if (!fs.existsSync(filePath)) {
+    const altPath = path.resolve(captureDir, `${sanitizedId.replace(/\./g, '_')}.pcap`);
+    if (altPath.startsWith(path.resolve(captureDir)) && fs.existsSync(altPath)) {
+      filePath = altPath;
+    }
   }
   return {
     filePath,

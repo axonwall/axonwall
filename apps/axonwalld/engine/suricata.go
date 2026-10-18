@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"text/template"
 )
+
+var safeIfaceRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,16}$`)
 
 const suricataConfigTpl = `
 %YAML 1.1
@@ -76,9 +80,15 @@ func GenerateSuricataConfig(interfaces []string) error {
 		return fmt.Errorf("failed to parse suricata template: %w", err)
 	}
 
-	// Default to eth1 if no LAN interfaces found to avoid empty list
-	if len(interfaces) == 0 {
-		interfaces = append(interfaces, "eth1")
+	var safeIfaces []string
+	for _, iface := range interfaces {
+		iface = strings.TrimSpace(iface)
+		if iface != "" && safeIfaceRe.MatchString(iface) {
+			safeIfaces = append(safeIfaces, iface)
+		}
+	}
+	if len(safeIfaces) == 0 {
+		safeIfaces = append(safeIfaces, "eth1")
 	}
 
 	f, err := os.OpenFile(configPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|0x20000, 0644)
@@ -88,7 +98,7 @@ func GenerateSuricataConfig(interfaces []string) error {
 	defer f.Close()
 
 	sc := SuricataConfig{
-		Interfaces: interfaces,
+		Interfaces: safeIfaces,
 	}
 
 	if err := tpl.Execute(f, sc); err != nil {

@@ -30,11 +30,13 @@ type K3sRuntimeBundle struct {
 }
 
 type K3sNodeInfo struct {
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	Status    string `json:"status"`
-	Version   string `json:"version"`
-	IpAddress string `json:"ipAddress"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
+	Roles      string `json:"roles"`
+	Status     string `json:"status"`
+	Version    string `json:"version"`
+	IpAddress  string `json:"ipAddress"`
+	InternalIp string `json:"internalIp"`
 }
 
 type OpenEbsVolumeInfo struct {
@@ -49,8 +51,12 @@ type OpenEbsVolumeInfo struct {
 type K3sClusterStatus struct {
 	Enabled         bool                `json:"enabled"`
 	Running         bool                `json:"running"`
+	ServiceActive   bool                `json:"serviceActive"`
+	ClusterJoined   bool                `json:"clusterJoined"`
+	Role            string              `json:"role"`
 	HaAutoJoined    bool                `json:"haAutoJoined"`
 	OpenEbsReady    bool                `json:"openEbsReady"`
+	OpenEbsHealthy  bool                `json:"openEbsHealthy"`
 	ZfsLocalPvPool  string              `json:"zfsLocalPvPool"`
 	Nodes           []K3sNodeInfo       `json:"nodes"`
 	Volumes         []OpenEbsVolumeInfo `json:"volumes"`
@@ -239,20 +245,24 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 
 	nodes := []K3sNodeInfo{
 		{
-			Name:      hostname,
-			Role:      "control-plane,etcd,master",
-			Status:    "Ready",
-			Version:   "v1.31.2+k3s1",
-			IpAddress: "192.168.1.1",
+			Name:       hostname,
+			Role:       "control-plane,etcd,master",
+			Roles:      "control-plane,etcd,master",
+			Status:     "Ready",
+			Version:    "v1.31.2+k3s1",
+			IpAddress:  "192.168.1.1",
+			InternalIp: "192.168.1.1",
 		},
 	}
 	if cfg.PeerIp != "" {
 		nodes = append(nodes, K3sNodeInfo{
-			Name:      hostname + "-ha-peer",
-			Role:      "control-plane,etcd,master",
-			Status:    "Ready",
-			Version:   "v1.31.2+k3s1",
-			IpAddress: cfg.PeerIp,
+			Name:       hostname + "-ha-peer",
+			Role:       "control-plane,etcd,master",
+			Roles:      "control-plane,etcd,master",
+			Status:     "Ready",
+			Version:    "v1.31.2+k3s1",
+			IpAddress:  cfg.PeerIp,
+			InternalIp: cfg.PeerIp,
 		})
 	}
 
@@ -275,11 +285,20 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		},
 	}
 
+	role := "primary-server"
+	if joined || cfg.PeerIp != "" {
+		role = "secondary-ha-server"
+	}
+
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
 		Running:         cfg.Enabled,
+		ServiceActive:   cfg.Enabled,
+		ClusterJoined:   joined || cfg.PeerIp != "",
+		Role:            role,
 		HaAutoJoined:    joined || cfg.PeerIp != "",
 		OpenEbsReady:    true,
+		OpenEbsHealthy:  true,
 		ZfsLocalPvPool:  "tank",
 		Nodes:           nodes,
 		Volumes:         volumes,

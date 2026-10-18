@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type ZeroTrustApp struct {
@@ -26,6 +27,7 @@ type ZeroTrustConfig struct {
 }
 
 type IAPManager struct {
+	mu  sync.Mutex
 	cmd *exec.Cmd
 }
 
@@ -48,7 +50,7 @@ func (m *IAPManager) ApplyConfig(configJSON []byte) error {
 		if !app.Enabled {
 			continue
 		}
-		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t") {
+		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t#\"'\\") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t#\"'\\") {
 			return fmt.Errorf("invalid characters in zero trust app hostname or upstream")
 		}
 	}
@@ -79,7 +81,7 @@ func (m *IAPManager) generateCaddyfile(config ZeroTrustConfig) string {
 		if !app.Enabled {
 			continue
 		}
-		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t") {
+		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t#\"'\\") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t#\"'\\") {
 			continue
 		}
 
@@ -96,6 +98,9 @@ func (m *IAPManager) generateCaddyfile(config ZeroTrustConfig) string {
 }
 
 func (m *IAPManager) ReloadCaddy(configPath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// If it's not running, start it
 	if m.cmd == nil || m.cmd.Process == nil {
 		m.cmd = exec.Command("caddy", "run", "--config", configPath, "--adapter", "caddyfile")
@@ -114,7 +119,11 @@ func (m *IAPManager) ReloadCaddy(configPath string) error {
 	reloadCmd := exec.Command("caddy", "reload", "--config", configPath, "--adapter", "caddyfile", "--address", "unix//run/axonwall/caddy-admin.sock")
 	if out, err := reloadCmd.CombinedOutput(); err != nil {
 		log.Printf("Warning: caddy reload failed (%v: %s), restarting process", err, string(out))
-		m.Stop()
+		if m.cmd != nil && m.cmd.Process != nil {
+			_ = m.cmd.Process.Kill()
+			_ = m.cmd.Wait()
+			m.cmd = nil
+		}
 		m.cmd = exec.Command("caddy", "run", "--config", configPath, "--adapter", "caddyfile")
 		m.cmd.Stdout = os.Stdout
 		m.cmd.Stderr = os.Stderr
@@ -129,6 +138,9 @@ func (m *IAPManager) ReloadCaddy(configPath string) error {
 }
 
 func (m *IAPManager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.cmd != nil && m.cmd.Process != nil {
 		m.cmd.Process.Kill()
 		m.cmd.Wait()
