@@ -173,6 +173,9 @@ func (m *SqliteSyncManager) authorized(r *http.Request) bool {
 
 func (m *SqliteSyncManager) startMasterServer() error {
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", m.cfg.ListenPort)
+	if m.cfg.LocalAddress != "" && m.cfg.LocalAddress != "0.0.0.0" {
+		listenAddr = fmt.Sprintf("%s:%d", m.cfg.LocalAddress, m.cfg.ListenPort)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/v1/sync/status", m.handleStatus)
@@ -192,12 +195,30 @@ func (m *SqliteSyncManager) startMasterServer() error {
 		slog.Error("HA sync master server has NO auth token configured: every sync request will be rejected (fail-closed) until sqliteSync.authToken is set")
 	}
 
-	slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
-	go func() {
-		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("SQLite Sync server error", "error", err)
+	certPath := "/etc/axonwall/certs/hub.crt"
+	keyPath := "/etc/axonwall/certs/hub.key"
+	hasTLS := false
+	if _, errC := os.Stat(certPath); errC == nil {
+		if _, errK := os.Stat(keyPath); errK == nil {
+			hasTLS = true
 		}
-	}()
+	}
+
+	if hasTLS {
+		slog.Info("Starting Unified HA Sync Master TLS Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
+		go func() {
+			if err := m.server.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
+				slog.Error("SQLite Sync TLS server error", "error", err)
+			}
+		}()
+	} else {
+		slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
+		go func() {
+			if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("SQLite Sync server error", "error", err)
+			}
+		}()
+	}
 
 	return nil
 }
@@ -430,6 +451,17 @@ func (m *SqliteSyncManager) handleDownloadState(w http.ResponseWriter, r *http.R
 	_, _ = w.Write(data)
 }
 
+func validZfsSnapshotName(name string) bool {
+	if name == "" || strings.HasPrefix(name, "-") || strings.Contains(name, "..") {
+		return false
+	}
+	parts := strings.Split(name, "@")
+	if len(parts) != 2 {
+		return false
+	}
+	return validZfsPath(parts[0], true) && validZfsPath(parts[1], false)
+}
+
 func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.Request) {
 	if !m.authorized(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -438,8 +470,12 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 
 	dataset := r.URL.Query().Get("dataset")
 	fromSnap := r.URL.Query().Get("from")
-	if dataset == "" || strings.ContainsAny(dataset, ";|&`$() ") {
+	if !validZfsPath(dataset, true) {
 		http.Error(w, "Invalid dataset parameter", http.StatusBadRequest)
+		return
+	}
+	if fromSnap != "" && !validZfsSnapshotName(fromSnap) {
+		http.Error(w, "Invalid from snapshot parameter", http.StatusBadRequest)
 		return
 	}
 
@@ -455,7 +491,7 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 	w.Header().Set("X-Zfs-Snapshot", targetSnap)
 
 	var sendArgs []string
-	if fromSnap != "" && !strings.ContainsAny(fromSnap, ";|&`$() ") {
+	if fromSnap != "" {
 		sendArgs = []string{"send", "-w", "-I", fromSnap, targetSnap}
 	} else {
 		sendArgs = []string{"send", "-w", targetSnap}

@@ -120,11 +120,46 @@ async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeout
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
-async function enforceRateLimit(maxRequests = 20, windowMs = 60000) {
-  const reqHeaders = await headers();
-  const ip = reqHeaders.get('x-forwarded-for') || '127.0.0.1';
+function assertActionPermitted(session: any, requiredRole?: string): asserts session is NonNullable<any> {
+  if (!session) {
+    throw new Error('Unauthorized');
+  }
+  if (session.passwordChangeRequired) {
+    throw new Error('Forbidden: Password change required before performing this action');
+  }
+  if (requiredRole && (!session.roles || !session.roles.includes(requiredRole))) {
+    throw new Error(`Forbidden: ${requiredRole} role required`);
+  }
+  return session;
+}
+
+async function enforceRateLimit(maxRequests = 20, windowMs = 60000, keySuffix = '') {
+  let clientIp = '127.0.0.1';
+  try {
+    const reqHeaders = await headers();
+    const rawXff = reqHeaders.get('x-forwarded-for');
+    if (rawXff) {
+      const parts = rawXff.split(',').map((p) => p.trim()).filter(Boolean);
+      clientIp = parts[parts.length - 1] || '127.0.0.1';
+    } else {
+      clientIp = reqHeaders.get('x-real-ip') || '127.0.0.1';
+    }
+  } catch {}
+
+  let limiterKey = clientIp;
+  try {
+    const session = await getSession();
+    if (session?.username) {
+      limiterKey = `${session.username}:${clientIp}`;
+    }
+  } catch {}
+
+  if (keySuffix) {
+    limiterKey += `:${keySuffix}`;
+  }
+
   const now = Date.now();
-  const record = actionRateLimit.get(ip);
+  const record = actionRateLimit.get(limiterKey);
 
   // Clean up old entries occasionally or when size reaches 10,000 to prevent memory leaks
   if (Math.random() < 0.05 || actionRateLimit.size >= 10000) {
@@ -139,7 +174,7 @@ async function enforceRateLimit(maxRequests = 20, windowMs = 60000) {
 
   if (record) {
     if (now > record.resetAt) {
-      actionRateLimit.set(ip, { count: 1, resetAt: now + windowMs });
+      actionRateLimit.set(limiterKey, { count: 1, resetAt: now + windowMs });
     } else {
       if (record.count >= maxRequests) {
         throw new Error('Too Many Requests');
@@ -147,7 +182,7 @@ async function enforceRateLimit(maxRequests = 20, windowMs = 60000) {
       record.count += 1;
     }
   } else {
-    actionRateLimit.set(ip, { count: 1, resetAt: now + windowMs });
+    actionRateLimit.set(limiterKey, { count: 1, resetAt: now + windowMs });
   }
 }
 
@@ -422,9 +457,7 @@ export async function saveYamlDomainFile(
   applyImmediately = true
 ): Promise<{ success: boolean; message: string; warnings: string[] }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required');
-  }
+  assertActionPermitted(session, 'admin');
 
   const currentSnapshot = await getYamlConfigFilesSnapshot();
   const updatedFiles: Record<string, string> = {
@@ -459,7 +492,7 @@ export async function saveYamlDomainFile(
 
 export async function exportUnifiedYamlConfig(): Promise<string> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
   const state = await getCurrentDesiredState();
   return serializeDesiredStateToSingleYaml(state);
 }
@@ -470,9 +503,7 @@ export async function applyDesiredState(
 ): Promise<{ success: boolean; message: string; nftScript: string; warnings: string[] }> {
   const session = await getSession();
   await enforceRateLimit(10, 60000); // Max 10 applies per minute per IP
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required to apply firewall state');
-  }
+  assertActionPermitted(session, 'admin');
 
   const normalizedState = DesiredStateSchema.parse(state);
 
@@ -515,7 +546,7 @@ export async function applyDesiredState(
     const { recordGitOpsChange } = await import('./gitops');
     await recordGitOpsChange(
       normalizedState,
-      session.username || 'admin',
+      session?.username || 'admin',
       `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
     );
   } catch {}
@@ -547,9 +578,7 @@ export async function applyDesiredState(
 
 export async function confirmActiveRuleset(): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required');
-  }
+  assertActionPermitted(session, 'admin');
 
   const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
   if (daemonResp) {
@@ -569,9 +598,7 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
 
 export async function rollbackActiveRuleset(): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required');
-  }
+  assertActionPermitted(session, 'admin');
 
   const daemonResp = await callAgentApi<any>('/v1/rollback', 'POST', { reason: 'operator rollback' });
   if (daemonResp) {
@@ -596,9 +623,7 @@ export async function runDiagnostic(
 ): Promise<{ success: boolean; output: string }> {
   const session = await getSession();
   await enforceRateLimit(5, 60000); // Max 5 diagnostics per minute per IP
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin credentials required for diagnostic tools');
-  }
+  assertActionPermitted(session, 'admin');
 
   const cleanTarget = target.trim();
   if (!cleanTarget) {
@@ -656,9 +681,7 @@ export async function startPacketCapture(
 ): Promise<CaptureResult> {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin credentials required for packet capture');
-  }
+  assertActionPermitted(session, 'admin');
 
   return executeCapture({ iface, filter, count });
 }
@@ -728,10 +751,10 @@ export async function getUpsStatus(): Promise<UpsStatus> {
 
   // 1. Try upsc query if NUT is running
   try {
-    const upscList = execSync('upsc -l 2>/dev/null', { encoding: 'utf8', timeout: 1000 }).trim();
-    const upsName = upscList.split('\n')[0]?.trim();
-    if (upsName) {
-      const rawData = execSync(`upsc ${upsName} 2>/dev/null`, { encoding: 'utf8', timeout: 1500 });
+    const upscList = execFileSync('upsc', ['-l'], { encoding: 'utf8', timeout: 1000 }).trim();
+    const rawUpsName = upscList.split('\n')[0]?.trim();
+    if (rawUpsName && !rawUpsName.startsWith('-') && /^[a-zA-Z0-9_.-]+$/.test(rawUpsName)) {
+      const rawData = execFileSync('upsc', [rawUpsName], { encoding: 'utf8', timeout: 1500 });
       const kv: Record<string, string> = {};
       for (const line of rawData.split('\n')) {
         const [k, v] = line.split(':').map((s) => s.trim());
@@ -744,7 +767,7 @@ export async function getUpsStatus(): Promise<UpsStatus> {
         runtimeSeconds: kv['battery.runtime'] ? Number(kv['battery.runtime']) : null,
         loadPct: kv['ups.load'] ? Number(kv['ups.load']) : null,
         inputVoltage: kv['input.voltage'] ? Number(kv['input.voltage']) : null,
-        model: kv['ups.model'] || upsName,
+        model: kv['ups.model'] || rawUpsName,
         isVirtual,
         message: 'Active NUT daemon connected',
       };
@@ -914,9 +937,13 @@ export async function getServiceJournalLogs(unit: string): Promise<string> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
 
-  const safeUnit = unit.replace(/[^a-zA-Z0-9.-]/g, '');
+  const trimmed = unit.trim();
+  if (!trimmed || trimmed.startsWith('-') || !/^[a-zA-Z0-9_@.-]+$/.test(trimmed)) {
+    throw new Error('Invalid service unit name');
+  }
+  const safeUnit = trimmed;
   try {
-    const logs = execSync(`journalctl -u ${safeUnit} -n 50 --no-pager 2>/dev/null`, {
+    const logs = execFileSync('journalctl', ['-u', safeUnit, '-n', '50', '--no-pager'], {
       encoding: 'utf8',
       timeout: 1500,
     });
@@ -1152,9 +1179,7 @@ export async function saveInterfaceAssignment(data: {
   mtu?: number;
 }): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized');
-  }
+  assertActionPermitted(session, 'admin');
 
   if (!/^[a-zA-Z0-9_.:-]+$/.test(data.device)) {
     throw new Error('Invalid device name');
@@ -1190,7 +1215,7 @@ export async function saveInterfaceAssignment(data: {
     const { recordGitOpsChange } = await import('./gitops');
     await recordGitOpsChange(
       state,
-      session.username || 'admin',
+      session?.username || 'admin',
       `Updated interface assignment ${data.name.toUpperCase()} -> ${data.device}`
     );
   } catch {}
@@ -1782,6 +1807,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
 
 function isAdminSession(session: Awaited<ReturnType<typeof getSession>>): boolean {
   if (!session) return false;
+  if (session.passwordChangeRequired) return false;
   if (session.source === 'local_admin') return true;
   if (Array.isArray(session.roles) && session.roles.includes('admin')) return true;
   if (Array.isArray(session.privileges) && session.privileges.includes('*')) return true;
@@ -2173,9 +2199,7 @@ export async function getHardwareTelemetry(): Promise<HardwareTelemetry> {
 export async function executeTerminalCommand(command: string): Promise<TerminalExecResponse> {
   const session = await getSession();
   await enforceRateLimit(30, 60000);
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Administrator credentials required to access web terminal');
-  }
+  assertActionPermitted(session, 'admin');
 
   const cleanCmd = command.trim();
   if (!cleanCmd) {

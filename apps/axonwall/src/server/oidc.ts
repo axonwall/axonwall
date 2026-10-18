@@ -125,8 +125,39 @@ export function roleFromGroups(groups: unknown): 'admin' | 'operator' | 'readonl
   const list = Array.isArray(groups)
     ? groups.filter((g): g is string => typeof g === 'string')
     : [];
-  const has = (needle: string) => list.some((g) => g.toLowerCase().includes(needle));
-  if (has('admin')) return 'admin';
-  if (has('operator') || has('noc')) return 'operator';
+
+  const adminGroups = new Set([
+    'admin',
+    'admins',
+    'administrator',
+    'administrators',
+    'axonwall-admin',
+    'axonwall-admins',
+    'netops-admin',
+    'secops-admin',
+    'superadmin',
+    'superadmins',
+  ]);
+
+  const operatorGroups = new Set([
+    'operator',
+    'operators',
+    'axonwall-operator',
+    'axonwall-operators',
+    'noc',
+    'netops',
+    'operations',
+  ]);
+
+  for (const raw of list) {
+    const normalized = raw.trim().toLowerCase();
+    if (adminGroups.has(normalized)) return 'admin';
+  }
+
+  for (const raw of list) {
+    const normalized = raw.trim().toLowerCase();
+    if (operatorGroups.has(normalized)) return 'operator';
+  }
+
   return 'readonly';
 }

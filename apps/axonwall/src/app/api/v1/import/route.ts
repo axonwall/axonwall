@@ -2,9 +2,24 @@ import { NextResponse } from 'next/server';
 import { importFirewallConfig, detectFirewallType, type FirewallVendor } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { applyDesiredState } from '../../../../server/agent';
+import { getSession } from '../../../../server/auth';
 
 export async function POST(req: Request) {
   try {
+    const session = await getSession();
+    if (!session) {
+      return NextResponse.json({ error: 'Unauthorized: Valid session required' }, { status: 401 });
+    }
+    if (session.passwordChangeRequired) {
+      return NextResponse.json({ error: 'Forbidden: Password change required' }, { status: 403 });
+    }
+
+    // Limit incoming request size to 10MB to prevent memory exhaustion
+    const contentLength = Number(req.headers.get('content-length') || '0');
+    if (contentLength > 10 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Payload too large (maximum 10MB)' }, { status: 413 });
+    }
+
     let configText = '';
     let vendor: FirewallVendor | undefined;
     let shouldApply = false;

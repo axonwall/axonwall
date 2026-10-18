@@ -203,12 +203,30 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       req.on('end', () => {
         try {
           const payload = JSON.parse(body);
-          const target = payload.target;
-          const isMac = payload.isMac || false;
+          const rawTarget = typeof payload.target === 'string' ? payload.target.trim() : '';
+          const isMac = Boolean(payload.isMac);
           
-          if (!target) {
-            res.writeHead(400);
+          if (!rawTarget) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ error: 'Missing target' }));
+          }
+
+          // Strict validation of block target to prevent nft syntax injection
+          let target = rawTarget;
+          if (isMac) {
+            const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
+            if (!macRegex.test(rawTarget)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Invalid MAC address target' }));
+            }
+            target = rawTarget.toLowerCase().replace(/-/g, ':');
+          } else {
+            const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}(\/([0-9]|[12][0-9]|3[0-2]))?$/;
+            const ipv6Regex = /^[0-9a-fA-F:]+(\/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$/;
+            if (!ipv4Regex.test(rawTarget) && !ipv6Regex.test(rawTarget)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Invalid IP address or CIDR target' }));
+            }
           }
 
           console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
@@ -227,7 +245,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, notifiedSatellites: count }));
         } catch (err) {
-          res.writeHead(400);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON' }));
         }
       });
@@ -344,12 +362,28 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     
     if (pathname === '/ws/satellite') {
       // Basic ZTP token validation
-      const satId = request.headers['x-axonwall-satellite-id'] as string;
+      const satId = (request.headers['x-axonwall-satellite-id'] as string || '').trim();
       const token = request.headers['x-axonwall-ztp-token'] as string;
 
       if (!satId || !token) {
         console.log(`[Fleet Manager] Rejected connection: missing ZTP headers`);
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      // Validate satellite ID syntax to prevent Prometheus label cardinality explosion / injection
+      if (!/^[a-zA-Z0-9._-]{1,64}$/.test(satId)) {
+        console.log(`[Fleet Manager] Rejected connection: invalid satellite ID syntax: ${satId}`);
+        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      // Enforce fleet size bound
+      if (!activeSatellites.has(satId) && activeSatellites.size >= 500) {
+        console.log(`[Fleet Manager] Rejected connection: fleet size limit reached`);
+        socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
         socket.destroy();
         return;
       }

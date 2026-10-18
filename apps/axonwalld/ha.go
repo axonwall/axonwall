@@ -51,7 +51,8 @@ func (e *HAEngine) StartSocketListener() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on ha socket %s: %w", e.sockPath, err)
 	}
-	_ = os.Chmod(e.sockPath, 0660)
+	_ = os.Chown(e.sockPath, 0, 0)
+	_ = os.Chmod(e.sockPath, 0600)
 	e.listener = l
 
 	slog.Info("HA Engine state transition socket listening", "path", e.sockPath)
@@ -71,6 +72,30 @@ func (e *HAEngine) StartSocketListener() error {
 
 func (e *HAEngine) handleNotificationConn(conn net.Conn) {
 	defer conn.Close()
+
+	// Verify peer credentials: only root (UID 0) is allowed to send transitions
+	if uconn, ok := conn.(*net.UnixConn); ok {
+		raw, err := uconn.SyscallConn()
+		if err == nil {
+			var credErr error
+			_ = raw.Control(func(fd uintptr) {
+				ucred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+				if err != nil {
+					credErr = err
+					return
+				}
+				if ucred.Uid != 0 {
+					credErr = fmt.Errorf("unauthorized caller uid %d, expected 0", ucred.Uid)
+				}
+			})
+			if credErr != nil {
+				slog.Warn("Rejecting HA socket connection from unauthorized peer", "error", credErr)
+				_, _ = conn.Write([]byte("ERR: unauthorized\n"))
+				return
+			}
+		}
+	}
+
 	scanner := bufio.NewScanner(conn)
 	if scanner.Scan() {
 		state := strings.ToUpper(strings.TrimSpace(scanner.Text()))

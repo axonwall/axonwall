@@ -134,21 +134,43 @@ export async function runLivePacketCapture({
   count?: number;
 }): Promise<CaptureResult> {
   const session = await getSession();
-  if (!session) {
-    throw new Error('Unauthorized');
+  if (!session || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin credentials required');
+  }
+  if (session.passwordChangeRequired) {
+    throw new Error('Password change required before performing this action');
   }
 
   // Sanitize interface
-  const cleanIface = iface.trim().replace(/[^a-zA-Z0-9_.-]/g, '') || 'any';
+  const trimmedIface = (iface || 'any').trim();
+  if (
+    trimmedIface.startsWith('-') ||
+    trimmedIface.includes('..') ||
+    trimmedIface.includes('/') ||
+    !/^[a-zA-Z0-9_.:-]+$/.test(trimmedIface)
+  ) {
+    throw new Error('Invalid interface name');
+  }
+  const cleanIface = trimmedIface;
   
-  // Sanitize filter to prevent command injection
-  const cleanFilter = filter.trim();
-  if (/[;&|`$<>]/.test(cleanFilter)) {
-    throw new Error('Invalid characters in BPF filter');
+  // Sanitize filter and reject options starting with '-'
+  const cleanFilter = (filter || '').trim();
+  const filterTokens: string[] = [];
+  if (cleanFilter) {
+    const rawTokens = cleanFilter.split(/\s+/);
+    for (const tok of rawTokens) {
+      if (tok.startsWith('-')) {
+        throw new Error(`Invalid filter token starting with '-': ${tok}`);
+      }
+      if (!/^[a-zA-Z0-9_.:/()=!<>-]+$/.test(tok)) {
+        throw new Error(`Invalid characters in BPF filter token: ${tok}`);
+      }
+      filterTokens.push(tok);
+    }
   }
 
   const boundedCount = Math.max(1, Math.min(200, count));
-  const captureId = `pcap-${Date.now()}-${cleanIface}`;
+  const captureId = `pcap-${Date.now()}-${cleanIface.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
   const captureDir = getCaptureDir();
   const pcapFilePath = path.join(captureDir, `${captureId}.pcap`);
   const startedAt = new Date().toISOString();
@@ -157,7 +179,7 @@ export async function runLivePacketCapture({
 
   try {
     // Attempt live execution using tcpdump
-    packets = await executeTcpdump(cleanIface, cleanFilter, boundedCount, pcapFilePath);
+    packets = await executeTcpdump(cleanIface, filterTokens, boundedCount, pcapFilePath);
   } catch {
     // Return empty list if tcpdump fails or interface is uncapturable
     packets = [];
@@ -183,14 +205,14 @@ export async function runLivePacketCapture({
 
 function executeTcpdump(
   iface: string,
-  filter: string,
+  filterTokens: string[],
   count: number,
   outputPath: string
 ): Promise<CapturedPacket[]> {
   return new Promise((resolve, reject) => {
     const args = ['-i', iface, '-c', String(count), '-nn', '-s', '0', '-w', outputPath];
-    if (filter) {
-      args.push(...filter.split(/\s+/));
+    if (filterTokens.length > 0) {
+      args.push('--', ...filterTokens);
     }
 
     const proc = spawn('tcpdump', args, { timeout: 15000 });
@@ -287,9 +309,15 @@ function parseTcpdumpText(raw: string): CapturedPacket[] {
 }
 
 export function getCaptureFile(id: string): { filePath: string; exists: boolean } {
-  const sanitizedId = id.replace(/[^a-zA-Z0-9_-]/g, '');
+  const sanitizedId = (id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!sanitizedId || sanitizedId !== id) {
+    return { filePath: '', exists: false };
+  }
   const captureDir = getCaptureDir();
-  const filePath = path.join(captureDir, `${sanitizedId}.pcap`);
+  const filePath = path.resolve(captureDir, `${sanitizedId}.pcap`);
+  if (!filePath.startsWith(path.resolve(captureDir))) {
+    return { filePath: '', exists: false };
+  }
   return {
     filePath,
     exists: fs.existsSync(filePath),

@@ -8474,78 +8474,6 @@ var require_websocket_server = __commonJS({
 // src/index.ts
 var import_prom_client = __toESM(require_prom_client(), 1);
 
-// ../../packages/axonwall_lib/dist/util/index.js
-function isValidIPv4(ip) {
-  const parts = ip.split(".");
-  if (parts.length !== 4)
-    return false;
-  for (const part of parts) {
-    if (!/^\d+$/.test(part))
-      return false;
-    const num = Number.parseInt(part, 10);
-    if (num < 0 || num > 255)
-      return false;
-    if (part.length > 1 && part.startsWith("0"))
-      return false;
-  }
-  return true;
-}
-function isValidIPv6(ip) {
-  const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|::(ffff(:0{1,4})?:)?((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9]))$/;
-  return ipv6Regex.test(ip);
-}
-function isValidCIDR(cidr) {
-  const parts = cidr.split("/");
-  if (parts.length !== 2)
-    return false;
-  const [ip, prefix] = parts;
-  const prefixNum = Number.parseInt(prefix, 10);
-  if (Number.isNaN(prefixNum))
-    return false;
-  if (isValidIPv4(ip)) {
-    return prefixNum >= 0 && prefixNum <= 32;
-  }
-  if (isValidIPv6(ip)) {
-    return prefixNum >= 0 && prefixNum <= 128;
-  }
-  return false;
-}
-function isValidPort(port) {
-  if (typeof port === "string" && !/^\d+$/.test(port.trim()))
-    return false;
-  const p = typeof port === "string" ? Number.parseInt(port.trim(), 10) : port;
-  return !Number.isNaN(p) && p >= 1 && p <= 65535;
-}
-function isValidPortRange(range) {
-  const items = range.split(",").map((s) => s.trim());
-  if (items.length === 0 || items.some((item) => item === ""))
-    return false;
-  for (const item of items) {
-    if (item.includes("-")) {
-      const parts = item.split("-");
-      if (parts.length !== 2)
-        return false;
-      const [startStr, endStr] = parts.map((s) => s.trim());
-      if (!isValidPort(startStr) || !isValidPort(endStr))
-        return false;
-      const start = Number.parseInt(startStr, 10);
-      const end = Number.parseInt(endStr, 10);
-      if (start > end)
-        return false;
-    } else {
-      if (!isValidPort(item))
-        return false;
-    }
-  }
-  return true;
-}
-function isValidMAC(mac3) {
-  return /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(mac3);
-}
-function sanitizeIdentifier(name) {
-  return name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-}
-
 // ../../node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
@@ -9090,7 +9018,7 @@ __export(core_exports2, {
   isValidCIDRv6: () => isValidCIDRv6,
   isValidCreditCard: () => isValidCreditCard,
   isValidIBAN: () => isValidIBAN,
-  isValidIPv6: () => isValidIPv62,
+  isValidIPv6: () => isValidIPv6,
   isValidJWT: () => isValidJWT,
   locales: () => locales_exports,
   memoizer: () => memoizer,
@@ -11497,7 +11425,7 @@ var $ZodIPv4 = /* @__PURE__ */ $constructor("$ZodIPv4", (inst, def) => {
   $ZodStringFormat.init(inst, def);
 });
 var ipv6Alphabet = /^[0-9a-fA-F:.]+$/;
-function isValidIPv62(value) {
+function isValidIPv6(value) {
   if (!ipv6Alphabet.test(value))
     return false;
   return canParseURL(`http://[${value}]`);
@@ -11506,7 +11434,7 @@ var $ZodIPv6 = /* @__PURE__ */ $constructor("$ZodIPv6", (inst, def) => {
   def.pattern ?? (def.pattern = ipv6);
   $ZodStringFormat.init(inst, def);
   inst._zod.check = (payload) => {
-    if (!isValidIPv62(payload.value)) {
+    if (!isValidIPv6(payload.value)) {
       payload.issues.push({
         code: "invalid_format",
         format: "ipv6",
@@ -11537,7 +11465,7 @@ function isValidCIDRv6(value) {
     return false;
   if (prefixNum < 0 || prefixNum > 128)
     return false;
-  return isValidIPv62(address);
+  return isValidIPv6(address);
 }
 var $ZodCIDRv6 = /* @__PURE__ */ $constructor("$ZodCIDRv6", (inst, def) => {
   def.pattern ?? (def.pattern = cidrv6);
@@ -21968,7 +21896,7 @@ function generateStringFormatCheck(doc, ctx, def, accessor, needsValue = true) {
     return accessor;
   }
   if (fmt === "ipv6") {
-    const validator = addConstant(ctx, isValidIPv62);
+    const validator = addConstant(ctx, isValidIPv6);
     doc.write(`if (!${validator}(${accessor})) return INVALID;`);
     return accessor;
   }
@@ -28263,6 +28191,78 @@ function date4(params) {
   return _coercedDate(ZodDate, params);
 }
 
+// ../../packages/axonwall_lib/dist/util/index.js
+function isValidIPv4(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4)
+    return false;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part))
+      return false;
+    const num = Number.parseInt(part, 10);
+    if (num < 0 || num > 255)
+      return false;
+    if (part.length > 1 && part.startsWith("0"))
+      return false;
+  }
+  return true;
+}
+function isValidIPv62(ip) {
+  const ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|::(ffff(:0{1,4})?:)?((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1?[0-9])?[0-9])\.){3}(25[0-5]|(2[0-4]|1?[0-9])?[0-9]))$/;
+  return ipv6Regex.test(ip);
+}
+function isValidCIDR(cidr) {
+  const parts = cidr.split("/");
+  if (parts.length !== 2)
+    return false;
+  const [ip, prefix] = parts;
+  const prefixNum = Number.parseInt(prefix, 10);
+  if (Number.isNaN(prefixNum))
+    return false;
+  if (isValidIPv4(ip)) {
+    return prefixNum >= 0 && prefixNum <= 32;
+  }
+  if (isValidIPv62(ip)) {
+    return prefixNum >= 0 && prefixNum <= 128;
+  }
+  return false;
+}
+function isValidPort(port) {
+  if (typeof port === "string" && !/^\d+$/.test(port.trim()))
+    return false;
+  const p = typeof port === "string" ? Number.parseInt(port.trim(), 10) : port;
+  return !Number.isNaN(p) && p >= 1 && p <= 65535;
+}
+function isValidPortRange(range) {
+  const items = range.split(",").map((s) => s.trim());
+  if (items.length === 0 || items.some((item) => item === ""))
+    return false;
+  for (const item of items) {
+    if (item.includes("-")) {
+      const parts = item.split("-");
+      if (parts.length !== 2)
+        return false;
+      const [startStr, endStr] = parts.map((s) => s.trim());
+      if (!isValidPort(startStr) || !isValidPort(endStr))
+        return false;
+      const start = Number.parseInt(startStr, 10);
+      const end = Number.parseInt(endStr, 10);
+      if (start > end)
+        return false;
+    } else {
+      if (!isValidPort(item))
+        return false;
+    }
+  }
+  return true;
+}
+function isValidMAC(mac3) {
+  return /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/.test(mac3);
+}
+function sanitizeIdentifier(name) {
+  return name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+}
+
 // ../../packages/axonwall_lib/dist/schemas/index.js
 var InterfaceTypeSchema = external_exports.enum([
   "static",
@@ -28287,7 +28287,7 @@ var InterfaceSchema = external_exports.object({
     message: "Invalid IPv4 address or CIDR"
   }).optional(),
   ipv4Gateway: external_exports.string().optional(),
-  ipv6Address: external_exports.string().refine((val) => val === "" || isValidCIDR(val) || isValidIPv6(val), {
+  ipv6Address: external_exports.string().refine((val) => val === "" || isValidCIDR(val) || isValidIPv62(val), {
     message: "Invalid IPv6 address or CIDR"
   }).optional(),
   ipv6Gateway: external_exports.string().optional(),
@@ -28359,7 +28359,7 @@ var GatewaySchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
   name: external_exports.string().min(1).max(32),
   interface: external_exports.string().min(1),
-  gatewayIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), {
+  gatewayIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), {
     message: "Invalid gateway IP"
   }),
   monitorIp: external_exports.string().optional(),
@@ -28388,9 +28388,19 @@ var WireGuardConfigSchema = external_exports.object({
 });
 var AntiLockoutSchema = external_exports.object({
   enabled: external_exports.boolean().default(true),
-  interface: external_exports.string().default("lan"),
+  interface: external_exports.string().optional(),
+  interfaces: external_exports.array(external_exports.string()).optional(),
   ports: external_exports.array(external_exports.number()).default([80, 443, 22, 3e3, 2966])
 });
+function normalizeAntiLockoutInterfaces(a) {
+  if (!a)
+    return ["lan"];
+  if (a.interfaces && a.interfaces.length > 0)
+    return a.interfaces;
+  if (a.interface)
+    return [a.interface];
+  return ["lan"];
+}
 var SystemSettingsSchema = external_exports.object({
   hostname: external_exports.string().default("axonwall"),
   domain: external_exports.string().default("local"),
@@ -28432,7 +28442,7 @@ var DnsHostOverrideSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
   hostname: external_exports.string().min(1),
   domain: external_exports.string().min(1),
-  ip: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: "Invalid IP address" }),
+  ip: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid IP address" }),
   description: external_exports.string().max(255).default("")
 });
 var DnsBlocklistFeedSchema = external_exports.object({
@@ -28461,7 +28471,7 @@ var DnsConfigSchema = external_exports.object({
 var StaticRouteSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
   network: external_exports.string().refine(isValidCIDR, { message: "Invalid route network CIDR" }),
-  gateway: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: "Invalid route gateway IP" }),
+  gateway: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid route gateway IP" }),
   interface: external_exports.string().optional(),
   description: external_exports.string().max(255).default(""),
   enabled: external_exports.boolean().default(true)
@@ -28523,7 +28533,7 @@ var VirtualIpTypeSchema = external_exports.enum(["alias", "carp", "proxyarp"]);
 var VirtualIpSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
   interface: external_exports.string().min(1),
-  ip: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: "Invalid IP address" }),
+  ip: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid IP address" }),
   subnetBits: external_exports.number().int().min(1).max(128).default(32),
   type: VirtualIpTypeSchema.default("alias"),
   vhid: external_exports.number().int().min(1).max(255).optional(),
@@ -28617,7 +28627,7 @@ var TrafficShaperConfigSchema = external_exports.object({
   interfaces: external_exports.array(TrafficShaperInterfaceSchema).default([])
 });
 var BgpNeighborSchema = external_exports.object({
-  peerIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: "Invalid peer IP" }),
+  peerIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid peer IP" }),
   remoteAs: external_exports.number().int().min(1).max(4294967295),
   description: external_exports.string().max(255).default(""),
   password: external_exports.string().optional(),
@@ -28646,13 +28656,13 @@ var OspfConfigSchema = external_exports.object({
 });
 var FrrConfigSchema = external_exports.object({
   enabled: external_exports.boolean().default(false),
-  bgp: BgpConfigSchema.default({}),
-  ospf: OspfConfigSchema.default({})
+  bgp: BgpConfigSchema.prefault({}),
+  ospf: OspfConfigSchema.prefault({})
 });
 var PacketTracerQuerySchema = external_exports.object({
   inInterface: external_exports.string().min(1),
-  srcIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: "Invalid source IP" }),
-  dstIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: "Invalid destination IP" }),
+  srcIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid source IP" }),
+  dstIp: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid destination IP" }),
   protocol: external_exports.enum(["tcp", "udp", "icmp"]).default("tcp"),
   srcPort: external_exports.number().int().min(1).max(65535).default(12345),
   dstPort: external_exports.number().int().min(1).max(65535).default(80)
@@ -28809,7 +28819,7 @@ var HighAvailabilityConfigSchema = external_exports.object({
   mtlsCert: external_exports.string().optional(),
   mtlsKey: external_exports.string().optional(),
   vrrpInstances: external_exports.array(VrrpInstanceSchema).default([]),
-  conntrackSync: ConntrackSyncSchema.default({ enabled: false }),
+  conntrackSync: ConntrackSyncSchema.prefault({ enabled: false }),
   sqliteSync: HaSqliteSyncConfigSchema.optional().default({
     enabled: false,
     mode: "direct_stream",
@@ -28978,12 +28988,12 @@ var AiConfigSchema = external_exports.object({
   systemContextInference: external_exports.boolean().default(true),
   autoAuditOnSave: external_exports.boolean().default(false),
   providers: external_exports.object({
-    antigravity: AntigravitySettingsSchema.default({}),
-    ollama: OllamaSettingsSchema.default({}),
-    claudeCode: ClaudeCodeSettingsSchema.default({}),
-    codex: CodexSettingsSchema.default({}),
-    vllm: VllmSettingsSchema.default({})
-  }).default({})
+    antigravity: AntigravitySettingsSchema.prefault({}),
+    ollama: OllamaSettingsSchema.prefault({}),
+    claudeCode: ClaudeCodeSettingsSchema.prefault({}),
+    codex: CodexSettingsSchema.prefault({}),
+    vllm: VllmSettingsSchema.prefault({})
+  }).prefault({})
 });
 var SatelliteNodeSchema = external_exports.object({
   id: external_exports.string(),
@@ -28999,7 +29009,7 @@ var SatelliteNodeSchema = external_exports.object({
     publicKey: external_exports.string().optional(),
     endpoint: external_exports.string().optional(),
     connected: external_exports.boolean().default(false)
-  }).default({}),
+  }).prefault({}),
   wifi: external_exports.array(external_exports.object({
     radio: external_exports.string(),
     ssid: external_exports.string(),
@@ -29229,7 +29239,7 @@ var K3sConfigSchema = external_exports.object({
 var DesiredStateSchema = external_exports.object({
   version: external_exports.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
-  system: SystemSettingsSchema.default({}),
+  system: SystemSettingsSchema.prefault({}),
   interfaces: external_exports.array(InterfaceSchema).default([]),
   vlans: external_exports.array(VlanSchema).default([]),
   bridges: external_exports.array(BridgeSchema).default([]),
@@ -29242,7 +29252,7 @@ var DesiredStateSchema = external_exports.object({
   gateways: external_exports.array(GatewaySchema).default([]),
   gatewayGroups: external_exports.array(GatewayGroupSchema).default([]),
   dhcp: DhcpConfigSchema.default({ enabled: true, subnets: [] }),
-  dns: DnsConfigSchema.default({ enabled: true, hostOverrides: [] }),
+  dns: DnsConfigSchema.prefault({ enabled: true, hostOverrides: [] }),
   routes: external_exports.array(StaticRouteSchema).default([]),
   trafficShaper: TrafficShaperConfigSchema.optional(),
   wireguard: WireGuardConfigSchema.optional(),
@@ -30101,10 +30111,15 @@ function compileNftables(state) {
     lines.push("    icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept");
     lines.push("    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept");
     if (state.system.antiLockout?.enabled) {
-      const lanIface = state.system.antiLockout.interface;
-      const lanDev = ifDeviceMap.get(lanIface) || lanIface;
+      const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
       const ports = state.system.antiLockout.ports.join(", ");
-      lines.push(`    iifname "${lanDev}" tcp dport { ${ports} } accept comment "anti-lockout"`);
+      for (const ifaceName of ifaceList) {
+        if (ifaceName !== "wan") {
+          const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+          const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
+          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        }
+      }
     }
     lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
     lines.push("  }");
@@ -30272,14 +30287,17 @@ function compileNftables(state) {
   lines.push("    icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept");
   lines.push("    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept");
   if (state.system.antiLockout?.enabled) {
-    const lanIface = state.system.antiLockout.interface;
-    if (lanIface !== "wan") {
-      const lanDev = ifDeviceMap.get(lanIface) || lanIface;
-      const ports = state.system.antiLockout.ports.join(", ");
-      lines.push(`    # Anti-Lockout: Allow management access from ${lanIface}`);
-      lines.push(`    iifname "${lanDev}" tcp dport { ${ports} } accept comment "anti-lockout"`);
-    } else {
-      warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
+    const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
+    const ports = state.system.antiLockout.ports.join(", ");
+    for (const ifaceName of ifaceList) {
+      if (ifaceName !== "wan") {
+        const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+        lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
+        const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
+        lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+      } else {
+        warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
+      }
     }
   }
   lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
@@ -30939,11 +30957,27 @@ async function main() {
       req.on("end", () => {
         try {
           const payload = JSON.parse(body);
-          const target = payload.target;
-          const isMac = payload.isMac || false;
-          if (!target) {
-            res.writeHead(400);
+          const rawTarget = typeof payload.target === "string" ? payload.target.trim() : "";
+          const isMac = Boolean(payload.isMac);
+          if (!rawTarget) {
+            res.writeHead(400, { "Content-Type": "application/json" });
             return res.end(JSON.stringify({ error: "Missing target" }));
+          }
+          let target = rawTarget;
+          if (isMac) {
+            const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
+            if (!macRegex.test(rawTarget)) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ error: "Invalid MAC address target" }));
+            }
+            target = rawTarget.toLowerCase().replace(/-/g, ":");
+          } else {
+            const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}(\/([0-9]|[12][0-9]|3[0-2]))?$/;
+            const ipv6Regex = /^[0-9a-fA-F:]+(\/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$/;
+            if (!ipv4Regex.test(rawTarget) && !ipv6Regex.test(rawTarget)) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ error: "Invalid IP address or CIDR target" }));
+            }
           }
           console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
           let count = 0;
@@ -30959,7 +30993,7 @@ async function main() {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true, notifiedSatellites: count }));
         } catch (err) {
-          res.writeHead(400);
+          res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON" }));
         }
       });
@@ -31063,11 +31097,23 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       return;
     }
     if (pathname === "/ws/satellite") {
-      const satId = request2.headers["x-axonwall-satellite-id"];
+      const satId = (request2.headers["x-axonwall-satellite-id"] || "").trim();
       const token = request2.headers["x-axonwall-ztp-token"];
       if (!satId || !token) {
         console.log(`[Fleet Manager] Rejected connection: missing ZTP headers`);
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      if (!/^[a-zA-Z0-9._-]{1,64}$/.test(satId)) {
+        console.log(`[Fleet Manager] Rejected connection: invalid satellite ID syntax: ${satId}`);
+        socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      if (!activeSatellites.has(satId) && activeSatellites.size >= 500) {
+        console.log(`[Fleet Manager] Rejected connection: fleet size limit reached`);
+        socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
         socket.destroy();
         return;
       }

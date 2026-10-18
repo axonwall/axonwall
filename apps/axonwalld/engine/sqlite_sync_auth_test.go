@@ -3,6 +3,7 @@ package engine
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,5 +71,41 @@ func TestSqliteSyncHandlersFailClosed(t *testing.T) {
 	// only stats the configured database files).
 	if code := call(newManager("s3cret"), (*SqliteSyncManager).handleStatus, "s3cret"); code != http.StatusOK {
 		t.Errorf("status: correct token: got %d, want 200", code)
+	}
+}
+
+func TestSqliteSyncZfsValidation(t *testing.T) {
+	m := NewSqliteSyncManager()
+	m.cfg = SqliteSyncConfig{
+		Enabled:   true,
+		NodeRole:  "master",
+		AuthToken: "s3cret",
+	}
+
+	callZfs := func(dataset, from string) int {
+		q := url.Values{}
+		q.Set("dataset", dataset)
+		if from != "" {
+			q.Set("from", from)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/sync/zfs?"+q.Encode(), nil)
+		req.Header.Set("X-Axonwall-Sync-Token", "s3cret")
+		rec := httptest.NewRecorder()
+		m.handleZfsSendStream(rec, req)
+		return rec.Code
+	}
+
+	// Malicious dataset parameters
+	if code := callZfs("-v", ""); code != http.StatusBadRequest {
+		t.Errorf("leading hyphen dataset: got %d, want 400", code)
+	}
+	if code := callZfs("pool/data;rm -rf /", ""); code != http.StatusBadRequest {
+		t.Errorf("semicolon dataset: got %d, want 400", code)
+	}
+	if code := callZfs("pool/data", "-R"); code != http.StatusBadRequest {
+		t.Errorf("leading hyphen fromSnap: got %d, want 400", code)
+	}
+	if code := callZfs("pool/data", "snap@extra@parts"); code != http.StatusBadRequest {
+		t.Errorf("invalid fromSnap: got %d, want 400", code)
 	}
 }
