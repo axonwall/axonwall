@@ -232,40 +232,122 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   };
 }
 
-const BASELINE_STATE: DesiredState = DesiredStateSchema.parse({
-  version: 1,
-  system: {
-    hostname: 'axonwall-core',
-    domain: 'axonwall.local',
-    dnsServers: ['1.1.1.1', '8.8.8.8'],
-    timezone: 'UTC',
-    flowtableOffload: true,
-    antiLockout: {
-      enabled: true,
-      interface: 'lan',
-      ports: [22, 80, 443, 2966, 3000],
+function buildBaselineState(): DesiredState {
+  let wanDev = 'eth0';
+  let wanMode: 'dhcp' | 'static' = 'dhcp';
+  let wanIp: string | undefined;
+  let wanGw: string | undefined;
+  let lanDev = 'eth1';
+  let lanMode: 'dhcp' | 'static' = 'static';
+  let lanIp = '192.168.1.1/24';
+  let opt1Dev = '';
+  let opt1Mode: 'dhcp' | 'static' = 'dhcp';
+  let opt1Ip: string | undefined;
+  let opt2Dev = '';
+  let opt2Mode: 'dhcp' | 'static' = 'dhcp';
+  let opt2Ip: string | undefined;
+
+  try {
+    if (fs.existsSync('/etc/axonwall/interfaces.conf')) {
+      const conf = fs.readFileSync('/etc/axonwall/interfaces.conf', 'utf8');
+      for (const rawLine of conf.split('\n')) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#') || !line.includes('=')) continue;
+        const idx = line.indexOf('=');
+        const k = line.slice(0, idx).trim();
+        const v = line.slice(idx + 1).trim();
+        if (k === 'WAN_INTERFACE' && v) wanDev = v;
+        else if (k === 'WAN_MODE' && (v === 'dhcp' || v === 'static')) wanMode = v;
+        else if (k === 'WAN_IPV4_ADDRESS' && v) wanIp = v;
+        else if (k === 'WAN_IPV4_GATEWAY' && v) wanGw = v;
+        else if (k === 'LAN_INTERFACE' && v) lanDev = v;
+        else if (k === 'LAN_MODE' && (v === 'dhcp' || v === 'static')) lanMode = v;
+        else if (k === 'LAN_IPV4_ADDRESS' && v) lanIp = v;
+        else if (k === 'OPT1_INTERFACE') opt1Dev = v;
+        else if (k === 'OPT1_MODE' && (v === 'dhcp' || v === 'static')) opt1Mode = v;
+        else if (k === 'OPT1_IPV4_ADDRESS' && v) opt1Ip = v;
+        else if (k === 'OPT2_INTERFACE') opt2Dev = v;
+        else if (k === 'OPT2_MODE' && (v === 'dhcp' || v === 'static')) opt2Mode = v;
+        else if (k === 'OPT2_IPV4_ADDRESS' && v) opt2Ip = v;
+      }
+    }
+  } catch {}
+
+  const antiLockoutIfaces = ['lan'];
+  if (opt1Dev) antiLockoutIfaces.push('opt1');
+  if (opt2Dev) antiLockoutIfaces.push('opt2');
+
+  return DesiredStateSchema.parse({
+    version: 1,
+    system: {
+      hostname: 'axonwall-core',
+      domain: 'axonwall.local',
+      dnsServers: ['1.1.1.1', '8.8.8.8'],
+      timezone: 'UTC',
+      flowtableOffload: true,
+      antiLockout: {
+        enabled: true,
+        interface: 'lan',
+        interfaces: antiLockoutIfaces,
+        ports: [22, 80, 443, 2966, 3000],
+      },
     },
-  },
-  interfaces: [
-    { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Gateway' },
-    { name: 'lan', device: 'eth1', type: 'static', enabled: true, ipv4Address: '192.168.1.1/24', mtu: 1500, description: 'LAN Network' },
-    { name: 'opt1', device: 'eth2', type: 'dhcp', enabled: false, mtu: 1500, description: 'OPT1 (Attached Network / Non-authoritative)' },
-    { name: 'opt2', device: 'eth3', type: 'dhcp', enabled: false, mtu: 1500, description: 'OPT2 (Attached Network / Non-authoritative)' },
-  ],
-  aliases: [],
-  rules: [],
-  nat: [],
-  gateways: [],
-  gatewayGroups: [],
-  vlans: [],
-  bridges: [],
-  bonds: [],
-  virtualIps: [],
-  vrfs: [],
-  dhcp: { enabled: true, subnets: [] },
-  dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
-  routes: [],
-});
+    interfaces: [
+      {
+        name: 'wan',
+        device: wanDev,
+        type: wanMode,
+        enabled: true,
+        ...(wanMode === 'static' && wanIp ? { ipv4Address: wanIp } : {}),
+        ...(wanMode === 'static' && wanGw ? { ipv4Gateway: wanGw } : {}),
+        mtu: 1500,
+        description: 'WAN Gateway',
+      },
+      {
+        name: 'lan',
+        device: lanDev,
+        type: lanMode,
+        enabled: true,
+        ...(lanMode === 'static' && lanIp ? { ipv4Address: lanIp } : {}),
+        mtu: 1500,
+        description: 'LAN Network',
+      },
+      {
+        name: 'opt1',
+        device: opt1Dev || 'eth2',
+        type: opt1Mode,
+        enabled: Boolean(opt1Dev),
+        ...(opt1Mode === 'static' && opt1Ip ? { ipv4Address: opt1Ip } : {}),
+        mtu: 1500,
+        description: 'OPT1 (Attached Network / Non-authoritative)',
+      },
+      {
+        name: 'opt2',
+        device: opt2Dev || 'eth3',
+        type: opt2Mode,
+        enabled: Boolean(opt2Dev),
+        ...(opt2Mode === 'static' && opt2Ip ? { ipv4Address: opt2Ip } : {}),
+        mtu: 1500,
+        description: 'OPT2 (Attached Network / Non-authoritative)',
+      },
+    ],
+    aliases: [],
+    rules: [],
+    nat: [],
+    gateways: [],
+    gatewayGroups: [],
+    vlans: [],
+    bridges: [],
+    bonds: [],
+    virtualIps: [],
+    vrfs: [],
+    dhcp: { enabled: true, subnets: [] },
+    dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
+    routes: [],
+  });
+}
+
+const BASELINE_STATE: DesiredState = buildBaselineState();
 
 const YAML_CONFIG_DIRS = [
   process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall',

@@ -121,15 +121,21 @@ fi
 
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
-  if [[ -n "$WAN_IF" && "$WAN_IF" != "eth0" && "$WAN_IF" != "wan0" ]]; then
-    if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
-      sed -i "s/elements = { \"eth0\", \"wan0\" }/elements = { \"eth0\", \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
+  INTERNAL_HAS_LINK=0
+  for _int_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF"; do
+    if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
+      INTERNAL_HAS_LINK=1
+      break
     fi
+  done
+  if [[ "$INTERNAL_HAS_LINK" == "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
+    if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
+      sed -i "s/elements = { [^}]* }/elements = { \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
+    fi
+  else
+    sed -i 's/elements = { [^}]* }/elements = { "wan0" }/' /usr/share/axonwall/lockdown.nft || true
   fi
   nft -f /usr/share/axonwall/lockdown.nft || true
-  if [[ -n "$WAN_IF" ]]; then
-    nft add element inet axonwall wan_interfaces "{ \"$WAN_IF\" }" 2>/dev/null || true
-  fi
 fi
 
 # 5. Initialize Axonwall System User & Environment

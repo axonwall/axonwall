@@ -71,6 +71,30 @@ function loadFallbackState(): DesiredState {
       } catch {}
     }
   }
+
+  let wanDev = 'eth0';
+  let lanDev = 'eth1';
+  let opt1Dev = '';
+  let opt2Dev = '';
+  try {
+    const confPath = path.join(ETC_DIR, 'interfaces.conf');
+    if (fs.existsSync(confPath)) {
+      for (const rawLine of fs.readFileSync(confPath, 'utf-8').split('\n')) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#') || !line.includes('=')) continue;
+        const [k, v] = line.split('=', 2).map((s) => s.trim());
+        if (k === 'WAN_INTERFACE' && v) wanDev = v;
+        else if (k === 'LAN_INTERFACE' && v) lanDev = v;
+        else if (k === 'OPT1_INTERFACE' && v) opt1Dev = v;
+        else if (k === 'OPT2_INTERFACE' && v) opt2Dev = v;
+      }
+    }
+  } catch {}
+
+  const antiLockoutIfaces = ['lan'];
+  if (opt1Dev) antiLockoutIfaces.push('opt1');
+  if (opt2Dev) antiLockoutIfaces.push('opt2');
+
   return DesiredStateSchema.parse({
     version: 1,
     system: {
@@ -78,10 +102,18 @@ function loadFallbackState(): DesiredState {
       domain: 'home.arpa',
       timezone: 'UTC',
       dnsServers: ['1.1.1.1', '9.9.9.9'],
+      antiLockout: {
+        enabled: true,
+        interface: 'lan',
+        interfaces: antiLockoutIfaces,
+        ports: [22, 80, 443, 2966, 3000],
+      },
     },
     interfaces: [
-      { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Uplink' },
-      { name: 'lan', device: 'eth1', type: 'static', ipv4Address: '192.168.1.1/24', enabled: true, mtu: 1500, description: 'LAN Network' },
+      { name: 'wan', device: wanDev, type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Uplink' },
+      { name: 'lan', device: lanDev, type: 'static', ipv4Address: '192.168.1.1/24', enabled: true, mtu: 1500, description: 'LAN Network' },
+      ...(opt1Dev ? [{ name: 'opt1', device: opt1Dev, type: 'dhcp' as const, enabled: true, mtu: 1500, description: 'OPT1 Network' }] : []),
+      ...(opt2Dev ? [{ name: 'opt2', device: opt2Dev, type: 'dhcp' as const, enabled: true, mtu: 1500, description: 'OPT2 Network' }] : []),
     ],
     rules: [],
   });

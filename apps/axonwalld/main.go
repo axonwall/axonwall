@@ -729,6 +729,97 @@ func applyBootInterfaces() {
 	}
 }
 
+func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
+	data, err := os.ReadFile("/etc/axonwall/interfaces.conf")
+	if err != nil {
+		return
+	}
+	config := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		config[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+
+	validDev := func(dev string) string {
+		if dev == "" || strings.HasPrefix(dev, "-") {
+			return ""
+		}
+		for _, r := range dev {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-') {
+				return ""
+			}
+		}
+		return dev
+	}
+
+	wanDev := validDev(config["WAN_INTERFACE"])
+	lanDev := validDev(config["LAN_INTERFACE"])
+	opt1Dev := validDev(config["OPT1_INTERFACE"])
+	opt2Dev := validDev(config["OPT2_INTERFACE"])
+
+	internalHasLink := false
+	for _, dev := range []string{lanDev, opt1Dev, opt2Dev} {
+		if dev == "" {
+			continue
+		}
+		if cData, cErr := os.ReadFile(filepath.Join("/sys/class/net", dev, "carrier")); cErr == nil && strings.TrimSpace(string(cData)) == "1" {
+			internalHasLink = true
+			break
+		}
+	}
+
+	// Update /usr/share/axonwall/lockdown.nft so wan_interfaces matches actual topology
+	lockdownPath := "/usr/share/axonwall/lockdown.nft"
+	if lData, lErr := os.ReadFile(lockdownPath); lErr == nil {
+		content := string(lData)
+		newElements := `elements = { "wan0" }`
+		if internalHasLink && wanDev != "" && wanDev != "wan0" && wanDev != lanDev && wanDev != opt1Dev && wanDev != opt2Dev {
+			newElements = fmt.Sprintf(`elements = { "wan0", %q }`, wanDev)
+		}
+		var updatedLines []string
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "elements = {") {
+				indent := line[:strings.Index(line, "elements")]
+				updatedLines = append(updatedLines, indent+newElements)
+			} else {
+				updatedLines = append(updatedLines, line)
+			}
+		}
+		_ = os.WriteFile(lockdownPath, []byte(strings.Join(updatedLines, "\n")), 0644)
+		if !hasLkgBundle {
+			_ = exec.Command("nft", "-f", lockdownPath).Run()
+		}
+	}
+
+	// Ensure configured internal interfaces (LAN, OPT1, OPT2) are permitted for anti-lockout in inet axonwall input
+	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
+	currentRules := string(currentRulesOut)
+	for _, entry := range []struct {
+		role string
+		dev  string
+	}{
+		{"lan", lanDev},
+		{"opt1", opt1Dev},
+		{"opt2", opt2Dev},
+	} {
+		if entry.dev == "" || entry.dev == wanDev {
+			continue
+		}
+		if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, entry.dev)) {
+			_ = exec.Command(
+				"nft", "insert", "rule", "inet", "axonwall", "input",
+				"iifname", entry.dev,
+				"tcp", "dport", "{ 22, 80, 443, 2966, 3000 }",
+				"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.role),
+			).Run()
+		}
+	}
+}
+
 func syncPersistentYamlConfigs() {
 	srcDir := "/var/lib/axonwall/etc-axonwall"
 	dstDir := "/etc/axonwall"
@@ -782,6 +873,7 @@ func main() {
 		applyBootInterfaces()
 
 		lkgPath := filepath.Join(*bundleDir, "last-known-good.nft")
+		hasLkg := false
 		if _, err := os.Stat(lkgPath); err == nil {
 			log.Printf("[Agent] Early-boot: applying last-known-good bundle from %s", lkgPath)
 			cmd := exec.Command("nft", "-f", lkgPath)
@@ -789,8 +881,10 @@ func main() {
 				log.Printf("[Agent] Failed to apply boot bundle: %s", string(out))
 			} else {
 				log.Printf("[Agent] Boot bundle applied successfully.")
+				hasLkg = true
 			}
 		}
+		reconcileBootAntiLockoutNft(hasLkg)
 	}
 
 	// Ensure directory for socket exists

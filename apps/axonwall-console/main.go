@@ -514,10 +514,39 @@ func updateStateJSON(cfg NetworkConfig) {
 	}
 	state["interfaces"] = updatedList
 
+	// Ensure antiLockout includes LAN and any configured OPT1/OPT2 interfaces
+	allowedIfaces := []string{"lan"}
+	if cfg.Opt1Device != "" {
+		allowedIfaces = append(allowedIfaces, "opt1")
+	}
+	if cfg.Opt2Device != "" {
+		allowedIfaces = append(allowedIfaces, "opt2")
+	}
+	sysMap, _ := state["system"].(map[string]interface{})
+	if sysMap == nil {
+		sysMap = make(map[string]interface{})
+	}
+	alMap, _ := sysMap["antiLockout"].(map[string]interface{})
+	if alMap == nil {
+		alMap = make(map[string]interface{})
+	}
+	alMap["enabled"] = true
+	alMap["interface"] = "lan"
+	var alIfaceList []interface{}
+	for _, it := range allowedIfaces {
+		alIfaceList = append(alIfaceList, it)
+	}
+	alMap["interfaces"] = alIfaceList
+	alMap["ports"] = []interface{}{22, 80, 443, 2966, 3000}
+	sysMap["antiLockout"] = alMap
+	state["system"] = sysMap
+
 	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
 		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
 		_ = os.WriteFile("/var/lib/axonwall/state.json", out, 0600)
 	}
+
+	writeSystemYamlAntiLockout(allowedIfaces)
 
 	// Also write /etc/axonwall/interfaces.yaml and /var/lib/axonwall/etc-axonwall/interfaces.yaml
 	var yamlBuilder strings.Builder
@@ -721,6 +750,101 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 
 	// 3. Update Web UI state
 	updateStateJSON(cfg)
+
+	// 4. Sync /usr/share/axonwall/lockdown.nft and live nftables anti-lockout rules so configured LAN/OPT interfaces are immediately reachable
+	reconcileConsoleAntiLockoutNft(cfg)
+}
+
+func writeSystemYamlAntiLockout(allowedIfaces []string) {
+	if len(allowedIfaces) == 0 {
+		allowedIfaces = []string{"lan"}
+	}
+	var yList []string
+	for _, item := range allowedIfaces {
+		yList = append(yList, fmt.Sprintf("      - %s", item))
+	}
+	newAntiLockoutBlock := fmt.Sprintf("  antiLockout:\n    enabled: true\n    interface: %s\n    interfaces:\n%s\n    ports:\n      - 22\n      - 80\n      - 443\n      - 2966\n      - 3000", allowedIfaces[0], strings.Join(yList, "\n"))
+
+	for _, yamlPath := range []string{"/etc/axonwall/system.yaml", "/var/lib/axonwall/etc-axonwall/system.yaml"} {
+		_ = os.MkdirAll(filepath.Dir(yamlPath), 0755)
+		if yamlData, err := os.ReadFile(yamlPath); err == nil && len(strings.TrimSpace(string(yamlData))) > 0 {
+			content := string(yamlData)
+			if idx := strings.Index(content, "  antiLockout:"); idx != -1 {
+				prefix := strings.TrimRight(content[:idx], "\n")
+				updated := prefix + "\n" + newAntiLockoutBlock + "\n"
+				_ = os.WriteFile(yamlPath, []byte(updated), 0644)
+				continue
+			}
+		}
+		hostname, _ := os.Hostname()
+		if hostname == "" {
+			hostname = "axonwall"
+		}
+		defaultYaml := fmt.Sprintf("# ============================================================================\n# Axonwall Firewall Configuration — /etc/axonwall/system.yaml\n# ============================================================================\n\nsystem:\n  hostname: %s\n  domain: local\n  timezone: UTC\n  flowtableOffload: true\n  dnsServers:\n    - 1.1.1.1\n    - 8.8.8.8\n%s\n", hostname, newAntiLockoutBlock)
+		_ = os.WriteFile(yamlPath, []byte(defaultYaml), 0644)
+	}
+}
+
+func reconcileConsoleAntiLockoutNft(cfg NetworkConfig) {
+	lockdownPath := "/usr/share/axonwall/lockdown.nft"
+	internalHasLink := false
+	for _, dev := range []string{cfg.LanDevice, cfg.Opt1Device, cfg.Opt2Device} {
+		if dev == "" {
+			continue
+		}
+		if cData, cErr := os.ReadFile(filepath.Join("/sys/class/net", dev, "carrier")); cErr == nil && strings.TrimSpace(string(cData)) == "1" {
+			internalHasLink = true
+			break
+		}
+	}
+
+	if lData, lErr := os.ReadFile(lockdownPath); lErr == nil {
+		content := string(lData)
+		newElements := `elements = { "wan0" }`
+		if internalHasLink && cfg.WanDevice != "" && cfg.WanDevice != "wan0" && cfg.WanDevice != cfg.LanDevice && cfg.WanDevice != cfg.Opt1Device && cfg.WanDevice != cfg.Opt2Device {
+			newElements = fmt.Sprintf(`elements = { "wan0", %q }`, cfg.WanDevice)
+		}
+		var updatedLines []string
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "elements = {") {
+				indent := line[:strings.Index(line, "elements")]
+				updatedLines = append(updatedLines, indent+newElements)
+			} else {
+				updatedLines = append(updatedLines, line)
+			}
+		}
+		_ = os.WriteFile(lockdownPath, []byte(strings.Join(updatedLines, "\n")), 0644)
+	}
+
+	// Ensure wan_interfaces set in live nftables does not block LAN/OPT interfaces
+	for _, dev := range []string{cfg.LanDevice, cfg.Opt1Device, cfg.Opt2Device} {
+		if dev != "" {
+			_ = exec.Command("nft", "delete", "element", "inet", "axonwall", "wan_interfaces", fmt.Sprintf("{ %q }", dev)).Run()
+		}
+	}
+
+	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
+	currentRules := string(currentRulesOut)
+	for _, entry := range []struct {
+		role string
+		dev  string
+	}{
+		{"lan", cfg.LanDevice},
+		{"opt1", cfg.Opt1Device},
+		{"opt2", cfg.Opt2Device},
+	} {
+		if entry.dev == "" || entry.dev == cfg.WanDevice {
+			continue
+		}
+		if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, entry.dev)) {
+			_ = exec.Command(
+				"nft", "insert", "rule", "inet", "axonwall", "input",
+				"iifname", entry.dev,
+				"tcp", "dport", "{ 22, 80, 443, 2966, 3000 }",
+				"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.role),
+			).Run()
+		}
+	}
 }
 
 func getWanIP() (string, string) {
@@ -1861,57 +1985,32 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 		_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/state.json", out, 0600)
 	}
 
-	// Update /etc/axonwall/system.yaml if present
-	for _, yamlPath := range []string{"/etc/axonwall/system.yaml", "/var/lib/axonwall/etc-axonwall/system.yaml"} {
-		if yamlData, err := os.ReadFile(yamlPath); err == nil {
-			content := string(yamlData)
-			var yList []string
-			for _, item := range currentIfaces {
-				yList = append(yList, fmt.Sprintf("      - %s", item))
-			}
-			newIfacesYaml := "    interfaces:\n" + strings.Join(yList, "\n")
-			if strings.Contains(content, "interfaces:") {
-				lines := strings.Split(content, "\n")
-				var newLines []string
-				skipInterfaces := false
-				for _, line := range lines {
-					trimmed := strings.TrimSpace(line)
-					if strings.HasPrefix(trimmed, "interfaces:") {
-						skipInterfaces = true
-						newLines = append(newLines, newIfacesYaml)
-						continue
-					}
-					if skipInterfaces {
-						if strings.HasPrefix(line, "      - ") || strings.HasPrefix(line, "    - ") {
-							continue
-						}
-						skipInterfaces = false
-					}
-					newLines = append(newLines, line)
-				}
-				_ = os.WriteFile(yamlPath, []byte(strings.Join(newLines, "\n")), 0644)
-			}
-		}
-	}
-
-	// Also directly insert immediate nftables rules at the top of chain input for instant zero-downtime access
-	devMap := map[string]string{
-		"lan":  lan,
-		"opt1": opt1,
-		"opt2": opt2,
-	}
-	for _, ifName := range currentIfaces {
-		dev := devMap[strings.ToLower(ifName)]
-		if dev != "" {
-			_ = exec.Command("nft", "insert", "rule", "inet", "axonwall", "input", "iifname", dev, "tcp", "dport", "{ 22, 80, 443, 2966, 3000 }", "accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", ifName)).Run()
-		}
-	}
+	// Update /etc/axonwall/system.yaml and /var/lib/axonwall/etc-axonwall/system.yaml
+	writeSystemYamlAntiLockout(currentIfaces)
 
 	// Recompile and apply ruleset via axonwallctl or axonwalld
 	fmt.Printf("\n%sApplying new Anti-Lockout ruleset...%s\n", colorCyan, colorReset)
 	if err := exec.Command("axonwallctl", "apply", "--no-confirm").Run(); err != nil {
 		// Fallback: trigger axonwalld or direct nft reload
 		_ = exec.Command("pkill", "-HUP", "axonwalld").Run()
+	}
+
+	// Ensure immediate nftables rules are present at the top of chain input for zero-downtime access
+	devMap := map[string]string{
+		"lan":  lan,
+		"opt1": opt1,
+		"opt2": opt2,
+	}
+	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
+	currentRules := string(currentRulesOut)
+	for _, ifName := range currentIfaces {
+		dev := devMap[strings.ToLower(ifName)]
+		if dev != "" {
+			_ = exec.Command("nft", "delete", "element", "inet", "axonwall", "wan_interfaces", fmt.Sprintf("{ %q }", dev)).Run()
+			if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, dev)) {
+				_ = exec.Command("nft", "insert", "rule", "inet", "axonwall", "input", "iifname", dev, "tcp", "dport", "{ 22, 80, 443, 2966, 3000 }", "accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", ifName)).Run()
+			}
+		}
 	}
 
 	fmt.Printf("\n%s[✓] Anti-Lockout updated successfully!%s\n", colorGreen, colorReset)

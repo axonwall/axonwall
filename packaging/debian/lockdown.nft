@@ -8,10 +8,10 @@ table inet axonwall {}
 flush table inet axonwall
 
 table inet axonwall {
-    # WAN interface set for lockdown isolation (default: eth0, wan0; dynamically expandable)
+    # WAN interface set for lockdown isolation (populated by axonwall-firstboot / axonwalld when internal LAN is present)
     set wan_interfaces {
         type ifname
-        elements = { "eth0", "wan0" }
+        elements = { "wan0" }
     }
 
     chain input {
@@ -32,7 +32,7 @@ table inet axonwall {
         iifname @wan_interfaces tcp dport { 22, 80, 443, 2966, 3000, 9876 } drop comment "block-wan-management"
 
         # Emergency Anti-Lockout on internal interfaces only
-        iifname != @wan_interfaces tcp dport { 22, 80, 443, 2966 } accept comment "emergency-anti-lockout"
+        iifname != @wan_interfaces tcp dport { 22, 80, 443, 2966, 3000 } accept comment "emergency-anti-lockout"
     }
 
     chain forward {

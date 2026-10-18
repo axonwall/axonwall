@@ -36426,7 +36426,8 @@ var CoreCapabilitiesSchema = external_exports.object({
   firewallEnabled: external_exports.boolean().default(true),
   nasEnabled: external_exports.boolean().default(false),
   k3sEnabled: external_exports.boolean().default(false),
-  virtEnabled: external_exports.boolean().default(false)
+  virtEnabled: external_exports.boolean().default(false),
+  vigilanteEnabled: external_exports.boolean().default(false)
 });
 var ZfsTopologySchema = external_exports.enum([
   "stripe",
@@ -36726,6 +36727,107 @@ var VirtConfigSchema = external_exports.object({
   backupJobs: external_exports.array(WorkloadBackupJobSchema).default([]),
   vxlanZones: external_exports.array(VxlanZoneSchema).default([])
 });
+var VigilanteModuleIdSchema = external_exports.enum([
+  "vigil-soc",
+  "vigil-local",
+  "opensearch",
+  "wazuh",
+  "bloodhound",
+  "falco",
+  "suricata",
+  "zeek",
+  "zap",
+  "flamingo",
+  "kctf",
+  "openvas"
+]);
+var VigilanteModuleConfigSchema = external_exports.object({
+  id: VigilanteModuleIdSchema,
+  name: external_exports.string().optional(),
+  enabled: external_exports.boolean().default(false),
+  namespace: external_exports.string().default("vigilante-soc"),
+  storageClass: external_exports.enum(["axonwall-replicated-ha", "axonwall-zfs-local", "default"]).default("axonwall-zfs-local"),
+  storageSizeGb: external_exports.number().int().min(1).default(10),
+  ingressHostname: external_exports.string().optional(),
+  customValuesYaml: external_exports.string().default("")
+});
+var VigilanteSoarPolicySchema = external_exports.object({
+  autoBlockC2Ips: external_exports.boolean().default(true),
+  autoIsolateCompromisedPods: external_exports.boolean().default(true),
+  autoFreezeRansomwarePods: external_exports.boolean().default(true),
+  ransomwareEntropyDeltaThreshold: external_exports.number().default(2),
+  warRoomQuorumThreshold: external_exports.number().min(0.5).max(1).default(0.75),
+  blocklistTimeoutSeconds: external_exports.number().int().min(0).default(86400)
+});
+var VigilanteDeceptionConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(true),
+  canaryServiceAccounts: external_exports.array(external_exports.string()).default(["cluster-admin-backup", "vault-sync-sa"]),
+  honeytokens: external_exports.array(external_exports.enum(["aws-sts", "github-pat", "slack-webhook", "kubeconfig"])).default(["aws-sts", "kubeconfig"]),
+  decoyServices: external_exports.array(external_exports.enum(["smb", "ssh", "redis", "mssql"])).default([]),
+  ransomwareCanaryDirs: external_exports.array(external_exports.string()).default(["/mnt/tank/shares"])
+});
+var VigilanteEvidenceVaultConfigSchema = external_exports.object({
+  zfsPool: external_exports.string().default("tank"),
+  datasetName: external_exports.string().default("vigilante-evidence"),
+  dataLakeBackend: external_exports.enum(["sqlite", "duckdb"]).default("sqlite"),
+  gpgEnabled: external_exports.boolean().default(false),
+  gpgKeyId: external_exports.string().default(""),
+  merkleLedgerEnabled: external_exports.boolean().default(true)
+});
+var VigilanteFederationConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  nodeName: external_exports.string().default("axonwall-soc-primary"),
+  peers: external_exports.array(external_exports.string()).default([]),
+  autoIngestPeerBlocks: external_exports.boolean().default(true)
+});
+var VigilanteConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  posture: external_exports.enum(["monitoring", "hybrid", "enforcing"]).default("hybrid"),
+  domain: external_exports.string().default("vigilante.local"),
+  modules: external_exports.array(VigilanteModuleConfigSchema).default([
+    { id: "vigil-soc", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 20, customValuesYaml: "" },
+    { id: "opensearch", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 50, customValuesYaml: "" },
+    { id: "wazuh", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 30, customValuesYaml: "" },
+    { id: "falco", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 5, customValuesYaml: "" },
+    { id: "suricata", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 10, customValuesYaml: "" },
+    { id: "zeek", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 10, customValuesYaml: "" },
+    { id: "bloodhound", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 15, customValuesYaml: "" },
+    { id: "zap", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 5, customValuesYaml: "" },
+    { id: "flamingo", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 5, customValuesYaml: "" },
+    { id: "kctf", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 20, customValuesYaml: "" },
+    { id: "openvas", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 30, customValuesYaml: "" },
+    { id: "vigil-local", enabled: false, namespace: "vigilante-soc", storageClass: "axonwall-zfs-local", storageSizeGb: 5, customValuesYaml: "" }
+  ]),
+  soar: VigilanteSoarPolicySchema.default({
+    autoBlockC2Ips: true,
+    autoIsolateCompromisedPods: true,
+    autoFreezeRansomwarePods: true,
+    ransomwareEntropyDeltaThreshold: 2,
+    warRoomQuorumThreshold: 0.75,
+    blocklistTimeoutSeconds: 86400
+  }),
+  deception: VigilanteDeceptionConfigSchema.default({
+    enabled: true,
+    canaryServiceAccounts: ["cluster-admin-backup", "vault-sync-sa"],
+    honeytokens: ["aws-sts", "kubeconfig"],
+    decoyServices: [],
+    ransomwareCanaryDirs: ["/mnt/tank/shares"]
+  }),
+  evidenceVault: VigilanteEvidenceVaultConfigSchema.default({
+    zfsPool: "tank",
+    datasetName: "vigilante-evidence",
+    dataLakeBackend: "sqlite",
+    gpgEnabled: false,
+    gpgKeyId: "",
+    merkleLedgerEnabled: true
+  }),
+  federation: VigilanteFederationConfigSchema.default({
+    enabled: false,
+    nodeName: "axonwall-soc-primary",
+    peers: [],
+    autoIngestPeerBlocks: true
+  })
+});
 var DesiredStateSchema = external_exports.object({
   version: external_exports.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -36769,7 +36871,8 @@ var DesiredStateSchema = external_exports.object({
   zeroTrust: ZeroTrustConfigSchema.optional(),
   nas: NasConfigSchema.optional(),
   k3s: K3sConfigSchema.optional(),
-  virt: VirtConfigSchema.optional()
+  virt: VirtConfigSchema.optional(),
+  vigilante: VigilanteConfigSchema.optional()
 });
 
 // ../../packages/axonwall_lib/dist/plugins/index.js
@@ -36779,15 +36882,18 @@ function resolveCapabilities(state) {
   const nasPlugin = plugins.find((p) => p.id === "core-nas");
   const k3sPlugin = plugins.find((p) => p.id === "core-k3s");
   const virtPlugin = plugins.find((p) => p.id === "core-virt");
+  const vigilantePlugin = plugins.find((p) => p.id === "core-vigilante");
   const firewallEnabled = state?.capabilities?.firewallEnabled !== void 0 ? state.capabilities.firewallEnabled : fwPlugin !== void 0 ? fwPlugin.enabled : true;
   const nasEnabled = state?.capabilities?.nasEnabled !== void 0 ? state.capabilities.nasEnabled : nasPlugin !== void 0 ? nasPlugin.enabled : Boolean(state?.nas?.enabled);
   const k3sEnabled = state?.capabilities?.k3sEnabled !== void 0 ? state.capabilities.k3sEnabled : k3sPlugin !== void 0 ? k3sPlugin.enabled : Boolean(state?.k3s?.enabled);
   const virtEnabled = state?.capabilities?.virtEnabled !== void 0 ? state.capabilities.virtEnabled : virtPlugin !== void 0 ? virtPlugin.enabled : Boolean(state?.virt?.enabled);
+  const vigilanteEnabled = state?.capabilities?.vigilanteEnabled !== void 0 ? state.capabilities.vigilanteEnabled : vigilantePlugin !== void 0 ? vigilantePlugin.enabled : Boolean(state?.vigilante?.enabled);
   return {
     firewallEnabled,
     nasEnabled,
     k3sEnabled,
-    virtEnabled
+    virtEnabled,
+    vigilanteEnabled
   };
 }
 
@@ -38339,8 +38445,11 @@ var utfDecoder = new TextDecoder("utf8", { fatal: true });
 var MAX_MESSAGE_ID = 2 ** 31 - 1;
 var logDebug = debuglog("ldapts");
 
-// ../../packages/axonwall_lib/dist/yaml/index.js
+// ../../packages/axonwall_lib/dist/compile/vigilante/index.js
 var import_yaml = __toESM(require_dist(), 1);
+
+// ../../packages/axonwall_lib/dist/yaml/index.js
+var import_yaml2 = __toESM(require_dist(), 1);
 var AXONWALL_YAML_DOMAINS = [
   {
     filename: "system.yaml",
@@ -38407,6 +38516,12 @@ var AXONWALL_YAML_DOMAINS = [
     title: "Axonwall Hypervisor, Virtual Machines (KVM/QEMU) & LXC Containers",
     description: "Controls KVM virtual machines, Cloud-Init, LXC system containers, ISO images, PCIe VFIO / SR-IOV passthrough, VXLAN SDN zones, and deduplicated backup schedules.",
     keys: ["virt"]
+  },
+  {
+    filename: "vigilante.yaml",
+    title: "Vigilante Cyber Defense, SOAR, Deception, Forensics & Modular SOC",
+    description: "Controls autonomous cyber defense operations, SOAR active containment, honeynet deception mesh, embedded security data lake, PCAP forensics, and 12 modular security packages.",
+    keys: ["vigilante"]
   }
 ];
 var AXONWALL_YAML_FILENAMES = AXONWALL_YAML_DOMAINS.map((d) => d.filename);
