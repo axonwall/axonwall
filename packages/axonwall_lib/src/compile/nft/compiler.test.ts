@@ -28,9 +28,8 @@ describe('Axonwall Network Utils & Schemas', () => {
   });
 });
 
-describe('Axonwall nftables Compiler', () => {
-  const sampleState: DesiredState = {
-    version: 1,
+const sampleState: DesiredState = {
+  version: 1,
     system: {
       hostname: 'axonwall-core',
       domain: 'axonwall.local',
@@ -155,6 +154,7 @@ describe('Axonwall nftables Compiler', () => {
     routes: [],
   };
 
+describe('Axonwall nftables Compiler', () => {
   it('compiles valid nftables ruleset with atomic table flush, anti-lockout, aliases, flowtable, and chains', () => {
     const res = compileNftables(sampleState);
     expect(res.nftScript).toContain('table inet axonwall {}\nflush table inet axonwall\ntable inet axonwall {');
@@ -351,7 +351,7 @@ describe('Axonwall nftables Compiler', () => {
 });
 
 describe('Axonwall JWT Minting & Verification', () => {
-  it('signs and verifies Supabase-compatible JWT with roles and privileges', async () => {
+  it('signs and verifies Supabase-compatible JWT with roles, privileges, and passwordChangeRequired', async () => {
     const secret = 'super-secret-jwt-token-with-at-least-32-chars!';
     const session = {
       userId: 'cn=josh,ou=users,dc=axonwall,dc=local',
@@ -361,6 +361,7 @@ describe('Axonwall JWT Minting & Verification', () => {
       roles: ['admin'],
       privileges: ['*' as const],
       exp: Math.floor(Date.now() / 1000) + 3600,
+      passwordChangeRequired: true,
     };
 
     const token = await mintSupabaseToken(session, secret);
@@ -371,5 +372,40 @@ describe('Axonwall JWT Minting & Verification', () => {
     expect(verified?.username).toBe('josh');
     expect(verified?.roles).toEqual(['admin']);
     expect(verified?.privileges).toEqual(['*']);
+    expect(verified?.passwordChangeRequired).toBe(true);
+  });
+
+  it('sanitizes newlines and backslashes in nft rule description comments', () => {
+    const state: DesiredState = {
+      ...sampleState,
+      rules: [
+        {
+          action: 'pass',
+          direction: 'in',
+          interface: 'lan',
+          quick: true,
+          protocol: 'tcp',
+          source: 'any',
+          sourcePort: '',
+          destination: 'any',
+          destinationPort: '80',
+          log: false,
+          enabled: true,
+          description: 'rule 1\nchain exploit { type filter hook input priority -10; }\ncomment "injection"',
+          sortOrder: 1,
+        },
+      ],
+    };
+    const compiled = compileNftables(state);
+    expect(compiled.nftScript).not.toContain('\nchain exploit');
+    expect(compiled.nftScript).toContain('comment "rule 1 chain exploit { type filter hook input priority -10; } comment \'injection\'"');
+  });
+
+  it('validates InterfaceSchema name against invalid characters and path traversal', () => {
+    expect(() => InterfaceSchema.parse({ name: 'lan', device: 'eth0' })).not.toThrow();
+    expect(() => InterfaceSchema.parse({ name: 'wan.100', device: 'eth0' })).not.toThrow();
+    expect(() => InterfaceSchema.parse({ name: 'lan/../../etc', device: 'eth0' })).toThrow('Invalid interface name');
+    expect(() => InterfaceSchema.parse({ name: 'lan foo', device: 'eth0' })).toThrow('Invalid interface name');
   });
 });
+

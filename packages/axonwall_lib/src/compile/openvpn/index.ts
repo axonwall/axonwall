@@ -31,16 +31,18 @@ export function compileOpenVpn(config?: OpenVpnConfig): CompiledOpenVpn {
 
 function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
   const safeName = server.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const safeCommentName = server.name.replace(/[\r\n]+/g, ' ').trim();
+  const safeDevName = (server.devName || 'ovpn-dco0').replace(/[^a-zA-Z0-9_-]/g, '');
   const [networkIp, cidrStr] = server.tunnelNetwork.split('/');
   const prefix = Number.parseInt(cidrStr || '24', 10);
   const netmask = cidrToNetmask(prefix);
 
   const lines: string[] = [
-    `# Axonwall OpenVPN 2.6 Server: ${server.name}`,
+    `# Axonwall OpenVPN 2.6 Server: ${safeCommentName}`,
     `# Mode: ${server.dcoEnabled ? 'Linux Kernel DCO (Data Channel Offload)' : 'Standard tun/tap'}`,
     `proto ${server.protocol === 'tcp' ? 'tcp-server' : 'udp'}`,
     `port ${server.port}`,
-    `dev ${server.devName || 'ovpn-dco0'}`,
+    `dev ${safeDevName}`,
     `dev-type ${server.deviceType || 'tun'}`,
     'topology subnet',
     `server ${networkIp} ${netmask}`,
@@ -90,7 +92,11 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
   const ccdFiles: Record<string, string> = {};
   if (server.cso && server.cso.length > 0) {
     for (const cso of server.cso) {
-      const csoLines: string[] = [`# Client Specific Override for ${cso.commonName}`];
+      const safeCn = cso.commonName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+      if (!safeCn || safeCn.includes('..') || safeCn.startsWith('.')) {
+        continue;
+      }
+      const csoLines: string[] = [`# Client Specific Override for ${safeCn}`];
       if (cso.assignedIp) {
         csoLines.push(`ifconfig-push ${cso.assignedIp} ${netmask}`);
       }
@@ -99,7 +105,7 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
         const rMask = cidrToNetmask(Number.parseInt(rCidr || '24', 10));
         csoLines.push(`push "route ${rIp} ${rMask}"`);
       }
-      ccdFiles[cso.commonName] = csoLines.join('\n') + '\n';
+      ccdFiles[safeCn] = csoLines.join('\n') + '\n';
     }
   }
 

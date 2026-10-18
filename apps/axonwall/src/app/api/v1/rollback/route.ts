@@ -9,7 +9,11 @@ export async function POST() {
       data: result,
     });
   } catch (err: any) {
-    const statusCode = err.message?.includes('Unauthorized') ? 401 : err.message?.includes('Admin') ? 403 : 500;
+    const statusCode = err.message?.includes('Unauthorized')
+      ? 401
+      : err.message?.includes('Forbidden') || err.message?.toLowerCase().includes('admin')
+        ? 403
+        : 500;
     return NextResponse.json(
       { status: 'error', error: err.message },
       { status: statusCode }

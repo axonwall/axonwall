@@ -22,7 +22,12 @@ export async function GET() {
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ success: false, message }, { status: 500 });
+    const status = message.includes('Unauthorized')
+      ? 401
+      : message.includes('Forbidden') || message.toLowerCase().includes('admin')
+        ? 403
+        : 500;
+    return NextResponse.json({ success: false, message }, { status });
   }
 }
 
@@ -34,12 +39,26 @@ export async function POST(req: NextRequest) {
 
     if (action === 'update') {
       const result = await applySystemFirmwareUpdate(slot);
-      return NextResponse.json(result);
+      const status = result.success
+        ? 200
+        : result.message.includes('Unauthorized')
+          ? 401
+          : result.message.includes('Administrator') || result.message.includes('Forbidden')
+            ? 403
+            : 400;
+      return NextResponse.json(result, { status });
     }
 
     if (action === 'activate') {
       const result = await activatePartitionSlot(slot);
-      return NextResponse.json(result);
+      const status = result.success
+        ? 200
+        : result.message.includes('Unauthorized')
+          ? 401
+          : result.message.includes('Admin') || result.message.includes('Forbidden')
+            ? 403
+            : 400;
+      return NextResponse.json(result, { status });
     }
 
     if (action === 'verify') {
@@ -53,6 +72,11 @@ export async function POST(req: NextRequest) {
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ success: false, message }, { status: 500 });
+    const status = message.includes('Unauthorized')
+      ? 401
+      : message.includes('Forbidden') || message.toLowerCase().includes('admin')
+        ? 403
+        : 500;
+    return NextResponse.json({ success: false, message }, { status });
   }
 }

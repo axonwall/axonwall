@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -94,7 +96,7 @@ func FetchPeerClusterToken(peerIp string, syncPort int, authToken string) (strin
 	if syncPort <= 0 {
 		syncPort = 9876
 	}
-	url := fmt.Sprintf("http://%s:%d/api/v1/sync/k3s-token", peerIp, syncPort)
+	url := fmt.Sprintf("http://%s/api/v1/sync/k3s-token", net.JoinHostPort(peerIp, strconv.Itoa(syncPort)))
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -171,7 +173,7 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 			_ = os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600)
 			m.mu.Lock()
 			m.haAutoJoined = true
-			m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s:6443 with OpenEBS replication", bundle.PeerIp)
+			m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(bundle.PeerIp, "6443"))
 			m.mu.Unlock()
 			slog.Info("Fetched K3s join token from HA primary peer", "peerIp", bundle.PeerIp)
 		} else {
@@ -217,7 +219,7 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	}
 	m.mu.Lock()
 	m.haAutoJoined = true
-	m.lastMessage = fmt.Sprintf("Joined K3s HA cluster via https://%s:6443", peerIp)
+	m.lastMessage = fmt.Sprintf("Joined K3s HA cluster via https://%s", net.JoinHostPort(peerIp, "6443"))
 	m.mu.Unlock()
 	_ = exec.Command("systemctl", "reload-or-restart", "k3s").Run()
 	return nil

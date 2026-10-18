@@ -16,7 +16,7 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const statusCode = err.message?.includes('Unauthorized')
       ? 401
-      : err.message?.includes('Admin')
+      : err.message?.includes('Forbidden') || err.message?.toLowerCase().includes('admin')
         ? 403
         : 400;
     return NextResponse.json(

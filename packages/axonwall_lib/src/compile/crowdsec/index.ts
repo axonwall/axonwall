@@ -19,8 +19,13 @@ export function compileCrowdSec(config?: CrowdSecConfig): CompiledCrowdSec {
     };
   }
 
-  const setName = config.remediationSetName || 'set_crowdsec_blacklists';
+  const rawSetName = config.remediationSetName
+    ?.split(/[\r\n\s;]/)[0]
+    .replace(/[^a-zA-Z0-9_]/g, '');
+  const setName = rawSetName || 'set_crowdsec_blacklists';
   const verdict = config.action === 'reject' ? 'reject' : 'drop';
+  const lapiUrl = (config.lapiUrl || 'http://127.0.0.1:8080/').split(/[\r\n]/)[0].replace(/["']/g, '').trim();
+  const apiKey = (config.apiKey || 'CROWDSEC_API_KEY_HERE').split(/[\r\n]/)[0].replace(/["']/g, '').trim();
 
   const bouncerYaml = `# Axonwall CrowdSec Firewall Bouncer Configuration
 mode: nftables
@@ -32,8 +37,8 @@ log_max_size: 100
 log_max_backups: 3
 log_max_age: 30
 
-api_url: ${config.lapiUrl || 'http://127.0.0.1:8080/'}
-api_key: ${config.apiKey || 'CROWDSEC_API_KEY_HERE'}
+api_url: ${lapiUrl}
+api_key: ${apiKey}
 insecure_skip_verify: false
 
 disable_ipv6: false

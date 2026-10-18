@@ -26,8 +26,10 @@ export async function GET(req: NextRequest) {
   // through a session-checked server/agent.ts helper), so the check
   // lives here -- it was the one API route missing it (audit A-06/B-10).
   const session = await getSession();
-  if (!session) {
-    return new Response('Unauthorized', { status: 401 });
+  if (!session || session.passwordChangeRequired) {
+    return new Response(session?.passwordChangeRequired ? 'Forbidden: Password change required' : 'Unauthorized', {
+      status: session?.passwordChangeRequired ? 403 : 401,
+    });
   }
 
   const { searchParams } = new URL(req.url);
@@ -37,10 +39,33 @@ export async function GET(req: NextRequest) {
 
   const encoder = new TextEncoder();
 
+  let cleanup = () => {};
+
   const stream = new ReadableStream({
     start(controller) {
+      let cleanedUp = false;
+      let interval: NodeJS.Timeout | null = null;
+      let unixReq: http.ClientRequest | null = null;
+
+      cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        if (unixReq) {
+          try {
+            unixReq.destroy();
+          } catch {}
+          unixReq = null;
+        }
+        if (interval) {
+          clearInterval(interval);
+          interval = null;
+        }
+      };
+
+      req.signal.addEventListener('abort', cleanup);
+
       // 1. Try proxying from axonwalld Unix socket
-      const unixReq = http.request(
+      unixReq = http.request(
         {
           socketPath: AGENT_API_SOCKET,
           path: `/v1/events/packets?interface=${encodeURIComponent(iface)}&protocol=${encodeURIComponent(protocol)}&filter=${encodeURIComponent(filter)}`,
@@ -53,13 +78,24 @@ export async function GET(req: NextRequest) {
         (res) => {
           if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
             res.on('data', (chunk) => {
-              controller.enqueue(chunk);
+              if (cleanedUp) return;
+              try {
+                controller.enqueue(chunk);
+              } catch {
+                cleanup();
+              }
             });
             res.on('end', () => {
-              controller.close();
+              cleanup();
+              try {
+                controller.close();
+              } catch {}
             });
             res.on('error', () => {
-              controller.close();
+              cleanup();
+              try {
+                controller.close();
+              } catch {}
             });
           } else {
             startFallbackStream(controller);
@@ -69,12 +105,15 @@ export async function GET(req: NextRequest) {
 
       unixReq.on('error', () => {
         // Fallback simulated stream when daemon is not listening on socket
-        startFallbackStream(controller);
+        if (!cleanedUp) {
+          startFallbackStream(controller);
+        }
       });
 
       unixReq.end();
 
       function startFallbackStream(ctrl: ReadableStreamDefaultController) {
+        if (cleanedUp) return;
         let index = 1;
         const mockFlows = [
           { proto: 'TLS', src: '192.168.1.105', sp: '58492', dst: '142.250.190.46', dp: '443', info: 'Application Data [TLS 1.3], len=482' },
@@ -86,7 +125,8 @@ export async function GET(req: NextRequest) {
           { proto: 'ICMP', src: '8.8.8.8', sp: '-', dst: '192.168.1.105', dp: '-', info: 'echo reply, id 0x8201, seq 4' },
         ];
 
-        const interval = setInterval(() => {
+        interval = setInterval(() => {
+          if (cleanedUp) return;
           try {
             const flow = mockFlows[index % mockFlows.length];
             const now = new Date().toTimeString().split(' ')[0] + '.' + String(Date.now() % 1000).padStart(3, '0');
@@ -105,14 +145,13 @@ export async function GET(req: NextRequest) {
             ctrl.enqueue(encoder.encode(`event: packet\ndata: ${payload}\n\n`));
             index++;
           } catch {
-            clearInterval(interval);
+            cleanup();
           }
         }, 300);
-
-        req.signal.addEventListener('abort', () => {
-          clearInterval(interval);
-        });
       }
+    },
+    cancel() {
+      cleanup();
     },
   });
 

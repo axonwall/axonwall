@@ -25,15 +25,19 @@ export function compileIpsec(config?: IpsecConfig): CompiledIpsec {
     if (!tunnel.enabled) continue;
 
     const safeName = tunnel.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const localTs = tunnel.localTs.join(', ');
-    const remoteTs = tunnel.remoteTs.join(', ');
-    const ikeProps = tunnel.ikeProposals.join(', ');
-    const espProps = tunnel.espProposals.join(', ');
+    const localTs = tunnel.localTs.map((t) => t.replace(/[\r\n\s]+/g, '')).join(', ');
+    const remoteTs = tunnel.remoteTs.map((t) => t.replace(/[\r\n\s]+/g, '')).join(', ');
+    const ikeProps = tunnel.ikeProposals.map((p) => p.replace(/[\r\n\s]+/g, '')).join(', ');
+    const espProps = tunnel.espProposals.map((p) => p.replace(/[\r\n\s]+/g, '')).join(', ');
+    const safeDpdAction = (tunnel.dpdAction || 'restart').replace(/[\r\n\s]+/g, '');
+    const safeAuth = (tunnel.authMethod || 'psk').replace(/[\r\n\s]+/g, '');
+    const safeLocalAddr = (tunnel.localAddress || '%any').replace(/[\r\n\s]+/g, '');
+    const safeRemoteAddr = tunnel.remoteAddress.replace(/[\r\n\s]+/g, '');
 
     let childAttrs = `        local_ts = ${localTs}
         remote_ts = ${remoteTs}
         esp_proposals = ${espProps}
-        dpd_action = ${tunnel.dpdAction || 'restart'}
+        dpd_action = ${safeDpdAction}
         start_action = start`;
 
     if (tunnel.routeBased && tunnel.xfrmInterfaceId) {
@@ -49,14 +53,14 @@ export function compileIpsec(config?: IpsecConfig): CompiledIpsec {
 
     const conn = `  ${safeName} {
     version = 2
-    local_addrs = ${tunnel.localAddress || '%any'}
-    remote_addrs = ${tunnel.remoteAddress}
+    local_addrs = ${safeLocalAddr}
+    remote_addrs = ${safeRemoteAddr}
     proposals = ${ikeProps}
     local {
-      auth = ${tunnel.authMethod || 'psk'}
+      auth = ${safeAuth}
     }
     remote {
-      auth = ${tunnel.authMethod || 'psk'}
+      auth = ${safeAuth}
     }
     children {
       ${safeName}-child {
@@ -68,8 +72,9 @@ ${childAttrs}
     connectionBlocks.push(conn);
 
     if (tunnel.presharedKey) {
+      const safePsk = tunnel.presharedKey.replace(/[\r\n]+/g, '').replace(/[\\"]/g, '\\$&');
       const secret = `  ike-${safeName} {
-    secret = "${tunnel.presharedKey}"
+    secret = "${safePsk}"
   }`;
       secretBlocks.push(secret);
     }

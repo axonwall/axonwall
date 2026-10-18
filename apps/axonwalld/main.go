@@ -1142,7 +1142,7 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
-				"message": fmt.Sprintf("Auto-joined K3s cluster at %s:6443", req.PeerIp),
+				"message": fmt.Sprintf("Auto-joined K3s cluster at %s", net.JoinHostPort(req.PeerIp, "6443")),
 			})
 		})
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

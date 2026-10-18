@@ -702,7 +702,7 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
 
   // Comment
   if (rule.description) {
-    const safeDesc = rule.description.replace(/"/g, "'");
+    const safeDesc = rule.description.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim();
     parts.push(`comment "${safeDesc}"`);
   }
 

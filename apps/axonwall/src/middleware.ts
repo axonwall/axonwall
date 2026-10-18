@@ -21,12 +21,20 @@ const SESSION_COOKIE = 'axonwall_session';
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Auth endpoints (login, logout, OIDC, gateway) must stay reachable.
-  if (pathname.startsWith('/api/auth/')) {
+  // Auth endpoints (login, logout, OIDC) must stay reachable without password change.
+  // Note: /api/auth/gateway is the zero-trust forward-auth proxy and MUST be gated.
+  if (pathname.startsWith('/api/auth/') && pathname !== '/api/auth/gateway') {
     return NextResponse.next();
   }
 
-  const token = request.cookies.get(SESSION_COOKIE)?.value;
+  let token = request.cookies.get(SESSION_COOKIE)?.value;
+  if (!token) {
+    const authHeader = request.headers.get('authorization');
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7).trim();
+    }
+  }
+
   if (!token) {
     // Unauthenticated requests are the routes' own concern (they 401).
     return NextResponse.next();

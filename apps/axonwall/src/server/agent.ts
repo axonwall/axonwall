@@ -1550,6 +1550,7 @@ function compareSemver(v1: string, v2: string): number {
 export async function getReleaseInfo(): Promise<ReleaseInfo> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
+  if (session.passwordChangeRequired) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const now = Date.now();
 
@@ -1658,6 +1659,7 @@ export interface SystemPartitionsTelemetry {
 export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTelemetry> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
+  if (session.passwordChangeRequired) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const kernel = os.release() || 'Linux 6.12.111+deb13-amd64';
 
@@ -2512,8 +2514,20 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
     throw new Error('Unauthorized: Admin privileges required');
   }
 
-  const daemonResp = await callAgentApi<any>('/v1/k3s/join', 'POST', {});
+  const state = await getCurrentDesiredState();
+  const peerIp = state.ha?.peerIp || state.ha?.peerAddress || '';
+  const syncPort = state.ha?.sqliteSync?.listenPort || state.ha?.peerPort || 9876;
+  const authToken = state.ha?.sqliteSync?.authToken || '';
+
+  const daemonResp = await callAgentApi<any>('/v1/k3s/join', 'POST', {
+    peerIp,
+    syncPort,
+    authToken,
+  });
   if (daemonResp) {
+    if (!daemonResp.success) {
+      throw new Error(daemonResp.message || 'Failed to auto-join K3s cluster');
+    }
     return {
       success: Boolean(daemonResp.success),
       message: daemonResp.message || 'Joined HA K3s cluster and reconciled OpenEBS storage.',

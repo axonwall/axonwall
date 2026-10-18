@@ -14,7 +14,7 @@ export const InterfaceTypeSchema = z.enum([
 
 export const InterfaceSchema = z.object({
   id: z.string().uuid().optional(),
-  name: z.string().min(1).max(32), // e.g. "wan", "lan", "opt1"
+  name: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid interface name'), // e.g. "wan", "lan", "opt1"
   device: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.:-]+$/, 'Invalid device identifier'), // e.g. "eth0", "enp1s0"
   type: InterfaceTypeSchema.default('static'),
   enabled: z.boolean().default(true),
@@ -356,7 +356,14 @@ export type IpsecConfig = z.infer<typeof IpsecConfigSchema>;
 
 export const OpenVpnCsoSchema = z.object({
   id: z.string().uuid().optional(),
-  commonName: z.string().min(1),
+  commonName: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-zA-Z0-9_.-]+$/, 'Common Name must only contain alphanumeric characters, dots, hyphens, and underscores')
+    .refine((val) => !val.includes('..') && !val.startsWith('.'), {
+      message: 'Common Name cannot contain .. or start with .',
+    }),
   assignedIp: z.string().refine(isValidIPv4, { message: 'Invalid IPv4' }).optional(),
   pushRoutes: z.array(z.string()).default([]),
   description: z.string().max(255).default(''),
@@ -365,12 +372,19 @@ export type OpenVpnCso = z.infer<typeof OpenVpnCsoSchema>;
 
 export const OpenVpnServerSchema = z.object({
   id: z.string().uuid().optional(),
-  name: z.string().min(1),
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-zA-Z0-9_.-]+$/, 'Server name must only contain alphanumeric characters, dots, hyphens, and underscores'),
   enabled: z.boolean().default(true),
   protocol: z.enum(['udp', 'tcp']).default('udp'),
   port: z.number().int().min(1).max(65535).default(1194),
   deviceType: z.enum(['tun', 'tap']).default('tun'),
-  devName: z.string().default('ovpn-dco0'),
+  devName: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]+$/, 'Device name must only contain alphanumeric characters, hyphens, and underscores')
+    .default('ovpn-dco0'),
   dcoEnabled: z.boolean().default(true),
   tunnelNetwork: z.string().refine(isValidCIDR, { message: 'Invalid tunnel CIDR' }).default('10.8.0.0/24'),
   localNetwork: z.string().optional(),

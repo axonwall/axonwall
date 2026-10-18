@@ -58,7 +58,10 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
   }
 
   if (isSecondaryJoin && effectivePeer) {
-    configLines.push(`server: "https://${effectivePeer}:6443"`);
+    const formattedPeer = effectivePeer.includes(':') && !effectivePeer.startsWith('[')
+      ? `[${effectivePeer}]`
+      : effectivePeer;
+    configLines.push(`server: "https://${formattedPeer}:6443"`);
     if (joinToken) {
       configLines.push(`token: "${joinToken}"`);
     } else {

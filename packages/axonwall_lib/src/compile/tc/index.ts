@@ -32,7 +32,8 @@ export function compileTrafficShaper(config?: TrafficShaperConfig): CompiledTraf
 }
 
 function compileInterfaceShaper(iface: TrafficShaperInterface, commands: string[]) {
-  const dev = iface.interface;
+  const dev = iface.interface.replace(/[^a-zA-Z0-9_.-]/g, '');
+  if (!dev) return;
   const ifbDev = `ifb-${dev.replace(/[^a-zA-Z0-9_-]/g, '')}`;
 
   commands.push(`### Traffic Shaper for Interface: ${dev} ###`);
@@ -43,7 +44,8 @@ function compileInterfaceShaper(iface: TrafficShaperInterface, commands: string[
     commands.push(`tc qdisc del dev ${dev} root 2>/dev/null || true`);
 
     if (iface.scheduler === 'cake') {
-      const diffserv = iface.cakeDiffserv || 'diffserv4';
+      const allowedDiffserv = ['diffserv4', 'diffserv3', 'besteffort'];
+      const diffserv = allowedDiffserv.includes(iface.cakeDiffserv || '') ? iface.cakeDiffserv : 'diffserv4';
       const ackFilter = iface.cakeAckFilter ? 'ack-filter' : '';
       commands.push(
         `tc qdisc add dev ${dev} root cake bandwidth ${iface.uploadBandwidthMbps}mbit ${diffserv} ${ackFilter}`.trim()
@@ -99,7 +101,8 @@ function compileInterfaceShaper(iface: TrafficShaperInterface, commands: string[
     // Shape on the IFB device
     commands.push(`tc qdisc del dev ${ifbDev} root 2>/dev/null || true`);
     if (iface.scheduler === 'cake') {
-      const diffserv = iface.cakeDiffserv || 'diffserv4';
+      const allowedDiffserv = ['diffserv4', 'diffserv3', 'besteffort'];
+      const diffserv = allowedDiffserv.includes(iface.cakeDiffserv || '') ? iface.cakeDiffserv : 'diffserv4';
       commands.push(`tc qdisc add dev ${ifbDev} root cake bandwidth ${iface.downloadBandwidthMbps}mbit ${diffserv}`);
     } else {
       commands.push(

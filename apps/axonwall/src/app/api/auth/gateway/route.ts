@@ -5,10 +5,12 @@ import { getCurrentDesiredState } from '@/server/agent';
 export async function GET(req: Request) {
   const session = await getSession();
   
-  if (!session) {
-    // If unauthorized, forward auth expects a 401, or we can redirect to login
-    // Caddy forward_auth handles the redirect if we return 401
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!session || session.passwordChangeRequired) {
+    // If unauthorized or password change required, forward auth expects a 401/403
+    return NextResponse.json(
+      { error: session?.passwordChangeRequired ? 'Password change required' : 'Unauthorized' },
+      { status: session?.passwordChangeRequired ? 403 : 401 }
+    );
   }
 
   // Check roles based on headers passed by Caddy, like X-Forwarded-Host

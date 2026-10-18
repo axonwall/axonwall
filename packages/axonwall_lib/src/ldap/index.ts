@@ -253,6 +253,7 @@ export async function verifyToken(
       roles: (payload.app_roles as string[]) || [],
       privileges: (payload.app_privs as Privilege[]) || [],
       exp: (payload.exp as number) || 0,
+      passwordChangeRequired: payload.pwd_change_required === true,
       sessionEpoch: (payload.session_epoch as number) || 0,
       jti: payload.jti as string | undefined,
     };

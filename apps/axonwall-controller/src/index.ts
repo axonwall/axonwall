@@ -498,12 +498,15 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
       const peers = allSats
         .filter(p => p.id !== sat.id)
-        .map(p => ({
-          publicKey: p.wgPublicKey,
-          endpoint: `${p.ip}:51820`, // Assuming they are reachable on their public IP on 51820
-          allowedIps: `${p.tunnelIp!.split('/')[0]}/32`, // Only route their tunnel IP for the mesh
-          keepAliveSec: 25,
-        }));
+        .map(p => {
+          const formattedIp = p.ip && p.ip.includes(':') && !p.ip.startsWith('[') ? `[${p.ip}]` : p.ip;
+          return {
+            publicKey: p.wgPublicKey,
+            endpoint: `${formattedIp}:51820`, // Assuming they are reachable on their public IP on 51820
+            allowedIps: `${p.tunnelIp!.split('/')[0]}/32`, // Only route their tunnel IP for the mesh
+            keepAliveSec: 25,
+          };
+        });
 
       sat.ws.send(JSON.stringify({
         type: 'SYNC_WIREGUARD',

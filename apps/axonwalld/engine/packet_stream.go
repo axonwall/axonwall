@@ -160,7 +160,9 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 				}
 
 				data, _ := json.Marshal(pkt)
-				_, _ = fmt.Fprintf(w, "event: packet\ndata: %s\n\n", data)
+				if _, err := fmt.Fprintf(w, "event: packet\ndata: %s\n\n", data); err != nil {
+					return
+				}
 				flusher.Flush()
 				idx++
 			}
@@ -226,7 +228,9 @@ func (m *PacketStreamManager) streamMockPackets(ctx context.Context, w http.Resp
 			}
 
 			data, _ := json.Marshal(pkt)
-			_, _ = fmt.Fprintf(w, "event: packet\ndata: %s\n\n", data)
+			if _, err := fmt.Fprintf(w, "event: packet\ndata: %s\n\n", data); err != nil {
+				return
+			}
 			flusher.Flush()
 			idx++
 		}

@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -366,7 +368,7 @@ func (m *SqliteSyncManager) pollAndSync() {
 		peerPort = cfg.ListenPort
 	}
 
-	statusUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/status", cfg.PeerAddress, peerPort)
+	statusUrl := fmt.Sprintf("http://%s/api/v1/sync/status", net.JoinHostPort(cfg.PeerAddress, strconv.Itoa(peerPort)))
 	req, err := http.NewRequest("GET", statusUrl, nil)
 	if err != nil {
 		return
@@ -473,7 +475,7 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	snapTag := fmt.Sprintf("ha-sync-%d", time.Now().UTC().Unix())
+	snapTag := fmt.Sprintf("ha-sync-%d", time.Now().UTC().UnixNano())
 	targetSnap := fmt.Sprintf("%s@%s", dataset, snapTag)
 
 	if out, err := exec.Command("zfs", "snapshot", targetSnap).CombinedOutput(); err != nil {
@@ -527,7 +529,7 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
 		return
 	}
 
-	stateUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/state", peerAddr, peerPort)
+	stateUrl := fmt.Sprintf("http://%s/api/v1/sync/state", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)))
 	req, err := http.NewRequest(http.MethodGet, stateUrl, nil)
 	if err != nil {
 		return
@@ -568,7 +570,7 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int) error {
 	authToken := m.cfg.AuthToken
 	m.mu.Unlock()
 
-	downloadUrl := fmt.Sprintf("http://%s:%d/api/v1/sync/db?path=%s", peerAddr, peerPort, url.QueryEscape(dbPath))
+	downloadUrl := fmt.Sprintf("http://%s/api/v1/sync/db?path=%s", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)), url.QueryEscape(dbPath))
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
 		return err

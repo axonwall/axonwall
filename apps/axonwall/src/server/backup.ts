@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
 
 const BACKUP_MAGIC = Buffer.from('AXB1'); // Axonwall Encrypted Backup Version 1 (PBKDF2 100k)
@@ -25,8 +25,8 @@ export async function createEncryptedBackup(
   passphrase: string
 ): Promise<{ id: string; buffer: Buffer; metadata: BackupMetadata }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required for configuration backups');
+  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin privileges required for configuration backups (password change required if pending)');
   }
 
   if (!passphrase || passphrase.length < 8) {
@@ -71,8 +71,8 @@ export async function restoreEncryptedBackup(
   passphrase: string
 ): Promise<{ metadata: BackupMetadata; state: DesiredState }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required to restore configuration');
+  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+    throw new Error('Unauthorized: Admin privileges required to restore configuration (password change required if pending)');
   }
 
   if (buffer.length < 48) {
@@ -101,11 +101,15 @@ export async function restoreEncryptedBackup(
     decipher.setAuthTag(tag);
     const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     const parsed = JSON.parse(decrypted.toString('utf8'));
+    const validatedState = DesiredStateSchema.parse(parsed.state);
     return {
       metadata: parsed.metadata,
-      state: parsed.state,
+      state: validatedState,
     };
   } catch (err: any) {
+    if (err?.name === 'ZodError') {
+      throw new Error(`Corrupted backup archive: state failed schema validation (${err.message})`);
+    }
     throw new Error('Decryption failed: incorrect passphrase or corrupted backup archive');
   }
 }

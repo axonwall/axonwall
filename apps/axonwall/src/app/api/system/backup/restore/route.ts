@@ -6,8 +6,16 @@ import { DesiredStateSchema } from '@axonwall/lib/schemas';
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    return NextResponse.json({ success: false, error: 'Unauthorized: Admin access required' }, { status: 401 });
+  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: session?.passwordChangeRequired
+          ? 'Password change required: default admin password must be changed first'
+          : 'Unauthorized: Admin access required',
+      },
+      { status: session?.passwordChangeRequired ? 403 : 401 }
+    );
   }
 
   try {

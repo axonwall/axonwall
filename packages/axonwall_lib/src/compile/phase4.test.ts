@@ -221,6 +221,40 @@ describe('Phase 4: Plugin Compilers', () => {
     expect(output).toContain('server app2 192.168.100.11:8080 check');
   });
 
+  it('sanitizes HAProxy identifiers and certName against path traversal and CRLF', () => {
+    const config: HaProxyPluginConfig = {
+      enabled: true,
+      mode: 'http',
+      frontends: [
+        {
+          name: 'fe\ninjection',
+          bindPort: 443,
+          ssl: true,
+          certName: '../../shadow\nexploit',
+          defaultBackend: 'be/app',
+        },
+      ],
+      backends: [
+        {
+          name: 'be/app',
+          mode: 'http',
+          balance: 'roundrobin',
+          servers: [
+            { name: 'srv\n1', address: '10.0.0.1\nmalicious', port: 8080, check: true },
+          ],
+        },
+      ],
+    };
+    const output = compileHaProxy(config);
+    expect(output).not.toContain('../../');
+    expect(output).not.toContain('\nexploit');
+    expect(output).not.toContain('fe\ninjection');
+    expect(output).not.toContain('10.0.0.1\nmalicious');
+    expect(output).toContain('frontend fe_injection');
+    expect(output).toContain('ssl crt /etc/axonwall/certs/______shadow_exploit.pem');
+    expect(output).toContain('server srv_1 10.0.0.1malicious:8080');
+  });
+
   it('compiles FreeRADIUS clients configuration', () => {
     const config: FreeRadiusPluginConfig = {
       enabled: true,

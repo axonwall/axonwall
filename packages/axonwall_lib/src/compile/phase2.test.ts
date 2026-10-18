@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { DesiredState, PacketTracerQuery } from '../schemas/index.js';
+import { type DesiredState, type PacketTracerQuery, OpenVpnCsoSchema } from '../schemas/index.js';
 import { compileNftables } from './nft/index.js';
 import { compileTrafficShaper } from './tc/index.js';
 import { compileIpsec } from './ipsec/index.js';
 import { compileOpenVpn, generateClientOvpnProfile } from './openvpn/index.js';
+import { compileWireGuard } from './wireguard/index.js';
 import { compileFrr } from './frr/index.js';
 import { simulatePacket } from '../sim/index.js';
 
@@ -109,6 +110,34 @@ describe('Phase 2: strongSwan IPsec Compiler', () => {
     expect(res.xfrmSetupCommands).toContain('ip link add xfrm42 type xfrm if_id 42 2>/dev/null || true');
     expect(res.xfrmSetupCommands).toContain('ip link set dev xfrm42 up');
   });
+
+  it('escapes quotes, backslashes, and newlines in presharedKey', () => {
+    const res = compileIpsec({
+      enabled: true,
+      tunnels: [
+        {
+          id: 'ipsec-inj',
+          name: 'Tunnel_Inj',
+          enabled: true,
+          routeBased: false,
+          xfrmInterfaceId: 1,
+          localAddress: '198.51.100.1',
+          remoteAddress: '203.0.113.1',
+          authMethod: 'psk',
+          presharedKey: 'key"with"quotes\nand\\backslashes',
+          ikeProposals: ['aes256-sha256-modp2048'],
+          espProposals: ['aes256gcm16-ecp256'],
+          localTs: ['10.0.0.0/16'],
+          remoteTs: ['10.1.0.0/16'],
+          dpdDelay: 30,
+          dpdAction: 'restart',
+          description: 'Tunnel with special chars in PSK',
+        },
+      ],
+    });
+    expect(res.swanctlConf).toContain('secret = "key\\"with\\"quotesand\\\\backslashes"');
+    expect(res.swanctlConf).not.toContain('\nand\\backslashes');
+  });
 });
 
 describe('Phase 2: OpenVPN 2.6 with DCO & CSO Compiler', () => {
@@ -162,6 +191,50 @@ describe('Phase 2: OpenVPN 2.6 with DCO & CSO Compiler', () => {
     expect(clientProfile).toContain('remote vpn.axonwall.net 1194');
     expect(clientProfile).toContain('<ca>');
   });
+
+  it('prevents path traversal in OpenVPN CSO commonName', () => {
+    expect(() => OpenVpnCsoSchema.parse({ commonName: '../../etc/shadow' })).toThrow();
+    expect(() => OpenVpnCsoSchema.parse({ commonName: '.hidden' })).toThrow();
+
+    const res = compileOpenVpn({
+      enabled: true,
+      servers: [
+        {
+          id: 'ovpn-1',
+          name: 'VPN\nInjection',
+          enabled: true,
+          protocol: 'udp',
+          port: 1194,
+          deviceType: 'tun',
+          devName: 'ovpn;rm',
+          dcoEnabled: true,
+          tunnelNetwork: '10.8.0.0/24',
+          cipher: 'AES-256-GCM',
+          authDigest: 'SHA256',
+          clientToClient: false,
+          duplicateCn: false,
+          description: '',
+          cso: [
+            {
+              commonName: '../../etc/passwd',
+              pushRoutes: ['192.168.1.0/24'],
+              description: 'Traversal attempt',
+            },
+            {
+              commonName: 'valid-client.1',
+              pushRoutes: ['192.168.2.0/24'],
+              description: 'Valid client',
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(res.servers[0].serverConf).not.toContain('VPN\nInjection');
+    expect(res.servers[0].serverConf).toContain('dev ovpnrm');
+    expect(res.servers[0].ccdFiles['../../etc/passwd']).toBeUndefined();
+    expect(res.servers[0].ccdFiles['valid-client.1']).toBeDefined();
+  });
 });
 
 describe('Phase 2: FRRouting (BGP / OSPF / BFD) Compiler', () => {
@@ -211,6 +284,64 @@ describe('Phase 2: FRRouting (BGP / OSPF / BFD) Compiler', () => {
     expect(res.daemonsConf).toContain('bgpd=yes');
     expect(res.daemonsConf).toContain('ospfd=yes');
     expect(res.daemonsConf).toContain('bfdd=yes');
+  });
+
+  it('strips newlines from BGP neighbor description and password', () => {
+    const res = compileFrr({
+      enabled: true,
+      bgp: {
+        enabled: true,
+        asNumber: 64512,
+        routerId: '1.1.1.1',
+        networks: ['10.0.0.0/16\nnetwork 0.0.0.0/0'],
+        neighbors: [
+          {
+            peerIp: '192.168.1.254',
+            remoteAs: 65000,
+            description: 'Transit\n neighbor 192.168.1.254 shutdown',
+            password: 'secret\npass',
+            bfd: false,
+            nextHopSelf: false,
+            softReconfiguration: false,
+          },
+        ],
+      },
+      ospf: {
+        enabled: false,
+        routerId: '1.1.1.1',
+        redistributeConnected: false,
+        redistributeDefault: false,
+        areas: [],
+      },
+    });
+
+    expect(res.frrConf).not.toContain('\n neighbor 192.168.1.254 shutdown');
+    expect(res.frrConf).toContain('description Transit  neighbor 192.168.1.254 shutdown');
+    expect(res.frrConf).toContain('password secretpass');
+    expect(res.frrConf).not.toContain('\nnetwork 0.0.0.0/0');
+  });
+
+  it('strips newlines from WireGuard peer names and keys', () => {
+    const res = compileWireGuard({
+      enabled: true,
+      address: '10.0.0.1/24\nPostUp = echo pwned',
+      listenPort: 51820,
+      privateKey: 'privatekey\nPostUp = echo pwned2',
+      peers: [
+        {
+          name: 'Peer 1\n[Peer]\nPublicKey = attacker',
+          publicKey: 'key1\nAllowedIPs = 0.0.0.0/0',
+          allowedIps: ['10.0.0.2/32\nAllowedIPs = 0.0.0.0/0'],
+          enabled: true,
+          persistentKeepalive: 25,
+        },
+      ],
+    });
+
+    expect(res.wgConfig).not.toContain('\nPostUp = echo pwned');
+    expect(res.wgConfig).not.toContain('# Peer: Peer 1\n[Peer]');
+    expect(res.wgConfig).toContain('# Peer: Peer 1 [Peer] PublicKey = attacker');
+    expect(res.wgConfig).not.toContain('key1\nAllowedIPs');
   });
 });
 

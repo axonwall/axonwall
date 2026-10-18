@@ -5,8 +5,13 @@ import { getCurrentDesiredState } from '@/server/agent';
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    return new NextResponse('Unauthorized: Admin access required', { status: 401 });
+  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+    return new NextResponse(
+      session?.passwordChangeRequired
+        ? 'Forbidden: Password change required'
+        : 'Unauthorized: Admin access required',
+      { status: session?.passwordChangeRequired ? 403 : 401 }
+    );
   }
 
   let body: any = {};

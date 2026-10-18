@@ -5,8 +5,11 @@ import { getSession } from '../../../../../../server/auth';
 export async function GET() {
   try {
     const session = await getSession();
-    if (!session || !session.roles.includes('admin')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+      return NextResponse.json(
+        { error: session?.passwordChangeRequired ? 'Password change required' : 'Unauthorized' },
+        { status: session?.passwordChangeRequired ? 403 : 401 }
+      );
     }
     const users = await listUsers();
     return NextResponse.json({ status: 'ok', data: users });
@@ -18,8 +21,11 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const session = await getSession();
-    if (!session || !session.roles.includes('admin')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+      return NextResponse.json(
+        { error: session?.passwordChangeRequired ? 'Password change required' : 'Unauthorized' },
+        { status: session?.passwordChangeRequired ? 403 : 401 }
+      );
     }
     const body = await req.json();
     if (!body.name) {

@@ -21,7 +21,12 @@ export async function GET() {
       snapshots,
     });
   } catch (err: any) {
-    return NextResponse.json({ error: err?.message || 'Failed to fetch NAS status' }, { status: 500 });
+    const status = err?.message?.includes('Unauthorized')
+      ? 401
+      : err?.message?.includes('Forbidden') || err?.message?.toLowerCase().includes('admin')
+        ? 403
+        : 500;
+    return NextResponse.json({ error: err?.message || 'Failed to fetch NAS status' }, { status });
   }
 }
 
@@ -38,6 +43,11 @@ export async function POST(req: Request) {
     }
     return NextResponse.json({ error: 'Unknown NAS action' }, { status: 400 });
   } catch (err: any) {
-    return NextResponse.json({ error: err?.message || 'NAS action failed' }, { status: 500 });
+    const status = err?.message?.includes('Unauthorized')
+      ? 401
+      : err?.message?.includes('Forbidden') || err?.message?.toLowerCase().includes('admin')
+        ? 403
+        : 500;
+    return NextResponse.json({ error: err?.message || 'NAS action failed' }, { status });
   }
 }

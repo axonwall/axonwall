@@ -33,7 +33,10 @@ export function compileSuricata(config?: SuricataConfig): CompiledSuricata {
     };
   }
 
-  const homeNetList = config.homeNet.join(',');
+  const safeHomeNet = (config.homeNet || [])
+    .map((cidr) => cidr.split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:./]/g, ''))
+    .filter(Boolean);
+  const homeNetList = safeHomeNet.length > 0 ? safeHomeNet.join(',') : '192.168.0.0/16,10.0.0.0/8,172.16.0.0/12';
   const isIps = config.mode === 'ips';
 
   const suricataYaml = `# Axonwall Suricata 7.0 Configuration (Auto-Generated)
@@ -106,7 +109,9 @@ rule-files:
 
   // nftables NFQUEUE rules
   const nftRules: string[] = [];
-  for (const iface of config.interfaces) {
+  for (const rawIface of config.interfaces) {
+    const iface = rawIface.split(/[\r\n\s";]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');
+    if (!iface) continue;
     const queueAction = config.nfqueueBypass ? 'queue num 0-3 bypass' : 'queue num 0-3';
     nftRules.push(
       `iifname "${iface}" ${queueAction} comment "suricata-ips-inbound"`,

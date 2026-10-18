@@ -3,8 +3,14 @@ import type { HaProxyPluginConfig } from '../../schemas/index.js';
 /**
  * Compiles HAProxy configuration (/etc/haproxy/haproxy.cfg).
  */
+function safeIdentifier(str: string): string {
+  return str.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
 export function compileHaProxy(config: HaProxyPluginConfig): string {
   const lines: string[] = [];
+
+  const safeConfigMode = safeIdentifier(config.mode);
 
   lines.push('# /etc/haproxy/haproxy.cfg - Managed by Axonwall HAProxy Plugin');
   lines.push('');
@@ -24,7 +30,7 @@ export function compileHaProxy(config: HaProxyPluginConfig): string {
 
   lines.push('defaults');
   lines.push('    log global');
-  lines.push(`    mode ${config.mode}`);
+  lines.push(`    mode ${safeConfigMode}`);
   lines.push('    option httplog');
   lines.push('    option dontlognull');
   lines.push('    timeout connect 5000ms');
@@ -33,30 +39,35 @@ export function compileHaProxy(config: HaProxyPluginConfig): string {
   lines.push('');
 
   for (const fe of config.frontends) {
-    lines.push(`frontend ${fe.name}`);
+    const safeFeName = safeIdentifier(fe.name);
+    lines.push(`frontend ${safeFeName}`);
     let bindLine = `    bind *:${fe.bindPort}`;
     if (fe.ssl && fe.certName) {
-      bindLine += ` ssl crt /etc/axonwall/certs/${fe.certName}.pem`;
+      const safeCert = safeIdentifier(fe.certName);
+      bindLine += ` ssl crt /etc/axonwall/certs/${safeCert}.pem`;
     }
     lines.push(bindLine);
-    lines.push(`    mode ${config.mode}`);
-    if (config.mode === 'http') {
+    lines.push(`    mode ${safeConfigMode}`);
+    if (safeConfigMode === 'http') {
       lines.push('    option forwardfor');
       lines.push('    http-request set-header X-Forwarded-Proto https if { ssl_fc }');
     }
-    lines.push(`    default_backend ${fe.defaultBackend}`);
+    lines.push(`    default_backend ${safeIdentifier(fe.defaultBackend)}`);
     lines.push('');
   }
 
   for (const be of config.backends) {
-    lines.push(`backend ${be.name}`);
-    lines.push(`    mode ${be.mode}`);
-    lines.push(`    balance ${be.balance}`);
+    const safeBeName = safeIdentifier(be.name);
+    lines.push(`backend ${safeBeName}`);
+    lines.push(`    mode ${safeIdentifier(be.mode)}`);
+    lines.push(`    balance ${safeIdentifier(be.balance)}`);
     if (be.mode === 'http') {
       lines.push('    option httpchk GET /');
     }
     for (const srv of be.servers) {
-      let srvLine = `    server ${srv.name} ${srv.address}:${srv.port}`;
+      const safeSrvName = safeIdentifier(srv.name);
+      const safeAddr = srv.address.replace(/[\r\n\s]+/g, '');
+      let srvLine = `    server ${safeSrvName} ${safeAddr}:${srv.port}`;
       if (srv.check) {
         srvLine += ' check';
       }

@@ -5,11 +5,12 @@ import type { HighAvailabilityConfig, DesiredState, HaSyncSections } from '../..
  */
 export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string = 'axonwall'): string {
   const lines: string[] = [];
+  const safeHostname = hostname.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '') || 'axonwall';
 
   lines.push('! Configuration File for keepalived (Axonwall Managed)');
   lines.push('');
   lines.push('global_defs {');
-  lines.push(`    router_id ${hostname}`);
+  lines.push(`    router_id ${safeHostname}`);
   lines.push('    script_user root');
   lines.push('    enable_script_security');
   lines.push('    vrrp_garp_master_refresh 60');
@@ -25,28 +26,39 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
   lines.push('');
 
   for (const vrrp of ha.vrrpInstances) {
+    const safeName = vrrp.name.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');
+    const safeInterface = vrrp.interface.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');
+    if (!safeName || !safeInterface) continue;
+
     const isMaster = ha.nodeRole === 'master' && !ha.maintenanceMode;
     // In maintenance mode, drop priority to lowest to force peer takeover
-    const effectivePriority = ha.maintenanceMode ? 1 : vrrp.priority;
+    const effectivePriority = ha.maintenanceMode ? 1 : Math.max(1, Math.min(255, Number(vrrp.priority) || 100));
+    const safeVrid = Math.max(1, Math.min(255, Number(vrrp.vrid) || 1));
 
-    lines.push(`vrrp_instance ${vrrp.name} {`);
+    lines.push(`vrrp_instance ${safeName} {`);
     lines.push(`    state ${isMaster ? 'MASTER' : 'BACKUP'}`);
-    lines.push(`    interface ${vrrp.interface}`);
-    lines.push(`    virtual_router_id ${vrrp.vrid}`);
+    lines.push(`    interface ${safeInterface}`);
+    lines.push(`    virtual_router_id ${safeVrid}`);
     lines.push(`    priority ${effectivePriority}`);
     lines.push('    advert_int 1');
     lines.push('    nopreempt');
 
     if (vrrp.authPassword) {
-      lines.push('    authentication {');
-      lines.push('        auth_type PASS');
-      lines.push(`        auth_pass ${vrrp.authPassword.slice(0, 8)}`);
-      lines.push('    }');
+      const safePassword = vrrp.authPassword.split(/[\r\n]/)[0].trim().replace(/[\r\n\s]+/g, '').slice(0, 8);
+      if (safePassword) {
+        lines.push('    authentication {');
+        lines.push('        auth_type PASS');
+        lines.push(`        auth_pass ${safePassword}`);
+        lines.push('    }');
+      }
     }
 
     lines.push('    virtual_ipaddress {');
     for (const vip of vrrp.virtualIps) {
-      lines.push(`        ${vip}`);
+      const safeVip = vip.split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:./]/g, '');
+      if (safeVip) {
+        lines.push(`        ${safeVip}`);
+      }
     }
     lines.push('    }');
 
@@ -70,12 +82,15 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
 export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = '127.0.0.1'): string {
   const sync = ha.conntrackSync;
   const lines: string[] = [];
-  const mode = sync.mode || 'FTFW';
-  const bufSize = sync.bufferSize || 12492800;
+  const safeMode = sync.mode === 'NOTRACK' || sync.mode === 'ALARM' ? sync.mode : 'FTFW';
+  const bufSize = Math.max(1024, Number(sync.bufferSize) || 12492800);
+  const safeLocalIp = localIp.split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:.]/g, '') || '127.0.0.1';
+  const safeInterface = sync.interface.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');
+  const safePort = Math.max(1, Math.min(65535, Number(sync.port) || 3780));
 
   lines.push('# conntrackd.conf - Axonwall High Availability State Synchronization');
   lines.push('Sync {');
-  lines.push(`    Mode ${mode} {`);
+  lines.push(`    Mode ${safeMode} {`);
   lines.push('        ResendQueueSize 131072');
   lines.push('        CommitTimeout 180');
   lines.push('        PurgeTimeout 60');
@@ -84,22 +99,25 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
   lines.push('');
 
   if (sync.protocol === 'multicast') {
+    const safeMulticastGroup = (sync.multicastGroup || '225.0.0.50').split(/[\r\n]/)[0].trim().replace(/[^0-9.]/g, '');
     lines.push('    Multicast {');
-    lines.push(`        IPv4_address ${sync.multicastGroup || '225.0.0.50'}`);
-    lines.push(`        Group ${sync.port || 3780}`);
-    lines.push(`        IPv4_interface ${localIp}`);
-    lines.push(`        Interface ${sync.interface}`);
+    lines.push(`        IPv4_address ${safeMulticastGroup}`);
+    lines.push(`        Group ${safePort}`);
+    lines.push(`        IPv4_interface ${safeLocalIp}`);
+    lines.push(`        Interface ${safeInterface}`);
     lines.push(`        SndSocketBuffer ${bufSize}`);
     lines.push(`        RcvSocketBuffer ${bufSize}`);
     lines.push('        Checksum on');
     lines.push('    }');
   } else {
     // Unicast UDP
+    const rawPeer = (sync.peerAddress || ha.peerAddress || '192.168.1.2').split(/[\r\n]/)[0].trim();
+    const safePeerAddress = rawPeer.replace(/[^a-fA-F0-9:.]/g, '');
     lines.push('    UDP {');
-    lines.push(`        IPv4_address ${localIp}`);
-    lines.push(`        IPv4_Destination_Address ${sync.peerAddress || ha.peerAddress || '192.168.1.2'}`);
-    lines.push(`        Port ${sync.port}`);
-    lines.push(`        Interface ${sync.interface}`);
+    lines.push(`        IPv4_address ${safeLocalIp}`);
+    lines.push(`        IPv4_Destination_Address ${safePeerAddress}`);
+    lines.push(`        Port ${safePort}`);
+    lines.push(`        Interface ${safeInterface}`);
     lines.push(`        SndSocketBuffer ${bufSize}`);
     lines.push(`        RcvSocketBuffer ${bufSize}`);
     lines.push('        Checksum on');
@@ -131,8 +149,9 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
 
   if (sync.filterIgnoreIps && sync.filterIgnoreIps.length > 0) {
     for (const ip of sync.filterIgnoreIps) {
-      if (ip !== '127.0.0.1') {
-        lines.push(`            IPv4_address ${ip}`);
+      const safeIp = ip.split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:.]/g, '');
+      if (safeIp && safeIp !== '127.0.0.1') {
+        lines.push(`            IPv4_address ${safeIp}`);
       }
     }
   }

@@ -25,9 +25,15 @@ export function compileFreeRadiusClients(config: FreeRadiusPluginConfig): string
   lines.push('');
 
   for (const client of config.clients) {
-    lines.push(`client ${client.name} {`);
-    lines.push(`    ipaddr = ${client.ipAddress}`);
-    lines.push(`    secret = "${client.secret}"`);
+    const safeName = client.name.split(/[\r\n\}]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');
+    const safeIp = client.ipAddress.split(/[\r\n\}]/)[0].trim().replace(/[^a-fA-F0-9:./]/g, '');
+    const rawSecret = client.secret.split(/[\r\n]/)[0];
+    const safeSecret = rawSecret.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    if (!safeName || !safeIp) continue;
+
+    lines.push(`client ${safeName} {`);
+    lines.push(`    ipaddr = ${safeIp}`);
+    lines.push(`    secret = "${safeSecret}"`);
     lines.push('    require_message_authenticator = auto');
     lines.push('    nas_type = other');
     lines.push('    limit {');

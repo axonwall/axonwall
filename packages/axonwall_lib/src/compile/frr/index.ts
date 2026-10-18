@@ -40,30 +40,33 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
   if (config.bgp && config.bgp.enabled) {
     daemons.bgpd = true;
     lines.push(`router bgp ${config.bgp.asNumber}`);
-    lines.push(` bgp router-id ${config.bgp.routerId}`);
+    lines.push(` bgp router-id ${config.bgp.routerId.replace(/[\r\n\s]+/g, '')}`);
     lines.push(' no bgp ebgp-requires-policy');
 
     for (const net of config.bgp.networks) {
-      lines.push(` network ${net}`);
+      lines.push(` network ${net.replace(/[\r\n\s]+/g, '')}`);
     }
 
     for (const neighbor of config.bgp.neighbors) {
-      lines.push(` neighbor ${neighbor.peerIp} remote-as ${neighbor.remoteAs}`);
+      const safePeerIp = neighbor.peerIp.replace(/[\r\n\s]+/g, '');
+      lines.push(` neighbor ${safePeerIp} remote-as ${neighbor.remoteAs}`);
       if (neighbor.description) {
-        lines.push(` neighbor ${neighbor.peerIp} description ${neighbor.description}`);
+        const safeDesc = neighbor.description.replace(/[\r\n]+/g, ' ').replace(/"/g, "'").trim();
+        lines.push(` neighbor ${safePeerIp} description ${safeDesc}`);
       }
       if (neighbor.password) {
-        lines.push(` neighbor ${neighbor.peerIp} password ${neighbor.password}`);
+        const safePass = neighbor.password.replace(/[\r\n\s]+/g, '');
+        lines.push(` neighbor ${safePeerIp} password ${safePass}`);
       }
       if (neighbor.bfd) {
         daemons.bfdd = true;
-        lines.push(` neighbor ${neighbor.peerIp} bfd`);
+        lines.push(` neighbor ${safePeerIp} bfd`);
       }
       if (neighbor.nextHopSelf) {
-        lines.push(` neighbor ${neighbor.peerIp} next-hop-self`);
+        lines.push(` neighbor ${safePeerIp} next-hop-self`);
       }
       if (neighbor.softReconfiguration) {
-        lines.push(` neighbor ${neighbor.peerIp} soft-reconfiguration inbound`);
+        lines.push(` neighbor ${safePeerIp} soft-reconfiguration inbound`);
       }
     }
     lines.push('!');
@@ -75,15 +78,16 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
 
     // Interface-level OSPF configurations
     for (const area of config.ospf.areas) {
+      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, '');
       for (const iface of area.interfaces) {
-        lines.push(`interface ${iface}`);
-        lines.push(` ip ospf area ${area.areaId}`);
+        lines.push(`interface ${iface.replace(/[\r\n\s]+/g, '')}`);
+        lines.push(` ip ospf area ${safeAreaId}`);
         lines.push('!');
       }
     }
 
     lines.push('router ospf');
-    lines.push(` ospf router-id ${config.ospf.routerId}`);
+    lines.push(` ospf router-id ${config.ospf.routerId.replace(/[\r\n\s]+/g, '')}`);
 
     if (config.ospf.redistributeConnected) {
       lines.push(' redistribute connected');
@@ -93,8 +97,9 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
     }
 
     for (const area of config.ospf.areas) {
+      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, '');
       for (const net of area.networks) {
-        lines.push(` network ${net} area ${area.areaId}`);
+        lines.push(` network ${net.replace(/[\r\n\s]+/g, '')} area ${safeAreaId}`);
       }
     }
     lines.push('!');
