@@ -61,4 +61,17 @@ COMMIT
     expect(res.vendor).toBe('iptables');
     expect(res.rulesCount).toBe(1);
   });
+
+  it('detects Linux firewalld zone XML and firewall-cmd dumps', () => {
+    const fwdXml = `<?xml version="1.0" encoding="utf-8"?>
+<zone name="public">
+  <service name="ssh"/>
+  <service name="https"/>
+  <port port="8080" protocol="tcp"/>
+</zone>`;
+    expect(detectFirewallType(fwdXml)).toBe('firewalld');
+    const res = importFirewallConfig(fwdXml);
+    expect(res.vendor).toBe('firewalld');
+    expect(res.rulesCount).toBe(3);
+  });
 });

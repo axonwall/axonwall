@@ -39,6 +39,7 @@ const VENDOR_OPTIONS: VendorOption[] = [
   { id: 'mikrotik', label: 'MikroTik RouterOS', badge: 'RSC', filename: 'export.rsc' },
   { id: 'cisco', label: 'Cisco ASA / FTD', badge: 'ACL', filename: 'running-config.cfg' },
   { id: 'iptables', label: 'Linux iptables', badge: 'save', filename: 'rules.v4' },
+  { id: 'firewalld', label: 'Linux firewalld', badge: 'XML/CLI', filename: 'public.xml' },
 ];
 
 const SAMPLE_CONFIGS: Record<FirewallVendor, string> = {
@@ -361,6 +362,41 @@ nat (inside,outside) source dynamic any interface
 nat (outside,dmz) source static any any destination static interface WebServer
 !
 route inside 10.0.0.0 255.0.0.0 192.168.10.254 1`,
+
+  firewalld: `<?xml version="1.0" encoding="utf-8"?>
+<ipset type="hash:net" name="trusted_admins">
+  <short>Trusted Admin Subnets</short>
+  <entry>10.80.0.0/24</entry>
+  <entry>192.168.10.50/32</entry>
+</ipset>
+<zone name="public" target="default">
+  <short>Public WAN</short>
+  <description>Public facing untrusted interface</description>
+  <interface name="eth0"/>
+  <service name="ssh"/>
+  <service name="https"/>
+  <service name="wireguard"/>
+  <port port="8443" protocol="tcp"/>
+  <masquerade/>
+  <forward-port port="80" protocol="tcp" to-port="8080" to-addr="192.168.1.50"/>
+  <rule family="ipv4">
+    <source ipset="trusted_admins"/>
+    <service name="cockpit"/>
+    <log prefix="ADMIN_COCKPIT: "/>
+    <accept/>
+  </rule>
+  <rule family="ipv4">
+    <source address="198.51.100.99"/>
+    <drop/>
+  </rule>
+</zone>
+<zone name="internal" target="ACCEPT">
+  <short>Internal Corporate LAN</short>
+  <interface name="eth1"/>
+  <service name="dns"/>
+  <service name="samba"/>
+  <service name="nfs"/>
+</zone>`,
 };
 
 export default function ImportPage() {
@@ -497,7 +533,7 @@ export default function ImportPage() {
           <span>Firewall Migration Studio</span>
         </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Import and translate existing firewall configurations (pfSense, OPNsense, VyOS / EdgeOS, MikroTik RouterOS, Linux iptables) directly into Axonwall DesiredState and production Linux nftables.
+          Import and translate existing firewall configurations (pfSense, OPNsense, VyOS / EdgeOS, MikroTik RouterOS, Cisco ASA, Linux iptables, and Linux firewalld) directly into Axonwall DesiredState and production Linux nftables.
         </p>
       </div>
 

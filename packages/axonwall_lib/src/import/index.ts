@@ -5,6 +5,7 @@ import { importVyosConfig } from './vyos/index.js';
 import { importMikrotikConfig } from './mikrotik/index.js';
 import { importIptablesConfig } from './iptables/index.js';
 import { importCiscoAsaConfig } from './cisco/index.js';
+import { importFirewalldConfig } from './firewalld/index.js';
 
 export * from './types.js';
 export * from './pfsense/index.js';
@@ -13,6 +14,7 @@ export * from './vyos/index.js';
 export * from './mikrotik/index.js';
 export * from './iptables/index.js';
 export * from './cisco/index.js';
+export * from './firewalld/index.js';
 export * from './analyzer.js';
 export * from './merge.js';
 
@@ -29,7 +31,22 @@ export function detectFirewallType(content: string): FirewallVendor {
     return 'opnsense';
   }
 
-  // 3. Cisco ASA / FTD
+  // 3. Linux firewalld (XML zones/policies/ipsets or firewall-cmd CLI output/scripts)
+  if (
+    trimmed.includes('<zone') ||
+    trimmed.includes('</zone>') ||
+    trimmed.includes('<policy') ||
+    trimmed.includes('</policy>') ||
+    trimmed.includes('<ipset') ||
+    trimmed.includes('firewall-cmd') ||
+    trimmed.includes('forward-ports:') ||
+    trimmed.includes('icmp-blocks:') ||
+    trimmed.includes('rich rules:')
+  ) {
+    return 'firewalld';
+  }
+
+  // 4. Cisco ASA / FTD
   if (
     trimmed.includes('access-list') ||
     trimmed.includes('nameif ') ||
@@ -39,7 +56,7 @@ export function detectFirewallType(content: string): FirewallVendor {
     return 'cisco';
   }
 
-  // 4. MikroTik RouterOS (.rsc)
+  // 5. MikroTik RouterOS (.rsc)
   if (
     trimmed.includes('/ip firewall') ||
     trimmed.includes('/interface ethernet') ||
@@ -49,7 +66,7 @@ export function detectFirewallType(content: string): FirewallVendor {
     return 'mikrotik';
   }
 
-  // 5. Linux iptables / nftables
+  // 6. Linux iptables / nftables
   if (
     trimmed.includes('*filter') ||
     trimmed.includes('*nat') ||
@@ -61,7 +78,7 @@ export function detectFirewallType(content: string): FirewallVendor {
     return 'iptables';
   }
 
-  // 6. VyOS / EdgeOS
+  // 7. VyOS / EdgeOS
   if (
     trimmed.includes('interfaces {') ||
     trimmed.includes('firewall {') ||
@@ -97,6 +114,8 @@ export function importFirewallConfig(content: string, forcedVendor?: FirewallVen
       return importIptablesConfig(content);
     case 'cisco':
       return importCiscoAsaConfig(content);
+    case 'firewalld':
+      return importFirewalldConfig(content);
     default:
       throw new Error(`Unsupported firewall vendor: ${vendor}`);
   }

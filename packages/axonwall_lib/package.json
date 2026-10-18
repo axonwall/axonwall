@@ -135,6 +135,10 @@
       "types": "./dist/import/cisco/index.d.ts",
       "default": "./dist/import/cisco/index.js"
     },
+    "./import/firewalld": {
+      "types": "./dist/import/firewalld/index.d.ts",
+      "default": "./dist/import/firewalld/index.js"
+    },
     "./rbac": {
       "types": "./dist/rbac/index.d.ts",
       "default": "./dist/rbac/index.js"
