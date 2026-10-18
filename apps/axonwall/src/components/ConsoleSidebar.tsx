@@ -63,7 +63,7 @@ export interface NavSection {
   name: string;
   icon: any;
   href?: string;
-  capability?: 'firewall' | 'nas' | 'k3s';
+  capability?: 'firewall' | 'nas' | 'k3s' | 'virt';
   items?: SubItem[];
 }
 
@@ -185,6 +185,19 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
+    id: 'compute',
+    name: 'Compute & VMs',
+    icon: Cpu,
+    capability: 'virt',
+    items: [
+      { name: 'Virtual Machines (KVM)', href: '/compute/vms', icon: Cpu, badge: 'KVM' },
+      { name: 'LXC Containers', href: '/compute/lxc', icon: Boxes, badge: 'LXC' },
+      { name: 'ISO Images & Media', href: '/compute/isos', icon: HardDrive },
+      { name: 'PCIe VFIO & SR-IOV', href: '/compute/pci', icon: Network },
+      { name: 'Deduplicated Backups', href: '/compute/backups', icon: Camera },
+    ],
+  },
+  {
     id: 'reporting',
     name: 'Reporting',
     icon: Activity,
@@ -245,10 +258,12 @@ export function ConsoleSidebar() {
     firewallEnabled: boolean;
     nasEnabled: boolean;
     k3sEnabled: boolean;
+    virtEnabled: boolean;
   }>({
     firewallEnabled: true,
     nasEnabled: false,
     k3sEnabled: false,
+    virtEnabled: false,
   });
 
   useEffect(() => {
@@ -259,15 +274,14 @@ export function ConsoleSidebar() {
           if (!mounted) return;
           // Derive exactly like the Plugin Store and the server-side
           // consumers: an unset capability means the role is DISABLED
-          // (CoreCapabilitiesSchema defaults nasEnabled/k3sEnabled to
+          // (CoreCapabilitiesSchema defaults nasEnabled/k3sEnabled/virtEnabled to
           // false, and baseline state carries no capabilities key at
-          // all). The previous `?? true` fallbacks made the sidebar show
-          // the Storage and K3s menus on systems where both roles were
-          // disabled or never enabled.
+          // all).
           setCapabilities({
             firewallEnabled: st.capabilities?.firewallEnabled !== false,
             nasEnabled: Boolean(st.capabilities?.nasEnabled ?? st.nas?.enabled),
             k3sEnabled: Boolean(st.capabilities?.k3sEnabled ?? st.k3s?.enabled),
+            virtEnabled: Boolean(st.capabilities?.virtEnabled ?? st.virt?.enabled),
           });
         })
         .catch(() => {});
@@ -285,6 +299,7 @@ export function ConsoleSidebar() {
       if (sec.capability === 'firewall' && !capabilities.firewallEnabled) return false;
       if (sec.capability === 'nas' && !capabilities.nasEnabled) return false;
       if (sec.capability === 'k3s' && !capabilities.k3sEnabled) return false;
+      if (sec.capability === 'virt' && !capabilities.virtEnabled) return false;
       return true;
     });
   }, [capabilities]);

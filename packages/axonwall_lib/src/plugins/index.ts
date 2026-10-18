@@ -58,6 +58,24 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
   },
   {
+    id: 'core-virt',
+    name: 'Axonwall Hypervisor (KVM/QEMU & LXC Containers)',
+    version: '0.3.1',
+    category: 'core_role',
+    description: 'Proxmox VE parity hypervisor with KVM hardware virtualization, Cloud-Init, LXC system containers, PCIe VFIO passthrough, and deduplicated backup engine.',
+    author: 'Axonwall Core',
+    systemdUnits: ['qemu-kvm.service', 'lxc.service'],
+    privileges: ['virt.vms', 'virt.containers', 'system.hardware'],
+    nftHooks: [
+      { table: 'inet axonwall', chain: 'forward', priority: 0 },
+    ],
+    menuEntry: {
+      title: 'Virtual Machines',
+      path: '/compute/vms',
+      icon: 'Cpu',
+    },
+  },
+  {
     id: 'haproxy',
     name: 'HAProxy Load Balancer & Reverse Proxy',
     version: '2.8.3',
@@ -157,6 +175,7 @@ export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabili
   const fwPlugin = plugins.find((p) => p.id === 'core-firewall');
   const nasPlugin = plugins.find((p) => p.id === 'core-nas');
   const k3sPlugin = plugins.find((p) => p.id === 'core-k3s');
+  const virtPlugin = plugins.find((p) => p.id === 'core-virt');
 
   const firewallEnabled =
     state?.capabilities?.firewallEnabled !== undefined
@@ -179,10 +198,18 @@ export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabili
         ? k3sPlugin.enabled
         : Boolean(state?.k3s?.enabled);
 
+  const virtEnabled =
+    state?.capabilities?.virtEnabled !== undefined
+      ? state.capabilities.virtEnabled
+      : virtPlugin !== undefined
+        ? virtPlugin.enabled
+        : Boolean(state?.virt?.enabled);
+
   return {
     firewallEnabled,
     nasEnabled,
     k3sEnabled,
+    virtEnabled,
   };
 }
 

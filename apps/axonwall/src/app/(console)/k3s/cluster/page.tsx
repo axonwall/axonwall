@@ -50,6 +50,7 @@ export default function K3sClusterPage() {
       firewallEnabled: next.capabilities?.firewallEnabled !== false,
       nasEnabled: Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled),
       k3sEnabled: true,
+      virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
     };
     next.k3s = next.k3s || {
       enabled: true,

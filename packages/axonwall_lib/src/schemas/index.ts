@@ -1004,6 +1004,7 @@ export const CoreCapabilitiesSchema = z.object({
   firewallEnabled: z.boolean().default(true),
   nasEnabled: z.boolean().default(false),
   k3sEnabled: z.boolean().default(false),
+  virtEnabled: z.boolean().default(false),
 });
 export type CoreCapabilities = z.infer<typeof CoreCapabilitiesSchema>;
 
@@ -1176,6 +1177,197 @@ export const K3sConfigSchema = z.object({
 });
 export type K3sConfig = z.infer<typeof K3sConfigSchema>;
 
+// =============================================================================
+// Virtualization, KVM/QEMU VMs, LXC Containers, VFIO & Deduplicated Backups
+// =============================================================================
+
+export const VmDiskBusSchema = z.enum(['virtio', 'scsi', 'sata', 'ide', 'nvme']);
+export type VmDiskBus = z.infer<typeof VmDiskBusSchema>;
+
+export const VmDiskCacheSchema = z.enum(['none', 'writethrough', 'writeback', 'unsafe']);
+export type VmDiskCache = z.infer<typeof VmDiskCacheSchema>;
+
+export const VmDiskSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().default('disk0'),
+  pool: z.string().default('tank'),
+  zvol: z.string().optional(),
+  sizeGb: z.number().int().min(1).default(32),
+  bus: VmDiskBusSchema.default('virtio'),
+  cache: VmDiskCacheSchema.default('none'),
+  discard: z.boolean().default(true),
+  iopsReadLimit: z.number().int().min(0).default(0),
+  iopsWriteLimit: z.number().int().min(0).default(0),
+  readOnly: z.boolean().default(false),
+  backup: z.boolean().default(true),
+});
+export type VmDisk = z.infer<typeof VmDiskSchema>;
+
+export const VmNicModelSchema = z.enum(['virtio', 'e1000', 'e1000e', 'vmxnet3']);
+export type VmNicModel = z.infer<typeof VmNicModelSchema>;
+
+export const VmNicSchema = z.object({
+  id: z.string().optional(),
+  mac: z.string().default(''),
+  bridge: z.string().default('br0'),
+  vlanTag: z.number().int().min(0).max(4094).optional(),
+  vnet: z.string().optional(),
+  model: VmNicModelSchema.default('virtio'),
+  firewall: z.boolean().default(true),
+  rateLimitMbps: z.number().int().min(0).default(0),
+});
+export type VmNic = z.infer<typeof VmNicSchema>;
+
+export const CloudInitConfigSchema = z.object({
+  user: z.string().default('axonadmin'),
+  password: z.string().optional(),
+  sshAuthorizedKeys: z.array(z.string()).default([]),
+  ipConfig: z.string().default('dhcp'),
+  gateway: z.string().optional(),
+  nameservers: z.array(z.string()).default([]),
+  searchDomain: z.string().optional(),
+  customUserData: z.string().optional(),
+});
+export type CloudInitConfig = z.infer<typeof CloudInitConfigSchema>;
+
+export const VirtualMachineSchema = z.object({
+  id: z.string().optional(),
+  vmid: z.number().int().min(100).max(99999),
+  name: z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/),
+  description: z.string().max(255).default(''),
+  osType: z.enum(['linux', 'windows', 'freebsd', 'other']).default('linux'),
+  bios: z.enum(['ovmf', 'seabios']).default('ovmf'),
+  secureBoot: z.boolean().default(false),
+  tpm2: z.boolean().default(false),
+  sockets: z.number().int().min(1).max(8).default(1),
+  cores: z.number().int().min(1).max(128).default(2),
+  cpuType: z.enum(['host', 'x86-64-v2-AES', 'kvm64', 'qemu64']).default('host'),
+  memoryMb: z.number().int().min(512).default(2048),
+  balloonMinMb: z.number().int().min(0).default(0),
+  disks: z.array(VmDiskSchema).default([]),
+  nics: z.array(VmNicSchema).default([]),
+  iso: z.string().optional(),
+  cloudInit: CloudInitConfigSchema.optional(),
+  pciPassthrough: z.array(z.string()).default([]),
+  usbPassthrough: z.array(z.string()).default([]),
+  autostart: z.boolean().default(false),
+  haManaged: z.boolean().default(false),
+  agent: z.boolean().default(true),
+  enabled: z.boolean().default(true),
+});
+export type VirtualMachine = z.infer<typeof VirtualMachineSchema>;
+
+export const LxcMountPointSchema = z.object({
+  id: z.string().optional(),
+  mountPath: z.string().min(1),
+  hostPath: z.string().min(1),
+  readOnly: z.boolean().default(false),
+});
+export type LxcMountPoint = z.infer<typeof LxcMountPointSchema>;
+
+export const LxcContainerSchema = z.object({
+  id: z.string().optional(),
+  ctid: z.number().int().min(100).max(99999),
+  hostname: z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/),
+  description: z.string().max(255).default(''),
+  template: z.string().min(1).default('debian-12-standard'),
+  unprivileged: z.boolean().default(true),
+  cores: z.number().int().min(1).max(128).default(1),
+  memoryMb: z.number().int().min(256).default(1024),
+  swapMb: z.number().int().min(0).default(512),
+  rootfsPool: z.string().default('tank'),
+  rootfsSizeGb: z.number().int().min(1).default(8),
+  mountPoints: z.array(LxcMountPointSchema).default([]),
+  nics: z.array(VmNicSchema).default([]),
+  dnsServers: z.array(z.string()).default([]),
+  searchDomain: z.string().optional(),
+  features: z.array(z.enum(['nesting', 'keyctl', 'fuse'])).default(['nesting']),
+  autostart: z.boolean().default(false),
+  haManaged: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+});
+export type LxcContainer = z.infer<typeof LxcContainerSchema>;
+
+export const IsoImageSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1),
+  url: z.string().optional(),
+  sha256: z.string().optional(),
+  pool: z.string().default('tank'),
+  path: z.string().optional(),
+  sizeBytes: z.number().nonnegative().default(0),
+});
+export type IsoImage = z.infer<typeof IsoImageSchema>;
+
+export const PciPassthroughDeviceSchema = z.object({
+  id: z.string().optional(),
+  bdf: z.string().regex(/^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/),
+  vendorId: z.string().optional(),
+  deviceId: z.string().optional(),
+  deviceClass: z.string().optional(),
+  iommuGroup: z.number().int().min(0).default(0),
+  driver: z.enum(['vfio-pci', 'host', 'other']).default('vfio-pci'),
+  sriovNumVfs: z.number().int().min(0).default(0),
+  description: z.string().max(255).default(''),
+});
+export type PciPassthroughDevice = z.infer<typeof PciPassthroughDeviceSchema>;
+
+export const BackupRetentionSchema = z.object({
+  keepLast: z.number().int().min(1).default(5),
+  keepDaily: z.number().int().min(0).default(7),
+  keepWeekly: z.number().int().min(0).default(4),
+  keepMonthly: z.number().int().min(0).default(12),
+});
+export type BackupRetention = z.infer<typeof BackupRetentionSchema>;
+
+export const WorkloadBackupJobSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1),
+  scheduleCron: z.string().default('0 1 * * *'),
+  targetType: z.enum(['all', 'selected']).default('all'),
+  targetVmids: z.array(z.number().int()).default([]),
+  targetCtids: z.array(z.number().int()).default([]),
+  storagePool: z.string().default('tank'),
+  destinationType: z.enum(['local-zfs', 's3', 'pbs']).default('local-zfs'),
+  s3Bucket: z.string().optional(),
+  s3Endpoint: z.string().optional(),
+  pbsServer: z.string().optional(),
+  pbsDatastore: z.string().optional(),
+  encryptionKey: z.string().optional(),
+  compression: z.enum(['zstd', 'lz4', 'gzip', 'none']).default('zstd'),
+  retention: BackupRetentionSchema.default({ keepLast: 5, keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
+  enabled: z.boolean().default(true),
+});
+export type WorkloadBackupJob = z.infer<typeof WorkloadBackupJobSchema>;
+
+export const VxlanZoneSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/),
+  vni: z.number().int().min(1).max(16777215),
+  peers: z.array(z.string()).default([]),
+  underlayInterface: z.string().default('lan'),
+  multicastGroup: z.string().optional(),
+  port: z.number().int().default(4789),
+  bridge: z.string().default(''),
+  mtu: z.number().int().min(1200).max(9000).default(1450),
+  enabled: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type VxlanZone = z.infer<typeof VxlanZoneSchema>;
+
+export const VirtConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  defaultPool: z.string().default('tank'),
+  isoPool: z.string().default('tank'),
+  vms: z.array(VirtualMachineSchema).default([]),
+  containers: z.array(LxcContainerSchema).default([]),
+  isos: z.array(IsoImageSchema).default([]),
+  pciDevices: z.array(PciPassthroughDeviceSchema).default([]),
+  backupJobs: z.array(WorkloadBackupJobSchema).default([]),
+  vxlanZones: z.array(VxlanZoneSchema).default([]),
+});
+export type VirtConfig = z.infer<typeof VirtConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -1219,6 +1411,7 @@ export const DesiredStateSchema = z.object({
   zeroTrust: ZeroTrustConfigSchema.optional(),
   nas: NasConfigSchema.optional(),
   k3s: K3sConfigSchema.optional(),
+  virt: VirtConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
 

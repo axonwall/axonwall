@@ -49,6 +49,7 @@ export default function PluginManagerPage() {
     if (id === 'core-firewall') return state.capabilities?.firewallEnabled !== false;
     if (id === 'core-nas') return Boolean(state.capabilities?.nasEnabled ?? state.nas?.enabled);
     if (id === 'core-k3s') return Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled);
+    if (id === 'core-virt') return Boolean(state.capabilities?.virtEnabled ?? state.virt?.enabled);
     return false;
   };
 
@@ -62,11 +63,13 @@ export default function PluginManagerPage() {
       const currentFw = next.capabilities?.firewallEnabled !== false;
       const currentNas = Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled);
       const currentK3s = Boolean(next.capabilities?.k3sEnabled ?? next.k3s?.enabled);
+      const currentVirt = Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled);
 
       const nextCaps = {
         firewallEnabled: id === 'core-firewall' ? !currentFw : currentFw,
         nasEnabled: id === 'core-nas' ? !currentNas : currentNas,
         k3sEnabled: id === 'core-k3s' ? !currentK3s : currentK3s,
+        virtEnabled: id === 'core-virt' ? !currentVirt : currentVirt,
       };
       next.capabilities = nextCaps;
 
@@ -105,6 +108,21 @@ export default function PluginManagerPage() {
           workloads: [],
         };
         next.k3s.enabled = nextCaps.k3sEnabled;
+      }
+
+      if (id === 'core-virt') {
+        next.virt = next.virt || {
+          enabled: nextCaps.virtEnabled,
+          defaultPool: 'tank',
+          isoPool: 'tank',
+          vms: [],
+          containers: [],
+          isos: [],
+          pciDevices: [],
+          backupJobs: [],
+          vxlanZones: [],
+        };
+        next.virt.enabled = nextCaps.virtEnabled;
       }
 
       const res = await applyDesiredState(next);

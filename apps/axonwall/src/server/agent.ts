@@ -65,7 +65,7 @@ function getAgentToken(): string | undefined {
   return tok || undefined;
 }
 
-async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeoutMs = 4000): Promise<T | null> {
+export async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeoutMs = 4000): Promise<T | null> {
   return new Promise((resolve) => {
     const postData = body ? JSON.stringify(body) : undefined;
     const agentToken = getAgentToken();

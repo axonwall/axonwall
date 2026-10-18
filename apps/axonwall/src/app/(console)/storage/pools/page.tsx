@@ -61,6 +61,7 @@ export default function ZfsPoolsPage() {
         firewallEnabled: next.capabilities?.firewallEnabled !== false,
         nasEnabled: true,
         k3sEnabled: Boolean(next.capabilities?.k3sEnabled ?? next.k3s?.enabled),
+        virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
       };
       next.nas = next.nas || {
         enabled: true,

@@ -827,6 +827,10 @@ func main() {
 	packetStreamMgr := engine.NewPacketStreamManager(pcapManager)
 	hardwareMgr := engine.NewHardwareManager()
 	terminalMgr := engine.NewTerminalManager()
+	taskManager := engine.NewTaskManager()
+	virtManager := engine.NewVirtManager(taskManager, nasManager)
+	vfioManager := engine.NewVFIOManager()
+	consoleProxy := engine.NewConsoleProxy()
 	watchdog := engine.NewWatchdogEngine()
 	watchdog.Start()
 
@@ -1182,6 +1186,239 @@ func main() {
 				"message": fmt.Sprintf("Auto-joined K3s cluster at %s", net.JoinHostPort(req.PeerIp, "6443")),
 			})
 		})
+
+		// Virt / Hypervisor APIs
+		mux.HandleFunc("/v1/virt/vms", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					Action string                 `json:"action"` // "start", "stop", "reset", "pause", "resume", "register"
+					VMID   int                    `json:"vmid"`
+					Force  bool                   `json:"force"`
+					Spec   *engine.CompiledVmSpec `json:"spec,omitempty"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if req.Action == "register" && req.Spec != nil {
+					virtManager.RegisterVMSpec(*req.Spec)
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+					return
+				}
+				user := "root@axonwall"
+				switch req.Action {
+				case "start":
+					upid, err := virtManager.StartVM(req.VMID, user)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				case "stop":
+					upid, err := virtManager.StopVM(req.VMID, req.Force, user)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				case "reset":
+					if err := virtManager.ResetVM(req.VMID); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+				case "pause":
+					if err := virtManager.PauseVM(req.VMID); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+				case "resume":
+					if err := virtManager.ResumeVM(req.VMID); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+				default:
+					http.Error(w, "Unknown VM action: "+req.Action, http.StatusBadRequest)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"vms": virtManager.ListVMs(),
+			})
+		})
+
+		mux.HandleFunc("/v1/virt/containers", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					Action string                 `json:"action"` // "start", "stop", "register"
+					CTID   int                    `json:"ctid"`
+					Force  bool                   `json:"force"`
+					Spec   *engine.CompiledCtSpec `json:"spec,omitempty"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if req.Action == "register" && req.Spec != nil {
+					virtManager.RegisterCTSpec(*req.Spec)
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+					return
+				}
+				user := "root@axonwall"
+				switch req.Action {
+				case "start":
+					upid, err := virtManager.StartContainer(req.CTID, user)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				case "stop":
+					upid, err := virtManager.StopContainer(req.CTID, req.Force, user)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				default:
+					http.Error(w, "Unknown container action: "+req.Action, http.StatusBadRequest)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"containers": virtManager.ListContainers(),
+			})
+		})
+
+		mux.HandleFunc("/v1/virt/pci", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					Action string `json:"action"` // "bind", "unbind", "sriov"
+					BDF    string `json:"bdf"`
+					NumVfs int    `json:"numVfs"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				switch req.Action {
+				case "bind":
+					if err := vfioManager.BindVfio(req.BDF); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+				case "unbind":
+					if err := vfioManager.UnbindVfio(req.BDF); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+				case "sriov":
+					if err := vfioManager.ConfigureSriov(req.BDF, req.NumVfs); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+				default:
+					http.Error(w, "Unknown PCI action: "+req.Action, http.StatusBadRequest)
+				}
+				return
+			}
+			devices, err := vfioManager.DiscoverPciDevices()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"devices": devices})
+		})
+
+		mux.HandleFunc("/v1/virt/isos", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					URL      string `json:"url"`
+					Filename string `json:"filename"`
+					Pool     string `json:"pool"`
+					Sha256   string `json:"sha256"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				user := "root@axonwall"
+				upid, err := virtManager.DownloadISO(req.URL, req.Filename, req.Pool, req.Sha256, user)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				return
+			}
+			pool := r.URL.Query().Get("pool")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"isos": virtManager.ListISOs(pool),
+			})
+		})
+
+		mux.HandleFunc("/v1/virt/backups", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					TargetType string `json:"targetType"` // "vm" or "lxc"
+					TargetID   int    `json:"targetId"`
+					Pool       string `json:"pool"`
+					DestType   string `json:"destType"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				user := "root@axonwall"
+				upid, err := virtManager.RunBackup(req.TargetType, req.TargetID, req.Pool, req.DestType, user)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				return
+			}
+			pool := r.URL.Query().Get("pool")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"backups": virtManager.ListBackups(pool),
+			})
+		})
+
+		mux.HandleFunc("/v1/virt/console/ws", consoleProxy.ServeHTTP)
+
+		mux.HandleFunc("/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tasks": taskManager.ListTasks(50),
+			})
+		})
+
+		mux.HandleFunc("/v1/tasks/log", taskManager.HandleStreamTaskLogSSE)
+
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}
 		go func() {
 			log.Printf("[Agent] Listening on REST Unix socket: %s", apiSocketPath)

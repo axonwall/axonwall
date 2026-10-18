@@ -11,7 +11,8 @@ export type AxonwallYamlDomainFile =
   | 'security.yaml'
   | 'ha.yaml'
   | 'storage.yaml'
-  | 'k3s.yaml';
+  | 'k3s.yaml'
+  | 'virt.yaml';
 
 export interface DomainYamlDefinition {
   filename: AxonwallYamlDomainFile;
@@ -90,6 +91,13 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     description:
       'Controls the embedded K3s Kubernetes cluster, WireGuard flannel CNI, OpenEBS ZFS-LocalPV & Replicated StorageClasses, and container workloads.',
     keys: ['k3s'],
+  },
+  {
+    filename: 'virt.yaml',
+    title: 'Axonwall Hypervisor, Virtual Machines (KVM/QEMU) & LXC Containers',
+    description:
+      'Controls KVM virtual machines, Cloud-Init, LXC system containers, ISO images, PCIe VFIO / SR-IOV passthrough, VXLAN SDN zones, and deduplicated backup schedules.',
+    keys: ['virt'],
   },
 ];
 

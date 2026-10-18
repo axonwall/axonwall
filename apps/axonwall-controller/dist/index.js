@@ -36425,7 +36425,8 @@ var SsoConfigSchema = external_exports.object({
 var CoreCapabilitiesSchema = external_exports.object({
   firewallEnabled: external_exports.boolean().default(true),
   nasEnabled: external_exports.boolean().default(false),
-  k3sEnabled: external_exports.boolean().default(false)
+  k3sEnabled: external_exports.boolean().default(false),
+  virtEnabled: external_exports.boolean().default(false)
 });
 var ZfsTopologySchema = external_exports.enum([
   "stripe",
@@ -36568,6 +36569,163 @@ var K3sConfigSchema = external_exports.object({
   openEbs: OpenEbsConfigSchema.optional(),
   workloads: external_exports.array(K3sWorkloadSpecSchema).default([])
 });
+var VmDiskBusSchema = external_exports.enum(["virtio", "scsi", "sata", "ide", "nvme"]);
+var VmDiskCacheSchema = external_exports.enum(["none", "writethrough", "writeback", "unsafe"]);
+var VmDiskSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  name: external_exports.string().default("disk0"),
+  pool: external_exports.string().default("tank"),
+  zvol: external_exports.string().optional(),
+  sizeGb: external_exports.number().int().min(1).default(32),
+  bus: VmDiskBusSchema.default("virtio"),
+  cache: VmDiskCacheSchema.default("none"),
+  discard: external_exports.boolean().default(true),
+  iopsReadLimit: external_exports.number().int().min(0).default(0),
+  iopsWriteLimit: external_exports.number().int().min(0).default(0),
+  readOnly: external_exports.boolean().default(false),
+  backup: external_exports.boolean().default(true)
+});
+var VmNicModelSchema = external_exports.enum(["virtio", "e1000", "e1000e", "vmxnet3"]);
+var VmNicSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  mac: external_exports.string().default(""),
+  bridge: external_exports.string().default("br0"),
+  vlanTag: external_exports.number().int().min(0).max(4094).optional(),
+  vnet: external_exports.string().optional(),
+  model: VmNicModelSchema.default("virtio"),
+  firewall: external_exports.boolean().default(true),
+  rateLimitMbps: external_exports.number().int().min(0).default(0)
+});
+var CloudInitConfigSchema = external_exports.object({
+  user: external_exports.string().default("axonadmin"),
+  password: external_exports.string().optional(),
+  sshAuthorizedKeys: external_exports.array(external_exports.string()).default([]),
+  ipConfig: external_exports.string().default("dhcp"),
+  gateway: external_exports.string().optional(),
+  nameservers: external_exports.array(external_exports.string()).default([]),
+  searchDomain: external_exports.string().optional(),
+  customUserData: external_exports.string().optional()
+});
+var VirtualMachineSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  vmid: external_exports.number().int().min(100).max(99999),
+  name: external_exports.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/),
+  description: external_exports.string().max(255).default(""),
+  osType: external_exports.enum(["linux", "windows", "freebsd", "other"]).default("linux"),
+  bios: external_exports.enum(["ovmf", "seabios"]).default("ovmf"),
+  secureBoot: external_exports.boolean().default(false),
+  tpm2: external_exports.boolean().default(false),
+  sockets: external_exports.number().int().min(1).max(8).default(1),
+  cores: external_exports.number().int().min(1).max(128).default(2),
+  cpuType: external_exports.enum(["host", "x86-64-v2-AES", "kvm64", "qemu64"]).default("host"),
+  memoryMb: external_exports.number().int().min(512).default(2048),
+  balloonMinMb: external_exports.number().int().min(0).default(0),
+  disks: external_exports.array(VmDiskSchema).default([]),
+  nics: external_exports.array(VmNicSchema).default([]),
+  iso: external_exports.string().optional(),
+  cloudInit: CloudInitConfigSchema.optional(),
+  pciPassthrough: external_exports.array(external_exports.string()).default([]),
+  usbPassthrough: external_exports.array(external_exports.string()).default([]),
+  autostart: external_exports.boolean().default(false),
+  haManaged: external_exports.boolean().default(false),
+  agent: external_exports.boolean().default(true),
+  enabled: external_exports.boolean().default(true)
+});
+var LxcMountPointSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  mountPath: external_exports.string().min(1),
+  hostPath: external_exports.string().min(1),
+  readOnly: external_exports.boolean().default(false)
+});
+var LxcContainerSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  ctid: external_exports.number().int().min(100).max(99999),
+  hostname: external_exports.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/),
+  description: external_exports.string().max(255).default(""),
+  template: external_exports.string().min(1).default("debian-12-standard"),
+  unprivileged: external_exports.boolean().default(true),
+  cores: external_exports.number().int().min(1).max(128).default(1),
+  memoryMb: external_exports.number().int().min(256).default(1024),
+  swapMb: external_exports.number().int().min(0).default(512),
+  rootfsPool: external_exports.string().default("tank"),
+  rootfsSizeGb: external_exports.number().int().min(1).default(8),
+  mountPoints: external_exports.array(LxcMountPointSchema).default([]),
+  nics: external_exports.array(VmNicSchema).default([]),
+  dnsServers: external_exports.array(external_exports.string()).default([]),
+  searchDomain: external_exports.string().optional(),
+  features: external_exports.array(external_exports.enum(["nesting", "keyctl", "fuse"])).default(["nesting"]),
+  autostart: external_exports.boolean().default(false),
+  haManaged: external_exports.boolean().default(false),
+  enabled: external_exports.boolean().default(true)
+});
+var IsoImageSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  name: external_exports.string().min(1),
+  url: external_exports.string().optional(),
+  sha256: external_exports.string().optional(),
+  pool: external_exports.string().default("tank"),
+  path: external_exports.string().optional(),
+  sizeBytes: external_exports.number().nonnegative().default(0)
+});
+var PciPassthroughDeviceSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  bdf: external_exports.string().regex(/^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/),
+  vendorId: external_exports.string().optional(),
+  deviceId: external_exports.string().optional(),
+  deviceClass: external_exports.string().optional(),
+  iommuGroup: external_exports.number().int().min(0).default(0),
+  driver: external_exports.enum(["vfio-pci", "host", "other"]).default("vfio-pci"),
+  sriovNumVfs: external_exports.number().int().min(0).default(0),
+  description: external_exports.string().max(255).default("")
+});
+var BackupRetentionSchema = external_exports.object({
+  keepLast: external_exports.number().int().min(1).default(5),
+  keepDaily: external_exports.number().int().min(0).default(7),
+  keepWeekly: external_exports.number().int().min(0).default(4),
+  keepMonthly: external_exports.number().int().min(0).default(12)
+});
+var WorkloadBackupJobSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  name: external_exports.string().min(1),
+  scheduleCron: external_exports.string().default("0 1 * * *"),
+  targetType: external_exports.enum(["all", "selected"]).default("all"),
+  targetVmids: external_exports.array(external_exports.number().int()).default([]),
+  targetCtids: external_exports.array(external_exports.number().int()).default([]),
+  storagePool: external_exports.string().default("tank"),
+  destinationType: external_exports.enum(["local-zfs", "s3", "pbs"]).default("local-zfs"),
+  s3Bucket: external_exports.string().optional(),
+  s3Endpoint: external_exports.string().optional(),
+  pbsServer: external_exports.string().optional(),
+  pbsDatastore: external_exports.string().optional(),
+  encryptionKey: external_exports.string().optional(),
+  compression: external_exports.enum(["zstd", "lz4", "gzip", "none"]).default("zstd"),
+  retention: BackupRetentionSchema.default({ keepLast: 5, keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }),
+  enabled: external_exports.boolean().default(true)
+});
+var VxlanZoneSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  name: external_exports.string().min(1).regex(/^[a-zA-Z0-9_-]+$/),
+  vni: external_exports.number().int().min(1).max(16777215),
+  peers: external_exports.array(external_exports.string()).default([]),
+  underlayInterface: external_exports.string().default("lan"),
+  multicastGroup: external_exports.string().optional(),
+  port: external_exports.number().int().default(4789),
+  bridge: external_exports.string().default(""),
+  mtu: external_exports.number().int().min(1200).max(9e3).default(1450),
+  enabled: external_exports.boolean().default(true),
+  description: external_exports.string().max(255).default("")
+});
+var VirtConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  defaultPool: external_exports.string().default("tank"),
+  isoPool: external_exports.string().default("tank"),
+  vms: external_exports.array(VirtualMachineSchema).default([]),
+  containers: external_exports.array(LxcContainerSchema).default([]),
+  isos: external_exports.array(IsoImageSchema).default([]),
+  pciDevices: external_exports.array(PciPassthroughDeviceSchema).default([]),
+  backupJobs: external_exports.array(WorkloadBackupJobSchema).default([]),
+  vxlanZones: external_exports.array(VxlanZoneSchema).default([])
+});
 var DesiredStateSchema = external_exports.object({
   version: external_exports.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -36610,7 +36768,8 @@ var DesiredStateSchema = external_exports.object({
   fleet: SatelliteFleetConfigSchema.optional(),
   zeroTrust: ZeroTrustConfigSchema.optional(),
   nas: NasConfigSchema.optional(),
-  k3s: K3sConfigSchema.optional()
+  k3s: K3sConfigSchema.optional(),
+  virt: VirtConfigSchema.optional()
 });
 
 // ../../packages/axonwall_lib/dist/plugins/index.js
@@ -36619,13 +36778,16 @@ function resolveCapabilities(state) {
   const fwPlugin = plugins.find((p) => p.id === "core-firewall");
   const nasPlugin = plugins.find((p) => p.id === "core-nas");
   const k3sPlugin = plugins.find((p) => p.id === "core-k3s");
+  const virtPlugin = plugins.find((p) => p.id === "core-virt");
   const firewallEnabled = state?.capabilities?.firewallEnabled !== void 0 ? state.capabilities.firewallEnabled : fwPlugin !== void 0 ? fwPlugin.enabled : true;
   const nasEnabled = state?.capabilities?.nasEnabled !== void 0 ? state.capabilities.nasEnabled : nasPlugin !== void 0 ? nasPlugin.enabled : Boolean(state?.nas?.enabled);
   const k3sEnabled = state?.capabilities?.k3sEnabled !== void 0 ? state.capabilities.k3sEnabled : k3sPlugin !== void 0 ? k3sPlugin.enabled : Boolean(state?.k3s?.enabled);
+  const virtEnabled = state?.capabilities?.virtEnabled !== void 0 ? state.capabilities.virtEnabled : virtPlugin !== void 0 ? virtPlugin.enabled : Boolean(state?.virt?.enabled);
   return {
     firewallEnabled,
     nasEnabled,
-    k3sEnabled
+    k3sEnabled,
+    virtEnabled
   };
 }
 
@@ -38239,6 +38401,12 @@ var AXONWALL_YAML_DOMAINS = [
     title: "Axonwall Embedded K3s Kubernetes & OpenEBS CSI Storage",
     description: "Controls the embedded K3s Kubernetes cluster, WireGuard flannel CNI, OpenEBS ZFS-LocalPV & Replicated StorageClasses, and container workloads.",
     keys: ["k3s"]
+  },
+  {
+    filename: "virt.yaml",
+    title: "Axonwall Hypervisor, Virtual Machines (KVM/QEMU) & LXC Containers",
+    description: "Controls KVM virtual machines, Cloud-Init, LXC system containers, ISO images, PCIe VFIO / SR-IOV passthrough, VXLAN SDN zones, and deduplicated backup schedules.",
+    keys: ["virt"]
   }
 ];
 var AXONWALL_YAML_FILENAMES = AXONWALL_YAML_DOMAINS.map((d) => d.filename);

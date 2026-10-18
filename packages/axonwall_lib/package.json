@@ -158,6 +158,18 @@
     "./yaml": {
       "types": "./dist/yaml/index.d.ts",
       "default": "./dist/yaml/index.js"
+    },
+    "./compile/virt": {
+      "types": "./dist/compile/virt/index.d.ts",
+      "default": "./dist/compile/virt/index.js"
+    },
+    "./compile/nas": {
+      "types": "./dist/compile/nas/index.d.ts",
+      "default": "./dist/compile/nas/index.js"
+    },
+    "./compile/k3s": {
+      "types": "./dist/compile/k3s/index.d.ts",
+      "default": "./dist/compile/k3s/index.js"
     }
   },
   "scripts": {
