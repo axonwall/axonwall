@@ -195,30 +195,24 @@ func (m *SqliteSyncManager) startMasterServer() error {
 		slog.Error("HA sync master server has NO auth token configured: every sync request will be rejected (fail-closed) until sqliteSync.authToken is set")
 	}
 
-	certPath := "/etc/axonwall/certs/hub.crt"
-	keyPath := "/etc/axonwall/certs/hub.key"
-	hasTLS := false
-	if _, errC := os.Stat(certPath); errC == nil {
-		if _, errK := os.Stat(keyPath); errK == nil {
-			hasTLS = true
+	// NOTE: plain HTTP on purpose. The peer-side clients (pollAndSync,
+	// FetchPeerClusterToken) dial http://; enabling TLS here without a
+	// matching client (scheme + CA pinning) silently breaks replication.
+	// Transport encryption for HA sync must be added on both ends at once.
+	slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
+	srv := m.server
+	go func() {
+		// The HA sync interface address may not be assigned yet at boot;
+		// keep retrying the bind instead of giving up on the first error.
+		for {
+			err := srv.ListenAndServe()
+			if err == nil || err == http.ErrServerClosed {
+				return
+			}
+			slog.Error("SQLite Sync server error; retrying in 5s", "addr", listenAddr, "error", err)
+			time.Sleep(5 * time.Second)
 		}
-	}
-
-	if hasTLS {
-		slog.Info("Starting Unified HA Sync Master TLS Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
-		go func() {
-			if err := m.server.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
-				slog.Error("SQLite Sync TLS server error", "error", err)
-			}
-		}()
-	} else {
-		slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
-		go func() {
-			if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("SQLite Sync server error", "error", err)
-			}
-		}()
-	}
+	}()
 
 	return nil
 }

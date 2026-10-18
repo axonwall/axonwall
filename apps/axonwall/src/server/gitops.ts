@@ -44,11 +44,11 @@ function ensureGitOpsRepo() {
 
 export async function recordGitOpsChange(
   state: DesiredState,
-  author = 'admin',
+  _author = 'admin',
   commitMsg = 'Firewall state updated (/etc/axonwall/*.yaml)'
 ): Promise<string | null> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
+  if (!session || !session.roles.includes('admin') || session.passwordChangeRequired) {
     throw new Error('Unauthorized');
   }
 
@@ -63,8 +63,9 @@ export async function recordGitOpsChange(
     fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o640 });
 
     execFileSync('git', ['add', ...AXONWALL_YAML_FILENAMES, 'state.json'], { cwd: GITOPS_DIR, stdio: 'ignore' });
-    const safeAuthor = author.replace(/[^a-zA-Z0-9._-]/g, '') || 'admin';
-    execFileSync('git', ['commit', '-m', commitMsg, `--author=${safeAuthor} <${safeAuthor}@axonwall.local>`], {
+    const safeAuthor = (session.username || 'admin').replace(/[^a-zA-Z0-9._-]/g, '') || 'admin';
+    const safeMsg = (commitMsg || 'Firewall state updated').replace(/[\r\n]+/g, ' ').slice(0, 200);
+    execFileSync('git', ['commit', '-m', safeMsg, `--author=${safeAuthor} <${safeAuthor}@axonwall.local>`], {
       cwd: GITOPS_DIR,
       stdio: 'ignore',
     });
@@ -161,7 +162,7 @@ export async function rollbackToGitOpsCommit(
   commitHash: string
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
+  if (!session || !session.roles.includes('admin') || session.passwordChangeRequired) {
     throw new Error('Unauthorized: Admin privileges required to rollback configuration');
   }
 

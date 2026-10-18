@@ -1,6 +1,6 @@
 'use server';
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import QRCode from 'qrcode';
 import { getSession } from './auth';
 
@@ -9,18 +9,33 @@ export async function generateWireGuardProfile() {
   if (!session) {
     throw new Error('Unauthorized');
   }
+  if (session.passwordChangeRequired) {
+    throw new Error('Forbidden: Password change required before generating VPN profile');
+  }
 
-  // 1. Generate keys
+  const hasAccess =
+    session.roles.includes('admin') ||
+    session.roles.includes('operator') ||
+    session.privileges?.includes('*') ||
+    session.privileges?.includes('vpn.wireguard.write');
+  if (!hasAccess) {
+    throw new Error('Forbidden: Insufficient privileges to generate WireGuard profile');
+  }
+
+  // 1. Generate keys safely without shell invocation
   let privateKey = '';
   let publicKey = '';
   try {
-    privateKey = execSync('wg genkey 2>/dev/null', { timeout: 1000 }).toString().trim();
-    publicKey = execSync(`echo "${privateKey}" | wg pubkey 2>/dev/null`, { timeout: 1000 }).toString().trim();
+    privateKey = execFileSync('wg', ['genkey'], { timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
+    publicKey = execFileSync('wg', ['pubkey'], { input: privateKey + '\n', timeout: 1000, stdio: ['pipe', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
   } catch {
-    // Generate cryptographically secure base64 keys using Node.js crypto if wg CLI is absent
+    // Generate cryptographically valid x25519 Curve25519 keypair using Node.js crypto if wg CLI is absent
     const crypto = await import('node:crypto');
-    privateKey = crypto.randomBytes(32).toString('base64');
-    publicKey = crypto.randomBytes(32).toString('base64');
+    const { publicKey: pubKeyObj, privateKey: privKeyObj } = crypto.generateKeyPairSync('x25519');
+    const rawPriv = privKeyObj.export({ type: 'pkcs8', format: 'der' }).subarray(-32);
+    const rawPub = pubKeyObj.export({ type: 'spki', format: 'der' }).subarray(-32);
+    privateKey = rawPriv.toString('base64');
+    publicKey = rawPub.toString('base64');
   }
 
   // 2. Mock assigning IP address from pool for the user

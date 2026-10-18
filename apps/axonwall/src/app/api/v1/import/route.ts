@@ -31,6 +31,9 @@ export async function POST(req: Request) {
       const formData = await req.formData();
       const file = formData.get('file') as File | null;
       if (file) {
+        if (file.size > 10 * 1024 * 1024) {
+          return NextResponse.json({ error: 'Uploaded file exceeds 10MB limit' }, { status: 413 });
+        }
         configText = await file.text();
       } else {
         configText = (formData.get('config') as string) || '';
@@ -63,6 +66,16 @@ export async function POST(req: Request) {
           error: 'No firewall configuration content provided. Send config text or upload a file.',
         },
         { status: 400 }
+      );
+    }
+
+    if (configText.length > 10 * 1024 * 1024) {
+      return NextResponse.json(
+        {
+          status: 'error',
+          error: 'Configuration content exceeds 10MB limit.',
+        },
+        { status: 413 }
       );
     }
 

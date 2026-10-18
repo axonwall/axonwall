@@ -380,12 +380,39 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         return;
       }
 
-      // Enforce fleet size bound
+      // Enforce fleet size bound with LRU eviction of stale disconnected satellites
       if (!activeSatellites.has(satId) && activeSatellites.size >= 500) {
-        console.log(`[Fleet Manager] Rejected connection: fleet size limit reached`);
-        socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
-        socket.destroy();
-        return;
+        let oldestDisconnectedId: string | null = null;
+        let oldestTime = Infinity;
+
+        for (const [id, sat] of activeSatellites.entries()) {
+          if (!sat.ws) {
+            const seenTime = Date.parse(sat.lastSeen) || 0;
+            if (seenTime < oldestTime) {
+              oldestTime = seenTime;
+              oldestDisconnectedId = id;
+            }
+          }
+        }
+
+        if (oldestDisconnectedId) {
+          try {
+            satUptimeGauge.remove({ satellite_id: oldestDisconnectedId });
+            satCpuGauge.remove({ satellite_id: oldestDisconnectedId });
+            satMemGauge.remove({ satellite_id: oldestDisconnectedId });
+            satConnsGauge.remove({ satellite_id: oldestDisconnectedId });
+          } catch {
+            // Metrics might already have been removed
+          }
+          lastRxTxBytes.delete(oldestDisconnectedId);
+          activeSatellites.delete(oldestDisconnectedId);
+          console.log(`[Fleet Manager] Evicted stale disconnected satellite ${oldestDisconnectedId} to make room for ${satId}`);
+        } else {
+          console.log(`[Fleet Manager] Rejected connection: fleet size limit reached (500 active satellites)`);
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+          socket.destroy();
+          return;
+        }
       }
 
       const expectedToken = process.env.AXONWALL_ZTP_TOKEN;

@@ -126,7 +126,16 @@ export function roleFromGroups(groups: unknown): 'admin' | 'operator' | 'readonl
     ? groups.filter((g): g is string => typeof g === 'string')
     : [];
 
-  const adminGroups = new Set([
+  const envAdminGroups = (process.env.OIDC_ADMIN_GROUPS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const envOperatorGroups = (process.env.OIDC_OPERATOR_GROUPS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  const adminSet = new Set([
     'admin',
     'admins',
     'administrator',
@@ -137,9 +146,10 @@ export function roleFromGroups(groups: unknown): 'admin' | 'operator' | 'readonl
     'secops-admin',
     'superadmin',
     'superadmins',
+    ...envAdminGroups,
   ]);
 
-  const operatorGroups = new Set([
+  const operatorSet = new Set([
     'operator',
     'operators',
     'axonwall-operator',
@@ -147,16 +157,35 @@ export function roleFromGroups(groups: unknown): 'admin' | 'operator' | 'readonl
     'noc',
     'netops',
     'operations',
+    ...envOperatorGroups,
   ]);
 
-  for (const raw of list) {
-    const normalized = raw.trim().toLowerCase();
-    if (adminGroups.has(normalized)) return 'admin';
+  const normalizedList = list.map((g) => g.trim().toLowerCase());
+
+  // 1. Direct match on configured/standard sets
+  for (const group of normalizedList) {
+    if (adminSet.has(group)) return 'admin';
   }
 
-  for (const raw of list) {
-    const normalized = raw.trim().toLowerCase();
-    if (operatorGroups.has(normalized)) return 'operator';
+  // 2. Tokenized match on compound names (e.g. "Firewall Admins", "it-admins", "secops_admin")
+  // Explicitly ignore negative prefixes like "non-admin", "not-admin"
+  for (const group of normalizedList) {
+    if (/\b(non|not|unprivileged)[-_ ]admin/i.test(group)) {
+      continue;
+    }
+    if (/(^|[._\s/-])(admin|admins|administrator|administrators|superadmin|superadmins)([._\s/-]|$)/i.test(group)) {
+      return 'admin';
+    }
+  }
+
+  // 3. Operator checks
+  for (const group of normalizedList) {
+    if (operatorSet.has(group)) return 'operator';
+  }
+  for (const group of normalizedList) {
+    if (/(^|[._\s/-])(operator|operators|noc|operations)([._\s/-]|$)/i.test(group)) {
+      return 'operator';
+    }
   }
 
   return 'readonly';

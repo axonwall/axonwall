@@ -18,6 +18,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { execSync, execFileSync } from 'node:child_process';
 import { getSession } from './auth';
+import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
 
 const AGENT_API_SOCKET = process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
@@ -120,7 +121,10 @@ async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeout
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
-function assertActionPermitted(session: any, requiredRole?: string): asserts session is NonNullable<any> {
+function assertActionPermitted(
+  session: UserSession | null,
+  requiredRole?: string
+): asserts session is UserSession {
   if (!session) {
     throw new Error('Unauthorized');
   }
@@ -130,7 +134,6 @@ function assertActionPermitted(session: any, requiredRole?: string): asserts ses
   if (requiredRole && (!session.roles || !session.roles.includes(requiredRole))) {
     throw new Error(`Forbidden: ${requiredRole} role required`);
   }
-  return session;
 }
 
 async function enforceRateLimit(maxRequests = 20, windowMs = 60000, keySuffix = '') {
@@ -146,11 +149,14 @@ async function enforceRateLimit(maxRequests = 20, windowMs = 60000, keySuffix = 
     }
   } catch {}
 
-  let limiterKey = clientIp;
+  // Authenticated callers are limited per user, independent of any
+  // client-supplied forwarding header (which is spoofable when the UI
+  // port is reached directly). Only anonymous callers fall back to IP.
+  let limiterKey = `ip:${clientIp}`;
   try {
     const session = await getSession();
     if (session?.username) {
-      limiterKey = `${session.username}:${clientIp}`;
+      limiterKey = `user:${session.username}`;
     }
   } catch {}
 
@@ -381,7 +387,7 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
 
 export async function getCurrentDesiredState(): Promise<DesiredState> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   // 1. Check if /etc/axonwall/*.yaml (or /var/lib/axonwall/etc-axonwall/*.yaml) exists and whether any file was modified on disk
   for (const dir of YAML_CONFIG_DIRS) {
@@ -430,7 +436,7 @@ export async function getYamlConfigFilesSnapshot(): Promise<{
   files: Record<string, string>;
 }> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const state = await getCurrentDesiredState();
   const generated = serializeDesiredStateToYamlFiles(state);
@@ -751,10 +757,10 @@ export async function getUpsStatus(): Promise<UpsStatus> {
 
   // 1. Try upsc query if NUT is running
   try {
-    const upscList = execFileSync('upsc', ['-l'], { encoding: 'utf8', timeout: 1000 }).trim();
+    const upscList = execFileSync('upsc', ['-l'], { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const rawUpsName = upscList.split('\n')[0]?.trim();
     if (rawUpsName && !rawUpsName.startsWith('-') && /^[a-zA-Z0-9_.-]+$/.test(rawUpsName)) {
-      const rawData = execFileSync('upsc', [rawUpsName], { encoding: 'utf8', timeout: 1500 });
+      const rawData = execFileSync('upsc', [rawUpsName], { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] });
       const kv: Record<string, string> = {};
       for (const line of rawData.split('\n')) {
         const [k, v] = line.split(':').map((s) => s.trim());
@@ -946,6 +952,7 @@ export async function getServiceJournalLogs(unit: string): Promise<string> {
     const logs = execFileSync('journalctl', ['-u', safeUnit, '-n', '50', '--no-pager'], {
       encoding: 'utf8',
       timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
     if (logs.trim()) return logs.trim();
   } catch {}
@@ -2308,7 +2315,7 @@ export async function getNasDisksInventory(): Promise<{
   } | null;
 }> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<any>('/v1/nas/disks');
   if (daemonResp && Array.isArray(daemonResp.disks)) {
@@ -2382,7 +2389,7 @@ export async function getNasDisksInventory(): Promise<{
 
 export async function getNasPoolsRuntime(): Promise<NasPoolStatus[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<any>('/v1/nas/pools');
   if (daemonResp && Array.isArray(daemonResp.pools)) {
@@ -2405,7 +2412,7 @@ export async function getNasPoolsRuntime(): Promise<NasPoolStatus[]> {
 
 export async function getNasSnapshotsRuntime(): Promise<NasSnapshotItem[]> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<any>('/v1/nas/snapshots');
   if (daemonResp && Array.isArray(daemonResp.snapshots)) {
@@ -2462,7 +2469,7 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
 
 export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<K3sRuntimeStatus>('/v1/k3s/status');
   if (daemonResp) {

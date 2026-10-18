@@ -162,7 +162,7 @@ export async function runLivePacketCapture({
       if (tok.startsWith('-')) {
         throw new Error(`Invalid filter token starting with '-': ${tok}`);
       }
-      if (!/^[a-zA-Z0-9_.:/()=!<>-]+$/.test(tok)) {
+      if (!/^[a-zA-Z0-9_.:/()=!<>&|[\]-]+$/.test(tok)) {
         throw new Error(`Invalid characters in BPF filter token: ${tok}`);
       }
       filterTokens.push(tok);
@@ -170,7 +170,7 @@ export async function runLivePacketCapture({
   }
 
   const boundedCount = Math.max(1, Math.min(200, count));
-  const captureId = `pcap-${Date.now()}-${cleanIface.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+  const captureId = `pcap-${Date.now()}-${cleanIface.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
   const captureDir = getCaptureDir();
   const pcapFilePath = path.join(captureDir, `${captureId}.pcap`);
   const startedAt = new Date().toISOString();
