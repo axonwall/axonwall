@@ -12,7 +12,8 @@ export type AxonwallYamlDomainFile =
   | 'ha.yaml'
   | 'storage.yaml'
   | 'k3s.yaml'
-  | 'virt.yaml';
+  | 'virt.yaml'
+  | 'vigilante.yaml';
 
 export interface DomainYamlDefinition {
   filename: AxonwallYamlDomainFile;
@@ -98,6 +99,13 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     description:
       'Controls KVM virtual machines, Cloud-Init, LXC system containers, ISO images, PCIe VFIO / SR-IOV passthrough, VXLAN SDN zones, and deduplicated backup schedules.',
     keys: ['virt'],
+  },
+  {
+    filename: 'vigilante.yaml',
+    title: 'Vigilante Cyber Defense, SOAR, Deception, Forensics & Modular SOC',
+    description:
+      'Controls autonomous cyber defense operations, SOAR active containment, honeynet deception mesh, embedded security data lake, PCAP forensics, and 12 modular security packages.',
+    keys: ['vigilante'],
   },
 ];
 

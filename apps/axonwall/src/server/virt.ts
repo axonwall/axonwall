@@ -241,6 +241,7 @@ export async function saveVmAction(
       nasEnabled: Boolean(state.capabilities?.nasEnabled ?? state.nas?.enabled),
       k3sEnabled: Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled),
       virtEnabled: true,
+      vigilanteEnabled: Boolean(state.capabilities?.vigilanteEnabled ?? state.vigilante?.enabled),
     },
     virt: {
       ...currentVirt,
@@ -402,6 +403,7 @@ export async function saveContainerAction(
       nasEnabled: Boolean(state.capabilities?.nasEnabled ?? state.nas?.enabled),
       k3sEnabled: Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled),
       virtEnabled: true,
+      vigilanteEnabled: Boolean(state.capabilities?.vigilanteEnabled ?? state.vigilante?.enabled),
     },
     virt: {
       ...currentVirt,

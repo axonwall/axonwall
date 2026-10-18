@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { BUILTIN_PLUGINS, type PluginManifest } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
-import type { DesiredState } from '@axonwall/lib/schemas';
+import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas';
 
 export default function PluginManagerPage() {
   const [state, setState] = useState<DesiredState | null>(null);
@@ -50,6 +50,7 @@ export default function PluginManagerPage() {
     if (id === 'core-nas') return Boolean(state.capabilities?.nasEnabled ?? state.nas?.enabled);
     if (id === 'core-k3s') return Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled);
     if (id === 'core-virt') return Boolean(state.capabilities?.virtEnabled ?? state.virt?.enabled);
+    if (id === 'core-vigilante') return Boolean(state.capabilities?.vigilanteEnabled ?? state.vigilante?.enabled);
     return false;
   };
 
@@ -64,12 +65,14 @@ export default function PluginManagerPage() {
       const currentNas = Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled);
       const currentK3s = Boolean(next.capabilities?.k3sEnabled ?? next.k3s?.enabled);
       const currentVirt = Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled);
+      const currentVigilante = Boolean(next.capabilities?.vigilanteEnabled ?? next.vigilante?.enabled);
 
       const nextCaps = {
         firewallEnabled: id === 'core-firewall' ? !currentFw : currentFw,
         nasEnabled: id === 'core-nas' ? !currentNas : currentNas,
         k3sEnabled: id === 'core-k3s' ? !currentK3s : currentK3s,
         virtEnabled: id === 'core-virt' ? !currentVirt : currentVirt,
+        vigilanteEnabled: id === 'core-vigilante' ? !currentVigilante : currentVigilante,
       };
       next.capabilities = nextCaps;
 
@@ -125,6 +128,13 @@ export default function PluginManagerPage() {
         next.virt.enabled = nextCaps.virtEnabled;
       }
 
+      if (id === 'core-vigilante') {
+        next.vigilante = next.vigilante || VigilanteConfigSchema.parse({
+          enabled: nextCaps.vigilanteEnabled,
+        });
+        next.vigilante.enabled = nextCaps.vigilanteEnabled;
+      }
+
       const res = await applyDesiredState(next);
       setState(next);
       window.dispatchEvent(new Event('axonwall-capabilities-updated'));
@@ -158,6 +168,7 @@ export default function PluginManagerPage() {
   const getRoleIcon = (id: string) => {
     if (id === 'core-firewall') return Flame;
     if (id === 'core-nas') return Database;
+    if (id === 'core-vigilante') return Shield;
     return Cpu;
   };
 

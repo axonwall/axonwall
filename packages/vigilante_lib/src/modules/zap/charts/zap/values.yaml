@@ -1,0 +1,26 @@
+image:
+  repository: ghcr.io/zaproxy/zaproxy
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  annotations: {}
+  hosts:
+    - host: zap.vigilante.local
+  tls:
+    - secretName: zap-tls
+      hosts:
+        - zap.vigilante.local
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 2Gi

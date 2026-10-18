@@ -1005,6 +1005,7 @@ export const CoreCapabilitiesSchema = z.object({
   nasEnabled: z.boolean().default(false),
   k3sEnabled: z.boolean().default(false),
   virtEnabled: z.boolean().default(false),
+  vigilanteEnabled: z.boolean().default(false),
 });
 export type CoreCapabilities = z.infer<typeof CoreCapabilitiesSchema>;
 
@@ -1368,6 +1369,125 @@ export const VirtConfigSchema = z.object({
 });
 export type VirtConfig = z.infer<typeof VirtConfigSchema>;
 
+// =============================================================================
+// Vigilante Cyber Defense, SOAR, Deception, Forensics & Modular SOC
+// =============================================================================
+
+export const VigilanteModuleIdSchema = z.enum([
+  'vigil-soc',
+  'vigil-local',
+  'opensearch',
+  'wazuh',
+  'bloodhound',
+  'falco',
+  'suricata',
+  'zeek',
+  'zap',
+  'flamingo',
+  'kctf',
+  'openvas',
+]);
+export type VigilanteModuleId = z.infer<typeof VigilanteModuleIdSchema>;
+
+export const VigilanteModuleConfigSchema = z.object({
+  id: VigilanteModuleIdSchema,
+  name: z.string().optional(),
+  enabled: z.boolean().default(false),
+  namespace: z.string().default('vigilante-soc'),
+  storageClass: z.enum(['axonwall-replicated-ha', 'axonwall-zfs-local', 'default']).default('axonwall-zfs-local'),
+  storageSizeGb: z.number().int().min(1).default(10),
+  ingressHostname: z.string().optional(),
+  customValuesYaml: z.string().default(''),
+});
+export type VigilanteModuleConfig = z.infer<typeof VigilanteModuleConfigSchema>;
+
+export const VigilanteSoarPolicySchema = z.object({
+  autoBlockC2Ips: z.boolean().default(true),
+  autoIsolateCompromisedPods: z.boolean().default(true),
+  autoFreezeRansomwarePods: z.boolean().default(true),
+  ransomwareEntropyDeltaThreshold: z.number().default(2.0),
+  warRoomQuorumThreshold: z.number().min(0.5).max(1.0).default(0.75),
+  blocklistTimeoutSeconds: z.number().int().min(0).default(86400),
+});
+export type VigilanteSoarPolicy = z.infer<typeof VigilanteSoarPolicySchema>;
+
+export const VigilanteDeceptionConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  canaryServiceAccounts: z.array(z.string()).default(['cluster-admin-backup', 'vault-sync-sa']),
+  honeytokens: z.array(z.enum(['aws-sts', 'github-pat', 'slack-webhook', 'kubeconfig'])).default(['aws-sts', 'kubeconfig']),
+  decoyServices: z.array(z.enum(['smb', 'ssh', 'redis', 'mssql'])).default([]),
+  ransomwareCanaryDirs: z.array(z.string()).default(['/mnt/tank/shares']),
+});
+export type VigilanteDeceptionConfig = z.infer<typeof VigilanteDeceptionConfigSchema>;
+
+export const VigilanteEvidenceVaultConfigSchema = z.object({
+  zfsPool: z.string().default('tank'),
+  datasetName: z.string().default('vigilante-evidence'),
+  dataLakeBackend: z.enum(['sqlite', 'duckdb']).default('sqlite'),
+  gpgEnabled: z.boolean().default(false),
+  gpgKeyId: z.string().default(''),
+  merkleLedgerEnabled: z.boolean().default(true),
+});
+export type VigilanteEvidenceVaultConfig = z.infer<typeof VigilanteEvidenceVaultConfigSchema>;
+
+export const VigilanteFederationConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  nodeName: z.string().default('axonwall-soc-primary'),
+  peers: z.array(z.string()).default([]),
+  autoIngestPeerBlocks: z.boolean().default(true),
+});
+export type VigilanteFederationConfig = z.infer<typeof VigilanteFederationConfigSchema>;
+
+export const VigilanteConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  posture: z.enum(['monitoring', 'hybrid', 'enforcing']).default('hybrid'),
+  domain: z.string().default('vigilante.local'),
+  modules: z.array(VigilanteModuleConfigSchema).default([
+    { id: 'vigil-soc', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 20, customValuesYaml: '' },
+    { id: 'opensearch', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 50, customValuesYaml: '' },
+    { id: 'wazuh', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 30, customValuesYaml: '' },
+    { id: 'falco', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 5, customValuesYaml: '' },
+    { id: 'suricata', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 10, customValuesYaml: '' },
+    { id: 'zeek', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 10, customValuesYaml: '' },
+    { id: 'bloodhound', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 15, customValuesYaml: '' },
+    { id: 'zap', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 5, customValuesYaml: '' },
+    { id: 'flamingo', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 5, customValuesYaml: '' },
+    { id: 'kctf', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 20, customValuesYaml: '' },
+    { id: 'openvas', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 30, customValuesYaml: '' },
+    { id: 'vigil-local', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 5, customValuesYaml: '' },
+  ]),
+  soar: VigilanteSoarPolicySchema.default({
+    autoBlockC2Ips: true,
+    autoIsolateCompromisedPods: true,
+    autoFreezeRansomwarePods: true,
+    ransomwareEntropyDeltaThreshold: 2.0,
+    warRoomQuorumThreshold: 0.75,
+    blocklistTimeoutSeconds: 86400,
+  }),
+  deception: VigilanteDeceptionConfigSchema.default({
+    enabled: true,
+    canaryServiceAccounts: ['cluster-admin-backup', 'vault-sync-sa'],
+    honeytokens: ['aws-sts', 'kubeconfig'],
+    decoyServices: [],
+    ransomwareCanaryDirs: ['/mnt/tank/shares'],
+  }),
+  evidenceVault: VigilanteEvidenceVaultConfigSchema.default({
+    zfsPool: 'tank',
+    datasetName: 'vigilante-evidence',
+    dataLakeBackend: 'sqlite',
+    gpgEnabled: false,
+    gpgKeyId: '',
+    merkleLedgerEnabled: true,
+  }),
+  federation: VigilanteFederationConfigSchema.default({
+    enabled: false,
+    nodeName: 'axonwall-soc-primary',
+    peers: [],
+    autoIngestPeerBlocks: true,
+  }),
+});
+export type VigilanteConfig = z.infer<typeof VigilanteConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -1412,6 +1532,7 @@ export const DesiredStateSchema = z.object({
   nas: NasConfigSchema.optional(),
   k3s: K3sConfigSchema.optional(),
   virt: VirtConfigSchema.optional(),
+  vigilante: VigilanteConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
 

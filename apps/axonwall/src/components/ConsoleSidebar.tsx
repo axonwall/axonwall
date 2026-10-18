@@ -49,6 +49,9 @@ import {
   Cpu,
   BookOpen,
   Power,
+  Target,
+  GitBranch,
+  Crosshair,
 } from 'lucide-react';
 
 export interface SubItem {
@@ -63,7 +66,7 @@ export interface NavSection {
   name: string;
   icon: any;
   href?: string;
-  capability?: 'firewall' | 'nas' | 'k3s' | 'virt';
+  capability?: 'firewall' | 'nas' | 'k3s' | 'virt' | 'vigilante';
   items?: SubItem[];
 }
 
@@ -198,6 +201,21 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
+    id: 'vigilante',
+    name: 'Vigilante Cyber Ops',
+    icon: Crosshair,
+    capability: 'vigilante',
+    items: [
+      { name: 'BattleStation & SOAR', href: '/vigilante/battlestation', icon: Crosshair, badge: 'SOAR' },
+      { name: 'Security Modules (12)', href: '/vigilante/modules', icon: Boxes, badge: '12' },
+      { name: 'Attack Graph & AD', href: '/vigilante/attack-graph', icon: GitBranch },
+      { name: 'Deception & Honeynets', href: '/vigilante/deception', icon: Radio, badge: 'Mesh' },
+      { name: 'Purple Team Matrix', href: '/vigilante/purpleteam', icon: Target },
+      { name: 'Forensics & Vault', href: '/vigilante/forensics', icon: Camera, badge: 'ZFS' },
+      { name: 'Security Data Lake', href: '/vigilante/datalake', icon: Database },
+    ],
+  },
+  {
     id: 'reporting',
     name: 'Reporting',
     icon: Activity,
@@ -259,11 +277,13 @@ export function ConsoleSidebar() {
     nasEnabled: boolean;
     k3sEnabled: boolean;
     virtEnabled: boolean;
+    vigilanteEnabled: boolean;
   }>({
     firewallEnabled: true,
     nasEnabled: false,
     k3sEnabled: false,
     virtEnabled: false,
+    vigilanteEnabled: false,
   });
 
   useEffect(() => {
@@ -282,6 +302,7 @@ export function ConsoleSidebar() {
             nasEnabled: Boolean(st.capabilities?.nasEnabled ?? st.nas?.enabled),
             k3sEnabled: Boolean(st.capabilities?.k3sEnabled ?? st.k3s?.enabled),
             virtEnabled: Boolean(st.capabilities?.virtEnabled ?? st.virt?.enabled),
+            vigilanteEnabled: Boolean(st.capabilities?.vigilanteEnabled ?? st.vigilante?.enabled),
           });
         })
         .catch(() => {});
@@ -300,6 +321,7 @@ export function ConsoleSidebar() {
       if (sec.capability === 'nas' && !capabilities.nasEnabled) return false;
       if (sec.capability === 'k3s' && !capabilities.k3sEnabled) return false;
       if (sec.capability === 'virt' && !capabilities.virtEnabled) return false;
+      if (sec.capability === 'vigilante' && !capabilities.vigilanteEnabled) return false;
       return true;
     });
   }, [capabilities]);

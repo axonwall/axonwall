@@ -47,11 +47,12 @@ type AgentServer struct {
 	sdwanProber     *SDWanProber
 	pcapManager     *engine.PacketCaptureManager
 	watchdog        *engine.WatchdogEngine
-	nasManager      *engine.NasManager
-	k3sManager      *engine.K3sManager
+	nasManager       *engine.NasManager
+	k3sManager       *engine.K3sManager
+	vigilanteManager *engine.VigilanteManager
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager) *AgentServer {
 	hostname, _ := os.Hostname()
 
 	initHash := ""
@@ -66,19 +67,20 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 	}
 
 	return &AgentServer{
-		bundleDir:      bundleDir,
-		activeHash:     initHash,
-		lastGoodHash:   initHash,
-		lastGoodScript: lastGoodScript,
-		nodeId:         fmt.Sprintf("axonwall-%s", hostname),
-		startTime:      time.Now(),
-		iapManager:     iapManager,
-		haEngine:       haEngine,
-		sdwanProber:    sdwanProber,
-		pcapManager:    pcapManager,
-		watchdog:       watchdog,
-		nasManager:     nasManager,
-		k3sManager:     k3sManager,
+		bundleDir:        bundleDir,
+		activeHash:       initHash,
+		lastGoodHash:     initHash,
+		lastGoodScript:   lastGoodScript,
+		nodeId:           fmt.Sprintf("axonwall-%s", hostname),
+		startTime:        time.Now(),
+		iapManager:       iapManager,
+		haEngine:         haEngine,
+		sdwanProber:      sdwanProber,
+		pcapManager:      pcapManager,
+		watchdog:         watchdog,
+		nasManager:       nasManager,
+		k3sManager:       k3sManager,
+		vigilanteManager: vigilanteManager,
 	}
 }
 
@@ -221,6 +223,10 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			if err := s.k3sManager.ApplyConfig([]byte(f.Content)); err != nil {
 				log.Printf("[Agent] Warning: Failed to apply K3s config: %v", err)
 			}
+		}
+
+		if filepath.Base(cleanPath) == "vigilante_config.json" && s.vigilanteManager != nil {
+			log.Printf("[Agent] Applying Vigilante Cyber Defense configuration")
 		}
 	}
 
@@ -833,8 +839,9 @@ func main() {
 	consoleProxy := engine.NewConsoleProxy()
 	watchdog := engine.NewWatchdogEngine()
 	watchdog.Start()
+	vigilanteManager := engine.NewVigilanteManager("/var/lib/axonwall/vigilante")
 
-	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager)
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -1418,6 +1425,113 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/tasks/log", taskManager.HandleStreamTaskLogSSE)
+
+		// Vigilante Cyber Defense / SOAR APIs
+		mux.HandleFunc("/v1/vigilante/soar/block-ip", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				IP         string `json:"ip"`
+				TimeoutSec int    `json:"timeoutSec"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := vigilanteManager.BlockIP(req.IP, req.TimeoutSec); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Successfully quarantined and blocked IP %s", req.IP),
+			})
+		})
+
+		mux.HandleFunc("/v1/vigilante/soar/unblock-ip", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				IP string `json:"ip"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := vigilanteManager.UnblockIP(req.IP); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Successfully unblocked IP %s", req.IP),
+			})
+		})
+
+		mux.HandleFunc("/v1/vigilante/soar/blocked-ips", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"blockedIPs": vigilanteManager.ListBlockedIPs(),
+			})
+		})
+
+		mux.HandleFunc("/v1/vigilante/vault/provision", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Pool    string `json:"pool"`
+				Dataset string `json:"dataset"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := vigilanteManager.ProvisionEvidenceVault(req.Pool, req.Dataset); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": "Vigilante evidence vault provisioned successfully",
+			})
+		})
+
+		mux.HandleFunc("/v1/vigilante/vault/snapshot", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Pool       string `json:"pool"`
+				Dataset    string `json:"dataset"`
+				IncidentID string `json:"incidentId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			snap, err := vigilanteManager.CreateIncidentSnapshot(req.Pool, req.Dataset, req.IncidentID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":  true,
+				"snapshot": snap,
+			})
+		})
+
+		mux.HandleFunc("/v1/vigilante/telemetry/stream", vigilanteManager.StreamLiveTelemetry)
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}
 		go func() {

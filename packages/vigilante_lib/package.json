@@ -1,0 +1,33 @@
+{
+  "name": "vigilante_lib",
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./engine/*": "./src/engine/*",
+    "./modules/*": "./src/modules/*",
+    "./mcp/*": "./src/mcp/*",
+    "./utils/*": "./src/utils/*",
+    "./cli/*": "./src/cli/*",
+    "./ui": "./src/ui/index.js",
+    "./ui/*": "./src/ui/*"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "detect-port": "^2.1.0",
+    "execa": "^8.0.1",
+    "fast-xml-parser": "^5.11.0",
+    "hostile": "^1.4.0",
+    "ink": "^4.4.1",
+    "ink-select-input": "^5.0.0",
+    "ink-spinner": "^5.0.0",
+    "js-yaml": "^5.3.0",
+    "nastymap": "^1.0.1",
+    "react": "^18.3.1 || ^19.0.0",
+    "sudo-prompt": "^9.2.1"
+  }
+}

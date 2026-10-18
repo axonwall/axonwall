@@ -51,6 +51,7 @@ export default function K3sClusterPage() {
       nasEnabled: Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled),
       k3sEnabled: true,
       virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
+      vigilanteEnabled: Boolean(next.capabilities?.vigilanteEnabled ?? next.vigilante?.enabled),
     };
     next.k3s = next.k3s || {
       enabled: true,

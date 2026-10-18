@@ -170,6 +170,10 @@
     "./compile/k3s": {
       "types": "./dist/compile/k3s/index.d.ts",
       "default": "./dist/compile/k3s/index.js"
+    },
+    "./compile/vigilante": {
+      "types": "./dist/compile/vigilante/index.d.ts",
+      "default": "./dist/compile/vigilante/index.js"
     }
   },
   "scripts": {

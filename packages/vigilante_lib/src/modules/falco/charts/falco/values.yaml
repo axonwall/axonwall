@@ -1,0 +1,46 @@
+image:
+  repository: falcosecurity/falco
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+driver:
+  kind: modern_ebpf
+
+falcosidekick:
+  enabled: true
+  image:
+    repository: falcosecurity/falcosidekick
+    tag: "2.28.0"
+  ui:
+    enabled: true
+    image:
+      repository: falcosecurity/falcosidekick-ui
+      tag: "2.1.0"
+    service:
+      port: 2802
+  redis:
+    image:
+      repository: redis/redis-stack-server
+      tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 2802
+
+ingress:
+  enabled: true
+  annotations: {}
+  hosts:
+    - host: falco.vigilante.local
+  tls:
+    - secretName: falco-tls
+      hosts:
+        - falco.vigilante.local
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

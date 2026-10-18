@@ -76,6 +76,25 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
   },
   {
+    id: 'core-vigilante',
+    name: 'Vigilante Cyber Defense, SOAR & Autonomous SOC',
+    version: '0.1.0',
+    category: 'core_role',
+    description: 'Autonomous Cyber Defense Operations, real-time SOAR active containment, honeynet deception mesh, embedded security data lake, PCAP forensics, eBPF lineage, and 12 modular security packages.',
+    author: 'DeployCoop / Axonwall Core',
+    systemdUnits: ['axonwall-vigilante.service', 'k3s.service'],
+    privileges: ['security.vigilante', 'security.soar', 'security.forensics', 'k3s.cluster', 'firewall.rules'],
+    nftHooks: [
+      { table: 'inet axonwall', chain: 'input', priority: -10 },
+      { table: 'inet axonwall', chain: 'forward', priority: -10 },
+    ],
+    menuEntry: {
+      title: 'Vigilante SOC & SOAR',
+      path: '/vigilante/battlestation',
+      icon: 'Radar',
+    },
+  },
+  {
     id: 'haproxy',
     name: 'HAProxy Load Balancer & Reverse Proxy',
     version: '2.8.3',
@@ -176,6 +195,7 @@ export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabili
   const nasPlugin = plugins.find((p) => p.id === 'core-nas');
   const k3sPlugin = plugins.find((p) => p.id === 'core-k3s');
   const virtPlugin = plugins.find((p) => p.id === 'core-virt');
+  const vigilantePlugin = plugins.find((p) => p.id === 'core-vigilante');
 
   const firewallEnabled =
     state?.capabilities?.firewallEnabled !== undefined
@@ -205,11 +225,19 @@ export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabili
         ? virtPlugin.enabled
         : Boolean(state?.virt?.enabled);
 
+  const vigilanteEnabled =
+    state?.capabilities?.vigilanteEnabled !== undefined
+      ? state.capabilities.vigilanteEnabled
+      : vigilantePlugin !== undefined
+        ? vigilantePlugin.enabled
+        : Boolean(state?.vigilante?.enabled);
+
   return {
     firewallEnabled,
     nasEnabled,
     k3sEnabled,
     virtEnabled,
+    vigilanteEnabled,
   };
 }
 
