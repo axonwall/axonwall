@@ -10,7 +10,7 @@ WORK_DIR="${SCRIPT_DIR}/build"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 
 # Extract version from package.json
-VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.8.9")
+VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.8.10")
 ARCH="amd64"
 PKG_NAME="axonwall_${VERSION}_${ARCH}"
 
