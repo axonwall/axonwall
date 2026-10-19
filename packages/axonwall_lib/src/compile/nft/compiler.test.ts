@@ -3,7 +3,7 @@ import { compileNftables, compileSatelliteNftables } from './index.js';
 import { lintRuleset } from '../../lint/index.js';
 import { isValidIPv4, isValidCIDR, isValidPortRange } from '../../util/index.js';
 import { mintSupabaseToken, verifyToken } from '../../ldap/index.js';
-import { InterfaceSchema, type DesiredState } from '../../schemas/index.js';
+import { InterfaceSchema, DesiredStateSchema, type DesiredState } from '../../schemas/index.js';
 
 describe('Axonwall Network Utils & Schemas', () => {
   it('validates IPv4, CIDR, comma-separated ports, and port ranges correctly', () => {
@@ -409,3 +409,36 @@ describe('Axonwall JWT Minting & Verification', () => {
   });
 });
 
+
+describe('Axonwall nftables Compiler — HA sync rule (audit S-04)', () => {
+  const haState = (listenPort?: number): DesiredState =>
+    DesiredStateSchema.parse({
+      interfaces: [
+        { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true },
+        { name: 'lan', device: 'eth1', type: 'static', enabled: true, ipv4Address: '192.168.100.1/24' },
+      ],
+      ha: {
+        enabled: true,
+        syncInterface: 'lan',
+        ...(listenPort !== undefined ? { sqliteSync: { listenPort } } : {}),
+      },
+    });
+
+  it('opens the default HA sync port 9876 on the sync interface, not 8443/9443', () => {
+    const res = compileNftables(haState());
+    expect(res.nftScript).toContain('iifname "eth1" tcp dport 9876 accept comment "ha-state-and-zfs-sync"');
+    expect(res.nftScript).not.toContain('8443');
+    expect(res.nftScript).not.toContain('9443');
+  });
+
+  it('opens a configured custom HA sync port', () => {
+    const res = compileNftables(haState(9999));
+    expect(res.nftScript).toContain('iifname "eth1" tcp dport 9999 accept comment "ha-state-and-zfs-sync"');
+    expect(res.nftScript).not.toContain('tcp dport 9876 accept comment "ha-state-and-zfs-sync"');
+  });
+
+  it('emits no HA sync rule when HA is disabled', () => {
+    const res = compileNftables(DesiredStateSchema.parse({}));
+    expect(res.nftScript).not.toContain('ha-state-and-zfs-sync');
+  });
+});
