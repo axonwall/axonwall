@@ -385,14 +385,34 @@ fi
 
 menuentry "Axonwall Appliance - Slot A" {
   search --no-floppy --label --set=root axon_root_a
-  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_a ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme,raid1,md-mod quiet console=tty0 console=ttyS0,115200
-  initrd /boot/initramfs-${KERNEL_FLAVOR}
+  if [ -f /boot/vmlinuz-${KERNEL_FLAVOR} ]; then
+    set kfile="/boot/vmlinuz-${KERNEL_FLAVOR}"
+  else
+    set kfile="/boot/vmlinuz"
+  fi
+  if [ -f /boot/initramfs-${KERNEL_FLAVOR} ]; then
+    set ifile="/boot/initramfs-${KERNEL_FLAVOR}"
+  else
+    set ifile="/boot/initrd.img"
+  fi
+  linux \${kfile} root=LABEL=axon_root_a ro rootfstype=ext4 slot=A modules=sd-mod,usb-storage,ext4,virtio_blk,nvme,raid1,md-mod quiet console=tty0 console=ttyS0,115200
+  initrd \${ifile}
 }
 
 menuentry "Axonwall Appliance - Slot B" {
   search --no-floppy --label --set=root axon_root_b
-  linux /boot/vmlinuz-${KERNEL_FLAVOR} root=LABEL=axon_root_b ro rootfstype=ext4 modules=sd-mod,usb-storage,ext4,virtio_blk,nvme,raid1,md-mod quiet console=tty0 console=ttyS0,115200
-  initrd /boot/initramfs-${KERNEL_FLAVOR}
+  if [ -f /boot/vmlinuz-${KERNEL_FLAVOR} ]; then
+    set kfile="/boot/vmlinuz-${KERNEL_FLAVOR}"
+  else
+    set kfile="/boot/vmlinuz"
+  fi
+  if [ -f /boot/initramfs-${KERNEL_FLAVOR} ]; then
+    set ifile="/boot/initramfs-${KERNEL_FLAVOR}"
+  else
+    set ifile="/boot/initrd.img"
+  fi
+  linux \${kfile} root=LABEL=axon_root_b ro rootfstype=ext4 slot=B modules=sd-mod,usb-storage,ext4,virtio_blk,nvme,raid1,md-mod quiet console=tty0 console=ttyS0,115200
+  initrd \${ifile}
 }
 GRUB_EOF
 
@@ -478,8 +498,12 @@ fi
 
 echo "[+] Cloning Slot A into Standby Slot B..."
 mount "$ROOT_B_DEV" /mnt/slot_b
-cp -a /mnt/slot_a/* /mnt/slot_b/ 2>/dev/null || true
+cp -a /mnt/slot_a/. /mnt/slot_b/ 2>/dev/null || true
 sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
+ln -sf "vmlinuz-${KERNEL_FLAVOR}" /mnt/slot_b/boot/vmlinuz 2>/dev/null || true
+ln -sf "initramfs-${KERNEL_FLAVOR}" /mnt/slot_b/boot/initrd.img 2>/dev/null || true
+ln -sf boot/vmlinuz /mnt/slot_b/vmlinuz 2>/dev/null || true
+ln -sf boot/initrd.img /mnt/slot_b/initrd.img 2>/dev/null || true
 
 # Persist initial per-slot versions
 INSTALL_VER="0.8.13"

@@ -7,6 +7,7 @@ import {
   activatePartitionSlot,
   verifySystemHealthQuorum,
   applySystemFirmwareUpdate,
+  rebootSystemAction,
   type ReleaseInfo,
   type PartitionSlotInfo,
   type HealthCheckItem,
@@ -28,6 +29,7 @@ import {
   Clock,
   RotateCcw,
   Check,
+  Power,
 } from 'lucide-react';
 
 export default function SystemUpdatesPage() {
@@ -68,6 +70,8 @@ export default function SystemUpdatesPage() {
   const [upgradeProgress, setUpgradeProgress] = useState(0);
   const [upgradePhase, setUpgradePhase] = useState('');
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [pendingRebootSlot, setPendingRebootSlot] = useState<'A' | 'B' | null>(null);
+  const [isRebooting, setIsRebooting] = useState(false);
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null);
 
   const activeSlot = slots.find((s) => s.isActive) || slots[0];
@@ -116,10 +120,29 @@ export default function SystemUpdatesPage() {
     refreshTelemetryAndRelease().catch(() => {});
   }, []);
 
+  const handleRebootIntoSlot = async (slot: 'A' | 'B') => {
+    if (
+      !confirm(
+        `Reboot the appliance now into Slot ${slot}? Active connections will briefly reset while the new partition boots.`
+      )
+    ) {
+      return;
+    }
+    setIsRebooting(true);
+    try {
+      const res = await rebootSystemAction(slot);
+      setAlertMessage(res.message || `Rebooting into Slot ${slot}...`);
+    } catch (err: any) {
+      alert(`Reboot request failed: ${err?.message || String(err)}`);
+    } finally {
+      setIsRebooting(false);
+    }
+  };
+
   const handleManualRollback = async () => {
     if (
       !confirm(
-        `Are you sure you want to trigger a safe rollback to Slot ${standbySlot.slot}? The system will configure GRUB active_slot=${standbySlot.slot}, reset bootcount=0, and reboot into the alternate rootfs.`
+        `Are you sure you want to trigger a safe rollback to Slot ${standbySlot.slot}? The system will configure GRUB active_slot=${standbySlot.slot}, reset bootcount=0, and arm the alternate rootfs for next boot.`
       )
     ) {
       return;
@@ -143,6 +166,7 @@ export default function SystemUpdatesPage() {
         return;
       }
 
+      setPendingRebootSlot(standbySlot.slot);
       setAlertMessage(res.message);
       setSlots(
         slots.map((s) => ({
@@ -178,9 +202,10 @@ export default function SystemUpdatesPage() {
   };
 
   const handleFlashUpgrade = async () => {
+    const targetSlot = standbySlot.slot;
     setIsUpgrading(true);
     setUpgradeProgress(15);
-    setUpgradePhase(`Resolving release payload for Slot ${standbySlot.slot}...`);
+    setUpgradePhase(`Resolving release payload for Slot ${targetSlot}...`);
 
     const timer1 = setTimeout(() => {
       setUpgradeProgress(40);
@@ -198,11 +223,11 @@ export default function SystemUpdatesPage() {
         const resp = await fetch('/api/system/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'update', slot: standbySlot.slot }),
+          body: JSON.stringify({ action: 'update', slot: targetSlot }),
         });
         res = await resp.json();
       } catch {
-        res = await applySystemFirmwareUpdate(standbySlot.slot);
+        res = await applySystemFirmwareUpdate(targetSlot);
       }
 
       if (!res.success) {
@@ -218,14 +243,15 @@ export default function SystemUpdatesPage() {
         setUpgradePhase('Arming GRUB boot-counting watchdog (bootcount=0, bootlimit=3)...');
         setTimeout(() => {
           setIsUpgrading(false);
+          setPendingRebootSlot(targetSlot);
           setAlertMessage(res.message);
           setSlots((prev) =>
             prev.map((s) =>
-              s.slot === standbySlot.slot
+              s.slot === targetSlot
                 ? {
                     ...s,
                     version: res.newVersion || releaseInfo?.latestVersion || '0.5.0',
-                    lastUpdated: `Updated to v${res.newVersion || releaseInfo?.latestVersion || '0.5.0'} (Pending Reboot)`,
+                    lastUpdated: `Updated to v${res.newVersion || releaseInfo?.latestVersion || '0.5.0'} (Next Boot Armed)`,
                   }
                 : s
             )
@@ -343,14 +369,26 @@ export default function SystemUpdatesPage() {
       )}
 
       {alertMessage && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm flex items-center justify-between">
+        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
             <span>{alertMessage}</span>
           </div>
-          <button onClick={() => setAlertMessage(null)} className="text-slate-400 hover:text-white text-xs">
-            ✕
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {pendingRebootSlot && (
+              <button
+                onClick={() => handleRebootIntoSlot(pendingRebootSlot)}
+                disabled={isRebooting}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition cursor-pointer disabled:opacity-50"
+              >
+                <Power className="w-3.5 h-3.5" />
+                <span>{isRebooting ? 'Rebooting...' : `Reboot into Slot ${pendingRebootSlot} Now`}</span>
+              </button>
+            )}
+            <button onClick={() => setAlertMessage(null)} className="text-slate-400 hover:text-white text-xs">
+              ✕
+            </button>
+          </div>
         </div>
       )}
 

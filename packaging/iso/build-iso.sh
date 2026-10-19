@@ -225,7 +225,8 @@ fi
 rm -rf config/includes.chroot/etc/axonwall/certs
 
 # Ensure post-base-installer and finish-install hooks in installer are executable
-find config/includes.installer/ -type f -name "*.d/*" -exec chmod +x {} + 2>/dev/null || true
+find config/includes.installer/ -type f -path "*.d/*" -exec chmod +x {} + 2>/dev/null || true
+chmod +x config/includes.installer/usr/lib/axonwall/* 2>/dev/null || true
 
 # Pre-cache bootloader packages so debian-installer offline installations succeed without network/disc prompts
 echo "[+] Pre-caching offline bootloader packages for BIOS & UEFI..."

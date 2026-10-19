@@ -92,6 +92,20 @@ if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && [ "$DATA_DEV" != "$
 fi
 
 # 3. Synchronize Slot A to Slot B for instant standby readiness
+# Ensure stable /boot/vmlinuz and /boot/initrd.img symlinks exist on Slot A before replication
+if [ -d /target/boot ]; then
+  LATEST_A_KERN=$(ls -1t /target/boot/vmlinuz-* 2>/dev/null | head -n1 || true)
+  if [ -n "$LATEST_A_KERN" ]; then
+    ln -sf "$(basename "$LATEST_A_KERN")" /target/boot/vmlinuz
+    ln -sf "boot/$(basename "$LATEST_A_KERN")" /target/vmlinuz 2>/dev/null || true
+  fi
+  LATEST_A_INITRD=$(ls -1t /target/boot/initrd.img-* 2>/dev/null | head -n1 || true)
+  if [ -n "$LATEST_A_INITRD" ]; then
+    ln -sf "$(basename "$LATEST_A_INITRD")" /target/boot/initrd.img
+    ln -sf "boot/$(basename "$LATEST_A_INITRD")" /target/initrd.img 2>/dev/null || true
+  fi
+fi
+
 if [ -b "$ROOT_B_DEV" ]; then
   STAGE_B="/tmp/stage_slot_b"
   mkdir -p "$STAGE_B"
@@ -113,6 +127,7 @@ if [ -b "$ROOT_B_DEV" ]; then
       rsync -aAX --delete \
         --exclude=/mnt/standby \
         --exclude=/var/lib/axonwall \
+        --exclude=/boot/efi/* \
         --exclude=/proc/* \
         --exclude=/sys/* \
         --exclude=/dev/* \
@@ -120,7 +135,7 @@ if [ -b "$ROOT_B_DEV" ]; then
         --exclude=/tmp/* \
         /target/ "$STAGE_B/" 2>/dev/null || true
     else
-      tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' -cf - . | tar -C "$STAGE_B" -xf - || true
+      tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' --exclude='./boot/efi/*' -cf - . | tar -C "$STAGE_B" -xf - || true
     fi
 
     # Configure Slot B's /etc/fstab for independent booting

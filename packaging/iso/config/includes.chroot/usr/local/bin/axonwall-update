@@ -198,6 +198,65 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
 
   # If mounting succeeds, synchronize root filesystem or extract downloaded release package
   if grep -qs " ${STAGE_DIR} " /proc/mounts || (command -v mountpoint >/dev/null 2>&1 && mountpoint -q "${STAGE_DIR}"); then
+    # Self-heal base OS rootfs on standby slot if missing /sbin, /bin, /etc, or /lib/modules
+    if [ ! -e "${STAGE_DIR}/sbin/init" ] || [ ! -d "${STAGE_DIR}/etc" ] || [ ! -d "${STAGE_DIR}/lib/modules" ]; then
+      echo "[+] Standby partition is missing base OS rootfs; cloning running root filesystem to Slot ${TARGET_SLOT}..."
+      if command -v rsync >/dev/null 2>&1; then
+        rsync -aAX \
+          --exclude=/proc/* \
+          --exclude=/sys/* \
+          --exclude=/dev/* \
+          --exclude=/run/* \
+          --exclude=/tmp/* \
+          --exclude=/mnt/* \
+          --exclude=/media/* \
+          --exclude=/lost+found \
+          --exclude=/var/lib/axonwall/* \
+          --exclude=/boot/efi/* \
+          / "${STAGE_DIR}/" 2>/dev/null || true
+      else
+        for sys_dir in bin etc home lib lib64 opt root sbin usr var; do
+          if [ -d "/${sys_dir}" ]; then
+            cp -a "/${sys_dir}" "${STAGE_DIR}/" 2>/dev/null || true
+          fi
+        done
+      fi
+      mkdir -p "${STAGE_DIR}/dev" "${STAGE_DIR}/proc" "${STAGE_DIR}/sys" "${STAGE_DIR}/run" "${STAGE_DIR}/tmp" "${STAGE_DIR}/boot" "${STAGE_DIR}/var/lib/axonwall" 2>/dev/null || true
+
+      # If running on Alpine and /lib/modules is a symlink to modloop, materialize real kernel modules
+      if [ -e /lib/modules ] && [ -L "${STAGE_DIR}/lib/modules" ]; then
+        rm -rf "${STAGE_DIR}/lib/modules"
+        mkdir -p "${STAGE_DIR}/lib/modules"
+        ( cd /lib/modules && tar cf - . ) | ( cd "${STAGE_DIR}/lib/modules" && tar xf - ) 2>/dev/null || true
+      fi
+    fi
+
+    # Ensure /etc/fstab on target slot points to the correct root label and has no /mnt/standby mount
+    if [ -f "${STAGE_DIR}/etc/fstab" ]; then
+      if [ "$TARGET_SLOT" = "B" ]; then
+        sed -i 's/axon_root_a/axon_root_b/g' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
+      else
+        sed -i 's/axon_root_b/axon_root_a/g' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
+      fi
+      sed -i '\#/mnt/standby#d' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
+    fi
+
+    # Self-heal /boot on target slot if kernel or initramfs/initrd is missing
+    mkdir -p "${STAGE_DIR}/boot" 2>/dev/null || true
+    if ! ls "${STAGE_DIR}/boot"/vmlinuz-* >/dev/null 2>&1; then
+      echo "[+] Synchronizing kernel and boot artifacts from running /boot to Slot ${TARGET_SLOT}..."
+      if [ -d /boot ] && ls /boot/vmlinuz-* >/dev/null 2>&1; then
+        for bf in /boot/vmlinuz* /boot/initrd* /boot/initramfs* /boot/System.map* /boot/config*; do
+          if [ -e "$bf" ]; then
+            cp -a "$bf" "${STAGE_DIR}/boot/" 2>/dev/null || true
+          fi
+        done
+        if [ -d /boot/grub ] && [ ! -d "${STAGE_DIR}/boot/grub" ]; then
+          cp -a /boot/grub "${STAGE_DIR}/boot/" 2>/dev/null || true
+        fi
+      fi
+    fi
+
     echo "[+] Updating application packages on standby partition..."
     if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
       PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
@@ -214,15 +273,18 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           fi
         fi
         if [ -d "${PKG_STAGE}/usr/sbin" ]; then
+          mkdir -p "${STAGE_DIR}/usr/sbin" 2>/dev/null || true
           cp -f "${PKG_STAGE}/usr/sbin/"* "${STAGE_DIR}/usr/sbin/" 2>/dev/null || true
         fi
         if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
+          mkdir -p "${STAGE_DIR}/usr/local/bin" 2>/dev/null || true
           cp -f "${PKG_STAGE}/usr/local/bin/axonwall-"* "${STAGE_DIR}/usr/local/bin/" 2>/dev/null || true
         fi
       fi
       rm -rf "${PKG_STAGE}"
       chown -R axonwall:axonwall "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
-    elif [ -d /opt/axonwall ] && [ -d "${STAGE_DIR}/opt/axonwall" ]; then
+    elif [ -d /opt/axonwall ]; then
+      mkdir -p "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
       if command -v rsync >/dev/null 2>&1; then
         rsync -a --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
       else
@@ -264,14 +326,14 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
     fi
 
-    # Ensure stable kernel & initrd symlinks exist on target slot
+    # Ensure stable kernel & initrd/initramfs symlinks exist on target slot (Debian & Alpine)
     if [ -d "${STAGE_DIR}/boot" ]; then
       LATEST_SLOT_KERN="$(ls -1t "${STAGE_DIR}/boot"/vmlinuz-* 2>/dev/null | head -n1 || true)"
       if [ -n "$LATEST_SLOT_KERN" ]; then
         ln -sf "$(basename "$LATEST_SLOT_KERN")" "${STAGE_DIR}/boot/vmlinuz"
         ln -sf "boot/$(basename "$LATEST_SLOT_KERN")" "${STAGE_DIR}/vmlinuz" 2>/dev/null || true
       fi
-      LATEST_SLOT_INITRD="$(ls -1t "${STAGE_DIR}/boot"/initrd.img-* 2>/dev/null | head -n1 || true)"
+      LATEST_SLOT_INITRD="$(ls -1t "${STAGE_DIR}/boot"/initrd.img-* "${STAGE_DIR}/boot"/initramfs-* 2>/dev/null | head -n1 || true)"
       if [ -n "$LATEST_SLOT_INITRD" ]; then
         ln -sf "$(basename "$LATEST_SLOT_INITRD")" "${STAGE_DIR}/boot/initrd.img"
         ln -sf "boot/$(basename "$LATEST_SLOT_INITRD")" "${STAGE_DIR}/initrd.img" 2>/dev/null || true
@@ -287,6 +349,18 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     rmdir "${STAGE_DIR}" 2>/dev/null || true
   fi
 
+  # Also ensure running rootfs has valid /boot/vmlinuz and /boot/initrd.img symlinks
+  if [ -d /boot ]; then
+    RUN_KERN="$(ls -1t /boot/vmlinuz-* 2>/dev/null | head -n1 || true)"
+    if [ -n "$RUN_KERN" ] && [ ! -e /boot/vmlinuz ]; then
+      ln -sf "$(basename "$RUN_KERN")" /boot/vmlinuz 2>/dev/null || true
+    fi
+    RUN_INITRD="$(ls -1t /boot/initrd.img-* /boot/initramfs-* 2>/dev/null | head -n1 || true)"
+    if [ -n "$RUN_INITRD" ] && [ ! -e /boot/initrd.img ]; then
+      ln -sf "$(basename "$RUN_INITRD")" /boot/initrd.img 2>/dev/null || true
+    fi
+  fi
+
   # Only update /etc/axonwall/version on the running rootfs if the target slot is the currently active slot
   ACTIVE_SLOT="A"
   if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
@@ -296,9 +370,23 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
   fi
 
-  # Arm GRUB boot watchdog for next boot on current /boot/grub/grubenv
+  # Arm GRUB boot watchdog for next boot on current /boot/grub/grubenv (and Slot A's grubenv if running on Slot B)
   echo "[+] Arming GRUB boot watchdog on /boot/grub/grubenv..."
   update_grubenv_file "/boot/grub/grubenv" "${TARGET_SLOT}"
+  if [ "$ACTIVE_SLOT" = "B" ]; then
+    SLOT_A_DEV="$(resolve_label_dev "axon_root_a")"
+    if [ -n "$SLOT_A_DEV" ] && [ -b "$SLOT_A_DEV" ]; then
+      SLOT_A_MNT="/tmp/axonwall-grubenv-slot-a"
+      mkdir -p "$SLOT_A_MNT" 2>/dev/null || true
+      if mount "$SLOT_A_DEV" "$SLOT_A_MNT" 2>/dev/null; then
+        if [ -d "$SLOT_A_MNT/boot/grub" ]; then
+          update_grubenv_file "$SLOT_A_MNT/boot/grub/grubenv" "${TARGET_SLOT}"
+        fi
+        umount "$SLOT_A_MNT" 2>/dev/null || true
+      fi
+      rmdir "$SLOT_A_MNT" 2>/dev/null || true
+    fi
+  fi
 else
   echo "[+] Running in standard single-root mode. Performing in-place package update..."
   mkdir -p /etc/axonwall 2>/dev/null || true
