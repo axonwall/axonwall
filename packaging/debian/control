@@ -15,6 +15,11 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
  keepalived,
  conntrackd,
  nodejs (>= 22.0.0),
+ openssh-server,
+ openssh-client,
+ openssl,
+ curl,
+ ca-certificates,
  rsync,
  python3
 Recommends:

@@ -77,8 +77,8 @@ ENV_EOF
         # 6. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service || true
-            systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service || true
+            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service ssh.service || true
+            systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service || true
         fi
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)

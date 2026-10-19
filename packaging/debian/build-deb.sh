@@ -32,7 +32,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssl, curl, ca-certificates, rsync, python3
+Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, openssl, curl, ca-certificates, rsync, python3
 Recommends: unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall

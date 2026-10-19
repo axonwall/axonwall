@@ -314,6 +314,8 @@ nfs-kernel-server
 open-iscsi
 etckeeper
 git
+openssh-server
+openssh-client
 EOF
 
 # 5. Build ISO
