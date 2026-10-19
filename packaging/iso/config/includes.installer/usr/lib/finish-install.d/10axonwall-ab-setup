@@ -143,6 +143,17 @@ if [ -b "$ROOT_B_DEV" ]; then
       fi
     fi
 
+    # Persist initial per-slot versions
+    INSTALL_VER="0.8.13"
+    if [ -f /target/etc/axonwall/version ]; then
+      INSTALL_VER="$(head -n1 /target/etc/axonwall/version | tr -d '\r\n ')"
+    fi
+    INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
+    mkdir -p /target/etc/axonwall /target/var/lib/axonwall "$STAGE_B/etc/axonwall" 2>/dev/null || true
+    printf '%s' "$INIT_SLOT_JSON" > /target/etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$INIT_SLOT_JSON" > /target/var/lib/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$INIT_SLOT_JSON" > "$STAGE_B/etc/axonwall/slot_versions.json" 2>/dev/null || true
+
     # Unmount standby staging
     if [ $IS_MOUNTED -eq 1 ]; then
       umount /target/mnt/standby 2>/dev/null || true

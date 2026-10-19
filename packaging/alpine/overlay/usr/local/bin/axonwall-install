@@ -480,6 +480,18 @@ echo "[+] Cloning Slot A into Standby Slot B..."
 mount "$ROOT_B_DEV" /mnt/slot_b
 cp -a /mnt/slot_a/* /mnt/slot_b/ 2>/dev/null || true
 sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
+
+# Persist initial per-slot versions
+INSTALL_VER="0.8.13"
+if [ -f /mnt/slot_a/etc/axonwall/version ]; then
+  INSTALL_VER="$(head -n1 /mnt/slot_a/etc/axonwall/version | tr -d '\r\n ')"
+fi
+INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
+mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/var/lib/axonwall /mnt/slot_b/etc/axonwall 2>/dev/null || true
+printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_a/etc/axonwall/slot_versions.json 2>/dev/null || true
+printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_a/var/lib/axonwall/slot_versions.json 2>/dev/null || true
+printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_b/etc/axonwall/slot_versions.json 2>/dev/null || true
+
 umount /mnt/slot_b
 
 # Add extra dedicated ZFS disks & record / create ZFS pool

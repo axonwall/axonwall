@@ -64,10 +64,11 @@ type WatchdogEngine struct {
 	stopChan         chan struct{}
 
 	// Injectable for tests; production values are set by the constructor.
-	updaterPaths      []string
-	checkInterfaces   func() HealthCheckResult
-	checkNftables     func() HealthCheckResult
-	checkControlPlane func() HealthCheckResult
+	updaterPaths        []string
+	checkInterfaces     func() HealthCheckResult
+	checkNftables       func() HealthCheckResult
+	checkControlPlane   func() HealthCheckResult
+	readSlotDiskVersion func(slot string) string
 }
 
 // NewWatchdogEngine initializes the A/B system watchdog engine with default paths.
@@ -91,6 +92,7 @@ func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEn
 	we.checkInterfaces = we.verifyInterfaces
 	we.checkNftables = we.verifyNftables
 	we.checkControlPlane = we.verifyControlPlane
+	we.readSlotDiskVersion = we.readSlotVersionFromDiskReal
 	we.detectInitialState()
 	return we
 }
@@ -154,25 +156,146 @@ func resolveLabelDevice(label string) string {
 	return byLabel
 }
 
-func (we *WatchdogEngine) detectInitialState() {
-	we.mu.Lock()
-	defer we.mu.Unlock()
-
+func detectActiveSlotFromSystem(cmdlinePath string) (string, string) {
 	activeSlot := "A"
 	rootDevice := resolveLabelDevice("axon_root_a")
 
 	// 1. Inspect kernel cmdline if accessible
-	if cmdlineBytes, err := os.ReadFile(we.cmdlinePath); err == nil {
+	if cmdlineBytes, err := os.ReadFile(cmdlinePath); err == nil {
 		cmdline := string(cmdlineBytes)
 		if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
-			activeSlot = "B"
-			rootDevice = resolveLabelDevice("axon_root_b")
+			return "B", resolveLabelDevice("axon_root_b")
 		} else if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
-			activeSlot = "A"
-			rootDevice = resolveLabelDevice("axon_root_a")
+			return "A", resolveLabelDevice("axon_root_a")
 		}
 	}
 
+	// 2. Fallback: inspect /proc/mounts to find root filesystem device
+	if mountsData, err := os.ReadFile("/proc/mounts"); err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(mountsData))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) >= 2 && fields[1] == "/" {
+				dev := fields[0]
+				if out, err := exec.Command("blkid", "-s", "LABEL", "-o", "value", dev).Output(); err == nil {
+					lbl := strings.TrimSpace(string(out))
+					if lbl == "axon_root_b" {
+						return "B", dev
+					} else if lbl == "axon_root_a" {
+						return "A", dev
+					}
+				}
+				rootDevice = dev
+				break
+			}
+		}
+	}
+
+	return activeSlot, rootDevice
+}
+
+func findMountPointForDevice(dev string) string {
+	mountsData, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return ""
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(mountsData))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 {
+			mDev := fields[0]
+			mMount := fields[1]
+			if mMount == "/" {
+				continue
+			}
+			if mDev == dev {
+				return mMount
+			}
+			if realDev, err := filepath.EvalSymlinks(dev); err == nil && realDev != "" && mDev == realDev {
+				return mMount
+			}
+			if realMDev, err := filepath.EvalSymlinks(mDev); err == nil && realMDev != "" && realMDev == dev {
+				return mMount
+			}
+		}
+	}
+	return ""
+}
+
+func readVersionFromDirectory(dir string) string {
+	for _, sub := range []string{"etc/axonwall/version", "opt/axonwall/apps/axonwall/package.json", "opt/axonwall/package.json"} {
+		fpath := filepath.Join(dir, sub)
+		if data, err := os.ReadFile(fpath); err == nil {
+			trimmed := strings.TrimSpace(string(data))
+			if strings.HasPrefix(trimmed, "{") {
+				if idx := strings.Index(trimmed, `"version":`); idx != -1 {
+					s := trimmed[idx+10:]
+					s = strings.Trim(strings.Split(s, ",")[0], ` "`)
+					if s != "" {
+						return s
+					}
+				}
+			} else if trimmed != "" {
+				lines := strings.Split(trimmed, "\n")
+				if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+					return strings.TrimSpace(lines[0])
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (we *WatchdogEngine) readSlotVersionFromDiskReal(slot string) string {
+	slotUpper := strings.ToUpper(strings.TrimSpace(slot))
+	label := "axon_root_a"
+	if slotUpper == "B" {
+		label = "axon_root_b"
+	}
+
+	dev := resolveLabelDevice(label)
+	if dev == "" {
+		return ""
+	}
+	if _, err := os.Stat(dev); err != nil {
+		return ""
+	}
+
+	// 1. Check if device is already mounted somewhere other than /
+	mountDir := findMountPointForDevice(dev)
+	if mountDir != "" {
+		if v := readVersionFromDirectory(mountDir); v != "" {
+			return v
+		}
+	}
+
+	// 2. Temporarily mount read-only
+	tmpDir, err := os.MkdirTemp("", "axon_slot_check_*")
+	if err != nil {
+		return ""
+	}
+	defer os.Remove(tmpDir)
+
+	// Try mounting with ro,noload (prevent ext4 journal replay modifications)
+	mountCmd := exec.Command("mount", "-o", "ro,noload", dev, tmpDir)
+	if err := mountCmd.Run(); err != nil {
+		mountCmd = exec.Command("mount", "-o", "ro", dev, tmpDir)
+		if err := mountCmd.Run(); err != nil {
+			return ""
+		}
+	}
+	defer func() {
+		_ = exec.Command("umount", "-l", tmpDir).Run()
+	}()
+
+	return readVersionFromDirectory(tmpDir)
+}
+
+func (we *WatchdogEngine) detectInitialState() {
+	we.mu.Lock()
+	defer we.mu.Unlock()
+
+	activeSlot, rootDevice := detectActiveSlotFromSystem(we.cmdlinePath)
 	inactiveSlot := "B"
 	if activeSlot == "B" {
 		inactiveSlot = "A"
@@ -205,16 +328,36 @@ func (we *WatchdogEngine) detectInitialState() {
 
 	appVer := readInstalledVersion()
 	slotAVer, slotBVer := we.loadSlotVersions()
-	if slotAVer == "" {
-		slotAVer = appVer
+
+	readDisk := we.readSlotDiskVersion
+	if readDisk == nil {
+		readDisk = we.readSlotVersionFromDiskReal
 	}
-	if slotBVer == "" {
-		slotBVer = appVer
-	}
+
+	// The active slot's version is authoritative from the currently running system
 	if activeSlot == "A" {
 		slotAVer = appVer
+		// For the inactive slot: if missing or identical to active slot (e.g. from previous corrupted persistence),
+		// inspect the physical inactive partition.
+		if slotBVer == "" || slotBVer == slotAVer {
+			if diskVer := readDisk("B"); diskVer != "" {
+				slotBVer = diskVer
+			}
+		}
+		if slotBVer == "" {
+			slotBVer = "Standby"
+		}
 	} else if activeSlot == "B" {
 		slotBVer = appVer
+		// For the inactive slot: if missing or identical to active slot, inspect physical partition.
+		if slotAVer == "" || slotAVer == slotBVer {
+			if diskVer := readDisk("A"); diskVer != "" {
+				slotAVer = diskVer
+			}
+		}
+		if slotAVer == "" {
+			slotAVer = "Standby"
+		}
 	}
 
 	activeVer := slotAVer
@@ -241,7 +384,7 @@ func (we *WatchdogEngine) detectInitialState() {
 
 func readInstalledVersion() string {
 	appVer := "0.8.13"
-	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json"} {
+	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json", "./package.json", "../package.json"} {
 		if data, err := os.ReadFile(vpath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
 			if strings.HasPrefix(trimmed, "{") {
@@ -254,8 +397,11 @@ func readInstalledVersion() string {
 					}
 				}
 			} else if trimmed != "" {
-				appVer = strings.TrimSpace(strings.Split(trimmed, "\n")[0])
-				break
+				lines := strings.Split(trimmed, "\n")
+				if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+					appVer = strings.TrimSpace(lines[0])
+					break
+				}
 			}
 		}
 	}
@@ -291,15 +437,39 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 	if slotBVer != "" {
 		we.status.SlotBVersion = slotBVer
 	}
-	if data, err := os.ReadFile("/etc/axonwall/version"); err == nil {
-		if v := strings.TrimSpace(strings.Split(string(data), "\n")[0]); v != "" {
-			if we.status.ActiveSlot == "A" {
-				we.status.SlotAVersion = v
-			} else if we.status.ActiveSlot == "B" {
-				we.status.SlotBVersion = v
+
+	appVer := readInstalledVersion()
+	readDisk := we.readSlotDiskVersion
+	if readDisk == nil {
+		readDisk = we.readSlotVersionFromDiskReal
+	}
+
+	if we.status.ActiveSlot == "A" {
+		we.status.SlotAVersion = appVer
+		if we.status.SlotBVersion == "" || we.status.SlotBVersion == "Standby" || we.status.SlotBVersion == "Unknown" || we.status.SlotBVersion == we.status.SlotAVersion {
+			readDisk := we.readSlotDiskVersion
+			if readDisk == nil {
+				readDisk = we.readSlotVersionFromDiskReal
+			}
+			if diskVer := readDisk("B"); diskVer != "" && diskVer != we.status.SlotBVersion {
+				we.status.SlotBVersion = diskVer
+				we.saveSlotVersionsLocked()
+			}
+		}
+	} else if we.status.ActiveSlot == "B" {
+		we.status.SlotBVersion = appVer
+		if we.status.SlotAVersion == "" || we.status.SlotAVersion == "Standby" || we.status.SlotAVersion == "Unknown" || we.status.SlotAVersion == we.status.SlotBVersion {
+			readDisk := we.readSlotDiskVersion
+			if readDisk == nil {
+				readDisk = we.readSlotVersionFromDiskReal
+			}
+			if diskVer := readDisk("A"); diskVer != "" && diskVer != we.status.SlotAVersion {
+				we.status.SlotAVersion = diskVer
+				we.saveSlotVersionsLocked()
 			}
 		}
 	}
+
 	activeVer := we.status.SlotAVersion
 	if we.status.ActiveSlot == "B" {
 		activeVer = we.status.SlotBVersion
@@ -571,10 +741,17 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 	_ = we.writeGrubEnvKey("bootcount", "0")
 	_ = we.writeGrubEnvKey("bootlimit", "3")
 
+	currentRunningVer := readInstalledVersion()
 	if targetSlot == "A" {
 		we.status.SlotAVersion = targetVersion
+		if we.status.ActiveSlot == "B" {
+			we.status.SlotBVersion = currentRunningVer
+		}
 	} else {
 		we.status.SlotBVersion = targetVersion
+		if we.status.ActiveSlot == "A" {
+			we.status.SlotAVersion = currentRunningVer
+		}
 	}
 
 	we.saveSlotVersionsLocked()

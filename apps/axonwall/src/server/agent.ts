@@ -1744,6 +1744,9 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   const daemonData = await callAgentApi<any>('/v1/system/partitions');
   if (daemonData && daemonData.activeSlot) {
     const activeSlot = daemonData.activeSlot.toUpperCase();
+    const defaultInactive = 'Standby';
+    const slotAVer = daemonData.slotAVersion || (activeSlot === 'A' ? currentVersion : defaultInactive);
+    const slotBVer = daemonData.slotBVersion || (activeSlot === 'B' ? currentVersion : defaultInactive);
     return {
       slots: [
         {
@@ -1751,7 +1754,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
           name: 'Slot A (Primary Rootfs)',
           isActive: activeSlot === 'A',
           isHealthy: daemonData.healthVerified || activeSlot === 'A',
-          version: daemonData.slotAVersion || currentVersion,
+          version: slotAVer,
           kernel: daemonData.kernelVersion || kernel,
           device: activeSlot === 'A' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_a',
           label: 'axon_root_a',
@@ -1763,7 +1766,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
           name: 'Slot B (Alternate Standby)',
           isActive: activeSlot === 'B',
           isHealthy: daemonData.healthVerified || activeSlot === 'B',
-          version: daemonData.slotBVersion || currentVersion,
+          version: slotBVer,
           kernel: daemonData.kernelVersion || kernel,
           device: activeSlot === 'B' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_b',
           label: 'axon_root_b',
@@ -1821,8 +1824,8 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
     if (countMatch) bootCount = parseInt(countMatch[1], 10);
   } catch {}
 
-  let slotAVersion = activeSlot === 'A' ? currentVersion : '0.5.0';
-  let slotBVersion = activeSlot === 'B' ? currentVersion : '0.5.0';
+  let slotAVersion = activeSlot === 'A' ? currentVersion : 'Standby';
+  let slotBVersion = activeSlot === 'B' ? currentVersion : 'Standby';
   try {
     for (const svPath of ['/var/lib/axonwall/slot_versions.json', '/etc/axonwall/slot_versions.json']) {
       if (fs.existsSync(svPath)) {

@@ -233,6 +233,35 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     if [ -n "$CLEAN_VER" ]; then
       mkdir -p "${STAGE_DIR}/etc/axonwall" 2>/dev/null || true
       echo "$CLEAN_VER" > "${STAGE_DIR}/etc/axonwall/version" 2>/dev/null || true
+
+      # Accurately compute and persist per-slot versions
+      RUNNING_ACTIVE_SLOT="A"
+      if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
+        RUNNING_ACTIVE_SLOT="B"
+      fi
+      RUNNING_VER="0.8.13"
+      if [ -f /etc/axonwall/version ]; then
+        RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
+      fi
+
+      if [ "$TARGET_SLOT" = "A" ]; then
+        SV_A="$CLEAN_VER"
+        SV_B="$RUNNING_VER"
+      else
+        SV_A="$RUNNING_VER"
+        SV_B="$CLEAN_VER"
+      fi
+
+      SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+      SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$SV_A" "$SV_B" "$SV_TIMESTAMP")"
+
+      # Write to target rootfs
+      printf '%s' "$SV_JSON" > "${STAGE_DIR}/etc/axonwall/slot_versions.json" 2>/dev/null || true
+
+      # Write to running rootfs and shared data partition
+      mkdir -p /etc/axonwall /var/lib/axonwall 2>/dev/null || true
+      printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+      printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
     fi
 
     # Ensure stable kernel & initrd symlinks exist on target slot

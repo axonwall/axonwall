@@ -1,7 +1,8 @@
 [Unit]
 Description=Axonwall Privileged Firewall & Networking Daemon
 Documentation=https://github.com/axonwall/axonwall
-After=network-pre.target systemd-sysctl.service
+After=local-fs.target network-pre.target systemd-sysctl.service
+Requires=local-fs.target
 Before=network.target
 Wants=network-pre.target
 DefaultDependencies=no
