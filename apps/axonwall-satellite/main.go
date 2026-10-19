@@ -61,7 +61,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(logger)
 
-	slog.Info("Starting Axonwall Satellite Agent", "version", "0.8.14", "id", *satID)
+	slog.Info("Starting Axonwall Satellite Agent", "version", "0.8.15", "id", *satID)
 
 	if *satID == "" || *token == "" {
 		slog.Error("Missing required ZTP parameters. Must provide -id and -token.")
