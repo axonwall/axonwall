@@ -23,9 +23,17 @@ func TestTaskManagerUPIDAndExecution(t *testing.T) {
 		return nil
 	})
 
-	time.Sleep(100 * time.Millisecond)
+	var task *TaskRecord
+	var err error
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		task, err = mgr.GetTask(taskUpid)
+		if err == nil && task.Status != "running" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
-	task, err := mgr.GetTask(taskUpid)
 	if err != nil {
 		t.Fatalf("failed to get task: %v", err)
 	}
