@@ -69,6 +69,7 @@ type WatchdogEngine struct {
 	checkNftables       func() HealthCheckResult
 	checkControlPlane   func() HealthCheckResult
 	readSlotDiskVersion func(slot string) string
+	readInstalledVer    func() string
 }
 
 // NewWatchdogEngine initializes the A/B system watchdog engine with default paths.
@@ -93,8 +94,16 @@ func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEn
 	we.checkNftables = we.verifyNftables
 	we.checkControlPlane = we.verifyControlPlane
 	we.readSlotDiskVersion = we.readSlotVersionFromDiskReal
+	we.readInstalledVer = readInstalledVersion
 	we.detectInitialState()
 	return we
+}
+
+func (we *WatchdogEngine) getInstalledVersion() string {
+	if we.readInstalledVer != nil {
+		return we.readInstalledVer()
+	}
+	return readInstalledVersion()
 }
 
 func (we *WatchdogEngine) getSlotVersionsPath() string {
@@ -326,7 +335,7 @@ func (we *WatchdogEngine) detectInitialState() {
 		kernelVer = strings.TrimSpace(string(buf[:]))
 	}
 
-	appVer := readInstalledVersion()
+	appVer := we.getInstalledVersion()
 	slotAVer, slotBVer := we.loadSlotVersions()
 
 	readDisk := we.readSlotDiskVersion
@@ -438,7 +447,7 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 		we.status.SlotBVersion = slotBVer
 	}
 
-	appVer := readInstalledVersion()
+	appVer := we.getInstalledVersion()
 	readDisk := we.readSlotDiskVersion
 	if readDisk == nil {
 		readDisk = we.readSlotVersionFromDiskReal
@@ -702,7 +711,7 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 	}
 	targetVersion = strings.TrimSpace(strings.TrimPrefix(targetVersion, "v"))
 	if targetVersion == "" {
-		targetVersion = readInstalledVersion()
+		targetVersion = we.getInstalledVersion()
 	}
 	// Sanitize version string to prevent any shell/argument injection
 	for _, r := range targetVersion {

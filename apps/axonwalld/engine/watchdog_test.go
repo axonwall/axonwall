@@ -212,6 +212,7 @@ func TestWatchdogAccurateSlotVersionsPreserved(t *testing.T) {
 
 	engine := NewWatchdogEngineCustom(grubenvPath, cmdlinePath)
 	engine.slotVersionsPath = slotVersionsPath
+	engine.readInstalledVer = func() string { return "0.8.12" }
 	stubUpdater := filepath.Join(tempDir, "axonwall-update")
 	if err := os.WriteFile(stubUpdater, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
 		t.Fatalf("write stub updater: %v", err)
@@ -219,7 +220,7 @@ func TestWatchdogAccurateSlotVersionsPreserved(t *testing.T) {
 	engine.updaterPaths = []string{stubUpdater}
 
 	mockDisk := map[string]string{
-		"A": "0.8.13",
+		"A": "0.8.12",
 		"B": "0.8.12",
 	}
 	engine.readSlotDiskVersion = func(slot string) string {
@@ -243,6 +244,7 @@ func TestWatchdogAccurateSlotVersionsPreserved(t *testing.T) {
 	}
 	engineRebooted := NewWatchdogEngineCustom(grubenvPath, cmdlinePath)
 	engineRebooted.slotVersionsPath = slotVersionsPath
+	engineRebooted.readInstalledVer = func() string { return "0.8.13" }
 	engineRebooted.readSlotDiskVersion = func(slot string) string {
 		if slot == "A" {
 			return "0.8.12"
@@ -285,6 +287,7 @@ func TestWatchdogSelfHealsDuplicateSlotVersions(t *testing.T) {
 
 	engine := NewWatchdogEngineCustom(grubenvPath, cmdlinePath)
 	engine.slotVersionsPath = slotVersionsPath
+	engine.readInstalledVer = func() string { return "0.8.13" }
 	// Mock inactive slot A disk inspection returning the real prior version
 	engine.readSlotDiskVersion = func(slot string) string {
 		if slot == "A" {
