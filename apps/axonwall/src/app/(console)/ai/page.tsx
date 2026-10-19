@@ -26,11 +26,10 @@ import {
 import {
   AI_PROVIDERS_META,
   parseDraftedRules,
-  parseLogAnalysis,
-  simulateAiResponse,
 } from '@axonwall/lib/ai';
 import type { AiProviderType, AiConfig, FirewallRule } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { testAiProviderProbe, generateAiCompletion } from '@/server/ai';
 
 interface ChatMessage {
   id: string;
@@ -88,12 +87,42 @@ export default function AiCopilotPage() {
     },
   });
 
+  const [testStatus, setTestStatus] = useState<Record<AiProviderType, { text: string; ok: boolean | null }>>({
+    antigravity: { text: 'Not tested (API key required)', ok: null },
+    ollama: { text: 'Not tested (127.0.0.1:11434)', ok: null },
+    'claude-code': { text: 'Not tested (API key required)', ok: null },
+    codex: { text: 'Not tested (API key required)', ok: null },
+    vllm: { text: 'Not tested (127.0.0.1:8000)', ok: null },
+  });
+
   useEffect(() => {
     getCurrentDesiredState()
       .then((state) => {
         if (state.ai) {
           setConfig(state.ai);
           setActiveProvider(state.ai.activeProvider);
+          setTestStatus({
+            antigravity: {
+              text: state.ai.providers.antigravity.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
+              ok: state.ai.providers.antigravity.apiKey ? null : false,
+            },
+            ollama: {
+              text: `Untested (${state.ai.providers.ollama.endpoint})`,
+              ok: null,
+            },
+            'claude-code': {
+              text: state.ai.providers.claudeCode.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
+              ok: state.ai.providers.claudeCode.apiKey ? null : false,
+            },
+            codex: {
+              text: state.ai.providers.codex.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
+              ok: state.ai.providers.codex.apiKey ? null : false,
+            },
+            vllm: {
+              text: `Untested (${state.ai.providers.vllm.endpoint})`,
+              ok: null,
+            },
+          });
         }
       })
       .catch(() => {});
@@ -113,19 +142,11 @@ export default function AiCopilotPage() {
     setIsSavingConfig(false);
   };
 
-  const [testStatus, setTestStatus] = useState<Record<string, string>>({
-    antigravity: 'Ready (Latency 142ms)',
-    ollama: 'Ready (Local 127.0.0.1:11434)',
-    'claude-code': 'Configured',
-    codex: 'Configured',
-    vllm: 'Ready (Local 127.0.0.1:8000)',
-  });
-
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: '1',
       sender: 'ai',
-      text: 'Welcome to the Axonwall AI Copilot. I am initialized with full awareness of your running nftables ruleset, ISC Kea DHCP subnets, and Keepalived HA state. Ask me to draft rules, audit your configuration, or analyze security alerts.',
+      text: 'Welcome to the Axonwall AI Copilot. I am initialized with full awareness of your running nftables ruleset, ISC Kea DHCP subnets, and Keepalived HA state. Configure your preferred AI provider or local LLM in the Provider Settings tab, then ask me to draft rules, audit your configuration, or analyze security alerts.',
       timestamp: '14:52',
       provider: 'antigravity',
     },
@@ -171,13 +192,16 @@ export default function AiCopilotPage() {
     setIsGenerating(true);
 
     try {
-      const mode = query.toLowerCase().includes('audit')
+      const lower = query.toLowerCase();
+      const mode = lower.includes('explain this security event log')
+        ? 'explain'
+        : lower.includes('audit')
         ? 'audit'
-        : query.toLowerCase().includes('rule') || query.toLowerCase().includes('block') || query.toLowerCase().includes('allow')
+        : lower.includes('rule') || lower.includes('block') || lower.includes('allow')
         ? 'draft'
         : 'chat';
 
-      const responseText = await simulateAiResponse(activeProvider, query, mode);
+      const responseText = await generateAiCompletion(activeProvider, query, mode, config);
       const parsed = parseDraftedRules(responseText);
 
       const aiMsg: ChatMessage = {
@@ -218,11 +242,29 @@ export default function AiCopilotPage() {
     setTimeout(() => setStagedNotification(null), 4000);
   };
 
-  const handleTestProvider = (providerKey: string) => {
-    setTestStatus((prev) => ({ ...prev, [providerKey]: 'Testing probe...' }));
-    setTimeout(() => {
-      setTestStatus((prev) => ({ ...prev, [providerKey]: 'Connected & Verified (200 OK)' }));
-    }, 800);
+  const handleTestProvider = async (providerKey: AiProviderType) => {
+    setTestStatus((prev) => ({
+      ...prev,
+      [providerKey]: { text: 'Testing probe...', ok: null },
+    }));
+    try {
+      const res = await testAiProviderProbe(providerKey, config);
+      setTestStatus((prev) => ({
+        ...prev,
+        [providerKey]: {
+          text: res.status,
+          ok: res.ok,
+        },
+      }));
+    } catch (err: any) {
+      setTestStatus((prev) => ({
+        ...prev,
+        [providerKey]: {
+          text: `Failed: ${err?.message || 'Probe error'}`,
+          ok: false,
+        },
+      }));
+    }
   };
 
   return (
@@ -571,6 +613,24 @@ export default function AiCopilotPage() {
                     />
                   </div>
                   <div>
+                    <label className="text-slate-500 block mb-1">API KEY (GEMINI / VERTEX)</label>
+                    <input
+                      type="password"
+                      placeholder="AIzaSy..."
+                      value={config.providers.antigravity.apiKey || ''}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          providers: {
+                            ...config.providers,
+                            antigravity: { ...config.providers.antigravity, apiKey: e.target.value },
+                          },
+                        })
+                      }
+                      className="w-full p-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                    />
+                  </div>
+                  <div>
                     <label className="text-slate-500 block mb-1">MODEL</label>
                     <select
                       value={config.providers.antigravity.model}
@@ -593,11 +653,22 @@ export default function AiCopilotPage() {
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-slate-800 flex items-center justify-between">
-                <span className="text-[11px] text-emerald-400 font-mono">{testStatus.antigravity}</span>
+              <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span
+                  className={`text-[11px] font-mono truncate ${
+                    testStatus.antigravity.ok === true
+                      ? 'text-emerald-400'
+                      : testStatus.antigravity.ok === false
+                      ? 'text-rose-400'
+                      : 'text-amber-400'
+                  }`}
+                  title={testStatus.antigravity.text}
+                >
+                  {testStatus.antigravity.text}
+                </span>
                 <button
                   onClick={() => handleTestProvider('antigravity')}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition shrink-0 cursor-pointer"
                 >
                   Test Probe
                 </button>
@@ -659,11 +730,22 @@ export default function AiCopilotPage() {
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-slate-800 flex items-center justify-between">
-                <span className="text-[11px] text-emerald-400 font-mono">{testStatus.ollama}</span>
+              <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span
+                  className={`text-[11px] font-mono truncate ${
+                    testStatus.ollama.ok === true
+                      ? 'text-emerald-400'
+                      : testStatus.ollama.ok === false
+                      ? 'text-rose-400'
+                      : 'text-amber-400'
+                  }`}
+                  title={testStatus.ollama.text}
+                >
+                  {testStatus.ollama.text}
+                </span>
                 <button
                   onClick={() => handleTestProvider('ollama')}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition shrink-0 cursor-pointer"
                 >
                   Test Probe
                 </button>
@@ -726,11 +808,22 @@ export default function AiCopilotPage() {
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-slate-800 flex items-center justify-between">
-                <span className="text-[11px] text-emerald-400 font-mono">{testStatus['claude-code']}</span>
+              <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span
+                  className={`text-[11px] font-mono truncate ${
+                    testStatus['claude-code'].ok === true
+                      ? 'text-emerald-400'
+                      : testStatus['claude-code'].ok === false
+                      ? 'text-rose-400'
+                      : 'text-amber-400'
+                  }`}
+                  title={testStatus['claude-code'].text}
+                >
+                  {testStatus['claude-code'].text}
+                </span>
                 <button
                   onClick={() => handleTestProvider('claude-code')}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition shrink-0 cursor-pointer"
                 >
                   Test Probe
                 </button>
@@ -793,11 +886,22 @@ export default function AiCopilotPage() {
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-slate-800 flex items-center justify-between">
-                <span className="text-[11px] text-emerald-400 font-mono">{testStatus.codex}</span>
+              <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span
+                  className={`text-[11px] font-mono truncate ${
+                    testStatus.codex.ok === true
+                      ? 'text-emerald-400'
+                      : testStatus.codex.ok === false
+                      ? 'text-rose-400'
+                      : 'text-amber-400'
+                  }`}
+                  title={testStatus.codex.text}
+                >
+                  {testStatus.codex.text}
+                </span>
                 <button
                   onClick={() => handleTestProvider('codex')}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition shrink-0 cursor-pointer"
                 >
                   Test Probe
                 </button>
@@ -837,6 +941,24 @@ export default function AiCopilotPage() {
                     />
                   </div>
                   <div>
+                    <label className="text-slate-500 block mb-1">API KEY (OPTIONAL)</label>
+                    <input
+                      type="password"
+                      placeholder="token-..."
+                      value={config.providers.vllm.apiKey || ''}
+                      onChange={(e) =>
+                        setConfig({
+                          ...config,
+                          providers: {
+                            ...config.providers,
+                            vllm: { ...config.providers.vllm, apiKey: e.target.value },
+                          },
+                        })
+                      }
+                      className="w-full p-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                    />
+                  </div>
+                  <div>
                     <label className="text-slate-500 block mb-1">LOADED WEIGHTS MODEL</label>
                     <select
                       value={config.providers.vllm.model}
@@ -859,11 +981,22 @@ export default function AiCopilotPage() {
                 </div>
               </div>
 
-              <div className="pt-4 border-t border-slate-800 flex items-center justify-between">
-                <span className="text-[11px] text-emerald-400 font-mono">{testStatus.vllm}</span>
+              <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span
+                  className={`text-[11px] font-mono truncate ${
+                    testStatus.vllm.ok === true
+                      ? 'text-emerald-400'
+                      : testStatus.vllm.ok === false
+                      ? 'text-rose-400'
+                      : 'text-amber-400'
+                  }`}
+                  title={testStatus.vllm.text}
+                >
+                  {testStatus.vllm.text}
+                </span>
                 <button
                   onClick={() => handleTestProvider('vllm')}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition shrink-0 cursor-pointer"
                 >
                   Test Probe
                 </button>

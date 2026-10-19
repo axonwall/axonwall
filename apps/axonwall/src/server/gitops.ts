@@ -11,7 +11,7 @@ import {
   serializeDesiredStateToYamlFiles,
   parseDesiredStateFromYamlFiles,
 } from '@axonwall/lib/yaml';
-import { applyDesiredState } from './agent';
+import { applyDesiredState, callAgentApi } from './agent';
 
 const GITOPS_DIR = process.env.GITOPS_DIR || '/var/lib/axonwall/gitops';
 
