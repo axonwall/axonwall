@@ -205,6 +205,15 @@ chmod 0640 /etc/axonwall/axonwall.env 2>/dev/null || true
 chown root:axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
 chown -R axonwall:axonwall /opt/axonwall 2>/dev/null || true
 
+# Initialize etckeeper if installed
+if command -v etckeeper >/dev/null 2>&1; then
+  if [ ! -d /etc/.git ]; then
+    echo "[Axonwall Firstboot] Initializing etckeeper for /etc configuration tracking..."
+    etckeeper init || true
+    etckeeper commit "Initial etckeeper commit for Axonwall appliance" || true
+  fi
+fi
+
 rm -f "$MARKER"
 
 PRIMARY_IP="192.168.1.1"

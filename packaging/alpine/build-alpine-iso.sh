@@ -158,6 +158,8 @@ CORE_PKGS=(
   grub-bios
   grub-efi
   openssh
+  etckeeper
+  git
 )
 
 if [[ "$MINIMAL" -eq 0 ]]; then

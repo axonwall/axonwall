@@ -29,6 +29,65 @@ export interface GitOpsHistory {
   currentHash?: string;
 }
 
+export interface EtckeeperStatus {
+  installed: boolean;
+  vcs: string;
+  clean: boolean;
+  lastCommitHash?: string;
+  lastCommitMsg?: string;
+  lastCommitTime?: string;
+  trackedPath: string;
+}
+
+export interface EtckeeperCommitLog {
+  hash: string;
+  author: string;
+  date: string;
+  subject: string;
+}
+
+export async function getEtckeeperStatus(): Promise<EtckeeperStatus | null> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  return await callAgentApi<EtckeeperStatus>('/v1/system/etckeeper/status', 'GET');
+}
+
+export async function getEtckeeperHistory(limit = 25): Promise<EtckeeperCommitLog[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const resp = await callAgentApi<{ history: EtckeeperCommitLog[] }>(
+    `/v1/system/etckeeper/history`,
+    'GET'
+  );
+  return resp?.history || [];
+}
+
+export async function getEtckeeperDiff(commitHash?: string): Promise<string> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const q = commitHash ? `?commit=${encodeURIComponent(commitHash)}` : '';
+  const resp = await callAgentApi<{ diff: string }>(
+    `/v1/system/etckeeper/diff${q}`,
+    'GET'
+  );
+  return resp?.diff || 'No diff available or etckeeper not initialized.';
+}
+
+export async function commitEtckeeper(message: string): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const author = session.username || 'admin';
+  const resp = await callAgentApi<{ success: boolean; message?: string }>(
+    '/v1/system/etckeeper/commit',
+    'POST',
+    { message, author }
+  );
+  if (resp && resp.success) {
+    return { success: true, message: resp.message || 'Changes in /etc committed successfully.' };
+  }
+  return { success: false, message: 'Failed to record commit via etckeeper.' };
+}
+
 function ensureGitOpsRepo() {
   try {
     if (!fs.existsSync(GITOPS_DIR)) {

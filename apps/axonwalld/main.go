@@ -50,9 +50,10 @@ type AgentServer struct {
 	nasManager       *engine.NasManager
 	k3sManager       *engine.K3sManager
 	vigilanteManager *engine.VigilanteManager
+	etckeeperManager *engine.EtckeeperManager
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager, etckeeperManager *engine.EtckeeperManager) *AgentServer {
 	hostname, _ := os.Hostname()
 
 	initHash := ""
@@ -81,6 +82,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		nasManager:       nasManager,
 		k3sManager:       k3sManager,
 		vigilanteManager: vigilanteManager,
+		etckeeperManager: etckeeperManager,
 	}
 }
 
@@ -228,6 +230,11 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		if filepath.Base(cleanPath) == "vigilante_config.json" && s.vigilanteManager != nil {
 			log.Printf("[Agent] Applying Vigilante Cyber Defense configuration")
 		}
+	}
+
+	if s.etckeeperManager != nil && len(req.Files) > 0 {
+		commitMsg := fmt.Sprintf("Axonwall configuration bundle applied (%s)", req.BundleHash)
+		s.etckeeperManager.ScheduleCommit(commitMsg, "axonwall")
 	}
 
 	// 3. Backup current script for rollback
@@ -934,8 +941,12 @@ func main() {
 	watchdog := engine.NewWatchdogEngine()
 	watchdog.Start()
 	vigilanteManager := engine.NewVigilanteManager("/var/lib/axonwall/vigilante")
+	etckeeperManager := engine.NewEtckeeperManager("/etc")
+	if etckeeperManager.IsInstalled() {
+		_ = etckeeperManager.Init()
+	}
 
-	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager)
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -1627,6 +1638,61 @@ func main() {
 
 		mux.HandleFunc("/v1/vigilante/telemetry/stream", vigilanteManager.StreamLiveTelemetry)
 
+		// Etckeeper /etc change tracking APIs
+		mux.HandleFunc("/v1/system/etckeeper/status", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(etckeeperManager.GetStatus())
+		})
+
+		mux.HandleFunc("/v1/system/etckeeper/commit", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Message string `json:"message"`
+				Author  string `json:"author"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := etckeeperManager.Commit(req.Message, req.Author); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": "Committed /etc changes to etckeeper successfully",
+			})
+		})
+
+		mux.HandleFunc("/v1/system/etckeeper/history", func(w http.ResponseWriter, r *http.Request) {
+			history, err := etckeeperManager.GetHistory(25)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"history": history,
+			})
+		})
+
+		mux.HandleFunc("/v1/system/etckeeper/diff", func(w http.ResponseWriter, r *http.Request) {
+			commitHash := r.URL.Query().Get("commit")
+			diff, err := etckeeperManager.GetDiff(commitHash)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"diff": diff,
+			})
+		})
+
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}
 		go func() {
 			log.Printf("[Agent] Listening on REST Unix socket: %s", apiSocketPath)
@@ -1651,6 +1717,7 @@ func main() {
 		haEngine.Stop()
 		sdwanProber.stop()
 		ebpfManager.Stop()
+		etckeeperManager.Close()
 		grpcServer.GracefulStop()
 		_ = os.Remove(*socketPath)
 		os.Exit(0)

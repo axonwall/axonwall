@@ -210,6 +210,15 @@ chown root:axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
 # Ensure proper ownership of Axonwall application directory (Next.js writes .next/cache)
 chown -R axonwall:axonwall /opt/axonwall 2>/dev/null || true
 
+# Initialize etckeeper if installed
+if command -v etckeeper &>/dev/null; then
+  if [[ ! -d /etc/.git ]]; then
+    echo "[Axonwall Firstboot] Initializing etckeeper for /etc configuration tracking..."
+    etckeeper init || true
+    etckeeper commit "Initial etckeeper commit for Axonwall appliance" || true
+  fi
+fi
+
 # 6. Remove marker and trigger services
 # Marker is removed first so ConditionPathExists doesn't loop or block
 rm -f "$MARKER"

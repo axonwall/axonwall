@@ -22,7 +22,9 @@ import {
   getGitOpsHistory,
   getCommitDiff,
   rollbackToGitOpsCommit,
+  getEtckeeperStatus,
   type GitCommitRecord,
+  type EtckeeperStatus,
 } from '@/server/gitops';
 import {
   getCurrentDesiredState,
@@ -55,6 +57,7 @@ export default function SystemPage() {
   // GitOps History
   const [commits, setCommits] = useState<GitCommitRecord[]>([]);
   const [currentHash, setCurrentHash] = useState<string | undefined>();
+  const [etckeeperStatus, setEtckeeperStatus] = useState<EtckeeperStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedDiff, setSelectedDiff] = useState<{ hash: string; diff: string } | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
@@ -68,13 +71,15 @@ export default function SystemPage() {
   const loadAll = async () => {
     setIsLoading(true);
     try {
-      const [gitData, state, snapshot] = await Promise.all([
+      const [gitData, state, snapshot, etcStatus] = await Promise.all([
         getGitOpsHistory(),
         getCurrentDesiredState(),
         getYamlConfigFilesSnapshot(),
+        getEtckeeperStatus(),
       ]);
       setCommits(gitData.commits);
       setCurrentHash(gitData.currentHash);
+      setEtckeeperStatus(etcStatus);
 
       if (state.system) {
         setHostname(state.system.hostname || 'axonwall');
@@ -494,22 +499,30 @@ export default function SystemPage() {
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
           <div className="flex items-center gap-2 text-white font-semibold">
-            <Settings className="w-5 h-5 text-cyan-400" />
-            <h2>Controller Status</h2>
+            <Server className="w-5 h-5 text-purple-400" />
+            <h2>/etc Tracking (etckeeper)</h2>
           </div>
           <div className="text-xs text-slate-300 space-y-2">
             <div className="flex justify-between">
-              <span className="text-slate-400">Agent Socket:</span>
-              <span className="font-mono text-slate-300">/run/axonwall/agent.sock</span>
+              <span className="text-slate-400">Status:</span>
+              <span className={etckeeperStatus?.installed ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'}>
+                {etckeeperStatus?.installed ? `Active (${etckeeperStatus.vcs || 'git'})` : 'Not Installed'}
+              </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Rollback Timeout:</span>
-              <span>120 seconds</span>
+              <span className="text-slate-400">Tracked Directory:</span>
+              <span className="font-mono text-cyan-400">{etckeeperStatus?.trackedPath || '/etc'}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Active Commit:</span>
-              <span className="font-mono text-emerald-400">
-                {currentHash ? currentHash.slice(0, 8) : 'HEAD'}
+              <span className="text-slate-400">Tree State:</span>
+              <span className={etckeeperStatus?.clean ? 'text-emerald-400' : 'text-amber-400'}>
+                {etckeeperStatus?.clean ? 'Clean (committed)' : 'Modified / Pending'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-400">Last /etc Commit:</span>
+              <span className="font-mono text-purple-400">
+                {etckeeperStatus?.lastCommitHash ? etckeeperStatus.lastCommitHash.slice(0, 8) : 'None'}
               </span>
             </div>
           </div>

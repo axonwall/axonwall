@@ -23,7 +23,9 @@ Recommends:
  frr,
  suricata,
  strongswan,
- openvpn
+ openvpn,
+ etckeeper,
+ git
 Description: Modern Linux Router & Next-Gen Firewall
  Axonwall replaces legacy BSD/PHP firewalls (OPNsense/pfSense) with a
  modern reactive architecture built on Linux nftables, Next.js, Supabase,

@@ -312,6 +312,8 @@ zfsutils-linux
 samba
 nfs-kernel-server
 open-iscsi
+etckeeper
+git
 EOF
 
 # 5. Build ISO

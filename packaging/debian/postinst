@@ -66,7 +66,15 @@ ENV_EOF
             chown root:axonwall /etc/axonwall/axonwall.env
         fi
 
-        # 5. Reload systemd daemon and enable services if systemd is running
+        # 5. Initialize etckeeper if installed
+        if command -v etckeeper >/dev/null 2>&1; then
+            if [ ! -d /etc/.git ]; then
+                etckeeper init || true
+                etckeeper commit "Initial etckeeper commit for Axonwall appliance" || true
+            fi
+        fi
+
+        # 6. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
             systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service || true
