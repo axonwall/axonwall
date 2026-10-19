@@ -117,13 +117,17 @@ const INITIAL_SATELLITES: SatelliteNode[] = [
   },
 ];
 
+const generateZtpToken = (): string =>
+  'ztp_axon_' +
+  Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
+
 export default function FleetPage() {
   const [satellites, setSatellites] = useState<SatelliteNode[]>(INITIAL_SATELLITES);
   const [selectedTag, setSelectedTag] = useState('ALL');
   const [search, setSearch] = useState('');
   const [selectedSat, setSelectedSat] = useState<SatelliteNode | null>(INITIAL_SATELLITES[1]);
   const [isZtpModalOpen, setIsZtpModalOpen] = useState(false);
-  const [generatedToken, setGeneratedToken] = useState('ztp_axon_98f4c1e20a4b77');
+  const [generatedToken, setGeneratedToken] = useState('');
   const [copied, setCopied] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -245,7 +249,10 @@ export default function FleetPage() {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={() => setIsZtpModalOpen(true)}
+            onClick={() => {
+              setGeneratedToken(generateZtpToken());
+              setIsZtpModalOpen(true);
+            }}
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-sm hover:bg-emerald-400 transition shadow-lg shadow-emerald-500/20"
           >
             <Plus className="w-4 h-4" />
@@ -609,7 +616,7 @@ export default function FleetPage() {
                   />
                   <button
                     onClick={() => {
-                      setGeneratedToken('ztp_axon_' + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join(''));
+                      setGeneratedToken(generateZtpToken());
                     }}
                     className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700"
                   >
