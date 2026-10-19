@@ -30,7 +30,17 @@ function buildNasAndK3sInputRules(
     if (!trustedDevs.includes(`"${syncDev}"`)) {
       trustedDevs.push(`"${syncDev}"`);
     }
-    hostRules.push(`    iifname "${syncDev}" tcp dport { 8443, 9443 } accept comment "ha-state-and-zfs-sync"`);
+    // Open the port the unified HA sync server actually listens on
+    // (sqliteSync.listenPort, default 9876 — state, DB, ZFS and K3s-token
+    // endpoints all share it). The previous hardcoded { 8443, 9443 } pair
+    // matched no listener in the tree and left the real sync port closed
+    // under the compiled input-drop policy (audit S-04).
+    const configuredPort = state.ha.sqliteSync?.listenPort;
+    const syncPort =
+      typeof configuredPort === 'number' && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535
+        ? configuredPort
+        : 9876;
+    hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
   }
 
   const devSet = trustedDevs.length > 0 ? `iifname { ${trustedDevs.join(', ')} } ` : '';
