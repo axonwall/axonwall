@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   Building2,
   Shield,
@@ -129,6 +130,13 @@ export default function SsoSettingsPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <Link
+            href="/system/users"
+            className="inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium px-3.5 py-2 rounded-lg border border-slate-700 transition"
+          >
+            <Users className="w-4 h-4 text-cyan-400" />
+            <span>Local Linux Users</span>
+          </Link>
           <button
             type="button"
             onClick={handleSaveConfig}

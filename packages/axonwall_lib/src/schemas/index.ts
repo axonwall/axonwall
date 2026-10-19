@@ -1488,6 +1488,75 @@ export const VigilanteConfigSchema = z.object({
 });
 export type VigilanteConfig = z.infer<typeof VigilanteConfigSchema>;
 
+export const ApplianceRoleSchema = z.enum(['admin', 'operator', 'readonly', 'os_only']);
+export type ApplianceRole = z.infer<typeof ApplianceRoleSchema>;
+
+export const LocalUserSchema = z.object({
+  username: z.string().min(1).max(32).regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'Invalid Linux username'),
+  uid: z.number().int().nonnegative(),
+  gid: z.number().int().nonnegative(),
+  comment: z.string().default(''),
+  homeDir: z.string().default(''),
+  shell: z.string().default(''),
+  groups: z.array(z.string()).default([]),
+  primaryGroup: z.string().default(''),
+  isSystem: z.boolean().default(false),
+  protected: z.boolean().default(false),
+  applianceRole: ApplianceRoleSchema.default('os_only'),
+  hasSSHKeys: z.boolean().default(false),
+  sshKeysCount: z.number().int().default(0),
+  sshKeys: z.array(z.string()).optional(),
+  hasPassword: z.boolean().default(false),
+  passwordLocked: z.boolean().default(false),
+});
+export type LocalUser = z.infer<typeof LocalUserSchema>;
+
+export const LocalGroupSchema = z.object({
+  name: z.string().min(1).max(32),
+  gid: z.number().int().nonnegative(),
+  members: z.array(z.string()).default([]),
+  isSystem: z.boolean().default(false),
+  protected: z.boolean().default(false),
+});
+export type LocalGroup = z.infer<typeof LocalGroupSchema>;
+
+export const CreateLocalUserRequestSchema = z.object({
+  username: z.string().min(1).max(32).regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'Invalid Linux username'),
+  comment: z.string().optional(),
+  password: z.string().optional(),
+  shell: z.string().optional(),
+  applianceRole: ApplianceRoleSchema.optional(),
+  groups: z.array(z.string()).optional(),
+  sshKeys: z.array(z.string()).optional(),
+});
+export type CreateLocalUserRequest = z.infer<typeof CreateLocalUserRequestSchema>;
+
+export const UpdateLocalUserRequestSchema = z.object({
+  comment: z.string().optional(),
+  password: z.string().optional(),
+  shell: z.string().optional(),
+  applianceRole: ApplianceRoleSchema.optional(),
+  groups: z.array(z.string()).optional(),
+  sshKeys: z.array(z.string()).optional(),
+  passwordLocked: z.boolean().optional(),
+});
+export type UpdateLocalUserRequest = z.infer<typeof UpdateLocalUserRequestSchema>;
+
+export const AuthLocalUserRequestSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+export type AuthLocalUserRequest = z.infer<typeof AuthLocalUserRequestSchema>;
+
+export const AuthLocalUserResponseSchema = z.object({
+  success: z.boolean(),
+  username: z.string(),
+  applianceRole: ApplianceRoleSchema,
+  groups: z.array(z.string()),
+  message: z.string().optional(),
+});
+export type AuthLocalUserResponse = z.infer<typeof AuthLocalUserResponseSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),

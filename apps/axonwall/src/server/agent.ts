@@ -22,7 +22,7 @@ import { assertActionPermitted } from './auth-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
 
-const AGENT_API_SOCKET = process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
+import { callAgentApi as internalCallAgentApi } from './agent-client';
 
 export interface AgentStatus {
   nodeId: string;
@@ -39,85 +39,12 @@ export interface AgentStatus {
   }>;
 }
 
-// In-memory mock/fallback state when running in dev mode without agent root daemon
 let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
 
-// axonwalld requires a per-install token on every agent API call
-// (see apps/axonwalld/agent_auth.go). The daemon provisions it at
-// /etc/axonwall/agent.token (0640 root:axonwall, readable by this
-// service); AXONWALL_AGENT_TOKEN overrides for dev/container setups.
-let cachedAgentToken: string | null | undefined;
-function getAgentToken(): string | undefined {
-  if (cachedAgentToken !== undefined) {
-    return cachedAgentToken ?? undefined;
-  }
-  let tok = process.env.AXONWALL_AGENT_TOKEN;
-  if (!tok) {
-    try {
-      tok = fs
-        .readFileSync(process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token', 'utf8')
-        .trim();
-    } catch {}
-  }
-  cachedAgentToken = tok || null;
-  return tok || undefined;
-}
-
 export async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeoutMs = 4000): Promise<T | null> {
-  return new Promise((resolve) => {
-    const postData = body ? JSON.stringify(body) : undefined;
-    const agentToken = getAgentToken();
-    const req = http.request(
-      {
-        socketPath: AGENT_API_SOCKET,
-        path,
-        method,
-        headers: {
-          ...(postData
-            ? {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData),
-              }
-            : {}),
-          ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {}),
-        },
-        timeout: timeoutMs,
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            try {
-              resolve(JSON.parse(data) as T);
-            } catch {
-              resolve(null);
-            }
-          } else {
-            resolve(null);
-          }
-        });
-      }
-    );
-
-    req.on('error', () => {
-      resolve(null);
-    });
-
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
-
-    if (postData) {
-      req.write(postData);
-    }
-    req.end();
-  });
+  return internalCallAgentApi<T>(path, method, body, timeoutMs);
 }
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();

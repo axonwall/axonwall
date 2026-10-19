@@ -83,6 +83,8 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Settings,
     items: [
       { name: 'Configuration & Revisions', href: '/system', icon: Settings },
+      { name: 'Local Users & Groups', href: '/system/users', icon: Users },
+      { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
       { name: 'High Availability (HA)', href: '/ha', icon: ArrowRightLeft },
       { name: 'Backup & Recovery', href: '/system/backup', icon: HardDrive },
       { name: 'A/B System Updates', href: '/system/updates', icon: RefreshCw },

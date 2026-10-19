@@ -945,6 +945,7 @@ func main() {
 	if etckeeperManager.IsInstalled() {
 		_ = etckeeperManager.Init()
 	}
+	userManager := engine.NewUserManager(etckeeperManager)
 
 	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
@@ -1691,6 +1692,127 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"diff": diff,
 			})
+		})
+
+		// Local Linux User & POSIX Group Management APIs
+		mux.HandleFunc("/v1/system/users", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				users, err := userManager.ParsePasswd()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"users": users})
+			case http.MethodPost:
+				var req engine.CreateUserRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					return
+				}
+				if err := userManager.CreateUser(req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": true,
+					"message": fmt.Sprintf("Created local user %s successfully", req.Username),
+				})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/v1/system/users/", func(w http.ResponseWriter, r *http.Request) {
+			username := strings.TrimPrefix(r.URL.Path, "/v1/system/users/")
+			username = strings.TrimSpace(username)
+			if username == "" {
+				http.Error(w, "Username required in path", http.StatusBadRequest)
+				return
+			}
+
+			switch r.Method {
+			case http.MethodPut:
+				var req engine.UpdateUserRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					return
+				}
+				if err := userManager.UpdateUser(username, req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": true,
+					"message": fmt.Sprintf("Updated local user %s successfully", username),
+				})
+			case http.MethodDelete:
+				removeHome := r.URL.Query().Get("removeHome") == "true"
+				if err := userManager.DeleteUser(username, removeHome); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": true,
+					"message": fmt.Sprintf("Deleted local user %s successfully", username),
+				})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/v1/system/groups", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				groups, err := userManager.ParseGroups()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"groups": groups})
+			case http.MethodPost:
+				var req struct {
+					Name string `json:"name"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					return
+				}
+				if err := userManager.EnsureGroupExists(req.Name); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": true,
+					"message": fmt.Sprintf("Group %s ensured successfully", req.Name),
+				})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/v1/system/users/auth", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.AuthUserRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			resp := userManager.Authenticate(req)
+			w.Header().Set("Content-Type", "application/json")
+			if !resp.Success {
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 		})
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

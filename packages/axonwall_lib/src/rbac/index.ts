@@ -99,7 +99,7 @@ export interface UserSession {
   username: string;
   displayName?: string;
   email?: string;
-  source: 'ldap' | 'local_admin';
+  source: 'ldap' | 'local_admin' | 'local' | 'oidc' | 'saml';
   roles: string[];
   privileges: Privilege[];
   exp: number;

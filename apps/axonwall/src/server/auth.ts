@@ -13,7 +13,8 @@ import {
   type LdapConfig,
   type AuthResult,
 } from '@axonwall/lib/ldap';
-import type { UserSession } from '@axonwall/lib/rbac';
+import { type UserSession, DEFAULT_ROLES, type Privilege } from '@axonwall/lib/rbac';
+import { callAgentApi } from './agent-client';
 
 import { SESSION_COOKIE, getJwtSecret } from './auth-constants';
 import { assertActionPermitted } from './auth-guard';
@@ -206,6 +207,39 @@ async function performAuthenticationInner(
       stampSessionEpoch(authRes.session);
     }
     return authRes;
+  }
+
+  // 1.8 Check Local Linux Users authenticated by axonwalld
+  try {
+    const localUserAuth = await callAgentApi<{
+      success: boolean;
+      username: string;
+      applianceRole: 'admin' | 'operator' | 'readonly' | 'os_only';
+      groups: string[];
+      message?: string;
+    }>('/v1/system/users/auth', 'POST', { username, password }, 2500);
+
+    if (localUserAuth && localUserAuth.success) {
+      const role = localUserAuth.applianceRole;
+      if (role === 'os_only') {
+        return { success: false, error: 'Local Linux user does not have Web Console administrative privileges' };
+      }
+      const roleDef = DEFAULT_ROLES[role];
+      const privileges = roleDef ? Array.from(roleDef.privileges) : [];
+      const session: UserSession = {
+        userId: `local:${username}`,
+        username,
+        displayName: username,
+        source: 'local',
+        roles: [role],
+        privileges,
+        exp: Math.floor(Date.now() / 1000) + 8 * 3600,
+      };
+      stampSessionEpoch(session);
+      return { success: true, session };
+    }
+  } catch {
+    // Daemon auth check failed or timed out, continue to LDAP fallback
   }
 
   // 2. Fall back to LDAP ONLY if explicitly enabled/configured
