@@ -13,21 +13,42 @@ case "$1" in
                 --comment "Axonwall Firewall System User" axonwall
         fi
 
+        # Service-identity split (audit B-12): the controller runs as its own
+        # user so a compromise of one Node service no longer yields the other
+        # service's secrets. axonwall-api is the shared group for the daemon
+        # sockets, the agent token and state traversal -- nothing else.
+        if ! getent group axonwall-api >/dev/null 2>&1; then
+            groupadd --system axonwall-api
+        fi
+        if ! getent group axonwall-controller >/dev/null 2>&1; then
+            groupadd --system axonwall-controller
+        fi
+        if ! getent passwd axonwall-controller >/dev/null 2>&1; then
+            useradd --system --gid axonwall-controller --home-dir /var/lib/axonwall \
+                --no-create-home --shell /usr/sbin/nologin \
+                --comment "Axonwall Controller Service User" axonwall-controller
+        fi
+        usermod -a -G axonwall-api axonwall 2>/dev/null || true
+        usermod -a -G axonwall-api axonwall-controller 2>/dev/null || true
+
         # 2. Ensure directories exist with strict permissions
         mkdir -p /var/lib/axonwall /var/log/axonwall /run/axonwall /etc/axonwall/certs /opt/axonwall
         mkdir -p /var/lib/axonwall/headscale /run/headscale
 
-        chown -R axonwall:axonwall /var/lib/axonwall /var/log/axonwall /opt/axonwall
-        chown -R axonwall:axonwall /var/lib/axonwall/headscale /run/headscale
-        chmod 750 /var/lib/axonwall /var/log/axonwall /opt/axonwall
+        chown -R axonwall:axonwall-api /var/lib/axonwall /opt/axonwall
+        chown -R axonwall:axonwall /var/log/axonwall
+        chown -R axonwall:axonwall /var/lib/axonwall/headscale
+        chown axonwall:axonwall-api /run/headscale
+        chmod 0770 /var/lib/axonwall
+        chmod 750 /var/log/axonwall /opt/axonwall
         chmod 770 /var/lib/axonwall/headscale /run/headscale
 
-        chown root:axonwall /etc/axonwall /etc/axonwall/certs
+        chown root:axonwall-api /etc/axonwall /etc/axonwall/certs
         chmod 0770 /etc/axonwall
         chmod 0750 /etc/axonwall/certs
         if [ -f /etc/axonwall/admin.env ]; then
-            chown root:axonwall /etc/axonwall/admin.env 2>/dev/null || true
-            chmod 0660 /etc/axonwall/admin.env 2>/dev/null || true
+            chown axonwall /etc/axonwall/admin.env 2>/dev/null || true
+            chmod 0600 /etc/axonwall/admin.env 2>/dev/null || true
         fi
 
         # 3. Generate baseline TLS certificates if absent
@@ -44,8 +65,10 @@ case "$1" in
         fi
 
         if [ -f /etc/axonwall/certs/hub.key ]; then
-            chown root:axonwall /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
-            chmod 640 /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+            # The controller is the only reader of the hub key (audit B-12).
+            chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+            chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
+            chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
         fi
 
         # 4. Generate default environment secrets if absent
@@ -56,14 +79,37 @@ case "$1" in
 
             cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
-AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
 LOCAL_ADMIN_USER=admin
 LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
 AGENT_SOCKET_PATH=/run/axonwall/agent.sock
 AGENT_API_SOCKET=/run/axonwall/agent-api.sock
 ENV_EOF
-            chmod 0640 /etc/axonwall/axonwall.env
-            chown root:axonwall /etc/axonwall/axonwall.env
+            chmod 0600 /etc/axonwall/axonwall.env
+            chown axonwall /etc/axonwall/axonwall.env
+
+            cat << ENV_EOF > /etc/axonwall/controller.env
+AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
+ENV_EOF
+            chmod 0600 /etc/axonwall/controller.env
+            chown root:root /etc/axonwall/controller.env
+        fi
+
+        # 4b. B-12 migration for upgrades: split the ZTP token out of a
+        # monolith axonwall.env written before the service-identity split,
+        # and re-assert the split ownership (idempotent).
+        if [ -f /etc/axonwall/axonwall.env ]; then
+            chown axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
+            chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
+            if [ ! -f /etc/axonwall/controller.env ] && grep -q '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env; then
+                grep '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env > /etc/axonwall/controller.env || true
+                chown root:root /etc/axonwall/controller.env 2>/dev/null || true
+                chmod 0600 /etc/axonwall/controller.env 2>/dev/null || true
+                sed -i '/^AXONWALL_ZTP_TOKEN=/d' /etc/axonwall/axonwall.env
+            fi
+        fi
+        if [ -f /etc/axonwall/agent.token ]; then
+            chown root:axonwall-api /etc/axonwall/agent.token 2>/dev/null || true
+            chmod 0640 /etc/axonwall/agent.token 2>/dev/null || true
         fi
 
         # 5. Initialize etckeeper if installed

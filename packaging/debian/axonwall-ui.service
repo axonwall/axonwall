@@ -8,6 +8,7 @@ Wants=axonwalld.service
 Type=simple
 User=axonwall
 Group=axonwall
+SupplementaryGroups=axonwall-api
 WorkingDirectory=/opt/axonwall/apps/axonwall
 EnvironmentFile=-/etc/axonwall/axonwall.env
 EnvironmentFile=-/etc/axonwall/admin.env

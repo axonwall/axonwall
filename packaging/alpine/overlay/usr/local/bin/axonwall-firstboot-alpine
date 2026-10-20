@@ -152,6 +152,15 @@ if ! id -u axonwall >/dev/null 2>&1; then
   adduser -S -D -H -h /var/lib/axonwall -s /sbin/nologin -G axonwall axonwall 2>/dev/null || true
 fi
 
+# Service-identity split (audit B-12): separate controller user + shared api group
+addgroup -S axonwall-api 2>/dev/null || true
+addgroup -S axonwall-controller 2>/dev/null || true
+if ! id -u axonwall-controller >/dev/null 2>&1; then
+  adduser -S -D -H -h /var/lib/axonwall -s /sbin/nologin -G axonwall-controller axonwall-controller 2>/dev/null || true
+fi
+adduser axonwall axonwall-api 2>/dev/null || true
+adduser axonwall-controller axonwall-api 2>/dev/null || true
+
 # Generate per-appliance TLS certificate
 mkdir -p /etc/axonwall/certs
 if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
@@ -166,14 +175,16 @@ if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ];
     -addext "subjectAltName=${SAN}" >/dev/null 2>&1 || true
 fi
 
-chown root:axonwall /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
-chown root:axonwall /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
+chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
 chmod 0770 /etc/axonwall 2>/dev/null || true
 chmod 0750 /etc/axonwall/certs 2>/dev/null || true
-chmod 0640 /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
+chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
 mkdir -p /var/lib/axonwall/headscale /run/headscale
-chown -R axonwall:axonwall /var/lib/axonwall /var/log/axonwall /run/headscale /run/axonwall 2>/dev/null || true
+chown -R axonwall:axonwall-api /var/lib/axonwall /run/headscale /run/axonwall 2>/dev/null || true
+chown -R axonwall:axonwall /var/log/axonwall 2>/dev/null || true
 chmod 0770 /var/lib/axonwall/headscale /run/headscale /run/axonwall 2>/dev/null || true
 
 # Generate appliance security tokens
@@ -188,11 +199,14 @@ if [ ! -s /etc/axonwall/axonwall.env ]; then
 
   cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
-AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
 LOCAL_ADMIN_USER=admin
 LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
 AGENT_SOCKET_PATH=/run/axonwall/agent.sock
 AGENT_API_SOCKET=/run/axonwall/agent-api.sock
+ENV_EOF
+
+  cat << ENV_EOF > /etc/axonwall/controller.env
+AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
 ENV_EOF
 
   if [ ! -f /etc/axonwall/.password_changed ]; then
@@ -201,9 +215,13 @@ ENV_EOF
   fi
 fi
 
-chmod 0640 /etc/axonwall/axonwall.env 2>/dev/null || true
-chown root:axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
-chown -R axonwall:axonwall /opt/axonwall 2>/dev/null || true
+chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
+chown axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
+if [ -f /etc/axonwall/controller.env ]; then
+  chown root:root /etc/axonwall/controller.env 2>/dev/null || true
+  chmod 0600 /etc/axonwall/controller.env 2>/dev/null || true
+fi
+chown -R axonwall:axonwall-api /opt/axonwall 2>/dev/null || true
 
 # Initialize etckeeper if installed
 if command -v etckeeper >/dev/null 2>&1; then

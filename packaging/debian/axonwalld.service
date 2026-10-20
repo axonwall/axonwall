@@ -17,10 +17,11 @@ KillMode=process
 
 # Privilege Separation & Sandboxing
 User=root
-Group=axonwall
+Group=axonwall-api
 RuntimeDirectory=axonwall
 RuntimeDirectoryMode=0770
 StateDirectory=axonwall
+StateDirectoryMode=0770
 LogsDirectory=axonwall
 
 # Linux Capabilities
