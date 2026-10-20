@@ -896,39 +896,7 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
         uptime = 'Active';
       }
     } catch {
-      // OpenRC (Alpine Linux) fallback
-      const svcBase = u.unit.replace(/\.service$/, '');
-      const openrcName = svcBase === 'kea-dhcp4-server' && fs.existsSync('/etc/init.d/kea-dhcp4') ? 'kea-dhcp4' : svcBase;
-      if (fs.existsSync(`/etc/init.d/${openrcName}`)) {
-        if (fs.existsSync(`/run/openrc/started/${openrcName}`)) {
-          status = 'active';
-          uptime = 'Active';
-        } else if (fs.existsSync(`/run/openrc/failed/${openrcName}`)) {
-          status = 'failed';
-        } else {
-          status = 'inactive';
-        }
-        try {
-          for (const pidFile of [`/run/${openrcName}.pid`, `/run/${openrcName}/${openrcName}.pid`]) {
-            if (fs.existsSync(pidFile)) {
-              const p = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
-              if (p > 0) {
-                pid = p;
-                break;
-              }
-            }
-          }
-          if (pid && fs.existsSync(`/proc/${pid}/status`)) {
-            const procStat = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
-            const rssMatch = procStat.match(/VmRSS:\s+(\d+)\s+kB/);
-            if (rssMatch) {
-              memory = `${(parseInt(rssMatch[1], 10) / 1024).toFixed(1)} MB`;
-            }
-          }
-        } catch {}
-      } else {
-        status = 'not-installed';
-      }
+      status = 'not-installed';
     }
 
     results.push({

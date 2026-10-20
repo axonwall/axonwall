@@ -1557,6 +1557,28 @@ export const AuthLocalUserResponseSchema = z.object({
 });
 export type AuthLocalUserResponse = z.infer<typeof AuthLocalUserResponseSchema>;
 
+export const PasswordPolicySchema = z.object({
+  minLength: z.number().int().min(8).max(128).default(12),
+  maxFailures: z.number().int().min(0).max(50).default(5),
+  lockoutDurationSeconds: z.number().int().min(60).max(86400).default(900),
+  historyCount: z.number().int().min(0).max(24).default(5),
+  maxAgeDays: z.number().int().min(0).max(3650).default(0), // 0 = no expiry
+});
+export type PasswordPolicy = z.infer<typeof PasswordPolicySchema>;
+
+export const IdentityConfigSchema = z.object({
+  baseDn: z.string().optional(), // Derived from system.domain on first bootstrap
+  disableRootSshWhenAdminExists: z.boolean().default(true),
+  passwordPolicy: PasswordPolicySchema.default({
+    minLength: 12,
+    maxFailures: 5,
+    lockoutDurationSeconds: 900,
+    historyCount: 5,
+    maxAgeDays: 0,
+  }),
+});
+export type IdentityConfig = z.infer<typeof IdentityConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -1587,6 +1609,7 @@ export const DesiredStateSchema = z.object({
   crowdsec: CrowdSecConfigSchema.optional(),
   geoip: GeoIpConfigSchema.optional(),
   sso: SsoConfigSchema.optional(),
+  identity: IdentityConfigSchema.optional(),
   tlsDecryption: TlsDecryptionSchema.optional(),
   ha: HighAvailabilityConfigSchema.optional(),
   observability: ObservabilityConfigSchema.optional(),

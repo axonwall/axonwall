@@ -452,7 +452,7 @@ func (m *UserManager) EnsureGroupExists(groupName string) error {
 		}
 	}
 
-	// Try groupadd or addgroup
+	// Use groupadd (Debian standard)
 	if path, err := exec.LookPath("groupadd"); err == nil {
 		out, err := exec.Command(path, groupName).CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "already exists") {
@@ -460,15 +460,8 @@ func (m *UserManager) EnsureGroupExists(groupName string) error {
 		}
 		return nil
 	}
-	if path, err := exec.LookPath("addgroup"); err == nil {
-		out, err := exec.Command(path, groupName).CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "already exists") {
-			return fmt.Errorf("addgroup failed: %s (%w)", string(out), err)
-		}
-		return nil
-	}
 
-	return fmt.Errorf("neither groupadd nor addgroup found on system")
+	return fmt.Errorf("groupadd not found on system")
 }
 
 // CreateUser provisions a new local Linux user
@@ -523,41 +516,23 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 		groupList = append(groupList, g)
 	}
 
-	// Execute useradd or adduser
-	if useraddPath, err := exec.LookPath("useradd"); err == nil {
-		args := []string{"-m", "-s", shell}
-		if req.Comment != "" {
-			args = append(args, "-c", req.Comment)
-		}
-		if len(groupList) > 0 {
-			args = append(args, "-G", strings.Join(groupList, ","))
-		}
-		args = append(args, username)
+	// Execute useradd (Debian standard)
+	useraddPath, err := exec.LookPath("useradd")
+	if err != nil {
+		return fmt.Errorf("useradd not found on system: %w", err)
+	}
+	args := []string{"-m", "-s", shell}
+	if req.Comment != "" {
+		args = append(args, "-c", req.Comment)
+	}
+	if len(groupList) > 0 {
+		args = append(args, "-G", strings.Join(groupList, ","))
+	}
+	args = append(args, username)
 
-		out, err := exec.Command(useraddPath, args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("useradd failed: %s (%w)", string(out), err)
-		}
-	} else if adduserPath, err := exec.LookPath("adduser"); err == nil {
-		// Alpine syntax: adduser -D -s <shell> -g <comment> <username>
-		args := []string{"-D", "-s", shell}
-		if req.Comment != "" {
-			args = append(args, "-g", req.Comment)
-		}
-		args = append(args, username)
-		out, err := exec.Command(adduserPath, args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("adduser failed: %s (%w)", string(out), err)
-		}
-
-		// Add to groups in Alpine
-		if addgroupPath, err := exec.LookPath("addgroup"); err == nil {
-			for _, g := range groupList {
-				_ = exec.Command(addgroupPath, username, g).Run()
-			}
-		}
-	} else {
-		return fmt.Errorf("neither useradd nor adduser found on system")
+	out, err := exec.Command(useraddPath, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("useradd failed: %s (%w)", string(out), err)
 	}
 
 	// Set password if provided
@@ -716,28 +691,18 @@ func (m *UserManager) DeleteUser(username string, removeHome bool) error {
 		return fmt.Errorf("cannot delete protected user '%s' (UID %d)", username, uid)
 	}
 
-	if userdelPath, err := exec.LookPath("userdel"); err == nil {
-		args := []string{}
-		if removeHome {
-			args = append(args, "-r")
-		}
-		args = append(args, username)
-		out, err := exec.Command(userdelPath, args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("userdel failed: %s (%w)", string(out), err)
-		}
-	} else if deluserPath, err := exec.LookPath("deluser"); err == nil {
-		args := []string{}
-		if removeHome {
-			args = append(args, "--remove-home")
-		}
-		args = append(args, username)
-		out, err := exec.Command(deluserPath, args...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("deluser failed: %s (%w)", string(out), err)
-		}
-	} else {
-		return fmt.Errorf("neither userdel nor deluser found on system")
+	userdelPath, err := exec.LookPath("userdel")
+	if err != nil {
+		return fmt.Errorf("userdel not found on system: %w", err)
+	}
+	args := []string{}
+	if removeHome {
+		args = append(args, "-r")
+	}
+	args = append(args, username)
+	out, err := exec.Command(userdelPath, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("userdel failed: %s (%w)", string(out), err)
 	}
 
 	if m.etckeeper != nil {
@@ -763,7 +728,8 @@ func (m *UserManager) SetPassword(username, password string) error {
 	return nil
 }
 
-// Authenticate verifies username and password against Linux shadow/PAM
+// Authenticate verifies username and password against Linux shadow/PAM.
+// Note: Secrets are passed strictly via stdin to prevent exposure in /proc/<pid>/cmdline.
 func (m *UserManager) Authenticate(req AuthUserRequest) AuthUserResponse {
 	username := strings.TrimSpace(req.Username)
 	password := req.Password
@@ -787,22 +753,24 @@ func (m *UserManager) Authenticate(req AuthUserRequest) AuthUserResponse {
 		return AuthUserResponse{Success: false, Message: "Account or password locked"}
 	}
 
-	// Verify password
+	// Verify password using stdin only (never pass password or hash via argv)
 	verified := false
 
-	// Strategy A: perl crypt()
+	// Strategy A: perl crypt() reading password and hash from stdin separated by NUL
 	if perlPath, err := exec.LookPath("perl"); err == nil {
-		cmd := exec.Command(perlPath, "-e", "exit(crypt($ARGV[0], $ARGV[1]) eq $ARGV[1] ? 0 : 1)", password, hash)
+		cmd := exec.Command(perlPath, "-e", `local $/ = "\0"; my $pw = <STDIN>; chomp($pw); my $h = <STDIN>; chomp($h); exit(crypt($pw, $h) eq $h ? 0 : 1);`)
+		cmd.Stdin = bytes.NewReader([]byte(password + "\x00" + hash + "\x00"))
 		if err := cmd.Run(); err == nil {
 			verified = true
 		}
 	}
 
-	// Strategy B: python3 crypt (if perl not available or failed)
+	// Strategy B: python3 crypt reading password and hash from stdin separated by NUL
 	if !verified {
 		if pyPath, err := exec.LookPath("python3"); err == nil {
-			script := `import crypt, sys; sys.exit(0 if crypt.crypt(sys.argv[1], sys.argv[2]) == sys.argv[2] else 1)`
-			cmd := exec.Command(pyPath, "-c", script, password, hash)
+			script := `import crypt, sys; parts = sys.stdin.buffer.read().split(b'\x00'); pw = parts[0].decode('utf-8'); h = parts[1].decode('utf-8'); sys.exit(0 if crypt.crypt(pw, h) == h else 1)`
+			cmd := exec.Command(pyPath, "-c", script)
+			cmd.Stdin = bytes.NewReader([]byte(password + "\x00" + hash + "\x00"))
 			if err := cmd.Run(); err == nil {
 				verified = true
 			}

@@ -51,9 +51,10 @@ type AgentServer struct {
 	k3sManager       *engine.K3sManager
 	vigilanteManager *engine.VigilanteManager
 	etckeeperManager *engine.EtckeeperManager
+	directoryManager *engine.DirectoryManager
 }
 
-func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager, etckeeperManager *engine.EtckeeperManager) *AgentServer {
+func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager, etckeeperManager *engine.EtckeeperManager, directoryManager *engine.DirectoryManager) *AgentServer {
 	hostname, _ := os.Hostname()
 
 	initHash := ""
@@ -83,6 +84,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		k3sManager:       k3sManager,
 		vigilanteManager: vigilanteManager,
 		etckeeperManager: etckeeperManager,
+		directoryManager: directoryManager,
 	}
 }
 
@@ -896,9 +898,10 @@ func main() {
 
 	// Ensure directory for socket exists
 	sockDir := filepath.Dir(*socketPath)
-	if err := os.MkdirAll(sockDir, 0755); err != nil {
+	if err := os.MkdirAll(sockDir, 0770); err != nil {
 		log.Fatalf("Failed to create socket directory %s: %v", sockDir, err)
 	}
+	chownSocketToAPIGroup(sockDir, 0770)
 	_ = os.Remove(*socketPath)
 
 	listener, err := net.Listen("unix", *socketPath)
@@ -907,8 +910,8 @@ func main() {
 	}
 	defer os.Remove(*socketPath)
 
-	// Socket permissions: 0660 so control plane group can access
-	_ = os.Chmod(*socketPath, 0660)
+	// Socket permissions: 0660 root:axonwall-api so control plane group can access
+	chownSocketToAPIGroup(*socketPath, 0660)
 
 	// Agent API authentication: every gRPC call and every HTTP REST
 	// call must carry the per-install agent token (see agent_auth.go).
@@ -946,8 +949,16 @@ func main() {
 		_ = etckeeperManager.Init()
 	}
 	userManager := engine.NewUserManager(etckeeperManager)
+	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
+	haEngine.SetDirectoryManager(directoryManager)
 
-	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager)
+	go func() {
+		if err := directoryManager.Bootstrap("axonwall.local", 1); err != nil {
+			log.Printf("[Directory] Warning during initial OpenLDAP bootstrap: %v", err)
+		}
+	}()
+
+	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager, directoryManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	// Start eBPF Manager
@@ -964,7 +975,7 @@ func main() {
 	if err != nil {
 		log.Printf("[Agent] Warning: Failed to listen on API unix socket %s: %v", apiSocketPath, err)
 	} else {
-		_ = os.Chmod(apiSocketPath, 0660)
+		chownSocketToAPIGroup(apiSocketPath, 0660)
 		mux := http.NewServeMux()
 		mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
 			resp, err := agentServer.GetStatus(r.Context(), &pb.GetStatusRequest{})
@@ -1694,13 +1705,23 @@ func main() {
 			})
 		})
 
-		// Local Linux User & POSIX Group Management APIs
+		// OpenLDAP Identity Directory & POSIX Group Management APIs
+		writeDirError := func(w http.ResponseWriter, msg string, code int) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   msg,
+				"message": msg,
+			})
+		}
+
 		mux.HandleFunc("/v1/system/users", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
-				users, err := userManager.ParsePasswd()
+				users, err := directoryManager.ListUsers()
 				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
+					writeDirError(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -1708,28 +1729,46 @@ func main() {
 			case http.MethodPost:
 				var req engine.CreateUserRequest
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 					return
 				}
-				if err := userManager.CreateUser(req); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
+				if err := directoryManager.CreateUser(req); err != nil {
+					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Created local user %s successfully", req.Username),
+					"message": fmt.Sprintf("Created directory user %s successfully", req.Username),
 				})
 			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
+		})
+
+		mux.HandleFunc("/v1/system/users/auth", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.AuthUserRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			resp := directoryManager.Authenticate(req)
+			w.Header().Set("Content-Type", "application/json")
+			if !resp.Success {
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 		})
 
 		mux.HandleFunc("/v1/system/users/", func(w http.ResponseWriter, r *http.Request) {
 			username := strings.TrimPrefix(r.URL.Path, "/v1/system/users/")
 			username = strings.TrimSpace(username)
 			if username == "" {
-				http.Error(w, "Username required in path", http.StatusBadRequest)
+				writeDirError(w, "Username required in path", http.StatusBadRequest)
 				return
 			}
 
@@ -1737,40 +1776,40 @@ func main() {
 			case http.MethodPut:
 				var req engine.UpdateUserRequest
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 					return
 				}
-				if err := userManager.UpdateUser(username, req); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
+				if err := directoryManager.UpdateUser(username, req); err != nil {
+					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Updated local user %s successfully", username),
+					"message": fmt.Sprintf("Updated directory user %s successfully", username),
 				})
 			case http.MethodDelete:
 				removeHome := r.URL.Query().Get("removeHome") == "true"
-				if err := userManager.DeleteUser(username, removeHome); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
+				if err := directoryManager.DeleteUser(username, removeHome); err != nil {
+					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Deleted local user %s successfully", username),
+					"message": fmt.Sprintf("Deleted directory user %s successfully", username),
 				})
 			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
 
 		mux.HandleFunc("/v1/system/groups", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
-				groups, err := userManager.ParseGroups()
+				groups, err := directoryManager.ListGroups()
 				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
+					writeDirError(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -1780,39 +1819,66 @@ func main() {
 					Name string `json:"name"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 					return
 				}
-				if err := userManager.EnsureGroupExists(req.Name); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
+				if _, err := directoryManager.EnsureLDAPGroupExists(req.Name, 0); err != nil {
+					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Group %s ensured successfully", req.Name),
+					"message": fmt.Sprintf("Directory group %s ensured successfully", req.Name),
 				})
 			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
 
-		mux.HandleFunc("/v1/system/users/auth", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			var req engine.AuthUserRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
-				return
-			}
-			resp := userManager.Authenticate(req)
+		mux.HandleFunc("/v1/system/directory/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if !resp.Success {
-				w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(directoryManager.GetStatus())
+		})
+
+		mux.HandleFunc("/v1/system/directory/policy", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPut && r.Method != http.MethodPost {
+				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
 			}
-			_ = json.NewEncoder(w).Encode(resp)
+			var policy engine.PasswordPolicyConfig
+			if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
+				writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := directoryManager.UpdatePasswordPolicy(policy); err != nil {
+				writeDirError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": "OpenLDAP password policy updated successfully",
+				"policy":  policy,
+			})
+		})
+
+		mux.HandleFunc("/v1/system/directory/migrate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			migrated, err := directoryManager.MigrateLocalHumanUsers()
+			if err != nil {
+				writeDirError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":  true,
+				"migrated": migrated,
+				"message":  fmt.Sprintf("Migrated %d local human account(s) into OpenLDAP", len(migrated)),
+			})
 		})
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

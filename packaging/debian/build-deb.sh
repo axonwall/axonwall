@@ -32,13 +32,13 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, openssl, curl, ca-certificates, rsync, python3
+Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3
 Recommends: unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
  Axonwall replaces legacy BSD/PHP firewalls (OPNsense/pfSense) with a
- modern reactive architecture built on Linux nftables, Next.js, and
- a privileged Go daemon with commit-confirm transaction safety.
+ modern reactive architecture built on Linux nftables, Next.js, OpenLDAP,
+ and a privileged Go daemon with commit-confirm transaction safety.
 EOF
 
 # 2. Copy Maintainer scripts
@@ -53,6 +53,8 @@ mkdir -p "${WORK_DIR}/usr/local/bin"
 mkdir -p "${WORK_DIR}/lib/systemd/system"
 mkdir -p "${WORK_DIR}/etc/axonwall"
 mkdir -p "${WORK_DIR}/etc/headscale"
+mkdir -p "${WORK_DIR}/etc/sudoers.d"
+mkdir -p "${WORK_DIR}/etc/ssh/sshd_config.d"
 mkdir -p "${WORK_DIR}/usr/share/axonwall"
 mkdir -p "${WORK_DIR}/usr/share/axonwall/satellites"
 mkdir -p "${WORK_DIR}/usr/lib/sysusers.d"
@@ -127,9 +129,21 @@ if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-update" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwall-update" "${WORK_DIR}/usr/local/bin/"
   chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-update"
 fi
+if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-opshell" ]]; then
+  cp "${CHROOT_SRC}/usr/local/bin/axonwall-opshell" "${WORK_DIR}/usr/local/bin/"
+  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-opshell"
+fi
 if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwallctl" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwallctl" "${WORK_DIR}/usr/local/bin/"
   chmod 755 "${WORK_DIR}/usr/local/bin/axonwallctl"
+fi
+if [[ -f "${CHROOT_SRC}/etc/sudoers.d/axonwall" ]]; then
+  cp "${CHROOT_SRC}/etc/sudoers.d/axonwall" "${WORK_DIR}/etc/sudoers.d/axonwall"
+  chmod 0440 "${WORK_DIR}/etc/sudoers.d/axonwall"
+fi
+if [[ -f "${CHROOT_SRC}/etc/ssh/sshd_config.d/axonwall.conf" ]]; then
+  cp "${CHROOT_SRC}/etc/ssh/sshd_config.d/axonwall.conf" "${WORK_DIR}/etc/ssh/sshd_config.d/axonwall.conf"
+  chmod 0644 "${WORK_DIR}/etc/ssh/sshd_config.d/axonwall.conf"
 fi
 
 echo "${VERSION}" > "${WORK_DIR}/etc/axonwall/version"
@@ -175,7 +189,6 @@ if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
 fi
 
 # 8. Build Debian Archive via dpkg-deb (or docker fallback if dpkg-deb is absent)
-# Use -Zxz so the inner data.tar.xz archive is universally extractable on both Debian and Alpine (BusyBox unxz)
 echo "[+] Building deb package: ${PKG_NAME}.deb..."
 if command -v dpkg-deb &>/dev/null; then
   dpkg-deb -Zxz --build --root-owner-group "${WORK_DIR}" "${OUTPUT_DIR}/${PKG_NAME}.deb"

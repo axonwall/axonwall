@@ -1,0 +1,19 @@
+# ==============================================================================
+# Axonwall Role-Based Sudoers Policy
+# Managed by Axonwall — maps LDAP/POSIX groups to appliance privileges
+# ==============================================================================
+Defaults env_reset
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Full administrative privileges for axonwall-admin members
+%axonwall-admin ALL=(ALL:ALL) ALL
+
+# Restricted diagnostic & console privileges for axonwall-operator members
+Cmnd_Alias AXONWALL_OP_CMDS = \
+    /usr/sbin/axonwall-console, \
+    /usr/local/bin/axonwallctl status, \
+    /usr/local/bin/axonwallctl diff, \
+    /usr/local/bin/axonwallctl validate, \
+    /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager
+
+%axonwall-operator ALL=(root) NOPASSWD: AXONWALL_OP_CMDS

@@ -20,12 +20,11 @@ User=root
 Group=axonwall-api
 RuntimeDirectory=axonwall
 RuntimeDirectoryMode=0770
-StateDirectory=axonwall
-StateDirectoryMode=0770
 LogsDirectory=axonwall
 
 # Sandboxing
 ProtectSystem=false
+ReadWritePaths=/etc /var/lib/axonwall /var/log/axonwall /run /home /usr/share/axonwall /boot
 ProtectHome=false
 PrivateTmp=true
 ProtectKernelTunables=false

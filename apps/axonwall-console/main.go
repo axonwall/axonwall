@@ -2072,20 +2072,11 @@ func actionRestartServices(reader *bufio.Reader) {
 	fmt.Println("=== Restart Core Services ===")
 	fmt.Println("Restarting axonwalld, axonwall-ui, and axonwall-controller...")
 
-	services := []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables"}
-	isOpenRC := false
-	if _, err := os.Stat("/sbin/openrc"); err == nil {
-		isOpenRC = true
-	}
+	services := []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables", "slapd", "sssd"}
 
 	for _, s := range services {
 		fmt.Printf("Restarting %s... ", s)
-		var cmd *exec.Cmd
-		if isOpenRC {
-			cmd = exec.Command("/sbin/rc-service", s, "restart")
-		} else {
-			cmd = exec.Command("systemctl", "restart", s)
-		}
+		cmd := exec.Command("systemctl", "restart", s)
 		if err := cmd.Run(); err == nil {
 			fmt.Printf("%s[OK]%s\n", colorGreen, colorReset)
 		} else {

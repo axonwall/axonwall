@@ -24,32 +24,59 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import type { LocalUser, LocalGroup, ApplianceRole } from '@axonwall/lib/schemas';
+import type { DirectoryStatus, PasswordPolicyConfig } from '@/server/users';
 import Link from 'next/link';
+
+function defaultShellForRole(role: ApplianceRole): string {
+  switch (role) {
+    case 'admin':
+      return '/bin/bash';
+    case 'operator':
+      return '/usr/local/bin/axonwall-opshell';
+    case 'readonly':
+      return '/usr/sbin/nologin';
+    default:
+      return '/bin/bash';
+  }
+}
 
 export default function LocalUsersPage() {
   const [users, setUsers] = useState<LocalUser[]>([]);
   const [groups, setGroups] = useState<LocalGroup[]>([]);
+  const [dirStatus, setDirStatus] = useState<DirectoryStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<'human' | 'system' | 'groups'>('human');
+  const [activeTab, setActiveTab] = useState<'human' | 'system' | 'groups' | 'policy'>('human');
 
   // Modal states
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<LocalUser | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
 
   // Form states
   const [formUsername, setFormUsername] = useState('');
   const [formComment, setFormComment] = useState('');
   const [formPassword, setFormPassword] = useState('');
-  const [formShell, setFormShell] = useState('/bin/bash');
+  const [formShell, setFormShell] = useState('/usr/local/bin/axonwall-opshell');
   const [formRole, setFormRole] = useState<ApplianceRole>('operator');
   const [formGroups, setFormGroups] = useState<string[]>([]);
   const [formSSHKeys, setFormSSHKeys] = useState('');
   const [formPasswordLocked, setFormPasswordLocked] = useState(false);
+
+  // Password policy states
+  const [policyForm, setPolicyForm] = useState<PasswordPolicyConfig>({
+    minLength: 12,
+    maxFailures: 5,
+    lockoutDurationSeconds: 900,
+    historyCount: 5,
+    maxAgeDays: 0,
+    disableRootSshWhenAdminExists: true,
+  });
 
   const [newGroupName, setNewGroupName] = useState('');
 
@@ -65,8 +92,14 @@ export default function LocalUsersPage() {
       const data = await res.json();
       setUsers(data.users || []);
       setGroups(data.groups || []);
+      if (data.directoryStatus) {
+        setDirStatus(data.directoryStatus);
+        if (data.directoryStatus.passwordPolicy) {
+          setPolicyForm(data.directoryStatus.passwordPolicy);
+        }
+      }
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch local users and groups');
+      setError(err.message || 'Failed to fetch directory users and groups');
     } finally {
       setIsLoading(false);
     }
@@ -76,16 +109,63 @@ export default function LocalUsersPage() {
     loadData();
   }, []);
 
+  const handleRoleChange = (role: ApplianceRole) => {
+    setFormRole(role);
+    if (!editingUser) {
+      setFormShell(defaultShellForRole(role));
+    }
+  };
+
+  const handleSavePolicy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const res = await fetch('/api/system/directory', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(policyForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update password policy');
+      setSuccessMsg(data.message || 'OpenLDAP password & security policy updated');
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update password policy');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleMigrateLocalUsers = async () => {
+    setIsMigrating(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const res = await fetch('/api/system/directory', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to migrate local users');
+      setSuccessMsg(data.message || 'Migrated local users into OpenLDAP');
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to migrate local users');
+    } finally {
+      setIsMigrating(false);
+    }
+  };
+
   const openCreateUserModal = () => {
     setEditingUser(null);
     setFormUsername('');
     setFormComment('');
     setFormPassword('');
-    setFormShell('/bin/bash');
     setFormRole('operator');
+    setFormShell(defaultShellForRole('operator'));
     setFormGroups([]);
     setFormSSHKeys('');
     setFormPasswordLocked(false);
+    setModalError(null);
     setIsUserModalOpen(true);
   };
 
@@ -94,17 +174,19 @@ export default function LocalUsersPage() {
     setFormUsername(user.username);
     setFormComment(user.comment || '');
     setFormPassword('');
-    setFormShell(user.shell || '/bin/bash');
+    setFormShell(user.shell || defaultShellForRole(user.applianceRole || 'os_only'));
     setFormRole(user.applianceRole || 'os_only');
     setFormGroups(user.groups || []);
     setFormSSHKeys((user.sshKeys || []).join('\n'));
     setFormPasswordLocked(user.passwordLocked);
+    setModalError(null);
     setIsUserModalOpen(true);
   };
 
   const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setModalError(null);
     setError(null);
     setSuccessMsg(null);
 
@@ -113,8 +195,14 @@ export default function LocalUsersPage() {
       .map((k) => k.trim())
       .filter((k) => k && !k.startsWith('#'));
 
+    const minPassLen = policyForm.minLength || 12;
+
     try {
       if (editingUser) {
+        if (formPassword.trim() && formPassword.trim().length < minPassLen) {
+          throw new Error(`Password must be at least ${minPassLen} characters long per appliance password policy`);
+        }
+
         // Update user
         const updatePayload: any = {
           comment: formComment,
@@ -134,9 +222,16 @@ export default function LocalUsersPage() {
           body: JSON.stringify(updatePayload),
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to update user');
+        if (!res.ok) throw new Error(data.error || data.message || 'Failed to update user');
         setSuccessMsg(`User ${editingUser.username} updated successfully`);
       } else {
+        if (!formPassword.trim()) {
+          throw new Error('Initial password is required');
+        }
+        if (formPassword.trim().length < minPassLen) {
+          throw new Error(`Password must be at least ${minPassLen} characters long per appliance password policy`);
+        }
+
         // Create user
         const createPayload = {
           username: formUsername.trim(),
@@ -154,13 +249,14 @@ export default function LocalUsersPage() {
           body: JSON.stringify(createPayload),
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to create user');
+        if (!res.ok) throw new Error(data.error || data.message || 'Failed to create user');
         setSuccessMsg(`User ${formUsername.trim()} created successfully`);
       }
 
       setIsUserModalOpen(false);
       await loadData();
     } catch (err: any) {
+      setModalError(err.message || 'Error saving user');
       setError(err.message || 'Error saving user');
     } finally {
       setIsSubmitting(false);
@@ -273,10 +369,10 @@ export default function LocalUsersPage() {
             <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
               <Users className="w-5 h-5" />
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">Local Users & POSIX Groups</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-white">Identity Directory & POSIX Groups</h1>
           </div>
           <p className="text-sm text-slate-400 mt-1">
-            Manage appliance Linux OS user accounts, POSIX group memberships, appliance administrative roles, and authorized SSH keys.
+            OpenLDAP-backed human user accounts, SSSD NSS/PAM/SSH public key integration, HA multi-provider replication, and role-based operator shells.
           </p>
         </div>
 
@@ -312,7 +408,7 @@ export default function LocalUsersPage() {
             className="inline-flex items-center gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium px-4 py-2 rounded-lg shadow-sm transition cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>Add User</span>
+            <span>Add Directory User</span>
           </button>
         </div>
       </div>
@@ -337,6 +433,78 @@ export default function LocalUsersPage() {
         </div>
       )}
 
+      {/* OpenLDAP Directory & HA Replication Status Banner */}
+      {dirStatus && (
+        <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
+                  dirStatus.slapdRunning && dirStatus.sssdRunning
+                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                    : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    dirStatus.slapdRunning && dirStatus.sssdRunning ? 'bg-emerald-400' : 'bg-amber-400'
+                  }`}
+                />
+                OpenLDAP ({dirStatus.slapdRunning ? 'Active' : 'Stopped'}) &bull; SSSD ({dirStatus.sssdRunning ? 'Active' : 'Stopped'})
+              </span>
+              <span className="text-xs font-mono text-slate-300 bg-slate-950 px-2.5 py-1 rounded border border-slate-800">
+                Base DN: <strong className="text-cyan-400">{dirStatus.baseDn}</strong>
+              </span>
+              <span className="text-xs font-mono text-slate-400 bg-slate-950 px-2.5 py-1 rounded border border-slate-800">
+                ServerID: {dirStatus.serverId} ({dirStatus.haRole || 'MASTER'})
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={`px-2.5 py-1 rounded border font-medium ${
+                  dirStatus.rootSshDisabled
+                    ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                    : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                }`}
+              >
+                Root SSH: {dirStatus.rootSshDisabled ? 'Disabled (Admin Enrolled)' : 'Break-Glass Key-Only'}
+              </span>
+              {dirStatus.haSyncEnabled && (
+                <span
+                  className={`px-2.5 py-1 rounded border font-mono ${
+                    dirStatus.inSync
+                      ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
+                      : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                  }`}
+                >
+                  syncrepl: {dirStatus.inSync ? 'IN SYNC' : 'REPLICATING'} ({dirStatus.clockSkewMs.toFixed(1)}ms skew)
+                </span>
+              )}
+            </div>
+          </div>
+
+          {dirStatus.unmigratedLocalCount > 0 && (
+            <div className="flex items-center justify-between gap-4 pt-2 border-t border-slate-800/80 text-xs text-amber-300">
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>
+                  Detected <strong>{dirStatus.unmigratedLocalCount}</strong> local human account(s) in <code className="font-mono">/etc/passwd</code> not yet in OpenLDAP. Migrate them so they persist across A/B rootfs upgrades and HA failover.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleMigrateLocalUsers}
+                disabled={isMigrating}
+                className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-semibold transition cursor-pointer shrink-0 disabled:opacity-50"
+              >
+                {isMigrating ? 'Migrating...' : 'Migrate Local Users to LDAP'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Metrics Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-xl flex items-center gap-3.5">
@@ -345,7 +513,7 @@ export default function LocalUsersPage() {
           </div>
           <div>
             <div className="text-2xl font-bold text-white">{humanUsers.length}</div>
-            <div className="text-xs text-slate-400 font-medium">Human User Accounts</div>
+            <div className="text-xs text-slate-400 font-medium">Directory Human Accounts</div>
           </div>
         </div>
         <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-xl flex items-center gap-3.5">
@@ -363,7 +531,7 @@ export default function LocalUsersPage() {
           </div>
           <div>
             <div className="text-2xl font-bold text-white">{sshKeyUsersCount}</div>
-            <div className="text-xs text-slate-400 font-medium">SSH Public Keys Enrolled</div>
+            <div className="text-xs text-slate-400 font-medium">LDAP SSH Public Keys</div>
           </div>
         </div>
         <div className="bg-slate-900/60 border border-slate-800 p-4 rounded-xl flex items-center gap-3.5">
@@ -372,14 +540,14 @@ export default function LocalUsersPage() {
           </div>
           <div>
             <div className="text-2xl font-bold text-white">{systemUsers.length}</div>
-            <div className="text-xs text-slate-400 font-medium">System / Daemon Accounts</div>
+            <div className="text-xs text-slate-400 font-medium">OS System Daemons</div>
           </div>
         </div>
       </div>
 
       {/* Navigation Tabs & Search */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 border-b border-slate-800 pb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setActiveTab('human')}
@@ -390,24 +558,9 @@ export default function LocalUsersPage() {
             }`}
           >
             <Users className="w-4 h-4" />
-            <span>Local Human Users</span>
+            <span>Directory Human Users</span>
             <span className="px-1.5 py-0.5 rounded-full text-xs bg-slate-800 text-slate-300">
               {humanUsers.length}
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('system')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer flex items-center gap-2 ${
-              activeTab === 'system'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
-          >
-            <Terminal className="w-4 h-4" />
-            <span>System & Daemons</span>
-            <span className="px-1.5 py-0.5 rounded-full text-xs bg-slate-800 text-slate-300">
-              {systemUsers.length}
             </span>
           </button>
           <button
@@ -423,6 +576,33 @@ export default function LocalUsersPage() {
             <span>POSIX Groups</span>
             <span className="px-1.5 py-0.5 rounded-full text-xs bg-slate-800 text-slate-300">
               {groups.length}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('policy')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer flex items-center gap-2 ${
+              activeTab === 'policy'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+          >
+            <Lock className="w-4 h-4" />
+            <span>Password & SSH Policy</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('system')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer flex items-center gap-2 ${
+              activeTab === 'system'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+          >
+            <Terminal className="w-4 h-4" />
+            <span>OS Daemons</span>
+            <span className="px-1.5 py-0.5 rounded-full text-xs bg-slate-800 text-slate-300">
+              {systemUsers.length}
             </span>
           </button>
         </div>
@@ -726,6 +906,128 @@ export default function LocalUsersPage() {
         </div>
       )}
 
+      {/* Tab 4: OpenLDAP Password & SSH Security Policy */}
+      {activeTab === 'policy' && (
+        <form
+          onSubmit={handleSavePolicy}
+          className="bg-slate-900/50 border border-slate-800 rounded-xl p-6 space-y-6 shadow-sm"
+        >
+          <div className="border-b border-slate-800 pb-4">
+            <h3 className="text-lg font-bold text-white">OpenLDAP Password &amp; SSH Security Policy (ppolicy)</h3>
+            <p className="text-xs text-slate-400 mt-1">
+              Configured directly in <code className="text-cyan-400 font-mono">cn=default,ou=policies,{dirStatus?.baseDn || 'dc=axonwall,dc=local'}</code> and replicated across HA nodes via syncrepl.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
+                Minimum Password Length
+              </label>
+              <input
+                type="number"
+                min={8}
+                max={128}
+                value={policyForm.minLength}
+                onChange={(e) => setPolicyForm({ ...policyForm, minLength: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white font-mono"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">Default: 12 characters (min 8).</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
+                Max Failed Bind Attempts (pwdMaxFailure)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={50}
+                value={policyForm.maxFailures}
+                onChange={(e) => setPolicyForm({ ...policyForm, maxFailures: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white font-mono"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">Consecutive failures before temporary lockout (0 = disabled).</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
+                Lockout Duration (Seconds)
+              </label>
+              <input
+                type="number"
+                min={60}
+                max={86400}
+                value={policyForm.lockoutDurationSeconds}
+                onChange={(e) => setPolicyForm({ ...policyForm, lockoutDurationSeconds: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white font-mono"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">Default: 900 seconds (15 minutes).</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
+                Password History Count (pwdInHistory)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={24}
+                value={policyForm.historyCount}
+                onChange={(e) => setPolicyForm({ ...policyForm, historyCount: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white font-mono"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">Prevents reuse of the last N passwords.</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
+                Maximum Password Age (Days)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={3650}
+                value={policyForm.maxAgeDays}
+                onChange={(e) => setPolicyForm({ ...policyForm, maxAgeDays: Number(e.target.value) })}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white font-mono"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">0 = passwords do not expire automatically.</p>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start gap-3">
+            <input
+              type="checkbox"
+              id="disableRootSsh"
+              checked={policyForm.disableRootSshWhenAdminExists}
+              onChange={(e) =>
+                setPolicyForm({ ...policyForm, disableRootSshWhenAdminExists: e.target.checked })
+              }
+              className="mt-1 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+            />
+            <label htmlFor="disableRootSsh" className="text-sm text-slate-200 cursor-pointer">
+              <div className="font-semibold text-white">
+                Automatically disable Root SSH login once an Administrator exists in OpenLDAP
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                When enabled and at least one unlocked <code className="text-emerald-400 font-mono">axonwall-admin</code> user is enrolled, Axonwall sets <code className="text-cyan-300 font-mono">PermitRootLogin no</code> in <code className="font-mono">/etc/ssh/sshd_config.d/axonwall.conf</code>.
+              </p>
+            </label>
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="px-5 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold rounded-lg shadow-sm transition cursor-pointer disabled:opacity-50"
+            >
+              {isSubmitting ? 'Applying Policy...' : 'Save Password & SSH Policy'}
+            </button>
+          </div>
+        </form>
+      )}
+
       {/* Modal: Create / Edit User */}
       {isUserModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
@@ -737,10 +1039,10 @@ export default function LocalUsersPage() {
                 </div>
                 <div>
                   <h3 className="text-lg font-bold text-white">
-                    {editingUser ? `Edit User: ${editingUser.username}` : 'Add Local Linux User'}
+                    {editingUser ? `Edit Directory User: ${editingUser.username}` : 'Add OpenLDAP Directory User'}
                   </h3>
                   <p className="text-xs text-slate-400">
-                    Provision Linux OS credentials and assign Axonwall administrative privileges.
+                    Provision OpenLDAP POSIX &amp; SSH credentials replicated across HA nodes.
                   </p>
                 </div>
               </div>
@@ -752,6 +1054,16 @@ export default function LocalUsersPage() {
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {modalError && (
+              <div className="flex items-center gap-3 p-3 bg-red-950/60 border border-red-800 rounded-xl text-red-200 text-xs">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <p className="flex-1 font-medium">{modalError}</p>
+                <button type="button" onClick={() => setModalError(null)} className="text-red-400 hover:text-red-200 cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
 
             <form onSubmit={handleSaveUser} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -806,7 +1118,7 @@ export default function LocalUsersPage() {
                       name="applianceRole"
                       value="admin"
                       checked={formRole === 'admin'}
-                      onChange={() => setFormRole('admin')}
+                      onChange={() => handleRoleChange('admin')}
                       className="sr-only"
                     />
                     <div className="flex items-center gap-1.5 font-bold text-xs text-emerald-400">
@@ -814,7 +1126,7 @@ export default function LocalUsersPage() {
                       <span>Administrator</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      Full access + sudo/wheel POSIX rights.
+                      Full access + sudo + /bin/bash shell.
                     </p>
                   </label>
 
@@ -830,7 +1142,7 @@ export default function LocalUsersPage() {
                       name="applianceRole"
                       value="operator"
                       checked={formRole === 'operator'}
-                      onChange={() => setFormRole('operator')}
+                      onChange={() => handleRoleChange('operator')}
                       className="sr-only"
                     />
                     <div className="flex items-center gap-1.5 font-bold text-xs text-blue-400">
@@ -838,7 +1150,7 @@ export default function LocalUsersPage() {
                       <span>Operator</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      Network, firewall, VPN management.
+                      Network/firewall ops + restricted Operator Shell.
                     </p>
                   </label>
 
@@ -854,7 +1166,7 @@ export default function LocalUsersPage() {
                       name="applianceRole"
                       value="readonly"
                       checked={formRole === 'readonly'}
-                      onChange={() => setFormRole('readonly')}
+                      onChange={() => handleRoleChange('readonly')}
                       className="sr-only"
                     />
                     <div className="flex items-center gap-1.5 font-bold text-xs text-amber-400">
@@ -862,7 +1174,7 @@ export default function LocalUsersPage() {
                       <span>Read-Only</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      View status, logs & telemetry only.
+                      Web console auditor (/usr/sbin/nologin).
                     </p>
                   </label>
 
@@ -878,7 +1190,7 @@ export default function LocalUsersPage() {
                       name="applianceRole"
                       value="os_only"
                       checked={formRole === 'os_only'}
-                      onChange={() => setFormRole('os_only')}
+                      onChange={() => handleRoleChange('os_only')}
                       className="sr-only"
                     />
                     <div className="flex items-center gap-1.5 font-bold text-xs text-slate-300">
@@ -886,7 +1198,7 @@ export default function LocalUsersPage() {
                       <span>OS Shell Only</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      No web console login permission.
+                      SSH shell access without Web Console login.
                     </p>
                   </label>
                 </div>
@@ -896,7 +1208,7 @@ export default function LocalUsersPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
-                    {editingUser ? 'New Password (leave blank to keep)' : 'Initial Password'}
+                    {editingUser ? 'New Password (leave blank to keep)' : `Initial Password (min ${policyForm.minLength} chars)`}
                   </label>
                   <input
                     type="password"
@@ -915,7 +1227,7 @@ export default function LocalUsersPage() {
                         className="rounded border-slate-800 bg-slate-950 text-cyan-500 focus:ring-cyan-500"
                       />
                       <label htmlFor="pwdLock" className="text-xs text-slate-400 cursor-pointer">
-                        Lock password (require SSH key authentication only)
+                        Lock password in OpenLDAP ppolicy (SSH key authentication only)
                       </label>
                     </div>
                   )}
@@ -923,17 +1235,18 @@ export default function LocalUsersPage() {
 
                 <div>
                   <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
-                    Login Shell
+                    Login Shell (loginShell)
                   </label>
                   <select
                     value={formShell}
                     onChange={(e) => setFormShell(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
                   >
-                    <option value="/bin/bash">/bin/bash (Default interactive)</option>
-                    <option value="/bin/sh">/bin/sh (POSIX standard)</option>
-                    <option value="/usr/sbin/nologin">/usr/sbin/nologin (Disabled shell)</option>
-                    <option value="/bin/false">/bin/false (Disabled shell)</option>
+                    <option value="/usr/local/bin/axonwall-opshell">/usr/local/bin/axonwall-opshell (Restricted Operator Menu)</option>
+                    <option value="/bin/bash">/bin/bash (Full Admin Bash Shell)</option>
+                    <option value="/bin/sh">/bin/sh (POSIX Bourne Shell)</option>
+                    <option value="/usr/sbin/nologin">/usr/sbin/nologin (Web Console Only / No SSH Shell)</option>
+                    <option value="/bin/false">/bin/false (Disabled Shell)</option>
                   </select>
                 </div>
               </div>

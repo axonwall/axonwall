@@ -20,7 +20,7 @@ Restart=always
 RestartSec=5s
 
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 PrivateTmp=true
 ReadWritePaths=/opt/axonwall /var/lib/axonwall /etc/axonwall -/run/headscale -/run/axonwall
 

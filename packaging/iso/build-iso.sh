@@ -18,7 +18,7 @@ fi
 
 mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
 if [[ -d "${WORK_DIR}" ]]; then
-  (cd "${WORK_DIR}" && lb clean --purge 2>/dev/null || true)
+  (cd "${WORK_DIR}" && lb clean 2>/dev/null || true)
 fi
 find "${WORK_DIR}" -mindepth 1 -not -path "${WORK_DIR}/cache*" -delete 2>/dev/null || true
 
@@ -48,12 +48,12 @@ echo "[+] Configuring live-build for Debian 13 (Trixie)..."
 lb config \
   --mode debian \
   --distribution trixie \
-  --mirror-bootstrap "https://deb.debian.org/debian/" \
-  --mirror-chroot "https://deb.debian.org/debian/" \
-  --mirror-chroot-security "https://deb.debian.org/debian-security/" \
-  --mirror-binary "https://deb.debian.org/debian/" \
-  --mirror-binary-security "https://deb.debian.org/debian-security/" \
-  --mirror-debian-installer "https://deb.debian.org/debian/" \
+  --mirror-bootstrap "http://deb.debian.org/debian/" \
+  --mirror-chroot "http://deb.debian.org/debian/" \
+  --mirror-chroot-security "http://deb.debian.org/debian-security/" \
+  --mirror-binary "http://deb.debian.org/debian/" \
+  --mirror-binary-security "http://deb.debian.org/debian-security/" \
+  --mirror-debian-installer "http://deb.debian.org/debian/" \
   --keyring-packages debian-archive-keyring \
   --architectures amd64 \
   --linux-flavours amd64 \
@@ -138,9 +138,17 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-update ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-update
 fi
 
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-opshell ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-opshell
+fi
+
+if [[ -f config/includes.chroot/etc/sudoers.d/axonwall ]]; then
+  chmod 0440 config/includes.chroot/etc/sudoers.d/axonwall
+fi
+
 chmod +x config/includes.chroot/usr/local/bin/axonwall-import || true
 
-VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || cat "${SCRIPT_DIR}/../../VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.2.0")
+VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || grep -m1 '"version"' "${SCRIPT_DIR}/../../package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || echo "0.9.2")
 echo "${VERSION}" > config/includes.chroot/etc/axonwall/version
 
 # Copy compiled daemon binaries if present
@@ -219,6 +227,12 @@ if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/index.js" ]]; then
   cp "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/index.js" config/includes.chroot/opt/axonwall/apps/axonwall-controller/dist/
   cp "${SCRIPT_DIR}/../../apps/axonwall-controller/package.json" config/includes.chroot/opt/axonwall/apps/axonwall-controller/
 fi
+if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwallctl.js" ]]; then
+  cp "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwallctl.js" config/includes.chroot/opt/axonwall/apps/axonwall-controller/dist/
+fi
+if [[ -f config/includes.chroot/usr/local/bin/axonwallctl ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwallctl
+fi
 
 # NOTE: TLS certificates are intentionally NOT generated here. A key baked into the
 # ISO would be identical on every appliance. axonwall-firstboot generates a unique one.
@@ -248,6 +262,12 @@ apt-get install -d -y --no-install-recommends \
   shim-unsigned \
   efibootmgr 2>/dev/null || true
 cp /var/cache/apt/archives/*.deb config/includes.chroot/var/cache/apt/archives/ 2>/dev/null || true
+
+# Preseed slapd in live-build chroot so package installation does not prompt or create unconfigured DB
+mkdir -p config/preseed
+cat << 'PRESEED_EOF' > config/preseed/slapd.cfg.chroot
+slapd slapd/no_configuration boolean true
+PRESEED_EOF
 
 # 4. Define package list to install in image
 mkdir -p config/package-lists
@@ -317,6 +337,14 @@ etckeeper
 git
 openssh-server
 openssh-client
+slapd
+ldap-utils
+sssd-ldap
+sssd-tools
+libnss-sss
+libpam-sss
+libpam-modules
+chrony
 EOF
 
 # 5. Build ISO

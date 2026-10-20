@@ -142,6 +142,12 @@ if [ -b "$ROOT_B_DEV" ]; then
     if [ -f "$STAGE_B/etc/fstab" ]; then
       sed -i 's/axon_root_a/axon_root_b/g' "$STAGE_B/etc/fstab"
       sed -i '\#/mnt/standby#d' "$STAGE_B/etc/fstab"
+      if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -qE '[[:space:]]/var/lib/axonwall[[:space:]]' "$STAGE_B/etc/fstab"; then
+        echo "LABEL=axon_data  /var/lib/axonwall  ext4  defaults,noatime  0  2" >> "$STAGE_B/etc/fstab"
+      fi
+      if ! grep -q '/var/lib/axonwall/home' "$STAGE_B/etc/fstab"; then
+        echo "/var/lib/axonwall/home  /home  none  bind  0  0" >> "$STAGE_B/etc/fstab"
+      fi
     fi
 
     # Ensure stable kernel & initrd symlinks in /boot for GRUB on Slot B
@@ -178,11 +184,20 @@ if [ -b "$ROOT_B_DEV" ]; then
   fi
 fi
 
-# Clean up /mnt/standby mountpoint in Slot A fstab
+# Clean up /mnt/standby mountpoint in Slot A fstab and configure /var/lib/axonwall/home bind-mount
+mkdir -p /target/var/lib/axonwall/home /target/var/lib/axonwall/ldap/config /target/var/lib/axonwall/ldap/data /target/var/lib/axonwall/ldap/accesslog /target/var/lib/axonwall/ldap/backups /target/var/lib/axonwall/secrets/ldap /target/var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
+if [ -d /target/home ] && [ -n "$(ls -A /target/home 2>/dev/null || true)" ]; then
+  cp -a /target/home/. /target/var/lib/axonwall/home/ 2>/dev/null || true
+fi
+chown 0:0 /target/var/lib/axonwall/home 2>/dev/null || true
+chmod 0755 /target/var/lib/axonwall /target/var/lib/axonwall/home 2>/dev/null || true
 if [ -f /target/etc/fstab ]; then
   sed -i '\#/mnt/standby#d' /target/etc/fstab
-  if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -q 'axon_data' /target/etc/fstab; then
+  if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -qE '[[:space:]]/var/lib/axonwall[[:space:]]' /target/etc/fstab; then
     echo "LABEL=axon_data  /var/lib/axonwall  ext4  defaults,noatime  0  2" >> /target/etc/fstab
+  fi
+  if ! grep -q '/var/lib/axonwall/home' /target/etc/fstab; then
+    echo "/var/lib/axonwall/home  /home  none  bind  0  0" >> /target/etc/fstab
   fi
 fi
 

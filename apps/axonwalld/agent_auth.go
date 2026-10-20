@@ -99,6 +99,21 @@ func persistAgentToken(path, token string) error {
 	return nil
 }
 
+func chownSocketToAPIGroup(path string, mode os.FileMode) {
+	_ = os.Chmod(path, mode)
+	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
+		if gid, err := strconv.Atoi(grp.Gid); err == nil {
+			_ = os.Chown(path, -1, gid)
+			return
+		}
+	}
+	if grp, err := user.LookupGroup("axonwall"); err == nil {
+		if gid, err := strconv.Atoi(grp.Gid); err == nil {
+			_ = os.Chown(path, -1, gid)
+		}
+	}
+}
+
 func agentTokenValid(provided, expected string) bool {
 	if provided == "" || expected == "" {
 		return false

@@ -1,0 +1,370 @@
+package engine
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
+	"math/big"
+	"net"
+	"os"
+	"os/exec"
+	"os/user"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	HAPKIDir          = "/var/lib/axonwall/secrets/ha-pki"
+	HAPKICACertPath   = "/var/lib/axonwall/secrets/ha-pki/ca.crt"
+	HAPKICAKeyPath    = "/var/lib/axonwall/secrets/ha-pki/ca.key"
+	HAPKINodeCertPath = "/var/lib/axonwall/secrets/ha-pki/node.crt"
+	HAPKINodeKeyPath  = "/var/lib/axonwall/secrets/ha-pki/node.key"
+)
+
+type HAPKIBundle struct {
+	CACertPEM      string `json:"caCertPem"`
+	CAKeyPEM       string `json:"caKeyPem"`
+	NodeCertPEM    string `json:"nodeCertPem"`
+	NodeKeyPEM     string `json:"nodeKeyPem"`
+	LDAPReplSecret string `json:"ldapReplSecret"`
+	LDAPBaseDN     string `json:"ldapBaseDn"`
+}
+
+// EnsureHAPKICerts generates or loads the internal HA Root CA and node leaf certificate
+// (with IP SANs for 127.0.0.1, localSyncIP, and peerSyncIP) in /var/lib/axonwall/secrets/ha-pki/.
+func EnsureHAPKICerts(hostname, localSyncIP, peerSyncIP string) error {
+	if err := EnsureHAPKICertsInDir(HAPKIDir, HAPKICACertPath, HAPKICAKeyPath, HAPKINodeCertPath, HAPKINodeKeyPath, hostname, localSyncIP, peerSyncIP); err != nil {
+		return err
+	}
+	fixHAPKIPermissions()
+	return nil
+}
+
+// EnsureHAPKICertsInDir generates or loads the HA Root CA and node leaf certificate at custom paths.
+func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath, hostname, localSyncIP, peerSyncIP string) error {
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return err
+	}
+
+	// 1. Ensure Root CA exists
+	var caCert *x509.Certificate
+	var caKey *ecdsa.PrivateKey
+
+	caCertBytes, errCert := os.ReadFile(caCertPath)
+	caKeyBytes, errKey := os.ReadFile(caKeyPath)
+	if errCert == nil && errKey == nil {
+		certBlock, _ := pem.Decode(caCertBytes)
+		keyBlock, _ := pem.Decode(caKeyBytes)
+		if certBlock != nil && keyBlock != nil {
+			caCert, _ = x509.ParseCertificate(certBlock.Bytes)
+			caKey, _ = x509.ParseECPrivateKey(keyBlock.Bytes)
+		}
+	}
+
+	if caCert == nil || caKey == nil {
+		var err error
+		caKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return fmt.Errorf("failed to generate HA CA key: %w", err)
+		}
+		serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		tmpl := &x509.Certificate{
+			SerialNumber: serial,
+			Subject: pkix.Name{
+				Organization: []string{"Axonwall High Availability Cluster"},
+				CommonName:   "Axonwall HA Internal Root CA",
+			},
+			NotBefore:             time.Now().Add(-1 * time.Hour),
+			NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+			BasicConstraintsValid: true,
+			IsCA:                  true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
+		if err != nil {
+			return fmt.Errorf("failed to create HA CA certificate: %w", err)
+		}
+		caCert, _ = x509.ParseCertificate(der)
+
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		keyDER, _ := x509.MarshalECPrivateKey(caKey)
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+		if err := os.WriteFile(caCertPath, certPEM, 0644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(caKeyPath, keyPEM, 0600); err != nil {
+			return err
+		}
+	}
+
+	// 2. Generate or regenerate node leaf certificate if missing or missing required IP SAN
+	needNodeCert := false
+	if nodeBytes, err := os.ReadFile(nodeCertPath); err != nil {
+		needNodeCert = true
+	} else if block, _ := pem.Decode(nodeBytes); block != nil {
+		if parsed, err := x509.ParseCertificate(block.Bytes); err == nil {
+			if localSyncIP != "" {
+				hasIP := false
+				for _, ip := range parsed.IPAddresses {
+					if ip.String() == localSyncIP {
+						hasIP = true
+						break
+					}
+				}
+				if !hasIP {
+					needNodeCert = true
+				}
+			}
+		} else {
+			needNodeCert = true
+		}
+	} else {
+		needNodeCert = true
+	}
+
+	if needNodeCert {
+		if err := issueNodeCert(caCert, caKey, hostname, localSyncIP, peerSyncIP, nodeCertPath, nodeKeyPath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func issueNodeCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname, ip1, ip2, certOut, keyOut string) error {
+	nodeKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	if hostname == "" {
+		hostname = "axonwall-ha-node"
+	}
+	ips := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	for _, rawIP := range []string{ip1, ip2} {
+		clean := strings.Split(strings.TrimSpace(rawIP), "/")[0]
+		if parsed := net.ParseIP(clean); parsed != nil {
+			ips = append(ips, parsed)
+		}
+	}
+
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			Organization: []string{"Axonwall High Availability Cluster"},
+			CommonName:   hostname,
+		},
+		NotBefore:   time.Now().Add(-1 * time.Hour),
+		NotAfter:    time.Now().Add(5 * 365 * 24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		DNSNames:    []string{hostname, "localhost", "axonwall.local"},
+		IPAddresses: ips,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &nodeKey.PublicKey, caKey)
+	if err != nil {
+		return err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, _ := x509.MarshalECPrivateKey(nodeKey)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	if err := os.WriteFile(certOut, certPEM, 0644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(keyOut, keyPEM, 0640); err != nil {
+		return err
+	}
+	return nil
+}
+
+func fixHAPKIPermissions() {
+	_ = os.Chmod("/var/lib/axonwall/secrets", 0750)
+	_ = os.Chmod(HAPKIDir, 0750)
+	if u, err := user.Lookup("openldap"); err == nil {
+		gid, _ := strconv.Atoi(u.Gid)
+		_ = os.Chown("/var/lib/axonwall/secrets", 0, gid)
+		_ = os.Chown(HAPKIDir, 0, gid)
+		_ = os.Chown(HAPKICACertPath, 0, gid)
+		_ = os.Chown(HAPKINodeCertPath, 0, gid)
+		_ = os.Chown(HAPKINodeKeyPath, 0, gid)
+		_ = os.Chmod(HAPKINodeKeyPath, 0640)
+	}
+}
+
+// ExportHAPKIBundle exports the HA CA and issues a leaf certificate for a peer node enrolling over the HA sync link.
+func ExportHAPKIBundle(peerIP string) (*HAPKIBundle, error) {
+	if err := EnsureHAPKICerts("axonwall-primary", "", peerIP); err != nil {
+		return nil, err
+	}
+	caCertBytes, err := os.ReadFile(HAPKICACertPath)
+	if err != nil {
+		return nil, err
+	}
+	caKeyBytes, err := os.ReadFile(HAPKICAKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	nodeCertBytes, err := os.ReadFile(HAPKINodeCertPath)
+	if err != nil {
+		return nil, err
+	}
+	nodeKeyBytes, err := os.ReadFile(HAPKINodeKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	replPass, _ := os.ReadFile(LDAPReplPassFile)
+	baseDN, _ := os.ReadFile(LDAPBaseDNFile)
+
+	return &HAPKIBundle{
+		CACertPEM:      string(caCertBytes),
+		CAKeyPEM:       string(caKeyBytes),
+		NodeCertPEM:    string(nodeCertBytes),
+		NodeKeyPEM:     string(nodeKeyBytes),
+		LDAPReplSecret: strings.TrimSpace(string(replPass)),
+		LDAPBaseDN:     strings.TrimSpace(string(baseDN)),
+	}, nil
+}
+
+// ImportHAPKIBundle installs the HA PKI bundle and LDAP replication secret received from the primary HA node.
+func ImportHAPKIBundle(bundle HAPKIBundle) error {
+	if err := os.MkdirAll(HAPKIDir, 0750); err != nil {
+		return err
+	}
+	if err := os.WriteFile(HAPKICACertPath, []byte(bundle.CACertPEM), 0644); err != nil {
+		return err
+	}
+	if bundle.CAKeyPEM != "" {
+		_ = os.WriteFile(HAPKICAKeyPath, []byte(bundle.CAKeyPEM), 0600)
+	}
+	if err := os.WriteFile(HAPKINodeCertPath, []byte(bundle.NodeCertPEM), 0644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(HAPKINodeKeyPath, []byte(bundle.NodeKeyPEM), 0640); err != nil {
+		return err
+	}
+	fixHAPKIPermissions()
+
+	if bundle.LDAPReplSecret != "" {
+		_ = os.MkdirAll(LDAPSecretsDir, 0700)
+		_ = os.WriteFile(LDAPReplPassFile, []byte(bundle.LDAPReplSecret+"\n"), 0600)
+	}
+	if bundle.LDAPBaseDN != "" {
+		_ = os.MkdirAll(LDAPBaseDir, 0750)
+		_ = os.WriteFile(LDAPBaseDNFile, []byte(bundle.LDAPBaseDN+"\n"), 0644)
+	}
+	return nil
+}
+
+// LoadHAPKITLSConfig returns a mutual-TLS *tls.Config if the HA PKI certificates are present.
+func LoadHAPKITLSConfig() (*tls.Config, error) {
+	caBytes, err := os.ReadFile(HAPKICACertPath)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.LoadX509KeyPair(HAPKINodeCertPath, HAPKINodeKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBytes) {
+		return nil, fmt.Errorf("failed to parse HA CA certificate")
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		ClientCAs:    pool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}
+
+// ConfigureMultiProviderSyncrepl configures OpenLDAP cn=config with TLS certificates,
+// serverID, olcMultiProvider: TRUE, and refreshAndPersist syncrepl over ldaps://<peerIP>:636.
+func ConfigureMultiProviderSyncrepl(serverID int, peerIP string, baseDN string) error {
+	cleanPeerIP := strings.Split(strings.TrimSpace(peerIP), ":")[0]
+	cleanPeerIP = strings.Split(cleanPeerIP, "/")[0]
+	if cleanPeerIP == "" {
+		return nil
+	}
+
+	if err := EnsureHAPKICerts("axonwall-ha", "", cleanPeerIP); err != nil {
+		return fmt.Errorf("failed to ensure HA PKI certificates: %w", err)
+	}
+
+	replBytes, err := os.ReadFile(LDAPReplPassFile)
+	if err != nil {
+		return fmt.Errorf("missing LDAP replication password: %w", err)
+	}
+	replPass := strings.TrimSpace(string(replBytes))
+
+	// Update cn=replicator password in local DIT to match repl.pw
+	if replHash, err := HashSSHA(replPass); err == nil {
+		replLDIF := fmt.Sprintf("dn: cn=replicator,%s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n", baseDN, replHash)
+		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+		cmd.Stdin = strings.NewReader(replLDIF)
+		_ = cmd.Run()
+	}
+
+	// Configure cn=config with TLS certificates and ServerID
+	globalLDIF := fmt.Sprintf(`dn: cn=config
+changetype: modify
+replace: olcServerID
+olcServerID: %d
+-
+replace: olcTLSCACertificateFile
+olcTLSCACertificateFile: %s
+-
+replace: olcTLSCertificateFile
+olcTLSCertificateFile: %s
+-
+replace: olcTLSCertificateKeyFile
+olcTLSCertificateKeyFile: %s
+`, serverID, HAPKICACertPath, HAPKINodeCertPath, HAPKINodeKeyPath)
+
+	cmdGlobal := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+	cmdGlobal.Stdin = strings.NewReader(globalLDIF)
+	if out, err := cmdGlobal.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to configure slapd TLS/ServerID: %s (%w)", string(out), err)
+	}
+
+	// Configure olcDatabase={1}mdb with olcSyncrepl and olcMultiProvider: TRUE
+	peerURI := fmt.Sprintf("ldaps://%s:636", cleanPeerIP)
+	syncreplVal := fmt.Sprintf(
+		`{0}rid=001 provider=%s bindmethod=simple binddn="cn=replicator,%s" credentials=%s searchbase="%s" type=refreshAndPersist retry="5 5 300 +" tls_cacert=%s tls_reqcert=demand`,
+		peerURI, baseDN, replPass, baseDN, HAPKICACertPath,
+	)
+
+	mdbLDIF := fmt.Sprintf(`dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+replace: olcSyncrepl
+olcSyncrepl: %s
+-
+replace: olcMultiProvider
+olcMultiProvider: TRUE
+`, syncreplVal)
+
+	cmdMdb := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+	cmdMdb.Stdin = strings.NewReader(mdbLDIF)
+	if out, err := cmdMdb.CombinedOutput(); err != nil {
+		// Fallback for older OpenLDAP schemas using olcMirrorMode instead of olcMultiProvider
+		mdbFallback := strings.ReplaceAll(mdbLDIF, "olcMultiProvider", "olcMirrorMode")
+		cmdFallback := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+		cmdFallback.Stdin = strings.NewReader(mdbFallback)
+		if out2, err2 := cmdFallback.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("failed to configure slapd syncrepl: %s / %s (%w)", string(out), string(out2), err)
+		}
+	}
+
+	// Also update SSSD failover URI
+	_ = EnsureSSSDConfiguredWithPeer(baseDN, peerURI)
+	return nil
+}
