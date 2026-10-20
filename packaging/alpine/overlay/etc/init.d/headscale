@@ -17,7 +17,7 @@ depend() {
 }
 
 start_pre() {
-    checkpath -d -m 0770 -o axonwall:axonwall /run/headscale
+    checkpath -d -m 0770 -o axonwall:axonwall-api /run/headscale
     checkpath -d -m 0770 -o axonwall:axonwall /var/lib/axonwall/headscale
     checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
 }

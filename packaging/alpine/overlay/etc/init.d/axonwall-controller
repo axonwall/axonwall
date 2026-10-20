@@ -5,7 +5,7 @@ description="Axonwall Changeset & Policy Compiler Controller"
 supervisor="supervise-daemon"
 command="/usr/bin/node"
 command_args="/opt/axonwall/apps/axonwall-controller/dist/index.js"
-command_user="axonwall:axonwall"
+command_user="axonwall-controller:axonwall-api"
 directory="/opt/axonwall/apps/axonwall-controller"
 pidfile="/run/axonwall-controller.pid"
 output_log="/var/log/axonwall/axonwall-controller.log"
@@ -19,9 +19,9 @@ depend() {
 }
 
 # Parse a KEY=value env file WITHOUT executing it (audit D-S08). These
-# files carry credential material -- firstboot embeds the admin password
-# in axonwall.env -- and sourcing them as root would execute any $(...)
-# or backtick construct in a value at every service start. Values are
+# files carry credential material -- controller.env holds the fleet ZTP
+# token -- and sourcing them as root would execute any $(...) or
+# backtick construct in a value at every service start. Values are
 # taken literally; one layer of matching surrounding quotes is stripped.
 load_env_file() {
     _env_file="$1"
@@ -49,6 +49,6 @@ load_env_file() {
 
 start_pre() {
     checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
-    load_env_file /etc/axonwall/axonwall.env
+    load_env_file /etc/axonwall/controller.env
     export NODE_ENV=production
 }

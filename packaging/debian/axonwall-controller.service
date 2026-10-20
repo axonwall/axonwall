@@ -6,10 +6,14 @@ Wants=axonwalld.service
 
 [Service]
 Type=simple
-User=axonwall
-Group=axonwall
+# Separate service identity (audit B-12): the controller holds the ZTP
+# token, agent token and hub TLS key; the UI holds the JWT secret and
+# admin credentials. axonwall-api is the shared group for the daemon
+# sockets, agent.token and state traversal only.
+User=axonwall-controller
+Group=axonwall-api
 WorkingDirectory=/opt/axonwall/apps/axonwall-controller
-EnvironmentFile=-/etc/axonwall/axonwall.env
+EnvironmentFile=-/etc/axonwall/controller.env
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/index.js
 Restart=always

@@ -84,7 +84,7 @@ func persistAgentToken(path, token string) error {
 	}
 	perm := os.FileMode(0600)
 	gid := -1
-	if grp, err := user.LookupGroup("axonwall"); err == nil {
+	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
 		if parsed, err := strconv.Atoi(grp.Gid); err == nil {
 			gid = parsed
 			perm = 0640
