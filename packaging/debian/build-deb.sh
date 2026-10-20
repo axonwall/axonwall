@@ -78,6 +78,10 @@ if [[ -f "${ROOT_DIR}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; 
   chmod 755 "${WORK_DIR}/usr/sbin/axonwall-satellite"
 fi
 
+# Hub TLS certificate rotation tool (audit B-14)
+cp "${SCRIPT_DIR}/axonwall-rotate-hub-cert" "${WORK_DIR}/usr/local/bin/axonwall-rotate-hub-cert"
+chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-rotate-hub-cert"
+
 if [[ -d "${ROOT_DIR}/apps/axonwall-satellite/bin" ]]; then
   cp -r "${ROOT_DIR}/apps/axonwall-satellite/bin/"* "${WORK_DIR}/usr/share/axonwall/satellites/" 2>/dev/null || true
 fi
