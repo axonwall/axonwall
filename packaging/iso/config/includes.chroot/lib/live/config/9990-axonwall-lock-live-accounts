@@ -1,0 +1,16 @@
+#!/bin/sh
+# Axonwall (audit C9): lock the live session's OS accounts.
+#
+# The live image previously baked publicly-known passwords for the live
+# user and root into the kernel boot parameters. Nothing in the live
+# flow uses OS password login -- the appliance console TUI authenticates
+# against /etc/axonwall/admin.env, services run as root/system users,
+# and SSH is key-only -- so both password fields are set to '!' (locked)
+# for the duration of the live session. Installed systems are unaffected:
+# live-config hooks only run on live boots, and the installer's own
+# credential flow (finish-install.d) is a separate path.
+for _user in axonwall root; do
+    if getent passwd "$_user" >/dev/null 2>&1; then
+        usermod -p '!' "$_user" 2>/dev/null || true
+    fi
+done
