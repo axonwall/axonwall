@@ -114,7 +114,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   if (daemonStatus) {
     return {
       nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
-      version: daemonStatus.version || '0.9.2',
+      version: daemonStatus.version || '0.9.3',
       uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
@@ -150,7 +150,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.9.2',
+    version: '0.9.3',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
@@ -926,39 +926,7 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
         uptime = 'Active';
       }
     } catch {
-      // OpenRC (Alpine Linux) fallback
-      const svcBase = u.unit.replace(/\.service$/, '');
-      const openrcName = svcBase === 'kea-dhcp4-server' && fs.existsSync('/etc/init.d/kea-dhcp4') ? 'kea-dhcp4' : svcBase;
-      if (fs.existsSync(`/etc/init.d/${openrcName}`)) {
-        if (fs.existsSync(`/run/openrc/started/${openrcName}`)) {
-          status = 'active';
-          uptime = 'Active';
-        } else if (fs.existsSync(`/run/openrc/failed/${openrcName}`)) {
-          status = 'failed';
-        } else {
-          status = 'inactive';
-        }
-        try {
-          for (const pidFile of [`/run/${openrcName}.pid`, `/run/${openrcName}/${openrcName}.pid`]) {
-            if (fs.existsSync(pidFile)) {
-              const p = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
-              if (p > 0) {
-                pid = p;
-                break;
-              }
-            }
-          }
-          if (pid && fs.existsSync(`/proc/${pid}/status`)) {
-            const procStat = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
-            const rssMatch = procStat.match(/VmRSS:\s+(\d+)\s+kB/);
-            if (rssMatch) {
-              memory = `${(parseInt(rssMatch[1], 10) / 1024).toFixed(1)} MB`;
-            }
-          }
-        } catch {}
-      } else {
-        status = 'not-installed';
-      }
+      status = 'not-installed';
     }
 
     results.push({
@@ -1565,7 +1533,7 @@ function getCurrentInstalledVersion(): string {
       }
     } catch {}
   }
-  return '0.9.2';
+  return '0.9.3';
 }
 
 function compareSemver(v1: string, v2: string): number {
@@ -1603,7 +1571,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
 
     const res = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/releases/latest', {
       headers: {
-        'User-Agent': 'Axonwall-Appliance-Updater/0.9.2',
+        'User-Agent': 'Axonwall-Appliance-Updater/0.9.3',
         Accept: 'application/vnd.github.v3+json',
       },
       signal: controller.signal,
@@ -1622,7 +1590,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
       // Fallback: Check tags
       const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/tags?per_page=5', {
         headers: {
-          'User-Agent': 'Axonwall-Appliance-Updater/0.9.2',
+          'User-Agent': 'Axonwall-Appliance-Updater/0.9.3',
           Accept: 'application/vnd.github.v3+json',
         },
       });
@@ -1931,7 +1899,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
 
     const currentVersion = getCurrentInstalledVersion();
     const release = await getReleaseInfo();
-    const targetVersion = (release.latestVersion || '0.9.2').replace(/[^0-9a-zA-Z._-]/g, '');
+    const targetVersion = (release.latestVersion || '0.9.3').replace(/[^0-9a-zA-Z._-]/g, '');
 
     // 1. Delegate privileged firmware update to root daemon (axonwalld) first
     const daemonResp = await callAgentApi<any>(

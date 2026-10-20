@@ -129,8 +129,6 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 			slog.Info("Promoting local Headscale service to Active Master...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
 				_ = exec.Command("systemctl", "try-reload-or-restart", "headscale").Run()
-			} else if _, err := exec.LookPath("rc-service"); err == nil {
-				_ = exec.Command("rc-service", "--ifexists", "headscale", "restart").Run()
 			}
 		}
 
@@ -151,8 +149,6 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 			slog.Info("Demoting local node to Standby: stopping Headscale to prevent split-brain writes...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
 				_ = exec.Command("systemctl", "stop", "headscale").Run()
-			} else if _, err := exec.LookPath("rc-service"); err == nil {
-				_ = exec.Command("rc-service", "--ifexists", "headscale", "stop").Run()
 			}
 		}
 
@@ -192,6 +188,7 @@ func (m *SqliteSyncManager) startMasterServer() error {
 	mux.HandleFunc("/api/v1/sync/state", m.handleDownloadState)
 	mux.HandleFunc("/api/v1/sync/zfs", m.handleZfsSendStream)
 	mux.HandleFunc("/api/v1/sync/k3s-token", m.handleK3sToken)
+	mux.HandleFunc("/api/v1/sync/pki-enroll", m.handlePkiEnroll)
 
 	m.server = &http.Server{
 		Addr:         listenAddr,
@@ -204,11 +201,7 @@ func (m *SqliteSyncManager) startMasterServer() error {
 		slog.Error("HA sync master server has NO auth token configured: every sync request will be rejected (fail-closed) until sqliteSync.authToken is set")
 	}
 
-	// NOTE: plain HTTP on purpose. The peer-side clients (pollAndSync,
-	// FetchPeerClusterToken) dial http://; enabling TLS here without a
-	// matching client (scheme + CA pinning) silently breaks replication.
-	// Transport encryption for HA sync must be added on both ends at once.
-	slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s)", "addr", listenAddr)
+	slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s + Identity PKI)", "addr", listenAddr)
 	srv := m.server
 	go func() {
 		// The HA sync interface address may not be assigned yet at boot;
@@ -224,6 +217,21 @@ func (m *SqliteSyncManager) startMasterServer() error {
 	}()
 
 	return nil
+}
+
+func (m *SqliteSyncManager) handlePkiEnroll(w http.ResponseWriter, r *http.Request) {
+	if !m.authorized(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	peerIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	bundle, err := ExportHAPKIBundle(peerIP)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to export HA PKI bundle: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(bundle)
 }
 
 func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -423,6 +431,29 @@ func (m *SqliteSyncManager) pollAndSync() {
 
 	// Synchronize non-K3s appliance state (/var/lib/axonwall/state.json & Samba passdb.tdb)
 	m.syncApplianceStateFromPeer(peerPort)
+
+	// Automatically enroll HA PKI + OpenLDAP multi-provider syncrepl secret if not yet enrolled
+	if _, err := os.Stat(HAPKICACertPath); os.IsNotExist(err) {
+		enrollUrl := fmt.Sprintf("http://%s/api/v1/sync/pki-enroll", net.JoinHostPort(cfg.PeerAddress, strconv.Itoa(peerPort)))
+		if enrollReq, err := http.NewRequest("GET", enrollUrl, nil); err == nil {
+			if cfg.AuthToken != "" {
+				enrollReq.Header.Set("X-Axonwall-Sync-Token", cfg.AuthToken)
+			}
+			if enrollResp, err := client.Do(enrollReq); err == nil {
+				if enrollResp.StatusCode == http.StatusOK {
+					var bundle HAPKIBundle
+					if json.NewDecoder(enrollResp.Body).Decode(&bundle) == nil && bundle.CACertPEM != "" {
+						if err := ImportHAPKIBundle(bundle); err == nil {
+							slog.Info("HA Backup Poller: Enrolled HA PKI bundle & LDAP replication credentials from primary peer")
+							_, _ = EnsureOpenLDAPBootstrapped(bundle.LDAPBaseDN, 2, DefaultPasswordPolicyConfig())
+							_ = ConfigureMultiProviderSyncrepl(2, cfg.PeerAddress, bundle.LDAPBaseDN)
+						}
+					}
+				}
+				_ = enrollResp.Body.Close()
+			}
+		}
+	}
 
 	// Automatically fetch K3s cluster join token if not yet present on backup node
 	if _, err := os.Stat("/var/lib/axonwall/k3s-join.token"); err != nil {

@@ -103,8 +103,6 @@ if [[ -n "$OPT1_IF" ]] && ip link show "$OPT1_IF" &>/dev/null; then
   ip link set up dev "$OPT1_IF" || true
   if command -v dhclient &>/dev/null; then
     dhclient -1 -v "$OPT1_IF" &>/dev/null || true
-  elif command -v udhcpc &>/dev/null; then
-    udhcpc -b -i "$OPT1_IF" -p "/var/run/udhcpc.${OPT1_IF}.pid" &>/dev/null || true
   fi
   echo "[Axonwall Firstboot] OPT1 interface ($OPT1_IF) brought UP (Non-authoritative / attached network)"
 fi
@@ -113,8 +111,6 @@ if [[ -n "$OPT2_IF" ]] && ip link show "$OPT2_IF" &>/dev/null; then
   ip link set up dev "$OPT2_IF" || true
   if command -v dhclient &>/dev/null; then
     dhclient -1 -v "$OPT2_IF" &>/dev/null || true
-  elif command -v udhcpc &>/dev/null; then
-    udhcpc -b -i "$OPT2_IF" -p "/var/run/udhcpc.${OPT2_IF}.pid" &>/dev/null || true
   fi
   echo "[Axonwall Firstboot] OPT2 interface ($OPT2_IF) brought UP (Non-authoritative / attached network)"
 fi
@@ -175,11 +171,53 @@ chmod 750 /etc/axonwall/certs 2>/dev/null || true
 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
 chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
-# Initialize Headscale directories
-mkdir -p /var/lib/axonwall/headscale /run/headscale
-chown -R axonwall:axonwall-api /var/lib/axonwall 2>/dev/null || true
+# Initialize persistent directories on /var/lib/axonwall (Headscale, OpenLDAP, HA PKI, shared /home)
+mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /run/headscale
+mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
+mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
+chown root:axonwall-api /var/lib/axonwall 2>/dev/null || true
+chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops 2>/dev/null || true
+for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed; do
+  if [[ -e "$f" ]]; then
+    chown axonwall:axonwall-api "$f" 2>/dev/null || true
+  fi
+done
+chown -R axonwall:axonwall /var/lib/axonwall/headscale 2>/dev/null || true
+chmod 0775 /var/lib/axonwall 2>/dev/null || true
+chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
+chown root:root /var/lib/axonwall/home 2>/dev/null || true
+chown -R root:root /var/lib/axonwall/secrets 2>/dev/null || true
+chmod 0700 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
+if id -u openldap &>/dev/null; then
+  chown -R openldap:openldap /var/lib/axonwall/ldap 2>/dev/null || true
+  chmod 0750 /var/lib/axonwall/ldap /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups 2>/dev/null || true
+fi
 chown axonwall:axonwall-api /run/headscale 2>/dev/null || true
 chmod 770 /var/lib/axonwall/headscale /run/headscale 2>/dev/null || true
+
+# Register /usr/local/bin/axonwall-opshell in /etc/shells
+if [[ -f /etc/shells ]] && ! grep -qxF '/usr/local/bin/axonwall-opshell' /etc/shells; then
+  echo '/usr/local/bin/axonwall-opshell' >> /etc/shells
+fi
+if [[ -f /etc/sudoers.d/axonwall ]]; then
+  chown root:root /etc/sudoers.d/axonwall 2>/dev/null || true
+  chmod 0440 /etc/sudoers.d/axonwall 2>/dev/null || true
+fi
+
+# Migrate any existing /home/* into /var/lib/axonwall/home and bind-mount /home
+if ! mountpoint -q /home 2>/dev/null; then
+  if [[ -d /home ]] && [[ -n "$(ls -A /home 2>/dev/null || true)" ]]; then
+    cp -a /home/. /var/lib/axonwall/home/ 2>/dev/null || true
+  fi
+  chown root:root /var/lib/axonwall/home 2>/dev/null || true
+  chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
+  mount --bind /var/lib/axonwall/home /home 2>/dev/null || true
+fi
+chown root:root /var/lib/axonwall/home /home 2>/dev/null || true
+chmod 0755 /var/lib/axonwall/home /home 2>/dev/null || true
+if [[ -f /etc/fstab ]] && ! grep -q '/var/lib/axonwall/home' /etc/fstab; then
+  echo '/var/lib/axonwall/home  /home  none  bind  0  0' >> /etc/fstab
+fi
 
 # Generate secure random appliance secrets if absent
 if [[ ! -s /etc/axonwall/axonwall.env ]]; then
@@ -221,8 +259,8 @@ fi
 chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
 chown axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
 if [[ -f /etc/axonwall/controller.env ]]; then
-  chown root:root /etc/axonwall/controller.env 2>/dev/null || true
-  chmod 0600 /etc/axonwall/controller.env 2>/dev/null || true
+  chown root:axonwall-controller /etc/axonwall/controller.env 2>/dev/null || true
+  chmod 0640 /etc/axonwall/controller.env 2>/dev/null || true
 fi
 
 # Ensure proper ownership of Axonwall application directory (Next.js writes .next/cache)
@@ -247,10 +285,10 @@ fi
 rm -f "$MARKER"
 
 systemctl daemon-reload
-systemctl enable axonwalld axonwall-controller axonwall-ui headscale ssh || true
+systemctl enable axonwalld axonwall-controller axonwall-ui headscale ssh chrony || true
 # Use non-blocking restarts so firstboot does not deadlock with services ordered After=axonwall-firstboot.service
 systemctl try-restart --no-block axonwalld || true
-systemctl restart --no-block axonwall-ui axonwall-controller headscale ssh || true
+systemctl restart --no-block axonwall-ui axonwall-controller headscale ssh chrony || true
 
 LAN_IP=""
 if [[ -n "$LAN_IF" ]]; then

@@ -1,15 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
-import { getLocalUsers, getLocalGroups, createLocalUser } from '@/server/users';
+import { getLocalUsers, getLocalGroups, createLocalUser, getDirectoryStatus } from '@/server/users';
 
 export async function GET() {
   try {
     const session = await getSession();
     assertActionPermitted(session);
 
-    const [users, groups] = await Promise.all([getLocalUsers(), getLocalGroups()]);
-    return NextResponse.json({ users, groups });
+    const [users, groups, directoryStatus] = await Promise.all([
+      getLocalUsers(),
+      getLocalGroups(),
+      getDirectoryStatus(),
+    ]);
+    return NextResponse.json({ users, groups, directoryStatus });
   } catch (err: any) {
     const status = err.message === 'Unauthorized' ? 401 : err.message?.startsWith('Forbidden') ? 403 : 500;
     return NextResponse.json({ error: err.message }, { status });

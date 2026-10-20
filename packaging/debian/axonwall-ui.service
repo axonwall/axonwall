@@ -21,7 +21,7 @@ RestartSec=5s
 
 # Sandboxing
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=false
 PrivateTmp=true
 NoNewPrivileges=true
 ReadWritePaths=/opt/axonwall /var/lib/axonwall /etc/axonwall -/run/headscale /run/axonwall

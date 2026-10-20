@@ -1,7 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# Axonwall Appliance Firmware & System Updater
-# Compatible with both Debian (glibc / systemd / dpkg) and Alpine (musl / OpenRC)
+# Axonwall Appliance Firmware & System Updater (Debian 13 Dual-Root A/B)
 # ==============================================================================
 set -eu
 
@@ -42,8 +41,17 @@ echo "  Target Version: ${TARGET_VERSION:-latest}"
 echo "  Channel       : ${UPDATE_CHANNEL}"
 echo "================================================================================"
 
-# Helper: Extract .deb payload to a destination directory on either Debian (dpkg-deb)
-# or Alpine Linux (using Node.js ar unpacker + BusyBox/GNU tar)
+# Pre-Update OpenLDAP Directory Backup (protects against MDB version skew on rollback)
+if command -v slapcat >/dev/null 2>&1 && [ -d /var/lib/axonwall/ldap/config/cn=config ]; then
+  BACKUP_TS="$(date -u +"%Y%m%dT%H%M%SZ" 2>/dev/null || echo "latest")"
+  mkdir -p /var/lib/axonwall/ldap/backups 2>/dev/null || true
+  echo "[+] Creating pre-update OpenLDAP LDIF snapshot in /var/lib/axonwall/ldap/backups/..."
+  slapcat -F /var/lib/axonwall/ldap/config -n 0 -l "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-config-${BACKUP_TS}.ldif" 2>/dev/null || true
+  slapcat -F /var/lib/axonwall/ldap/config -n 1 -l "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-data-${BACKUP_TS}.ldif" 2>/dev/null || true
+  chmod 0600 "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-"*.ldif 2>/dev/null || true
+fi
+
+# Helper: Extract .deb payload to a destination directory on Debian
 extract_deb() {
   deb_file="$1"
   dest_dir="$2"
@@ -73,10 +81,7 @@ extract_deb() {
     ' "$deb_file" "/tmp" 2>/dev/null || true)"
 
     if [ -n "$data_tar" ] && [ -f "$data_tar" ]; then
-      # Tar-slip guard (audit D-S07): refuse archives whose member names
-      # are absolute or climb out of the destination with .. -- the
-      # fallback extractor runs as root and BusyBox tar does not
-      # sanitize these the way GNU tar does.
+      # Tar-slip guard (audit D-S07)
       if tar -tf "$data_tar" 2>/dev/null | grep -qE '^/|(^|/)\.\.(/|$)'; then
         echo "[!] Update package contains unsafe paths; refusing to extract." >&2
         rm -f "$data_tar"
@@ -87,11 +92,6 @@ extract_deb() {
         return 1
       }
       rm -f "$data_tar"
-      # On Alpine (musl), strip any glibc-only sharp image binaries from standalone bundle
-      if [ -f /etc/alpine-release ] || [ -f "${dest_dir}/etc/alpine-release" ]; then
-        rm -rf "${dest_dir}/opt/axonwall/node_modules/.pnpm/"@img+sharp* \
-               "${dest_dir}/opt/axonwall/node_modules/.pnpm/"sharp* 2>/dev/null || true
-      fi
       return 0
     fi
   fi
@@ -99,7 +99,7 @@ extract_deb() {
   return 1
 }
 
-# Helper: Resolve partition block device by label across udev (Debian) and mdev (Alpine)
+# Helper: Resolve partition block device by label
 resolve_label_dev() {
   label="$1"
   if [ -e "/dev/disk/by-label/${label}" ]; then
@@ -212,6 +212,7 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           --exclude=/media/* \
           --exclude=/lost+found \
           --exclude=/var/lib/axonwall/* \
+          --exclude=/home/* \
           --exclude=/boot/efi/* \
           / "${STAGE_DIR}/" 2>/dev/null || true
       else
@@ -221,17 +222,10 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           fi
         done
       fi
-      mkdir -p "${STAGE_DIR}/dev" "${STAGE_DIR}/proc" "${STAGE_DIR}/sys" "${STAGE_DIR}/run" "${STAGE_DIR}/tmp" "${STAGE_DIR}/boot" "${STAGE_DIR}/var/lib/axonwall" 2>/dev/null || true
-
-      # If running on Alpine and /lib/modules is a symlink to modloop, materialize real kernel modules
-      if [ -e /lib/modules ] && [ -L "${STAGE_DIR}/lib/modules" ]; then
-        rm -rf "${STAGE_DIR}/lib/modules"
-        mkdir -p "${STAGE_DIR}/lib/modules"
-        ( cd /lib/modules && tar cf - . ) | ( cd "${STAGE_DIR}/lib/modules" && tar xf - ) 2>/dev/null || true
-      fi
+      mkdir -p "${STAGE_DIR}/dev" "${STAGE_DIR}/proc" "${STAGE_DIR}/sys" "${STAGE_DIR}/run" "${STAGE_DIR}/tmp" "${STAGE_DIR}/boot" "${STAGE_DIR}/home" "${STAGE_DIR}/var/lib/axonwall" 2>/dev/null || true
     fi
 
-    # Ensure /etc/fstab on target slot points to the correct root label and has no /mnt/standby mount
+    # Ensure /etc/fstab on target slot points to the correct root label, has no /mnt/standby mount, and bind-mounts /var/lib/axonwall/home -> /home
     if [ -f "${STAGE_DIR}/etc/fstab" ]; then
       if [ "$TARGET_SLOT" = "B" ]; then
         sed -i 's/axon_root_a/axon_root_b/g' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
@@ -239,6 +233,9 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
         sed -i 's/axon_root_b/axon_root_a/g' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
       fi
       sed -i '\#/mnt/standby#d' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
+      if ! grep -q '/var/lib/axonwall/home' "${STAGE_DIR}/etc/fstab"; then
+        echo "/var/lib/axonwall/home  /home  none  bind  0  0" >> "${STAGE_DIR}/etc/fstab"
+      fi
     fi
 
     # Self-heal /boot on target slot if kernel or initramfs/initrd is missing

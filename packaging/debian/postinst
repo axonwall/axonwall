@@ -33,15 +33,58 @@ case "$1" in
 
         # 2. Ensure directories exist with strict permissions
         mkdir -p /var/lib/axonwall /var/log/axonwall /run/axonwall /etc/axonwall/certs /opt/axonwall
-        mkdir -p /var/lib/axonwall/headscale /run/headscale
+        mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /run/headscale
+        mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
+        mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 
-        chown -R axonwall:axonwall-api /var/lib/axonwall /opt/axonwall
+        chown root:axonwall-api /var/lib/axonwall
+        chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /opt/axonwall
+        for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed; do
+            if [ -e "$f" ]; then
+                chown axonwall:axonwall-api "$f" 2>/dev/null || true
+            fi
+        done
         chown -R axonwall:axonwall /var/log/axonwall
         chown -R axonwall:axonwall /var/lib/axonwall/headscale
         chown axonwall:axonwall-api /run/headscale
-        chmod 0770 /var/lib/axonwall
+        chown root:root /var/lib/axonwall/home
+        chmod 0775 /var/lib/axonwall
+        chmod 0755 /var/lib/axonwall/home
         chmod 750 /var/log/axonwall /opt/axonwall
         chmod 770 /var/lib/axonwall/headscale /run/headscale
+        chmod 0700 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
+        chown -R root:root /var/lib/axonwall/secrets
+
+        if getent passwd openldap >/dev/null 2>&1; then
+            chown -R openldap:openldap /var/lib/axonwall/ldap
+            chmod 0750 /var/lib/axonwall/ldap /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
+        fi
+
+        # Register /usr/local/bin/axonwall-opshell in /etc/shells
+        if [ -f /etc/shells ] && ! grep -qxF '/usr/local/bin/axonwall-opshell' /etc/shells; then
+            echo '/usr/local/bin/axonwall-opshell' >> /etc/shells
+        fi
+
+        # Ensure /etc/sudoers.d/axonwall has mode 0440
+        if [ -f /etc/sudoers.d/axonwall ]; then
+            chown root:root /etc/sudoers.d/axonwall 2>/dev/null || true
+            chmod 0440 /etc/sudoers.d/axonwall 2>/dev/null || true
+        fi
+
+        # Migrate existing /home/* into /var/lib/axonwall/home and bind-mount /home if not already mounted
+        if [ -d /var/lib/axonwall/home ] && ! mountpoint -q /home 2>/dev/null; then
+            if [ -d /home ] && [ "$(ls -A /home 2>/dev/null)" ]; then
+                cp -a /home/. /var/lib/axonwall/home/ 2>/dev/null || true
+            fi
+            chown root:root /var/lib/axonwall/home 2>/dev/null || true
+            chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
+            mount --bind /var/lib/axonwall/home /home 2>/dev/null || true
+        fi
+        chown root:root /var/lib/axonwall/home /home 2>/dev/null || true
+        chmod 0755 /var/lib/axonwall/home /home 2>/dev/null || true
+        if [ -f /etc/fstab ] && ! grep -q '/var/lib/axonwall/home' /etc/fstab; then
+            echo '/var/lib/axonwall/home  /home  none  bind  0  0' >> /etc/fstab
+        fi
 
         chown root:axonwall-api /etc/axonwall /etc/axonwall/certs
         chmod 0770 /etc/axonwall
@@ -90,8 +133,8 @@ ENV_EOF
             cat << ENV_EOF > /etc/axonwall/controller.env
 AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
 ENV_EOF
-            chmod 0600 /etc/axonwall/controller.env
-            chown root:root /etc/axonwall/controller.env
+            chmod 0640 /etc/axonwall/controller.env
+            chown root:axonwall-controller /etc/axonwall/controller.env
 
             # No public default (audit C9): the generated admin password
             # is random; surface it to the operator only, exactly like
@@ -110,10 +153,12 @@ ENV_EOF
             chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
             if [ ! -f /etc/axonwall/controller.env ] && grep -q '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env; then
                 grep '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env > /etc/axonwall/controller.env || true
-                chown root:root /etc/axonwall/controller.env 2>/dev/null || true
-                chmod 0600 /etc/axonwall/controller.env 2>/dev/null || true
                 sed -i '/^AXONWALL_ZTP_TOKEN=/d' /etc/axonwall/axonwall.env
             fi
+        fi
+        if [ -f /etc/axonwall/controller.env ]; then
+            chown root:axonwall-controller /etc/axonwall/controller.env 2>/dev/null || true
+            chmod 0640 /etc/axonwall/controller.env 2>/dev/null || true
         fi
         if [ -f /etc/axonwall/agent.token ]; then
             chown root:axonwall-api /etc/axonwall/agent.token 2>/dev/null || true
@@ -128,11 +173,18 @@ ENV_EOF
             fi
         fi
 
+        # 5b. Sync any regular systemd unit files in /etc/systemd/system/ so ISO-placed copies do not shadow updated /lib/systemd/system/ units
+        for unit in axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service; do
+            if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then
+                cp "/lib/systemd/system/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null || true
+            fi
+        done
+
         # 6. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service ssh.service || true
-            systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service || true
+            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service ssh.service chrony.service || true
+            systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service || true
         fi
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)

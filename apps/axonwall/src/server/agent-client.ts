@@ -59,7 +59,18 @@ export async function callAgentApi<T>(
               resolve(null);
             }
           } else {
-            resolve(null);
+            let errorMsg = '';
+            try {
+              const parsed = JSON.parse(data);
+              errorMsg = parsed.message || parsed.error || '';
+            } catch {
+              errorMsg = data.trim();
+            }
+            if (!errorMsg) {
+              errorMsg = `Daemon API error (${res.statusCode || 'unknown'})`;
+            }
+            // Return failure object carrying the daemon error message
+            resolve({ success: false, message: errorMsg, error: errorMsg } as unknown as T);
           }
         });
       }

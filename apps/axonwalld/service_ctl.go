@@ -10,25 +10,6 @@ import (
 	"syscall"
 )
 
-func normalizeOpenRCService(svc string) string {
-	s := strings.TrimSuffix(svc, ".service")
-	if s == "kea-dhcp4-server" {
-		if _, err := exec.LookPath("rc-service"); err == nil {
-			if exec.Command("rc-service", "--exists", "kea-dhcp4").Run() == nil {
-				return "kea-dhcp4"
-			}
-		}
-	}
-	if s == "ssh" {
-		if _, err := exec.LookPath("rc-service"); err == nil {
-			if exec.Command("rc-service", "--exists", "sshd").Run() == nil {
-				return "sshd"
-			}
-		}
-	}
-	return s
-}
-
 // managedServices is the allowlist of units the daemon may reload,
 // restart, or stop on behalf of bundle/API callers (audit D-S03). Before
 // this list existed, any name surviving a "/" check reached systemctl as
@@ -42,6 +23,7 @@ var managedServices = map[string]bool{
 	"unbound": true, "frr": true, "caddy": true, "headscale": true,
 	"keepalived": true, "conntrackd": true, "nftables": true,
 	"ssh": true, "sshd": true,
+	"slapd": true, "sssd": true, "chrony": true,
 }
 
 func validServiceName(svc string) bool {
@@ -55,10 +37,6 @@ func reloadOrRestartService(svc string) ([]byte, error) {
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		return exec.Command("systemctl", "try-reload-or-restart", svc).CombinedOutput()
 	}
-	if _, err := exec.LookPath("rc-service"); err == nil {
-		name := normalizeOpenRCService(svc)
-		return exec.Command("rc-service", "--ifexists", name, "restart").CombinedOutput()
-	}
 	return exec.Command("service", strings.TrimSuffix(svc, ".service"), "restart").CombinedOutput()
 }
 
@@ -69,22 +47,15 @@ func stopSystemService(svc string) ([]byte, error) {
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		return exec.Command("systemctl", "stop", svc).CombinedOutput()
 	}
-	if _, err := exec.LookPath("rc-service"); err == nil {
-		name := normalizeOpenRCService(svc)
-		return exec.Command("rc-service", "--ifexists", name, "stop").CombinedOutput()
-	}
 	return exec.Command("service", strings.TrimSuffix(svc, ".service"), "stop").CombinedOutput()
 }
 
 // dhcpClientRunning reports whether a DHCP client started by the system
-// networking path (ifup/dhcpcd, ifup/udhcpc, or an earlier boot-apply) is
-// already alive for dev, based on the clients' pidfiles. Starting a second
-// client on the same interface is destructive: a fresh udhcpc runs its
-// deconfig script first, which flushes the IPv4 addresses the running
-// client just configured, and the two clients then fight over the lease.
+// networking path (ifup/dhcpcd, dhclient, or an earlier boot-apply) is
+// already alive for dev, based on the clients' pidfiles.
 func dhcpClientRunning(dev string) bool {
 	pidFiles := []string{
-		"/var/run/udhcpc." + dev + ".pid",
+		"/var/run/dhclient." + dev + ".pid",
 		"/var/run/dhcpcd/" + dev + ".pid",
 		"/var/run/dhcpcd-" + dev + ".pid",
 	}
@@ -117,16 +88,8 @@ func triggerDhcpClient(dev string) {
 		return
 	}
 	go func() {
-		// Prefer udhcpc if present (Alpine default)
-		if udhcpcPath, err := exec.LookPath("udhcpc"); err == nil {
-			pidFile := "/var/run/udhcpc." + dev + ".pid"
-			_ = exec.Command(udhcpcPath, "-b", "-i", dev, "-p", pidFile).Run()
-			return
-		}
-		// Fallback to dhclient (Debian default)
 		if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 			_ = exec.Command(dhclientPath, "-1", "-v", dev).Run()
-			return
 		}
 	}()
 }
@@ -137,17 +100,5 @@ func releaseDhcpLease(dev string) {
 	}
 	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 		_ = exec.Command(dhclientPath, "-r", dev).Run()
-	}
-	// Signal the recorded pid directly. The previous implementation
-	// interpolated dev into a root `sh -c` string (audit D-S01 note);
-	// the pidfile is written by triggerDhcpClient, so no shell and no
-	// pkill pattern are needed.
-	pidFile := "/var/run/udhcpc." + dev + ".pid"
-	if data, err := os.ReadFile(pidFile); err == nil {
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-			if proc, err := os.FindProcess(pid); err == nil {
-				_ = proc.Signal(syscall.SIGTERM)
-			}
-		}
 	}
 }

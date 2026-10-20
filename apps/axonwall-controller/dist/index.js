@@ -36828,6 +36828,81 @@ var VigilanteConfigSchema = external_exports.object({
     autoIngestPeerBlocks: true
   })
 });
+var ApplianceRoleSchema = external_exports.enum(["admin", "operator", "readonly", "os_only"]);
+var LocalUserSchema = external_exports.object({
+  username: external_exports.string().min(1).max(32).regex(/^[a-z_][a-z0-9_-]{0,31}$/, "Invalid Linux username"),
+  uid: external_exports.number().int().nonnegative(),
+  gid: external_exports.number().int().nonnegative(),
+  comment: external_exports.string().default(""),
+  homeDir: external_exports.string().default(""),
+  shell: external_exports.string().default(""),
+  groups: external_exports.array(external_exports.string()).default([]),
+  primaryGroup: external_exports.string().default(""),
+  isSystem: external_exports.boolean().default(false),
+  protected: external_exports.boolean().default(false),
+  applianceRole: ApplianceRoleSchema.default("os_only"),
+  hasSSHKeys: external_exports.boolean().default(false),
+  sshKeysCount: external_exports.number().int().default(0),
+  sshKeys: external_exports.array(external_exports.string()).optional(),
+  hasPassword: external_exports.boolean().default(false),
+  passwordLocked: external_exports.boolean().default(false)
+});
+var LocalGroupSchema = external_exports.object({
+  name: external_exports.string().min(1).max(32),
+  gid: external_exports.number().int().nonnegative(),
+  members: external_exports.array(external_exports.string()).default([]),
+  isSystem: external_exports.boolean().default(false),
+  protected: external_exports.boolean().default(false)
+});
+var CreateLocalUserRequestSchema = external_exports.object({
+  username: external_exports.string().min(1).max(32).regex(/^[a-z_][a-z0-9_-]{0,31}$/, "Invalid Linux username"),
+  comment: external_exports.string().optional(),
+  password: external_exports.string().optional(),
+  shell: external_exports.string().optional(),
+  applianceRole: ApplianceRoleSchema.optional(),
+  groups: external_exports.array(external_exports.string()).optional(),
+  sshKeys: external_exports.array(external_exports.string()).optional()
+});
+var UpdateLocalUserRequestSchema = external_exports.object({
+  comment: external_exports.string().optional(),
+  password: external_exports.string().optional(),
+  shell: external_exports.string().optional(),
+  applianceRole: ApplianceRoleSchema.optional(),
+  groups: external_exports.array(external_exports.string()).optional(),
+  sshKeys: external_exports.array(external_exports.string()).optional(),
+  passwordLocked: external_exports.boolean().optional()
+});
+var AuthLocalUserRequestSchema = external_exports.object({
+  username: external_exports.string().min(1),
+  password: external_exports.string().min(1)
+});
+var AuthLocalUserResponseSchema = external_exports.object({
+  success: external_exports.boolean(),
+  username: external_exports.string(),
+  applianceRole: ApplianceRoleSchema,
+  groups: external_exports.array(external_exports.string()),
+  message: external_exports.string().optional()
+});
+var PasswordPolicySchema = external_exports.object({
+  minLength: external_exports.number().int().min(8).max(128).default(12),
+  maxFailures: external_exports.number().int().min(0).max(50).default(5),
+  lockoutDurationSeconds: external_exports.number().int().min(60).max(86400).default(900),
+  historyCount: external_exports.number().int().min(0).max(24).default(5),
+  maxAgeDays: external_exports.number().int().min(0).max(3650).default(0)
+  // 0 = no expiry
+});
+var IdentityConfigSchema = external_exports.object({
+  baseDn: external_exports.string().optional(),
+  // Derived from system.domain on first bootstrap
+  disableRootSshWhenAdminExists: external_exports.boolean().default(true),
+  passwordPolicy: PasswordPolicySchema.default({
+    minLength: 12,
+    maxFailures: 5,
+    lockoutDurationSeconds: 900,
+    historyCount: 5,
+    maxAgeDays: 0
+  })
+});
 var DesiredStateSchema = external_exports.object({
   version: external_exports.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -36858,6 +36933,7 @@ var DesiredStateSchema = external_exports.object({
   crowdsec: CrowdSecConfigSchema.optional(),
   geoip: GeoIpConfigSchema.optional(),
   sso: SsoConfigSchema.optional(),
+  identity: IdentityConfigSchema.optional(),
   tlsDecryption: TlsDecryptionSchema.optional(),
   ha: HighAvailabilityConfigSchema.optional(),
   observability: ObservabilityConfigSchema.optional(),
@@ -37648,7 +37724,11 @@ function buildNasAndK3sInputRules(state, ifDeviceMap, nasEnabled, k3sEnabled) {
     if (!trustedDevs.includes(`"${syncDev}"`)) {
       trustedDevs.push(`"${syncDev}"`);
     }
-    hostRules.push(`    iifname "${syncDev}" tcp dport { 8443, 9443 } accept comment "ha-state-and-zfs-sync"`);
+    const configuredPort = state.ha.sqliteSync?.listenPort;
+    const syncPort = typeof configuredPort === "number" && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535 ? configuredPort : 9876;
+    hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
+    hostRules.push(`    iifname "${syncDev}" tcp dport 636 accept comment "ha-openldap-ldaps-syncrepl"`);
+    hostRules.push(`    iifname "${syncDev}" udp dport 123 accept comment "ha-chrony-ntp-sync"`);
   }
   const devSet = trustedDevs.length > 0 ? `iifname { ${trustedDevs.join(", ")} } ` : "";
   if (nasEnabled) {

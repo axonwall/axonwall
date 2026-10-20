@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Axonwall Restricted Operator Shell (/usr/local/bin/axonwall-opshell)
+# Assigned to users in the 'axonwall-operator' POSIX/LDAP group.
+# Prevents arbitrary root/bash escapes while providing structured appliance
+# diagnostics, log inspection, and TUI access.
+# ==============================================================================
+set -uo pipefail
+
+# Trap signals to prevent breaking out of the menu into a subshell
+trap '' SIGINT SIGQUIT SIGTSTP
+
+# Reject environment variables that could hijack execution inside child tools
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export LESSSECURE=1
+export PAGER="cat"
+
+# Handle non-interactive SSH command execution: ssh user@host "<command>"
+if [[ "${1:-}" == "-c" ]]; then
+  CMD="${2:-}"
+  case "$CMD" in
+    "axonwallctl status"|"axonwallctl diff"|"axonwallctl validate")
+      exec /usr/local/bin/$CMD
+      ;;
+    "ip addr"|"ip a"|"ip -br addr")
+      exec /sbin/ip addr show
+      ;;
+    "ip route"|"ip r")
+      exec /sbin/ip route show
+      ;;
+    "uptime")
+      exec /usr/bin/uptime
+      ;;
+    *)
+      echo "axonwall-opshell: command rejected by operator policy: ${CMD}" >&2
+      echo "Allowed non-interactive commands: 'axonwallctl status', 'axonwallctl diff', 'axonwallctl validate', 'ip addr', 'ip route', 'uptime'" >&2
+      exit 126
+      ;;
+  esac
+fi
+
+while true; do
+  echo ""
+  echo "================================================================================"
+  echo "  Axonwall Operator Shell — User: $(whoami)@$(hostname)"
+  echo "  Role: axonwall-operator (Restricted Diagnostic & Operations Environment)"
+  echo "================================================================================"
+  echo "  [1] Launch Axonwall Console TUI"
+  echo "  [2] Configuration Status (axonwallctl status)"
+  echo "  [3] Pending Configuration Diff (axonwallctl diff)"
+  echo "  [4] Validate Configuration (axonwallctl validate)"
+  echo "  [5] Network Interfaces & Addresses (ip -br addr)"
+  echo "  [6] Routing Table (ip route)"
+  echo "  [7] Ping Connectivity Test"
+  echo "  [8] Tail Appliance Service Logs (axonwalld / slapd / sssd)"
+  echo "  [9] HA & Directory Replication Status"
+  echo "  [0] Exit SSH Session"
+  echo "--------------------------------------------------------------------------------"
+  printf "Select option [0-9]: "
+  if ! IFS= read -r choice; then
+    echo ""
+    exit 0
+  fi
+
+  case "${choice}" in
+    1)
+      if [[ -x /usr/sbin/axonwall-console ]]; then
+        sudo /usr/sbin/axonwall-console || /usr/sbin/axonwall-console
+      else
+        echo "axonwall-console binary not found."
+      fi
+      ;;
+    2)
+      sudo /usr/local/bin/axonwallctl status 2>/dev/null || /usr/local/bin/axonwallctl status
+      ;;
+    3)
+      sudo /usr/local/bin/axonwallctl diff 2>/dev/null || /usr/local/bin/axonwallctl diff
+      ;;
+    4)
+      sudo /usr/local/bin/axonwallctl validate 2>/dev/null || /usr/local/bin/axonwallctl validate
+      ;;
+    5)
+      /sbin/ip -br addr show
+      ;;
+    6)
+      /sbin/ip route show
+      ;;
+    7)
+      printf "Enter target IP or hostname to ping: "
+      if IFS= read -r target; then
+        # Strict validation: only alphanumeric, dots, colons, hyphens
+        if [[ "$target" =~ ^[a-zA-Z0-9.:-]+$ ]] && [[ ! "$target" =~ ^- ]]; then
+          /bin/ping -c 4 -W 2 "$target" || true
+        else
+          echo "Invalid target format."
+        fi
+      fi
+      ;;
+    8)
+      sudo /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager 2>/dev/null || \
+        /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager || true
+      ;;
+    9)
+      echo "--- System Services ---"
+      /bin/systemctl is-active axonwalld slapd sssd keepalived chrony 2>/dev/null || true
+      echo "--- Time Synchronization (chronyc tracking) ---"
+      /usr/bin/chronyc tracking 2>/dev/null || true
+      ;;
+    0|q|Q|exit|logout)
+      echo "Logging out..."
+      exit 0
+      ;;
+    *)
+      echo "Invalid selection."
+      ;;
+  esac
+done

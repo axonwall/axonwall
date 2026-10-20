@@ -49,12 +49,13 @@ type HAConfig struct {
 }
 
 type HAEngine struct {
-	mu         sync.Mutex
-	config     HAConfig
-	sqliteSync *engine.SqliteSyncManager
-	nasManager *engine.NasManager
-	listener   net.Listener
-	sockPath   string
+	mu               sync.Mutex
+	config           HAConfig
+	sqliteSync       *engine.SqliteSyncManager
+	nasManager       *engine.NasManager
+	directoryManager *engine.DirectoryManager
+	listener         net.Listener
+	sockPath         string
 }
 
 func NewHAEngine(nasMgr *engine.NasManager) *HAEngine {
@@ -69,6 +70,12 @@ func (e *HAEngine) SetK3sManager(km *engine.K3sManager) {
 	if e.sqliteSync != nil {
 		e.sqliteSync.SetK3sManager(km)
 	}
+}
+
+func (e *HAEngine) SetDirectoryManager(dm *engine.DirectoryManager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.directoryManager = dm
 }
 
 func (e *HAEngine) StartSocketListener() error {
@@ -144,6 +151,17 @@ func (e *HAEngine) OnTransition(state string) {
 
 	slog.Info("HAEngine handling transition", "state", state)
 	e.sqliteSync.OnStateChange(state)
+	if e.directoryManager != nil {
+		serverID := 1
+		if strings.ToLower(e.config.Role) == "secondary" || strings.ToLower(e.config.Role) == "backup" {
+			serverID = 2
+		}
+		peerURI := ""
+		if e.config.PeerIp != "" {
+			peerURI = fmt.Sprintf("ldaps://%s:636", e.config.PeerIp)
+		}
+		e.directoryManager.SetHAState(e.config.Enabled, state, serverID, peerURI)
+	}
 	if e.nasManager != nil {
 		if state == "MASTER" {
 			e.nasManager.PromoteFailoverMaster()
@@ -164,6 +182,9 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		_, _ = stopSystemService("keepalived")
 		_, _ = stopSystemService("conntrackd")
 		e.sqliteSync.Stop()
+		if e.directoryManager != nil {
+			e.directoryManager.SetHAState(false, "MASTER", 1, "")
+		}
 		return nil
 	}
 
@@ -211,6 +232,35 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 
 	if out, err := reloadOrRestartService("conntrackd"); err != nil {
 		slog.Warn("Failed to reload conntrackd", "error", err, "output", string(out))
+	}
+
+	// Configure Chrony NTP peering with HA peer to keep CSN clocks strictly synchronized
+	if cfg.PeerIp != "" {
+		_ = os.MkdirAll("/etc/chrony/conf.d", 0755)
+		chronyPeerConf := fmt.Sprintf("# Managed by Axonwall HA Engine\npeer %s iburst\nallow %s\n", cfg.PeerIp, cfg.PeerIp)
+		_ = os.WriteFile("/etc/chrony/conf.d/axonwall-ha.conf", []byte(chronyPeerConf), 0644)
+		_, _ = reloadOrRestartService("chrony")
+	}
+
+	// Configure OpenLDAP Multi-Provider syncrepl over mTLS (ldaps://<peerIp>:636)
+	serverID := 1
+	haState := "MASTER"
+	if cfg.Role == "secondary" || cfg.Role == "backup" {
+		serverID = 2
+		haState = "BACKUP"
+	}
+	peerURI := ""
+	if cfg.PeerIp != "" {
+		peerURI = fmt.Sprintf("ldaps://%s:636", cfg.PeerIp)
+	}
+	if e.directoryManager != nil {
+		e.directoryManager.SetHAState(true, haState, serverID, peerURI)
+	}
+	if cfg.PeerIp != "" {
+		baseDN, _, _ := engine.ResolveOrCreateBaseDN("axonwall.local")
+		if err := engine.ConfigureMultiProviderSyncrepl(serverID, cfg.PeerIp, baseDN); err != nil {
+			slog.Warn("Failed to configure OpenLDAP multi-provider syncrepl", "error", err)
+		}
 	}
 
 	// Apply Distributed SQLite Sync
