@@ -75,7 +75,7 @@ case "$1" in
         if [ ! -s /etc/axonwall/axonwall.env ]; then
             JWT_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || echo "axonwall-secret-token")
             ZTP_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || echo "axonwall-ztp")
-            ADMIN_PASS="axonwall"
+            ADMIN_PASS="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
 
             cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
@@ -92,6 +92,14 @@ AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
 ENV_EOF
             chmod 0600 /etc/axonwall/controller.env
             chown root:root /etc/axonwall/controller.env
+
+            # No public default (audit C9): the generated admin password
+            # is random; surface it to the operator only, exactly like
+            # firstboot does. No .password_changed marker is planted, so
+            # the first login still forces a change.
+            printf '%s\n' "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
+            chmod 0600 /etc/axonwall/initial-admin-password
+            chown root:root /etc/axonwall/initial-admin-password
         fi
 
         # 4b. B-12 migration for upgrades: split the ZTP token out of a

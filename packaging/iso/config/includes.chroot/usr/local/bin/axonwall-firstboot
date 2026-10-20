@@ -191,7 +191,7 @@ if [[ ! -s /etc/axonwall/axonwall.env ]]; then
   if [[ -f /etc/axonwall/admin.env ]]; then
     INSTALL_PASS=$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)
   fi
-  ADMIN_PASS="${INSTALL_PASS:-${LOCAL_ADMIN_PASSWORD:-axonwall}}"
+  ADMIN_PASS="${INSTALL_PASS:-${LOCAL_ADMIN_PASSWORD:-$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')}}"
 
   cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}

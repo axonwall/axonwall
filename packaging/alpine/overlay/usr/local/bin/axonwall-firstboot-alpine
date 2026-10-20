@@ -191,7 +191,7 @@ chmod 0770 /var/lib/axonwall/headscale /run/headscale /run/axonwall 2>/dev/null 
 if [ ! -s /etc/axonwall/axonwall.env ]; then
   JWT_SECRET="$(openssl rand -hex 32)"
   ZTP_TOKEN="$(openssl rand -hex 16)"
-  ADMIN_PASS="axonwall"
+  ADMIN_PASS="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
   if [ -f /etc/axonwall/admin.env ]; then
     INSTALL_PASS="$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)"
     [ -n "$INSTALL_PASS" ] && ADMIN_PASS="$INSTALL_PASS"
