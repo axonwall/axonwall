@@ -1,4 +1,5 @@
 import type { DesiredState, K3sConfig } from '../../schemas/index.js';
+import { isValidDevice } from '../../util/index.js';
 
 export interface CompiledK3s {
   k3sConfigYaml: string;
@@ -53,8 +54,8 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
   ];
 
   const ifaceObj = state.interfaces.find((i) => i.name === k3s.nodeIpInterface);
-  if (ifaceObj?.device) {
-    configLines.push(`flannel-iface: "${ifaceObj.device}"`);
+  if (isValidDevice(ifaceObj?.device)) {
+    configLines.push(`flannel-iface: "${ifaceObj!.device}"`);
   }
 
   if (isSecondaryJoin && effectivePeer) {

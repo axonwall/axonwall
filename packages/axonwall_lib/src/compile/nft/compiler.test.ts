@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { compileNftables, compileSatelliteNftables } from './index.js';
 import { lintRuleset } from '../../lint/index.js';
-import { isValidIPv4, isValidCIDR, isValidPortRange } from '../../util/index.js';
+import { isValidIPv4, isValidCIDR, isValidPortRange, isValidDevice } from '../../util/index.js';
 import { mintSupabaseToken, verifyToken } from '../../ldap/index.js';
 import { InterfaceSchema, DesiredStateSchema, type DesiredState } from '../../schemas/index.js';
 
@@ -440,5 +440,55 @@ describe('Axonwall nftables Compiler — HA sync rule (audit S-04)', () => {
   it('emits no HA sync rule when HA is disabled', () => {
     const res = compileNftables(DesiredStateSchema.parse({}));
     expect(res.nftScript).not.toContain('ha-state-and-zfs-sync');
+  });
+});
+
+describe('Axonwall nftables Compiler — Device Validation and Flowtable Handling', () => {
+  it('validates device names correctly with isValidDevice', () => {
+    expect(isValidDevice('eth0')).toBe(true);
+    expect(isValidDevice('ens18')).toBe(true);
+    expect(isValidDevice('vlan.100')).toBe(true);
+    expect(isValidDevice('')).toBe(false);
+    expect(isValidDevice(undefined)).toBe(false);
+    expect(isValidDevice(null)).toBe(false);
+    expect(isValidDevice('none')).toBe(false);
+    expect(isValidDevice('NONE')).toBe(false);
+    expect(isValidDevice('null')).toBe(false);
+    expect(isValidDevice('disabled')).toBe(false);
+    expect(isValidDevice('unassigned')).toBe(false);
+  });
+
+  it('filters out device "none" from flowtable devices and interface dispatchers', () => {
+    const stateWithNone: DesiredState = DesiredStateSchema.parse({
+      system: {
+        flowtableOffload: true,
+      },
+      interfaces: [
+        { name: 'wan', device: 'ens19', type: 'static', enabled: true, ipv4Address: '148.135.193.214/27' },
+        { name: 'lan', device: 'none', type: 'static', enabled: true, ipv4Address: '192.168.1.1/24' },
+        { name: 'opt1', device: 'ens18', type: 'dhcp', enabled: true },
+      ],
+    });
+
+    const res = compileNftables(stateWithNone);
+    expect(res.nftScript).toContain('devices = { "ens19", "ens18" };');
+    expect(res.nftScript).not.toContain('"none"');
+    expect(res.nftScript).not.toContain('iifname "none"');
+  });
+
+  it('omits flowtable entirely if all interfaces have invalid devices', () => {
+    const stateNoDevs: DesiredState = DesiredStateSchema.parse({
+      system: {
+        flowtableOffload: true,
+      },
+      interfaces: [
+        { name: 'wan', device: 'none', type: 'dhcp', enabled: true },
+        { name: 'lan', device: 'unassigned', type: 'static', enabled: true },
+      ],
+    });
+
+    const res = compileNftables(stateNoDevs);
+    expect(res.nftScript).not.toContain('flowtable ft_fastpath');
+    expect(res.nftScript).not.toContain('flow add @ft_fastpath');
   });
 });

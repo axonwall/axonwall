@@ -1,5 +1,5 @@
 import { type DesiredState, type FirewallRule, type NatRule, type Alias, normalizeAntiLockoutInterfaces } from '../../schemas/index.js';
-import { sanitizeIdentifier } from '../../util/index.js';
+import { sanitizeIdentifier, isValidDevice } from '../../util/index.js';
 import { resolveCapabilities } from '../../plugins/index.js';
 import { compileSuricata } from '../suricata/index.js';
 import { compileCrowdSec } from '../crowdsec/index.js';
@@ -22,27 +22,29 @@ function buildNasAndK3sInputRules(
 ): string[] {
   const hostRules: string[] = [];
   const trustedDevs = state.interfaces
-    .filter((i) => i.enabled && i.name !== 'wan' && i.device)
+    .filter((i) => i.enabled && i.name !== 'wan' && isValidDevice(i.device))
     .map((i) => `"${i.device}"`);
 
   if (state.ha?.enabled && state.ha.syncInterface) {
     const syncDev = ifDeviceMap.get(state.ha.syncInterface) || state.ha.syncInterface;
-    if (!trustedDevs.includes(`"${syncDev}"`)) {
-      trustedDevs.push(`"${syncDev}"`);
+    if (isValidDevice(syncDev)) {
+      if (!trustedDevs.includes(`"${syncDev}"`)) {
+        trustedDevs.push(`"${syncDev}"`);
+      }
+      // Open the port the unified HA sync server actually listens on
+      // (sqliteSync.listenPort, default 9876 — state, DB, ZFS and K3s-token
+      // endpoints all share it). The previous hardcoded { 8443, 9443 } pair
+      // matched no listener in the tree and left the real sync port closed
+      // under the compiled input-drop policy (audit S-04).
+      const configuredPort = state.ha.sqliteSync?.listenPort;
+      const syncPort =
+        typeof configuredPort === 'number' && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535
+          ? configuredPort
+          : 9876;
+      hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
+      hostRules.push(`    iifname "${syncDev}" tcp dport 636 accept comment "ha-openldap-ldaps-syncrepl"`);
+      hostRules.push(`    iifname "${syncDev}" udp dport 123 accept comment "ha-chrony-ntp-sync"`);
     }
-    // Open the port the unified HA sync server actually listens on
-    // (sqliteSync.listenPort, default 9876 — state, DB, ZFS and K3s-token
-    // endpoints all share it). The previous hardcoded { 8443, 9443 } pair
-    // matched no listener in the tree and left the real sync port closed
-    // under the compiled input-drop policy (audit S-04).
-    const configuredPort = state.ha.sqliteSync?.listenPort;
-    const syncPort =
-      typeof configuredPort === 'number' && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535
-        ? configuredPort
-        : 9876;
-    hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
-    hostRules.push(`    iifname "${syncDev}" tcp dport 636 accept comment "ha-openldap-ldaps-syncrepl"`);
-    hostRules.push(`    iifname "${syncDev}" udp dport 123 accept comment "ha-chrony-ntp-sync"`);
   }
 
   const devSet = trustedDevs.length > 0 ? `iifname { ${trustedDevs.join(', ')} } ` : '';
@@ -160,8 +162,10 @@ export function compileNftables(state: DesiredState): CompileResult {
       for (const ifaceName of ifaceList) {
         if (ifaceName !== 'wan') {
           const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-          const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
-          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          if (isValidDevice(dev)) {
+            const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
+            lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          }
         }
       }
     }
@@ -199,7 +203,9 @@ export function compileNftables(state: DesiredState): CompileResult {
   const suricataConfig = state.suricata
     ? {
         ...state.suricata,
-        interfaces: state.suricata.interfaces.map((i) => ifDeviceMap.get(i) || i),
+        interfaces: state.suricata.interfaces
+          .map((i) => ifDeviceMap.get(i) || i)
+          .filter(isValidDevice),
       }
     : undefined;
   const suricataCompiled = compileSuricata(suricataConfig);
@@ -290,7 +296,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // 3. Flowtable for hardware/software fastpath offloading
   const enabledDevices = state.interfaces
-    .filter((i) => i.enabled && i.device)
+    .filter((i) => i.enabled && isValidDevice(i.device))
     .map((i) => `"${i.device}"`);
 
   if (state.system.flowtableOffload && enabledDevices.length > 0) {
@@ -312,7 +318,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     const tlsConfig = state.suricata.tlsDecryption;
     lines.push(`    # TLS Decryption Interception`);
     for (const iface of state.interfaces) {
-      if (iface.enabled && iface.name !== 'wan') {
+      if (iface.enabled && iface.name !== 'wan' && isValidDevice(iface.device)) {
         const dev = iface.device;
         lines.push(`    iifname "${dev}" tcp dport 443 redirect to :${tlsConfig.transparentProxyPort} comment "tls-decryption-intercept"`);
       }
@@ -322,6 +328,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   for (const nat of state.nat) {
     if (!nat.enabled || nat.type !== 'dnat' || !nat.targetIp) continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
+    if (!isValidDevice(ifaceDev)) continue;
     let protoMatch = '';
     if (nat.protocol === 'any' || nat.protocol === 'tcp_udp') {
       protoMatch = nat.destinationPort
@@ -371,9 +378,11 @@ export function compileNftables(state: DesiredState): CompileResult {
     for (const ifaceName of ifaceList) {
       if (ifaceName !== 'wan') {
         const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-        lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
-        const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
-        lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        if (isValidDevice(dev)) {
+          lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
+          const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
+          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        }
       } else {
         warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
       }
@@ -395,7 +404,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Interface dispatcher for input
   for (const iface of state.interfaces) {
-    if (!iface.enabled) continue;
+    if (!iface.enabled || !isValidDevice(iface.device)) continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump input_${iface.name}`);
   }
@@ -430,7 +439,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Interface dispatcher for forward
   for (const iface of state.interfaces) {
-    if (!iface.enabled) continue;
+    if (!iface.enabled || !isValidDevice(iface.device)) continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump forward_${iface.name}`);
   }
@@ -452,6 +461,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   for (const nat of state.nat) {
     if (!nat.enabled) continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
+    if (!isValidDevice(ifaceDev)) continue;
     if (nat.type === 'masquerade') {
       lines.push(`    oifname "${ifaceDev}" masquerade comment "outbound-nat"`);
     } else if (nat.type === 'snat' && nat.targetIp) {
@@ -467,7 +477,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     }
     for (const gwIfaceName of gatewayIfaces) {
       const iface = state.interfaces.find((i) => i.name === gwIfaceName);
-      if (iface) {
+      if (iface && isValidDevice(iface.device)) {
         lines.push(`    oifname "${iface.device}" masquerade comment "default-gateway-masquerade"`);
       }
     }

@@ -1,4 +1,5 @@
 import type { DhcpConfig, Interface } from '../../schemas/index.js';
+import { isValidDevice } from '../../util/index.js';
 
 export interface KeaCompileResult {
   keaDhcp4Config: string;
@@ -12,7 +13,7 @@ export function compileKeaDhcp4(dhcp: DhcpConfig, interfaces: Interface[]): KeaC
 
   const activeSubnets = dhcp.subnets.filter((s) => s.enabled);
   const activeInterfaces = Array.from(
-    new Set(activeSubnets.map((s) => ifDeviceMap.get(s.interface) || s.interface))
+    new Set(activeSubnets.map((s) => ifDeviceMap.get(s.interface) || s.interface).filter(isValidDevice))
   );
 
   const keaConfig = {

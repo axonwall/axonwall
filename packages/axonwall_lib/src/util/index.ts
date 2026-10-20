@@ -69,3 +69,9 @@ export function isValidMAC(mac: string): boolean {
 export function sanitizeIdentifier(name: string): string {
   return name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
 }
+
+export function isValidDevice(dev?: string | null): boolean {
+  if (!dev) return false;
+  const d = dev.trim().toLowerCase();
+  return d !== '' && d !== 'none' && d !== 'null' && d !== 'disabled' && d !== 'unassigned';
+}
