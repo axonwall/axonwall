@@ -651,6 +651,7 @@ export const HaSqliteSyncConfigSchema = z.object({
   peerAddress: z.string().optional(),
   peerPort: z.number().int().min(1).max(65535).optional(),
   authToken: z.string().optional(),
+  transport: z.enum(['token-http', 'mtls']).default('token-http'),
   litestreamBucket: z.string().optional(),
   litestreamEndpoint: z.string().optional(),
   litestreamAccessKeyId: z.string().optional(),
@@ -676,6 +677,7 @@ export const HighAvailabilityConfigSchema = z.object({
     databases: ['/var/lib/axonwall/headscale/db.sqlite'],
     syncIntervalSeconds: 5,
     listenPort: 9876,
+    transport: 'token-http',
   }),
   syncSections: HaSyncSectionsSchema.default({
     interfaces: false,

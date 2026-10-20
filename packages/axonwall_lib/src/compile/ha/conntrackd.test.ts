@@ -27,6 +27,7 @@ describe('compileConntrackd', () => {
         databases: [],
         syncIntervalSeconds: 5,
         listenPort: 9876,
+        transport: 'token-http',
       },
       syncSections: {
         interfaces: false,
@@ -76,6 +77,7 @@ describe('compileConntrackd', () => {
         databases: [],
         syncIntervalSeconds: 5,
         listenPort: 9876,
+        transport: 'token-http',
       },
       syncSections: {
         interfaces: false,

@@ -96,13 +96,20 @@ func (m *K3sManager) GetClusterNodeToken() (string, error) {
 
 // FetchPeerClusterToken contacts the primary HA node's sync endpoint to retrieve the K3s join token.
 func FetchPeerClusterToken(peerIp string, syncPort int, authToken string) (string, error) {
+	return FetchPeerClusterTokenWithClient(peerIp, syncPort, authToken, &http.Client{Timeout: 8 * time.Second}, "http")
+}
+
+// FetchPeerClusterTokenWithClient is FetchPeerClusterToken over a
+// caller-supplied client and scheme, so the HA sync poller can reach the
+// endpoint over the mTLS transport (audit D-04 Phase 1).
+func FetchPeerClusterTokenWithClient(peerIp string, syncPort int, authToken string, client *http.Client, scheme string) (string, error) {
 	if peerIp == "" {
 		return "", fmt.Errorf("peerIp is empty")
 	}
 	if syncPort <= 0 {
 		syncPort = 9876
 	}
-	url := fmt.Sprintf("http://%s/api/v1/sync/k3s-token", net.JoinHostPort(peerIp, strconv.Itoa(syncPort)))
+	url := fmt.Sprintf("%s://%s/api/v1/sync/k3s-token", scheme, net.JoinHostPort(peerIp, strconv.Itoa(syncPort)))
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -110,7 +117,6 @@ func FetchPeerClusterToken(peerIp string, syncPort int, authToken string) (strin
 	if authToken != "" {
 		req.Header.Set("X-Axonwall-Sync-Token", authToken)
 	}
-	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err

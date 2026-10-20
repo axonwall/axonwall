@@ -97,6 +97,7 @@ export default function HighAvailabilityPage() {
             mode: sqliteSyncMode,
             syncIntervalSeconds: syncInterval,
             listenPort: state.ha?.sqliteSync?.listenPort || 9876,
+            transport: state.ha?.sqliteSync?.transport || 'token-http',
             databases: state.ha?.sqliteSync?.databases || ['/var/lib/axonwall/headscale/db.sqlite'],
           },
         },

@@ -266,11 +266,18 @@ func ImportHAPKIBundle(bundle HAPKIBundle) error {
 
 // LoadHAPKITLSConfig returns a mutual-TLS *tls.Config if the HA PKI certificates are present.
 func LoadHAPKITLSConfig() (*tls.Config, error) {
-	caBytes, err := os.ReadFile(HAPKICACertPath)
+	return LoadHAPKITLSConfigFromPaths(HAPKICACertPath, HAPKINodeCertPath, HAPKINodeKeyPath)
+}
+
+// LoadHAPKITLSConfigFromPaths is LoadHAPKITLSConfig with explicit file
+// locations, so the sync transport wiring (and its tests) can build the
+// config for PKI material outside the packaged paths.
+func LoadHAPKITLSConfigFromPaths(caCertPath, nodeCertPath, nodeKeyPath string) (*tls.Config, error) {
+	caBytes, err := os.ReadFile(caCertPath)
 	if err != nil {
 		return nil, err
 	}
-	cert, err := tls.LoadX509KeyPair(HAPKINodeCertPath, HAPKINodeKeyPath)
+	cert, err := tls.LoadX509KeyPair(nodeCertPath, nodeKeyPath)
 	if err != nil {
 		return nil, err
 	}

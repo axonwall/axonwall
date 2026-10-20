@@ -30,6 +30,7 @@ type SqliteSyncConfig struct {
 	PeerAddress          string   `json:"peerAddress"`
 	PeerPort             int      `json:"peerPort"`
 	AuthToken            string   `json:"authToken"`
+	Transport            string   `json:"transport"` // "" or "token-http" = shared token over HTTP; "mtls" = HA PKI mutual TLS (D-04 P1)
 	LocalAddress         string   `json:"localAddress"`
 	AutoPromoteHeadscale bool     `json:"autoPromoteHeadscale"`
 	CheckpointOnSync     bool     `json:"checkpointOnSync"`
@@ -45,17 +46,19 @@ type DatabaseStatus struct {
 type SyncStatusResponse struct {
 	NodeRole  string           `json:"nodeRole"`
 	Timestamp int64            `json:"timestamp"`
+	Transport string           `json:"transport"`
 	Databases []DatabaseStatus `json:"databases"`
 }
 
 type SqliteSyncManager struct {
-	mu            sync.Mutex
-	cfg           SqliteSyncConfig
-	server        *http.Server
-	stopPoller    chan struct{}
-	pollerRunning bool
-	litestreamCmd *exec.Cmd
-	k3sManager    *K3sManager
+	mu                 sync.Mutex
+	cfg                SqliteSyncConfig
+	server             *http.Server
+	stopPoller         chan struct{}
+	pollerRunning      bool
+	litestreamCmd      *exec.Cmd
+	k3sManager         *K3sManager
+	effectiveTransport string // transport the master server is actually serving ("token-http" or "mtls")
 }
 
 func NewSqliteSyncManager() *SqliteSyncManager {
@@ -176,23 +179,54 @@ func (m *SqliteSyncManager) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(authToken)) == 1
 }
 
-func (m *SqliteSyncManager) startMasterServer() error {
-	listenAddr := fmt.Sprintf("0.0.0.0:%d", m.cfg.ListenPort)
-	if m.cfg.LocalAddress != "" && m.cfg.LocalAddress != "0.0.0.0" {
-		listenAddr = fmt.Sprintf("%s:%d", m.cfg.LocalAddress, m.cfg.ListenPort)
-	}
+// syncMux builds the sync endpoint set shared by the plain and mTLS
+// listeners (and by tests).
+func (m *SqliteSyncManager) syncMux() *http.ServeMux {
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/api/v1/sync/status", m.handleStatus)
 	mux.HandleFunc("/api/v1/sync/db", m.handleDownloadDb)
 	mux.HandleFunc("/api/v1/sync/state", m.handleDownloadState)
 	mux.HandleFunc("/api/v1/sync/zfs", m.handleZfsSendStream)
 	mux.HandleFunc("/api/v1/sync/k3s-token", m.handleK3sToken)
 	mux.HandleFunc("/api/v1/sync/pki-enroll", m.handlePkiEnroll)
+	return mux
+}
+
+// mtlsRequested reports whether the configuration asks for the HA PKI
+// mutual-TLS transport (audit D-04 Phase 1). Anything else (empty,
+// "token-http") keeps the long-standing shared-token-over-HTTP transport.
+func (m *SqliteSyncManager) mtlsRequested() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.Transport == "mtls"
+}
+
+// peerClient returns the HTTP client and URL scheme the backup poller
+// should use for peer data endpoints. When mTLS is requested AND the HA
+// PKI material is present, the client presents the node certificate and
+// verifies the peer against the shared HA CA. Otherwise it falls back to
+// the plain token-authenticated client: a not-yet-enrolled node has no
+// certificate to present, and enrollment itself (always plain HTTP) is
+// how it gets one. The k3s-token and state/db fetchers use this client;
+// enrollment never does.
+func (m *SqliteSyncManager) peerClient(timeout time.Duration) (*http.Client, string) {
+	if m.mtlsRequested() {
+		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
+			return &http.Client{Timeout: timeout, Transport: &http.Transport{TLSClientConfig: tlsCfg}}, "https"
+		}
+	}
+	return &http.Client{Timeout: timeout}, "http"
+}
+
+func (m *SqliteSyncManager) startMasterServer() error {
+	listenAddr := fmt.Sprintf("0.0.0.0:%d", m.cfg.ListenPort)
+	if m.cfg.LocalAddress != "" && m.cfg.LocalAddress != "0.0.0.0" {
+		listenAddr = fmt.Sprintf("%s:%d", m.cfg.LocalAddress, m.cfg.ListenPort)
+	}
 
 	m.server = &http.Server{
 		Addr:         listenAddr,
-		Handler:      mux,
+		Handler:      m.syncMux(),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 300 * time.Second,
 	}
@@ -201,13 +235,41 @@ func (m *SqliteSyncManager) startMasterServer() error {
 		slog.Error("HA sync master server has NO auth token configured: every sync request will be rejected (fail-closed) until sqliteSync.authToken is set")
 	}
 
-	slog.Info("Starting Unified HA Sync Master HTTP Server (SQLite + State + ZFS + K3s + Identity PKI)", "addr", listenAddr)
+	// D-04 Phase 1: serve mutual TLS when the operator selected the mtls
+	// transport AND HA PKI material exists. Enrollment is the bootstrap
+	// that creates that material, so an mtls request on a never-enrolled
+	// node falls back to token-http with a loud error instead of serving
+	// nothing at all; the effective transport is reported in /status so
+	// the state is observable, and flips to mtls on the next config apply
+	// once the pair has enrolled.
+	serveTLS := false
+	if m.cfg.Transport == "mtls" {
+		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
+			m.server.TLSConfig = tlsCfg
+			serveTLS = true
+		} else {
+			slog.Error("HA sync transport 'mtls' requested but HA PKI material is unavailable; serving token-http until the pair has enrolled (check /api/v1/sync/status transport field)", "error", err)
+		}
+	}
+	// Callers (ApplyConfig, OnStateChange) hold m.mu.
+	if serveTLS {
+		m.effectiveTransport = "mtls"
+	} else {
+		m.effectiveTransport = "token-http"
+	}
+
+	slog.Info("Starting Unified HA Sync Master Server (SQLite + State + ZFS + K3s + Identity PKI)", "addr", listenAddr, "transport", m.effectiveTransport)
 	srv := m.server
 	go func() {
 		// The HA sync interface address may not be assigned yet at boot;
 		// keep retrying the bind instead of giving up on the first error.
 		for {
-			err := srv.ListenAndServe()
+			var err error
+			if serveTLS {
+				err = srv.ListenAndServeTLS("", "")
+			} else {
+				err = srv.ListenAndServe()
+			}
 			if err == nil || err == http.ErrServerClosed {
 				return
 			}
@@ -237,6 +299,7 @@ func (m *SqliteSyncManager) handlePkiEnroll(w http.ResponseWriter, r *http.Reque
 func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	nodeRole := m.cfg.NodeRole
+	transport := m.effectiveTransport
 	databases := append([]string(nil), m.cfg.Databases...)
 	m.mu.Unlock()
 
@@ -264,6 +327,7 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 	resp := SyncStatusResponse{
 		NodeRole:  nodeRole,
 		Timestamp: time.Now().Unix(),
+		Transport: transport,
 		Databases: dbStatuses,
 	}
 
@@ -383,7 +447,8 @@ func (m *SqliteSyncManager) pollAndSync() {
 		peerPort = cfg.ListenPort
 	}
 
-	statusUrl := fmt.Sprintf("http://%s/api/v1/sync/status", net.JoinHostPort(cfg.PeerAddress, strconv.Itoa(peerPort)))
+	client, scheme := m.peerClient(10 * time.Second)
+	statusUrl := fmt.Sprintf("%s://%s/api/v1/sync/status", scheme, net.JoinHostPort(cfg.PeerAddress, strconv.Itoa(peerPort)))
 	req, err := http.NewRequest("GET", statusUrl, nil)
 	if err != nil {
 		return
@@ -392,7 +457,6 @@ func (m *SqliteSyncManager) pollAndSync() {
 		req.Header.Set("X-Axonwall-Sync-Token", cfg.AuthToken)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		slog.Debug("Peer sync status check unreachable", "url", statusUrl, "error", err)
@@ -421,7 +485,8 @@ func (m *SqliteSyncManager) pollAndSync() {
 				"localSha256", localSha,
 			)
 
-			if err := m.fetchAndApplyDb(peerDb.Path, peerPort); err != nil {
+			dbClient, _ := m.peerClient(60 * time.Second)
+			if err := m.fetchAndApplyDb(peerDb.Path, peerPort, dbClient, scheme); err != nil {
 				slog.Error("Failed to synchronize database from peer", "path", peerDb.Path, "error", err)
 			} else {
 				slog.Info("Successfully synchronized database from peer", "path", peerDb.Path)
@@ -430,16 +495,20 @@ func (m *SqliteSyncManager) pollAndSync() {
 	}
 
 	// Synchronize non-K3s appliance state (/var/lib/axonwall/state.json & Samba passdb.tdb)
-	m.syncApplianceStateFromPeer(peerPort)
+	m.syncApplianceStateFromPeer(peerPort, client, scheme)
 
-	// Automatically enroll HA PKI + OpenLDAP multi-provider syncrepl secret if not yet enrolled
+	// Automatically enroll HA PKI + OpenLDAP multi-provider syncrepl secret if not yet enrolled.
+	// Enrollment is the PKI bootstrap and ALWAYS uses plain HTTP + the
+	// shared token, even when the mtls transport is selected: a node that
+	// has no certificate yet cannot present one.
 	if _, err := os.Stat(HAPKICACertPath); os.IsNotExist(err) {
 		enrollUrl := fmt.Sprintf("http://%s/api/v1/sync/pki-enroll", net.JoinHostPort(cfg.PeerAddress, strconv.Itoa(peerPort)))
 		if enrollReq, err := http.NewRequest("GET", enrollUrl, nil); err == nil {
 			if cfg.AuthToken != "" {
 				enrollReq.Header.Set("X-Axonwall-Sync-Token", cfg.AuthToken)
 			}
-			if enrollResp, err := client.Do(enrollReq); err == nil {
+			plainClient := &http.Client{Timeout: 10 * time.Second}
+			if enrollResp, err := plainClient.Do(enrollReq); err == nil {
 				if enrollResp.StatusCode == http.StatusOK {
 					var bundle HAPKIBundle
 					if json.NewDecoder(enrollResp.Body).Decode(&bundle) == nil && bundle.CACertPEM != "" {
@@ -457,7 +526,7 @@ func (m *SqliteSyncManager) pollAndSync() {
 
 	// Automatically fetch K3s cluster join token if not yet present on backup node
 	if _, err := os.Stat("/var/lib/axonwall/k3s-join.token"); err != nil {
-		if tok, err := FetchPeerClusterToken(cfg.PeerAddress, peerPort, cfg.AuthToken); err == nil && tok != "" {
+		if tok, err := FetchPeerClusterTokenWithClient(cfg.PeerAddress, peerPort, cfg.AuthToken, client, scheme); err == nil && tok != "" {
 			_ = os.MkdirAll("/var/lib/axonwall", 0755)
 			_ = os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600)
 			slog.Info("HA Backup Poller: Automatically retrieved K3s cluster join token from primary peer")
@@ -566,7 +635,7 @@ func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
+func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *http.Client, scheme string) {
 	m.mu.Lock()
 	peerAddr := m.cfg.PeerAddress
 	authToken := m.cfg.AuthToken
@@ -576,7 +645,7 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
 		return
 	}
 
-	stateUrl := fmt.Sprintf("http://%s/api/v1/sync/state", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)))
+	stateUrl := fmt.Sprintf("%s://%s/api/v1/sync/state", scheme, net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)))
 	req, err := http.NewRequest(http.MethodGet, stateUrl, nil)
 	if err != nil {
 		return
@@ -585,7 +654,6 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
 		req.Header.Set("X-Axonwall-Sync-Token", authToken)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -624,7 +692,7 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int) {
 	_ = os.WriteFile(replicaPath, body, 0600)
 }
 
-func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int) error {
+func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client *http.Client, scheme string) error {
 	m.mu.Lock()
 	peerAddr := m.cfg.PeerAddress
 	authToken := m.cfg.AuthToken
@@ -645,7 +713,7 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int) error {
 	}
 	dbPath = cleanDbPath
 
-	downloadUrl := fmt.Sprintf("http://%s/api/v1/sync/db?path=%s", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)), url.QueryEscape(dbPath))
+	downloadUrl := fmt.Sprintf("%s://%s/api/v1/sync/db?path=%s", scheme, net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)), url.QueryEscape(dbPath))
 	req, err := http.NewRequest("GET", downloadUrl, nil)
 	if err != nil {
 		return err
@@ -654,7 +722,6 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int) error {
 		req.Header.Set("X-Axonwall-Sync-Token", authToken)
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("http download failed: %w", err)
