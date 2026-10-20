@@ -1,0 +1,104 @@
+#!/bin/sh
+# axonwall-rotate-hub-cert -- rotate the appliance hub TLS certificate.
+#
+# Audit B-14: the packaged hub certificate is a 10-year self-signed cert
+# with no renewal machinery. This is the supported rotation path: it
+# regenerates hub.key/hub.crt with the same SAN profile firstboot uses,
+# keeps a timestamped backup, restores the B-12 ownership (key owned by
+# the axonwall-controller user, 0600), and restarts the controller.
+#
+# The fleet CA (/etc/axonwall/certs/ca.crt, when present) is NOT touched:
+# satellites pinned to that CA keep working. Consumers of the self-signed
+# cert itself (browsers, system-root verifiers) must re-trust the new one.
+#
+# Usage:
+#   axonwall-rotate-hub-cert [--days N]   regenerate + restart controller
+#   axonwall-rotate-hub-cert --check      print expiry; exit 1 when the
+#                                         cert expires within 90 days or
+#                                         is already expired (monitoring)
+set -u
+
+CERT_DIR="${AXONWALL_CERT_DIR:-/etc/axonwall/certs}"
+CRT="$CERT_DIR/hub.crt"
+KEY="$CERT_DIR/hub.key"
+DAYS=3650
+CHECK=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --days) DAYS="$2"; shift 2 ;;
+        --check) CHECK=1; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ ! -s "$CRT" ]; then
+    echo "no hub certificate at $CRT" >&2
+    exit 2
+fi
+
+enddate="$(openssl x509 -in "$CRT" -noout -enddate 2>/dev/null | cut -d= -f2-)"
+echo "current hub certificate expires: ${enddate:-unknown}"
+
+if [ "$CHECK" -eq 1 ]; then
+    if openssl x509 -in "$CRT" -noout -checkend 0 >/dev/null 2>&1 \
+        && openssl x509 -in "$CRT" -noout -checkend 7776000 >/dev/null 2>&1; then
+        echo "OK: more than 90 days remaining"
+        exit 0
+    fi
+    echo "WARNING: hub certificate expires within 90 days (or is expired) -- run axonwall-rotate-hub-cert" >&2
+    exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "must run as root" >&2
+    exit 2
+fi
+command -v openssl >/dev/null 2>&1 || { echo "openssl not found" >&2; exit 2; }
+
+HN="$(hostname 2>/dev/null || echo axonwall)"
+SAN="DNS:${HN},DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
+IPS="$(hostname -I 2>/dev/null || true)"
+if [ -n "$IPS" ]; then
+    for ip in $IPS; do SAN="${SAN},IP:${ip}"; done
+else
+    SAN="${SAN},IP:192.168.1.1"
+fi
+
+STAMP="$(date +%Y%m%d%H%M%S)"
+if [ -f "$KEY" ]; then cp -a "$KEY" "$KEY.bak-$STAMP" && chmod 0600 "$KEY.bak-$STAMP"; fi
+if [ -f "$CRT" ]; then cp -a "$CRT" "$CRT.bak-$STAMP"; fi
+
+TMPD="$(mktemp -d)"
+trap 'rm -rf "$TMPD"' EXIT INT TERM
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$TMPD/hub.key" -out "$TMPD/hub.crt" \
+    -days "$DAYS" -subj "/O=Axonwall/OU=Appliance/CN=${HN}" \
+    -addext "subjectAltName=${SAN}" >/dev/null 2>&1
+if [ ! -s "$TMPD/hub.key" ] || [ ! -s "$TMPD/hub.crt" ]; then
+    echo "openssl certificate generation failed" >&2
+    exit 2
+fi
+
+mv "$TMPD/hub.key" "$KEY"
+mv "$TMPD/hub.crt" "$CRT"
+if getent passwd axonwall-controller >/dev/null 2>&1; then
+    chown axonwall-controller:axonwall-controller "$KEY" "$CRT" 2>/dev/null || true
+fi
+chmod 0600 "$KEY"
+chmod 0644 "$CRT"
+
+echo "new hub certificate expires: $(openssl x509 -in "$CRT" -noout -enddate | cut -d= -f2-)"
+
+# Restart the controller -- the TLS listener that serves this certificate.
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl restart axonwall-controller 2>/dev/null \
+        || echo "note: restart axonwall-controller manually"
+elif command -v rc-service >/dev/null 2>&1; then
+    rc-service axonwall-controller restart 2>/dev/null \
+        || echo "note: restart axonwall-controller manually"
+else
+    echo "note: restart the axonwall-controller service to pick up the new certificate"
+fi
+
+echo "Done. Satellites pinned to the fleet CA are unaffected; browsers must re-trust the new self-signed certificate."

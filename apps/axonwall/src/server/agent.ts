@@ -730,6 +730,36 @@ export async function getSystemHealthTelemetry(): Promise<SystemHealthMetrics> {
   };
 }
 
+export interface HubCertStatus {
+  expiresAt: string;
+  daysRemaining: number;
+  subject: string;
+}
+
+// Hub TLS certificate expiry (audit B-14). The packaged hub certificate
+// is a 10-year self-signed cert with no renewal machinery; surface its
+// expiry so it never arrives as a surprise outage. The cert is public
+// material (mode 0644) and this runs server-side, so reading it directly
+// is safe. Returns null when no packaged cert exists (dev machines).
+export async function getHubCertStatus(): Promise<HubCertStatus | null> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  try {
+    const pem = fs.readFileSync('/etc/axonwall/certs/hub.crt', 'utf8');
+    const cert = new crypto.X509Certificate(pem);
+    const expires = new Date(cert.validTo);
+    if (Number.isNaN(expires.getTime())) return null;
+    return {
+      expiresAt: expires.toISOString(),
+      daysRemaining: Math.floor((expires.getTime() - Date.now()) / 86_400_000),
+      subject: cert.subject.replace(/\n/g, ', '),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface UpsStatus {
   connected: boolean;
   status: string; // 'OL' | 'OB' | 'LB' | 'DISCONNECTED'

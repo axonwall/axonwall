@@ -10,18 +10,22 @@ import {
   Server,
   Zap,
   Layers,
+  ShieldAlert,
+  ShieldCheck,
   ArrowUpRight,
   ArrowDownLeft,
 } from 'lucide-react';
-import { getSystemHealthTelemetry, type SystemHealthMetrics } from '../../../../server/agent';
+import { getSystemHealthTelemetry, getHubCertStatus, type SystemHealthMetrics, type HubCertStatus } from '../../../../server/agent';
 
 export default function SystemHealthPage() {
   const [timeRange, setTimeRange] = useState<'1h' | '24h' | '7d'>('1h');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [metrics, setMetrics] = useState<SystemHealthMetrics | null>(null);
+  const [cert, setCert] = useState<HubCertStatus | null>(null);
 
   useEffect(() => {
     getSystemHealthTelemetry().then(setMetrics).catch(() => {});
+    getHubCertStatus().then(setCert).catch(() => {});
   }, []);
 
   const handleRefresh = async () => {
@@ -153,6 +157,43 @@ export default function SystemHealthPage() {
       </div>
 
       {/* Network Bandwidth Gauges */}
+      {/* Hub TLS certificate (audit B-14) */}
+      {cert && (
+        <div
+          className={`p-5 rounded-2xl border space-y-2 ${
+            cert.daysRemaining < 0
+              ? 'bg-red-500/10 border-red-500/30'
+              : cert.daysRemaining <= 90
+                ? 'bg-amber-500/10 border-amber-500/30'
+                : 'bg-slate-900 border-slate-800'
+          }`}
+        >
+          <div className="flex items-center justify-between text-slate-400">
+            <span className="text-xs font-semibold uppercase tracking-wider">Hub TLS Certificate</span>
+            {cert.daysRemaining <= 90 ? (
+              <ShieldAlert className="w-4 h-4 text-amber-400" />
+            ) : (
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            )}
+          </div>
+          <div className="text-sm text-slate-300">
+            Expires{' '}
+            <span className="text-white font-semibold">{new Date(cert.expiresAt).toLocaleDateString()}</span>{' '}
+            {cert.daysRemaining < 0
+              ? `(expired ${Math.abs(cert.daysRemaining)} days ago)`
+              : `(${cert.daysRemaining} days remaining)`}{' '}
+            · {cert.subject}
+          </div>
+          {cert.daysRemaining <= 90 && (
+            <p className="text-xs text-amber-300">
+              Rotate before expiry with <span className="font-mono">axonwall-rotate-hub-cert</span> on the
+              appliance. Satellites pinned to the fleet CA are unaffected; browsers must re-trust the new
+              self-signed certificate.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
           <div className="flex items-center justify-between">
