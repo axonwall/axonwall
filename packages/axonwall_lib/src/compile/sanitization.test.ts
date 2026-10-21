@@ -213,6 +213,7 @@ describe('Compiler Input Sanitization & Security Hardening', () => {
           syncIntervalSeconds: 5,
           listenPort: 9876,
           transport: 'token-http',
+          requireSignedPayloads: false,
         },
         syncSections: {
           interfaces: false,
@@ -256,6 +257,7 @@ describe('Compiler Input Sanitization & Security Hardening', () => {
           syncIntervalSeconds: 5,
           listenPort: 9876,
           transport: 'token-http',
+          requireSignedPayloads: false,
         },
         syncSections: {
           interfaces: false,

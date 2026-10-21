@@ -39,6 +39,7 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
       syncIntervalSeconds: 5,
       listenPort: 9876,
       transport: 'token-http',
+      requireSignedPayloads: false,
       peerAddress: '10.0.99.2',
       peerPort: 9876,
       authToken: 'synctoken123',
@@ -87,6 +88,16 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     };
     const config = compileSqliteSyncConfig(mtlsHaConfig, '10.0.99.1');
     expect(config.transport).toBe('mtls');
+  });
+
+  it('passes requireSignedPayloads through to the daemon config (D-04 P2)', () => {
+    const signedHaConfig: HighAvailabilityConfig = {
+      ...baseHaConfig,
+      sqliteSync: { ...baseHaConfig.sqliteSync, requireSignedPayloads: true },
+    };
+    const config = compileSqliteSyncConfig(signedHaConfig, '10.0.99.1');
+    expect(config.requireSignedPayloads).toBe(true);
+    expect(compileSqliteSyncConfig(baseHaConfig, '10.0.99.1').requireSignedPayloads).toBe(false);
   });
 
   it('compiles litestream config with s3 and directory replica targets', () => {

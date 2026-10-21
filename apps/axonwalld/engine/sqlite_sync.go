@@ -21,19 +21,20 @@ import (
 )
 
 type SqliteSyncConfig struct {
-	Enabled              bool     `json:"enabled"`
-	NodeRole             string   `json:"nodeRole"` // "master" or "backup"
-	Mode                 string   `json:"mode"`     // "direct_stream" or "litestream"
-	Databases            []string `json:"databases"`
-	SyncIntervalSeconds  int      `json:"syncIntervalSeconds"`
-	ListenPort           int      `json:"listenPort"`
-	PeerAddress          string   `json:"peerAddress"`
-	PeerPort             int      `json:"peerPort"`
-	AuthToken            string   `json:"authToken"`
-	Transport            string   `json:"transport"` // "" or "token-http" = shared token over HTTP; "mtls" = HA PKI mutual TLS (D-04 P1)
-	LocalAddress         string   `json:"localAddress"`
-	AutoPromoteHeadscale bool     `json:"autoPromoteHeadscale"`
-	CheckpointOnSync     bool     `json:"checkpointOnSync"`
+	Enabled               bool     `json:"enabled"`
+	NodeRole              string   `json:"nodeRole"` // "master" or "backup"
+	Mode                  string   `json:"mode"`     // "direct_stream" or "litestream"
+	Databases             []string `json:"databases"`
+	SyncIntervalSeconds   int      `json:"syncIntervalSeconds"`
+	ListenPort            int      `json:"listenPort"`
+	PeerAddress           string   `json:"peerAddress"`
+	PeerPort              int      `json:"peerPort"`
+	AuthToken             string   `json:"authToken"`
+	Transport             string   `json:"transport"`             // "" or "token-http" = shared token over HTTP; "mtls" = HA PKI mutual TLS (D-04 P1)
+	RequireSignedPayloads bool     `json:"requireSignedPayloads"` // reject unsigned /db and /state payloads from the peer (D-04 P2)
+	LocalAddress          string   `json:"localAddress"`
+	AutoPromoteHeadscale  bool     `json:"autoPromoteHeadscale"`
+	CheckpointOnSync      bool     `json:"checkpointOnSync"`
 }
 
 type DatabaseStatus struct {
@@ -199,6 +200,30 @@ func (m *SqliteSyncManager) mtlsRequested() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cfg.Transport == "mtls"
+}
+
+// verifyPeerPayload applies the payload-signature policy (audit D-04
+// Phase 2) to one downloaded payload. digest is the SHA-256 the receiver
+// computed over the received bytes (already cross-checked against the
+// peer's declared checksum by the caller). A signature that is present
+// but invalid is always refused; a missing signature is refused only
+// when requireSignedPayloads is configured, and otherwise logged.
+func (m *SqliteSyncManager) verifyPeerPayload(what string, digest []byte, sigHeader string) error {
+	m.mu.Lock()
+	require := m.cfg.RequireSignedPayloads
+	m.mu.Unlock()
+
+	if sigHeader == "" {
+		if require {
+			return fmt.Errorf("%s: peer did not sign the payload and requireSignedPayloads is set; refusing to apply", what)
+		}
+		slog.Warn("HA sync payload is unsigned; applying because requireSignedPayloads is off", "payload", what)
+		return nil
+	}
+	if !haVerifyPayloadSignature(digest, sigHeader) {
+		return fmt.Errorf("%s: payload signature verification FAILED; refusing to apply", what)
+	}
+	return nil
 }
 
 // peerClient returns the HTTP client and URL scheme the backup poller
@@ -390,6 +415,14 @@ func (m *SqliteSyncManager) handleDownloadDb(w http.ResponseWriter, r *http.Requ
 	checksum := computeFileSha256(tmpBackup)
 	w.Header().Set("Content-Type", "application/x-sqlite3")
 	w.Header().Set("X-Checksum-SHA256", checksum)
+	// D-04 Phase 2: sign the payload digest with the HA node key when the
+	// pair has enrolled. Unenrolled pairs serve unsigned; the receiver's
+	// requireSignedPayloads policy decides whether that is acceptable.
+	if digestBytes, err := hex.DecodeString(checksum); err == nil {
+		if sig, err := haSignPayloadDigest(digestBytes); err == nil {
+			w.Header().Set("X-Axonwall-Payload-Signature", sig)
+		}
+	}
 
 	f, err := os.Open(tmpBackup)
 	if err != nil {
@@ -555,6 +588,10 @@ func (m *SqliteSyncManager) handleDownloadState(w http.ResponseWriter, r *http.R
 	sum := sha256.Sum256(data)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Checksum-SHA256", hex.EncodeToString(sum[:]))
+	// D-04 Phase 2: see handleDownloadDb.
+	if sig, err := haSignPayloadDigest(sum[:]); err == nil {
+		w.Header().Set("X-Axonwall-Payload-Signature", sig)
+	}
 	_, _ = w.Write(data)
 }
 
@@ -688,6 +725,12 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *htt
 		slog.Warn("Peer state checksum mismatch, skipping sync", "peerSha", peerSha, "actualSha", actualSha)
 		return
 	}
+	// D-04 Phase 2: verify the payload signature before the replica is
+	// written; an unverifiable payload changes nothing on this node.
+	if err := m.verifyPeerPayload("appliance state", actualSum[:], resp.Header.Get("X-Axonwall-Payload-Signature")); err != nil {
+		slog.Warn("Peer state signature check failed, skipping sync", "error", err)
+		return
+	}
 	_ = os.MkdirAll(filepath.Dir(localPath), 0755)
 	_ = os.WriteFile(replicaPath, body, 0600)
 }
@@ -760,6 +803,13 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 	if expectedSha != "" && actualSha != expectedSha {
 		os.Remove(tmpFile)
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedSha, actualSha)
+	}
+
+	// D-04 Phase 2: verify the payload signature before the downloaded
+	// database is allowed to replace the local one.
+	if err := m.verifyPeerPayload("database "+dbPath, hasher.Sum(nil), resp.Header.Get("X-Axonwall-Payload-Signature")); err != nil {
+		os.Remove(tmpFile)
+		return err
 	}
 
 	// Remove any existing WAL or SHM files when replacing primary database file
