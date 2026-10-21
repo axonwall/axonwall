@@ -815,6 +815,11 @@ export const PluginManifestSchema = z.object({
     path: z.string(),
     icon: z.string().optional(),
   }).optional(),
+  packages: z.object({
+    debian: z.array(z.string()).default([]),
+    alpine: z.array(z.string()).default([]),
+  }).optional(),
+  cliBinaries: z.array(z.string()).optional(),
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
 

@@ -37,7 +37,7 @@ func TestCloudInitYAML_Structure(t *testing.T) {
 			map[string]interface{}{
 				"name":                "admin",
 				"sudo":                "ALL=(ALL) NOPASSWD:ALL",
-				"shell":               "/bin/bash",
+				"shell":               "/usr/bin/zsh",
 				"ssh_authorized_keys": []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG..."},
 			},
 		},

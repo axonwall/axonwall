@@ -371,6 +371,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 
 	s.pendingConfirm = true
 	s.confirmDeadline = time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	_ = os.MkdirAll("/run/axonwall", 0755)
+	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (%ds)", timeoutSec)), 0644)
 
 	s.rollbackTimer = time.AfterFunc(time.Duration(timeoutSec)*time.Second, func() {
 		s.triggerAutoRollback(req.JobId)
@@ -431,6 +433,7 @@ func (s *AgentServer) executeRollback(reason string) error {
 
 	s.pendingConfirm = false
 	s.candidateScript = ""
+	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 	log.Printf("[Agent] Successfully rolled back to last known good configuration (reason: %s).", reason)
 	return nil
 }
@@ -461,6 +464,7 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	}
 
 	s.pendingConfirm = false
+	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 	if s.candidateScript != "" {
 		s.lastGoodScript = s.candidateScript
 		if s.activeHash == "" {
@@ -1059,6 +1063,7 @@ func main() {
 	}
 	userManager := engine.NewUserManager(etckeeperManager)
 	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
+	pluginManager := engine.NewPluginManager("/var/lib/axonwall")
 	haEngine.SetDirectoryManager(directoryManager)
 
 	go func() {
@@ -2000,6 +2005,50 @@ func main() {
 				"migrated": migrated,
 				"message":  fmt.Sprintf("Migrated %d local human account(s) into OpenLDAP", len(migrated)),
 			})
+		})
+
+		// Extension Plugins Lifecycle & Management APIs
+		mux.HandleFunc("/v1/system/plugins", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"plugins":  pluginManager.ListPlugins(),
+				"osFamily": engine.DetectOSFamily(),
+			})
+		})
+
+		mux.HandleFunc("/v1/system/plugins/action", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.PluginActionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			var resp engine.PluginActionResponse
+			switch req.Action {
+			case "install":
+				resp = pluginManager.InstallPlugin(req.PluginID)
+			case "uninstall", "remove":
+				resp = pluginManager.UninstallPlugin(req.PluginID)
+			case "reconfigure", "re-sync":
+				resp = pluginManager.ReconfigurePlugin(req.PluginID)
+			default:
+				resp = engine.PluginActionResponse{
+					Success: false,
+					Message: fmt.Sprintf("Unsupported action '%s'", req.Action),
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if !resp.Success {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 		})
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

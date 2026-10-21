@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Axonwall Interactive Ink JS TUI Launcher (/usr/local/bin/axonwall-tui)
+# ==============================================================================
+set -euo pipefail
+
+# Locate bundled axonwall-tui.js
+if [[ -f "/opt/axonwall/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
+  exec node "/opt/axonwall/apps/axonwall-controller/dist/axonwall-tui.js" "$@"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIST="${SCRIPT_DIR}/../../../../../apps/axonwall-controller/dist/axonwall-tui.js"
+if [[ -f "${REPO_DIST}" ]]; then
+  exec node "${REPO_DIST}" "$@"
+fi
+
+echo "Error: axonwall-tui bundle not found at /opt/axonwall/apps/axonwall-controller/dist/axonwall-tui.js" >&2
+exit 1

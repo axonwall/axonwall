@@ -1,0 +1,13 @@
+# /etc/inittab - Axonwall Alpine Appliance Init Configuration
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+# Launch Axonwall Interactive Appliance Console on primary display & serial
+tty1::respawn:/usr/sbin/axonwall-console
+tty2::respawn:/sbin/getty 38400 tty2
+tty3::respawn:/sbin/getty 38400 tty3
+ttyS0::respawn:/usr/sbin/axonwall-console
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown

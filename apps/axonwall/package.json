@@ -19,6 +19,7 @@
     "clsx": "^2.1.1",
     "jose": "^6.0.8",
     "lucide-react": "^1.57.0",
+    "nastymap": "workspace:*",
     "next": "^15.5.27",
     "otplib": "^13.5.0",
     "qrcode": "^1.5.4",

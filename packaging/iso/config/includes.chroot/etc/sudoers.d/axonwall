@@ -5,12 +5,14 @@
 Defaults env_reset
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Full administrative privileges for axonwall-admin members
-%axonwall-admin ALL=(ALL:ALL) ALL
+# Full administrative privileges for axonwall-admin members (supports SSH-key-only accounts)
+%axonwall-admin ALL=(ALL:ALL) NOPASSWD: ALL
 
 # Restricted diagnostic & console privileges for axonwall-operator members
 Cmnd_Alias AXONWALL_OP_CMDS = \
     /usr/sbin/axonwall-console, \
+    /usr/local/bin/axonwall-tui, \
+    /usr/local/bin/axonwall-tui --tab nastymap, \
     /usr/local/bin/axonwallctl status, \
     /usr/local/bin/axonwallctl diff, \
     /usr/local/bin/axonwallctl validate, \

@@ -2616,5 +2616,507 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
   };
 }
 
+export interface AutoDetectedSubnet {
+  id: string;
+  label: string;
+  device: string;
+  role: string;
+  ip: string;
+  cidr: string;
+  gateway?: string;
+  operstate: string;
+  suggestedCommands: {
+    pingSweep: string;
+    fastPorts: string;
+    serviceOs: string;
+    vulnAudit: string;
+  };
+}
+
+export interface AutoCliDefaults {
+  hostname: string;
+  defaultInterface: string;
+  defaultSubnetCidr: string;
+  defaultGatewayIp: string;
+  defaultDnsServer: string;
+  subnets: AutoDetectedSubnet[];
+  interfaces: string[];
+  availableTools: Record<string, boolean>;
+}
+
+function ipNetmaskToCidr(ip: string, netmask: string): string {
+  const ipParts = ip.split('.').map(Number);
+  const maskParts = netmask.split('.').map(Number);
+  if (ipParts.length !== 4 || maskParts.length !== 4) return `${ip}/24`;
+  const netParts = ipParts.map((p, idx) => p & (maskParts[idx] ?? 255));
+  const prefix = maskParts.reduce((acc, octet) => acc + (octet.toString(2).match(/1/g) || []).length, 0);
+  return `${netParts.join('.')}/${prefix}`;
+}
+
+function ipCidrToNetworkCidr(ipCidr: string): { ip: string; cidr: string } {
+  const [ipPart = '192.168.1.1', prefixStr = '24'] = ipCidr.split('/');
+  const prefix = Math.min(32, Math.max(8, Number(prefixStr) || 24));
+  const parts = ipPart.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) {
+    return { ip: ipPart, cidr: ipCidr.includes('/') ? ipCidr : `${ipCidr}/24` };
+  }
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const ipInt = (((parts[0] ?? 0) << 24) | ((parts[1] ?? 0) << 16) | ((parts[2] ?? 0) << 8) | (parts[3] ?? 0)) >>> 0;
+  const netInt = (ipInt & mask) >>> 0;
+  const netIp = [
+    (netInt >>> 24) & 255,
+    (netInt >>> 16) & 255,
+    (netInt >>> 8) & 255,
+    netInt & 255,
+  ].join('.');
+  return { ip: ipPart, cidr: `${netIp}/${prefix}` };
+}
+
+function hasBinary(bin: string): boolean {
+  for (const dir of ['/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin']) {
+    if (fs.existsSync(path.join(dir, bin))) return true;
+  }
+  return false;
+}
+
+export async function getAutoCliDefaults(): Promise<AutoCliDefaults> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const state = await getCurrentDesiredState();
+  const subnets: AutoDetectedSubnet[] = [];
+  const seenCidrs = new Set<string>();
+  const interfaceNames = new Set<string>();
+
+  // 1. Add configured Axonwall interfaces (LAN, WAN, OPT1, OPT2, etc.)
+  for (const iface of state.interfaces || []) {
+    if (iface.device) interfaceNames.add(iface.device);
+    if (iface.ipv4Address) {
+      const { ip, cidr } = ipCidrToNetworkCidr(iface.ipv4Address);
+      if (!seenCidrs.has(cidr)) {
+        seenCidrs.add(cidr);
+        subnets.push({
+          id: `cfg-${iface.name}`,
+          label: `${iface.name.toUpperCase()} (${iface.device}) — ${iface.description || cidr}`,
+          device: iface.device,
+          role: iface.name.toUpperCase(),
+          ip,
+          cidr,
+          gateway: iface.ipv4Gateway,
+          operstate: iface.enabled ? 'UP' : 'DOWN',
+          suggestedCommands: {
+            pingSweep: `nmap -sn -T4 ${cidr}`,
+            fastPorts: `nmap -F -T4 ${cidr}`,
+            serviceOs: `nmap -sV -O --version-light -T4 ${cidr}`,
+            vulnAudit: `nmap -sV --script=banner,http-title,ssl-cert -T4 ${cidr}`,
+          },
+        });
+      }
+    }
+  }
+
+  // 2. Add live OS network interfaces
+  const osNet = os.networkInterfaces();
+  for (const [ifName, addrs] of Object.entries(osNet)) {
+    if (!addrs) continue;
+    if (ifName !== 'lo') interfaceNames.add(ifName);
+    for (const addr of addrs) {
+      if ((addr.family === 'IPv4' || (addr as any).family === 4) && !addr.internal) {
+        const cidr = ipNetmaskToCidr(addr.address, addr.netmask);
+        if (!seenCidrs.has(cidr)) {
+          seenCidrs.add(cidr);
+          subnets.push({
+            id: `os-${ifName}-${addr.address}`,
+            label: `${ifName} (Live OS NIC) — ${cidr}`,
+            device: ifName,
+            role: 'LIVE',
+            ip: addr.address,
+            cidr,
+            operstate: 'UP',
+            suggestedCommands: {
+              pingSweep: `nmap -sn -T4 ${cidr}`,
+              fastPorts: `nmap -F -T4 ${cidr}`,
+              serviceOs: `nmap -sV -O --version-light -T4 ${cidr}`,
+              vulnAudit: `nmap -sV --script=banner,http-title,ssl-cert -T4 ${cidr}`,
+            },
+          });
+        }
+      }
+    }
+  }
+
+  // 3. Add configured static routes from routing.yaml
+  for (const route of state.routes || []) {
+    if (route.enabled !== false && route.network && !seenCidrs.has(route.network)) {
+      seenCidrs.add(route.network);
+      subnets.push({
+        id: `route-${route.network}`,
+        label: `Static Route (${route.interface || 'routed'}) — ${route.network}${route.description ? ` [${route.description}]` : ''}`,
+        device: route.interface || 'eth0',
+        role: 'ROUTE',
+        ip: route.gateway,
+        cidr: route.network,
+        gateway: route.gateway,
+        operstate: 'ROUTED',
+        suggestedCommands: {
+          pingSweep: `nmap -sn -T4 ${route.network}`,
+          fastPorts: `nmap -F -T4 ${route.network}`,
+          serviceOs: `nmap -sV -O --version-light -T4 ${route.network}`,
+          vulnAudit: `nmap -sV --script=banner,http-title,ssl-cert -T4 ${route.network}`,
+        },
+      });
+    }
+  }
+
+  const lanSubnet =
+    subnets.find((s) => s.role === 'LAN') ||
+    subnets.find((s) => s.role === 'LIVE') ||
+    subnets[0];
+
+  const defaultGateway =
+    state.gateways?.find((g) => g.isDefault)?.gatewayIp ||
+    state.gateways?.[0]?.gatewayIp ||
+    lanSubnet?.ip ||
+    '192.168.1.1';
+
+  const defaultDns =
+    state.dns?.dotUpstreams?.[0] ||
+    state.system?.dnsServers?.[0] ||
+    '1.1.1.1';
+
+  const allIfaces = Array.from(interfaceNames);
+  if (allIfaces.length === 0) allIfaces.push('eth0', 'eth1');
+
+  return {
+    hostname: state.system?.hostname || os.hostname() || 'axonwall',
+    defaultInterface: lanSubnet?.device || allIfaces[0] || 'eth0',
+    defaultSubnetCidr: lanSubnet?.cidr || '192.168.1.0/24',
+    defaultGatewayIp: defaultGateway,
+    defaultDnsServer: defaultDns,
+    subnets,
+    interfaces: allIfaces,
+    availableTools: {
+      nmap: hasBinary('nmap'),
+      btop: hasBinary('btop'),
+      htop: hasBinary('htop'),
+      mpstat: hasBinary('mpstat'),
+      iostat: hasBinary('iostat'),
+      iotop: hasBinary('iotop'),
+      iftop: hasBinary('iftop'),
+      slurm: hasBinary('slurm'),
+      netstat: hasBinary('netstat'),
+      arp: hasBinary('arp'),
+      dig: hasBinary('dig'),
+      zsh: hasBinary('zsh'),
+      vim: hasBinary('vim'),
+    },
+  };
+}
+
+export async function runNmapScan(params: {
+  target: string;
+  profile: 'ping' | 'fast_ports' | 'service_os' | 'vuln_audit' | 'traceroute';
+  simulated?: boolean;
+}): Promise<{
+  success: boolean;
+  xml?: string;
+  command: string;
+  mode: 'live' | 'simulated';
+  durationMs: number;
+  error?: string;
+}> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session);
+
+  const cleanTarget = params.target.trim();
+  if (!cleanTarget || cleanTarget.startsWith('-') || !/^[a-zA-Z0-9.:/_-]+$/.test(cleanTarget)) {
+    return {
+      success: false,
+      command: '',
+      mode: 'simulated',
+      durationMs: 0,
+      error: 'Invalid scan target. Specify a valid IPv4/IPv6 address, CIDR subnet, or hostname.',
+    };
+  }
+
+  const profileFlags: Record<typeof params.profile, string[]> = {
+    ping: ['-sn', '-T4'],
+    fast_ports: ['-F', '-T4'],
+    service_os: ['-sV', '--version-light', '-T4'],
+    vuln_audit: ['-sV', '--version-light', '--script=banner,http-title,ssl-cert', '-T4'],
+    traceroute: ['-F', '--traceroute', '-T4'],
+  };
+
+  const flags = profileFlags[params.profile] || ['-F', '-T4'];
+  const displayCmd = `nmap ${flags.join(' ')} ${cleanTarget}`;
+  const startMs = Date.now();
+
+  if (!params.simulated && hasBinary('nmap')) {
+    try {
+      const args = [...flags, '-oX', '-', cleanTarget];
+      const xmlOut = execFileSync('nmap', args, {
+        encoding: 'utf-8',
+        timeout: 60000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      if (xmlOut && xmlOut.includes('<nmaprun')) {
+        return {
+          success: true,
+          xml: xmlOut,
+          command: displayCmd,
+          mode: 'live',
+          durationMs: Date.now() - startMs,
+        };
+      }
+    } catch (err: any) {
+      const stdoutStr = typeof err?.stdout === 'string' ? err.stdout : err?.stdout?.toString?.('utf-8') || '';
+      if (stdoutStr.includes('<nmaprun')) {
+        return {
+          success: true,
+          xml: stdoutStr,
+          command: displayCmd,
+          mode: 'live',
+          durationMs: Date.now() - startMs,
+        };
+      }
+    }
+  }
+
+  // Return empty xml marker so client uses NastyMap's built-in scenario generator for cleanTarget
+  return {
+    success: true,
+    command: displayCmd,
+    mode: 'simulated',
+    durationMs: Math.max(120, Date.now() - startMs),
+  };
+}
+
+export type CliUtilityId =
+  | 'sysstat'
+  | 'net_tools'
+  | 'dnsutils'
+  | 'bandwidth'
+  | 'top_procs'
+  | 'iotop';
+
+export async function runCliToolSnapshot(
+  tool: CliUtilityId,
+  options?: {
+    iface?: string;
+    target?: string;
+    dnsServer?: string;
+    recordType?: string;
+  }
+): Promise<{
+  success: boolean;
+  command: string;
+  output: string;
+  timestamp: string;
+}> {
+  const session = await getSession();
+  await enforceRateLimit(20, 60000);
+  assertActionPermitted(session);
+
+  const safeIface =
+    options?.iface && /^[a-zA-Z0-9._-]+$/.test(options.iface) && !options.iface.startsWith('-')
+      ? options.iface
+      : 'eth0';
+  const safeTarget =
+    options?.target && /^[a-zA-Z0-9.:-]+$/.test(options.target) && !options.target.startsWith('-')
+      ? options.target
+      : 'cloudflare.com';
+  const safeDns =
+    options?.dnsServer && /^[a-zA-Z0-9.:-]+$/.test(options.dnsServer) && !options.dnsServer.startsWith('-')
+      ? options.dnsServer
+      : '1.1.1.1';
+  const safeRecordType =
+    options?.recordType && /^(A|AAAA|MX|TXT|NS|SOA|PTR|CNAME|SRV)$/.test(options.recordType.toUpperCase())
+      ? options.recordType.toUpperCase()
+      : 'A';
+
+  const runExecFileSafe = (bin: string, args: string[]): string | null => {
+    try {
+      return execFileSync(bin, args, {
+        encoding: 'utf-8',
+        timeout: 6000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  let command = '';
+  let output = '';
+
+  switch (tool) {
+    case 'sysstat': {
+      command = 'mpstat -P ALL && iostat -xz';
+      const mpOut = runExecFileSafe('mpstat', ['-P', 'ALL']);
+      const ioOut = runExecFileSafe('iostat', ['-xz']);
+      const sections: string[] = [];
+      if (mpOut) {
+        sections.push('=== CPU Utilization (sysstat mpstat -P ALL) ===\n' + mpOut.trim());
+      } else {
+        const load = os.loadavg().map((n) => n.toFixed(2)).join(', ');
+        const cpus = os.cpus();
+        sections.push(
+          `=== CPU Utilization (${cpus.length} cores — Load Avg: ${load}) ===\n` +
+            cpus
+              .slice(0, 16)
+              .map((c, idx) => {
+                const total = Object.values(c.times).reduce((a, b) => a + b, 0) || 1;
+                const busy = (((total - c.times.idle) / total) * 100).toFixed(1);
+                return `CPU ${String(idx).padStart(2, ' ')}: ${busy.padStart(5, ' ')}% busy  (${c.model})`;
+              })
+              .join('\n')
+        );
+      }
+      if (ioOut) {
+        sections.push('\n=== Block Device Extended I/O (sysstat iostat -xz) ===\n' + ioOut.trim());
+      } else if (fs.existsSync('/proc/diskstats')) {
+        const diskLines = fs
+          .readFileSync('/proc/diskstats', 'utf-8')
+          .trim()
+          .split('\n')
+          .filter((l) => /\b(sd[a-z]|vd[a-z]|nvme\d+n\d+|mmcblk\d+)\b/.test(l))
+          .slice(0, 10);
+        sections.push(
+          '\n=== Block Device Statistics (/proc/diskstats) ===\n' +
+            'Device       ReadsCompleted  SectorsRead  WritesCompleted  SectorsWritten\n' +
+            diskLines
+              .map((l) => {
+                const p = l.trim().split(/\s+/);
+                return `${(p[2] || '').padEnd(12, ' ')} ${(p[3] || '0').padEnd(15, ' ')} ${(p[5] || '0').padEnd(12, ' ')} ${(p[7] || '0').padEnd(16, ' ')} ${p[9] || '0'}`;
+              })
+              .join('\n')
+        );
+      }
+      output = sections.join('\n');
+      break;
+    }
+
+    case 'net_tools': {
+      command = 'netstat -tulnp && arp -an && ip route show';
+      const netstatOut =
+        runExecFileSafe('netstat', ['-tuln']) ||
+        runExecFileSafe('ss', ['-tuln']) ||
+        'No socket output available.';
+      const arpOut =
+        runExecFileSafe('arp', ['-an']) ||
+        runExecFileSafe('ip', ['neigh', 'show']) ||
+        'No ARP entries found.';
+      const routeOut =
+        runExecFileSafe('ip', ['route', 'show']) ||
+        runExecFileSafe('netstat', ['-rn']) ||
+        'No routing table output available.';
+      output = [
+        '=== Active Listening Sockets (net-tools / netstat -tuln) ===',
+        netstatOut.trim(),
+        '',
+        '=== Neighbor / ARP Cache (arp -an) ===',
+        arpOut.trim(),
+        '',
+        '=== Kernel Routing Table (ip route show) ===',
+        routeOut.trim(),
+      ].join('\n');
+      break;
+    }
+
+    case 'dnsutils': {
+      command = `dig @${safeDns} ${safeTarget} ${safeRecordType} + stats`;
+      const digOut =
+        runExecFileSafe('dig', [`@${safeDns}`, safeTarget, safeRecordType]) ||
+        runExecFileSafe('nslookup', ['-type=' + safeRecordType, safeTarget, safeDns]);
+      output = digOut
+        ? digOut.trim()
+        : `; <<>> DiG 9.20 <<>> @${safeDns} ${safeTarget} ${safeRecordType}\n;; Unable to invoke dig binary on host.`;
+      break;
+    }
+
+    case 'bandwidth': {
+      command = `slurm -i ${safeIface} / iftop -t -s 1 -n -N -i ${safeIface}`;
+      const sections: string[] = [];
+      const statsDir = `/sys/class/net/${safeIface}/statistics`;
+      if (fs.existsSync(statsDir)) {
+        const readStat = (name: string) => {
+          try {
+            return Number(fs.readFileSync(path.join(statsDir, name), 'utf-8').trim()) || 0;
+          } catch {
+            return 0;
+          }
+        };
+        const rxBytes = readStat('rx_bytes');
+        const txBytes = readStat('tx_bytes');
+        const rxPkts = readStat('rx_packets');
+        const txPkts = readStat('tx_packets');
+        const rxErrs = readStat('rx_errors');
+        const txErrs = readStat('tx_errors');
+        const rxDrop = readStat('rx_dropped');
+        const txDrop = readStat('tx_dropped');
+        const fmtBytes = (b: number) =>
+          b > 1024 ** 3
+            ? `${(b / 1024 ** 3).toFixed(2)} GB`
+            : b > 1024 ** 2
+              ? `${(b / 1024 ** 2).toFixed(2)} MB`
+              : `${(b / 1024).toFixed(1)} KB`;
+
+        sections.push(
+          `=== Interface Bandwidth & Packet Counters (${safeIface} — slurm / kernel telemetry) ===`,
+          `Interface      : ${safeIface}`,
+          `RX Traffic     : ${fmtBytes(rxBytes)} (${rxPkts.toLocaleString()} packets, ${rxErrs} errors, ${rxDrop} dropped)`,
+          `TX Traffic     : ${fmtBytes(txBytes)} (${txPkts.toLocaleString()} packets, ${txErrs} errors, ${txDrop} dropped)`
+        );
+      }
+      const ssFlows = runExecFileSafe('ss', ['-tin']);
+      if (ssFlows) {
+        sections.push('\n=== Active TCP Flows & Congestion Telemetry (iftop / ss -tin) ===\n' + ssFlows.trim().slice(0, 3500));
+      }
+      output = sections.join('\n') || `Interface ${safeIface} telemetry collected.`;
+      break;
+    }
+
+    case 'top_procs': {
+      command = 'btop / htop (ps aux --sort=-%cpu)';
+      const psOut =
+        runExecFileSafe('ps', ['aux', '--sort=-%cpu']) ||
+        runExecFileSafe('ps', ['aux']);
+      const memInfo = `System Memory: ${((os.totalmem() - os.freemem()) / 1024 ** 3).toFixed(2)} GB / ${(os.totalmem() / 1024 ** 3).toFixed(2)} GB (${(((os.totalmem() - os.freemem()) / (os.totalmem() || 1)) * 100).toFixed(1)}%) | Load Avg: ${os.loadavg().map((l) => l.toFixed(2)).join(', ')}`;
+      output = [
+        '=== Process & Resource Monitor (btop / htop snapshot) ===',
+        memInfo,
+        '',
+        psOut ? psOut.split('\n').slice(0, 28).join('\n') : 'Process table unavailable.',
+      ].join('\n');
+      break;
+    }
+
+    case 'iotop': {
+      command = 'iotop -b -n 1 -o';
+      const iotopOut =
+        runExecFileSafe('iotop', ['-b', '-n', '1', '-o']) ||
+        runExecFileSafe('iostat', ['-d', '-x']);
+      if (iotopOut) {
+        output = '=== Disk I/O Top Monitor (iotop -b -n 1 -o) ===\n' + iotopOut.trim();
+      } else if (fs.existsSync('/proc/diskstats')) {
+        const raw = fs.readFileSync('/proc/diskstats', 'utf-8').trim().split('\n').slice(0, 20).join('\n');
+        output = '=== Kernel Disk I/O Counters (/proc/diskstats) ===\n' + raw;
+      } else {
+        output = 'Disk I/O statistics unavailable.';
+      }
+      break;
+    }
+  }
+
+  return {
+    success: true,
+    command,
+    output,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+
 
 

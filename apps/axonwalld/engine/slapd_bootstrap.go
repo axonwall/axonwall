@@ -115,8 +115,20 @@ func ensureRandomSecretFile(path string) (string, error) {
 	return secret, nil
 }
 
+// resolveSlapdUserGroup detects the OS service account for OpenLDAP ("openldap" on Debian, "ldap" on Alpine).
+func resolveSlapdUserGroup() (string, string) {
+	if _, err := user.Lookup("openldap"); err == nil {
+		return "openldap", "openldap"
+	}
+	if _, err := user.Lookup("ldap"); err == nil {
+		return "ldap", "ldap"
+	}
+	return "openldap", "openldap"
+}
+
 func chownOpenLDAPRecursive(path string) {
-	u, err := user.Lookup("openldap")
+	uName, _ := resolveSlapdUserGroup()
+	u, err := user.Lookup(uName)
 	if err != nil {
 		return
 	}
@@ -130,20 +142,53 @@ func chownOpenLDAPRecursive(path string) {
 	})
 }
 
-// ConfigureSlapdSystemPaths writes /etc/default/slapd and AppArmor overrides so slapd
-// uses /var/lib/axonwall/ldap/config across both A/B root slots.
+// ConfigureSlapdSystemPaths writes /etc/default/slapd (Debian), /etc/conf.d/slapd (Alpine OpenRC),
+// cross-distro schema/module symlinks, and AppArmor overrides so slapd uses /var/lib/axonwall/ldap/config.
 func ConfigureSlapdSystemPaths() error {
-	slapdDefault := `# Managed by Axonwall Identity Engine
+	slapdUser, slapdGroup := resolveSlapdUserGroup()
+
+	// Ensure cross-distro schema & module symlinks exist so cn=config works identically on Debian and Alpine
+	if _, err := os.Stat("/etc/openldap/schema"); err == nil {
+		if _, err := os.Stat("/etc/ldap"); os.IsNotExist(err) {
+			_ = os.Symlink("/etc/openldap", "/etc/ldap")
+		} else if _, err := os.Stat("/etc/ldap/schema"); os.IsNotExist(err) {
+			_ = os.Symlink("/etc/openldap/schema", "/etc/ldap/schema")
+		}
+	}
+	if _, err := os.Stat("/usr/lib/openldap"); err == nil {
+		if _, err := os.Stat("/usr/lib/ldap"); os.IsNotExist(err) {
+			_ = os.Symlink("/usr/lib/openldap", "/usr/lib/ldap")
+		}
+	}
+
+	// Ensure runtime socket directories exist for both Debian (/run/slapd) and Alpine (/var/lib/openldap/run, /run/openldap)
+	for _, rdir := range []string{"/run/slapd", "/run/openldap", "/var/lib/openldap/run"} {
+		_ = os.MkdirAll(rdir, 0755)
+		chownOpenLDAPRecursive(rdir)
+	}
+
+	_ = os.MkdirAll("/etc/default", 0755)
+	slapdDefault := fmt.Sprintf(`# Managed by Axonwall Identity Engine
 SLAPD_CONF="/var/lib/axonwall/ldap/config"
-SLAPD_USER="openldap"
-SLAPD_GROUP="openldap"
+SLAPD_USER="%s"
+SLAPD_GROUP="%s"
 SLAPD_PIDFILE="/run/slapd/slapd.pid"
 SLAPD_SERVICES="ldap://127.0.0.1:389/ ldaps:/// ldapi:///"
 SLAPD_SENTINEL_FILE=/etc/ldap/noslapd
 SLAPD_OPTIONS=""
-`
+`, slapdUser, slapdGroup)
 	if err := os.WriteFile("/etc/default/slapd", []byte(slapdDefault), 0644); err != nil {
 		return fmt.Errorf("failed to write /etc/default/slapd: %w", err)
+	}
+
+	// Alpine OpenRC configuration (/etc/conf.d/slapd)
+	if _, err := os.Stat("/etc/conf.d"); err == nil {
+		slapdConfD := `# Managed by Axonwall Identity Engine
+cfgfile=""
+cfgdir="/var/lib/axonwall/ldap/config"
+listen_uris="ldap://127.0.0.1:389/ ldaps:/// ldapi:///"
+`
+		_ = os.WriteFile("/etc/conf.d/slapd", []byte(slapdConfD), 0644)
 	}
 
 	// Ensure AppArmor permits slapd to access /var/lib/axonwall/ldap/** and /var/lib/axonwall/secrets/ha-pki/**
@@ -436,15 +481,22 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 	}
 
 	chownOpenLDAPRecursive(LDAPBaseDir)
-	_ = os.MkdirAll("/run/slapd", 0755)
-	chownOpenLDAPRecursive("/run/slapd")
+	for _, rdir := range []string{"/run/slapd", "/run/openldap", "/var/lib/openldap/run"} {
+		_ = os.MkdirAll(rdir, 0755)
+		chownOpenLDAPRecursive(rdir)
+	}
 
 	// Ensure slapd is enabled and running
 	_ = exec.Command("systemctl", "enable", "slapd").Run()
 	if exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", "cn=config", "-s", "base", "dn").Run() != nil {
-		if out, err := exec.Command("systemctl", "restart", "slapd").CombinedOutput(); err != nil {
-			// Fallback when running inside a container without systemd as PID 1
-			slapdCmd := exec.Command("/usr/sbin/slapd", "-h", "ldap://127.0.0.1:389/ ldaps:/// ldapi:///", "-g", "openldap", "-u", "openldap", "-F", LDAPConfigDir)
+		out, err := exec.Command("systemctl", "restart", "slapd").CombinedOutput()
+		time.Sleep(200 * time.Millisecond)
+		if err != nil || exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", "cn=config", "-s", "base", "dn").Run() != nil {
+			// Fallback when running on OpenRC or inside a container without systemd as PID 1
+			_ = exec.Command("pkill", "-x", "slapd").Run()
+			time.Sleep(100 * time.Millisecond)
+			slapdUser, slapdGroup := resolveSlapdUserGroup()
+			slapdCmd := exec.Command("/usr/sbin/slapd", "-h", "ldap://127.0.0.1:389/ ldaps:/// ldapi:///", "-g", slapdGroup, "-u", slapdUser, "-F", LDAPConfigDir)
 			if out2, err2 := slapdCmd.CombinedOutput(); err2 != nil {
 				return "", fmt.Errorf("failed to start slapd: %s / %s (%w)", string(out), string(out2), err2)
 			}

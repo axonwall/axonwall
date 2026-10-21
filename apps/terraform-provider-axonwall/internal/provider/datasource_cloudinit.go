@@ -228,7 +228,7 @@ func (d *CloudInitConfigDataSource) Read(ctx context.Context, req datasource.Rea
 		"name":  adminUser,
 		"gecos": "Axonwall Administrator",
 		"sudo":  "ALL=(ALL) NOPASSWD:ALL",
-		"shell": "/bin/bash",
+		"shell": "/usr/bin/zsh",
 	}
 	if len(sshKeys) > 0 {
 		userEntry["ssh_authorized_keys"] = sshKeys

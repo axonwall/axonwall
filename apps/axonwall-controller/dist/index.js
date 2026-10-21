@@ -36280,7 +36280,12 @@ var PluginManifestSchema = external_exports.object({
     title: external_exports.string(),
     path: external_exports.string(),
     icon: external_exports.string().optional()
-  }).optional()
+  }).optional(),
+  packages: external_exports.object({
+    debian: external_exports.array(external_exports.string()).default([]),
+    alpine: external_exports.array(external_exports.string()).default([])
+  }).optional(),
+  cliBinaries: external_exports.array(external_exports.string()).optional()
 });
 var InstalledPluginRecordSchema = external_exports.object({
   id: external_exports.string(),
@@ -38966,7 +38971,7 @@ var CloudInitUserSchema = external_exports.object({
   name: external_exports.string().regex(LINUX_USERNAME, "Invalid Linux username format"),
   gecos: external_exports.string().optional(),
   sudo: external_exports.string().optional(),
-  shell: external_exports.string().default("/bin/bash"),
+  shell: external_exports.string().default("/usr/bin/zsh"),
   lock_passwd: external_exports.boolean().default(false),
   ssh_authorized_keys: external_exports.array(external_exports.string().regex(OPENSSH_PUBKEY, "Invalid OpenSSH public key format")).default([])
 });

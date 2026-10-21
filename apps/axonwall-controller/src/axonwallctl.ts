@@ -687,6 +687,125 @@ async function cmdCloudInit(userArgs: string[]) {
   }
 }
 
+async function cmdPlugin(args: string[]) {
+  const subcmd = (args[0] || 'list').toLowerCase();
+  const pluginId = args[1];
+
+  switch (subcmd) {
+    case 'list':
+    case 'ls': {
+      try {
+        const res = await sendAgentSocketRequest<{ plugins: any[]; osFamily: string }>('/v1/system/plugins', 'GET');
+        console.log(`\n${cCyan}${cBold}=== Axonwall Extension Plugins (${res.osFamily.toUpperCase()} Host) ===${cReset}\n`);
+        console.log(
+          `  ${cBold}${'ID'.padEnd(28)} ${'NAME'.padEnd(46)} ${'STATUS'.padEnd(16)} PACKAGES${cReset}`
+        );
+        console.log(`  ${'-'.repeat(105)}`);
+        for (const p of res.plugins) {
+          let statusStr = `${cDim}Available${cReset}`;
+          if (p.bundled) {
+            statusStr = `${cGreen}Bundled (OS)${cReset}`;
+          } else if (p.installed) {
+            statusStr = `${cCyan}Installed${cReset}`;
+          }
+          const pkgList = (p.packages || []).join(' ');
+          console.log(
+            `  ${p.id.padEnd(28)} ${p.name.padEnd(46)} ${statusStr.padEnd(25)} ${cDim}${pkgList}${cReset}`
+          );
+        }
+        console.log('');
+      } catch (err: any) {
+        console.error(`${cRed}Failed to fetch plugins from agent daemon:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'install':
+    case 'add': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin install <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Installing plugin '${pluginId}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
+          '/v1/system/plugins/action',
+          'POST',
+          { pluginId, action: 'install' }
+        );
+        if (res.success) {
+          console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[!] ${res.message}${cReset}`);
+          if (res.output) console.error(res.output);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}Failed to install plugin:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'remove':
+    case 'uninstall':
+    case 'del': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin remove <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Removing plugin '${pluginId}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
+          '/v1/system/plugins/action',
+          'POST',
+          { pluginId, action: 'uninstall' }
+        );
+        if (res.success) {
+          console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[!] ${res.message}${cReset}`);
+          if (res.output) console.error(res.output);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}Failed to remove plugin:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'reconfigure':
+    case 're-sync':
+    case 'sync': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin re-sync <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Re-syncing configuration for plugin '${pluginId}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string }>(
+          '/v1/system/plugins/action',
+          'POST',
+          { pluginId, action: 'reconfigure' }
+        );
+        if (res.success) {
+          console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[!] ${res.message}${cReset}`);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}Failed to re-sync plugin:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    default:
+      console.error(`${cRed}Unknown plugin subcommand: ${subcmd}${cReset}`);
+      console.log(`Usage: axonwallctl plugin <list|install|remove|re-sync> [plugin-id]`);
+      process.exit(1);
+  }
+}
+
 function showHelp() {
   console.log(`${cCyan}${cBold}axonwallctl — Axonwall Declarative YAML CLI (/etc/axonwall/*.yaml)${cReset}
 
@@ -701,6 +820,7 @@ ${cBold}COMMANDS:${cReset}
   confirm             Confirm the currently pending configuration commit and disarm auto-rollback
   rollback            Immediately abort pending commit and revert to last-known-good configuration
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
+  plugin <cmd> [id]   Manage extension plugins (list, install, remove, re-sync)
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR, then automatically validate and apply
   export              Output the complete unified configuration as a single YAML document to stdout
@@ -736,6 +856,10 @@ async function main() {
       break;
     case 'rollback':
       await cmdRollback();
+      break;
+    case 'plugin':
+    case 'plugins':
+      await cmdPlugin(args.slice(1));
       break;
     case 'cloudinit':
     case 'cloud-init':

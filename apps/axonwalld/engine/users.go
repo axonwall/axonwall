@@ -483,7 +483,11 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 
 	shell := req.Shell
 	if shell == "" {
-		if _, err := os.Stat("/bin/bash"); err == nil {
+		if _, err := os.Stat("/usr/bin/zsh"); err == nil {
+			shell = "/usr/bin/zsh"
+		} else if _, err := os.Stat("/bin/zsh"); err == nil {
+			shell = "/bin/zsh"
+		} else if _, err := os.Stat("/bin/bash"); err == nil {
 			shell = "/bin/bash"
 		} else {
 			shell = "/bin/sh"

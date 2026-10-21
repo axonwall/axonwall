@@ -169,7 +169,7 @@ export const CloudInitUserSchema = z.object({
   name: z.string().regex(LINUX_USERNAME, 'Invalid Linux username format'),
   gecos: z.string().optional(),
   sudo: z.string().optional(),
-  shell: z.string().default('/bin/bash'),
+  shell: z.string().default('/usr/bin/zsh'),
   lock_passwd: z.boolean().default(false),
   ssh_authorized_keys: z.array(z.string().regex(OPENSSH_PUBKEY, 'Invalid OpenSSH public key format')).default([]),
 });
