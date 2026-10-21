@@ -1,7 +1,7 @@
 'use client';
 
-import { Route, CheckCircle2, Plus, Trash2 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { Route, CheckCircle2, Plus, Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import type { DesiredState, Gateway, StaticRoute } from '@axonwall/lib/schemas';
 
@@ -9,8 +9,10 @@ export default function RoutingPage() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [gateways, setGateways] = useState<Gateway[]>([]);
   const [routes, setRoutes] = useState<StaticRoute[]>([]);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Static route form
   const [newNetwork, setNewNetwork] = useState('');
@@ -18,30 +20,43 @@ export default function RoutingPage() {
   const [newIface, setNewIface] = useState('auto');
   const [newDesc, setNewDesc] = useState('');
 
-  useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        setGateways(
-          state.gateways?.length
-            ? state.gateways
-            : [
-                {
-                  name: 'WAN_DHCP',
-                  interface: 'wan',
-                  gatewayIp: '192.168.1.1',
-                  monitorIp: '1.1.1.1',
-                  weight: 1,
-                  isDefault: true,
-                  enabled: true,
-                  description: 'Primary WAN Gateway',
-                },
-              ]
-        );
-        setRoutes(state.routes || []);
-      })
-      .catch(() => {});
+  const loadRoutingData = useCallback(async (isManual = false) => {
+    setLoading(true);
+    setErrorMsg(null);
+    if (isManual) setStatusMsg(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      setGateways(
+        state.gateways?.length
+          ? state.gateways
+          : [
+              {
+                name: 'WAN_DHCP',
+                interface: 'wan',
+                gatewayIp: '192.168.1.1',
+                monitorIp: '1.1.1.1',
+                weight: 1,
+                isDefault: true,
+                enabled: true,
+                description: 'Primary WAN Gateway',
+              },
+            ]
+      );
+      setRoutes(state.routes || []);
+      if (isManual) {
+        setStatusMsg(`Successfully loaded ${state.routes?.length || 0} static route(s) from /etc/axonwall/routing.yaml`);
+      }
+    } catch (err: any) {
+      setErrorMsg(`Failed to load routing configuration: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadRoutingData(false);
+  }, [loadRoutingData]);
 
   const persistRouting = async (nextGateways: Gateway[], nextRoutes: StaticRoute[]) => {
     setGateways(nextGateways);
@@ -86,13 +101,32 @@ export default function RoutingPage() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-white">Gateways & Static Routing</h1>
-        <p className="text-sm text-slate-400 mt-1">
-          Configure upstream gateways and static kernel routes synced with{' '}
-          <code className="text-emerald-400 font-mono">/etc/axonwall/routing.yaml</code>.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-white">Gateways & Static Routing</h1>
+          <p className="text-sm text-slate-400 mt-1">
+            Configure upstream gateways and static kernel routes synced with{' '}
+            <code className="text-emerald-400 font-mono">/etc/axonwall/routing.yaml</code>.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => loadRoutingData(true)}
+          disabled={loading}
+          className="self-start sm:self-auto bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+          title="Reload configuration directly from /etc/axonwall/routing.yaml"
+        >
+          <RotateCcw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-400' : ''}`} />
+          <span>{loading ? 'Reloading...' : 'Reload from Disk'}</span>
+        </button>
       </div>
+
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
       {statusMsg && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
@@ -152,7 +186,12 @@ export default function RoutingPage() {
           <span className="text-xs text-slate-400">{routes.length} configured routes</span>
         </div>
 
-        {routes.length === 0 ? (
+        {loading && routes.length === 0 ? (
+          <div className="p-6 text-center text-slate-400 text-xs border border-slate-800 rounded-lg flex items-center justify-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+            <span>Reading routes from /etc/axonwall/routing.yaml...</span>
+          </div>
+        ) : routes.length === 0 ? (
           <div className="p-6 text-center text-slate-500 text-xs border border-slate-800 rounded-lg">
             No custom static routes configured. Add a static route below or in <code className="text-emerald-400">/etc/axonwall/routing.yaml</code>.
           </div>

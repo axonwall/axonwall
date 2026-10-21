@@ -35702,7 +35702,7 @@ var GatewaySchema = external_exports.object({
   weight: external_exports.number().int().min(1).max(30).default(1),
   isDefault: external_exports.boolean().default(false),
   enabled: external_exports.boolean().default(true),
-  description: external_exports.string().max(255).default("")
+  description: external_exports.union([external_exports.string(), external_exports.number().transform(String), external_exports.null().transform(() => "")]).default("")
 });
 var WireGuardPeerSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
@@ -35809,7 +35809,7 @@ var StaticRouteSchema = external_exports.object({
   network: external_exports.string().refine(isValidCIDR, { message: "Invalid route network CIDR" }),
   gateway: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid route gateway IP" }),
   interface: external_exports.string().optional(),
-  description: external_exports.string().max(255).default(""),
+  description: external_exports.union([external_exports.string(), external_exports.number().transform(String), external_exports.null().transform(() => "")]).default(""),
   enabled: external_exports.boolean().default(true)
 });
 var GatewayGroupMemberSchema = external_exports.object({

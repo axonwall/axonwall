@@ -3,11 +3,12 @@
 # Axonwall Monorepo Release & Version Tagger
 # ==============================================================================
 # Usage:
-#   ./scripts/release-tagger.sh patch      # e.g. 0.1.8 -> 0.1.9
-#   ./scripts/release-tagger.sh minor      # e.g. 0.1.8 -> 0.2.0
-#   ./scripts/release-tagger.sh major      # e.g. 0.1.8 -> 1.0.0
+#   ./scripts/release-tagger.sh patch      # e.g. 0.1.8 -> 0.1.9 (no confirm)
+#   ./scripts/release-tagger.sh minor      # e.g. 0.1.8 -> 0.2.0 (prompts for confirmation)
+#   ./scripts/release-tagger.sh major      # e.g. 0.1.8 -> 1.0.0 (prompts for confirmation)
 #   ./scripts/release-tagger.sh 0.1.9      # Explicit version
 #   ./scripts/release-tagger.sh --push     # Also push commits and tags to origin
+#   ./scripts/release-tagger.sh -y         # Skip confirmation prompt for minor/major
 # ==============================================================================
 
 set -euo pipefail
@@ -26,10 +27,13 @@ fi
 
 TARGET_ARG="patch"
 PUSH_FLAG=false
+YES_FLAG=false
 
 for arg in "$@"; do
   if [ "$arg" == "--push" ] || [ "$arg" == "-p" ]; then
     PUSH_FLAG=true
+  elif [ "$arg" == "--yes" ] || [ "$arg" == "-y" ]; then
+    YES_FLAG=true
   else
     TARGET_ARG="$arg"
   fi
@@ -59,23 +63,47 @@ case "${TARGET_ARG}" in
       NEW_VERSION="${TARGET_ARG}"
     else
       echo "Error: Unknown argument \"${TARGET_ARG}\"."
-      echo "Usage: $0 [patch|minor|major|<version>] [--push]"
+      echo "Usage: $0 [patch|minor|major|<version>] [--push] [--yes]"
       exit 1
     fi
     ;;
 esac
+
+IFS="." read -r NEW_MAJ NEW_MIN NEW_PAT <<< "${NEW_VERSION}"
+NEW_PAT="${NEW_PAT%%-*}"
+
+RELEASE_TYPE="patch"
+if [ "${TARGET_ARG}" == "major" ] || [ "${NEW_MAJ:-0}" -gt "${MAJOR:-0}" ]; then
+  RELEASE_TYPE="major"
+elif [ "${TARGET_ARG}" == "minor" ] || [ "${NEW_MIN:-0}" -gt "${MINOR:-0}" ]; then
+  RELEASE_TYPE="minor"
+fi
 
 TAG_NAME="v${NEW_VERSION}"
 
 echo "============================================================"
 echo " Axonwall Release Tagger"
 echo " Current Version: ${CURRENT_VERSION}"
-echo " New Version:     ${NEW_VERSION} (${TAG_NAME})"
+echo " New Version:     ${NEW_VERSION} (${TAG_NAME}) [${RELEASE_TYPE}]"
 echo "============================================================"
 
 if git rev-parse "${TAG_NAME}" >/dev/null 2>&1; then
   echo "Error: Tag ${TAG_NAME} already exists in git!"
   exit 1
+fi
+
+if [ "${RELEASE_TYPE}" == "major" ] || [ "${RELEASE_TYPE}" == "minor" ]; then
+  if [ "${YES_FLAG}" != true ]; then
+    echo ""
+    echo "⚠️  Attention: You are about to initiate a ${RELEASE_TYPE^^} release (${CURRENT_VERSION} -> ${NEW_VERSION})."
+    read -r -p "Are you sure you want to proceed with this ${RELEASE_TYPE} release? [y/N]: " CONFIRMATION
+
+    if [[ ! "${CONFIRMATION}" =~ ^[yY]([eE][sS])?$ ]]; then
+      echo "Release aborted by user."
+      exit 1
+    fi
+    echo ""
+  fi
 fi
 
 echo ">> Updating VERSION file..."

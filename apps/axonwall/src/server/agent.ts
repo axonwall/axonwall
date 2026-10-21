@@ -272,67 +272,55 @@ function buildBaselineState(): DesiredState {
 
 const BASELINE_STATE: DesiredState = buildBaselineState();
 
-const YAML_CONFIG_DIRS = [
-  process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall',
-  '/var/lib/axonwall/etc-axonwall',
-];
+const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR || '/etc/axonwall';
+const PERSIST_CONFIG_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
+const YAML_CONFIG_DIRS = [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR];
 
 let cachedDesiredState: DesiredState | null = null;
-let lastLoadedYamlMtimeMs = 0;
+let lastLoadedFingerprint = '';
 
-function getLatestYamlMtimeInDir(dir: string): { maxMtimeMs: number; count: number } {
-  let maxMtimeMs = 0;
-  let count = 0;
-  try {
-    if (!fs.existsSync(dir)) return { maxMtimeMs: 0, count: 0 };
+function readAllYamlConfigFiles(): {
+  files: Record<string, string>;
+  fingerprint: string;
+} {
+  const files: Record<string, string> = {};
+
+  // Read fallback from /var/lib/axonwall/etc-axonwall first, then overlay /etc/axonwall
+  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
+    if (!fs.existsSync(dir)) continue;
     for (const filename of AXONWALL_YAML_FILENAMES) {
       const fullPath = path.join(dir, filename);
       if (fs.existsSync(fullPath)) {
-        const stat = fs.statSync(fullPath);
-        count++;
-        if (stat.mtimeMs > maxMtimeMs) {
-          maxMtimeMs = stat.mtimeMs;
-        }
+        try {
+          files[filename] = fs.readFileSync(fullPath, 'utf8');
+        } catch {}
       }
+    }
+    const singlePath = path.join(dir, 'axonwall.yaml');
+    if (fs.existsSync(singlePath)) {
+      try {
+        files['axonwall.yaml'] = fs.readFileSync(singlePath, 'utf8');
+      } catch {}
     }
     const confD = path.join(dir, 'conf.d');
     if (fs.existsSync(confD)) {
-      for (const entry of fs.readdirSync(confD)) {
-        if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
-          const stat = fs.statSync(path.join(confD, entry));
-          count++;
-          if (stat.mtimeMs > maxMtimeMs) {
-            maxMtimeMs = stat.mtimeMs;
+      try {
+        for (const entry of fs.readdirSync(confD).sort()) {
+          if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
+            const entryPath = path.join(confD, entry);
+            files[`conf.d/${entry}`] = fs.readFileSync(entryPath, 'utf8');
           }
         }
-      }
+      } catch {}
     }
-  } catch {}
-  return { maxMtimeMs, count };
-}
-
-function readYamlFilesFromDir(dir: string): Record<string, string> | null {
-  try {
-    if (!fs.existsSync(dir)) return null;
-    const files: Record<string, string> = {};
-    for (const filename of AXONWALL_YAML_FILENAMES) {
-      const fullPath = path.join(dir, filename);
-      if (fs.existsSync(fullPath)) {
-        files[filename] = fs.readFileSync(fullPath, 'utf8');
-      }
-    }
-    const confD = path.join(dir, 'conf.d');
-    if (fs.existsSync(confD)) {
-      for (const entry of fs.readdirSync(confD).sort()) {
-        if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
-          files[`conf.d/${entry}`] = fs.readFileSync(path.join(confD, entry), 'utf8');
-        }
-      }
-    }
-    return Object.keys(files).length > 0 ? files : null;
-  } catch {
-    return null;
   }
+
+  const hash = crypto.createHash('sha256');
+  for (const [k, v] of Object.entries(files).sort()) {
+    hash.update(`${k}:${v}\n`);
+  }
+
+  return { files, fingerprint: hash.digest('hex') };
 }
 
 function persistDesiredStateToDisk(state: DesiredState): Record<string, string> {
@@ -344,7 +332,7 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
     daemonFileMap[`/etc/axonwall/${filename}`] = content;
   }
 
-  for (const dir of YAML_CONFIG_DIRS) {
+  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
     try {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
@@ -366,13 +354,9 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
     } catch {}
   }
 
-  let newestMtime = Date.now();
-  for (const dir of YAML_CONFIG_DIRS) {
-    const { maxMtimeMs } = getLatestYamlMtimeInDir(dir);
-    if (maxMtimeMs > newestMtime) newestMtime = maxMtimeMs;
-  }
   cachedDesiredState = normalized;
-  lastLoadedYamlMtimeMs = newestMtime;
+  const { fingerprint } = readAllYamlConfigFiles();
+  lastLoadedFingerprint = fingerprint;
   return daemonFileMap;
 }
 
@@ -493,24 +477,20 @@ function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: strin
 }
 
 async function getDesiredStateInternal(): Promise<DesiredState> {
-  // 1. Check if /etc/axonwall/*.yaml (or /var/lib/axonwall/etc-axonwall/*.yaml) exists and whether any file was modified on disk
-  for (const dir of YAML_CONFIG_DIRS) {
-    const { maxMtimeMs, count } = getLatestYamlMtimeInDir(dir);
-    if (count > 0) {
-      if (cachedDesiredState && maxMtimeMs <= lastLoadedYamlMtimeMs) {
-        return structuredClone(cachedDesiredState);
-      }
-      const rawYamlMap = readYamlFilesFromDir(dir);
-      if (rawYamlMap) {
-        try {
-          const parsed = parseDesiredStateFromYamlFiles(rawYamlMap);
-          cachedDesiredState = parsed;
-          lastLoadedYamlMtimeMs = maxMtimeMs;
-          return structuredClone(cachedDesiredState);
-        } catch (err) {
-          console.error(`[axonwall] Failed to parse YAML files in ${dir}:`, err);
-        }
-      }
+  // 1. Read overlaid /var/lib/axonwall/etc-axonwall and /etc/axonwall YAML configuration
+  const { files, fingerprint } = readAllYamlConfigFiles();
+
+  if (Object.keys(files).length > 0) {
+    if (cachedDesiredState && fingerprint === lastLoadedFingerprint) {
+      return structuredClone(cachedDesiredState);
+    }
+    try {
+      const parsed = parseDesiredStateFromYamlFiles(files);
+      cachedDesiredState = parsed;
+      lastLoadedFingerprint = fingerprint;
+      return structuredClone(cachedDesiredState);
+    } catch (err: any) {
+      console.error('[axonwall] Failed to parse YAML files:', err?.message || err);
     }
   }
 
@@ -550,20 +530,11 @@ export async function getYamlConfigFilesSnapshot(): Promise<{
 
   const state = await getCurrentDesiredState();
   const generated = serializeDesiredStateToYamlFiles(state);
-
-  for (const dir of YAML_CONFIG_DIRS) {
-    const onDisk = readYamlFilesFromDir(dir);
-    if (onDisk && Object.keys(onDisk).length > 0) {
-      return {
-        directory: dir,
-        files: { ...generated, ...onDisk },
-      };
-    }
-  }
+  const { files: onDisk } = readAllYamlConfigFiles();
 
   return {
-    directory: '/etc/axonwall',
-    files: generated,
+    directory: ETC_CONFIG_DIR,
+    files: { ...generated, ...onDisk },
   };
 }
 
@@ -760,7 +731,7 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
   mockPendingConfirm = false;
   mockDeadline = 0;
   cachedDesiredState = null;
-  lastLoadedYamlMtimeMs = 0;
+  lastLoadedFingerprint = '';
 
   const daemonResp = await callAgentApi<any>('/v1/rollback', 'POST', { reason: 'operator rollback' });
   if (daemonResp) {
