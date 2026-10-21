@@ -1,6 +1,6 @@
 {
   "name": "@axonwall/lib",
-  "version": "0.9.8",
+  "version": "0.9.6",
   "private": true,
   "license": "GPL-2.0-or-later",
   "type": "module",
@@ -191,7 +191,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
-    "typescript": "^7.0.2",
+    "typescript": "^5.8.2",
     "vitest": "^5.0.4"
   }
 }
