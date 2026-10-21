@@ -136,13 +136,23 @@ Description: Select OpenZFS pool ('tank') RAID topology:
 
 Template: axonwall/partition_mode
 Type: select
-Choices: Guided A/B Dual-Root (Standard Presets), Expert Custom Partitioning (Granular Sizes, Filesystems, Separate /var/log & LUKS2)
-Default: Guided A/B Dual-Root (Standard Presets)
+Choices: Automated A/B Dual-Root (Express - Recommended), Guided A/B Dual-Root (Choose Slot & Swap sizes), Custom Storage Wizard (System RAID-1, OpenZFS, LUKS2, Dedicated /var/log), Manual Partitioning (Debian Custom Partitioner UI)
+Default: Automated A/B Dual-Root (Express - Recommended)
 Description: Select partitioning workflow:
- Guided mode offers quick presets for root and swap sizing.
- Expert mode allows customizing EFI size, filesystem types (ext4/xfs),
- explicit partition gigabytes for /var/lib/axonwall, a dedicated /var/log
- partition for high-velocity firewall audit logging, and LUKS2 encryption.
+ Choose how you would like to partition the installation drive:
+ .
+  - Automated A/B Dual-Root (Express): Recommended default. Automatically
+    calculates optimal Slot A, Slot B, and Swap sizes based on disk capacity,
+    allocates remaining space to persistent data (/var/lib/axonwall), and
+    immediately installs with zero hassle.
+  - Guided A/B Dual-Root: Classic workflow. Lets you choose your preferred
+    system root slot size and swap size, then automatically partitions.
+  - Custom Storage Wizard: Granular control over multi-disk RAID-1 mirroring,
+    filesystem types (ext4/xfs), dedicated /var/log partition, LUKS2/TPM2
+    encryption, and OpenZFS ('tank') storage pool allocation.
+  - Manual Partitioning: Pre-populates the A/B partition layout and opens
+    Debian's interactive partition table editor (partman) for complete manual
+    control over disk formatting, resizing, and mountpoints.
 
 Template: axonwall/custom_efi_size
 Type: string

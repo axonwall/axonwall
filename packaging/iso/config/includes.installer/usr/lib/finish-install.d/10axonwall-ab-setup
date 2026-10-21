@@ -8,6 +8,7 @@ echo "[Axonwall Installer] Finalizing A/B Dual-Root, System RAID & ZFS Setup..."
 echo "================================================================================"
 
 # Load installer choices recorded by 10initial_auto
+PARTITION_MODE="auto"
 ZFS_MB=0
 ZFS_GB=0
 ZFS_ALLOC_MODE="none"
@@ -60,9 +61,19 @@ fi
 
 # Fallback detection for Slot B device if not mounted at /target/mnt/standby
 if [ -z "$ROOT_B_DEV" ] || [ "$ROOT_B_DEV" = "$ROOT_A_DEV" ]; then
-  PART_NUM=$(echo "$ROOT_A_DEV" | grep -oE '[0-9]+$')
-  NEXT_NUM=$(( PART_NUM + 1 ))
-  ROOT_B_DEV=$(part_dev "$TARGET_DISK" "$NEXT_NUM")
+  if [ "$PARTITION_MODE" = "manual" ]; then
+    # In manual mode, only use candidate if specifically mounted or labeled
+    CANDIDATE_B=$(blkid -L axon_root_b 2>/dev/null || true)
+    if [ -n "$CANDIDATE_B" ] && [ -b "$CANDIDATE_B" ]; then
+      ROOT_B_DEV="$CANDIDATE_B"
+    else
+      ROOT_B_DEV=""
+    fi
+  else
+    PART_NUM=$(echo "$ROOT_A_DEV" | grep -oE '[0-9]+$')
+    NEXT_NUM=$(( PART_NUM + 1 ))
+    ROOT_B_DEV=$(part_dev "$TARGET_DISK" "$NEXT_NUM")
+  fi
 fi
 
 # Fallback detection for Logs, Data and Optional ZFS partition
