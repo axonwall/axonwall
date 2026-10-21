@@ -15,6 +15,14 @@ SYSTEM_RAID_MODE="single"
 SYSTEM_RAID_DISKS=""
 ZFS_EXTRA_DISKS=""
 ZFS_RAID_TOPOLOGY="auto"
+ROOT_FSTYPE="ext4"
+DATA_FSTYPE="ext4"
+LOGS_ENABLED=0
+LOGS_GB=0
+LOGS_FSTYPE="xfs"
+LUKS_ENABLED=0
+LUKS_TPM2=0
+LUKS_PASSPHRASE=""
 
 if [ -f /var/lib/partman/axonwall-choices ]; then
   . /var/lib/partman/axonwall-choices
@@ -34,6 +42,7 @@ part_dev() {
 ROOT_A_DEV=$(df /target | tail -n1 | awk '{print $1}')
 ROOT_B_DEV=$(df /target/mnt/standby 2>/dev/null | tail -n1 | awk '{print $1}')
 DATA_DEV=$(df /target/var/lib/axonwall 2>/dev/null | tail -n1 | awk '{print $1}')
+LOGS_DEV=$(df /target/var/log 2>/dev/null | tail -n1 | awk '{print $1}')
 
 if [ -z "$TARGET_DISK" ]; then
   TARGET_DISK=$(echo "$ROOT_A_DEV" | sed -E 's/p?[0-9]+$//')
@@ -46,10 +55,11 @@ if [ -z "$ROOT_B_DEV" ] || [ "$ROOT_B_DEV" = "$ROOT_A_DEV" ]; then
   ROOT_B_DEV=$(part_dev "$TARGET_DISK" "$NEXT_NUM")
 fi
 
-# Fallback detection for Persistent Data and Optional ZFS partition
+# Fallback detection for Logs, Data and Optional ZFS partition
 ALL_PARTS=$(ls "${TARGET_DISK}"* 2>/dev/null | grep -E "${TARGET_DISK}(p?[0-9]+)$" | sort -V || true)
 LAST_PART=$(echo "$ALL_PARTS" | tail -n1)
 SECOND_LAST_PART=$(echo "$ALL_PARTS" | tail -n2 | head -n1)
+THIRD_LAST_PART=$(echo "$ALL_PARTS" | tail -n3 | head -n1)
 
 ZFS_DEV=""
 if [ "${ZFS_MB:-0}" -gt 0 ]; then
@@ -57,38 +67,112 @@ if [ "${ZFS_MB:-0}" -gt 0 ]; then
   if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
     DATA_DEV="$SECOND_LAST_PART"
   fi
+  if [ "$LOGS_ENABLED" = "1" ] && [ -z "$LOGS_DEV" ]; then
+    LOGS_DEV="$THIRD_LAST_PART"
+  fi
 else
   if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
     DATA_DEV="$LAST_PART"
+  fi
+  if [ "$LOGS_ENABLED" = "1" ] && [ -z "$LOGS_DEV" ]; then
+    LOGS_DEV="$SECOND_LAST_PART"
   fi
 fi
 
 echo "[+] Target Disk       : ${TARGET_DISK}"
 echo "[+] System RAID Mode  : ${SYSTEM_RAID_MODE} (${SYSTEM_RAID_DISKS:-$TARGET_DISK})"
-echo "[+] Slot A (Primary)  : ${ROOT_A_DEV}"
-echo "[+] Slot B (Standby)  : ${ROOT_B_DEV}"
-echo "[+] Persistent Data   : ${DATA_DEV:-<embedded>}"
+echo "[+] Slot A (Primary)  : ${ROOT_A_DEV} (${ROOT_FSTYPE})"
+echo "[+] Slot B (Standby)  : ${ROOT_B_DEV} (${ROOT_FSTYPE})"
+echo "[+] Persistent Data   : ${DATA_DEV:-<embedded>} (${DATA_FSTYPE}, LUKS2=${LUKS_ENABLED})"
+echo "[+] Dedicated Logs    : ${LOGS_DEV:-<none>} (${LOGS_FSTYPE})"
 echo "[+] ZFS Partition     : ${ZFS_DEV:-<none>} (${ZFS_GB:-0} GB)"
 
-# 2. Label filesystems on Primary Disk
+# 2. Label filesystems and configure LUKS2 Encryption
 if [ -b "$ROOT_A_DEV" ]; then
   echo "[+] Setting filesystem label: ${ROOT_A_DEV} -> axon_root_a"
-  e2label "$ROOT_A_DEV" axon_root_a 2>/dev/null || tune2fs -L axon_root_a "$ROOT_A_DEV" 2>/dev/null || true
-fi
-
-if [ -b "$ROOT_B_DEV" ]; then
-  if ! blkid "$ROOT_B_DEV" 2>/dev/null | grep -q 'ext4'; then
-    echo "[+] Formatting Slot B standby partition: ${ROOT_B_DEV} as ext4..."
-    mkfs.ext4 -F -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+  if [ "$ROOT_FSTYPE" = "xfs" ] && command -v xfs_admin >/dev/null 2>&1; then
+    xfs_admin -L axon_root_a "$ROOT_A_DEV" 2>/dev/null || true
   else
-    echo "[+] Setting filesystem label: ${ROOT_B_DEV} -> axon_root_b"
-    e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    e2label "$ROOT_A_DEV" axon_root_a 2>/dev/null || tune2fs -L axon_root_a "$ROOT_A_DEV" 2>/dev/null || true
   fi
 fi
 
-if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && [ "$DATA_DEV" != "$ROOT_B_DEV" ]; then
+if [ -b "$ROOT_B_DEV" ]; then
+  echo "[+] Formatting Slot B standby partition: ${ROOT_B_DEV} as ${ROOT_FSTYPE}..."
+  if [ "$ROOT_FSTYPE" = "xfs" ]; then
+    mkfs.xfs -f -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+  else
+    mkfs.ext4 -F -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+  fi
+fi
+
+# Configure dedicated /var/log partition if enabled
+if [ "$LOGS_ENABLED" = "1" ] && [ -b "$LOGS_DEV" ] && [ "$LOGS_DEV" != "$ROOT_A_DEV" ]; then
+  echo "[+] Formatting dedicated logs partition: ${LOGS_DEV} as ${LOGS_FSTYPE}..."
+  if [ "$LOGS_FSTYPE" = "xfs" ]; then
+    mkfs.xfs -f -L axon_logs "$LOGS_DEV" 2>/dev/null || true
+  else
+    mkfs.ext4 -F -L axon_logs "$LOGS_DEV" 2>/dev/null || true
+  fi
+fi
+
+# Configure LUKS2 Encryption for Persistent Data volume if requested
+TARGET_DATA_MAPPER="$DATA_DEV"
+if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/dev/null 2>&1; then
+  echo "[+] Initializing LUKS2 encryption on ${DATA_DEV}..."
+  mkdir -p /target/etc/axonwall
+  VAULT_KEY_PATH="/target/etc/axonwall/vault.key"
+  if [ -n "$LUKS_PASSPHRASE" ]; then
+    printf '%s' "$LUKS_PASSPHRASE" > "$VAULT_KEY_PATH"
+  else
+    dd if=/dev/urandom of="$VAULT_KEY_PATH" bs=32 count=1 2>/dev/null
+  fi
+  chmod 0400 "$VAULT_KEY_PATH"
+  chown 0:0 "$VAULT_KEY_PATH"
+
+  cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 -s 512 -d "$VAULT_KEY_PATH" "$DATA_DEV" 2>/dev/null || true
+  cryptsetup open -d "$VAULT_KEY_PATH" "$DATA_DEV" axon_crypt_data 2>/dev/null || true
+  TARGET_DATA_MAPPER="/dev/mapper/axon_crypt_data"
+
+  if [ -b "$TARGET_DATA_MAPPER" ]; then
+    if [ "$DATA_FSTYPE" = "xfs" ]; then
+      mkfs.xfs -f -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
+    else
+      mkfs.ext4 -F -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
+    fi
+
+    DATA_UUID="$(blkid -s UUID -o value "$DATA_DEV" 2>/dev/null || echo "$DATA_DEV")"
+    mkdir -p /target/etc
+    echo "axon_crypt_data UUID=${DATA_UUID} /etc/axonwall/vault.key luks,discard" >> /target/etc/crypttab
+
+    if [ "$LUKS_TPM2" = "1" ]; then
+      echo "[+] Enrolling hardware TPM 2.0 PCR policy for automated unlock..."
+      in-target systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0,2,7 "$DATA_DEV" 2>/dev/null || true
+    fi
+  fi
+elif [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && [ "$DATA_DEV" != "$ROOT_B_DEV" ]; then
   echo "[+] Setting filesystem label: ${DATA_DEV} -> axon_data"
-  e2label "$DATA_DEV" axon_data 2>/dev/null || tune2fs -L axon_data "$DATA_DEV" 2>/dev/null || true
+  if [ "$DATA_FSTYPE" = "xfs" ] && command -v xfs_admin >/dev/null 2>&1; then
+    xfs_admin -L axon_data "$DATA_DEV" 2>/dev/null || true
+  else
+    e2label "$DATA_DEV" axon_data 2>/dev/null || tune2fs -L axon_data "$DATA_DEV" 2>/dev/null || true
+  fi
+fi
+
+# Seed Cloud-Init configuration into target if present from install media
+if [ -f /var/lib/partman/cloud-config.yaml ]; then
+  echo "[+] Copying Cloud-Init seed configuration into /target/var/lib/cloud/seed/nocloud-net/..."
+  mkdir -p /target/var/lib/cloud/seed/nocloud-net
+  cp /var/lib/partman/cloud-config.yaml /target/var/lib/cloud/seed/nocloud-net/user-data
+  if [ -f /var/lib/partman/meta-data ]; then
+    cp /var/lib/partman/meta-data /target/var/lib/cloud/seed/nocloud-net/meta-data
+  else
+    echo "instance-id: $(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "axonwall-01")" > /target/var/lib/cloud/seed/nocloud-net/meta-data
+  fi
+  if [ -f /var/lib/partman/network-config ]; then
+    cp /var/lib/partman/network-config /target/var/lib/cloud/seed/nocloud-net/network-config
+  fi
+  chmod 0600 /target/var/lib/cloud/seed/nocloud-net/*
 fi
 
 # 3. Synchronize Slot A to Slot B for instant standby readiness
@@ -143,10 +227,20 @@ if [ -b "$ROOT_B_DEV" ]; then
       sed -i 's/axon_root_a/axon_root_b/g' "$STAGE_B/etc/fstab"
       sed -i '\#/mnt/standby#d' "$STAGE_B/etc/fstab"
       if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -qE '[[:space:]]/var/lib/axonwall[[:space:]]' "$STAGE_B/etc/fstab"; then
-        echo "LABEL=axon_data  /var/lib/axonwall  ext4  defaults,noatime  0  2" >> "$STAGE_B/etc/fstab"
+        echo "LABEL=axon_data  /var/lib/axonwall  ${DATA_FSTYPE:-ext4}  defaults,noatime  0  2" >> "$STAGE_B/etc/fstab"
+      fi
+      if [ "$LOGS_ENABLED" = "1" ] && [ -b "$LOGS_DEV" ] && ! grep -qE '[[:space:]]/var/log[[:space:]]' "$STAGE_B/etc/fstab"; then
+        echo "LABEL=axon_logs  /var/log  ${LOGS_FSTYPE:-xfs}  defaults,noatime  0  2" >> "$STAGE_B/etc/fstab"
       fi
       if ! grep -q '/var/lib/axonwall/home' "$STAGE_B/etc/fstab"; then
         echo "/var/lib/axonwall/home  /home  none  bind  0  0" >> "$STAGE_B/etc/fstab"
+      fi
+      if [ -f /target/etc/crypttab ]; then
+        cp /target/etc/crypttab "$STAGE_B/etc/crypttab" 2>/dev/null || true
+      fi
+      if [ -d /target/var/lib/cloud/seed ]; then
+        mkdir -p "$STAGE_B/var/lib/cloud/seed" 2>/dev/null || true
+        cp -a /target/var/lib/cloud/seed/. "$STAGE_B/var/lib/cloud/seed/" 2>/dev/null || true
       fi
     fi
 
@@ -194,7 +288,10 @@ chmod 0755 /target/var/lib/axonwall /target/var/lib/axonwall/home 2>/dev/null ||
 if [ -f /target/etc/fstab ]; then
   sed -i '\#/mnt/standby#d' /target/etc/fstab
   if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -qE '[[:space:]]/var/lib/axonwall[[:space:]]' /target/etc/fstab; then
-    echo "LABEL=axon_data  /var/lib/axonwall  ext4  defaults,noatime  0  2" >> /target/etc/fstab
+    echo "LABEL=axon_data  /var/lib/axonwall  ${DATA_FSTYPE:-ext4}  defaults,noatime  0  2" >> /target/etc/fstab
+  fi
+  if [ "$LOGS_ENABLED" = "1" ] && [ -b "$LOGS_DEV" ] && ! grep -qE '[[:space:]]/var/log[[:space:]]' /target/etc/fstab; then
+    echo "LABEL=axon_logs  /var/log  ${LOGS_FSTYPE:-xfs}  defaults,noatime  0  2" >> /target/etc/fstab
   fi
   if ! grep -q '/var/lib/axonwall/home' /target/etc/fstab; then
     echo "/var/lib/axonwall/home  /home  none  bind  0  0" >> /target/etc/fstab

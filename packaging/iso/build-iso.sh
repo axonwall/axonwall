@@ -330,6 +330,12 @@ gdisk
 parted
 smartmontools
 zfsutils-linux
+cloud-init
+cloud-guest-utils
+cryptsetup
+systemd-cryptsetup
+tpm2-tools
+xfsprogs
 samba
 nfs-kernel-server
 open-iscsi

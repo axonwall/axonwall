@@ -19,6 +19,13 @@ modprobe nf_conntrack 2>/dev/null || true
 modprobe tcp_bbr 2>/dev/null || true
 sysctl --system || true
 
+# 1.1 Process Cloud-Init configuration (#cloud-config) if present
+mkdir -p /etc/axonwall
+if [[ -x /usr/local/bin/axonwall-cloud-init ]]; then
+  echo "[Axonwall Firstboot] Checking for cloud-init provisioning metadata..."
+  /usr/local/bin/axonwall-cloud-init --no-apply 2>&1 || true
+fi
+
 # 2. Identify Primary LAN & WAN NICs, plus optional OPT1 & OPT2 NICs
 INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | head -n 4 || true))
 WAN_IF="${INTERFACES[0]:-eth0}"
@@ -289,6 +296,11 @@ systemctl enable axonwalld axonwall-controller axonwall-ui headscale ssh chrony 
 # Use non-blocking restarts so firstboot does not deadlock with services ordered After=axonwall-firstboot.service
 systemctl try-restart --no-block axonwalld || true
 systemctl restart --no-block axonwall-ui axonwall-controller headscale ssh chrony || true
+
+if command -v axonwallctl &>/dev/null; then
+  echo "[Axonwall Firstboot] Compiling declarative YAML configuration..."
+  axonwallctl apply 2>&1 || true
+fi
 
 LAN_IP=""
 if [[ -n "$LAN_IF" ]]; then

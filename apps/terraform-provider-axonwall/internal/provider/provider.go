@@ -81,7 +81,9 @@ func (p *axonwallProvider) Resources(ctx context.Context) []func() resource.Reso
 }
 
 func (p *axonwallProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{}
+	return []func() datasource.DataSource{
+		NewCloudInitConfigDataSource,
+	}
 }
 
 func New(version string) func() provider.Provider {

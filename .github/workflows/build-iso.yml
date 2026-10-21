@@ -189,7 +189,8 @@ jobs:
             grub-pc-bin \
             grub-efi-amd64-bin \
             dosfstools \
-            mtools || sudo apt-get install -fy --fix-broken
+            mtools \
+            qemu-utils || sudo apt-get install -fy --fix-broken
 
           # Download and install live-build directly. HTTPS + a pinned
           # SHA-256 (cross-checked against the hash published for
@@ -204,12 +205,17 @@ jobs:
         run: |
           sudo ./packaging/iso/build-iso.sh
 
+      - name: Build Cloud Appliance Image (QCOW2)
+        run: |
+          sudo ./packaging/cloud-image/build-qcow2.sh
+
       - name: Compute Checksums
         run: |
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
-          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output
+          sudo bash -c 'if [ -d packaging/cloud-image/output ]; then cd packaging/cloud-image/output && sha256sum axonwall-debian13-amd64-cloud.qcow2 > axonwall-debian13-amd64-cloud.qcow2.sha256 && chmod 644 axonwall-debian13-amd64-cloud.qcow2.sha256; fi'
+          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output 2>/dev/null || true
 
-      - name: Sign ISO Checksums (if signing key configured)
+      - name: Sign ISO & Cloud Image Checksums (if signing key configured)
         env:
           AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
         if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
@@ -217,7 +223,7 @@ jobs:
           key_file="$(mktemp)"
           trap 'rm -f "$key_file"' EXIT
           printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
-          for sha in packaging/iso/output/*.iso.sha256; do
+          for sha in packaging/iso/output/*.iso.sha256 packaging/cloud-image/output/*.qcow2.sha256; do
             if [ -f "$sha" ]; then
               openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
             fi
@@ -241,6 +247,16 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
           retention-days: 1
 
+      - name: Upload Cloud Appliance QCOW2 Artifact (release handoff)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: axonwall-cloud-qcow2
+          path: |
+            packaging/cloud-image/output/*.qcow2
+            packaging/cloud-image/output/*.qcow2.sha256
+            packaging/cloud-image/output/*.qcow2.sha256.sig
+          retention-days: 1
+
 
   release:
     name: Publish Release Artifacts
@@ -262,6 +278,14 @@ jobs:
         with:
           name: axonwall-debian-iso
           path: packaging/iso/output
+
+      - name: Download Cloud Appliance QCOW2 Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: axonwall-cloud-qcow2
+          path: packaging/cloud-image/output
+
       - name: Release Distribution Artifacts (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -269,31 +293,38 @@ jobs:
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+            packaging/cloud-image/output/*.qcow2
+            packaging/cloud-image/output/*.qcow2.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
             packaging/debian/output/*.deb.sha256.sig
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
+            packaging/cloud-image/output/*.qcow2.sha256.sig
 
       - name: Publish Rolling Latest Pre-Release (on main)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: rolling-latest
-          name: "Axonwall Appliance ISO & Debian Package (Rolling Latest)"
+          name: "Axonwall Appliance ISO, Cloud QCOW2 & Debian Package (Rolling Latest)"
           body: |
             ### Automated Continuous Build
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
             - **Distribution**:
-              - Debian 13 (Trixie) amd64 (Bare-Metal Hybrid ISO + .deb Package)
+              - Debian 13 (Trixie) amd64 (Bare-Metal Hybrid ISO + Cloud QCOW2 + .deb Package)
             - **Artifacts**:
               - `axonwall-debian13-amd64.iso`
+              - `axonwall-debian13-amd64-cloud.qcow2`
               - `axonwall_*.deb`
           prerelease: true
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
+            packaging/cloud-image/output/*.qcow2
+            packaging/cloud-image/output/*.qcow2.sha256
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
             packaging/debian/output/*.deb.sha256.sig
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
+            packaging/cloud-image/output/*.qcow2.sha256.sig

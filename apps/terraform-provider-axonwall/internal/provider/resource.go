@@ -81,8 +81,51 @@ func (r *DesiredStateResource) Create(ctx context.Context, req resource.CreateRe
 }
 
 func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	// Not fully implemented: We just blindly return what was previously saved in Terraform state.
-	// In a real implementation, we would GET the current state from the Axonwall API.
+	var data DesiredStateResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if r.client == nil || r.client.Endpoint == "" {
+		return
+	}
+
+	url := r.client.Endpoint + "/state"
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to create HTTP request to /state", err.Error())
+		return
+	}
+	if r.client.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+r.client.Token)
+	}
+
+	httpResp, err := r.client.Client.Do(httpReq)
+	if err != nil {
+		// If daemon is unreachable during drift detection, keep existing state
+		return
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode == http.StatusNotFound {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
+	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+		bodyBytes, err := io.ReadAll(httpResp.Body)
+		if err == nil && len(bodyBytes) > 0 {
+			var jsonObj interface{}
+			if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
+				if normBytes, err := json.Marshal(jsonObj); err == nil {
+					data.StateJSON = types.StringValue(string(normBytes))
+				}
+			}
+		}
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *DesiredStateResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {

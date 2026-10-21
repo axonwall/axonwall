@@ -133,3 +133,92 @@ Description: Select OpenZFS pool ('tank') RAID topology:
   - Mirror: Ideal for 2-disk systems or low-latency IOPS workloads.
   - RAID-Z1 / RAID-Z2 / RAID-Z3: Single, dual, or triple parity across 3+ VDEVs.
   - dRAID1 / dRAID2: Next-gen Distributed RAID-Z with rapid rebuild times.
+
+Template: axonwall/partition_mode
+Type: select
+Choices: Guided A/B Dual-Root (Standard Presets), Expert Custom Partitioning (Granular Sizes, Filesystems, Separate /var/log & LUKS2)
+Default: Guided A/B Dual-Root (Standard Presets)
+Description: Select partitioning workflow:
+ Guided mode offers quick presets for root and swap sizing.
+ Expert mode allows customizing EFI size, filesystem types (ext4/xfs),
+ explicit partition gigabytes for /var/lib/axonwall, a dedicated /var/log
+ partition for high-velocity firewall audit logging, and LUKS2 encryption.
+
+Template: axonwall/custom_efi_size
+Type: string
+Default: 512
+Description: Custom EFI System Partition (ESP) size (in MB):
+ Enter the desired size in megabytes for /boot/efi (AXON_EFI). Minimum is 256 MB.
+
+Template: axonwall/root_fstype
+Type: select
+Choices: ext4 (Recommended), xfs (High Performance)
+Default: ext4 (Recommended)
+Description: Root slot filesystem type:
+ Select the filesystem for Slot A and Slot B system partitions.
+
+Template: axonwall/data_alloc_mode
+Type: select
+Choices: Allocate remaining space to /var/lib/axonwall, Explicit size in GB
+Default: Allocate remaining space to /var/lib/axonwall
+Description: /var/lib/axonwall (axon_data) allocation mode:
+ Choose whether to allocate remaining capacity or specify an exact size in GB.
+
+Template: axonwall/custom_data_size
+Type: string
+Default: 32
+Description: /var/lib/axonwall size (in GB):
+ Enter explicit gigabyte capacity for /var/lib/axonwall (axon_data).
+
+Template: axonwall/data_fstype
+Type: select
+Choices: ext4 (Recommended), xfs
+Default: ext4 (Recommended)
+Description: /var/lib/axonwall filesystem type:
+ Select filesystem format for persistent data and configurations.
+
+Template: axonwall/separate_log_partition
+Type: boolean
+Default: false
+Description: Create dedicated /var/log partition (axon_logs)?
+ Isolating /var/log onto an independent partition protects the system from
+ disk exhaustion caused by heavy Suricata PCAP captures, ClickHouse flows,
+ or debug kernel dumps.
+
+Template: axonwall/custom_log_size
+Type: string
+Default: 20
+Description: Dedicated /var/log partition size (in GB):
+ Enter size in gigabytes for the /var/log (axon_logs) partition.
+
+Template: axonwall/log_fstype
+Type: select
+Choices: xfs (Recommended for write-heavy logs), ext4
+Default: xfs (Recommended for write-heavy logs)
+Description: /var/log filesystem type:
+ XFS is recommended for large append-only log streams and directory concurrency.
+
+Template: axonwall/encryption_enabled
+Type: boolean
+Default: false
+Description: Enable LUKS2 Encryption for persistent data and storage volumes?
+ When enabled, persistent data (axon_data), dedicated logs (axon_logs), and
+ ZFS storage partitions are encrypted with AES-XTS LUKS2.
+
+Template: axonwall/encryption_passphrase
+Type: password
+Description: LUKS2 Master Encryption Passphrase:
+ Enter the master passphrase to encrypt and unlock storage volumes.
+
+Template: axonwall/encryption_passphrase_again
+Type: password
+Description: Re-enter LUKS2 Master Encryption Passphrase:
+ Verify the master encryption passphrase.
+
+Template: axonwall/tpm2_unlock
+Type: boolean
+Default: false
+Description: Enroll TPM2 device for automated, secure unattended unlock?
+ If this hardware has a TPM 2.0 cryptoprocessor, Axonwall can bind volume keys
+ to PCR policies via systemd-cryptenroll, permitting automated boot without
+ interactive console passphrases while keeping disks locked if removed from the chassis.

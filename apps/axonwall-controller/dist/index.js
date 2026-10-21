@@ -35592,6 +35592,12 @@ function isValidMAC(mac3) {
 function sanitizeIdentifier(name) {
   return name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
 }
+function isValidDevice(dev) {
+  if (!dev)
+    return false;
+  const d = dev.trim().toLowerCase();
+  return d !== "" && d !== "none" && d !== "null" && d !== "disabled" && d !== "unassigned";
+}
 
 // ../../packages/axonwall_lib/dist/schemas/index.js
 var InterfaceTypeSchema = external_exports.enum([
@@ -36135,6 +36141,8 @@ var HaSqliteSyncConfigSchema = external_exports.object({
   peerAddress: external_exports.string().optional(),
   peerPort: external_exports.number().int().min(1).max(65535).optional(),
   authToken: external_exports.string().optional(),
+  transport: external_exports.enum(["token-http", "mtls"]).default("token-http"),
+  requireSignedPayloads: external_exports.boolean().default(false),
   litestreamBucket: external_exports.string().optional(),
   litestreamEndpoint: external_exports.string().optional(),
   litestreamAccessKeyId: external_exports.string().optional(),
@@ -36157,7 +36165,9 @@ var HighAvailabilityConfigSchema = external_exports.object({
     mode: "direct_stream",
     databases: ["/var/lib/axonwall/headscale/db.sqlite"],
     syncIntervalSeconds: 5,
-    listenPort: 9876
+    listenPort: 9876,
+    transport: "token-http",
+    requireSignedPayloads: false
   }),
   syncSections: HaSyncSectionsSchema.default({
     interfaces: false,
@@ -37588,7 +37598,7 @@ function compileK3s(state, joinToken) {
     `flannel-backend: "${k3s.flannelBackend}"`
   ];
   const ifaceObj = state.interfaces.find((i) => i.name === k3s.nodeIpInterface);
-  if (ifaceObj?.device) {
+  if (isValidDevice(ifaceObj?.device)) {
     configLines.push(`flannel-iface: "${ifaceObj.device}"`);
   }
   if (isSecondaryJoin && effectivePeer) {
@@ -37718,17 +37728,19 @@ function compileK3s(state, joinToken) {
 // ../../packages/axonwall_lib/dist/compile/nft/index.js
 function buildNasAndK3sInputRules(state, ifDeviceMap, nasEnabled, k3sEnabled) {
   const hostRules = [];
-  const trustedDevs = state.interfaces.filter((i) => i.enabled && i.name !== "wan" && i.device).map((i) => `"${i.device}"`);
+  const trustedDevs = state.interfaces.filter((i) => i.enabled && i.name !== "wan" && isValidDevice(i.device)).map((i) => `"${i.device}"`);
   if (state.ha?.enabled && state.ha.syncInterface) {
     const syncDev = ifDeviceMap.get(state.ha.syncInterface) || state.ha.syncInterface;
-    if (!trustedDevs.includes(`"${syncDev}"`)) {
-      trustedDevs.push(`"${syncDev}"`);
+    if (isValidDevice(syncDev)) {
+      if (!trustedDevs.includes(`"${syncDev}"`)) {
+        trustedDevs.push(`"${syncDev}"`);
+      }
+      const configuredPort = state.ha.sqliteSync?.listenPort;
+      const syncPort = typeof configuredPort === "number" && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535 ? configuredPort : 9876;
+      hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
+      hostRules.push(`    iifname "${syncDev}" tcp dport 636 accept comment "ha-openldap-ldaps-syncrepl"`);
+      hostRules.push(`    iifname "${syncDev}" udp dport 123 accept comment "ha-chrony-ntp-sync"`);
     }
-    const configuredPort = state.ha.sqliteSync?.listenPort;
-    const syncPort = typeof configuredPort === "number" && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535 ? configuredPort : 9876;
-    hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
-    hostRules.push(`    iifname "${syncDev}" tcp dport 636 accept comment "ha-openldap-ldaps-syncrepl"`);
-    hostRules.push(`    iifname "${syncDev}" udp dport 123 accept comment "ha-chrony-ntp-sync"`);
   }
   const devSet = trustedDevs.length > 0 ? `iifname { ${trustedDevs.join(", ")} } ` : "";
   if (nasEnabled) {
@@ -37821,8 +37833,10 @@ function compileNftables(state) {
       for (const ifaceName of ifaceList) {
         if (ifaceName !== "wan") {
           const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-          const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
-          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          if (isValidDevice(dev)) {
+            const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
+            lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          }
         }
       }
     }
@@ -37856,7 +37870,7 @@ function compileNftables(state) {
   }
   const suricataConfig = state.suricata ? {
     ...state.suricata,
-    interfaces: state.suricata.interfaces.map((i) => ifDeviceMap.get(i) || i)
+    interfaces: state.suricata.interfaces.map((i) => ifDeviceMap.get(i) || i).filter(isValidDevice)
   } : void 0;
   const suricataCompiled = compileSuricata(suricataConfig);
   const crowdsecCompiled = compileCrowdSec(state.crowdsec);
@@ -37932,7 +37946,7 @@ function compileNftables(state) {
     }
     lines.push("");
   }
-  const enabledDevices = state.interfaces.filter((i) => i.enabled && i.device).map((i) => `"${i.device}"`);
+  const enabledDevices = state.interfaces.filter((i) => i.enabled && isValidDevice(i.device)).map((i) => `"${i.device}"`);
   if (state.system.flowtableOffload && enabledDevices.length > 0) {
     lines.push("  # Flowtable Fastpath");
     lines.push("  flowtable ft_fastpath {");
@@ -37947,7 +37961,7 @@ function compileNftables(state) {
     const tlsConfig = state.suricata.tlsDecryption;
     lines.push(`    # TLS Decryption Interception`);
     for (const iface of state.interfaces) {
-      if (iface.enabled && iface.name !== "wan") {
+      if (iface.enabled && iface.name !== "wan" && isValidDevice(iface.device)) {
         const dev = iface.device;
         lines.push(`    iifname "${dev}" tcp dport 443 redirect to :${tlsConfig.transparentProxyPort} comment "tls-decryption-intercept"`);
       }
@@ -37957,6 +37971,8 @@ function compileNftables(state) {
     if (!nat.enabled || nat.type !== "dnat" || !nat.targetIp)
       continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
+    if (!isValidDevice(ifaceDev))
+      continue;
     let protoMatch = "";
     if (nat.protocol === "any" || nat.protocol === "tcp_udp") {
       protoMatch = nat.destinationPort ? `meta l4proto { tcp, udp } th dport ${formatPort(nat.destinationPort)}` : "meta l4proto { tcp, udp }";
@@ -37997,9 +38013,11 @@ function compileNftables(state) {
     for (const ifaceName of ifaceList) {
       if (ifaceName !== "wan") {
         const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-        lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
-        const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
-        lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        if (isValidDevice(dev)) {
+          lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
+          const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
+          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        }
       } else {
         warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
       }
@@ -38013,7 +38031,7 @@ function compileNftables(state) {
     lines.push(`    udp dport 41641 accept comment "headscale-mesh"`);
   }
   for (const iface of state.interfaces) {
-    if (!iface.enabled)
+    if (!iface.enabled || !isValidDevice(iface.device))
       continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump input_${iface.name}`);
@@ -38042,7 +38060,7 @@ function compileNftables(state) {
   lines.push("    ct state established,related accept");
   lines.push("    ct state invalid drop");
   for (const iface of state.interfaces) {
-    if (!iface.enabled)
+    if (!iface.enabled || !isValidDevice(iface.device))
       continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump forward_${iface.name}`);
@@ -38062,6 +38080,8 @@ function compileNftables(state) {
     if (!nat.enabled)
       continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
+    if (!isValidDevice(ifaceDev))
+      continue;
     if (nat.type === "masquerade") {
       lines.push(`    oifname "${ifaceDev}" masquerade comment "outbound-nat"`);
     } else if (nat.type === "snat" && nat.targetIp) {
@@ -38076,7 +38096,7 @@ function compileNftables(state) {
     }
     for (const gwIfaceName of gatewayIfaces) {
       const iface = state.interfaces.find((i) => i.name === gwIfaceName);
-      if (iface) {
+      if (iface && isValidDevice(iface.device)) {
         lines.push(`    oifname "${iface.device}" masquerade comment "default-gateway-masquerade"`);
       }
     }
@@ -38605,6 +38625,143 @@ var AXONWALL_YAML_DOMAINS = [
   }
 ];
 var AXONWALL_YAML_FILENAMES = AXONWALL_YAML_DOMAINS.map((d) => d.filename);
+
+// ../../packages/axonwall_lib/dist/cloudinit/index.js
+var import_yaml3 = __toESM(require_dist(), 1);
+var FilesystemTypeSchema = external_exports.enum(["ext4", "xfs", "btrfs"]).default("ext4");
+var PartitionSlotSchema = external_exports.object({
+  size_gb: external_exports.number().min(4).default(16),
+  filesystem: FilesystemTypeSchema.default("ext4")
+});
+var SwapPartitionSchema = external_exports.object({
+  size_gb: external_exports.number().min(0).default(2),
+  zram_enabled: external_exports.boolean().default(false)
+});
+var DataPartitionSchema = external_exports.object({
+  size_gb: external_exports.number().min(2).optional(),
+  allocate_remaining: external_exports.boolean().default(false),
+  filesystem: FilesystemTypeSchema.default("ext4")
+});
+var LogsPartitionSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  size_gb: external_exports.number().min(2).default(10),
+  filesystem: FilesystemTypeSchema.default("xfs"),
+  mountpoint: external_exports.string().default("/var/log")
+});
+var CustomMountSchema = external_exports.object({
+  name: external_exports.string().min(1),
+  disk: external_exports.string().optional(),
+  size_gb: external_exports.number().min(1),
+  filesystem: FilesystemTypeSchema.default("ext4"),
+  mountpoint: external_exports.string().min(1)
+});
+var SystemRaidSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  level: external_exports.enum(["raid1"]).default("raid1")
+});
+var EncryptionSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  tpm2_auto_unlock: external_exports.boolean().default(false),
+  passphrase: external_exports.string().optional(),
+  cipher: external_exports.string().default("aes-xts-plain64"),
+  key_size: external_exports.number().default(512)
+});
+var CloudInitZfsDatasetSchema = external_exports.object({
+  name: external_exports.string().min(1),
+  mountpoint: external_exports.string().optional(),
+  compression: external_exports.string().default("lz4"),
+  properties: external_exports.record(external_exports.string(), external_exports.string()).optional()
+});
+var CloudInitZfsStorageSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  pool_name: external_exports.string().default("tank"),
+  allocate_system_disk_remainder: external_exports.boolean().default(true),
+  system_disk_size_gb: external_exports.number().min(0).default(0),
+  extra_disks: external_exports.array(external_exports.string()).default([]),
+  topology: external_exports.enum(["auto", "stripe", "mirror", "raidz1", "raidz2", "raidz3", "draid1", "draid2"]).default("auto"),
+  datasets: external_exports.array(CloudInitZfsDatasetSchema).default([])
+});
+var CloudInitStorageSchema = external_exports.object({
+  layout_mode: external_exports.enum(["standard_ab", "compact_ab", "single_root", "custom"]).default("standard_ab"),
+  target_disks: external_exports.array(external_exports.string()).min(1).default(["/dev/sda"]),
+  system_raid: SystemRaidSchema.default(() => ({ enabled: false, level: "raid1" })),
+  encryption: EncryptionSchema.default(() => ({
+    enabled: false,
+    tpm2_auto_unlock: false,
+    cipher: "aes-xts-plain64",
+    key_size: 512
+  })),
+  partitions: external_exports.object({
+    efi_size_mb: external_exports.number().min(128).max(4096).default(512),
+    slot_a: PartitionSlotSchema.default(() => ({ size_gb: 16, filesystem: "ext4" })),
+    slot_b: PartitionSlotSchema.default(() => ({ size_gb: 16, filesystem: "ext4" })),
+    swap: SwapPartitionSchema.default(() => ({ size_gb: 2, zram_enabled: false })),
+    data: DataPartitionSchema.default(() => ({ allocate_remaining: true, filesystem: "ext4" })),
+    logs: LogsPartitionSchema.default(() => ({
+      enabled: false,
+      size_gb: 10,
+      filesystem: "xfs",
+      mountpoint: "/var/log"
+    })),
+    custom_mounts: external_exports.array(CustomMountSchema).default([])
+  }).default(() => ({
+    efi_size_mb: 512,
+    slot_a: { size_gb: 16, filesystem: "ext4" },
+    slot_b: { size_gb: 16, filesystem: "ext4" },
+    swap: { size_gb: 2, zram_enabled: false },
+    data: { allocate_remaining: true, filesystem: "ext4" },
+    logs: { enabled: false, size_gb: 10, filesystem: "xfs", mountpoint: "/var/log" },
+    custom_mounts: []
+  })),
+  zfs: CloudInitZfsStorageSchema.default(() => ({
+    enabled: false,
+    pool_name: "tank",
+    allocate_system_disk_remainder: true,
+    system_disk_size_gb: 0,
+    extra_disks: [],
+    topology: "auto",
+    datasets: []
+  }))
+});
+var CloudInitZtpSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  controller_url: external_exports.string().url().optional(),
+  enrollment_token: external_exports.string().optional()
+});
+var CloudInitAuthSchema = external_exports.object({
+  admin_username: external_exports.string().default("admin"),
+  admin_password: external_exports.string().optional(),
+  admin_password_hash: external_exports.string().optional(),
+  ztp: CloudInitZtpSchema.default({ enabled: false })
+});
+var AxonwallCloudConfigSchema = external_exports.object({
+  storage: CloudInitStorageSchema.optional(),
+  auth: CloudInitAuthSchema.optional(),
+  desired_state: DesiredStateSchema.partial().optional()
+});
+var CloudInitUserSchema = external_exports.object({
+  name: external_exports.string(),
+  gecos: external_exports.string().optional(),
+  sudo: external_exports.string().optional(),
+  shell: external_exports.string().default("/bin/bash"),
+  lock_passwd: external_exports.boolean().default(false),
+  ssh_authorized_keys: external_exports.array(external_exports.string()).default([])
+});
+var FullCloudInitSchema = external_exports.object({
+  hostname: external_exports.string().optional(),
+  fqdn: external_exports.string().optional(),
+  manage_etc_hosts: external_exports.boolean().optional(),
+  timezone: external_exports.string().optional(),
+  users: external_exports.array(CloudInitUserSchema).optional(),
+  packages: external_exports.array(external_exports.string()).optional(),
+  runcmd: external_exports.array(external_exports.string()).optional(),
+  growpart: external_exports.object({
+    mode: external_exports.string().optional(),
+    devices: external_exports.array(external_exports.string()).optional(),
+    ignore_growroot_disabled: external_exports.boolean().optional()
+  }).optional(),
+  axonwall: AxonwallCloudConfigSchema.optional()
+});
 
 // src/headscale.ts
 function assertSafeIdentifier(val, paramName) {

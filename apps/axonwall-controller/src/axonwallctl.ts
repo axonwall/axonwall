@@ -12,6 +12,7 @@ import {
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { parseCloudInitYaml, serializeYaml, type FullCloudInit } from '@axonwall/lib/cloudinit';
 
 const ETC_DIR = process.env.AXONWALL_ETC_DIR || '/etc/axonwall';
 const PERSIST_YAML_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
@@ -394,10 +395,11 @@ async function cmdApply(autoConfirm = true) {
 
 async function cmdEdit(domainArg?: string) {
   ensureInitializedYamlFiles();
+  const domainNames = AXONWALL_YAML_DOMAINS.map((d) => d.filename.replace(/\.ya?ml$/, ''));
   const domain = (domainArg || 'firewall').replace(/\.ya?ml$/i, '').toLowerCase();
-  if (!AXONWALL_YAML_DOMAINS.includes(domain as any)) {
+  if (!domainNames.includes(domain as any)) {
     console.error(
-      `${cRed}Unknown configuration section '${domainArg}'. Valid sections: ${AXONWALL_YAML_DOMAINS.join(', ')}${cReset}`
+      `${cRed}Unknown configuration section '${domainArg}'. Valid sections: ${domainNames.join(', ')}${cReset}`
     );
     process.exit(1);
   }
@@ -425,6 +427,194 @@ function cmdExport() {
   process.stdout.write(serializeDesiredStateToSingleYaml(state));
 }
 
+async function cmdCloudInit(userArgs: string[]) {
+  let explicitFile: string | undefined;
+  let autoApply = true;
+
+  for (const arg of userArgs) {
+    if (arg === '--no-apply') {
+      autoApply = false;
+    } else if (arg === '--apply') {
+      autoApply = true;
+    } else if (!arg.startsWith('-') && !explicitFile) {
+      explicitFile = arg;
+    }
+  }
+
+  // 1. Locate candidate cloud-init user-data file
+  const candidatePaths = [
+    explicitFile,
+    process.env.CLOUD_INIT_USER_DATA,
+    '/var/lib/cloud/instance/user-data.txt',
+    '/var/lib/cloud/seed/nocloud-net/user-data',
+    '/var/lib/cloud/seed/nocloud/user-data',
+    '/etc/axonwall/cloud-config.yaml',
+  ].filter(Boolean) as string[];
+
+  let resolvedPath = '';
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) {
+      resolvedPath = p;
+      break;
+    }
+  }
+
+  if (!resolvedPath) {
+    console.log(`${cYellow}[Axonwall Cloud-Init] No cloud-init user-data detected in standard locations.${cReset}`);
+    return;
+  }
+
+  console.log(`${cCyan}${cBold}[Axonwall Cloud-Init] Found cloud-config at ${resolvedPath}${cReset}`);
+  const rawContent = fs.readFileSync(resolvedPath, 'utf-8');
+
+  let cloudConfig: FullCloudInit;
+  try {
+    cloudConfig = parseCloudInitYaml(rawContent);
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Failed to parse cloud-config YAML: ${err.message}${cReset}`);
+    process.exit(1);
+  }
+
+  const isRoot = typeof process.getuid === 'function' ? process.getuid() === 0 : false;
+  const isDryRun = userArgs.includes('--dry-run');
+
+  // 2. Reconcile hostname
+  if (cloudConfig.hostname) {
+    console.log(`[+] Setting system hostname to: ${cloudConfig.hostname}`);
+    if (!isDryRun && isRoot) {
+      try {
+        execFileSync('hostnamectl', ['--no-ask-password', 'set-hostname', cloudConfig.hostname], {
+          stdio: 'ignore',
+          timeout: 2000,
+        });
+      } catch {
+        try {
+          fs.writeFileSync('/etc/hostname', cloudConfig.hostname.trim() + '\n', 'utf-8');
+        } catch {}
+      }
+    }
+  }
+
+  // 3. Reconcile SSH keys from users
+  if (cloudConfig.users && cloudConfig.users.length > 0) {
+    const allKeys: string[] = [];
+    for (const u of cloudConfig.users) {
+      if (u.ssh_authorized_keys && u.ssh_authorized_keys.length > 0) {
+        allKeys.push(...u.ssh_authorized_keys);
+      }
+    }
+    if (allKeys.length > 0) {
+      console.log(`[+] Found ${allKeys.length} SSH public key(s) in cloud-config.`);
+      if (!isDryRun && isRoot) {
+        try {
+          const sshDir = '/root/.ssh';
+          const authKeysPath = path.join(sshDir, 'authorized_keys');
+          fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+          let existingKeys = '';
+          if (fs.existsSync(authKeysPath)) {
+            existingKeys = fs.readFileSync(authKeysPath, 'utf-8');
+          }
+          const newKeys = allKeys.filter((k) => !existingKeys.includes(k.trim()));
+          if (newKeys.length > 0) {
+            fs.appendFileSync(authKeysPath, '\n' + newKeys.join('\n') + '\n', { mode: 0o600 });
+            console.log(`[+] Injected ${newKeys.length} SSH public key(s) into /root/.ssh/authorized_keys.`);
+          }
+        } catch (err: any) {
+          console.warn(`[!] Unable to write SSH keys: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  // 4. Reconcile Axonwall specific configuration
+  const axon = cloudConfig.axonwall;
+  if (axon) {
+    // 4a. Auth
+    if (axon.auth) {
+      if (axon.auth.admin_password) {
+        console.log(`[+] Administrator credentials configured for user '${axon.auth.admin_username || 'admin'}'.`);
+        if (!isDryRun) {
+          try {
+            fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+            const adminEnvPath = path.join(ETC_DIR, 'admin.env');
+            fs.writeFileSync(
+              adminEnvPath,
+              `LOCAL_ADMIN_USER=${axon.auth.admin_username || 'admin'}\nLOCAL_ADMIN_PASSWORD=${axon.auth.admin_password}\n`,
+              { mode: 0o600 }
+            );
+          } catch (err: any) {
+            console.warn(`[!] Unable to write admin.env: ${err.message}`);
+          }
+        }
+      }
+      if (axon.auth.ztp?.enabled) {
+        console.log(`[+] Zero-Touch Provisioning (ZTP) enabled via ${axon.auth.ztp.controller_url || '<default-controller>'}.`);
+        if (!isDryRun) {
+          try {
+            fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+            const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
+            const content = `AXONWALL_ZTP_TOKEN=${axon.auth.ztp.enrollment_token || ''}\nAXONWALL_CONTROLLER_URL=${axon.auth.ztp.controller_url || ''}\n`;
+            fs.writeFileSync(ctrlEnvPath, content, { mode: 0o640 });
+          } catch (err: any) {
+            console.warn(`[!] Unable to write controller.env: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    // 4b. Desired State
+    if (axon.desired_state && Object.keys(axon.desired_state).length > 0) {
+      console.log(`[+] Staging declarative desired_state from cloud-config into /etc/axonwall/conf.d/99-cloudinit.yaml...`);
+      if (!isDryRun) {
+        try {
+          const confD = path.join(ETC_DIR, 'conf.d');
+          fs.mkdirSync(confD, { recursive: true, mode: 0o755 });
+          const cloudInitYamlPath = path.join(confD, '99-cloudinit.yaml');
+          fs.writeFileSync(cloudInitYamlPath, serializeYaml(axon.desired_state), { mode: 0o644 });
+        } catch (err: any) {
+          console.warn(`[!] Unable to write 99-cloudinit.yaml: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  // 5. Expand data partition if growpart is available (QCOW2 / Cloud Image auto-grow)
+  if (!isDryRun && isRoot) {
+    try {
+      const res = spawnSync('which', ['growpart'], { stdio: 'pipe' });
+      if (res.status === 0) {
+        const findmnt = spawnSync('findmnt', ['-n', '-o', 'SOURCE', '/var/lib/axonwall'], { encoding: 'utf-8' });
+        const dev = findmnt.stdout?.trim();
+        if (dev && dev.startsWith('/dev/')) {
+          const diskRes = spawnSync('lsblk', ['-no', 'PKNAME', dev], { encoding: 'utf-8' });
+          const disk = diskRes.stdout?.trim();
+          const partMatch = dev.match(/\d+$/);
+          if (disk && partMatch) {
+            const partNum = partMatch[0];
+            console.log(`[+] Attempting dynamic partition resize of /dev/${disk} partition ${partNum}...`);
+            spawnSync('growpart', [`/dev/${disk}`, partNum], { stdio: 'inherit' });
+            const fstypeRes = spawnSync('lsblk', ['-no', 'FSTYPE', dev], { encoding: 'utf-8' });
+            const fstype = fstypeRes.stdout?.trim();
+            if (fstype === 'xfs') {
+              spawnSync('xfs_growfs', ['/var/lib/axonwall'], { stdio: 'inherit' });
+            } else {
+              spawnSync('resize2fs', [dev], { stdio: 'inherit' });
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 6. Apply if requested
+  if (autoApply && !isDryRun) {
+    console.log(`\n${cCyan}Compiling and applying configuration from cloud-init...${cReset}`);
+    await cmdApply(true);
+  } else if (isDryRun) {
+    console.log(`\n${cGreen}[✓] Cloud-init dry-run completed successfully. All schemas and parameters validated.${cReset}`);
+  }
+}
+
 function showHelp() {
   console.log(`${cCyan}${cBold}axonwallctl — Axonwall Declarative YAML CLI (/etc/axonwall/*.yaml)${cReset}
 
@@ -437,11 +627,12 @@ ${cBold}COMMANDS:${cReset}
   diff                Show uncommitted YAML changes and preview compiled Linux nftables ruleset
   apply               Compile and atomically apply /etc/axonwall/*.yaml to kernel nftables, daemons, and GitOps
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
+  cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR, then automatically validate and apply
   export              Output the complete unified configuration as a single YAML document to stdout
 
 ${cBold}SECTIONS (/etc/axonwall/<section>.yaml):${cReset}
-  ${AXONWALL_YAML_DOMAINS.join(', ')}
+  ${AXONWALL_YAML_DOMAINS.map((d) => d.filename.replace(/\.ya?ml$/, '')).join(', ')}
 `);
 }
 
@@ -463,6 +654,10 @@ async function main() {
     case 'apply':
     case 'reload':
       await cmdApply(true);
+      break;
+    case 'cloudinit':
+    case 'cloud-init':
+      await cmdCloudInit(args.slice(1));
       break;
     case 'edit':
       await cmdEdit(args[1]);
