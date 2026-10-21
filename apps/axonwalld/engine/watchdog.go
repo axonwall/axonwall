@@ -325,14 +325,16 @@ func (we *WatchdogEngine) detectInitialState() {
 	kernelVer := "unknown"
 	var uname syscall.Utsname
 	if err := syscall.Uname(&uname); err == nil {
-		var buf [65]byte
-		for i, b := range uname.Release {
+		var buf []byte
+		for _, b := range uname.Release {
 			if b == 0 {
 				break
 			}
-			buf[i] = byte(b)
+			buf = append(buf, byte(b))
 		}
-		kernelVer = strings.TrimSpace(string(buf[:]))
+		if len(buf) > 0 {
+			kernelVer = strings.TrimSpace(string(buf))
+		}
 	}
 
 	appVer := we.getInstalledVersion()
@@ -392,7 +394,7 @@ func (we *WatchdogEngine) detectInitialState() {
 }
 
 func readInstalledVersion() string {
-	appVer := "0.9.5"
+	appVer := "0.9.6"
 	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json", "./package.json", "../package.json"} {
 		if data, err := os.ReadFile(vpath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
@@ -604,16 +606,29 @@ func (we *WatchdogEngine) verifyNftables() HealthCheckResult {
 		}
 	}
 
-	// 2. Validate standard baseline ruleset syntax when running as root
-	testScript := "table inet axonwall_watchdog_test { chain test_chain { type filter hook input priority 0; } }\ndelete table inet axonwall_watchdog_test\n"
-	tmpFile, err := os.CreateTemp("", "watchdog-nft-*.nft")
-	if err == nil {
-		defer os.Remove(tmpFile.Name())
-		tmpFile.WriteString(testScript)
-		tmpFile.Close()
+	// 2. Validate standard baseline ruleset syntax when running as root.
+	// nftables requires newlines or semicolons after chain blocks.
+	testScript := "table inet axonwall_watchdog_test {\n\tchain test_chain {\n\t\ttype filter hook input priority 0;\n\t}\n}\ndelete table inet axonwall_watchdog_test\n"
 
-		cCheck := exec.Command("nft", "-c", "-f", tmpFile.Name())
-		if cOut, cErr := cCheck.CombinedOutput(); cErr != nil {
+	cCheck := exec.Command("nft", "-c", "-f", "-")
+	cCheck.Stdin = strings.NewReader(testScript)
+	if cOut, cErr := cCheck.CombinedOutput(); cErr != nil {
+		// Fallback to temp file if stdin '-' is not supported on older nftables versions
+		tmpFile, err := os.CreateTemp("", "watchdog-nft-*.nft")
+		if err == nil {
+			defer os.Remove(tmpFile.Name())
+			tmpFile.WriteString(testScript)
+			tmpFile.Close()
+
+			fCheck := exec.Command("nft", "-c", "-f", tmpFile.Name())
+			if fOut, fErr := fCheck.CombinedOutput(); fErr != nil {
+				return HealthCheckResult{
+					Name:   "Kernel nftables Atomic Baseline",
+					Status: CheckStatusFail,
+					Detail: fmt.Sprintf("nftables kernel compiler check failed: %s", string(fOut)),
+				}
+			}
+		} else {
 			return HealthCheckResult{
 				Name:   "Kernel nftables Atomic Baseline",
 				Status: CheckStatusFail,
