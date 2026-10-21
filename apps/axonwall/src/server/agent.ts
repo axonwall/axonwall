@@ -736,6 +736,9 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  mockPendingConfirm = false;
+  mockDeadline = 0;
+
   const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
   if (daemonResp) {
     return {
@@ -744,8 +747,6 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
     };
   }
 
-  mockPendingConfirm = false;
-  mockDeadline = 0;
   return {
     success: true,
     message: 'Configuration confirmed. Promoted to last-known-good.',
@@ -756,6 +757,11 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  mockPendingConfirm = false;
+  mockDeadline = 0;
+  cachedDesiredState = null;
+  lastLoadedYamlMtimeMs = 0;
+
   const daemonResp = await callAgentApi<any>('/v1/rollback', 'POST', { reason: 'operator rollback' });
   if (daemonResp) {
     return {
@@ -764,8 +770,6 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
     };
   }
 
-  mockPendingConfirm = false;
-  mockDeadline = 0;
   return {
     success: true,
     message: 'Successfully rolled back to previous last-known-good configuration.',

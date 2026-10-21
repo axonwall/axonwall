@@ -254,6 +254,12 @@ async function cmdStatus() {
     const status = await sendAgentSocketRequest<any>('/v1/status', 'GET');
     console.log(`  ${cBold}Privileged Daemon:${cReset} ${cGreen}ONLINE${cReset} (${status.nodeId || 'axonwalld'}, v${status.version || '0.5.2'})`);
     console.log(`  ${cBold}Active Bundle:${cReset}     ${status.activeBundleHash ? status.activeBundleHash.slice(0, 12) : 'none'}`);
+    if (status.pendingConfirm) {
+      const remaining = status.secondsUntilRollback ?? 0;
+      console.log(
+        `  ${cRed}${cBold}Commit-Confirm:${cReset}    ${cRed}PENDING (Auto-rollback in ${remaining}s)${cReset} — run '${cCyan}axonwallctl confirm${cReset}' to confirm or '${cYellow}axonwallctl rollback${cReset}' to revert`
+      );
+    }
   } catch {
     console.log(`  ${cBold}Privileged Daemon:${cReset} ${cYellow}OFFLINE / STANDALONE MODE${cReset}`);
   }
@@ -379,8 +385,10 @@ async function cmdApply(autoConfirm = true) {
 
     if (autoConfirm) {
       await sendAgentSocketRequest('/v1/confirm', 'POST', { jobId });
+      console.log(`${cGreen}${cBold}[✓] Applied /etc/axonwall/*.yaml to kernel nftables and system daemons (hash: ${bundleHash.slice(0, 12)}).${cReset}`);
+    } else {
+      console.log(`${cYellow}${cBold}[!] Applied with Commit-Confirm (120s timeout). Run 'axonwallctl confirm' to confirm or 'axonwallctl rollback' to revert.${cReset}`);
     }
-    console.log(`${cGreen}${cBold}[✓] Applied /etc/axonwall/*.yaml to kernel nftables and system daemons (hash: ${bundleHash.slice(0, 12)}).${cReset}`);
   } catch (err: any) {
     console.log(
       `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk (daemon socket offline: ${err?.message || 'standalone'}).${cReset}`
@@ -426,6 +434,36 @@ async function cmdEdit(domainArg?: string) {
 function cmdExport() {
   const state = cmdValidate();
   process.stdout.write(serializeDesiredStateToSingleYaml(state));
+}
+
+async function cmdConfirm() {
+  console.log(`${cCyan}Confirming pending ruleset and configuration commit...${cReset}`);
+  try {
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/confirm', 'POST', {});
+    if (resp.success) {
+      console.log(`${cGreen}${cBold}[✓] Active ruleset and configuration successfully confirmed. Auto-rollback disarmed.${cReset}`);
+    } else {
+      console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+    }
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Failed to confirm ruleset: ${err?.message || err}${cReset}`);
+    process.exit(1);
+  }
+}
+
+async function cmdRollback() {
+  console.log(`${cYellow}Rolling back to last-known-good ruleset and configuration...${cReset}`);
+  try {
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/rollback', 'POST', {});
+    if (resp.success) {
+      console.log(`${cGreen}${cBold}[✓] Rolled back to last-known-good ruleset and restored /etc/axonwall/*.yaml.${cReset}`);
+    } else {
+      console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+    }
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Failed to trigger rollback: ${err?.message || err}${cReset}`);
+    process.exit(1);
+  }
 }
 
 async function cmdCloudInit(userArgs: string[]) {
@@ -659,7 +697,9 @@ ${cBold}COMMANDS:${cReset}
   status              Show status of /etc/axonwall/*.yaml files, validation state, and daemon connectivity
   validate            Validate all /etc/axonwall/*.yaml and /etc/axonwall/conf.d/*.yaml files against Zod schemas
   diff                Show uncommitted YAML changes and preview compiled Linux nftables ruleset
-  apply               Compile and atomically apply /etc/axonwall/*.yaml to kernel nftables, daemons, and GitOps
+  apply [--no-confirm] Compile and apply /etc/axonwall/*.yaml (auto-confirms unless --no-confirm)
+  confirm             Confirm the currently pending configuration commit and disarm auto-rollback
+  rollback            Immediately abort pending commit and revert to last-known-good configuration
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR, then automatically validate and apply
@@ -686,8 +726,16 @@ async function main() {
       cmdDiff();
       break;
     case 'apply':
-    case 'reload':
-      await cmdApply(true);
+    case 'reload': {
+      const noConfirm = args.includes('--no-confirm');
+      await cmdApply(!noConfirm);
+      break;
+    }
+    case 'confirm':
+      await cmdConfirm();
+      break;
+    case 'rollback':
+      await cmdRollback();
       break;
     case 'cloudinit':
     case 'cloud-init':

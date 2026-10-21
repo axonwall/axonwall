@@ -37725,6 +37725,172 @@ function compileK3s(state, joinToken) {
   };
 }
 
+// ../../packages/axonwall_lib/dist/compile/kea/index.js
+function compileKeaDhcp4(dhcp, interfaces) {
+  const ifDeviceMap = /* @__PURE__ */ new Map();
+  for (const iface of interfaces) {
+    ifDeviceMap.set(iface.name, iface.device);
+  }
+  const activeSubnets = dhcp.subnets.filter((s) => s.enabled);
+  const activeInterfaces = Array.from(new Set(activeSubnets.map((s) => ifDeviceMap.get(s.interface) || s.interface).filter(isValidDevice)));
+  const keaConfig = {
+    Dhcp4: {
+      "interfaces-config": {
+        interfaces: activeInterfaces,
+        "dhcp-socket-type": "raw"
+      },
+      "lease-database": {
+        type: "memfile",
+        persist: true,
+        name: "/var/lib/axonwall/kea/dhcp4.leases"
+      },
+      "valid-lifetime": 7200,
+      "renew-timer": 1800,
+      "rebind-timer": 3600,
+      "subnet4": activeSubnets.map((sub, idx) => {
+        const optionData = [];
+        if (sub.routers.length > 0) {
+          optionData.push({
+            name: "routers",
+            data: sub.routers.join(", ")
+          });
+        }
+        if (sub.dnsServers.length > 0) {
+          optionData.push({
+            name: "domain-name-servers",
+            data: sub.dnsServers.join(", ")
+          });
+        }
+        return {
+          id: idx + 1,
+          subnet: sub.subnet,
+          interface: ifDeviceMap.get(sub.interface) || sub.interface,
+          pools: [
+            {
+              pool: `${sub.poolStart} - ${sub.poolEnd}`
+            }
+          ],
+          "option-data": optionData,
+          reservations: sub.staticMappings.map((m) => ({
+            "hw-address": m.mac,
+            "ip-address": m.ip,
+            hostname: m.hostname || void 0
+          }))
+        };
+      })
+    }
+  };
+  return {
+    keaDhcp4Config: JSON.stringify(keaConfig, null, 2)
+  };
+}
+
+// ../../packages/axonwall_lib/dist/compile/frr/index.js
+function compileFrr(config2) {
+  const daemons = {
+    zebra: true,
+    bgpd: false,
+    ospfd: false,
+    ospf6d: false,
+    bfdd: false
+  };
+  if (!config2 || !config2.enabled) {
+    return {
+      frrConf: "# FRRouting is disabled\n",
+      daemons,
+      daemonsConf: generateDaemonsConf(daemons)
+    };
+  }
+  const lines = [
+    "frr version 10.0",
+    "frr defaults traditional",
+    "hostname axonwall",
+    "log syslog informational",
+    "service integrated-vtysh-config",
+    "!"
+  ];
+  if (config2.bgp && config2.bgp.enabled) {
+    daemons.bgpd = true;
+    lines.push(`router bgp ${config2.bgp.asNumber}`);
+    lines.push(` bgp router-id ${config2.bgp.routerId.replace(/[\r\n\s]+/g, "")}`);
+    lines.push(" no bgp ebgp-requires-policy");
+    for (const net of config2.bgp.networks) {
+      lines.push(` network ${net.replace(/[\r\n\s]+/g, "")}`);
+    }
+    for (const neighbor of config2.bgp.neighbors) {
+      const safePeerIp = neighbor.peerIp.replace(/[\r\n\s]+/g, "");
+      lines.push(` neighbor ${safePeerIp} remote-as ${neighbor.remoteAs}`);
+      if (neighbor.description) {
+        const safeDesc = neighbor.description.replace(/[\r\n]+/g, " ").replace(/"/g, "'").trim();
+        lines.push(` neighbor ${safePeerIp} description ${safeDesc}`);
+      }
+      if (neighbor.password) {
+        const safePass = neighbor.password.replace(/[\r\n\s]+/g, "");
+        lines.push(` neighbor ${safePeerIp} password ${safePass}`);
+      }
+      if (neighbor.bfd) {
+        daemons.bfdd = true;
+        lines.push(` neighbor ${safePeerIp} bfd`);
+      }
+      if (neighbor.nextHopSelf) {
+        lines.push(` neighbor ${safePeerIp} next-hop-self`);
+      }
+      if (neighbor.softReconfiguration) {
+        lines.push(` neighbor ${safePeerIp} soft-reconfiguration inbound`);
+      }
+    }
+    lines.push("!");
+  }
+  if (config2.ospf && config2.ospf.enabled) {
+    daemons.ospfd = true;
+    for (const area of config2.ospf.areas) {
+      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, "");
+      for (const iface of area.interfaces) {
+        lines.push(`interface ${iface.replace(/[\r\n\s]+/g, "")}`);
+        lines.push(` ip ospf area ${safeAreaId}`);
+        lines.push("!");
+      }
+    }
+    lines.push("router ospf");
+    lines.push(` ospf router-id ${config2.ospf.routerId.replace(/[\r\n\s]+/g, "")}`);
+    if (config2.ospf.redistributeConnected) {
+      lines.push(" redistribute connected");
+    }
+    if (config2.ospf.redistributeDefault) {
+      lines.push(" default-information originate");
+    }
+    for (const area of config2.ospf.areas) {
+      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, "");
+      for (const net of area.networks) {
+        lines.push(` network ${net.replace(/[\r\n\s]+/g, "")} area ${safeAreaId}`);
+      }
+    }
+    lines.push("!");
+  }
+  lines.push("line vty", "!");
+  return {
+    frrConf: lines.join("\n") + "\n",
+    daemons,
+    daemonsConf: generateDaemonsConf(daemons)
+  };
+}
+function generateDaemonsConf(daemons) {
+  return [
+    "# FRR daemons configuration",
+    `zebra=${daemons.zebra ? "yes" : "no"}`,
+    `bgpd=${daemons.bgpd ? "yes" : "no"}`,
+    `ospfd=${daemons.ospfd ? "yes" : "no"}`,
+    `ospf6d=${daemons.ospf6d ? "yes" : "no"}`,
+    `bfdd=${daemons.bfdd ? "yes" : "no"}`,
+    "fabricd=no",
+    "vrrpd=no",
+    "staticd=yes",
+    "vtysh_enable=yes",
+    'zebra_options="  -A 127.0.0.1 -s 90000000"',
+    ""
+  ].join("\n");
+}
+
 // ../../packages/axonwall_lib/dist/compile/nft/index.js
 function buildNasAndK3sInputRules(state, ifDeviceMap, nasEnabled, k3sEnabled) {
   const hostRules = [];
@@ -37806,6 +37972,60 @@ function compileNftables(state) {
       }, null, 2),
       fileMode: 384
     });
+  }
+  if (state.ha) {
+    files.push({
+      path: "/etc/axonwall/managed/ha_config.json",
+      content: JSON.stringify(state.ha, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.gateways && state.gateways.length > 0 || state.gatewayGroups && state.gatewayGroups.length > 0) {
+    files.push({
+      path: "/etc/axonwall/managed/sdwan_config.json",
+      content: JSON.stringify({
+        gateways: state.gateways || [],
+        gatewayGroups: state.gatewayGroups || []
+      }, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.zeroTrust) {
+    files.push({
+      path: "/etc/axonwall/managed/zero_trust_apps.json",
+      content: JSON.stringify(state.zeroTrust, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.vigilante) {
+    files.push({
+      path: "/etc/axonwall/managed/vigilante_config.json",
+      content: JSON.stringify(state.vigilante, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.dhcp?.enabled && state.dhcp.subnets && state.dhcp.subnets.length > 0) {
+    const kea = compileKeaDhcp4(state.dhcp, state.interfaces);
+    files.push({
+      path: "/etc/kea/kea-dhcp4.conf",
+      content: kea.keaDhcp4Config,
+      fileMode: 420
+    });
+    reloadServices.push("kea-dhcp4-server");
+  }
+  if (state.frr?.enabled) {
+    const frr = compileFrr(state.frr);
+    files.push({
+      path: "/etc/frr/frr.conf",
+      content: frr.frrConf,
+      fileMode: 416
+    });
+    files.push({
+      path: "/etc/frr/daemons",
+      content: frr.daemonsConf,
+      fileMode: 416
+    });
+    reloadServices.push("frr");
   }
   const ifDeviceMap = /* @__PURE__ */ new Map();
   for (const iface of state.interfaces) {
