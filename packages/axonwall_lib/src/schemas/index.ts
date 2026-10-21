@@ -652,6 +652,7 @@ export const HaSqliteSyncConfigSchema = z.object({
   peerPort: z.number().int().min(1).max(65535).optional(),
   authToken: z.string().optional(),
   transport: z.enum(['token-http', 'mtls']).default('token-http'),
+  requireSignedPayloads: z.boolean().default(false),
   litestreamBucket: z.string().optional(),
   litestreamEndpoint: z.string().optional(),
   litestreamAccessKeyId: z.string().optional(),
@@ -678,6 +679,7 @@ export const HighAvailabilityConfigSchema = z.object({
     syncIntervalSeconds: 5,
     listenPort: 9876,
     transport: 'token-http',
+    requireSignedPayloads: false,
   }),
   syncSections: HaSyncSectionsSchema.default({
     interfaces: false,

@@ -62,6 +62,7 @@ describe('Phase 4: High Availability Compilers', () => {
       syncIntervalSeconds: 5,
       listenPort: 9876,
       transport: 'token-http',
+      requireSignedPayloads: false,
     },
     syncSections: {
       interfaces: false,

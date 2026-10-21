@@ -272,6 +272,7 @@ export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
     syncIntervalSeconds: 5,
     listenPort: 9876,
     transport: 'token-http' as const,
+    requireSignedPayloads: false,
   };
   const lines: string[] = [];
 
@@ -328,6 +329,7 @@ export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: str
     syncIntervalSeconds: 5,
     listenPort: 9876,
     transport: 'token-http' as const,
+    requireSignedPayloads: false,
   };
   const isMaster = ha.nodeRole === 'master' && !ha.maintenanceMode;
 
@@ -339,6 +341,7 @@ export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: str
     syncIntervalSeconds: sync.syncIntervalSeconds,
     listenPort: sync.listenPort,
     transport: sync.transport,
+    requireSignedPayloads: sync.requireSignedPayloads,
     peerAddress: sync.peerAddress || ha.peerAddress,
     peerPort: sync.peerPort || sync.listenPort,
     authToken: sync.authToken || ha.vrrpInstances?.[0]?.authPassword || '',

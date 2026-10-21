@@ -28,6 +28,7 @@ describe('compileConntrackd', () => {
         syncIntervalSeconds: 5,
         listenPort: 9876,
         transport: 'token-http',
+        requireSignedPayloads: false,
       },
       syncSections: {
         interfaces: false,
@@ -78,6 +79,7 @@ describe('compileConntrackd', () => {
         syncIntervalSeconds: 5,
         listenPort: 9876,
         transport: 'token-http',
+        requireSignedPayloads: false,
       },
       syncSections: {
         interfaces: false,

@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -375,3 +376,97 @@ olcMultiProvider: TRUE
 	_ = EnsureSSSDConfiguredWithPeer(baseDN, peerURI)
 	return nil
 }
+
+// --- HA payload signing (audit D-04 Phase 2) ---
+//
+// The sync master signs the SHA-256 digest of the /db and /state payloads
+// with the HA node key and sends the signature in the
+// X-Axonwall-Payload-Signature header; the poller verifies it against the
+// HA node certificate before applying anything. Both pair members hold the
+// same node keypair (it is part of the enrollment bundle), so a valid
+// signature proves "produced by a holder of the pair's node key" -- a
+// network attacker who has only the shared sync token cannot forge state
+// the peer will accept. Signatures are ECDSA P-256 over the raw 32-byte
+// digest, ASN.1-encoded and base64'd for the header.
+
+// signPayloadDigest signs a 32-byte SHA-256 digest with key.
+func signPayloadDigest(key *ecdsa.PrivateKey, digest []byte) (string, error) {
+	if key == nil {
+		return "", fmt.Errorf("no HA node key")
+	}
+	sig, err := ecdsa.SignASN1(rand.Reader, key, digest)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(sig), nil
+}
+
+// verifyPayloadSignatureWithCert verifies a signature produced by
+// signPayloadDigest against the public key in cert.
+func verifyPayloadSignatureWithCert(cert *x509.Certificate, digest []byte, sigB64 string) bool {
+	if cert == nil {
+		return false
+	}
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return false
+	}
+	return ecdsa.VerifyASN1(pub, digest, sig)
+}
+
+func loadHANodeKey() (*ecdsa.PrivateKey, error) {
+	data, err := os.ReadFile(HAPKINodeKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("HA node key is not PEM")
+	}
+	return x509.ParseECPrivateKey(block.Bytes)
+}
+
+func loadHANodeCert() (*x509.Certificate, error) {
+	data, err := os.ReadFile(HAPKINodeCertPath)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("HA node certificate is not PEM")
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+// signPayloadDigestFromPKI signs with the packaged HA node key. It fails
+// when the pair has not enrolled (no PKI material), in which case callers
+// serve the payload unsigned and the receiver's policy decides.
+func signPayloadDigestFromPKI(digest []byte) (string, error) {
+	key, err := loadHANodeKey()
+	if err != nil {
+		return "", err
+	}
+	return signPayloadDigest(key, digest)
+}
+
+// verifyPayloadSignatureFromPKI verifies against the packaged HA node
+// certificate. Any error (no PKI, unparsable signature) is a failed
+// verification.
+func verifyPayloadSignatureFromPKI(digest []byte, sigB64 string) bool {
+	cert, err := loadHANodeCert()
+	if err != nil {
+		return false
+	}
+	return verifyPayloadSignatureWithCert(cert, digest, sigB64)
+}
+
+// Test seams: the sync handlers and poller call these variables so tests
+// can substitute PKI material from a temporary directory.
+var (
+	haSignPayloadDigest      = signPayloadDigestFromPKI
+	haVerifyPayloadSignature = verifyPayloadSignatureFromPKI
+)
