@@ -20,7 +20,7 @@ spec:
         - operator: Exists
       containers:
         - name: axonwalld
-          image: ghcr.io/axonwall/axonwalld:v0.9.9
+          image: ghcr.io/axonwall/axonwalld:v0.9.10
           securityContext:
             privileged: true
             capabilities:
