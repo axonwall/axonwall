@@ -234,6 +234,11 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 	}
 
+	// Reconcile static routes whenever a bundle is applied
+	if err := ReconcileStaticRoutes(); err != nil {
+		log.Printf("[Agent] Warning: Static routes reconciliation: %v", err)
+	}
+
 	if s.etckeeperManager != nil && len(req.Files) > 0 {
 		commitMsg := fmt.Sprintf("Axonwall configuration bundle applied (%s)", req.BundleHash)
 		s.etckeeperManager.ScheduleCommit(commitMsg, "axonwall")
@@ -736,6 +741,11 @@ func applyBootInterfaces() {
 			}
 		}
 	}
+
+	// 5. Static routes configuration
+	if err := ReconcileStaticRoutes(); err != nil {
+		log.Printf("[Agent] Boot-apply: static routes reconciliation: %v", err)
+	}
 }
 
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
@@ -917,6 +927,9 @@ func main() {
 			}
 		}
 		reconcileBootAntiLockoutNft(hasLkg)
+		if err := ReconcileStaticRoutes(); err != nil {
+			log.Printf("[Agent] Early-boot: static routes reconciliation: %v", err)
+		}
 	}
 
 	// Ensure directory for socket exists
@@ -1047,6 +1060,18 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
+		})
+		mux.HandleFunc("/v1/routes/reconcile", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if err := ReconcileStaticRoutes(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "Static routes reconciled successfully"})
 		})
 		mux.HandleFunc("/v1/confirm", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {

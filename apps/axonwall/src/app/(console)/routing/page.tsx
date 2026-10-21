@@ -15,7 +15,7 @@ export default function RoutingPage() {
   // Static route form
   const [newNetwork, setNewNetwork] = useState('');
   const [newGwIp, setNewGwIp] = useState('');
-  const [newIface, setNewIface] = useState('lan');
+  const [newIface, setNewIface] = useState('auto');
   const [newDesc, setNewDesc] = useState('');
 
   useEffect(() => {
@@ -211,13 +211,27 @@ export default function RoutingPage() {
             className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
             required
           />
-          <input
-            type="text"
+          <select
             value={newIface}
             onChange={(e) => setNewIface(e.target.value)}
-            placeholder="Interface (lan)"
-            className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
-          />
+            className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
+          >
+            <option value="auto">Auto (Kernel Resolution)</option>
+            {fullState?.interfaces && fullState.interfaces.length > 0 ? (
+              fullState.interfaces.map((iface) => (
+                <option key={iface.name} value={iface.name}>
+                  {iface.name.toUpperCase()} ({iface.device})
+                </option>
+              ))
+            ) : (
+              <>
+                <option value="lan">LAN</option>
+                <option value="wan">WAN</option>
+                <option value="opt1">OPT1</option>
+                <option value="opt2">OPT2</option>
+              </>
+            )}
+          </select>
           <input
             type="text"
             value={newDesc}
