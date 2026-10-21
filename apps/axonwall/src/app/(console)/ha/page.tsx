@@ -1,7 +1,21 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { ShieldAlert, RefreshCw, Server, Activity, Database, CheckCircle2, ArrowRightLeft } from 'lucide-react';
+import {
+  ShieldAlert,
+  RefreshCw,
+  Server,
+  Activity,
+  Database,
+  CheckCircle2,
+  ArrowRightLeft,
+  Layers,
+  Network,
+  Lock,
+  Cpu,
+  Save,
+  Check,
+} from 'lucide-react';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 
 export default function HighAvailabilityPage() {
@@ -104,7 +118,10 @@ export default function HighAvailabilityPage() {
       });
       setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
       setTimeout(() => setSyncStatusMsg(null), 4000);
-    } catch {}
+    } catch {
+      setSyncStatusMsg('Error saving High Availability configuration');
+      setTimeout(() => setSyncStatusMsg(null), 4000);
+    }
     setIsSaving(false);
   };
 
@@ -116,111 +133,171 @@ export default function HighAvailabilityPage() {
       setTimeout(() => setSyncStatusMsg(null), 5000);
     }, 1200);
   };
-  
+
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
-      <div className="flex justify-between items-center mb-8">
+    <div className="p-8 space-y-8 max-w-7xl mx-auto pb-16">
+      {/* Top Banner */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">High Availability (HA) & Distributed State</h1>
-          <p className="text-sm text-slate-500 mt-1">Configure active/passive failover using VRRP (Keepalived), Netfilter state sync (conntrackd), and real-time SQLite replication.</p>
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+              <Layers className="w-5 h-5" />
+            </div>
+            <h1 className="text-2xl font-bold tracking-tight text-white">
+              High Availability (HA) & Distributed State
+            </h1>
+            <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              VRRP & CARP
+            </span>
+          </div>
+          <p className="text-sm text-slate-400 mt-1">
+            Configure active/passive cluster failover using VRRP (Keepalived), Netfilter connection tracking state sync (conntrackd), and real-time SQLite WAL replication.
+          </p>
         </div>
+
         <div className="flex items-center gap-3">
+          {enabled ? (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Active Cluster ({role === 'primary' ? 'MASTER' : 'BACKUP'})</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
+              <span className="w-2 h-2 rounded-full bg-slate-500" />
+              <span>HA Disabled</span>
+            </span>
+          )}
+
           <button
             type="button"
             onClick={handleSaveHa}
             disabled={isSaving}
-            className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-1.5 rounded text-sm font-medium cursor-pointer disabled:opacity-50"
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
           >
-            {isSaving ? 'Saving...' : 'Save to ha.yaml'}
+            <Save className="w-4 h-4" />
+            <span>{isSaving ? 'Saving State...' : 'Save to ha.yaml'}</span>
           </button>
-          <span className="text-sm font-medium text-slate-500">HA Status:</span>
-          {enabled ? (
-            <span className="px-3 py-1 bg-emerald-100 text-emerald-700 text-sm font-semibold rounded-full flex items-center gap-1">
-              <Activity className="w-4 h-4" /> Active ({role})
-            </span>
-          ) : (
-            <span className="px-3 py-1 bg-slate-100 text-slate-600 text-sm font-semibold rounded-full flex items-center gap-1">
-              Disabled
-            </span>
-          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="md:col-span-2 space-y-6">
-          {/* VRRP & Failover Configuration */}
-          <div className="bg-white border rounded-lg shadow-sm p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
-                <RefreshCw className="w-5 h-5 text-blue-500" />
-                Failover Configuration
-              </h2>
-              <label className="flex items-center cursor-pointer">
-                <div className="relative">
-                  <input type="checkbox" className="sr-only" checked={enabled} onChange={() => setEnabled(!enabled)} />
-                  <div className={`block w-14 h-8 rounded-full transition-colors ${enabled ? 'bg-blue-500' : 'bg-slate-300'}`}></div>
-                  <div className={`dot absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition-transform ${enabled ? 'transform translate-x-6' : ''}`}></div>
+      {syncStatusMsg && (
+        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm flex items-center justify-between shadow-lg">
+          <div className="flex items-center gap-2.5">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+            <span>{syncStatusMsg}</span>
+          </div>
+          <button
+            onClick={() => setSyncStatusMsg(null)}
+            className="text-slate-400 hover:text-white text-xs cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 space-y-6">
+          {/* VRRP & Failover Configuration Card */}
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-6 shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                  <RefreshCw className="w-5 h-5" />
                 </div>
+                <div>
+                  <h2 className="text-base font-bold text-white flex items-center gap-2">
+                    Failover Configuration
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Keepalived virtual router redundancy protocol and priority rules
+                  </p>
+                </div>
+              </div>
+
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  checked={enabled}
+                  onChange={() => setEnabled(!enabled)}
+                />
+                <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all border border-slate-700 peer-checked:bg-emerald-500 peer-checked:border-emerald-400"></div>
               </label>
             </div>
 
             {enabled && (
-              <div className="space-y-4 animate-in fade-in slide-in-from-top-2">
-                <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-5 animate-in fade-in slide-in-from-top-2 duration-200">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Node Role</label>
-                    <select 
-                      value={role} 
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                      Node Role
+                    </label>
+                    <select
+                      value={role}
                       onChange={(e) => setRole(e.target.value as 'primary' | 'secondary')}
-                      className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition cursor-pointer"
                     >
-                      <option value="primary">Primary (MASTER)</option>
-                      <option value="secondary">Secondary (BACKUP)</option>
+                      <option value="primary">Primary (MASTER - High Priority 150)</option>
+                      <option value="secondary">Secondary (BACKUP - Standard Priority 100)</option>
                     </select>
                   </div>
+
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Virtual Router ID (VRID)</label>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                      Virtual Router ID (VRID)
+                    </label>
                     <input
                       type="number"
                       value={vrid}
                       onChange={(e) => setVrid(Number(e.target.value) || 51)}
-                      className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition font-mono"
                     />
                   </div>
                 </div>
-                
+
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Sync Interface (pfsync / conntrackd)</label>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                    Sync Interface (conntrackd / CARP sync)
+                  </label>
                   <select
                     value={syncInterface}
                     onChange={(e) => setSyncInterface(e.target.value)}
-                    className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition cursor-pointer font-mono"
                   >
-                    <option value="eth3">eth3 (Dedicated Sync Link)</option>
-                    <option value="eth1">eth1 (LAN)</option>
+                    <option value="eth3">eth3 (Dedicated Point-to-Point Sync Link)</option>
+                    <option value="eth2">eth2 (OPT1 Dedicated Interconnect)</option>
+                    <option value="eth1">eth1 (LAN Shared Interconnect)</option>
+                    <option value="eth0">eth0 (WAN)</option>
                   </select>
-                  <p className="text-xs text-slate-500 mt-1">A dedicated crossover cable or isolated VLAN is highly recommended for state synchronization.</p>
+                  <p className="text-xs text-slate-500 mt-1.5">
+                    A dedicated point-to-point interconnect or isolated VLAN is strongly recommended to isolate high-throughput state synchronization traffic.
+                  </p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Peer IP Address</label>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                      Peer Sync IP Address
+                    </label>
                     <input
                       type="text"
                       placeholder="10.0.99.2"
                       value={peerIp}
                       onChange={(e) => setPeerIp(e.target.value)}
-                      className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition font-mono"
                     />
                   </div>
+
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Sync Password (VRRP / mTLS)</label>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                      Sync Password (VRRP & IPC Authentication)
+                    </label>
                     <input
                       type="password"
                       placeholder="••••••••"
                       value={syncPassword}
                       onChange={(e) => setSyncPassword(e.target.value)}
-                      className="w-full border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 text-sm p-2 border"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition font-mono"
                     />
                   </div>
                 </div>
@@ -228,89 +305,99 @@ export default function HighAvailabilityPage() {
             )}
           </div>
 
-          {/* Distributed SQLite & Mesh State Sync */}
+          {/* Distributed SQLite & Mesh State Sync Card */}
           {enabled && (
-            <div className="bg-white border rounded-lg shadow-sm p-6 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Database className="w-5 h-5 text-indigo-500" />
+            <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-6 shadow-xl">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+                    <Database className="w-5 h-5" />
+                  </div>
                   <div>
-                    <h2 className="text-lg font-semibold text-slate-800">Distributed SQLite & Mesh State Sync</h2>
-                    <p className="text-xs text-slate-500">Live WAL replication of Headscale Tailnet machine keys, node state, and WireGuard identity databases.</p>
+                    <h2 className="text-base font-bold text-white">
+                      Distributed SQLite & Mesh State Sync
+                    </h2>
+                    <p className="text-xs text-slate-400">
+                      Real-time continuous WAL replication of Headscale Tailnet machine keys, node state, and WireGuard identity databases.
+                    </p>
                   </div>
                 </div>
-                <label className="flex items-center cursor-pointer">
-                  <div className="relative">
-                    <input 
-                      type="checkbox" 
-                      className="sr-only" 
-                      checked={sqliteSyncEnabled} 
-                      onChange={() => setSqliteSyncEnabled(!sqliteSyncEnabled)} 
-                    />
-                    <div className={`block w-12 h-7 rounded-full transition-colors ${sqliteSyncEnabled ? 'bg-indigo-600' : 'bg-slate-300'}`}></div>
-                    <div className={`dot absolute left-1 top-1 bg-white w-5 h-5 rounded-full transition-transform ${sqliteSyncEnabled ? 'transform translate-x-5' : ''}`}></div>
-                  </div>
+
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    checked={sqliteSyncEnabled}
+                    onChange={() => setSqliteSyncEnabled(!sqliteSyncEnabled)}
+                  />
+                  <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all border border-slate-700 peer-checked:bg-indigo-500 peer-checked:border-indigo-400"></div>
                 </label>
               </div>
 
               {sqliteSyncEnabled && (
-                <div className="space-y-4 pt-4 border-t">
-                  <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-5 animate-in fade-in slide-in-from-top-2 duration-200">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1">Replication Engine Mode</label>
-                      <select 
-                        value={sqliteSyncMode} 
+                      <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                        Replication Engine Mode
+                      </label>
+                      <select
+                        value={sqliteSyncMode}
                         onChange={(e) => setSqliteSyncMode(e.target.value as 'direct_stream' | 'litestream')}
-                        className="w-full border-slate-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 text-sm p-2 border"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-indigo-500 transition cursor-pointer"
                       >
                         <option value="direct_stream">Direct Streaming (Embedded Go daemon - Port 9876)</option>
-                        <option value="litestream">Litestream (Continuous WAL Streaming / S3 / Replica)</option>
+                        <option value="litestream">Litestream (Continuous WAL Streaming / Local Replica)</option>
                       </select>
                     </div>
+
                     <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1">Sync Interval (Seconds)</label>
-                      <input 
-                        type="number" 
+                      <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                        Sync Interval (Seconds)
+                      </label>
+                      <input
+                        type="number"
                         value={syncInterval}
                         onChange={(e) => setSyncInterval(Number(e.target.value))}
-                        min={1} 
-                        max={60} 
-                        className="w-full border-slate-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 text-sm p-2 border" 
+                        min={1}
+                        max={60}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-indigo-500 transition font-mono"
                       />
                     </div>
                   </div>
 
-                  <div className="bg-slate-50 border rounded p-3 text-xs text-slate-700 space-y-1">
-                    <div className="font-semibold text-slate-900">Synchronized Database Targets:</div>
-                    <div className="font-mono bg-white px-2 py-1 rounded border inline-block text-indigo-700">/var/lib/axonwall/headscale/db.sqlite</div>
-                    <p className="text-slate-500 mt-1">Automatic Headscale promotion/demotion hook: Backup node automatically stops Headscale to avoid dual-master writes; promotes and checkpoints on VRRP takeover.</p>
+                  <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-300 space-y-2">
+                    <div className="font-semibold text-white flex items-center gap-2">
+                      <Database className="w-4 h-4 text-indigo-400" />
+                      <span>Synchronized Database Targets:</span>
+                    </div>
+                    <div className="font-mono bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800 text-indigo-300 inline-block text-[11px]">
+                      /var/lib/axonwall/headscale/db.sqlite
+                    </div>
+                    <p className="text-slate-400 text-[11px] leading-relaxed">
+                      Automatic Headscale promotion/demotion hook: The backup node automatically keeps Headscale stopped to prevent dual-master write split-brain, checkpointing and starting the service instantly upon VRRP master promotion.
+                    </p>
                   </div>
 
-                  {syncStatusMsg && (
-                    <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-md text-xs flex items-center gap-2">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span>{syncStatusMsg}</span>
-                    </div>
-                  )}
-
-                  <div className="flex justify-between items-center pt-2">
-                    <button 
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
+                    <button
                       type="button"
                       onClick={handleTriggerSync}
                       disabled={isSyncing}
-                      className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-3 py-1.5 rounded text-xs font-medium flex items-center gap-1.5 transition-colors"
+                      className="w-full sm:w-auto px-3.5 py-2 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
                     >
                       <ArrowRightLeft className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                      {isSyncing ? 'Verifying...' : 'Verify Replica & Trigger Instant Sync'}
+                      <span>{isSyncing ? 'Verifying Snapshot...' : 'Verify Replica & Trigger Instant Sync'}</span>
                     </button>
-                    
+
                     <button
                       type="button"
                       onClick={handleSaveHa}
                       disabled={isSaving}
-                      className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-medium cursor-pointer disabled:opacity-50"
+                      className="w-full sm:w-auto px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
                     >
-                      {isSaving ? 'Saving...' : 'Save & Apply HA State'}
+                      <Check className="w-4 h-4" />
+                      <span>{isSaving ? 'Applying...' : 'Save & Apply HA State'}</span>
                     </button>
                   </div>
                 </div>
@@ -318,57 +405,104 @@ export default function HighAvailabilityPage() {
             </div>
           )}
 
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex gap-3">
-            <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-            <div className="text-sm text-amber-800">
-              <p className="font-semibold mb-1">Split-Brain & State Warning</p>
-              <p>Ensure your switch infrastructure does not block VRRP multicast traffic (224.0.0.18). SQLite sync uses Keepalived notify transitions to gracefully stop Headscale on standby nodes, preventing database lock contention and sequence divergence.</p>
+          {/* Split-Brain & Safety Warning */}
+          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex gap-3 shadow-lg">
+            <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-white">Split-Brain & Multicast Heartbeat Warning</p>
+              <p className="text-amber-300/80 leading-relaxed">
+                Ensure upstream switches and hypervisor vSwitches permit VRRP multicast traffic (<code className="font-mono bg-amber-500/20 px-1 py-0.5 rounded text-amber-200">224.0.0.18</code> / protocol 112). SQLite sync hooks cleanly shut down Headscale on standby nodes to prevent database lock contention and sequence divergence.
+              </p>
             </div>
           </div>
         </div>
 
-        {/* Sidebar Status */}
+        {/* Sidebar Status Card */}
         <div className="space-y-6">
-          <div className="bg-white border rounded-lg shadow-sm p-6">
-            <h3 className="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
-              <Server className="w-4 h-4 text-slate-500" />
-              Node & Replication Status
-            </h3>
-            <div className="space-y-4">
-              <div className="flex justify-between items-center text-sm">
-                <span className="text-slate-500">Keepalived (VRRP)</span>
-                {enabled ? <span className="text-emerald-600 font-medium">Running</span> : <span className="text-slate-400">Stopped</span>}
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-5 shadow-xl">
+            <div className="flex items-center gap-2.5 border-b border-slate-800 pb-4">
+              <div className="p-2 rounded-lg bg-slate-800 text-slate-300">
+                <Server className="w-4 h-4" />
               </div>
-              <div className="flex justify-between items-center text-sm">
-                <span className="text-slate-500">Conntrackd (State)</span>
-                {enabled ? <span className="text-emerald-600 font-medium">Synced (1.2k states)</span> : <span className="text-slate-400">Stopped</span>}
+              <h3 className="text-sm font-bold text-white">Node & Replication Status</h3>
+            </div>
+
+            <div className="space-y-3.5 text-xs">
+              <div className="flex justify-between items-center py-1">
+                <span className="text-slate-400 font-medium">Keepalived (VRRP)</span>
+                {enabled ? (
+                  <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Running
+                  </span>
+                ) : (
+                  <span className="text-slate-500 font-mono">Stopped</span>
+                )}
               </div>
-              <div className="flex justify-between items-center text-sm">
-                <span className="text-slate-500">Config Sync</span>
-                {enabled && role === 'primary' ? <span className="text-blue-600 font-medium">Pushing to Peer</span> : <span className="text-slate-400">Idle</span>}
+
+              <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
+                <span className="text-slate-400 font-medium">Conntrackd (State Sync)</span>
+                {enabled ? (
+                  <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    Synced (Active)
+                  </span>
+                ) : (
+                  <span className="text-slate-500 font-mono">Stopped</span>
+                )}
               </div>
-              <div className="flex justify-between items-center text-sm pt-2 border-t">
-                <span className="text-slate-500">SQLite Sync (Headscale)</span>
+
+              <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
+                <span className="text-slate-400 font-medium">Configuration Sync</span>
+                {enabled && role === 'primary' ? (
+                  <span className="text-emerald-400 font-semibold font-mono">Pushing to Peer</span>
+                ) : (
+                  <span className="text-slate-500 font-mono">Standby / Idle</span>
+                )}
+              </div>
+
+              <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
+                <span className="text-slate-400 font-medium">SQLite WAL Sync</span>
                 {enabled && sqliteSyncEnabled ? (
                   role === 'primary' ? (
-                    <span className="text-indigo-600 font-medium flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-indigo-500"></span> Serving (Master)
+                    <span className="text-indigo-400 font-semibold font-mono flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+                      Serving (Master)
                     </span>
                   ) : (
-                    <span className="text-emerald-600 font-medium flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Replicating (0 lag)
+                    <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                      Replicating (0 lag)
                     </span>
                   )
                 ) : (
-                  <span className="text-slate-400">Disabled</span>
+                  <span className="text-slate-500 font-mono">Disabled</span>
                 )}
               </div>
             </div>
-            
+
             {enabled && (
-              <button className="w-full mt-6 bg-slate-100 hover:bg-slate-200 text-slate-700 border px-4 py-2 rounded text-sm font-medium transition-colors">
-                Force Failover to Peer
-              </button>
+              <div className="pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      confirm(
+                        `Are you sure you want to trigger a manual failover? This node will switch to ${
+                          role === 'primary' ? 'SECONDARY (BACKUP)' : 'PRIMARY (MASTER)'
+                        }.`
+                      )
+                    ) {
+                      setRole(role === 'primary' ? 'secondary' : 'primary');
+                      setSyncStatusMsg('Node role transitioned. Click "Save to ha.yaml" to apply changes.');
+                    }
+                  }}
+                  className="w-full px-4 py-2.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer shadow-md"
+                >
+                  <ArrowRightLeft className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Force Failover to Peer</span>
+                </button>
+              </div>
             )}
           </div>
         </div>
