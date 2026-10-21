@@ -22,7 +22,7 @@ import { assertActionPermitted } from './auth-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
 
-import { callAgentApi as internalCallAgentApi } from './agent-client';
+import { callAgentApi } from './agent-client';
 
 export interface AgentStatus {
   nodeId: string;
@@ -42,10 +42,6 @@ export interface AgentStatus {
 let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
-
-export async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeoutMs = 4000): Promise<T | null> {
-  return internalCallAgentApi<T>(path, method, body, timeoutMs);
-}
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
@@ -380,7 +376,7 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
   return daemonFileMap;
 }
 
-export async function getDesiredStateInternal(): Promise<DesiredState> {
+async function getDesiredStateInternal(): Promise<DesiredState> {
   // 1. Check if /etc/axonwall/*.yaml (or /var/lib/axonwall/etc-axonwall/*.yaml) exists and whether any file was modified on disk
   for (const dir of YAML_CONFIG_DIRS) {
     const { maxMtimeMs, count } = getLatestYamlMtimeInDir(dir);
@@ -899,9 +895,10 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
     let uptime: string | null = null;
 
     try {
-      const showOut = execSync(
-        `systemctl show ${u.unit} --property=ActiveState,SubState,MainPID,MemoryCurrent 2>/dev/null`,
-        { encoding: 'utf8', timeout: 500 }
+      const showOut = execFileSync(
+        'systemctl',
+        ['show', u.unit, '--property=ActiveState,SubState,MainPID,MemoryCurrent'],
+        { encoding: 'utf8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] }
       );
       const props: Record<string, string> = {};
       for (const line of showOut.split('\n')) {
@@ -1403,7 +1400,11 @@ export async function getRecentThreatAlerts(): Promise<ThreatAlert[]> {
   }
 
   try {
-    const raw = execSync(`tail -n 50 ${evePath} 2>/dev/null`, { encoding: 'utf8', timeout: 1000 });
+    const raw = execFileSync('tail', ['-n', '50', evePath], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
     const lines = raw.trim().split('\n');
     const alerts: ThreatAlert[] = [];
 

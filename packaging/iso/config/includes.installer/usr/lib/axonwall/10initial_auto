@@ -157,7 +157,60 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	luks_tpm2=0
 	luks_passphrase=""
 
-	if [ ! -f /var/lib/partman/cloud-config.yaml ]; then
+	if [ -f /var/lib/partman/cloud-config.yaml ]; then
+		logger -t axonwall-installer "Unattended Cloud-Init installation active: parsing storage choices from cloud-config.yaml"
+		# Custom EFI size
+		c_efi="$(awk '/efi_size_mb:/ {print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -dc '0-9' | head -n1)"
+		[ -n "$c_efi" ] && [ "$c_efi" -ge 128 ] && efi_mb="$c_efi"
+
+		# Root partition size
+		c_root="$(awk '/slot_a:/,/[a-z_]:/ {if (/size_gb:/) print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -dc '0-9' | head -n1)"
+		[ -n "$c_root" ] && [ "$c_root" -ge 6 ] && root_gb="$c_root"
+
+		# Root filesystem type
+		c_rfstype="$(awk '/slot_a:/,/[a-z_]:/ {if (/filesystem:/) print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -dc 'a-z' | head -n1)"
+		[ "$c_rfstype" = "xfs" ] && root_fstype="xfs"
+
+		# Swap size
+		c_swap="$(awk '/swap:/,/[a-z_]:/ {if (/size_gb:/) print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -dc '0-9' | head -n1)"
+		[ -n "$c_swap" ] && swap_gb="$c_swap"
+
+		# Dedicated logs partition
+		if grep -A 5 "logs:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -q "enabled:\s*true"; then
+			logs_enabled=1
+			c_lgb="$(awk '/logs:/,/[a-z_]:/ {if (/size_gb:/) print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -dc '0-9' | head -n1)"
+			[ -n "$c_lgb" ] && logs_gb="$c_lgb"
+			c_lfstype="$(awk '/logs:/,/[a-z_]:/ {if (/filesystem:/) print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -dc 'a-z' | head -n1)"
+			[ "$c_lfstype" = "ext4" ] && logs_fstype="ext4"
+		fi
+
+		# Encryption (LUKS2 / TPM2)
+		if grep -A 6 "encryption:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -q "enabled:\s*true"; then
+			luks_enabled=1
+			if grep -A 6 "encryption:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -q "tpm2_auto_unlock:\s*true"; then
+				luks_tpm2=1
+			fi
+			luks_passphrase="$(awk '/encryption:/,/[a-z_]:/ {if (/passphrase:/) {sub(/.*passphrase:[ \t]*/, ""); sub(/^["'\''']/, ""); sub(/["'\''']$/, ""); print}}' /var/lib/partman/cloud-config.yaml 2>/dev/null | head -n1)"
+		fi
+
+		root_mb=$(( root_gb * 1024 ))
+		swap_mb=$(( swap_gb * 1024 ))
+		remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - logs_gb - 1 ))
+		[ "$remaining_gb" -lt 4 ] && remaining_gb=4
+		data_gb="$remaining_gb"
+
+		# ZFS allocation
+		if grep -A 6 "zfs:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -q "enabled:\s*true"; then
+			zfs_alloc_mode="custom"
+			c_zgb="$(awk '/zfs:/,/[a-z_]:/ {if (/system_disk_size_gb:/) print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -dc '0-9' | head -n1)"
+			if [ -n "$c_zgb" ] && [ "$c_zgb" -gt 0 ]; then
+				zfs_gb="$c_zgb"
+				data_gb=$(( remaining_gb - zfs_gb ))
+			fi
+		fi
+		data_mb=$(( data_gb * 1024 ))
+		zfs_mb=$(( zfs_gb * 1024 ))
+	else
 		db_input critical axonwall/partition_mode || true
 		db_go || true
 		db_get axonwall/partition_mode || true
@@ -166,316 +219,328 @@ if [ "$method" ] && [ -z "$disks" ]; then
 				partition_mode="expert"
 				;;
 		esac
-	fi
 
-	if [ "$partition_mode" = "expert" ]; then
-		# Expert: Custom EFI Size
-		db_input critical axonwall/custom_efi_size || true
-		db_go || true
-		db_get axonwall/custom_efi_size || true
-		c_efi="$(echo "$RET" | tr -dc '0-9')"
-		if [ -n "$c_efi" ] && [ "$c_efi" -ge 128 ]; then
-			efi_mb="$c_efi"
-		fi
-
-		# Expert: Root slot filesystem type
-		db_input critical axonwall/root_fstype || true
-		db_go || true
-		db_get axonwall/root_fstype || true
-		case "$RET" in
-			*"xfs"*) root_fstype="xfs" ;;
-			*) root_fstype="ext4" ;;
-		esac
-	fi
-
-	# Set sensible default root size based on detected disk capacity
-	if [ "$disk_size_gb" -lt 30 ]; then
-		db_set axonwall/root_size "8 GB per slot (Compact - 16-32 GB embedded/eMMC)"
-	fi
-
-	# 4. Prompt user for system root partition size per slot
-	db_input critical axonwall/root_size || true
-	db_go || true
-	db_get axonwall/root_size || true
-	root_choice="$RET"
-
-	root_gb=16
-	case "$root_choice" in
-		8*|"Compact"*)
-			root_gb=8
-			;;
-		32*|"Expanded"*)
-			root_gb=32
-			;;
-		"Custom"*)
-			db_input critical axonwall/custom_root_size || true
+		if [ "$partition_mode" = "expert" ]; then
+			# Expert: Custom EFI Size
+			db_input critical axonwall/custom_efi_size || true
 			db_go || true
-			db_get axonwall/custom_root_size || true
-			val="$(echo "$RET" | tr -dc '0-9')"
-			if [ -n "$val" ] && [ "$val" -ge 6 ]; then
-				root_gb="$val"
-			else
-				root_gb=16
+			db_get axonwall/custom_efi_size || true
+			c_efi="$(echo "$RET" | tr -dc '0-9')"
+			if [ -n "$c_efi" ] && [ "$c_efi" -ge 128 ]; then
+				efi_mb="$c_efi"
 			fi
-			;;
-		*)
-			root_gb=16
-			;;
-	esac
 
-	# Safety clamp: Ensure two slots plus overhead fit on disk
-	max_allowed_gb=$(( (disk_size_gb - 4) / 2 ))
-	if [ "$max_allowed_gb" -lt 6 ]; then
-		max_allowed_gb=6
-	fi
-	if [ "$root_gb" -gt "$max_allowed_gb" ] && [ "$disk_size_gb" -ge 16 ]; then
-		root_gb="$max_allowed_gb"
-	fi
-
-	# 5. Prompt user for swap space allocation
-	db_input critical axonwall/swap_size || true
-	db_go || true
-	db_get axonwall/swap_size || true
-	swap_choice="$RET"
-
-	swap_gb=2
-	case "$swap_choice" in
-		"No swap"*)
-			swap_gb=0
-			;;
-		"4 GB"*)
-			swap_gb=4
-			;;
-		"8 GB"*)
-			swap_gb=8
-			;;
-		*)
-			swap_gb=2
-			;;
-	esac
-
-	# 6. Expert Mode: Dedicated /var/log Partition & Custom Data Allocation
-	if [ "$partition_mode" = "expert" ]; then
-		db_input critical axonwall/separate_log_partition || true
-		db_go || true
-		db_get axonwall/separate_log_partition || true
-		if [ "$RET" = "true" ]; then
-			logs_enabled=1
-			db_input critical axonwall/custom_log_size || true
+			# Expert: Root slot filesystem type
+			db_input critical axonwall/root_fstype || true
 			db_go || true
-			db_get axonwall/custom_log_size || true
-			l_val="$(echo "$RET" | tr -dc '0-9')"
-			logs_gb="${l_val:-20}"
-			db_input critical axonwall/log_fstype || true
-			db_go || true
-			db_get axonwall/log_fstype || true
+			db_get axonwall/root_fstype || true
 			case "$RET" in
-				*"ext4"*) logs_fstype="ext4" ;;
-				*) logs_fstype="xfs" ;;
+				*"xfs"*) root_fstype="xfs" ;;
+				*) root_fstype="ext4" ;;
 			esac
 		fi
 
-		db_input critical axonwall/data_alloc_mode || true
+		# Set sensible default root size based on detected disk capacity
+		if [ "$disk_size_gb" -lt 30 ]; then
+			db_set axonwall/root_size "8 GB per slot (Compact - 16-32 GB embedded/eMMC)"
+		fi
+
+		# 4. Prompt user for system root partition size per slot
+		db_input critical axonwall/root_size || true
 		db_go || true
-		db_get axonwall/data_alloc_mode || true
-		case "$RET" in
-			*"Explicit"*)
-				data_alloc_mode="explicit"
-				db_input critical axonwall/custom_data_size || true
+		db_get axonwall/root_size || true
+		root_choice="$RET"
+
+		root_gb=16
+		case "$root_choice" in
+			8*|"Compact"*)
+				root_gb=8
+				;;
+			32*|"Expanded"*)
+				root_gb=32
+				;;
+			"Custom"*)
+				db_input critical axonwall/custom_root_size || true
 				db_go || true
-				db_get axonwall/custom_data_size || true
-				d_val="$(echo "$RET" | tr -dc '0-9')"
-				data_gb="${d_val:-32}"
+				db_get axonwall/custom_root_size || true
+				val="$(echo "$RET" | tr -dc '0-9')"
+				if [ -n "$val" ] && [ "$val" -ge 6 ]; then
+					root_gb="$val"
+				else
+					root_gb=16
+				fi
+				;;
+			*)
+				root_gb=16
 				;;
 		esac
 
-		db_input critical axonwall/data_fstype || true
+		# Safety clamp: Ensure two slots plus overhead fit on disk
+		max_allowed_gb=$(( (disk_size_gb - 4) / 2 ))
+		if [ "$max_allowed_gb" -lt 6 ]; then
+			max_allowed_gb=6
+		fi
+		if [ "$root_gb" -gt "$max_allowed_gb" ] && [ "$disk_size_gb" -ge 16 ]; then
+			root_gb="$max_allowed_gb"
+		fi
+
+		# 5. Prompt user for swap space allocation
+		db_input critical axonwall/swap_size || true
 		db_go || true
-		db_get axonwall/data_fstype || true
-		case "$RET" in
-			*"xfs"*) data_fstype="xfs" ;;
-			*) data_fstype="ext4" ;;
+		db_get axonwall/swap_size || true
+		swap_choice="$RET"
+
+		swap_gb=2
+		case "$swap_choice" in
+			"No swap"*)
+				swap_gb=0
+				;;
+			"4 GB"*)
+				swap_gb=4
+				;;
+			"8 GB"*)
+				swap_gb=8
+				;;
+			*)
+				swap_gb=2
+				;;
 		esac
 
-		# Expert Mode: LUKS2 Encryption
-		db_input critical axonwall/encryption_enabled || true
-		db_go || true
-		db_get axonwall/encryption_enabled || true
-		if [ "$RET" = "true" ]; then
-			luks_enabled=1
-			db_input critical axonwall/encryption_passphrase || true
+		# 6. Expert Mode: Dedicated /var/log Partition & Custom Data Allocation
+		if [ "$partition_mode" = "expert" ]; then
+			db_input critical axonwall/separate_log_partition || true
 			db_go || true
-			db_get axonwall/encryption_passphrase || true
-			luks_passphrase="$RET"
-			db_input critical axonwall/tpm2_unlock || true
+			db_get axonwall/separate_log_partition || true
+			if [ "$RET" = "true" ]; then
+				logs_enabled=1
+				db_input critical axonwall/custom_log_size || true
+				db_go || true
+				db_get axonwall/custom_log_size || true
+				l_val="$(echo "$RET" | tr -dc '0-9')"
+				logs_gb="${l_val:-20}"
+				db_input critical axonwall/log_fstype || true
+				db_go || true
+				db_get axonwall/log_fstype || true
+				case "$RET" in
+					*"ext4"*) logs_fstype="ext4" ;;
+					*) logs_fstype="xfs" ;;
+				esac
+			fi
+
+			db_input critical axonwall/data_alloc_mode || true
 			db_go || true
-			db_get axonwall/tpm2_unlock || true
-			[ "$RET" = "true" ] && luks_tpm2=1
+			db_get axonwall/data_alloc_mode || true
+			case "$RET" in
+				*"Explicit"*)
+					data_alloc_mode="explicit"
+					db_input critical axonwall/custom_data_size || true
+					db_go || true
+					db_get axonwall/custom_data_size || true
+					d_val="$(echo "$RET" | tr -dc '0-9')"
+					data_gb="${d_val:-32}"
+					;;
+			esac
+
+			db_input critical axonwall/data_fstype || true
+			db_go || true
+			db_get axonwall/data_fstype || true
+			case "$RET" in
+				*"xfs"*) data_fstype="xfs" ;;
+				*) data_fstype="ext4" ;;
+			esac
+
+			# Expert Mode: LUKS2 Encryption
+			db_input critical axonwall/encryption_enabled || true
+			db_go || true
+			db_get axonwall/encryption_enabled || true
+			if [ "$RET" = "true" ]; then
+				luks_enabled=1
+				db_input critical axonwall/encryption_passphrase || true
+				db_go || true
+				db_get axonwall/encryption_passphrase || true
+				luks_passphrase="$RET"
+				db_input critical axonwall/tpm2_unlock || true
+				db_go || true
+				db_get axonwall/tpm2_unlock || true
+				[ "$RET" = "true" ] && luks_tpm2=1
+			fi
 		fi
-	fi
 
-	root_mb=$(( root_gb * 1024 ))
-	swap_mb=$(( swap_gb * 1024 ))
+		root_mb=$(( root_gb * 1024 ))
+		swap_mb=$(( swap_gb * 1024 ))
 
-	# 5. Prompt user for ZFS Storage Allocation on the system disk(s)
-	remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - 1 ))
-	if [ "$remaining_gb" -lt 4 ]; then
-		remaining_gb=4
-	fi
+		# 5. Prompt user for ZFS Storage Allocation on the system disk(s)
+		remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - 1 ))
+		if [ "$remaining_gb" -lt 4 ]; then
+			remaining_gb=4
+		fi
 
-	db_input critical axonwall/zfs_allocation || true
-	db_go || true
-	db_get axonwall/zfs_allocation || true
-	zfs_alloc_choice="$RET"
+		db_input critical axonwall/zfs_allocation || true
+		db_go || true
+		db_get axonwall/zfs_allocation || true
+		zfs_alloc_choice="$RET"
 
-	zfs_alloc_mode="remainder"
-	zfs_gb=0
-	data_gb=16
-	if [ "$remaining_gb" -lt 24 ]; then
-		data_gb=8
-	fi
+		zfs_alloc_mode="remainder"
+		zfs_gb=0
+		data_gb=16
+		if [ "$remaining_gb" -lt 24 ]; then
+			data_gb=8
+		fi
 
-	case "$zfs_alloc_choice" in
-		"Allocate remaining"*)
-			zfs_alloc_mode="remainder"
-			if [ "$remaining_gb" -gt "$data_gb" ]; then
-				zfs_gb=$(( remaining_gb - data_gb ))
-			else
-				zfs_gb=0
-				zfs_alloc_mode="none"
-			fi
-			;;
-		"Split remaining"*)
-			zfs_alloc_mode="split"
-			data_gb=$(( remaining_gb / 2 ))
-			if [ "$data_gb" -lt 4 ]; then
-				data_gb=4
-			fi
-			zfs_gb=$(( remaining_gb - data_gb ))
-			if [ "$zfs_gb" -lt 2 ]; then
-				zfs_gb=0
-				zfs_alloc_mode="none"
-			fi
-			;;
-		"Custom ZFS"*)
-			zfs_alloc_mode="custom"
-			db_input critical axonwall/custom_zfs_size || true
-			db_go || true
-			db_get axonwall/custom_zfs_size || true
-			c_val="$(echo "$RET" | tr -dc '0-9')"
-			if [ -n "$c_val" ] && [ "$c_val" -ge 1 ]; then
-				max_zfs_gb=$(( remaining_gb - 4 ))
-				if [ "$max_zfs_gb" -lt 1 ]; then
-					max_zfs_gb=1
-				fi
-				if [ "$c_val" -gt "$max_zfs_gb" ]; then
-					zfs_gb="$max_zfs_gb"
+		case "$zfs_alloc_choice" in
+			"Allocate remaining"*)
+				zfs_alloc_mode="remainder"
+				if [ "$remaining_gb" -gt "$data_gb" ]; then
+					zfs_gb=$(( remaining_gb - data_gb ))
 				else
-					zfs_gb="$c_val"
+					zfs_gb=0
+					zfs_alloc_mode="none"
 				fi
-				data_gb=$(( remaining_gb - zfs_gb ))
-			else
-				zfs_gb=0
+				;;
+			"Split remaining"*)
+				zfs_alloc_mode="split"
+				data_gb=$(( remaining_gb / 2 ))
+				if [ "$data_gb" -lt 4 ]; then
+					data_gb=4
+				fi
+				zfs_gb=$(( remaining_gb - data_gb ))
+				if [ "$zfs_gb" -lt 2 ]; then
+					zfs_gb=0
+					zfs_alloc_mode="none"
+				fi
+				;;
+			"Custom ZFS"*)
+				zfs_alloc_mode="custom"
+				db_input critical axonwall/custom_zfs_size || true
+				db_go || true
+				db_get axonwall/custom_zfs_size || true
+				c_val="$(echo "$RET" | tr -dc '0-9')"
+				if [ -n "$c_val" ] && [ "$c_val" -ge 1 ]; then
+					max_zfs_gb=$(( remaining_gb - 4 ))
+					if [ "$max_zfs_gb" -lt 1 ]; then
+						max_zfs_gb=1
+					fi
+					if [ "$c_val" -gt "$max_zfs_gb" ]; then
+						zfs_gb="$max_zfs_gb"
+					else
+						zfs_gb="$c_val"
+					fi
+					data_gb=$(( remaining_gb - zfs_gb ))
+				else
+					zfs_gb=0
+					zfs_alloc_mode="none"
+				fi
+				;;
+			*)
 				zfs_alloc_mode="none"
-			fi
-			;;
-		*)
-			zfs_alloc_mode="none"
-			zfs_gb=0
-			data_gb="$remaining_gb"
-			;;
-	esac
+				zfs_gb=0
+				data_gb="$remaining_gb"
+				;;
+		esac
 
-	data_mb=$(( data_gb * 1024 ))
-	zfs_mb=$(( zfs_gb * 1024 ))
+		data_mb=$(( data_gb * 1024 ))
+		zfs_mb=$(( zfs_gb * 1024 ))
 
-	# 6. Check for additional secondary disks not used as system disks
-	extra_candidates=""
-	for d in $(get_auto_disks); do
-		d_dev="$(cat "$d/device" 2>/dev/null || echo "$d")"
-		is_sys=0
-		for s_dev in $system_raid_disks; do
-			if [ "$d_dev" = "$s_dev" ]; then
-				is_sys=1
-				break
+		# 6. Check for additional secondary disks not used as system disks
+		extra_candidates=""
+		for d in $(get_auto_disks); do
+			d_dev="$(cat "$d/device" 2>/dev/null || echo "$d")"
+			is_sys=0
+			for s_dev in $system_raid_disks; do
+				if [ "$d_dev" = "$s_dev" ]; then
+					is_sys=1
+					break
+				fi
+			done
+			if [ "$is_sys" -eq 0 ] && [ -n "$d_dev" ]; then
+				if [ -z "$extra_candidates" ]; then
+					extra_candidates="$d_dev"
+				else
+					extra_candidates="${extra_candidates}, ${d_dev}"
+				fi
 			fi
 		done
-		if [ "$is_sys" -eq 0 ] && [ -n "$d_dev" ]; then
-			if [ -z "$extra_candidates" ]; then
-				extra_candidates="$d_dev"
-			else
-				extra_candidates="${extra_candidates}, ${d_dev}"
-			fi
+
+		zfs_extra_disks=""
+		if [ -n "$extra_candidates" ]; then
+			db_subst axonwall/zfs_extra_disks CHOICES "$extra_candidates" || true
+			db_input critical axonwall/zfs_extra_disks || true
+			db_go || true
+			db_get axonwall/zfs_extra_disks || true
+			zfs_extra_disks="$(echo "$RET" | tr -d ',' | tr -s ' ')"
 		fi
-	done
 
-	zfs_extra_disks=""
-	if [ -n "$extra_candidates" ]; then
-		db_subst axonwall/zfs_extra_disks CHOICES "$extra_candidates" || true
-		db_input critical axonwall/zfs_extra_disks || true
-		db_go || true
-		db_get axonwall/zfs_extra_disks || true
-		zfs_extra_disks="$(echo "$RET" | tr -d ',' | tr -s ' ')"
-	fi
-
-	# Count total ZFS VDEVs (system disk ZFS partitions + extra whole disks)
-	zfs_vdev_count=0
-	if [ "$zfs_mb" -gt 0 ]; then
-		for _s in $system_raid_disks; do
+		# Count total ZFS VDEVs (system disk ZFS partitions + extra whole disks)
+		zfs_vdev_count=0
+		if [ "$zfs_mb" -gt 0 ]; then
+			for _s in $system_raid_disks; do
+				zfs_vdev_count=$(( zfs_vdev_count + 1 ))
+			done
+		fi
+		for _e in $zfs_extra_disks; do
 			zfs_vdev_count=$(( zfs_vdev_count + 1 ))
 		done
-	fi
-	for _e in $zfs_extra_disks; do
-		zfs_vdev_count=$(( zfs_vdev_count + 1 ))
-	done
 
-	zfs_raid_topology="auto"
-	if [ "$zfs_vdev_count" -ge 1 ]; then
-		db_input critical axonwall/zfs_raid_topology || true
-		db_go || true
-		db_get axonwall/zfs_raid_topology || true
-		case "$RET" in
-			"Stripe"*) zfs_raid_topology="stripe" ;;
-			"Mirror"*) zfs_raid_topology="mirror" ;;
-			"RAID-Z1"*) zfs_raid_topology="raidz1" ;;
-			"RAID-Z2"*) zfs_raid_topology="raidz2" ;;
-			"RAID-Z3"*) zfs_raid_topology="raidz3" ;;
-			"dRAID1"*) zfs_raid_topology="draid1" ;;
-			"dRAID2"*) zfs_raid_topology="draid2" ;;
-			*) zfs_raid_topology="auto" ;;
-		esac
+		zfs_raid_topology="auto"
+		if [ "$zfs_vdev_count" -ge 1 ]; then
+			db_input critical axonwall/zfs_raid_topology || true
+			db_go || true
+			db_get axonwall/zfs_raid_topology || true
+			case "$RET" in
+				"Stripe"*) zfs_raid_topology="stripe" ;;
+				"Mirror"*) zfs_raid_topology="mirror" ;;
+				"RAID-Z1"*) zfs_raid_topology="raidz1" ;;
+				"RAID-Z2"*) zfs_raid_topology="raidz2" ;;
+				"RAID-Z3"*) zfs_raid_topology="raidz3" ;;
+				"dRAID1"*) zfs_raid_topology="draid1" ;;
+				"dRAID2"*) zfs_raid_topology="draid2" ;;
+				*) zfs_raid_topology="auto" ;;
+			esac
+		fi
 	fi
 
 	# 7. Persist installer partition & RAID choices for finish-install hook
 	logs_mb=$(( logs_gb * 1024 ))
 	mkdir -p /var/lib/partman
+	chmod 0700 /var/lib/partman
+
+	# Write sensitive passphrase to a dedicated mode-0600 file
+	if [ -n "$luks_passphrase" ]; then
+		printf '%s' "$luks_passphrase" > /var/lib/partman/axonwall-luks.pass
+		chmod 0600 /var/lib/partman/axonwall-luks.pass
+	fi
+
+	sh_esc() {
+		printf "'%s'" "$(echo "$1" | sed "s/'/'\\\\''/g")"
+	}
+
 	cat << EOF > /var/lib/partman/axonwall-choices
 ROOT_GB=${root_gb}
 ROOT_MB=${root_mb}
-ROOT_FSTYPE=${root_fstype}
+ROOT_FSTYPE=$(sh_esc "${root_fstype}")
 EFI_MB=${efi_mb}
 SWAP_GB=${swap_gb}
 SWAP_MB=${swap_mb}
 DATA_GB=${data_gb}
 DATA_MB=${data_mb}
-DATA_FSTYPE=${data_fstype}
-DATA_ALLOC_MODE=${data_alloc_mode}
+DATA_FSTYPE=$(sh_esc "${data_fstype}")
+DATA_ALLOC_MODE=$(sh_esc "${data_alloc_mode}")
 LOGS_ENABLED=${logs_enabled}
 LOGS_GB=${logs_gb}
 LOGS_MB=${logs_mb}
-LOGS_FSTYPE=${logs_fstype}
+LOGS_FSTYPE=$(sh_esc "${logs_fstype}")
 LUKS_ENABLED=${luks_enabled}
 LUKS_TPM2=${luks_tpm2}
-LUKS_PASSPHRASE="${luks_passphrase}"
-ZFS_ALLOC_MODE=${zfs_alloc_mode}
+ZFS_ALLOC_MODE=$(sh_esc "${zfs_alloc_mode}")
 ZFS_GB=${zfs_gb}
 ZFS_MB=${zfs_mb}
-TARGET_DISK=${dev_name}
-SYSTEM_RAID_MODE=${system_raid_mode}
-SYSTEM_RAID_DISKS="${system_raid_disks}"
-ZFS_EXTRA_DISKS="${zfs_extra_disks}"
-ZFS_RAID_TOPOLOGY=${zfs_raid_topology}
+TARGET_DISK=$(sh_esc "${dev_name}")
+SYSTEM_RAID_MODE=$(sh_esc "${system_raid_mode}")
+SYSTEM_RAID_DISKS=$(sh_esc "${system_raid_disks}")
+ZFS_EXTRA_DISKS=$(sh_esc "${zfs_extra_disks}")
+ZFS_RAID_TOPOLOGY=$(sh_esc "${zfs_raid_topology}")
 EOF
+	chmod 0600 /var/lib/partman/axonwall-choices
 
 	# 8. Dynamically construct A/B Dual-Root (+ Optional Logs & ZFS Partition) recipe
 	cat << RECIPE_CONTENT > /tmp/axonwall-ab-recipe

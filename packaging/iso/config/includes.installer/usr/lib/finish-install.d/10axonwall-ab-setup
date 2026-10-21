@@ -24,8 +24,18 @@ LUKS_ENABLED=0
 LUKS_TPM2=0
 LUKS_PASSPHRASE=""
 
+cleanup_secrets() {
+  shred -u /var/lib/partman/axonwall-luks.pass 2>/dev/null || rm -f /var/lib/partman/axonwall-luks.pass 2>/dev/null || true
+  rm -f /tmp/axonwall-luks* /target/run/axonwall-luks* /target/tmp/axonwall-luks* 2>/dev/null || true
+}
+trap cleanup_secrets EXIT INT TERM
+
 if [ -f /var/lib/partman/axonwall-choices ]; then
   . /var/lib/partman/axonwall-choices
+fi
+
+if [ -f /var/lib/partman/axonwall-luks.pass ]; then
+  LUKS_PASSPHRASE="$(cat /var/lib/partman/axonwall-luks.pass 2>/dev/null || true)"
 fi
 
 part_dev() {
@@ -120,36 +130,75 @@ fi
 TARGET_DATA_MAPPER="$DATA_DEV"
 if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/dev/null 2>&1; then
   echo "[+] Initializing LUKS2 encryption on ${DATA_DEV}..."
-  mkdir -p /target/etc/axonwall
-  VAULT_KEY_PATH="/target/etc/axonwall/vault.key"
+
+  # Unmount /target/var/lib/axonwall if partman pre-mounted the unencrypted device, staging any existing files
+  STAGE_DATA="/tmp/target_axonwall_staged"
+  rm -rf "$STAGE_DATA"
+  mkdir -p "$STAGE_DATA"
+  if mountpoint -q /target/var/lib/axonwall 2>/dev/null; then
+    echo "[+] Staging existing files from /target/var/lib/axonwall before LUKS formatting..."
+    cp -a /target/var/lib/axonwall/. "$STAGE_DATA/" 2>/dev/null || true
+    umount /target/var/lib/axonwall 2>/dev/null || true
+  fi
+
+  TEMP_KEY="/tmp/axonwall-luks.key"
+  rm -f "$TEMP_KEY"
   if [ -n "$LUKS_PASSPHRASE" ]; then
-    printf '%s' "$LUKS_PASSPHRASE" > "$VAULT_KEY_PATH"
+    printf '%s' "$LUKS_PASSPHRASE" > "$TEMP_KEY"
   else
-    dd if=/dev/urandom of="$VAULT_KEY_PATH" bs=32 count=1 2>/dev/null
+    dd if=/dev/urandom of="$TEMP_KEY" bs=32 count=1 2>/dev/null
   fi
-  chmod 0400 "$VAULT_KEY_PATH"
-  chown 0:0 "$VAULT_KEY_PATH"
+  chmod 0400 "$TEMP_KEY"
 
-  cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 -s 512 -d "$VAULT_KEY_PATH" "$DATA_DEV" 2>/dev/null || true
-  cryptsetup open -d "$VAULT_KEY_PATH" "$DATA_DEV" axon_crypt_data 2>/dev/null || true
-  TARGET_DATA_MAPPER="/dev/mapper/axon_crypt_data"
+  if cryptsetup luksFormat --type luks2 --batch-mode --cipher aes-xts-plain64 -s 512 -d "$TEMP_KEY" "$DATA_DEV"; then
+    cryptsetup open -d "$TEMP_KEY" "$DATA_DEV" axon_crypt_data 2>/dev/null || true
+    TARGET_DATA_MAPPER="/dev/mapper/axon_crypt_data"
 
-  if [ -b "$TARGET_DATA_MAPPER" ]; then
-    if [ "$DATA_FSTYPE" = "xfs" ]; then
-      mkfs.xfs -f -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
-    else
-      mkfs.ext4 -F -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
+    if [ -b "$TARGET_DATA_MAPPER" ]; then
+      if [ "$DATA_FSTYPE" = "xfs" ]; then
+        mkfs.xfs -f -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
+      else
+        mkfs.ext4 -F -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
+      fi
+
+      mkdir -p /target/var/lib/axonwall
+      mount "$TARGET_DATA_MAPPER" /target/var/lib/axonwall 2>/dev/null || true
+
+      if [ -d "$STAGE_DATA" ] && [ -n "$(ls -A "$STAGE_DATA" 2>/dev/null || true)" ]; then
+        cp -a "$STAGE_DATA/." /target/var/lib/axonwall/ 2>/dev/null || true
+      fi
+      rm -rf "$STAGE_DATA"
+
+      DATA_UUID="$(blkid -s UUID -o value "$DATA_DEV" 2>/dev/null || echo "$DATA_DEV")"
+      mkdir -p /target/etc
+
+      TPM2_SUCCESS=0
+      if [ "$LUKS_TPM2" = "1" ] && command -v in-target >/dev/null 2>&1; then
+        echo "[+] Enrolling hardware TPM 2.0 PCR policy for automated unlock..."
+        mkdir -p /target/run
+        cp "$TEMP_KEY" /target/run/axonwall-luks-enroll.key
+        chmod 0400 /target/run/axonwall-luks-enroll.key
+        if in-target systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0,2,7 --unlock-key-file=/run/axonwall-luks-enroll.key "$DATA_DEV" 2>/dev/null; then
+          TPM2_SUCCESS=1
+          echo "[+] Successfully enrolled TPM 2.0 token."
+        else
+          echo "[-] Warning: TPM 2.0 enrollment failed. Falling back to passphrase unlock at boot."
+        fi
+        rm -f /target/run/axonwall-luks-enroll.key
+      fi
+
+      if [ "$TPM2_SUCCESS" = "1" ]; then
+        echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard,tpm2-device=auto" >> /target/etc/crypttab
+      else
+        echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard" >> /target/etc/crypttab
+      fi
     fi
-
-    DATA_UUID="$(blkid -s UUID -o value "$DATA_DEV" 2>/dev/null || echo "$DATA_DEV")"
-    mkdir -p /target/etc
-    echo "axon_crypt_data UUID=${DATA_UUID} /etc/axonwall/vault.key luks,discard" >> /target/etc/crypttab
-
-    if [ "$LUKS_TPM2" = "1" ]; then
-      echo "[+] Enrolling hardware TPM 2.0 PCR policy for automated unlock..."
-      in-target systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0,2,7 "$DATA_DEV" 2>/dev/null || true
-    fi
+  else
+    echo "[-] Error: cryptsetup luksFormat failed on ${DATA_DEV}"
+    rm -rf "$STAGE_DATA"
   fi
+
+  shred -u "$TEMP_KEY" 2>/dev/null || rm -f "$TEMP_KEY"
 elif [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && [ "$DATA_DEV" != "$ROOT_B_DEV" ]; then
   echo "[+] Setting filesystem label: ${DATA_DEV} -> axon_data"
   if [ "$DATA_FSTYPE" = "xfs" ] && command -v xfs_admin >/dev/null 2>&1; then
@@ -226,6 +275,9 @@ if [ -b "$ROOT_B_DEV" ]; then
     if [ -f "$STAGE_B/etc/fstab" ]; then
       sed -i 's/axon_root_a/axon_root_b/g' "$STAGE_B/etc/fstab"
       sed -i '\#/mnt/standby#d' "$STAGE_B/etc/fstab"
+      if [ "$LUKS_ENABLED" = "1" ]; then
+        sed -i '\#[[:space:]]/var/lib/axonwall[[:space:]]#d' "$STAGE_B/etc/fstab"
+      fi
       if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -qE '[[:space:]]/var/lib/axonwall[[:space:]]' "$STAGE_B/etc/fstab"; then
         echo "LABEL=axon_data  /var/lib/axonwall  ${DATA_FSTYPE:-ext4}  defaults,noatime  0  2" >> "$STAGE_B/etc/fstab"
       fi
@@ -287,6 +339,9 @@ chown 0:0 /target/var/lib/axonwall/home 2>/dev/null || true
 chmod 0755 /target/var/lib/axonwall /target/var/lib/axonwall/home 2>/dev/null || true
 if [ -f /target/etc/fstab ]; then
   sed -i '\#/mnt/standby#d' /target/etc/fstab
+  if [ "$LUKS_ENABLED" = "1" ]; then
+    sed -i '\#[[:space:]]/var/lib/axonwall[[:space:]]#d' /target/etc/fstab
+  fi
   if [ -b "$DATA_DEV" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ] && ! grep -qE '[[:space:]]/var/lib/axonwall[[:space:]]' /target/etc/fstab; then
     echo "LABEL=axon_data  /var/lib/axonwall  ${DATA_FSTYPE:-ext4}  defaults,noatime  0  2" >> /target/etc/fstab
   fi
@@ -475,5 +530,9 @@ KCONF_EOF
 
 # 9. Refresh GRUB configuration
 in-target update-grub 2>/dev/null || true
+
+# 10. Clean up sensitive installer state files
+cleanup_secrets
+rm -f /var/lib/partman/axonwall-choices /tmp/axonwall-* /target/tmp/axonwall-* /target/run/axonwall-* 2>/dev/null || true
 
 echo "[✓] Axonwall A/B Dual-Root, System RAID & ZFS Setup successfully finished."

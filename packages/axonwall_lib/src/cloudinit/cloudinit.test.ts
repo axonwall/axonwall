@@ -157,8 +157,8 @@ axonwall:
     expect(choices.ZFS_EXTRA_DISKS).toBe('/dev/sdb');
 
     const envText = formatInstallerChoicesEnv(choices);
-    expect(envText).toContain('TARGET_DISK="/dev/nvme0n1"');
-    expect(envText).toContain('SYSTEM_RAID_MODE="mirror"');
+    expect(envText).toContain("TARGET_DISK='/dev/nvme0n1'");
+    expect(envText).toContain("SYSTEM_RAID_MODE='mirror'");
     expect(envText).toContain('LUKS_ENABLED=true');
     expect(envText).toContain('LUKS_TPM2=true');
     expect(envText).toContain('LOGS_ENABLED=true');

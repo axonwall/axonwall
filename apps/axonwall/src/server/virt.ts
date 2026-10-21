@@ -10,7 +10,8 @@ import {
   type VirtConfig,
 } from '@axonwall/lib/schemas';
 import { compileVmProcess, compileLxcContainer } from '@axonwall/lib';
-import { getCurrentDesiredState, applyDesiredState, callAgentApi } from './agent';
+import { getCurrentDesiredState, applyDesiredState } from './agent';
+import { callAgentApi } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 

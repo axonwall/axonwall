@@ -195,6 +195,14 @@ chroot "${TARGET}" grub-install --target=i386-pc --recheck "${LOOP_DEV}" 2>/dev/
 # Update GRUB configuration
 chroot "${TARGET}" update-grub 2>/dev/null || true
 
+# Sanitize image before unmounting: ensure unique machine-id and SSH host keys on VM instantiation
+echo "[+] Sanitizing appliance image (machine-id, host keys, cloud-init state)..."
+: > "${TARGET}/etc/machine-id"
+rm -f "${TARGET}/var/lib/dbus/machine-id"
+rm -f "${TARGET}/etc/ssh/ssh_host_"*
+rm -rf "${TARGET}/var/lib/cloud/data" "${TARGET}/var/lib/cloud/instance" "${TARGET}/var/lib/cloud/instances"
+rm -rf "${TARGET}/tmp/"* "${TARGET}/var/tmp/"*
+
 # Unmount target mounts
 umount "${TARGET}/sys" "${TARGET}/proc" "${TARGET}/dev/pts" "${TARGET}/dev"
 umount "${TARGET}/boot/efi" "${TARGET}/var/lib/axonwall" "${TARGET}"

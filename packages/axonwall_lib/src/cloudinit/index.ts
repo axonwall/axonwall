@@ -45,10 +45,17 @@ export const SystemRaidSchema = z.object({
   level: z.enum(['raid1']).default('raid1'),
 });
 
+const RFC1123_HOSTNAME = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+const LINUX_USERNAME = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}$/;
+const OPENSSH_PUBKEY = /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+[A-Za-z0-9+/=]+(\s+[^\r\n]*)?$/;
+
 export const EncryptionSchema = z.object({
   enabled: z.boolean().default(false),
   tpm2_auto_unlock: z.boolean().default(false),
-  passphrase: z.string().optional(),
+  passphrase: z
+    .string()
+    .refine((s) => !/[\r\n\0]/.test(s), 'Passphrase cannot contain newlines or null bytes')
+    .optional(),
   cipher: z.string().default('aes-xts-plain64'),
   key_size: z.number().default(512),
 });
@@ -128,12 +135,18 @@ export type CloudInitStorage = z.infer<typeof CloudInitStorageSchema>;
 export const CloudInitZtpSchema = z.object({
   enabled: z.boolean().default(false),
   controller_url: z.string().url().optional(),
-  enrollment_token: z.string().optional(),
+  enrollment_token: z
+    .string()
+    .refine((s) => !/[\r\n\0]/.test(s), 'Enrollment token cannot contain newlines or null bytes')
+    .optional(),
 });
 
 export const CloudInitAuthSchema = z.object({
-  admin_username: z.string().default('admin'),
-  admin_password: z.string().optional(),
+  admin_username: z.string().regex(LINUX_USERNAME, 'Invalid Linux username format').default('admin'),
+  admin_password: z
+    .string()
+    .refine((s) => !/[\r\n\0]/.test(s), 'Password cannot contain newlines or null bytes')
+    .optional(),
   admin_password_hash: z.string().optional(),
   ztp: CloudInitZtpSchema.default({ enabled: false }),
 });
@@ -153,16 +166,19 @@ export const AxonwallCloudConfigSchema = z.object({
 export type AxonwallCloudConfig = z.infer<typeof AxonwallCloudConfigSchema>;
 
 export const CloudInitUserSchema = z.object({
-  name: z.string(),
+  name: z.string().regex(LINUX_USERNAME, 'Invalid Linux username format'),
   gecos: z.string().optional(),
   sudo: z.string().optional(),
   shell: z.string().default('/bin/bash'),
   lock_passwd: z.boolean().default(false),
-  ssh_authorized_keys: z.array(z.string()).default([]),
+  ssh_authorized_keys: z.array(z.string().regex(OPENSSH_PUBKEY, 'Invalid OpenSSH public key format')).default([]),
 });
 
 export const FullCloudInitSchema = z.object({
-  hostname: z.string().optional(),
+  hostname: z
+    .string()
+    .regex(RFC1123_HOSTNAME, 'Hostname must adhere to RFC 1123 format (e.g. host-01)')
+    .optional(),
   fqdn: z.string().optional(),
   manage_etc_hosts: z.boolean().optional(),
   timezone: z.string().optional(),
@@ -296,6 +312,13 @@ export function cloudInitStorageToInstallerChoices(storage: CloudInitStorage): I
   };
 }
 
+function escapeShellSingleQuotes(val: string | number | boolean): string {
+  if (typeof val === 'number' || typeof val === 'boolean') {
+    return String(val);
+  }
+  return `'${String(val).replace(/'/g, "'\\''")}'`;
+}
+
 /**
  * Formats InstallerChoices as shell variables suitable for sourcing in sh scripts.
  */
@@ -304,34 +327,34 @@ export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
     `# ==============================================================================`,
     `# Axonwall Installer Automated Choices (generated from cloud-config)`,
     `# ==============================================================================`,
-    `TARGET_DISK="${choices.TARGET_DISK}"`,
-    `SYSTEM_RAID_MODE="${choices.SYSTEM_RAID_MODE}"`,
-    `SYSTEM_RAID_DISKS="${choices.SYSTEM_RAID_DISKS}"`,
+    `TARGET_DISK=${escapeShellSingleQuotes(choices.TARGET_DISK)}`,
+    `SYSTEM_RAID_MODE=${escapeShellSingleQuotes(choices.SYSTEM_RAID_MODE)}`,
+    `SYSTEM_RAID_DISKS=${escapeShellSingleQuotes(choices.SYSTEM_RAID_DISKS)}`,
     `EFI_MB=${choices.EFI_MB}`,
     `ROOT_GB=${choices.ROOT_GB}`,
     `ROOT_MB=${choices.ROOT_MB}`,
-    `ROOT_FSTYPE="${choices.ROOT_FSTYPE}"`,
+    `ROOT_FSTYPE=${escapeShellSingleQuotes(choices.ROOT_FSTYPE)}`,
     `STANDBY_ENABLED=${choices.STANDBY_ENABLED}`,
     `SWAP_GB=${choices.SWAP_GB}`,
     `SWAP_MB=${choices.SWAP_MB}`,
     `ZRAM_ENABLED=${choices.ZRAM_ENABLED}`,
     `DATA_GB=${choices.DATA_GB}`,
     `DATA_MB=${choices.DATA_MB}`,
-    `DATA_FSTYPE="${choices.DATA_FSTYPE}"`,
-    `DATA_ALLOC_MODE="${choices.DATA_ALLOC_MODE}"`,
+    `DATA_FSTYPE=${escapeShellSingleQuotes(choices.DATA_FSTYPE)}`,
+    `DATA_ALLOC_MODE=${escapeShellSingleQuotes(choices.DATA_ALLOC_MODE)}`,
     `LOGS_ENABLED=${choices.LOGS_ENABLED}`,
     `LOGS_GB=${choices.LOGS_GB}`,
     `LOGS_MB=${choices.LOGS_MB}`,
-    `LOGS_FSTYPE="${choices.LOGS_FSTYPE}"`,
+    `LOGS_FSTYPE=${escapeShellSingleQuotes(choices.LOGS_FSTYPE)}`,
     `LUKS_ENABLED=${choices.LUKS_ENABLED}`,
     `LUKS_TPM2=${choices.LUKS_TPM2}`,
-    `LUKS_PASSPHRASE="${choices.LUKS_PASSPHRASE}"`,
-    `ZFS_ALLOC_MODE="${choices.ZFS_ALLOC_MODE}"`,
+    `LUKS_PASSPHRASE=${escapeShellSingleQuotes(choices.LUKS_PASSPHRASE)}`,
+    `ZFS_ALLOC_MODE=${escapeShellSingleQuotes(choices.ZFS_ALLOC_MODE)}`,
     `ZFS_GB=${choices.ZFS_GB}`,
     `ZFS_MB=${choices.ZFS_MB}`,
-    `ZFS_EXTRA_DISKS="${choices.ZFS_EXTRA_DISKS}"`,
-    `ZFS_RAID_TOPOLOGY="${choices.ZFS_RAID_TOPOLOGY}"`,
-    `CUSTOM_MOUNTS_JSON='${choices.CUSTOM_MOUNTS_JSON.replace(/'/g, "'\\''")}'`,
+    `ZFS_EXTRA_DISKS=${escapeShellSingleQuotes(choices.ZFS_EXTRA_DISKS)}`,
+    `ZFS_RAID_TOPOLOGY=${escapeShellSingleQuotes(choices.ZFS_RAID_TOPOLOGY)}`,
+    `CUSTOM_MOUNTS_JSON=${escapeShellSingleQuotes(choices.CUSTOM_MOUNTS_JSON)}`,
     ``,
   ].join('\n');
 }

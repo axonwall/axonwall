@@ -409,7 +409,8 @@ async function cmdEdit(domainArg?: string) {
     const state = loadFallbackState();
     const serialized = serializeDesiredStateToYamlFiles(state) as Record<string, string>;
     fs.mkdirSync(ETC_DIR, { recursive: true });
-    fs.writeFileSync(targetPath, serialized[`${domain}.yaml`] || '', { mode: 0o644 });
+    fs.writeFileSync(targetPath, serialized[`${domain}.yaml`] || '', { mode: 0o600 });
+    try { fs.chmodSync(targetPath, 0o600); } catch {}
   }
 
   const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
@@ -483,7 +484,7 @@ async function cmdCloudInit(userArgs: string[]) {
     console.log(`[+] Setting system hostname to: ${cloudConfig.hostname}`);
     if (!isDryRun && isRoot) {
       try {
-        execFileSync('hostnamectl', ['--no-ask-password', 'set-hostname', cloudConfig.hostname], {
+        execFileSync('hostnamectl', ['--no-ask-password', 'set-hostname', '--', cloudConfig.hostname], {
           stdio: 'ignore',
           timeout: 2000,
         });
@@ -495,30 +496,40 @@ async function cmdCloudInit(userArgs: string[]) {
     }
   }
 
-  // 3. Reconcile SSH keys from users
+  // 3. Reconcile SSH keys from privileged users (root, admin, or sudoers)
   if (cloudConfig.users && cloudConfig.users.length > 0) {
     const allKeys: string[] = [];
+    const openSshRegex = /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+[A-Za-z0-9+/=]+(\s+[^\r\n]*)?$/;
+
     for (const u of cloudConfig.users) {
-      if (u.ssh_authorized_keys && u.ssh_authorized_keys.length > 0) {
-        allKeys.push(...u.ssh_authorized_keys);
+      const isPrivileged = u.name === 'root' || u.name === 'admin' || (u.sudo && u.sudo.includes('ALL'));
+      if (isPrivileged && u.ssh_authorized_keys && u.ssh_authorized_keys.length > 0) {
+        for (const k of u.ssh_authorized_keys) {
+          const trimmed = k.trim();
+          if (trimmed && openSshRegex.test(trimmed)) {
+            allKeys.push(trimmed);
+          }
+        }
       }
     }
     if (allKeys.length > 0) {
-      console.log(`[+] Found ${allKeys.length} SSH public key(s) in cloud-config.`);
+      console.log(`[+] Found ${allKeys.length} validated administrative SSH public key(s) in cloud-config.`);
       if (!isDryRun && isRoot) {
         try {
           const sshDir = '/root/.ssh';
           const authKeysPath = path.join(sshDir, 'authorized_keys');
           fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+          try { fs.chmodSync(sshDir, 0o700); } catch {}
           let existingKeys = '';
           if (fs.existsSync(authKeysPath)) {
             existingKeys = fs.readFileSync(authKeysPath, 'utf-8');
           }
-          const newKeys = allKeys.filter((k) => !existingKeys.includes(k.trim()));
+          const newKeys = allKeys.filter((k) => !existingKeys.includes(k));
           if (newKeys.length > 0) {
             fs.appendFileSync(authKeysPath, '\n' + newKeys.join('\n') + '\n', { mode: 0o600 });
             console.log(`[+] Injected ${newKeys.length} SSH public key(s) into /root/.ssh/authorized_keys.`);
           }
+          try { fs.chmodSync(authKeysPath, 0o600); } catch {}
         } catch (err: any) {
           console.warn(`[!] Unable to write SSH keys: ${err.message}`);
         }
@@ -537,11 +548,17 @@ async function cmdCloudInit(userArgs: string[]) {
           try {
             fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
             const adminEnvPath = path.join(ETC_DIR, 'admin.env');
-            fs.writeFileSync(
-              adminEnvPath,
-              `LOCAL_ADMIN_USER=${axon.auth.admin_username || 'admin'}\nLOCAL_ADMIN_PASSWORD=${axon.auth.admin_password}\n`,
-              { mode: 0o600 }
-            );
+            const envContent = `LOCAL_ADMIN_USER=${axon.auth.admin_username || 'admin'}\nLOCAL_ADMIN_PASSWORD=${axon.auth.admin_password}\n`;
+            fs.writeFileSync(adminEnvPath, envContent, { mode: 0o600 });
+            try { fs.chmodSync(adminEnvPath, 0o600); } catch {}
+
+            // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
+            try {
+              const persistDir = '/var/lib/axonwall/etc-axonwall';
+              fs.mkdirSync(persistDir, { recursive: true, mode: 0o755 });
+              fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o600 });
+              fs.chmodSync(path.join(persistDir, 'admin.env'), 0o600);
+            } catch {}
           } catch (err: any) {
             console.warn(`[!] Unable to write admin.env: ${err.message}`);
           }
@@ -554,7 +571,8 @@ async function cmdCloudInit(userArgs: string[]) {
             fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
             const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
             const content = `AXONWALL_ZTP_TOKEN=${axon.auth.ztp.enrollment_token || ''}\nAXONWALL_CONTROLLER_URL=${axon.auth.ztp.controller_url || ''}\n`;
-            fs.writeFileSync(ctrlEnvPath, content, { mode: 0o640 });
+            fs.writeFileSync(ctrlEnvPath, content, { mode: 0o600 });
+            try { fs.chmodSync(ctrlEnvPath, 0o600); } catch {}
           } catch (err: any) {
             console.warn(`[!] Unable to write controller.env: ${err.message}`);
           }
@@ -570,7 +588,8 @@ async function cmdCloudInit(userArgs: string[]) {
           const confD = path.join(ETC_DIR, 'conf.d');
           fs.mkdirSync(confD, { recursive: true, mode: 0o755 });
           const cloudInitYamlPath = path.join(confD, '99-cloudinit.yaml');
-          fs.writeFileSync(cloudInitYamlPath, serializeYaml(axon.desired_state), { mode: 0o644 });
+          fs.writeFileSync(cloudInitYamlPath, serializeYaml(axon.desired_state), { mode: 0o600 });
+          try { fs.chmodSync(cloudInitYamlPath, 0o600); } catch {}
         } catch (err: any) {
           console.warn(`[!] Unable to write 99-cloudinit.yaml: ${err.message}`);
         }
@@ -578,7 +597,22 @@ async function cmdCloudInit(userArgs: string[]) {
     }
   }
 
-  // 5. Expand data partition if growpart is available (QCOW2 / Cloud Image auto-grow)
+  // 5. Secure cloud-init seed files so secrets are not world-readable
+  if (!isDryRun && isRoot) {
+    try {
+      for (const p of [
+        '/var/lib/cloud/seed/nocloud-net/user-data',
+        '/var/lib/cloud/seed/nocloud/user-data',
+        '/var/lib/partman/cloud-config.yaml',
+      ]) {
+        if (fs.existsSync(p)) {
+          fs.chmodSync(p, 0o600);
+        }
+      }
+    } catch {}
+  }
+
+  // 6. Expand data partition if growpart is available (QCOW2 / Cloud Image auto-grow)
   if (!isDryRun && isRoot) {
     try {
       const res = spawnSync('which', ['growpart'], { stdio: 'pipe' });

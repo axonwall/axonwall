@@ -38659,10 +38659,13 @@ var SystemRaidSchema = external_exports.object({
   enabled: external_exports.boolean().default(false),
   level: external_exports.enum(["raid1"]).default("raid1")
 });
+var RFC1123_HOSTNAME = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+var LINUX_USERNAME = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}$/;
+var OPENSSH_PUBKEY = /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+[A-Za-z0-9+/=]+(\s+[^\r\n]*)?$/;
 var EncryptionSchema = external_exports.object({
   enabled: external_exports.boolean().default(false),
   tpm2_auto_unlock: external_exports.boolean().default(false),
-  passphrase: external_exports.string().optional(),
+  passphrase: external_exports.string().refine((s) => !/[\r\n\0]/.test(s), "Passphrase cannot contain newlines or null bytes").optional(),
   cipher: external_exports.string().default("aes-xts-plain64"),
   key_size: external_exports.number().default(512)
 });
@@ -38726,11 +38729,11 @@ var CloudInitStorageSchema = external_exports.object({
 var CloudInitZtpSchema = external_exports.object({
   enabled: external_exports.boolean().default(false),
   controller_url: external_exports.string().url().optional(),
-  enrollment_token: external_exports.string().optional()
+  enrollment_token: external_exports.string().refine((s) => !/[\r\n\0]/.test(s), "Enrollment token cannot contain newlines or null bytes").optional()
 });
 var CloudInitAuthSchema = external_exports.object({
-  admin_username: external_exports.string().default("admin"),
-  admin_password: external_exports.string().optional(),
+  admin_username: external_exports.string().regex(LINUX_USERNAME, "Invalid Linux username format").default("admin"),
+  admin_password: external_exports.string().refine((s) => !/[\r\n\0]/.test(s), "Password cannot contain newlines or null bytes").optional(),
   admin_password_hash: external_exports.string().optional(),
   ztp: CloudInitZtpSchema.default({ enabled: false })
 });
@@ -38740,15 +38743,15 @@ var AxonwallCloudConfigSchema = external_exports.object({
   desired_state: DesiredStateSchema.partial().optional()
 });
 var CloudInitUserSchema = external_exports.object({
-  name: external_exports.string(),
+  name: external_exports.string().regex(LINUX_USERNAME, "Invalid Linux username format"),
   gecos: external_exports.string().optional(),
   sudo: external_exports.string().optional(),
   shell: external_exports.string().default("/bin/bash"),
   lock_passwd: external_exports.boolean().default(false),
-  ssh_authorized_keys: external_exports.array(external_exports.string()).default([])
+  ssh_authorized_keys: external_exports.array(external_exports.string().regex(OPENSSH_PUBKEY, "Invalid OpenSSH public key format")).default([])
 });
 var FullCloudInitSchema = external_exports.object({
-  hostname: external_exports.string().optional(),
+  hostname: external_exports.string().regex(RFC1123_HOSTNAME, "Hostname must adhere to RFC 1123 format (e.g. host-01)").optional(),
   fqdn: external_exports.string().optional(),
   manage_etc_hosts: external_exports.boolean().optional(),
   timezone: external_exports.string().optional(),

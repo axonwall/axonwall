@@ -114,7 +114,7 @@ func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadReques
 	}
 
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
-		bodyBytes, err := io.ReadAll(httpResp.Body)
+		bodyBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 10<<20))
 		if err == nil && len(bodyBytes) > 0 {
 			var jsonObj interface{}
 			if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
@@ -155,7 +155,8 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 	}
 
 	payload := map[string]interface{}{
-		"state": parsedState,
+		"jobId":                 "terraform",
+		"state":                 parsedState,
 		"confirmTimeoutSeconds": 120,
 	}
 	bodyBytes, err := json.Marshal(payload)
@@ -180,7 +181,7 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(httpResp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 		return fmt.Errorf("API error %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
@@ -202,7 +203,7 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 	defer confirmResp.Body.Close()
 
 	if confirmResp.StatusCode < 200 || confirmResp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(confirmResp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(confirmResp.Body, 1<<20))
 		return fmt.Errorf("confirm error %d: %s", confirmResp.StatusCode, string(respBody))
 	}
 

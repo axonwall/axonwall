@@ -185,6 +185,7 @@ func (d *CloudInitConfigDataSource) Schema(ctx context.Context, req datasource.S
 			"rendered": schema.StringAttribute{
 				MarkdownDescription: "Rendered #cloud-config YAML document.",
 				Computed:            true,
+				Sensitive:           true,
 			},
 		},
 	}

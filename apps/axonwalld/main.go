@@ -829,6 +829,19 @@ func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 	}
 }
 
+func syncFile(srcPath, dstPath string, perm os.FileMode) {
+	srcInfo, err1 := os.Stat(srcPath)
+	if err1 != nil {
+		return
+	}
+	dstInfo, err2 := os.Stat(dstPath)
+	if err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime()) {
+		if data, err := os.ReadFile(srcPath); err == nil {
+			_ = os.WriteFile(dstPath, data, perm)
+		}
+	}
+}
+
 func syncPersistentYamlConfigs() {
 	srcDir := "/var/lib/axonwall/etc-axonwall"
 	dstDir := "/etc/axonwall"
@@ -838,25 +851,35 @@ func syncPersistentYamlConfigs() {
 	}
 	_ = os.MkdirAll(dstDir, 0755)
 	_ = os.MkdirAll(filepath.Join(dstDir, "conf.d"), 0755)
+
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+		if entry.IsDir() {
+			if name == "conf.d" {
+				confEntries, err := os.ReadDir(filepath.Join(srcDir, "conf.d"))
+				if err == nil {
+					for _, ce := range confEntries {
+						if ce.IsDir() {
+							continue
+						}
+						cName := ce.Name()
+						if strings.HasSuffix(cName, ".yaml") || strings.HasSuffix(cName, ".yml") {
+							syncFile(filepath.Join(srcDir, "conf.d", cName), filepath.Join(dstDir, "conf.d", cName), 0600)
+						}
+					}
+				}
+			}
 			continue
 		}
-		srcPath := filepath.Join(srcDir, name)
-		dstPath := filepath.Join(dstDir, name)
-		srcInfo, err1 := os.Stat(srcPath)
-		dstInfo, err2 := os.Stat(dstPath)
-		// Copy if missing in /etc/axonwall or if persistent copy is newer
-		if err1 == nil && (err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime())) {
-			if data, err := os.ReadFile(srcPath); err == nil {
-				_ = os.WriteFile(dstPath, data, 0600)
-			}
+
+		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
+			syncFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name), 0600)
 		}
 	}
+
+	// Also ensure administrative credentials and controller configs are synced
+	syncFile(filepath.Join(srcDir, "admin.env"), filepath.Join(dstDir, "admin.env"), 0600)
+	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0600)
 }
 
 func main() {
