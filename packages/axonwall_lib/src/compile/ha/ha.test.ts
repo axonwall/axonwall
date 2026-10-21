@@ -38,6 +38,7 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
       databases: ['/var/lib/axonwall/headscale/db.sqlite'],
       syncIntervalSeconds: 5,
       listenPort: 9876,
+      transport: 'token-http',
       peerAddress: '10.0.99.2',
       peerPort: 9876,
       authToken: 'synctoken123',
@@ -74,8 +75,18 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     expect(config.listenPort).toBe(9876);
     expect(config.peerAddress).toBe('10.0.99.2');
     expect(config.authToken).toBe('synctoken123');
+    expect(config.transport).toBe('token-http');
     expect(config.localAddress).toBe('10.0.99.1');
     expect(config.autoPromoteHeadscale).toBe(true);
+  });
+
+  it('passes the mtls transport selection through to the daemon config (D-04 P1)', () => {
+    const mtlsHaConfig: HighAvailabilityConfig = {
+      ...baseHaConfig,
+      sqliteSync: { ...baseHaConfig.sqliteSync, transport: 'mtls' },
+    };
+    const config = compileSqliteSyncConfig(mtlsHaConfig, '10.0.99.1');
+    expect(config.transport).toBe('mtls');
   });
 
   it('compiles litestream config with s3 and directory replica targets', () => {

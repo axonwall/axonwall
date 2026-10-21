@@ -212,6 +212,7 @@ describe('Compiler Input Sanitization & Security Hardening', () => {
           databases: [],
           syncIntervalSeconds: 5,
           listenPort: 9876,
+          transport: 'token-http',
         },
         syncSections: {
           interfaces: false,
@@ -254,6 +255,7 @@ describe('Compiler Input Sanitization & Security Hardening', () => {
           databases: [],
           syncIntervalSeconds: 5,
           listenPort: 9876,
+          transport: 'token-http',
         },
         syncSections: {
           interfaces: false,

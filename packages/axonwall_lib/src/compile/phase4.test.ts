@@ -61,6 +61,7 @@ describe('Phase 4: High Availability Compilers', () => {
       databases: ['/var/lib/axonwall/headscale/db.sqlite'],
       syncIntervalSeconds: 5,
       listenPort: 9876,
+      transport: 'token-http',
     },
     syncSections: {
       interfaces: false,
