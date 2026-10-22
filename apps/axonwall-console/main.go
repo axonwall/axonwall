@@ -1215,14 +1215,16 @@ func printHeader() {
 	} else if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
 		fmt.Println(" 12) Run Axonwall Disk Installer Utility")
 	}
+	fmt.Printf("  %sT) Launch Interactive Ink Web-Console & NastyMap TUI (axonwall-tui)%s\n", colorGreen+colorBold, colorReset)
+	fmt.Printf("  %sN) Launch NastyMap Interactive Nmap Scanner & Topology TUI%s\n", colorCyan+colorBold, colorReset)
 	fmt.Printf("  %sA) Manage Anti-Lockout / Allowed Management Interfaces (LAN, OPT1, OPT2)%s\n", colorYellow, colorReset)
 	fmt.Printf("  %sE) Edit / Validate / Apply /etc/axonwall/*.yaml Configuration Files%s\n", colorCyan, colorReset)
 	fmt.Println("  0) Logout / Lock Console")
 	fmt.Println("================================================================================")
 	if isLiveMode() {
-		fmt.Print(" Enter option [0-12, A, E, or I]: ")
+		fmt.Print(" Enter option [0-12, T, N, A, E, or I]: ")
 	} else {
-		fmt.Print(" Enter option [0-11, A, or E]: ")
+		fmt.Print(" Enter option [0-11, T, N, A, or E]: ")
 	}
 }
 
@@ -2227,10 +2229,16 @@ func main() {
 				actionRestartServices(reader)
 			case "9":
 				clearScreen()
-				fmt.Printf("%sDropping to root shell. Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
-				shellPath := "/bin/bash"
+				fmt.Printf("%sDropping to root shell (ZSH/Bash). Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
+				shellPath := "/usr/bin/zsh"
 				if _, err := os.Stat(shellPath); err != nil {
-					shellPath = "/bin/sh"
+					shellPath = "/bin/zsh"
+					if _, err := os.Stat(shellPath); err != nil {
+						shellPath = "/bin/bash"
+						if _, err := os.Stat(shellPath); err != nil {
+							shellPath = "/bin/sh"
+						}
+					}
 				}
 				shell := exec.Command(shellPath)
 				shell.Stdin = os.Stdin
@@ -2269,6 +2277,20 @@ func main() {
 				}
 			case "12", "I", "INSTALL":
 				actionInstallToDisk(reader)
+			case "T", "TUI":
+				clearScreen()
+				cmd := exec.Command("/usr/local/bin/axonwall-tui")
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				_ = cmd.Run()
+			case "N", "NASTYMAP":
+				clearScreen()
+				cmd := exec.Command("/usr/local/bin/axonwall-tui", "--tab", "nastymap")
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				_ = cmd.Run()
 			case "A", "ANTILOCKOUT", "LOCKOUT":
 				actionManageAntiLockout(reader)
 			case "E", "YAML":

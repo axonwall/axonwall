@@ -1,0 +1,100 @@
+# ==============================================================================
+# Axonwall Appliance — Starship Cross-Shell Prompt Configuration
+# Guide: https://starship.rs/guide/ | Location: /etc/axonwall/starship.toml
+# ==============================================================================
+
+"$schema" = 'https://starship.rs/config-schema.json'
+
+add_newline = false
+command_timeout = 500
+
+format = """
+[\\[axonwall\\]](bold #10b981) \
+${custom.axonwall_commit}\
+$username\
+[@](bold #64748b)\
+$hostname\
+[:](bold #64748b)\
+$directory\
+$git_branch\
+$git_status\
+$cmd_duration\
+$jobs\
+$status\
+$line_break\
+$character"""
+
+right_format = """${custom.axonwall_if}$time"""
+
+[username]
+show_always = true
+style_user = "bold #38bdf8"
+style_root = "bold #ef4444"
+format = "[$user]($style)"
+
+[hostname]
+ssh_only = false
+style = "bold #f8fafc"
+format = "[$hostname]($style)"
+trim_at = "."
+
+[directory]
+style = "bold #60a5fa"
+truncation_length = 4
+truncate_to_repo = false
+read_only = " 🔒"
+read_only_style = "bold #f59e0b"
+format = "[$path]($style)[$read_only]($read_only_style) "
+
+[git_branch]
+symbol = "git:"
+style = "bold #a855f7"
+format = "on [$symbol$branch]($style) "
+
+[git_status]
+style = "bold #f59e0b"
+format = '([\[$all_status$ahead_behind\]]($style) )'
+
+[cmd_duration]
+min_time = 2000
+style = "bold #facc15"
+format = "took [$duration]($style) "
+
+[jobs]
+symbol = "⚙ "
+style = "bold #38bdf8"
+number_threshold = 1
+format = "[$symbol$number]($style) "
+
+[status]
+disabled = false
+style = "bold #ef4444"
+symbol = "✘ "
+format = '[\[$symbol$status\]]($style) '
+
+[time]
+disabled = false
+time_format = "%H:%M:%S"
+style = "dimmed #94a3b8"
+format = '[\[$time\]]($style)'
+
+[character]
+success_symbol = "[❯](bold #10b981)"
+error_symbol = "[❯](bold #ef4444)"
+vimcmd_symbol = "[❮](bold #38bdf8)"
+
+# Custom Axonwall module: warns when a Commit-Confirm rollback timer is active
+[custom.axonwall_commit]
+when = "test -f /run/axonwall/commit-confirm.pending"
+command = "cat /run/axonwall/commit-confirm.pending 2>/dev/null || echo 'COMMIT-CONFIRM ACTIVE'"
+style = "bold #f59e0b"
+format = '[⚠ $output — run `confirm` ]($style)'
+shell = ["/bin/sh", "-c"]
+
+# Custom Axonwall module: displays active default network interface in right prompt
+[custom.axonwall_if]
+when = "true"
+command = "ip route show default 2>/dev/null | awk '{print $5; exit}'"
+style = "dimmed #38bdf8"
+format = '([\[$output\]]($style) )'
+shell = ["/bin/sh", "-c"]

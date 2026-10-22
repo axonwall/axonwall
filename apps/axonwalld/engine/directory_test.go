@@ -87,14 +87,17 @@ loginShell: /usr/local/bin/axonwall-opshell
 }
 
 func TestDefaultShellForRole(t *testing.T) {
-	if DefaultShellForRole("admin") != "/bin/bash" {
-		t.Errorf("expected /bin/bash for admin")
+	if DefaultShellForRole("admin") != "/usr/bin/zsh" {
+		t.Errorf("expected /usr/bin/zsh for admin")
 	}
 	if DefaultShellForRole("operator") != "/usr/local/bin/axonwall-opshell" {
 		t.Errorf("expected /usr/local/bin/axonwall-opshell for operator")
 	}
 	if DefaultShellForRole("readonly") != "/usr/sbin/nologin" {
 		t.Errorf("expected /usr/sbin/nologin for readonly")
+	}
+	if DefaultShellForRole("os_only") != "/usr/bin/zsh" {
+		t.Errorf("expected /usr/bin/zsh for os_only")
 	}
 }
 

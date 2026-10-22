@@ -107,7 +107,7 @@ export const GatewaySchema = z.object({
   weight: z.number().int().min(1).max(30).default(1),
   isDefault: z.boolean().default(false),
   enabled: z.boolean().default(true),
-  description: z.string().max(255).default(''),
+  description: z.union([z.string(), z.number().transform(String), z.null().transform(() => '')]).default(''),
 });
 export type Gateway = z.infer<typeof GatewaySchema>;
 
@@ -232,7 +232,7 @@ export const StaticRouteSchema = z.object({
   network: z.string().refine(isValidCIDR, { message: 'Invalid route network CIDR' }),
   gateway: z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), { message: 'Invalid route gateway IP' }),
   interface: z.string().optional(),
-  description: z.string().max(255).default(''),
+  description: z.union([z.string(), z.number().transform(String), z.null().transform(() => '')]).default(''),
   enabled: z.boolean().default(true),
 });
 export type StaticRoute = z.infer<typeof StaticRouteSchema>;
@@ -815,6 +815,11 @@ export const PluginManifestSchema = z.object({
     path: z.string(),
     icon: z.string().optional(),
   }).optional(),
+  packages: z.object({
+    debian: z.array(z.string()).default([]),
+    alpine: z.array(z.string()).default([]),
+  }).optional(),
+  cliBinaries: z.array(z.string()).optional(),
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
 

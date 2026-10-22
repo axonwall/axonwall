@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { getDesiredStateInternal } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
 
 export async function GET(req: Request) {
   try {
@@ -24,7 +24,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: 'Invalid Host' }, { status: 400 });
     }
 
-    const state = await getDesiredStateInternal();
+    const state = await getCurrentDesiredState();
     const app = state.zeroTrust?.apps?.find(
       (a) => a.enabled && a.publicHostname.replace(/^https?:\/\//i, '').split(':')[0].trim().toLowerCase() === host
     );

@@ -165,26 +165,30 @@ async function performAuthenticationInner(
 
   // 1. Check local break-glass admin first
   let localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
-  let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || 'axonwall';
+  let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || '';
 
-  try {
-    if (fs.existsSync('/etc/axonwall/admin.env')) {
-      const content = fs.readFileSync('/etc/axonwall/admin.env', 'utf-8');
-      for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('LOCAL_ADMIN_USER=')) {
-          localAdminUser = trimmed.substring('LOCAL_ADMIN_USER='.length);
-        } else if (trimmed.startsWith('LOCAL_ADMIN_PASSWORD=')) {
-          localAdminPass = trimmed.substring('LOCAL_ADMIN_PASSWORD='.length);
+  for (const adminEnvPath of ['/var/lib/axonwall/etc-axonwall/admin.env', '/etc/axonwall/admin.env']) {
+    try {
+      if (fs.existsSync(adminEnvPath)) {
+        const content = fs.readFileSync(adminEnvPath, 'utf-8');
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('LOCAL_ADMIN_USER=')) {
+            localAdminUser = trimmed.substring('LOCAL_ADMIN_USER='.length);
+          } else if (trimmed.startsWith('LOCAL_ADMIN_PASSWORD=')) {
+            localAdminPass = trimmed.substring('LOCAL_ADMIN_PASSWORD='.length);
+          }
         }
+        if (localAdminPass) break;
       }
-    }
-  } catch {
-    // fallback to env
+    } catch {}
   }
 
   // If attempting to authenticate as local admin
   if (username === localAdminUser) {
+    if (!localAdminPass) {
+      return { success: false, error: 'Local administrator account is not configured' };
+    }
     const authRes = authenticateLocalAdmin(username, password, localAdminUser, localAdminPass);
     if (!authRes.success) {
       return { success: false, error: 'Invalid username or password' };
@@ -419,21 +423,28 @@ export async function changeAdminPasswordAction(formData: FormData) {
 
   // Verify current password
   let localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
-  let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || 'axonwall';
+  let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || '';
 
-  try {
-    if (fs.existsSync('/etc/axonwall/admin.env')) {
-      const content = fs.readFileSync('/etc/axonwall/admin.env', 'utf-8');
-      for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('LOCAL_ADMIN_USER=')) {
-          localAdminUser = trimmed.substring('LOCAL_ADMIN_USER='.length);
-        } else if (trimmed.startsWith('LOCAL_ADMIN_PASSWORD=')) {
-          localAdminPass = trimmed.substring('LOCAL_ADMIN_PASSWORD='.length);
+  for (const adminEnvPath of ['/var/lib/axonwall/etc-axonwall/admin.env', '/etc/axonwall/admin.env']) {
+    try {
+      if (fs.existsSync(adminEnvPath)) {
+        const content = fs.readFileSync(adminEnvPath, 'utf-8');
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('LOCAL_ADMIN_USER=')) {
+            localAdminUser = trimmed.substring('LOCAL_ADMIN_USER='.length);
+          } else if (trimmed.startsWith('LOCAL_ADMIN_PASSWORD=')) {
+            localAdminPass = trimmed.substring('LOCAL_ADMIN_PASSWORD='.length);
+          }
         }
+        if (localAdminPass) break;
       }
-    }
-  } catch {}
+    } catch {}
+  }
+
+  if (!localAdminPass) {
+    return { error: 'Local administrator account is not configured' };
+  }
 
   const authRes = authenticateLocalAdmin(session.username, currentPassword, localAdminUser, localAdminPass);
   if (!authRes.success) {
@@ -449,20 +460,30 @@ export async function changeAdminPasswordAction(formData: FormData) {
     if (!fs.existsSync('/etc/axonwall')) {
       fs.mkdirSync('/etc/axonwall', { recursive: true, mode: 0o755 });
     }
-    if (!fs.existsSync('/var/lib/axonwall')) {
-      fs.mkdirSync('/var/lib/axonwall', { recursive: true, mode: 0o755 });
-    }
 
     const envContent = `LOCAL_ADMIN_USER=${localAdminUser}\nLOCAL_ADMIN_PASSWORD=${hashedSecret}\n`;
     fs.writeFileSync('/etc/axonwall/admin.env', envContent, { mode: 0o600 });
+    try { fs.chmodSync('/etc/axonwall/admin.env', 0o600); } catch {}
+
+    // Mirror to /var/lib/axonwall/etc-axonwall/admin.env for A/B rootfs persistence
+    try {
+      const persistentDir = '/var/lib/axonwall/etc-axonwall';
+      if (!fs.existsSync(persistentDir)) {
+        fs.mkdirSync(persistentDir, { recursive: true, mode: 0o755 });
+      }
+      fs.writeFileSync(`${persistentDir}/admin.env`, envContent, { mode: 0o600 });
+      fs.chmodSync(`${persistentDir}/admin.env`, 0o600);
+    } catch {}
 
     const now = new Date().toISOString();
-    fs.writeFileSync('/etc/axonwall/.password_changed', now, { mode: 0o644 });
-    fs.writeFileSync('/var/lib/axonwall/.password_changed', now, { mode: 0o644 });
+    try { fs.writeFileSync('/etc/axonwall/.password_changed', now, { mode: 0o644 }); } catch {}
+    try { fs.writeFileSync('/var/lib/axonwall/.password_changed', now, { mode: 0o644 }); } catch {}
 
-    if (fs.existsSync('/etc/axonwall/initial-admin-password')) {
-      fs.unlinkSync('/etc/axonwall/initial-admin-password');
-    }
+    try {
+      if (fs.existsSync('/etc/axonwall/initial-admin-password')) {
+        fs.unlinkSync('/etc/axonwall/initial-admin-password');
+      }
+    } catch {}
 
     // A password change ends every outstanding session (audit B-09).
     bumpSessionEpoch();
@@ -470,14 +491,7 @@ export async function changeAdminPasswordAction(formData: FormData) {
     process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
     return { success: true };
   } catch (err: any) {
-    // Development fallback if lacking root permissions
-    try {
-      fs.writeFileSync('./.password_changed', new Date().toISOString());
-      process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
-      return { success: true };
-    } catch {
-      return { error: `Failed to persist new credentials: ${err.message}` };
-    }
+    return { error: `Failed to persist new credentials: ${err.message}` };
   }
 }
 

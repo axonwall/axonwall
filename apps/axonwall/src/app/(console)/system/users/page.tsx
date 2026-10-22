@@ -30,13 +30,13 @@ import Link from 'next/link';
 function defaultShellForRole(role: ApplianceRole): string {
   switch (role) {
     case 'admin':
-      return '/bin/bash';
+      return '/usr/bin/zsh';
     case 'operator':
       return '/usr/local/bin/axonwall-opshell';
     case 'readonly':
       return '/usr/sbin/nologin';
     default:
-      return '/bin/bash';
+      return '/usr/bin/zsh';
   }
 }
 
@@ -1126,7 +1126,7 @@ export default function LocalUsersPage() {
                       <span>Administrator</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      Full access + sudo + /bin/bash shell.
+                      Full access + sudo + /usr/bin/zsh shell (Starship).
                     </p>
                   </label>
 
@@ -1150,7 +1150,7 @@ export default function LocalUsersPage() {
                       <span>Operator</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      Network/firewall ops + restricted Operator Shell.
+                      Network/firewall ops + Ink TUI & Operator Shell.
                     </p>
                   </label>
 
@@ -1198,7 +1198,7 @@ export default function LocalUsersPage() {
                       <span>OS Shell Only</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      SSH shell access without Web Console login.
+                      SSH ZSH shell access without Web Console login.
                     </p>
                   </label>
                 </div>
@@ -1242,8 +1242,9 @@ export default function LocalUsersPage() {
                     onChange={(e) => setFormShell(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
                   >
-                    <option value="/usr/local/bin/axonwall-opshell">/usr/local/bin/axonwall-opshell (Restricted Operator Menu)</option>
-                    <option value="/bin/bash">/bin/bash (Full Admin Bash Shell)</option>
+                    <option value="/usr/bin/zsh">/usr/bin/zsh (Modern ZSH + Starship — Default Shell)</option>
+                    <option value="/usr/local/bin/axonwall-opshell">/usr/local/bin/axonwall-opshell (Restricted Operator Menu & Ink TUI)</option>
+                    <option value="/bin/bash">/bin/bash (GNU Bourne-Again Shell)</option>
                     <option value="/bin/sh">/bin/sh (POSIX Bourne Shell)</option>
                     <option value="/usr/sbin/nologin">/usr/sbin/nologin (Web Console Only / No SSH Shell)</option>
                     <option value="/bin/false">/bin/false (Disabled Shell)</option>

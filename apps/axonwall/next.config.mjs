@@ -14,6 +14,7 @@ const cspHeader = `
 const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
+  transpilePackages: ['nastymap'],
   experimental: {
     serverActions: {
       bodySizeLimit: '2mb',

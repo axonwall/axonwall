@@ -173,7 +173,64 @@ ENV_EOF
             fi
         fi
 
-        # 5b. Sync any regular systemd unit files in /etc/systemd/system/ so ISO-placed copies do not shadow updated /lib/systemd/system/ units
+        # 5b. Configure VIM as standard editor & vi via update-alternatives, and ZSH as default interactive shell
+        for vim_bin in /usr/bin/vim.basic /usr/bin/vim.nox /usr/bin/vim.tiny /usr/bin/vim; do
+            if [ -x "$vim_bin" ] && command -v update-alternatives >/dev/null 2>&1; then
+                update-alternatives --set editor "$vim_bin" >/dev/null 2>&1 || true
+                update-alternatives --set vi "$vim_bin" >/dev/null 2>&1 || true
+                update-alternatives --set view "$vim_bin" >/dev/null 2>&1 || true
+                break
+            fi
+        done
+
+        if [ -x /usr/bin/zsh ]; then
+            if [ -f /etc/shells ] && ! grep -qxF '/usr/bin/zsh' /etc/shells; then
+                echo '/usr/bin/zsh' >> /etc/shells
+            fi
+            if [ -f /etc/zsh/zshrc ] && ! grep -q '/etc/zsh/axonwall.zsh' /etc/zsh/zshrc; then
+                printf '\n# Load Axonwall ZSH environment\n[ -f /etc/zsh/axonwall.zsh ] && source /etc/zsh/axonwall.zsh\n' >> /etc/zsh/zshrc
+            fi
+            mkdir -p /etc/skel
+            if [ ! -f /etc/skel/.zshrc ]; then
+                printf '# Axonwall Default User ZSH Profile\n[ -f /etc/zsh/axonwall.zsh ] && source /etc/zsh/axonwall.zsh\n' > /etc/skel/.zshrc
+            fi
+            if [ ! -f /root/.zshrc ]; then
+                printf '# Axonwall Root ZSH Profile\n[ -f /etc/zsh/axonwall.zsh ] && source /etc/zsh/axonwall.zsh\n' > /root/.zshrc
+            fi
+            chsh -s /usr/bin/zsh root 2>/dev/null || usermod -s /usr/bin/zsh root 2>/dev/null || true
+
+            # Set /usr/bin/zsh as default shell for any existing local interactive shell users (UID 1000..59999)
+            if [ -f /etc/passwd ]; then
+                awk -F: '($3 >= 1000 && $3 < 60000 && ($7 == "/bin/bash" || $7 == "/bin/sh")) {print $1 ":" $3 ":" $4 ":" $6}' /etc/passwd | while IFS=: read -r uname uid gid homedir; do
+                    usermod -s /usr/bin/zsh "$uname" 2>/dev/null || true
+                    if [ -n "$homedir" ] && [ -d "$homedir" ] && [ ! -f "${homedir}/.zshrc" ]; then
+                        cp /etc/skel/.zshrc "${homedir}/.zshrc" 2>/dev/null || true
+                        chown "${uid}:${gid}" "${homedir}/.zshrc" 2>/dev/null || true
+                    fi
+                done
+            fi
+
+            if [ -f /etc/default/useradd ]; then
+                if grep -q '^SHELL=' /etc/default/useradd; then
+                    sed -i 's|^SHELL=.*|SHELL=/usr/bin/zsh|' /etc/default/useradd 2>/dev/null || true
+                else
+                    echo 'SHELL=/usr/bin/zsh' >> /etc/default/useradd 2>/dev/null || true
+                fi
+            fi
+            if [ -f /etc/adduser.conf ]; then
+                if grep -q '^DSHELL=' /etc/adduser.conf; then
+                    sed -i 's|^DSHELL=.*|DSHELL=/usr/bin/zsh|' /etc/adduser.conf 2>/dev/null || true
+                else
+                    echo 'DSHELL=/usr/bin/zsh' >> /etc/adduser.conf 2>/dev/null || true
+                fi
+            fi
+        fi
+
+        if [ -f /etc/default/sysstat ]; then
+            sed -i 's/^ENABLED="false"/ENABLED="true"/' /etc/default/sysstat 2>/dev/null || true
+        fi
+
+        # 5c. Sync any regular systemd unit files in /etc/systemd/system/ so ISO-placed copies do not shadow updated /lib/systemd/system/ units
         for unit in axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service; do
             if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then
                 cp "/lib/systemd/system/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null || true
@@ -183,8 +240,8 @@ ENV_EOF
         # 6. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service ssh.service chrony.service || true
-            systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service || true
+            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service ssh.service chrony.service sysstat.service || true
+            systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
         fi
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)

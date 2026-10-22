@@ -29,6 +29,7 @@ domains = axonwall
 [nss]
 filter_users = root,axonwall,axonwall-controller,openldap,sshd,nobody
 filter_groups = root,axonwall,axonwall-api,axonwall-controller,openldap,sshd,nogroup
+default_shell = /usr/bin/zsh
 entry_negative_timeout = 5
 
 [pam]
@@ -53,20 +54,83 @@ entry_cache_timeout = 30
 `, ldapURI, baseDN, baseDN, baseDN, tlsBlock)
 }
 
+// hasSSSD returns true if the SSSD daemon binary is installed on the host OS (Debian/glibc).
+func hasSSSD() bool {
+	_, err := exec.LookPath("sssd")
+	return err == nil
+}
+
+// EnsureAuthorizedKeysHelperInstalled writes /usr/local/bin/axonwall-ssh-authorizedkeys
+// and symlinks /usr/bin/sss_ssh_authorizedkeys to it if sss_ssh_authorizedkeys is absent (e.g. Alpine/musl),
+// enabling sshd AuthorizedKeysCommand to resolve sshPublicKey directly from OpenLDAP.
+func EnsureAuthorizedKeysHelperInstalled() {
+	helperPath := "/usr/local/bin/axonwall-ssh-authorizedkeys"
+	helperScript := `#!/bin/sh
+# Managed by Axonwall Identity Engine — OpenLDAP SSH AuthorizedKeysCommand helper
+USER_ARG="${1:-}"
+case "$USER_ARG" in
+  ""|*[!a-z0-9_-]*) exit 0 ;;
+esac
+BASE_DN="dc=axonwall,dc=local"
+if [ -r /var/lib/axonwall/ldap/BASE_DN ]; then
+  ReadDN="$(tr -d '[:space:]' < /var/lib/axonwall/ldap/BASE_DN)"
+  [ -n "$ReadDN" ] && BASE_DN="$ReadDN"
+fi
+if command -v ldapsearch >/dev/null 2>&1; then
+  ldapsearch -LLL -o ldif-wrap=no -x -H ldap://127.0.0.1:389 \
+    -b "ou=users,${BASE_DN}" "(uid=${USER_ARG})" sshPublicKey 2>/dev/null \
+    | sed -n 's/^sshPublicKey: //p'
+fi
+if [ -r "/home/${USER_ARG}/.ssh/authorized_keys" ]; then
+  cat "/home/${USER_ARG}/.ssh/authorized_keys" 2>/dev/null || true
+fi
+`
+	_ = os.MkdirAll("/usr/local/bin", 0755)
+	if err := os.WriteFile(helperPath, []byte(helperScript), 0755); err == nil {
+		_ = os.Chmod(helperPath, 0755)
+	}
+	if _, err := os.Stat("/usr/bin/sss_ssh_authorizedkeys"); os.IsNotExist(err) {
+		_ = os.MkdirAll("/usr/bin", 0755)
+		_ = os.Symlink(helperPath, "/usr/bin/sss_ssh_authorizedkeys")
+	}
+}
+
 // EnsureSSSDConfigured writes /etc/sssd/sssd.conf (mode 0600), updates /etc/nsswitch.conf
 // (`files sss`), enables pam_mkhomedir, registers /usr/local/bin/axonwall-opshell in /etc/shells,
-// and starts sssd.
+// and starts sssd (or configures the lightweight OpenLDAP NSS/SSH bridge on Alpine/musl).
 func EnsureSSSDConfigured(baseDN string) error {
 	return EnsureSSSDConfiguredWithPeer(baseDN, "")
 }
 
 // EnsureSSSDConfiguredWithPeer configures SSSD with optional HA peer LDAPS failover.
 func EnsureSSSDConfiguredWithPeer(baseDN string, peerLDAPURI string) error {
-	// 1. Register /usr/local/bin/axonwall-opshell in /etc/shells
+	// 0. On minimal appliances (e.g., Alpine MINIMAL=1) where /usr/bin/zsh is not installed,
+	// symlink /usr/bin/zsh -> /bin/ash (or /bin/sh) so LDAP users with loginShell=/usr/bin/zsh
+	// (including users replicated from a Debian HA node) can log in over SSH cleanly.
+	if _, err := os.Stat("/usr/bin/zsh"); os.IsNotExist(err) {
+		if _, err := os.Stat("/bin/zsh"); err == nil {
+			_ = os.Symlink("/bin/zsh", "/usr/bin/zsh")
+		} else if _, err := os.Stat("/bin/ash"); err == nil {
+			_ = os.Symlink("/bin/ash", "/usr/bin/zsh")
+		} else {
+			_ = os.Symlink("/bin/sh", "/usr/bin/zsh")
+		}
+	}
+
+	EnsureAuthorizedKeysHelperInstalled()
+
+	// 1. Register /usr/local/bin/axonwall-opshell and /usr/bin/zsh in /etc/shells
 	if shellsData, err := os.ReadFile("/etc/shells"); err == nil {
-		if !strings.Contains(string(shellsData), "/usr/local/bin/axonwall-opshell") {
-			updated := strings.TrimRight(string(shellsData), "\n") + "\n/usr/local/bin/axonwall-opshell\n"
-			_ = os.WriteFile("/etc/shells", []byte(updated), 0644)
+		updated := strings.TrimRight(string(shellsData), "\n")
+		changed := false
+		for _, sh := range []string{"/usr/bin/zsh", "/bin/zsh", "/usr/local/bin/axonwall-opshell"} {
+			if !strings.Contains(updated+"\n", sh+"\n") {
+				updated += "\n" + sh
+				changed = true
+			}
+		}
+		if changed {
+			_ = os.WriteFile("/etc/shells", []byte(updated+"\n"), 0644)
 		}
 	}
 
@@ -77,13 +141,19 @@ func EnsureSSSDConfiguredWithPeer(baseDN string, peerLDAPURI string) error {
 		sudoersContent := `# Managed by Axonwall Identity Engine
 Defaults env_reset
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-%axonwall-admin ALL=(ALL:ALL) ALL
-Cmnd_Alias AXONWALL_OP_CMDS = /usr/sbin/axonwall-console, /usr/local/bin/axonwallctl status, /usr/local/bin/axonwallctl diff, /usr/local/bin/axonwallctl validate, /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager
+%axonwall-admin ALL=(ALL:ALL) NOPASSWD: ALL
+Cmnd_Alias AXONWALL_OP_CMDS = /usr/sbin/axonwall-console, /usr/local/bin/axonwall-tui, /usr/local/bin/axonwall-tui *, /usr/local/bin/axonwallctl status, /usr/local/bin/axonwallctl diff, /usr/local/bin/axonwallctl validate, /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager
 %axonwall-operator ALL=(root) NOPASSWD: AXONWALL_OP_CMDS
 `
 		_ = os.WriteFile(sudoersPath, []byte(sudoersContent), 0440)
 	} else {
 		_ = os.Chmod(sudoersPath, 0440)
+	}
+
+	// If SSSD is not installed (e.g. Alpine Linux / musl libc), DirectoryManager mirrors
+	// LDAP POSIX entries directly into /etc/passwd and /etc/group and uses axonwall-ssh-authorizedkeys.
+	if !hasSSSD() {
+		return nil
 	}
 
 	// 3. Ensure /etc/nsswitch.conf resolves passwd, group, shadow via "files sss"
@@ -117,9 +187,6 @@ Cmnd_Alias AXONWALL_OP_CMDS = /usr/sbin/axonwall-console, /usr/local/bin/axonwal
 	}
 
 	// 5. Write /etc/sssd/sssd.conf with mode 0600 root:root
-	if _, err := exec.LookPath("sssd"); err != nil {
-		return fmt.Errorf("sssd binary not installed: %w", err)
-	}
 	if err := os.MkdirAll("/etc/sssd", 0700); err != nil {
 		return err
 	}

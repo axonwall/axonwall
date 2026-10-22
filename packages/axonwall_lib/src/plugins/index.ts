@@ -187,6 +187,41 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       icon: 'Activity',
     },
   },
+  {
+    id: 'cli-workstation',
+    name: 'Modern Operator Shell & Editor (ZSH, Starship & VIM)',
+    version: '1.0.0',
+    category: 'extension',
+    description: 'Pre-configured productivity environment with ZSH, Starship cyber-emerald prompt, live Commit-Confirm rollback indicator, VIM syntax defaults, and Tmux terminal multiplexer.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.users', 'system.hardware'],
+    packages: {
+      debian: ['zsh', 'vim', 'tmux'],
+      alpine: ['zsh', 'vim', 'starship', 'tmux'],
+    },
+    cliBinaries: ['zsh', 'vim', 'starship', 'tmux'],
+  },
+  {
+    id: 'cli-diagnostics-nastymap',
+    name: 'NastyMap & Live CLI Telemetry Suite',
+    version: '1.0.0',
+    category: 'extension',
+    description: 'Autonomous host discovery and vulnerability auditing with NastyMap & Nmap, plus real-time system/network monitors (btop, htop, iftop, iotop, slurm, sysstat, dnsutils).',
+    author: 'Axonwall Core / NastyMap',
+    systemdUnits: [],
+    privileges: ['system.monitoring', 'network.interfaces'],
+    packages: {
+      debian: ['nmap', 'dnsutils', 'net-tools', 'btop', 'htop', 'iftop', 'iotop', 'slurm', 'sysstat'],
+      alpine: ['nmap', 'bind-tools', 'net-tools', 'btop', 'htop', 'iftop', 'sysstat'],
+    },
+    cliBinaries: ['nmap', 'dig', 'netstat', 'btop', 'htop', 'iftop', 'iostat', 'mpstat'],
+    menuEntry: {
+      title: 'Diagnostics & NastyMap',
+      path: '/diagnostics',
+      icon: 'Terminal',
+    },
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {

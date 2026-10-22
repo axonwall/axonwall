@@ -230,8 +230,14 @@ fi
 if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwallctl.js" ]]; then
   cp "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwallctl.js" config/includes.chroot/opt/axonwall/apps/axonwall-controller/dist/
 fi
+if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
+  cp "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwall-tui.js" config/includes.chroot/opt/axonwall/apps/axonwall-controller/dist/
+fi
 if [[ -f config/includes.chroot/usr/local/bin/axonwallctl ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwallctl
+fi
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-tui ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-tui
 fi
 
 # NOTE: TLS certificates are intentionally NOT generated here. A key baked into the
@@ -317,6 +323,26 @@ jq
 ca-certificates
 nodejs
 net-tools
+dnsutils
+nmap
+zsh
+vim
+btop
+htop
+sysstat
+iotop
+iftop
+slurm
+starship
+zoxide
+zsh-autosuggestions
+zsh-syntax-highlighting
+tmux
+fzf
+ripgrep
+fd-find
+bat
+mtr-tiny
 openssl
 kmod
 procps
@@ -330,6 +356,12 @@ gdisk
 parted
 smartmontools
 zfsutils-linux
+cloud-init
+cloud-guest-utils
+cryptsetup
+systemd-cryptsetup
+tpm2-tools
+xfsprogs
 samba
 nfs-kernel-server
 open-iscsi

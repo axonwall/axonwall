@@ -10,7 +10,7 @@ WORK_DIR="${SCRIPT_DIR}/build"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 
 # Extract version from package.json
-VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.9.6")
+VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.11.3")
 ARCH="amd64"
 PKG_NAME="axonwall_${VERSION}_${ARCH}"
 
@@ -32,8 +32,8 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3
-Recommends: unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git
+Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, nmap
+Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
  Axonwall replaces legacy BSD/PHP firewalls (OPNsense/pfSense) with a
@@ -55,6 +55,9 @@ mkdir -p "${WORK_DIR}/etc/axonwall"
 mkdir -p "${WORK_DIR}/etc/headscale"
 mkdir -p "${WORK_DIR}/etc/sudoers.d"
 mkdir -p "${WORK_DIR}/etc/ssh/sshd_config.d"
+mkdir -p "${WORK_DIR}/etc/zsh"
+mkdir -p "${WORK_DIR}/etc/skel"
+mkdir -p "${WORK_DIR}/etc/vim"
 mkdir -p "${WORK_DIR}/usr/share/axonwall"
 mkdir -p "${WORK_DIR}/usr/share/axonwall/satellites"
 mkdir -p "${WORK_DIR}/usr/lib/sysusers.d"
@@ -115,7 +118,7 @@ if [[ ! -f "${WORK_DIR}/usr/sbin/litestream" ]]; then
   rm -f "${LITE_TAR}"
 fi
 
-# 5. Copy System Scripts
+# 5. Copy System Scripts & Terminal Configs
 CHROOT_SRC="${ROOT_DIR}/packaging/iso/config/includes.chroot"
 if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-firstboot" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwall-firstboot" "${WORK_DIR}/usr/local/bin/"
@@ -140,6 +143,34 @@ fi
 if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwallctl" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwallctl" "${WORK_DIR}/usr/local/bin/"
   chmod 755 "${WORK_DIR}/usr/local/bin/axonwallctl"
+fi
+if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-tui" ]]; then
+  cp "${CHROOT_SRC}/usr/local/bin/axonwall-tui" "${WORK_DIR}/usr/local/bin/"
+  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-tui"
+fi
+if [[ -f "${CHROOT_SRC}/etc/axonwall/starship.toml" ]]; then
+  cp "${CHROOT_SRC}/etc/axonwall/starship.toml" "${WORK_DIR}/etc/axonwall/starship.toml"
+  chmod 0644 "${WORK_DIR}/etc/axonwall/starship.toml"
+fi
+if [[ -f "${CHROOT_SRC}/etc/zsh/axonwall.zsh" ]]; then
+  cp "${CHROOT_SRC}/etc/zsh/axonwall.zsh" "${WORK_DIR}/etc/zsh/axonwall.zsh"
+  chmod 0644 "${WORK_DIR}/etc/zsh/axonwall.zsh"
+fi
+if [[ -f "${CHROOT_SRC}/etc/zsh/zshenv" ]]; then
+  cp "${CHROOT_SRC}/etc/zsh/zshenv" "${WORK_DIR}/etc/zsh/zshenv"
+  chmod 0644 "${WORK_DIR}/etc/zsh/zshenv"
+fi
+if [[ -f "${CHROOT_SRC}/etc/skel/.zshrc" ]]; then
+  cp "${CHROOT_SRC}/etc/skel/.zshrc" "${WORK_DIR}/etc/skel/.zshrc"
+  chmod 0644 "${WORK_DIR}/etc/skel/.zshrc"
+fi
+if [[ -f "${CHROOT_SRC}/etc/vim/vimrc.local" ]]; then
+  cp "${CHROOT_SRC}/etc/vim/vimrc.local" "${WORK_DIR}/etc/vim/vimrc.local"
+  chmod 0644 "${WORK_DIR}/etc/vim/vimrc.local"
+fi
+if [[ -f "${CHROOT_SRC}/etc/tmux.conf" ]]; then
+  cp "${CHROOT_SRC}/etc/tmux.conf" "${WORK_DIR}/etc/tmux.conf"
+  chmod 0644 "${WORK_DIR}/etc/tmux.conf"
 fi
 if [[ -f "${CHROOT_SRC}/etc/sudoers.d/axonwall" ]]; then
   cp "${CHROOT_SRC}/etc/sudoers.d/axonwall" "${WORK_DIR}/etc/sudoers.d/axonwall"
@@ -190,6 +221,9 @@ if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/index.js" ]]; then
 fi
 if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
+fi
+if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
+  cp "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
 fi
 
 # 8. Build Debian Archive via dpkg-deb (or docker fallback if dpkg-deb is absent)

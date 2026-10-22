@@ -6,6 +6,8 @@ import { compileCrowdSec } from '../crowdsec/index.js';
 import { compileGeoIp } from '../geoip/index.js';
 import { compileNas } from '../nas/index.js';
 import { compileK3s } from '../k3s/index.js';
+import { compileKeaDhcp4 } from '../kea/index.js';
+import { compileFrr } from '../frr/index.js';
 
 export interface CompileResult {
   nftScript: string;
@@ -130,6 +132,76 @@ export function compileNftables(state: DesiredState): CompileResult {
       ),
       fileMode: 0o600,
     });
+  }
+
+  // Emit High Availability runtime configuration
+  if (state.ha) {
+    files.push({
+      path: '/etc/axonwall/managed/ha_config.json',
+      content: JSON.stringify(state.ha, null, 2),
+      fileMode: 0o600,
+    });
+  }
+
+  // Emit SD-WAN Gateway & probe configuration
+  if ((state.gateways && state.gateways.length > 0) || (state.gatewayGroups && state.gatewayGroups.length > 0)) {
+    files.push({
+      path: '/etc/axonwall/managed/sdwan_config.json',
+      content: JSON.stringify(
+        {
+          gateways: state.gateways || [],
+          gatewayGroups: state.gatewayGroups || [],
+        },
+        null,
+        2,
+      ),
+      fileMode: 0o600,
+    });
+  }
+
+  // Emit Zero Trust Identity-Aware Proxy (IAP) configuration
+  if (state.zeroTrust) {
+    files.push({
+      path: '/etc/axonwall/managed/zero_trust_apps.json',
+      content: JSON.stringify(state.zeroTrust, null, 2),
+      fileMode: 0o600,
+    });
+  }
+
+  // Emit Vigilante threat defense configuration
+  if (state.vigilante) {
+    files.push({
+      path: '/etc/axonwall/managed/vigilante_config.json',
+      content: JSON.stringify(state.vigilante, null, 2),
+      fileMode: 0o600,
+    });
+  }
+
+  // Emit Kea DHCPv4 Server configuration
+  if (state.dhcp?.enabled && state.dhcp.subnets && state.dhcp.subnets.length > 0) {
+    const kea = compileKeaDhcp4(state.dhcp, state.interfaces);
+    files.push({
+      path: '/etc/kea/kea-dhcp4.conf',
+      content: kea.keaDhcp4Config,
+      fileMode: 0o644,
+    });
+    reloadServices.push('kea-dhcp4-server');
+  }
+
+  // Emit FRRouting (FRR) configuration
+  if (state.frr?.enabled) {
+    const frr = compileFrr(state.frr);
+    files.push({
+      path: '/etc/frr/frr.conf',
+      content: frr.frrConf,
+      fileMode: 0o640,
+    });
+    files.push({
+      path: '/etc/frr/daemons',
+      content: frr.daemonsConf,
+      fileMode: 0o640,
+    });
+    reloadServices.push('frr');
   }
 
   // Helper to map interfaces to system devices

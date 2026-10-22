@@ -22,7 +22,7 @@ import { assertActionPermitted } from './auth-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
 
-import { callAgentApi as internalCallAgentApi } from './agent-client';
+import { callAgentApi } from './agent-client';
 
 export interface AgentStatus {
   nodeId: string;
@@ -42,10 +42,6 @@ export interface AgentStatus {
 let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
-
-export async function callAgentApi<T>(path: string, method = 'GET', body?: any, timeoutMs = 4000): Promise<T | null> {
-  return internalCallAgentApi<T>(path, method, body, timeoutMs);
-}
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
@@ -114,7 +110,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   if (daemonStatus) {
     return {
       nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
-      version: daemonStatus.version || '0.9.6',
+      version: daemonStatus.version || '0.11.3',
       uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
@@ -150,7 +146,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.9.6',
+    version: '0.11.3',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
@@ -276,67 +272,55 @@ function buildBaselineState(): DesiredState {
 
 const BASELINE_STATE: DesiredState = buildBaselineState();
 
-const YAML_CONFIG_DIRS = [
-  process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall',
-  '/var/lib/axonwall/etc-axonwall',
-];
+const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR || '/etc/axonwall';
+const PERSIST_CONFIG_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
+const YAML_CONFIG_DIRS = [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR];
 
 let cachedDesiredState: DesiredState | null = null;
-let lastLoadedYamlMtimeMs = 0;
+let lastLoadedFingerprint = '';
 
-function getLatestYamlMtimeInDir(dir: string): { maxMtimeMs: number; count: number } {
-  let maxMtimeMs = 0;
-  let count = 0;
-  try {
-    if (!fs.existsSync(dir)) return { maxMtimeMs: 0, count: 0 };
+function readAllYamlConfigFiles(): {
+  files: Record<string, string>;
+  fingerprint: string;
+} {
+  const files: Record<string, string> = {};
+
+  // Read fallback from /var/lib/axonwall/etc-axonwall first, then overlay /etc/axonwall
+  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
+    if (!fs.existsSync(dir)) continue;
     for (const filename of AXONWALL_YAML_FILENAMES) {
       const fullPath = path.join(dir, filename);
       if (fs.existsSync(fullPath)) {
-        const stat = fs.statSync(fullPath);
-        count++;
-        if (stat.mtimeMs > maxMtimeMs) {
-          maxMtimeMs = stat.mtimeMs;
-        }
+        try {
+          files[filename] = fs.readFileSync(fullPath, 'utf8');
+        } catch {}
       }
+    }
+    const singlePath = path.join(dir, 'axonwall.yaml');
+    if (fs.existsSync(singlePath)) {
+      try {
+        files['axonwall.yaml'] = fs.readFileSync(singlePath, 'utf8');
+      } catch {}
     }
     const confD = path.join(dir, 'conf.d');
     if (fs.existsSync(confD)) {
-      for (const entry of fs.readdirSync(confD)) {
-        if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
-          const stat = fs.statSync(path.join(confD, entry));
-          count++;
-          if (stat.mtimeMs > maxMtimeMs) {
-            maxMtimeMs = stat.mtimeMs;
+      try {
+        for (const entry of fs.readdirSync(confD).sort()) {
+          if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
+            const entryPath = path.join(confD, entry);
+            files[`conf.d/${entry}`] = fs.readFileSync(entryPath, 'utf8');
           }
         }
-      }
+      } catch {}
     }
-  } catch {}
-  return { maxMtimeMs, count };
-}
-
-function readYamlFilesFromDir(dir: string): Record<string, string> | null {
-  try {
-    if (!fs.existsSync(dir)) return null;
-    const files: Record<string, string> = {};
-    for (const filename of AXONWALL_YAML_FILENAMES) {
-      const fullPath = path.join(dir, filename);
-      if (fs.existsSync(fullPath)) {
-        files[filename] = fs.readFileSync(fullPath, 'utf8');
-      }
-    }
-    const confD = path.join(dir, 'conf.d');
-    if (fs.existsSync(confD)) {
-      for (const entry of fs.readdirSync(confD).sort()) {
-        if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
-          files[`conf.d/${entry}`] = fs.readFileSync(path.join(confD, entry), 'utf8');
-        }
-      }
-    }
-    return Object.keys(files).length > 0 ? files : null;
-  } catch {
-    return null;
   }
+
+  const hash = crypto.createHash('sha256');
+  for (const [k, v] of Object.entries(files).sort()) {
+    hash.update(`${k}:${v}\n`);
+  }
+
+  return { files, fingerprint: hash.digest('hex') };
 }
 
 function persistDesiredStateToDisk(state: DesiredState): Record<string, string> {
@@ -348,7 +332,7 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
     daemonFileMap[`/etc/axonwall/${filename}`] = content;
   }
 
-  for (const dir of YAML_CONFIG_DIRS) {
+  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
     try {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
@@ -370,35 +354,143 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
     } catch {}
   }
 
-  let newestMtime = Date.now();
-  for (const dir of YAML_CONFIG_DIRS) {
-    const { maxMtimeMs } = getLatestYamlMtimeInDir(dir);
-    if (maxMtimeMs > newestMtime) newestMtime = maxMtimeMs;
-  }
   cachedDesiredState = normalized;
-  lastLoadedYamlMtimeMs = newestMtime;
+  const { fingerprint } = readAllYamlConfigFiles();
+  lastLoadedFingerprint = fingerprint;
   return daemonFileMap;
 }
 
-export async function getDesiredStateInternal(): Promise<DesiredState> {
-  // 1. Check if /etc/axonwall/*.yaml (or /var/lib/axonwall/etc-axonwall/*.yaml) exists and whether any file was modified on disk
-  for (const dir of YAML_CONFIG_DIRS) {
-    const { maxMtimeMs, count } = getLatestYamlMtimeInDir(dir);
-    if (count > 0) {
-      if (cachedDesiredState && maxMtimeMs <= lastLoadedYamlMtimeMs) {
-        return structuredClone(cachedDesiredState);
+function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: string; confContent: string } {
+  const wanIface = state.interfaces?.find((i) => i.name === 'wan');
+  const lanIface = state.interfaces?.find((i) => i.name === 'lan');
+  const opt1Iface = state.interfaces?.find((i) => i.name === 'opt1');
+  const opt2Iface = state.interfaces?.find((i) => i.name === 'opt2');
+
+  const confLines = [
+    `WAN_INTERFACE=${wanIface?.device || 'eth0'}`,
+    `WAN_MODE=${wanIface?.type || 'dhcp'}`,
+    `WAN_IPV4_ADDRESS=${wanIface?.ipv4Address || ''}`,
+    `WAN_IPV4_GATEWAY=${wanIface?.ipv4Gateway || ''}`,
+    `WAN_DNS1=${state.system?.dnsServers?.[0] || '1.1.1.1'}`,
+    `WAN_DNS2=${state.system?.dnsServers?.[1] || '8.8.8.8'}`,
+    `LAN_INTERFACE=${lanIface?.device || 'eth1'}`,
+    `LAN_MODE=${lanIface?.type || 'static'}`,
+    `LAN_IPV4_ADDRESS=${lanIface?.ipv4Address || '192.168.1.1/24'}`,
+    `LAN_DHCP_ENABLED=${state.dhcp?.enabled ?? true}`,
+    `OPT1_INTERFACE=${opt1Iface?.device || ''}`,
+    `OPT1_MODE=${opt1Iface?.type || 'dhcp'}`,
+    `OPT1_IPV4_ADDRESS=${opt1Iface?.ipv4Address || ''}`,
+    `OPT2_INTERFACE=${opt2Iface?.device || ''}`,
+    `OPT2_MODE=${opt2Iface?.type || 'dhcp'}`,
+    `OPT2_IPV4_ADDRESS=${opt2Iface?.ipv4Address || ''}`,
+  ];
+  const confContent = confLines.join('\n') + '\n';
+
+  for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+    try {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+      fs.writeFileSync(path.join(dir, 'interfaces.conf'), confContent, { mode: 0o644 });
+    } catch {}
+  }
+
+  const cidrToNetmask = (cidr: number): string => {
+    const mask = [];
+    for (let i = 0; i < 4; i++) {
+      const bits = Math.max(0, Math.min(8, cidr - i * 8));
+      mask.push(256 - Math.pow(2, 8 - bits));
+    }
+    return mask.join('.');
+  };
+
+  const routes = (state.routes || []).filter((r) => r.enabled ?? true);
+
+  const renderIfaceStanza = (label: string, ifaceObj?: typeof wanIface) => {
+    if (!ifaceObj || !ifaceObj.device || !ifaceObj.enabled) return '';
+    let s = `# ${label} Interface\nauto ${ifaceObj.device}\n`;
+    if (ifaceObj.type === 'static' && ifaceObj.ipv4Address) {
+      const parts = ifaceObj.ipv4Address.split('/');
+      const ip = parts[0];
+      const cidr = parts[1] ? parseInt(parts[1], 10) : 24;
+      s += `iface ${ifaceObj.device} inet static\n`;
+      s += `    address ${ip}\n`;
+      s += `    netmask ${cidrToNetmask(cidr)}\n`;
+      if (ifaceObj.ipv4Gateway) {
+        s += `    gateway ${ifaceObj.ipv4Gateway}\n`;
       }
-      const rawYamlMap = readYamlFilesFromDir(dir);
-      if (rawYamlMap) {
-        try {
-          const parsed = parseDesiredStateFromYamlFiles(rawYamlMap);
-          cachedDesiredState = parsed;
-          lastLoadedYamlMtimeMs = maxMtimeMs;
-          return structuredClone(cachedDesiredState);
-        } catch (err) {
-          console.error(`[axonwall] Failed to parse YAML files in ${dir}:`, err);
-        }
+      if (state.system?.dnsServers && state.system.dnsServers.length > 0) {
+        s += `    dns-nameservers ${state.system.dnsServers.join(' ')}\n`;
       }
+    } else {
+      s += `iface ${ifaceObj.device} inet dhcp\n`;
+    }
+
+    // Attach static routes bound to this interface
+    const ifaceRoutes = routes.filter((r) => {
+      const iface = (r.interface || '').toLowerCase().trim();
+      return iface === label.toLowerCase() || iface === ifaceObj.name?.toLowerCase() || iface === ifaceObj.device.toLowerCase();
+    });
+
+    for (const r of ifaceRoutes) {
+      if (r.network && r.gateway) {
+        s += `    up ip route replace ${r.network} via ${r.gateway} dev ${ifaceObj.device} proto static || true\n`;
+        s += `    down ip route del ${r.network} proto static || true\n`;
+      }
+    }
+
+    return s + '\n';
+  };
+
+  let ifaces = '# /etc/network/interfaces -- Generated by Axonwall\n';
+  ifaces += '# This file is managed by Axonwall. Manual changes will be overwritten.\n\n';
+  ifaces += 'auto lo\niface lo inet loopback\n\n';
+
+  ifaces += renderIfaceStanza('WAN', wanIface);
+  ifaces += renderIfaceStanza('LAN', lanIface);
+  ifaces += renderIfaceStanza('OPT1', opt1Iface);
+  ifaces += renderIfaceStanza('OPT2', opt2Iface);
+
+  const unboundRoutes = routes.filter((r) => {
+    const iface = (r.interface || '').toLowerCase().trim();
+    return !iface || iface === 'auto';
+  });
+
+  if (unboundRoutes.length > 0) {
+    ifaces += '# System-wide Static Routes\n';
+    for (const r of unboundRoutes) {
+      if (r.network && r.gateway) {
+        ifaces += `# Route ${r.network} via ${r.gateway}\n`;
+      }
+    }
+  }
+
+  try {
+    if (!fs.existsSync('/etc/network')) {
+      fs.mkdirSync('/etc/network', { recursive: true });
+    }
+    fs.writeFileSync('/etc/network/interfaces', ifaces, 'utf8');
+    if (fs.existsSync('/etc/network/interfaces.d')) {
+      fs.writeFileSync('/etc/network/interfaces.d/axonwall', ifaces, 'utf8');
+    }
+  } catch {}
+
+  return { ifacesContent: ifaces, confContent };
+}
+
+async function getDesiredStateInternal(): Promise<DesiredState> {
+  // 1. Read overlaid /var/lib/axonwall/etc-axonwall and /etc/axonwall YAML configuration
+  const { files, fingerprint } = readAllYamlConfigFiles();
+
+  if (Object.keys(files).length > 0) {
+    if (cachedDesiredState && fingerprint === lastLoadedFingerprint) {
+      return structuredClone(cachedDesiredState);
+    }
+    try {
+      const parsed = parseDesiredStateFromYamlFiles(files);
+      cachedDesiredState = parsed;
+      lastLoadedFingerprint = fingerprint;
+      return structuredClone(cachedDesiredState);
+    } catch (err: any) {
+      console.error('[axonwall] Failed to parse YAML files:', err?.message || err);
     }
   }
 
@@ -438,20 +530,11 @@ export async function getYamlConfigFilesSnapshot(): Promise<{
 
   const state = await getCurrentDesiredState();
   const generated = serializeDesiredStateToYamlFiles(state);
-
-  for (const dir of YAML_CONFIG_DIRS) {
-    const onDisk = readYamlFilesFromDir(dir);
-    if (onDisk && Object.keys(onDisk).length > 0) {
-      return {
-        directory: dir,
-        files: { ...generated, ...onDisk },
-      };
-    }
-  }
+  const { files: onDisk } = readAllYamlConfigFiles();
 
   return {
-    directory: '/etc/axonwall',
-    files: generated,
+    directory: ETC_CONFIG_DIR,
+    files: { ...generated, ...onDisk },
   };
 }
 
@@ -521,6 +604,8 @@ export async function applyDesiredState(
 
   // 3. Persist /etc/axonwall/*.yaml to disk and include them in the daemon bundle
   const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
+  const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
+
   const allFiles = [
     ...files.map((f: any) => ({
       ...f,
@@ -533,6 +618,18 @@ export async function applyDesiredState(
       fileMode: 0o600,
       file_mode: 0o600,
     })),
+    {
+      path: '/etc/axonwall/interfaces.conf',
+      content: confContent,
+      fileMode: 0o644,
+      file_mode: 0o644,
+    },
+    {
+      path: '/etc/network/interfaces',
+      content: ifacesContent,
+      fileMode: 0o644,
+      file_mode: 0o644,
+    },
     {
       path: '/etc/axonwall/state.json',
       content: JSON.stringify(normalizedState, null, 2),
@@ -573,7 +670,27 @@ export async function applyDesiredState(
     };
   }
 
-  // Fallback for dev mode
+  // Fallback for dev mode / local execution
+  try {
+    const routes = normalizedState.routes || [];
+    for (const r of routes) {
+      if (!r.network || !r.gateway) continue;
+      const isV6 = r.network.includes(':') || r.gateway.includes(':');
+      const family = isV6 ? '-6' : '-4';
+      if (r.enabled ?? true) {
+        const args = [family, 'route', 'replace', r.network, 'via', r.gateway, 'proto', 'static'];
+        try {
+          execFileSync('ip', args, { stdio: 'ignore', timeout: 2000 });
+        } catch {}
+      } else {
+        const args = [family, 'route', 'del', r.network, 'proto', 'static'];
+        try {
+          execFileSync('ip', args, { stdio: 'ignore', timeout: 2000 });
+        } catch {}
+      }
+    }
+  } catch {}
+
   mockPendingConfirm = true;
   mockDeadline = Math.floor(Date.now() / 1000) + confirmTimeoutSeconds;
   mockActiveRuleset = nftScript;
@@ -590,6 +707,9 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  mockPendingConfirm = false;
+  mockDeadline = 0;
+
   const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
   if (daemonResp) {
     return {
@@ -598,8 +718,6 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
     };
   }
 
-  mockPendingConfirm = false;
-  mockDeadline = 0;
   return {
     success: true,
     message: 'Configuration confirmed. Promoted to last-known-good.',
@@ -610,6 +728,11 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  mockPendingConfirm = false;
+  mockDeadline = 0;
+  cachedDesiredState = null;
+  lastLoadedFingerprint = '';
+
   const daemonResp = await callAgentApi<any>('/v1/rollback', 'POST', { reason: 'operator rollback' });
   if (daemonResp) {
     return {
@@ -618,8 +741,6 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
     };
   }
 
-  mockPendingConfirm = false;
-  mockDeadline = 0;
   return {
     success: true,
     message: 'Successfully rolled back to previous last-known-good configuration.',
@@ -899,9 +1020,10 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
     let uptime: string | null = null;
 
     try {
-      const showOut = execSync(
-        `systemctl show ${u.unit} --property=ActiveState,SubState,MainPID,MemoryCurrent 2>/dev/null`,
-        { encoding: 'utf8', timeout: 500 }
+      const showOut = execFileSync(
+        'systemctl',
+        ['show', u.unit, '--property=ActiveState,SubState,MainPID,MemoryCurrent'],
+        { encoding: 'utf8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] }
       );
       const props: Record<string, string> = {};
       for (const line of showOut.split('\n')) {
@@ -1231,79 +1353,7 @@ export async function saveInterfaceAssignment(data: {
 
   // Persist device mappings and interface configuration into /etc/axonwall/interfaces.conf and /etc/network/interfaces
   try {
-    const wanIface = state.interfaces.find((i) => i.name === 'wan');
-    const lanIface = state.interfaces.find((i) => i.name === 'lan');
-    const opt1Iface = state.interfaces.find((i) => i.name === 'opt1');
-    const opt2Iface = state.interfaces.find((i) => i.name === 'opt2');
-
-    const confLines = [
-      `WAN_INTERFACE=${wanIface?.device || 'eth0'}`,
-      `WAN_MODE=${wanIface?.type || 'dhcp'}`,
-      `WAN_IPV4_ADDRESS=${wanIface?.ipv4Address || ''}`,
-      `WAN_IPV4_GATEWAY=${wanIface?.ipv4Gateway || ''}`,
-      `WAN_DNS1=${state.system?.dnsServers?.[0] || '1.1.1.1'}`,
-      `WAN_DNS2=${state.system?.dnsServers?.[1] || '8.8.8.8'}`,
-      `LAN_INTERFACE=${lanIface?.device || 'eth1'}`,
-      `LAN_MODE=${lanIface?.type || 'static'}`,
-      `LAN_IPV4_ADDRESS=${lanIface?.ipv4Address || '192.168.1.1/24'}`,
-      `LAN_DHCP_ENABLED=${state.dhcp?.enabled ?? true}`,
-      `OPT1_INTERFACE=${opt1Iface?.device || ''}`,
-      `OPT1_MODE=${opt1Iface?.type || 'dhcp'}`,
-      `OPT1_IPV4_ADDRESS=${opt1Iface?.ipv4Address || ''}`,
-      `OPT2_INTERFACE=${opt2Iface?.device || ''}`,
-      `OPT2_MODE=${opt2Iface?.type || 'dhcp'}`,
-      `OPT2_IPV4_ADDRESS=${opt2Iface?.ipv4Address || ''}`,
-    ];
-    fs.mkdirSync('/etc/axonwall', { recursive: true });
-    fs.writeFileSync('/etc/axonwall/interfaces.conf', confLines.join('\n') + '\n', 'utf8');
-
-    const cidrToNetmask = (cidr: number): string => {
-      const mask = [];
-      for (let i = 0; i < 4; i++) {
-        const bits = Math.max(0, Math.min(8, cidr - i * 8));
-        mask.push(256 - Math.pow(2, 8 - bits));
-      }
-      return mask.join('.');
-    };
-
-    let ifaces = '# /etc/network/interfaces -- Generated by Axonwall\n';
-    ifaces += '# This file is managed by Axonwall. Manual changes will be overwritten.\n\n';
-    ifaces += 'auto lo\niface lo inet loopback\n\n';
-
-    const renderIfaceStanza = (label: string, ifaceObj?: typeof wanIface) => {
-      if (!ifaceObj || !ifaceObj.device || !ifaceObj.enabled) return '';
-      let s = `# ${label} Interface\nauto ${ifaceObj.device}\n`;
-      if (ifaceObj.type === 'static' && ifaceObj.ipv4Address) {
-        const parts = ifaceObj.ipv4Address.split('/');
-        const ip = parts[0];
-        const cidr = parts[1] ? parseInt(parts[1], 10) : 24;
-        s += `iface ${ifaceObj.device} inet static\n`;
-        s += `    address ${ip}\n`;
-        s += `    netmask ${cidrToNetmask(cidr)}\n`;
-        if (ifaceObj.ipv4Gateway) {
-          s += `    gateway ${ifaceObj.ipv4Gateway}\n`;
-        }
-        if (state.system?.dnsServers && state.system.dnsServers.length > 0) {
-          s += `    dns-nameservers ${state.system.dnsServers.join(' ')}\n`;
-        }
-      } else {
-        s += `iface ${ifaceObj.device} inet dhcp\n`;
-      }
-      return s + '\n';
-    };
-
-    ifaces += renderIfaceStanza('WAN', wanIface);
-    ifaces += renderIfaceStanza('LAN', lanIface);
-    ifaces += renderIfaceStanza('OPT1', opt1Iface);
-    ifaces += renderIfaceStanza('OPT2', opt2Iface);
-
-    if (!fs.existsSync('/etc/network')) {
-      fs.mkdirSync('/etc/network', { recursive: true });
-    }
-    fs.writeFileSync('/etc/network/interfaces', ifaces, 'utf8');
-    if (fs.existsSync('/etc/network/interfaces.d')) {
-      fs.writeFileSync('/etc/network/interfaces.d/axonwall', ifaces, 'utf8');
-    }
+    syncNetworkInterfacesFiles(state);
   } catch {}
 
   // Apply basic network state if active
@@ -1403,7 +1453,11 @@ export async function getRecentThreatAlerts(): Promise<ThreatAlert[]> {
   }
 
   try {
-    const raw = execSync(`tail -n 50 ${evePath} 2>/dev/null`, { encoding: 'utf8', timeout: 1000 });
+    const raw = execFileSync('tail', ['-n', '50', evePath], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
     const lines = raw.trim().split('\n');
     const alerts: ThreatAlert[] = [];
 
@@ -1533,7 +1587,7 @@ function getCurrentInstalledVersion(): string {
       }
     } catch {}
   }
-  return '0.9.6';
+  return '0.11.3';
 }
 
 function compareSemver(v1: string, v2: string): number {
@@ -1571,7 +1625,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
 
     const res = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/releases/latest', {
       headers: {
-        'User-Agent': 'Axonwall-Appliance-Updater/0.9.6',
+        'User-Agent': 'Axonwall-Appliance-Updater/0.11.3',
         Accept: 'application/vnd.github.v3+json',
       },
       signal: controller.signal,
@@ -1590,7 +1644,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
       // Fallback: Check tags
       const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/tags?per_page=5', {
         headers: {
-          'User-Agent': 'Axonwall-Appliance-Updater/0.9.6',
+          'User-Agent': 'Axonwall-Appliance-Updater/0.11.3',
           Accept: 'application/vnd.github.v3+json',
         },
       });
@@ -1899,7 +1953,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
 
     const currentVersion = getCurrentInstalledVersion();
     const release = await getReleaseInfo();
-    const targetVersion = (release.latestVersion || '0.9.6').replace(/[^0-9a-zA-Z._-]/g, '');
+    const targetVersion = (release.latestVersion || '0.11.3').replace(/[^0-9a-zA-Z._-]/g, '');
 
     // 1. Delegate privileged firmware update to root daemon (axonwalld) first
     const daemonResp = await callAgentApi<any>(
@@ -2561,6 +2615,508 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
     message: 'Fetched K3s join token from HA primary node over mTLS and joined cluster with OpenEBS storage classes.',
   };
 }
+
+export interface AutoDetectedSubnet {
+  id: string;
+  label: string;
+  device: string;
+  role: string;
+  ip: string;
+  cidr: string;
+  gateway?: string;
+  operstate: string;
+  suggestedCommands: {
+    pingSweep: string;
+    fastPorts: string;
+    serviceOs: string;
+    vulnAudit: string;
+  };
+}
+
+export interface AutoCliDefaults {
+  hostname: string;
+  defaultInterface: string;
+  defaultSubnetCidr: string;
+  defaultGatewayIp: string;
+  defaultDnsServer: string;
+  subnets: AutoDetectedSubnet[];
+  interfaces: string[];
+  availableTools: Record<string, boolean>;
+}
+
+function ipNetmaskToCidr(ip: string, netmask: string): string {
+  const ipParts = ip.split('.').map(Number);
+  const maskParts = netmask.split('.').map(Number);
+  if (ipParts.length !== 4 || maskParts.length !== 4) return `${ip}/24`;
+  const netParts = ipParts.map((p, idx) => p & (maskParts[idx] ?? 255));
+  const prefix = maskParts.reduce((acc, octet) => acc + (octet.toString(2).match(/1/g) || []).length, 0);
+  return `${netParts.join('.')}/${prefix}`;
+}
+
+function ipCidrToNetworkCidr(ipCidr: string): { ip: string; cidr: string } {
+  const [ipPart = '192.168.1.1', prefixStr = '24'] = ipCidr.split('/');
+  const prefix = Math.min(32, Math.max(8, Number(prefixStr) || 24));
+  const parts = ipPart.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) {
+    return { ip: ipPart, cidr: ipCidr.includes('/') ? ipCidr : `${ipCidr}/24` };
+  }
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const ipInt = (((parts[0] ?? 0) << 24) | ((parts[1] ?? 0) << 16) | ((parts[2] ?? 0) << 8) | (parts[3] ?? 0)) >>> 0;
+  const netInt = (ipInt & mask) >>> 0;
+  const netIp = [
+    (netInt >>> 24) & 255,
+    (netInt >>> 16) & 255,
+    (netInt >>> 8) & 255,
+    netInt & 255,
+  ].join('.');
+  return { ip: ipPart, cidr: `${netIp}/${prefix}` };
+}
+
+function hasBinary(bin: string): boolean {
+  for (const dir of ['/usr/bin', '/usr/sbin', '/bin', '/sbin', '/usr/local/bin', '/usr/local/sbin']) {
+    if (fs.existsSync(path.join(dir, bin))) return true;
+  }
+  return false;
+}
+
+export async function getAutoCliDefaults(): Promise<AutoCliDefaults> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const state = await getCurrentDesiredState();
+  const subnets: AutoDetectedSubnet[] = [];
+  const seenCidrs = new Set<string>();
+  const interfaceNames = new Set<string>();
+
+  // 1. Add configured Axonwall interfaces (LAN, WAN, OPT1, OPT2, etc.)
+  for (const iface of state.interfaces || []) {
+    if (iface.device) interfaceNames.add(iface.device);
+    if (iface.ipv4Address) {
+      const { ip, cidr } = ipCidrToNetworkCidr(iface.ipv4Address);
+      if (!seenCidrs.has(cidr)) {
+        seenCidrs.add(cidr);
+        subnets.push({
+          id: `cfg-${iface.name}`,
+          label: `${iface.name.toUpperCase()} (${iface.device}) — ${iface.description || cidr}`,
+          device: iface.device,
+          role: iface.name.toUpperCase(),
+          ip,
+          cidr,
+          gateway: iface.ipv4Gateway,
+          operstate: iface.enabled ? 'UP' : 'DOWN',
+          suggestedCommands: {
+            pingSweep: `nmap -sn -T4 ${cidr}`,
+            fastPorts: `nmap -F -T4 ${cidr}`,
+            serviceOs: `nmap -sV -O --version-light -T4 ${cidr}`,
+            vulnAudit: `nmap -sV --script=banner,http-title,ssl-cert -T4 ${cidr}`,
+          },
+        });
+      }
+    }
+  }
+
+  // 2. Add live OS network interfaces
+  const osNet = os.networkInterfaces();
+  for (const [ifName, addrs] of Object.entries(osNet)) {
+    if (!addrs) continue;
+    if (ifName !== 'lo') interfaceNames.add(ifName);
+    for (const addr of addrs) {
+      if ((addr.family === 'IPv4' || (addr as any).family === 4) && !addr.internal) {
+        const cidr = ipNetmaskToCidr(addr.address, addr.netmask);
+        if (!seenCidrs.has(cidr)) {
+          seenCidrs.add(cidr);
+          subnets.push({
+            id: `os-${ifName}-${addr.address}`,
+            label: `${ifName} (Live OS NIC) — ${cidr}`,
+            device: ifName,
+            role: 'LIVE',
+            ip: addr.address,
+            cidr,
+            operstate: 'UP',
+            suggestedCommands: {
+              pingSweep: `nmap -sn -T4 ${cidr}`,
+              fastPorts: `nmap -F -T4 ${cidr}`,
+              serviceOs: `nmap -sV -O --version-light -T4 ${cidr}`,
+              vulnAudit: `nmap -sV --script=banner,http-title,ssl-cert -T4 ${cidr}`,
+            },
+          });
+        }
+      }
+    }
+  }
+
+  // 3. Add configured static routes from routing.yaml
+  for (const route of state.routes || []) {
+    if (route.enabled !== false && route.network && !seenCidrs.has(route.network)) {
+      seenCidrs.add(route.network);
+      subnets.push({
+        id: `route-${route.network}`,
+        label: `Static Route (${route.interface || 'routed'}) — ${route.network}${route.description ? ` [${route.description}]` : ''}`,
+        device: route.interface || 'eth0',
+        role: 'ROUTE',
+        ip: route.gateway,
+        cidr: route.network,
+        gateway: route.gateway,
+        operstate: 'ROUTED',
+        suggestedCommands: {
+          pingSweep: `nmap -sn -T4 ${route.network}`,
+          fastPorts: `nmap -F -T4 ${route.network}`,
+          serviceOs: `nmap -sV -O --version-light -T4 ${route.network}`,
+          vulnAudit: `nmap -sV --script=banner,http-title,ssl-cert -T4 ${route.network}`,
+        },
+      });
+    }
+  }
+
+  const lanSubnet =
+    subnets.find((s) => s.role === 'LAN') ||
+    subnets.find((s) => s.role === 'LIVE') ||
+    subnets[0];
+
+  const defaultGateway =
+    state.gateways?.find((g) => g.isDefault)?.gatewayIp ||
+    state.gateways?.[0]?.gatewayIp ||
+    lanSubnet?.ip ||
+    '192.168.1.1';
+
+  const defaultDns =
+    state.dns?.dotUpstreams?.[0] ||
+    state.system?.dnsServers?.[0] ||
+    '1.1.1.1';
+
+  const allIfaces = Array.from(interfaceNames);
+  if (allIfaces.length === 0) allIfaces.push('eth0', 'eth1');
+
+  return {
+    hostname: state.system?.hostname || os.hostname() || 'axonwall',
+    defaultInterface: lanSubnet?.device || allIfaces[0] || 'eth0',
+    defaultSubnetCidr: lanSubnet?.cidr || '192.168.1.0/24',
+    defaultGatewayIp: defaultGateway,
+    defaultDnsServer: defaultDns,
+    subnets,
+    interfaces: allIfaces,
+    availableTools: {
+      nmap: hasBinary('nmap'),
+      btop: hasBinary('btop'),
+      htop: hasBinary('htop'),
+      mpstat: hasBinary('mpstat'),
+      iostat: hasBinary('iostat'),
+      iotop: hasBinary('iotop'),
+      iftop: hasBinary('iftop'),
+      slurm: hasBinary('slurm'),
+      netstat: hasBinary('netstat'),
+      arp: hasBinary('arp'),
+      dig: hasBinary('dig'),
+      zsh: hasBinary('zsh'),
+      vim: hasBinary('vim'),
+    },
+  };
+}
+
+export async function runNmapScan(params: {
+  target: string;
+  profile: 'ping' | 'fast_ports' | 'service_os' | 'vuln_audit' | 'traceroute';
+  simulated?: boolean;
+}): Promise<{
+  success: boolean;
+  xml?: string;
+  command: string;
+  mode: 'live' | 'simulated';
+  durationMs: number;
+  error?: string;
+}> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session);
+
+  const cleanTarget = params.target.trim();
+  if (!cleanTarget || cleanTarget.startsWith('-') || !/^[a-zA-Z0-9.:/_-]+$/.test(cleanTarget)) {
+    return {
+      success: false,
+      command: '',
+      mode: 'simulated',
+      durationMs: 0,
+      error: 'Invalid scan target. Specify a valid IPv4/IPv6 address, CIDR subnet, or hostname.',
+    };
+  }
+
+  const profileFlags: Record<typeof params.profile, string[]> = {
+    ping: ['-sn', '-T4'],
+    fast_ports: ['-F', '-T4'],
+    service_os: ['-sV', '--version-light', '-T4'],
+    vuln_audit: ['-sV', '--version-light', '--script=banner,http-title,ssl-cert', '-T4'],
+    traceroute: ['-F', '--traceroute', '-T4'],
+  };
+
+  const flags = profileFlags[params.profile] || ['-F', '-T4'];
+  const displayCmd = `nmap ${flags.join(' ')} ${cleanTarget}`;
+  const startMs = Date.now();
+
+  if (!params.simulated && hasBinary('nmap')) {
+    try {
+      const args = [...flags, '-oX', '-', cleanTarget];
+      const xmlOut = execFileSync('nmap', args, {
+        encoding: 'utf-8',
+        timeout: 60000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      if (xmlOut && xmlOut.includes('<nmaprun')) {
+        return {
+          success: true,
+          xml: xmlOut,
+          command: displayCmd,
+          mode: 'live',
+          durationMs: Date.now() - startMs,
+        };
+      }
+    } catch (err: any) {
+      const stdoutStr = typeof err?.stdout === 'string' ? err.stdout : err?.stdout?.toString?.('utf-8') || '';
+      if (stdoutStr.includes('<nmaprun')) {
+        return {
+          success: true,
+          xml: stdoutStr,
+          command: displayCmd,
+          mode: 'live',
+          durationMs: Date.now() - startMs,
+        };
+      }
+    }
+  }
+
+  // Return empty xml marker so client uses NastyMap's built-in scenario generator for cleanTarget
+  return {
+    success: true,
+    command: displayCmd,
+    mode: 'simulated',
+    durationMs: Math.max(120, Date.now() - startMs),
+  };
+}
+
+export type CliUtilityId =
+  | 'sysstat'
+  | 'net_tools'
+  | 'dnsutils'
+  | 'bandwidth'
+  | 'top_procs'
+  | 'iotop';
+
+export async function runCliToolSnapshot(
+  tool: CliUtilityId,
+  options?: {
+    iface?: string;
+    target?: string;
+    dnsServer?: string;
+    recordType?: string;
+  }
+): Promise<{
+  success: boolean;
+  command: string;
+  output: string;
+  timestamp: string;
+}> {
+  const session = await getSession();
+  await enforceRateLimit(20, 60000);
+  assertActionPermitted(session);
+
+  const safeIface =
+    options?.iface && /^[a-zA-Z0-9._-]+$/.test(options.iface) && !options.iface.startsWith('-')
+      ? options.iface
+      : 'eth0';
+  const safeTarget =
+    options?.target && /^[a-zA-Z0-9.:-]+$/.test(options.target) && !options.target.startsWith('-')
+      ? options.target
+      : 'cloudflare.com';
+  const safeDns =
+    options?.dnsServer && /^[a-zA-Z0-9.:-]+$/.test(options.dnsServer) && !options.dnsServer.startsWith('-')
+      ? options.dnsServer
+      : '1.1.1.1';
+  const safeRecordType =
+    options?.recordType && /^(A|AAAA|MX|TXT|NS|SOA|PTR|CNAME|SRV)$/.test(options.recordType.toUpperCase())
+      ? options.recordType.toUpperCase()
+      : 'A';
+
+  const runExecFileSafe = (bin: string, args: string[]): string | null => {
+    try {
+      return execFileSync(bin, args, {
+        encoding: 'utf-8',
+        timeout: 6000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  let command = '';
+  let output = '';
+
+  switch (tool) {
+    case 'sysstat': {
+      command = 'mpstat -P ALL && iostat -xz';
+      const mpOut = runExecFileSafe('mpstat', ['-P', 'ALL']);
+      const ioOut = runExecFileSafe('iostat', ['-xz']);
+      const sections: string[] = [];
+      if (mpOut) {
+        sections.push('=== CPU Utilization (sysstat mpstat -P ALL) ===\n' + mpOut.trim());
+      } else {
+        const load = os.loadavg().map((n) => n.toFixed(2)).join(', ');
+        const cpus = os.cpus();
+        sections.push(
+          `=== CPU Utilization (${cpus.length} cores — Load Avg: ${load}) ===\n` +
+            cpus
+              .slice(0, 16)
+              .map((c, idx) => {
+                const total = Object.values(c.times).reduce((a, b) => a + b, 0) || 1;
+                const busy = (((total - c.times.idle) / total) * 100).toFixed(1);
+                return `CPU ${String(idx).padStart(2, ' ')}: ${busy.padStart(5, ' ')}% busy  (${c.model})`;
+              })
+              .join('\n')
+        );
+      }
+      if (ioOut) {
+        sections.push('\n=== Block Device Extended I/O (sysstat iostat -xz) ===\n' + ioOut.trim());
+      } else if (fs.existsSync('/proc/diskstats')) {
+        const diskLines = fs
+          .readFileSync('/proc/diskstats', 'utf-8')
+          .trim()
+          .split('\n')
+          .filter((l) => /\b(sd[a-z]|vd[a-z]|nvme\d+n\d+|mmcblk\d+)\b/.test(l))
+          .slice(0, 10);
+        sections.push(
+          '\n=== Block Device Statistics (/proc/diskstats) ===\n' +
+            'Device       ReadsCompleted  SectorsRead  WritesCompleted  SectorsWritten\n' +
+            diskLines
+              .map((l) => {
+                const p = l.trim().split(/\s+/);
+                return `${(p[2] || '').padEnd(12, ' ')} ${(p[3] || '0').padEnd(15, ' ')} ${(p[5] || '0').padEnd(12, ' ')} ${(p[7] || '0').padEnd(16, ' ')} ${p[9] || '0'}`;
+              })
+              .join('\n')
+        );
+      }
+      output = sections.join('\n');
+      break;
+    }
+
+    case 'net_tools': {
+      command = 'netstat -tulnp && arp -an && ip route show';
+      const netstatOut =
+        runExecFileSafe('netstat', ['-tuln']) ||
+        runExecFileSafe('ss', ['-tuln']) ||
+        'No socket output available.';
+      const arpOut =
+        runExecFileSafe('arp', ['-an']) ||
+        runExecFileSafe('ip', ['neigh', 'show']) ||
+        'No ARP entries found.';
+      const routeOut =
+        runExecFileSafe('ip', ['route', 'show']) ||
+        runExecFileSafe('netstat', ['-rn']) ||
+        'No routing table output available.';
+      output = [
+        '=== Active Listening Sockets (net-tools / netstat -tuln) ===',
+        netstatOut.trim(),
+        '',
+        '=== Neighbor / ARP Cache (arp -an) ===',
+        arpOut.trim(),
+        '',
+        '=== Kernel Routing Table (ip route show) ===',
+        routeOut.trim(),
+      ].join('\n');
+      break;
+    }
+
+    case 'dnsutils': {
+      command = `dig @${safeDns} ${safeTarget} ${safeRecordType} + stats`;
+      const digOut =
+        runExecFileSafe('dig', [`@${safeDns}`, safeTarget, safeRecordType]) ||
+        runExecFileSafe('nslookup', ['-type=' + safeRecordType, safeTarget, safeDns]);
+      output = digOut
+        ? digOut.trim()
+        : `; <<>> DiG 9.20 <<>> @${safeDns} ${safeTarget} ${safeRecordType}\n;; Unable to invoke dig binary on host.`;
+      break;
+    }
+
+    case 'bandwidth': {
+      command = `slurm -i ${safeIface} / iftop -t -s 1 -n -N -i ${safeIface}`;
+      const sections: string[] = [];
+      const statsDir = `/sys/class/net/${safeIface}/statistics`;
+      if (fs.existsSync(statsDir)) {
+        const readStat = (name: string) => {
+          try {
+            return Number(fs.readFileSync(path.join(statsDir, name), 'utf-8').trim()) || 0;
+          } catch {
+            return 0;
+          }
+        };
+        const rxBytes = readStat('rx_bytes');
+        const txBytes = readStat('tx_bytes');
+        const rxPkts = readStat('rx_packets');
+        const txPkts = readStat('tx_packets');
+        const rxErrs = readStat('rx_errors');
+        const txErrs = readStat('tx_errors');
+        const rxDrop = readStat('rx_dropped');
+        const txDrop = readStat('tx_dropped');
+        const fmtBytes = (b: number) =>
+          b > 1024 ** 3
+            ? `${(b / 1024 ** 3).toFixed(2)} GB`
+            : b > 1024 ** 2
+              ? `${(b / 1024 ** 2).toFixed(2)} MB`
+              : `${(b / 1024).toFixed(1)} KB`;
+
+        sections.push(
+          `=== Interface Bandwidth & Packet Counters (${safeIface} — slurm / kernel telemetry) ===`,
+          `Interface      : ${safeIface}`,
+          `RX Traffic     : ${fmtBytes(rxBytes)} (${rxPkts.toLocaleString()} packets, ${rxErrs} errors, ${rxDrop} dropped)`,
+          `TX Traffic     : ${fmtBytes(txBytes)} (${txPkts.toLocaleString()} packets, ${txErrs} errors, ${txDrop} dropped)`
+        );
+      }
+      const ssFlows = runExecFileSafe('ss', ['-tin']);
+      if (ssFlows) {
+        sections.push('\n=== Active TCP Flows & Congestion Telemetry (iftop / ss -tin) ===\n' + ssFlows.trim().slice(0, 3500));
+      }
+      output = sections.join('\n') || `Interface ${safeIface} telemetry collected.`;
+      break;
+    }
+
+    case 'top_procs': {
+      command = 'btop / htop (ps aux --sort=-%cpu)';
+      const psOut =
+        runExecFileSafe('ps', ['aux', '--sort=-%cpu']) ||
+        runExecFileSafe('ps', ['aux']);
+      const memInfo = `System Memory: ${((os.totalmem() - os.freemem()) / 1024 ** 3).toFixed(2)} GB / ${(os.totalmem() / 1024 ** 3).toFixed(2)} GB (${(((os.totalmem() - os.freemem()) / (os.totalmem() || 1)) * 100).toFixed(1)}%) | Load Avg: ${os.loadavg().map((l) => l.toFixed(2)).join(', ')}`;
+      output = [
+        '=== Process & Resource Monitor (btop / htop snapshot) ===',
+        memInfo,
+        '',
+        psOut ? psOut.split('\n').slice(0, 28).join('\n') : 'Process table unavailable.',
+      ].join('\n');
+      break;
+    }
+
+    case 'iotop': {
+      command = 'iotop -b -n 1 -o';
+      const iotopOut =
+        runExecFileSafe('iotop', ['-b', '-n', '1', '-o']) ||
+        runExecFileSafe('iostat', ['-d', '-x']);
+      if (iotopOut) {
+        output = '=== Disk I/O Top Monitor (iotop -b -n 1 -o) ===\n' + iotopOut.trim();
+      } else if (fs.existsSync('/proc/diskstats')) {
+        const raw = fs.readFileSync('/proc/diskstats', 'utf-8').trim().split('\n').slice(0, 20).join('\n');
+        output = '=== Kernel Disk I/O Counters (/proc/diskstats) ===\n' + raw;
+      } else {
+        output = 'Disk I/O statistics unavailable.';
+      }
+      break;
+    }
+  }
+
+  return {
+    success: true,
+    command,
+    output,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 
 
 

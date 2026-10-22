@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# axonwall-cloud-init — Cloud-Init / #cloud-config Firstboot Reconciler
+# ==============================================================================
+set -euo pipefail
+
+if command -v axonwallctl &>/dev/null; then
+  exec axonwallctl cloudinit "$@"
+fi
+
+# Fallback path if axonwallctl is not in PATH
+for candidate in \
+  "/opt/axonwall/apps/axonwall-controller/dist/axonwallctl.js" \
+  "/home/djehauti/git/axonwall_monorepo/apps/axonwall-controller/dist/axonwallctl.js"
+do
+  if [[ -f "$candidate" ]]; then
+    exec node "$candidate" cloudinit "$@"
+  fi
+done
+
+echo "[Axonwall Cloud-Init] Error: neither axonwallctl nor controller bundle found." >&2
+exit 1

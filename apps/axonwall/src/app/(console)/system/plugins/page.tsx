@@ -13,9 +13,12 @@ import {
   Search,
   Power,
   Loader2,
+  RefreshCw,
+  Terminal,
 } from 'lucide-react';
 import { BUILTIN_PLUGINS, type PluginManifest } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getExtensionPlugins, executePluginAction, type ExtensionPluginLiveStatus } from '@/server/plugins';
 import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas';
 
 export default function PluginManagerPage() {
@@ -23,22 +26,33 @@ export default function PluginManagerPage() {
   const [savingRole, setSavingRole] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const [installedPlugins, setInstalledPlugins] = useState<Record<string, boolean>>({
-    haproxy: true,
-    freeradius: true,
-    snmp: false,
-    'nut-ups': true,
-    tailscale: false,
-    ntopng: false,
-  });
+  const [livePlugins, setLivePlugins] = useState<Record<string, ExtensionPluginLiveStatus>>({});
+  const [osFamily, setOsFamily] = useState<'alpine' | 'debian'>('debian');
+  const [pluginActionLoading, setPluginActionLoading] = useState<string | null>(null);
 
   const [selectedPlugin, setSelectedPlugin] = useState<PluginManifest | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+
+  const refreshLivePlugins = () => {
+    getExtensionPlugins()
+      .then((res) => {
+        if (res && res.plugins) {
+          const map: Record<string, ExtensionPluginLiveStatus> = {};
+          for (const p of res.plugins) {
+            map[p.id] = p;
+          }
+          setLivePlugins(map);
+          setOsFamily(res.osFamily);
+        }
+      })
+      .catch(() => {});
+  };
 
   useEffect(() => {
     getCurrentDesiredState()
       .then((s) => setState(s))
       .catch(() => {});
+    refreshLivePlugins();
   }, []);
 
   const coreRolePlugins = BUILTIN_PLUGINS.filter((p) => p.category === 'core_role');
@@ -152,11 +166,31 @@ export default function PluginManagerPage() {
     }
   };
 
-  const toggleInstall = (id: string) => {
-    setInstalledPlugins((prev) => ({
-      ...prev,
-      [id]: !prev[id],
-    }));
+  const handlePluginAction = async (id: string, action: 'install' | 'uninstall' | 'reconfigure') => {
+    setPluginActionLoading(id);
+    setStatusBanner(null);
+    try {
+      const res = await executePluginAction(id, action);
+      if (res.success) {
+        setStatusBanner({
+          type: 'success',
+          text: res.message,
+        });
+      } else {
+        setStatusBanner({
+          type: 'error',
+          text: res.message || `Action ${action} failed`,
+        });
+      }
+      refreshLivePlugins();
+    } catch (err: any) {
+      setStatusBanner({
+        type: 'error',
+        text: err?.message || `Failed to execute ${action} for plugin ${id}`,
+      });
+    } finally {
+      setPluginActionLoading(null);
+    }
   };
 
   const filteredExtensions = extensionPlugins.filter(
@@ -183,7 +217,7 @@ export default function PluginManagerPage() {
           <div>
             <h1 className="text-2xl font-bold text-white tracking-tight">Appliance Roles & Plugin Store</h1>
             <p className="text-sm text-slate-400">
-              Toggle Core Appliance Roles (Firewall, TrueNAS-grade ZFS NAS, K3s + OpenEBS) or install sandboxed extensions.
+              Toggle Core Appliance Roles (Firewall, TrueNAS-grade ZFS NAS, K3s + OpenEBS) or install sandboxed extensions ({osFamily.toUpperCase()} Host).
             </p>
           </div>
         </div>
@@ -320,10 +354,28 @@ export default function PluginManagerPage() {
 
       {/* Add-on Extensions Grid */}
       <div className="space-y-4 pt-2">
-        <h2 className="text-base font-bold text-white tracking-tight">Sandboxed Extension Plugins</h2>
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-bold text-white tracking-tight">Sandboxed Extension Plugins</h2>
+            <p className="text-xs text-slate-400">
+              Modular services, network telemetry, and operator CLI packages ({osFamily === 'alpine' ? 'Alpine apk' : 'Debian apt'}).
+            </p>
+          </div>
+          <button
+            onClick={refreshLivePlugins}
+            className="px-3 py-1.5 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Refresh Status
+          </button>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredExtensions.map((plugin) => {
-            const isInstalled = !!installedPlugins[plugin.id];
+            const live = livePlugins[plugin.id];
+            const isInstalled = live ? live.installed : false;
+            const isBundled = live ? live.bundled : false;
+            const isLoading = pluginActionLoading === plugin.id;
+
             return (
               <div
                 key={plugin.id}
@@ -337,12 +389,14 @@ export default function PluginManagerPage() {
                     </div>
                     <span
                       className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${
-                        isInstalled
-                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                        isBundled
+                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                          : isInstalled
+                            ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
+                            : 'bg-slate-800 text-slate-400 border-slate-700'
                       }`}
                     >
-                      {isInstalled ? 'Installed' : 'Available'}
+                      {isBundled ? 'Bundled (OS)' : isInstalled ? 'Installed' : 'Available'}
                     </span>
                   </div>
 
@@ -354,6 +408,11 @@ export default function PluginManagerPage() {
                     {plugin.systemdUnits.map((u) => (
                       <span key={u} className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] font-mono text-slate-400">
                         {u}
+                      </span>
+                    ))}
+                    {plugin.cliBinaries && plugin.cliBinaries.map((b) => (
+                      <span key={b} className="px-2 py-0.5 rounded bg-emerald-950/40 border border-emerald-900/60 text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                        <Terminal className="w-2.5 h-2.5" /> {b}
                       </span>
                     ))}
                   </div>
@@ -368,24 +427,52 @@ export default function PluginManagerPage() {
                   </button>
 
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => toggleInstall(plugin.id)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                        isInstalled
-                          ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20'
-                          : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/40'
-                      }`}
-                    >
-                      {isInstalled ? (
-                        <>
-                          <Trash2 className="w-3.5 h-3.5" /> Uninstall
-                        </>
-                      ) : (
-                        <>
-                          <Download className="w-3.5 h-3.5" /> Install Plugin
-                        </>
-                      )}
-                    </button>
+                    {plugin.id === 'cli-workstation' && isInstalled && (
+                      <button
+                        disabled={isLoading}
+                        onClick={() => handlePluginAction(plugin.id, 'reconfigure')}
+                        title="Re-apply starship, zsh, vim, and tmux configuration files"
+                        className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} /> Re-sync
+                      </button>
+                    )}
+
+                    {isInstalled ? (
+                      <button
+                        disabled={isLoading || isBundled}
+                        onClick={() => handlePluginAction(plugin.id, 'uninstall')}
+                        title={isBundled ? 'Cannot uninstall packages bundled into the rootfs image' : 'Uninstall extension package'}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
+                          isBundled
+                            ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
+                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20'
+                        }`}
+                      >
+                        {isLoading ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5" />
+                        )}
+                        {isBundled ? 'Bundled' : 'Uninstall'}
+                      </button>
+                    ) : (
+                      <button
+                        disabled={isLoading}
+                        onClick={() => handlePluginAction(plugin.id, 'install')}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/40 transition flex items-center gap-1.5"
+                      >
+                        {isLoading ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Installing...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="w-3.5 h-3.5" /> Install Plugin
+                          </>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -426,16 +513,42 @@ export default function PluginManagerPage() {
                   ))}
                 </div>
               </div>
-              <div>
-                <span className="text-slate-500 block">SYSTEMD SANDBOX UNITS</span>
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {selectedPlugin.systemdUnits.map((u) => (
-                    <span key={u} className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 font-mono">
-                      {u}
-                    </span>
-                  ))}
+              {selectedPlugin.systemdUnits && selectedPlugin.systemdUnits.length > 0 && (
+                <div>
+                  <span className="text-slate-500 block">SYSTEMD SANDBOX UNITS</span>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {selectedPlugin.systemdUnits.map((u) => (
+                      <span key={u} className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 font-mono">
+                        {u}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
+              {selectedPlugin.packages && (
+                <div>
+                  <span className="text-slate-500 block">OS PACKAGES ({osFamily.toUpperCase()})</span>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {((osFamily === 'alpine' ? selectedPlugin.packages.alpine : selectedPlugin.packages.debian) || []).map((pkg) => (
+                      <span key={pkg} className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-sky-400 font-mono">
+                        {pkg}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {selectedPlugin.cliBinaries && selectedPlugin.cliBinaries.length > 0 && (
+                <div>
+                  <span className="text-slate-500 block">CLI BINARIES</span>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {selectedPlugin.cliBinaries.map((bin) => (
+                      <span key={bin} className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-emerald-400 font-mono">
+                        {bin}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
               {selectedPlugin.nftHooks && (
                 <div>
                   <span className="text-slate-500 block">NFTABLES HOOK POINTS</span>

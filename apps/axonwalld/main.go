@@ -54,12 +54,66 @@ type AgentServer struct {
 	directoryManager *engine.DirectoryManager
 }
 
+func snapshotLkgConfig(bundleDir string) {
+	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
+	if err := os.MkdirAll(lkgConfigDir, 0700); err != nil {
+		return
+	}
+
+	srcDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+	for _, srcDir := range srcDirs {
+		entries, err := os.ReadDir(srcDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".json") || name == "interfaces.conf" {
+				srcPath := filepath.Join(srcDir, name)
+				dstPath := filepath.Join(lkgConfigDir, name)
+				if data, err := os.ReadFile(srcPath); err == nil && len(data) > 0 {
+					_ = os.WriteFile(dstPath, data, 0600)
+				}
+			}
+		}
+	}
+}
+
+func restoreLkgConfig(bundleDir string) {
+	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
+	entries, err := os.ReadDir(lkgConfigDir)
+	if err != nil {
+		return
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		srcPath := filepath.Join(lkgConfigDir, name)
+		data, err := os.ReadFile(srcPath)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+
+		targetDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+		for _, dir := range targetDirs {
+			_ = os.MkdirAll(dir, 0755)
+			_ = os.WriteFile(filepath.Join(dir, name), data, 0644)
+		}
+	}
+}
+
 func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager, etckeeperManager *engine.EtckeeperManager, directoryManager *engine.DirectoryManager) *AgentServer {
 	hostname, _ := os.Hostname()
 
 	initHash := ""
 	lastGoodScript := ""
-	for _, checkPath := range []string{"/etc/nftables.conf", filepath.Join(bundleDir, "last-known-good.nft")} {
+	for _, checkPath := range []string{filepath.Join(bundleDir, "last-known-good.nft"), "/etc/axonwall/last-known-good.nft", "/etc/nftables.conf"} {
 		if data, err := os.ReadFile(checkPath); err == nil && len(data) > 0 {
 			h := sha256.Sum256(data)
 			initHash = hex.EncodeToString(h[:])
@@ -67,6 +121,18 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 			break
 		}
 	}
+	if lastGoodScript == "" {
+		if out, err := exec.Command("nft", "list", "ruleset").CombinedOutput(); err == nil && len(out) > 0 {
+			h := sha256.Sum256(out)
+			initHash = hex.EncodeToString(h[:])
+			lastGoodScript = string(out)
+			if err := os.MkdirAll(bundleDir, 0700); err == nil {
+				_ = os.WriteFile(filepath.Join(bundleDir, "last-known-good.nft"), out, 0600)
+			}
+		}
+	}
+
+	snapshotLkgConfig(bundleDir)
 
 	return &AgentServer{
 		bundleDir:        bundleDir,
@@ -120,8 +186,26 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}, nil
 	}
 
+	// Snapshot verified configuration before writing candidate changes
+	if !s.pendingConfirm {
+		snapshotLkgConfig(s.bundleDir)
+	}
+
 	// 2. Write optional bundle configuration files (e.g. kea, unbound, suricata, crowdsec)
-	allowedPrefixes := []string{"/etc/axonwall/", "/tmp/", "/etc/suricata/", "/etc/crowdsec/"}
+	allowedPrefixes := []string{
+		"/etc/axonwall/",
+		"/tmp/",
+		"/etc/network/",
+		"/etc/suricata/",
+		"/etc/crowdsec/",
+		"/etc/kea/",
+		"/etc/unbound/",
+		"/etc/frr/",
+		"/etc/wireguard/",
+		"/etc/swanctl/",
+		"/etc/haproxy/",
+		"/etc/freeradius/",
+	}
 	for _, f := range req.Files {
 		// Enforce safety: paths must reside within allowed system config locations or /tmp/
 		cleanPath := filepath.Clean(f.Path)
@@ -234,6 +318,11 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 	}
 
+	// Reconcile static routes whenever a bundle is applied
+	if err := ReconcileStaticRoutes(); err != nil {
+		log.Printf("[Agent] Warning: Static routes reconciliation: %v", err)
+	}
+
 	if s.etckeeperManager != nil && len(req.Files) > 0 {
 		commitMsg := fmt.Sprintf("Axonwall configuration bundle applied (%s)", req.BundleHash)
 		s.etckeeperManager.ScheduleCommit(commitMsg, "axonwall")
@@ -282,6 +371,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 
 	s.pendingConfirm = true
 	s.confirmDeadline = time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	_ = os.MkdirAll("/run/axonwall", 0755)
+	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (%ds)", timeoutSec)), 0644)
 
 	s.rollbackTimer = time.AfterFunc(time.Duration(timeoutSec)*time.Second, func() {
 		s.triggerAutoRollback(req.JobId)
@@ -296,6 +387,57 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	}, nil
 }
 
+func (s *AgentServer) executeRollback(reason string) error {
+	if s.lastGoodScript == "" {
+		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
+		if data, err := os.ReadFile(lkgPath); err == nil && len(data) > 0 {
+			s.lastGoodScript = string(data)
+		} else {
+			return fmt.Errorf("no previous last-known-good configuration available for rollback")
+		}
+	}
+
+	if s.lastGoodScript != "" {
+		tmpFile, err := os.CreateTemp("", "axonwall-rollback-*.nft")
+		if err != nil {
+			return fmt.Errorf("failed to create rollback temp file: %w", err)
+		}
+		_ = tmpFile.Close()
+		defer os.Remove(tmpFile.Name())
+
+		if err := os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644); err != nil {
+			return fmt.Errorf("failed to write rollback script: %w", err)
+		}
+
+		cmd := exec.Command("nft", "-f", tmpFile.Name())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[Agent] ERROR applying rollback ruleset: %s", string(out))
+			return fmt.Errorf("failed to execute rollback nftables application: %s", string(out))
+		}
+
+		if s.lastGoodHash != "" {
+			s.activeHash = s.lastGoodHash
+		} else {
+			h := sha256.Sum256([]byte(s.lastGoodScript))
+			s.activeHash = hex.EncodeToString(h[:])
+		}
+	}
+
+	// Restore LKG configuration files & state
+	restoreLkgConfig(s.bundleDir)
+
+	// Reconcile static routes with the restored configuration
+	if err := ReconcileStaticRoutes(); err != nil {
+		log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
+	}
+
+	s.pendingConfirm = false
+	s.candidateScript = ""
+	_ = os.Remove("/run/axonwall/commit-confirm.pending")
+	log.Printf("[Agent] Successfully rolled back to last known good configuration (reason: %s).", reason)
+	return nil
+}
+
 func (s *AgentServer) triggerAutoRollback(jobId string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -305,38 +447,9 @@ func (s *AgentServer) triggerAutoRollback(jobId string) {
 	}
 
 	log.Printf("[Agent] WARNING: Commit-confirm deadline expired for job %s! Initiating automatic rollback.", jobId)
-
-	if s.lastGoodScript == "" {
-		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
-		if data, err := os.ReadFile(lkgPath); err == nil {
-			s.lastGoodScript = string(data)
-		}
+	if err := s.executeRollback(fmt.Sprintf("commit-confirm timeout for job %s", jobId)); err != nil {
+		log.Printf("[Agent] Automatic rollback failed: %v", err)
 	}
-
-	if s.lastGoodScript != "" {
-		tmpFile, err := os.CreateTemp("", "axonwall-rollback-*.nft")
-		if err == nil {
-			_ = tmpFile.Close()
-			_ = os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644)
-			cmd := exec.Command("nft", "-f", tmpFile.Name())
-			out, err := cmd.CombinedOutput()
-			os.Remove(tmpFile.Name())
-			if err != nil {
-				log.Printf("[Agent] ERROR applying rollback ruleset: %s", string(out))
-			} else {
-				if s.lastGoodHash != "" {
-					s.activeHash = s.lastGoodHash
-				} else {
-					h := sha256.Sum256([]byte(s.lastGoodScript))
-					s.activeHash = hex.EncodeToString(h[:])
-				}
-				log.Printf("[Agent] Successfully rolled back to last known good ruleset.")
-			}
-		}
-	}
-
-	s.pendingConfirm = false
-	s.candidateScript = ""
 }
 
 func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.ConfirmResponse, error) {
@@ -351,6 +464,7 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	}
 
 	s.pendingConfirm = false
+	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 	if s.candidateScript != "" {
 		s.lastGoodScript = s.candidateScript
 		if s.activeHash == "" {
@@ -366,6 +480,9 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 		_ = os.WriteFile(lkgPath, []byte(s.lastGoodScript), 0600)
 		log.Printf("[Agent] Persisted last-known-good configuration to %s", lkgPath)
 	}
+
+	// Snapshot confirmed YAML configuration to LKG
+	snapshotLkgConfig(s.bundleDir)
 
 	return &pb.ConfirmResponse{
 		Success: true,
@@ -384,51 +501,16 @@ func (s *AgentServer) Rollback(ctx context.Context, req *pb.RollbackRequest) (*p
 		s.rollbackTimer = nil
 	}
 
-	if s.lastGoodScript == "" {
-		// Attempt to load from disk
-		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
-		data, err := os.ReadFile(lkgPath)
-		if err == nil {
-			s.lastGoodScript = string(data)
-		} else {
-			return &pb.RollbackResponse{
-				Success: false,
-				Message: "No previous last-known-good configuration available for rollback",
-			}, nil
-		}
-	}
-
-	tmpFile, err := os.CreateTemp("", "axonwall-rollback-*.nft")
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create rollback temp file: %v", err)
-	}
-	_ = tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
-
-	if err := os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to write rollback script: %v", err)
-	}
-
-	cmd := exec.Command("nft", "-f", tmpFile.Name())
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if err := s.executeRollback(req.Reason); err != nil {
 		return &pb.RollbackResponse{
 			Success: false,
-			Message: fmt.Sprintf("failed to execute rollback nftables application: %s", string(out)),
+			Message: err.Error(),
 		}, nil
 	}
 
-	if s.lastGoodHash != "" {
-		s.activeHash = s.lastGoodHash
-	} else {
-		h := sha256.Sum256([]byte(s.lastGoodScript))
-		s.activeHash = hex.EncodeToString(h[:])
-	}
-	s.pendingConfirm = false
-	s.candidateScript = ""
-
 	return &pb.RollbackResponse{
 		Success: true,
-		Message: "Successfully rolled back to last known good ruleset.",
+		Message: "Successfully rolled back to last known good configuration.",
 	}, nil
 }
 
@@ -736,6 +818,11 @@ func applyBootInterfaces() {
 			}
 		}
 	}
+
+	// 5. Static routes configuration
+	if err := ReconcileStaticRoutes(); err != nil {
+		log.Printf("[Agent] Boot-apply: static routes reconciliation: %v", err)
+	}
 }
 
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
@@ -829,6 +916,19 @@ func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 	}
 }
 
+func syncFile(srcPath, dstPath string, perm os.FileMode) {
+	srcInfo, err1 := os.Stat(srcPath)
+	if err1 != nil {
+		return
+	}
+	dstInfo, err2 := os.Stat(dstPath)
+	if err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime()) {
+		if data, err := os.ReadFile(srcPath); err == nil {
+			_ = os.WriteFile(dstPath, data, perm)
+		}
+	}
+}
+
 func syncPersistentYamlConfigs() {
 	srcDir := "/var/lib/axonwall/etc-axonwall"
 	dstDir := "/etc/axonwall"
@@ -838,25 +938,35 @@ func syncPersistentYamlConfigs() {
 	}
 	_ = os.MkdirAll(dstDir, 0755)
 	_ = os.MkdirAll(filepath.Join(dstDir, "conf.d"), 0755)
+
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+		if entry.IsDir() {
+			if name == "conf.d" {
+				confEntries, err := os.ReadDir(filepath.Join(srcDir, "conf.d"))
+				if err == nil {
+					for _, ce := range confEntries {
+						if ce.IsDir() {
+							continue
+						}
+						cName := ce.Name()
+						if strings.HasSuffix(cName, ".yaml") || strings.HasSuffix(cName, ".yml") {
+							syncFile(filepath.Join(srcDir, "conf.d", cName), filepath.Join(dstDir, "conf.d", cName), 0600)
+						}
+					}
+				}
+			}
 			continue
 		}
-		srcPath := filepath.Join(srcDir, name)
-		dstPath := filepath.Join(dstDir, name)
-		srcInfo, err1 := os.Stat(srcPath)
-		dstInfo, err2 := os.Stat(dstPath)
-		// Copy if missing in /etc/axonwall or if persistent copy is newer
-		if err1 == nil && (err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime())) {
-			if data, err := os.ReadFile(srcPath); err == nil {
-				_ = os.WriteFile(dstPath, data, 0600)
-			}
+
+		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
+			syncFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name), 0600)
 		}
 	}
+
+	// Also ensure administrative credentials and controller configs are synced
+	syncFile(filepath.Join(srcDir, "admin.env"), filepath.Join(dstDir, "admin.env"), 0600)
+	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0600)
 }
 
 func main() {
@@ -894,6 +1004,9 @@ func main() {
 			}
 		}
 		reconcileBootAntiLockoutNft(hasLkg)
+		if err := ReconcileStaticRoutes(); err != nil {
+			log.Printf("[Agent] Early-boot: static routes reconciliation: %v", err)
+		}
 	}
 
 	// Ensure directory for socket exists
@@ -950,6 +1063,7 @@ func main() {
 	}
 	userManager := engine.NewUserManager(etckeeperManager)
 	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
+	pluginManager := engine.NewPluginManager("/var/lib/axonwall")
 	haEngine.SetDirectoryManager(directoryManager)
 
 	go func() {
@@ -1024,6 +1138,18 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(resp)
+		})
+		mux.HandleFunc("/v1/routes/reconcile", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if err := ReconcileStaticRoutes(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "Static routes reconciled successfully"})
 		})
 		mux.HandleFunc("/v1/confirm", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -1879,6 +2005,50 @@ func main() {
 				"migrated": migrated,
 				"message":  fmt.Sprintf("Migrated %d local human account(s) into OpenLDAP", len(migrated)),
 			})
+		})
+
+		// Extension Plugins Lifecycle & Management APIs
+		mux.HandleFunc("/v1/system/plugins", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"plugins":  pluginManager.ListPlugins(),
+				"osFamily": engine.DetectOSFamily(),
+			})
+		})
+
+		mux.HandleFunc("/v1/system/plugins/action", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.PluginActionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			var resp engine.PluginActionResponse
+			switch req.Action {
+			case "install":
+				resp = pluginManager.InstallPlugin(req.PluginID)
+			case "uninstall", "remove":
+				resp = pluginManager.UninstallPlugin(req.PluginID)
+			case "reconfigure", "re-sync":
+				resp = pluginManager.ReconfigurePlugin(req.PluginID)
+			default:
+				resp = engine.PluginActionResponse{
+					Success: false,
+					Message: fmt.Sprintf("Unsupported action '%s'", req.Action),
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if !resp.Success {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 		})
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

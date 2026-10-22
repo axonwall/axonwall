@@ -2043,14 +2043,14 @@ var require_pushgateway = __commonJS({
       const gatewayUrlParsed = url2.parse(this.gatewayUrl);
       const gatewayUrlPath = gatewayUrlParsed.pathname && gatewayUrlParsed.pathname !== "/" ? gatewayUrlParsed.pathname : "";
       const jobPath = job ? `/job/${encodeURIComponent(job)}${generateGroupings(groupings)}` : "";
-      const path = `${gatewayUrlPath}/metrics${jobPath}`;
-      const target = url2.resolve(this.gatewayUrl, path);
+      const path2 = `${gatewayUrlPath}/metrics${jobPath}`;
+      const target = url2.resolve(this.gatewayUrl, path2);
       const requestParams = url2.parse(target);
       const httpModule = isHttps(requestParams.href) ? https2 : http2;
       const options = Object.assign(requestParams, this.requestOptions, {
         method
       });
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve2, reject) => {
         if (method === "DELETE" && options.headers) {
           delete options.headers["Content-Encoding"];
         }
@@ -2066,7 +2066,7 @@ var require_pushgateway = __commonJS({
                 new Error(`push failed with status ${resp.statusCode}, ${body}`)
               );
             } else {
-              resolve({ resp, body });
+              resolve2({ resp, body });
             }
           });
         });
@@ -4616,13 +4616,13 @@ var require_cluster = __commonJS({
        */
       clusterMetrics() {
         const requestId = requestCtr++;
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve2, reject) => {
           let settled = false;
           function done(err, result) {
             if (settled) return;
             settled = true;
             if (err) reject(err);
-            else resolve(result);
+            else resolve2(result);
           }
           const request2 = {
             responses: [],
@@ -7025,7 +7025,7 @@ var require_websocket = __commonJS({
     var EventEmitter = __require("events");
     var https2 = __require("https");
     var http2 = __require("http");
-    var net = __require("net");
+    var net2 = __require("net");
     var tls = __require("tls");
     var { randomBytes, createHash: createHash2 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
@@ -7782,12 +7782,12 @@ var require_websocket = __commonJS({
     }
     function netConnect(options) {
       options.path = options.socketPath;
-      return net.connect(options);
+      return net2.connect(options);
     }
     function tlsConnect(options) {
       options.path = void 0;
       if (!options.servername && options.servername !== "") {
-        options.servername = net.isIP(options.host) ? "" : options.host;
+        options.servername = net2.isIP(options.host) ? "" : options.host;
       }
       return tls.connect(options);
     }
@@ -8548,17 +8548,17 @@ var require_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    function visit_(key, node2, visitor, path) {
-      const ctrl = callVisitor(key, node2, visitor, path);
+    function visit_(key, node2, visitor, path2) {
+      const ctrl = callVisitor(key, node2, visitor, path2);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path, ctrl);
-        return visit_(key, ctrl, visitor, path);
+        replaceNode(key, path2, ctrl);
+        return visit_(key, ctrl, visitor, path2);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path = Object.freeze(path.concat(node2));
+          path2 = Object.freeze(path2.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = visit_(i, node2.items[i], visitor, path);
+            const ci = visit_(i, node2.items[i], visitor, path2);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -8569,13 +8569,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path = Object.freeze(path.concat(node2));
-          const ck = visit_("key", node2.key, visitor, path);
+          path2 = Object.freeze(path2.concat(node2));
+          const ck = visit_("key", node2.key, visitor, path2);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = visit_("value", node2.value, visitor, path);
+          const cv = visit_("value", node2.value, visitor, path2);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -8596,17 +8596,17 @@ var require_visit = __commonJS({
     visitAsync.BREAK = BREAK;
     visitAsync.SKIP = SKIP;
     visitAsync.REMOVE = REMOVE;
-    async function visitAsync_(key, node2, visitor, path) {
-      const ctrl = await callVisitor(key, node2, visitor, path);
+    async function visitAsync_(key, node2, visitor, path2) {
+      const ctrl = await callVisitor(key, node2, visitor, path2);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path, ctrl);
-        return visitAsync_(key, ctrl, visitor, path);
+        replaceNode(key, path2, ctrl);
+        return visitAsync_(key, ctrl, visitor, path2);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path = Object.freeze(path.concat(node2));
+          path2 = Object.freeze(path2.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = await visitAsync_(i, node2.items[i], visitor, path);
+            const ci = await visitAsync_(i, node2.items[i], visitor, path2);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -8617,13 +8617,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path = Object.freeze(path.concat(node2));
-          const ck = await visitAsync_("key", node2.key, visitor, path);
+          path2 = Object.freeze(path2.concat(node2));
+          const ck = await visitAsync_("key", node2.key, visitor, path2);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = await visitAsync_("value", node2.value, visitor, path);
+          const cv = await visitAsync_("value", node2.value, visitor, path2);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -8650,23 +8650,23 @@ var require_visit = __commonJS({
       }
       return visitor;
     }
-    function callVisitor(key, node2, visitor, path) {
+    function callVisitor(key, node2, visitor, path2) {
       if (typeof visitor === "function")
-        return visitor(key, node2, path);
+        return visitor(key, node2, path2);
       if (identity.isMap(node2))
-        return visitor.Map?.(key, node2, path);
+        return visitor.Map?.(key, node2, path2);
       if (identity.isSeq(node2))
-        return visitor.Seq?.(key, node2, path);
+        return visitor.Seq?.(key, node2, path2);
       if (identity.isPair(node2))
-        return visitor.Pair?.(key, node2, path);
+        return visitor.Pair?.(key, node2, path2);
       if (identity.isScalar(node2))
-        return visitor.Scalar?.(key, node2, path);
+        return visitor.Scalar?.(key, node2, path2);
       if (identity.isAlias(node2))
-        return visitor.Alias?.(key, node2, path);
+        return visitor.Alias?.(key, node2, path2);
       return void 0;
     }
-    function replaceNode(key, path, node2) {
-      const parent = path[path.length - 1];
+    function replaceNode(key, path2, node2) {
+      const parent = path2[path2.length - 1];
       if (identity.isCollection(parent)) {
         parent.items[key] = node2;
       } else if (identity.isPair(parent)) {
@@ -9278,10 +9278,10 @@ var require_Collection = __commonJS({
     var createNode = require_createNode();
     var identity = require_identity();
     var Node = require_Node();
-    function collectionFromPath(schema, path, value) {
+    function collectionFromPath(schema, path2, value) {
       let v = value;
-      for (let i = path.length - 1; i >= 0; --i) {
-        const k = path[i];
+      for (let i = path2.length - 1; i >= 0; --i) {
+        const k = path2[i];
         if (typeof k === "number" && Number.isInteger(k) && k >= 0) {
           const a = [];
           a[k] = v;
@@ -9300,7 +9300,7 @@ var require_Collection = __commonJS({
         sourceObjects: /* @__PURE__ */ new Map()
       });
     }
-    var isEmptyPath = (path) => path == null || typeof path === "object" && !!path[Symbol.iterator]().next().done;
+    var isEmptyPath = (path2) => path2 == null || typeof path2 === "object" && !!path2[Symbol.iterator]().next().done;
     var Collection = class extends Node.NodeBase {
       constructor(type, schema) {
         super(type);
@@ -9330,11 +9330,11 @@ var require_Collection = __commonJS({
        * be a Pair instance or a `{ key, value }` object, which may not have a key
        * that already exists in the map.
        */
-      addIn(path, value) {
-        if (isEmptyPath(path))
+      addIn(path2, value) {
+        if (isEmptyPath(path2))
           this.add(value);
         else {
-          const [key, ...rest] = path;
+          const [key, ...rest] = path2;
           const node2 = this.get(key, true);
           if (identity.isCollection(node2))
             node2.addIn(rest, value);
@@ -9348,8 +9348,8 @@ var require_Collection = __commonJS({
        * Removes a value from the collection.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path) {
-        const [key, ...rest] = path;
+      deleteIn(path2) {
+        const [key, ...rest] = path2;
         if (rest.length === 0)
           return this.delete(key);
         const node2 = this.get(key, true);
@@ -9363,8 +9363,8 @@ var require_Collection = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path, keepScalar) {
-        const [key, ...rest] = path;
+      getIn(path2, keepScalar) {
+        const [key, ...rest] = path2;
         const node2 = this.get(key, true);
         if (rest.length === 0)
           return !keepScalar && identity.isScalar(node2) ? node2.value : node2;
@@ -9382,8 +9382,8 @@ var require_Collection = __commonJS({
       /**
        * Checks if the collection includes a value with the key `key`.
        */
-      hasIn(path) {
-        const [key, ...rest] = path;
+      hasIn(path2) {
+        const [key, ...rest] = path2;
         if (rest.length === 0)
           return this.has(key);
         const node2 = this.get(key, true);
@@ -9393,8 +9393,8 @@ var require_Collection = __commonJS({
        * Sets a value in this collection. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path, value) {
-        const [key, ...rest] = path;
+      setIn(path2, value) {
+        const [key, ...rest] = path2;
         if (rest.length === 0) {
           this.set(key, value);
         } else {
@@ -11909,9 +11909,9 @@ var require_Document = __commonJS({
           this.contents.add(value);
       }
       /** Adds a value to the document. */
-      addIn(path, value) {
+      addIn(path2, value) {
         if (assertCollection(this.contents))
-          this.contents.addIn(path, value);
+          this.contents.addIn(path2, value);
       }
       /**
        * Create a new `Alias` node, ensuring that the target `node` has the required anchor.
@@ -11986,14 +11986,14 @@ var require_Document = __commonJS({
        * Removes a value from the document.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path) {
-        if (Collection.isEmptyPath(path)) {
+      deleteIn(path2) {
+        if (Collection.isEmptyPath(path2)) {
           if (this.contents == null)
             return false;
           this.contents = null;
           return true;
         }
-        return assertCollection(this.contents) ? this.contents.deleteIn(path) : false;
+        return assertCollection(this.contents) ? this.contents.deleteIn(path2) : false;
       }
       /**
        * Returns item at `key`, or `undefined` if not found. By default unwraps
@@ -12008,10 +12008,10 @@ var require_Document = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path, keepScalar) {
-        if (Collection.isEmptyPath(path))
+      getIn(path2, keepScalar) {
+        if (Collection.isEmptyPath(path2))
           return !keepScalar && identity.isScalar(this.contents) ? this.contents.value : this.contents;
-        return identity.isCollection(this.contents) ? this.contents.getIn(path, keepScalar) : void 0;
+        return identity.isCollection(this.contents) ? this.contents.getIn(path2, keepScalar) : void 0;
       }
       /**
        * Checks if the document includes a value with the key `key`.
@@ -12022,10 +12022,10 @@ var require_Document = __commonJS({
       /**
        * Checks if the document includes a value at `path`.
        */
-      hasIn(path) {
-        if (Collection.isEmptyPath(path))
+      hasIn(path2) {
+        if (Collection.isEmptyPath(path2))
           return this.contents !== void 0;
-        return identity.isCollection(this.contents) ? this.contents.hasIn(path) : false;
+        return identity.isCollection(this.contents) ? this.contents.hasIn(path2) : false;
       }
       /**
        * Sets a value in this document. For `!!set`, `value` needs to be a
@@ -12042,13 +12042,13 @@ var require_Document = __commonJS({
        * Sets a value in this document. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path, value) {
-        if (Collection.isEmptyPath(path)) {
+      setIn(path2, value) {
+        if (Collection.isEmptyPath(path2)) {
           this.contents = value;
         } else if (this.contents == null) {
-          this.contents = Collection.collectionFromPath(this.schema, Array.from(path), value);
+          this.contents = Collection.collectionFromPath(this.schema, Array.from(path2), value);
         } else if (assertCollection(this.contents)) {
-          this.contents.setIn(path, value);
+          this.contents.setIn(path2, value);
         }
       }
       /**
@@ -14009,9 +14009,9 @@ var require_cst_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    visit2.itemAtPath = (cst, path) => {
+    visit2.itemAtPath = (cst, path2) => {
       let item = cst;
-      for (const [field, index] of path) {
+      for (const [field, index] of path2) {
         const tok = item?.[field];
         if (tok && "items" in tok) {
           item = tok.items[index];
@@ -14020,23 +14020,23 @@ var require_cst_visit = __commonJS({
       }
       return item;
     };
-    visit2.parentCollection = (cst, path) => {
-      const parent = visit2.itemAtPath(cst, path.slice(0, -1));
-      const field = path[path.length - 1][0];
+    visit2.parentCollection = (cst, path2) => {
+      const parent = visit2.itemAtPath(cst, path2.slice(0, -1));
+      const field = path2[path2.length - 1][0];
       const coll = parent?.[field];
       if (coll && "items" in coll)
         return coll;
       throw new Error("Parent collection not found");
     };
-    function _visit(path, item, visitor) {
-      let ctrl = visitor(item, path);
+    function _visit(path2, item, visitor) {
+      let ctrl = visitor(item, path2);
       if (typeof ctrl === "symbol")
         return ctrl;
       for (const field of ["key", "value"]) {
         const token = item[field];
         if (token && "items" in token) {
           for (let i = 0; i < token.items.length; ++i) {
-            const ci = _visit(Object.freeze(path.concat([[field, i]])), token.items[i], visitor);
+            const ci = _visit(Object.freeze(path2.concat([[field, i]])), token.items[i], visitor);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -14047,10 +14047,10 @@ var require_cst_visit = __commonJS({
             }
           }
           if (typeof ctrl === "function" && field === "key")
-            ctrl = ctrl(item, path);
+            ctrl = ctrl(item, path2);
         }
       }
-      return typeof ctrl === "function" ? ctrl(item, path) : ctrl;
+      return typeof ctrl === "function" ? ctrl(item, path2) : ctrl;
     }
     exports.visit = visit2;
   }
@@ -16621,10 +16621,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path) {
-  if (!path)
+function getElementAtPath(obj, path2) {
+  if (!path2)
     return obj;
-  return path.reduce((acc, key) => acc?.[key], obj);
+  return path2.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16964,11 +16964,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path, issues) {
+function prefixIssues(path2, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path);
+    iss.path.unshift(path2);
     return iss;
   });
 }
@@ -17430,16 +17430,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path = []) => {
+  const processError = (error63, path2 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else {
-        const fullpath = [...path, ...issue2.path];
+        const fullpath = [...path2, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -17478,17 +17478,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path = []) => {
+  const processError = (error63, path2 = []) => {
     var _a3;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else {
-        const fullpath = [...path, ...issue2.path];
+        const fullpath = [...path2, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -17527,8 +17527,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path) {
+  const path2 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path2) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -20871,7 +20871,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve) {
+function isRecursive(inst, stack, resolve2) {
   const cached2 = recursive.get(inst);
   if (cached2 !== void 0)
     return cached2 ? PROVEN : NONE;
@@ -20881,7 +20881,7 @@ function isRecursive(inst, stack, resolve) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve);
+      const answer = isRecursive(child, stack, resolve2);
       if (answer > result)
         result = answer;
     }
@@ -20892,7 +20892,7 @@ function isRecursive(inst, stack, resolve) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve2) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -20956,7 +20956,7 @@ function isRecursive(inst, stack, resolve) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve2 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -34666,13 +34666,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path = ref.slice(1).split("/").filter(Boolean);
-  if (path.length === 0) {
+  const path2 = ref.slice(1).split("/").filter(Boolean);
+  if (path2.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path[0] === defsKey) {
-    const key = path[1] === void 0 ? void 0 : decodeJSONPointerSegment(path[1]);
+  if (path2[0] === defsKey) {
+    const key = path2[1] === void 0 ? void 0 : decodeJSONPointerSegment(path2[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -35592,6 +35592,12 @@ function isValidMAC(mac3) {
 function sanitizeIdentifier(name) {
   return name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
 }
+function isValidDevice(dev) {
+  if (!dev)
+    return false;
+  const d = dev.trim().toLowerCase();
+  return d !== "" && d !== "none" && d !== "null" && d !== "disabled" && d !== "unassigned";
+}
 
 // ../../packages/axonwall_lib/dist/schemas/index.js
 var InterfaceTypeSchema = external_exports.enum([
@@ -35696,7 +35702,7 @@ var GatewaySchema = external_exports.object({
   weight: external_exports.number().int().min(1).max(30).default(1),
   isDefault: external_exports.boolean().default(false),
   enabled: external_exports.boolean().default(true),
-  description: external_exports.string().max(255).default("")
+  description: external_exports.union([external_exports.string(), external_exports.number().transform(String), external_exports.null().transform(() => "")]).default("")
 });
 var WireGuardPeerSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
@@ -35803,7 +35809,7 @@ var StaticRouteSchema = external_exports.object({
   network: external_exports.string().refine(isValidCIDR, { message: "Invalid route network CIDR" }),
   gateway: external_exports.string().refine((val) => isValidIPv4(val) || isValidIPv62(val), { message: "Invalid route gateway IP" }),
   interface: external_exports.string().optional(),
-  description: external_exports.string().max(255).default(""),
+  description: external_exports.union([external_exports.string(), external_exports.number().transform(String), external_exports.null().transform(() => "")]).default(""),
   enabled: external_exports.boolean().default(true)
 });
 var GatewayGroupMemberSchema = external_exports.object({
@@ -36135,6 +36141,8 @@ var HaSqliteSyncConfigSchema = external_exports.object({
   peerAddress: external_exports.string().optional(),
   peerPort: external_exports.number().int().min(1).max(65535).optional(),
   authToken: external_exports.string().optional(),
+  transport: external_exports.enum(["token-http", "mtls"]).default("token-http"),
+  requireSignedPayloads: external_exports.boolean().default(false),
   litestreamBucket: external_exports.string().optional(),
   litestreamEndpoint: external_exports.string().optional(),
   litestreamAccessKeyId: external_exports.string().optional(),
@@ -36157,7 +36165,9 @@ var HighAvailabilityConfigSchema = external_exports.object({
     mode: "direct_stream",
     databases: ["/var/lib/axonwall/headscale/db.sqlite"],
     syncIntervalSeconds: 5,
-    listenPort: 9876
+    listenPort: 9876,
+    transport: "token-http",
+    requireSignedPayloads: false
   }),
   syncSections: HaSyncSectionsSchema.default({
     interfaces: false,
@@ -36270,7 +36280,12 @@ var PluginManifestSchema = external_exports.object({
     title: external_exports.string(),
     path: external_exports.string(),
     icon: external_exports.string().optional()
-  }).optional()
+  }).optional(),
+  packages: external_exports.object({
+    debian: external_exports.array(external_exports.string()).default([]),
+    alpine: external_exports.array(external_exports.string()).default([])
+  }).optional(),
+  cliBinaries: external_exports.array(external_exports.string()).optional()
 });
 var InstalledPluginRecordSchema = external_exports.object({
   id: external_exports.string(),
@@ -37507,7 +37522,7 @@ function compileNfsExports(nas) {
     const squash = exp.mapRootUser === "root" ? "no_root_squash" : "root_squash";
     const rawNets = exp.allowedNetworks && exp.allowedNetworks.length > 0 ? exp.allowedNetworks : ["*"];
     const nets = rawNets.map(sanitizeIniVal).filter(Boolean);
-    const clientSpecs = nets.map((net) => `${net}(${mode},${syncMode},no_subtree_check,${squash})`).join(" ");
+    const clientSpecs = nets.map((net2) => `${net2}(${mode},${syncMode},no_subtree_check,${squash})`).join(" ");
     lines.push(`${sanitizeIniVal(exp.path)} ${clientSpecs}`);
   }
   lines.push("");
@@ -37588,7 +37603,7 @@ function compileK3s(state, joinToken) {
     `flannel-backend: "${k3s.flannelBackend}"`
   ];
   const ifaceObj = state.interfaces.find((i) => i.name === k3s.nodeIpInterface);
-  if (ifaceObj?.device) {
+  if (isValidDevice(ifaceObj?.device)) {
     configLines.push(`flannel-iface: "${ifaceObj.device}"`);
   }
   if (isSecondaryJoin && effectivePeer) {
@@ -37715,20 +37730,188 @@ function compileK3s(state, joinToken) {
   };
 }
 
+// ../../packages/axonwall_lib/dist/compile/kea/index.js
+function compileKeaDhcp4(dhcp, interfaces) {
+  const ifDeviceMap = /* @__PURE__ */ new Map();
+  for (const iface of interfaces) {
+    ifDeviceMap.set(iface.name, iface.device);
+  }
+  const activeSubnets = dhcp.subnets.filter((s) => s.enabled);
+  const activeInterfaces = Array.from(new Set(activeSubnets.map((s) => ifDeviceMap.get(s.interface) || s.interface).filter(isValidDevice)));
+  const keaConfig = {
+    Dhcp4: {
+      "interfaces-config": {
+        interfaces: activeInterfaces,
+        "dhcp-socket-type": "raw"
+      },
+      "lease-database": {
+        type: "memfile",
+        persist: true,
+        name: "/var/lib/axonwall/kea/dhcp4.leases"
+      },
+      "valid-lifetime": 7200,
+      "renew-timer": 1800,
+      "rebind-timer": 3600,
+      "subnet4": activeSubnets.map((sub, idx) => {
+        const optionData = [];
+        if (sub.routers.length > 0) {
+          optionData.push({
+            name: "routers",
+            data: sub.routers.join(", ")
+          });
+        }
+        if (sub.dnsServers.length > 0) {
+          optionData.push({
+            name: "domain-name-servers",
+            data: sub.dnsServers.join(", ")
+          });
+        }
+        return {
+          id: idx + 1,
+          subnet: sub.subnet,
+          interface: ifDeviceMap.get(sub.interface) || sub.interface,
+          pools: [
+            {
+              pool: `${sub.poolStart} - ${sub.poolEnd}`
+            }
+          ],
+          "option-data": optionData,
+          reservations: sub.staticMappings.map((m) => ({
+            "hw-address": m.mac,
+            "ip-address": m.ip,
+            hostname: m.hostname || void 0
+          }))
+        };
+      })
+    }
+  };
+  return {
+    keaDhcp4Config: JSON.stringify(keaConfig, null, 2)
+  };
+}
+
+// ../../packages/axonwall_lib/dist/compile/frr/index.js
+function compileFrr(config2) {
+  const daemons = {
+    zebra: true,
+    bgpd: false,
+    ospfd: false,
+    ospf6d: false,
+    bfdd: false
+  };
+  if (!config2 || !config2.enabled) {
+    return {
+      frrConf: "# FRRouting is disabled\n",
+      daemons,
+      daemonsConf: generateDaemonsConf(daemons)
+    };
+  }
+  const lines = [
+    "frr version 10.0",
+    "frr defaults traditional",
+    "hostname axonwall",
+    "log syslog informational",
+    "service integrated-vtysh-config",
+    "!"
+  ];
+  if (config2.bgp && config2.bgp.enabled) {
+    daemons.bgpd = true;
+    lines.push(`router bgp ${config2.bgp.asNumber}`);
+    lines.push(` bgp router-id ${config2.bgp.routerId.replace(/[\r\n\s]+/g, "")}`);
+    lines.push(" no bgp ebgp-requires-policy");
+    for (const net2 of config2.bgp.networks) {
+      lines.push(` network ${net2.replace(/[\r\n\s]+/g, "")}`);
+    }
+    for (const neighbor of config2.bgp.neighbors) {
+      const safePeerIp = neighbor.peerIp.replace(/[\r\n\s]+/g, "");
+      lines.push(` neighbor ${safePeerIp} remote-as ${neighbor.remoteAs}`);
+      if (neighbor.description) {
+        const safeDesc = neighbor.description.replace(/[\r\n]+/g, " ").replace(/"/g, "'").trim();
+        lines.push(` neighbor ${safePeerIp} description ${safeDesc}`);
+      }
+      if (neighbor.password) {
+        const safePass = neighbor.password.replace(/[\r\n\s]+/g, "");
+        lines.push(` neighbor ${safePeerIp} password ${safePass}`);
+      }
+      if (neighbor.bfd) {
+        daemons.bfdd = true;
+        lines.push(` neighbor ${safePeerIp} bfd`);
+      }
+      if (neighbor.nextHopSelf) {
+        lines.push(` neighbor ${safePeerIp} next-hop-self`);
+      }
+      if (neighbor.softReconfiguration) {
+        lines.push(` neighbor ${safePeerIp} soft-reconfiguration inbound`);
+      }
+    }
+    lines.push("!");
+  }
+  if (config2.ospf && config2.ospf.enabled) {
+    daemons.ospfd = true;
+    for (const area of config2.ospf.areas) {
+      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, "");
+      for (const iface of area.interfaces) {
+        lines.push(`interface ${iface.replace(/[\r\n\s]+/g, "")}`);
+        lines.push(` ip ospf area ${safeAreaId}`);
+        lines.push("!");
+      }
+    }
+    lines.push("router ospf");
+    lines.push(` ospf router-id ${config2.ospf.routerId.replace(/[\r\n\s]+/g, "")}`);
+    if (config2.ospf.redistributeConnected) {
+      lines.push(" redistribute connected");
+    }
+    if (config2.ospf.redistributeDefault) {
+      lines.push(" default-information originate");
+    }
+    for (const area of config2.ospf.areas) {
+      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, "");
+      for (const net2 of area.networks) {
+        lines.push(` network ${net2.replace(/[\r\n\s]+/g, "")} area ${safeAreaId}`);
+      }
+    }
+    lines.push("!");
+  }
+  lines.push("line vty", "!");
+  return {
+    frrConf: lines.join("\n") + "\n",
+    daemons,
+    daemonsConf: generateDaemonsConf(daemons)
+  };
+}
+function generateDaemonsConf(daemons) {
+  return [
+    "# FRR daemons configuration",
+    `zebra=${daemons.zebra ? "yes" : "no"}`,
+    `bgpd=${daemons.bgpd ? "yes" : "no"}`,
+    `ospfd=${daemons.ospfd ? "yes" : "no"}`,
+    `ospf6d=${daemons.ospf6d ? "yes" : "no"}`,
+    `bfdd=${daemons.bfdd ? "yes" : "no"}`,
+    "fabricd=no",
+    "vrrpd=no",
+    "staticd=yes",
+    "vtysh_enable=yes",
+    'zebra_options="  -A 127.0.0.1 -s 90000000"',
+    ""
+  ].join("\n");
+}
+
 // ../../packages/axonwall_lib/dist/compile/nft/index.js
 function buildNasAndK3sInputRules(state, ifDeviceMap, nasEnabled, k3sEnabled) {
   const hostRules = [];
-  const trustedDevs = state.interfaces.filter((i) => i.enabled && i.name !== "wan" && i.device).map((i) => `"${i.device}"`);
+  const trustedDevs = state.interfaces.filter((i) => i.enabled && i.name !== "wan" && isValidDevice(i.device)).map((i) => `"${i.device}"`);
   if (state.ha?.enabled && state.ha.syncInterface) {
     const syncDev = ifDeviceMap.get(state.ha.syncInterface) || state.ha.syncInterface;
-    if (!trustedDevs.includes(`"${syncDev}"`)) {
-      trustedDevs.push(`"${syncDev}"`);
+    if (isValidDevice(syncDev)) {
+      if (!trustedDevs.includes(`"${syncDev}"`)) {
+        trustedDevs.push(`"${syncDev}"`);
+      }
+      const configuredPort = state.ha.sqliteSync?.listenPort;
+      const syncPort = typeof configuredPort === "number" && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535 ? configuredPort : 9876;
+      hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
+      hostRules.push(`    iifname "${syncDev}" tcp dport 636 accept comment "ha-openldap-ldaps-syncrepl"`);
+      hostRules.push(`    iifname "${syncDev}" udp dport 123 accept comment "ha-chrony-ntp-sync"`);
     }
-    const configuredPort = state.ha.sqliteSync?.listenPort;
-    const syncPort = typeof configuredPort === "number" && Number.isInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65535 ? configuredPort : 9876;
-    hostRules.push(`    iifname "${syncDev}" tcp dport ${syncPort} accept comment "ha-state-and-zfs-sync"`);
-    hostRules.push(`    iifname "${syncDev}" tcp dport 636 accept comment "ha-openldap-ldaps-syncrepl"`);
-    hostRules.push(`    iifname "${syncDev}" udp dport 123 accept comment "ha-chrony-ntp-sync"`);
   }
   const devSet = trustedDevs.length > 0 ? `iifname { ${trustedDevs.join(", ")} } ` : "";
   if (nasEnabled) {
@@ -37795,6 +37978,60 @@ function compileNftables(state) {
       fileMode: 384
     });
   }
+  if (state.ha) {
+    files.push({
+      path: "/etc/axonwall/managed/ha_config.json",
+      content: JSON.stringify(state.ha, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.gateways && state.gateways.length > 0 || state.gatewayGroups && state.gatewayGroups.length > 0) {
+    files.push({
+      path: "/etc/axonwall/managed/sdwan_config.json",
+      content: JSON.stringify({
+        gateways: state.gateways || [],
+        gatewayGroups: state.gatewayGroups || []
+      }, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.zeroTrust) {
+    files.push({
+      path: "/etc/axonwall/managed/zero_trust_apps.json",
+      content: JSON.stringify(state.zeroTrust, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.vigilante) {
+    files.push({
+      path: "/etc/axonwall/managed/vigilante_config.json",
+      content: JSON.stringify(state.vigilante, null, 2),
+      fileMode: 384
+    });
+  }
+  if (state.dhcp?.enabled && state.dhcp.subnets && state.dhcp.subnets.length > 0) {
+    const kea = compileKeaDhcp4(state.dhcp, state.interfaces);
+    files.push({
+      path: "/etc/kea/kea-dhcp4.conf",
+      content: kea.keaDhcp4Config,
+      fileMode: 420
+    });
+    reloadServices.push("kea-dhcp4-server");
+  }
+  if (state.frr?.enabled) {
+    const frr = compileFrr(state.frr);
+    files.push({
+      path: "/etc/frr/frr.conf",
+      content: frr.frrConf,
+      fileMode: 416
+    });
+    files.push({
+      path: "/etc/frr/daemons",
+      content: frr.daemonsConf,
+      fileMode: 416
+    });
+    reloadServices.push("frr");
+  }
   const ifDeviceMap = /* @__PURE__ */ new Map();
   for (const iface of state.interfaces) {
     ifDeviceMap.set(iface.name, iface.device);
@@ -37821,8 +38058,10 @@ function compileNftables(state) {
       for (const ifaceName of ifaceList) {
         if (ifaceName !== "wan") {
           const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-          const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
-          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          if (isValidDevice(dev)) {
+            const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
+            lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          }
         }
       }
     }
@@ -37856,7 +38095,7 @@ function compileNftables(state) {
   }
   const suricataConfig = state.suricata ? {
     ...state.suricata,
-    interfaces: state.suricata.interfaces.map((i) => ifDeviceMap.get(i) || i)
+    interfaces: state.suricata.interfaces.map((i) => ifDeviceMap.get(i) || i).filter(isValidDevice)
   } : void 0;
   const suricataCompiled = compileSuricata(suricataConfig);
   const crowdsecCompiled = compileCrowdSec(state.crowdsec);
@@ -37932,7 +38171,7 @@ function compileNftables(state) {
     }
     lines.push("");
   }
-  const enabledDevices = state.interfaces.filter((i) => i.enabled && i.device).map((i) => `"${i.device}"`);
+  const enabledDevices = state.interfaces.filter((i) => i.enabled && isValidDevice(i.device)).map((i) => `"${i.device}"`);
   if (state.system.flowtableOffload && enabledDevices.length > 0) {
     lines.push("  # Flowtable Fastpath");
     lines.push("  flowtable ft_fastpath {");
@@ -37947,7 +38186,7 @@ function compileNftables(state) {
     const tlsConfig = state.suricata.tlsDecryption;
     lines.push(`    # TLS Decryption Interception`);
     for (const iface of state.interfaces) {
-      if (iface.enabled && iface.name !== "wan") {
+      if (iface.enabled && iface.name !== "wan" && isValidDevice(iface.device)) {
         const dev = iface.device;
         lines.push(`    iifname "${dev}" tcp dport 443 redirect to :${tlsConfig.transparentProxyPort} comment "tls-decryption-intercept"`);
       }
@@ -37957,6 +38196,8 @@ function compileNftables(state) {
     if (!nat.enabled || nat.type !== "dnat" || !nat.targetIp)
       continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
+    if (!isValidDevice(ifaceDev))
+      continue;
     let protoMatch = "";
     if (nat.protocol === "any" || nat.protocol === "tcp_udp") {
       protoMatch = nat.destinationPort ? `meta l4proto { tcp, udp } th dport ${formatPort(nat.destinationPort)}` : "meta l4proto { tcp, udp }";
@@ -37997,9 +38238,11 @@ function compileNftables(state) {
     for (const ifaceName of ifaceList) {
       if (ifaceName !== "wan") {
         const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-        lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
-        const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
-        lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        if (isValidDevice(dev)) {
+          lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
+          const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
+          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        }
       } else {
         warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
       }
@@ -38013,7 +38256,7 @@ function compileNftables(state) {
     lines.push(`    udp dport 41641 accept comment "headscale-mesh"`);
   }
   for (const iface of state.interfaces) {
-    if (!iface.enabled)
+    if (!iface.enabled || !isValidDevice(iface.device))
       continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump input_${iface.name}`);
@@ -38042,7 +38285,7 @@ function compileNftables(state) {
   lines.push("    ct state established,related accept");
   lines.push("    ct state invalid drop");
   for (const iface of state.interfaces) {
-    if (!iface.enabled)
+    if (!iface.enabled || !isValidDevice(iface.device))
       continue;
     const dev = iface.device;
     lines.push(`    iifname "${dev}" jump forward_${iface.name}`);
@@ -38062,6 +38305,8 @@ function compileNftables(state) {
     if (!nat.enabled)
       continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
+    if (!isValidDevice(ifaceDev))
+      continue;
     if (nat.type === "masquerade") {
       lines.push(`    oifname "${ifaceDev}" masquerade comment "outbound-nat"`);
     } else if (nat.type === "snat" && nat.targetIp) {
@@ -38076,7 +38321,7 @@ function compileNftables(state) {
     }
     for (const gwIfaceName of gatewayIfaces) {
       const iface = state.interfaces.find((i) => i.name === gwIfaceName);
-      if (iface) {
+      if (iface && isValidDevice(iface.device)) {
         lines.push(`    oifname "${iface.device}" masquerade comment "default-gateway-masquerade"`);
       }
     }
@@ -38455,6 +38700,9 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 import * as http from "node:http";
 import * as https from "node:https";
 import * as fs2 from "node:fs";
+import * as net from "node:net";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // src/headscale.ts
 import { execFile } from "child_process";
@@ -38606,6 +38854,146 @@ var AXONWALL_YAML_DOMAINS = [
 ];
 var AXONWALL_YAML_FILENAMES = AXONWALL_YAML_DOMAINS.map((d) => d.filename);
 
+// ../../packages/axonwall_lib/dist/cloudinit/index.js
+var import_yaml3 = __toESM(require_dist(), 1);
+var FilesystemTypeSchema = external_exports.enum(["ext4", "xfs", "btrfs"]).default("ext4");
+var PartitionSlotSchema = external_exports.object({
+  size_gb: external_exports.number().min(4).default(16),
+  filesystem: FilesystemTypeSchema.default("ext4")
+});
+var SwapPartitionSchema = external_exports.object({
+  size_gb: external_exports.number().min(0).default(2),
+  zram_enabled: external_exports.boolean().default(false)
+});
+var DataPartitionSchema = external_exports.object({
+  size_gb: external_exports.number().min(2).optional(),
+  allocate_remaining: external_exports.boolean().default(false),
+  filesystem: FilesystemTypeSchema.default("ext4")
+});
+var LogsPartitionSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  size_gb: external_exports.number().min(2).default(10),
+  filesystem: FilesystemTypeSchema.default("xfs"),
+  mountpoint: external_exports.string().default("/var/log")
+});
+var CustomMountSchema = external_exports.object({
+  name: external_exports.string().min(1),
+  disk: external_exports.string().optional(),
+  size_gb: external_exports.number().min(1),
+  filesystem: FilesystemTypeSchema.default("ext4"),
+  mountpoint: external_exports.string().min(1)
+});
+var SystemRaidSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  level: external_exports.enum(["raid1"]).default("raid1")
+});
+var RFC1123_HOSTNAME = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+var LINUX_USERNAME = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}$/;
+var OPENSSH_PUBKEY = /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+[A-Za-z0-9+/=]+(\s+[^\r\n]*)?$/;
+var EncryptionSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  tpm2_auto_unlock: external_exports.boolean().default(false),
+  passphrase: external_exports.string().refine((s) => !/[\r\n\0]/.test(s), "Passphrase cannot contain newlines or null bytes").optional(),
+  cipher: external_exports.string().default("aes-xts-plain64"),
+  key_size: external_exports.number().default(512)
+});
+var CloudInitZfsDatasetSchema = external_exports.object({
+  name: external_exports.string().min(1),
+  mountpoint: external_exports.string().optional(),
+  compression: external_exports.string().default("lz4"),
+  properties: external_exports.record(external_exports.string(), external_exports.string()).optional()
+});
+var CloudInitZfsStorageSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  pool_name: external_exports.string().default("tank"),
+  allocate_system_disk_remainder: external_exports.boolean().default(true),
+  system_disk_size_gb: external_exports.number().min(0).default(0),
+  extra_disks: external_exports.array(external_exports.string()).default([]),
+  topology: external_exports.enum(["auto", "stripe", "mirror", "raidz1", "raidz2", "raidz3", "draid1", "draid2"]).default("auto"),
+  datasets: external_exports.array(CloudInitZfsDatasetSchema).default([])
+});
+var CloudInitStorageSchema = external_exports.object({
+  layout_mode: external_exports.enum(["standard_ab", "compact_ab", "single_root", "custom"]).default("standard_ab"),
+  target_disks: external_exports.array(external_exports.string()).min(1).default(["/dev/sda"]),
+  system_raid: SystemRaidSchema.default(() => ({ enabled: false, level: "raid1" })),
+  encryption: EncryptionSchema.default(() => ({
+    enabled: false,
+    tpm2_auto_unlock: false,
+    cipher: "aes-xts-plain64",
+    key_size: 512
+  })),
+  partitions: external_exports.object({
+    efi_size_mb: external_exports.number().min(128).max(4096).default(512),
+    slot_a: PartitionSlotSchema.default(() => ({ size_gb: 16, filesystem: "ext4" })),
+    slot_b: PartitionSlotSchema.default(() => ({ size_gb: 16, filesystem: "ext4" })),
+    swap: SwapPartitionSchema.default(() => ({ size_gb: 2, zram_enabled: false })),
+    data: DataPartitionSchema.default(() => ({ allocate_remaining: true, filesystem: "ext4" })),
+    logs: LogsPartitionSchema.default(() => ({
+      enabled: false,
+      size_gb: 10,
+      filesystem: "xfs",
+      mountpoint: "/var/log"
+    })),
+    custom_mounts: external_exports.array(CustomMountSchema).default([])
+  }).default(() => ({
+    efi_size_mb: 512,
+    slot_a: { size_gb: 16, filesystem: "ext4" },
+    slot_b: { size_gb: 16, filesystem: "ext4" },
+    swap: { size_gb: 2, zram_enabled: false },
+    data: { allocate_remaining: true, filesystem: "ext4" },
+    logs: { enabled: false, size_gb: 10, filesystem: "xfs", mountpoint: "/var/log" },
+    custom_mounts: []
+  })),
+  zfs: CloudInitZfsStorageSchema.default(() => ({
+    enabled: false,
+    pool_name: "tank",
+    allocate_system_disk_remainder: true,
+    system_disk_size_gb: 0,
+    extra_disks: [],
+    topology: "auto",
+    datasets: []
+  }))
+});
+var CloudInitZtpSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  controller_url: external_exports.string().url().optional(),
+  enrollment_token: external_exports.string().refine((s) => !/[\r\n\0]/.test(s), "Enrollment token cannot contain newlines or null bytes").optional()
+});
+var CloudInitAuthSchema = external_exports.object({
+  admin_username: external_exports.string().regex(LINUX_USERNAME, "Invalid Linux username format").default("admin"),
+  admin_password: external_exports.string().refine((s) => !/[\r\n\0]/.test(s), "Password cannot contain newlines or null bytes").optional(),
+  admin_password_hash: external_exports.string().optional(),
+  ztp: CloudInitZtpSchema.default({ enabled: false })
+});
+var AxonwallCloudConfigSchema = external_exports.object({
+  storage: CloudInitStorageSchema.optional(),
+  auth: CloudInitAuthSchema.optional(),
+  desired_state: DesiredStateSchema.partial().optional()
+});
+var CloudInitUserSchema = external_exports.object({
+  name: external_exports.string().regex(LINUX_USERNAME, "Invalid Linux username format"),
+  gecos: external_exports.string().optional(),
+  sudo: external_exports.string().optional(),
+  shell: external_exports.string().default("/usr/bin/zsh"),
+  lock_passwd: external_exports.boolean().default(false),
+  ssh_authorized_keys: external_exports.array(external_exports.string().regex(OPENSSH_PUBKEY, "Invalid OpenSSH public key format")).default([])
+});
+var FullCloudInitSchema = external_exports.object({
+  hostname: external_exports.string().regex(RFC1123_HOSTNAME, "Hostname must adhere to RFC 1123 format (e.g. host-01)").optional(),
+  fqdn: external_exports.string().optional(),
+  manage_etc_hosts: external_exports.boolean().optional(),
+  timezone: external_exports.string().optional(),
+  users: external_exports.array(CloudInitUserSchema).optional(),
+  packages: external_exports.array(external_exports.string()).optional(),
+  runcmd: external_exports.array(external_exports.string()).optional(),
+  growpart: external_exports.object({
+    mode: external_exports.string().optional(),
+    devices: external_exports.array(external_exports.string()).optional(),
+    ignore_growroot_disabled: external_exports.boolean().optional()
+  }).optional(),
+  axonwall: AxonwallCloudConfigSchema.optional()
+});
+
 // src/headscale.ts
 function assertSafeIdentifier(val, paramName) {
   const str = String(val).trim();
@@ -38629,7 +39017,7 @@ function getHeadscaleBin() {
   return "headscale";
 }
 function runHeadscale(args) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     if (!fs.existsSync(HEADSCALE_SOCKET_PATH)) {
       return reject(
         new Error(`Headscale service is not running (${HEADSCALE_SOCKET_PATH} not found). Ensure the headscale service is started.`)
@@ -38643,12 +39031,12 @@ function runHeadscale(args) {
       }
       const trimmed = stdout.trim();
       if (!trimmed || trimmed === "null") {
-        return resolve(null);
+        return resolve2(null);
       }
       try {
-        resolve(JSON.parse(trimmed));
+        resolve2(JSON.parse(trimmed));
       } catch {
-        resolve(trimmed);
+        resolve2(trimmed);
       }
     });
   });
@@ -38722,6 +39110,98 @@ function buildArtifactBundle(jobId, state) {
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
+function createHttpRedirectServer(targetPort) {
+  const redirectServer = http.createServer((req, res) => {
+    const rawHost = req.headers.host || `localhost:${targetPort}`;
+    const host = rawHost.includes(":") ? rawHost : `${rawHost}:${targetPort}`;
+    const targetUrl = `https://${host}${req.url || "/"}`;
+    res.writeHead(301, {
+      Location: targetUrl,
+      "Content-Type": "text/html; charset=utf-8",
+      Connection: "close",
+      "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+    });
+    res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="refresh" content="0;url=${targetUrl}">
+  <title>Redirecting to HTTPS</title>
+</head>
+<body style="font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #94a3b8; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+  <div style="background: #1e293b; padding: 2rem; border-radius: 8px; border: 1px solid #334155; text-align: center; max-width: 480px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);">
+    <h2 style="color: #38bdf8; margin: 0 0 1rem 0;">Upgrading to Secure HTTPS...</h2>
+    <p style="margin: 0 0 1rem 0;">Redirecting you automatically to the secure management console.</p>
+    <p style="margin: 0; font-size: 0.85rem;"><a href="${targetUrl}" style="color: #38bdf8; text-decoration: underline;">Click here if you are not redirected</a></p>
+  </div>
+  <script>location.href = ${JSON.stringify(targetUrl)};</script>
+</body>
+</html>`);
+  });
+  redirectServer.on("upgrade", (req, socket) => {
+    const rawHost = req.headers.host || `localhost:${targetPort}`;
+    const host = rawHost.includes(":") ? rawHost : `${rawHost}:${targetPort}`;
+    const targetUrl = `https://${host}${req.url || "/"}`;
+    socket.write(
+      `HTTP/1.1 301 Moved Permanently\r
+Location: ${targetUrl}\r
+Connection: close\r
+Content-Type: text/plain\r
+\r
+Redirecting to HTTPS\r
+`
+    );
+    socket.destroy();
+  });
+  redirectServer.on("clientError", (err, socket) => {
+    socket.destroy(err);
+  });
+  return redirectServer;
+}
+function createPortMultiplexer(httpsServer, redirectServer) {
+  const tcpMultiplexer = net.createServer((socket) => {
+    let handled = false;
+    const onReadable = () => {
+      if (handled) return;
+      const buf = socket.read(1);
+      if (!buf) return;
+      handled = true;
+      socket.removeListener("error", onError);
+      socket.removeListener("close", onClose);
+      socket.unshift(buf);
+      if (buf[0] === 22) {
+        httpsServer.emit("connection", socket);
+      } else {
+        redirectServer.emit("connection", socket);
+      }
+    };
+    const onError = (_err) => {
+      if (!handled) {
+        handled = true;
+        socket.destroy();
+      }
+    };
+    const onClose = () => {
+      handled = true;
+    };
+    socket.once("readable", onReadable);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+  tcpMultiplexer.on("error", (err) => {
+    console.error("[Axonwall Controller] TCP Multiplexer error:", err);
+  });
+  tcpMultiplexer.on("close", () => {
+    if (typeof httpsServer.closeAllConnections === "function") {
+      httpsServer.closeAllConnections();
+    }
+    if (typeof redirectServer.closeAllConnections === "function") {
+      redirectServer.closeAllConnections();
+    }
+    httpsServer.close();
+    redirectServer.close();
+  });
+  return tcpMultiplexer;
+}
 async function main() {
   console.log("[Axonwall Controller] Starting Axonwall Control Plane Worker...");
   console.log("[Axonwall Controller] Monitoring config changes and apply pipeline.");
@@ -38769,7 +39249,9 @@ async function main() {
   const keyPath = "/etc/axonwall/certs/hub.key";
   const caPath = "/etc/axonwall/certs/ca.crt";
   const uiPort = parseInt(process.env.UI_PORT || "3000", 10);
+  const port = parseInt(process.env.CONTROLLER_PORT || "2966", 10);
   let server;
+  let mainServer;
   const requestHandler = (req, res) => {
     let pathname;
     try {
@@ -38940,8 +39422,8 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     req.pipe(uiReq);
   };
   if (fs2.existsSync(certPath) && fs2.existsSync(keyPath)) {
-    console.log("[Axonwall Controller] Starting in SECURE mTLS mode");
-    server = https.createServer({
+    console.log(`[Axonwall Controller] Starting in SECURE mTLS mode (HTTP auto-upgrade enabled on port ${port})`);
+    const httpsServer = https.createServer({
       cert: fs2.readFileSync(certPath),
       key: fs2.readFileSync(keyPath),
       ca: fs2.existsSync(caPath) ? fs2.readFileSync(caPath) : void 0,
@@ -38954,12 +39436,17 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       // API rejects presented-but-invalid certificates (verifyFleetAuth).
       rejectUnauthorized: false
     }, requestHandler);
+    const redirectServer = createHttpRedirectServer(port);
+    const tcpMultiplexer = createPortMultiplexer(httpsServer, redirectServer);
+    mainServer = httpsServer;
+    server = tcpMultiplexer;
   } else {
     console.log("[Axonwall Controller] Starting in INSECURE HTTP mode");
-    server = http.createServer(requestHandler);
+    mainServer = http.createServer(requestHandler);
+    server = mainServer;
   }
   const wss = new import_websocket_server.default({ noServer: true, maxPayload: 1048576 });
-  server.on("upgrade", (request2, socket, head) => {
+  mainServer.on("upgrade", (request2, socket, head) => {
     let pathname;
     try {
       pathname = new URL(request2.url || "/", `http://${request2.headers.host || "localhost"}`).pathname;
@@ -39232,17 +39719,26 @@ ${headerLines.join("\r\n")}\r
     }
     broadcastMeshTopology();
   });
-  const port = parseInt(process.env.CONTROLLER_PORT || "2966", 10);
   server.listen(port, "0.0.0.0", () => {
     console.log(`[Axonwall Controller] Fleet Manager listening on 0.0.0.0:${port}`);
   });
 }
-if (process.env.NODE_ENV !== "test") {
+var isDirectExecution = () => {
+  if (process.env.NODE_ENV === "test") return false;
+  try {
+    return !!process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+  } catch {
+    return false;
+  }
+};
+if (isDirectExecution()) {
   main().catch((err) => {
     console.error("[Axonwall Controller] Fatal error:", err);
     process.exit(1);
   });
 }
 export {
-  buildArtifactBundle
+  buildArtifactBundle,
+  createHttpRedirectServer,
+  createPortMultiplexer
 };

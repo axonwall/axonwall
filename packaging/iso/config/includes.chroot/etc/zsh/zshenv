@@ -1,0 +1,10 @@
+# ==============================================================================
+# /etc/zsh/zshenv — Global ZSH Environment for Axonwall Appliances
+# ==============================================================================
+
+export STARSHIP_CONFIG="/etc/axonwall/starship.toml"
+export STARSHIP_LOG="error"
+
+# Suppress Debian's interactive zsh-newuser-install wizard so SSH admins/operators
+# immediately enter the preconfigured Axonwall + Starship environment.
+zsh-newuser-install() { :; }

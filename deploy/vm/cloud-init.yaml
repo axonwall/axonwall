@@ -1,13 +1,23 @@
 #cloud-config
-# Axonwall VM Cloud-Init bootstrap configuration
-# Supported on KVM/Proxmox (qcow2), VMware (OVA), Hyper-V, AWS AMI, Azure, GCP
+# ==============================================================================
+# Axonwall Appliance Cloud-Init Reference Specification
+# ==============================================================================
+# Compatible with:
+# - Bare-metal ISO installation (attach as volume labeled 'cidata' or 'AXONCFG')
+# - Proxmox VE (Cloud-Init Drive / NoCloud)
+# - QEMU/KVM (.qcow2 image)
+# - OpenStack / CloudStack (ConfigDrive / metadata)
+# - AWS EC2 / Azure / GCP
+# ==============================================================================
 
-hostname: axonwall-vm
-fqdn: axonwall-vm.local
+hostname: axonwall-edge01
+fqdn: axonwall-edge01.corp.internal
 manage_etc_hosts: true
+timezone: UTC
 
+# System user & SSH public keys
 users:
-  - name: axonwall
+  - name: admin
     gecos: Axonwall Administrator
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
@@ -15,20 +25,120 @@ users:
     ssh_authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenericBootstrapKeyAxonwallDeployment admin@axonwall
 
+# Additional packages to install via cloud-init
 packages:
-  - nftables
-  - iproute2
-  - wireguard-tools
-  - keepalived
-  - conntrackd
   - qemu-guest-agent
 
+# Post-bootstrap commands
 runcmd:
-  # Enable forwarding and IP parameters
-  - sysctl -w net.ipv4.ip_forward=1
-  - sysctl -w net.ipv6.conf.all.forwarding=1
-  - sysctl -w net.netfilter.nf_conntrack_tcp_be_liberal=1
-  # Start guest agent and firewall daemon
   - systemctl enable --now qemu-guest-agent || true
-  - systemctl enable --now axonwalld || true
-  - systemctl enable --now axonwall-ui || true
+
+# ==============================================================================
+# Axonwall Engine Namespace
+# ==============================================================================
+axonwall:
+  # ----------------------------------------------------------------------------
+  # 1. Authentication & Central Controller ZTP
+  # ----------------------------------------------------------------------------
+  auth:
+    admin_username: admin
+    admin_password: "InitialComplexPassword123!"
+    ztp:
+      enabled: true
+      controller_url: "https://controller.axonwall.corp:8443"
+      enrollment_token: "ztp_tok_sec_994a3e2b1c8f4d0a"
+
+  # ----------------------------------------------------------------------------
+  # 2. Storage & Partition Layout (Bare-metal ISO & Cloud Provisioning)
+  # ----------------------------------------------------------------------------
+  storage:
+    # Layout mode: 'standard_ab' (A/B dual-root unbrickable updates),
+    # 'compact_ab', or 'single_root'
+    layout_mode: standard_ab
+    target_disks:
+      - /dev/sda
+
+    # Optional hardware RAID-1 mirroring across disks (e.g. ['/dev/sda', '/dev/sdb'])
+    system_raid:
+      enabled: false
+      level: raid1
+
+    # LUKS2 Volume Encryption with TPM2 Hardware Auto-Unlock
+    encryption:
+      enabled: true
+      tpm2_auto_unlock: true
+      # Optional recovery passphrase if TPM2 chip is unavailable or cleared
+      passphrase: "BackupVaultRecoveryPassphrase#2026"
+      cipher: aes-xts-plain64
+      key_size: 512
+
+    # Custom Partition Sizing and Filesystem Formats
+    partitions:
+      efi_size_mb: 512
+      slot_a:
+        size_gb: 16
+        filesystem: ext4
+      slot_b:
+        size_gb: 16
+        filesystem: ext4
+      swap:
+        size_gb: 2
+        zram_enabled: true
+      data:
+        allocate_remaining: true
+        filesystem: ext4
+      # Dedicated /var/log partition prevents log floods from filling root or data
+      logs:
+        enabled: true
+        size_gb: 10
+        filesystem: xfs
+        mountpoint: /var/log
+
+  # ----------------------------------------------------------------------------
+  # 3. Declarative Desired State (Firewall Rules, Interfaces, Services)
+  # ----------------------------------------------------------------------------
+  desired_state:
+    version: 1
+    system:
+      hostname: axonwall-edge01
+      domain: corp.internal
+      dnsServers:
+        - 1.1.1.1
+        - 8.8.8.8
+
+    interfaces:
+      - name: wan
+        device: eth0
+        description: Primary Uplink
+        enabled: true
+        type: dhcp
+
+      - name: lan
+        device: eth1
+        description: Corporate LAN
+        enabled: true
+        type: static
+        ipv4Address: 192.168.1.1/24
+
+    rules:
+      - description: Allow outbound DNS from LAN
+        action: pass
+        direction: in
+        interface: lan
+        protocol: udp
+        destinationPort: "53"
+        enabled: true
+      - description: Allow outbound web browsing
+        action: pass
+        direction: in
+        interface: lan
+        protocol: tcp
+        destinationPort: "443"
+        enabled: true
+
+    nat:
+      - description: Default Masquerade to WAN
+        type: masquerade
+        interface: wan
+        source: 192.168.1.0/24
+        enabled: true

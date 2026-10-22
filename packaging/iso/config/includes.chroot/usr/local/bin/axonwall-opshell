@@ -3,7 +3,7 @@
 # Axonwall Restricted Operator Shell (/usr/local/bin/axonwall-opshell)
 # Assigned to users in the 'axonwall-operator' POSIX/LDAP group.
 # Prevents arbitrary root/bash escapes while providing structured appliance
-# diagnostics, log inspection, and TUI access.
+# diagnostics, log inspection, and interactive Ink TUI / NastyMap access.
 # ==============================================================================
 set -uo pipefail
 
@@ -15,10 +15,23 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export LESSSECURE=1
 export PAGER="cat"
 
+# Auto-detect primary active interface for intelligent CLI utility defaults
+DEFAULT_IF="$(/sbin/ip route show default 2>/dev/null | awk '{print $5; exit}')"
+if [[ -z "${DEFAULT_IF}" ]]; then
+  DEFAULT_IF="$(/sbin/ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | head -n 1)"
+fi
+DEFAULT_IF="${DEFAULT_IF:-eth0}"
+
 # Handle non-interactive SSH command execution: ssh user@host "<command>"
 if [[ "${1:-}" == "-c" ]]; then
   CMD="${2:-}"
   case "$CMD" in
+    "axonwall-tui")
+      exec /usr/local/bin/axonwall-tui
+      ;;
+    "axonwall-tui --tab nastymap"|"nastymap")
+      exec /usr/local/bin/axonwall-tui --tab nastymap
+      ;;
     "axonwallctl status"|"axonwallctl diff"|"axonwallctl validate")
       exec /usr/local/bin/$CMD
       ;;
@@ -33,7 +46,7 @@ if [[ "${1:-}" == "-c" ]]; then
       ;;
     *)
       echo "axonwall-opshell: command rejected by operator policy: ${CMD}" >&2
-      echo "Allowed non-interactive commands: 'axonwallctl status', 'axonwallctl diff', 'axonwallctl validate', 'ip addr', 'ip route', 'uptime'" >&2
+      echo "Allowed non-interactive commands: 'axonwall-tui', 'nastymap', 'axonwallctl status', 'axonwallctl diff', 'axonwallctl validate', 'ip addr', 'ip route', 'uptime'" >&2
       exit 126
       ;;
   esac
@@ -42,18 +55,18 @@ fi
 while true; do
   echo ""
   echo "================================================================================"
-  echo "  Axonwall Operator Shell — User: $(whoami)@$(hostname)"
-  echo "  Role: axonwall-operator (Restricted Diagnostic & Operations Environment)"
+  echo "  Axonwall Operator Shell — User: $(whoami)@$(hostname) | Default NIC: ${DEFAULT_IF}"
+  echo "  Role: axonwall-operator (Interactive TUI, NastyMap & Operations Environment)"
   echo "================================================================================"
-  echo "  [1] Launch Axonwall Console TUI"
-  echo "  [2] Configuration Status (axonwallctl status)"
-  echo "  [3] Pending Configuration Diff (axonwallctl diff)"
-  echo "  [4] Validate Configuration (axonwallctl validate)"
-  echo "  [5] Network Interfaces & Addresses (ip -br addr)"
-  echo "  [6] Routing Table (ip route)"
-  echo "  [7] Ping Connectivity Test"
-  echo "  [8] Tail Appliance Service Logs (axonwalld / slapd / sssd)"
-  echo "  [9] HA & Directory Replication Status"
+  echo "  [1] Launch Axonwall Interactive Ink Web-Console TUI (axonwall-tui)"
+  echo "  [2] Launch NastyMap Network Scanner & Topology TUI (axonwall-tui --tab nastymap)"
+  echo "  [3] Launch Classic Appliance Console Menu (axonwall-console)"
+  echo "  [4] Configuration Status / Diff / Validate (axonwallctl)"
+  echo "  [5] Network Interfaces, Routing & Sockets (ip addr / ip route / netstat)"
+  echo "  [6] Live Interface Bandwidth Monitor (slurm -z -i ${DEFAULT_IF})"
+  echo "  [7] System CPU & Disk I/O Telemetry (mpstat / iostat)"
+  echo "  [8] Ping & DNS Resolution Diagnostics (ping / dig)"
+  echo "  [9] Tail Appliance Service Logs & HA Status (journalctl / chronyc)"
   echo "  [0] Exit SSH Session"
   echo "--------------------------------------------------------------------------------"
   printf "Select option [0-9]: "
@@ -63,48 +76,83 @@ while true; do
   fi
 
   case "${choice}" in
-    1)
+    1|tui|TUI)
+      if [[ -x /usr/local/bin/axonwall-tui ]]; then
+        sudo /usr/local/bin/axonwall-tui 2>/dev/null || /usr/local/bin/axonwall-tui
+      else
+        echo "axonwall-tui not found."
+      fi
+      ;;
+    2|nmap|nastymap)
+      if [[ -x /usr/local/bin/axonwall-tui ]]; then
+        sudo /usr/local/bin/axonwall-tui --tab nastymap 2>/dev/null || /usr/local/bin/axonwall-tui --tab nastymap
+      else
+        echo "axonwall-tui not found."
+      fi
+      ;;
+    3)
       if [[ -x /usr/sbin/axonwall-console ]]; then
         sudo /usr/sbin/axonwall-console || /usr/sbin/axonwall-console
       else
         echo "axonwall-console binary not found."
       fi
       ;;
-    2)
+    4)
+      echo "--- Configuration Status ---"
       sudo /usr/local/bin/axonwallctl status 2>/dev/null || /usr/local/bin/axonwallctl status
-      ;;
-    3)
+      echo ""
+      echo "--- Configuration Validation ---"
+      sudo /usr/local/bin/axonwallctl validate 2>/dev/null || /usr/local/bin/axonwallctl validate
+      echo ""
+      echo "--- Pending Configuration Diff ---"
       sudo /usr/local/bin/axonwallctl diff 2>/dev/null || /usr/local/bin/axonwallctl diff
       ;;
-    4)
-      sudo /usr/local/bin/axonwallctl validate 2>/dev/null || /usr/local/bin/axonwallctl validate
-      ;;
     5)
+      echo "--- Network Interfaces ---"
       /sbin/ip -br addr show
+      echo ""
+      echo "--- Routing Table ---"
+      /sbin/ip route show
+      echo ""
+      echo "--- Listening Sockets (net-tools) ---"
+      /bin/netstat -tuln 2>/dev/null || /bin/ss -tuln 2>/dev/null || true
       ;;
     6)
-      /sbin/ip route show
+      if command -v slurm >/dev/null 2>&1; then
+        /usr/bin/slurm -z -i "${DEFAULT_IF}" || true
+      else
+        /sbin/ip -s link show dev "${DEFAULT_IF}" || true
+      fi
       ;;
     7)
-      printf "Enter target IP or hostname to ping: "
+      echo "--- CPU Utilization (sysstat mpstat) ---"
+      /usr/bin/mpstat -P ALL 1 1 2>/dev/null || /usr/bin/uptime
+      echo ""
+      echo "--- Block Device I/O (sysstat iostat) ---"
+      /usr/bin/iostat -xz 1 1 2>/dev/null || true
+      ;;
+    8)
+      printf "Enter target IP or hostname to ping & resolve [default: 1.1.1.1]: "
       if IFS= read -r target; then
-        # Strict validation: only alphanumeric, dots, colons, hyphens
+        target="${target:-1.1.1.1}"
         if [[ "$target" =~ ^[a-zA-Z0-9.:-]+$ ]] && [[ ! "$target" =~ ^- ]]; then
+          echo "--- DNS Lookup (dig) ---"
+          /usr/bin/dig +short "$target" 2>/dev/null || true
+          echo "--- ICMP Ping ---"
           /bin/ping -c 4 -W 2 "$target" || true
         else
           echo "Invalid target format."
         fi
       fi
       ;;
-    8)
-      sudo /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager 2>/dev/null || \
-        /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager || true
-      ;;
     9)
       echo "--- System Services ---"
       /bin/systemctl is-active axonwalld slapd sssd keepalived chrony 2>/dev/null || true
       echo "--- Time Synchronization (chronyc tracking) ---"
       /usr/bin/chronyc tracking 2>/dev/null || true
+      echo "--- Recent Service Logs ---"
+      sudo /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager 2>/dev/null || \
+        /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager || true
       ;;
     0|q|Q|exit|logout)
       echo "Logging out..."

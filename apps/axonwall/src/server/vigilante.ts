@@ -6,7 +6,8 @@ import {
   VigilanteConfigSchema,
   VigilanteModuleConfigSchema,
 } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState, callAgentApi } from './agent';
+import { getCurrentDesiredState, applyDesiredState } from './agent';
+import { callAgentApi } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 
@@ -92,7 +93,7 @@ export async function saveVigilanteConfigAction(
   patch: Partial<VigilanteConfig>
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const state = await getCurrentDesiredState();
   const current = state.vigilante ?? VigilanteConfigSchema.parse({ enabled: true });
@@ -127,7 +128,7 @@ export async function soarBlockIPAction(
   timeoutSec = 86400
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'operator');
 
   const res = await callAgentApi<{ success: boolean; message: string }>(
     '/v1/vigilante/soar/block-ip',
@@ -142,7 +143,7 @@ export async function soarUnblockIPAction(
   ip: string
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'operator');
 
   const res = await callAgentApi<{ success: boolean; message: string }>(
     '/v1/vigilante/soar/unblock-ip',
@@ -170,7 +171,7 @@ export async function provisionEvidenceVaultAction(
   dataset = 'vigilante-evidence'
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<{ success: boolean; message: string }>(
     '/v1/vigilante/vault/provision',
@@ -187,7 +188,7 @@ export async function createIncidentSnapshotAction(
   incidentId: string
 ): Promise<{ success: boolean; snapshot?: string; error?: string }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'operator');
 
   const res = await callAgentApi<{ success: boolean; snapshot?: string; error?: string }>(
     '/v1/vigilante/vault/snapshot',
@@ -226,7 +227,7 @@ export async function toggleSecurityModuleAction(
   enabled: boolean
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const state = await getCurrentDesiredState();
   if (!state.vigilante) {

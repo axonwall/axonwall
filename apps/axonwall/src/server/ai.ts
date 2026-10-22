@@ -20,23 +20,69 @@ export interface AiProbeResult {
   error?: string;
 }
 
+function validateAiEndpoint(endpoint: string, isLocalExpected: boolean): string {
+  const clean = endpoint.trim().replace(/\/+$/, '');
+  let url: URL;
+  try {
+    url = new URL(clean);
+  } catch {
+    throw new Error('Invalid endpoint URL');
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Endpoint must use http: or https:');
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
+    throw new Error('Access to cloud metadata endpoints is prohibited');
+  }
+
+  if (!isLocalExpected && url.protocol === 'http:' && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+    throw new Error('Remote AI provider endpoints must use HTTPS');
+  }
+
+  return clean;
+}
+
+function resolveAiApiKey(
+  configuredKey: string | undefined,
+  envKey: string | undefined,
+  endpoint: string,
+  defaultEndpoint: string,
+  isClientConfig: boolean
+): string {
+  if (isClientConfig && endpoint !== defaultEndpoint) {
+    return (configuredKey || '').trim();
+  }
+  return (configuredKey || envKey || '').trim();
+}
+
 export async function testAiProviderProbe(
   provider: AiProviderType,
   currentConfig?: AiConfig
 ): Promise<AiProbeResult> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, currentConfig ? 'admin' : undefined);
 
   const state = await getCurrentDesiredState();
   const aiCfg = currentConfig || state.ai;
+  const isClientConfig = Boolean(currentConfig);
   const start = Date.now();
 
   try {
     switch (provider) {
       case 'antigravity': {
         const p = aiCfg?.providers?.antigravity;
-        const endpoint = (p?.endpoint || AI_PROVIDERS_META.antigravity.defaultEndpoint).replace(/\/+$/, '');
-        const apiKey = (p?.apiKey || process.env.GEMINI_API_KEY || '').trim();
+        const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.antigravity.defaultEndpoint;
+        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.antigravity.isLocal);
+        const apiKey = resolveAiApiKey(
+          p?.apiKey,
+          process.env.GEMINI_API_KEY,
+          endpoint,
+          AI_PROVIDERS_META.antigravity.defaultEndpoint,
+          isClientConfig
+        );
         if (!apiKey) {
           return {
             ok: false,
@@ -72,7 +118,8 @@ export async function testAiProviderProbe(
 
       case 'ollama': {
         const p = aiCfg?.providers?.ollama;
-        const endpoint = (p?.endpoint || AI_PROVIDERS_META.ollama.defaultEndpoint).replace(/\/+$/, '');
+        const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.ollama.defaultEndpoint;
+        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.ollama.isLocal);
         const res = await fetch(`${endpoint}/api/tags`, {
           method: 'GET',
           signal: AbortSignal.timeout(4000),
@@ -100,8 +147,15 @@ export async function testAiProviderProbe(
 
       case 'claude-code': {
         const p = aiCfg?.providers?.claudeCode;
-        const endpoint = (p?.endpoint || AI_PROVIDERS_META['claude-code'].defaultEndpoint).replace(/\/+$/, '');
-        const apiKey = (p?.apiKey || process.env.ANTHROPIC_API_KEY || '').trim();
+        const rawEndpoint = p?.endpoint || AI_PROVIDERS_META['claude-code'].defaultEndpoint;
+        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META['claude-code'].isLocal);
+        const apiKey = resolveAiApiKey(
+          p?.apiKey,
+          process.env.ANTHROPIC_API_KEY,
+          endpoint,
+          AI_PROVIDERS_META['claude-code'].defaultEndpoint,
+          isClientConfig
+        );
         if (!apiKey) {
           return {
             ok: false,
@@ -141,8 +195,15 @@ export async function testAiProviderProbe(
 
       case 'codex': {
         const p = aiCfg?.providers?.codex;
-        const endpoint = (p?.endpoint || AI_PROVIDERS_META.codex.defaultEndpoint).replace(/\/+$/, '');
-        const apiKey = (p?.apiKey || process.env.OPENAI_API_KEY || '').trim();
+        const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.codex.defaultEndpoint;
+        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.codex.isLocal);
+        const apiKey = resolveAiApiKey(
+          p?.apiKey,
+          process.env.OPENAI_API_KEY,
+          endpoint,
+          AI_PROVIDERS_META.codex.defaultEndpoint,
+          isClientConfig
+        );
         if (!apiKey) {
           return {
             ok: false,
@@ -181,8 +242,15 @@ export async function testAiProviderProbe(
 
       case 'vllm': {
         const p = aiCfg?.providers?.vllm;
-        const endpoint = (p?.endpoint || AI_PROVIDERS_META.vllm.defaultEndpoint).replace(/\/+$/, '');
-        const apiKey = (p?.apiKey || '').trim();
+        const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.vllm.defaultEndpoint;
+        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.vllm.isLocal);
+        const apiKey = resolveAiApiKey(
+          p?.apiKey,
+          undefined,
+          endpoint,
+          AI_PROVIDERS_META.vllm.defaultEndpoint,
+          isClientConfig
+        );
         const headers: Record<string, string> = {};
         if (apiKey) {
           headers.Authorization = `Bearer ${apiKey}`;
@@ -232,10 +300,11 @@ export async function generateAiCompletion(
   currentConfig?: AiConfig
 ): Promise<string> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, (currentConfig || mode === 'audit') ? 'admin' : undefined);
 
   const state = await getCurrentDesiredState();
   const aiCfg = currentConfig || state.ai;
+  const isClientConfig = Boolean(currentConfig);
 
   const systemPrompt = buildSystemPrompt({
     hostname: state.system?.hostname || 'axonwall',
@@ -259,9 +328,16 @@ export async function generateAiCompletion(
   switch (provider) {
     case 'antigravity': {
       const p = aiCfg?.providers?.antigravity;
-      const endpoint = (p?.endpoint || AI_PROVIDERS_META.antigravity.defaultEndpoint).replace(/\/+$/, '');
+      const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.antigravity.defaultEndpoint;
+      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.antigravity.isLocal);
       const model = p?.model || AI_PROVIDERS_META.antigravity.defaultModel;
-      const apiKey = (p?.apiKey || process.env.GEMINI_API_KEY || '').trim();
+      const apiKey = resolveAiApiKey(
+        p?.apiKey,
+        process.env.GEMINI_API_KEY,
+        endpoint,
+        AI_PROVIDERS_META.antigravity.defaultEndpoint,
+        isClientConfig
+      );
       if (!apiKey) {
         throw new Error('Missing API Key for Google Antigravity / Gemini. Enter your API key in the Provider Settings tab.');
       }
@@ -301,7 +377,8 @@ export async function generateAiCompletion(
 
     case 'ollama': {
       const p = aiCfg?.providers?.ollama;
-      const endpoint = (p?.endpoint || AI_PROVIDERS_META.ollama.defaultEndpoint).replace(/\/+$/, '');
+      const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.ollama.defaultEndpoint;
+      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.ollama.isLocal);
       const model = p?.model || AI_PROVIDERS_META.ollama.defaultModel;
       const temperature = p?.temperature ?? 0.2;
 
@@ -335,9 +412,16 @@ export async function generateAiCompletion(
 
     case 'claude-code': {
       const p = aiCfg?.providers?.claudeCode;
-      const endpoint = (p?.endpoint || AI_PROVIDERS_META['claude-code'].defaultEndpoint).replace(/\/+$/, '');
+      const rawEndpoint = p?.endpoint || AI_PROVIDERS_META['claude-code'].defaultEndpoint;
+      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META['claude-code'].isLocal);
       const model = p?.model || AI_PROVIDERS_META['claude-code'].defaultModel;
-      const apiKey = (p?.apiKey || process.env.ANTHROPIC_API_KEY || '').trim();
+      const apiKey = resolveAiApiKey(
+        p?.apiKey,
+        process.env.ANTHROPIC_API_KEY,
+        endpoint,
+        AI_PROVIDERS_META['claude-code'].defaultEndpoint,
+        isClientConfig
+      );
       if (!apiKey) {
         throw new Error('Missing API Key for Claude Code (Anthropic). Enter your API key in the Provider Settings tab.');
       }
@@ -375,9 +459,16 @@ export async function generateAiCompletion(
 
     case 'codex': {
       const p = aiCfg?.providers?.codex;
-      const endpoint = (p?.endpoint || AI_PROVIDERS_META.codex.defaultEndpoint).replace(/\/+$/, '');
+      const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.codex.defaultEndpoint;
+      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.codex.isLocal);
       const model = p?.model || AI_PROVIDERS_META.codex.defaultModel;
-      const apiKey = (p?.apiKey || process.env.OPENAI_API_KEY || '').trim();
+      const apiKey = resolveAiApiKey(
+        p?.apiKey,
+        process.env.OPENAI_API_KEY,
+        endpoint,
+        AI_PROVIDERS_META.codex.defaultEndpoint,
+        isClientConfig
+      );
       if (!apiKey) {
         throw new Error('Missing API Key for OpenAI Codex. Enter your API key in the Provider Settings tab.');
       }
@@ -414,9 +505,16 @@ export async function generateAiCompletion(
 
     case 'vllm': {
       const p = aiCfg?.providers?.vllm;
-      const endpoint = (p?.endpoint || AI_PROVIDERS_META.vllm.defaultEndpoint).replace(/\/+$/, '');
+      const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.vllm.defaultEndpoint;
+      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.vllm.isLocal);
       const model = p?.model || AI_PROVIDERS_META.vllm.defaultModel;
-      const apiKey = (p?.apiKey || '').trim();
+      const apiKey = resolveAiApiKey(
+        p?.apiKey,
+        undefined,
+        endpoint,
+        AI_PROVIDERS_META.vllm.defaultEndpoint,
+        isClientConfig
+      );
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (apiKey) {
         headers.Authorization = `Bearer ${apiKey}`;

@@ -104,13 +104,33 @@ func (d *DirectoryManager) savePersistedPolicy(p PasswordPolicyConfig) {
 func DefaultShellForRole(role string) string {
 	switch role {
 	case "admin":
-		return "/bin/bash"
+		return "/usr/bin/zsh"
 	case "operator":
 		return "/usr/local/bin/axonwall-opshell"
 	case "readonly":
 		return "/usr/sbin/nologin"
 	default:
-		return "/bin/bash"
+		return "/usr/bin/zsh"
+	}
+}
+
+// seedUserZshrc ensures a user's home directory has a .zshrc that loads /etc/zsh/axonwall.zsh
+// so ZSH's first-run wizard (zsh-newuser-install) never blocks interactive logins.
+func seedUserZshrc(homeDir string, uid, gid int) {
+	if homeDir == "" || !strings.HasPrefix(homeDir, "/") {
+		return
+	}
+	_ = os.MkdirAll(homeDir, 0750)
+	_ = os.Chown(homeDir, uid, gid)
+	zshrcPath := filepath.Join(homeDir, ".zshrc")
+	if _, err := os.Stat(zshrcPath); os.IsNotExist(err) {
+		content := "# Axonwall ZSH User Profile\n[ -f /etc/zsh/axonwall.zsh ] && source /etc/zsh/axonwall.zsh\n"
+		if skelData, err := os.ReadFile("/etc/skel/.zshrc"); err == nil && len(skelData) > 0 {
+			content = string(skelData)
+		}
+		if err := os.WriteFile(zshrcPath, []byte(content), 0640); err == nil {
+			_ = os.Chown(zshrcPath, uid, gid)
+		}
 	}
 }
 
@@ -151,7 +171,14 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 		for _, u := range users {
 			if u.ApplianceRole == "admin" && !u.PasswordLocked {
 				hasAdmin = true
-				break
+			}
+			// Upgrade existing shell users (admin / os_only) from legacy /bin/bash to /usr/bin/zsh
+			if (u.ApplianceRole == "admin" || u.ApplianceRole == "os_only") && (u.Shell == "/bin/bash" || u.Shell == "") {
+				zshShell := "/usr/bin/zsh"
+				_ = d.UpdateUser(u.Username, UpdateUserRequest{Shell: &zshShell})
+			}
+			if u.HomeDir != "" && u.UID >= 1000 {
+				seedUserZshrc(u.HomeDir, u.UID, u.GID)
 			}
 		}
 		if !hasAdmin {
@@ -162,12 +189,24 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 				Comment:       "Axonwall Break-Glass Administrator",
 				Password:      adminPass,
 				ApplianceRole: "admin",
-				Shell:         "/bin/bash",
+				Shell:         "/usr/bin/zsh",
 			})
 		}
 	}
 
+	d.syncLocalNSSMirrorIfNoSSSD("")
 	_ = d.SyncRootSshPolicy()
+
+	// On musl/Alpine systems without SSSD, periodically mirror OpenLDAP users/groups (including HA syncrepl changes)
+	if !hasSSSD() {
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				d.syncLocalNSSMirrorIfNoSSSD("")
+			}
+		}()
+	}
 	return nil
 }
 
@@ -557,7 +596,7 @@ func (d *DirectoryManager) CreateUser(req CreateUserRequest) error {
 	if !validUsernameRegex.MatchString(username) {
 		return fmt.Errorf("invalid username '%s': must be 1-32 chars, lowercase alphanumeric, starting with a letter", username)
 	}
-	if username == "root" || username == "axonwall" || username == "axonwall-controller" || username == "openldap" || username == "sshd" || username == "nobody" {
+	if username == "root" || username == "axonwall" || username == "axonwall-controller" || username == "openldap" || username == "ldap" || username == "sshd" || username == "nobody" {
 		return fmt.Errorf("username '%s' is reserved for OS system daemons", username)
 	}
 
@@ -660,14 +699,14 @@ loginShell: %s
 		}
 	}
 
-	// Pre-create home directory on persistent /var/lib/axonwall/home (bind-mounted at /home)
-	_ = os.MkdirAll(homeDir, 0750)
-	_ = os.Chown(homeDir, uid, gid)
+	// Pre-create home directory on persistent /var/lib/axonwall/home (bind-mounted at /home) and seed .zshrc
+	seedUserZshrc(homeDir, uid, gid)
 
 	if username == "admin" && req.Password != "" {
 		d.syncBreakGlassPasswordFile(req.Password)
 	}
 
+	d.syncLocalNSSMirrorIfNoSSSD("")
 	InvalidateSSSDCache(username)
 	_ = d.SyncRootSshPolicy()
 	return nil
@@ -809,6 +848,7 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 		d.syncBreakGlassPasswordFile(*req.Password)
 	}
 
+	d.syncLocalNSSMirrorIfNoSSSD("")
 	InvalidateSSSDCache(username)
 	_ = d.SyncRootSshPolicy()
 	return nil
@@ -869,6 +909,7 @@ func (d *DirectoryManager) DeleteUser(username string, removeHome bool) error {
 		_ = os.RemoveAll(filepath.Join("/home", username))
 	}
 
+	d.syncLocalNSSMirrorIfNoSSSD(username)
 	InvalidateSSSDCache(username)
 	_ = d.SyncRootSshPolicy()
 	return nil
@@ -993,6 +1034,219 @@ pwdMaxAge: %d
 	return nil
 }
 
+// syncLocalNSSMirrorIfNoSSSD mirrors OpenLDAP POSIX users and groups into /etc/passwd, /etc/group, and /etc/shadow
+// on musl/Alpine Linux systems where libnss_sss is not available.
+func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
+	if hasSSSD() {
+		return
+	}
+
+	ldapUsers, err := d.listLDAPUsersInternal()
+	if err != nil {
+		return
+	}
+	ldapGroups, _, _, _ := d.listLDAPGroupsInternal()
+
+	ldapUserByName := make(map[string]LocalUser, len(ldapUsers))
+	for _, u := range ldapUsers {
+		ldapUserByName[u.Username] = u
+		if u.HomeDir != "" && u.UID >= 1000 {
+			seedUserZshrc(u.HomeDir, u.UID, u.GID)
+		}
+	}
+
+	// 1. Synchronize /etc/group
+	ldapGroupByName := make(map[string]LocalGroup, len(ldapGroups))
+	for _, g := range ldapGroups {
+		ldapGroupByName[g.Name] = g
+	}
+	if groupBytes, err := os.ReadFile("/etc/group"); err == nil {
+		var newGroupLines []string
+		seenGroups := make(map[string]bool)
+		for _, line := range strings.Split(string(groupBytes), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				if line != "" {
+					newGroupLines = append(newGroupLines, line)
+				}
+				continue
+			}
+			parts := strings.Split(trimmed, ":")
+			if len(parts) < 4 {
+				newGroupLines = append(newGroupLines, line)
+				continue
+			}
+			gName := parts[0]
+			gGID, _ := strconv.Atoi(parts[2])
+			if deletedUser != "" && gName == deletedUser {
+				continue
+			}
+			if lg, ok := ldapGroupByName[gName]; ok {
+				seenGroups[gName] = true
+				// Merge existing local system members with LDAP members
+				memberMap := make(map[string]bool)
+				var mergedMembers []string
+				if parts[3] != "" {
+					for _, m := range strings.Split(parts[3], ",") {
+						m = strings.TrimSpace(m)
+						if m == "" || m == deletedUser {
+							continue
+						}
+						// Keep non-LDAP members or still-valid LDAP members
+						if _, isLDAP := ldapUserByName[m]; !isLDAP {
+							memberMap[m] = true
+							mergedMembers = append(mergedMembers, m)
+						}
+					}
+				}
+				for _, m := range lg.Members {
+					if m != "" && m != deletedUser && !memberMap[m] {
+						memberMap[m] = true
+						mergedMembers = append(mergedMembers, m)
+					}
+				}
+				newGroupLines = append(newGroupLines, fmt.Sprintf("%s:%s:%s:%s", gName, parts[1], parts[2], strings.Join(mergedMembers, ",")))
+			} else if gGID >= 10000 && gGID < 60000 {
+				// Stale LDAP group that was deleted from directory
+				continue
+			} else {
+				newGroupLines = append(newGroupLines, line)
+			}
+		}
+		for _, lg := range ldapGroups {
+			if seenGroups[lg.Name] || (deletedUser != "" && lg.Name == deletedUser) {
+				continue
+			}
+			var cleanMembers []string
+			for _, m := range lg.Members {
+				if m != "" && m != deletedUser {
+					cleanMembers = append(cleanMembers, m)
+				}
+			}
+			newGroupLines = append(newGroupLines, fmt.Sprintf("%s:x:%d:%s", lg.Name, lg.GID, strings.Join(cleanMembers, ",")))
+		}
+		newGroupContent := strings.Join(newGroupLines, "\n") + "\n"
+		if newGroupContent != string(groupBytes) {
+			_ = os.WriteFile("/etc/group", []byte(newGroupContent), 0644)
+		}
+	}
+
+	// 2. Synchronize /etc/passwd
+	validUsers := make(map[string]bool)
+	if passwdBytes, err := os.ReadFile("/etc/passwd"); err == nil {
+		var newPasswdLines []string
+		seenUsers := make(map[string]bool)
+		for _, line := range strings.Split(string(passwdBytes), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				if line != "" {
+					newPasswdLines = append(newPasswdLines, line)
+				}
+				continue
+			}
+			parts := strings.Split(trimmed, ":")
+			if len(parts) < 7 {
+				newPasswdLines = append(newPasswdLines, line)
+				continue
+			}
+			uName := parts[0]
+			uUID, _ := strconv.Atoi(parts[2])
+			if deletedUser != "" && uName == deletedUser {
+				continue
+			}
+			if lu, ok := ldapUserByName[uName]; ok && uName != "root" {
+				seenUsers[uName] = true
+				validUsers[uName] = true
+				gecos := strings.ReplaceAll(lu.Comment, ":", " ")
+				home := lu.HomeDir
+				if home == "" {
+					home = "/home/" + lu.Username
+				}
+				sh := lu.Shell
+				if sh == "" {
+					sh = DefaultShellForRole(lu.ApplianceRole)
+				}
+				newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", lu.Username, lu.UID, lu.GID, gecos, home, sh))
+			} else if uUID >= 10000 && uUID < 60000 {
+				// Stale LDAP user removed from directory
+				continue
+			} else {
+				validUsers[uName] = true
+				newPasswdLines = append(newPasswdLines, line)
+			}
+		}
+		for _, lu := range ldapUsers {
+			if seenUsers[lu.Username] || lu.Username == "root" || (deletedUser != "" && lu.Username == deletedUser) {
+				continue
+			}
+			validUsers[lu.Username] = true
+			gecos := strings.ReplaceAll(lu.Comment, ":", " ")
+			home := lu.HomeDir
+			if home == "" {
+				home = "/home/" + lu.Username
+			}
+			sh := lu.Shell
+			if sh == "" {
+				sh = DefaultShellForRole(lu.ApplianceRole)
+			}
+			newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", lu.Username, lu.UID, lu.GID, gecos, home, sh))
+		}
+		newPasswdContent := strings.Join(newPasswdLines, "\n") + "\n"
+		if newPasswdContent != string(passwdBytes) {
+			_ = os.WriteFile("/etc/passwd", []byte(newPasswdContent), 0644)
+		}
+	}
+
+	// 3. Synchronize /etc/shadow (use '*' for unlocked LDAP accounts so OpenSSH without PAM permits publickey auth)
+	if shadowBytes, err := os.ReadFile("/etc/shadow"); err == nil {
+		var newShadowLines []string
+		seenShadow := make(map[string]bool)
+		for _, line := range strings.Split(string(shadowBytes), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				if line != "" {
+					newShadowLines = append(newShadowLines, line)
+				}
+				continue
+			}
+			parts := strings.Split(trimmed, ":")
+			if len(parts) < 2 {
+				newShadowLines = append(newShadowLines, line)
+				continue
+			}
+			uName := parts[0]
+			if !validUsers[uName] || (deletedUser != "" && uName == deletedUser) {
+				continue
+			}
+			if lu, ok := ldapUserByName[uName]; ok && uName != "root" {
+				seenShadow[uName] = true
+				if lu.PasswordLocked {
+					parts[1] = "!"
+				} else if parts[1] == "" || strings.HasPrefix(parts[1], "!") {
+					parts[1] = "*"
+				}
+				newShadowLines = append(newShadowLines, strings.Join(parts, ":"))
+			} else {
+				newShadowLines = append(newShadowLines, line)
+			}
+		}
+		for _, lu := range ldapUsers {
+			if seenShadow[lu.Username] || lu.Username == "root" || (deletedUser != "" && lu.Username == deletedUser) {
+				continue
+			}
+			pwField := "*"
+			if lu.PasswordLocked {
+				pwField = "!"
+			}
+			newShadowLines = append(newShadowLines, fmt.Sprintf("%s:%s:19723:0:99999:7:::", lu.Username, pwField))
+		}
+		newShadowContent := strings.Join(newShadowLines, "\n") + "\n"
+		if newShadowContent != string(shadowBytes) {
+			_ = os.WriteFile("/etc/shadow", []byte(newShadowContent), 0640)
+		}
+	}
+}
+
 // SyncRootSshPolicy checks whether at least one active axonwall-admin user exists in OpenLDAP.
 // Once an admin user exists (and DisableRootSshWhenAdminExists is true), it sets PermitRootLogin no
 // in /etc/ssh/sshd_config.d/axonwall.conf and reloads sshd.
@@ -1016,6 +1270,11 @@ func (d *DirectoryManager) SyncRootSshPolicy() error {
 		permitRoot = "no"
 	}
 
+	usePAMLine := ""
+	if _, err := os.Stat("/etc/pam.d/sshd"); err == nil {
+		usePAMLine = "UsePAM yes\n"
+	}
+
 	sshdConf := fmt.Sprintf(`# ==============================================================================
 # Axonwall Hardened SSH Configuration (Keys Only + SSSD/OpenLDAP Integration)
 # ==============================================================================
@@ -1023,12 +1282,11 @@ PermitRootLogin %s
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 AuthenticationMethods publickey
-UsePAM yes
-AuthorizedKeysCommand /usr/bin/sss_ssh_authorizedkeys %%u
+%sAuthorizedKeysCommand /usr/bin/sss_ssh_authorizedkeys %%u
 AuthorizedKeysCommandUser nobody
 X11Forwarding no
 MaxAuthTries 3
-`, permitRoot)
+`, permitRoot, usePAMLine)
 
 	confPath := "/etc/ssh/sshd_config.d/axonwall.conf"
 	existing, _ := os.ReadFile(confPath)
@@ -1086,8 +1344,8 @@ func (d *DirectoryManager) MigrateLocalHumanUsers() ([]string, error) {
 			comment = u.Username
 		}
 		shell := u.Shell
-		if shell == "" {
-			shell = "/bin/bash"
+		if shell == "" || shell == "/bin/bash" {
+			shell = "/usr/bin/zsh"
 		}
 
 		var sshLines strings.Builder
@@ -1136,11 +1394,13 @@ loginShell: %s
 			_ = d.setGroupMembership(g, u.Username, true)
 		}
 
+		seedUserZshrc("/home/"+u.Username, u.UID, u.GID)
 		migrated = append(migrated, u.Username)
 		InvalidateSSSDCache(u.Username)
 	}
 
 	if len(migrated) > 0 {
+		d.syncLocalNSSMirrorIfNoSSSD("")
 		_ = d.SyncRootSshPolicy()
 	}
 	return migrated, nil
@@ -1148,6 +1408,8 @@ loginShell: %s
 
 // GetStatus returns live health, replication CSN, clock skew, and policy status for the Identity Directory.
 func (d *DirectoryManager) GetStatus() DirectoryStatus {
+	d.syncLocalNSSMirrorIfNoSSSD("")
+
 	d.mu.RLock()
 	status := DirectoryStatus{
 		BaseDN:         d.baseDN,
@@ -1162,7 +1424,8 @@ func (d *DirectoryManager) GetStatus() DirectoryStatus {
 	status.SlapdRunning = exec.Command("systemctl", "is-active", "--quiet", "slapd").Run() == nil ||
 		exec.Command("pgrep", "-x", "slapd").Run() == nil
 	status.SssdRunning = exec.Command("systemctl", "is-active", "--quiet", "sssd").Run() == nil ||
-		exec.Command("pgrep", "-x", "sssd").Run() == nil
+		exec.Command("pgrep", "-x", "sssd").Run() == nil ||
+		(!hasSSSD() && status.SlapdRunning)
 
 	// Check local contextCSN
 	if status.SlapdRunning && status.BaseDN != "" {

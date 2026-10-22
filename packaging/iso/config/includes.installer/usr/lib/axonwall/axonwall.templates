@@ -133,3 +133,102 @@ Description: Select OpenZFS pool ('tank') RAID topology:
   - Mirror: Ideal for 2-disk systems or low-latency IOPS workloads.
   - RAID-Z1 / RAID-Z2 / RAID-Z3: Single, dual, or triple parity across 3+ VDEVs.
   - dRAID1 / dRAID2: Next-gen Distributed RAID-Z with rapid rebuild times.
+
+Template: axonwall/partition_mode
+Type: select
+Choices: Automated A/B Dual-Root (Express - Recommended), Guided A/B Dual-Root (Choose Slot & Swap sizes), Custom Storage Wizard (System RAID-1, OpenZFS, LUKS2, Dedicated /var/log), Manual Partitioning (Debian Custom Partitioner UI)
+Default: Automated A/B Dual-Root (Express - Recommended)
+Description: Select partitioning workflow:
+ Choose how you would like to partition the installation drive:
+ .
+  - Automated A/B Dual-Root (Express): Recommended default. Automatically
+    calculates optimal Slot A, Slot B, and Swap sizes based on disk capacity,
+    allocates remaining space to persistent data (/var/lib/axonwall), and
+    immediately installs with zero hassle.
+  - Guided A/B Dual-Root: Classic workflow. Lets you choose your preferred
+    system root slot size and swap size, then automatically partitions.
+  - Custom Storage Wizard: Granular control over multi-disk RAID-1 mirroring,
+    filesystem types (ext4/xfs), dedicated /var/log partition, LUKS2/TPM2
+    encryption, and OpenZFS ('tank') storage pool allocation.
+  - Manual Partitioning: Pre-populates the A/B partition layout and opens
+    Debian's interactive partition table editor (partman) for complete manual
+    control over disk formatting, resizing, and mountpoints.
+
+Template: axonwall/custom_efi_size
+Type: string
+Default: 512
+Description: Custom EFI System Partition (ESP) size (in MB):
+ Enter the desired size in megabytes for /boot/efi (AXON_EFI). Minimum is 256 MB.
+
+Template: axonwall/root_fstype
+Type: select
+Choices: ext4 (Recommended), xfs (High Performance)
+Default: ext4 (Recommended)
+Description: Root slot filesystem type:
+ Select the filesystem for Slot A and Slot B system partitions.
+
+Template: axonwall/data_alloc_mode
+Type: select
+Choices: Allocate remaining space to /var/lib/axonwall, Explicit size in GB
+Default: Allocate remaining space to /var/lib/axonwall
+Description: /var/lib/axonwall (axon_data) allocation mode:
+ Choose whether to allocate remaining capacity or specify an exact size in GB.
+
+Template: axonwall/custom_data_size
+Type: string
+Default: 32
+Description: /var/lib/axonwall size (in GB):
+ Enter explicit gigabyte capacity for /var/lib/axonwall (axon_data).
+
+Template: axonwall/data_fstype
+Type: select
+Choices: ext4 (Recommended), xfs
+Default: ext4 (Recommended)
+Description: /var/lib/axonwall filesystem type:
+ Select filesystem format for persistent data and configurations.
+
+Template: axonwall/separate_log_partition
+Type: boolean
+Default: false
+Description: Create dedicated /var/log partition (axon_logs)?
+ Isolating /var/log onto an independent partition protects the system from
+ disk exhaustion caused by heavy Suricata PCAP captures, ClickHouse flows,
+ or debug kernel dumps.
+
+Template: axonwall/custom_log_size
+Type: string
+Default: 20
+Description: Dedicated /var/log partition size (in GB):
+ Enter size in gigabytes for the /var/log (axon_logs) partition.
+
+Template: axonwall/log_fstype
+Type: select
+Choices: xfs (Recommended for write-heavy logs), ext4
+Default: xfs (Recommended for write-heavy logs)
+Description: /var/log filesystem type:
+ XFS is recommended for large append-only log streams and directory concurrency.
+
+Template: axonwall/encryption_enabled
+Type: boolean
+Default: false
+Description: Enable LUKS2 Encryption for persistent data and storage volumes?
+ When enabled, persistent data (axon_data), dedicated logs (axon_logs), and
+ ZFS storage partitions are encrypted with AES-XTS LUKS2.
+
+Template: axonwall/encryption_passphrase
+Type: password
+Description: LUKS2 Master Encryption Passphrase:
+ Enter the master passphrase to encrypt and unlock storage volumes.
+
+Template: axonwall/encryption_passphrase_again
+Type: password
+Description: Re-enter LUKS2 Master Encryption Passphrase:
+ Verify the master encryption passphrase.
+
+Template: axonwall/tpm2_unlock
+Type: boolean
+Default: false
+Description: Enroll TPM2 device for automated, secure unattended unlock?
+ If this hardware has a TPM 2.0 cryptoprocessor, Axonwall can bind volume keys
+ to PCR policies via systemd-cryptenroll, permitting automated boot without
+ interactive console passphrases while keeping disks locked if removed from the chassis.

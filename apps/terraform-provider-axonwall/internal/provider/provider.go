@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
@@ -62,7 +63,9 @@ func (p *axonwallProvider) Configure(ctx context.Context, req provider.Configure
 		endpoint = "http://localhost:3000/api/v1"
 	}
 
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
 
 	apiClient := &AxonwallClient{
 		Endpoint: endpoint,
@@ -81,7 +84,9 @@ func (p *axonwallProvider) Resources(ctx context.Context) []func() resource.Reso
 }
 
 func (p *axonwallProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{}
+	return []func() datasource.DataSource{
+		NewCloudInitConfigDataSource,
+	}
 }
 
 func New(version string) func() provider.Provider {

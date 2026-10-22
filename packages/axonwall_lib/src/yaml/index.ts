@@ -199,8 +199,11 @@ export interface YamlValidationResult {
  * Parses and merges a map of YAML filename -> YAML content into a validated DesiredState.
  * Supports both the 10 modular domain files and optional conf.d/*.yaml or axonwall.yaml overrides.
  */
-export function validateYamlConfigFiles(files: Record<string, string>): YamlValidationResult {
-  const mergedRaw: Record<string, unknown> = {};
+export function validateYamlConfigFiles(
+  files: Record<string, string>,
+  fallbackState?: Partial<DesiredState>
+): YamlValidationResult {
+  const mergedRaw: Record<string, unknown> = fallbackState ? { ...fallbackState } : {};
   const errors: YamlValidationIssue[] = [];
   const keyToSourceFile = new Map<string, string>();
 
@@ -267,8 +270,11 @@ export function validateYamlConfigFiles(files: Record<string, string>): YamlVali
  * Parses and merges a map of YAML filename -> YAML content into a validated DesiredState,
  * throwing a detailed Error if validation fails.
  */
-export function parseDesiredStateFromYamlFiles(files: Record<string, string>): DesiredState {
-  const res = validateYamlConfigFiles(files);
+export function parseDesiredStateFromYamlFiles(
+  files: Record<string, string>,
+  fallbackState?: Partial<DesiredState>
+): DesiredState {
+  const res = validateYamlConfigFiles(files, fallbackState);
   if (!res.valid || !res.state) {
     const summary = res.errors
       .map((e) => `[${e.file}${e.path ? ` -> ${e.path}` : ''}] ${e.message}`)

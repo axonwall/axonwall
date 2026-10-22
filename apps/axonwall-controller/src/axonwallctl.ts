@@ -12,6 +12,7 @@ import {
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { parseCloudInitYaml, serializeYaml, type FullCloudInit } from '@axonwall/lib/cloudinit';
 
 const ETC_DIR = process.env.AXONWALL_ETC_DIR || '/etc/axonwall';
 const PERSIST_YAML_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
@@ -253,6 +254,12 @@ async function cmdStatus() {
     const status = await sendAgentSocketRequest<any>('/v1/status', 'GET');
     console.log(`  ${cBold}Privileged Daemon:${cReset} ${cGreen}ONLINE${cReset} (${status.nodeId || 'axonwalld'}, v${status.version || '0.5.2'})`);
     console.log(`  ${cBold}Active Bundle:${cReset}     ${status.activeBundleHash ? status.activeBundleHash.slice(0, 12) : 'none'}`);
+    if (status.pendingConfirm) {
+      const remaining = status.secondsUntilRollback ?? 0;
+      console.log(
+        `  ${cRed}${cBold}Commit-Confirm:${cReset}    ${cRed}PENDING (Auto-rollback in ${remaining}s)${cReset} — run '${cCyan}axonwallctl confirm${cReset}' to confirm or '${cYellow}axonwallctl rollback${cReset}' to revert`
+      );
+    }
   } catch {
     console.log(`  ${cBold}Privileged Daemon:${cReset} ${cYellow}OFFLINE / STANDALONE MODE${cReset}`);
   }
@@ -378,8 +385,10 @@ async function cmdApply(autoConfirm = true) {
 
     if (autoConfirm) {
       await sendAgentSocketRequest('/v1/confirm', 'POST', { jobId });
+      console.log(`${cGreen}${cBold}[✓] Applied /etc/axonwall/*.yaml to kernel nftables and system daemons (hash: ${bundleHash.slice(0, 12)}).${cReset}`);
+    } else {
+      console.log(`${cYellow}${cBold}[!] Applied with Commit-Confirm (120s timeout). Run 'axonwallctl confirm' to confirm or 'axonwallctl rollback' to revert.${cReset}`);
     }
-    console.log(`${cGreen}${cBold}[✓] Applied /etc/axonwall/*.yaml to kernel nftables and system daemons (hash: ${bundleHash.slice(0, 12)}).${cReset}`);
   } catch (err: any) {
     console.log(
       `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk (daemon socket offline: ${err?.message || 'standalone'}).${cReset}`
@@ -394,10 +403,11 @@ async function cmdApply(autoConfirm = true) {
 
 async function cmdEdit(domainArg?: string) {
   ensureInitializedYamlFiles();
+  const domainNames = AXONWALL_YAML_DOMAINS.map((d) => d.filename.replace(/\.ya?ml$/, ''));
   const domain = (domainArg || 'firewall').replace(/\.ya?ml$/i, '').toLowerCase();
-  if (!AXONWALL_YAML_DOMAINS.includes(domain as any)) {
+  if (!domainNames.includes(domain as any)) {
     console.error(
-      `${cRed}Unknown configuration section '${domainArg}'. Valid sections: ${AXONWALL_YAML_DOMAINS.join(', ')}${cReset}`
+      `${cRed}Unknown configuration section '${domainArg}'. Valid sections: ${domainNames.join(', ')}${cReset}`
     );
     process.exit(1);
   }
@@ -407,7 +417,8 @@ async function cmdEdit(domainArg?: string) {
     const state = loadFallbackState();
     const serialized = serializeDesiredStateToYamlFiles(state) as Record<string, string>;
     fs.mkdirSync(ETC_DIR, { recursive: true });
-    fs.writeFileSync(targetPath, serialized[`${domain}.yaml`] || '', { mode: 0o644 });
+    fs.writeFileSync(targetPath, serialized[`${domain}.yaml`] || '', { mode: 0o600 });
+    try { fs.chmodSync(targetPath, 0o600); } catch {}
   }
 
   const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
@@ -425,6 +436,376 @@ function cmdExport() {
   process.stdout.write(serializeDesiredStateToSingleYaml(state));
 }
 
+async function cmdConfirm() {
+  console.log(`${cCyan}Confirming pending ruleset and configuration commit...${cReset}`);
+  try {
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/confirm', 'POST', {});
+    if (resp.success) {
+      console.log(`${cGreen}${cBold}[✓] Active ruleset and configuration successfully confirmed. Auto-rollback disarmed.${cReset}`);
+    } else {
+      console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+    }
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Failed to confirm ruleset: ${err?.message || err}${cReset}`);
+    process.exit(1);
+  }
+}
+
+async function cmdRollback() {
+  console.log(`${cYellow}Rolling back to last-known-good ruleset and configuration...${cReset}`);
+  try {
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/rollback', 'POST', {});
+    if (resp.success) {
+      console.log(`${cGreen}${cBold}[✓] Rolled back to last-known-good ruleset and restored /etc/axonwall/*.yaml.${cReset}`);
+    } else {
+      console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+    }
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Failed to trigger rollback: ${err?.message || err}${cReset}`);
+    process.exit(1);
+  }
+}
+
+async function cmdCloudInit(userArgs: string[]) {
+  let explicitFile: string | undefined;
+  let autoApply = true;
+
+  for (const arg of userArgs) {
+    if (arg === '--no-apply') {
+      autoApply = false;
+    } else if (arg === '--apply') {
+      autoApply = true;
+    } else if (!arg.startsWith('-') && !explicitFile) {
+      explicitFile = arg;
+    }
+  }
+
+  // 1. Locate candidate cloud-init user-data file
+  const candidatePaths = [
+    explicitFile,
+    process.env.CLOUD_INIT_USER_DATA,
+    '/var/lib/cloud/instance/user-data.txt',
+    '/var/lib/cloud/seed/nocloud-net/user-data',
+    '/var/lib/cloud/seed/nocloud/user-data',
+    '/etc/axonwall/cloud-config.yaml',
+  ].filter(Boolean) as string[];
+
+  let resolvedPath = '';
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) {
+      resolvedPath = p;
+      break;
+    }
+  }
+
+  if (!resolvedPath) {
+    console.log(`${cYellow}[Axonwall Cloud-Init] No cloud-init user-data detected in standard locations.${cReset}`);
+    return;
+  }
+
+  console.log(`${cCyan}${cBold}[Axonwall Cloud-Init] Found cloud-config at ${resolvedPath}${cReset}`);
+  const rawContent = fs.readFileSync(resolvedPath, 'utf-8');
+
+  let cloudConfig: FullCloudInit;
+  try {
+    cloudConfig = parseCloudInitYaml(rawContent);
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Failed to parse cloud-config YAML: ${err.message}${cReset}`);
+    process.exit(1);
+  }
+
+  const isRoot = typeof process.getuid === 'function' ? process.getuid() === 0 : false;
+  const isDryRun = userArgs.includes('--dry-run');
+
+  // 2. Reconcile hostname
+  if (cloudConfig.hostname) {
+    console.log(`[+] Setting system hostname to: ${cloudConfig.hostname}`);
+    if (!isDryRun && isRoot) {
+      try {
+        execFileSync('hostnamectl', ['--no-ask-password', 'set-hostname', '--', cloudConfig.hostname], {
+          stdio: 'ignore',
+          timeout: 2000,
+        });
+      } catch {
+        try {
+          fs.writeFileSync('/etc/hostname', cloudConfig.hostname.trim() + '\n', 'utf-8');
+        } catch {}
+      }
+    }
+  }
+
+  // 3. Reconcile SSH keys from privileged users (root, admin, or sudoers)
+  if (cloudConfig.users && cloudConfig.users.length > 0) {
+    const allKeys: string[] = [];
+    const openSshRegex = /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+[A-Za-z0-9+/=]+(\s+[^\r\n]*)?$/;
+
+    for (const u of cloudConfig.users) {
+      const isPrivileged = u.name === 'root' || u.name === 'admin' || (u.sudo && u.sudo.includes('ALL'));
+      if (isPrivileged && u.ssh_authorized_keys && u.ssh_authorized_keys.length > 0) {
+        for (const k of u.ssh_authorized_keys) {
+          const trimmed = k.trim();
+          if (trimmed && openSshRegex.test(trimmed)) {
+            allKeys.push(trimmed);
+          }
+        }
+      }
+    }
+    if (allKeys.length > 0) {
+      console.log(`[+] Found ${allKeys.length} validated administrative SSH public key(s) in cloud-config.`);
+      if (!isDryRun && isRoot) {
+        try {
+          const sshDir = '/root/.ssh';
+          const authKeysPath = path.join(sshDir, 'authorized_keys');
+          fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+          try { fs.chmodSync(sshDir, 0o700); } catch {}
+          let existingKeys = '';
+          if (fs.existsSync(authKeysPath)) {
+            existingKeys = fs.readFileSync(authKeysPath, 'utf-8');
+          }
+          const newKeys = allKeys.filter((k) => !existingKeys.includes(k));
+          if (newKeys.length > 0) {
+            fs.appendFileSync(authKeysPath, '\n' + newKeys.join('\n') + '\n', { mode: 0o600 });
+            console.log(`[+] Injected ${newKeys.length} SSH public key(s) into /root/.ssh/authorized_keys.`);
+          }
+          try { fs.chmodSync(authKeysPath, 0o600); } catch {}
+        } catch (err: any) {
+          console.warn(`[!] Unable to write SSH keys: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  // 4. Reconcile Axonwall specific configuration
+  const axon = cloudConfig.axonwall;
+  if (axon) {
+    // 4a. Auth
+    if (axon.auth) {
+      if (axon.auth.admin_password) {
+        console.log(`[+] Administrator credentials configured for user '${axon.auth.admin_username || 'admin'}'.`);
+        if (!isDryRun) {
+          try {
+            fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+            const adminEnvPath = path.join(ETC_DIR, 'admin.env');
+            const envContent = `LOCAL_ADMIN_USER=${axon.auth.admin_username || 'admin'}\nLOCAL_ADMIN_PASSWORD=${axon.auth.admin_password}\n`;
+            fs.writeFileSync(adminEnvPath, envContent, { mode: 0o600 });
+            try { fs.chmodSync(adminEnvPath, 0o600); } catch {}
+
+            // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
+            try {
+              const persistDir = '/var/lib/axonwall/etc-axonwall';
+              fs.mkdirSync(persistDir, { recursive: true, mode: 0o755 });
+              fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o600 });
+              fs.chmodSync(path.join(persistDir, 'admin.env'), 0o600);
+            } catch {}
+          } catch (err: any) {
+            console.warn(`[!] Unable to write admin.env: ${err.message}`);
+          }
+        }
+      }
+      if (axon.auth.ztp?.enabled) {
+        console.log(`[+] Zero-Touch Provisioning (ZTP) enabled via ${axon.auth.ztp.controller_url || '<default-controller>'}.`);
+        if (!isDryRun) {
+          try {
+            fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+            const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
+            const content = `AXONWALL_ZTP_TOKEN=${axon.auth.ztp.enrollment_token || ''}\nAXONWALL_CONTROLLER_URL=${axon.auth.ztp.controller_url || ''}\n`;
+            fs.writeFileSync(ctrlEnvPath, content, { mode: 0o600 });
+            try { fs.chmodSync(ctrlEnvPath, 0o600); } catch {}
+          } catch (err: any) {
+            console.warn(`[!] Unable to write controller.env: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    // 4b. Desired State
+    if (axon.desired_state && Object.keys(axon.desired_state).length > 0) {
+      console.log(`[+] Staging declarative desired_state from cloud-config into /etc/axonwall/conf.d/99-cloudinit.yaml...`);
+      if (!isDryRun) {
+        try {
+          const confD = path.join(ETC_DIR, 'conf.d');
+          fs.mkdirSync(confD, { recursive: true, mode: 0o755 });
+          const cloudInitYamlPath = path.join(confD, '99-cloudinit.yaml');
+          fs.writeFileSync(cloudInitYamlPath, serializeYaml(axon.desired_state), { mode: 0o600 });
+          try { fs.chmodSync(cloudInitYamlPath, 0o600); } catch {}
+        } catch (err: any) {
+          console.warn(`[!] Unable to write 99-cloudinit.yaml: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  // 5. Secure cloud-init seed files so secrets are not world-readable
+  if (!isDryRun && isRoot) {
+    try {
+      for (const p of [
+        '/var/lib/cloud/seed/nocloud-net/user-data',
+        '/var/lib/cloud/seed/nocloud/user-data',
+        '/var/lib/partman/cloud-config.yaml',
+      ]) {
+        if (fs.existsSync(p)) {
+          fs.chmodSync(p, 0o600);
+        }
+      }
+    } catch {}
+  }
+
+  // 6. Expand data partition if growpart is available (QCOW2 / Cloud Image auto-grow)
+  if (!isDryRun && isRoot) {
+    try {
+      const res = spawnSync('which', ['growpart'], { stdio: 'pipe' });
+      if (res.status === 0) {
+        const findmnt = spawnSync('findmnt', ['-n', '-o', 'SOURCE', '/var/lib/axonwall'], { encoding: 'utf-8' });
+        const dev = findmnt.stdout?.trim();
+        if (dev && dev.startsWith('/dev/')) {
+          const diskRes = spawnSync('lsblk', ['-no', 'PKNAME', dev], { encoding: 'utf-8' });
+          const disk = diskRes.stdout?.trim();
+          const partMatch = dev.match(/\d+$/);
+          if (disk && partMatch) {
+            const partNum = partMatch[0];
+            console.log(`[+] Attempting dynamic partition resize of /dev/${disk} partition ${partNum}...`);
+            spawnSync('growpart', [`/dev/${disk}`, partNum], { stdio: 'inherit' });
+            const fstypeRes = spawnSync('lsblk', ['-no', 'FSTYPE', dev], { encoding: 'utf-8' });
+            const fstype = fstypeRes.stdout?.trim();
+            if (fstype === 'xfs') {
+              spawnSync('xfs_growfs', ['/var/lib/axonwall'], { stdio: 'inherit' });
+            } else {
+              spawnSync('resize2fs', [dev], { stdio: 'inherit' });
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 6. Apply if requested
+  if (autoApply && !isDryRun) {
+    console.log(`\n${cCyan}Compiling and applying configuration from cloud-init...${cReset}`);
+    await cmdApply(true);
+  } else if (isDryRun) {
+    console.log(`\n${cGreen}[✓] Cloud-init dry-run completed successfully. All schemas and parameters validated.${cReset}`);
+  }
+}
+
+async function cmdPlugin(args: string[]) {
+  const subcmd = (args[0] || 'list').toLowerCase();
+  const pluginId = args[1];
+
+  switch (subcmd) {
+    case 'list':
+    case 'ls': {
+      try {
+        const res = await sendAgentSocketRequest<{ plugins: any[]; osFamily: string }>('/v1/system/plugins', 'GET');
+        console.log(`\n${cCyan}${cBold}=== Axonwall Extension Plugins (${res.osFamily.toUpperCase()} Host) ===${cReset}\n`);
+        console.log(
+          `  ${cBold}${'ID'.padEnd(28)} ${'NAME'.padEnd(46)} ${'STATUS'.padEnd(16)} PACKAGES${cReset}`
+        );
+        console.log(`  ${'-'.repeat(105)}`);
+        for (const p of res.plugins) {
+          let statusStr = `${cDim}Available${cReset}`;
+          if (p.bundled) {
+            statusStr = `${cGreen}Bundled (OS)${cReset}`;
+          } else if (p.installed) {
+            statusStr = `${cCyan}Installed${cReset}`;
+          }
+          const pkgList = (p.packages || []).join(' ');
+          console.log(
+            `  ${p.id.padEnd(28)} ${p.name.padEnd(46)} ${statusStr.padEnd(25)} ${cDim}${pkgList}${cReset}`
+          );
+        }
+        console.log('');
+      } catch (err: any) {
+        console.error(`${cRed}Failed to fetch plugins from agent daemon:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'install':
+    case 'add': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin install <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Installing plugin '${pluginId}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
+          '/v1/system/plugins/action',
+          'POST',
+          { pluginId, action: 'install' }
+        );
+        if (res.success) {
+          console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[!] ${res.message}${cReset}`);
+          if (res.output) console.error(res.output);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}Failed to install plugin:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'remove':
+    case 'uninstall':
+    case 'del': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin remove <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Removing plugin '${pluginId}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
+          '/v1/system/plugins/action',
+          'POST',
+          { pluginId, action: 'uninstall' }
+        );
+        if (res.success) {
+          console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[!] ${res.message}${cReset}`);
+          if (res.output) console.error(res.output);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}Failed to remove plugin:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'reconfigure':
+    case 're-sync':
+    case 'sync': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin re-sync <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Re-syncing configuration for plugin '${pluginId}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string }>(
+          '/v1/system/plugins/action',
+          'POST',
+          { pluginId, action: 'reconfigure' }
+        );
+        if (res.success) {
+          console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[!] ${res.message}${cReset}`);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}Failed to re-sync plugin:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    default:
+      console.error(`${cRed}Unknown plugin subcommand: ${subcmd}${cReset}`);
+      console.log(`Usage: axonwallctl plugin <list|install|remove|re-sync> [plugin-id]`);
+      process.exit(1);
+  }
+}
+
 function showHelp() {
   console.log(`${cCyan}${cBold}axonwallctl — Axonwall Declarative YAML CLI (/etc/axonwall/*.yaml)${cReset}
 
@@ -435,13 +816,17 @@ ${cBold}COMMANDS:${cReset}
   status              Show status of /etc/axonwall/*.yaml files, validation state, and daemon connectivity
   validate            Validate all /etc/axonwall/*.yaml and /etc/axonwall/conf.d/*.yaml files against Zod schemas
   diff                Show uncommitted YAML changes and preview compiled Linux nftables ruleset
-  apply               Compile and atomically apply /etc/axonwall/*.yaml to kernel nftables, daemons, and GitOps
+  apply [--no-confirm] Compile and apply /etc/axonwall/*.yaml (auto-confirms unless --no-confirm)
+  confirm             Confirm the currently pending configuration commit and disarm auto-rollback
+  rollback            Immediately abort pending commit and revert to last-known-good configuration
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
+  plugin <cmd> [id]   Manage extension plugins (list, install, remove, re-sync)
+  cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR, then automatically validate and apply
   export              Output the complete unified configuration as a single YAML document to stdout
 
 ${cBold}SECTIONS (/etc/axonwall/<section>.yaml):${cReset}
-  ${AXONWALL_YAML_DOMAINS.join(', ')}
+  ${AXONWALL_YAML_DOMAINS.map((d) => d.filename.replace(/\.ya?ml$/, '')).join(', ')}
 `);
 }
 
@@ -461,8 +846,24 @@ async function main() {
       cmdDiff();
       break;
     case 'apply':
-    case 'reload':
-      await cmdApply(true);
+    case 'reload': {
+      const noConfirm = args.includes('--no-confirm');
+      await cmdApply(!noConfirm);
+      break;
+    }
+    case 'confirm':
+      await cmdConfirm();
+      break;
+    case 'rollback':
+      await cmdRollback();
+      break;
+    case 'plugin':
+    case 'plugins':
+      await cmdPlugin(args.slice(1));
+      break;
+    case 'cloudinit':
+    case 'cloud-init':
+      await cmdCloudInit(args.slice(1));
       break;
     case 'edit':
       await cmdEdit(args[1]);
