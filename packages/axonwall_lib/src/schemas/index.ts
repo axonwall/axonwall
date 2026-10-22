@@ -159,6 +159,7 @@ export const SystemSettingsSchema = z.object({
     interface: 'lan',
     ports: [80, 443, 22, 3000, 2966],
   }),
+  mcpEnabled: z.boolean().optional(),
 });
 
 export const DhcpStaticMappingSchema = z.object({
@@ -1420,6 +1421,12 @@ export const VigilanteSoarPolicySchema = z.object({
 });
 export type VigilanteSoarPolicy = z.infer<typeof VigilanteSoarPolicySchema>;
 
+export const McpServerConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  disabledReason: z.string().optional(),
+});
+export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
+
 export const VigilanteDeceptionConfigSchema = z.object({
   enabled: z.boolean().default(true),
   canaryServiceAccounts: z.array(z.string()).default(['cluster-admin-backup', 'vault-sync-sa']),
@@ -1634,6 +1641,7 @@ export const DesiredStateSchema = z.object({
   k3s: K3sConfigSchema.optional(),
   virt: VirtConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
+  mcp: McpServerConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;
 

@@ -2043,8 +2043,8 @@ var require_pushgateway = __commonJS({
       const gatewayUrlParsed = url2.parse(this.gatewayUrl);
       const gatewayUrlPath = gatewayUrlParsed.pathname && gatewayUrlParsed.pathname !== "/" ? gatewayUrlParsed.pathname : "";
       const jobPath = job ? `/job/${encodeURIComponent(job)}${generateGroupings(groupings)}` : "";
-      const path4 = `${gatewayUrlPath}/metrics${jobPath}`;
-      const target = url2.resolve(this.gatewayUrl, path4);
+      const path5 = `${gatewayUrlPath}/metrics${jobPath}`;
+      const target = url2.resolve(this.gatewayUrl, path5);
       const requestParams = url2.parse(target);
       const httpModule = isHttps(requestParams.href) ? https2 : http3;
       const options = Object.assign(requestParams, this.requestOptions, {
@@ -3794,7 +3794,7 @@ var require_osMemoryHeapLinux = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/osMemoryHeapLinux.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs6 = __require("fs");
+    var fs7 = __require("fs");
     var values = ["VmSize", "VmRSS", "VmData"];
     var PROCESS_RESIDENT_MEMORY = "process_resident_memory_bytes";
     var PROCESS_VIRTUAL_MEMORY = "process_virtual_memory_bytes";
@@ -3825,7 +3825,7 @@ var require_osMemoryHeapLinux = __commonJS({
         // Use this one metric's `collect` to set all metrics' values.
         collect() {
           try {
-            const stat = fs6.readFileSync("/proc/self/status", "utf8");
+            const stat = fs7.readFileSync("/proc/self/status", "utf8");
             const structuredOutput = structureOutput(stat);
             residentMemGauge.set(labels, structuredOutput.VmRSS);
             virtualMemGauge.set(labels, structuredOutput.VmSize);
@@ -3905,7 +3905,7 @@ var require_processOpenFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processOpenFileDescriptors.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs6 = __require("fs");
+    var fs7 = __require("fs");
     var process2 = __require("process");
     var PROCESS_OPEN_FDS = "process_open_fds";
     module.exports = (registry2, config2 = {}) => {
@@ -3922,7 +3922,7 @@ var require_processOpenFileDescriptors = __commonJS({
         labelNames,
         collect() {
           try {
-            const fds = fs6.readdirSync("/proc/self/fd");
+            const fds = fs7.readdirSync("/proc/self/fd");
             this.set(labels, fds.length - 1);
           } catch {
           }
@@ -3938,13 +3938,13 @@ var require_processMaxFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processMaxFileDescriptors.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs6 = __require("fs");
+    var fs7 = __require("fs");
     var PROCESS_MAX_FDS = "process_max_fds";
     var maxFds;
     module.exports = (registry2, config2 = {}) => {
       if (maxFds === void 0) {
         try {
-          const limits = fs6.readFileSync("/proc/self/limits", "utf8");
+          const limits = fs7.readFileSync("/proc/self/limits", "utf8");
           const lines = limits.split("\n");
           for (const line of lines) {
             if (line.startsWith("Max open files")) {
@@ -8548,17 +8548,17 @@ var require_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    function visit_(key, node2, visitor, path4) {
-      const ctrl = callVisitor(key, node2, visitor, path4);
+    function visit_(key, node2, visitor, path5) {
+      const ctrl = callVisitor(key, node2, visitor, path5);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path4, ctrl);
-        return visit_(key, ctrl, visitor, path4);
+        replaceNode(key, path5, ctrl);
+        return visit_(key, ctrl, visitor, path5);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path4 = Object.freeze(path4.concat(node2));
+          path5 = Object.freeze(path5.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = visit_(i, node2.items[i], visitor, path4);
+            const ci = visit_(i, node2.items[i], visitor, path5);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -8569,13 +8569,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path4 = Object.freeze(path4.concat(node2));
-          const ck = visit_("key", node2.key, visitor, path4);
+          path5 = Object.freeze(path5.concat(node2));
+          const ck = visit_("key", node2.key, visitor, path5);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = visit_("value", node2.value, visitor, path4);
+          const cv = visit_("value", node2.value, visitor, path5);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -8596,17 +8596,17 @@ var require_visit = __commonJS({
     visitAsync.BREAK = BREAK;
     visitAsync.SKIP = SKIP;
     visitAsync.REMOVE = REMOVE;
-    async function visitAsync_(key, node2, visitor, path4) {
-      const ctrl = await callVisitor(key, node2, visitor, path4);
+    async function visitAsync_(key, node2, visitor, path5) {
+      const ctrl = await callVisitor(key, node2, visitor, path5);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path4, ctrl);
-        return visitAsync_(key, ctrl, visitor, path4);
+        replaceNode(key, path5, ctrl);
+        return visitAsync_(key, ctrl, visitor, path5);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path4 = Object.freeze(path4.concat(node2));
+          path5 = Object.freeze(path5.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = await visitAsync_(i, node2.items[i], visitor, path4);
+            const ci = await visitAsync_(i, node2.items[i], visitor, path5);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -8617,13 +8617,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path4 = Object.freeze(path4.concat(node2));
-          const ck = await visitAsync_("key", node2.key, visitor, path4);
+          path5 = Object.freeze(path5.concat(node2));
+          const ck = await visitAsync_("key", node2.key, visitor, path5);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = await visitAsync_("value", node2.value, visitor, path4);
+          const cv = await visitAsync_("value", node2.value, visitor, path5);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -8650,23 +8650,23 @@ var require_visit = __commonJS({
       }
       return visitor;
     }
-    function callVisitor(key, node2, visitor, path4) {
+    function callVisitor(key, node2, visitor, path5) {
       if (typeof visitor === "function")
-        return visitor(key, node2, path4);
+        return visitor(key, node2, path5);
       if (identity.isMap(node2))
-        return visitor.Map?.(key, node2, path4);
+        return visitor.Map?.(key, node2, path5);
       if (identity.isSeq(node2))
-        return visitor.Seq?.(key, node2, path4);
+        return visitor.Seq?.(key, node2, path5);
       if (identity.isPair(node2))
-        return visitor.Pair?.(key, node2, path4);
+        return visitor.Pair?.(key, node2, path5);
       if (identity.isScalar(node2))
-        return visitor.Scalar?.(key, node2, path4);
+        return visitor.Scalar?.(key, node2, path5);
       if (identity.isAlias(node2))
-        return visitor.Alias?.(key, node2, path4);
+        return visitor.Alias?.(key, node2, path5);
       return void 0;
     }
-    function replaceNode(key, path4, node2) {
-      const parent = path4[path4.length - 1];
+    function replaceNode(key, path5, node2) {
+      const parent = path5[path5.length - 1];
       if (identity.isCollection(parent)) {
         parent.items[key] = node2;
       } else if (identity.isPair(parent)) {
@@ -9278,10 +9278,10 @@ var require_Collection = __commonJS({
     var createNode = require_createNode();
     var identity = require_identity();
     var Node = require_Node();
-    function collectionFromPath(schema, path4, value) {
+    function collectionFromPath(schema, path5, value) {
       let v = value;
-      for (let i = path4.length - 1; i >= 0; --i) {
-        const k = path4[i];
+      for (let i = path5.length - 1; i >= 0; --i) {
+        const k = path5[i];
         if (typeof k === "number" && Number.isInteger(k) && k >= 0) {
           const a = [];
           a[k] = v;
@@ -9300,7 +9300,7 @@ var require_Collection = __commonJS({
         sourceObjects: /* @__PURE__ */ new Map()
       });
     }
-    var isEmptyPath = (path4) => path4 == null || typeof path4 === "object" && !!path4[Symbol.iterator]().next().done;
+    var isEmptyPath = (path5) => path5 == null || typeof path5 === "object" && !!path5[Symbol.iterator]().next().done;
     var Collection = class extends Node.NodeBase {
       constructor(type, schema) {
         super(type);
@@ -9330,11 +9330,11 @@ var require_Collection = __commonJS({
        * be a Pair instance or a `{ key, value }` object, which may not have a key
        * that already exists in the map.
        */
-      addIn(path4, value) {
-        if (isEmptyPath(path4))
+      addIn(path5, value) {
+        if (isEmptyPath(path5))
           this.add(value);
         else {
-          const [key, ...rest] = path4;
+          const [key, ...rest] = path5;
           const node2 = this.get(key, true);
           if (identity.isCollection(node2))
             node2.addIn(rest, value);
@@ -9348,8 +9348,8 @@ var require_Collection = __commonJS({
        * Removes a value from the collection.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path4) {
-        const [key, ...rest] = path4;
+      deleteIn(path5) {
+        const [key, ...rest] = path5;
         if (rest.length === 0)
           return this.delete(key);
         const node2 = this.get(key, true);
@@ -9363,8 +9363,8 @@ var require_Collection = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path4, keepScalar) {
-        const [key, ...rest] = path4;
+      getIn(path5, keepScalar) {
+        const [key, ...rest] = path5;
         const node2 = this.get(key, true);
         if (rest.length === 0)
           return !keepScalar && identity.isScalar(node2) ? node2.value : node2;
@@ -9382,8 +9382,8 @@ var require_Collection = __commonJS({
       /**
        * Checks if the collection includes a value with the key `key`.
        */
-      hasIn(path4) {
-        const [key, ...rest] = path4;
+      hasIn(path5) {
+        const [key, ...rest] = path5;
         if (rest.length === 0)
           return this.has(key);
         const node2 = this.get(key, true);
@@ -9393,8 +9393,8 @@ var require_Collection = __commonJS({
        * Sets a value in this collection. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path4, value) {
-        const [key, ...rest] = path4;
+      setIn(path5, value) {
+        const [key, ...rest] = path5;
         if (rest.length === 0) {
           this.set(key, value);
         } else {
@@ -11909,9 +11909,9 @@ var require_Document = __commonJS({
           this.contents.add(value);
       }
       /** Adds a value to the document. */
-      addIn(path4, value) {
+      addIn(path5, value) {
         if (assertCollection(this.contents))
-          this.contents.addIn(path4, value);
+          this.contents.addIn(path5, value);
       }
       /**
        * Create a new `Alias` node, ensuring that the target `node` has the required anchor.
@@ -11986,14 +11986,14 @@ var require_Document = __commonJS({
        * Removes a value from the document.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path4) {
-        if (Collection.isEmptyPath(path4)) {
+      deleteIn(path5) {
+        if (Collection.isEmptyPath(path5)) {
           if (this.contents == null)
             return false;
           this.contents = null;
           return true;
         }
-        return assertCollection(this.contents) ? this.contents.deleteIn(path4) : false;
+        return assertCollection(this.contents) ? this.contents.deleteIn(path5) : false;
       }
       /**
        * Returns item at `key`, or `undefined` if not found. By default unwraps
@@ -12008,10 +12008,10 @@ var require_Document = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path4, keepScalar) {
-        if (Collection.isEmptyPath(path4))
+      getIn(path5, keepScalar) {
+        if (Collection.isEmptyPath(path5))
           return !keepScalar && identity.isScalar(this.contents) ? this.contents.value : this.contents;
-        return identity.isCollection(this.contents) ? this.contents.getIn(path4, keepScalar) : void 0;
+        return identity.isCollection(this.contents) ? this.contents.getIn(path5, keepScalar) : void 0;
       }
       /**
        * Checks if the document includes a value with the key `key`.
@@ -12022,10 +12022,10 @@ var require_Document = __commonJS({
       /**
        * Checks if the document includes a value at `path`.
        */
-      hasIn(path4) {
-        if (Collection.isEmptyPath(path4))
+      hasIn(path5) {
+        if (Collection.isEmptyPath(path5))
           return this.contents !== void 0;
-        return identity.isCollection(this.contents) ? this.contents.hasIn(path4) : false;
+        return identity.isCollection(this.contents) ? this.contents.hasIn(path5) : false;
       }
       /**
        * Sets a value in this document. For `!!set`, `value` needs to be a
@@ -12042,13 +12042,13 @@ var require_Document = __commonJS({
        * Sets a value in this document. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path4, value) {
-        if (Collection.isEmptyPath(path4)) {
+      setIn(path5, value) {
+        if (Collection.isEmptyPath(path5)) {
           this.contents = value;
         } else if (this.contents == null) {
-          this.contents = Collection.collectionFromPath(this.schema, Array.from(path4), value);
+          this.contents = Collection.collectionFromPath(this.schema, Array.from(path5), value);
         } else if (assertCollection(this.contents)) {
-          this.contents.setIn(path4, value);
+          this.contents.setIn(path5, value);
         }
       }
       /**
@@ -14009,9 +14009,9 @@ var require_cst_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    visit2.itemAtPath = (cst, path4) => {
+    visit2.itemAtPath = (cst, path5) => {
       let item = cst;
-      for (const [field, index] of path4) {
+      for (const [field, index] of path5) {
         const tok = item?.[field];
         if (tok && "items" in tok) {
           item = tok.items[index];
@@ -14020,23 +14020,23 @@ var require_cst_visit = __commonJS({
       }
       return item;
     };
-    visit2.parentCollection = (cst, path4) => {
-      const parent = visit2.itemAtPath(cst, path4.slice(0, -1));
-      const field = path4[path4.length - 1][0];
+    visit2.parentCollection = (cst, path5) => {
+      const parent = visit2.itemAtPath(cst, path5.slice(0, -1));
+      const field = path5[path5.length - 1][0];
       const coll = parent?.[field];
       if (coll && "items" in coll)
         return coll;
       throw new Error("Parent collection not found");
     };
-    function _visit(path4, item, visitor) {
-      let ctrl = visitor(item, path4);
+    function _visit(path5, item, visitor) {
+      let ctrl = visitor(item, path5);
       if (typeof ctrl === "symbol")
         return ctrl;
       for (const field of ["key", "value"]) {
         const token = item[field];
         if (token && "items" in token) {
           for (let i = 0; i < token.items.length; ++i) {
-            const ci = _visit(Object.freeze(path4.concat([[field, i]])), token.items[i], visitor);
+            const ci = _visit(Object.freeze(path5.concat([[field, i]])), token.items[i], visitor);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -14047,10 +14047,10 @@ var require_cst_visit = __commonJS({
             }
           }
           if (typeof ctrl === "function" && field === "key")
-            ctrl = ctrl(item, path4);
+            ctrl = ctrl(item, path5);
         }
       }
-      return typeof ctrl === "function" ? ctrl(item, path4) : ctrl;
+      return typeof ctrl === "function" ? ctrl(item, path5) : ctrl;
     }
     exports.visit = visit2;
   }
@@ -15352,14 +15352,14 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs6 = this.flowScalar(this.type);
+              const fs7 = this.flowScalar(this.type);
               if (atNextItem || it.value) {
-                map2.items.push({ start, key: fs6, sep: [] });
+                map2.items.push({ start, key: fs7, sep: [] });
                 this.onKeyLine = true;
               } else if (it.sep) {
-                this.stack.push(fs6);
+                this.stack.push(fs7);
               } else {
-                Object.assign(it, { key: fs6, sep: [] });
+                Object.assign(it, { key: fs7, sep: [] });
                 this.onKeyLine = true;
               }
               return;
@@ -15487,13 +15487,13 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs6 = this.flowScalar(this.type);
+              const fs7 = this.flowScalar(this.type);
               if (!it || it.value)
-                fc.items.push({ start: [], key: fs6, sep: [] });
+                fc.items.push({ start: [], key: fs7, sep: [] });
               else if (it.sep)
-                this.stack.push(fs6);
+                this.stack.push(fs7);
               else
-                Object.assign(it, { key: fs6, sep: [] });
+                Object.assign(it, { key: fs7, sep: [] });
               return;
             }
             case "flow-map-end":
@@ -16621,10 +16621,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path4) {
-  if (!path4)
+function getElementAtPath(obj, path5) {
+  if (!path5)
     return obj;
-  return path4.reduce((acc, key) => acc?.[key], obj);
+  return path5.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16964,11 +16964,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path4, issues) {
+function prefixIssues(path5, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path4);
+    iss.path.unshift(path5);
     return iss;
   });
 }
@@ -17430,16 +17430,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path4 = []) => {
+  const processError = (error63, path5 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path5, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
       } else {
-        const fullpath = [...path4, ...issue2.path];
+        const fullpath = [...path5, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -17478,17 +17478,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path4 = []) => {
+  const processError = (error63, path5 = []) => {
     var _a3;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path5, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
       } else {
-        const fullpath = [...path4, ...issue2.path];
+        const fullpath = [...path5, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -17527,8 +17527,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path4 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path4) {
+  const path5 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path5) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -34666,13 +34666,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path4 = ref.slice(1).split("/").filter(Boolean);
-  if (path4.length === 0) {
+  const path5 = ref.slice(1).split("/").filter(Boolean);
+  if (path5.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path4[0] === defsKey) {
-    const key = path4[1] === void 0 ? void 0 : decodeJSONPointerSegment(path4[1]);
+  if (path5[0] === defsKey) {
+    const key = path5[1] === void 0 ? void 0 : decodeJSONPointerSegment(path5[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -35750,7 +35750,8 @@ var SystemSettingsSchema = external_exports.object({
     enabled: true,
     interface: "lan",
     ports: [80, 443, 22, 3e3, 2966]
-  })
+  }),
+  mcpEnabled: external_exports.boolean().optional()
 });
 var DhcpStaticMappingSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
@@ -36774,6 +36775,10 @@ var VigilanteSoarPolicySchema = external_exports.object({
   warRoomQuorumThreshold: external_exports.number().min(0.5).max(1).default(0.75),
   blocklistTimeoutSeconds: external_exports.number().int().min(0).default(86400)
 });
+var McpServerConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(true),
+  disabledReason: external_exports.string().optional()
+});
 var VigilanteDeceptionConfigSchema = external_exports.object({
   enabled: external_exports.boolean().default(true),
   canaryServiceAccounts: external_exports.array(external_exports.string()).default(["cluster-admin-backup", "vault-sync-sa"]),
@@ -36963,7 +36968,8 @@ var DesiredStateSchema = external_exports.object({
   nas: NasConfigSchema.optional(),
   k3s: K3sConfigSchema.optional(),
   virt: VirtConfigSchema.optional(),
-  vigilante: VigilanteConfigSchema.optional()
+  vigilante: VigilanteConfigSchema.optional(),
+  mcp: McpServerConfigSchema.optional()
 });
 
 // ../../packages/axonwall_lib/dist/plugins/index.js
@@ -38699,14 +38705,14 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 // src/index.ts
 import * as http2 from "node:http";
 import * as https from "node:https";
-import * as fs5 from "node:fs";
+import * as fs6 from "node:fs";
 import * as net from "node:net";
-import * as path3 from "node:path";
+import * as path4 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/headscale.ts
 import { execFile } from "child_process";
-import fs from "fs";
+import fs2 from "fs";
 
 // ../../packages/axonwall_lib/dist/import/firewalld/index.js
 var FIREWALLD_SERVICES = {
@@ -38995,6 +39001,8 @@ var FullCloudInitSchema = external_exports.object({
 });
 
 // ../../packages/axonwall_lib/dist/mcp/index.js
+import * as fs from "node:fs";
+import * as path from "node:path";
 var MCP_SCOPES = [
   "mcp:telemetry:read",
   "mcp:pcap:capture",
@@ -39006,6 +39014,16 @@ var MCP_SCOPES = [
   "mcp:firewall:apply"
 ];
 var McpScopeSchema = external_exports.enum(MCP_SCOPES);
+var McpSettingsSchema = external_exports.object({
+  enabled: external_exports.boolean().default(true),
+  disabledReason: external_exports.string().optional(),
+  disabledAt: external_exports.string().optional(),
+  disabledBy: external_exports.string().optional()
+});
+var McpConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(true),
+  disabledReason: external_exports.string().optional()
+});
 var McpPolicyLimitsSchema = external_exports.object({
   /** Minimum CIDR prefix length allowed for IPv4 tactical actions (e.g. 24 = max /24 subnet, 32 = single host only) */
   maxIpv4PrefixLen: external_exports.number().int().min(8).max(32).default(24),
@@ -39415,6 +39433,73 @@ function validateRedirectTargetAllowlist(targetDestination, allowedRedirectTarge
     reason: `Redirect destination '${targetDestination}' is not in this MCP key's allowedRedirectTargets allowlist (${allowedRedirectTargets.join(", ")})`
   };
 }
+function resolveMcpSettingsPath() {
+  if (process.env.AXONWALL_MCP_SETTINGS_PATH) {
+    return process.env.AXONWALL_MCP_SETTINGS_PATH;
+  }
+  const primaryDir = "/var/lib/axonwall";
+  try {
+    fs.mkdirSync(primaryDir, { recursive: true, mode: 448 });
+    fs.accessSync(primaryDir, fs.constants.W_OK);
+    return path.join(primaryDir, "mcp-settings.json");
+  } catch {
+    const fallbackDir = "/tmp/axonwall";
+    fs.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
+    return path.join(fallbackDir, "mcp-settings.json");
+  }
+}
+function getMcpServerStatus(settingsPath) {
+  const envEnabled = process.env.AXONWALL_MCP_ENABLED;
+  const envDisabled = process.env.AXONWALL_DISABLE_MCP;
+  if (envDisabled === "1" || envDisabled === "true") {
+    return {
+      enabled: false,
+      disabledReason: "Disabled unconditionally via AXONWALL_DISABLE_MCP environment variable",
+      source: "env"
+    };
+  }
+  if (envEnabled !== void 0) {
+    const isEn = envEnabled.toLowerCase() === "true" || envEnabled === "1";
+    if (!isEn) {
+      return {
+        enabled: false,
+        disabledReason: "Disabled unconditionally via AXONWALL_MCP_ENABLED=false environment variable",
+        source: "env"
+      };
+    }
+  }
+  const filePath = settingsPath || resolveMcpSettingsPath();
+  if (fs.existsSync(filePath)) {
+    try {
+      const raw = fs.readFileSync(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      const validated = McpSettingsSchema.safeParse(parsed);
+      if (validated.success) {
+        if (!validated.data.enabled) {
+          return {
+            enabled: false,
+            disabledReason: validated.data.disabledReason || "Disabled by administrator policy",
+            disabledAt: validated.data.disabledAt,
+            disabledBy: validated.data.disabledBy,
+            source: "settings_file"
+          };
+        }
+        return {
+          enabled: true,
+          source: "settings_file"
+        };
+      }
+    } catch {
+    }
+  }
+  return {
+    enabled: true,
+    source: "default"
+  };
+}
+function isMcpServerEnabled(settingsPath) {
+  return getMcpServerStatus(settingsPath).enabled;
+}
 
 // src/headscale.ts
 function assertSafeIdentifier(val, paramName) {
@@ -39434,19 +39519,19 @@ var HEADSCALE_SOCKET_PATH = process.env.HEADSCALE_SOCKET_PATH || "/run/headscale
 var HEADSCALE_CONFIG_PATH = process.env.HEADSCALE_CONFIG_PATH || "/etc/headscale/config.yaml";
 var HEADSCALE_BIN = process.env.HEADSCALE_BIN || "/usr/sbin/headscale";
 function getHeadscaleBin() {
-  if (fs.existsSync(HEADSCALE_BIN)) return HEADSCALE_BIN;
-  if (fs.existsSync("/usr/local/bin/headscale")) return "/usr/local/bin/headscale";
+  if (fs2.existsSync(HEADSCALE_BIN)) return HEADSCALE_BIN;
+  if (fs2.existsSync("/usr/local/bin/headscale")) return "/usr/local/bin/headscale";
   return "headscale";
 }
 function runHeadscale(args) {
   return new Promise((resolve2, reject) => {
-    if (!fs.existsSync(HEADSCALE_SOCKET_PATH)) {
+    if (!fs2.existsSync(HEADSCALE_SOCKET_PATH)) {
       return reject(
         new Error(`Headscale service is not running (${HEADSCALE_SOCKET_PATH} not found). Ensure the headscale service is started.`)
       );
     }
     const bin = getHeadscaleBin();
-    const fullArgs = fs.existsSync(HEADSCALE_CONFIG_PATH) ? ["--config", HEADSCALE_CONFIG_PATH, ...args] : args;
+    const fullArgs = fs2.existsSync(HEADSCALE_CONFIG_PATH) ? ["--config", HEADSCALE_CONFIG_PATH, ...args] : args;
     execFile(bin, fullArgs, { timeout: 1e4 }, (err, stdout, stderr) => {
       if (err) {
         return reject(new Error(stderr?.trim() || err.message));
@@ -39518,8 +39603,8 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
 
 // src/mcp/authz.ts
 import * as crypto2 from "node:crypto";
-import * as fs2 from "node:fs";
-import * as path from "node:path";
+import * as fs3 from "node:fs";
+import * as path2 from "node:path";
 var rateLimitBuckets = /* @__PURE__ */ new Map();
 function resolveMcpKeysPath() {
   if (process.env.AXONWALL_MCP_KEYS_PATH) {
@@ -39527,22 +39612,22 @@ function resolveMcpKeysPath() {
   }
   const primaryDir = "/var/lib/axonwall";
   try {
-    fs2.mkdirSync(primaryDir, { recursive: true, mode: 448 });
-    fs2.accessSync(primaryDir, fs2.constants.W_OK);
-    return path.join(primaryDir, "mcp-keys.json");
+    fs3.mkdirSync(primaryDir, { recursive: true, mode: 448 });
+    fs3.accessSync(primaryDir, fs3.constants.W_OK);
+    return path2.join(primaryDir, "mcp-keys.json");
   } catch {
     const fallbackDir = "/tmp/axonwall";
-    fs2.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
-    return path.join(fallbackDir, "mcp-keys.json");
+    fs3.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
+    return path2.join(fallbackDir, "mcp-keys.json");
   }
 }
 function loadMcpKeysInternal() {
   const keysPath = resolveMcpKeysPath();
-  if (!fs2.existsSync(keysPath)) {
+  if (!fs3.existsSync(keysPath)) {
     return [];
   }
   try {
-    const raw = fs2.readFileSync(keysPath, "utf8");
+    const raw = fs3.readFileSync(keysPath, "utf8");
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     const valid = [];
@@ -39559,10 +39644,10 @@ function loadMcpKeysInternal() {
 }
 function saveMcpKeysInternal(keys) {
   const keysPath = resolveMcpKeysPath();
-  fs2.mkdirSync(path.dirname(keysPath), { recursive: true, mode: 448 });
+  fs3.mkdirSync(path2.dirname(keysPath), { recursive: true, mode: 448 });
   const tmpPath = `${keysPath}.tmp.${process.pid}`;
-  fs2.writeFileSync(tmpPath, JSON.stringify(keys, null, 2), { mode: 384 });
-  fs2.renameSync(tmpPath, keysPath);
+  fs3.writeFileSync(tmpPath, JSON.stringify(keys, null, 2), { mode: 384 });
+  fs3.renameSync(tmpPath, keysPath);
 }
 function hashMcpToken(rawToken) {
   return crypto2.createHash("sha256").update(rawToken.trim()).digest("hex");
@@ -39644,6 +39729,15 @@ function checkSlidingWindowRateLimit(keyId, limitPerMinute) {
 }
 function authenticateMcpToken(rawToken, clientIp, req) {
   const cleanIp = (clientIp || "127.0.0.1").replace(/^::ffff:/i, "").trim();
+  const serverStatus = getMcpServerStatus();
+  if (!serverStatus.enabled) {
+    return {
+      authenticated: false,
+      clientIp: cleanIp,
+      errorStatus: 503,
+      errorMessage: serverStatus.disabledReason || "Axonwall MCP server is disabled by administrator policy"
+    };
+  }
   if (!rawToken || !rawToken.trim().startsWith("axw_mcp_")) {
     return {
       authenticated: false,
@@ -39743,14 +39837,14 @@ function hasMcpScope(key, requiredScope) {
 }
 
 // src/mcp/server.ts
-import * as fs4 from "node:fs";
+import * as fs5 from "node:fs";
 import * as http from "node:http";
 import * as crypto4 from "node:crypto";
 
 // src/mcp/audit.ts
 import * as crypto3 from "node:crypto";
-import * as fs3 from "node:fs";
-import * as path2 from "node:path";
+import * as fs4 from "node:fs";
+import * as path3 from "node:path";
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 function resolveMcpAuditPath() {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) {
@@ -39758,13 +39852,13 @@ function resolveMcpAuditPath() {
   }
   const primaryDir = "/var/log/axonwall";
   try {
-    fs3.mkdirSync(primaryDir, { recursive: true, mode: 448 });
-    fs3.accessSync(primaryDir, fs3.constants.W_OK);
-    return path2.join(primaryDir, "mcp-audit.jsonl");
+    fs4.mkdirSync(primaryDir, { recursive: true, mode: 448 });
+    fs4.accessSync(primaryDir, fs4.constants.W_OK);
+    return path3.join(primaryDir, "mcp-audit.jsonl");
   } catch {
     const fallbackDir = "/tmp/axonwall";
-    fs3.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
-    return path2.join(fallbackDir, "mcp-audit.jsonl");
+    fs4.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
+    return path3.join(fallbackDir, "mcp-audit.jsonl");
   }
 }
 function computeEntryHash(entryWithoutHash) {
@@ -39788,8 +39882,8 @@ function computeEntryHash(entryWithoutHash) {
 }
 function getLastHash(auditPath) {
   try {
-    if (!fs3.existsSync(auditPath)) return GENESIS_HASH;
-    const content = fs3.readFileSync(auditPath, "utf8").trim();
+    if (!fs4.existsSync(auditPath)) return GENESIS_HASH;
+    const content = fs4.readFileSync(auditPath, "utf8").trim();
     if (!content) return GENESIS_HASH;
     const lines = content.split("\n");
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -39827,8 +39921,8 @@ function recordMcpAuditEntry(input2) {
     entryHash
   };
   try {
-    fs3.mkdirSync(path2.dirname(auditPath), { recursive: true, mode: 448 });
-    fs3.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 384 });
+    fs4.mkdirSync(path3.dirname(auditPath), { recursive: true, mode: 448 });
+    fs4.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 384 });
   } catch (err) {
     console.error("[MCP Audit] Failed to append audit entry:", err);
   }
@@ -39836,10 +39930,10 @@ function recordMcpAuditEntry(input2) {
 }
 function verifyMcpAuditChain() {
   const auditPath = resolveMcpAuditPath();
-  if (!fs3.existsSync(auditPath)) {
+  if (!fs4.existsSync(auditPath)) {
     return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
   }
-  const raw = fs3.readFileSync(auditPath, "utf8").trim();
+  const raw = fs4.readFileSync(auditPath, "utf8").trim();
   if (!raw) {
     return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
   }
@@ -39886,10 +39980,10 @@ function verifyMcpAuditChain() {
 function queryMcpAuditEntries(limit = 100) {
   const auditPath = resolveMcpAuditPath();
   const integrity = verifyMcpAuditChain();
-  if (!fs3.existsSync(auditPath)) {
+  if (!fs4.existsSync(auditPath)) {
     return { entries: [], integrity };
   }
-  const raw = fs3.readFileSync(auditPath, "utf8").trim();
+  const raw = fs4.readFileSync(auditPath, "utf8").trim();
   if (!raw) {
     return { entries: [], integrity };
   }
@@ -39918,8 +40012,8 @@ function readAgentToken() {
   }
   for (const p of AGENT_TOKEN_PATHS) {
     try {
-      if (fs4.existsSync(p)) {
-        const tok = fs4.readFileSync(p, "utf8").trim();
+      if (fs5.existsSync(p)) {
+        const tok = fs5.readFileSync(p, "utf8").trim();
         if (tok) return tok;
       }
     } catch {
@@ -39928,7 +40022,7 @@ function readAgentToken() {
   return "";
 }
 async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
-  if (!fs4.existsSync(AGENT_SOCKET_PATH)) {
+  if (!fs5.existsSync(AGENT_SOCKET_PATH)) {
     return {
       ok: false,
       status: 503,
@@ -39995,8 +40089,8 @@ function loadLocalDesiredState() {
   const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
   for (const p of candidates) {
     try {
-      if (fs4.existsSync(p)) {
-        const raw = JSON.parse(fs4.readFileSync(p, "utf8"));
+      if (fs5.existsSync(p)) {
+        const raw = JSON.parse(fs5.readFileSync(p, "utf8"));
         const parsed = DesiredStateSchema.safeParse(raw);
         if (parsed.success) return parsed.data;
         return raw;
@@ -40375,8 +40469,8 @@ async function handleMcpReadResource(uri, env) {
     case "axonwall://telemetry/alerts/suricata": {
       const alerts = [];
       try {
-        if (fs4.existsSync("/var/log/suricata/eve.json")) {
-          const lines = fs4.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+        if (fs5.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs5.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
           for (const line of lines.slice(-50).reverse()) {
             try {
               alerts.push(JSON.parse(line));
@@ -40512,8 +40606,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       const sigFilter = typeof args.signatureContains === "string" ? args.signatureContains.toLowerCase() : "";
       const matchingAlerts = [];
       try {
-        if (fs4.existsSync("/var/log/suricata/eve.json")) {
-          const lines = fs4.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+        if (fs5.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs5.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
           for (let i = lines.length - 1; i >= 0 && matchingAlerts.length < limit; i--) {
             const line = lines[i];
             if (!line) continue;
@@ -41017,7 +41111,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       }
       state.rules.push(req.rule);
       try {
-        fs4.writeFileSync("/etc/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
+        fs5.writeFileSync("/etc/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
       } catch {
       }
       let applyStatus = "staged_only";
@@ -41083,6 +41177,17 @@ async function processMcpJsonRpcMessage(msg, env) {
   }
   if (msg.id === void 0) {
     return null;
+  }
+  const serverStatus = getMcpServerStatus();
+  if (!serverStatus.enabled) {
+    return {
+      jsonrpc: "2.0",
+      id: msg.id,
+      error: {
+        code: -32e3,
+        message: serverStatus.disabledReason || "Axonwall MCP server is disabled by administrator policy"
+      }
+    };
   }
   try {
     switch (msg.method) {
@@ -41361,7 +41466,7 @@ async function main() {
       return;
     }
     const verifyFleetAuth = (req2, res2) => {
-      if (fs5.existsSync(caPath)) {
+      if (fs6.existsSync(caPath)) {
         const tlsSocket = req2.socket;
         let peerCert = null;
         try {
@@ -41474,6 +41579,19 @@ async function main() {
       return;
     }
     if (pathname === "/api/v1/mcp" || pathname === "/api/v1/mcp/sse") {
+      const serverStatus = getMcpServerStatus();
+      if (!serverStatus.enabled) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32e3,
+            message: serverStatus.disabledReason || "Axonwall MCP server is disabled by administrator policy"
+          }
+        }));
+        return;
+      }
       const authHeader = (req.headers.authorization || "").trim();
       const rawToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : (req.headers["x-axonwall-mcp-token"] || "").trim();
       const clientIp = (req.socket?.remoteAddress || "127.0.0.1").replace(/^::ffff:/i, "");
@@ -41621,13 +41739,13 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     });
     req.pipe(uiReq);
   };
-  if (fs5.existsSync(certPath) && fs5.existsSync(keyPath)) {
+  if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
     console.log(`[Axonwall Controller] Starting in SECURE mTLS mode (HTTP auto-upgrade enabled on port ${port})`);
     const httpsServer = https.createServer({
-      cert: fs5.readFileSync(certPath),
-      key: fs5.readFileSync(keyPath),
-      ca: fs5.existsSync(caPath) ? fs5.readFileSync(caPath) : void 0,
-      requestCert: fs5.existsSync(caPath),
+      cert: fs6.readFileSync(certPath),
+      key: fs6.readFileSync(keyPath),
+      ca: fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0,
+      requestCert: fs6.existsSync(caPath),
       // Client certificates are enforced per-path, not at the TLS layer:
       // this listener is shared by the web console (browsers have no
       // client cert) and by satellites that only receive their cert
@@ -41714,7 +41832,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         socket.destroy();
         return;
       }
-      if (fs5.existsSync(caPath)) {
+      if (fs6.existsSync(caPath)) {
         const tlsSocket = socket;
         if (!tlsSocket.authorized) {
           console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
@@ -41926,7 +42044,7 @@ ${headerLines.join("\r\n")}\r
 var isDirectExecution = () => {
   if (process.env.NODE_ENV === "test") return false;
   try {
-    return !!process.argv[1] && fileURLToPath(import.meta.url) === path3.resolve(process.argv[1]);
+    return !!process.argv[1] && fileURLToPath(import.meta.url) === path4.resolve(process.argv[1]);
   } catch {
     return false;
   }
@@ -41945,6 +42063,8 @@ export {
   createHttpRedirectServer,
   createMcpApiKeyRecord,
   createPortMultiplexer,
+  getMcpServerStatus,
+  isMcpServerEnabled,
   listMcpApiKeys,
   processMcpJsonRpcMessage,
   queryMcpAuditEntries,

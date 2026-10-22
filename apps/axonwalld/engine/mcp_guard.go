@@ -308,3 +308,41 @@ func ValidateRedirectDestination(dest string) (hostIP string, port int, isV6 boo
 	v6 := parsedIP.To4() == nil
 	return parsedIP.String(), 0, v6, parsedIP.String(), nil
 }
+
+// IsMcpSubsystemEnabled checks if the MCP control plane is enabled on this system.
+// It checks AXONWALL_DISABLE_MCP / AXONWALL_MCP_ENABLED environment variables
+// and the persistent /var/lib/axonwall/mcp-settings.json configuration file.
+func IsMcpSubsystemEnabled() (bool, string) {
+	if dis := os.Getenv("AXONWALL_DISABLE_MCP"); dis == "1" || strings.EqualFold(dis, "true") {
+		return false, "MCP server is disabled via AXONWALL_DISABLE_MCP environment variable"
+	}
+	if en := os.Getenv("AXONWALL_MCP_ENABLED"); en != "" {
+		if strings.EqualFold(en, "false") || en == "0" {
+			return false, "MCP server is disabled via AXONWALL_MCP_ENABLED=false environment variable"
+		}
+	}
+
+	settingsPath := os.Getenv("AXONWALL_MCP_SETTINGS_PATH")
+	if settingsPath == "" {
+		settingsPath = "/var/lib/axonwall/mcp-settings.json"
+	}
+
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		var cfg struct {
+			Enabled        *bool  `json:"enabled"`
+			DisabledReason string `json:"disabledReason"`
+		}
+		if jsonErr := json.Unmarshal(data, &cfg); jsonErr == nil && cfg.Enabled != nil {
+			if !*cfg.Enabled {
+				reason := cfg.DisabledReason
+				if reason == "" {
+					reason = "MCP server is disabled by administrator policy"
+				}
+				return false, reason
+			}
+		}
+	}
+
+	return true, ""
+}
+

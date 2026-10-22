@@ -10,6 +10,7 @@ import {
   McpProposeRuleRequestSchema,
   validateMcpTarget,
   validateRedirectTargetAllowlist,
+  getMcpServerStatus,
   type McpApiKey,
   type McpGuardContext,
   type McpScope,
@@ -1399,6 +1400,19 @@ export async function processMcpJsonRpcMessage(
   // Notifications (no id) do not return a response
   if (msg.id === undefined) {
     return null;
+  }
+
+  // Check Master Kill-Switch / Disable State
+  const serverStatus = getMcpServerStatus();
+  if (!serverStatus.enabled) {
+    return {
+      jsonrpc: '2.0',
+      id: msg.id,
+      error: {
+        code: -32000,
+        message: serverStatus.disabledReason || 'Axonwall MCP server is disabled by administrator policy',
+      },
+    };
   }
 
   try {

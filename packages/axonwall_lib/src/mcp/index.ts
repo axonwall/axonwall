@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { z } from 'zod';
 import { FirewallRuleSchema } from '../schemas/index.js';
 
@@ -18,6 +20,20 @@ export const MCP_SCOPES = [
 
 export const McpScopeSchema = z.enum(MCP_SCOPES);
 export type McpScope = z.infer<typeof McpScopeSchema>;
+
+export const McpSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  disabledReason: z.string().optional(),
+  disabledAt: z.string().optional(),
+  disabledBy: z.string().optional(),
+});
+export type McpSettings = z.infer<typeof McpSettingsSchema>;
+
+export const McpConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  disabledReason: z.string().optional(),
+});
+export type McpConfig = z.infer<typeof McpConfigSchema>;
 
 export const McpPolicyLimitsSchema = z.object({
   /** Minimum CIDR prefix length allowed for IPv4 tactical actions (e.g. 24 = max /24 subnet, 32 = single host only) */
@@ -529,3 +545,93 @@ export function validateRedirectTargetAllowlist(
     reason: `Redirect destination '${targetDestination}' is not in this MCP key's allowedRedirectTargets allowlist (${allowedRedirectTargets.join(', ')})`,
   };
 }
+
+// ============================================================================
+// 7. Master Kill-Switch / Disable Management
+// ============================================================================
+
+export function resolveMcpSettingsPath(): string {
+  if (process.env.AXONWALL_MCP_SETTINGS_PATH) {
+    return process.env.AXONWALL_MCP_SETTINGS_PATH;
+  }
+  const primaryDir = '/var/lib/axonwall';
+  try {
+    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o700 });
+    fs.accessSync(primaryDir, fs.constants.W_OK);
+    return path.join(primaryDir, 'mcp-settings.json');
+  } catch {
+    const fallbackDir = '/tmp/axonwall';
+    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
+    return path.join(fallbackDir, 'mcp-settings.json');
+  }
+}
+
+export interface McpServerStatus {
+  enabled: boolean;
+  disabledReason?: string;
+  disabledAt?: string;
+  disabledBy?: string;
+  source: 'env' | 'settings_file' | 'default';
+}
+
+export function getMcpServerStatus(settingsPath?: string): McpServerStatus {
+  // 1. Check environment variable overrides (highest precedence)
+  const envEnabled = process.env.AXONWALL_MCP_ENABLED;
+  const envDisabled = process.env.AXONWALL_DISABLE_MCP;
+
+  if (envDisabled === '1' || envDisabled === 'true') {
+    return {
+      enabled: false,
+      disabledReason: 'Disabled unconditionally via AXONWALL_DISABLE_MCP environment variable',
+      source: 'env',
+    };
+  }
+
+  if (envEnabled !== undefined) {
+    const isEn = envEnabled.toLowerCase() === 'true' || envEnabled === '1';
+    if (!isEn) {
+      return {
+        enabled: false,
+        disabledReason: 'Disabled unconditionally via AXONWALL_MCP_ENABLED=false environment variable',
+        source: 'env',
+      };
+    }
+  }
+
+  // 2. Check persistent configuration file
+  const filePath = settingsPath || resolveMcpSettingsPath();
+  if (fs.existsSync(filePath)) {
+    try {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      const validated = McpSettingsSchema.safeParse(parsed);
+      if (validated.success) {
+        if (!validated.data.enabled) {
+          return {
+            enabled: false,
+            disabledReason: validated.data.disabledReason || 'Disabled by administrator policy',
+            disabledAt: validated.data.disabledAt,
+            disabledBy: validated.data.disabledBy,
+            source: 'settings_file',
+          };
+        }
+        return {
+          enabled: true,
+          source: 'settings_file',
+        };
+      }
+    } catch {
+      // In case of read/parse failure, default to enabled
+    }
+  }
+
+  return {
+    enabled: true,
+    source: 'default',
+  };
+}
+
+export function isMcpServerEnabled(settingsPath?: string): boolean {
+  return getMcpServerStatus(settingsPath).enabled;
+}
+

@@ -17,6 +17,8 @@ import {
   Lock,
   Terminal,
   Activity,
+  Power,
+  PowerOff,
 } from 'lucide-react';
 import {
   getMcpDashboardData,
@@ -25,6 +27,7 @@ import {
   toggleMcpApiKeyAction,
   revertMcpLeaseAction,
   emergencyFlushMcpLeasesAction,
+  toggleMcpServerMasterSwitchAction,
   type McpDashboardData,
 } from '@/server/agent';
 import type { McpScope } from '@axonwall/lib/mcp';
@@ -198,6 +201,29 @@ export default function McpControlPlanePage() {
     await refreshData();
   };
 
+  const handleToggleMasterSwitch = async (newEnabled: boolean) => {
+    const actionText = newEnabled ? 'enable' : 'completely disable';
+    const confirmPrompt = newEnabled
+      ? 'Enable the Axonwall MCP Subsystem? AI agents with valid keys will be permitted to connect and execute tools.'
+      : 'COMPLETELY DISABLE AXONWALL MCP SUBSYSTEM?\n\nThis will:\n1. Immediately block all incoming MCP connections on HTTPS port 2966 (/api/v1/mcp)\n2. Forbid Stdio MCP command execution\n3. Reject all mutating /v1/mcp/* daemon endpoints\n4. Automatically flush all active AI tactical leases from the kernel.';
+    if (!confirm(confirmPrompt)) {
+      return;
+    }
+    const res = await toggleMcpServerMasterSwitchAction(newEnabled);
+    if (res.success) {
+      setStatusMsg({
+        type: 'success',
+        text: `MCP Subsystem ${newEnabled ? 'enabled successfully' : 'completely disabled across all transports and kernel engines'}.`,
+      });
+      await refreshData();
+    } else {
+      setStatusMsg({
+        type: 'error',
+        text: res.error || `Failed to ${actionText} MCP subsystem`,
+      });
+    }
+  };
+
   const handleRevertLease = async (leaseId: string) => {
     const res = await revertMcpLeaseAction(leaseId);
     if (res.success) {
@@ -268,6 +294,101 @@ export default function McpControlPlanePage() {
           </button>
         </div>
       </div>
+
+      {/* Master Subsystem Kill-Switch Card */}
+      {data?.serverStatus && (
+        <div
+          className={`p-5 rounded-2xl border transition-all ${
+            data.serverStatus.enabled
+              ? 'bg-slate-900/80 border-slate-800'
+              : 'bg-rose-950/30 border-rose-600/40 shadow-lg shadow-rose-950/20'
+          }`}
+        >
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div
+                className={`p-2.5 rounded-xl border mt-0.5 ${
+                  data.serverStatus.enabled
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+                }`}
+              >
+                {data.serverStatus.enabled ? (
+                  <Power className="w-6 h-6" />
+                ) : (
+                  <PowerOff className="w-6 h-6" />
+                )}
+              </div>
+              <div>
+                <div className="flex items-center gap-3">
+                  <h3 className="text-base font-semibold text-slate-100">
+                    MCP Server Master Switch
+                  </h3>
+                  <span
+                    className={`px-2.5 py-0.5 text-xs font-bold uppercase tracking-wider rounded-full border ${
+                      data.serverStatus.enabled
+                        ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                        : 'bg-rose-500/20 border-rose-500/40 text-rose-300'
+                    }`}
+                  >
+                    {data.serverStatus.enabled ? 'ACTIVE & SERVING' : 'COMPLETELY DISABLED'}
+                  </span>
+                  {data.serverStatus.source === 'env' && (
+                    <span className="px-2 py-0.5 text-2xs font-mono rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      ENV OVERRIDE
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm text-slate-400 mt-1 max-w-2xl">
+                  {data.serverStatus.enabled ? (
+                    'The MCP subsystem is currently accepting authorized client connections over HTTPS port 2966 and local Stdio transport. All AI tool executions are monitored and audited.'
+                  ) : (
+                    <span className="text-rose-200">
+                      <strong>MCP Subsystem is completely disabled:</strong>{' '}
+                      {data.serverStatus.disabledReason || 'All connections and tool invocations are rejected.'}
+                    </span>
+                  )}
+                </p>
+                {!data.serverStatus.enabled && data.serverStatus.disabledAt && (
+                  <p className="text-xs text-slate-500 mt-1">
+                    Disabled on {new Date(data.serverStatus.disabledAt).toLocaleString()}
+                    {data.serverStatus.disabledBy ? ` by ${data.serverStatus.disabledBy}` : ''}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 shrink-0">
+              {data.serverStatus.source === 'env' ? (
+                <div className="text-xs text-amber-400 bg-amber-950/30 border border-amber-500/30 px-3 py-2 rounded-lg max-w-xs text-center">
+                  Locked via environment variable. Edit systemd service or container env to change.
+                </div>
+              ) : (
+                <button
+                  onClick={() => handleToggleMasterSwitch(!data.serverStatus.enabled)}
+                  className={`px-5 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-2 border transition-all ${
+                    data.serverStatus.enabled
+                      ? 'bg-rose-600/15 hover:bg-rose-600/25 border-rose-500/30 text-rose-300 hover:border-rose-500/50'
+                      : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold border-transparent shadow-lg shadow-emerald-950/40'
+                  }`}
+                >
+                  {data.serverStatus.enabled ? (
+                    <>
+                      <PowerOff className="w-4 h-4" />
+                      Disable MCP Subsystem
+                    </>
+                  ) : (
+                    <>
+                      <Power className="w-4 h-4" />
+                      Enable MCP Subsystem
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {statusMsg && (
         <div

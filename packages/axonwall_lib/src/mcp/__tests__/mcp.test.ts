@@ -132,4 +132,22 @@ describe('Axonwall MCP Safety Guard & Blast-Radius Validator', () => {
     expect(antiLockoutIdx).toBeGreaterThan(loIdx);
     expect(blockedIpsIdx).toBeGreaterThan(antiLockoutIdx);
   });
+
+  it('correctly reports master switch status via env vars and settings file', async () => {
+    const { isMcpServerEnabled, getMcpServerStatus } = await import('../index.js');
+    
+    // Default enabled
+    expect(isMcpServerEnabled('/nonexistent/mcp-settings.json')).toBe(true);
+
+    // Disabled via AXONWALL_MCP_ENABLED=false
+    process.env.AXONWALL_MCP_ENABLED = 'false';
+    expect(isMcpServerEnabled('/nonexistent/mcp-settings.json')).toBe(false);
+    expect(getMcpServerStatus('/nonexistent/mcp-settings.json').source).toBe('env');
+    delete process.env.AXONWALL_MCP_ENABLED;
+
+    // Disabled via AXONWALL_DISABLE_MCP=1
+    process.env.AXONWALL_DISABLE_MCP = '1';
+    expect(isMcpServerEnabled('/nonexistent/mcp-settings.json')).toBe(false);
+    delete process.env.AXONWALL_DISABLE_MCP;
+  });
 });

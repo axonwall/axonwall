@@ -47,6 +47,7 @@ import { listUsers, createUser, createPreAuthKey } from './headscale.js';
 import { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord } from './mcp/authz.js';
 import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, type JsonRpcRequest } from './mcp/server.js';
 import { recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries } from './mcp/audit.js';
+import { isMcpServerEnabled, getMcpServerStatus } from '@axonwall/lib/mcp';
 
 export {
   authenticateMcpToken,
@@ -59,6 +60,8 @@ export {
   recordMcpAuditEntry,
   verifyMcpAuditChain,
   queryMcpAuditEntries,
+  isMcpServerEnabled,
+  getMcpServerStatus,
 };
 
 function getSafeRedirectUrl(
@@ -443,6 +446,20 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     // Security AI / VigilSOC Model Context Protocol (MCP) Endpoint (/api/v1/mcp)
     // ========================================================================
     if (pathname === '/api/v1/mcp' || pathname === '/api/v1/mcp/sse') {
+      const serverStatus = getMcpServerStatus();
+      if (!serverStatus.enabled) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32000,
+            message: serverStatus.disabledReason || 'Axonwall MCP server is disabled by administrator policy',
+          },
+        }));
+        return;
+      }
+
       const authHeader = (req.headers.authorization || '').trim();
       const rawToken = authHeader.toLowerCase().startsWith('bearer ')
         ? authHeader.slice(7).trim()

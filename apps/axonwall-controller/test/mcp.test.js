@@ -114,3 +114,78 @@ test('MCP AuthZ, Blast-Radius Guardrails & Hash-Chained Audit Verification', asy
   assert.equal(chainStatus.valid, true);
   assert.equal(chainStatus.totalEntries, 3);
 });
+
+test('MCP Master Kill-Switch / Disable Subsystem Verification', async () => {
+  const {
+    createMcpApiKeyRecord,
+    authenticateMcpToken,
+    processMcpJsonRpcMessage,
+    isMcpServerEnabled,
+  } = await import('../dist/index.js');
+
+  const { rawToken } = createMcpApiKeyRecord({
+    name: 'KillSwitch Agent',
+    scopes: ['mcp:telemetry:read'],
+  });
+
+  // Verify default enabled
+  const authBefore = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(authBefore.authenticated, true);
+  assert.equal(isMcpServerEnabled(), true);
+
+  // 1. Disable via environment variable AXONWALL_MCP_ENABLED=false
+  process.env.AXONWALL_MCP_ENABLED = 'false';
+  assert.equal(isMcpServerEnabled(), false);
+
+  const disabledAuthEnv = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(disabledAuthEnv.authenticated, false);
+  assert.equal(disabledAuthEnv.errorStatus, 503);
+  assert.ok(disabledAuthEnv.errorMessage?.toLowerCase().includes('disabled'));
+
+  // JSON-RPC message rejected when disabled
+  const rpcRespEnv = await processMcpJsonRpcMessage(
+    { jsonrpc: '2.0', id: 10, method: 'tools/list', params: {} },
+    { key: authBefore.key, clientIp: '127.0.0.1' }
+  );
+  assert.ok(rpcRespEnv?.error);
+  assert.equal(rpcRespEnv.error.code, -32000);
+  assert.ok(rpcRespEnv.error.message.toLowerCase().includes('disabled'));
+
+  delete process.env.AXONWALL_MCP_ENABLED;
+
+  // 2. Disable via AXONWALL_DISABLE_MCP=1
+  process.env.AXONWALL_DISABLE_MCP = '1';
+  assert.equal(isMcpServerEnabled(), false);
+
+  const disabledAuthKill = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(disabledAuthKill.authenticated, false);
+  assert.equal(disabledAuthKill.errorStatus, 503);
+
+  delete process.env.AXONWALL_DISABLE_MCP;
+
+  // 3. Disable via persistent configuration file
+  const settingsFile = path.join(tmpDir, 'mcp-settings.json');
+  process.env.AXONWALL_MCP_SETTINGS_PATH = settingsFile;
+
+  fs.writeFileSync(settingsFile, JSON.stringify({
+    enabled: false,
+    disabledReason: 'Emergency maintenance lockdown',
+    disabledAt: new Date().toISOString(),
+    disabledBy: 'secops-admin',
+  }));
+
+  assert.equal(isMcpServerEnabled(), false);
+
+  const disabledAuthFile = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(disabledAuthFile.authenticated, false);
+  assert.equal(disabledAuthFile.errorStatus, 503);
+  assert.ok(disabledAuthFile.errorMessage?.includes('Emergency maintenance lockdown'));
+
+  // Re-enable via file
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: true }));
+  assert.equal(isMcpServerEnabled(), true);
+
+  const reEnabledAuth = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(reEnabledAuth.authenticated, true);
+});
+

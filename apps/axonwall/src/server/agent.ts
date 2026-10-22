@@ -13,12 +13,17 @@ import {
 import {
   McpApiKeySchema,
   McpPolicyLimitsSchema,
+  McpSettingsSchema,
+  isMcpServerEnabled,
+  getMcpServerStatus,
+  resolveMcpSettingsPath,
   type McpApiKey,
   type McpApiKeyPublic,
   type McpAuditLogEntry,
   type McpPolicyLimits,
   type McpScope,
   type McpTacticalLease,
+  type McpServerStatus,
 } from '@axonwall/lib/mcp';
 import http from 'node:http';
 import os from 'node:os';
@@ -3308,6 +3313,7 @@ function readAndVerifyMcpAuditLog(limit = 100): {
 }
 
 export interface McpDashboardData {
+  serverStatus: McpServerStatus;
   keys: McpApiKeyPublic[];
   leases: McpTacticalLease[];
   protectedPosture: {
@@ -3352,7 +3358,10 @@ export async function getMcpDashboardData(): Promise<McpDashboardData> {
     }
   }
 
+  const serverStatus = getMcpServerStatus();
+
   return {
+    serverStatus,
     keys,
     leases,
     protectedPosture,
@@ -3479,6 +3488,59 @@ export async function emergencyFlushMcpLeasesAction(
     clearedCount: res?.clearedCount ?? 0,
   };
 }
+
+export async function toggleMcpServerMasterSwitchAction(
+  enabled: boolean,
+  reason?: string
+): Promise<{ success: boolean; status: McpServerStatus; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const settingsPath = resolveMcpSettingsPath();
+  const currentStatus = getMcpServerStatus(settingsPath);
+
+  // If locked via environment variable, refuse modification and inform user
+  if (currentStatus.source === 'env') {
+    return {
+      success: false,
+      status: currentStatus,
+      error: `Cannot toggle MCP server state from Web Console: ${currentStatus.disabledReason}. Remove the environment variable to manage via console.`,
+    };
+  }
+
+  const payload = {
+    enabled: Boolean(enabled),
+    disabledReason: enabled ? undefined : (reason?.trim() || 'Disabled by administrator from Web Console'),
+    disabledAt: enabled ? undefined : new Date().toISOString(),
+    disabledBy: session.username || 'admin',
+  };
+
+  try {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true, mode: 0o700 });
+    const tmp = `${settingsPath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, settingsPath);
+
+    // If disabled, automatically flush active kernel leases for safety
+    if (!enabled) {
+      await callAgentApi<any>('/v1/mcp/flush', 'POST', {
+        reason: 'Master MCP Server switch disabled by administrator',
+      }).catch(() => {});
+    }
+
+    return {
+      success: true,
+      status: getMcpServerStatus(settingsPath),
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      status: currentStatus,
+      error: `Failed to persist MCP server settings: ${err?.message || err}`,
+    };
+  }
+}
+
 
 
 

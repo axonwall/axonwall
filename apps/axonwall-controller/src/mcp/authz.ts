@@ -6,6 +6,8 @@ import {
   McpApiKeySchema,
   McpPolicyLimitsSchema,
   isIpInCidr,
+  isMcpServerEnabled,
+  getMcpServerStatus,
   type McpApiKey,
   type McpApiKeyPublic,
   type McpPolicyLimits,
@@ -193,6 +195,17 @@ export function authenticateMcpToken(
   req?: http.IncomingMessage
 ): McpAuthResult {
   const cleanIp = (clientIp || '127.0.0.1').replace(/^::ffff:/i, '').trim();
+
+  // 1. Check Master Kill-Switch / Disable State
+  const serverStatus = getMcpServerStatus();
+  if (!serverStatus.enabled) {
+    return {
+      authenticated: false,
+      clientIp: cleanIp,
+      errorStatus: 503,
+      errorMessage: serverStatus.disabledReason || 'Axonwall MCP server is disabled by administrator policy',
+    };
+  }
 
   if (!rawToken || !rawToken.trim().startsWith('axw_mcp_')) {
     return {
