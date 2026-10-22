@@ -217,7 +217,19 @@ fi
 
 echo "[+] Resolving and caching ${#CORE_PKGS[@]} packages and transitive dependencies into /apks/x86_64..."
 apk fetch --recursive --output "${WORK_DIR}/iso/apks/x86_64" "${CORE_PKGS[@]}"
-# Generate RSA keypair and sign APKINDEX so apk verifies it offline
+# Generate RSA keypair and sign APKINDEX so apk verifies it offline.
+#
+# Trust model for this key (audit C-S4, decided 2026-10-22): the key is
+# deliberately ephemeral per build. Its job is intra-image integrity —
+# the APKINDEX is signed here and the public half is baked into the
+# overlay and the initramfs, so boot-time and runtime apk verify the
+# offline repo against the image's own key. No cross-release key
+# pinning is promised or needed: an installed appliance never
+# apk-installs after imaging, and updates replace whole A/B slots
+# verified at the image level (release checksum / release signature).
+# Publisher identity across releases belongs to the release-signing
+# key; whether a persistent APK key is also warranted will be decided
+# together with the release-signing enablement, not here.
 echo "[+] Generating Axonwall signing key and indexing APK repository..."
 mkdir -p /root/.abuild "${WORK_DIR}/ovl/etc/apk/keys"
 abuild-keygen -a -n -q
