@@ -61,10 +61,15 @@ func TestBuildSyncTrustStatusUnenrolled(t *testing.T) {
 		t.Fatalf("fallback transports misreported: %+v", st)
 	}
 
-	// Default config normalizes to token-http on both fields.
+	// Default config resolves to the product default, mtls, on both
+	// fields (D-04 Phase 4); only an explicit value opts out.
 	st2 := buildSyncTrustStatus(SqliteSyncConfig{}, "", nil, nil)
-	if st2.TransportConfigured != "token-http" || st2.TransportEffective != "token-http" {
-		t.Fatalf("empty config must normalize to token-http: %+v", st2)
+	if st2.TransportConfigured != "mtls" || st2.TransportEffective != "mtls" {
+		t.Fatalf("empty config must resolve to the mtls default: %+v", st2)
+	}
+	st3 := buildSyncTrustStatus(SqliteSyncConfig{Transport: "token-http"}, "", nil, nil)
+	if st3.TransportConfigured != "token-http" || st3.TransportEffective != "token-http" {
+		t.Fatalf("explicit token-http opt-out must be honored: %+v", st3)
 	}
 }
 

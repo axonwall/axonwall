@@ -271,7 +271,7 @@ export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
     databases: ['/var/lib/axonwall/headscale/db.sqlite'],
     syncIntervalSeconds: 5,
     listenPort: 9876,
-    transport: 'token-http' as const,
+    transport: 'mtls' as const,
     requireSignedPayloads: false,
   };
   const lines: string[] = [];
@@ -328,7 +328,7 @@ export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: str
     databases: ['/var/lib/axonwall/headscale/db.sqlite'],
     syncIntervalSeconds: 5,
     listenPort: 9876,
-    transport: 'token-http' as const,
+    transport: 'mtls' as const,
     requireSignedPayloads: false,
   };
   const isMaster = ha.nodeRole === 'master' && !ha.maintenanceMode;
