@@ -560,7 +560,7 @@ export function ConsoleSidebar() {
 
       {/* Footer Info */}
       <div className="p-3 border-t border-slate-800 text-[11px] text-slate-500 flex items-center justify-between shrink-0">
-        <span className="font-mono">Axonwall v0.11.9</span>
+        <span className="font-mono">Axonwall v0.11.10</span>
         <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           Active
