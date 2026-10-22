@@ -222,6 +222,21 @@ if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
   fi
 fi
 
+# Capture running version and active slot before mounting or modifying anything
+RUNNING_ACTIVE_SLOT="A"
+if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
+  RUNNING_ACTIVE_SLOT="B"
+fi
+RUNNING_VER="0.8.13"
+if [ -f /etc/axonwall/version ]; then
+  RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
+fi
+
+if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ -f /etc/axonwall/version ] && [ "$CLEAN_VER" != "$RUNNING_VER" ]; then
+  echo "[-] ERROR: Could not download or verify release package for v${CLEAN_VER} (currently running v${RUNNING_VER}). Aborting firmware update." >&2
+  exit 1
+fi
+
 # 3. Check if running in Dual-Root or Single-Disk Appliance mode
 if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
   echo "[+] Detected Dual-Root target partition: ${TARGET_DEV} (${TARGET_LABEL})"
@@ -301,11 +316,31 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
         fi
         if [ -d "${PKG_STAGE}/usr/sbin" ]; then
           mkdir -p "${STAGE_DIR}/usr/sbin" 2>/dev/null || true
-          cp -f "${PKG_STAGE}/usr/sbin/"* "${STAGE_DIR}/usr/sbin/" 2>/dev/null || true
+          for sbin_f in "${PKG_STAGE}/usr/sbin/"*; do
+            if [ -e "$sbin_f" ]; then
+              rm -f "${STAGE_DIR}/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
+              cp -f "$sbin_f" "${STAGE_DIR}/usr/sbin/" 2>/dev/null || true
+              chmod 755 "${STAGE_DIR}/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
+            fi
+          done
         fi
         if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
           mkdir -p "${STAGE_DIR}/usr/local/bin" 2>/dev/null || true
-          cp -f "${PKG_STAGE}/usr/local/bin/axonwall-"* "${STAGE_DIR}/usr/local/bin/" 2>/dev/null || true
+          for bin_f in "${PKG_STAGE}/usr/local/bin/axonwall-"*; do
+            if [ -e "$bin_f" ]; then
+              rm -f "${STAGE_DIR}/usr/local/bin/$(basename "$bin_f")" 2>/dev/null || true
+              cp -f "$bin_f" "${STAGE_DIR}/usr/local/bin/" 2>/dev/null || true
+              chmod 755 "${STAGE_DIR}/usr/local/bin/$(basename "$bin_f")" 2>/dev/null || true
+            fi
+          done
+          if [ -f "${STAGE_DIR}/usr/local/bin/axonwall-update" ]; then
+            if sh -n "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null; then
+              cp -f "${STAGE_DIR}/usr/local/bin/axonwall-update" /usr/local/bin/axonwall-update 2>/dev/null || true
+              chmod 755 /usr/local/bin/axonwall-update 2>/dev/null || true
+            else
+              cp -f /usr/local/bin/axonwall-update "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null || true
+            fi
+          fi
         fi
       fi
       rm -rf "${PKG_STAGE}"
@@ -324,21 +359,27 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       echo "$CLEAN_VER" > "${STAGE_DIR}/etc/axonwall/version" 2>/dev/null || true
 
       # Accurately compute and persist per-slot versions
-      RUNNING_ACTIVE_SLOT="A"
-      if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
-        RUNNING_ACTIVE_SLOT="B"
-      fi
-      RUNNING_VER="0.8.13"
-      if [ -f /etc/axonwall/version ]; then
-        RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
+      EXISTING_SV_A=""
+      EXISTING_SV_B=""
+      if [ -f /var/lib/axonwall/slot_versions.json ]; then
+        EXISTING_SV_A="$(grep -oE '"slotA"[[:space:]]*:[[:space:]]*"[^"]+"' /var/lib/axonwall/slot_versions.json 2>/dev/null | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+        EXISTING_SV_B="$(grep -oE '"slotB"[[:space:]]*:[[:space:]]*"[^"]+"' /var/lib/axonwall/slot_versions.json 2>/dev/null | sed -E 's/.*"([^"]+)"$/\1/' || true)"
       fi
 
       if [ "$TARGET_SLOT" = "A" ]; then
         SV_A="$CLEAN_VER"
-        SV_B="$RUNNING_VER"
+        if [ "$RUNNING_ACTIVE_SLOT" = "B" ]; then
+          SV_B="$RUNNING_VER"
+        else
+          SV_B="${EXISTING_SV_B:-$RUNNING_VER}"
+        fi
       else
-        SV_A="$RUNNING_VER"
         SV_B="$CLEAN_VER"
+        if [ "$RUNNING_ACTIVE_SLOT" = "A" ]; then
+          SV_A="$RUNNING_VER"
+        else
+          SV_A="${EXISTING_SV_A:-$RUNNING_VER}"
+        fi
       fi
 
       SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"

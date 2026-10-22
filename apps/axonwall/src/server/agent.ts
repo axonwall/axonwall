@@ -2184,8 +2184,14 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
 
     // 1. Try daemon endpoint
     const daemonResp = await callAgentApi<any>('/v1/system/slot/activate', 'POST', { slot: cleanSlot });
-    if (daemonResp && daemonResp.success) {
-      return { success: true, message: daemonResp.message };
+    if (daemonResp) {
+      if (daemonResp.success) {
+        return { success: true, message: daemonResp.message };
+      }
+      return {
+        success: false,
+        message: daemonResp.message || daemonResp.error || `Failed to activate partition Slot ${cleanSlot}`,
+      };
     }
 
     // 2. Direct grub-editenv execution if running as root or with sudo
@@ -2253,15 +2259,26 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       { slot: cleanSlot, version: targetVersion },
       45000
     );
-    if (daemonResp && daemonResp.success) {
-      cachedReleaseInfo = null;
+    if (daemonResp) {
+      if (daemonResp.success) {
+        cachedReleaseInfo = null;
+        return {
+          success: true,
+          message:
+            daemonResp.message ||
+            `Firmware v${targetVersion} successfully prepared and flashed to Slot ${cleanSlot}! Watchdog bootcount armed (bootlimit=3). Reboot when ready.`,
+          targetSlot: cleanSlot,
+          newVersion: daemonResp.newVersion || targetVersion,
+        };
+      }
       return {
-        success: true,
+        success: false,
         message:
           daemonResp.message ||
-          `Firmware v${targetVersion} successfully prepared and flashed to Slot ${cleanSlot}! Watchdog bootcount armed (bootlimit=3). Reboot when ready.`,
+          daemonResp.error ||
+          `Firmware update to v${targetVersion} on Slot ${cleanSlot} failed.`,
         targetSlot: cleanSlot,
-        newVersion: daemonResp.newVersion || targetVersion,
+        newVersion: currentVersion,
       };
     }
 
@@ -2271,10 +2288,19 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       if (fs.existsSync(up)) {
         try {
           execFileSync(up, ['--slot', cleanSlot, '--version', targetVersion], {
-            stdio: 'ignore',
-            timeout: 30000,
+            stdio: 'pipe',
+            timeout: 45000,
           });
-        } catch {}
+        } catch (execErr: any) {
+          const stderr = execErr?.stderr ? String(execErr.stderr).trim() : '';
+          const stdout = execErr?.stdout ? String(execErr.stdout).trim() : '';
+          return {
+            success: false,
+            message: `axonwall-update failed: ${stderr || stdout || execErr?.message || 'exit error'}`,
+            targetSlot: cleanSlot,
+            newVersion: currentVersion,
+          };
+        }
         break;
       }
     }
