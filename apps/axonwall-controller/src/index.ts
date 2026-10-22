@@ -40,8 +40,113 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { listUsers, createUser, createPreAuthKey } from './headscale.js';
 
+export function createHttpRedirectServer(targetPort: number): http.Server {
+  const redirectServer = http.createServer((req, res) => {
+    const rawHost = req.headers.host || `localhost:${targetPort}`;
+    const host = rawHost.includes(':') ? rawHost : `${rawHost}:${targetPort}`;
+    const targetUrl = `https://${host}${req.url || '/'}`;
+
+    res.writeHead(301, {
+      Location: targetUrl,
+      'Content-Type': 'text/html; charset=utf-8',
+      Connection: 'close',
+      'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+    });
+    res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <meta http-equiv="refresh" content="0;url=${targetUrl}">
+  <title>Redirecting to HTTPS</title>
+</head>
+<body style="font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #94a3b8; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+  <div style="background: #1e293b; padding: 2rem; border-radius: 8px; border: 1px solid #334155; text-align: center; max-width: 480px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);">
+    <h2 style="color: #38bdf8; margin: 0 0 1rem 0;">Upgrading to Secure HTTPS...</h2>
+    <p style="margin: 0 0 1rem 0;">Redirecting you automatically to the secure management console.</p>
+    <p style="margin: 0; font-size: 0.85rem;"><a href="${targetUrl}" style="color: #38bdf8; text-decoration: underline;">Click here if you are not redirected</a></p>
+  </div>
+  <script>location.href = ${JSON.stringify(targetUrl)};</script>
+</body>
+</html>`);
+  });
+
+  redirectServer.on('upgrade', (req, socket) => {
+    const rawHost = req.headers.host || `localhost:${targetPort}`;
+    const host = rawHost.includes(':') ? rawHost : `${rawHost}:${targetPort}`;
+    const targetUrl = `https://${host}${req.url || '/'}`;
+    socket.write(
+      'HTTP/1.1 301 Moved Permanently\r\n' +
+      `Location: ${targetUrl}\r\n` +
+      'Connection: close\r\n' +
+      'Content-Type: text/plain\r\n\r\n' +
+      'Redirecting to HTTPS\r\n'
+    );
+    socket.destroy();
+  });
+
+  redirectServer.on('clientError', (err, socket) => {
+    socket.destroy(err);
+  });
+
+  return redirectServer;
+}
+
+export function createPortMultiplexer(httpsServer: https.Server, redirectServer: http.Server): net.Server {
+  const tcpMultiplexer = net.createServer((socket) => {
+    let handled = false;
+
+    const onReadable = () => {
+      if (handled) return;
+      const buf = socket.read(1);
+      if (!buf) return;
+      handled = true;
+      socket.removeListener('error', onError);
+      socket.removeListener('close', onClose);
+      socket.unshift(buf);
+      if (buf[0] === 0x16) {
+        httpsServer.emit('connection', socket);
+      } else {
+        redirectServer.emit('connection', socket);
+      }
+    };
+
+    const onError = (_err: Error) => {
+      if (!handled) {
+        handled = true;
+        socket.destroy();
+      }
+    };
+
+    const onClose = () => {
+      handled = true;
+    };
+
+    socket.once('readable', onReadable);
+    socket.once('error', onError);
+    socket.once('close', onClose);
+  });
+
+  tcpMultiplexer.on('error', (err) => {
+    console.error('[Axonwall Controller] TCP Multiplexer error:', err);
+  });
+
+  tcpMultiplexer.on('close', () => {
+    if (typeof (httpsServer as any).closeAllConnections === 'function') {
+      (httpsServer as any).closeAllConnections();
+    }
+    if (typeof (redirectServer as any).closeAllConnections === 'function') {
+      (redirectServer as any).closeAllConnections();
+    }
+    httpsServer.close();
+    redirectServer.close();
+  });
+
+  return tcpMultiplexer;
+}
 
 async function main() {
   console.log('[Axonwall Controller] Starting Axonwall Control Plane Worker...');
@@ -130,7 +235,9 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
   const caPath = '/etc/axonwall/certs/ca.crt';
 
   const uiPort = parseInt(process.env.UI_PORT || '3000', 10);
-  let server;
+  const port = parseInt(process.env.CONTROLLER_PORT || '2966', 10);
+  let server: net.Server | http.Server;
+  let mainServer: https.Server | http.Server;
   const requestHandler = (req: any, res: any) => {
     let pathname: string;
     try {
@@ -325,8 +432,8 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
   };
 
   if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-    console.log('[Axonwall Controller] Starting in SECURE mTLS mode');
-    server = https.createServer({
+    console.log(`[Axonwall Controller] Starting in SECURE mTLS mode (HTTP auto-upgrade enabled on port ${port})`);
+    const httpsServer = https.createServer({
       cert: fs.readFileSync(certPath),
       key: fs.readFileSync(keyPath),
       ca: fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined,
@@ -339,14 +446,21 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       // API rejects presented-but-invalid certificates (verifyFleetAuth).
       rejectUnauthorized: false
     }, requestHandler);
+
+    const redirectServer = createHttpRedirectServer(port);
+    const tcpMultiplexer = createPortMultiplexer(httpsServer, redirectServer);
+
+    mainServer = httpsServer;
+    server = tcpMultiplexer;
   } else {
     console.log('[Axonwall Controller] Starting in INSECURE HTTP mode');
-    server = http.createServer(requestHandler);
+    mainServer = http.createServer(requestHandler);
+    server = mainServer;
   }
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1048576 });
 
-  server.on('upgrade', (request, socket, head) => {
+  mainServer.on('upgrade', (request, socket, head) => {
     let pathname: string;
     try {
       pathname = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`).pathname;
@@ -670,13 +784,21 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     broadcastMeshTopology();
   });
 
-  const port = parseInt(process.env.CONTROLLER_PORT || '2966', 10);
   server.listen(port, '0.0.0.0', () => {
     console.log(`[Axonwall Controller] Fleet Manager listening on 0.0.0.0:${port}`);
   });
 }
 
-if (process.env.NODE_ENV !== 'test') {
+const isDirectExecution = () => {
+  if (process.env.NODE_ENV === 'test') return false;
+  try {
+    return !!process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+  } catch {
+    return false;
+  }
+};
+
+if (isDirectExecution()) {
   main().catch((err) => {
     console.error('[Axonwall Controller] Fatal error:', err);
     process.exit(1);
