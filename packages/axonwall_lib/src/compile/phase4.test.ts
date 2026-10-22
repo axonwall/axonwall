@@ -14,6 +14,7 @@ import {
   validatePluginManifest,
   findPluginById,
   isPluginAllowed,
+  isPluginEnabled,
 } from '../plugins/index.js';
 import { aggregateFlows, serviceNameForPort, type FlowRecord } from '../telemetry/index.js';
 import type {
@@ -329,6 +330,43 @@ describe('Phase 4: Plugin Framework & Registry', () => {
     expect(isPluginAllowed(haproxy, ['services.haproxy', 'system.certificates'])).toBe(true);
     expect(isPluginAllowed(haproxy, ['services.other'])).toBe(false);
     expect(isPluginAllowed(haproxy, ['*'])).toBe(true);
+  });
+
+  it('includes headscale as a builtin extension plugin with mesh menu entry', () => {
+    const headscale = findPluginById('headscale');
+    expect(headscale).toBeDefined();
+    expect(headscale?.name).toContain('Headscale');
+    expect(headscale?.menuEntry).toEqual({
+      title: 'Mesh VPN (Headscale)',
+      path: '/vpn/mesh',
+      icon: 'Network',
+    });
+  });
+
+  it('evaluates whether a plugin is enabled/on or disabled/off', () => {
+    // When state is undefined or empty
+    expect(isPluginEnabled('nut-ups', undefined)).toBe(false);
+    expect(isPluginEnabled('nut-ups', {})).toBe(false);
+    expect(isPluginEnabled('headscale', {})).toBe(false);
+
+    // NUT UPS
+    expect(isPluginEnabled('nut-ups', { ups: { enabled: false } as any })).toBe(false);
+    expect(isPluginEnabled('nut-ups', { ups: { enabled: true } as any })).toBe(true);
+    expect(isPluginEnabled('nut-ups', { plugins: [{ id: 'nut-ups', enabled: true }] })).toBe(true);
+    expect(isPluginEnabled('nut-ups', { plugins: [{ id: 'nut-ups', enabled: false }] })).toBe(false);
+
+    // Headscale
+    expect(isPluginEnabled('headscale', { headscale: { enabled: false } as any })).toBe(false);
+    expect(isPluginEnabled('headscale', { headscale: { enabled: true } as any })).toBe(true);
+    expect(isPluginEnabled('headscale', { plugins: [{ id: 'headscale', enabled: true }] })).toBe(true);
+
+    // HAProxy
+    expect(isPluginEnabled('haproxy', { haproxy: { enabled: false } as any })).toBe(false);
+    expect(isPluginEnabled('haproxy', { haproxy: { enabled: true } as any })).toBe(true);
+
+    // Generic extension plugin
+    expect(isPluginEnabled('tailscale', { plugins: [{ id: 'tailscale', enabled: true }] })).toBe(true);
+    expect(isPluginEnabled('tailscale', { plugins: [{ id: 'tailscale', enabled: false }] })).toBe(false);
   });
 });
 

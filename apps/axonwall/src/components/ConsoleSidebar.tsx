@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Logo } from './Logo';
 import { getCurrentDesiredState } from '@/server/agent';
+import { isPluginEnabled } from '@axonwall/lib/plugins';
+import type { DesiredState } from '@axonwall/lib/schemas';
 import {
   Shield,
   LayoutDashboard,
@@ -59,6 +61,7 @@ export interface SubItem {
   href: string;
   icon?: any;
   badge?: string;
+  pluginId?: string;
 }
 
 export interface NavSection {
@@ -88,11 +91,10 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'High Availability (HA)', href: '/ha', icon: ArrowRightLeft },
       { name: 'Backup & Recovery', href: '/system/backup', icon: HardDrive },
       { name: 'A/B System Updates', href: '/system/updates', icon: RefreshCw },
-      { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
       { name: 'Service Supervisor', href: '/system/services', icon: Server },
       { name: 'Plugin Store & Roles', href: '/system/plugins', icon: Boxes, badge: 'Core' },
       { name: 'MCP Security AI Control', href: '/system/mcp', icon: KeyRound, badge: 'AuthZ' },
-      { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
+      { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging, pluginId: 'nut-ups' },
       { name: 'Firewall Importer', href: '/system/import', icon: FileText },
       { name: 'Web Shell & Sensors', href: '/system/terminal', icon: Terminal },
       { name: 'Power & Reboot', href: '/system/power', icon: Power },
@@ -161,7 +163,7 @@ export const NAV_SECTIONS: NavSection[] = [
     capability: 'firewall',
     items: [
       { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
-      { name: 'Mesh VPN (Headscale)', href: '/vpn/mesh', icon: Network },
+      { name: 'Mesh VPN (Headscale)', href: '/vpn/mesh', icon: Network, pluginId: 'headscale' },
       { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
       { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },
     ],
@@ -272,6 +274,7 @@ export function ConsoleSidebar() {
   const pathname = usePathname();
   const [search, setSearch] = useState('');
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  const [desiredState, setDesiredState] = useState<DesiredState | null>(null);
   // Defaults mirror CoreCapabilitiesSchema (firewall on, NAS/K3s opt-in)
   // and the pre-fetch state must not advertise menus for roles that are
   // not enabled.
@@ -295,6 +298,7 @@ export function ConsoleSidebar() {
       getCurrentDesiredState()
         .then((st) => {
           if (!mounted) return;
+          setDesiredState(st);
           // Derive exactly like the Plugin Store and the server-side
           // consumers: an unset capability means the role is DISABLED
           // (CoreCapabilitiesSchema defaults nasEnabled/k3sEnabled/virtEnabled to
@@ -326,8 +330,20 @@ export function ConsoleSidebar() {
       if (sec.capability === 'virt' && !capabilities.virtEnabled) return false;
       if (sec.capability === 'vigilante' && !capabilities.vigilanteEnabled) return false;
       return true;
-    });
-  }, [capabilities]);
+    })
+      .map((sec) => {
+        if (!sec.items) return sec;
+        const filteredItems = sec.items.filter((item) => {
+          if (!item.pluginId) return true;
+          return isPluginEnabled(item.pluginId, desiredState);
+        });
+        return {
+          ...sec,
+          items: filteredItems,
+        };
+      })
+      .filter((sec) => sec.href || (sec.items && sec.items.length > 0));
+  }, [capabilities, desiredState]);
 
   // Auto-expand the section containing the active pathname
   useEffect(() => {
@@ -544,7 +560,7 @@ export function ConsoleSidebar() {
 
       {/* Footer Info */}
       <div className="p-3 border-t border-slate-800 text-[11px] text-slate-500 flex items-center justify-between shrink-0">
-        <span className="font-mono">Axonwall v0.11.8</span>
+        <span className="font-mono">Axonwall v0.11.9</span>
         <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           Active

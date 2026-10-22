@@ -140,6 +140,18 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			RequiredBinaries: []string{"upsd"},
 		},
 		{
+			ID:               "headscale",
+			Name:             "Headscale Mesh VPN Coordination Server",
+			Version:          "0.29.4",
+			Category:         "extension",
+			Description:      "Self-hosted, open source WireGuard mesh coordination server with MagicDNS, multi-tenant namespaces, and route distribution.",
+			Author:           "Juan Font / Axonwall Core",
+			SystemdUnits:     []string{"headscale.service"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			RequiredBinaries: []string{"headscale"},
+		},
+		{
 			ID:               "tailscale",
 			Name:             "Tailscale Mesh VPN",
 			Version:          "1.74.0",

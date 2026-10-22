@@ -55,6 +55,9 @@ export default function MeshVpnPage() {
       };
       setFullState(nextState);
       const res = await applyDesiredState(nextState);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall-capabilities-updated'));
+      }
       setStatusMsg(res.message || 'Saved Headscale configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
       setStatusMsg(`Error: ${err?.message || 'Failed to save Headscale settings'}`);

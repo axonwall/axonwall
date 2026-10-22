@@ -158,6 +158,21 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
   },
   {
+    id: 'headscale',
+    name: 'Headscale Mesh VPN Coordination Server',
+    version: '0.29.4',
+    category: 'extension',
+    description: 'Self-hosted, open source WireGuard mesh coordination server with MagicDNS, multi-tenant namespaces, and route distribution.',
+    author: 'Juan Font / Axonwall Core',
+    systemdUnits: ['headscale.service'],
+    privileges: ['vpn.admin', 'network.interfaces'],
+    menuEntry: {
+      title: 'Mesh VPN (Headscale)',
+      path: '/vpn/mesh',
+      icon: 'Network',
+    },
+  },
+  {
     id: 'tailscale',
     name: 'Tailscale Mesh VPN',
     version: '1.74.0',
@@ -290,3 +305,45 @@ export function isPluginAllowed(manifest: PluginManifest, grantedPrivileges: str
   }
   return manifest.privileges.every((priv) => grantedPrivileges.includes(priv));
 }
+
+export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> | null): boolean {
+  if (!state) return false;
+
+  // Check core roles
+  if (pluginId === 'core-firewall') {
+    return state.capabilities?.firewallEnabled !== false;
+  }
+  if (pluginId === 'core-nas') {
+    return Boolean(state.capabilities?.nasEnabled ?? state.nas?.enabled);
+  }
+  if (pluginId === 'core-k3s') {
+    return Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled);
+  }
+  if (pluginId === 'core-virt') {
+    return Boolean(state.capabilities?.virtEnabled ?? state.virt?.enabled);
+  }
+  if (pluginId === 'core-vigilante') {
+    return Boolean(state.capabilities?.vigilanteEnabled ?? state.vigilante?.enabled);
+  }
+
+  // Check specific service/extension plugins
+  if (pluginId === 'nut-ups') {
+    return Boolean(state.ups?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'nut-ups' && p.enabled));
+  }
+  if (pluginId === 'headscale') {
+    return Boolean(state.headscale?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'headscale' && p.enabled));
+  }
+  if (pluginId === 'haproxy') {
+    return Boolean(state.haproxy?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'haproxy' && p.enabled));
+  }
+  if (pluginId === 'freeradius') {
+    return Boolean(state.freeradius?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'freeradius' && p.enabled));
+  }
+  if (pluginId === 'snmp') {
+    return Boolean(state.snmp?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'snmp' && p.enabled));
+  }
+
+  // Generic extension plugin check
+  return Boolean(state.plugins?.some((p) => p.id === pluginId && p.enabled));
+}
+

@@ -36142,7 +36142,7 @@ var HaSqliteSyncConfigSchema = external_exports.object({
   peerAddress: external_exports.string().optional(),
   peerPort: external_exports.number().int().min(1).max(65535).optional(),
   authToken: external_exports.string().optional(),
-  transport: external_exports.enum(["token-http", "mtls"]).default("token-http"),
+  transport: external_exports.enum(["token-http", "mtls"]).default("mtls"),
   requireSignedPayloads: external_exports.boolean().default(false),
   litestreamBucket: external_exports.string().optional(),
   litestreamEndpoint: external_exports.string().optional(),
@@ -36167,7 +36167,7 @@ var HighAvailabilityConfigSchema = external_exports.object({
     databases: ["/var/lib/axonwall/headscale/db.sqlite"],
     syncIntervalSeconds: 5,
     listenPort: 9876,
-    transport: "token-http",
+    transport: "mtls",
     requireSignedPayloads: false
   }),
   syncSections: HaSyncSectionsSchema.default({

@@ -65,6 +65,9 @@ export default function UpsMonitoringPage() {
     try {
       const state = await getCurrentDesiredState();
       await applyDesiredState({ ...state, ups: upsConfig });
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall-capabilities-updated'));
+      }
     } catch {}
     setIsSaving(false);
   };

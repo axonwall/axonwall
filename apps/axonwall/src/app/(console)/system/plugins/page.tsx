@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   Boxes,
   Download,
@@ -15,8 +16,9 @@ import {
   Loader2,
   RefreshCw,
   Terminal,
+  Settings,
 } from 'lucide-react';
-import { BUILTIN_PLUGINS, type PluginManifest } from '@axonwall/lib/plugins';
+import { BUILTIN_PLUGINS, isPluginEnabled, type PluginManifest } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import { getExtensionPlugins, executePluginAction, type ExtensionPluginLiveStatus } from '@/server/plugins';
 import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas';
@@ -176,6 +178,9 @@ export default function PluginManagerPage() {
           type: 'success',
           text: res.message,
         });
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('axonwall-capabilities-updated'));
+        }
       } else {
         setStatusBanner({
           type: 'error',
@@ -190,6 +195,87 @@ export default function PluginManagerPage() {
       });
     } finally {
       setPluginActionLoading(null);
+    }
+  };
+
+  const toggleExtensionPlugin = async (id: string) => {
+    if (!state) return;
+    setSavingRole(id);
+    setStatusBanner(null);
+
+    try {
+      const next = structuredClone(state);
+      const isCurrentlyEnabled = isPluginEnabled(id, next);
+
+      if (id === 'nut-ups') {
+        next.ups = next.ups || {
+          enabled: false,
+          name: 'axonups',
+          driver: 'usbhid-ups',
+          port: 'auto',
+          shutdownBatteryPct: 20,
+          lowBatteryRuntimeSec: 300,
+        };
+        next.ups.enabled = !isCurrentlyEnabled;
+      } else if (id === 'headscale') {
+        next.headscale = next.headscale || {
+          enabled: false,
+          magicDnsDomain: 'tailnet.axonwall.local',
+        };
+        next.headscale.enabled = !isCurrentlyEnabled;
+      } else if (id === 'haproxy') {
+        next.haproxy = next.haproxy || {
+          enabled: false,
+          mode: 'http',
+          frontends: [],
+          backends: [],
+        };
+        next.haproxy.enabled = !isCurrentlyEnabled;
+      } else if (id === 'freeradius') {
+        next.freeradius = next.freeradius || {
+          enabled: false,
+          authPort: 1812,
+          acctPort: 1813,
+          clients: [],
+          ldapSync: true,
+        };
+        next.freeradius.enabled = !isCurrentlyEnabled;
+      } else if (id === 'snmp') {
+        next.snmp = next.snmp || {
+          enabled: false,
+          community: 'public',
+          sysLocation: 'Axonwall Gateway',
+          sysContact: 'admin@local',
+          listenPort: 161,
+        };
+        next.snmp.enabled = !isCurrentlyEnabled;
+      } else {
+        const plugins = next.plugins || [];
+        const idx = plugins.findIndex((p) => p.id === id);
+        if (idx >= 0) {
+          plugins[idx].enabled = !plugins[idx].enabled;
+        } else {
+          plugins.push({ id, enabled: true });
+        }
+        next.plugins = plugins;
+      }
+
+      const res = await applyDesiredState(next);
+      setState(next);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall-capabilities-updated'));
+      }
+      setStatusBanner({
+        type: 'success',
+        text: `${id} is now ${!isCurrentlyEnabled ? 'enabled' : 'disabled'} (${res.message})`,
+      });
+    } catch (err: any) {
+      setStatusBanner({
+        type: 'error',
+        text: err?.message || `Failed to toggle plugin ${id}`,
+      });
+    } finally {
+      setSavingRole(null);
     }
   };
 
@@ -375,6 +461,8 @@ export default function PluginManagerPage() {
             const isInstalled = live ? live.installed : false;
             const isBundled = live ? live.bundled : false;
             const isLoading = pluginActionLoading === plugin.id;
+            const isEnabled = isPluginEnabled(plugin.id, state);
+            const isSaving = savingRole === plugin.id;
 
             return (
               <div
@@ -387,17 +475,30 @@ export default function PluginManagerPage() {
                       <h3 className="text-base font-semibold text-white tracking-tight">{plugin.name}</h3>
                       <span className="text-xs text-slate-500 font-mono">v{plugin.version} • {plugin.author}</span>
                     </div>
-                    <span
-                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${
-                        isBundled
-                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                          : isInstalled
-                            ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
-                            : 'bg-slate-800 text-slate-400 border-slate-700'
-                      }`}
-                    >
-                      {isBundled ? 'Bundled (OS)' : isInstalled ? 'Installed' : 'Available'}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${
+                          isBundled
+                            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                            : isInstalled
+                              ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
+                              : 'bg-slate-800 text-slate-400 border-slate-700'
+                        }`}
+                      >
+                        {isBundled ? 'Bundled (OS)' : isInstalled ? 'Installed' : 'Available'}
+                      </span>
+                      {(isInstalled || isBundled) && (
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                            isEnabled
+                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                              : 'bg-slate-800/80 text-slate-400 border-slate-700'
+                          }`}
+                        >
+                          {isEnabled ? 'Active' : 'Disabled'}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <p className="text-xs text-slate-400 leading-relaxed line-clamp-3">
@@ -418,15 +519,44 @@ export default function PluginManagerPage() {
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between pt-4 border-t border-slate-800/80">
-                  <button
-                    onClick={() => setSelectedPlugin(plugin)}
-                    className="text-xs text-slate-400 hover:text-emerald-400 font-medium flex items-center gap-1 transition"
-                  >
-                    <Shield className="w-3.5 h-3.5" /> Manifest
-                  </button>
+                <div className="flex items-center justify-between pt-4 border-t border-slate-800/80 gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setSelectedPlugin(plugin)}
+                      className="text-xs text-slate-400 hover:text-emerald-400 font-medium flex items-center gap-1 transition"
+                    >
+                      <Shield className="w-3.5 h-3.5" /> Manifest
+                    </button>
+                    {plugin.menuEntry && (
+                      <Link
+                        href={plugin.menuEntry.path}
+                        className="text-xs text-emerald-400 hover:text-emerald-300 font-medium flex items-center gap-1 transition"
+                      >
+                        <Settings className="w-3.5 h-3.5" /> Configure
+                      </Link>
+                    )}
+                  </div>
 
                   <div className="flex items-center gap-2">
+                    {(isInstalled || isBundled) && (
+                      <button
+                        disabled={isSaving}
+                        onClick={() => toggleExtensionPlugin(plugin.id)}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
+                          isEnabled
+                            ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20'
+                            : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/40'
+                        }`}
+                      >
+                        {isSaving ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Power className="w-3.5 h-3.5" />
+                        )}
+                        {isEnabled ? 'Disable' : 'Enable'}
+                      </button>
+                    )}
+
                     {plugin.id === 'cli-workstation' && isInstalled && (
                       <button
                         disabled={isLoading}
