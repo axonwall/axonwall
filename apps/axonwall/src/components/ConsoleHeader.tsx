@@ -152,7 +152,7 @@ export function ConsoleHeader({
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <span className="font-semibold text-sm text-slate-200">axonwall-appliance</span>
             <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">
-              v0.11.2
+              v0.11.3
             </span>
           </div>
 
