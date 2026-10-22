@@ -161,4 +161,23 @@ func TestVerifyPeerPayloadGate(t *testing.T) {
 	if err := newMgr(true).verifyPeerPayload("state", digest[:], sig); err != nil {
 		t.Fatalf("valid signature refused: %v", err)
 	}
+
+	// D-04 Phase 4b capability gate: a peer that advertises signing in
+	// its status has its unsigned payloads refused even with the local
+	// gate off; a peer that does not advertise (pre-signing build) is
+	// treated exactly as before.
+	newPeerMgr := func(require, peerSigns bool) *SqliteSyncManager {
+		m := newMgr(require)
+		m.peerSignsPayloads = peerSigns
+		return m
+	}
+	if err := newPeerMgr(false, true).verifyPeerPayload("state", digest[:], ""); err == nil {
+		t.Fatal("unsigned payload from a signing-advertising peer must be refused even with the gate off")
+	}
+	if err := newPeerMgr(false, true).verifyPeerPayload("state", digest[:], sig); err != nil {
+		t.Fatalf("valid signature from an advertising peer refused: %v", err)
+	}
+	if err := newPeerMgr(false, false).verifyPeerPayload("state", digest[:], ""); err != nil {
+		t.Fatalf("unsigned payload from a non-advertising peer should still be allowed with the gate off: %v", err)
+	}
 }

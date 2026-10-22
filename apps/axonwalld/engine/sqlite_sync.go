@@ -50,6 +50,12 @@ type SyncStatusResponse struct {
 	Timestamp int64            `json:"timestamp"`
 	Transport string           `json:"transport"`
 	Databases []DatabaseStatus `json:"databases"`
+	// SignsPayloads advertises that this node signs its /db and /state
+	// payloads (audit D-04 Phase 4b). Peers require signatures from a
+	// node that advertises signing, which lets enforcement distinguish
+	// a current master from a pre-signing one. Absent (false) in
+	// responses from pre-P4b builds.
+	SignsPayloads bool `json:"signsPayloads"`
 }
 
 type SqliteSyncManager struct {
@@ -61,6 +67,7 @@ type SqliteSyncManager struct {
 	litestreamCmd      *exec.Cmd
 	k3sManager         *K3sManager
 	effectiveTransport string // transport the master server is actually serving ("token-http" or "mtls")
+	peerSignsPayloads  bool   // capability from the peer's latest sync status (D-04 P4b); set by the poller each round before any payload fetch
 }
 
 func NewSqliteSyncManager() *SqliteSyncManager {
@@ -277,21 +284,29 @@ func (m *SqliteSyncManager) mtlsRequested() bool {
 }
 
 // verifyPeerPayload applies the payload-signature policy (audit D-04
-// Phase 2) to one downloaded payload. digest is the SHA-256 the receiver
-// computed over the received bytes (already cross-checked against the
-// peer's declared checksum by the caller). A signature that is present
-// but invalid is always refused; a missing signature is refused only
-// when requireSignedPayloads is configured, and otherwise logged.
+// Phase 2, capability gate Phase 4b) to one downloaded payload. digest
+// is the SHA-256 the receiver computed over the received bytes (already
+// cross-checked against the peer's declared checksum by the caller). A
+// signature that is present but invalid is always refused. A missing
+// signature is refused when requireSignedPayloads is configured, or
+// when the peer advertised payload signing in its sync status — the
+// advertisement is what distinguishes a current master (whose unsigned
+// payload means stripping or misconfiguration) from a pre-signing one
+// (whose unsigned payloads are still applied, with a warning).
 func (m *SqliteSyncManager) verifyPeerPayload(what string, digest []byte, sigHeader string) error {
 	m.mu.Lock()
 	require := m.cfg.RequireSignedPayloads
+	peerSigns := m.peerSignsPayloads
 	m.mu.Unlock()
 
 	if sigHeader == "" {
 		if require {
 			return fmt.Errorf("%s: peer did not sign the payload and requireSignedPayloads is set; refusing to apply", what)
 		}
-		slog.Warn("HA sync payload is unsigned; applying because requireSignedPayloads is off", "payload", what)
+		if peerSigns {
+			return fmt.Errorf("%s: peer advertises payload signing but did not sign the payload; refusing to apply", what)
+		}
+		slog.Warn("HA sync payload is unsigned; applying because the peer does not advertise signing and requireSignedPayloads is off", "payload", what)
 		return nil
 	}
 	if !haVerifyPayloadSignature(digest, sigHeader) {
@@ -424,10 +439,11 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := SyncStatusResponse{
-		NodeRole:  nodeRole,
-		Timestamp: time.Now().Unix(),
-		Transport: transport,
-		Databases: dbStatuses,
+		NodeRole:      nodeRole,
+		Timestamp:     time.Now().Unix(),
+		Transport:     transport,
+		Databases:     dbStatuses,
+		SignsPayloads: haPayloadSigningAvailable(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -581,6 +597,13 @@ func (m *SqliteSyncManager) pollAndSync() {
 		slog.Warn("Failed to parse peer sync status response", "error", err)
 		return
 	}
+
+	// D-04 Phase 4b: record the peer's advertised signing capability
+	// for this round; verifyPeerPayload requires signatures from a
+	// peer that advertises them. Set before any payload fetch below.
+	m.mu.Lock()
+	m.peerSignsPayloads = statusResp.SignsPayloads
+	m.mu.Unlock()
 
 	// Compare peer databases against local copies
 	for _, peerDb := range statusResp.Databases {

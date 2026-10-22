@@ -410,7 +410,7 @@ export default function HighAvailabilityPage() {
                         <span className="text-sm text-slate-200">Require signed payloads</span>
                       </label>
                       <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
-                        When on, this node refuses unsigned database/state payloads from the peer. Invalid signatures are always refused.
+                        When on, this node refuses unsigned database/state payloads from the peer — including older peers that never sign. Unsigned payloads from a peer that advertises signing are refused even when this is off, and invalid signatures are always refused.
                       </p>
                     </div>
                   </div>
