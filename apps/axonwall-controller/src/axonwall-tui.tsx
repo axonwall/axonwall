@@ -89,15 +89,18 @@ function saveStateToDisk(state: DesiredState): Record<string, string> {
   }
   for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
     try {
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       for (const [fn, content] of Object.entries(serialized)) {
-        fs.writeFileSync(path.join(dir, fn), content, 'utf-8');
+        const filePath = path.join(dir, fn);
+        fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o600 });
+        try { fs.chmodSync(filePath, 0o600); } catch {}
       }
     } catch {}
   }
   try {
-    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true });
-    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), 'utf-8');
+    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    try { fs.chmodSync(STATE_JSON_PATH, 0o600); } catch {}
   } catch {}
   return daemonFiles;
 }
@@ -204,13 +207,21 @@ function execSafe(bin: string, args: string[]): string {
   }
 }
 
-export function AxonwallTuiApp({ initialTab = 'dashboard' }: { initialTab?: TopTab }) {
+export function AxonwallTuiApp({
+  initialTab = 'dashboard',
+  readOnly = false,
+}: {
+  initialTab?: TopTab;
+  readOnly?: boolean;
+}) {
   const { exit } = useApp();
   const [activeTab, setActiveTab] = useState<TopTab>(initialTab);
   const [state, setState] = useState<DesiredState>(() => loadCurrentState());
   const [daemonStatus, setDaemonStatus] = useState<any>(null);
   const [statusMessage, setStatusMessage] = useState<string>(
-    'Ready — Use [1-7] to switch tabs, [↑/↓] to select, [Space] to toggle, [a] to apply, [q] to exit.'
+    readOnly
+      ? 'Ready [READ-ONLY OPERATOR MODE] — Use [1-7] to inspect tabs, [↑/↓] to scroll, [q] to exit.'
+      : 'Ready — Use [1-7] to switch tabs, [↑/↓] to select, [Space] to toggle, [a] to apply, [q] to exit.'
   );
   const [cursorIdx, setCursorIdx] = useState<number>(0);
   const [cliOutput, setCliOutput] = useState<string>('');
@@ -380,10 +391,22 @@ export function AxonwallTuiApp({ initialTab = 'dashboard' }: { initialTab?: TopT
       setCursorIdx(0);
       if (!cliOutput) runCliToolInline(0);
     } else if (input === 'c') {
+      if (readOnly) {
+        setStatusMessage('Read-only operator session: confirming commit is disabled.');
+        return;
+      }
       handleConfirm();
     } else if (input === 'r') {
+      if (readOnly) {
+        setStatusMessage('Read-only operator session: configuration rollback is disabled.');
+        return;
+      }
       handleRollback();
     } else if (input === 'a') {
+      if (readOnly) {
+        setStatusMessage('Read-only operator session: applying configuration changes is disabled.');
+        return;
+      }
       handleApplyConfig();
     } else if (input === 'd') {
       refreshAll();
@@ -397,6 +420,10 @@ export function AxonwallTuiApp({ initialTab = 'dashboard' }: { initialTab?: TopT
     } else if (key.downArrow) {
       setCursorIdx((prev) => prev + 1);
     } else if (input === ' ' || key.return) {
+      if (readOnly && (activeTab === 'interfaces' || activeTab === 'firewall' || activeTab === 'routing')) {
+        setStatusMessage('Read-only operator session: configuration modifications are disabled.');
+        return;
+      }
       if (activeTab === 'interfaces' && state.interfaces[cursorIdx]) {
         const next = structuredClone(state);
         const target = next.interfaces[cursorIdx]!;
@@ -461,6 +488,11 @@ export function AxonwallTuiApp({ initialTab = 'dashboard' }: { initialTab?: TopT
           </Text>
         </Box>
         <Box gap={2}>
+          {readOnly && (
+            <Text bold color="yellow">
+              [READ-ONLY OPERATOR MODE]
+            </Text>
+          )}
           <Text color={daemonStatus ? 'green' : 'yellow'}>
             ● {daemonStatus ? 'axonwalld Connected' : 'YAML Direct Mode'}
           </Text>
@@ -694,7 +726,7 @@ export function AxonwallTuiApp({ initialTab = 'dashboard' }: { initialTab?: TopT
       )}
 
       {activeTab === 'nastymap' && (
-        <NastyMapApp embedded={true} detectedSubnets={detectedSubnets} />
+        <NastyMapApp embedded={true} detectedSubnets={detectedSubnets} readOnly={readOnly} />
       )}
 
       {activeTab === 'cli_ops' && (
@@ -737,21 +769,44 @@ export function AxonwallTuiApp({ initialTab = 'dashboard' }: { initialTab?: TopT
 
       {/* Status Bar & Hotkey Legend */}
       <Box marginTop={1} justifyContent="space-between">
-        <Text color="green">{statusMessage}</Text>
+        <Text color={readOnly ? 'yellow' : 'green'}>{statusMessage}</Text>
         <Text color="gray">
-          [1-7] Tabs · [a] Apply · [c] Confirm · [r] Rollback · [d] Reload · [q] Quit
+          {readOnly
+            ? '[1-7] Tabs · [d] Reload · [q] Quit [READ-ONLY OPERATOR]'
+            : '[1-7] Tabs · [a] Apply · [c] Confirm · [r] Rollback · [d] Reload · [q] Quit'}
         </Text>
       </Box>
     </Box>
   );
 }
 
-// Parse CLI arguments (--tab nastymap, etc.)
+// Parse CLI arguments (--tab nastymap, --readonly, etc.)
 const args = process.argv.slice(2);
 let startTab: TopTab = 'dashboard';
+let readOnlyMode = process.env.AXONWALL_TUI_READONLY === '1';
+
 for (let i = 0; i < args.length; i++) {
-  if ((args[i] === '--tab' || args[i] === '-t') && args[i + 1]) {
+  const arg = args[i];
+  if (arg === '--readonly' || arg === '-r') {
+    readOnlyMode = true;
+  } else if ((arg === '--tab' || arg === '-t' || arg === '--view') && args[i + 1]) {
     const val = args[i + 1]!.toLowerCase();
+    if (val === 'nastymap' || val === 'nmap') startTab = 'nastymap';
+    else if (val === 'routing' || val === 'routes') startTab = 'routing';
+    else if (val === 'firewall' || val === 'fw') startTab = 'firewall';
+    else if (val === 'interfaces' || val === 'if') startTab = 'interfaces';
+    else if (val === 'services') startTab = 'services';
+    else if (val === 'cli' || val === 'ops' || val === 'cli_ops') startTab = 'cli_ops';
+  } else if (arg?.startsWith('--view=')) {
+    const val = arg.slice(7).toLowerCase();
+    if (val === 'nastymap' || val === 'nmap') startTab = 'nastymap';
+    else if (val === 'routing' || val === 'routes') startTab = 'routing';
+    else if (val === 'firewall' || val === 'fw') startTab = 'firewall';
+    else if (val === 'interfaces' || val === 'if') startTab = 'interfaces';
+    else if (val === 'services') startTab = 'services';
+    else if (val === 'cli' || val === 'ops' || val === 'cli_ops') startTab = 'cli_ops';
+  } else if (arg?.startsWith('--tab=')) {
+    const val = arg.slice(6).toLowerCase();
     if (val === 'nastymap' || val === 'nmap') startTab = 'nastymap';
     else if (val === 'routing' || val === 'routes') startTab = 'routing';
     else if (val === 'firewall' || val === 'fw') startTab = 'firewall';
@@ -761,4 +816,4 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-render(<AxonwallTuiApp initialTab={startTab} />);
+render(<AxonwallTuiApp initialTab={startTab} readOnly={readOnlyMode} />);

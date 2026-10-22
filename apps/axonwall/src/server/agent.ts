@@ -16,11 +16,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
-import { execSync, execFileSync } from 'node:child_process';
+import { execSync, execFileSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
+
+const execFileAsync = promisify(execFile);
 
 import { callAgentApi } from './agent-client';
 
@@ -2827,7 +2830,7 @@ export async function runNmapScan(params: {
 }> {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const cleanTarget = params.target.trim();
   if (!cleanTarget || cleanTarget.startsWith('-') || !/^[a-zA-Z0-9.:/_-]+$/.test(cleanTarget)) {
@@ -2838,6 +2841,22 @@ export async function runNmapScan(params: {
       durationMs: 0,
       error: 'Invalid scan target. Specify a valid IPv4/IPv6 address, CIDR subnet, or hostname.',
     };
+  }
+
+  // Prevent denial of service from scanning broad CIDR blocks (e.g. /0 or /8)
+  if (cleanTarget.includes('/')) {
+    const parts = cleanTarget.split('/');
+    const prefix = parseInt(parts[1] || '', 10);
+    const isIpv6 = cleanTarget.includes(':');
+    if (isNaN(prefix) || (isIpv6 ? prefix < 120 : prefix < 24)) {
+      return {
+        success: false,
+        command: '',
+        mode: 'simulated',
+        durationMs: 0,
+        error: 'Subnet scan range is too broad. Minimum allowed prefix is /24 for IPv4 and /120 for IPv6.',
+      };
+    }
   }
 
   const profileFlags: Record<typeof params.profile, string[]> = {
@@ -2855,7 +2874,7 @@ export async function runNmapScan(params: {
   if (!params.simulated && hasBinary('nmap')) {
     try {
       const args = [...flags, '-oX', '-', cleanTarget];
-      const xmlOut = execFileSync('nmap', args, {
+      const { stdout: xmlOut } = await execFileAsync('nmap', args, {
         encoding: 'utf-8',
         timeout: 60000,
         maxBuffer: 10 * 1024 * 1024,
@@ -2916,7 +2935,7 @@ export async function runCliToolSnapshot(
 }> {
   const session = await getSession();
   await enforceRateLimit(20, 60000);
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'operator');
 
   const safeIface =
     options?.iface && /^[a-zA-Z0-9._-]+$/.test(options.iface) && !options.iface.startsWith('-')

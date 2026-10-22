@@ -7,6 +7,7 @@ import { parseNmapXml, generateNetworkScenario, ENTERPRISE_NETWORK_XML } from 'n
 export interface LiveSimulatorViewProps {
   onScanCompleted: (scan: NmapRun, label?: string) => void;
   detectedSubnets?: Array<{ role: string; cidr: string; device: string }>;
+  readOnly?: boolean;
 }
 
 const SCAN_PROFILES = [
@@ -16,7 +17,7 @@ const SCAN_PROFILES = [
   { id: 'vuln', label: 'NSE Banner/SSL Audit (-sV --script=banner,ssl-cert -T4)', flags: ['-sV', '--version-light', '--script=banner,ssl-cert', '-T4'] },
 ];
 
-export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [] }: LiveSimulatorViewProps) {
+export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [], readOnly = false }: LiveSimulatorViewProps) {
   const subnets = detectedSubnets.length > 0
     ? detectedSubnets
     : [
@@ -28,7 +29,11 @@ export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [] }: Liv
   const [profileIdx, setProfileIdx] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [phase, setPhase] = useState('Press [Space] to run Nmap scan on selected appliance subnet');
+  const [phase, setPhase] = useState(
+    readOnly
+      ? 'Read-only operator session: active Nmap scans disabled. Browse discovered topology or switch sample.'
+      : 'Press [Space] to run Nmap scan on selected appliance subnet'
+  );
   const [streamedHosts, setStreamedHosts] = useState<NmapHost[]>([]);
   const fullScan = React.useMemo(() => parseNmapXml(ENTERPRISE_NETWORK_XML), []);
 
@@ -38,6 +43,10 @@ export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [] }: Liv
   useInput((input) => {
     if (isRunning) return;
     if (input === ' ') {
+      if (readOnly) {
+        setPhase('Active Nmap scanning is disabled in read-only operator mode.');
+        return;
+      }
       startScan();
     } else if (input === 't') {
       setSubnetIdx((prev) => (prev + 1) % subnets.length);

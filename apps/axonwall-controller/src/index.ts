@@ -45,11 +45,49 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listUsers, createUser, createPreAuthKey } from './headscale.js';
 
+function getSafeRedirectUrl(
+  req: http.IncomingMessage,
+  targetPort: number
+): { targetUrl: string; escapedUrl: string; scriptSafeUrl: string } {
+  const rawHostHeader = (req.headers.host || '').trim();
+  let hostname = 'localhost';
+  if (rawHostHeader) {
+    const ipv6Match = rawHostHeader.match(/^(\[[0-9a-fA-F:]+\])(?::\d+)?$/);
+    if (ipv6Match) {
+      hostname = ipv6Match[1]!;
+    } else {
+      const hostMatch = rawHostHeader.match(/^([a-zA-Z0-9.-]+)(?::\d+)?$/);
+      if (hostMatch) {
+        hostname = hostMatch[1]!;
+      }
+    }
+  }
+
+  // Strip control characters, ensure leading single slash, prevent protocol-relative redirects
+  let safePath = (req.url || '/').replace(/[\x00-\x1f\x7f]/g, '');
+  if (!safePath.startsWith('/')) {
+    safePath = '/' + safePath;
+  }
+  safePath = safePath.replace(/^\/+/, '/');
+
+  const targetUrl = `https://${hostname}:${targetPort}${safePath}`;
+  const escapedUrl = targetUrl
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  const scriptSafeUrl = JSON.stringify(targetUrl)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
+
+  return { targetUrl, escapedUrl, scriptSafeUrl };
+}
+
 export function createHttpRedirectServer(targetPort: number): http.Server {
   const redirectServer = http.createServer((req, res) => {
-    const rawHost = req.headers.host || `localhost:${targetPort}`;
-    const host = rawHost.includes(':') ? rawHost : `${rawHost}:${targetPort}`;
-    const targetUrl = `https://${host}${req.url || '/'}`;
+    const { targetUrl, escapedUrl, scriptSafeUrl } = getSafeRedirectUrl(req, targetPort);
 
     res.writeHead(301, {
       Location: targetUrl,
@@ -60,27 +98,26 @@ export function createHttpRedirectServer(targetPort: number): http.Server {
     res.end(`<!DOCTYPE html>
 <html>
 <head>
-  <meta http-equiv="refresh" content="0;url=${targetUrl}">
+  <meta http-equiv="refresh" content="0;url=${escapedUrl}">
   <title>Redirecting to HTTPS</title>
 </head>
 <body style="font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #94a3b8; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
   <div style="background: #1e293b; padding: 2rem; border-radius: 8px; border: 1px solid #334155; text-align: center; max-width: 480px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);">
     <h2 style="color: #38bdf8; margin: 0 0 1rem 0;">Upgrading to Secure HTTPS...</h2>
     <p style="margin: 0 0 1rem 0;">Redirecting you automatically to the secure management console.</p>
-    <p style="margin: 0; font-size: 0.85rem;"><a href="${targetUrl}" style="color: #38bdf8; text-decoration: underline;">Click here if you are not redirected</a></p>
+    <p style="margin: 0; font-size: 0.85rem;"><a href="${escapedUrl}" style="color: #38bdf8; text-decoration: underline;">Click here if you are not redirected</a></p>
   </div>
-  <script>location.href = ${JSON.stringify(targetUrl)};</script>
+  <script>location.href = ${scriptSafeUrl};</script>
 </body>
 </html>`);
   });
 
   redirectServer.on('upgrade', (req, socket) => {
-    const rawHost = req.headers.host || `localhost:${targetPort}`;
-    const host = rawHost.includes(':') ? rawHost : `${rawHost}:${targetPort}`;
-    const targetUrl = `https://${host}${req.url || '/'}`;
+    const { targetUrl } = getSafeRedirectUrl(req, targetPort);
+    const safeLocation = targetUrl.replace(/[\r\n]/g, '');
     socket.write(
       'HTTP/1.1 301 Moved Permanently\r\n' +
-      `Location: ${targetUrl}\r\n` +
+      `Location: ${safeLocation}\r\n` +
       'Connection: close\r\n' +
       'Content-Type: text/plain\r\n\r\n' +
       'Redirecting to HTTPS\r\n'
@@ -99,11 +136,21 @@ export function createPortMultiplexer(httpsServer: https.Server, redirectServer:
   const tcpMultiplexer = net.createServer((socket) => {
     let handled = false;
 
+    // Mitigate slowloris / connection exhaustion prior to TLS handshake:
+    // destroy unauthenticated connections that send 0 bytes within 5 seconds.
+    socket.setTimeout(5000, () => {
+      if (!handled) {
+        handled = true;
+        socket.destroy();
+      }
+    });
+
     const onReadable = () => {
       if (handled) return;
       const buf = socket.read(1);
       if (!buf) return;
       handled = true;
+      socket.setTimeout(0); // Clear pre-handshake timeout before handing socket over
       socket.removeListener('error', onError);
       socket.removeListener('close', onClose);
       socket.unshift(buf);

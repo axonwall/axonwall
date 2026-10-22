@@ -102,8 +102,8 @@ func restoreLkgConfig(bundleDir string) {
 
 		targetDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
 		for _, dir := range targetDirs {
-			_ = os.MkdirAll(dir, 0755)
-			_ = os.WriteFile(filepath.Join(dir, name), data, 0644)
+			_ = os.MkdirAll(dir, 0700)
+			_ = os.WriteFile(filepath.Join(dir, name), data, 0600)
 		}
 	}
 }

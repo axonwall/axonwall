@@ -482,12 +482,15 @@ if [ -n "$NEW_ADMIN_PASS" ]; then
   fi
   rm -f "$PW_TMP"
   if [ -n "$SCRYPT_HASH" ]; then
-    mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/var/lib/axonwall
+    mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/var/lib/axonwall /mnt/data/etc-axonwall
     printf 'LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n' "$SCRYPT_HASH" > /mnt/slot_a/etc/axonwall/admin.env
     chmod 0600 /mnt/slot_a/etc/axonwall/admin.env
-    rm -f /mnt/slot_a/etc/axonwall/initial-admin-password
+    cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+    chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+    rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
     date -u +%Y-%m-%dT%H:%M:%SZ > /mnt/slot_a/etc/axonwall/.password_changed
     date -u +%Y-%m-%dT%H:%M:%SZ > /mnt/slot_a/var/lib/axonwall/.password_changed
+    date -u +%Y-%m-%dT%H:%M:%SZ > /mnt/data/.password_changed
     # OS accounts get the same password (best effort).
     printf 'root:%s\n' "$NEW_ADMIN_PASS" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
     if grep -q '^axonwall:' /mnt/slot_a/etc/passwd 2>/dev/null; then
@@ -515,10 +518,11 @@ if [ -f /mnt/slot_a/etc/axonwall/version ]; then
   INSTALL_VER="$(head -n1 /mnt/slot_a/etc/axonwall/version | tr -d '\r\n ')"
 fi
 INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
-mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/var/lib/axonwall /mnt/slot_b/etc/axonwall 2>/dev/null || true
+mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/var/lib/axonwall /mnt/slot_b/etc/axonwall /mnt/data 2>/dev/null || true
 printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_a/etc/axonwall/slot_versions.json 2>/dev/null || true
 printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_a/var/lib/axonwall/slot_versions.json 2>/dev/null || true
 printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_b/etc/axonwall/slot_versions.json 2>/dev/null || true
+printf '%s' "$INIT_SLOT_JSON" > /mnt/data/slot_versions.json 2>/dev/null || true
 
 umount /mnt/slot_b
 

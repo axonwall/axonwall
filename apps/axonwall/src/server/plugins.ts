@@ -50,7 +50,14 @@ export async function executePluginAction(
   action: 'install' | 'uninstall' | 'reconfigure'
 ): Promise<PluginActionResult> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
+
+  if (!/^[a-z0-9-]+$/.test(pluginId)) {
+    return {
+      success: false,
+      message: 'Invalid plugin identifier format.',
+    };
+  }
 
   const res = await callAgentApi<PluginActionResult>(
     '/v1/system/plugins/action',

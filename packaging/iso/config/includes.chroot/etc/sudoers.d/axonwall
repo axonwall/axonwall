@@ -9,10 +9,12 @@ Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/b
 %axonwall-admin ALL=(ALL:ALL) NOPASSWD: ALL
 
 # Restricted diagnostic & console privileges for axonwall-operator members
+# Operator sessions are strictly READ-ONLY (no mutation of interfaces/rules/routes or live nmap scans)
 Cmnd_Alias AXONWALL_OP_CMDS = \
-    /usr/sbin/axonwall-console, \
-    /usr/local/bin/axonwall-tui, \
-    /usr/local/bin/axonwall-tui --tab nastymap, \
+    /usr/local/bin/axonwall-tui --readonly, \
+    /usr/local/bin/axonwall-tui --readonly --tab nastymap, \
+    /usr/local/bin/axonwall-tui --tab nastymap --readonly, \
+    /usr/local/bin/axonwall-tui --readonly --view=nastymap, \
     /usr/local/bin/axonwallctl status, \
     /usr/local/bin/axonwallctl diff, \
     /usr/local/bin/axonwallctl validate, \

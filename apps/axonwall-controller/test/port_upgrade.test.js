@@ -138,3 +138,59 @@ test('createPortMultiplexer routes both TLS and plaintext HTTP on the exact same
   assert.equal(json.secure, true);
   assert.equal(json.path, '/routing');
 });
+
+test('createHttpRedirectServer sanitizes malicious Host headers and escapes XSS payloads', async (t) => {
+  const targetPort = 2966;
+  const redirectServer = createHttpRedirectServer(targetPort);
+
+  await new Promise((resolve) => redirectServer.listen(0, '127.0.0.1', resolve));
+  const assignedPort = redirectServer.address().port;
+
+  t.after(() => {
+    if (typeof redirectServer.closeAllConnections === 'function') {
+      redirectServer.closeAllConnections();
+    }
+    redirectServer.close();
+  });
+
+  // Test: Malicious Host header with port injection and XSS script tag in URL
+  const res = await new Promise((resolve, reject) => {
+    const req = http.get(
+      {
+        hostname: '127.0.0.1',
+        port: assignedPort,
+        path: '///attacker.com/</script><script>alert(1)</script>',
+        headers: { host: 'evil.com:443', connection: 'close' },
+        agent: false,
+      },
+      resolve
+    );
+    req.on('error', reject);
+  });
+
+  assert.equal(res.statusCode, 301);
+  // Host header port 443 must be stripped and replaced with controller's targetPort 2966
+  // Protocol-relative triple slashes must collapse to single leading slash
+  assert.equal(
+    res.headers.location,
+    'https://evil.com:2966/attacker.com/</script><script>alert(1)</script>'
+  );
+
+  let body = '';
+  res.on('data', (chunk) => (body += chunk));
+  await new Promise((resolve) => res.on('end', resolve));
+
+  // Verify raw </script> is NOT unescaped inside HTML or script
+  assert.ok(
+    !body.includes('href="https://evil.com:2966/attacker.com/</script>'),
+    'HTML attribute must be entity-escaped'
+  );
+  assert.ok(
+    body.includes('&lt;/script&gt;'),
+    'HTML body must contain XML/HTML entity-escaped script tag'
+  );
+  assert.ok(
+    body.includes('\\u003c/script\\u003e'),
+    'JavaScript redirect must contain escaped unicode tag'
+  );
+});

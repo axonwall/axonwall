@@ -58,18 +58,17 @@ while true; do
   echo "  Axonwall Operator Shell — User: $(whoami)@$(hostname) | Default NIC: ${DEFAULT_IF}"
   echo "  Role: axonwall-operator (Interactive TUI, NastyMap & Operations Environment)"
   echo "================================================================================"
-  echo "  [1] Launch Axonwall Interactive Ink Web-Console TUI (axonwall-tui)"
-  echo "  [2] Launch NastyMap Network Scanner & Topology TUI (axonwall-tui --tab nastymap)"
-  echo "  [3] Launch Classic Appliance Console Menu (axonwall-console)"
-  echo "  [4] Configuration Status / Diff / Validate (axonwallctl)"
-  echo "  [5] Network Interfaces, Routing & Sockets (ip addr / ip route / netstat)"
-  echo "  [6] Live Interface Bandwidth Monitor (slurm -z -i ${DEFAULT_IF})"
-  echo "  [7] System CPU & Disk I/O Telemetry (mpstat / iostat)"
-  echo "  [8] Ping & DNS Resolution Diagnostics (ping / dig)"
-  echo "  [9] Tail Appliance Service Logs & HA Status (journalctl / chronyc)"
+  echo "  [1] Launch Axonwall Interactive TUI [Read-Only Operator] (axonwall-tui --readonly)"
+  echo "  [2] Launch NastyMap Network Topology Viewer [Read-Only] (axonwall-tui --readonly --tab nastymap)"
+  echo "  [3] Configuration Status / Diff / Validate (axonwallctl)"
+  echo "  [4] Network Interfaces, Routing & Sockets (ip addr / ip route / netstat)"
+  echo "  [5] Live Interface Bandwidth Monitor (slurm -z -i ${DEFAULT_IF})"
+  echo "  [6] System CPU & Disk I/O Telemetry (mpstat / iostat)"
+  echo "  [7] Ping & DNS Resolution Diagnostics (ping / dig)"
+  echo "  [8] Tail Appliance Service Logs & HA Status (journalctl / chronyc)"
   echo "  [0] Exit SSH Session"
   echo "--------------------------------------------------------------------------------"
-  printf "Select option [0-9]: "
+  printf "Select option [0-8]: "
   if ! IFS= read -r choice; then
     echo ""
     exit 0
@@ -78,26 +77,19 @@ while true; do
   case "${choice}" in
     1|tui|TUI)
       if [[ -x /usr/local/bin/axonwall-tui ]]; then
-        sudo /usr/local/bin/axonwall-tui 2>/dev/null || /usr/local/bin/axonwall-tui
+        sudo /usr/local/bin/axonwall-tui --readonly 2>/dev/null || /usr/local/bin/axonwall-tui --readonly
       else
         echo "axonwall-tui not found."
       fi
       ;;
     2|nmap|nastymap)
       if [[ -x /usr/local/bin/axonwall-tui ]]; then
-        sudo /usr/local/bin/axonwall-tui --tab nastymap 2>/dev/null || /usr/local/bin/axonwall-tui --tab nastymap
+        sudo /usr/local/bin/axonwall-tui --readonly --tab nastymap 2>/dev/null || /usr/local/bin/axonwall-tui --readonly --tab nastymap
       else
         echo "axonwall-tui not found."
       fi
       ;;
     3)
-      if [[ -x /usr/sbin/axonwall-console ]]; then
-        sudo /usr/sbin/axonwall-console || /usr/sbin/axonwall-console
-      else
-        echo "axonwall-console binary not found."
-      fi
-      ;;
-    4)
       echo "--- Configuration Status ---"
       sudo /usr/local/bin/axonwallctl status 2>/dev/null || /usr/local/bin/axonwallctl status
       echo ""
@@ -107,7 +99,7 @@ while true; do
       echo "--- Pending Configuration Diff ---"
       sudo /usr/local/bin/axonwallctl diff 2>/dev/null || /usr/local/bin/axonwallctl diff
       ;;
-    5)
+    4)
       echo "--- Network Interfaces ---"
       /sbin/ip -br addr show
       echo ""
@@ -117,21 +109,21 @@ while true; do
       echo "--- Listening Sockets (net-tools) ---"
       /bin/netstat -tuln 2>/dev/null || /bin/ss -tuln 2>/dev/null || true
       ;;
-    6)
+    5)
       if command -v slurm >/dev/null 2>&1; then
         /usr/bin/slurm -z -i "${DEFAULT_IF}" || true
       else
         /sbin/ip -s link show dev "${DEFAULT_IF}" || true
       fi
       ;;
-    7)
+    6)
       echo "--- CPU Utilization (sysstat mpstat) ---"
       /usr/bin/mpstat -P ALL 1 1 2>/dev/null || /usr/bin/uptime
       echo ""
       echo "--- Block Device I/O (sysstat iostat) ---"
       /usr/bin/iostat -xz 1 1 2>/dev/null || true
       ;;
-    8)
+    7)
       printf "Enter target IP or hostname to ping & resolve [default: 1.1.1.1]: "
       if IFS= read -r target; then
         target="${target:-1.1.1.1}"
@@ -145,7 +137,7 @@ while true; do
         fi
       fi
       ;;
-    9)
+    8)
       echo "--- System Services ---"
       /bin/systemctl is-active axonwalld slapd sssd keepalived chrony 2>/dev/null || true
       echo "--- Time Synchronization (chronyc tracking) ---"

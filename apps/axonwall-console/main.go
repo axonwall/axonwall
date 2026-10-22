@@ -606,10 +606,10 @@ func updateStateJSON(cfg NetworkConfig) {
 	}
 
 	yamlBytes := []byte(yamlBuilder.String())
-	_ = os.MkdirAll("/etc/axonwall", 0755)
-	_ = os.WriteFile("/etc/axonwall/interfaces.yaml", yamlBytes, 0644)
-	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0755)
-	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml", yamlBytes, 0644)
+	_ = os.MkdirAll("/etc/axonwall", 0700)
+	_ = os.WriteFile("/etc/axonwall/interfaces.yaml", yamlBytes, 0600)
+	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0700)
+	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml", yamlBytes, 0600)
 }
 
 func persistNetworkInterfaces(cfg NetworkConfig) {
@@ -772,7 +772,7 @@ func writeSystemYamlAntiLockout(allowedIfaces []string) {
 			if idx := strings.Index(content, "  antiLockout:"); idx != -1 {
 				prefix := strings.TrimRight(content[:idx], "\n")
 				updated := prefix + "\n" + newAntiLockoutBlock + "\n"
-				_ = os.WriteFile(yamlPath, []byte(updated), 0644)
+				_ = os.WriteFile(yamlPath, []byte(updated), 0600)
 				continue
 			}
 		}
@@ -781,7 +781,7 @@ func writeSystemYamlAntiLockout(allowedIfaces []string) {
 			hostname = "axonwall"
 		}
 		defaultYaml := fmt.Sprintf("# ============================================================================\n# Axonwall Firewall Configuration — /etc/axonwall/system.yaml\n# ============================================================================\n\nsystem:\n  hostname: %s\n  domain: local\n  timezone: UTC\n  flowtableOffload: true\n  dnsServers:\n    - 1.1.1.1\n    - 8.8.8.8\n%s\n", hostname, newAntiLockoutBlock)
-		_ = os.WriteFile(yamlPath, []byte(defaultYaml), 0644)
+		_ = os.WriteFile(yamlPath, []byte(defaultYaml), 0600)
 	}
 }
 
@@ -918,46 +918,54 @@ func clearScreen() {
 
 func getAdminCredentials() (string, string) {
 	adminUser := "admin"
-	adminPass := "axonwall"
+	adminPass := ""
+	if isLiveMode() {
+		adminPass = "axonwall"
+	}
 	foundPass := false
 
-	// 1. Check /etc/axonwall/admin.env first
-	if data, err := os.ReadFile("/etc/axonwall/admin.env"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "LOCAL_ADMIN_USER=") {
-				adminUser = strings.TrimPrefix(line, "LOCAL_ADMIN_USER=")
-			} else if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") {
-				adminPass = strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD=")
-				foundPass = true
+	// 1. Check persistent and system admin.env / axonwall.env configuration files
+	envCandidates := []string{
+		"/var/lib/axonwall/etc-axonwall/admin.env",
+		"/etc/axonwall/admin.env",
+		"/var/lib/axonwall/etc-axonwall/axonwall.env",
+		"/etc/axonwall/axonwall.env",
+	}
+
+	for _, envFile := range envCandidates {
+		if data, err := os.ReadFile(envFile); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "ADMIN_USER=") {
+					adminUser = strings.TrimPrefix(line, "ADMIN_USER=")
+				} else if strings.HasPrefix(line, "LOCAL_ADMIN_USER=") {
+					adminUser = strings.TrimPrefix(line, "LOCAL_ADMIN_USER=")
+				} else if strings.HasPrefix(line, "ADMIN_PASSWORD_HASH=") {
+					adminPass = strings.TrimPrefix(line, "ADMIN_PASSWORD_HASH=")
+					foundPass = true
+				} else if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") && !foundPass {
+					adminPass = strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD=")
+					foundPass = true
+				}
 			}
-		}
-		if foundPass {
-			return adminUser, adminPass
+			if foundPass {
+				return adminUser, adminPass
+			}
 		}
 	}
 
-	// 2. Check /etc/axonwall/axonwall.env
-	if data, err := os.ReadFile("/etc/axonwall/axonwall.env"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "LOCAL_ADMIN_USER=") {
-				adminUser = strings.TrimPrefix(line, "LOCAL_ADMIN_USER=")
-			} else if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") {
-				adminPass = strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD=")
-				foundPass = true
-			}
-		}
-		if foundPass {
-			return adminUser, adminPass
-		}
+	// 2. Check initial generated random password files if not yet changed
+	seedCandidates := []string{
+		"/var/lib/axonwall/etc-axonwall/initial-admin-password",
+		"/etc/axonwall/initial-admin-password",
 	}
-
-	// 3. Fallback to /etc/axonwall/initial-admin-password
-	if data, err := os.ReadFile("/etc/axonwall/initial-admin-password"); err == nil {
-		p := strings.TrimSpace(string(data))
-		if p != "" {
-			adminPass = p
+	for _, seedFile := range seedCandidates {
+		if data, err := os.ReadFile(seedFile); err == nil {
+			p := strings.TrimSpace(string(data))
+			if p != "" {
+				adminPass = p
+				return adminUser, adminPass
+			}
 		}
 	}
 
@@ -1083,6 +1091,13 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	}
 
 	expectedUser, expectedPass := getAdminCredentials()
+	if expectedPass == "" {
+		time.Sleep(1500 * time.Millisecond)
+		fmt.Printf("\n%s[!] No appliance admin password configured or found in persistent storage.%s\n", colorRed, colorReset)
+		fmt.Printf("    Please configure credentials via the Web Console or check /etc/axonwall/initial-admin-password.\n\n")
+		time.Sleep(2 * time.Second)
+		return "", false
+	}
 
 	// Verify constant-time match for configured administrator account
 	userMatches := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) == 1

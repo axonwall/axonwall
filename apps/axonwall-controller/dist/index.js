@@ -39110,11 +39110,33 @@ function buildArtifactBundle(jobId, state) {
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
+function getSafeRedirectUrl(req, targetPort) {
+  const rawHostHeader = (req.headers.host || "").trim();
+  let hostname3 = "localhost";
+  if (rawHostHeader) {
+    const ipv6Match = rawHostHeader.match(/^(\[[0-9a-fA-F:]+\])(?::\d+)?$/);
+    if (ipv6Match) {
+      hostname3 = ipv6Match[1];
+    } else {
+      const hostMatch = rawHostHeader.match(/^([a-zA-Z0-9.-]+)(?::\d+)?$/);
+      if (hostMatch) {
+        hostname3 = hostMatch[1];
+      }
+    }
+  }
+  let safePath = (req.url || "/").replace(/[\x00-\x1f\x7f]/g, "");
+  if (!safePath.startsWith("/")) {
+    safePath = "/" + safePath;
+  }
+  safePath = safePath.replace(/^\/+/, "/");
+  const targetUrl = `https://${hostname3}:${targetPort}${safePath}`;
+  const escapedUrl = targetUrl.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  const scriptSafeUrl = JSON.stringify(targetUrl).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+  return { targetUrl, escapedUrl, scriptSafeUrl };
+}
 function createHttpRedirectServer(targetPort) {
   const redirectServer = http.createServer((req, res) => {
-    const rawHost = req.headers.host || `localhost:${targetPort}`;
-    const host = rawHost.includes(":") ? rawHost : `${rawHost}:${targetPort}`;
-    const targetUrl = `https://${host}${req.url || "/"}`;
+    const { targetUrl, escapedUrl, scriptSafeUrl } = getSafeRedirectUrl(req, targetPort);
     res.writeHead(301, {
       Location: targetUrl,
       "Content-Type": "text/html; charset=utf-8",
@@ -39124,26 +39146,25 @@ function createHttpRedirectServer(targetPort) {
     res.end(`<!DOCTYPE html>
 <html>
 <head>
-  <meta http-equiv="refresh" content="0;url=${targetUrl}">
+  <meta http-equiv="refresh" content="0;url=${escapedUrl}">
   <title>Redirecting to HTTPS</title>
 </head>
 <body style="font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #94a3b8; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
   <div style="background: #1e293b; padding: 2rem; border-radius: 8px; border: 1px solid #334155; text-align: center; max-width: 480px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);">
     <h2 style="color: #38bdf8; margin: 0 0 1rem 0;">Upgrading to Secure HTTPS...</h2>
     <p style="margin: 0 0 1rem 0;">Redirecting you automatically to the secure management console.</p>
-    <p style="margin: 0; font-size: 0.85rem;"><a href="${targetUrl}" style="color: #38bdf8; text-decoration: underline;">Click here if you are not redirected</a></p>
+    <p style="margin: 0; font-size: 0.85rem;"><a href="${escapedUrl}" style="color: #38bdf8; text-decoration: underline;">Click here if you are not redirected</a></p>
   </div>
-  <script>location.href = ${JSON.stringify(targetUrl)};</script>
+  <script>location.href = ${scriptSafeUrl};</script>
 </body>
 </html>`);
   });
   redirectServer.on("upgrade", (req, socket) => {
-    const rawHost = req.headers.host || `localhost:${targetPort}`;
-    const host = rawHost.includes(":") ? rawHost : `${rawHost}:${targetPort}`;
-    const targetUrl = `https://${host}${req.url || "/"}`;
+    const { targetUrl } = getSafeRedirectUrl(req, targetPort);
+    const safeLocation = targetUrl.replace(/[\r\n]/g, "");
     socket.write(
       `HTTP/1.1 301 Moved Permanently\r
-Location: ${targetUrl}\r
+Location: ${safeLocation}\r
 Connection: close\r
 Content-Type: text/plain\r
 \r
@@ -39160,11 +39181,18 @@ Redirecting to HTTPS\r
 function createPortMultiplexer(httpsServer, redirectServer) {
   const tcpMultiplexer = net.createServer((socket) => {
     let handled = false;
+    socket.setTimeout(5e3, () => {
+      if (!handled) {
+        handled = true;
+        socket.destroy();
+      }
+    });
     const onReadable = () => {
       if (handled) return;
       const buf = socket.read(1);
       if (!buf) return;
       handled = true;
+      socket.setTimeout(0);
       socket.removeListener("error", onError);
       socket.removeListener("close", onClose);
       socket.unshift(buf);

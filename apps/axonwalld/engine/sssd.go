@@ -142,7 +142,7 @@ func EnsureSSSDConfiguredWithPeer(baseDN string, peerLDAPURI string) error {
 Defaults env_reset
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 %axonwall-admin ALL=(ALL:ALL) NOPASSWD: ALL
-Cmnd_Alias AXONWALL_OP_CMDS = /usr/sbin/axonwall-console, /usr/local/bin/axonwall-tui, /usr/local/bin/axonwall-tui *, /usr/local/bin/axonwallctl status, /usr/local/bin/axonwallctl diff, /usr/local/bin/axonwallctl validate, /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager
+Cmnd_Alias AXONWALL_OP_CMDS = /usr/local/bin/axonwall-tui --readonly, /usr/local/bin/axonwall-tui --readonly --tab nastymap, /usr/local/bin/axonwall-tui --tab nastymap --readonly, /usr/local/bin/axonwall-tui --readonly --view=nastymap, /usr/local/bin/axonwallctl status, /usr/local/bin/axonwallctl diff, /usr/local/bin/axonwallctl validate, /bin/journalctl -u axonwalld -u slapd -u sssd -n 50 --no-pager
 %axonwall-operator ALL=(root) NOPASSWD: AXONWALL_OP_CMDS
 `
 		_ = os.WriteFile(sudoersPath, []byte(sudoersContent), 0440)

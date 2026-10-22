@@ -103,6 +103,16 @@ export async function exportToPng(
   });
 }
 
+function escapeXml(unsafe: unknown): string {
+  if (unsafe === undefined || unsafe === null) return '';
+  return String(unsafe)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Programmatic headless generator: creates an SVG string representation of a TopologyGraph
  * without requiring a DOM (can run in Node.js / CLI / CI report generator).
@@ -138,7 +148,7 @@ export function generateHeadlessSvg(
       const midX = (s.x + t.x) / 2;
       const midY = (s.y + t.y) / 2;
       linksSvg += `
-        <text x="${midX}" y="${midY - 4}" fill="#94a3b8" font-size="10" font-family="sans-serif" text-anchor="middle">${link.label}</text>
+        <text x="${midX}" y="${midY - 4}" fill="#94a3b8" font-size="10" font-family="sans-serif" text-anchor="middle">${escapeXml(link.label)}</text>
       `;
     }
   }
@@ -152,8 +162,8 @@ export function generateHeadlessSvg(
     nodesSvg += `
       <g transform="translate(${node.x}, ${node.y})">
         <circle r="${node.radius}" fill="${fill}" stroke="${stroke}" stroke-width="2.5" />
-        <text y="${node.radius + 14}" fill="#f8fafc" font-size="11" font-family="sans-serif" font-weight="600" text-anchor="middle">${node.label}</text>
-        <text y="${node.radius + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${node.ip}</text>
+        <text y="${node.radius + 14}" fill="#f8fafc" font-size="11" font-family="sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
+        <text y="${node.radius + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
       </g>
     `;
   }
@@ -169,7 +179,7 @@ export function generateHeadlessSvg(
   <rect width="100%" height="100%" fill="#0b0f19" />
   <circle cx="${width / 2}" cy="${height / 2}" r="${Math.min(width, height) * 0.45}" fill="url(#bgGlow)" />
   
-  <text x="24" y="36" fill="#f8fafc" font-size="18" font-family="sans-serif" font-weight="bold">${title}</text>
+  <text x="24" y="36" fill="#f8fafc" font-size="18" font-family="sans-serif" font-weight="bold">${escapeXml(title)}</text>
   <text x="24" y="56" fill="#64748b" font-size="12" font-family="monospace">Generated with NastyMap · ${graph.nodes.length} nodes · ${graph.links.length} links</text>
 
   <g id="links">
@@ -193,12 +203,12 @@ export function generateHtmlReport(scan: NmapRun, graph: TopologyGraph): string 
     .map(
       (h) => `
     <tr style="border-bottom: 1px solid #1e293b;">
-      <td style="padding: 10px 14px; font-family: monospace; color: #38bdf8;">${h.ipv4 || h.id}</td>
-      <td style="padding: 10px 14px; color: #f8fafc;">${h.primaryHostname || '-'}</td>
-      <td style="padding: 10px 14px;"><span style="display:inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: bold; background: ${h.status.state === 'up' ? '#065f46; color: #34d399;' : '#881337; color: #f87171;'}">${h.status.state.toUpperCase()}</span></td>
-      <td style="padding: 10px 14px; color: #94a3b8;">${h.primaryOs || h.osFamily || 'Unknown'}</td>
-      <td style="padding: 10px 14px; color: #cbd5e1;">${h.ports.filter((p) => p.state === 'open').map((p) => `${p.portid}/${p.protocol}`).join(', ') || 'None'}</td>
-      <td style="padding: 10px 14px; color: #94a3b8;">${h.latencyMs !== undefined ? `${h.latencyMs} ms` : '-'}</td>
+      <td style="padding: 10px 14px; font-family: monospace; color: #38bdf8;">${escapeXml(h.ipv4 || h.id)}</td>
+      <td style="padding: 10px 14px; color: #f8fafc;">${escapeXml(h.primaryHostname || '-')}</td>
+      <td style="padding: 10px 14px;"><span style="display:inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: bold; background: ${h.status.state === 'up' ? '#065f46; color: #34d399;' : '#881337; color: #f87171;'}">${escapeXml(h.status.state.toUpperCase())}</span></td>
+      <td style="padding: 10px 14px; color: #94a3b8;">${escapeXml(h.primaryOs || h.osFamily || 'Unknown')}</td>
+      <td style="padding: 10px 14px; color: #cbd5e1;">${escapeXml(h.ports.filter((p) => p.state === 'open').map((p) => `${p.portid}/${p.protocol}`).join(', ') || 'None')}</td>
+      <td style="padding: 10px 14px; color: #94a3b8;">${escapeXml(h.latencyMs !== undefined ? `${h.latencyMs} ms` : '-')}</td>
     </tr>
   `
     )
@@ -222,8 +232,8 @@ export function generateHtmlReport(scan: NmapRun, graph: TopologyGraph): string 
   <div class="container">
     <div class="header">
       <h1 style="margin: 0 0 8px 0; font-size: 24px; color: #38bdf8;">NastyMap Scan Report</h1>
-      <p style="margin: 0; color: #94a3b8; font-family: monospace; font-size: 13px;">Command: ${scan.args}</p>
-      <p style="margin: 4px 0 0 0; color: #64748b; font-size: 12px;">Scanned at ${scan.startstr} · Nmap v${scan.version} · ${scan.hosts.length} Hosts</p>
+      <p style="margin: 0; color: #94a3b8; font-family: monospace; font-size: 13px;">Command: ${escapeXml(scan.args)}</p>
+      <p style="margin: 4px 0 0 0; color: #64748b; font-size: 12px;">Scanned at ${escapeXml(scan.startstr)} · Nmap v${escapeXml(scan.version)} · ${scan.hosts.length} Hosts</p>
     </div>
 
     <div class="map-container">

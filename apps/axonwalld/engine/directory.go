@@ -1034,6 +1034,39 @@ pwdMaxAge: %d
 	return nil
 }
 
+func cleanNSSField(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ':' || r == '\n' || r == '\r' || r == '\x00' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isValidNSSIdent(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for i, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			if i == 0 && (r == '-' || r == '.') {
+				return false
+			}
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func writeAtomicNSSFile(targetPath string, data []byte, perm os.FileMode) error {
+	tmpPath := targetPath + ".axon_tmp"
+	if err := os.WriteFile(tmpPath, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, targetPath)
+}
+
 // syncLocalNSSMirrorIfNoSSSD mirrors OpenLDAP POSIX users and groups into /etc/passwd, /etc/group, and /etc/shadow
 // on musl/Alpine Linux systems where libnss_sss is not available.
 func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
@@ -1049,7 +1082,11 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 
 	ldapUserByName := make(map[string]LocalUser, len(ldapUsers))
 	for _, u := range ldapUsers {
-		ldapUserByName[u.Username] = u
+		cleanU := cleanNSSField(u.Username)
+		if !isValidNSSIdent(cleanU) {
+			continue
+		}
+		ldapUserByName[cleanU] = u
 		if u.HomeDir != "" && u.UID >= 1000 {
 			seedUserZshrc(u.HomeDir, u.UID, u.GID)
 		}
@@ -1058,7 +1095,10 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 	// 1. Synchronize /etc/group
 	ldapGroupByName := make(map[string]LocalGroup, len(ldapGroups))
 	for _, g := range ldapGroups {
-		ldapGroupByName[g.Name] = g
+		cleanG := cleanNSSField(g.Name)
+		if isValidNSSIdent(cleanG) {
+			ldapGroupByName[cleanG] = g
+		}
 	}
 	if groupBytes, err := os.ReadFile("/etc/group"); err == nil {
 		var newGroupLines []string
@@ -1100,12 +1140,13 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 					}
 				}
 				for _, m := range lg.Members {
-					if m != "" && m != deletedUser && !memberMap[m] {
-						memberMap[m] = true
-						mergedMembers = append(mergedMembers, m)
+					cleanM := cleanNSSField(m)
+					if cleanM != "" && cleanM != deletedUser && isValidNSSIdent(cleanM) && !memberMap[cleanM] {
+						memberMap[cleanM] = true
+						mergedMembers = append(mergedMembers, cleanM)
 					}
 				}
-				newGroupLines = append(newGroupLines, fmt.Sprintf("%s:%s:%s:%s", gName, parts[1], parts[2], strings.Join(mergedMembers, ",")))
+				newGroupLines = append(newGroupLines, fmt.Sprintf("%s:%s:%s:%s", cleanNSSField(gName), parts[1], parts[2], strings.Join(mergedMembers, ",")))
 			} else if gGID >= 10000 && gGID < 60000 {
 				// Stale LDAP group that was deleted from directory
 				continue
@@ -1114,20 +1155,22 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 			}
 		}
 		for _, lg := range ldapGroups {
-			if seenGroups[lg.Name] || (deletedUser != "" && lg.Name == deletedUser) {
+			cleanG := cleanNSSField(lg.Name)
+			if !isValidNSSIdent(cleanG) || seenGroups[cleanG] || (deletedUser != "" && cleanG == deletedUser) {
 				continue
 			}
 			var cleanMembers []string
 			for _, m := range lg.Members {
-				if m != "" && m != deletedUser {
-					cleanMembers = append(cleanMembers, m)
+				cleanM := cleanNSSField(m)
+				if cleanM != "" && cleanM != deletedUser && isValidNSSIdent(cleanM) {
+					cleanMembers = append(cleanMembers, cleanM)
 				}
 			}
-			newGroupLines = append(newGroupLines, fmt.Sprintf("%s:x:%d:%s", lg.Name, lg.GID, strings.Join(cleanMembers, ",")))
+			newGroupLines = append(newGroupLines, fmt.Sprintf("%s:x:%d:%s", cleanG, lg.GID, strings.Join(cleanMembers, ",")))
 		}
 		newGroupContent := strings.Join(newGroupLines, "\n") + "\n"
 		if newGroupContent != string(groupBytes) {
-			_ = os.WriteFile("/etc/group", []byte(newGroupContent), 0644)
+			_ = writeAtomicNSSFile("/etc/group", []byte(newGroupContent), 0644)
 		}
 	}
 
@@ -1157,16 +1200,16 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 			if lu, ok := ldapUserByName[uName]; ok && uName != "root" {
 				seenUsers[uName] = true
 				validUsers[uName] = true
-				gecos := strings.ReplaceAll(lu.Comment, ":", " ")
-				home := lu.HomeDir
+				gecos := cleanNSSField(strings.ReplaceAll(lu.Comment, ":", " "))
+				home := cleanNSSField(lu.HomeDir)
 				if home == "" {
-					home = "/home/" + lu.Username
+					home = "/home/" + cleanNSSField(lu.Username)
 				}
-				sh := lu.Shell
+				sh := cleanNSSField(lu.Shell)
 				if sh == "" {
 					sh = DefaultShellForRole(lu.ApplianceRole)
 				}
-				newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", lu.Username, lu.UID, lu.GID, gecos, home, sh))
+				newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", cleanNSSField(lu.Username), lu.UID, lu.GID, gecos, home, sh))
 			} else if uUID >= 10000 && uUID < 60000 {
 				// Stale LDAP user removed from directory
 				continue
@@ -1176,24 +1219,25 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 			}
 		}
 		for _, lu := range ldapUsers {
-			if seenUsers[lu.Username] || lu.Username == "root" || (deletedUser != "" && lu.Username == deletedUser) {
+			cleanU := cleanNSSField(lu.Username)
+			if !isValidNSSIdent(cleanU) || seenUsers[cleanU] || cleanU == "root" || (deletedUser != "" && cleanU == deletedUser) {
 				continue
 			}
-			validUsers[lu.Username] = true
-			gecos := strings.ReplaceAll(lu.Comment, ":", " ")
-			home := lu.HomeDir
+			validUsers[cleanU] = true
+			gecos := cleanNSSField(strings.ReplaceAll(lu.Comment, ":", " "))
+			home := cleanNSSField(lu.HomeDir)
 			if home == "" {
-				home = "/home/" + lu.Username
+				home = "/home/" + cleanU
 			}
-			sh := lu.Shell
+			sh := cleanNSSField(lu.Shell)
 			if sh == "" {
 				sh = DefaultShellForRole(lu.ApplianceRole)
 			}
-			newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", lu.Username, lu.UID, lu.GID, gecos, home, sh))
+			newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", cleanU, lu.UID, lu.GID, gecos, home, sh))
 		}
 		newPasswdContent := strings.Join(newPasswdLines, "\n") + "\n"
 		if newPasswdContent != string(passwdBytes) {
-			_ = os.WriteFile("/etc/passwd", []byte(newPasswdContent), 0644)
+			_ = writeAtomicNSSFile("/etc/passwd", []byte(newPasswdContent), 0644)
 		}
 	}
 
@@ -1231,18 +1275,19 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 			}
 		}
 		for _, lu := range ldapUsers {
-			if seenShadow[lu.Username] || lu.Username == "root" || (deletedUser != "" && lu.Username == deletedUser) {
+			cleanU := cleanNSSField(lu.Username)
+			if !isValidNSSIdent(cleanU) || seenShadow[cleanU] || cleanU == "root" || (deletedUser != "" && cleanU == deletedUser) {
 				continue
 			}
 			pwField := "*"
 			if lu.PasswordLocked {
 				pwField = "!"
 			}
-			newShadowLines = append(newShadowLines, fmt.Sprintf("%s:%s:19723:0:99999:7:::", lu.Username, pwField))
+			newShadowLines = append(newShadowLines, fmt.Sprintf("%s:%s:19723:0:99999:7:::", cleanU, pwField))
 		}
 		newShadowContent := strings.Join(newShadowLines, "\n") + "\n"
 		if newShadowContent != string(shadowBytes) {
-			_ = os.WriteFile("/etc/shadow", []byte(newShadowContent), 0640)
+			_ = writeAtomicNSSFile("/etc/shadow", []byte(newShadowContent), 0640)
 		}
 	}
 }

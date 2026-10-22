@@ -20,6 +20,7 @@ export interface AppProps {
   diffScanB?: NmapRun;
   embedded?: boolean;
   detectedSubnets?: Array<{ role: string; cidr: string; device: string }>;
+  readOnly?: boolean;
 }
 
 const SUB_TABS: TabId[] = ['topology', 'geo', 'diff', 'hosts', 'stats', 'live'];
@@ -32,6 +33,7 @@ export function App({
   diffScanB,
   embedded = false,
   detectedSubnets = [],
+  readOnly = false,
 }: AppProps) {
   const { exit } = useApp();
   const [currentScan, setCurrentScan] = useState<NmapRun>(() => {
@@ -157,6 +159,7 @@ export function App({
           {activeTab === 'live' && (
             <LiveSimulatorView
               detectedSubnets={detectedSubnets}
+              readOnly={readOnly}
               onScanCompleted={(newScan, label) => {
                 setBaselineScan(currentScan);
                 setCurrentScan(newScan);
