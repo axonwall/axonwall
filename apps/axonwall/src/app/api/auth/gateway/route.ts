@@ -33,8 +33,14 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: 'Forbidden: Application not configured or disabled' }, { status: 403 });
     }
 
-    if (app.allowedRoles && app.allowedRoles.length > 0) {
-      const hasRole = Array.isArray(session.roles) && session.roles.some((r) => app.allowedRoles.includes(r as any));
+    if (!app.allowAnyAuthenticated) {
+      // Fail closed (audit B-S3): an app with no role list admits only
+      // admins rather than every authenticated session; open access is
+      // the explicit allowAnyAuthenticated choice instead.
+      const effectiveRoles =
+        app.allowedRoles && app.allowedRoles.length > 0 ? app.allowedRoles : ['admin'];
+      const hasRole =
+        Array.isArray(session.roles) && session.roles.some((r) => effectiveRoles.includes(r as any));
       if (!hasRole) {
         return NextResponse.json({ error: 'Forbidden: Insufficient privileges' }, { status: 403 });
       }
