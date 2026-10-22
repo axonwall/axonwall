@@ -152,6 +152,16 @@ if [[ -f "${CHROOT_SRC}/etc/axonwall/starship.toml" ]]; then
   cp "${CHROOT_SRC}/etc/axonwall/starship.toml" "${WORK_DIR}/etc/axonwall/starship.toml"
   chmod 0644 "${WORK_DIR}/etc/axonwall/starship.toml"
 fi
+# Release-signing trust anchor: axonwall-update enforces detached
+# signatures on downloaded release checksums when this file is
+# present (packaging source: includes.chroot/etc/axonwall). Shipping
+# it in the .deb as well means .deb-maintained systems enforce too,
+# and a future key rotation can deliver the new anchor inside a
+# release whose download was verified against the old one.
+if [[ -f "${CHROOT_SRC}/etc/axonwall/release-signing.pub" ]]; then
+  cp "${CHROOT_SRC}/etc/axonwall/release-signing.pub" "${WORK_DIR}/etc/axonwall/release-signing.pub"
+  chmod 0644 "${WORK_DIR}/etc/axonwall/release-signing.pub"
+fi
 if [[ -f "${CHROOT_SRC}/etc/zsh/axonwall.zsh" ]]; then
   cp "${CHROOT_SRC}/etc/zsh/axonwall.zsh" "${WORK_DIR}/etc/zsh/axonwall.zsh"
   chmod 0644 "${WORK_DIR}/etc/zsh/axonwall.zsh"
