@@ -11,6 +11,14 @@ import {
   validateYamlConfigFiles,
 } from '@axonwall/lib/yaml';
 import {
+  parseStorageFromLsblk,
+  buildCloudInitFromSystem,
+  exportCloudInitYaml,
+  generateCloudInitMetaData,
+  type CloudInitExportOptions,
+  type HostIntrospectionData,
+} from '@axonwall/lib/cloudinit';
+import {
   McpApiKeySchema,
   McpPolicyLimitsSchema,
   McpSettingsSchema,
@@ -600,6 +608,246 @@ export async function exportUnifiedYamlConfig(): Promise<string> {
   assertActionPermitted(session);
   const state = await getCurrentDesiredState();
   return serializeDesiredStateToSingleYaml(state);
+}
+
+export interface CloudInitExportSnapshot {
+  yaml: string;
+  metaData: string;
+  hostname: string;
+  fqdn: string;
+  storageSummary: {
+    layoutMode: string;
+    targetDisks: string[];
+    slotAGb: number;
+    slotBGb: number;
+    swapGb: number;
+    zramEnabled: boolean;
+    raidEnabled: boolean;
+    luksEnabled: boolean;
+    zfsEnabled: boolean;
+  };
+  usersCount: number;
+  sshKeysCount: number;
+  packagesCount: number;
+}
+
+async function collectHostIntrospectionData(): Promise<HostIntrospectionData> {
+  const desiredState = await getDesiredStateInternal();
+  const hostname = os.hostname() || desiredState.system?.hostname || 'axonwall-fw';
+  let timezone = desiredState.system?.timezone || 'UTC';
+  try {
+    if (fs.existsSync('/etc/timezone')) {
+      const tz = fs.readFileSync('/etc/timezone', 'utf8').trim();
+      if (tz) timezone = tz;
+    }
+  } catch {}
+
+  // 1. Storage introspection via lsblk + zpool
+  let lsblkRaw = '{}';
+  try {
+    lsblkRaw = execFileSync(
+      'lsblk',
+      ['-J', '-b', '-o', 'NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT,PKNAME'],
+      { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+  } catch {}
+
+  const zfsPools: Array<{
+    name: string;
+    datasets?: Array<{ name: string; mountpoint?: string; compression?: string }>;
+  }> = [];
+  try {
+    const zpoolOut = execFileSync('zpool', ['list', '-H', '-o', 'name'], {
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (zpoolOut) {
+      for (const poolName of zpoolOut.split('\n').map((s) => s.trim()).filter(Boolean)) {
+        const datasets: Array<{ name: string; mountpoint?: string; compression?: string }> = [];
+        try {
+          const zfsOut = execFileSync('zfs', ['list', '-H', '-r', '-o', 'name,mountpoint,compression', poolName], {
+            encoding: 'utf8',
+            timeout: 2000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          }).trim();
+          for (const line of zfsOut.split('\n')) {
+            const [dsName, mp, comp] = line.split('\t').map((s) => s.trim());
+            if (dsName && dsName !== poolName) {
+              datasets.push({
+                name: dsName.replace(new RegExp(`^${poolName}/`), ''),
+                mountpoint: mp && mp !== 'none' && mp !== '-' ? mp : undefined,
+                compression: comp || 'lz4',
+              });
+            }
+          }
+        } catch {}
+        zfsPools.push({ name: poolName, datasets });
+      }
+    }
+  } catch {}
+
+  const storage = parseStorageFromLsblk(lsblkRaw, { zfsPools });
+
+  // 2. Admin credentials & ZTP metadata
+  let adminUsername = 'admin';
+  let adminPassword: string | undefined;
+  for (const envPath of ['/etc/axonwall/admin.env', '/var/lib/axonwall/etc-axonwall/admin.env']) {
+    try {
+      if (fs.existsSync(envPath)) {
+        const raw = fs.readFileSync(envPath, 'utf8');
+        for (const line of raw.split('\n')) {
+          const [k, ...vParts] = line.trim().split('=');
+          const v = vParts.join('=').trim();
+          if (k === 'LOCAL_ADMIN_USER' && v) adminUsername = v;
+          if (k === 'LOCAL_ADMIN_PASSWORD' && v) adminPassword = v;
+        }
+        break;
+      }
+    } catch {}
+  }
+
+  let ztpEnabled = false;
+  let controllerUrl: string | undefined;
+  let enrollmentToken: string | undefined;
+  try {
+    if (fs.existsSync('/etc/axonwall/controller.env')) {
+      const raw = fs.readFileSync('/etc/axonwall/controller.env', 'utf8');
+      for (const line of raw.split('\n')) {
+        const [k, ...vParts] = line.trim().split('=');
+        const v = vParts.join('=').trim();
+        if (k === 'AXONWALL_CONTROLLER_URL' && v) controllerUrl = v;
+        if (k === 'AXONWALL_ZTP_TOKEN' && v) enrollmentToken = v;
+      }
+      if (
+        controllerUrl &&
+        !controllerUrl.includes('127.0.0.1') &&
+        !controllerUrl.includes('localhost')
+      ) {
+        ztpEnabled = true;
+      }
+    }
+  } catch {}
+
+  // 3. OS Users & SSH Authorized Keys
+  const osUsersMap = new Map<
+    string,
+    {
+      name: string;
+      gecos?: string;
+      sudo?: string;
+      shell?: string;
+      lockPasswd?: boolean;
+      sshAuthorizedKeys: string[];
+    }
+  >();
+
+  try {
+    const daemonUsers = await callAgentApi<{ users: any[] }>('/v1/system/users', 'GET');
+    if (daemonUsers && Array.isArray(daemonUsers.users)) {
+      for (const u of daemonUsers.users) {
+        if (u.isSystem) continue;
+        const isPriv =
+          u.applianceRole === 'admin' ||
+          (Array.isArray(u.groups) && (u.groups.includes('sudo') || u.groups.includes('wheel')));
+        osUsersMap.set(u.username, {
+          name: u.username,
+          gecos: u.comment || `${u.username} (${u.applianceRole || 'operator'})`,
+          sudo: isPriv ? 'ALL=(ALL) NOPASSWD:ALL' : undefined,
+          shell: u.shell || '/usr/bin/zsh',
+          lockPasswd: Boolean(u.passwordLocked),
+          sshAuthorizedKeys: Array.isArray(u.sshKeys) ? u.sshKeys : [],
+        });
+      }
+    }
+  } catch {}
+
+  // Fallback / supplement from /home/*/.ssh/authorized_keys and /root/.ssh/authorized_keys
+  try {
+    if (fs.existsSync('/home')) {
+      for (const dirName of fs.readdirSync('/home')) {
+        const akPath = path.join('/home', dirName, '.ssh', 'authorized_keys');
+        let keys: string[] = [];
+        try {
+          if (fs.existsSync(akPath)) {
+            keys = fs
+              .readFileSync(akPath, 'utf8')
+              .split('\n')
+              .map((l) => l.trim())
+              .filter((l) => l && !l.startsWith('#'));
+          }
+        } catch {}
+        const existing = osUsersMap.get(dirName);
+        if (existing) {
+          existing.sshAuthorizedKeys = Array.from(new Set([...existing.sshAuthorizedKeys, ...keys]));
+        } else if (/^[a-z_][a-z0-9_-]{0,31}$/.test(dirName)) {
+          osUsersMap.set(dirName, {
+            name: dirName,
+            gecos: `${dirName} Administrator`,
+            sudo: 'ALL=(ALL) NOPASSWD:ALL',
+            shell: '/usr/bin/zsh',
+            sshAuthorizedKeys: keys,
+          });
+        }
+      }
+    }
+  } catch {}
+
+  return {
+    desiredState,
+    hostname,
+    timezone,
+    storage,
+    adminUsername,
+    adminPassword,
+    ztp: ztpEnabled ? { enabled: true, controllerUrl, enrollmentToken } : { enabled: false },
+    osUsers: Array.from(osUsersMap.values()),
+  };
+}
+
+export async function exportCloudInitConfigAction(
+  options: CloudInitExportOptions = {}
+): Promise<CloudInitExportSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const data = await collectHostIntrospectionData();
+  const safeOptions: CloudInitExportOptions = {
+    redactSecrets: options.redactSecrets !== false,
+    templateMode: Boolean(options.templateMode),
+    includeStorage: options.includeStorage !== false,
+    includeUsers: options.includeUsers !== false,
+    includePackages: options.includePackages !== false,
+    hostnameOverride: options.hostnameOverride?.trim() || undefined,
+  };
+
+  const fullConfig = buildCloudInitFromSystem(data, safeOptions);
+  const yaml = exportCloudInitYaml(data, safeOptions);
+  const metaData = generateCloudInitMetaData(undefined, fullConfig.hostname);
+  const st = data.storage;
+  const users = fullConfig.users || [];
+  const sshKeysCount = users.reduce((acc, u) => acc + (u.ssh_authorized_keys?.length || 0), 0);
+
+  return {
+    yaml,
+    metaData,
+    hostname: fullConfig.hostname || data.hostname || 'axonwall-fw',
+    fqdn: fullConfig.fqdn || `${fullConfig.hostname || 'axonwall-fw'}.axonwall.local`,
+    storageSummary: {
+      layoutMode: st?.layout_mode || 'standard_ab',
+      targetDisks: st?.target_disks || ['/dev/sda'],
+      slotAGb: st?.partitions?.slot_a?.size_gb ?? 16,
+      slotBGb: st?.partitions?.slot_b?.size_gb ?? 16,
+      swapGb: st?.partitions?.swap?.size_gb ?? 2,
+      zramEnabled: Boolean(st?.partitions?.swap?.zram_enabled),
+      raidEnabled: Boolean(st?.system_raid?.enabled),
+      luksEnabled: Boolean(st?.encryption?.enabled),
+      zfsEnabled: Boolean(st?.zfs?.enabled),
+    },
+    usersCount: users.length,
+    sshKeysCount,
+    packagesCount: (fullConfig.packages || []).length,
+  };
 }
 
 export async function applyDesiredState(

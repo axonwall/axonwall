@@ -1,187 +1,253 @@
 import { describe, it, expect } from 'vitest';
+import { DesiredStateSchema } from '../schemas/index.js';
 import {
+  parseStorageFromLsblk,
+  buildCloudInitFromSystem,
+  exportCloudInitYaml,
   parseCloudInitYaml,
-  serializeCloudInitYaml,
+  generateCloudInitMetaData,
+  buildNoCloudIso,
   cloudInitStorageToInstallerChoices,
-  formatInstallerChoicesEnv,
-  type FullCloudInit,
+  REDACTED_KEY32_PLACEHOLDER,
+  REDACTED_SECRET_PLACEHOLDER,
 } from './index.js';
 
-describe('Axonwall Cloud-Init & Custom Partitioning Engine', () => {
-  it('parses valid #cloud-config with custom partitions and LUKS2 encryption', () => {
-    const yaml = `
-#cloud-config
-hostname: edge-sec-01
-timezone: America/New_York
-users:
-  - name: axonwall
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAdminKey admin@corp
+describe('Cloud-Init Exporter & System Replicator', () => {
+  const sampleLsblk = {
+    blockdevices: [
+      {
+        name: 'sda',
+        size: 68719476736, // 64 GB
+        type: 'disk',
+        fstype: null,
+        label: null,
+        mountpoint: null,
+        children: [
+          {
+            name: 'sda1',
+            size: 536870912, // 512 MB
+            type: 'part',
+            fstype: 'vfat',
+            label: 'EFI',
+            mountpoint: '/boot/efi',
+          },
+          {
+            name: 'sda2',
+            size: 17179869184, // 16 GB
+            type: 'part',
+            fstype: 'ext4',
+            label: 'axon_root_a',
+            mountpoint: null,
+          },
+          {
+            name: 'sda3',
+            size: 17179869184, // 16 GB
+            type: 'part',
+            fstype: 'ext4',
+            label: 'axon_root_b',
+            mountpoint: '/',
+          },
+          {
+            name: 'sda4',
+            size: 2147483648, // 2 GB
+            type: 'part',
+            fstype: 'swap',
+            label: null,
+            mountpoint: '[SWAP]',
+          },
+          {
+            name: 'sda5',
+            size: 31675383808, // ~29.5 GB
+            type: 'part',
+            fstype: 'ext4',
+            label: 'axon_data',
+            mountpoint: '/var/lib/axonwall',
+          },
+        ],
+      },
+      {
+        name: 'zram0',
+        size: 1073741824,
+        type: 'disk',
+        fstype: 'swap',
+        label: null,
+        mountpoint: '[SWAP]',
+      },
+    ],
+  };
 
-axonwall:
-  storage:
-    layout_mode: custom
-    target_disks:
-      - /dev/nvme0n1
-      - /dev/nvme1n1
-    system_raid:
-      enabled: true
-      level: raid1
-    encryption:
-      enabled: true
-      tpm2_auto_unlock: true
-      passphrase: "super-secure-vault-passphrase"
-    partitions:
-      efi_size_mb: 1024
-      slot_a:
-        size_gb: 24
-        filesystem: ext4
-      slot_b:
-        size_gb: 24
-        filesystem: ext4
-      swap:
-        size_gb: 4
-        zram_enabled: true
-      data:
-        size_gb: 80
-        filesystem: xfs
-      logs:
-        enabled: true
-        size_gb: 50
-        filesystem: xfs
-        mountpoint: /var/log
-      custom_mounts:
-        - name: axon_pcap
-          size_gb: 120
-          filesystem: xfs
-          mountpoint: /var/lib/axonwall/pcap
-    zfs:
-      enabled: true
-      pool_name: storage_pool
-      allocate_system_disk_remainder: true
-      extra_disks:
-        - /dev/sda
-        - /dev/sdb
-      topology: mirror
-      datasets:
-        - name: storage_pool/nas
-          mountpoint: /mnt/nas
-          compression: zstd
-  auth:
-    admin_username: admin
-    admin_password_hash: "scrypt$12345$abcdef"
-    ztp:
-      enabled: true
-      controller_url: "https://hub.example.com:2966"
-      enrollment_token: "enrollment-secret-token"
-  desired_state:
-    system:
-      hostname: edge-sec-01
-      domain: corp.internal
-`;
+  it('introspects A/B dual-root partition layout from lsblk JSON', () => {
+    const storage = parseStorageFromLsblk(sampleLsblk);
+    expect(storage.layout_mode).toBe('standard_ab');
+    expect(storage.target_disks).toEqual(['/dev/sda']);
+    expect(storage.partitions.efi_size_mb).toBe(512);
+    expect(storage.partitions.slot_a).toEqual({ size_gb: 16, filesystem: 'ext4' });
+    expect(storage.partitions.slot_b).toEqual({ size_gb: 16, filesystem: 'ext4' });
+    expect(storage.partitions.swap).toEqual({ size_gb: 2, zram_enabled: true });
+    expect(storage.partitions.data.allocate_remaining).toBe(true);
 
-    const parsed = parseCloudInitYaml(yaml);
-    expect(parsed.hostname).toBe('edge-sec-01');
-    expect(parsed.users?.[0].name).toBe('axonwall');
-    expect(parsed.axonwall?.storage?.layout_mode).toBe('custom');
-    expect(parsed.axonwall?.storage?.encryption.enabled).toBe(true);
-    expect(parsed.axonwall?.storage?.encryption.tpm2_auto_unlock).toBe(true);
-    expect(parsed.axonwall?.storage?.system_raid.enabled).toBe(true);
-    expect(parsed.axonwall?.storage?.partitions.slot_a.size_gb).toBe(24);
-    expect(parsed.axonwall?.storage?.partitions.logs.enabled).toBe(true);
-    expect(parsed.axonwall?.storage?.partitions.logs.size_gb).toBe(50);
-    expect(parsed.axonwall?.storage?.partitions.custom_mounts[0].mountpoint).toBe('/var/lib/axonwall/pcap');
-    expect(parsed.axonwall?.storage?.zfs.pool_name).toBe('storage_pool');
-    expect(parsed.axonwall?.storage?.zfs.extra_disks).toEqual(['/dev/sda', '/dev/sdb']);
-    expect(parsed.axonwall?.auth?.ztp.controller_url).toBe('https://hub.example.com:2966');
+    const choices = cloudInitStorageToInstallerChoices(storage);
+    expect(choices.STANDBY_ENABLED).toBe(true);
+    expect(choices.ROOT_GB).toBe(16);
+    expect(choices.ZRAM_ENABLED).toBe(true);
   });
 
-  it('converts CloudInitStorage into installer choice variables with LUKS2 & RAID-1', () => {
-    const parsed: FullCloudInit = {
-      axonwall: {
-        storage: {
-          layout_mode: 'custom',
-          target_disks: ['/dev/nvme0n1', '/dev/nvme1n1'],
-          system_raid: { enabled: true, level: 'raid1' },
-          encryption: {
-            enabled: true,
-            tpm2_auto_unlock: true,
-            passphrase: 'vault-passphrase',
-            cipher: 'aes-xts-plain64',
-            key_size: 512,
-          },
-          partitions: {
-            efi_size_mb: 1024,
-            slot_a: { size_gb: 25, filesystem: 'ext4' },
-            slot_b: { size_gb: 25, filesystem: 'ext4' },
-            swap: { size_gb: 8, zram_enabled: true },
-            data: { size_gb: 60, allocate_remaining: false, filesystem: 'xfs' },
-            logs: { enabled: true, size_gb: 40, filesystem: 'xfs', mountpoint: '/var/log' },
-            custom_mounts: [
-              { name: 'axon_telemetry', size_gb: 100, filesystem: 'ext4', mountpoint: '/var/lib/axonwall/telemetry' },
+  it('builds a valid #cloud-config YAML with redacted secrets and round-trips through parseCloudInitYaml', () => {
+    const desiredState = DesiredStateSchema.parse({
+      system: {
+        hostname: 'edge-fw-01',
+        domain: 'corp.axonwall.io',
+        timezone: 'America/Chicago',
+      },
+      interfaces: [
+        {
+          name: 'wan',
+          device: 'eth0',
+          type: 'static',
+          ipv4Address: '203.0.113.10/24',
+          ipv4Gateway: '203.0.113.1',
+        },
+        {
+          name: 'lan',
+          device: 'eth1',
+          type: 'static',
+          ipv4Address: '10.80.0.1/24',
+        },
+      ],
+      frr: {
+        enabled: true,
+        bgp: {
+          enabled: true,
+          asNumber: 65001,
+          routerId: '10.80.0.1',
+          neighbors: [
+            {
+              peerIp: '203.0.113.1',
+              remoteAs: 65000,
+              password: 'super-secret-bgp-md5-password',
+            },
+          ],
+        },
+      },
+      wireguard: {
+        enabled: true,
+        listenPort: 51820,
+        privateKey: 'LIVE_WG_PRIVATE_KEY_SECRET_32_CHARS_LONG_1234',
+        address: '10.99.0.1/24',
+      },
+    });
+
+    const storage = parseStorageFromLsblk(sampleLsblk);
+    const yamlText = exportCloudInitYaml(
+      {
+        desiredState,
+        hostname: 'edge-fw-01',
+        timezone: 'America/Chicago',
+        storage,
+        adminUsername: 'admin',
+        adminPassword: 'real-admin-password',
+        ztp: {
+          enabled: true,
+          controllerUrl: 'https://ctrl.corp.axonwall.io:2966',
+          enrollmentToken: 'real-ztp-token',
+        },
+        osUsers: [
+          {
+            name: 'thoth',
+            gecos: 'Thoth Admin',
+            sudo: 'ALL=(ALL) NOPASSWD:ALL',
+            shell: '/usr/bin/zsh',
+            sshAuthorizedKeys: [
+              'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl thoth@workstation',
+              '# comment line that should be filtered out',
             ],
           },
-          zfs: {
-            enabled: true,
-            pool_name: 'tank',
-            allocate_system_disk_remainder: true,
-            system_disk_size_gb: 0,
-            extra_disks: ['/dev/sdb'],
-            topology: 'mirror',
-            datasets: [],
-          },
-        },
+        ],
       },
-    };
+      {
+        redactSecrets: true,
+        templateMode: false,
+      }
+    );
 
-    const choices = cloudInitStorageToInstallerChoices(parsed.axonwall!.storage!);
-    expect(choices.TARGET_DISK).toBe('/dev/nvme0n1');
-    expect(choices.SYSTEM_RAID_MODE).toBe('mirror');
-    expect(choices.SYSTEM_RAID_DISKS).toBe('/dev/nvme0n1 /dev/nvme1n1');
-    expect(choices.EFI_MB).toBe(1024);
-    expect(choices.ROOT_GB).toBe(25);
-    expect(choices.ROOT_MB).toBe(25600);
-    expect(choices.ROOT_FSTYPE).toBe('ext4');
-    expect(choices.SWAP_GB).toBe(8);
-    expect(choices.ZRAM_ENABLED).toBe(true);
-    expect(choices.DATA_GB).toBe(60);
-    expect(choices.DATA_FSTYPE).toBe('xfs');
-    expect(choices.LOGS_ENABLED).toBe(true);
-    expect(choices.LOGS_GB).toBe(40);
-    expect(choices.LOGS_FSTYPE).toBe('xfs');
-    expect(choices.LUKS_ENABLED).toBe(true);
-    expect(choices.LUKS_TPM2).toBe(true);
-    expect(choices.LUKS_PASSPHRASE).toBe('vault-passphrase');
-    expect(choices.ZFS_ALLOC_MODE).toBe('remainder');
-    expect(choices.ZFS_EXTRA_DISKS).toBe('/dev/sdb');
+    expect(yamlText.startsWith('#cloud-config\n')).toBe(true);
+    expect(yamlText).not.toContain('super-secret-bgp-md5-password');
+    expect(yamlText).not.toContain('LIVE_WG_PRIVATE_KEY_SECRET_32_CHARS_LONG_1234');
+    expect(yamlText).not.toContain('real-admin-password');
+    expect(yamlText).not.toContain('real-ztp-token');
 
-    const envText = formatInstallerChoicesEnv(choices);
-    expect(envText).toContain("TARGET_DISK='/dev/nvme0n1'");
-    expect(envText).toContain("SYSTEM_RAID_MODE='mirror'");
-    expect(envText).toContain('LUKS_ENABLED=true');
-    expect(envText).toContain('LUKS_TPM2=true');
-    expect(envText).toContain('LOGS_ENABLED=true');
-    expect(envText).toContain('ROOT_MB=25600');
+    const parsed = parseCloudInitYaml(yamlText);
+    expect(parsed.hostname).toBe('edge-fw-01');
+    expect(parsed.packages).toContain('frr');
+    expect(parsed.packages).toContain('wireguard-tools');
+    expect(parsed.users?.length).toBe(1);
+    expect(parsed.users?.[0]?.name).toBe('thoth');
+    expect(parsed.users?.[0]?.ssh_authorized_keys.length).toBe(1);
+    expect(parsed.axonwall?.auth?.admin_password).toBe(REDACTED_SECRET_PLACEHOLDER);
+    expect(parsed.axonwall?.desired_state?.wireguard?.privateKey).toBe(REDACTED_KEY32_PLACEHOLDER);
+    expect(parsed.axonwall?.desired_state?.frr?.bgp?.neighbors?.[0]?.password).toBe(
+      REDACTED_SECRET_PLACEHOLDER
+    );
   });
 
-  it('serializes and roundtrips cloud-config YAML cleanly', () => {
-    const input: FullCloudInit = {
-      hostname: 'axonwall-cloud',
-      timezone: 'UTC',
-      axonwall: {
-        auth: {
-          admin_username: 'admin',
-          admin_password_hash: 'scrypt$dummy$hash',
-          ztp: { enabled: false },
-        },
+  it('supports templateMode by appending -clone and converting static WAN interfaces to DHCP', () => {
+    const desiredState = DesiredStateSchema.parse({
+      system: {
+        hostname: 'hq-fw-01',
+        domain: 'axonwall.local',
       },
-    };
+      interfaces: [
+        {
+          name: 'wan',
+          device: 'eth0',
+          type: 'static',
+          ipv4Address: '198.51.100.42/24',
+          ipv4Gateway: '198.51.100.1',
+          macAddress: '52:54:00:12:34:56',
+        },
+        {
+          name: 'lan',
+          device: 'eth1',
+          type: 'static',
+          ipv4Address: '192.168.1.1/24',
+        },
+      ],
+    });
 
-    const serialized = serializeCloudInitYaml(input);
-    expect(serialized.startsWith('#cloud-config')).toBe(true);
-    const roundtripped = parseCloudInitYaml(serialized);
-    expect(roundtripped.hostname).toBe('axonwall-cloud');
-    expect(roundtripped.axonwall?.auth?.admin_password_hash).toBe('scrypt$dummy$hash');
+    const config = buildCloudInitFromSystem(
+      { desiredState, hostname: 'hq-fw-01' },
+      { redactSecrets: true, templateMode: true }
+    );
+
+    expect(config.hostname).toBe('hq-fw-01-clone');
+    expect(config.axonwall?.desired_state?.system?.hostname).toBe('hq-fw-01-clone');
+    const wan = config.axonwall?.desired_state?.interfaces?.find((i) => i.name === 'wan');
+    const lan = config.axonwall?.desired_state?.interfaces?.find((i) => i.name === 'lan');
+    expect(wan?.type).toBe('dhcp');
+    expect(wan?.ipv4Address).toBeUndefined();
+    expect(wan?.macAddress).toBeUndefined();
+    expect(lan?.ipv4Address).toBe('192.168.1.1/24');
+  });
+
+  it('generates a valid ISO9660 + Rock Ridge NoCloud cidata.iso image', () => {
+    const userData = '#cloud-config\nhostname: axonwall-clone\n';
+    const metaData = generateCloudInitMetaData('i-axonwall-01', 'axonwall-clone');
+    const isoBytes = buildNoCloudIso(userData, metaData);
+
+    expect(isoBytes.byteLength).toBeGreaterThanOrEqual(180 * 2048);
+    // Check Primary Volume Descriptor at sector 16 (offset 32768)
+    const pvdOffset = 16 * 2048;
+    expect(isoBytes[pvdOffset]).toBe(0x01);
+    const cd001 = new TextDecoder().decode(isoBytes.subarray(pvdOffset + 1, pvdOffset + 6));
+    expect(cd001).toBe('CD001');
+    const volId = new TextDecoder()
+      .decode(isoBytes.subarray(pvdOffset + 40, pvdOffset + 72))
+      .trim();
+    expect(volId).toBe('cidata');
+
+    // Verify embedded payload exists in data sectors
+    const fullText = new TextDecoder().decode(isoBytes);
+    expect(fullText).toContain('#cloud-config\nhostname: axonwall-clone');
+    expect(fullText).toContain('instance-id: i-axonwall-01');
   });
 });

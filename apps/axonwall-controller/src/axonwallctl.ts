@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
@@ -12,7 +13,17 @@ import {
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
-import { parseCloudInitYaml, serializeYaml, type FullCloudInit } from '@axonwall/lib/cloudinit';
+import {
+  parseCloudInitYaml,
+  serializeYaml,
+  parseStorageFromLsblk,
+  buildCloudInitFromSystem,
+  exportCloudInitYaml,
+  generateCloudInitMetaData,
+  buildNoCloudIso,
+  type FullCloudInit,
+  type CloudInitExportOptions,
+} from '@axonwall/lib/cloudinit';
 
 const ETC_DIR = process.env.AXONWALL_ETC_DIR || '/etc/axonwall';
 const PERSIST_YAML_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
@@ -265,7 +276,7 @@ async function cmdStatus() {
   }
 }
 
-function cmdValidate(): DesiredState {
+function cmdValidate(silent = false): DesiredState {
   ensureInitializedYamlFiles();
   const files = readYamlConfigFiles();
   const result = validateYamlConfigFiles(files);
@@ -278,12 +289,14 @@ function cmdValidate(): DesiredState {
     process.exit(1);
   }
 
-  console.log(`${cGreen}${cBold}[✓] All /etc/axonwall/*.yaml files passed schema and syntax validation.${cReset}`);
-  console.log(
-    `    Interfaces: ${result.state.interfaces.length} | Firewall Rules: ${result.state.rules.length} | NAT Rules: ${
-      result.state.nat?.length || 0
-    } | DHCP Pools: ${result.state.dhcp?.subnets?.length || 0}`
-  );
+  if (!silent) {
+    console.log(`${cGreen}${cBold}[✓] All /etc/axonwall/*.yaml files passed schema and syntax validation.${cReset}`);
+    console.log(
+      `    Interfaces: ${result.state.interfaces.length} | Firewall Rules: ${result.state.rules.length} | NAT Rules: ${
+        result.state.nat?.length || 0
+      } | DHCP Pools: ${result.state.dhcp?.subnets?.length || 0}`
+    );
+  }
   return result.state;
 }
 
@@ -466,7 +479,255 @@ async function cmdRollback() {
   }
 }
 
+async function cmdCloudInitExport(userArgs: string[]) {
+  let outputFile: string | undefined;
+  let isoFile: string | undefined;
+  let redactSecrets = true;
+  let templateMode = false;
+  let includeStorage = true;
+  let includeUsers = true;
+  let includePackages = true;
+  let hostnameOverride: string | undefined;
+
+  for (let i = 0; i < userArgs.length; i++) {
+    const arg = userArgs[i]!;
+    if ((arg === '-o' || arg === '--output') && userArgs[i + 1]) {
+      outputFile = userArgs[++i];
+    } else if (arg.startsWith('--output=')) {
+      outputFile = arg.slice('--output='.length);
+    } else if (arg === '--iso' && userArgs[i + 1]) {
+      isoFile = userArgs[++i];
+    } else if (arg.startsWith('--iso=')) {
+      isoFile = arg.slice('--iso='.length);
+    } else if (arg === '--hostname' && userArgs[i + 1]) {
+      hostnameOverride = userArgs[++i];
+    } else if (arg.startsWith('--hostname=')) {
+      hostnameOverride = arg.slice('--hostname='.length);
+    } else if (arg === '--redact') {
+      redactSecrets = true;
+    } else if (arg === '--no-redact' || arg === '--include-secrets') {
+      redactSecrets = false;
+    } else if (arg === '--template') {
+      templateMode = true;
+    } else if (arg === '--no-storage') {
+      includeStorage = false;
+    } else if (arg === '--no-users') {
+      includeUsers = false;
+    } else if (arg === '--no-packages') {
+      includePackages = false;
+    }
+  }
+
+  const desiredState = cmdValidate(true);
+  const hostname = os.hostname() || desiredState.system?.hostname || 'axonwall-fw';
+  let timezone = desiredState.system?.timezone || 'UTC';
+  try {
+    if (fs.existsSync('/etc/timezone')) {
+      const tz = fs.readFileSync('/etc/timezone', 'utf8').trim();
+      if (tz) timezone = tz;
+    }
+  } catch {}
+
+  let lsblkRaw = '{}';
+  try {
+    lsblkRaw = execFileSync(
+      'lsblk',
+      ['-J', '-b', '-o', 'NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT,PKNAME'],
+      { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+  } catch {}
+
+  const zfsPools: Array<{
+    name: string;
+    datasets?: Array<{ name: string; mountpoint?: string; compression?: string }>;
+  }> = [];
+  try {
+    const zpoolOut = execFileSync('zpool', ['list', '-H', '-o', 'name'], {
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (zpoolOut) {
+      for (const poolName of zpoolOut.split('\n').map((s) => s.trim()).filter(Boolean)) {
+        const datasets: Array<{ name: string; mountpoint?: string; compression?: string }> = [];
+        try {
+          const zfsOut = execFileSync(
+            'zfs',
+            ['list', '-H', '-r', '-o', 'name,mountpoint,compression', poolName],
+            { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }
+          ).trim();
+          for (const line of zfsOut.split('\n')) {
+            const [dsName, mp, comp] = line.split('\t').map((s) => s.trim());
+            if (dsName && dsName !== poolName) {
+              datasets.push({
+                name: dsName.replace(new RegExp(`^${poolName}/`), ''),
+                mountpoint: mp && mp !== 'none' && mp !== '-' ? mp : undefined,
+                compression: comp || 'lz4',
+              });
+            }
+          }
+        } catch {}
+        zfsPools.push({ name: poolName, datasets });
+      }
+    }
+  } catch {}
+
+  const storage = parseStorageFromLsblk(lsblkRaw, { zfsPools });
+
+  let adminUsername = 'admin';
+  let adminPassword: string | undefined;
+  for (const envPath of [path.join(ETC_DIR, 'admin.env'), path.join(PERSIST_YAML_DIR, 'admin.env')]) {
+    try {
+      if (fs.existsSync(envPath)) {
+        const raw = fs.readFileSync(envPath, 'utf8');
+        for (const line of raw.split('\n')) {
+          const [k, ...vParts] = line.trim().split('=');
+          const v = vParts.join('=').trim();
+          if (k === 'LOCAL_ADMIN_USER' && v) adminUsername = v;
+          if (k === 'LOCAL_ADMIN_PASSWORD' && v) adminPassword = v;
+        }
+        break;
+      }
+    } catch {}
+  }
+
+  let ztpEnabled = false;
+  let controllerUrl: string | undefined;
+  let enrollmentToken: string | undefined;
+  try {
+    const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
+    if (fs.existsSync(ctrlEnvPath)) {
+      const raw = fs.readFileSync(ctrlEnvPath, 'utf8');
+      for (const line of raw.split('\n')) {
+        const [k, ...vParts] = line.trim().split('=');
+        const v = vParts.join('=').trim();
+        if (k === 'AXONWALL_CONTROLLER_URL' && v) controllerUrl = v;
+        if (k === 'AXONWALL_ZTP_TOKEN' && v) enrollmentToken = v;
+      }
+      if (
+        controllerUrl &&
+        !controllerUrl.includes('127.0.0.1') &&
+        !controllerUrl.includes('localhost')
+      ) {
+        ztpEnabled = true;
+      }
+    }
+  } catch {}
+
+  const osUsersMap = new Map<
+    string,
+    {
+      name: string;
+      gecos?: string;
+      sudo?: string;
+      shell?: string;
+      lockPasswd?: boolean;
+      sshAuthorizedKeys: string[];
+    }
+  >();
+
+  try {
+    const daemonUsers = await sendAgentSocketRequest<{ users: any[] }>('/v1/system/users', 'GET');
+    if (daemonUsers && Array.isArray(daemonUsers.users)) {
+      for (const u of daemonUsers.users) {
+        if (u.isSystem) continue;
+        const isPriv =
+          u.applianceRole === 'admin' ||
+          (Array.isArray(u.groups) && (u.groups.includes('sudo') || u.groups.includes('wheel')));
+        osUsersMap.set(u.username, {
+          name: u.username,
+          gecos: u.comment || `${u.username} (${u.applianceRole || 'operator'})`,
+          sudo: isPriv ? 'ALL=(ALL) NOPASSWD:ALL' : undefined,
+          shell: u.shell || '/usr/bin/zsh',
+          lockPasswd: Boolean(u.passwordLocked),
+          sshAuthorizedKeys: Array.isArray(u.sshKeys) ? u.sshKeys : [],
+        });
+      }
+    }
+  } catch {}
+
+  try {
+    if (fs.existsSync('/home')) {
+      for (const dirName of fs.readdirSync('/home')) {
+        const akPath = path.join('/home', dirName, '.ssh', 'authorized_keys');
+        let keys: string[] = [];
+        try {
+          if (fs.existsSync(akPath)) {
+            keys = fs
+              .readFileSync(akPath, 'utf8')
+              .split('\n')
+              .map((l) => l.trim())
+              .filter((l) => l && !l.startsWith('#'));
+          }
+        } catch {}
+        const existing = osUsersMap.get(dirName);
+        if (existing) {
+          existing.sshAuthorizedKeys = Array.from(new Set([...existing.sshAuthorizedKeys, ...keys]));
+        } else if (/^[a-z_][a-z0-9_-]{0,31}$/.test(dirName)) {
+          osUsersMap.set(dirName, {
+            name: dirName,
+            gecos: `${dirName} Administrator`,
+            sudo: 'ALL=(ALL) NOPASSWD:ALL',
+            shell: '/usr/bin/zsh',
+            sshAuthorizedKeys: keys,
+          });
+        }
+      }
+    }
+  } catch {}
+
+  const options: CloudInitExportOptions = {
+    redactSecrets,
+    templateMode,
+    includeStorage,
+    includeUsers,
+    includePackages,
+    hostnameOverride,
+  };
+
+  const hostData = {
+    desiredState,
+    hostname,
+    timezone,
+    storage,
+    adminUsername,
+    adminPassword,
+    ztp: ztpEnabled ? { enabled: true, controllerUrl, enrollmentToken } : { enabled: false },
+    osUsers: Array.from(osUsersMap.values()),
+  };
+
+  const fullConfig = buildCloudInitFromSystem(hostData, options);
+  const yamlText = exportCloudInitYaml(hostData, options);
+  const metaData = generateCloudInitMetaData(undefined, fullConfig.hostname);
+
+  if (outputFile) {
+    fs.mkdirSync(path.dirname(path.resolve(outputFile)), { recursive: true });
+    fs.writeFileSync(outputFile, yamlText, { mode: 0o600 });
+    try { fs.chmodSync(outputFile, 0o600); } catch {}
+    console.error(`${cGreen}[✓] Exported #cloud-config YAML (${yamlText.length} bytes) to ${outputFile}${cReset}`);
+  }
+
+  if (isoFile) {
+    const isoBytes = buildNoCloudIso(yamlText, metaData);
+    fs.mkdirSync(path.dirname(path.resolve(isoFile)), { recursive: true });
+    fs.writeFileSync(isoFile, isoBytes, { mode: 0o600 });
+    try { fs.chmodSync(isoFile, 0o600); } catch {}
+    console.error(
+      `${cGreen}[✓] Generated bootable NoCloud seed ISO (label='cidata', ${isoBytes.byteLength} bytes) at ${isoFile}${cReset}`
+    );
+  }
+
+  if (!outputFile && !isoFile) {
+    process.stdout.write(yamlText);
+  }
+}
+
 async function cmdCloudInit(userArgs: string[]) {
+  if (userArgs[0]?.toLowerCase() === 'export') {
+    await cmdCloudInitExport(userArgs.slice(1));
+    return;
+  }
+
   let explicitFile: string | undefined;
   let autoApply = true;
 
@@ -822,6 +1083,8 @@ ${cBold}COMMANDS:${cReset}
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
   plugin <cmd> [id]   Manage extension plugins (list, install, remove, re-sync)
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
+  cloudinit export    Export running appliance into #cloud-config YAML or bootable NoCloud cidata.iso
+                      Options: [-o <file.yaml>] [--iso <cidata.iso>] [--template] [--no-redact] [--hostname <name>]
   edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR, then automatically validate and apply
   export              Output the complete unified configuration as a single YAML document to stdout
 
