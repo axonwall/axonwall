@@ -236,16 +236,28 @@ func ReconcileStaticRoutes() error {
 
 			args := []string{family, "route", "replace", r.Network, "via", r.Gateway}
 			if dev != "" {
-				args = append(args, "dev", dev)
+				args = append(args, "dev", dev, "onlink")
 			}
 			args = append(args, "proto", "static")
 
 			cmd := exec.Command("ip", args...)
 			if out, err := cmd.CombinedOutput(); err != nil {
+				// If adding with onlink failed, retry without onlink as fallback
+				if dev != "" {
+					fallbackArgs := []string{family, "route", "replace", r.Network, "via", r.Gateway, "dev", dev, "proto", "static"}
+					if fbOut, fbErr := exec.Command("ip", fallbackArgs...).CombinedOutput(); fbErr == nil {
+						appliedCount++
+						log.Printf("[Agent] Applied static route: %s via %s (dev=%s)", r.Network, r.Gateway, dev)
+						continue
+					} else {
+						log.Printf("[Agent] Failed to apply static route %s via %s: %s", r.Network, r.Gateway, strings.TrimSpace(string(fbOut)))
+						continue
+					}
+				}
 				log.Printf("[Agent] Failed to apply static route %s via %s: %s", r.Network, r.Gateway, strings.TrimSpace(string(out)))
 			} else {
 				appliedCount++
-				log.Printf("[Agent] Applied static route: %s via %s (dev=%s)", r.Network, r.Gateway, dev)
+				log.Printf("[Agent] Applied static route: %s via %s (dev=%s, onlink)", r.Network, r.Gateway, dev)
 			}
 		} else {
 			// If explicitly disabled, remove from kernel if present with proto static

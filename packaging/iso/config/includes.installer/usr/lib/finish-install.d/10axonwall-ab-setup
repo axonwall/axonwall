@@ -119,11 +119,14 @@ if [ -b "$ROOT_A_DEV" ]; then
 fi
 
 if [ -b "$ROOT_B_DEV" ]; then
+  udevadm settle 2>/dev/null || true
+  sleep 1
   echo "[+] Formatting Slot B standby partition: ${ROOT_B_DEV} as ${ROOT_FSTYPE}..."
   if [ "$ROOT_FSTYPE" = "xfs" ]; then
     mkfs.xfs -f -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
   else
     mkfs.ext4 -F -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
   fi
 fi
 
@@ -284,7 +287,7 @@ if [ -b "$ROOT_B_DEV" ]; then
 
     # Configure Slot B's /etc/fstab for independent booting
     if [ -f "$STAGE_B/etc/fstab" ]; then
-      sed -i 's/axon_root_a/axon_root_b/g' "$STAGE_B/etc/fstab"
+      sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root_b\1|' "$STAGE_B/etc/fstab" 2>/dev/null || true
       sed -i '\#/mnt/standby#d' "$STAGE_B/etc/fstab"
       if [ "$LUKS_ENABLED" = "1" ]; then
         sed -i '\#[[:space:]]/var/lib/axonwall[[:space:]]#d' "$STAGE_B/etc/fstab"
@@ -349,6 +352,7 @@ fi
 chown 0:0 /target/var/lib/axonwall/home 2>/dev/null || true
 chmod 0755 /target/var/lib/axonwall /target/var/lib/axonwall/home 2>/dev/null || true
 if [ -f /target/etc/fstab ]; then
+  sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root_a\1|' /target/etc/fstab 2>/dev/null || true
   sed -i '\#/mnt/standby#d' /target/etc/fstab
   if [ "$LUKS_ENABLED" = "1" ]; then
     sed -i '\#[[:space:]]/var/lib/axonwall[[:space:]]#d' /target/etc/fstab

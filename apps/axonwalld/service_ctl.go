@@ -90,6 +90,12 @@ func triggerDhcpClient(dev string) {
 	go func() {
 		if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 			_ = exec.Command(dhclientPath, "-1", "-v", dev).Run()
+		} else if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
+			_ = exec.Command(dhcpcdPath, "-4", "-n", dev).Run()
+		}
+		// After DHCP client negotiates lease, re-reconcile static routes
+		if err := ReconcileStaticRoutes(); err != nil {
+			log.Printf("[Agent] Post-DHCP static route reconciliation: %v", err)
 		}
 	}()
 }

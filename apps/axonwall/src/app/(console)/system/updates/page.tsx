@@ -130,8 +130,22 @@ export default function SystemUpdatesPage() {
     }
     setIsRebooting(true);
     try {
-      const res = await rebootSystemAction(slot);
-      setAlertMessage(res.message || `Rebooting into Slot ${slot}...`);
+      let res: { success?: boolean; message?: string } = {};
+      try {
+        const resp = await fetch('/api/system/power', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'reboot', slot }),
+        });
+        res = await resp.json();
+      } catch {
+        res = await rebootSystemAction(slot);
+      }
+      if (res.success === false) {
+        alert(`Reboot request failed: ${res.message || 'Operation failed'}`);
+      } else {
+        setAlertMessage(res.message || `Rebooting into Slot ${slot}...`);
+      }
     } catch (err: any) {
       alert(`Reboot request failed: ${err?.message || String(err)}`);
     } finally {

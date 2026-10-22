@@ -143,6 +143,40 @@ if [ "$TARGET_SLOT" = "A" ]; then
 fi
 TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
 
+if [ -z "$TARGET_DEV" ]; then
+  # Fallback: identify unlabelled standby partition adjacent to running root partition
+  RUNNING_ROOT="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+  if [ -b "$RUNNING_ROOT" ]; then
+    ROOT_DISK="$(echo "$RUNNING_ROOT" | sed -E 's/p?[0-9]+$//')"
+    ROOT_PART_NUM="$(echo "$RUNNING_ROOT" | grep -oE '[0-9]+$')"
+    if [ "$TARGET_SLOT" = "B" ] && [ -n "$ROOT_PART_NUM" ]; then
+      SIBLING_DEV=""
+      if echo "$RUNNING_ROOT" | grep -q 'nvme\|mmcblk\|loop'; then
+        SIBLING_DEV="${ROOT_DISK}p$(( ROOT_PART_NUM + 1 ))"
+      else
+        SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM + 1 ))"
+      fi
+      if [ -b "$SIBLING_DEV" ]; then
+        echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
+        e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
+        TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+      fi
+    elif [ "$TARGET_SLOT" = "A" ] && [ -n "$ROOT_PART_NUM" ] && [ "$ROOT_PART_NUM" -gt 1 ]; then
+      SIBLING_DEV=""
+      if echo "$RUNNING_ROOT" | grep -q 'nvme\|mmcblk\|loop'; then
+        SIBLING_DEV="${ROOT_DISK}p$(( ROOT_PART_NUM - 1 ))"
+      else
+        SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM - 1 ))"
+      fi
+      if [ -b "$SIBLING_DEV" ]; then
+        echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
+        e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
+        TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+      fi
+    fi
+  fi
+fi
+
 # 2. Attempt to fetch release package from GitHub Releases if online
 CLEAN_VER="${TARGET_VERSION#v}"
 DEB_TMP=""
@@ -227,11 +261,7 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
 
     # Ensure /etc/fstab on target slot points to the correct root label, has no /mnt/standby mount, and bind-mounts /var/lib/axonwall/home -> /home
     if [ -f "${STAGE_DIR}/etc/fstab" ]; then
-      if [ "$TARGET_SLOT" = "B" ]; then
-        sed -i 's/axon_root_a/axon_root_b/g' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
-      else
-        sed -i 's/axon_root_b/axon_root_a/g' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
-      fi
+      sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL='"${TARGET_LABEL}"'\1|' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
       sed -i '\#/mnt/standby#d' "${STAGE_DIR}/etc/fstab" 2>/dev/null || true
       if ! grep -q '/var/lib/axonwall/home' "${STAGE_DIR}/etc/fstab"; then
         echo "/var/lib/axonwall/home  /home  none  bind  0  0" >> "${STAGE_DIR}/etc/fstab"
@@ -383,7 +413,9 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       fi
       rmdir "$SLOT_A_MNT" 2>/dev/null || true
     fi
-  fi
+elif [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline; then
+  echo "[-] ERROR: Appliance is configured for Dual-Root A/B, but target block device for Slot ${TARGET_SLOT} could not be resolved." >&2
+  exit 1
 else
   echo "[+] Running in standard single-root mode. Performing in-place package update..."
   mkdir -p /etc/axonwall 2>/dev/null || true
