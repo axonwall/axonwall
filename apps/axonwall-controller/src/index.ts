@@ -44,6 +44,22 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listUsers, createUser, createPreAuthKey } from './headscale.js';
+import { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord } from './mcp/authz.js';
+import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, type JsonRpcRequest } from './mcp/server.js';
+import { recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries } from './mcp/audit.js';
+
+export {
+  authenticateMcpToken,
+  createMcpApiKeyRecord,
+  listMcpApiKeys,
+  revokeMcpApiKeyRecord,
+  processMcpJsonRpcMessage,
+  MCP_RESOURCES_CATALOG,
+  MCP_TOOLS_CATALOG,
+  recordMcpAuditEntry,
+  verifyMcpAuditChain,
+  queryMcpAuditEntries,
+};
 
 function getSafeRedirectUrl(
   req: http.IncomingMessage,
@@ -420,6 +436,113 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         totalEnrolled: activeSatellites.size,
         satellites: satellitesData,
       }));
+      return;
+    }
+
+    // ========================================================================
+    // Security AI / VigilSOC Model Context Protocol (MCP) Endpoint (/api/v1/mcp)
+    // ========================================================================
+    if (pathname === '/api/v1/mcp' || pathname === '/api/v1/mcp/sse') {
+      const authHeader = (req.headers.authorization || '').trim();
+      const rawToken = authHeader.toLowerCase().startsWith('bearer ')
+        ? authHeader.slice(7).trim()
+        : ((req.headers['x-axonwall-mcp-token'] as string) || '').trim();
+      const clientIp = (req.socket?.remoteAddress || '127.0.0.1').replace(/^::ffff:/i, '');
+
+      const authRes = authenticateMcpToken(rawToken, clientIp, req);
+      if (!authRes.authenticated || !authRes.key) {
+        recordMcpAuditEntry({
+          keyId: authRes.key?.id ?? 'unauthenticated',
+          keyName: authRes.key?.name ?? 'unauthenticated',
+          agentType: authRes.key?.agentType ?? 'unknown',
+          clientIp,
+          toolName: `http:${req.method}:${pathname}`,
+          requiredScope: 'mcp:auth',
+          decision: 'denied',
+          denialReason: authRes.errorMessage || 'Authentication failed',
+          paramsSummary: { pathname, method: req.method },
+        });
+        res.writeHead(authRes.errorStatus || 401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32001, message: authRes.errorMessage || 'Unauthorized MCP request' },
+        }));
+        return;
+      }
+
+      const authenticatedKey = authRes.key;
+
+      if (req.method === 'GET') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        res.write(`event: endpoint\ndata: /api/v1/mcp\n\n`);
+        const keepAlive = setInterval(() => {
+          if (!res.writableEnded) {
+            res.write(`: ping ${Date.now()}\n\n`);
+          }
+        }, 15000);
+        req.on('close', () => clearInterval(keepAlive));
+        return;
+      }
+
+      if (req.method === 'POST') {
+        let body = '';
+        let aborted = false;
+        req.on('data', (chunk: any) => {
+          body += chunk.toString();
+          if (body.length > 262144) {
+            aborted = true;
+            res.writeHead(413, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Payload too large' } }));
+            req.destroy();
+          }
+        });
+        req.on('end', async () => {
+          if (aborted) return;
+          try {
+            const rpcPayload = JSON.parse(body) as JsonRpcRequest;
+            const rpcResp = await processMcpJsonRpcMessage(rpcPayload, {
+              key: authenticatedKey,
+              clientIp,
+              onFleetBroadcastBlock: (targetIp: string) => {
+                let notified = 0;
+                for (const sat of activeSatellites.values()) {
+                  if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
+                    sat.ws.send(JSON.stringify({
+                      type: 'BLOCK_TARGET',
+                      payload: { target: targetIp, isMac: false },
+                    }));
+                    notified++;
+                  }
+                }
+                return notified;
+              },
+            });
+            if (!rpcResp) {
+              res.writeHead(202);
+              res.end();
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(rpcResp));
+          } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              jsonrpc: '2.0',
+              id: null,
+              error: { code: -32700, message: 'Invalid JSON-RPC payload' },
+            }));
+          }
+        });
+        return;
+      }
+
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method Not Allowed' }));
       return;
     }
 

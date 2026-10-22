@@ -10,6 +10,16 @@ import {
   parseDesiredStateFromYamlFiles,
   validateYamlConfigFiles,
 } from '@axonwall/lib/yaml';
+import {
+  McpApiKeySchema,
+  McpPolicyLimitsSchema,
+  type McpApiKey,
+  type McpApiKeyPublic,
+  type McpAuditLogEntry,
+  type McpPolicyLimits,
+  type McpScope,
+  type McpTacticalLease,
+} from '@axonwall/lib/mcp';
 import http from 'node:http';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -3135,6 +3145,316 @@ export async function runCliToolSnapshot(
     timestamp: new Date().toISOString(),
   };
 }
+
+// ============================================================================
+// Security AI / VigilSOC MCP Control Plane Management Actions
+// ============================================================================
+
+const MCP_GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+
+function getMcpKeysStoragePath(): string {
+  if (process.env.AXONWALL_MCP_KEYS_PATH) return process.env.AXONWALL_MCP_KEYS_PATH;
+  const primary = '/var/lib/axonwall';
+  try {
+    fs.mkdirSync(primary, { recursive: true, mode: 0o700 });
+    fs.accessSync(primary, fs.constants.W_OK);
+    return path.join(primary, 'mcp-keys.json');
+  } catch {
+    const fallback = '/tmp/axonwall';
+    fs.mkdirSync(fallback, { recursive: true, mode: 0o700 });
+    return path.join(fallback, 'mcp-keys.json');
+  }
+}
+
+function getMcpAuditStoragePath(): string {
+  if (process.env.AXONWALL_MCP_AUDIT_PATH) return process.env.AXONWALL_MCP_AUDIT_PATH;
+  const primary = '/var/log/axonwall';
+  try {
+    fs.mkdirSync(primary, { recursive: true, mode: 0o700 });
+    fs.accessSync(primary, fs.constants.W_OK);
+    return path.join(primary, 'mcp-audit.jsonl');
+  } catch {
+    const fallback = '/tmp/axonwall';
+    fs.mkdirSync(fallback, { recursive: true, mode: 0o700 });
+    return path.join(fallback, 'mcp-audit.jsonl');
+  }
+}
+
+function readStoredMcpKeys(): McpApiKey[] {
+  const filePath = getMcpKeysStoragePath();
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!Array.isArray(parsed)) return [];
+    const out: McpApiKey[] = [];
+    for (const item of parsed) {
+      const res = McpApiKeySchema.safeParse(item);
+      if (res.success) out.push(res.data);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredMcpKeys(keys: McpApiKey[]): void {
+  const filePath = getMcpKeysStoragePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const tmp = `${filePath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(keys, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, filePath);
+}
+
+function readAndVerifyMcpAuditLog(limit = 100): {
+  entries: McpAuditLogEntry[];
+  integrity: { valid: boolean; totalEntries: number; brokenAtIndex?: number; headHash: string };
+} {
+  const auditPath = getMcpAuditStoragePath();
+  if (!fs.existsSync(auditPath)) {
+    return {
+      entries: [],
+      integrity: { valid: true, totalEntries: 0, headHash: MCP_GENESIS_HASH },
+    };
+  }
+  const raw = fs.readFileSync(auditPath, 'utf8').trim();
+  if (!raw) {
+    return {
+      entries: [],
+      integrity: { valid: true, totalEntries: 0, headHash: MCP_GENESIS_HASH },
+    };
+  }
+
+  const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+  let expectedPrev = MCP_GENESIS_HASH;
+  let valid = true;
+  let brokenAtIndex: number | undefined;
+
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      const entry = JSON.parse(lines[i]!) as McpAuditLogEntry;
+      const canonical = JSON.stringify({
+        id: entry.id,
+        timestamp: entry.timestamp,
+        keyId: entry.keyId,
+        keyName: entry.keyName,
+        agentType: entry.agentType,
+        clientIp: entry.clientIp,
+        toolName: entry.toolName,
+        requiredScope: entry.requiredScope,
+        decision: entry.decision,
+        denialReason: entry.denialReason ?? null,
+        paramsSummary: entry.paramsSummary,
+        auditMetadata: entry.auditMetadata ?? null,
+        leaseId: entry.leaseId ?? null,
+        prevHash: entry.prevHash,
+      });
+      const recomputed = crypto.createHash('sha256').update(canonical).digest('hex');
+      if (entry.prevHash !== expectedPrev || recomputed !== entry.entryHash) {
+        valid = false;
+        brokenAtIndex = i;
+        break;
+      }
+      expectedPrev = entry.entryHash;
+    } catch {
+      valid = false;
+      brokenAtIndex = i;
+      break;
+    }
+  }
+
+  const entries: McpAuditLogEntry[] = [];
+  for (const line of lines.slice(Math.max(0, lines.length - limit)).reverse()) {
+    try {
+      entries.push(JSON.parse(line) as McpAuditLogEntry);
+    } catch {
+      // skip
+    }
+  }
+
+  return {
+    entries,
+    integrity: {
+      valid,
+      totalEntries: lines.length,
+      brokenAtIndex,
+      headHash: expectedPrev,
+    },
+  };
+}
+
+export interface McpDashboardData {
+  keys: McpApiKeyPublic[];
+  leases: McpTacticalLease[];
+  protectedPosture: {
+    applianceIps: string[];
+    gatewayAndHaIps: string[];
+    antiLockoutPorts: number[];
+  };
+  auditEntries: McpAuditLogEntry[];
+  auditIntegrity: {
+    valid: boolean;
+    totalEntries: number;
+    brokenAtIndex?: number;
+    headHash: string;
+  };
+}
+
+export async function getMcpDashboardData(): Promise<McpDashboardData> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const keys = readStoredMcpKeys().map(({ secretHashSha256: _omit, ...pub }) => pub);
+  const { entries, integrity } = readAndVerifyMcpAuditLog(100);
+
+  let leases: McpTacticalLease[] = [];
+  let protectedPosture = {
+    applianceIps: ['192.168.1.1'],
+    gatewayAndHaIps: [] as string[],
+    antiLockoutPorts: [2966, 22, 9876],
+  };
+
+  const postureRes = await callAgentApi<any>('/v1/mcp/posture');
+  if (postureRes && postureRes.success) {
+    if (Array.isArray(postureRes.leases)) {
+      leases = postureRes.leases;
+    }
+    if (postureRes.posture) {
+      protectedPosture = {
+        applianceIps: postureRes.posture.applianceIps || ['192.168.1.1'],
+        gatewayAndHaIps: postureRes.posture.gatewayAndHaIps || [],
+        antiLockoutPorts: postureRes.posture.antiLockoutPorts || [2966, 22, 9876],
+      };
+    }
+  }
+
+  return {
+    keys,
+    leases,
+    protectedPosture,
+    auditEntries: entries,
+    auditIntegrity: integrity,
+  };
+}
+
+export async function createMcpApiKeyAction(input: {
+  name: string;
+  agentType: 'vigilsoc' | 'soar' | 'custom-ai' | 'readonly-analyst';
+  scopes: McpScope[];
+  allowedSourceCidrs: string[];
+  mtlsCertFingerprintSha256?: string;
+  policyLimits: Partial<McpPolicyLimits>;
+  expiresInDays?: number;
+}): Promise<{ success: boolean; rawToken?: string; key?: McpApiKeyPublic; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  if (!input.name || input.name.trim().length < 2) {
+    return { success: false, error: 'Key name must be at least 2 characters' };
+  }
+  if (!Array.isArray(input.scopes) || input.scopes.length === 0) {
+    return { success: false, error: 'Select at least one capability scope' };
+  }
+
+  const shortId = crypto.randomBytes(4).toString('hex');
+  const secretHex = crypto.randomBytes(32).toString('hex');
+  const keyPrefix = `axw_mcp_${shortId}`;
+  const rawToken = `${keyPrefix}_${secretHex}`;
+  const secretHashSha256 = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+  const now = new Date();
+  const expiresAt =
+    input.expiresInDays && input.expiresInDays > 0
+      ? new Date(now.getTime() + input.expiresInDays * 86400 * 1000).toISOString()
+      : undefined;
+
+  const parsedLimits = McpPolicyLimitsSchema.parse(input.policyLimits || {});
+
+  const record = McpApiKeySchema.parse({
+    id: `mcp_key_${shortId}`,
+    name: input.name.trim(),
+    agentType: input.agentType || 'vigilsoc',
+    keyPrefix,
+    secretHashSha256,
+    scopes: input.scopes,
+    allowedSourceCidrs: (input.allowedSourceCidrs || []).map((c) => c.trim()).filter(Boolean),
+    mtlsCertFingerprintSha256: input.mtlsCertFingerprintSha256?.trim() || undefined,
+    policyLimits: parsedLimits,
+    enabled: true,
+    createdAt: now.toISOString(),
+    expiresAt,
+    createdBy: session?.username || 'admin',
+  });
+
+  const existing = readStoredMcpKeys();
+  existing.unshift(record);
+  writeStoredMcpKeys(existing);
+
+  const { secretHashSha256: _omit, ...pub } = record;
+  return {
+    success: true,
+    rawToken,
+    key: pub,
+  };
+}
+
+export async function revokeMcpApiKeyAction(keyId: string): Promise<{ success: boolean; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const existing = readStoredMcpKeys();
+  const idx = existing.findIndex((k) => k.id === keyId);
+  if (idx === -1) {
+    return { success: false, error: 'MCP API key not found' };
+  }
+  existing.splice(idx, 1);
+  writeStoredMcpKeys(existing);
+  return { success: true };
+}
+
+export async function toggleMcpApiKeyAction(
+  keyId: string,
+  enabled: boolean
+): Promise<{ success: boolean; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const existing = readStoredMcpKeys();
+  const target = existing.find((k) => k.id === keyId);
+  if (!target) {
+    return { success: false, error: 'MCP API key not found' };
+  }
+  target.enabled = Boolean(enabled);
+  writeStoredMcpKeys(existing);
+  return { success: true };
+}
+
+export async function revertMcpLeaseAction(
+  leaseId: string,
+  reason = 'Manual revert by administrator from Web Console'
+): Promise<{ success: boolean; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const res = await callAgentApi<any>('/v1/mcp/revert', 'POST', { leaseId, reason });
+  if (res && !res.success && res.error) {
+    return { success: false, error: res.error };
+  }
+  return { success: true };
+}
+
+export async function emergencyFlushMcpLeasesAction(
+  reason = 'Emergency Panic Flush triggered by administrator from Web Console'
+): Promise<{ success: boolean; clearedCount: number }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const res = await callAgentApi<any>('/v1/mcp/flush', 'POST', { reason });
+  return {
+    success: true,
+    clearedCount: res?.clearedCount ?? 0,
+  };
+}
+
 
 
 

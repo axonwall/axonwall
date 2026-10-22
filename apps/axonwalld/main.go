@@ -1064,6 +1064,7 @@ func main() {
 	userManager := engine.NewUserManager(etckeeperManager)
 	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
 	pluginManager := engine.NewPluginManager("/var/lib/axonwall")
+	mcpTrafficManager := engine.NewMcpTrafficManager()
 	haEngine.SetDirectoryManager(directoryManager)
 
 	go func() {
@@ -2049,6 +2050,208 @@ func main() {
 				w.WriteHeader(http.StatusBadRequest)
 			}
 			_ = json.NewEncoder(w).Encode(resp)
+		})
+
+		// =====================================================================
+		// Security AI / VigilSOC MCP Tactical Traffic Control & Forensics APIs
+		// =====================================================================
+		writeMcpJSON := func(w http.ResponseWriter, status int, payload any) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(payload)
+		}
+
+		mux.HandleFunc("/v1/mcp/posture", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{
+				"success": true,
+				"posture": engine.DiscoverProtectedPosture(),
+				"leases":  mcpTrafficManager.ListLeases(),
+			})
+		})
+
+		mux.HandleFunc("/v1/mcp/leases", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{
+				"success": true,
+				"leases":  mcpTrafficManager.ListLeases(),
+			})
+		})
+
+		mux.HandleFunc("/v1/mcp/blackhole", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			var req engine.McpBlackholeReq
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			lease, err := mcpTrafficManager.BlackholeTraffic(req)
+			if err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "lease": lease})
+		})
+
+		mux.HandleFunc("/v1/mcp/shape", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			var req engine.McpShapeReq
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			lease, err := mcpTrafficManager.ShapeTraffic(req)
+			if err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "lease": lease})
+		})
+
+		mux.HandleFunc("/v1/mcp/redirect", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			var req engine.McpRedirectReq
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			lease, err := mcpTrafficManager.RedirectTraffic(req)
+			if err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "lease": lease})
+		})
+
+		mux.HandleFunc("/v1/mcp/sinkhole-dns", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			var req engine.McpDnsSinkholeReq
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			lease, err := mcpTrafficManager.SinkholeDNS(req)
+			if err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "lease": lease})
+		})
+
+		mux.HandleFunc("/v1/mcp/revert", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			var req struct {
+				LeaseID string `json:"leaseId"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil || req.LeaseID == "" {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "leaseId is required"})
+				return
+			}
+			lease, err := mcpTrafficManager.RevertLease(req.LeaseID)
+			if err != nil {
+				writeMcpJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "revertedLease": lease})
+		})
+
+		mux.HandleFunc("/v1/mcp/flush", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			cleared := mcpTrafficManager.FlushAllLeases()
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "clearedCount": cleared})
+		})
+
+		mux.HandleFunc("/v1/mcp/flows", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			q := r.URL.Query()
+			port, _ := strconv.Atoi(q.Get("port"))
+			minBytes, _ := strconv.ParseUint(q.Get("minBytes"), 10, 64)
+			limit, _ := strconv.Atoi(q.Get("limit"))
+			flows := mcpTrafficManager.QueryActiveFlows(
+				q.Get("srcIp"),
+				q.Get("dstIp"),
+				q.Get("protocol"),
+				q.Get("state"),
+				port,
+				minBytes,
+				limit,
+			)
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "flows": flows})
+		})
+
+		mux.HandleFunc("/v1/mcp/host-context", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			ip := r.URL.Query().Get("ip")
+			ctxData, err := mcpTrafficManager.InspectHostContext(ip)
+			if err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "context": ctxData})
+		})
+
+		mux.HandleFunc("/v1/mcp/pcap-sample", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeMcpJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "error": "Method not allowed"})
+				return
+			}
+			var req struct {
+				Interface       string `json:"interface"`
+				SrcIP           string `json:"srcIp"`
+				DstIP           string `json:"dstIp"`
+				Protocol        string `json:"protocol"`
+				Port            int    `json:"port"`
+				MaxPackets      int    `json:"maxPackets"`
+				DurationSeconds int    `json:"durationSeconds"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			packets, err := mcpTrafficManager.CapturePacketSample(
+				req.Interface,
+				req.SrcIP,
+				req.DstIP,
+				req.Protocol,
+				req.Port,
+				req.MaxPackets,
+				req.DurationSeconds,
+			)
+			if err != nil {
+				writeMcpJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "packets": packets})
 		})
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

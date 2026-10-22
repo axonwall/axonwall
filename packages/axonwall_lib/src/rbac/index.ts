@@ -26,6 +26,8 @@ export const PRIVILEGES = [
   'system.users.read',
   'system.users.write',
   'system.reboot',
+  'system.mcp.read',
+  'system.mcp.write',
   'diagnostics.read',
   'diagnostics.exec',
 ] as const;

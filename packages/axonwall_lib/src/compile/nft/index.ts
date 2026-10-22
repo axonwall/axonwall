@@ -425,25 +425,13 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Input chain (traffic to the firewall host itself)
   lines.push('  chain input {');
   lines.push('    type filter hook input priority filter; policy drop;');
-  if (state.crowdsec?.enabled) {
-    lines.push(`    ${crowdsecCompiled.nftRule} comment "crowdsec-drop"`);
-  }
-  if (state.geoip?.enabled && geoipCompiled.inputRules.length > 0) {
-    for (const rule of geoipCompiled.inputRules) {
-      lines.push(`    ${rule}`);
-    }
-  }
-  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
-  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
-  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
-
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
   lines.push('    iif "lo" accept');
   lines.push('    icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept');
   lines.push('    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept');
 
-  // Anti-Lockout Rule
+  // Anti-Lockout Rule (Evaluated BEFORE dynamic AI/SOAR blocklists so management access can never be locked out)
   if (state.system.antiLockout?.enabled) {
     const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
     const ports = state.system.antiLockout.ports.join(', ');
@@ -460,6 +448,18 @@ export function compileNftables(state: DesiredState): CompileResult {
       }
     }
   }
+
+  if (state.crowdsec?.enabled) {
+    lines.push(`    ${crowdsecCompiled.nftRule} comment "crowdsec-drop"`);
+  }
+  if (state.geoip?.enabled && geoipCompiled.inputRules.length > 0) {
+    for (const rule of geoipCompiled.inputRules) {
+      lines.push(`    ${rule}`);
+    }
+  }
+  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
+  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
 
   // NAS & K3s Core Role Listeners (when enabled alongside Firewall)
   lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));

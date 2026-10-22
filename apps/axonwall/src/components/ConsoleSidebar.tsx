@@ -91,6 +91,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
       { name: 'Service Supervisor', href: '/system/services', icon: Server },
       { name: 'Plugin Store & Roles', href: '/system/plugins', icon: Boxes, badge: 'Core' },
+      { name: 'MCP Security AI Control', href: '/system/mcp', icon: KeyRound, badge: 'AuthZ' },
       { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging },
       { name: 'Firewall Importer', href: '/system/import', icon: FileText },
       { name: 'Web Shell & Sensors', href: '/system/terminal', icon: Terminal },

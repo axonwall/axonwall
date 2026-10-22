@@ -178,6 +178,10 @@
     "./cloudinit": {
       "types": "./dist/cloudinit/index.d.ts",
       "default": "./dist/cloudinit/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "default": "./dist/mcp/index.js"
     }
   },
   "scripts": {

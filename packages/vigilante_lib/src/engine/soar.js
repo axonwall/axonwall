@@ -201,6 +201,7 @@ export async function blockIp(arg1, arg2 = {}) {
   }
 
   const containmentId = `cont-ip-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const reasonStr = options.reason || 'Malicious C2 / Port Scan Source';
   const record = {
     id: containmentId,
     containmentId,
@@ -209,9 +210,78 @@ export async function blockIp(arg1, arg2 = {}) {
     active: true,
     status: 'BLOCKED',
     blockedAt: new Date().toISOString(),
-    reason: options.reason || 'Malicious C2 / Port Scan Source',
-    iptablesRule: `iptables -I INPUT -s ${ipAddress} -j DROP`
+    reason: reasonStr,
+    iptablesRule: `nft add element inet axonwall_mcp blackhole { ${ipAddress} }`,
+    mcpLeaseId: null,
+    enforcedInKernel: false
   };
+
+  // If running on an Axonwall appliance, enforce in the kernel via axonwalld /v1/mcp/blackhole
+  const sockPath = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
+  if (fsSync.existsSync(sockPath)) {
+    try {
+      const httpMod = await import('node:http');
+      let agentToken = process.env.AXONWALL_AGENT_TOKEN || '';
+      if (!agentToken) {
+        for (const p of ['/etc/axonwall/agent.token', '/var/lib/axonwall/etc-axonwall/agent.token']) {
+          if (fsSync.existsSync(p)) {
+            agentToken = fsSync.readFileSync(p, 'utf8').trim();
+            if (agentToken) break;
+          }
+        }
+      }
+      const payload = JSON.stringify({
+        target: ipAddress,
+        mode: 'nft_drop',
+        direction: 'both',
+        protocol: 'any',
+        killActiveConnections: true,
+        ttlSeconds: Number(options.ttlSeconds) || 3600,
+        keyId: 'vigilante-soar-local',
+        keyName: 'Vigilante SOAR Engine',
+        audit: {
+          reason: reasonStr.length >= 10 ? reasonStr : `Vigilante SOAR: ${reasonStr}`
+        }
+      });
+      const daemonResp = await new Promise((resolve, reject) => {
+        const req = httpMod.request(
+          {
+            socketPath: sockPath,
+            path: '/v1/mcp/blackhole',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload),
+              ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {})
+            },
+            timeout: 5000
+          },
+          (res) => {
+            let body = '';
+            res.on('data', (c) => { body += c.toString(); });
+            res.on('end', () => {
+              try {
+                resolve({ status: res.statusCode, data: JSON.parse(body) });
+              } catch {
+                resolve({ status: res.statusCode, data: {} });
+              }
+            });
+          }
+        );
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+      });
+      if (daemonResp && daemonResp.status === 200 && daemonResp.data?.lease?.id) {
+        record.mcpLeaseId = daemonResp.data.lease.id;
+        record.enforcedInKernel = true;
+      } else if (daemonResp && daemonResp.data?.error) {
+        record.kernelGuardNotice = daemonResp.data.error;
+      }
+    } catch (err) {
+      logger.warn('SOAR', `Could not enforce IP block via axonwalld socket: ${err.message}`);
+    }
+  }
 
   const recordFile = path.join(containmentsDir, `${containmentId}.json`);
   await fs.writeFile(recordFile, JSON.stringify(record, null, 2), 'utf8');

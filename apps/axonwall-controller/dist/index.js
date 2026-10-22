@@ -2002,7 +2002,7 @@ var require_pushgateway = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/pushgateway.js"(exports, module) {
     "use strict";
     var url2 = __require("url");
-    var http2 = __require("http");
+    var http3 = __require("http");
     var https2 = __require("https");
     var { gzipSync } = __require("zlib");
     var { globalRegistry: globalRegistry2 } = require_registry();
@@ -2043,10 +2043,10 @@ var require_pushgateway = __commonJS({
       const gatewayUrlParsed = url2.parse(this.gatewayUrl);
       const gatewayUrlPath = gatewayUrlParsed.pathname && gatewayUrlParsed.pathname !== "/" ? gatewayUrlParsed.pathname : "";
       const jobPath = job ? `/job/${encodeURIComponent(job)}${generateGroupings(groupings)}` : "";
-      const path2 = `${gatewayUrlPath}/metrics${jobPath}`;
-      const target = url2.resolve(this.gatewayUrl, path2);
+      const path4 = `${gatewayUrlPath}/metrics${jobPath}`;
+      const target = url2.resolve(this.gatewayUrl, path4);
       const requestParams = url2.parse(target);
-      const httpModule = isHttps(requestParams.href) ? https2 : http2;
+      const httpModule = isHttps(requestParams.href) ? https2 : http3;
       const options = Object.assign(requestParams, this.requestOptions, {
         method
       });
@@ -3794,7 +3794,7 @@ var require_osMemoryHeapLinux = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/osMemoryHeapLinux.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs3 = __require("fs");
+    var fs6 = __require("fs");
     var values = ["VmSize", "VmRSS", "VmData"];
     var PROCESS_RESIDENT_MEMORY = "process_resident_memory_bytes";
     var PROCESS_VIRTUAL_MEMORY = "process_virtual_memory_bytes";
@@ -3825,7 +3825,7 @@ var require_osMemoryHeapLinux = __commonJS({
         // Use this one metric's `collect` to set all metrics' values.
         collect() {
           try {
-            const stat = fs3.readFileSync("/proc/self/status", "utf8");
+            const stat = fs6.readFileSync("/proc/self/status", "utf8");
             const structuredOutput = structureOutput(stat);
             residentMemGauge.set(labels, structuredOutput.VmRSS);
             virtualMemGauge.set(labels, structuredOutput.VmSize);
@@ -3905,7 +3905,7 @@ var require_processOpenFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processOpenFileDescriptors.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs3 = __require("fs");
+    var fs6 = __require("fs");
     var process2 = __require("process");
     var PROCESS_OPEN_FDS = "process_open_fds";
     module.exports = (registry2, config2 = {}) => {
@@ -3922,7 +3922,7 @@ var require_processOpenFileDescriptors = __commonJS({
         labelNames,
         collect() {
           try {
-            const fds = fs3.readdirSync("/proc/self/fd");
+            const fds = fs6.readdirSync("/proc/self/fd");
             this.set(labels, fds.length - 1);
           } catch {
           }
@@ -3938,13 +3938,13 @@ var require_processMaxFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processMaxFileDescriptors.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs3 = __require("fs");
+    var fs6 = __require("fs");
     var PROCESS_MAX_FDS = "process_max_fds";
     var maxFds;
     module.exports = (registry2, config2 = {}) => {
       if (maxFds === void 0) {
         try {
-          const limits = fs3.readFileSync("/proc/self/limits", "utf8");
+          const limits = fs6.readFileSync("/proc/self/limits", "utf8");
           const lines = limits.split("\n");
           for (const line of lines) {
             if (line.startsWith("Max open files")) {
@@ -4624,16 +4624,16 @@ var require_cluster = __commonJS({
             if (err) reject(err);
             else resolve2(result);
           }
-          const request2 = {
+          const request3 = {
             responses: [],
             pending: 0,
             done,
             errorTimeout: setTimeout(() => {
               const err = new Error("Operation timed out.");
-              request2.done(err);
+              request3.done(err);
             }, 5e3)
           };
-          requests.set(requestId, request2);
+          requests.set(requestId, request3);
           const message = {
             type: GET_METRICS_REQ,
             requestId
@@ -4641,11 +4641,11 @@ var require_cluster = __commonJS({
           for (const id in cluster().workers) {
             if (cluster().workers[id].isConnected()) {
               cluster().workers[id].send(message);
-              request2.pending++;
+              request3.pending++;
             }
           }
-          if (request2.pending === 0) {
-            clearTimeout(request2.errorTimeout);
+          if (request3.pending === 0) {
+            clearTimeout(request3.errorTimeout);
             process.nextTick(() => done(null, ""));
           }
         });
@@ -4715,19 +4715,19 @@ var require_cluster = __commonJS({
       if (cluster().isMaster) {
         cluster().on("message", (worker, message) => {
           if (message.type === GET_METRICS_RES) {
-            const request2 = requests.get(message.requestId);
+            const request3 = requests.get(message.requestId);
             if (message.error) {
-              request2.done(new Error(message.error));
+              request3.done(new Error(message.error));
               return;
             }
-            message.metrics.forEach((registry2) => request2.responses.push(registry2));
-            request2.pending--;
-            if (request2.pending === 0) {
+            message.metrics.forEach((registry2) => request3.responses.push(registry2));
+            request3.pending--;
+            if (request3.pending === 0) {
               requests.delete(message.requestId);
-              clearTimeout(request2.errorTimeout);
-              const registry2 = AggregatorRegistry.aggregate(request2.responses);
+              clearTimeout(request3.errorTimeout);
+              const registry2 = AggregatorRegistry.aggregate(request3.responses);
               const promString = registry2.metrics();
-              request2.done(null, promString);
+              request3.done(null, promString);
             }
           }
         });
@@ -7024,10 +7024,10 @@ var require_websocket = __commonJS({
     "use strict";
     var EventEmitter = __require("events");
     var https2 = __require("https");
-    var http2 = __require("http");
+    var http3 = __require("http");
     var net2 = __require("net");
     var tls = __require("tls");
-    var { randomBytes, createHash: createHash2 } = __require("crypto");
+    var { randomBytes: randomBytes4, createHash: createHash5 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -7578,8 +7578,8 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes(16).toString("base64");
-      const request2 = isSecure ? https2.request : http2.request;
+      const key = randomBytes4(16).toString("base64");
+      const request3 = isSecure ? https2.request : http3.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
       opts.createConnection = opts.createConnection || (isSecure ? tlsConnect : netConnect);
@@ -7656,12 +7656,12 @@ var require_websocket = __commonJS({
         if (opts.auth && !options.headers.authorization) {
           options.headers.authorization = "Basic " + Buffer.from(opts.auth).toString("base64");
         }
-        req = websocket._req = request2(opts);
+        req = websocket._req = request3(opts);
         if (websocket._redirects) {
           websocket.emit("redirect", websocket.url, req);
         }
       } else {
-        req = websocket._req = request2(opts);
+        req = websocket._req = request3(opts);
       }
       if (opts.timeout) {
         req.on("timeout", () => {
@@ -7708,7 +7708,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash5("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -8075,9 +8075,9 @@ var require_websocket_server = __commonJS({
   "../../node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket-server.js"(exports, module) {
     "use strict";
     var EventEmitter = __require("events");
-    var http2 = __require("http");
+    var http3 = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash2 } = __require("crypto");
+    var { createHash: createHash5 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -8156,8 +8156,8 @@ var require_websocket_server = __commonJS({
           );
         }
         if (options.port != null) {
-          this._server = http2.createServer((req, res) => {
-            const body = http2.STATUS_CODES[426];
+          this._server = http3.createServer((req, res) => {
+            const body = http3.STATUS_CODES[426];
             res.writeHead(426, {
               "Content-Length": body.length,
               "Content-Type": "text/plain"
@@ -8384,7 +8384,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash2("sha1").update(key + GUID).digest("base64");
+        const digest = createHash5("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -8446,7 +8446,7 @@ var require_websocket_server = __commonJS({
       this.destroy();
     }
     function abortHandshake(socket, code, message, headers) {
-      message = message || http2.STATUS_CODES[code];
+      message = message || http3.STATUS_CODES[code];
       headers = {
         Connection: "close",
         "Content-Type": "text/html",
@@ -8455,7 +8455,7 @@ var require_websocket_server = __commonJS({
       };
       socket.once("finish", socket.destroy);
       socket.end(
-        `HTTP/1.1 ${code} ${http2.STATUS_CODES[code]}\r
+        `HTTP/1.1 ${code} ${http3.STATUS_CODES[code]}\r
 ` + Object.keys(headers).map((h) => `${h}: ${headers[h]}`).join("\r\n") + "\r\n\r\n" + message
       );
     }
@@ -8548,17 +8548,17 @@ var require_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    function visit_(key, node2, visitor, path2) {
-      const ctrl = callVisitor(key, node2, visitor, path2);
+    function visit_(key, node2, visitor, path4) {
+      const ctrl = callVisitor(key, node2, visitor, path4);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path2, ctrl);
-        return visit_(key, ctrl, visitor, path2);
+        replaceNode(key, path4, ctrl);
+        return visit_(key, ctrl, visitor, path4);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path2 = Object.freeze(path2.concat(node2));
+          path4 = Object.freeze(path4.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = visit_(i, node2.items[i], visitor, path2);
+            const ci = visit_(i, node2.items[i], visitor, path4);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -8569,13 +8569,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path2 = Object.freeze(path2.concat(node2));
-          const ck = visit_("key", node2.key, visitor, path2);
+          path4 = Object.freeze(path4.concat(node2));
+          const ck = visit_("key", node2.key, visitor, path4);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = visit_("value", node2.value, visitor, path2);
+          const cv = visit_("value", node2.value, visitor, path4);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -8596,17 +8596,17 @@ var require_visit = __commonJS({
     visitAsync.BREAK = BREAK;
     visitAsync.SKIP = SKIP;
     visitAsync.REMOVE = REMOVE;
-    async function visitAsync_(key, node2, visitor, path2) {
-      const ctrl = await callVisitor(key, node2, visitor, path2);
+    async function visitAsync_(key, node2, visitor, path4) {
+      const ctrl = await callVisitor(key, node2, visitor, path4);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path2, ctrl);
-        return visitAsync_(key, ctrl, visitor, path2);
+        replaceNode(key, path4, ctrl);
+        return visitAsync_(key, ctrl, visitor, path4);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path2 = Object.freeze(path2.concat(node2));
+          path4 = Object.freeze(path4.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = await visitAsync_(i, node2.items[i], visitor, path2);
+            const ci = await visitAsync_(i, node2.items[i], visitor, path4);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -8617,13 +8617,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path2 = Object.freeze(path2.concat(node2));
-          const ck = await visitAsync_("key", node2.key, visitor, path2);
+          path4 = Object.freeze(path4.concat(node2));
+          const ck = await visitAsync_("key", node2.key, visitor, path4);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = await visitAsync_("value", node2.value, visitor, path2);
+          const cv = await visitAsync_("value", node2.value, visitor, path4);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -8650,23 +8650,23 @@ var require_visit = __commonJS({
       }
       return visitor;
     }
-    function callVisitor(key, node2, visitor, path2) {
+    function callVisitor(key, node2, visitor, path4) {
       if (typeof visitor === "function")
-        return visitor(key, node2, path2);
+        return visitor(key, node2, path4);
       if (identity.isMap(node2))
-        return visitor.Map?.(key, node2, path2);
+        return visitor.Map?.(key, node2, path4);
       if (identity.isSeq(node2))
-        return visitor.Seq?.(key, node2, path2);
+        return visitor.Seq?.(key, node2, path4);
       if (identity.isPair(node2))
-        return visitor.Pair?.(key, node2, path2);
+        return visitor.Pair?.(key, node2, path4);
       if (identity.isScalar(node2))
-        return visitor.Scalar?.(key, node2, path2);
+        return visitor.Scalar?.(key, node2, path4);
       if (identity.isAlias(node2))
-        return visitor.Alias?.(key, node2, path2);
+        return visitor.Alias?.(key, node2, path4);
       return void 0;
     }
-    function replaceNode(key, path2, node2) {
-      const parent = path2[path2.length - 1];
+    function replaceNode(key, path4, node2) {
+      const parent = path4[path4.length - 1];
       if (identity.isCollection(parent)) {
         parent.items[key] = node2;
       } else if (identity.isPair(parent)) {
@@ -9278,10 +9278,10 @@ var require_Collection = __commonJS({
     var createNode = require_createNode();
     var identity = require_identity();
     var Node = require_Node();
-    function collectionFromPath(schema, path2, value) {
+    function collectionFromPath(schema, path4, value) {
       let v = value;
-      for (let i = path2.length - 1; i >= 0; --i) {
-        const k = path2[i];
+      for (let i = path4.length - 1; i >= 0; --i) {
+        const k = path4[i];
         if (typeof k === "number" && Number.isInteger(k) && k >= 0) {
           const a = [];
           a[k] = v;
@@ -9300,7 +9300,7 @@ var require_Collection = __commonJS({
         sourceObjects: /* @__PURE__ */ new Map()
       });
     }
-    var isEmptyPath = (path2) => path2 == null || typeof path2 === "object" && !!path2[Symbol.iterator]().next().done;
+    var isEmptyPath = (path4) => path4 == null || typeof path4 === "object" && !!path4[Symbol.iterator]().next().done;
     var Collection = class extends Node.NodeBase {
       constructor(type, schema) {
         super(type);
@@ -9330,11 +9330,11 @@ var require_Collection = __commonJS({
        * be a Pair instance or a `{ key, value }` object, which may not have a key
        * that already exists in the map.
        */
-      addIn(path2, value) {
-        if (isEmptyPath(path2))
+      addIn(path4, value) {
+        if (isEmptyPath(path4))
           this.add(value);
         else {
-          const [key, ...rest] = path2;
+          const [key, ...rest] = path4;
           const node2 = this.get(key, true);
           if (identity.isCollection(node2))
             node2.addIn(rest, value);
@@ -9348,8 +9348,8 @@ var require_Collection = __commonJS({
        * Removes a value from the collection.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path2) {
-        const [key, ...rest] = path2;
+      deleteIn(path4) {
+        const [key, ...rest] = path4;
         if (rest.length === 0)
           return this.delete(key);
         const node2 = this.get(key, true);
@@ -9363,8 +9363,8 @@ var require_Collection = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path2, keepScalar) {
-        const [key, ...rest] = path2;
+      getIn(path4, keepScalar) {
+        const [key, ...rest] = path4;
         const node2 = this.get(key, true);
         if (rest.length === 0)
           return !keepScalar && identity.isScalar(node2) ? node2.value : node2;
@@ -9382,8 +9382,8 @@ var require_Collection = __commonJS({
       /**
        * Checks if the collection includes a value with the key `key`.
        */
-      hasIn(path2) {
-        const [key, ...rest] = path2;
+      hasIn(path4) {
+        const [key, ...rest] = path4;
         if (rest.length === 0)
           return this.has(key);
         const node2 = this.get(key, true);
@@ -9393,8 +9393,8 @@ var require_Collection = __commonJS({
        * Sets a value in this collection. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path2, value) {
-        const [key, ...rest] = path2;
+      setIn(path4, value) {
+        const [key, ...rest] = path4;
         if (rest.length === 0) {
           this.set(key, value);
         } else {
@@ -11909,9 +11909,9 @@ var require_Document = __commonJS({
           this.contents.add(value);
       }
       /** Adds a value to the document. */
-      addIn(path2, value) {
+      addIn(path4, value) {
         if (assertCollection(this.contents))
-          this.contents.addIn(path2, value);
+          this.contents.addIn(path4, value);
       }
       /**
        * Create a new `Alias` node, ensuring that the target `node` has the required anchor.
@@ -11986,14 +11986,14 @@ var require_Document = __commonJS({
        * Removes a value from the document.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path2) {
-        if (Collection.isEmptyPath(path2)) {
+      deleteIn(path4) {
+        if (Collection.isEmptyPath(path4)) {
           if (this.contents == null)
             return false;
           this.contents = null;
           return true;
         }
-        return assertCollection(this.contents) ? this.contents.deleteIn(path2) : false;
+        return assertCollection(this.contents) ? this.contents.deleteIn(path4) : false;
       }
       /**
        * Returns item at `key`, or `undefined` if not found. By default unwraps
@@ -12008,10 +12008,10 @@ var require_Document = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path2, keepScalar) {
-        if (Collection.isEmptyPath(path2))
+      getIn(path4, keepScalar) {
+        if (Collection.isEmptyPath(path4))
           return !keepScalar && identity.isScalar(this.contents) ? this.contents.value : this.contents;
-        return identity.isCollection(this.contents) ? this.contents.getIn(path2, keepScalar) : void 0;
+        return identity.isCollection(this.contents) ? this.contents.getIn(path4, keepScalar) : void 0;
       }
       /**
        * Checks if the document includes a value with the key `key`.
@@ -12022,10 +12022,10 @@ var require_Document = __commonJS({
       /**
        * Checks if the document includes a value at `path`.
        */
-      hasIn(path2) {
-        if (Collection.isEmptyPath(path2))
+      hasIn(path4) {
+        if (Collection.isEmptyPath(path4))
           return this.contents !== void 0;
-        return identity.isCollection(this.contents) ? this.contents.hasIn(path2) : false;
+        return identity.isCollection(this.contents) ? this.contents.hasIn(path4) : false;
       }
       /**
        * Sets a value in this document. For `!!set`, `value` needs to be a
@@ -12042,13 +12042,13 @@ var require_Document = __commonJS({
        * Sets a value in this document. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path2, value) {
-        if (Collection.isEmptyPath(path2)) {
+      setIn(path4, value) {
+        if (Collection.isEmptyPath(path4)) {
           this.contents = value;
         } else if (this.contents == null) {
-          this.contents = Collection.collectionFromPath(this.schema, Array.from(path2), value);
+          this.contents = Collection.collectionFromPath(this.schema, Array.from(path4), value);
         } else if (assertCollection(this.contents)) {
-          this.contents.setIn(path2, value);
+          this.contents.setIn(path4, value);
         }
       }
       /**
@@ -14009,9 +14009,9 @@ var require_cst_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    visit2.itemAtPath = (cst, path2) => {
+    visit2.itemAtPath = (cst, path4) => {
       let item = cst;
-      for (const [field, index] of path2) {
+      for (const [field, index] of path4) {
         const tok = item?.[field];
         if (tok && "items" in tok) {
           item = tok.items[index];
@@ -14020,23 +14020,23 @@ var require_cst_visit = __commonJS({
       }
       return item;
     };
-    visit2.parentCollection = (cst, path2) => {
-      const parent = visit2.itemAtPath(cst, path2.slice(0, -1));
-      const field = path2[path2.length - 1][0];
+    visit2.parentCollection = (cst, path4) => {
+      const parent = visit2.itemAtPath(cst, path4.slice(0, -1));
+      const field = path4[path4.length - 1][0];
       const coll = parent?.[field];
       if (coll && "items" in coll)
         return coll;
       throw new Error("Parent collection not found");
     };
-    function _visit(path2, item, visitor) {
-      let ctrl = visitor(item, path2);
+    function _visit(path4, item, visitor) {
+      let ctrl = visitor(item, path4);
       if (typeof ctrl === "symbol")
         return ctrl;
       for (const field of ["key", "value"]) {
         const token = item[field];
         if (token && "items" in token) {
           for (let i = 0; i < token.items.length; ++i) {
-            const ci = _visit(Object.freeze(path2.concat([[field, i]])), token.items[i], visitor);
+            const ci = _visit(Object.freeze(path4.concat([[field, i]])), token.items[i], visitor);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -14047,10 +14047,10 @@ var require_cst_visit = __commonJS({
             }
           }
           if (typeof ctrl === "function" && field === "key")
-            ctrl = ctrl(item, path2);
+            ctrl = ctrl(item, path4);
         }
       }
-      return typeof ctrl === "function" ? ctrl(item, path2) : ctrl;
+      return typeof ctrl === "function" ? ctrl(item, path4) : ctrl;
     }
     exports.visit = visit2;
   }
@@ -15352,14 +15352,14 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs3 = this.flowScalar(this.type);
+              const fs6 = this.flowScalar(this.type);
               if (atNextItem || it.value) {
-                map2.items.push({ start, key: fs3, sep: [] });
+                map2.items.push({ start, key: fs6, sep: [] });
                 this.onKeyLine = true;
               } else if (it.sep) {
-                this.stack.push(fs3);
+                this.stack.push(fs6);
               } else {
-                Object.assign(it, { key: fs3, sep: [] });
+                Object.assign(it, { key: fs6, sep: [] });
                 this.onKeyLine = true;
               }
               return;
@@ -15487,13 +15487,13 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs3 = this.flowScalar(this.type);
+              const fs6 = this.flowScalar(this.type);
               if (!it || it.value)
-                fc.items.push({ start: [], key: fs3, sep: [] });
+                fc.items.push({ start: [], key: fs6, sep: [] });
               else if (it.sep)
-                this.stack.push(fs3);
+                this.stack.push(fs6);
               else
-                Object.assign(it, { key: fs3, sep: [] });
+                Object.assign(it, { key: fs6, sep: [] });
               return;
             }
             case "flow-map-end":
@@ -16621,10 +16621,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path2) {
-  if (!path2)
+function getElementAtPath(obj, path4) {
+  if (!path4)
     return obj;
-  return path2.reduce((acc, key) => acc?.[key], obj);
+  return path4.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16964,11 +16964,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path2, issues) {
+function prefixIssues(path4, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path2);
+    iss.path.unshift(path4);
     return iss;
   });
 }
@@ -17430,16 +17430,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path2 = []) => {
+  const processError = (error63, path4 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else {
-        const fullpath = [...path2, ...issue2.path];
+        const fullpath = [...path4, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -17478,17 +17478,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path2 = []) => {
+  const processError = (error63, path4 = []) => {
     var _a3;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path4, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path4, ...issue2.path]);
       } else {
-        const fullpath = [...path2, ...issue2.path];
+        const fullpath = [...path4, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -17527,8 +17527,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path2 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path2) {
+  const path4 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path4) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -34666,13 +34666,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path2 = ref.slice(1).split("/").filter(Boolean);
-  if (path2.length === 0) {
+  const path4 = ref.slice(1).split("/").filter(Boolean);
+  if (path4.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path2[0] === defsKey) {
-    const key = path2[1] === void 0 ? void 0 : decodeJSONPointerSegment(path2[1]);
+  if (path4[0] === defsKey) {
+    const key = path4[1] === void 0 ? void 0 : decodeJSONPointerSegment(path4[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -38216,17 +38216,6 @@ function compileNftables(state) {
   lines.push("");
   lines.push("  chain input {");
   lines.push("    type filter hook input priority filter; policy drop;");
-  if (state.crowdsec?.enabled) {
-    lines.push(`    ${crowdsecCompiled.nftRule} comment "crowdsec-drop"`);
-  }
-  if (state.geoip?.enabled && geoipCompiled.inputRules.length > 0) {
-    for (const rule of geoipCompiled.inputRules) {
-      lines.push(`    ${rule}`);
-    }
-  }
-  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
-  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
-  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
   lines.push("    ct state established,related accept");
   lines.push("    ct state invalid drop");
   lines.push('    iif "lo" accept');
@@ -38248,6 +38237,17 @@ function compileNftables(state) {
       }
     }
   }
+  if (state.crowdsec?.enabled) {
+    lines.push(`    ${crowdsecCompiled.nftRule} comment "crowdsec-drop"`);
+  }
+  if (state.geoip?.enabled && geoipCompiled.inputRules.length > 0) {
+    for (const rule of geoipCompiled.inputRules) {
+      lines.push(`    ${rule}`);
+    }
+  }
+  lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
+  lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
   lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
   if (state.wireguard?.enabled) {
     lines.push(`    udp dport ${state.wireguard.listenPort} accept comment "wireguard-service"`);
@@ -38684,7 +38684,7 @@ function lintRuleset(state) {
 }
 
 // src/index.ts
-import * as crypto2 from "node:crypto";
+import * as crypto5 from "node:crypto";
 
 // ../../node_modules/.pnpm/ws@8.22.0/node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -38697,11 +38697,11 @@ var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 
 // src/index.ts
-import * as http from "node:http";
+import * as http2 from "node:http";
 import * as https from "node:https";
-import * as fs2 from "node:fs";
+import * as fs5 from "node:fs";
 import * as net from "node:net";
-import * as path from "node:path";
+import * as path3 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/headscale.ts
@@ -38994,6 +38994,428 @@ var FullCloudInitSchema = external_exports.object({
   axonwall: AxonwallCloudConfigSchema.optional()
 });
 
+// ../../packages/axonwall_lib/dist/mcp/index.js
+var MCP_SCOPES = [
+  "mcp:telemetry:read",
+  "mcp:pcap:capture",
+  "mcp:traffic:blackhole",
+  "mcp:traffic:shape",
+  "mcp:traffic:redirect",
+  "mcp:fleet:broadcast",
+  "mcp:firewall:write",
+  "mcp:firewall:apply"
+];
+var McpScopeSchema = external_exports.enum(MCP_SCOPES);
+var McpPolicyLimitsSchema = external_exports.object({
+  /** Minimum CIDR prefix length allowed for IPv4 tactical actions (e.g. 24 = max /24 subnet, 32 = single host only) */
+  maxIpv4PrefixLen: external_exports.number().int().min(8).max(32).default(24),
+  /** Minimum CIDR prefix length allowed for IPv6 tactical actions (e.g. 64 = max /64 subnet, 128 = single host only) */
+  maxIpv6PrefixLen: external_exports.number().int().min(32).max(128).default(64),
+  /** Maximum TTL in seconds for any tactical lease created by this key */
+  maxTtlSeconds: external_exports.number().int().min(10).max(604800).default(86400),
+  /** Default TTL in seconds when not specified by caller */
+  defaultTtlSeconds: external_exports.number().int().min(10).max(86400).default(3600),
+  /** Maximum concurrent active tactical leases owned by this key */
+  maxActiveLeases: external_exports.number().int().min(1).max(1e4).default(250),
+  /** Maximum tool invocations per minute for this key */
+  rateLimitPerMinute: external_exports.number().int().min(1).max(6e3).default(120),
+  /** Explicit allowlist of destination IPs/CIDRs or host:port targets that mcp_redirect_traffic may steer traffic toward */
+  allowedRedirectTargets: external_exports.array(external_exports.string()).default([]),
+  /** Whether this key is allowed to target internal RFC1918/ULA subnets for East-West micro-segmentation (appliance/gateway IPs remain strictly immune) */
+  allowInternalRFC1918Targets: external_exports.boolean().default(true)
+});
+var McpApiKeySchema = external_exports.object({
+  id: external_exports.string().min(1),
+  name: external_exports.string().min(1).max(128),
+  agentType: external_exports.enum(["vigilsoc", "soar", "custom-ai", "readonly-analyst"]).default("vigilsoc"),
+  /** Prefix visible in UI for identification, e.g. axw_mcp_7f3a9b */
+  keyPrefix: external_exports.string().min(1),
+  /** Hex-encoded SHA-256 hash of the full bearer token */
+  secretHashSha256: external_exports.string().regex(/^[a-f0-9]{64}$/),
+  scopes: external_exports.array(McpScopeSchema).min(1),
+  /** Optional list of source IPv4/IPv6 CIDRs permitted to authenticate with this key (empty = any reachable management interface) */
+  allowedSourceCidrs: external_exports.array(external_exports.string()).default([]),
+  /** Optional SHA-256 fingerprint of client TLS certificate required on port 2966 */
+  mtlsCertFingerprintSha256: external_exports.string().optional(),
+  policyLimits: McpPolicyLimitsSchema.default(() => McpPolicyLimitsSchema.parse({})),
+  enabled: external_exports.boolean().default(true),
+  createdAt: external_exports.string(),
+  expiresAt: external_exports.string().optional(),
+  lastUsedAt: external_exports.string().optional(),
+  lastUsedIp: external_exports.string().optional(),
+  createdBy: external_exports.string().default("admin")
+});
+var McpApiKeyPublicSchema = McpApiKeySchema.omit({ secretHashSha256: true });
+var McpAuditMetadataSchema = external_exports.object({
+  reason: external_exports.string().min(10, "Audit reason must be at least 10 characters explaining the security rationale").max(1024),
+  incidentId: external_exports.string().max(128).optional(),
+  mitreTechniqueId: external_exports.string().regex(/^T\d{4}(\.\d{3})?$/, "Must be a valid MITRE ATT&CK ID (e.g. T1071 or T1071.001)").optional(),
+  confidence: external_exports.number().min(0).max(1).optional()
+});
+var McpAuditLogEntrySchema = external_exports.object({
+  id: external_exports.string(),
+  timestamp: external_exports.string(),
+  keyId: external_exports.string(),
+  keyName: external_exports.string(),
+  agentType: external_exports.string(),
+  clientIp: external_exports.string(),
+  toolName: external_exports.string(),
+  requiredScope: external_exports.string(),
+  decision: external_exports.enum(["allowed", "denied", "failed"]),
+  denialReason: external_exports.string().optional(),
+  paramsSummary: external_exports.record(external_exports.string(), external_exports.unknown()),
+  auditMetadata: McpAuditMetadataSchema.optional(),
+  leaseId: external_exports.string().optional(),
+  prevHash: external_exports.string(),
+  entryHash: external_exports.string()
+});
+var McpBlackholeRequestSchema = external_exports.object({
+  target: external_exports.string().min(3).max(64),
+  mode: external_exports.enum(["nft_drop", "nft_reject", "route_blackhole"]).default("nft_drop"),
+  direction: external_exports.enum(["both", "inbound", "outbound"]).default("both"),
+  protocol: external_exports.enum(["any", "tcp", "udp", "icmp"]).default("any"),
+  port: external_exports.number().int().min(1).max(65535).optional(),
+  killActiveConnections: external_exports.boolean().default(true),
+  propagateToFleet: external_exports.boolean().default(false),
+  ttlSeconds: external_exports.number().int().min(10).max(604800).default(3600),
+  audit: McpAuditMetadataSchema
+});
+var McpShapeRequestSchema = external_exports.object({
+  target: external_exports.string().min(3).max(64),
+  interface: external_exports.string().max(32).default("wan"),
+  direction: external_exports.enum(["both", "egress", "ingress"]).default("both"),
+  rateKbps: external_exports.number().int().min(8).max(1e7),
+  ceilKbps: external_exports.number().int().min(8).max(1e7).optional(),
+  latencyMs: external_exports.number().int().min(0).max(5e3).default(0),
+  jitterMs: external_exports.number().int().min(0).max(1e3).default(0),
+  packetLossPercent: external_exports.number().min(0).max(50).default(0),
+  dscpMark: external_exports.number().int().min(0).max(63).optional(),
+  ttlSeconds: external_exports.number().int().min(10).max(604800).default(3600),
+  audit: McpAuditMetadataSchema
+});
+var McpRedirectRequestSchema = external_exports.object({
+  source: external_exports.string().min(3).max(64),
+  originalDstIp: external_exports.string().max(64).optional(),
+  originalDstPort: external_exports.number().int().min(1).max(65535).optional(),
+  protocol: external_exports.enum(["tcp", "udp", "any"]).default("tcp"),
+  redirectType: external_exports.enum(["dnat_honeypot", "policy_route"]).default("dnat_honeypot"),
+  /** For dnat_honeypot: "<ip>" or "<ip>:<port>". For policy_route: gateway IP or routing table/mark name */
+  targetDestination: external_exports.string().min(3).max(128),
+  masqueradeReturn: external_exports.boolean().default(true),
+  ttlSeconds: external_exports.number().int().min(10).max(604800).default(3600),
+  audit: McpAuditMetadataSchema
+});
+var McpDnsSinkholeRequestSchema = external_exports.object({
+  domain: external_exports.string().min(3).max(253).regex(/^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/, "Invalid FQDN"),
+  sinkholeIp: external_exports.string().default("0.0.0.0"),
+  includeSubdomains: external_exports.boolean().default(true),
+  ttlSeconds: external_exports.number().int().min(10).max(604800).default(3600),
+  audit: McpAuditMetadataSchema
+});
+var McpPcapSampleRequestSchema = external_exports.object({
+  interface: external_exports.string().min(1).max(32).default("wan"),
+  srcIp: external_exports.string().max(64).optional(),
+  dstIp: external_exports.string().max(64).optional(),
+  protocol: external_exports.enum(["any", "tcp", "udp", "icmp", "icmp6", "arp"]).default("any"),
+  port: external_exports.number().int().min(1).max(65535).optional(),
+  maxPackets: external_exports.number().int().min(1).max(100).default(25),
+  durationSeconds: external_exports.number().int().min(1).max(15).default(5)
+});
+var McpProposeRuleRequestSchema = external_exports.object({
+  rule: FirewallRuleSchema,
+  applyImmediately: external_exports.boolean().default(false),
+  confirmTimeoutSeconds: external_exports.number().int().min(60).max(600).default(120),
+  audit: McpAuditMetadataSchema
+});
+var McpTacticalLeaseSchema = external_exports.object({
+  id: external_exports.string(),
+  kind: external_exports.enum(["blackhole", "shape", "redirect", "dns_sinkhole"]),
+  createdAt: external_exports.string(),
+  expiresAt: external_exports.string(),
+  ttlSeconds: external_exports.number().int(),
+  createdByKeyId: external_exports.string(),
+  createdByKeyName: external_exports.string(),
+  targetSummary: external_exports.string(),
+  parameters: external_exports.record(external_exports.string(), external_exports.unknown()),
+  audit: McpAuditMetadataSchema
+});
+function parseIpv4ToUint32(ip) {
+  const parts = ip.trim().split(".");
+  if (parts.length !== 4)
+    return null;
+  let result = 0;
+  for (const p of parts) {
+    if (!/^\d{1,3}$/.test(p))
+      return null;
+    const n = Number(p);
+    if (n < 0 || n > 255)
+      return null;
+    result = (result << 8 | n) >>> 0;
+  }
+  return result >>> 0;
+}
+function parseIpv6ToBigInt(ip) {
+  const trimmed = ip.trim().toLowerCase();
+  if (!trimmed.includes(":"))
+    return null;
+  const doubleColonParts = trimmed.split("::");
+  if (doubleColonParts.length > 2)
+    return null;
+  const left = doubleColonParts[0] ? doubleColonParts[0].split(":") : [];
+  const right = doubleColonParts.length === 2 && doubleColonParts[1] ? doubleColonParts[1].split(":") : [];
+  if (doubleColonParts.length === 1 && left.length !== 8)
+    return null;
+  if (left.length + right.length > 8)
+    return null;
+  const missing = 8 - (left.length + right.length);
+  const groups = [...left, ...Array(doubleColonParts.length === 2 ? missing : 0).fill("0"), ...right];
+  if (groups.length !== 8)
+    return null;
+  let result = 0n;
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g))
+      return null;
+    result = result << 16n | BigInt(parseInt(g, 16));
+  }
+  return result;
+}
+function parseIpOrCidr(input2) {
+  const raw = input2.trim();
+  if (!raw)
+    return null;
+  const slashIdx = raw.indexOf("/");
+  const addrPart = slashIdx === -1 ? raw : raw.slice(0, slashIdx);
+  const prefixPart = slashIdx === -1 ? null : raw.slice(slashIdx + 1);
+  if (addrPart.includes(":")) {
+    const v6Val = parseIpv6ToBigInt(addrPart);
+    if (v6Val === null)
+      return null;
+    let prefixLen2 = 128;
+    if (prefixPart !== null) {
+      if (!/^\d{1,3}$/.test(prefixPart))
+        return null;
+      prefixLen2 = Number(prefixPart);
+      if (prefixLen2 < 0 || prefixLen2 > 128)
+        return null;
+    }
+    return {
+      family: 6,
+      address: addrPart.toLowerCase(),
+      prefixLen: prefixLen2,
+      normalizedCidr: prefixLen2 === 128 ? `${addrPart.toLowerCase()}/128` : `${addrPart.toLowerCase()}/${prefixLen2}`,
+      isSingleHost: prefixLen2 === 128
+    };
+  }
+  const v4Val = parseIpv4ToUint32(addrPart);
+  if (v4Val === null)
+    return null;
+  let prefixLen = 32;
+  if (prefixPart !== null) {
+    if (!/^\d{1,2}$/.test(prefixPart))
+      return null;
+    prefixLen = Number(prefixPart);
+    if (prefixLen < 0 || prefixLen > 32)
+      return null;
+  }
+  return {
+    family: 4,
+    address: addrPart,
+    prefixLen,
+    normalizedCidr: `${addrPart}/${prefixLen}`,
+    isSingleHost: prefixLen === 32
+  };
+}
+function ipv4CidrOverlaps(cidrA, cidrB) {
+  const a = parseIpOrCidr(cidrA);
+  const b = parseIpOrCidr(cidrB);
+  if (!a || !b || a.family !== 4 || b.family !== 4)
+    return false;
+  const valA = parseIpv4ToUint32(a.address);
+  const valB = parseIpv4ToUint32(b.address);
+  if (valA === null || valB === null)
+    return false;
+  const minPrefix = Math.min(a.prefixLen, b.prefixLen);
+  if (minPrefix === 0)
+    return true;
+  const mask = minPrefix === 32 ? 4294967295 : ~((1 << 32 - minPrefix) - 1) >>> 0;
+  return (valA & mask) >>> 0 === (valB & mask) >>> 0;
+}
+function ipv6CidrOverlaps(cidrA, cidrB) {
+  const a = parseIpOrCidr(cidrA);
+  const b = parseIpOrCidr(cidrB);
+  if (!a || !b || a.family !== 6 || b.family !== 6)
+    return false;
+  const valA = parseIpv6ToBigInt(a.address);
+  const valB = parseIpv6ToBigInt(b.address);
+  if (valA === null || valB === null)
+    return false;
+  const minPrefix = Math.min(a.prefixLen, b.prefixLen);
+  if (minPrefix === 0)
+    return true;
+  const shift = BigInt(128 - minPrefix);
+  return valA >> shift === valB >> shift;
+}
+function cidrOverlaps(cidrA, cidrB) {
+  const a = parseIpOrCidr(cidrA);
+  const b = parseIpOrCidr(cidrB);
+  if (!a || !b || a.family !== b.family)
+    return false;
+  return a.family === 4 ? ipv4CidrOverlaps(cidrA, cidrB) : ipv6CidrOverlaps(cidrA, cidrB);
+}
+function isIpInCidr(ip, cidr) {
+  const cleanIp = ip.replace(/^::ffff:/i, "").trim();
+  return cidrOverlaps(cleanIp, cidr);
+}
+var IMMUTABLE_PROTECTED_CIDRS_V4 = [
+  "0.0.0.0/8",
+  // "This" network / default route
+  "127.0.0.0/8",
+  // Loopback
+  "169.254.0.0/16",
+  // Link-local
+  "224.0.0.0/4",
+  // IPv4 Multicast (includes VRRP 224.0.0.18)
+  "255.255.255.255/32"
+  // Limited broadcast
+];
+var IMMUTABLE_PROTECTED_CIDRS_V6 = [
+  "::/128",
+  // Unspecified
+  "::1/128",
+  // Loopback
+  "fe80::/10",
+  // Link-local
+  "ff00::/8"
+  // IPv6 Multicast
+];
+var RFC1918_AND_ULA_CIDRS = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "100.64.0.0/10",
+  // CGNAT / Tailscale / Headscale mesh range
+  "fc00::/7"
+  // IPv6 Unique Local Addresses
+];
+var DEFAULT_ANTI_LOCKOUT_PORTS = [2966, 22, 9876];
+function validateMcpTarget(target, ctx, options) {
+  const parsed = parseIpOrCidr(target);
+  if (!parsed) {
+    return { valid: false, reason: `Invalid IP address or CIDR notation: '${target}'` };
+  }
+  if (parsed.prefixLen === 0) {
+    return { valid: false, reason: "Targeting default route (/0) is strictly prohibited by anti-lockout guard" };
+  }
+  const minPrefix = parsed.family === 4 ? ctx.policyLimits.maxIpv4PrefixLen : ctx.policyLimits.maxIpv6PrefixLen;
+  if (parsed.prefixLen < minPrefix) {
+    return {
+      valid: false,
+      reason: `Target prefix /${parsed.prefixLen} exceeds blast-radius limit (minimum allowed prefix length is /${minPrefix} for IPv${parsed.family})`
+    };
+  }
+  const immutableList = parsed.family === 4 ? IMMUTABLE_PROTECTED_CIDRS_V4 : IMMUTABLE_PROTECTED_CIDRS_V6;
+  for (const protectedCidr of immutableList) {
+    if (cidrOverlaps(parsed.normalizedCidr, protectedCidr)) {
+      return {
+        valid: false,
+        reason: `Target '${parsed.normalizedCidr}' overlaps immutable protected range '${protectedCidr}' (loopback/link-local/multicast)`
+      };
+    }
+  }
+  for (const rawHostIp of ctx.applianceHostIps) {
+    const hostOnly = rawHostIp.split("/")[0]?.trim();
+    if (hostOnly && cidrOverlaps(parsed.normalizedCidr, hostOnly)) {
+      return {
+        valid: false,
+        reason: `Target '${parsed.normalizedCidr}' overlaps the firewall appliance's own interface address '${hostOnly}'`
+      };
+    }
+  }
+  for (const rawGwIp of ctx.gatewayAndHaIps) {
+    const gwOnly = rawGwIp.split("/")[0]?.trim();
+    if (gwOnly && cidrOverlaps(parsed.normalizedCidr, gwOnly)) {
+      return {
+        valid: false,
+        reason: `Target '${parsed.normalizedCidr}' overlaps protected gateway or HA peer address '${gwOnly}'`
+      };
+    }
+  }
+  if (ctx.callerIp) {
+    const cleanCaller = ctx.callerIp.replace(/^::ffff:/i, "").trim();
+    if (cleanCaller && cleanCaller !== "127.0.0.1" && cleanCaller !== "::1") {
+      if (cidrOverlaps(parsed.normalizedCidr, cleanCaller)) {
+        return {
+          valid: false,
+          reason: `Target '${parsed.normalizedCidr}' overlaps the MCP client's own active source IP '${cleanCaller}' (self-lockout prevented)`
+        };
+      }
+    }
+  }
+  if (!ctx.policyLimits.allowInternalRFC1918Targets) {
+    for (const rfcCidr of RFC1918_AND_ULA_CIDRS) {
+      if (cidrOverlaps(parsed.normalizedCidr, rfcCidr)) {
+        return {
+          valid: false,
+          reason: `Target '${parsed.normalizedCidr}' is in private/internal space '${rfcCidr}' and allowInternalRFC1918Targets is disabled for this MCP key`
+        };
+      }
+    }
+  }
+  if (options?.port !== void 0) {
+    const protectedPorts = ctx.antiLockoutPorts ?? [...DEFAULT_ANTI_LOCKOUT_PORTS];
+    if (protectedPorts.includes(options.port)) {
+      return {
+        valid: false,
+        reason: `Port ${options.port} is a protected anti-lockout management port and cannot be blocked, throttled, or redirected`
+      };
+    }
+  }
+  return {
+    valid: true,
+    normalizedTarget: parsed.isSingleHost ? parsed.address : parsed.normalizedCidr
+  };
+}
+function validateRedirectTargetAllowlist(targetDestination, allowedRedirectTargets) {
+  if (!allowedRedirectTargets || allowedRedirectTargets.length === 0) {
+    return {
+      valid: false,
+      reason: "No allowedRedirectTargets are configured for this MCP key. Configure honeypot/scrubbing targets in the MCP key policy before using mcp_redirect_traffic."
+    };
+  }
+  const trimmed = targetDestination.trim();
+  let ipPart = trimmed;
+  if (trimmed.startsWith("[")) {
+    const closeIdx = trimmed.indexOf("]");
+    if (closeIdx === -1) {
+      return { valid: false, reason: `Malformed IPv6 redirect target: '${trimmed}'` };
+    }
+    ipPart = trimmed.slice(1, closeIdx);
+  } else if (trimmed.split(":").length === 2) {
+    ipPart = trimmed.split(":")[0];
+  }
+  const parsedDest = parseIpOrCidr(ipPart);
+  if (!parsedDest || !parsedDest.isSingleHost) {
+    return {
+      valid: false,
+      reason: `Redirect target destination '${targetDestination}' must resolve to a single valid host IP (with optional :port)`
+    };
+  }
+  for (const allowed of allowedRedirectTargets) {
+    const trimmedAllowed = allowed.trim();
+    if (trimmedAllowed === trimmed) {
+      return { valid: true, normalizedTarget: trimmed };
+    }
+    const allowedIpPart = trimmedAllowed.includes(":") && !trimmedAllowed.includes("::") ? trimmedAllowed.split(":")[0] : trimmedAllowed;
+    if (cidrOverlaps(parsedDest.address, allowedIpPart)) {
+      return { valid: true, normalizedTarget: trimmed };
+    }
+  }
+  return {
+    valid: false,
+    reason: `Redirect destination '${targetDestination}' is not in this MCP key's allowedRedirectTargets allowlist (${allowedRedirectTargets.join(", ")})`
+  };
+}
+
 // src/headscale.ts
 function assertSafeIdentifier(val, paramName) {
   const str = String(val).trim();
@@ -39094,12 +39516,1661 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
   };
 }
 
+// src/mcp/authz.ts
+import * as crypto2 from "node:crypto";
+import * as fs2 from "node:fs";
+import * as path from "node:path";
+var rateLimitBuckets = /* @__PURE__ */ new Map();
+function resolveMcpKeysPath() {
+  if (process.env.AXONWALL_MCP_KEYS_PATH) {
+    return process.env.AXONWALL_MCP_KEYS_PATH;
+  }
+  const primaryDir = "/var/lib/axonwall";
+  try {
+    fs2.mkdirSync(primaryDir, { recursive: true, mode: 448 });
+    fs2.accessSync(primaryDir, fs2.constants.W_OK);
+    return path.join(primaryDir, "mcp-keys.json");
+  } catch {
+    const fallbackDir = "/tmp/axonwall";
+    fs2.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
+    return path.join(fallbackDir, "mcp-keys.json");
+  }
+}
+function loadMcpKeysInternal() {
+  const keysPath = resolveMcpKeysPath();
+  if (!fs2.existsSync(keysPath)) {
+    return [];
+  }
+  try {
+    const raw = fs2.readFileSync(keysPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const valid = [];
+    for (const item of parsed) {
+      const res = McpApiKeySchema.safeParse(item);
+      if (res.success) {
+        valid.push(res.data);
+      }
+    }
+    return valid;
+  } catch {
+    return [];
+  }
+}
+function saveMcpKeysInternal(keys) {
+  const keysPath = resolveMcpKeysPath();
+  fs2.mkdirSync(path.dirname(keysPath), { recursive: true, mode: 448 });
+  const tmpPath = `${keysPath}.tmp.${process.pid}`;
+  fs2.writeFileSync(tmpPath, JSON.stringify(keys, null, 2), { mode: 384 });
+  fs2.renameSync(tmpPath, keysPath);
+}
+function hashMcpToken(rawToken) {
+  return crypto2.createHash("sha256").update(rawToken.trim()).digest("hex");
+}
+function createMcpApiKeyRecord(input2) {
+  const shortId = crypto2.randomBytes(4).toString("hex");
+  const secretHex = crypto2.randomBytes(32).toString("hex");
+  const keyPrefix = `axw_mcp_${shortId}`;
+  const rawToken = `${keyPrefix}_${secretHex}`;
+  const secretHashSha256 = hashMcpToken(rawToken);
+  const now = /* @__PURE__ */ new Date();
+  let expiresAt;
+  if (input2.expiresInDays && input2.expiresInDays > 0) {
+    expiresAt = new Date(now.getTime() + input2.expiresInDays * 86400 * 1e3).toISOString();
+  }
+  const parsedLimits = McpPolicyLimitsSchema.parse(input2.policyLimits ?? {});
+  const record2 = McpApiKeySchema.parse({
+    id: `mcp_key_${shortId}`,
+    name: input2.name.trim(),
+    agentType: input2.agentType ?? "vigilsoc",
+    keyPrefix,
+    secretHashSha256,
+    scopes: input2.scopes,
+    allowedSourceCidrs: (input2.allowedSourceCidrs ?? []).map((c) => c.trim()).filter(Boolean),
+    mtlsCertFingerprintSha256: input2.mtlsCertFingerprintSha256?.trim() || void 0,
+    policyLimits: parsedLimits,
+    enabled: true,
+    createdAt: now.toISOString(),
+    expiresAt,
+    createdBy: input2.createdBy ?? "admin"
+  });
+  const existing = loadMcpKeysInternal();
+  existing.unshift(record2);
+  saveMcpKeysInternal(existing);
+  const { secretHashSha256: _omitted, ...publicRecord } = record2;
+  return {
+    rawToken,
+    key: publicRecord
+  };
+}
+function listMcpApiKeys() {
+  return loadMcpKeysInternal().map(({ secretHashSha256: _omitted, ...pub }) => pub);
+}
+function revokeMcpApiKeyRecord(keyId) {
+  const keys = loadMcpKeysInternal();
+  const idx = keys.findIndex((k) => k.id === keyId);
+  if (idx === -1) return false;
+  keys.splice(idx, 1);
+  saveMcpKeysInternal(keys);
+  rateLimitBuckets.delete(keyId);
+  return true;
+}
+function extractClientCertificateFingerprint(req) {
+  if (!req) return null;
+  const sock = req.socket;
+  if (sock && typeof sock.getPeerCertificate === "function") {
+    try {
+      const cert = sock.getPeerCertificate();
+      if (cert && cert.fingerprint256) {
+        return String(cert.fingerprint256).replace(/:/g, "").toLowerCase();
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+function checkSlidingWindowRateLimit(keyId, limitPerMinute) {
+  const now = Date.now();
+  const windowStart = now - 6e4;
+  const timestamps = (rateLimitBuckets.get(keyId) ?? []).filter((ts) => ts > windowStart);
+  if (timestamps.length >= limitPerMinute) {
+    rateLimitBuckets.set(keyId, timestamps);
+    return false;
+  }
+  timestamps.push(now);
+  rateLimitBuckets.set(keyId, timestamps);
+  return true;
+}
+function authenticateMcpToken(rawToken, clientIp, req) {
+  const cleanIp = (clientIp || "127.0.0.1").replace(/^::ffff:/i, "").trim();
+  if (!rawToken || !rawToken.trim().startsWith("axw_mcp_")) {
+    return {
+      authenticated: false,
+      clientIp: cleanIp,
+      errorStatus: 401,
+      errorMessage: "Missing or malformed Axonwall MCP Bearer token (expected axw_mcp_<id>_<secret>)"
+    };
+  }
+  const candidateHashHex = hashMcpToken(rawToken);
+  const candidateBuf = Buffer.from(candidateHashHex, "hex");
+  const keys = loadMcpKeysInternal();
+  let matchedKey;
+  for (const k of keys) {
+    const storedBuf = Buffer.from(k.secretHashSha256, "hex");
+    if (storedBuf.length === candidateBuf.length && crypto2.timingSafeEqual(storedBuf, candidateBuf)) {
+      matchedKey = k;
+      break;
+    }
+  }
+  if (!matchedKey) {
+    return {
+      authenticated: false,
+      clientIp: cleanIp,
+      errorStatus: 401,
+      errorMessage: "Invalid or revoked Axonwall MCP API key"
+    };
+  }
+  if (!matchedKey.enabled) {
+    return {
+      authenticated: false,
+      key: matchedKey,
+      clientIp: cleanIp,
+      errorStatus: 403,
+      errorMessage: `MCP API key '${matchedKey.name}' (${matchedKey.id}) is currently disabled`
+    };
+  }
+  if (matchedKey.expiresAt) {
+    const expMs = Date.parse(matchedKey.expiresAt);
+    if (!Number.isNaN(expMs) && expMs <= Date.now()) {
+      return {
+        authenticated: false,
+        key: matchedKey,
+        clientIp: cleanIp,
+        errorStatus: 403,
+        errorMessage: `MCP API key '${matchedKey.name}' expired at ${matchedKey.expiresAt}`
+      };
+    }
+  }
+  if (matchedKey.allowedSourceCidrs && matchedKey.allowedSourceCidrs.length > 0) {
+    const allowed = matchedKey.allowedSourceCidrs.some((cidr) => isIpInCidr(cleanIp, cidr));
+    if (!allowed) {
+      return {
+        authenticated: false,
+        key: matchedKey,
+        clientIp: cleanIp,
+        errorStatus: 403,
+        errorMessage: `Client IP '${cleanIp}' is not in allowedSourceCidrs (${matchedKey.allowedSourceCidrs.join(", ")}) for key '${matchedKey.name}'`
+      };
+    }
+  }
+  if (matchedKey.mtlsCertFingerprintSha256) {
+    const expectedFp = matchedKey.mtlsCertFingerprintSha256.replace(/:/g, "").toLowerCase();
+    const peerFp = extractClientCertificateFingerprint(req);
+    if (!peerFp || peerFp !== expectedFp) {
+      return {
+        authenticated: false,
+        key: matchedKey,
+        clientIp: cleanIp,
+        errorStatus: 403,
+        errorMessage: `mTLS client certificate fingerprint mismatch for key '${matchedKey.name}'`
+      };
+    }
+  }
+  if (!checkSlidingWindowRateLimit(matchedKey.id, matchedKey.policyLimits.rateLimitPerMinute)) {
+    return {
+      authenticated: false,
+      key: matchedKey,
+      clientIp: cleanIp,
+      errorStatus: 429,
+      errorMessage: `Rate limit exceeded (${matchedKey.policyLimits.rateLimitPerMinute} req/min) for MCP key '${matchedKey.name}'`
+    };
+  }
+  try {
+    matchedKey.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
+    matchedKey.lastUsedIp = cleanIp;
+    saveMcpKeysInternal(keys);
+  } catch {
+  }
+  return {
+    authenticated: true,
+    key: matchedKey,
+    clientIp: cleanIp
+  };
+}
+function hasMcpScope(key, requiredScope) {
+  return key.scopes.includes(requiredScope);
+}
+
+// src/mcp/server.ts
+import * as fs4 from "node:fs";
+import * as http from "node:http";
+import * as crypto4 from "node:crypto";
+
+// src/mcp/audit.ts
+import * as crypto3 from "node:crypto";
+import * as fs3 from "node:fs";
+import * as path2 from "node:path";
+var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
+function resolveMcpAuditPath() {
+  if (process.env.AXONWALL_MCP_AUDIT_PATH) {
+    return process.env.AXONWALL_MCP_AUDIT_PATH;
+  }
+  const primaryDir = "/var/log/axonwall";
+  try {
+    fs3.mkdirSync(primaryDir, { recursive: true, mode: 448 });
+    fs3.accessSync(primaryDir, fs3.constants.W_OK);
+    return path2.join(primaryDir, "mcp-audit.jsonl");
+  } catch {
+    const fallbackDir = "/tmp/axonwall";
+    fs3.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
+    return path2.join(fallbackDir, "mcp-audit.jsonl");
+  }
+}
+function computeEntryHash(entryWithoutHash) {
+  const canonical = JSON.stringify({
+    id: entryWithoutHash.id,
+    timestamp: entryWithoutHash.timestamp,
+    keyId: entryWithoutHash.keyId,
+    keyName: entryWithoutHash.keyName,
+    agentType: entryWithoutHash.agentType,
+    clientIp: entryWithoutHash.clientIp,
+    toolName: entryWithoutHash.toolName,
+    requiredScope: entryWithoutHash.requiredScope,
+    decision: entryWithoutHash.decision,
+    denialReason: entryWithoutHash.denialReason ?? null,
+    paramsSummary: entryWithoutHash.paramsSummary,
+    auditMetadata: entryWithoutHash.auditMetadata ?? null,
+    leaseId: entryWithoutHash.leaseId ?? null,
+    prevHash: entryWithoutHash.prevHash
+  });
+  return crypto3.createHash("sha256").update(canonical).digest("hex");
+}
+function getLastHash(auditPath) {
+  try {
+    if (!fs3.existsSync(auditPath)) return GENESIS_HASH;
+    const content = fs3.readFileSync(auditPath, "utf8").trim();
+    if (!content) return GENESIS_HASH;
+    const lines = content.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]?.trim();
+      if (!line) continue;
+      const parsed = JSON.parse(line);
+      if (parsed.entryHash) return parsed.entryHash;
+    }
+  } catch {
+  }
+  return GENESIS_HASH;
+}
+function recordMcpAuditEntry(input2) {
+  const auditPath = resolveMcpAuditPath();
+  const prevHash = getLastHash(auditPath);
+  const partial2 = {
+    id: `mcp_aud_${crypto3.randomBytes(6).toString("hex")}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    keyId: input2.keyId,
+    keyName: input2.keyName,
+    agentType: input2.agentType,
+    clientIp: input2.clientIp,
+    toolName: input2.toolName,
+    requiredScope: input2.requiredScope,
+    decision: input2.decision,
+    denialReason: input2.denialReason,
+    paramsSummary: input2.paramsSummary,
+    auditMetadata: input2.auditMetadata,
+    leaseId: input2.leaseId,
+    prevHash
+  };
+  const entryHash = computeEntryHash(partial2);
+  const fullEntry = {
+    ...partial2,
+    entryHash
+  };
+  try {
+    fs3.mkdirSync(path2.dirname(auditPath), { recursive: true, mode: 448 });
+    fs3.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 384 });
+  } catch (err) {
+    console.error("[MCP Audit] Failed to append audit entry:", err);
+  }
+  return fullEntry;
+}
+function verifyMcpAuditChain() {
+  const auditPath = resolveMcpAuditPath();
+  if (!fs3.existsSync(auditPath)) {
+    return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
+  }
+  const raw = fs3.readFileSync(auditPath, "utf8").trim();
+  if (!raw) {
+    return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
+  }
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  let expectedPrev = GENESIS_HASH;
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      if (entry.prevHash !== expectedPrev) {
+        return {
+          valid: false,
+          totalEntries: lines.length,
+          brokenAtIndex: i,
+          brokenEntryId: entry.id,
+          headHash: entry.entryHash || ""
+        };
+      }
+      const recomputed = computeEntryHash(entry);
+      if (recomputed !== entry.entryHash) {
+        return {
+          valid: false,
+          totalEntries: lines.length,
+          brokenAtIndex: i,
+          brokenEntryId: entry.id,
+          headHash: entry.entryHash || ""
+        };
+      }
+      expectedPrev = entry.entryHash;
+    } catch {
+      return {
+        valid: false,
+        totalEntries: lines.length,
+        brokenAtIndex: i,
+        headHash: expectedPrev
+      };
+    }
+  }
+  return {
+    valid: true,
+    totalEntries: lines.length,
+    headHash: expectedPrev
+  };
+}
+function queryMcpAuditEntries(limit = 100) {
+  const auditPath = resolveMcpAuditPath();
+  const integrity = verifyMcpAuditChain();
+  if (!fs3.existsSync(auditPath)) {
+    return { entries: [], integrity };
+  }
+  const raw = fs3.readFileSync(auditPath, "utf8").trim();
+  if (!raw) {
+    return { entries: [], integrity };
+  }
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  const slice = lines.slice(Math.max(0, lines.length - limit)).reverse();
+  const entries = [];
+  for (const line of slice) {
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+    }
+  }
+  return { entries, integrity };
+}
+
+// src/mcp/server.ts
+var AGENT_SOCKET_PATH = process.env.AXONWALL_AGENT_API_SOCK || "/run/axonwall/agent-api.sock";
+var AGENT_TOKEN_PATHS = [
+  "/etc/axonwall/agent.token",
+  "/var/lib/axonwall/etc-axonwall/agent.token",
+  "/run/axonwall/agent.token"
+];
+function readAgentToken() {
+  if (process.env.AXONWALL_AGENT_TOKEN) {
+    return process.env.AXONWALL_AGENT_TOKEN.trim();
+  }
+  for (const p of AGENT_TOKEN_PATHS) {
+    try {
+      if (fs4.existsSync(p)) {
+        const tok = fs4.readFileSync(p, "utf8").trim();
+        if (tok) return tok;
+      }
+    } catch {
+    }
+  }
+  return "";
+}
+async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
+  if (!fs4.existsSync(AGENT_SOCKET_PATH)) {
+    return {
+      ok: false,
+      status: 503,
+      data: { error: `axonwalld socket not available at ${AGENT_SOCKET_PATH}` }
+    };
+  }
+  const token = readAgentToken();
+  const payloadStr = body !== void 0 ? JSON.stringify(body) : void 0;
+  return new Promise((resolve2) => {
+    const req = http.request(
+      {
+        socketPath: AGENT_SOCKET_PATH,
+        path: pathUrl,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...token ? { "X-Axonwall-Agent-Token": token } : {},
+          ...payloadStr ? { "Content-Length": Buffer.byteLength(payloadStr) } : {}
+        },
+        timeout: timeoutMs
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let parsed = raw;
+          try {
+            parsed = raw ? JSON.parse(raw) : {};
+          } catch {
+            parsed = { raw };
+          }
+          const status = res.statusCode || 500;
+          resolve2({
+            ok: status >= 200 && status < 300,
+            status,
+            data: parsed
+          });
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve2({
+        ok: false,
+        status: 504,
+        data: { error: "axonwalld request timed out" }
+      });
+    });
+    req.on("error", (err) => {
+      resolve2({
+        ok: false,
+        status: 502,
+        data: { error: err.message }
+      });
+    });
+    if (payloadStr) {
+      req.write(payloadStr);
+    }
+    req.end();
+  });
+}
+function loadLocalDesiredState() {
+  const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
+  for (const p of candidates) {
+    try {
+      if (fs4.existsSync(p)) {
+        const raw = JSON.parse(fs4.readFileSync(p, "utf8"));
+        const parsed = DesiredStateSchema.safeParse(raw);
+        if (parsed.success) return parsed.data;
+        return raw;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+async function buildGuardContext(key, clientIp) {
+  const applianceHostIps = /* @__PURE__ */ new Set(["192.168.1.1"]);
+  const gatewayAndHaIps = /* @__PURE__ */ new Set();
+  const antiLockoutPorts = /* @__PURE__ */ new Set([2966, 22, 9876]);
+  let activeLeasesCount = 0;
+  const state = loadLocalDesiredState();
+  if (state) {
+    for (const p of state.system?.antiLockout?.ports ?? []) {
+      antiLockoutPorts.add(p);
+    }
+    for (const iface of state.interfaces ?? []) {
+      if (iface.ipv4Address) applianceHostIps.add(iface.ipv4Address.split("/")[0]);
+      if (iface.ipv6Address) applianceHostIps.add(iface.ipv6Address.split("/")[0]);
+      if (iface.ipv4Gateway) gatewayAndHaIps.add(iface.ipv4Gateway.split("/")[0]);
+      if (iface.ipv6Gateway) gatewayAndHaIps.add(iface.ipv6Gateway.split("/")[0]);
+    }
+    for (const gw of state.gateways ?? []) {
+      if (gw.gatewayIp) gatewayAndHaIps.add(gw.gatewayIp.split("/")[0]);
+    }
+    if (state.ha?.peerIp) gatewayAndHaIps.add(state.ha.peerIp.split("/")[0]);
+    if (state.ha?.peerAddress) gatewayAndHaIps.add(state.ha.peerAddress.split("/")[0]);
+  }
+  const postureRes = await callAxonwalldApi("GET", "/v1/mcp/posture");
+  if (postureRes.ok && postureRes.data) {
+    for (const ip of postureRes.data.posture?.applianceIps ?? []) {
+      applianceHostIps.add(ip);
+    }
+    for (const ip of postureRes.data.posture?.gatewayAndHaIps ?? []) {
+      gatewayAndHaIps.add(ip);
+    }
+    for (const p of postureRes.data.posture?.antiLockoutPorts ?? []) {
+      antiLockoutPorts.add(Number(p));
+    }
+    if (Array.isArray(postureRes.data.leases)) {
+      activeLeasesCount = postureRes.data.leases.filter(
+        (l) => l.createdByKeyId === key.id
+      ).length;
+    }
+  }
+  return {
+    ctx: {
+      applianceHostIps: Array.from(applianceHostIps),
+      gatewayAndHaIps: Array.from(gatewayAndHaIps),
+      callerIp: clientIp,
+      antiLockoutPorts: Array.from(antiLockoutPorts),
+      policyLimits: key.policyLimits
+    },
+    activeLeasesCount
+  };
+}
+var MCP_RESOURCES_CATALOG = [
+  {
+    uri: "axonwall://system/overview",
+    name: "Axonwall Appliance & Security Posture Overview",
+    description: "Appliance version, interfaces, protected management IPs, HA status, and active MCP key policy limits.",
+    mimeType: "application/json"
+  },
+  {
+    uri: "axonwall://telemetry/interfaces",
+    name: "Live Interface Traffic Counters",
+    description: "Real-time RX/TX bytes, packets, drops, and errors across all firewall interfaces.",
+    mimeType: "application/json"
+  },
+  {
+    uri: "axonwall://telemetry/alerts/suricata",
+    name: "Suricata IDS/IPS Threat Alerts",
+    description: "Recent Suricata EVE JSON threat alerts, anomalies, and DNS/TLS inspection events.",
+    mimeType: "application/json"
+  },
+  {
+    uri: "axonwall://telemetry/flows/top",
+    name: "Top Active Conntrack Network Flows",
+    description: "Highest-volume active kernel conntrack sessions ranked by bytes transferred.",
+    mimeType: "application/json"
+  },
+  {
+    uri: "axonwall://firewall/tactical-leases",
+    name: "Active AI / MCP Tactical Traffic Control Leases",
+    description: "All currently active TTL-bounded blackholes, tc shapers/tarpits, DNAT redirects, and DNS sinkholes.",
+    mimeType: "application/json"
+  },
+  {
+    uri: "axonwall://firewall/ruleset-summary",
+    name: "Declarative Firewall, NAT & Shaper Summary",
+    description: "Redacted summary of declarative firewall rules, NAT mappings, aliases, static routes, and QoS queues.",
+    mimeType: "application/json"
+  },
+  {
+    uri: "axonwall://topology/nastymap",
+    name: "NastyMap Network Topology & Host Inventory",
+    description: "Discovered LAN/OPT hosts, ARP neighbor table, and DHCP leases.",
+    mimeType: "application/json"
+  },
+  {
+    uri: "axonwall://audit/mcp-trail",
+    name: "Tamper-Evident MCP Audit Trail",
+    description: "Recent SHA-256 hash-chained MCP tool invocation records and chain verification status.",
+    mimeType: "application/json"
+  }
+];
+var MCP_TOOLS_CATALOG = [
+  {
+    name: "mcp_query_flows",
+    description: "Query live Linux kernel conntrack flows (/proc/net/nf_conntrack) to inspect active connections, byte volume, protocol, and NAT states. Requires scope: mcp:telemetry:read.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        srcIp: { type: "string", description: "Filter by source IP address" },
+        dstIp: { type: "string", description: "Filter by destination IP address" },
+        protocol: { type: "string", enum: ["any", "tcp", "udp", "icmp"], default: "any" },
+        state: { type: "string", description: "Optional TCP state filter (e.g. ESTABLISHED, SYN_SENT)" },
+        port: { type: "number", description: "Filter by source or destination port (1-65535)" },
+        minBytes: { type: "number", description: "Minimum bytes transferred" },
+        limit: { type: "number", default: 50, description: "Max flows to return (1-500)" }
+      }
+    }
+  },
+  {
+    name: "mcp_query_threat_events",
+    description: "Search Suricata IDS/IPS EVE threat alerts and active SOAR/MCP blocklists. Requires scope: mcp:telemetry:read.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        srcIp: { type: "string", description: "Filter alerts by source IP" },
+        dstIp: { type: "string", description: "Filter alerts by destination IP" },
+        signatureContains: { type: "string", description: "Case-insensitive substring match on alert signature" },
+        limit: { type: "number", default: 50 }
+      }
+    }
+  },
+  {
+    name: "mcp_inspect_host_context",
+    description: "Retrieve comprehensive 360-degree forensics on a single IP: ARP/MAC neighbor entry, Kea DHCP lease hostname, active conntrack flows, Suricata IDS alerts, and active MCP tactical leases. Requires scope: mcp:telemetry:read.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ipAddress: { type: "string", description: "IPv4 or IPv6 host address to inspect" }
+      },
+      required: ["ipAddress"]
+    }
+  },
+  {
+    name: "mcp_capture_packet_sample",
+    description: "Run a strictly bounded live BPF packet capture (max 100 packets, max 15s) on a firewall interface and return dissected packet headers/info. Requires scope: mcp:pcap:capture.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        interface: { type: "string", default: "wan", description: "Logical or kernel interface name (wan, lan, opt1, any)" },
+        srcIp: { type: "string", description: "Optional source host IP filter" },
+        dstIp: { type: "string", description: "Optional destination host IP filter" },
+        protocol: { type: "string", enum: ["any", "tcp", "udp", "icmp", "icmp6", "arp"], default: "any" },
+        port: { type: "number", description: "Optional L4 port filter (1-65535)" },
+        maxPackets: { type: "number", default: 25, description: "Number of packets to capture (1-100)" },
+        durationSeconds: { type: "number", default: 5, description: "Capture timeout in seconds (1-15)" }
+      }
+    }
+  },
+  {
+    name: "mcp_blackhole_traffic",
+    description: "Immediately blackhole/quarantine an offending IP or CIDR at the kernel level (nftables table inet axonwall_mcp drop/reject or kernel blackhole route), optionally severing established C2 sockets via conntrack -D and broadcasting to fleet satellites. Protected appliance/gateway/caller IPs and anti-lockout ports are strictly immune. Requires scope: mcp:traffic:blackhole.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "Target IP or CIDR (must satisfy key blast-radius prefix limit, e.g. >= /24)" },
+        mode: { type: "string", enum: ["nft_drop", "nft_reject", "route_blackhole"], default: "nft_drop" },
+        direction: { type: "string", enum: ["both", "inbound", "outbound"], default: "both" },
+        protocol: { type: "string", enum: ["any", "tcp", "udp", "icmp"], default: "any" },
+        port: { type: "number", description: "Optional specific L4 destination port to block (1-65535)" },
+        killActiveConnections: { type: "boolean", default: true, description: "Sever established conntrack sessions immediately" },
+        propagateToFleet: { type: "boolean", default: false, description: "Broadcast block to connected fleet satellites (requires mcp:fleet:broadcast)" },
+        ttlSeconds: { type: "number", default: 3600, description: "Mandatory self-healing lease TTL in seconds (10-604800)" },
+        audit: {
+          type: "object",
+          properties: {
+            reason: { type: "string", description: "Detailed security justification (min 10 chars)" },
+            incidentId: { type: "string" },
+            mitreTechniqueId: { type: "string", description: "Optional MITRE ATT&CK ID (e.g. T1071.001)" },
+            confidence: { type: "number" }
+          },
+          required: ["reason"]
+        }
+      },
+      required: ["target", "audit"]
+    }
+  },
+  {
+    name: "mcp_shape_traffic",
+    description: "Dynamically throttle bandwidth (Linux tc HTB) and/or inject artificial tarpit latency, jitter, or packet loss (tc netem) and DSCP markings for a suspicious IP or subnet (e.g. suspected data exfiltration or aggressive scanner). Requires scope: mcp:traffic:shape.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target: { type: "string", description: "Target IP or CIDR to throttle/tarpit" },
+        interface: { type: "string", default: "wan", description: "Interface to attach shaper class on" },
+        direction: { type: "string", enum: ["both", "egress", "ingress"], default: "both" },
+        rateKbps: { type: "number", description: "Guaranteed/throttled bandwidth in kbps (min 8)" },
+        ceilKbps: { type: "number", description: "Ceiling bandwidth in kbps" },
+        latencyMs: { type: "number", default: 0, description: "Injected tarpit delay in ms (0-5000)" },
+        jitterMs: { type: "number", default: 0, description: "Delay jitter in ms (0-1000)" },
+        packetLossPercent: { type: "number", default: 0, description: "Artificial packet loss % (0-50)" },
+        dscpMark: { type: "number", description: "Optional DSCP codepoint (0-63) to stamp on packets" },
+        ttlSeconds: { type: "number", default: 3600 },
+        audit: {
+          type: "object",
+          properties: {
+            reason: { type: "string" },
+            incidentId: { type: "string" },
+            mitreTechniqueId: { type: "string" },
+            confidence: { type: "number" }
+          },
+          required: ["reason"]
+        }
+      },
+      required: ["target", "rateKbps", "audit"]
+    }
+  },
+  {
+    name: "mcp_redirect_traffic",
+    description: "Transparently steer traffic from a specific attacker IP/CIDR toward an isolated deception honeypot (attacker-scoped DNAT in table inet axonwall_mcp) or policy-routing scrubbing gateway without affecting normal users. Target destination MUST be in the MCP key allowedRedirectTargets allowlist. Requires scope: mcp:traffic:redirect.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "Attacker source IP or CIDR to redirect" },
+        originalDstIp: { type: "string", description: "Optional original destination IP being targeted" },
+        originalDstPort: { type: "number", description: "Optional original destination port (e.g. 22, 445, 3389)" },
+        protocol: { type: "string", enum: ["tcp", "udp", "any"], default: "tcp" },
+        redirectType: { type: "string", enum: ["dnat_honeypot", "policy_route"], default: "dnat_honeypot" },
+        targetDestination: {
+          type: "string",
+          description: "Honeypot IP[:port] or policy-route gateway IP (must match key allowedRedirectTargets)"
+        },
+        masqueradeReturn: { type: "boolean", default: true },
+        ttlSeconds: { type: "number", default: 3600 },
+        audit: {
+          type: "object",
+          properties: {
+            reason: { type: "string" },
+            incidentId: { type: "string" },
+            mitreTechniqueId: { type: "string" },
+            confidence: { type: "number" }
+          },
+          required: ["reason"]
+        }
+      },
+      required: ["source", "targetDestination", "audit"]
+    }
+  },
+  {
+    name: "mcp_sinkhole_dns",
+    description: "Dynamically sinkhole a malicious C2 or phishing domain in Unbound DNS (local-zone override) with automatic TTL expiry. Requires scope: mcp:traffic:redirect.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        domain: { type: "string", description: "Fully qualified domain name to sinkhole (e.g. c2.badactor.example)" },
+        sinkholeIp: { type: "string", default: "0.0.0.0", description: "IP to return (0.0.0.0 or allowed honeypot IP)" },
+        includeSubdomains: { type: "boolean", default: true },
+        ttlSeconds: { type: "number", default: 3600 },
+        audit: {
+          type: "object",
+          properties: {
+            reason: { type: "string" },
+            incidentId: { type: "string" },
+            mitreTechniqueId: { type: "string" },
+            confidence: { type: "number" }
+          },
+          required: ["reason"]
+        }
+      },
+      required: ["domain", "audit"]
+    }
+  },
+  {
+    name: "mcp_revert_lease",
+    description: "Immediately revert and remove a specific tactical lease (blackhole, traffic shaper, redirect, or DNS sinkhole) by its leaseId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        leaseId: { type: "string", description: "The leaseId returned when the tactical action was created" },
+        reason: { type: "string", description: "Reason for reverting the tactical lease" }
+      },
+      required: ["leaseId", "reason"]
+    }
+  },
+  {
+    name: "mcp_emergency_clear_all",
+    description: "Emergency panic switch: immediately flush all AI/MCP tactical blackholes, tc shapers, redirects, and DNS sinkholes from the kernel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: { type: "string", description: "Audit reason for emergency flush" }
+      },
+      required: ["reason"]
+    }
+  },
+  {
+    name: "mcp_propose_firewall_rule",
+    description: "Stage a persistent declarative firewall rule into DesiredState, and optionally apply it with mandatory Commit-Confirm automatic rollback protection. Requires mcp:firewall:write (and mcp:firewall:apply if applyImmediately=true).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rule: {
+          type: "object",
+          description: "Declarative FirewallRule object (interface, direction, action, protocol, source, destination, destinationPort, description)"
+        },
+        applyImmediately: { type: "boolean", default: false },
+        confirmTimeoutSeconds: { type: "number", default: 120, description: "Commit-Confirm rollback watchdog timer (60-600s)" },
+        audit: {
+          type: "object",
+          properties: {
+            reason: { type: "string" },
+            incidentId: { type: "string" },
+            mitreTechniqueId: { type: "string" },
+            confidence: { type: "number" }
+          },
+          required: ["reason"]
+        }
+      },
+      required: ["rule", "audit"]
+    }
+  }
+];
+async function handleMcpReadResource(uri, env) {
+  if (!hasMcpScope(env.key, "mcp:telemetry:read")) {
+    recordMcpAuditEntry({
+      keyId: env.key.id,
+      keyName: env.key.name,
+      agentType: env.key.agentType,
+      clientIp: env.clientIp,
+      toolName: `resource:${uri}`,
+      requiredScope: "mcp:telemetry:read",
+      decision: "denied",
+      denialReason: "Missing required scope mcp:telemetry:read",
+      paramsSummary: { uri }
+    });
+    throw new Error("Authorization denied: missing required scope mcp:telemetry:read");
+  }
+  let payload;
+  switch (uri) {
+    case "axonwall://system/overview": {
+      const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+      const statusRes = await callAxonwalldApi("GET", "/v1/status");
+      payload = {
+        applianceStatus: statusRes.ok ? statusRes.data : { status: "standalone" },
+        protectedPosture: {
+          applianceHostIps: ctx.applianceHostIps,
+          gatewayAndHaIps: ctx.gatewayAndHaIps,
+          antiLockoutPorts: ctx.antiLockoutPorts
+        },
+        authenticatedPrincipal: {
+          keyId: env.key.id,
+          name: env.key.name,
+          agentType: env.key.agentType,
+          scopes: env.key.scopes,
+          policyLimits: env.key.policyLimits,
+          activeLeasesOwned: activeLeasesCount
+        }
+      };
+      break;
+    }
+    case "axonwall://telemetry/interfaces": {
+      const statusRes = await callAxonwalldApi("GET", "/v1/status");
+      payload = {
+        interfaces: statusRes.ok ? statusRes.data?.interfaces ?? [] : [],
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      break;
+    }
+    case "axonwall://telemetry/alerts/suricata": {
+      const alerts = [];
+      try {
+        if (fs4.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs4.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+          for (const line of lines.slice(-50).reverse()) {
+            try {
+              alerts.push(JSON.parse(line));
+            } catch {
+            }
+          }
+        }
+      } catch {
+      }
+      payload = { alerts };
+      break;
+    }
+    case "axonwall://telemetry/flows/top": {
+      const flowsRes = await callAxonwalldApi("GET", "/v1/mcp/flows?limit=50");
+      payload = {
+        flows: flowsRes.ok ? flowsRes.data?.flows ?? [] : []
+      };
+      break;
+    }
+    case "axonwall://firewall/tactical-leases": {
+      const leasesRes = await callAxonwalldApi("GET", "/v1/mcp/leases");
+      payload = {
+        leases: leasesRes.ok ? leasesRes.data?.leases ?? [] : []
+      };
+      break;
+    }
+    case "axonwall://firewall/ruleset-summary": {
+      const state = loadLocalDesiredState();
+      payload = state ? {
+        version: state.version,
+        hostname: state.system?.hostname,
+        antiLockout: state.system?.antiLockout,
+        interfaces: state.interfaces,
+        rulesCount: state.rules?.length ?? 0,
+        rules: state.rules ?? [],
+        natRules: state.nat ?? [],
+        aliases: state.aliases ?? [],
+        routes: state.routes ?? [],
+        trafficShaper: state.trafficShaper
+      } : { message: "No declarative DesiredState file found on disk" };
+      break;
+    }
+    case "axonwall://topology/nastymap": {
+      const arpRes = await callAxonwalldApi("GET", "/v1/arp");
+      const leasesRes = await callAxonwalldApi("GET", "/v1/leases");
+      payload = {
+        arpTable: arpRes.ok ? arpRes.data : [],
+        dhcpLeases: leasesRes.ok ? leasesRes.data : []
+      };
+      break;
+    }
+    case "axonwall://audit/mcp-trail": {
+      payload = queryMcpAuditEntries(50);
+      break;
+    }
+    default:
+      throw new Error(`Unknown MCP resource URI: ${uri}`);
+  }
+  return {
+    contents: [
+      {
+        uri,
+        mimeType: "application/json",
+        text: JSON.stringify(payload, null, 2)
+      }
+    ]
+  };
+}
+async function handleMcpCallTool(toolName, rawArgs, env) {
+  const args = rawArgs ?? {};
+  const deny = (requiredScope, reason, auditMeta) => {
+    recordMcpAuditEntry({
+      keyId: env.key.id,
+      keyName: env.key.name,
+      agentType: env.key.agentType,
+      clientIp: env.clientIp,
+      toolName,
+      requiredScope,
+      decision: "denied",
+      denialReason: reason,
+      paramsSummary: args,
+      auditMetadata: auditMeta
+    });
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({ success: false, error: reason }, null, 2) }]
+    };
+  };
+  const requireScope = (scope, auditMeta) => {
+    if (!hasMcpScope(env.key, scope)) {
+      return deny(scope, `Authorization denied: MCP key '${env.key.name}' lacks required scope '${scope}'`, auditMeta);
+    }
+    return null;
+  };
+  switch (toolName) {
+    case "mcp_query_flows": {
+      const scopeErr = requireScope("mcp:telemetry:read");
+      if (scopeErr) return scopeErr;
+      const qs = new URLSearchParams();
+      if (typeof args.srcIp === "string" && args.srcIp) qs.set("srcIp", args.srcIp);
+      if (typeof args.dstIp === "string" && args.dstIp) qs.set("dstIp", args.dstIp);
+      if (typeof args.protocol === "string" && args.protocol) qs.set("protocol", args.protocol);
+      if (typeof args.state === "string" && args.state) qs.set("state", args.state);
+      if (typeof args.port === "number") qs.set("port", String(args.port));
+      if (typeof args.minBytes === "number") qs.set("minBytes", String(args.minBytes));
+      qs.set("limit", String(typeof args.limit === "number" ? Math.min(500, Math.max(1, args.limit)) : 50));
+      const res = await callAxonwalldApi("GET", `/v1/mcp/flows?${qs.toString()}`);
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:telemetry:read",
+        decision: "allowed",
+        paramsSummary: args
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(res.ok ? res.data : { flows: [], note: res.data?.error }, null, 2)
+          }
+        ]
+      };
+    }
+    case "mcp_query_threat_events": {
+      const scopeErr = requireScope("mcp:telemetry:read");
+      if (scopeErr) return scopeErr;
+      const limit = typeof args.limit === "number" ? Math.min(200, Math.max(1, args.limit)) : 50;
+      const srcFilter = typeof args.srcIp === "string" ? args.srcIp.trim() : "";
+      const dstFilter = typeof args.dstIp === "string" ? args.dstIp.trim() : "";
+      const sigFilter = typeof args.signatureContains === "string" ? args.signatureContains.toLowerCase() : "";
+      const matchingAlerts = [];
+      try {
+        if (fs4.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs4.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+          for (let i = lines.length - 1; i >= 0 && matchingAlerts.length < limit; i--) {
+            const line = lines[i];
+            if (!line) continue;
+            try {
+              const ev = JSON.parse(line);
+              if (srcFilter && ev.src_ip !== srcFilter) continue;
+              if (dstFilter && ev.dest_ip !== dstFilter) continue;
+              if (sigFilter) {
+                const sig = String(ev.alert?.signature || "").toLowerCase();
+                if (!sig.includes(sigFilter)) continue;
+              }
+              matchingAlerts.push(ev);
+            } catch {
+            }
+          }
+        }
+      } catch {
+      }
+      const leasesRes = await callAxonwalldApi("GET", "/v1/mcp/leases");
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:telemetry:read",
+        decision: "allowed",
+        paramsSummary: args
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                suricataAlerts: matchingAlerts,
+                activeMcpLeases: leasesRes.ok ? leasesRes.data?.leases ?? [] : []
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+    case "mcp_inspect_host_context": {
+      const scopeErr = requireScope("mcp:telemetry:read");
+      if (scopeErr) return scopeErr;
+      const ipAddress = typeof args.ipAddress === "string" ? args.ipAddress.trim() : "";
+      if (!ipAddress) {
+        return deny("mcp:telemetry:read", "ipAddress parameter is required");
+      }
+      const res = await callAxonwalldApi("GET", `/v1/mcp/host-context?ip=${encodeURIComponent(ipAddress)}`);
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:telemetry:read",
+        decision: "allowed",
+        paramsSummary: { ipAddress }
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }],
+        isError: !res.ok
+      };
+    }
+    case "mcp_capture_packet_sample": {
+      const scopeErr = requireScope("mcp:pcap:capture");
+      if (scopeErr) return scopeErr;
+      const parsed = McpPcapSampleRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny("mcp:pcap:capture", `Invalid packet capture parameters: ${parsed.error.message}`);
+      }
+      const res = await callAxonwalldApi("POST", "/v1/mcp/pcap-sample", parsed.data, 2e4);
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:pcap:capture",
+        decision: "allowed",
+        paramsSummary: parsed.data
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(res.data, null, 2) }],
+        isError: !res.ok
+      };
+    }
+    case "mcp_blackhole_traffic": {
+      const parsed = McpBlackholeRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny("mcp:traffic:blackhole", `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+      const scopeErr = requireScope("mcp:traffic:blackhole", req.audit);
+      if (scopeErr) return scopeErr;
+      if (req.propagateToFleet) {
+        const fleetErr = requireScope("mcp:fleet:broadcast", req.audit);
+        if (fleetErr) return fleetErr;
+      }
+      const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+      if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
+        return deny(
+          "mcp:traffic:blackhole",
+          `Maximum active tactical leases (${env.key.policyLimits.maxActiveLeases}) reached for key '${env.key.name}'`,
+          req.audit
+        );
+      }
+      const targetCheck = validateMcpTarget(req.target, ctx, { port: req.port });
+      if (!targetCheck.valid) {
+        return deny("mcp:traffic:blackhole", targetCheck.reason || "Target rejected by safety guard", req.audit);
+      }
+      const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
+      const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/blackhole", {
+        ...req,
+        target: targetCheck.normalizedTarget,
+        ttlSeconds: boundedTtl,
+        callerIp: env.clientIp,
+        maxIpv4PrefixLen: env.key.policyLimits.maxIpv4PrefixLen,
+        maxIpv6PrefixLen: env.key.policyLimits.maxIpv6PrefixLen,
+        keyId: env.key.id,
+        keyName: env.key.name
+      });
+      if (!daemonRes.ok && daemonRes.status !== 503) {
+        return deny("mcp:traffic:blackhole", daemonRes.data?.error || "Daemon rejected blackhole request", req.audit);
+      }
+      const lease = daemonRes.ok ? daemonRes.data.lease : {
+        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
+        kind: "blackhole",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
+        ttlSeconds: boundedTtl,
+        createdByKeyId: env.key.id,
+        createdByKeyName: env.key.name,
+        targetSummary: `Blackhole ${targetCheck.normalizedTarget} (${req.mode}, ${req.direction})`,
+        parameters: { ...req, target: targetCheck.normalizedTarget, ttlSeconds: boundedTtl },
+        audit: req.audit
+      };
+      let fleetPropagatedCount = 0;
+      if (req.propagateToFleet && env.onFleetBroadcastBlock && targetCheck.normalizedTarget) {
+        fleetPropagatedCount = env.onFleetBroadcastBlock(
+          targetCheck.normalizedTarget,
+          req.audit.reason,
+          Math.ceil(boundedTtl / 60)
+        );
+      }
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:traffic:blackhole",
+        decision: "allowed",
+        paramsSummary: {
+          target: targetCheck.normalizedTarget,
+          mode: req.mode,
+          direction: req.direction,
+          port: req.port,
+          ttlSeconds: boundedTtl,
+          propagateToFleet: req.propagateToFleet
+        },
+        auditMetadata: req.audit,
+        leaseId: lease.id
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                lease,
+                fleetPropagatedSatellites: fleetPropagatedCount,
+                auditEntryHash: auditEntry.entryHash
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+    case "mcp_shape_traffic": {
+      const parsed = McpShapeRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny("mcp:traffic:shape", `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+      const scopeErr = requireScope("mcp:traffic:shape", req.audit);
+      if (scopeErr) return scopeErr;
+      const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+      if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
+        return deny(
+          "mcp:traffic:shape",
+          `Maximum active tactical leases (${env.key.policyLimits.maxActiveLeases}) reached for key '${env.key.name}'`,
+          req.audit
+        );
+      }
+      const targetCheck = validateMcpTarget(req.target, ctx);
+      if (!targetCheck.valid) {
+        return deny("mcp:traffic:shape", targetCheck.reason || "Target rejected by safety guard", req.audit);
+      }
+      const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
+      const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/shape", {
+        ...req,
+        target: targetCheck.normalizedTarget,
+        ttlSeconds: boundedTtl,
+        callerIp: env.clientIp,
+        maxIpv4PrefixLen: env.key.policyLimits.maxIpv4PrefixLen,
+        maxIpv6PrefixLen: env.key.policyLimits.maxIpv6PrefixLen,
+        keyId: env.key.id,
+        keyName: env.key.name
+      });
+      if (!daemonRes.ok && daemonRes.status !== 503) {
+        return deny("mcp:traffic:shape", daemonRes.data?.error || "Daemon rejected traffic shaping request", req.audit);
+      }
+      const lease = daemonRes.ok ? daemonRes.data.lease : {
+        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
+        kind: "shape",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
+        ttlSeconds: boundedTtl,
+        createdByKeyId: env.key.id,
+        createdByKeyName: env.key.name,
+        targetSummary: `Throttle ${targetCheck.normalizedTarget} to ${req.rateKbps} kbps`,
+        parameters: { ...req, target: targetCheck.normalizedTarget, ttlSeconds: boundedTtl },
+        audit: req.audit
+      };
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:traffic:shape",
+        decision: "allowed",
+        paramsSummary: {
+          target: targetCheck.normalizedTarget,
+          interface: req.interface,
+          rateKbps: req.rateKbps,
+          latencyMs: req.latencyMs,
+          ttlSeconds: boundedTtl
+        },
+        auditMetadata: req.audit,
+        leaseId: lease.id
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2)
+          }
+        ]
+      };
+    }
+    case "mcp_redirect_traffic": {
+      const parsed = McpRedirectRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny("mcp:traffic:redirect", `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+      const scopeErr = requireScope("mcp:traffic:redirect", req.audit);
+      if (scopeErr) return scopeErr;
+      const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+      if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
+        return deny(
+          "mcp:traffic:redirect",
+          `Maximum active tactical leases (${env.key.policyLimits.maxActiveLeases}) reached for key '${env.key.name}'`,
+          req.audit
+        );
+      }
+      const sourceCheck = validateMcpTarget(req.source, ctx, { port: req.originalDstPort });
+      if (!sourceCheck.valid) {
+        return deny("mcp:traffic:redirect", sourceCheck.reason || "Source rejected by safety guard", req.audit);
+      }
+      const destCheck = validateRedirectTargetAllowlist(
+        req.targetDestination,
+        env.key.policyLimits.allowedRedirectTargets
+      );
+      if (!destCheck.valid) {
+        return deny("mcp:traffic:redirect", destCheck.reason || "Redirect destination not in allowlist", req.audit);
+      }
+      const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
+      const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/redirect", {
+        ...req,
+        source: sourceCheck.normalizedTarget,
+        targetDestination: destCheck.normalizedTarget,
+        ttlSeconds: boundedTtl,
+        callerIp: env.clientIp,
+        maxIpv4PrefixLen: env.key.policyLimits.maxIpv4PrefixLen,
+        maxIpv6PrefixLen: env.key.policyLimits.maxIpv6PrefixLen,
+        keyId: env.key.id,
+        keyName: env.key.name
+      });
+      if (!daemonRes.ok && daemonRes.status !== 503) {
+        return deny("mcp:traffic:redirect", daemonRes.data?.error || "Daemon rejected redirect request", req.audit);
+      }
+      const lease = daemonRes.ok ? daemonRes.data.lease : {
+        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
+        kind: "redirect",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
+        ttlSeconds: boundedTtl,
+        createdByKeyId: env.key.id,
+        createdByKeyName: env.key.name,
+        targetSummary: `Redirect ${sourceCheck.normalizedTarget} -> ${destCheck.normalizedTarget} (${req.redirectType})`,
+        parameters: { ...req, source: sourceCheck.normalizedTarget, ttlSeconds: boundedTtl },
+        audit: req.audit
+      };
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:traffic:redirect",
+        decision: "allowed",
+        paramsSummary: {
+          source: sourceCheck.normalizedTarget,
+          targetDestination: destCheck.normalizedTarget,
+          redirectType: req.redirectType,
+          ttlSeconds: boundedTtl
+        },
+        auditMetadata: req.audit,
+        leaseId: lease.id
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2)
+          }
+        ]
+      };
+    }
+    case "mcp_sinkhole_dns": {
+      const parsed = McpDnsSinkholeRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny("mcp:traffic:redirect", `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+      const scopeErr = requireScope("mcp:traffic:redirect", req.audit);
+      if (scopeErr) return scopeErr;
+      if (req.domain.endsWith(".axonwall.local") || req.domain === "localhost") {
+        return deny("mcp:traffic:redirect", `Cannot sinkhole internal appliance domain '${req.domain}'`, req.audit);
+      }
+      const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
+      const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/sinkhole-dns", {
+        ...req,
+        ttlSeconds: boundedTtl,
+        keyId: env.key.id,
+        keyName: env.key.name
+      });
+      if (!daemonRes.ok && daemonRes.status !== 503) {
+        return deny("mcp:traffic:redirect", daemonRes.data?.error || "Daemon rejected DNS sinkhole request", req.audit);
+      }
+      const lease = daemonRes.ok ? daemonRes.data.lease : {
+        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
+        kind: "dns_sinkhole",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
+        ttlSeconds: boundedTtl,
+        createdByKeyId: env.key.id,
+        createdByKeyName: env.key.name,
+        targetSummary: `DNS Sinkhole ${req.domain} -> ${req.sinkholeIp}`,
+        parameters: { ...req, ttlSeconds: boundedTtl },
+        audit: req.audit
+      };
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:traffic:redirect",
+        decision: "allowed",
+        paramsSummary: {
+          domain: req.domain,
+          sinkholeIp: req.sinkholeIp,
+          ttlSeconds: boundedTtl
+        },
+        auditMetadata: req.audit,
+        leaseId: lease.id
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2)
+          }
+        ]
+      };
+    }
+    case "mcp_revert_lease": {
+      const hasAnyWriteScope = hasMcpScope(env.key, "mcp:traffic:blackhole") || hasMcpScope(env.key, "mcp:traffic:shape") || hasMcpScope(env.key, "mcp:traffic:redirect") || hasMcpScope(env.key, "mcp:firewall:write");
+      if (!hasAnyWriteScope) {
+        return deny("mcp:traffic:*", "MCP key lacks any traffic control write scope to revert leases");
+      }
+      const leaseId = typeof args.leaseId === "string" ? args.leaseId.trim() : "";
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "Reverted via MCP";
+      if (!leaseId) {
+        return deny("mcp:traffic:*", "leaseId is required");
+      }
+      const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/revert", { leaseId });
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:traffic:*",
+        decision: "allowed",
+        paramsSummary: { leaseId, reason },
+        leaseId
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              daemonRes.ok ? daemonRes.data : { success: true, leaseId, note: daemonRes.data?.error },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+    case "mcp_emergency_clear_all": {
+      const hasAnyWriteScope = hasMcpScope(env.key, "mcp:traffic:blackhole") || hasMcpScope(env.key, "mcp:traffic:shape") || hasMcpScope(env.key, "mcp:traffic:redirect") || hasMcpScope(env.key, "mcp:firewall:write");
+      if (!hasAnyWriteScope) {
+        return deny("mcp:traffic:*", "MCP key lacks any traffic control write scope to flush leases");
+      }
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "Emergency flush via MCP";
+      const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/flush", {});
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:traffic:*",
+        decision: "allowed",
+        paramsSummary: { reason }
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                clearedCount: daemonRes.ok ? daemonRes.data?.clearedCount ?? 0 : 0,
+                reason
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+    case "mcp_propose_firewall_rule": {
+      const parsed = McpProposeRuleRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny("mcp:firewall:write", `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+      const writeErr = requireScope("mcp:firewall:write", req.audit);
+      if (writeErr) return writeErr;
+      if (req.applyImmediately) {
+        const applyErr = requireScope("mcp:firewall:apply", req.audit);
+        if (applyErr) return applyErr;
+      }
+      const { ctx } = await buildGuardContext(env.key, env.clientIp);
+      if (req.rule.action === "block" || req.rule.action === "reject") {
+        if (req.rule.source && req.rule.source !== "any" && !req.rule.source.startsWith("$")) {
+          const srcCheck = validateMcpTarget(req.rule.source, ctx);
+          if (!srcCheck.valid) {
+            return deny("mcp:firewall:write", `Rule source rejected by guard: ${srcCheck.reason}`, req.audit);
+          }
+        }
+        if (req.rule.destinationPort && /^\d+$/.test(req.rule.destinationPort)) {
+          const portNum = Number(req.rule.destinationPort);
+          if ((ctx.antiLockoutPorts ?? [2966, 22, 9876]).includes(portNum)) {
+            return deny(
+              "mcp:firewall:write",
+              `Blocking anti-lockout port ${portNum} is prohibited`,
+              req.audit
+            );
+          }
+        }
+      }
+      const state = loadLocalDesiredState();
+      if (!state) {
+        return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
+      }
+      state.rules.push(req.rule);
+      try {
+        fs4.writeFileSync("/etc/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
+      } catch {
+      }
+      let applyStatus = "staged_only";
+      if (req.applyImmediately) {
+        const compiled = compileNftables(state);
+        const applyRes = await callAxonwalldApi("POST", "/v1/apply", {
+          jobId: `mcp_apply_${Date.now()}`,
+          bundleHash: crypto4.createHash("sha256").update(compiled.nftScript).digest("hex"),
+          nftablesRuleset: compiled.nftScript,
+          files: compiled.files,
+          reloadServices: compiled.reloadServices,
+          commitConfirmTimeoutSec: req.confirmTimeoutSeconds
+        });
+        applyStatus = applyRes.ok ? `applied_with_commit_confirm_${req.confirmTimeoutSeconds}s` : `apply_error: ${applyRes.data?.error}`;
+      }
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: req.applyImmediately ? "mcp:firewall:apply" : "mcp:firewall:write",
+        decision: "allowed",
+        paramsSummary: {
+          ruleId: req.rule.id,
+          action: req.rule.action,
+          source: req.rule.source,
+          destination: req.rule.destination,
+          applyStatus
+        },
+        auditMetadata: req.audit
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                rule: req.rule,
+                applyStatus,
+                commitConfirmNotice: req.applyImmediately ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection.` : "Rule staged in DesiredState.",
+                auditEntryHash: auditEntry.entryHash
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+    default:
+      return deny("mcp:unknown", `Unknown MCP tool: '${toolName}'`);
+  }
+}
+async function processMcpJsonRpcMessage(msg, env) {
+  if (!msg || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
+    return {
+      jsonrpc: "2.0",
+      id: msg?.id ?? null,
+      error: { code: -32600, message: "Invalid JSON-RPC 2.0 request" }
+    };
+  }
+  if (msg.id === void 0) {
+    return null;
+  }
+  try {
+    switch (msg.method) {
+      case "initialize":
+        return {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            protocolVersion: "2024-11-05",
+            serverInfo: {
+              name: "axonwall-firewall-mcp",
+              version: "0.11.4"
+            },
+            capabilities: {
+              resources: { listChanged: false },
+              tools: { listChanged: false }
+            }
+          }
+        };
+      case "ping":
+        return {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {}
+        };
+      case "resources/list":
+        return {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            resources: MCP_RESOURCES_CATALOG
+          }
+        };
+      case "resources/read": {
+        const uri = String(msg.params?.uri || "");
+        const res = await handleMcpReadResource(uri, env);
+        return {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: res
+        };
+      }
+      case "tools/list":
+        return {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            tools: MCP_TOOLS_CATALOG
+          }
+        };
+      case "tools/call": {
+        const toolName = String(msg.params?.name || "");
+        const toolArgs = msg.params?.arguments || {};
+        const res = await handleMcpCallTool(toolName, toolArgs, env);
+        return {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: res
+        };
+      }
+      default:
+        return {
+          jsonrpc: "2.0",
+          id: msg.id,
+          error: {
+            code: -32601,
+            message: `Method not found: ${msg.method}`
+          }
+        };
+    }
+  } catch (err) {
+    return {
+      jsonrpc: "2.0",
+      id: msg.id,
+      error: {
+        code: -32e3,
+        message: err?.message || "MCP server execution error"
+      }
+    };
+  }
+}
+
 // src/index.ts
 function buildArtifactBundle(jobId, state) {
   const issues = lintRuleset(state);
   const warnings = issues.map((i) => `[${i.severity.toUpperCase()}] ${i.message}`);
   const { nftScript, files, reloadServices } = compileNftables(state);
-  const hash2 = crypto2.createHash("sha256").update(nftScript).digest("hex");
+  const hash2 = crypto5.createHash("sha256").update(nftScript).digest("hex");
   return {
     jobId,
     bundleHash: hash2,
@@ -39135,7 +41206,7 @@ function getSafeRedirectUrl(req, targetPort) {
   return { targetUrl, escapedUrl, scriptSafeUrl };
 }
 function createHttpRedirectServer(targetPort) {
-  const redirectServer = http.createServer((req, res) => {
+  const redirectServer = http2.createServer((req, res) => {
     const { targetUrl, escapedUrl, scriptSafeUrl } = getSafeRedirectUrl(req, targetPort);
     res.writeHead(301, {
       Location: targetUrl,
@@ -39290,7 +41361,7 @@ async function main() {
       return;
     }
     const verifyFleetAuth = (req2, res2) => {
-      if (fs2.existsSync(caPath)) {
+      if (fs5.existsSync(caPath)) {
         const tlsSocket = req2.socket;
         let peerCert = null;
         try {
@@ -39311,7 +41382,7 @@ async function main() {
         res2.end(JSON.stringify({ error: "Fleet management authentication unconfigured" }));
         return false;
       }
-      const isValid = token && token.length === expectedToken.length && crypto2.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      const isValid = token && token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
       if (!isValid) {
         res2.writeHead(401, { "Content-Type": "application/json" });
         res2.end(JSON.stringify({ error: "Unauthorized: Valid X-Axonwall-ZTP-Token required" }));
@@ -39402,8 +41473,109 @@ async function main() {
       }));
       return;
     }
+    if (pathname === "/api/v1/mcp" || pathname === "/api/v1/mcp/sse") {
+      const authHeader = (req.headers.authorization || "").trim();
+      const rawToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : (req.headers["x-axonwall-mcp-token"] || "").trim();
+      const clientIp = (req.socket?.remoteAddress || "127.0.0.1").replace(/^::ffff:/i, "");
+      const authRes = authenticateMcpToken(rawToken, clientIp, req);
+      if (!authRes.authenticated || !authRes.key) {
+        recordMcpAuditEntry({
+          keyId: authRes.key?.id ?? "unauthenticated",
+          keyName: authRes.key?.name ?? "unauthenticated",
+          agentType: authRes.key?.agentType ?? "unknown",
+          clientIp,
+          toolName: `http:${req.method}:${pathname}`,
+          requiredScope: "mcp:auth",
+          decision: "denied",
+          denialReason: authRes.errorMessage || "Authentication failed",
+          paramsSummary: { pathname, method: req.method }
+        });
+        res.writeHead(authRes.errorStatus || 401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32001, message: authRes.errorMessage || "Unauthorized MCP request" }
+        }));
+        return;
+      }
+      const authenticatedKey = authRes.key;
+      if (req.method === "GET") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive"
+        });
+        res.write(`event: endpoint
+data: /api/v1/mcp
+
+`);
+        const keepAlive = setInterval(() => {
+          if (!res.writableEnded) {
+            res.write(`: ping ${Date.now()}
+
+`);
+          }
+        }, 15e3);
+        req.on("close", () => clearInterval(keepAlive));
+        return;
+      }
+      if (req.method === "POST") {
+        let body = "";
+        let aborted2 = false;
+        req.on("data", (chunk) => {
+          body += chunk.toString();
+          if (body.length > 262144) {
+            aborted2 = true;
+            res.writeHead(413, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Payload too large" } }));
+            req.destroy();
+          }
+        });
+        req.on("end", async () => {
+          if (aborted2) return;
+          try {
+            const rpcPayload = JSON.parse(body);
+            const rpcResp = await processMcpJsonRpcMessage(rpcPayload, {
+              key: authenticatedKey,
+              clientIp,
+              onFleetBroadcastBlock: (targetIp) => {
+                let notified = 0;
+                for (const sat of activeSatellites.values()) {
+                  if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
+                    sat.ws.send(JSON.stringify({
+                      type: "BLOCK_TARGET",
+                      payload: { target: targetIp, isMac: false }
+                    }));
+                    notified++;
+                  }
+                }
+                return notified;
+              }
+            });
+            if (!rpcResp) {
+              res.writeHead(202);
+              res.end();
+              return;
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(rpcResp));
+          } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32700, message: "Invalid JSON-RPC payload" }
+            }));
+          }
+        });
+        return;
+      }
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Method Not Allowed" }));
+      return;
+    }
     const forwardedHost = req.headers.host || req.headers["x-forwarded-host"] || "localhost";
-    const uiReq = http.request({
+    const uiReq = http2.request({
       hostname: "127.0.0.1",
       port: uiPort,
       path: req.url,
@@ -39449,13 +41621,13 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     });
     req.pipe(uiReq);
   };
-  if (fs2.existsSync(certPath) && fs2.existsSync(keyPath)) {
+  if (fs5.existsSync(certPath) && fs5.existsSync(keyPath)) {
     console.log(`[Axonwall Controller] Starting in SECURE mTLS mode (HTTP auto-upgrade enabled on port ${port})`);
     const httpsServer = https.createServer({
-      cert: fs2.readFileSync(certPath),
-      key: fs2.readFileSync(keyPath),
-      ca: fs2.existsSync(caPath) ? fs2.readFileSync(caPath) : void 0,
-      requestCert: fs2.existsSync(caPath),
+      cert: fs5.readFileSync(certPath),
+      key: fs5.readFileSync(keyPath),
+      ca: fs5.existsSync(caPath) ? fs5.readFileSync(caPath) : void 0,
+      requestCert: fs5.existsSync(caPath),
       // Client certificates are enforced per-path, not at the TLS layer:
       // this listener is shared by the web console (browsers have no
       // client cert) and by satellites that only receive their cert
@@ -39470,22 +41642,22 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     server = tcpMultiplexer;
   } else {
     console.log("[Axonwall Controller] Starting in INSECURE HTTP mode");
-    mainServer = http.createServer(requestHandler);
+    mainServer = http2.createServer(requestHandler);
     server = mainServer;
   }
   const wss = new import_websocket_server.default({ noServer: true, maxPayload: 1048576 });
-  mainServer.on("upgrade", (request2, socket, head) => {
+  mainServer.on("upgrade", (request3, socket, head) => {
     let pathname;
     try {
-      pathname = new URL(request2.url || "/", `http://${request2.headers.host || "localhost"}`).pathname;
+      pathname = new URL(request3.url || "/", `http://${request3.headers.host || "localhost"}`).pathname;
     } catch {
       socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
       socket.destroy();
       return;
     }
     if (pathname === "/ws/satellite") {
-      const satId = (request2.headers["x-axonwall-satellite-id"] || "").trim();
-      const token = request2.headers["x-axonwall-ztp-token"];
+      const satId = (request3.headers["x-axonwall-satellite-id"] || "").trim();
+      const token = request3.headers["x-axonwall-ztp-token"];
       if (!satId || !token) {
         console.log(`[Fleet Manager] Rejected connection: missing ZTP headers`);
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -39535,14 +41707,14 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         socket.destroy();
         return;
       }
-      const isTokenValid = token.length === expectedToken.length && crypto2.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      const isTokenValid = token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
       if (!isTokenValid) {
         console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
-      if (fs2.existsSync(caPath)) {
+      if (fs5.existsSync(caPath)) {
         const tlsSocket = socket;
         if (!tlsSocket.authorized) {
           console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
@@ -39552,16 +41724,16 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         }
       }
       console.log(`[Fleet Manager] Satellite authenticated successfully: ${satId}`);
-      wss.handleUpgrade(request2, socket, head, (ws) => {
-        wss.emit("connection", ws, request2, satId);
+      wss.handleUpgrade(request3, socket, head, (ws) => {
+        wss.emit("connection", ws, request3, satId);
       });
     } else {
-      const uiWsReq = http.request({
+      const uiWsReq = http2.request({
         hostname: "127.0.0.1",
         port: uiPort,
-        path: request2.url,
-        method: request2.method,
-        headers: request2.headers
+        path: request3.url,
+        method: request3.method,
+        headers: request3.headers
       });
       uiWsReq.on("upgrade", (uiRes, uiSocket, uiHead) => {
         const headerLines = [];
@@ -39620,8 +41792,8 @@ ${headerLines.join("\r\n")}\r
       }));
     }
   }
-  wss.on("connection", async (ws, request2, satId) => {
-    const remoteIp = request2.socket.remoteAddress || "127.0.0.1";
+  wss.on("connection", async (ws, request3, satId) => {
+    const remoteIp = request3.socket.remoteAddress || "127.0.0.1";
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
     const existing = activeSatellites.get(satId);
     if (existing?.ws && existing.ws !== ws) {
@@ -39633,7 +41805,7 @@ ${headerLines.join("\r\n")}\r
     let wgPrivateKey = existing?.wgPrivateKey;
     let wgPublicKey = existing?.wgPublicKey;
     if (!wgPrivateKey || !wgPublicKey) {
-      const { publicKey, privateKey } = crypto2.generateKeyPairSync("x25519");
+      const { publicKey, privateKey } = crypto5.generateKeyPairSync("x25519");
       const rawPriv = privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32);
       const rawPub = publicKey.export({ type: "spki", format: "der" }).subarray(-32);
       wgPrivateKey = rawPriv.toString("base64");
@@ -39658,7 +41830,7 @@ ${headerLines.join("\r\n")}\r
       connectedAt: (/* @__PURE__ */ new Date()).toISOString(),
       lastSeen: (/* @__PURE__ */ new Date()).toISOString(),
       ip: remoteIp.replace(/^::ffff:/, ""),
-      arch: request2.headers["user-agent"]?.includes("arm") ? "arm64" : "amd64",
+      arch: request3.headers["user-agent"]?.includes("arm") ? "arm64" : "amd64",
       wgPrivateKey,
       wgPublicKey,
       tunnelIp,
@@ -39754,7 +41926,7 @@ ${headerLines.join("\r\n")}\r
 var isDirectExecution = () => {
   if (process.env.NODE_ENV === "test") return false;
   try {
-    return !!process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+    return !!process.argv[1] && fileURLToPath(import.meta.url) === path3.resolve(process.argv[1]);
   } catch {
     return false;
   }
@@ -39766,7 +41938,17 @@ if (isDirectExecution()) {
   });
 }
 export {
+  MCP_RESOURCES_CATALOG,
+  MCP_TOOLS_CATALOG,
+  authenticateMcpToken,
   buildArtifactBundle,
   createHttpRedirectServer,
-  createPortMultiplexer
+  createMcpApiKeyRecord,
+  createPortMultiplexer,
+  listMcpApiKeys,
+  processMcpJsonRpcMessage,
+  queryMcpAuditEntries,
+  recordMcpAuditEntry,
+  revokeMcpApiKeyRecord,
+  verifyMcpAuditChain
 };
