@@ -413,6 +413,7 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       fi
       rmdir "$SLOT_A_MNT" 2>/dev/null || true
     fi
+  fi
 elif [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline; then
   echo "[-] ERROR: Appliance is configured for Dual-Root A/B, but target block device for Slot ${TARGET_SLOT} could not be resolved." >&2
   exit 1
