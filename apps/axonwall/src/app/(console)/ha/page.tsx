@@ -16,7 +16,7 @@ import {
   Save,
   Check,
 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, applyDesiredState, getHASyncTrustStatus, type HASyncTrustStatus } from '@/server/agent';
 
 export default function HighAvailabilityPage() {
   const [enabled, setEnabled] = useState(false);
@@ -28,6 +28,9 @@ export default function HighAvailabilityPage() {
   const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(true);
   const [sqliteSyncMode, setSqliteSyncMode] = useState<'direct_stream' | 'litestream'>('direct_stream');
   const [syncInterval, setSyncInterval] = useState(5);
+  const [syncTransport, setSyncTransport] = useState<'token-http' | 'mtls'>('token-http');
+  const [requireSigned, setRequireSigned] = useState(false);
+  const [trustStatus, setTrustStatus] = useState<HASyncTrustStatus | null>(null);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -52,9 +55,17 @@ export default function HighAvailabilityPage() {
             setSqliteSyncEnabled(state.ha.sqliteSync.enabled);
             setSqliteSyncMode(state.ha.sqliteSync.mode);
             setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
+            setSyncTransport(state.ha.sqliteSync.transport || 'token-http');
+            setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
           }
         }
       })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    getHASyncTrustStatus()
+      .then((status) => setTrustStatus(status))
       .catch(() => {});
   }, []);
 
@@ -111,8 +122,8 @@ export default function HighAvailabilityPage() {
             mode: sqliteSyncMode,
             syncIntervalSeconds: syncInterval,
             listenPort: state.ha?.sqliteSync?.listenPort || 9876,
-            transport: state.ha?.sqliteSync?.transport || 'token-http',
-            requireSignedPayloads: state.ha?.sqliteSync?.requireSignedPayloads ?? false,
+            transport: syncTransport,
+            requireSignedPayloads: requireSigned,
             databases: state.ha?.sqliteSync?.databases || ['/var/lib/axonwall/headscale/db.sqlite'],
           },
         },
@@ -367,6 +378,43 @@ export default function HighAvailabilityPage() {
                     </div>
                   </div>
 
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                        Sync Transport
+                      </label>
+                      <select
+                        value={syncTransport}
+                        onChange={(e) => setSyncTransport(e.target.value as 'token-http' | 'mtls')}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-indigo-500 transition cursor-pointer"
+                      >
+                        <option value="token-http">Shared token over HTTP</option>
+                        <option value="mtls">Mutual TLS (HA PKI certificates)</option>
+                      </select>
+                      <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                        mTLS takes effect once the pair has enrolled (see Sync Trust below). Enrollment itself always uses the token channel.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                        Payload Signatures
+                      </label>
+                      <label className="flex items-center gap-3 bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={requireSigned}
+                          onChange={() => setRequireSigned(!requireSigned)}
+                          className="w-4 h-4 accent-indigo-500"
+                        />
+                        <span className="text-sm text-slate-200">Require signed payloads</span>
+                      </label>
+                      <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                        When on, this node refuses unsigned database/state payloads from the peer. Invalid signatures are always refused.
+                      </p>
+                    </div>
+                  </div>
+
                   <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-300 space-y-2">
                     <div className="font-semibold text-white flex items-center gap-2">
                       <Database className="w-4 h-4 text-indigo-400" />
@@ -378,6 +426,70 @@ export default function HighAvailabilityPage() {
                     <p className="text-slate-400 text-[11px] leading-relaxed">
                       Automatic Headscale promotion/demotion hook: The backup node automatically keeps Headscale stopped to prevent dual-master write split-brain, checkpointing and starting the service instantly upon VRRP master promotion.
                     </p>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-300 space-y-2">
+                    <div className="font-semibold text-white flex items-center gap-2">
+                      <Lock className="w-4 h-4 text-indigo-400" />
+                      <span>Sync Trust (live from this node&apos;s daemon):</span>
+                    </div>
+                    {trustStatus === null ? (
+                      <p className="text-slate-400 text-[11px] leading-relaxed">
+                        Daemon unreachable — trust state unavailable.
+                      </p>
+                    ) : (
+                      <div className="space-y-1.5 text-[11px] leading-relaxed">
+                        <div className="flex flex-wrap gap-x-6 gap-y-1">
+                          <span>
+                            PKI enrollment:{' '}
+                            {trustStatus.pkiEnrolled ? (
+                              <span className="text-emerald-300 font-semibold">enrolled</span>
+                            ) : (
+                              <span className="text-amber-300 font-semibold">not enrolled yet</span>
+                            )}
+                          </span>
+                          <span>
+                            Transport in effect:{' '}
+                            <span className="font-mono text-indigo-300">{trustStatus.transportEffective}</span>
+                            {trustStatus.transportEffective !== trustStatus.transportConfigured && (
+                              <span className="text-amber-300"> (configured: {trustStatus.transportConfigured})</span>
+                            )}
+                          </span>
+                          <span>
+                            Signed payloads required:{' '}
+                            <span className="text-slate-200">{trustStatus.requireSignedPayloads ? 'yes' : 'no'}</span>
+                          </span>
+                        </div>
+                        {trustStatus.pkiEnrolled ? (
+                          <>
+                            <div>
+                              <span className="text-slate-400">Node certificate SHA-256: </span>
+                              <span className="font-mono bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-indigo-300 break-all inline-block">
+                                {trustStatus.nodeCertFingerprint}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400">HA CA SHA-256: </span>
+                              <span className="font-mono bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-indigo-300 break-all inline-block">
+                                {trustStatus.caCertFingerprint}
+                              </span>
+                            </div>
+                            <p className="text-slate-500">
+                              Both nodes of a pair share one CA and one node certificate, so both nodes must show identical
+                              fingerprints. A mismatch means the pair is not enrolled together.
+                              {trustStatus.nodeCertExpiresAt && (
+                                <> Node certificate expires {new Date(trustStatus.nodeCertExpiresAt).toLocaleDateString()}.</>
+                              )}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-slate-500">
+                            The backup node enrolls automatically over the token-authenticated channel on its first sync poll.
+                            Once enrolled on both nodes, the mTLS transport and payload signatures become available.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">

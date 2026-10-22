@@ -171,6 +171,15 @@ func (e *HAEngine) OnTransition(state string) {
 	}
 }
 
+// SyncTrustStatus reports the HA sync trust state (PKI enrollment,
+// transports, payload-signing policy) for the agent API (D-04 Phase 3).
+func (e *HAEngine) SyncTrustStatus() engine.SyncTrustStatus {
+	if e.sqliteSync == nil {
+		return engine.SyncTrustStatus{}
+	}
+	return e.sqliteSync.TrustStatus()
+}
+
 func (e *HAEngine) Apply(cfg HAConfig) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -470,3 +471,30 @@ var (
 	haSignPayloadDigest      = signPayloadDigestFromPKI
 	haVerifyPayloadSignature = verifyPayloadSignatureFromPKI
 )
+
+// certFingerprintSHA256 renders a certificate's SHA-256 fingerprint in
+// the colon-separated uppercase hex form operators are used to comparing
+// out-of-band (audit D-04 Phase 3).
+func certFingerprintSHA256(cert *x509.Certificate) string {
+	if cert == nil {
+		return ""
+	}
+	sum := sha256.Sum256(cert.Raw)
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":")
+}
+
+func loadHACACert() (*x509.Certificate, error) {
+	data, err := os.ReadFile(HAPKICACertPath)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("HA CA certificate is not PEM")
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
