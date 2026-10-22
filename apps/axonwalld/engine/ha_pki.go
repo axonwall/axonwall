@@ -465,11 +465,22 @@ func verifyPayloadSignatureFromPKI(digest []byte, sigB64 string) bool {
 	return verifyPayloadSignatureWithCert(cert, digest, sigB64)
 }
 
+// payloadSigningAvailable reports whether this node can sign sync
+// payloads, i.e. the HA node private key is present and parseable
+// (audit D-04 Phase 4b). It mirrors exactly the condition under which
+// signPayloadDigestFromPKI succeeds, so the capability a master
+// advertises in its sync status is the behavior peers will observe.
+func payloadSigningAvailable() bool {
+	_, err := loadHANodeKey()
+	return err == nil
+}
+
 // Test seams: the sync handlers and poller call these variables so tests
 // can substitute PKI material from a temporary directory.
 var (
-	haSignPayloadDigest      = signPayloadDigestFromPKI
-	haVerifyPayloadSignature = verifyPayloadSignatureFromPKI
+	haSignPayloadDigest       = signPayloadDigestFromPKI
+	haVerifyPayloadSignature  = verifyPayloadSignatureFromPKI
+	haPayloadSigningAvailable = payloadSigningAvailable
 )
 
 // certFingerprintSHA256 renders a certificate's SHA-256 fingerprint in
