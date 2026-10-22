@@ -14,7 +14,17 @@ export default function IAPDashboardPage() {
   const [newName, setNewName] = useState('');
   const [newHost, setNewHost] = useState('');
   const [newUpstream, setNewUpstream] = useState('');
-  const [newRoles, setNewRoles] = useState('admin, user');
+  const [newRoles, setNewRoles] = useState<string[]>(['admin']);
+  const [newAllowAny, setNewAllowAny] = useState(false);
+
+  const ROLE_OPTIONS = [
+    { value: 'admin', label: 'Admin' },
+    { value: 'operator', label: 'Operator' },
+    { value: 'readonly', label: 'Read-only' },
+  ];
+
+  const toggleNewRole = (role: string) =>
+    setNewRoles((prev) => (prev.includes(role) ? prev.filter((r) => r !== role) : [...prev, role]));
 
   useEffect(() => {
     getCurrentDesiredState()
@@ -59,10 +69,11 @@ export default function IAPDashboardPage() {
         name: newName.trim(),
         publicHostname: newHost.trim(),
         internalUpstream: newUpstream.trim(),
-        allowedRoles: newRoles
-          .split(',')
-          .map((r) => r.trim())
-          .filter(Boolean),
+        // An app is never saved with a silently empty policy: open
+        // access is the explicit allowAnyAuthenticated flag, and no
+        // role selection means the admin-only default (audit B-S3).
+        allowedRoles: newAllowAny ? [] : newRoles.length > 0 ? newRoles : ['admin'],
+        allowAnyAuthenticated: newAllowAny,
         enabled: true,
         description: 'Zero-Trust Protected Application',
       },
@@ -70,6 +81,8 @@ export default function IAPDashboardPage() {
     setNewName('');
     setNewHost('');
     setNewUpstream('');
+    setNewRoles(['admin']);
+    setNewAllowAny(false);
     await persistApps(nextApps);
   };
 
@@ -124,7 +137,13 @@ export default function IAPDashboardPage() {
                     <td className="px-4 py-3 font-semibold text-white font-sans">{app.name}</td>
                     <td className="px-4 py-3 text-emerald-400">{app.publicHostname}</td>
                     <td className="px-4 py-3 text-slate-300">{app.internalUpstream}</td>
-                    <td className="px-4 py-3 text-slate-400">{app.allowedRoles.join(', ')}</td>
+                    <td className="px-4 py-3 text-slate-400">
+                      {app.allowAnyAuthenticated
+                        ? 'Any authenticated user'
+                        : app.allowedRoles && app.allowedRoles.length > 0
+                          ? app.allowedRoles.join(', ')
+                          : 'admin (default)'}
+                    </td>
                     <td className="px-4 py-3 text-emerald-400">Protected</td>
                     <td className="px-4 py-3 text-right">
                       <button
@@ -167,13 +186,37 @@ export default function IAPDashboardPage() {
             className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
             required
           />
-          <input
-            type="text"
-            value={newRoles}
-            onChange={(e) => setNewRoles(e.target.value)}
-            placeholder="Roles (admin, user)"
-            className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
-          />
+          <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 flex flex-col gap-1.5">
+            <div className={`flex flex-wrap gap-x-3 gap-y-1 ${newAllowAny ? 'opacity-40 pointer-events-none' : ''}`}>
+              {ROLE_OPTIONS.map((role) => (
+                <label key={role.value} className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={newRoles.includes(role.value)}
+                    onChange={() => toggleNewRole(role.value)}
+                    className="accent-emerald-500"
+                  />
+                  {role.label}
+                </label>
+              ))}
+            </div>
+            <label className="flex items-center gap-1.5 text-[11px] text-amber-300/90 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={newAllowAny}
+                onChange={(e) => setNewAllowAny(e.target.checked)}
+                className="accent-amber-500"
+              />
+              Any authenticated user
+            </label>
+            <span className="text-[10px] text-slate-500 leading-snug">
+              {newAllowAny
+                ? 'Every signed-in session, including read-only SSO users, can use this app.'
+                : newRoles.length === 0
+                  ? 'No roles selected: admin only.'
+                  : 'Only the selected roles can use this app.'}
+            </span>
+          </div>
           <button
             type="submit"
             disabled={saving}

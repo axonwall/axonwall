@@ -948,7 +948,13 @@ export const ZeroTrustAppSchema = z.object({
   name: z.string().min(1),
   publicHostname: z.string().min(1),
   internalUpstream: z.string().min(1), // e.g. "http://10.0.0.5:8080"
-  allowedRoles: z.array(z.string()).default(['admin', 'user']),
+  allowedRoles: z.array(z.string()).default(['admin']),
+  // Deliberate open access: any authenticated session may use the app.
+  // Distinct from an empty allowedRoles list, which the gateway
+  // authorizer treats as admin-only (fail closed, audit B-S3); the
+  // previous 'user' default entry was dropped — it is not an
+  // appliance role (admin | operator | readonly) and never matched.
+  allowAnyAuthenticated: z.boolean().default(false),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),
 });
