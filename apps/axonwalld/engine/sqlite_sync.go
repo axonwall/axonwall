@@ -31,7 +31,7 @@ type SqliteSyncConfig struct {
 	PeerAddress           string   `json:"peerAddress"`
 	PeerPort              int      `json:"peerPort"`
 	AuthToken             string   `json:"authToken"`
-	Transport             string   `json:"transport"`             // "" or "token-http" = shared token over HTTP; "mtls" = HA PKI mutual TLS (D-04 P1)
+	Transport             string   `json:"transport"`             // "token-http" = legacy shared token over HTTP; "" or "mtls" = HA PKI mutual TLS (D-04 P1; default since P4)
 	RequireSignedPayloads bool     `json:"requireSignedPayloads"` // reject unsigned /db and /state payloads from the peer (D-04 P2)
 	LocalAddress          string   `json:"localAddress"`
 	AutoPromoteHeadscale  bool     `json:"autoPromoteHeadscale"`
@@ -214,11 +214,19 @@ type SyncTrustStatus struct {
 // the node has not enrolled). Both pair members share one CA and one node
 // certificate, so the fingerprints shown are the pair's identity: the two
 // nodes should display identical values.
-func buildSyncTrustStatus(cfg SqliteSyncConfig, effectiveTransport string, caCert, nodeCert *x509.Certificate) SyncTrustStatus {
-	configured := cfg.Transport
-	if configured != "mtls" {
-		configured = "token-http"
+// resolvedTransport maps a configured transport value onto the product
+// default (audit D-04 Phase 4): only an explicit "token-http" selects the
+// legacy shared-token transport; "mtls" and the empty value (configs
+// written before the field existed, or by hand) both mean mTLS.
+func resolvedTransport(configured string) string {
+	if configured == "token-http" {
+		return "token-http"
 	}
+	return "mtls"
+}
+
+func buildSyncTrustStatus(cfg SqliteSyncConfig, effectiveTransport string, caCert, nodeCert *x509.Certificate) SyncTrustStatus {
+	configured := resolvedTransport(cfg.Transport)
 	if effectiveTransport != "mtls" && effectiveTransport != "token-http" {
 		effectiveTransport = configured
 	}
@@ -250,7 +258,7 @@ func (m *SqliteSyncManager) TrustStatus() SyncTrustStatus {
 	if cfg.NodeRole != "master" {
 		// A backup has no master server; its effective transport is what
 		// the poller can resolve: mTLS only once PKI material exists.
-		if cfg.Transport == "mtls" && nodeCert != nil {
+		if resolvedTransport(cfg.Transport) == "mtls" && nodeCert != nil {
 			effective = "mtls"
 		} else {
 			effective = "token-http"
@@ -259,13 +267,13 @@ func (m *SqliteSyncManager) TrustStatus() SyncTrustStatus {
 	return buildSyncTrustStatus(cfg, effective, caCert, nodeCert)
 }
 
-// mtlsRequested reports whether the configuration asks for the HA PKI
-// mutual-TLS transport (audit D-04 Phase 1). Anything else (empty,
-// "token-http") keeps the long-standing shared-token-over-HTTP transport.
+// mtlsRequested reports whether the configuration resolves to the HA
+// PKI mutual-TLS transport (audit D-04 Phases 1+4): everything except an
+// explicit "token-http" opt-out.
 func (m *SqliteSyncManager) mtlsRequested() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.cfg.Transport == "mtls"
+	return resolvedTransport(m.cfg.Transport) == "mtls"
 }
 
 // verifyPeerPayload applies the payload-signature policy (audit D-04
@@ -334,7 +342,7 @@ func (m *SqliteSyncManager) startMasterServer() error {
 	// the state is observable, and flips to mtls on the next config apply
 	// once the pair has enrolled.
 	serveTLS := false
-	if m.cfg.Transport == "mtls" {
+	if resolvedTransport(m.cfg.Transport) == "mtls" {
 		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
 			m.server.TLSConfig = tlsCfg
 			serveTLS = true

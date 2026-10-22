@@ -28,7 +28,7 @@ export default function HighAvailabilityPage() {
   const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(true);
   const [sqliteSyncMode, setSqliteSyncMode] = useState<'direct_stream' | 'litestream'>('direct_stream');
   const [syncInterval, setSyncInterval] = useState(5);
-  const [syncTransport, setSyncTransport] = useState<'token-http' | 'mtls'>('token-http');
+  const [syncTransport, setSyncTransport] = useState<'token-http' | 'mtls'>('mtls');
   const [requireSigned, setRequireSigned] = useState(false);
   const [trustStatus, setTrustStatus] = useState<HASyncTrustStatus | null>(null);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
@@ -55,7 +55,7 @@ export default function HighAvailabilityPage() {
             setSqliteSyncEnabled(state.ha.sqliteSync.enabled);
             setSqliteSyncMode(state.ha.sqliteSync.mode);
             setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
-            setSyncTransport(state.ha.sqliteSync.transport || 'token-http');
+            setSyncTransport(state.ha.sqliteSync.transport || 'mtls');
             setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
           }
         }
@@ -388,8 +388,8 @@ export default function HighAvailabilityPage() {
                         onChange={(e) => setSyncTransport(e.target.value as 'token-http' | 'mtls')}
                         className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-indigo-500 transition cursor-pointer"
                       >
-                        <option value="token-http">Shared token over HTTP</option>
-                        <option value="mtls">Mutual TLS (HA PKI certificates)</option>
+                        <option value="mtls">Mutual TLS (HA PKI certificates) — default</option>
+                        <option value="token-http">Shared token over HTTP (legacy)</option>
                       </select>
                       <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
                         mTLS takes effect once the pair has enrolled (see Sync Trust below). Enrollment itself always uses the token channel.
