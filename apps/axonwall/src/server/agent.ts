@@ -881,6 +881,31 @@ export async function getHubCertStatus(): Promise<HubCertStatus | null> {
   }
 }
 
+export interface HASyncTrustStatus {
+  nodeRole: string;
+  transportConfigured: string;
+  transportEffective: string;
+  requireSignedPayloads: boolean;
+  pkiEnrolled: boolean;
+  nodeCertFingerprint?: string;
+  caCertFingerprint?: string;
+  nodeCertSubject?: string;
+  nodeCertExpiresAt?: string;
+}
+
+// HA sync trust state (audit D-04 Phase 3): PKI enrollment, the transport
+// configured vs the one actually in effect, the payload-signing policy,
+// and the pair's certificate fingerprints. The daemon owns the PKI files
+// (they are not readable by the UI user), so this comes from its agent
+// API; null when the daemon is unreachable.
+export async function getHASyncTrustStatus(): Promise<HASyncTrustStatus | null> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const resp = await callAgentApi<HASyncTrustStatus>('/v1/ha/sync-trust');
+  return resp ?? null;
+}
+
 export interface UpsStatus {
   connected: boolean;
   status: string; // 'OL' | 'OB' | 'LB' | 'DISCONNECTED'

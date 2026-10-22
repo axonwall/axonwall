@@ -1412,6 +1412,14 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(k3sManager.GetStatus())
 		})
+		mux.HandleFunc("/v1/ha/sync-trust", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if haEngine == nil {
+				_ = json.NewEncoder(w).Encode(map[string]any{"pkiEnrolled": false})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(haEngine.SyncTrustStatus())
+		})
 		mux.HandleFunc("/v1/k3s/join", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

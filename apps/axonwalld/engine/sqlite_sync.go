@@ -3,6 +3,7 @@ package engine
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -191,6 +192,71 @@ func (m *SqliteSyncManager) syncMux() *http.ServeMux {
 	mux.HandleFunc("/api/v1/sync/k3s-token", m.handleK3sToken)
 	mux.HandleFunc("/api/v1/sync/pki-enroll", m.handlePkiEnroll)
 	return mux
+}
+
+// SyncTrustStatus is the operator-facing view of the HA sync trust state
+// (audit D-04 Phase 3), served by the daemon's agent API at
+// /v1/ha/sync-trust and rendered on the HA settings page.
+type SyncTrustStatus struct {
+	NodeRole              string `json:"nodeRole"`
+	TransportConfigured   string `json:"transportConfigured"`
+	TransportEffective    string `json:"transportEffective"`
+	RequireSignedPayloads bool   `json:"requireSignedPayloads"`
+	PKIEnrolled           bool   `json:"pkiEnrolled"`
+	NodeCertFingerprint   string `json:"nodeCertFingerprint,omitempty"`
+	CACertFingerprint     string `json:"caCertFingerprint,omitempty"`
+	NodeCertSubject       string `json:"nodeCertSubject,omitempty"`
+	NodeCertExpiresAt     string `json:"nodeCertExpiresAt,omitempty"`
+}
+
+// buildSyncTrustStatus assembles the trust status from the sync config,
+// the transport actually in effect, and the pair's certificates (nil when
+// the node has not enrolled). Both pair members share one CA and one node
+// certificate, so the fingerprints shown are the pair's identity: the two
+// nodes should display identical values.
+func buildSyncTrustStatus(cfg SqliteSyncConfig, effectiveTransport string, caCert, nodeCert *x509.Certificate) SyncTrustStatus {
+	configured := cfg.Transport
+	if configured != "mtls" {
+		configured = "token-http"
+	}
+	if effectiveTransport != "mtls" && effectiveTransport != "token-http" {
+		effectiveTransport = configured
+	}
+	st := SyncTrustStatus{
+		NodeRole:              cfg.NodeRole,
+		TransportConfigured:   configured,
+		TransportEffective:    effectiveTransport,
+		RequireSignedPayloads: cfg.RequireSignedPayloads,
+	}
+	if caCert != nil && nodeCert != nil {
+		st.PKIEnrolled = true
+		st.NodeCertFingerprint = certFingerprintSHA256(nodeCert)
+		st.CACertFingerprint = certFingerprintSHA256(caCert)
+		st.NodeCertSubject = nodeCert.Subject.CommonName
+		st.NodeCertExpiresAt = nodeCert.NotAfter.UTC().Format(time.RFC3339)
+	}
+	return st
+}
+
+// TrustStatus reports this node's HA sync trust state.
+func (m *SqliteSyncManager) TrustStatus() SyncTrustStatus {
+	m.mu.Lock()
+	cfg := m.cfg
+	effective := m.effectiveTransport
+	m.mu.Unlock()
+
+	caCert, _ := loadHACACert()
+	nodeCert, _ := loadHANodeCert()
+	if cfg.NodeRole != "master" {
+		// A backup has no master server; its effective transport is what
+		// the poller can resolve: mTLS only once PKI material exists.
+		if cfg.Transport == "mtls" && nodeCert != nil {
+			effective = "mtls"
+		} else {
+			effective = "token-http"
+		}
+	}
+	return buildSyncTrustStatus(cfg, effective, caCert, nodeCert)
 }
 
 // mtlsRequested reports whether the configuration asks for the HA PKI
