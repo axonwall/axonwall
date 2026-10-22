@@ -155,9 +155,15 @@ func TestPeerClientFallsBackToHTTPWithoutPKI(t *testing.T) {
 	if !newMTLSManager().mtlsRequested() {
 		t.Fatal("mtlsRequested should be true for transport 'mtls'")
 	}
+	// D-04 Phase 4: the empty value resolves to the mtls default; only
+	// an explicit "token-http" opts out to the legacy transport.
 	m := NewSqliteSyncManager()
+	m.cfg = SqliteSyncConfig{}
+	if !m.mtlsRequested() {
+		t.Fatal("mtlsRequested should be true for the empty (default) transport")
+	}
 	m.cfg = SqliteSyncConfig{Transport: "token-http"}
 	if m.mtlsRequested() {
-		t.Fatal("mtlsRequested should be false for transport 'token-http'")
+		t.Fatal("mtlsRequested should be false for explicit transport 'token-http'")
 	}
 }
