@@ -1,0 +1,102 @@
+#!/bin/sh
+# axonwall-vault-firstboot -- first-boot provisioning for the Vault Edition.
+#
+# Runs once, gated by the /etc/axonwall/.vault-firstboot marker (the
+# axonwall-vault-firstboot.service condition). The marker is removed by
+# axonwall-vault-provision.service once provisioning is proven, so a
+# failed run retries next boot. Every step here is idempotent.
+#
+#   1. TLS: provision the hub TLS PKI via axonwall-rotate-hub-cert
+#      --ensure (B-14: on-box appliance CA + CA-issued 825-day hub
+#      leaf; idempotent, never disturbs an operator CA). The inline
+#      self-signed generation remains as the fallback if the tool is
+#      missing or fails, exactly as in the firewall firstboot.
+#      Backup clients should pin /etc/axonwall/certs/ca.crt (stable
+#      across leaf renewals), not the leaf.
+#   2. Credentials + S3 identity config via axonwall-vault-provision
+#      --write-config (generated once, never overwritten).
+#   3. Optional dedicated data device (VAULT_DATA_DEVICE in
+#      /etc/axonwall/vault.env): create the 'vaultdata' ZFS pool mounted
+#      at /var/lib/axonwall/vault. A device carrying an existing
+#      filesystem signature is REFUSED unless VAULT_DATA_DEVICE_FORCE=1;
+#      on refusal the vault falls back to the root filesystem (loudly).
+#   4. Hand off: seaweedfs.service is enabled in the image but gated on
+#      the config written in step 2 and ordered after this unit, and
+#      axonwall-vault-provision.service then creates the bucket and
+#      proves the immutability posture live. This script deliberately
+#      never calls systemctl: starting a unit from inside a service
+#      that has ordering edges with it deadlocks the boot transaction
+#      (found by the Phase 2 boot smoke).
+#
+# Operator knobs live in /etc/axonwall/vault.env (VAULT_DATA_DEVICE,
+# VAULT_DATA_DEVICE_FORCE, VAULT_BUCKET, VAULT_RETENTION_DAYS).
+set -u
+
+CONF_DIR="/etc/axonwall"
+CERT_DIR="$CONF_DIR/certs"
+DATA_DIR="/var/lib/axonwall/vault"
+ENV_FILE="$CONF_DIR/vault.env"
+
+log() { echo "vault-firstboot: $*"; }
+die() { echo "vault-firstboot: ERROR: $*" >&2; exit 1; }
+
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+# --- 1. TLS certificate ----------------------------------------------------
+mkdir -p "$CERT_DIR"
+if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
+    log "provisioning appliance TLS PKI (CA + hub leaf) via axonwall-rotate-hub-cert"
+    axonwall-rotate-hub-cert --ensure || true
+fi
+if [ ! -s "$CERT_DIR/hub.crt" ] || [ ! -s "$CERT_DIR/hub.key" ]; then
+    SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
+    for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
+    log "generating S3 endpoint certificate (SAN: $SAN)"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$CERT_DIR/hub.key" -out "$CERT_DIR/hub.crt" \
+        -days 825 -subj "/CN=$(hostname)" \
+        -addext "subjectAltName=${SAN}" \
+        || die "certificate generation failed"
+fi
+chown root:axonwall-vault "$CERT_DIR/hub.key" 2>/dev/null || true
+chmod 0640 "$CERT_DIR/hub.key"
+chmod 0644 "$CERT_DIR/hub.crt"
+
+# --- 2. Credentials + identity config --------------------------------------
+/usr/local/bin/axonwall-vault-provision --write-config \
+    || die "credential/config generation failed"
+# The service runs as axonwall-vault and must read its identity config;
+# the provision tool writes it root-only, so anchor the group here (the
+# tmpfiles 'z' entry keeps it anchored on later boots).
+chown root:axonwall-vault "$CONF_DIR/seaweedfs-s3.json" 2>/dev/null || true
+chmod 0640 "$CONF_DIR/seaweedfs-s3.json"
+
+# --- 3. Data device ----------------------------------------------------------
+if [ -n "${VAULT_DATA_DEVICE:-}" ] && [ -b "$VAULT_DATA_DEVICE" ]; then
+    if ! zpool list vaultdata >/dev/null 2>&1; then
+        _sig="$(blkid -p -o value -s TYPE "$VAULT_DATA_DEVICE" 2>/dev/null || true)"
+        if [ -n "$_sig" ] && [ "${VAULT_DATA_DEVICE_FORCE:-0}" != "1" ]; then
+            log "WARNING: $VAULT_DATA_DEVICE already carries a '$_sig' signature; refusing to"
+            log "WARNING: create the vaultdata pool on it (set VAULT_DATA_DEVICE_FORCE=1 in"
+            log "WARNING: $ENV_FILE to override). Vault data will live on the root filesystem."
+        else
+            log "creating ZFS pool vaultdata on $VAULT_DATA_DEVICE"
+            zpool create -m "$DATA_DIR" vaultdata "$VAULT_DATA_DEVICE" \
+                || die "zpool create failed"
+        fi
+    else
+        zpool import vaultdata >/dev/null 2>&1 || true
+    fi
+elif [ -n "${VAULT_DATA_DEVICE:-}" ]; then
+    log "WARNING: VAULT_DATA_DEVICE=$VAULT_DATA_DEVICE is not a block device; using root filesystem"
+fi
+mkdir -p "$DATA_DIR"
+chown axonwall-vault:axonwall-vault "$DATA_DIR" 2>/dev/null || true
+chmod 0750 "$DATA_DIR"
+
+# --- 4. Hand off ---------------------------------------------------------------
+# Nothing to start from here: seaweedfs.service is enabled in the image,
+# ordered after this unit, and gated on the identity config written in
+# step 2; axonwall-vault-provision.service follows it and removes the
+# provisioning marker once the bucket posture is proven.
+log "identity and TLS ready; seaweedfs and bucket provisioning follow via systemd"

@@ -1,0 +1,5 @@
+# Systemd sysusers configuration for Axonwall Vault Edition
+# Type Name ID GECOS Home Shell
+g axonwall-vault - -
+u axonwall-vault - "Axonwall Vault Service User" /var/lib/axonwall/vault /usr/sbin/nologin
+m axonwall-vault axonwall-api
