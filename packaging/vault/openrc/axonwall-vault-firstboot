@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+# axonwall-vault-firstboot — Alpine vault flavor counterpart of the
+# Debian axonwall-vault-firstboot.service. Runs the vault firstboot
+# script while its marker exists; the script is idempotent and never
+# starts services (the Debian flavor learned that lesson as a boot
+# deadlock: ordering belongs to the service manager, here the
+# depend() edges toward seaweedfs).
+
+name="axonwall-vault-firstboot"
+description="Axonwall Vault Firstboot Provisioner"
+
+depend() {
+    need localmount
+    after networking
+    before seaweedfs axonwall-vault-provision
+}
+
+start() {
+    if [ -f /etc/axonwall/.vault-firstboot ]; then
+        ebegin "Running Axonwall Vault Firstboot Provisioner"
+        /usr/local/bin/axonwall-vault-firstboot-alpine
+        eend $?
+    fi
+}

@@ -1,0 +1,39 @@
+#!/sbin/openrc-run
+# axonwall-vault-provision — Alpine vault flavor counterpart of the
+# Debian axonwall-vault-provision.service: once SeaweedFS is up, run
+# the provision tool's --ensure (bucket create + retention + live
+# posture probes) against the local TLS endpoint, pinning the hub leaf
+# directly (provisioning-time only; leaf renewal never invalidates
+# stored credentials, and the CA cert at /etc/axonwall/certs/ca.crt is
+# what backup clients should pin for the long term). The firstboot
+# marker is removed only on success, so a failed run retries at the
+# next boot — the same gate the Debian service uses.
+
+name="axonwall-vault-provision"
+description="Axonwall Vault Bucket Provisioning and Posture Verification"
+
+export VAULT_S3_ENDPOINT="https://127.0.0.1:8333"
+export VAULT_S3_CACERT="/etc/axonwall/certs/hub.crt"
+
+depend() {
+    need net
+    after seaweedfs
+}
+
+start() {
+    if [ -f /etc/axonwall/.vault-firstboot ]; then
+        ebegin "Provisioning Axonwall Vault bucket"
+        if [ -f /etc/axonwall/vault.env ]; then
+            set -a
+            # shellcheck disable=SC1091
+            . /etc/axonwall/vault.env
+            set +a
+        fi
+        /usr/local/bin/axonwall-vault-provision --ensure
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            rm -f /etc/axonwall/.vault-firstboot
+        fi
+        eend $rc
+    fi
+}

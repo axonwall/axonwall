@@ -1,0 +1,142 @@
+#!/bin/sh
+# axonwall-vault-firstboot-alpine — first-boot provisioning for the
+# Alpine Axonwall Vault Edition (the Alpine counterpart of the Debian
+# flavor's axonwall-vault-firstboot; the two share the provisioning
+# tool and the posture model, not the storage stack: the data device
+# format here is ext4/btrfs instead of ZFS).
+#
+# Runs from the axonwall-vault-firstboot OpenRC service while
+# /etc/axonwall/.vault-firstboot exists. Deliberately never starts any
+# service: ordering belongs to OpenRC (axonwall-vault-firstboot is
+# ordered before seaweedfs, the provision service runs after it) —
+# the Debian flavor's first version deadlocked its boot by starting a
+# service from inside firstboot; do not reintroduce that here.
+#
+# Steps:
+#   1. S3 TLS serving cert from the B-14 on-box appliance CA
+#      (axonwall-rotate-hub-cert --ensure), falling back to a plain
+#      self-signed cert only if the tool is absent or fails.
+#   2. SeaweedFS identity config via axonwall-vault-provision
+#      --write-config (per-appliance credentials, policy-scoped
+#      writer — see the Phase 0 findings doc). The service group is
+#      created first so the config and hub key can be group-anchored
+#      readable by the seaweedfs service user without being
+#      world-readable.
+#   3. OPTIONAL dedicated data device: if VAULT_DATA_DEVICE is set in
+#      /etc/axonwall/vault.env and the device carries NO filesystem
+#      signature, format it (ext4, or btrfs when VAULT_DATA_FS=btrfs)
+#      and mount it at /var/lib/axonwall/vault with an fstab entry. A
+#      signed device is NEVER formatted unless
+#      VAULT_DATA_DEVICE_FORCE=1. Without a data device, vault data
+#      lives on the root filesystem (fine for try-outs; a dedicated
+#      device is the supported layout).
+set -u
+
+CONF_DIR=/etc/axonwall
+CERT_DIR=$CONF_DIR/certs
+DATA_DIR=/var/lib/axonwall/vault
+VAULT_GROUP=axonwall-vault
+
+log() { echo "[vault-firstboot] $*"; }
+
+mkdir -p "$CERT_DIR" "$CONF_DIR" "$DATA_DIR" /var/log/axonwall
+chmod 0750 "$DATA_DIR"
+
+# Operator knobs (VAULT_DATA_DEVICE, VAULT_DATA_FS, ...).
+if [ -f "$CONF_DIR/vault.env" ]; then
+    # shellcheck disable=SC1091
+    . "$CONF_DIR/vault.env"
+else
+    cat > "$CONF_DIR/vault.env" <<'EOF'
+# Axonwall Vault operator knobs, read by the vault firstboot and the
+# provision service at every boot while firstboot is pending.
+# VAULT_BUCKET=backups
+# VAULT_RETENTION_DAYS=30
+# VAULT_DATA_DEVICE=/dev/disk/by-id/…   (dedicated data device)
+# VAULT_DATA_FS=ext4                    (ext4 or btrfs)
+# VAULT_DATA_DEVICE_FORCE=0             (1 = format even if signed)
+EOF
+    chmod 0644 "$CONF_DIR/vault.env"
+fi
+
+# --- 1. S3 TLS certificate (B-14 appliance CA; self-signed fallback) ---
+if [ ! -f "$CERT_DIR/hub.crt" ] || [ ! -f "$CERT_DIR/hub.key" ]; then
+    if [ -x /usr/local/bin/axonwall-rotate-hub-cert ] && \
+       /usr/local/bin/axonwall-rotate-hub-cert --ensure; then
+        log "S3 TLS certificate issued by the appliance CA"
+    fi
+fi
+if [ ! -f "$CERT_DIR/hub.crt" ] || [ ! -f "$CERT_DIR/hub.key" ]; then
+    log "generating self-signed S3 TLS certificate (fallback)"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$CERT_DIR/hub.key" -out "$CERT_DIR/hub.crt" \
+        -days 825 -subj "/CN=axonwall-vault" \
+        -addext "subjectAltName=DNS:axonwall-vault,IP:127.0.0.1" 2>/dev/null
+fi
+chmod 0644 "$CERT_DIR/hub.crt" 2>/dev/null
+chmod 0600 "$CERT_DIR/hub.key" 2>/dev/null
+
+# --- 2. Identity config + service anchors ------------------------------
+# The seaweedfs service also ensures the user/group in start_pre; the
+# group is needed HERE, earlier, so the config files can be anchored
+# group-readable before the service ever starts.
+if ! getent group "$VAULT_GROUP" >/dev/null 2>&1 && ! grep -q "^$VAULT_GROUP:" /etc/group; then
+    addgroup -S "$VAULT_GROUP" 2>/dev/null || log "WARNING: addgroup $VAULT_GROUP failed"
+fi
+# Same ensure as the service's start_pre (both idempotent): the user
+# is needed here so the data-dir ownership below can be set before
+# the service starts.
+if ! id -u "$VAULT_GROUP" >/dev/null 2>&1; then
+    adduser -S -D -H -h "$DATA_DIR" -s /sbin/nologin -G "$VAULT_GROUP" "$VAULT_GROUP" 2>/dev/null || \
+        log "WARNING: adduser $VAULT_GROUP failed"
+fi
+if [ -x /usr/local/bin/axonwall-vault-provision ]; then
+    /usr/local/bin/axonwall-vault-provision --write-config || \
+        log "WARNING: vault --write-config failed (provision service will retry)"
+else
+    log "WARNING: /usr/local/bin/axonwall-vault-provision missing"
+fi
+# z-anchors, done by hand on Alpine (no tmpfiles.d): the service user
+# reads the s3 config and the TLS key via its group; nothing else may.
+chown root:"$VAULT_GROUP" "$CONF_DIR/seaweedfs-s3.json" 2>/dev/null
+chmod 0640 "$CONF_DIR/seaweedfs-s3.json" 2>/dev/null
+chown root:"$VAULT_GROUP" "$CERT_DIR/hub.key" 2>/dev/null
+chmod 0640 "$CERT_DIR/hub.key" 2>/dev/null
+[ -f "$CERT_DIR/ca.crt" ] && { chown root:"$VAULT_GROUP" "$CERT_DIR/ca.crt"; chmod 0644 "$CERT_DIR/ca.crt"; }
+
+# --- 3. Optional dedicated data device (ext4 / btrfs) -------------------
+DATA_DEVICE=${VAULT_DATA_DEVICE:-}
+DATA_FS=${VAULT_DATA_FS:-ext4}
+if [ -n "$DATA_DEVICE" ] && [ -b "$DATA_DEVICE" ]; then
+    if grep -qs " $DATA_DIR " /proc/mounts; then
+        log "data dir already on a mounted device; leaving as-is"
+    elif blkid "$DATA_DEVICE" >/dev/null 2>&1 && [ "${VAULT_DATA_DEVICE_FORCE:-0}" != "1" ]; then
+        log "ERROR: $DATA_DEVICE already carries a filesystem signature;"
+        log "refusing to format. Set VAULT_DATA_DEVICE_FORCE=1 in"
+        log "$CONF_DIR/vault.env to override, or point VAULT_DATA_DEVICE elsewhere."
+    else
+        log "formatting $DATA_DEVICE as $DATA_FS for vault data"
+        case "$DATA_FS" in
+            btrfs) mkfs.btrfs -f -L vaultdata "$DATA_DEVICE" ;;
+            *)     mkfs.ext4 -F -L vaultdata "$DATA_DEVICE" ;;
+        esac
+        UUID=$(blkid "$DATA_DEVICE" 2>/dev/null | sed -n 's/.*UUID="\([^"]*\)".*/\1/p' | head -n 1)
+        if [ -n "$UUID" ]; then
+            grep -v " $DATA_DIR " /etc/fstab > /etc/fstab.vault-tmp 2>/dev/null || true
+            mv /etc/fstab.vault-tmp /etc/fstab
+            echo "UUID=$UUID $DATA_DIR $DATA_FS defaults,noatime 0 2" >> /etc/fstab
+            if mount "$DATA_DIR"; then
+                chown "$VAULT_GROUP:$VAULT_GROUP" "$DATA_DIR" 2>/dev/null
+                chmod 0750 "$DATA_DIR"
+                log "data device mounted at $DATA_DIR"
+            else
+                log "ERROR: mounting $DATA_DEVICE at $DATA_DIR failed"
+            fi
+        else
+            log "ERROR: could not read UUID of formatted $DATA_DEVICE"
+        fi
+    fi
+fi
+
+log "firstboot provisioning complete; bucket ensure runs in axonwall-vault-provision"
+exit 0

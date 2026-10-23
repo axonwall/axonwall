@@ -1,0 +1,51 @@
+#!/sbin/openrc-run
+# seaweedfs — Axonwall Vault storage (SeaweedFS all-in-one: master,
+# volume, filer, S3 gateway). Installed into the Alpine overlay only
+# for the vault flavor by build-alpine-iso.sh.
+#
+# The S3 gateway is the ONLY client-reachable surface (nftables admits
+# 22/8333 only); master/volume/filer ports stay unreachable from the
+# network. -s3.* and -filer.* flags are the Phase 0 bench-mandated
+# settings (findings doc in the repo history): the filer HTTP surface
+# can delete compliance-locked data, so it is disabled outright, and
+# bucket deletion is closed. Do not relax them here.
+#
+# The service user/group and data dir are ensured in start_pre: the
+# live image's overlay must never be trusted to carry the right
+# ownership (a build-host umask once shipped the whole /var tree at
+# 0770 root:root on this packaging, which is the class of failure
+# checkpath here defends against).
+
+name="seaweedfs"
+description="Axonwall Vault storage (SeaweedFS)"
+command="/usr/sbin/weed"
+command_args="server -dir=/var/lib/axonwall/vault -ip.bind=0.0.0.0 -master.port=9333 -volume.port=8080 -master.volumeSizeLimitMB=5120 -filer.port=8888 -filer.disableHttp=true -s3 -s3.port=8333 -s3.config=/etc/axonwall/seaweedfs-s3.json -s3.allowDeleteBucketNotEmpty=false -s3.autoCreateBucket=false -s3.cert.file=/etc/axonwall/certs/hub.crt -s3.key.file=/etc/axonwall/certs/hub.key"
+command_user="axonwall-vault:axonwall-vault"
+command_background="yes"
+pidfile="/run/seaweedfs.pid"
+output_log="/var/log/axonwall/seaweedfs.log"
+error_log="/var/log/axonwall/seaweedfs.err.log"
+# weed takes ~20s to release its ports on SIGTERM; give it room
+# before the stop escalates.
+retry="TERM/90/KILL/5"
+
+depend() {
+    need net
+    after axonwall-vault-firstboot
+    before axonwall-vault-provision
+}
+
+start_pre() {
+    if ! id -u axonwall-vault >/dev/null 2>&1; then
+        addgroup -S axonwall-vault 2>/dev/null
+        adduser -S -D -H -h /var/lib/axonwall/vault -s /sbin/nologin \
+            -G axonwall-vault axonwall-vault 2>/dev/null
+    fi
+    checkpath -d -m 0750 -o axonwall-vault:axonwall-vault /var/lib/axonwall/vault
+    checkpath -d -m 0755 -o root:root /var/log/axonwall
+    if [ ! -f /etc/axonwall/seaweedfs-s3.json ]; then
+        eerror "seaweedfs: /etc/axonwall/seaweedfs-s3.json missing (vault firstboot has not provisioned it)"
+        return 1
+    fi
+    return 0
+}

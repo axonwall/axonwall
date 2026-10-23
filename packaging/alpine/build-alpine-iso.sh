@@ -15,10 +15,15 @@ MINIMAL=1
 IN_CONTAINER=0
 
 ARGS=("$@")
+FLAVOR="${AXONWALL_FLAVOR:-axonwall}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile)
       PROFILE="${2:-virt}"
+      shift 2
+      ;;
+    --flavor)
+      FLAVOR="${2:-axonwall}"
       shift 2
       ;;
     --minimal)
@@ -49,11 +54,18 @@ if [[ "$IN_CONTAINER" -eq 0 ]] && [[ ! -f /etc/alpine-release ]]; then
     /bin/sh -c "apk add --no-cache bash >/dev/null && exec /bin/bash /repo/packaging/alpine/build-alpine-iso.sh --in-container ${ARGS[*]}"
 fi
 
+case "$FLAVOR" in
+  axonwall|vault) ;;
+  *) echo "[!] ERROR: unknown flavor '$FLAVOR' (expected: axonwall, vault)" >&2; exit 1 ;;
+esac
+
 ALPINE_BRANCH="v3.21"
 ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}"
 WORK_DIR="/tmp/axonwall-alpine-build"
 OUTPUT_DIR="${REPO_ROOT}/packaging/alpine/output"
-if [[ "$MINIMAL" -eq 1 ]]; then
+if [[ "$FLAVOR" == "vault" ]]; then
+  ISO_NAME="axonwall-vault-alpine-${PROFILE}-amd64.iso"
+elif [[ "$MINIMAL" -eq 1 ]]; then
   ISO_NAME="axonwall-alpine-${PROFILE}-minimal-amd64.iso"
 else
   ISO_NAME="axonwall-alpine-${PROFILE}-amd64.iso"
@@ -179,7 +191,50 @@ CORE_PKGS=(
   chrony-openrc
 )
 
-if [[ "$MINIMAL" -eq 0 ]]; then
+if [[ "$FLAVOR" == "vault" ]]; then
+  # Vault edition: base OS + storage/admin tooling only. The firewall
+  # stack (WireGuard, HA, conntrack), the OpenLDAP/SSO set, the DHCP
+  # *server*, and Node.js are absent from the image by design (not
+  # disabled). Data device filesystems are ext4/btrfs — no ZFS on the
+  # Alpine edition. nftables-openrc supplies the service that loads
+  # /etc/nftables.nft (the static vault ruleset).
+  CORE_PKGS=(
+    alpine-base
+    alpine-conf
+    openrc
+    busybox
+    busybox-openrc
+    busybox-mdev-openrc
+    kmod
+    nftables
+    nftables-openrc
+    iproute2
+    ifupdown-ng
+    dhcpcd
+    ethtool
+    tcpdump
+    curl
+    jq
+    openssl
+    ca-certificates
+    parted
+    mdadm
+    sgdisk
+    e2fsprogs
+    btrfs-progs
+    dosfstools
+    grub
+    grub-bios
+    grub-efi
+    openssh
+    sudo
+    shadow
+    chrony
+    chrony-openrc
+  )
+fi
+
+if [[ "$MINIMAL" -eq 0 && "$FLAVOR" == "axonwall" ]]; then
   CORE_PKGS+=(
     frr
     strongswan
@@ -324,12 +379,28 @@ if [[ -f /bin/busybox ]]; then
 fi
 
 # Symlink Debian OpenLDAP paths (/etc/ldap, /usr/lib/ldap) to Alpine paths (/etc/openldap, /usr/lib/openldap)
-ln -sf /etc/openldap "${OVL}/etc/ldap"
-ln -sf /usr/lib/openldap "${OVL}/usr/lib/ldap"
+if [[ "$FLAVOR" == "axonwall" ]]; then
+  ln -sf /etc/openldap "${OVL}/etc/ldap"
+  ln -sf /usr/lib/openldap "${OVL}/usr/lib/ldap"
+fi
+
+if [[ "$FLAVOR" == "vault" ]]; then
+  # No LDAP/HA state on the vault: drop the skeleton dirs created
+  # above for the firewall flavor and add the vault data dir.
+  rm -rf "${OVL}/etc/headscale" "${OVL}/opt/axonwall" \
+         "${OVL}/var/lib/axonwall/ldap" "${OVL}/var/lib/axonwall/secrets" \
+         "${OVL}/var/lib/openldap"
+  mkdir -p "${OVL}/var/lib/axonwall/vault"
+fi
 
 # Write /etc/hostname & /etc/apk/world
-echo "axonwall" > "${OVL}/etc/hostname"
-touch "${OVL}/etc/axonwall/.firstboot"
+if [[ "$FLAVOR" == "vault" ]]; then
+  echo "axonwall-vault" > "${OVL}/etc/hostname"
+  touch "${OVL}/etc/axonwall/.vault-firstboot" "${OVL}/etc/axonwall/.vault-edition"
+else
+  echo "axonwall" > "${OVL}/etc/hostname"
+  touch "${OVL}/etc/axonwall/.firstboot"
+fi
 
 printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
 
@@ -337,16 +408,35 @@ printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
 cp -a "${SCRIPT_DIR}/overlay/"* "${OVL}/"
 chmod +x "${OVL}/etc/init.d/"* "${OVL}/usr/local/bin/"*
 
+if [[ "$FLAVOR" == "vault" ]]; then
+  # The stock overlay carries the firewall appliance's services and
+  # firstboot; the vault replaces them with its own (installed below
+  # from packaging/vault). Kept from stock: inittab/issue/motd, the
+  # network-setup service + interface generator, the hub-cert daily
+  # renewal, the rotate tool, axonwall-install, and the
+  # dhclient/systemctl shims.
+  rm -f "${OVL}/etc/init.d/axonwall-controller" "${OVL}/etc/init.d/axonwall-firstboot" \
+        "${OVL}/etc/init.d/axonwall-ui" "${OVL}/etc/init.d/axonwalld" \
+        "${OVL}/etc/init.d/headscale" "${OVL}/usr/local/bin/axonwall-firstboot-alpine"
+fi
+
 # Copy shared scripts and configs from Debian/ISO packaging
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/99-axonwall.conf" "${OVL}/etc/sysctl.d/"
 # Alpine's stock sshd is built without PAM, so strip UsePAM from sshd_config.d/axonwall.conf
 grep -v '^UsePAM ' "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/ssh/sshd_config.d/axonwall.conf" > "${OVL}/etc/ssh/sshd_config.d/axonwall.conf"
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sudoers.d/axonwall" "${OVL}/etc/sudoers.d/axonwall"
 chmod 0440 "${OVL}/etc/sudoers.d/axonwall"
-cp "${REPO_ROOT}/packaging/debian/headscale-config.yaml" "${OVL}/etc/headscale/config.yaml"
-cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
+if [[ "$FLAVOR" == "vault" ]]; then
+  # Same ruleset as the Debian vault edition (one source:
+  # packaging/vault/nftables.conf); Alpine's nftables service loads
+  # /etc/nftables.nft.
+  cp "${REPO_ROOT}/packaging/vault/nftables.conf" "${OVL}/etc/nftables.nft"
+else
+  cp "${REPO_ROOT}/packaging/debian/headscale-config.yaml" "${OVL}/etc/headscale/config.yaml"
+  cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
+fi
 
-if [[ "$MINIMAL" -eq 0 ]]; then
+if [[ "$MINIMAL" -eq 0 && "$FLAVOR" == "axonwall" ]]; then
   mkdir -p "${OVL}/etc/zsh" "${OVL}/etc/skel" "${OVL}/etc/vim"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/starship.toml" "${OVL}/etc/axonwall/starship.toml"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zsh/axonwall.zsh" "${OVL}/etc/zsh/axonwall.zsh"
@@ -355,28 +445,59 @@ if [[ "$MINIMAL" -eq 0 ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/skel/.zshrc" "${OVL}/root/.zshrc"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/vim/vimrc.local" "${OVL}/etc/vim/vimrc.local"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/tmux.conf" "${OVL}/etc/tmux.conf"
-else
+elif [[ "$FLAVOR" == "axonwall" ]]; then
   # On minimal Alpine (no zsh installed), symlink /usr/bin/zsh -> /bin/ash so SSO users
   # replicated with loginShell=/usr/bin/zsh can SSH into minimal Alpine seamlessly.
   ln -sf /bin/ash "${OVL}/usr/bin/zsh"
 fi
 
-cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-ha-notify" "${OVL}/usr/local/bin/"
-cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-import" "${OVL}/usr/local/bin/"
+if [[ "$FLAVOR" == "axonwall" ]]; then
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-ha-notify" "${OVL}/usr/local/bin/"
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-import" "${OVL}/usr/local/bin/"
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwallctl" "${OVL}/usr/local/bin/"
+  if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" ]]; then
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" "${OVL}/usr/local/bin/"
+  fi
+  if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-opshell" ]]; then
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-opshell" "${OVL}/usr/local/bin/"
+  fi
+fi
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update" "${OVL}/usr/local/bin/"
-cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwallctl" "${OVL}/usr/local/bin/"
-if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" ]]; then
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" "${OVL}/usr/local/bin/"
-fi
-if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-opshell" ]]; then
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-opshell" "${OVL}/usr/local/bin/"
-fi
 chmod +x "${OVL}/usr/local/bin/axonwall"*
+
+if [[ "$FLAVOR" == "vault" ]]; then
+  # Vault tooling: the shared Phase 1 tools, the Alpine firstboot
+  # script, and the OpenRC services (from packaging/vault, the same
+  # directory the Debian flavor installs its systemd units from).
+  cp "${REPO_ROOT}/packaging/vault/axonwall-vault-provision" "${OVL}/usr/local/bin/"
+  cp "${REPO_ROOT}/packaging/vault/axonwall-vault-status" "${OVL}/usr/local/bin/"
+  cp "${REPO_ROOT}/packaging/vault/axonwall-vault-firstboot-alpine" "${OVL}/usr/local/bin/"
+  cp "${REPO_ROOT}/packaging/vault/openrc/seaweedfs" "${OVL}/etc/init.d/seaweedfs"
+  cp "${REPO_ROOT}/packaging/vault/openrc/axonwall-vault-firstboot" "${OVL}/etc/init.d/"
+  cp "${REPO_ROOT}/packaging/vault/openrc/axonwall-vault-provision" "${OVL}/etc/init.d/"
+  chmod +x "${OVL}/usr/local/bin/axonwall-vault"* \
+           "${OVL}/etc/init.d/seaweedfs" "${OVL}/etc/init.d/axonwall-vault"*
+fi
 
 # Version stamp
 VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.2.2")"
 echo "${VERSION}" > "${OVL}/etc/axonwall/version"
 
+if [[ "$FLAVOR" == "vault" ]]; then
+  # SeaweedFS, pinned + sha256-verified (the same pin as the Debian
+  # flavor in build-iso.sh — bump both together, and re-run the
+  # Phase 0 battery on a version change).
+  WEED_VERSION="4.48"
+  WEED_SHA256="4a7d108384d044d95212d1342cdda9533fa55842c1c9b41f606ca3c8a9561124"
+  echo "[+] Fetching SeaweedFS v${WEED_VERSION} for vault overlay..."
+  curl -fsSL -o "${WORK_DIR}/seaweedfs.tar.gz" "https://github.com/seaweedfs/seaweedfs/releases/download/${WEED_VERSION}/linux_amd64.tar.gz"
+  echo "${WEED_SHA256}  ${WORK_DIR}/seaweedfs.tar.gz" | sha256sum -c -
+  tar -xzf "${WORK_DIR}/seaweedfs.tar.gz" -C "${WORK_DIR}" weed
+  install -m 0755 "${WORK_DIR}/weed" "${OVL}/usr/sbin/weed"
+  rm -f "${WORK_DIR}/seaweedfs.tar.gz" "${WORK_DIR}/weed"
+fi
+
+if [[ "$FLAVOR" == "axonwall" ]]; then
 # Copy compiled Go daemons (axonwalld, axonwall-console, axonwall-satellite)
 if [[ -f "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" ]]; then
   cp "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" "${OVL}/usr/sbin/axonwalld"
@@ -446,6 +567,7 @@ fi
 if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
   cp "${REPO_ROOT}/apps/axonwall-controller/dist/axonwall-tui.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
 fi
+fi # FLAVOR == axonwall payload (daemons, headscale, UI, controller)
 
 # Configure OpenRC runlevel symlinks
 # modloop is required on this diskless image: it mounts the modloop squashfs
@@ -461,12 +583,28 @@ done
 for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
 done
-for svc in chronyd crond slapd sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
-  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
-done
+if [[ "$FLAVOR" == "vault" ]]; then
+  for svc in chronyd crond sshd nftables axonwall-vault-firstboot seaweedfs axonwall-vault-provision local; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
+  done
+else
+  for svc in chronyd crond slapd sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
+  done
+fi
 for svc in mount-ro killprocs savecache; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/shutdown/${svc}"
 done
+
+if [[ "$FLAVOR" == "vault" ]]; then
+  # Never let a build-host umask leak into the image (this packaging
+  # once shipped /var, /var/lib and /var/log/axonwall at 0770
+  # root:root on the firewall flavor): pin the skeleton modes the
+  # vault services rely on. The service additionally re-asserts its
+  # data-dir ownership in start_pre.
+  chmod 0755 "${OVL}/var" "${OVL}/var/lib" "${OVL}/var/log" "${OVL}/usr/lib" "${OVL}/var/lib/axonwall"
+  chmod 0750 "${OVL}/var/lib/axonwall/vault"
+fi
 
 # Pack axonwall.apkovl.tar.gz into ISO root with maximum compression
 (cd "${OVL}" && tar -cf - . | gzip -9 > "${WORK_DIR}/iso/axonwall.apkovl.tar.gz")
@@ -476,19 +614,27 @@ STORAGE_MODULES="loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,
 
 mkdir -p "${WORK_DIR}/iso/boot/syslinux" "${WORK_DIR}/iso/boot/grub"
 
+if [[ "$FLAVOR" == "vault" ]]; then
+  MENU_LIVE="Axonwall Vault (Live Mode)"
+  MENU_INSTALL="Install Axonwall Vault to Storage Disk"
+else
+  MENU_LIVE="Axonwall Appliance (Live Mode)"
+  MENU_INSTALL="Install Axonwall to Storage Disk (A/B + RAID + ZFS)"
+fi
+
 cat << SYSLINUX_EOF > "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 TIMEOUT 50
 PROMPT 1
 DEFAULT live
 
 LABEL live
-  MENU LABEL Axonwall Appliance (Live Mode)
+  MENU LABEL ${MENU_LIVE}
   KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_FLAVOR}
   APPEND modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
 
 LABEL install
-  MENU LABEL Install Axonwall to Storage Disk (A/B + RAID + ZFS)
+  MENU LABEL ${MENU_INSTALL}
   KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_FLAVOR}
   APPEND modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
@@ -498,12 +644,12 @@ cat << GRUB_EOF > "${WORK_DIR}/iso/boot/grub/grub.cfg"
 set default=0
 set timeout=5
 
-menuentry "Axonwall Appliance (Live Mode)" {
+menuentry "${MENU_LIVE}" {
   linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_FLAVOR}
 }
 
-menuentry "Install Axonwall to Storage Disk (A/B + RAID + ZFS)" {
+menuentry "${MENU_INSTALL}" {
   linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_FLAVOR}
 }
@@ -512,11 +658,18 @@ GRUB_EOF
 # 6. Assemble bootable BIOS + UEFI Hybrid ISO
 echo "[+] Generating hybrid BIOS/UEFI ISO image: ${ISO_NAME}..."
 MBR_BIN="/usr/share/syslinux/isohdpfx.bin"
+if [[ "$FLAVOR" == "vault" ]]; then
+  ISO_VOLUME="AXONWALL_VAULT"
+  ISO_APP="Axonwall Alpine Vault Appliance"
+else
+  ISO_VOLUME="AXONWALL_ALPINE"
+  ISO_APP="Axonwall Alpine Firewall & Router Appliance"
+fi
 XORRISO_ARGS=(
   -as mkisofs
   -o "${OUTPUT_DIR}/${ISO_NAME}"
-  -V "AXONWALL_ALPINE"
-  -A "Axonwall Alpine Firewall & Router Appliance"
+  -V "${ISO_VOLUME}"
+  -A "${ISO_APP}"
   -p "Axonwall Core Team"
   -J -R -l
 )
