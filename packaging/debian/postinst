@@ -116,8 +116,15 @@ case "$1" in
             chmod 0600 /etc/axonwall/admin.env 2>/dev/null || true
         fi
 
-        # 3. Generate baseline TLS certificates if absent
-        if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
+        # 3. Provision the hub TLS PKI if needed (audit B-14): an on-box
+        # appliance CA plus a CA-issued hub leaf, via the shared tool.
+        # --ensure is idempotent, migrates legacy self-signed installs to
+        # the CA model, and leaves operator-CA installs untouched. The
+        # inline fallback (the previous self-signed generation) covers
+        # the tool being unavailable.
+        if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
+            axonwall-rotate-hub-cert --ensure || true
+        elif [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
             if command -v openssl >/dev/null 2>&1; then
                 SAN="DNS:$(hostname 2>/dev/null || echo axonwall),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
                 openssl req -x509 -newkey rsa:2048 -nodes \
@@ -262,7 +269,7 @@ ENV_EOF
         # 6. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service ssh.service chrony.service sysstat.service || true
+            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
             systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
         fi
         ;;

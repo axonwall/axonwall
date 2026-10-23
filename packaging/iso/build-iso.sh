@@ -118,6 +118,10 @@ cp "${SCRIPT_DIR}/../debian/axonwall-console.service" config/includes.chroot/etc
 ln -sf /etc/systemd/system/axonwall-console.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-console.service
 cp "${SCRIPT_DIR}/../debian/headscale.service" config/includes.chroot/etc/systemd/system/ || true
 ln -sf /etc/systemd/system/headscale.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/headscale.service
+cp "${SCRIPT_DIR}/../debian/axonwall-hub-cert-renew.service" config/includes.chroot/etc/systemd/system/ || true
+cp "${SCRIPT_DIR}/../debian/axonwall-hub-cert-renew.timer" config/includes.chroot/etc/systemd/system/ || true
+mkdir -p config/includes.chroot/etc/systemd/system/timers.target.wants/
+ln -sf /etc/systemd/system/axonwall-hub-cert-renew.timer config/includes.chroot/etc/systemd/system/timers.target.wants/axonwall-hub-cert-renew.timer
 
 mkdir -p config/includes.chroot/etc/headscale
 cp "${SCRIPT_DIR}/../debian/headscale-config.yaml" config/includes.chroot/etc/headscale/config.yaml || true
