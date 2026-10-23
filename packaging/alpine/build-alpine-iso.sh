@@ -315,6 +315,31 @@ mkdir -p \
   "${OVL}/var/lib/openldap/run" \
   "${OVL}/var/log/axonwall"
 
+# Deterministic modes for the state directories created above. Without this
+# they inherit the build container's umask: a umask-007 build shipped them
+# 0770 root:root, which locked slapd (running as ldap) out of its config
+# tree under /var/lib/axonwall and supervise-daemon out of the service log
+# directory /var/log/axonwall. Runtime (firstboot / checkpath) re-asserts
+# the tighter service modes; the shipped modes only need to guarantee
+# traversal until then.
+chmod 0755 \
+  "${OVL}/var" \
+  "${OVL}/var/lib" \
+  "${OVL}/var/log" \
+  "${OVL}/var/lib/axonwall" \
+  "${OVL}/var/lib/axonwall/home" \
+  "${OVL}/var/lib/axonwall/ldap" \
+  "${OVL}/var/lib/axonwall/ldap/config" \
+  "${OVL}/var/lib/axonwall/ldap/data" \
+  "${OVL}/var/lib/axonwall/ldap/accesslog" \
+  "${OVL}/var/lib/axonwall/ldap/backups" \
+  "${OVL}/var/lib/openldap/run" \
+  "${OVL}/var/log/axonwall"
+chmod 0750 \
+  "${OVL}/var/lib/axonwall/secrets" \
+  "${OVL}/var/lib/axonwall/secrets/ldap" \
+  "${OVL}/var/lib/axonwall/secrets/ha-pki"
+
 # Ensure basic /bin/busybox and /sbin/init symlink exist in overlay as fail-safe
 if [[ -f /bin/busybox ]]; then
   cp /bin/busybox "${OVL}/bin/busybox"
@@ -402,13 +427,17 @@ HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d7
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" "${OVL}/usr/sbin/headscale"
   strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
-  chmod +x "${OVL}/usr/sbin/headscale"
+  # headscale serves as the dedicated axonwall-headscale user, so the
+  # binary must be world-executable: chmod +x alone preserves whatever
+  # mode the source file had (0750 under a restrictive build umask),
+  # which supervise-daemon then cannot exec as that user.
+  chmod 0755 "${OVL}/usr/sbin/headscale"
 elif [[ ! -f "${OVL}/usr/sbin/headscale" ]]; then
   echo "[+] Fetching Headscale v${HEADSCALE_VERSION} for Alpine overlay..."
   curl -fsSL -o "${OVL}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
   echo "${HEADSCALE_SHA256}  ${OVL}/usr/sbin/headscale" | sha256sum -c -
   strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
-  chmod +x "${OVL}/usr/sbin/headscale"
+  chmod 0755 "${OVL}/usr/sbin/headscale"
 fi
 
 # Copy Next.js standalone UI & Controller
@@ -467,6 +496,23 @@ done
 for svc in mount-ro killprocs savecache; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/shutdown/${svc}"
 done
+
+# Normalize directory modes across the assembled overlay before packing:
+# every directory must stay traversable by the unprivileged service users
+# (ldap, the axonwall-api group members, ...). Payload copied with cp -a
+# otherwise carries whatever modes the build host produced, which is how
+# /var, /var/lib and /usr/lib shipped as 0770 in the v0.11.13 build.
+# /root and the secrets tree keep their restrictive modes and are
+# re-asserted explicitly after the sweep.
+find "${OVL}" -type d \
+  ! -path "${OVL}/root" ! -path "${OVL}/root/*" \
+  ! -path "${OVL}/var/lib/axonwall/secrets" ! -path "${OVL}/var/lib/axonwall/secrets/*" \
+  -exec chmod a+rx {} +
+chmod 0700 "${OVL}/root"
+chmod 0750 \
+  "${OVL}/var/lib/axonwall/secrets" \
+  "${OVL}/var/lib/axonwall/secrets/ldap" \
+  "${OVL}/var/lib/axonwall/secrets/ha-pki"
 
 # Pack axonwall.apkovl.tar.gz into ISO root with maximum compression
 (cd "${OVL}" && tar -cf - . | gzip -9 > "${WORK_DIR}/iso/axonwall.apkovl.tar.gz")
