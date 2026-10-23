@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=axonwall
+User=axonwall-headscale
 Group=axonwall-api
 Environment="HEADSCALE_CONFIG=/etc/headscale/config.yaml"
 ExecStart=/usr/sbin/headscale serve

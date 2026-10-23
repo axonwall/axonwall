@@ -56,6 +56,18 @@ start_pre() {
         chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key 2>/dev/null || true
         chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
     fi
+    # Headscale identity split migration (idempotent, B-12 follow-up):
+    # installs predating the split have headscale's data owned by the
+    # shared axonwall user; hand it to axonwall-headscale and tighten
+    # the config (all of its readers are axonwall-api members).
+    if id -u axonwall-headscale >/dev/null 2>&1; then
+        chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
+        chown axonwall-headscale:axonwall-api /run/headscale 2>/dev/null || true
+        if [ -f /etc/headscale/config.yaml ]; then
+            chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
+            chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
+        fi
+    fi
     if [ -f /usr/share/axonwall/lockdown.nft ]; then
         /usr/sbin/nft -f /usr/share/axonwall/lockdown.nft 2>/dev/null || true
     fi

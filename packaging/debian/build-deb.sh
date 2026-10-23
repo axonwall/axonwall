@@ -196,6 +196,9 @@ echo "${VERSION}" > "${WORK_DIR}/etc/axonwall/version"
 # 6. Copy Configurations, Rulesets, Systemd, Sysusers
 cp "${SCRIPT_DIR}/lockdown.nft" "${WORK_DIR}/usr/share/axonwall/lockdown.nft"
 cp "${SCRIPT_DIR}/headscale-config.yaml" "${WORK_DIR}/etc/headscale/config.yaml"
+# The config can carry the OIDC client secret; postinst assigns it to
+# root:axonwall-api on install (all of its readers are group members).
+chmod 0640 "${WORK_DIR}/etc/headscale/config.yaml"
 cp "${SCRIPT_DIR}/axonwalld.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-ui.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-controller.service" "${WORK_DIR}/lib/systemd/system/"
