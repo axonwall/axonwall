@@ -163,9 +163,15 @@ if ! id -u axonwall-headscale &>/dev/null; then
   useradd -r -g axonwall-headscale -s /usr/sbin/nologin -d /var/lib/axonwall axonwall-headscale 2>/dev/null || true
 fi
 
-# Generate a per-appliance TLS certificate (never ship a shared private key in the ISO)
+# Provision the hub TLS PKI (audit B-14): an on-box appliance CA plus a
+# CA-issued hub leaf, via the shared provisioning tool. --ensure is
+# idempotent and never disturbs an operator CA. The inline fallback is
+# the previous self-signed generation, used only if the tool is missing.
 mkdir -p /etc/axonwall/certs
-if [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; then
+if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
+  echo "[Axonwall Firstboot] Provisioning appliance TLS PKI (CA + hub leaf)..."
+  axonwall-rotate-hub-cert --ensure || true
+elif [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; then
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
   for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done

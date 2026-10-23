@@ -1,0 +1,5 @@
+#!/bin/sh
+# B-14: renew the hub TLS leaf from the on-box appliance CA when it
+# nears expiry. The tool is a no-op in every other trust state
+# (operator CA, legacy self-signed, healthy leaf).
+exec /usr/local/bin/axonwall-rotate-hub-cert --if-needed

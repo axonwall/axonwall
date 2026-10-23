@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew the Axonwall hub TLS certificate from the appliance CA when it nears expiry (B-14)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/axonwall-rotate-hub-cert --if-needed

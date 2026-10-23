@@ -461,7 +461,7 @@ done
 for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
 done
-for svc in chronyd slapd sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+for svc in chronyd crond slapd sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
 done
 for svc in mount-ro killprocs savecache; do
