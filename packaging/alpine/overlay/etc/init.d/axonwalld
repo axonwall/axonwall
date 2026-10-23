@@ -35,7 +35,14 @@ start_pre() {
         mkdir -p /var/lib/openldap/run /run/openldap
         chown -R ldap:ldap /var/lib/openldap/run /run/openldap 2>/dev/null || true
     fi
-    if [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
+    if [ -x /bin/zsh ]; then
+        # Full build: the real zsh is /bin/zsh; /usr/bin/zsh must resolve
+        # to it (see firstboot-alpine). An ash symlink here makes busybox
+        # reject the shell ("zsh: applet not found") on console shell drop.
+        if [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; then
+            ln -sf /bin/zsh /usr/bin/zsh 2>/dev/null || true
+        fi
+    elif [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
         ln -sf /bin/ash /usr/bin/zsh 2>/dev/null || true
     fi
     # B-12 upgrade migration (idempotent): split the ZTP token out of a

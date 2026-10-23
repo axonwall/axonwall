@@ -222,9 +222,17 @@ if ! grep -q ' /home ' /proc/mounts 2>/dev/null; then
   mount --bind /var/lib/axonwall/home /home 2>/dev/null || true
 fi
 
-# On minimal Alpine builds without zsh installed, symlink /usr/bin/zsh -> /bin/ash
-# so SSO users replicated with loginShell=/usr/bin/zsh can log in over SSH cleanly
-if [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
+# /usr/bin/zsh must resolve to a real shell. On full builds the zsh package
+# installs /bin/zsh, so point /usr/bin/zsh there (replacing any stale ash
+# symlink): an ash symlink makes busybox reject the shell with
+# "zsh: applet not found", which breaks the console shell drop. Only on
+# minimal builds (no zsh anywhere) fall back to ash, so SSO users replicated
+# with loginShell=/usr/bin/zsh can log in over SSH cleanly.
+if [ -x /bin/zsh ]; then
+  if [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; then
+    ln -sf /bin/zsh /usr/bin/zsh 2>/dev/null || true
+  fi
+elif [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
   ln -sf /bin/ash /usr/bin/zsh 2>/dev/null || true
 fi
 
