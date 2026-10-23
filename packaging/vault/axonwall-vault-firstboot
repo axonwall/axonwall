@@ -2,9 +2,9 @@
 # axonwall-vault-firstboot -- first-boot provisioning for the Vault Edition.
 #
 # Runs once, gated by the /etc/axonwall/.vault-firstboot marker (the
-# axonwall-vault-firstboot.service condition). The marker is removed only
-# after every step succeeds; a failed run keeps it and retries next boot.
-# Every step is idempotent.
+# axonwall-vault-firstboot.service condition). The marker is removed by
+# axonwall-vault-provision.service once provisioning is proven, so a
+# failed run retries next boot. Every step here is idempotent.
 #
 #   1. TLS: mint the S3 endpoint certificate if absent -- self-signed
 #      with the appliance SAN profile (hostname, axonwall.local,
@@ -18,8 +18,13 @@
 #      at /var/lib/axonwall/vault. A device carrying an existing
 #      filesystem signature is REFUSED unless VAULT_DATA_DEVICE_FORCE=1;
 #      on refusal the vault falls back to the root filesystem (loudly).
-#   4. Enable + start SeaweedFS, then axonwall-vault-provision --ensure
-#      creates the bucket and proves the immutability posture live.
+#   4. Hand off: seaweedfs.service is enabled in the image but gated on
+#      the config written in step 2 and ordered after this unit, and
+#      axonwall-vault-provision.service then creates the bucket and
+#      proves the immutability posture live. This script deliberately
+#      never calls systemctl: starting a unit from inside a service
+#      that has ordering edges with it deadlocks the boot transaction
+#      (found by the Phase 2 boot smoke).
 #
 # Operator knobs live in /etc/axonwall/vault.env (VAULT_DATA_DEVICE,
 # VAULT_DATA_DEVICE_FORCE, VAULT_BUCKET, VAULT_RETENTION_DAYS).
@@ -28,7 +33,6 @@ set -u
 CONF_DIR="/etc/axonwall"
 CERT_DIR="$CONF_DIR/certs"
 DATA_DIR="/var/lib/axonwall/vault"
-MARKER="$CONF_DIR/.vault-firstboot"
 ENV_FILE="$CONF_DIR/vault.env"
 
 log() { echo "vault-firstboot: $*"; }
@@ -84,15 +88,9 @@ mkdir -p "$DATA_DIR"
 chown axonwall-vault:axonwall-vault "$DATA_DIR" 2>/dev/null || true
 chmod 0750 "$DATA_DIR"
 
-# --- 4. Start the store and provision the bucket -----------------------------
-systemctl enable seaweedfs.service >/dev/null 2>&1 || true
-systemctl start seaweedfs.service || die "seaweedfs failed to start"
-# The S3 endpoint serves TLS with the cert minted above; provisioning
-# talks to it over loopback only, verifying against that same cert.
-VAULT_S3_ENDPOINT="https://127.0.0.1:8333" \
-VAULT_S3_CACERT="$CERT_DIR/hub.crt" \
-    /usr/local/bin/axonwall-vault-provision --ensure \
-    || die "bucket provisioning/posture verification failed"
-
-rm -f "$MARKER"
-log "vault provisioning complete"
+# --- 4. Hand off ---------------------------------------------------------------
+# Nothing to start from here: seaweedfs.service is enabled in the image,
+# ordered after this unit, and gated on the identity config written in
+# step 2; axonwall-vault-provision.service follows it and removes the
+# provisioning marker once the bucket posture is proven.
+log "identity and TLS ready; seaweedfs and bucket provisioning follow via systemd"

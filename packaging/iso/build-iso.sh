@@ -179,11 +179,15 @@ else
   # Vault Edition units, tools and identity files.
   cp "${SCRIPT_DIR}/../vault/seaweedfs.service" config/includes.chroot/etc/systemd/system/
   cp "${SCRIPT_DIR}/../vault/axonwall-vault-firstboot.service" config/includes.chroot/etc/systemd/system/
+  cp "${SCRIPT_DIR}/../vault/axonwall-vault-provision.service" config/includes.chroot/etc/systemd/system/
   ln -sf /etc/systemd/system/axonwall-vault-firstboot.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-vault-firstboot.service
+  ln -sf /etc/systemd/system/axonwall-vault-provision.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-vault-provision.service
+  # seaweedfs is enabled but inert until firstboot writes its identity
+  # config: the unit carries ConditionPathExists on that config and is
+  # ordered after the firstboot unit.
+  ln -sf /etc/systemd/system/seaweedfs.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/seaweedfs.service
   # The stock nftables.service applies /etc/nftables.conf (vault ruleset).
   ln -sf /lib/systemd/system/nftables.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/nftables.service
-  # NOTE: seaweedfs.service is deliberately NOT enabled here -- vault
-  # firstboot enables it once credentials and the TLS cert exist.
   mkdir -p config/includes.chroot/usr/lib/sysusers.d config/includes.chroot/usr/lib/tmpfiles.d
   cp "${SCRIPT_DIR}/../vault/axonwall-vault.sysusers" config/includes.chroot/usr/lib/sysusers.d/axonwall-vault.conf
   cp "${SCRIPT_DIR}/../vault/axonwall-vault.tmpfiles" config/includes.chroot/usr/lib/tmpfiles.d/axonwall-vault.conf

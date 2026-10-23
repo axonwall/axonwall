@@ -1,0 +1,24 @@
+[Unit]
+Description=Axonwall Vault bucket provisioning and posture verification
+After=seaweedfs.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/axonwall/.vault-firstboot
+
+[Service]
+Type=oneshot
+# Operator knobs (VAULT_BUCKET, VAULT_RETENTION_DAYS) reach the tool
+# through the same env file the firstboot script sources.
+EnvironmentFile=-/etc/axonwall/vault.env
+# Provisioning talks to the S3 endpoint over loopback only, verifying
+# TLS against the endpoint's own certificate.
+Environment=VAULT_S3_ENDPOINT=https://127.0.0.1:8333
+Environment=VAULT_S3_CACERT=/etc/axonwall/certs/hub.crt
+ExecStart=/usr/local/bin/axonwall-vault-provision --ensure
+# The marker gates BOTH firstboot and this service; it is removed only
+# after --ensure has created the bucket and proven the posture live,
+# so a failed run retries on the next boot.
+ExecStartPost=/bin/rm -f /etc/axonwall/.vault-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

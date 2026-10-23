@@ -1,8 +1,12 @@
 [Unit]
 Description=Axonwall Vault storage (SeaweedFS)
 Documentation=https://github.com/seaweedfs/seaweedfs
-After=network-online.target
+After=network-online.target axonwall-vault-firstboot.service
 Wants=network-online.target
+# Enabled in the image but inert until firstboot has written the S3
+# identity config; the ordering edge lives here (never in the firstboot
+# unit) so no service ever starts a unit it is ordered against.
+ConditionPathExists=/etc/axonwall/seaweedfs-s3.json
 
 [Service]
 Type=simple
@@ -22,6 +26,7 @@ Group=axonwall-vault
 # are the store's root-equivalent admin domain.
 ExecStart=/usr/sbin/weed server \
   -dir=/var/lib/axonwall/vault \
+  -ip.bind=0.0.0.0 \
   -master.port=9333 \
   -volume.port=8080 \
   -master.volumeSizeLimitMB=5120 \
