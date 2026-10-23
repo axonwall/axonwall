@@ -213,12 +213,17 @@ jobs:
         run: |
           sudo env AXONWALL_FLAVOR=vault ./packaging/iso/build-iso.sh
 
+      - name: Build Vault Alpine ISO
+        run: |
+          ./packaging/alpine/build-alpine-iso.sh --flavor vault
+
       - name: Compute Checksums
         run: |
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-vault-debian13-amd64.iso > axonwall-vault-debian13-amd64.iso.sha256 && chmod 644 axonwall-vault-debian13-amd64.iso.sha256'
+          sudo bash -c 'cd packaging/alpine/output && sha256sum axonwall-vault-alpine-virt-amd64.iso > axonwall-vault-alpine-virt-amd64.iso.sha256 && chmod 644 axonwall-vault-alpine-virt-amd64.iso.sha256'
           sudo bash -c 'if [ -d packaging/cloud-image/output ]; then cd packaging/cloud-image/output && sha256sum axonwall-debian13-amd64-cloud.qcow2 > axonwall-debian13-amd64-cloud.qcow2.sha256 && chmod 644 axonwall-debian13-amd64-cloud.qcow2.sha256; fi'
-          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output 2>/dev/null || true
+          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output packaging/alpine/output 2>/dev/null || true
 
       - name: Sign ISO & Cloud Image Checksums (if signing key configured)
         env:
@@ -228,7 +233,7 @@ jobs:
           key_file="$(mktemp)"
           trap 'rm -f "$key_file"' EXIT
           printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
-          for sha in packaging/iso/output/*.iso.sha256 packaging/cloud-image/output/*.qcow2.sha256; do
+          for sha in packaging/iso/output/*.iso.sha256 packaging/alpine/output/*.iso.sha256 packaging/cloud-image/output/*.qcow2.sha256; do
             if [ -f "$sha" ]; then
               openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
             fi
@@ -260,6 +265,16 @@ jobs:
             packaging/iso/output/axonwall-vault-debian13-amd64.iso
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256.sig
+          retention-days: 1
+
+      - name: Upload Vault Alpine ISO Artifact (release handoff)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: axonwall-vault-alpine-iso
+          path: |
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso.sha256
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso.sha256.sig
           retention-days: 1
 
       - name: Upload Cloud Appliance QCOW2 Artifact (release handoff)
@@ -300,6 +315,12 @@ jobs:
           name: axonwall-vault-debian-iso
           path: packaging/iso/output
 
+      - name: Download Vault Alpine ISO Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-vault-alpine-iso
+          path: packaging/alpine/output
+
       - name: Download Cloud Appliance QCOW2 Artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
@@ -316,6 +337,8 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/iso/output/axonwall-vault-debian13-amd64.iso
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso.sha256
             packaging/cloud-image/output/*.qcow2
             packaging/cloud-image/output/*.qcow2.sha256
             packaging/debian/output/*.deb
@@ -323,6 +346,7 @@ jobs:
             packaging/debian/output/*.deb.sha256.sig
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256.sig
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso.sha256.sig
             packaging/cloud-image/output/*.qcow2.sha256.sig
 
       - name: Publish Rolling Latest Pre-Release (on main)
@@ -340,6 +364,7 @@ jobs:
             - **Artifacts**:
               - `axonwall-debian13-amd64.iso`
               - `axonwall-vault-debian13-amd64.iso`
+              - `axonwall-vault-alpine-virt-amd64.iso`
               - `axonwall-debian13-amd64-cloud.qcow2`
               - `axonwall_*.deb`
           prerelease: true
@@ -348,6 +373,8 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/iso/output/axonwall-vault-debian13-amd64.iso
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso.sha256
             packaging/cloud-image/output/*.qcow2
             packaging/cloud-image/output/*.qcow2.sha256
             packaging/debian/output/*.deb
@@ -355,4 +382,5 @@ jobs:
             packaging/debian/output/*.deb.sha256.sig
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256.sig
+            packaging/alpine/output/axonwall-vault-alpine-virt-amd64.iso.sha256.sig
             packaging/cloud-image/output/*.qcow2.sha256.sig
