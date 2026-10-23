@@ -1,0 +1,14 @@
+[Unit]
+Description=Axonwall Vault Firstboot Provisioner
+After=network-online.target
+Wants=network-online.target
+Before=seaweedfs.service
+ConditionPathExists=/etc/axonwall/.vault-firstboot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/axonwall-vault-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

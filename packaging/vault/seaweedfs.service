@@ -1,0 +1,45 @@
+[Unit]
+Description=Axonwall Vault storage (SeaweedFS)
+Documentation=https://github.com/seaweedfs/seaweedfs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=axonwall-vault
+Group=axonwall-vault
+# All-in-one SeaweedFS: master + volume + filer + S3 gateway.
+# Vault posture (Phase 0 bench findings, all mandatory):
+#   -filer.disableHttp=true          the filer HTTP surface can delete
+#                                    locked buckets; S3 uses gRPC instead
+#   -s3.allowDeleteBucketNotEmpty=false
+#                                    AWS semantics; the upstream default
+#                                    (true) destroys non-empty buckets
+#   -s3.autoCreateBucket=false       bucket creation is a provisioning act
+# Only the S3 port (8333, TLS) is reachable from the LAN; the static
+# nftables ruleset (/etc/nftables.conf) drops the master (9333), volume
+# (8080), filer (8888/18888) and auxiliary (8181/9101) listeners, which
+# are the store's root-equivalent admin domain.
+ExecStart=/usr/sbin/weed server \
+  -dir=/var/lib/axonwall/vault \
+  -master.port=9333 \
+  -volume.port=8080 \
+  -master.volumeSizeLimitMB=5120 \
+  -filer.port=8888 \
+  -filer.disableHttp=true \
+  -s3 \
+  -s3.port=8333 \
+  -s3.config=/etc/axonwall/seaweedfs-s3.json \
+  -s3.allowDeleteBucketNotEmpty=false \
+  -s3.autoCreateBucket=false \
+  -s3.cert.file=/etc/axonwall/certs/hub.crt \
+  -s3.key.file=/etc/axonwall/certs/hub.key
+Restart=on-failure
+RestartSec=5
+# SeaweedFS takes ~20s to release its ports on shutdown (Phase 0 note);
+# do not SIGKILL it into a half-drained state.
+TimeoutStopSec=90
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
