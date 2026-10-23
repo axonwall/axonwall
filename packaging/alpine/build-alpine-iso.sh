@@ -119,6 +119,10 @@ fi
 # An unpinned base ISO fails the build closed -- bump the pin together
 # with the Alpine point release.
 case "${ISO_FILE}" in
+  alpine-virt-3.21.9-x86_64.iso)
+    EXPECTED_ISO_SHA256="1ceafa2ca068faf2925de977815681c182708f3c6cbfbad137f3ffc9324a03b4" ;;
+  alpine-standard-3.21.9-x86_64.iso)
+    EXPECTED_ISO_SHA256="026d52f9e4571cacb84e8c8d19f05385f3e411f9ac135f3e2178b8eb00b7cc8d" ;;
   alpine-virt-3.21.8-x86_64.iso)
     EXPECTED_ISO_SHA256="478f6629181541a8c24ddcdf4c3f1810cf8deacb47f4e7e2ed367a7b2ef4d80e" ;;
   alpine-standard-3.21.8-x86_64.iso)
