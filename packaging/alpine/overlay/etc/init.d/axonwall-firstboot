@@ -6,7 +6,7 @@ description="Axonwall Appliance Firstboot Provisioner"
 depend() {
     need localmount
     after networking
-    before axonwalld axonwall-controller axonwall-ui headscale
+    before slapd axonwalld axonwall-controller axonwall-ui headscale
 }
 
 start() {
