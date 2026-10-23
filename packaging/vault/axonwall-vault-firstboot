@@ -6,11 +6,13 @@
 # axonwall-vault-provision.service once provisioning is proven, so a
 # failed run retries next boot. Every step here is idempotent.
 #
-#   1. TLS: mint the S3 endpoint certificate if absent -- self-signed
-#      with the appliance SAN profile (hostname, axonwall.local,
-#      localhost, and every current IP). NOTE: when the B-14 appliance
-#      CA (PR #79) lands on main, this step is replaced by
-#      axonwall-rotate-hub-cert --ensure, like the other firstboots.
+#   1. TLS: provision the hub TLS PKI via axonwall-rotate-hub-cert
+#      --ensure (B-14: on-box appliance CA + CA-issued 825-day hub
+#      leaf; idempotent, never disturbs an operator CA). The inline
+#      self-signed generation remains as the fallback if the tool is
+#      missing or fails, exactly as in the firewall firstboot.
+#      Backup clients should pin /etc/axonwall/certs/ca.crt (stable
+#      across leaf renewals), not the leaf.
 #   2. Credentials + S3 identity config via axonwall-vault-provision
 #      --write-config (generated once, never overwritten).
 #   3. Optional dedicated data device (VAULT_DATA_DEVICE in
@@ -42,6 +44,10 @@ die() { echo "vault-firstboot: ERROR: $*" >&2; exit 1; }
 
 # --- 1. TLS certificate ----------------------------------------------------
 mkdir -p "$CERT_DIR"
+if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
+    log "provisioning appliance TLS PKI (CA + hub leaf) via axonwall-rotate-hub-cert"
+    axonwall-rotate-hub-cert --ensure || true
+fi
 if [ ! -s "$CERT_DIR/hub.crt" ] || [ ! -s "$CERT_DIR/hub.key" ]; then
     SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
     for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
