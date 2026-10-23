@@ -423,10 +423,24 @@ if [[ -d "${REPO_ROOT}/apps/axonwall/.next/standalone" ]]; then
     "${OVL}/opt/axonwall/node_modules/.pnpm/"postcss* \
     "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/@vercel/og \
     "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/webpack \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/babel* \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/next-devtools \
     2>/dev/null || true
   find "${OVL}/opt/axonwall" \( -name "*.map" -o -name "*.d.ts" -o -name "*.md" -o -name "LICENSE*" \) -delete 2>/dev/null || true
+  # Next's production server loads dist/next-devtools/server/shared.js at
+  # startup (via dist/server/patch-error-inspect.js), and shared.js in
+  # turn requires dist/compiled/babel/code-frame. The strip list above
+  # previously removed both dist/next-devtools and dist/compiled/babel*,
+  # which crashed axonwall-ui on boot with "Cannot find module
+  # '../next-devtools/server/shared'" (and, once that was restored,
+  # "Cannot find module 'next/dist/compiled/babel/code-frame'").
+  # Fail the build if the runtime files are missing from the payload.
+  for next_dir in "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next; do
+    for req in dist/next-devtools/server/shared.js dist/server/patch-error-inspect.js dist/compiled/babel/code-frame.js; do
+      if [[ ! -f "${next_dir}/${req}" ]]; then
+        echo "[!] ERROR: Next.js runtime file missing from UI payload: ${next_dir}/${req}" >&2
+        exit 1
+      fi
+    done
+  done
   mkdir -p "${OVL}/opt/axonwall/apps/axonwall/.next" "${OVL}/opt/axonwall/.next"
   if [[ -d "${REPO_ROOT}/apps/axonwall/.next/static" ]]; then
     cp -a "${REPO_ROOT}/apps/axonwall/.next/static" "${OVL}/opt/axonwall/apps/axonwall/.next/"
