@@ -1,0 +1,314 @@
+#!/bin/sh
+# axonwall-vault-provision -- provision an Axonwall Vault Edition appliance.
+#
+# Vault Edition design (Phase 0 bench, 2026-10-23): SeaweedFS is the store,
+# and the vault's guarantees come from three layers working together:
+#   1. a bucket created with Object Lock and a default COMPLIANCE retention,
+#   2. a writer identity scoped by an IAM policy document that grants
+#      put/get/list/retention/multipart but NO DeleteObjectVersion, and
+#   3. the server flags and port posture set by the service unit
+#      (-s3.allowDeleteBucketNotEmpty=false, -filer.disableHttp=true,
+#      only the S3 port reachable by clients).
+# This tool owns layers 1 and 2. It generates the per-appliance credentials,
+# writes the SeaweedFS identity config, creates and verifies the bucket,
+# and then PROVES the posture with live probes before declaring success
+# (verify-before-install, the B-14 rule).
+#
+# The legacy coarse identity actions are NOT used for the writer: in
+# SeaweedFS 4.48 the "Write" action silently includes DeleteObjectVersion,
+# while retention-header PUTs (which Kopia needs) require the policy form.
+# The policy allowlist below is the exact set proven on the Phase 0 bench.
+#
+# Credentials are generated once and never rotated or overwritten by this
+# tool. The writer secret is the only credential that ever leaves the box
+# (the operator copies it to backup clients). Secrets are never printed.
+#
+# Usage:
+#   axonwall-vault-provision --write-config   credentials + S3 identity
+#                                             config only (offline)
+#   axonwall-vault-provision --ensure         write-config, then create +
+#                                             verify the bucket (online)
+#   axonwall-vault-provision --verify         probes only; exit 1 on any
+#                                             posture failure
+#
+# Environment:
+#   VAULT_CONF_DIR        default /etc/axonwall
+#   VAULT_BUCKET          default backups
+#   VAULT_RETENTION_DAYS  default 30 (bucket default COMPLIANCE retention)
+#   VAULT_S3_ENDPOINT     default http://127.0.0.1:8333 (loopback: the
+#                         admin credential never leaves the box)
+#   VAULT_S3_CACERT       CA bundle for https endpoints (optional)
+set -u
+
+CONF_DIR="${VAULT_CONF_DIR:-/etc/axonwall}"
+BUCKET="${VAULT_BUCKET:-backups}"
+RETENTION_DAYS="${VAULT_RETENTION_DAYS:-30}"
+ENDPOINT="${VAULT_S3_ENDPOINT:-http://127.0.0.1:8333}"
+CACERT="${VAULT_S3_CACERT:-}"
+
+ADMIN_ENV="$CONF_DIR/vault-admin.env"
+WRITER_ENV="$CONF_DIR/vault-writer.env"
+S3_CONFIG="$CONF_DIR/seaweedfs-s3.json"
+STAMP="$CONF_DIR/vault-provisioned-at"
+POLICY_NAME="vault-writer"
+PROBE_KEY=".vault-provision-probe"
+
+MODE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --write-config) MODE="write-config"; shift ;;
+        --ensure) MODE="ensure"; shift ;;
+        --verify) MODE="verify"; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+[ -n "$MODE" ] || { echo "usage: $0 --write-config|--ensure|--verify" >&2; exit 2; }
+
+HOSTPORT="$(printf '%s' "$ENDPOINT" | sed -e 's|^https\?://||' -e 's|/.*$||')"
+
+# --- SigV4 signing (POSIX sh + openssl) -----------------------------------
+# s3_req ACCESS SECRET METHOD PATH QUERY BODYFILE [EXTRA-HEADER ...]
+# Prints the response body on stdout; the HTTP status is left in
+# $S3_STATUS and response headers in the file $S3_HDRS.
+s3_req() {
+    _ak="$1"; _sk="$2"; _method="$3"; _path="$4"; _query="$5"; _body="$6"; shift 6
+    _amzdate="$(date -u +%Y%m%dT%H%M%SZ)"
+    _datestamp="$(date -u +%Y%m%d)"
+    if [ -n "$_body" ]; then
+        _payload_hash="$(openssl dgst -sha256 "$_body" | sed -e 's/^.*= *//')"
+    else
+        _payload_hash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    fi
+    _hdr_file="$(mktemp)"
+    {
+        printf 'host:%s\n' "$HOSTPORT"
+        printf 'x-amz-content-sha256:%s\n' "$_payload_hash"
+        printf 'x-amz-date:%s\n' "$_amzdate"
+        for _h in "$@"; do
+            _n="$(printf '%s' "$_h" | cut -d: -f1 | tr 'A-Z' 'a-z')"
+            _v="$(printf '%s' "$_h" | cut -d: -f2- | sed -e 's/^ *//')"
+            printf '%s:%s\n' "$_n" "$_v"
+        done
+    } | LC_ALL=C sort > "$_hdr_file"
+    _signed="$(cut -d: -f1 "$_hdr_file" | paste -sd';' -)"
+    _canon_body="$(mktemp)"
+    _canon_query="$(printf '%s' "$_query" | awk -F'&' 'BEGIN{OFS="&"} {for(i=1;i<=NF;i++){if(index($i,"=")==0) $i=$i"="}; print}')"
+    {
+        printf '%s\n%s\n%s\n' "$_method" "$_path" "$_canon_query"
+        cat "$_hdr_file"
+        printf '\n%s\n%s' "$_signed" "$_payload_hash"
+    } > "$_canon_body"
+    _canon_hash="$(openssl dgst -sha256 "$_canon_body" | sed -e 's/^.*= *//')"
+    _scope="$_datestamp/us-east-1/s3/aws4_request"
+    _string_to_sign="AWS4-HMAC-SHA256
+$_amzdate
+$_scope
+$_canon_hash"
+    _k1="$(printf '%s' "$_datestamp" | openssl dgst -sha256 -hmac "AWS4$_sk" -binary | od -An -tx1 | tr -d ' \n')"
+    _k2="$(printf '%s' 'us-east-1' | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$_k1" -binary | od -An -tx1 | tr -d ' \n')"
+    _k3="$(printf '%s' 's3' | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$_k2" -binary | od -An -tx1 | tr -d ' \n')"
+    _k4="$(printf '%s' 'aws4_request' | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$_k3" | sed -e 's/^.*= *//')"
+    _signature="$(printf '%s' "$_string_to_sign" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$_k4" | sed -e 's/^.*= *//')"
+    _auth="AWS4-HMAC-SHA256 Credential=$_ak/$_scope, SignedHeaders=$_signed, Signature=$_signature"
+    _url="$ENDPOINT$_path"
+    [ -n "$_query" ] && _url="$_url?$_query"
+    S3_HDRS="$(mktemp)"
+    _curl_hdr_args=""
+    while IFS= read -r _line; do
+        _curl_hdr_args="$_curl_hdr_args
+$_line"
+    done < "$_hdr_file"
+    rm -f "$_hdr_file" "$_canon_body"
+    _resp_body_tmp="$(mktemp)"
+    # Build the curl invocation with one -H per signed header, without eval:
+    _args_file="$(mktemp)"
+    {
+        echo "-s"
+        echo "-D"; echo "$S3_HDRS"
+        echo "-o"; echo "$_resp_body_tmp"
+        echo "-w"; echo "%{http_code}"
+        echo "-X"; echo "$_method"
+        [ -n "$CACERT" ] && { echo "--cacert"; echo "$CACERT"; }
+        echo "-H"; echo "Authorization: $_auth"
+        while IFS= read -r _line; do echo "-H"; echo "$_line"; done <<EOF
+$(printf '%s' "$_curl_hdr_args" | tail -n +2)
+EOF
+        [ -n "$_body" ] && { echo "--data-binary"; echo "@$_body"; }
+        echo "$_url"
+    } > "$_args_file"
+    S3_STATUS="$(xargs -a "$_args_file" -d '\n' curl 2>/dev/null)"
+    rm -f "$_args_file"
+    cat "$_resp_body_tmp"
+    rm -f "$_resp_body_tmp"
+}
+
+load_creds() {
+    # shellcheck disable=SC1090
+    [ -f "$ADMIN_ENV" ] && . "$ADMIN_ENV"
+    # shellcheck disable=SC1090
+    [ -f "$WRITER_ENV" ] && . "$WRITER_ENV"
+    : "${VAULT_ADMIN_ACCESS_KEY:?admin credentials missing in $ADMIN_ENV}"
+    : "${VAULT_ADMIN_SECRET_KEY:?admin secret missing in $ADMIN_ENV}"
+    : "${VAULT_WRITER_ACCESS_KEY:?writer credentials missing in $WRITER_ENV}"
+    : "${VAULT_WRITER_SECRET_KEY:?writer secret missing in $WRITER_ENV}"
+}
+
+gen_access_key() { printf 'AXVW%s' "$(openssl rand -hex 8 | tr 'a-f' 'A-F')"; }
+gen_secret_key() { openssl rand -base64 30 | tr -d '\n'; }
+
+write_config() {
+    mkdir -p "$CONF_DIR"
+    chmod 0700 "$CONF_DIR" 2>/dev/null || true
+    if [ ! -f "$ADMIN_ENV" ]; then
+        umask 077
+        {
+            echo "VAULT_ADMIN_ACCESS_KEY=$(gen_access_key)"
+            echo "VAULT_ADMIN_SECRET_KEY=$(gen_secret_key)"
+        } > "$ADMIN_ENV"
+        echo "generated vault admin credentials: $ADMIN_ENV"
+    fi
+    if [ ! -f "$WRITER_ENV" ]; then
+        umask 077
+        {
+            echo "VAULT_WRITER_ACCESS_KEY=$(gen_access_key)"
+            echo "VAULT_WRITER_SECRET_KEY=$(gen_secret_key)"
+        } > "$WRITER_ENV"
+        echo "generated vault writer credentials: $WRITER_ENV"
+    fi
+    chmod 0600 "$ADMIN_ENV" "$WRITER_ENV"
+    load_creds
+    if [ -f "$S3_CONFIG" ]; then
+        if grep -q "\"$VAULT_WRITER_ACCESS_KEY\"" "$S3_CONFIG" \
+           && grep -q "\"$VAULT_ADMIN_ACCESS_KEY\"" "$S3_CONFIG" \
+           && grep -q "\"name\": \"$POLICY_NAME\"" "$S3_CONFIG"; then
+            echo "S3 identity config already matches credentials: $S3_CONFIG"
+            return 0
+        fi
+        echo "existing $S3_CONFIG does not match the stored credentials; refusing to overwrite" >&2
+        return 1
+    fi
+    _policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject","s3:GetObject","s3:GetObjectVersion","s3:ListBucket","s3:ListBucketVersions","s3:PutObjectRetention","s3:GetObjectRetention","s3:PutObjectLegalHold","s3:GetObjectLegalHold","s3:CreateMultipartUpload","s3:UploadPart","s3:CompleteMultipartUpload","s3:AbortMultipartUpload","s3:ListMultipartUploads","s3:ListBucketMultipartUploads","s3:DeleteObject"],"Resource":["arn:aws:s3:::'"$BUCKET"'","arn:aws:s3:::'"$BUCKET"'/*"]}]}'
+    _policy_esc="$(printf '%s' "$_policy" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    umask 077
+    {
+        echo '{'
+        echo '  "identities": ['
+        echo '    {'
+        echo '      "name": "vault-admin",'
+        echo "      \"credentials\": [{\"accessKey\": \"$VAULT_ADMIN_ACCESS_KEY\", \"secretKey\": \"$VAULT_ADMIN_SECRET_KEY\"}],"
+        echo '      "actions": ["Admin"]'
+        echo '    },'
+        echo '    {'
+        echo '      "name": "backup-writer",'
+        echo "      \"credentials\": [{\"accessKey\": \"$VAULT_WRITER_ACCESS_KEY\", \"secretKey\": \"$VAULT_WRITER_SECRET_KEY\"}],"
+        echo "      \"policyNames\": [\"$POLICY_NAME\"]"
+        echo '    }'
+        echo '  ],'
+        echo '  "policies": ['
+        echo "    {\"name\": \"$POLICY_NAME\", \"content\": \"$_policy_esc\"}"
+        echo '  ]'
+        echo '}'
+    } > "$S3_CONFIG"
+    chmod 0600 "$S3_CONFIG"
+    echo "wrote S3 identity config: $S3_CONFIG (bucket: $BUCKET)"
+}
+
+wait_for_s3() {
+    _i=0
+    while [ $_i -lt 30 ]; do
+        _code="$(curl -s -o /dev/null -w '%{http_code}' ${CACERT:+--cacert "$CACERT"} "$ENDPOINT/" 2>/dev/null || echo 000)"
+        [ "$_code" != "000" ] && return 0
+        _i=$((_i + 1)); sleep 2
+    done
+    echo "S3 endpoint $ENDPOINT did not answer within 60s" >&2
+    return 1
+}
+
+ensure_bucket() {
+    load_creds
+    wait_for_s3 || return 1
+    s3_req "$VAULT_ADMIN_ACCESS_KEY" "$VAULT_ADMIN_SECRET_KEY" HEAD "/$BUCKET" "" "" >/dev/null
+    _head_status="$S3_STATUS"
+    if [ "$_head_status" = "404" ]; then
+        s3_req "$VAULT_ADMIN_ACCESS_KEY" "$VAULT_ADMIN_SECRET_KEY" PUT "/$BUCKET" "" "" \
+            "x-amz-bucket-object-lock-enabled:true" >/dev/null
+        [ "$S3_STATUS" = "200" ] || { echo "CreateBucket($BUCKET) failed: HTTP $S3_STATUS" >&2; return 1; }
+        echo "created bucket $BUCKET with Object Lock enabled"
+    elif [ "$_head_status" != "200" ]; then
+        echo "HeadBucket($BUCKET) failed: HTTP $_head_status" >&2; return 1
+    fi
+    _cur="$(s3_req "$VAULT_ADMIN_ACCESS_KEY" "$VAULT_ADMIN_SECRET_KEY" GET "/$BUCKET" "object-lock" "")"
+    if printf '%s' "$_cur" | grep -q '<ObjectLockEnabled>Enabled</ObjectLockEnabled>' \
+       && printf '%s' "$_cur" | grep -q '<Rule>'; then
+        if printf '%s' "$_cur" | grep -q '<Mode>COMPLIANCE</Mode>' \
+           && printf '%s' "$_cur" | grep -q "<Days>$RETENTION_DAYS</Days>"; then
+            echo "bucket default retention already COMPLIANCE ${RETENTION_DAYS}d"
+            return 0
+        fi
+        echo "bucket $BUCKET already has a DIFFERENT default retention; refusing to change it" >&2
+        echo "current config: $_cur" >&2
+        return 1
+    fi
+    # Lock enabled with no default rule yet (the state CreateBucket leaves),
+    # or no config at all: setting the rule completes provisioning.
+    _cfg_body="$(mktemp)"
+    {
+        echo '<ObjectLockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        echo '  <ObjectLockEnabled>Enabled</ObjectLockEnabled>'
+        echo '  <Rule><DefaultRetention><Mode>COMPLIANCE</Mode><Days>'"$RETENTION_DAYS"'</Days></DefaultRetention></Rule>'
+        echo '</ObjectLockConfiguration>'
+    } > "$_cfg_body"
+    _md5="$(openssl md5 -binary "$_cfg_body" | openssl base64)"
+    s3_req "$VAULT_ADMIN_ACCESS_KEY" "$VAULT_ADMIN_SECRET_KEY" PUT "/$BUCKET" "object-lock" "$_cfg_body" \
+        "Content-MD5:$_md5" >/dev/null
+    _st="$S3_STATUS"
+    rm -f "$_cfg_body"
+    [ "$_st" = "200" ] || { echo "PutObjectLockConfiguration failed: HTTP $_st" >&2; return 1; }
+    echo "set bucket default retention: COMPLIANCE ${RETENTION_DAYS}d"
+}
+
+verify_posture() {
+    load_creds
+    wait_for_s3 || return 1
+    _fail=0
+    _until="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1d +%Y-%m-%dT%H:%M:%SZ)"
+    _probe_body="$(mktemp)"; printf 'axonwall vault provision probe\n' > "$_probe_body"
+    s3_req "$VAULT_WRITER_ACCESS_KEY" "$VAULT_WRITER_SECRET_KEY" PUT "/$BUCKET/$PROBE_KEY" "" "$_probe_body" \
+        "x-amz-object-lock-mode:COMPLIANCE" "x-amz-object-lock-retain-until-date:$_until" >/dev/null
+    _st="$S3_STATUS"
+    _version="$(grep -i '^x-amz-version-id:' "$S3_HDRS" 2>/dev/null | tr -d '\r' | awk '{print $2}')"
+    rm -f "$S3_HDRS"
+    if [ "$_st" = "200" ]; then echo "probe 1 ok: writer PUT with retention headers accepted"
+    else echo "probe 1 FAILED: writer PUT with retention headers -> HTTP $_st" >&2; _fail=1; fi
+    _ret="$(s3_req "$VAULT_WRITER_ACCESS_KEY" "$VAULT_WRITER_SECRET_KEY" GET "/$BUCKET/$PROBE_KEY" "retention" "")"
+    if printf '%s' "$_ret" | grep -q '<Mode>COMPLIANCE</Mode>'; then
+        echo "probe 2 ok: probe object carries a COMPLIANCE retention stamp"
+    else echo "probe 2 FAILED: retention readback: $_ret" >&2; _fail=1; fi
+    if [ -n "$_version" ]; then
+        s3_req "$VAULT_WRITER_ACCESS_KEY" "$VAULT_WRITER_SECRET_KEY" DELETE "/$BUCKET/$PROBE_KEY" "versionId=$_version" "" >/dev/null
+        if [ "$S3_STATUS" = "403" ]; then echo "probe 3 ok: writer DeleteObjectVersion refused (403)"
+        else echo "probe 3 FAILED: writer DeleteObjectVersion -> HTTP $S3_STATUS (expected 403)" >&2; _fail=1; fi
+        s3_req "$VAULT_ADMIN_ACCESS_KEY" "$VAULT_ADMIN_SECRET_KEY" DELETE "/$BUCKET/$PROBE_KEY" "versionId=$_version" "" >/dev/null
+        if [ "$S3_STATUS" = "403" ]; then echo "probe 4 ok: admin DeleteObjectVersion of locked probe refused (403)"
+        else echo "probe 4 FAILED: admin DeleteObjectVersion of locked probe -> HTTP $S3_STATUS (expected 403)" >&2; _fail=1; fi
+    else
+        echo "probes 3-4 FAILED: no version id returned by probe PUT" >&2; _fail=1
+    fi
+    rm -f "$_probe_body"
+    [ $_fail -eq 0 ] || return 1
+    echo "posture verified: bucket $BUCKET (COMPLIANCE ${RETENTION_DAYS}d default), writer is put-only at the version layer"
+    echo "note: probe object $PROBE_KEY remains, locked, until its retention passes"
+    return 0
+}
+
+case "$MODE" in
+    write-config) write_config ;;
+    ensure)
+        write_config || exit 1
+        ensure_bucket || exit 1
+        verify_posture || exit 1
+        date -u +%Y-%m-%dT%H:%M:%SZ > "$STAMP"; chmod 0600 "$STAMP"
+        echo "vault provisioned: $STAMP"
+        ;;
+    verify) verify_posture ;;
+esac
