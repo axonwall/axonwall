@@ -5,7 +5,7 @@ description="Headscale WireGuard Mesh Coordination Server"
 supervisor="supervise-daemon"
 command="/usr/sbin/headscale"
 command_args="serve -c /etc/headscale/config.yaml"
-command_user="axonwall:axonwall"
+command_user="axonwall-headscale:axonwall-api"
 pidfile="/run/headscale.pid"
 output_log="/var/log/axonwall/headscale.log"
 error_log="/var/log/axonwall/headscale.log"
@@ -17,7 +17,7 @@ depend() {
 }
 
 start_pre() {
-    checkpath -d -m 0770 -o axonwall:axonwall-api /run/headscale
-    checkpath -d -m 0770 -o axonwall:axonwall /var/lib/axonwall/headscale
+    checkpath -d -m 0770 -o axonwall-headscale:axonwall-api /run/headscale
+    checkpath -d -m 0770 -o axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
     checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
 }

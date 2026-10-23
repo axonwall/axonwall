@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -832,6 +833,30 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *htt
 	_ = os.WriteFile(replicaPath, body, 0600)
 }
 
+// preserveFileOwnership best-effort chowns newPath to the owner of the
+// file at targetPath — or, when the target does not exist yet, to the
+// owner of its directory. The sync daemon runs as root, so a database
+// it applies would otherwise land root-owned and the service that owns
+// it (headscale runs as its own user since the B-12 follow-up split)
+// would lose write access to its own database after the first sync.
+// Failures are logged, not fatal — but loudly, for that reason.
+func preserveFileOwnership(newPath, targetPath string) {
+	stat, err := os.Stat(targetPath)
+	if err != nil {
+		stat, err = os.Stat(filepath.Dir(targetPath))
+		if err != nil {
+			return
+		}
+	}
+	sys, ok := stat.Sys().(*syscall.Stat_t)
+	if !ok {
+		return
+	}
+	if err := os.Chown(newPath, int(sys.Uid), int(sys.Gid)); err != nil {
+		slog.Warn("HA sync: could not preserve ownership on applied database", "path", targetPath, "error", err)
+	}
+}
+
 func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client *http.Client, scheme string) error {
 	m.mu.Lock()
 	peerAddr := m.cfg.PeerAddress
@@ -908,6 +933,10 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 		os.Remove(tmpFile)
 		return err
 	}
+
+	// Keep the replaced database's ownership on the downloaded copy
+	// (see preserveFileOwnership) before it becomes the live file.
+	preserveFileOwnership(tmpFile, dbPath)
 
 	// Remove any existing WAL or SHM files when replacing primary database file
 	_ = os.Remove(dbPath + "-wal")

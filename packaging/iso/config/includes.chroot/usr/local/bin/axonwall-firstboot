@@ -157,6 +157,12 @@ fi
 usermod -a -G axonwall-api axonwall 2>/dev/null || true
 usermod -a -G axonwall-api axonwall-controller 2>/dev/null || true
 
+# Headscale identity split (B-12 follow-up): headscale runs as its own user
+groupadd -r axonwall-headscale 2>/dev/null || true
+if ! id -u axonwall-headscale &>/dev/null; then
+  useradd -r -g axonwall-headscale -s /usr/sbin/nologin -d /var/lib/axonwall axonwall-headscale 2>/dev/null || true
+fi
+
 # Generate a per-appliance TLS certificate (never ship a shared private key in the ISO)
 mkdir -p /etc/axonwall/certs
 if [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; then
@@ -189,7 +195,7 @@ for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/
     chown axonwall:axonwall-api "$f" 2>/dev/null || true
   fi
 done
-chown -R axonwall:axonwall /var/lib/axonwall/headscale 2>/dev/null || true
+chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
 chmod 0775 /var/lib/axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
 chown root:root /var/lib/axonwall/home 2>/dev/null || true
@@ -199,7 +205,9 @@ if id -u openldap &>/dev/null; then
   chown -R openldap:openldap /var/lib/axonwall/ldap 2>/dev/null || true
   chmod 0750 /var/lib/axonwall/ldap /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups 2>/dev/null || true
 fi
-chown axonwall:axonwall-api /run/headscale 2>/dev/null || true
+chown axonwall-headscale:axonwall-api /run/headscale 2>/dev/null || true
+chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
+chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
 chmod 770 /var/lib/axonwall/headscale /run/headscale 2>/dev/null || true
 
 # Register /usr/local/bin/axonwall-opshell in /etc/shells
