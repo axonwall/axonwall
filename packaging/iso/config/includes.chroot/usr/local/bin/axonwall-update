@@ -326,7 +326,7 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
         fi
         if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
           mkdir -p "${STAGE_DIR}/usr/local/bin" 2>/dev/null || true
-          for bin_f in "${PKG_STAGE}/usr/local/bin/axonwall-"*; do
+          for bin_f in "${PKG_STAGE}/usr/local/bin/axonwall"*; do
             if [ -e "$bin_f" ]; then
               rm -f "${STAGE_DIR}/usr/local/bin/$(basename "$bin_f")" 2>/dev/null || true
               cp -f "$bin_f" "${STAGE_DIR}/usr/local/bin/" 2>/dev/null || true
@@ -344,7 +344,7 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
         fi
       fi
       rm -rf "${PKG_STAGE}"
-      chown -R axonwall:axonwall "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
+      chown -R axonwall:axonwall-api "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
     elif [ -d /opt/axonwall ]; then
       mkdir -p "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
       if command -v rsync >/dev/null 2>&1; then
@@ -477,10 +477,18 @@ else
         else
           cp -a "${PKG_STAGE}/opt/axonwall/." /opt/axonwall/ 2>/dev/null || true
         fi
-        chown -R axonwall:axonwall /opt/axonwall 2>/dev/null || true
+        chown -R axonwall:axonwall-api /opt/axonwall 2>/dev/null || true
       fi
       if [ -d "${PKG_STAGE}/usr/sbin" ]; then
         cp -f "${PKG_STAGE}/usr/sbin/"* /usr/sbin/ 2>/dev/null || true
+      fi
+      if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
+        for bin_f in "${PKG_STAGE}/usr/local/bin/axonwall"*; do
+          if [ -e "$bin_f" ]; then
+            cp -f "$bin_f" /usr/local/bin/ 2>/dev/null || true
+            chmod 755 "/usr/local/bin/$(basename "$bin_f")" 2>/dev/null || true
+          fi
+        done
       fi
     fi
     rm -rf "${PKG_STAGE}"

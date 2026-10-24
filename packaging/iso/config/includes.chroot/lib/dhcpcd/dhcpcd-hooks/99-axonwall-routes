@@ -2,8 +2,12 @@
 # Axonwall hook: reconcile static routes whenever dhcpcd acquires or renews a lease
 case "$reason" in
   BOUND|INFORM|REBIND|REBOOT|RENEW)
-    if [ -x /usr/sbin/axonwallctl ]; then
-      /usr/sbin/axonwallctl apply >/dev/null 2>&1 &
+    if [ ! -f /etc/axonwall/.firstboot ]; then
+      if [ -x /usr/local/bin/axonwallctl ]; then
+        /usr/local/bin/axonwallctl apply >/dev/null 2>&1 &
+      elif [ -x /usr/sbin/axonwallctl ]; then
+        /usr/sbin/axonwallctl apply >/dev/null 2>&1 &
+      fi
     fi
     ;;
 esac

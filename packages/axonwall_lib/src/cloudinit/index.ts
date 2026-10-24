@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { DesiredStateSchema, type DesiredState } from '../schemas/index.js';
+import { DesiredStateSchema, inferInterfaceRole, type DesiredState } from '../schemas/index.js';
 
 // ==============================================================================
 // 1. Storage & Custom Partitioning Schemas (used during ISO install & cloud init)
@@ -844,7 +844,7 @@ export function prepareDesiredStateForCloudInit(
     // Convert WAN static interfaces to DHCP in template mode to avoid immediate duplicate IP collision on boot
     if (Array.isArray(cloned.interfaces)) {
       for (const iface of cloned.interfaces) {
-        if (iface.name.toLowerCase().startsWith('wan') && iface.type === 'static') {
+        if (inferInterfaceRole(iface) === 'wan' && iface.type === 'static') {
           iface.type = 'dhcp';
           delete iface.ipv4Address;
           delete iface.ipv4Gateway;

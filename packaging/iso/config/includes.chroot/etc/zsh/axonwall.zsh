@@ -59,13 +59,21 @@ _axonwall_default_if() {
 }
 
 _axonwall_lan_cidr() {
-  local lan_if cidr
+  local lan_if wan_if cidr
   lan_if="$(grep '^LAN_INTERFACE=' /etc/axonwall/interfaces.conf 2>/dev/null | cut -d= -f2)"
+  wan_if="$(grep '^WAN_INTERFACE=' /etc/axonwall/interfaces.conf 2>/dev/null | cut -d= -f2)"
+  case "${lan_if:l}" in
+    none|-|unassigned|\<none\>) lan_if="" ;;
+  esac
   if [[ -n "$lan_if" ]]; then
     cidr="$(ip -o -4 addr show dev "$lan_if" 2>/dev/null | awk '{print $4; exit}')"
   fi
   if [[ -z "$cidr" ]]; then
-    cidr="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4; exit}')"
+    if [[ -n "$wan_if" ]]; then
+      cidr="$(ip -o -4 addr show scope global 2>/dev/null | awk -v w="$wan_if" '$2 != w {print $4; exit}')"
+    else
+      cidr="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4; exit}')"
+    fi
   fi
   echo "${cidr:-192.168.1.0/24}"
 }

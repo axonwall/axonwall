@@ -26,7 +26,7 @@ table inet axonwall {
 
         # Standard ICMP
         icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept
-        icmpv6 type { echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded } accept
+        icmpv6 type { echo-request, echo-reply, destination-unreachable, packet-too-big, time-exceeded, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
 
         # Drop incoming management access from WAN interfaces (mirrors OPNsense default deny on WAN)
         iifname @wan_interfaces tcp dport { 22, 80, 443, 2966, 3000, 9876 } drop comment "block-wan-management"

@@ -27,12 +27,55 @@ import {
 function suggestPoolFromCidr(cidr: string): { start: string; end: string } | null {
   const parts = (cidr || '').trim().split('/');
   const ip = parts[0] || '';
+  const prefix = parts[1] ? parseInt(parts[1], 10) : 24;
   const octets = ip.split('.').map((n) => parseInt(n, 10));
-  if (octets.length !== 4 || octets.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+  if (
+    octets.length !== 4 ||
+    octets.some((n) => Number.isNaN(n) || n < 0 || n > 255) ||
+    Number.isNaN(prefix) ||
+    prefix < 8 ||
+    prefix > 30
+  ) {
     return null;
   }
-  const base = `${octets[0]}.${octets[1]}.${octets[2]}`;
-  return { start: `${base}.100`, end: `${base}.200` };
+  const ipInt = (((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  const netInt = (ipInt & mask) >>> 0;
+  const bcastInt = (netInt | (~mask >>> 0)) >>> 0;
+  const firstUsableInt = (netInt + 1) >>> 0;
+  const lastUsableInt = (bcastInt - 1) >>> 0;
+  const intToIp = (val: number) =>
+    `${(val >>> 24) & 255}.${(val >>> 16) & 255}.${(val >>> 8) & 255}.${val & 255}`;
+
+  if (prefix <= 24) {
+    const base24 = (ipInt & 0xffffff00) >>> 0;
+    let startInt = (base24 + 100) >>> 0;
+    let endInt = (base24 + 200) >>> 0;
+    if (ipInt >= startInt && ipInt <= endInt) {
+      startInt = (base24 + 10) >>> 0;
+      endInt = (base24 + 99) >>> 0;
+    }
+    return { start: intToIp(startInt), end: intToIp(endInt) };
+  }
+  let startInt = firstUsableInt;
+  let endInt = lastUsableInt;
+  if (ipInt === firstUsableInt && firstUsableInt < lastUsableInt) {
+    startInt = (firstUsableInt + 1) >>> 0;
+  } else if (ipInt === lastUsableInt && lastUsableInt > firstUsableInt) {
+    endInt = (lastUsableInt - 1) >>> 0;
+  } else if (ipInt > firstUsableInt && ipInt < lastUsableInt) {
+    const lowerSpan = ipInt - firstUsableInt;
+    const upperSpan = lastUsableInt - ipInt;
+    if (upperSpan >= lowerSpan) {
+      startInt = (ipInt + 1) >>> 0;
+    } else {
+      endInt = (ipInt - 1) >>> 0;
+    }
+  }
+  return {
+    start: intToIp(Math.min(startInt, endInt)),
+    end: intToIp(Math.max(startInt, endInt)),
+  };
 }
 
 export default function InterfacesPage() {

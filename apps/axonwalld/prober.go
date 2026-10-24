@@ -42,9 +42,19 @@ type GatewayGroup struct {
 }
 
 type SDWanConfig struct {
-	Enabled       bool            `json:"enabled"`
+	Enabled       *bool           `json:"enabled,omitempty"`
 	Gateways      []GatewayTarget `json:"gateways"`
 	GatewayGroups []GatewayGroup  `json:"gatewayGroups"`
+}
+
+func (c *SDWanConfig) isEnabled() bool {
+	if c == nil || len(c.Gateways) == 0 {
+		return false
+	}
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type SDWanProber struct {
@@ -80,7 +90,7 @@ func (p *SDWanProber) ReloadConfig(path string) error {
 	p.active = make(map[string]bool)
 	p.mu.Unlock()
 
-	if !config.Enabled || len(config.Gateways) == 0 {
+	if !config.isEnabled() {
 		p.stop()
 		return nil
 	}
@@ -128,7 +138,7 @@ func (p *SDWanProber) run(ctx context.Context) {
 
 func (p *SDWanProber) probeAll(ctx context.Context) {
 	p.mu.Lock()
-	if p.config == nil || !p.config.Enabled {
+	if !p.config.isEnabled() {
 		p.mu.Unlock()
 		return
 	}
@@ -136,6 +146,7 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 	groups := p.config.GatewayGroups
 	p.mu.Unlock()
 
+	devMap := loadInterfaceDeviceMap()
 	stateChanged := false
 
 	for _, gw := range gateways {
@@ -150,12 +161,13 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 		if targetIP == "" || net.ParseIP(targetIP) == nil {
 			continue
 		}
-		if !validGwIfaceRegex.MatchString(gw.Interface) {
+		resolvedDev := resolveInterfaceDevice(gw.Interface, devMap)
+		if resolvedDev == "" || !validGwIfaceRegex.MatchString(resolvedDev) {
 			continue
 		}
 
 		// Basic ICMP ping with a 1-second timeout, sending 2 packets
-		cmd := exec.CommandContext(ctx, "ping", "-c", "2", "-W", "1", "-I", gw.Interface, targetIP)
+		cmd := exec.CommandContext(ctx, "ping", "-c", "2", "-W", "1", "-I", resolvedDev, targetIP)
 		err := cmd.Run()
 		if ctx.Err() != nil {
 			return
@@ -166,11 +178,11 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 		isActive := err == nil
 
 		if isActive && !wasActive {
-			slog.Info("SD-WAN Prober: Gateway came ONLINE", "gateway", gw.Name, "interface", gw.Interface)
+			slog.Info("SD-WAN Prober: Gateway came ONLINE", "gateway", gw.Name, "interface", gw.Interface, "device", resolvedDev)
 			p.active[gw.Name] = true
 			stateChanged = true
 		} else if !isActive && wasActive {
-			slog.Warn("SD-WAN Prober: Gateway went OFFLINE (packet loss)", "gateway", gw.Name, "interface", gw.Interface)
+			slog.Warn("SD-WAN Prober: Gateway went OFFLINE (packet loss)", "gateway", gw.Name, "interface", gw.Interface, "device", resolvedDev)
 			p.active[gw.Name] = false
 			stateChanged = true
 		}
@@ -188,6 +200,8 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	devMap := loadInterfaceDeviceMap()
 
 	// If GatewayGroups exist, use them. Otherwise, fallback to gateways with IsDefault=true
 	var activeTargets []GatewayTarget
@@ -244,7 +258,8 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 	// Example: ip route replace default nexthop via 192.168.1.1 dev eth0 weight 1 nexthop via 10.0.0.1 dev eth2 weight 1
 	args := []string{"route", "replace", "default"}
 	for _, gw := range activeTargets {
-		if net.ParseIP(gw.GatewayIP) == nil || !validGwIfaceRegex.MatchString(gw.Interface) {
+		resolvedDev := resolveInterfaceDevice(gw.Interface, devMap)
+		if net.ParseIP(gw.GatewayIP) == nil || resolvedDev == "" || !validGwIfaceRegex.MatchString(resolvedDev) {
 			continue
 		}
 		weight := gw.Weight
@@ -252,7 +267,7 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 		if weight > 0 {
 			weightStr = strconv.Itoa(weight)
 		}
-		args = append(args, "nexthop", "via", gw.GatewayIP, "dev", gw.Interface, "weight", weightStr)
+		args = append(args, "nexthop", "via", gw.GatewayIP, "dev", resolvedDev, "weight", weightStr)
 	}
 
 	if len(args) == 3 {

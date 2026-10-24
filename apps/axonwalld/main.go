@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,26 +29,27 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
+	"gopkg.in/yaml.v3"
 )
 
 type AgentServer struct {
 	pb.UnimplementedAgentServiceServer
-	mu              sync.Mutex
-	bundleDir       string
-	activeHash      string
-	lastGoodHash    string
-	lastGoodScript  string
-	candidateScript string
-	pendingConfirm  bool
-	confirmDeadline time.Time
-	rollbackTimer   *time.Timer
-	nodeId          string
-	startTime       time.Time
-	iapManager      *engine.IAPManager
-	haEngine        *HAEngine
-	sdwanProber     *SDWanProber
-	pcapManager     *engine.PacketCaptureManager
-	watchdog        *engine.WatchdogEngine
+	mu               sync.Mutex
+	bundleDir        string
+	activeHash       string
+	lastGoodHash     string
+	lastGoodScript   string
+	candidateScript  string
+	pendingConfirm   bool
+	confirmDeadline  time.Time
+	rollbackTimer    *time.Timer
+	nodeId           string
+	startTime        time.Time
+	iapManager       *engine.IAPManager
+	haEngine         *HAEngine
+	sdwanProber      *SDWanProber
+	pcapManager      *engine.PacketCaptureManager
+	watchdog         *engine.WatchdogEngine
 	nasManager       *engine.NasManager
 	k3sManager       *engine.K3sManager
 	vigilanteManager *engine.VigilanteManager
@@ -60,7 +63,8 @@ func snapshotLkgConfig(bundleDir string) {
 		return
 	}
 
-	srcDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+	// Read fallback dir first so live /etc/axonwall files take precedence
+	srcDirs := []string{"/var/lib/axonwall/etc-axonwall", "/etc/axonwall"}
 	for _, srcDir := range srcDirs {
 		entries, err := os.ReadDir(srcDir)
 		if err != nil {
@@ -202,6 +206,7 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		"/etc/unbound/",
 		"/etc/frr/",
 		"/etc/wireguard/",
+		"/etc/rosenpass/",
 		"/etc/swanctl/",
 		"/etc/haproxy/",
 		"/etc/freeradius/",
@@ -270,8 +275,9 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		_ = file.Chmod(mode)
 		file.Close()
 
-		// Mirror /etc/axonwall/*.yaml (and conf.d/*.yaml) to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence
-		if strings.HasPrefix(cleanPath, "/etc/axonwall/") && (strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml")) {
+		// Mirror /etc/axonwall/*.yaml, *.json, and interfaces.conf to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence
+		if strings.HasPrefix(cleanPath, "/etc/axonwall/") &&
+			(strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml") || strings.HasSuffix(cleanPath, ".json") || filepath.Base(cleanPath) == "interfaces.conf") {
 			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
 			persistPath := filepath.Join("/var/lib/axonwall/etc-axonwall", relPath)
 			_ = os.MkdirAll(filepath.Dir(persistPath), 0755)
@@ -728,12 +734,20 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 		return ip
 	}
 	validCIDR := func(cidr string) string {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			if net.ParseIP(cidr) == nil {
-				return ""
-			}
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			return ""
 		}
-		return cidr
+		if _, _, err := net.ParseCIDR(cidr); err == nil {
+			return cidr
+		}
+		if ip := net.ParseIP(cidr); ip != nil {
+			if ip.To4() != nil {
+				return cidr + "/24"
+			}
+			return cidr + "/64"
+		}
+		return ""
 	}
 
 	byName := make(map[string]bootIfaceSpec)
@@ -761,6 +775,13 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 			order = append(order, s.Name)
 		}
 		byName[s.Name] = s
+	}
+	remove := func(name string) {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			return
+		}
+		delete(byName, name)
 	}
 
 	// 1. Legacy 4-slot keys in interfaces.conf
@@ -810,20 +831,31 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 		})
 	}
 
-	// 2. N-interface keys (IFACE_<NAME>_DEVICE, etc.) in interfaces.conf
-	for k, v := range config {
+	// 2. N-interface keys (IFACE_<NAME>_DEVICE, etc.) in interfaces.conf (sorted for deterministic order)
+	var confKeys []string
+	for k := range config {
+		confKeys = append(confKeys, k)
+	}
+	sort.Strings(confKeys)
+	for _, k := range confKeys {
+		v := config[k]
 		if strings.HasPrefix(k, "IFACE_") && strings.HasSuffix(k, "_DEVICE") {
 			rawName := strings.TrimSuffix(strings.TrimPrefix(k, "IFACE_"), "_DEVICE")
 			if rawName == "" {
 				continue
 			}
+			prefix := "IFACE_" + rawName
+			logicalName := strings.TrimSpace(config[prefix+"_NAME"])
+			if logicalName == "" {
+				logicalName = strings.ToLower(rawName)
+			}
 			dev := validDev(v)
 			if dev == "" {
+				remove(logicalName)
 				continue
 			}
-			prefix := "IFACE_" + rawName
 			upsert(bootIfaceSpec{
-				Name:    strings.ToLower(rawName),
+				Name:    logicalName,
 				Role:    strings.ToLower(config[prefix+"_ROLE"]),
 				Device:  dev,
 				Mode:    strings.ToLower(config[prefix+"_MODE"]),
@@ -833,7 +865,53 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 		}
 	}
 
-	// 3. Also merge any enabled interfaces from /etc/axonwall/state.json or /var/lib/axonwall/state.json
+	// 3. Merge interfaces from /etc/axonwall/interfaces.yaml or /var/lib/axonwall/etc-axonwall/interfaces.yaml
+	for _, yamlPath := range []string{"/etc/axonwall/interfaces.yaml", "/var/lib/axonwall/etc-axonwall/interfaces.yaml"} {
+		raw, err := os.ReadFile(yamlPath)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		var parsed struct {
+			Interfaces []struct {
+				Name        string `yaml:"name"`
+				Role        string `yaml:"role"`
+				Device      string `yaml:"device"`
+				Type        string `yaml:"type"`
+				IPv4Mode    string `yaml:"ipv4Mode"`
+				Enabled     *bool  `yaml:"enabled"`
+				IPv4Address string `yaml:"ipv4Address"`
+				IPv4Gateway string `yaml:"ipv4Gateway"`
+			} `yaml:"interfaces"`
+		}
+		if yaml.Unmarshal(raw, &parsed) == nil && len(parsed.Interfaces) > 0 {
+			for _, yIface := range parsed.Interfaces {
+				if yIface.Enabled != nil && !*yIface.Enabled {
+					remove(yIface.Name)
+					continue
+				}
+				dev := validDev(yIface.Device)
+				if dev == "" {
+					remove(yIface.Name)
+					continue
+				}
+				mode := yIface.Type
+				if mode == "" {
+					mode = yIface.IPv4Mode
+				}
+				upsert(bootIfaceSpec{
+					Name:    yIface.Name,
+					Role:    yIface.Role,
+					Device:  dev,
+					Mode:    mode,
+					IPv4:    validCIDR(yIface.IPv4Address),
+					Gateway: validIP(yIface.IPv4Gateway),
+				})
+			}
+			break
+		}
+	}
+
+	// 4. Also merge interfaces from /etc/axonwall/state.json or /var/lib/axonwall/state.json
 	for _, statePath := range []string{"/etc/axonwall/state.json", "/var/lib/axonwall/state.json"} {
 		raw, err := os.ReadFile(statePath)
 		if err != nil {
@@ -853,10 +931,12 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 		if json.Unmarshal(raw, &parsed) == nil && len(parsed.Interfaces) > 0 {
 			for _, stIface := range parsed.Interfaces {
 				if stIface.Enabled != nil && !*stIface.Enabled {
+					remove(stIface.Name)
 					continue
 				}
 				dev := validDev(stIface.Device)
 				if dev == "" {
+					remove(stIface.Name)
 					continue
 				}
 				upsert(bootIfaceSpec{
@@ -875,8 +955,8 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 	seenDev := make(map[string]bool)
 	var specs []bootIfaceSpec
 	for _, name := range order {
-		s := byName[name]
-		if seenDev[s.Device] {
+		s, ok := byName[name]
+		if !ok || seenDev[s.Device] {
 			continue
 		}
 		seenDev[s.Device] = true
@@ -921,7 +1001,8 @@ func applyBootInterfaces() {
 		_ = exec.Command("ip", "link", "set", spec.Device, "up").Run()
 		if spec.Mode == "static" && spec.IPv4 != "" {
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
-			if !strings.Contains(string(out), strings.Split(spec.IPv4, "/")[0]) {
+			ipOnly := strings.Split(spec.IPv4, "/")[0]
+			if !strings.Contains(string(out), "inet "+spec.IPv4) && !strings.Contains(string(out), "inet "+ipOnly+"/") {
 				log.Printf("[Agent] Boot-apply: configuring static IP %s on %s (%s, role=%s)", spec.IPv4, spec.Name, spec.Device, spec.Role)
 				if spec.Role == "wan" {
 					_ = exec.Command("ip", "addr", "flush", "dev", spec.Device).Run()
@@ -930,11 +1011,9 @@ func applyBootInterfaces() {
 					log.Printf("[Agent] Boot-apply: failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
 				}
 			}
-			if spec.Gateway != "" && (!defaultRouteSet || spec.Role == "wan") {
+			if spec.Gateway != "" && spec.Role == "wan" && !defaultRouteSet {
 				_ = exec.Command("ip", "route", "replace", "default", "via", spec.Gateway, "dev", spec.Device).Run()
-				if spec.Role == "wan" {
-					defaultRouteSet = true
-				}
+				defaultRouteSet = true
 			}
 			if spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
 				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr != nil || len(strings.TrimSpace(string(rData))) == 0 {
@@ -2452,6 +2531,120 @@ func main() {
 				return
 			}
 			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "packets": packets})
+		})
+
+		// =====================================================================
+		// Rosenpass Post-Quantum Hybrid Dual-KEM (Classic McEliece + ML-KEM) APIs
+		// =====================================================================
+		mux.HandleFunc("/v1/vpn/rosenpass/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			wgDev := r.URL.Query().Get("wgDevice")
+			if wgDev == "" {
+				wgDev = "wg0"
+			}
+			st := engine.GetRosenpassStatus(engine.DefaultRosenpassDir, wgDev)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(st)
+		})
+
+		mux.HandleFunc("/v1/vpn/rosenpass/keygen", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Force bool `json:"force"`
+			}
+			_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+			if err := engine.ProvisionRosenpassEnvironment(engine.DefaultRosenpassDir); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			shaHex, sizeBytes, err := engine.GenerateRosenpassKeypair(engine.DefaultRosenpassDir, req.Force)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":       true,
+				"publicKeyPath": "/etc/rosenpass/pq.pk",
+				"sizeBytes":     sizeBytes,
+				"sha256":        shaHex,
+			})
+		})
+
+		mux.HandleFunc("/v1/vpn/rosenpass/pubkey", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			pkPath := filepath.Join(engine.DefaultRosenpassDir, "pq.pk")
+			data, err := os.ReadFile(pkPath)
+			if err != nil || len(data) == 0 {
+				// Auto-provision if missing
+				if _, _, genErr := engine.GenerateRosenpassKeypair(engine.DefaultRosenpassDir, false); genErr == nil {
+					data, err = os.ReadFile(pkPath)
+				}
+			}
+			if err != nil {
+				http.Error(w, fmt.Sprintf("public key not found: %v", err), http.StatusNotFound)
+				return
+			}
+			sum := sha256.Sum256(data)
+			shaHex := hex.EncodeToString(sum[:])
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":         true,
+				"publicKeyBase64": base64.StdEncoding.EncodeToString(data),
+				"sizeBytes":       len(data),
+				"sha256":          shaHex,
+			})
+		})
+
+		mux.HandleFunc("/v1/vpn/rosenpass/peer-pubkey", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				PeerName        string `json:"peerName"`
+				PublicKeyBase64 string `json:"publicKeyBase64"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 2*1024*1024)).Decode(&req); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			rawKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(req.PublicKeyBase64))
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "invalid base64 publicKeyBase64 payload"})
+				return
+			}
+			savedPath, shaHex, sizeBytes, err := engine.SaveRosenpassPeerPublicKey(engine.DefaultRosenpassDir, req.PeerName, rawKey)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":   true,
+				"path":      savedPath,
+				"sha256":    shaHex,
+				"sizeBytes": sizeBytes,
+			})
 		})
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

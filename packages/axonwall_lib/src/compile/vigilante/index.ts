@@ -1,4 +1,4 @@
-import type { DesiredState, VigilanteConfig } from '../../schemas/index.js';
+import { inferInterfaceRole, type DesiredState, type VigilanteConfig } from '../../schemas/index.js';
 import { stringify as stringifyYaml } from 'yaml';
 
 export interface CompiledVigilanteBundle {
@@ -59,7 +59,10 @@ export function compileVigilanteUnboundOverrides(state: DesiredState): string {
   }
 
   const domain = vigilante.domain || 'vigilante.local';
-  const lanIface = state.interfaces.find((i) => i.name.toLowerCase() === 'lan');
+  const lanIface =
+    state.interfaces.find((i) => i.enabled && i.name.toLowerCase() === 'lan' && i.ipv4Address) ||
+    state.interfaces.find((i) => i.enabled && inferInterfaceRole(i) === 'lan' && i.ipv4Address) ||
+    state.interfaces.find((i) => i.name.toLowerCase() === 'lan');
   const lanIp = lanIface?.ipv4Address?.split('/')[0] || '192.168.1.1';
 
   const defaultSubdomains: Record<string, string> = {

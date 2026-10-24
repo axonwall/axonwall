@@ -134,12 +134,21 @@ func (e *NftablesEngine) BlockTarget(target string, isMac bool) error {
 	} else {
 		if ip := net.ParseIP(target); ip != nil {
 			target = ip.String()
+			if ip.To4() == nil {
+				setName = "blocked_ips6"
+			} else {
+				setName = "blocked_ips"
+			}
 		} else if _, ipNet, err := net.ParseCIDR(target); err == nil && ipNet != nil {
 			target = ipNet.String()
+			if ipNet.IP.To4() == nil {
+				setName = "blocked_ips6"
+			} else {
+				setName = "blocked_ips"
+			}
 		} else {
 			return fmt.Errorf("invalid IP or CIDR target %q", target)
 		}
-		setName = "blocked_ips"
 	}
 
 	cmd := exec.Command("nft", "add", "element", "inet", "axonwall", setName, "{", target, "}")

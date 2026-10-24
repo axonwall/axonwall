@@ -156,6 +156,41 @@ export const WireGuardConfigSchema = z.object({
   address: z.string().default('10.10.0.1/24'),
   peers: z.array(WireGuardPeerSchema).default([]),
 });
+export type WireGuardConfig = z.infer<typeof WireGuardConfigSchema>;
+export type WireGuardPeer = z.infer<typeof WireGuardPeerSchema>;
+
+export const RosenpassPeerSchema = z.object({
+  id: z.string().optional(),
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-zA-Z0-9_-]+$/, 'Peer name must only contain alphanumeric characters, hyphens, and underscores'),
+  wgPeerPublicKey: z.string().min(32),
+  endpoint: z.string().optional(), // host:port e.g. 203.0.113.20:9999
+  pqPublicKeyPath: z.string().default('/etc/rosenpass/peers/peer-pq.pk'),
+  pqPublicKeySha256: z.string().optional(),
+  wgDevice: z.string().default('wg0'),
+  keyOut: z.string().optional(),
+  enabled: z.boolean().default(true),
+});
+export type RosenpassPeer = z.infer<typeof RosenpassPeerSchema>;
+
+export const RosenpassConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  listenPort: z.number().int().min(1).max(65535).default(9999),
+  listenAddresses: z.array(z.string()).default(['0.0.0.0:9999', '[::]:9999']),
+  wgDevice: z.string().default('wg0'),
+  verbosity: z.enum(['Quiet', 'Verbose']).default('Quiet'),
+  rekeyIntervalSeconds: z.number().int().min(30).max(300).default(120),
+  failClosedBootGuard: z.boolean().default(true),
+  memfdSecret: z.boolean().default(true),
+  publicKeyPath: z.string().default('/etc/rosenpass/pq.pk'),
+  secretKeyPath: z.string().default('/etc/rosenpass/pq.sk'),
+  publicKeySha256: z.string().optional(),
+  peers: z.array(RosenpassPeerSchema).default([]),
+});
+export type RosenpassConfig = z.infer<typeof RosenpassConfigSchema>;
 
 export const AntiLockoutSchema = z.object({
   enabled: z.boolean().default(true),
@@ -1648,6 +1683,7 @@ export const DesiredStateSchema = z.object({
   routes: z.array(StaticRouteSchema).default([]),
   trafficShaper: TrafficShaperConfigSchema.optional(),
   wireguard: WireGuardConfigSchema.optional(),
+  rosenpass: RosenpassConfigSchema.optional(),
   ipsec: IpsecConfigSchema.optional(),
   openvpn: OpenVpnConfigSchema.optional(),
   headscale: HeadscaleConfigSchema.optional(),

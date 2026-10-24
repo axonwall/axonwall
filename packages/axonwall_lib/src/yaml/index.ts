@@ -60,10 +60,10 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
   },
   {
     filename: 'vpn.yaml',
-    title: 'Axonwall Virtual Private Networks (WireGuard, IPsec, OpenVPN, Mesh)',
+    title: 'Axonwall Virtual Private Networks (WireGuard, Rosenpass PQ-KEM, IPsec, OpenVPN, Mesh)',
     description:
-      'Controls WireGuard kernel tunnels & peers, route/policy-based IPsec (strongSwan IKEv2), OpenVPN DCO servers, and Headscale Zero-Config Mesh VPN.',
-    keys: ['wireguard', 'ipsec', 'openvpn', 'headscale'],
+      'Controls WireGuard kernel tunnels & peers, Rosenpass Hybrid Post-Quantum Dual-KEM (Classic McEliece + ML-KEM), route/policy-based IPsec (strongSwan IKEv2), OpenVPN DCO servers, and Headscale Zero-Config Mesh VPN.',
+    keys: ['wireguard', 'rosenpass', 'ipsec', 'openvpn', 'headscale'],
   },
   {
     filename: 'security.yaml',

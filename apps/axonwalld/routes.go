@@ -39,8 +39,9 @@ type RoutingDomainConfig struct {
 
 type InterfacesConfigYaml struct {
 	Interfaces []struct {
-		Name   string `yaml:"name" json:"name"`
-		Device string `yaml:"device" json:"device"`
+		Name    string `yaml:"name" json:"name"`
+		Device  string `yaml:"device" json:"device"`
+		Enabled *bool  `yaml:"enabled" json:"enabled"`
 	} `yaml:"interfaces" json:"interfaces"`
 }
 
@@ -95,6 +96,7 @@ func loadInterfaceDeviceMap() map[string]string {
 	// 1. Read /etc/axonwall/interfaces.conf
 	for _, confPath := range []string{"/etc/axonwall/interfaces.conf", "/var/lib/axonwall/etc-axonwall/interfaces.conf"} {
 		if data, err := os.ReadFile(confPath); err == nil {
+			rawKv := make(map[string]string)
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
@@ -103,6 +105,9 @@ func loadInterfaceDeviceMap() map[string]string {
 				parts := strings.SplitN(line, "=", 2)
 				k := strings.TrimSpace(parts[0])
 				v := strings.TrimSpace(parts[1])
+				rawKv[k] = v
+			}
+			for k, v := range rawKv {
 				if isPlaceholderNetdev(v) {
 					continue
 				}
@@ -117,9 +122,13 @@ func loadInterfaceDeviceMap() map[string]string {
 					devMap["opt2"] = v
 				default:
 					if strings.HasPrefix(k, "IFACE_") && strings.HasSuffix(k, "_DEVICE") {
-						rawName := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(k, "IFACE_"), "_DEVICE"))
-						if rawName != "" {
-							devMap[rawName] = v
+						rawKey := strings.TrimSuffix(strings.TrimPrefix(k, "IFACE_"), "_DEVICE")
+						name := strings.TrimSpace(rawKv["IFACE_"+rawKey+"_NAME"])
+						if name == "" {
+							name = strings.ToLower(rawKey)
+						}
+						if name != "" {
+							devMap[strings.ToLower(name)] = v
 						}
 					}
 				}
@@ -134,31 +143,42 @@ func loadInterfaceDeviceMap() map[string]string {
 			var ifCfg InterfacesConfigYaml
 			if err := yaml.Unmarshal(data, &ifCfg); err == nil {
 				for _, iface := range ifCfg.Interfaces {
-					if iface.Name != "" && !isPlaceholderNetdev(iface.Device) {
-						devMap[strings.ToLower(iface.Name)] = iface.Device
+					name := strings.ToLower(strings.TrimSpace(iface.Name))
+					if name == "" {
+						continue
 					}
+					if (iface.Enabled != nil && !*iface.Enabled) || isPlaceholderNetdev(iface.Device) {
+						delete(devMap, name)
+						continue
+					}
+					devMap[name] = iface.Device
 				}
 			}
 			break
 		}
 	}
 
-	// 3. Read /etc/axonwall/state.json if present
+	// 3. Read /etc/axonwall/state.json if present (overrides stale interfaces.conf entries)
 	for _, path := range []string{"/etc/axonwall/state.json", "/var/lib/axonwall/state.json"} {
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			var state struct {
 				Interfaces []struct {
-					Name   string `json:"name"`
-					Device string `json:"device"`
+					Name    string `json:"name"`
+					Device  string `json:"device"`
+					Enabled *bool  `json:"enabled"`
 				} `json:"interfaces"`
 			}
 			if err := json.Unmarshal(data, &state); err == nil {
 				for _, iface := range state.Interfaces {
-					if iface.Name != "" && !isPlaceholderNetdev(iface.Device) {
-						if _, exists := devMap[strings.ToLower(iface.Name)]; !exists {
-							devMap[strings.ToLower(iface.Name)] = iface.Device
-						}
+					name := strings.ToLower(strings.TrimSpace(iface.Name))
+					if name == "" {
+						continue
 					}
+					if (iface.Enabled != nil && !*iface.Enabled) || isPlaceholderNetdev(iface.Device) {
+						delete(devMap, name)
+						continue
+					}
+					devMap[name] = iface.Device
 				}
 			}
 			break

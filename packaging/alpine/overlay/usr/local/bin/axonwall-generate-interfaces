@@ -35,7 +35,7 @@ if [ -s "$CONF" ] && [ -s "$IFACES_FILE" ]; then
 fi
 
 # Identify Primary WAN, LAN, OPT1 & OPT2 NICs (same detection as firstboot)
-IFACES="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | grep -v '^wg' | grep -v '^ tailscale' | head -n 4 || true)"
+IFACES="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' | head -n 4 || true)"
 WAN_IF="$(echo "$IFACES" | sed -n '1p')"
 LAN_IF="$(echo "$IFACES" | sed -n '2p')"
 OPT1_IF="$(echo "$IFACES" | sed -n '3p')"
@@ -108,7 +108,7 @@ iface ${OPT2_IF} inet dhcp
 IFACES_OPT2_EOF
   fi
 
-  cp "$IFACES_FILE" "${ROOT}/etc/network/interfaces.d/axonwall" 2>/dev/null || true
+  rm -f "${ROOT}/etc/network/interfaces.d/axonwall" 2>/dev/null || true
 fi
 
 exit 0

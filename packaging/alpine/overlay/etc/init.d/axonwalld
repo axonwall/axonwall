@@ -54,8 +54,8 @@ start_pre() {
         chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
         if [ ! -f /etc/axonwall/controller.env ] && grep -q '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env; then
             grep '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env > /etc/axonwall/controller.env || true
-            chown root:root /etc/axonwall/controller.env 2>/dev/null || true
-            chmod 0600 /etc/axonwall/controller.env 2>/dev/null || true
+            chown root:axonwall-controller /etc/axonwall/controller.env 2>/dev/null || true
+            chmod 0640 /etc/axonwall/controller.env 2>/dev/null || true
             sed -i '/^AXONWALL_ZTP_TOKEN=/d' /etc/axonwall/axonwall.env
         fi
     fi

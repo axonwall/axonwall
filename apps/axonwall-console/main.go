@@ -289,6 +289,10 @@ func releaseDhcpLease(dev string) {
 	if dev == "" {
 		return
 	}
+	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
+		_ = exec.Command(dhcpcdPath, "-k", dev).Run()
+		_ = exec.Command(dhcpcdPath, "-x", dev).Run()
+	}
 	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 		_ = exec.Command(dhclientPath, "-r", dev).Run()
 	}
@@ -360,6 +364,88 @@ func cidrToNetmask(cidr int) string {
 	return fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
 }
 
+func computeDefaultSubnetAndPool(cidrStr string) (subnetCIDR, poolStart, poolEnd, routerIP string, ok bool) {
+	trimmed := strings.TrimSpace(cidrStr)
+	if trimmed == "" {
+		return "", "", "", "", false
+	}
+	if !strings.Contains(trimmed, "/") {
+		trimmed += "/24"
+	}
+	ip, ipNet, err := net.ParseCIDR(trimmed)
+	if err != nil || ip == nil || ipNet == nil {
+		return "", "", "", "", false
+	}
+	ip4 := ip.To4()
+	ones, bits := ipNet.Mask.Size()
+	if ip4 == nil || bits != 32 || ones < 8 || ones > 30 {
+		return "", "", "", "", false
+	}
+	ipToUint32 := func(b net.IP) uint32 {
+		v := b.To4()
+		return uint32(v[0])<<24 | uint32(v[1])<<16 | uint32(v[2])<<8 | uint32(v[3])
+	}
+	uint32ToIP := func(n uint32) string {
+		return fmt.Sprintf("%d.%d.%d.%d", byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	}
+	routerInt := ipToUint32(ip4)
+	netInt := ipToUint32(ipNet.IP)
+	hostBits := uint(32 - ones)
+	bcastInt := netInt | ((uint32(1) << hostBits) - 1)
+	firstHost := netInt + 1
+	lastHost := bcastInt - 1
+
+	var startInt, endInt uint32
+	if ones <= 24 {
+		startInt = netInt + 100
+		endInt = netInt + 200
+		if routerInt >= startInt && routerInt <= endInt {
+			if routerInt-firstHost >= 50 {
+				startInt = netInt + 10
+				endInt = netInt + 90
+			} else {
+				startInt = routerInt + 1
+				endInt = netInt + 250
+			}
+		}
+	} else {
+		totalHosts := lastHost - firstHost + 1
+		if totalHosts <= 2 {
+			startInt = firstHost
+			if routerInt == firstHost {
+				startInt = lastHost
+			}
+			endInt = startInt
+		} else {
+			halfStart := firstHost + totalHosts/2
+			if routerInt < halfStart {
+				startInt = halfStart
+				endInt = lastHost
+			} else if routerInt > firstHost+1 {
+				startInt = firstHost + 1
+				endInt = routerInt - 1
+			} else {
+				startInt = routerInt + 1
+				endInt = lastHost
+			}
+		}
+	}
+	return ipNet.String(), uint32ToIP(startInt), uint32ToIP(endInt), ip4.String(), true
+}
+
+func deterministicSubnetUUID(ifName string) string {
+	switch ifName {
+	case "lan":
+		return "00000000-0000-4000-8000-000000000001"
+	case "opt1":
+		return "00000000-0000-4000-8000-000000000002"
+	case "opt2":
+		return "00000000-0000-4000-8000-000000000003"
+	default:
+		return "00000000-0000-4000-8000-000000000009"
+	}
+}
+
 type NetworkConfig struct {
 	WanDevice  string
 	WanMode    string // "dhcp" or "static"
@@ -368,18 +454,20 @@ type NetworkConfig struct {
 	WanDNS1    string
 	WanDNS2    string
 
-	LanDevice  string
-	LanMode    string // "static" or "dhcp"
-	LanIP      string // e.g. "192.168.1.1/24"
-	LanDHCP    bool
+	LanDevice string
+	LanMode   string // "static" or "dhcp"
+	LanIP     string // e.g. "192.168.1.1/24"
+	LanDHCP   bool
 
 	Opt1Device string
 	Opt1Mode   string // "dhcp", "static", or ""
 	Opt1IP     string
+	Opt1DHCP   bool
 
 	Opt2Device string
 	Opt2Mode   string // "dhcp", "static", or ""
 	Opt2IP     string
+	Opt2DHCP   bool
 }
 
 func readCurrentNetworkConfig() NetworkConfig {
@@ -431,7 +519,7 @@ func readCurrentNetworkConfig() NetworkConfig {
 				if v != "" {
 					cfg.LanIP = v
 				}
-			case "LAN_DHCP_ENABLED":
+			case "LAN_DHCP_ENABLED", "IFACE_LAN_DHCP_SERVER":
 				cfg.LanDHCP = strings.ToLower(v) == "true" || v == "1"
 			case "OPT1_INTERFACE":
 				cfg.Opt1Device = normalizeAssignedDevice(v)
@@ -439,19 +527,23 @@ func readCurrentNetworkConfig() NetworkConfig {
 				cfg.Opt1Mode = v
 			case "OPT1_IPV4_ADDRESS":
 				cfg.Opt1IP = v
+			case "OPT1_DHCP_ENABLED", "IFACE_OPT1_DHCP_SERVER":
+				cfg.Opt1DHCP = strings.ToLower(v) == "true" || v == "1"
 			case "OPT2_INTERFACE":
 				cfg.Opt2Device = normalizeAssignedDevice(v)
 			case "OPT2_MODE":
 				cfg.Opt2Mode = v
 			case "OPT2_IPV4_ADDRESS":
 				cfg.Opt2IP = v
+			case "OPT2_DHCP_ENABLED", "IFACE_OPT2_DHCP_SERVER":
+				cfg.Opt2DHCP = strings.ToLower(v) == "true" || v == "1"
 			}
 		}
 	}
 	return cfg
 }
 
-func updateStateJSON(cfg NetworkConfig) {
+func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	cfg.WanDevice = normalizeAssignedDevice(cfg.WanDevice)
 	cfg.LanDevice = normalizeAssignedDevice(cfg.LanDevice)
 	cfg.Opt1Device = normalizeAssignedDevice(cfg.Opt1Device)
@@ -520,13 +612,28 @@ func updateStateJSON(cfg NetworkConfig) {
 	setIface("wan", "wan", cfg.WanDevice, cfg.WanMode, cfg.WanDevice != "", false, cfg.WanIP, cfg.WanGateway, "WAN Gateway")
 	setIface("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanDevice != "", cfg.LanMode == "static" && cfg.LanDHCP, cfg.LanIP, "", "LAN Network")
 	if cfg.Opt1Device != "" {
-		setIface("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, true, false, cfg.Opt1IP, "", "OPT1 (Joined Network / Non-authoritative)")
+		opt1Dhcp := cfg.Opt1Mode == "static" && cfg.Opt1DHCP
+		opt1Desc := "OPT1 (Joined Network / Non-authoritative)"
+		if opt1Dhcp {
+			opt1Desc = "OPT1 (Authoritative Network)"
+		}
+		setIface("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, true, opt1Dhcp, cfg.Opt1IP, "", opt1Desc)
+	} else {
+		delete(ifacesMap, "opt1")
 	}
 	if cfg.Opt2Device != "" {
-		setIface("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, true, false, cfg.Opt2IP, "", "OPT2 (Joined Network / Non-authoritative)")
+		opt2Dhcp := cfg.Opt2Mode == "static" && cfg.Opt2DHCP
+		opt2Desc := "OPT2 (Joined Network / Non-authoritative)"
+		if opt2Dhcp {
+			opt2Desc = "OPT2 (Authoritative Network)"
+		}
+		setIface("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, true, opt2Dhcp, cfg.Opt2IP, "", opt2Desc)
+	} else {
+		delete(ifacesMap, "opt2")
 	}
 
 	var updatedList []interface{}
+	var extraIfaces []map[string]interface{}
 	seen := make(map[string]bool)
 	for _, name := range []string{"wan", "lan", "opt1", "opt2"} {
 		if entry, ok := ifacesMap[name]; ok {
@@ -538,11 +645,88 @@ func updateStateJSON(cfg NetworkConfig) {
 		if !seen[name] {
 			if entry, ok := ifacesMap[name]; ok {
 				updatedList = append(updatedList, entry)
+				extraIfaces = append(extraIfaces, entry)
 				seen[name] = true
 			}
 		}
 	}
 	state["interfaces"] = updatedList
+
+	// Reconcile state["dhcp"]["subnets"] for lan, opt1, opt2
+	dhcpMap, _ := state["dhcp"].(map[string]interface{})
+	if dhcpMap == nil {
+		dhcpMap = map[string]interface{}{
+			"enabled": true,
+			"subnets": []interface{}{},
+		}
+	}
+	rawSubnets, _ := dhcpMap["subnets"].([]interface{})
+	for _, dhcpSpec := range []struct {
+		name    string
+		enabled bool
+		ip      string
+	}{
+		{"lan", cfg.LanDevice != "" && cfg.LanMode == "static" && cfg.LanDHCP, cfg.LanIP},
+		{"opt1", cfg.Opt1Device != "" && cfg.Opt1Mode == "static" && cfg.Opt1DHCP, cfg.Opt1IP},
+		{"opt2", cfg.Opt2Device != "" && cfg.Opt2Mode == "static" && cfg.Opt2DHCP, cfg.Opt2IP},
+	} {
+		if dhcpSpec.enabled {
+			subnetCIDR, poolStart, poolEnd, routerIP, ok := computeDefaultSubnetAndPool(dhcpSpec.ip)
+			if !ok {
+				continue
+			}
+			foundIdx := -1
+			for idx, rawSub := range rawSubnets {
+				if sMap, ok := rawSub.(map[string]interface{}); ok {
+					if ifStr, _ := sMap["interface"].(string); ifStr == dhcpSpec.name {
+						foundIdx = idx
+						break
+					}
+				}
+			}
+			if foundIdx >= 0 {
+				sMap := rawSubnets[foundIdx].(map[string]interface{})
+				prevSub, _ := sMap["subnet"].(string)
+				sMap["subnet"] = subnetCIDR
+				if prevSub != subnetCIDR || sMap["poolStart"] == nil || sMap["poolEnd"] == nil {
+					sMap["poolStart"] = poolStart
+					sMap["poolEnd"] = poolEnd
+				}
+				sMap["routers"] = []interface{}{routerIP}
+				sMap["dnsServers"] = []interface{}{routerIP}
+				rawSubnets[foundIdx] = sMap
+			} else {
+				rawSubnets = append(rawSubnets, map[string]interface{}{
+					"id":             deterministicSubnetUUID(dhcpSpec.name),
+					"interface":      dhcpSpec.name,
+					"subnet":         subnetCIDR,
+					"poolStart":      poolStart,
+					"poolEnd":        poolEnd,
+					"routers":        []interface{}{routerIP},
+					"dnsServers":     []interface{}{routerIP},
+					"domainName":     "local",
+					"leaseTime":      86400,
+					"staticMappings": []interface{}{},
+				})
+			}
+		} else {
+			var filtered []interface{}
+			for _, rawSub := range rawSubnets {
+				if sMap, ok := rawSub.(map[string]interface{}); ok {
+					if ifStr, _ := sMap["interface"].(string); ifStr == dhcpSpec.name {
+						continue
+					}
+				}
+				filtered = append(filtered, rawSub)
+			}
+			rawSubnets = filtered
+		}
+	}
+	if rawSubnets == nil {
+		rawSubnets = []interface{}{}
+	}
+	dhcpMap["subnets"] = rawSubnets
+	state["dhcp"] = dhcpMap
 
 	// Ensure antiLockout includes all LAN interfaces
 	allowedIfaces := []string{"lan"}
@@ -552,16 +736,12 @@ func updateStateJSON(cfg NetworkConfig) {
 	if cfg.Opt2Device != "" {
 		allowedIfaces = append(allowedIfaces, "opt2")
 	}
-	for _, name := range originalOrder {
-		if name == "wan" || name == "lan" || name == "opt1" || name == "opt2" {
-			continue
-		}
-		if entry, ok := ifacesMap[name]; ok {
-			roleStr, _ := entry["role"].(string)
-			en, _ := entry["enabled"].(bool)
-			if en && roleStr != "wan" && !strings.HasPrefix(name, "wan") {
-				allowedIfaces = append(allowedIfaces, name)
-			}
+	for _, entry := range extraIfaces {
+		name, _ := entry["name"].(string)
+		roleStr, _ := entry["role"].(string)
+		en, _ := entry["enabled"].(bool)
+		if en && roleStr != "wan" && !strings.HasPrefix(name, "wan") {
+			allowedIfaces = append(allowedIfaces, name)
 		}
 	}
 	sysMap, _ := state["system"].(map[string]interface{})
@@ -623,38 +803,44 @@ func updateStateJSON(cfg NetworkConfig) {
 	writeYamlIface("wan", "wan", cfg.WanDevice, cfg.WanMode, false, cfg.WanIP, cfg.WanGateway, "WAN Gateway")
 	writeYamlIface("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanMode == "static" && cfg.LanDHCP, cfg.LanIP, "", "LAN Network")
 	if cfg.Opt1Device != "" {
-		writeYamlIface("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, false, cfg.Opt1IP, "", "OPT1 (Joined Network / Non-authoritative)")
+		opt1Dhcp := cfg.Opt1Mode == "static" && cfg.Opt1DHCP
+		opt1Desc := "OPT1 (Joined Network / Non-authoritative)"
+		if opt1Dhcp {
+			opt1Desc = "OPT1 (Authoritative Network)"
+		}
+		writeYamlIface("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, opt1Dhcp, cfg.Opt1IP, "", opt1Desc)
 	}
 	if cfg.Opt2Device != "" {
-		writeYamlIface("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, false, cfg.Opt2IP, "", "OPT2 (Joined Network / Non-authoritative)")
+		opt2Dhcp := cfg.Opt2Mode == "static" && cfg.Opt2DHCP
+		opt2Desc := "OPT2 (Joined Network / Non-authoritative)"
+		if opt2Dhcp {
+			opt2Desc = "OPT2 (Authoritative Network)"
+		}
+		writeYamlIface("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, opt2Dhcp, cfg.Opt2IP, "", opt2Desc)
 	}
-	for _, name := range originalOrder {
-		if name == "wan" || name == "lan" || name == "opt1" || name == "opt2" {
-			continue
+	for _, entry := range extraIfaces {
+		name, _ := entry["name"].(string)
+		devStr, _ := entry["device"].(string)
+		roleStr, _ := entry["role"].(string)
+		if roleStr == "" {
+			if strings.HasPrefix(name, "wan") {
+				roleStr = "wan"
+			} else {
+				roleStr = "lan"
+			}
 		}
-		if entry, ok := ifacesMap[name]; ok {
-			devStr, _ := entry["device"].(string)
-			roleStr, _ := entry["role"].(string)
-			if roleStr == "" {
-				if strings.HasPrefix(name, "wan") {
-					roleStr = "wan"
-				} else {
-					roleStr = "lan"
-				}
-			}
-			typeStr, _ := entry["type"].(string)
-			if typeStr == "" {
-				typeStr = "dhcp"
-			}
-			dhcpSrv, _ := entry["dhcpServer"].(bool)
-			ipStr, _ := entry["ipv4Address"].(string)
-			gwStr, _ := entry["ipv4Gateway"].(string)
-			descStr, _ := entry["description"].(string)
-			if descStr == "" {
-				descStr = strings.ToUpper(name) + " Network"
-			}
-			writeYamlIface(name, roleStr, devStr, typeStr, dhcpSrv, ipStr, gwStr, descStr)
+		typeStr, _ := entry["type"].(string)
+		if typeStr == "" {
+			typeStr = "dhcp"
 		}
+		dhcpSrv, _ := entry["dhcpServer"].(bool)
+		ipStr, _ := entry["ipv4Address"].(string)
+		gwStr, _ := entry["ipv4Gateway"].(string)
+		descStr, _ := entry["description"].(string)
+		if descStr == "" {
+			descStr = strings.ToUpper(name) + " Network"
+		}
+		writeYamlIface(name, roleStr, devStr, typeStr, dhcpSrv, ipStr, gwStr, descStr)
 	}
 
 	// Preserve existing VLANs, bridges, bonds/laggs, and VRFs from existing file
@@ -687,6 +873,20 @@ func updateStateJSON(cfg NetworkConfig) {
 	_ = os.WriteFile("/etc/axonwall/interfaces.yaml", yamlBytes, 0600)
 	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0700)
 	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml", yamlBytes, 0600)
+
+	return extraIfaces
+}
+
+func sanitizeConfKey(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
 
 func persistNetworkInterfaces(cfg NetworkConfig) {
@@ -695,7 +895,10 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	cfg.Opt1Device = normalizeAssignedDevice(cfg.Opt1Device)
 	cfg.Opt2Device = normalizeAssignedDevice(cfg.Opt2Device)
 
-	// 1. Write /etc/axonwall/interfaces.conf and /var/lib/axonwall/etc-axonwall/interfaces.conf
+	// 1. Update Web UI state first so we also retrieve any 5th+ interfaces from state.json
+	extraIfaces := updateStateJSON(cfg)
+
+	// 2. Write /etc/axonwall/interfaces.conf and /var/lib/axonwall/etc-axonwall/interfaces.conf
 	var conf strings.Builder
 	conf.WriteString(fmt.Sprintf("WAN_INTERFACE=%s\n", cfg.WanDevice))
 	conf.WriteString(fmt.Sprintf("WAN_MODE=%s\n", cfg.WanMode))
@@ -706,28 +909,81 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	conf.WriteString(fmt.Sprintf("LAN_INTERFACE=%s\n", cfg.LanDevice))
 	conf.WriteString(fmt.Sprintf("LAN_MODE=%s\n", cfg.LanMode))
 	conf.WriteString(fmt.Sprintf("LAN_IPV4_ADDRESS=%s\n", cfg.LanIP))
-	conf.WriteString(fmt.Sprintf("LAN_DHCP_ENABLED=%t\n", cfg.LanDevice != "" && cfg.LanDHCP))
+	conf.WriteString(fmt.Sprintf("LAN_DHCP_ENABLED=%t\n", cfg.LanDevice != "" && cfg.LanMode == "static" && cfg.LanDHCP))
 	conf.WriteString(fmt.Sprintf("OPT1_INTERFACE=%s\n", cfg.Opt1Device))
 	conf.WriteString(fmt.Sprintf("OPT1_MODE=%s\n", cfg.Opt1Mode))
 	conf.WriteString(fmt.Sprintf("OPT1_IPV4_ADDRESS=%s\n", cfg.Opt1IP))
+	conf.WriteString(fmt.Sprintf("OPT1_DHCP_ENABLED=%t\n", cfg.Opt1Device != "" && cfg.Opt1Mode == "static" && cfg.Opt1DHCP))
 	conf.WriteString(fmt.Sprintf("OPT2_INTERFACE=%s\n", cfg.Opt2Device))
 	conf.WriteString(fmt.Sprintf("OPT2_MODE=%s\n", cfg.Opt2Mode))
 	conf.WriteString(fmt.Sprintf("OPT2_IPV4_ADDRESS=%s\n", cfg.Opt2IP))
+	conf.WriteString(fmt.Sprintf("OPT2_DHCP_ENABLED=%t\n", cfg.Opt2Device != "" && cfg.Opt2Mode == "static" && cfg.Opt2DHCP))
+
+	var allNames []string
+	writeIfaceConf := func(name, role, dev, mode, ip, gw string, dhcpSrv bool) {
+		if dev == "" {
+			return
+		}
+		allNames = append(allNames, name)
+		key := sanitizeConfKey(name)
+		conf.WriteString(fmt.Sprintf("IFACE_%s_NAME=%s\n", key, name))
+		conf.WriteString(fmt.Sprintf("IFACE_%s_DEVICE=%s\n", key, dev))
+		conf.WriteString(fmt.Sprintf("IFACE_%s_ROLE=%s\n", key, role))
+		conf.WriteString(fmt.Sprintf("IFACE_%s_MODE=%s\n", key, mode))
+		conf.WriteString(fmt.Sprintf("IFACE_%s_IPV4_ADDRESS=%s\n", key, ip))
+		conf.WriteString(fmt.Sprintf("IFACE_%s_IPV4_GATEWAY=%s\n", key, gw))
+		conf.WriteString(fmt.Sprintf("IFACE_%s_DHCP_SERVER=%t\n", key, dhcpSrv))
+	}
+	writeIfaceConf("wan", "wan", cfg.WanDevice, cfg.WanMode, cfg.WanIP, cfg.WanGateway, false)
+	writeIfaceConf("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanIP, "", cfg.LanMode == "static" && cfg.LanDHCP)
+	writeIfaceConf("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, cfg.Opt1IP, "", cfg.Opt1Mode == "static" && cfg.Opt1DHCP)
+	writeIfaceConf("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, cfg.Opt2IP, "", cfg.Opt2Mode == "static" && cfg.Opt2DHCP)
+	for _, entry := range extraIfaces {
+		en, hasEn := entry["enabled"].(bool)
+		if hasEn && !en {
+			continue
+		}
+		name, _ := entry["name"].(string)
+		devStr := normalizeAssignedDevice(fmt.Sprintf("%v", entry["device"]))
+		if name == "" || devStr == "" {
+			continue
+		}
+		roleStr, _ := entry["role"].(string)
+		if roleStr == "" {
+			if strings.HasPrefix(name, "wan") {
+				roleStr = "wan"
+			} else {
+				roleStr = "lan"
+			}
+		}
+		modeStr, _ := entry["type"].(string)
+		if modeStr == "" {
+			modeStr = "dhcp"
+		}
+		ipStr, _ := entry["ipv4Address"].(string)
+		gwStr, _ := entry["ipv4Gateway"].(string)
+		dhcpSrv, _ := entry["dhcpServer"].(bool)
+		writeIfaceConf(name, roleStr, devStr, modeStr, ipStr, gwStr, dhcpSrv)
+	}
+	conf.WriteString(fmt.Sprintf("AXONWALL_INTERFACES=%s\n", strings.Join(allNames, ",")))
 
 	_ = os.MkdirAll("/etc/axonwall", 0755)
 	_ = os.WriteFile("/etc/axonwall/interfaces.conf", []byte(conf.String()), 0644)
 	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0755)
 	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.conf", []byte(conf.String()), 0644)
 
-	// 2. Write /etc/network/interfaces
+	// 3. Write /etc/network/interfaces
 	var ifaces strings.Builder
 	ifaces.WriteString("# /etc/network/interfaces -- Generated by Axonwall\n")
 	ifaces.WriteString("# This file is managed by Axonwall. Manual changes will be overwritten.\n\n")
 	ifaces.WriteString("auto lo\n")
 	ifaces.WriteString("iface lo inet loopback\n\n")
 
+	writtenDevs := make(map[string]bool)
+
 	// WAN
 	if cfg.WanDevice != "" {
+		writtenDevs[cfg.WanDevice] = true
 		ifaces.WriteString(fmt.Sprintf("# WAN Interface\nauto %s\n", cfg.WanDevice))
 		if cfg.WanMode == "static" && cfg.WanIP != "" {
 			ipParts := strings.Split(cfg.WanIP, "/")
@@ -761,7 +1017,8 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	}
 
 	// LAN
-	if cfg.LanDevice != "" {
+	if cfg.LanDevice != "" && !writtenDevs[cfg.LanDevice] {
+		writtenDevs[cfg.LanDevice] = true
 		ifaces.WriteString(fmt.Sprintf("# LAN Interface\nauto %s\n", cfg.LanDevice))
 		if cfg.LanMode == "dhcp" {
 			ifaces.WriteString(fmt.Sprintf("iface %s inet dhcp\n", cfg.LanDevice))
@@ -785,7 +1042,8 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	}
 
 	// OPT1
-	if cfg.Opt1Device != "" {
+	if cfg.Opt1Device != "" && !writtenDevs[cfg.Opt1Device] {
+		writtenDevs[cfg.Opt1Device] = true
 		ifaces.WriteString(fmt.Sprintf("# OPT1 Interface\nauto %s\n", cfg.Opt1Device))
 		if cfg.Opt1Mode == "static" && cfg.Opt1IP != "" {
 			ipParts := strings.Split(cfg.Opt1IP, "/")
@@ -806,7 +1064,8 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	}
 
 	// OPT2
-	if cfg.Opt2Device != "" {
+	if cfg.Opt2Device != "" && !writtenDevs[cfg.Opt2Device] {
+		writtenDevs[cfg.Opt2Device] = true
 		ifaces.WriteString(fmt.Sprintf("# OPT2 Interface\nauto %s\n", cfg.Opt2Device))
 		if cfg.Opt2Mode == "static" && cfg.Opt2IP != "" {
 			ipParts := strings.Split(cfg.Opt2IP, "/")
@@ -826,15 +1085,49 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 		ifaces.WriteString("\n")
 	}
 
+	// 5th+ interfaces from state.json
+	for _, entry := range extraIfaces {
+		en, hasEn := entry["enabled"].(bool)
+		if hasEn && !en {
+			continue
+		}
+		name, _ := entry["name"].(string)
+		devStr := normalizeAssignedDevice(fmt.Sprintf("%v", entry["device"]))
+		if devStr == "" || writtenDevs[devStr] {
+			continue
+		}
+		writtenDevs[devStr] = true
+		modeStr, _ := entry["type"].(string)
+		ipStr, _ := entry["ipv4Address"].(string)
+		gwStr, _ := entry["ipv4Gateway"].(string)
+		ifaces.WriteString(fmt.Sprintf("# %s Interface\nauto %s\n", strings.ToUpper(name), devStr))
+		if modeStr == "static" && ipStr != "" {
+			ipParts := strings.Split(ipStr, "/")
+			ipAddr := ipParts[0]
+			netmask := "255.255.255.0"
+			if len(ipParts) > 1 {
+				if c, err := strconv.Atoi(ipParts[1]); err == nil {
+					netmask = cidrToNetmask(c)
+				}
+			}
+			ifaces.WriteString(fmt.Sprintf("iface %s inet static\n", devStr))
+			ifaces.WriteString(fmt.Sprintf("    address %s\n", ipAddr))
+			ifaces.WriteString(fmt.Sprintf("    netmask %s\n", netmask))
+			if gwStr != "" {
+				ifaces.WriteString(fmt.Sprintf("    gateway %s\n", gwStr))
+			}
+		} else {
+			ifaces.WriteString(fmt.Sprintf("iface %s inet dhcp\n", devStr))
+		}
+		ifaces.WriteString("\n")
+	}
+
 	_ = os.MkdirAll("/etc/network", 0755)
 	_ = os.WriteFile("/etc/network/interfaces", []byte(ifaces.String()), 0644)
 	_ = os.Remove("/etc/network/interfaces.d/axonwall")
 
-	// 3. Update Web UI state
-	updateStateJSON(cfg)
-
 	// 4. Sync /usr/share/axonwall/lockdown.nft and live nftables anti-lockout rules so configured LAN/OPT interfaces are immediately reachable
-	reconcileConsoleAntiLockoutNft(cfg)
+	reconcileConsoleAntiLockoutNft(cfg, extraIfaces)
 }
 
 func writeSystemYamlAntiLockout(allowedIfaces []string) {
@@ -853,7 +1146,25 @@ func writeSystemYamlAntiLockout(allowedIfaces []string) {
 			content := string(yamlData)
 			if idx := strings.Index(content, "  antiLockout:"); idx != -1 {
 				prefix := strings.TrimRight(content[:idx], "\n")
+				rest := content[idx+len("  antiLockout:"):]
+				var trailingLines []string
+				inAntiLockout := true
+				for _, line := range strings.Split(rest, "\n")[1:] {
+					trimmed := strings.TrimSpace(line)
+					if inAntiLockout {
+						if trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(line, "    ") {
+							inAntiLockout = false
+							trailingLines = append(trailingLines, line)
+						}
+					} else {
+						trailingLines = append(trailingLines, line)
+					}
+				}
+				suffix := strings.TrimRight(strings.Join(trailingLines, "\n"), "\n")
 				updated := prefix + "\n" + newAntiLockoutBlock + "\n"
+				if suffix != "" {
+					updated += suffix + "\n"
+				}
 				_ = os.WriteFile(yamlPath, []byte(updated), 0600)
 				continue
 			}
@@ -867,25 +1178,66 @@ func writeSystemYamlAntiLockout(allowedIfaces []string) {
 	}
 }
 
-func reconcileConsoleAntiLockoutNft(cfg NetworkConfig) {
+func reconcileConsoleAntiLockoutNft(cfg NetworkConfig, extraIfaces []map[string]interface{}) {
 	lockdownPath := "/usr/share/axonwall/lockdown.nft"
-	internalHasLink := false
-	for _, dev := range []string{cfg.LanDevice, cfg.Opt1Device, cfg.Opt2Device} {
-		if dev == "" {
+	internalDevs := []struct {
+		role string
+		dev  string
+	}{
+		{"lan", cfg.LanDevice},
+		{"opt1", cfg.Opt1Device},
+		{"opt2", cfg.Opt2Device},
+	}
+	wanDevs := []string{}
+	if cfg.WanDevice != "" {
+		wanDevs = append(wanDevs, cfg.WanDevice)
+	}
+	for _, entry := range extraIfaces {
+		en, hasEn := entry["enabled"].(bool)
+		if hasEn && !en {
 			continue
 		}
-		if cData, cErr := os.ReadFile(filepath.Join("/sys/class/net", dev, "carrier")); cErr == nil && strings.TrimSpace(string(cData)) == "1" {
+		name, _ := entry["name"].(string)
+		devStr := normalizeAssignedDevice(fmt.Sprintf("%v", entry["device"]))
+		if devStr == "" {
+			continue
+		}
+		roleStr, _ := entry["role"].(string)
+		if roleStr == "wan" || (roleStr == "" && strings.HasPrefix(name, "wan")) {
+			wanDevs = append(wanDevs, devStr)
+		} else {
+			internalDevs = append(internalDevs, struct {
+				role string
+				dev  string
+			}{name, devStr})
+		}
+	}
+
+	internalSet := make(map[string]bool)
+	internalHasLink := false
+	for _, item := range internalDevs {
+		if item.dev == "" {
+			continue
+		}
+		internalSet[item.dev] = true
+		if cData, cErr := os.ReadFile(filepath.Join("/sys/class/net", item.dev, "carrier")); cErr == nil && strings.TrimSpace(string(cData)) == "1" {
 			internalHasLink = true
-			break
 		}
 	}
 
 	if lData, lErr := os.ReadFile(lockdownPath); lErr == nil {
 		content := string(lData)
-		newElements := `elements = { "wan0" }`
-		if internalHasLink && cfg.WanDevice != "" && cfg.WanDevice != "wan0" && cfg.WanDevice != cfg.LanDevice && cfg.WanDevice != cfg.Opt1Device && cfg.WanDevice != cfg.Opt2Device {
-			newElements = fmt.Sprintf(`elements = { "wan0", %q }`, cfg.WanDevice)
+		elemList := []string{`"wan0"`}
+		if internalHasLink {
+			seenWan := map[string]bool{"wan0": true}
+			for _, wDev := range wanDevs {
+				if wDev != "" && !seenWan[wDev] && !internalSet[wDev] {
+					elemList = append(elemList, fmt.Sprintf("%q", wDev))
+					seenWan[wDev] = true
+				}
+			}
 		}
+		newElements := fmt.Sprintf("elements = { %s }", strings.Join(elemList, ", "))
 		var updatedLines []string
 		for _, line := range strings.Split(content, "\n") {
 			if strings.Contains(line, "elements = {") {
@@ -899,22 +1251,15 @@ func reconcileConsoleAntiLockoutNft(cfg NetworkConfig) {
 	}
 
 	// Ensure wan_interfaces set in live nftables does not block LAN/OPT interfaces
-	for _, dev := range []string{cfg.LanDevice, cfg.Opt1Device, cfg.Opt2Device} {
-		if dev != "" {
-			_ = exec.Command("nft", "delete", "element", "inet", "axonwall", "wan_interfaces", fmt.Sprintf("{ %q }", dev)).Run()
+	for _, item := range internalDevs {
+		if item.dev != "" {
+			_ = exec.Command("nft", "delete", "element", "inet", "axonwall", "wan_interfaces", fmt.Sprintf("{ %q }", item.dev)).Run()
 		}
 	}
 
 	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
 	currentRules := string(currentRulesOut)
-	for _, entry := range []struct {
-		role string
-		dev  string
-	}{
-		{"lan", cfg.LanDevice},
-		{"opt1", cfg.Opt1Device},
-		{"opt2", cfg.Opt2Device},
-	} {
+	for _, entry := range internalDevs {
 		if entry.dev == "" || entry.dev == cfg.WanDevice {
 			continue
 		}
@@ -1755,10 +2100,12 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 			cfg.Opt1Device = iface
 			cfg.Opt1Mode = "dhcp"
 			cfg.Opt1IP = ""
+			cfg.Opt1DHCP = false
 		} else {
 			cfg.Opt2Device = iface
 			cfg.Opt2Mode = "dhcp"
 			cfg.Opt2IP = ""
+			cfg.Opt2DHCP = false
 		}
 		persistNetworkInterfaces(cfg)
 		fmt.Printf("%s[✓] Interface %s set to UP in DHCP client mode (configuration persisted).%s\n", colorGreen, iface, colorReset)
@@ -1806,10 +2153,12 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 			cfg.Opt1Device = iface
 			cfg.Opt1Mode = "static"
 			cfg.Opt1IP = cidrFull
+			cfg.Opt1DHCP = enableDHCP
 		} else if ifName == "opt2" {
 			cfg.Opt2Device = iface
 			cfg.Opt2Mode = "static"
 			cfg.Opt2IP = cidrFull
+			cfg.Opt2DHCP = enableDHCP
 		}
 		persistNetworkInterfaces(cfg)
 

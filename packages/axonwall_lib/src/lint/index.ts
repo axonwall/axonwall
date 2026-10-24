@@ -1,4 +1,4 @@
-import { normalizeAntiLockoutInterfaces } from '../schemas/index.js';
+import { normalizeAntiLockoutInterfaces, inferInterfaceRole } from '../schemas/index.js';
 import type { DesiredState, FirewallRule } from '../schemas/index.js';
 
 export interface LintIssue {
@@ -133,13 +133,19 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
   }
 
   // 4. Anti-Lockout Interface Safety Check
+  const wanIfaces = new Set(
+    state.interfaces.filter((i) => inferInterfaceRole(i) === 'wan').map((i) => i.name),
+  );
+  wanIfaces.add('wan');
+
   if (state.system?.antiLockout?.enabled) {
     const antiLockoutIfaces = normalizeAntiLockoutInterfaces(state.system.antiLockout);
-    if (antiLockoutIfaces.includes('wan')) {
+    const badWan = antiLockoutIfaces.find((n) => wanIfaces.has(n));
+    if (badWan) {
       issues.push({
         type: 'anti_lockout_on_wan',
         severity: 'error',
-        message: "Anti-Lockout rule cannot be bound to the 'wan' interface. Management services must be isolated to LAN/internal networks.",
+        message: `Anti-Lockout rule cannot be bound to WAN interface '${badWan}'. Management services must be isolated to LAN/internal networks.`,
       });
     }
   }
@@ -149,7 +155,7 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
   const mgmtPorts = new Set(mgmtPortNums.map(String));
   for (const rule of state.rules) {
     if (!rule.enabled || rule.action !== 'pass' || rule.direction !== 'in') continue;
-    if (rule.interface !== 'wan') continue;
+    if (!wanIfaces.has(rule.interface)) continue;
     if (rule.protocol !== 'tcp' && rule.protocol !== 'tcp_udp' && rule.protocol !== 'any') continue;
 
     const isWildcardSrc = !rule.source || rule.source === 'any' || rule.source === '0.0.0.0/0' || rule.source === '::/0';

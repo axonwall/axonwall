@@ -12,7 +12,8 @@ import {
   validateYamlConfigFiles,
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
-import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, inferInterfaceRole, type DesiredState } from '@axonwall/lib/schemas';
+import { isValidDevice } from '@axonwall/lib/util';
 import {
   parseCloudInitYaml,
   serializeYaml,
@@ -88,24 +89,148 @@ function loadFallbackState(): DesiredState {
   let lanDev = 'eth1';
   let opt1Dev = '';
   let opt2Dev = '';
+  let wanMode: 'dhcp' | 'static' = 'dhcp';
+  let wanAddr: string | undefined;
+  let wanGw: string | undefined;
+  let lanMode: 'dhcp' | 'static' = 'static';
+  let lanAddr = '192.168.1.1/24';
+  let opt1Mode: 'dhcp' | 'static' = 'dhcp';
+  let opt1Addr: string | undefined;
+  let opt2Mode: 'dhcp' | 'static' = 'dhcp';
+  let opt2Addr: string | undefined;
+  const extraIfaces: Array<{
+    name: string;
+    role: 'wan' | 'lan';
+    device: string;
+    type: 'dhcp' | 'static';
+    ipv4Address?: string;
+    ipv4Gateway?: string;
+    dhcpServer: boolean;
+    enabled: boolean;
+    mtu: number;
+    description: string;
+  }> = [];
+
   try {
     const confPath = path.join(ETC_DIR, 'interfaces.conf');
     if (fs.existsSync(confPath)) {
+      wanDev = '';
+      lanDev = '';
+      const rawKv: Record<string, string> = {};
       for (const rawLine of fs.readFileSync(confPath, 'utf-8').split('\n')) {
         const line = rawLine.trim();
         if (!line || line.startsWith('#') || !line.includes('=')) continue;
-        const [k, v] = line.split('=', 2).map((s) => s.trim());
-        if (k === 'WAN_INTERFACE' && v) wanDev = v;
-        else if (k === 'LAN_INTERFACE' && v) lanDev = v;
-        else if (k === 'OPT1_INTERFACE' && v) opt1Dev = v;
-        else if (k === 'OPT2_INTERFACE' && v) opt2Dev = v;
+        const eqIdx = line.indexOf('=');
+        const k = line.slice(0, eqIdx).trim();
+        const v = line.slice(eqIdx + 1).trim();
+        rawKv[k] = v;
+        if (k === 'WAN_INTERFACE') wanDev = isValidDevice(v) ? v : '';
+        else if (k === 'LAN_INTERFACE') lanDev = isValidDevice(v) ? v : '';
+        else if (k === 'OPT1_INTERFACE') opt1Dev = isValidDevice(v) ? v : '';
+        else if (k === 'OPT2_INTERFACE') opt2Dev = isValidDevice(v) ? v : '';
+        else if (k === 'WAN_MODE' && (v === 'static' || v === 'dhcp')) wanMode = v;
+        else if (k === 'WAN_IPV4_ADDRESS' && v) wanAddr = v;
+        else if (k === 'WAN_IPV4_GATEWAY' && v) wanGw = v;
+        else if (k === 'LAN_MODE' && (v === 'static' || v === 'dhcp')) lanMode = v;
+        else if (k === 'LAN_IPV4_ADDRESS' && v) lanAddr = v;
+        else if (k === 'OPT1_MODE' && (v === 'static' || v === 'dhcp')) opt1Mode = v;
+        else if (k === 'OPT1_IPV4_ADDRESS' && v) opt1Addr = v;
+        else if (k === 'OPT2_MODE' && (v === 'static' || v === 'dhcp')) opt2Mode = v;
+        else if (k === 'OPT2_IPV4_ADDRESS' && v) opt2Addr = v;
+      }
+
+      const seenNames = new Set(['wan', 'lan', 'opt1', 'opt2']);
+      for (const [k, v] of Object.entries(rawKv)) {
+        if (k.startsWith('IFACE_') && k.endsWith('_DEVICE') && isValidDevice(v)) {
+          const keyCore = k.slice('IFACE_'.length, -'_DEVICE'.length);
+          const name = (rawKv[`IFACE_${keyCore}_NAME`] || keyCore).trim().toLowerCase();
+          if (!name || seenNames.has(name)) continue;
+          seenNames.add(name);
+          const roleRaw = (rawKv[`IFACE_${keyCore}_ROLE`] || '').toLowerCase();
+          const role: 'wan' | 'lan' = roleRaw === 'wan' || name.startsWith('wan') ? 'wan' : 'lan';
+          const modeRaw = (rawKv[`IFACE_${keyCore}_MODE`] || '').toLowerCase();
+          const type: 'dhcp' | 'static' = modeRaw === 'static' ? 'static' : 'dhcp';
+          const ipv4Address = rawKv[`IFACE_${keyCore}_IPV4_ADDRESS`] || undefined;
+          const ipv4Gateway = rawKv[`IFACE_${keyCore}_IPV4_GATEWAY`] || undefined;
+          const dhcpServer = role === 'lan' && type === 'static' && rawKv[`IFACE_${keyCore}_DHCP_SERVER`] === 'true';
+          extraIfaces.push({
+            name,
+            role,
+            device: v,
+            type,
+            ipv4Address,
+            ipv4Gateway,
+            dhcpServer,
+            enabled: true,
+            mtu: 1500,
+            description: `${name.toUpperCase()} ${role === 'wan' ? 'WAN Uplink' : 'LAN Network'}`,
+          });
+        }
       }
     }
   } catch {}
 
-  const antiLockoutIfaces = ['lan'];
-  if (opt1Dev) antiLockoutIfaces.push('opt1');
-  if (opt2Dev) antiLockoutIfaces.push('opt2');
+  const interfacesList = [
+    {
+      name: 'wan',
+      role: 'wan' as const,
+      device: wanDev || 'none',
+      type: wanMode,
+      ipv4Address: wanMode === 'static' ? wanAddr : undefined,
+      ipv4Gateway: wanMode === 'static' ? wanGw : undefined,
+      dhcpServer: false,
+      enabled: Boolean(wanDev),
+      mtu: 1500,
+      description: 'WAN Uplink',
+    },
+    {
+      name: 'lan',
+      role: 'lan' as const,
+      device: lanDev || 'none',
+      type: lanMode,
+      ipv4Address: lanMode === 'static' ? lanAddr : undefined,
+      dhcpServer: Boolean(lanDev) && lanMode === 'static',
+      enabled: Boolean(lanDev),
+      mtu: 1500,
+      description: 'LAN Network',
+    },
+    ...(opt1Dev
+      ? [
+          {
+            name: 'opt1',
+            role: 'lan' as const,
+            device: opt1Dev,
+            type: opt1Mode,
+            ipv4Address: opt1Mode === 'static' ? opt1Addr : undefined,
+            dhcpServer: false,
+            enabled: true,
+            mtu: 1500,
+            description: 'OPT1 Network',
+          },
+        ]
+      : []),
+    ...(opt2Dev
+      ? [
+          {
+            name: 'opt2',
+            role: 'lan' as const,
+            device: opt2Dev,
+            type: opt2Mode,
+            ipv4Address: opt2Mode === 'static' ? opt2Addr : undefined,
+            dhcpServer: false,
+            enabled: true,
+            mtu: 1500,
+            description: 'OPT2 Network',
+          },
+        ]
+      : []),
+    ...extraIfaces,
+  ];
+
+  const antiLockoutIfaces = interfacesList
+    .filter((i) => inferInterfaceRole(i) === 'lan' && i.enabled)
+    .map((i) => i.name);
+  if (antiLockoutIfaces.length === 0) antiLockoutIfaces.push('lan');
 
   return DesiredStateSchema.parse({
     version: 1,
@@ -116,17 +241,12 @@ function loadFallbackState(): DesiredState {
       dnsServers: ['1.1.1.1', '9.9.9.9'],
       antiLockout: {
         enabled: true,
-        interface: 'lan',
+        interface: antiLockoutIfaces[0] || 'lan',
         interfaces: antiLockoutIfaces,
         ports: [22, 80, 443, 2966, 3000],
       },
     },
-    interfaces: [
-      { name: 'wan', device: wanDev, type: 'dhcp', enabled: true, mtu: 1500, description: 'WAN Uplink' },
-      { name: 'lan', device: lanDev, type: 'static', ipv4Address: '192.168.1.1/24', enabled: true, mtu: 1500, description: 'LAN Network' },
-      ...(opt1Dev ? [{ name: 'opt1', device: opt1Dev, type: 'dhcp' as const, enabled: true, mtu: 1500, description: 'OPT1 Network' }] : []),
-      ...(opt2Dev ? [{ name: 'opt2', device: opt2Dev, type: 'dhcp' as const, enabled: true, mtu: 1500, description: 'OPT2 Network' }] : []),
-    ],
+    interfaces: interfacesList,
     rules: [],
   });
 }
@@ -351,9 +471,7 @@ async function cmdApply(autoConfirm = true) {
       fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
       for (const [filename, content] of Object.entries(yamlFiles)) {
         const target = path.join(dir, filename);
-        if (!fs.existsSync(target) || dir === PERSIST_YAML_DIR) {
-          fs.writeFileSync(target, content, { mode: 0o644 });
-        }
+        fs.writeFileSync(target, content, { mode: 0o644 });
       }
     } catch {}
   }

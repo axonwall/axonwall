@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { KeyRound, Plus, Trash2, Copy, Check, FileText, Save, CheckCircle2 } from 'lucide-react';
+import Link from 'next/link';
+import { KeyRound, Plus, Trash2, Copy, Check, FileText, Save, CheckCircle2, ShieldCheck } from 'lucide-react';
 import { compileWireGuard } from '@axonwall/lib/compile/wireguard';
+import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
@@ -178,6 +180,42 @@ PersistentKeepalive = 25
           <span>{statusMsg}</span>
         </div>
       )}
+
+      {/* Post-Quantum Rosenpass Hybrid Dual-KEM Status Banner */}
+      <div className="bg-slate-900/90 border border-emerald-500/20 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
+            <ShieldCheck className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold text-white">
+                Post-Quantum Hybrid Dual-KEM (Rosenpass: Classic McEliece 460896 + ML-KEM-512)
+              </span>
+              <span
+                className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                  fullState?.rosenpass?.enabled
+                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                }`}
+              >
+                {fullState?.rosenpass?.enabled ? 'ACTIVE (120s OSKK ROTATION)' : 'CLASSICAL ECDH ONLY'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-1">
+              {fullState?.rosenpass?.enabled
+                ? `Fail-closed PostUp boot guard: ${fullState.rosenpass.failClosedBootGuard !== false ? 'ENABLED (/dev/urandom 256-bit seed)' : 'DISABLED'} • Listening on UDP :${fullState.rosenpass.listenPort || 9999}`
+                : 'Enable the Rosenpass plugin to harden wg0 against Harvest-Now-Decrypt-Later (HNDL) quantum adversaries with out-of-band Dual-KEM PSK rotation.'}
+            </p>
+          </div>
+        </div>
+        <Link
+          href={isPluginEnabled('rosenpass', fullState) ? '/vpn/rosenpass' : '/system/plugins'}
+          className="bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition self-start sm:self-center"
+        >
+          {isPluginEnabled('rosenpass', fullState) ? 'Configure PQ-KEM Mesh →' : 'Enable in Plugin Store →'}
+        </Link>
+      </div>
 
       {/* Server Tunnel Card */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">

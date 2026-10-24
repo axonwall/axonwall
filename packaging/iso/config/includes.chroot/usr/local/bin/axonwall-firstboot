@@ -26,8 +26,8 @@ if [[ -x /usr/local/bin/axonwall-cloud-init ]]; then
   /usr/local/bin/axonwall-cloud-init --no-apply 2>&1 || true
 fi
 
-# 2. Identify Primary LAN & WAN NICs, plus optional OPT1 & OPT2 NICs
-INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | head -n 4 || true))
+# 2. Identify physical NICs (excluding loopback and virtual/tunnel netdevs)
+INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' || true))
 WAN_IF="${INTERFACES[0]:-eth0}"
 LAN_IF="${INTERFACES[1]:-}"
 OPT1_IF="${INTERFACES[2]:-}"
@@ -53,7 +53,47 @@ OPT1_IPV4_ADDRESS=
 OPT2_INTERFACE=${OPT2_IF}
 OPT2_MODE=dhcp
 OPT2_IPV4_ADDRESS=
+IFACE_WAN_NAME=wan
+IFACE_WAN_DEVICE=${WAN_IF}
+IFACE_WAN_ROLE=wan
+IFACE_WAN_MODE=dhcp
+IFACE_WAN_IPV4_ADDRESS=
+IFACE_WAN_IPV4_GATEWAY=
+IFACE_WAN_DHCP_SERVER=false
 CONF_EOF
+
+ALL_IFACE_NAMES="wan"
+if [[ -n "$LAN_IF" ]]; then
+  ALL_IFACE_NAMES="${ALL_IFACE_NAMES},lan"
+  cat << CONF_LAN_EOF >> /etc/axonwall/interfaces.conf
+IFACE_LAN_NAME=lan
+IFACE_LAN_DEVICE=${LAN_IF}
+IFACE_LAN_ROLE=lan
+IFACE_LAN_MODE=static
+IFACE_LAN_IPV4_ADDRESS=192.168.1.1/24
+IFACE_LAN_IPV4_GATEWAY=
+IFACE_LAN_DHCP_SERVER=true
+CONF_LAN_EOF
+fi
+
+for (( idx=2; idx<${#INTERFACES[@]}; idx++ )); do
+  _opt_num=$(( idx - 1 ))
+  _opt_name="opt${_opt_num}"
+  _opt_key="OPT${_opt_num}"
+  _opt_dev="${INTERFACES[$idx]}"
+  [[ -z "$_opt_dev" ]] && continue
+  ALL_IFACE_NAMES="${ALL_IFACE_NAMES},${_opt_name}"
+  cat << CONF_OPT_EOF >> /etc/axonwall/interfaces.conf
+IFACE_${_opt_key}_NAME=${_opt_name}
+IFACE_${_opt_key}_DEVICE=${_opt_dev}
+IFACE_${_opt_key}_ROLE=lan
+IFACE_${_opt_key}_MODE=dhcp
+IFACE_${_opt_key}_IPV4_ADDRESS=
+IFACE_${_opt_key}_IPV4_GATEWAY=
+IFACE_${_opt_key}_DHCP_SERVER=false
+CONF_OPT_EOF
+done
+echo "AXONWALL_INTERFACES=${ALL_IFACE_NAMES}" >> /etc/axonwall/interfaces.conf
 
 # Ensure /etc/network/interfaces is populated persistently
 mkdir -p /etc/network /etc/network/interfaces.d
@@ -79,57 +119,67 @@ iface ${LAN_IF} inet static
 IFACES_LAN_EOF
 fi
 
-if [[ -n "$OPT1_IF" ]]; then
-cat << IFACES_OPT1_EOF >> /etc/network/interfaces
-# OPT1 Interface
-auto ${OPT1_IF}
-iface ${OPT1_IF} inet dhcp
+for (( idx=2; idx<${#INTERFACES[@]}; idx++ )); do
+  _opt_num=$(( idx - 1 ))
+  _opt_dev="${INTERFACES[$idx]}"
+  [[ -z "$_opt_dev" ]] && continue
+  cat << IFACES_OPT_EOF >> /etc/network/interfaces
+# OPT${_opt_num} Interface
+auto ${_opt_dev}
+iface ${_opt_dev} inet dhcp
 
-IFACES_OPT1_EOF
-fi
+IFACES_OPT_EOF
+done
 
-if [[ -n "$OPT2_IF" ]]; then
-cat << IFACES_OPT2_EOF >> /etc/network/interfaces
-# OPT2 Interface
-auto ${OPT2_IF}
-iface ${OPT2_IF} inet dhcp
+rm -f /etc/network/interfaces.d/axonwall 2>/dev/null || true
 
-IFACES_OPT2_EOF
-fi
+start_dhcp_if_missing() {
+  local _if="$1"
+  [[ -z "$_if" ]] && return 0
+  ip link show "$_if" &>/dev/null || return 0
+  ip link set up dev "$_if" 2>/dev/null || true
+  if ip -4 addr show dev "$_if" 2>/dev/null | grep -q 'inet '; then
+    return 0
+  fi
+  if command -v dhcpcd &>/dev/null; then
+    dhcpcd -4 "$_if" &>/dev/null || true
+  elif command -v dhclient &>/dev/null; then
+    dhclient -1 -v "$_if" &>/dev/null || true
+  fi
+}
 
-cp /etc/network/interfaces /etc/network/interfaces.d/axonwall 2>/dev/null || true
+# Bring up WAN interface and acquire DHCP lease if not already configured
+start_dhcp_if_missing "$WAN_IF"
 
 # 3. Configure default LAN static IP (192.168.1.1/24) only on a real second NIC
 if [[ -n "$LAN_IF" ]] && ip link show "$LAN_IF" &>/dev/null; then
-  ip addr add 192.168.1.1/24 dev "$LAN_IF" || true
+  ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
   ip link set up dev "$LAN_IF" || true
 fi
 
-# Configure OPT1 and OPT2 as non-authoritative interfaces (link up, NO Kea DHCP server)
-if [[ -n "$OPT1_IF" ]] && ip link show "$OPT1_IF" &>/dev/null; then
-  ip link set up dev "$OPT1_IF" || true
-  if command -v dhclient &>/dev/null; then
-    dhclient -1 -v "$OPT1_IF" &>/dev/null || true
+# Configure OPT1, OPT2, and any additional physical NICs as non-authoritative interfaces (link up, DHCP client)
+for (( idx=2; idx<${#INTERFACES[@]}; idx++ )); do
+  _opt_num=$(( idx - 1 ))
+  _opt_dev="${INTERFACES[$idx]}"
+  if [[ -n "$_opt_dev" ]] && ip link show "$_opt_dev" &>/dev/null; then
+    start_dhcp_if_missing "$_opt_dev"
+    echo "[Axonwall Firstboot] OPT${_opt_num} interface ($_opt_dev) brought UP (Non-authoritative / attached network)"
   fi
-  echo "[Axonwall Firstboot] OPT1 interface ($OPT1_IF) brought UP (Non-authoritative / attached network)"
-fi
-
-if [[ -n "$OPT2_IF" ]] && ip link show "$OPT2_IF" &>/dev/null; then
-  ip link set up dev "$OPT2_IF" || true
-  if command -v dhclient &>/dev/null; then
-    dhclient -1 -v "$OPT2_IF" &>/dev/null || true
-  fi
-  echo "[Axonwall Firstboot] OPT2 interface ($OPT2_IF) brought UP (Non-authoritative / attached network)"
-fi
+done
 
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
   INTERNAL_HAS_LINK=0
-  for _int_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF"; do
-    if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
-      INTERNAL_HAS_LINK=1
-      break
-    fi
+  for _attempt in 1 2 3; do
+    for (( idx=1; idx<${#INTERFACES[@]}; idx++ )); do
+      _int_if="${INTERFACES[$idx]}"
+      if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
+        INTERNAL_HAS_LINK=1
+        break 2
+      fi
+    done
+    [[ ${#INTERFACES[@]} -le 1 ]] && break
+    sleep 1
   done
   if [[ "$INTERNAL_HAS_LINK" == "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
     if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
@@ -244,7 +294,6 @@ fi
 if [[ ! -s /etc/axonwall/axonwall.env ]]; then
   echo "[Axonwall Firstboot] Generating unique appliance security tokens and credentials..."
   JWT_SECRET=$(openssl rand -hex 32)
-  ZTP_TOKEN=$(openssl rand -hex 16)
   
   INSTALL_PASS=""
   if [[ -f /etc/axonwall/admin.env ]]; then
@@ -260,17 +309,20 @@ AGENT_SOCKET_PATH=/run/axonwall/agent.sock
 AGENT_API_SOCKET=/run/axonwall/agent-api.sock
 ENV_EOF
 
-  cat << ENV_EOF > /etc/axonwall/controller.env
-AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
-ENV_EOF
-
-  if [[ ! -f /etc/axonwall/.password_changed ]]; then
+  if [[ ! -f /etc/axonwall/.password_changed && "$ADMIN_PASS" != scrypt\$* ]]; then
     echo "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
     chmod 0600 /etc/axonwall/initial-admin-password
     chown root:root /etc/axonwall/initial-admin-password
   else
     echo "[Axonwall Firstboot] Administrator credentials established during installation."
   fi
+fi
+
+if [[ ! -s /etc/axonwall/controller.env ]]; then
+  ZTP_TOKEN=$(openssl rand -hex 16)
+  cat << ENV_EOF > /etc/axonwall/controller.env
+AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
+ENV_EOF
 fi
 
 if [[ -f /etc/axonwall/admin.env ]]; then
@@ -365,20 +417,26 @@ rm -f "$MARKER"
 
 systemctl daemon-reload
 systemctl enable axonwalld axonwall-controller axonwall-ui headscale ssh chrony sysstat || true
-# Use non-blocking restarts so firstboot does not deadlock with services ordered After=axonwall-firstboot.service
-systemctl try-restart --no-block axonwalld || true
+# Start/restart axonwalld synchronously before axonwallctl apply so the agent socket stays live during apply
+systemctl try-restart axonwalld || true
 systemctl restart --no-block axonwall-ui axonwall-controller headscale ssh chrony || true
 
-if command -v axonwallctl &>/dev/null; then
+if [[ -x /usr/local/bin/axonwallctl ]]; then
+  echo "[Axonwall Firstboot] Compiling declarative YAML configuration..."
+  /usr/local/bin/axonwallctl apply 2>&1 || true
+elif command -v axonwallctl &>/dev/null; then
   echo "[Axonwall Firstboot] Compiling declarative YAML configuration..."
   axonwallctl apply 2>&1 || true
 fi
 
-LAN_IP=""
-if [[ -n "$LAN_IF" ]]; then
-  LAN_IP=$(ip -4 addr show dev "$LAN_IF" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
-fi
-PRIMARY_IP="${LAN_IP:-192.168.1.1}"
+PRIMARY_IP=""
+for _cand_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF" "$WAN_IF"; do
+  if [[ -n "$_cand_if" ]]; then
+    PRIMARY_IP=$(ip -4 addr show dev "$_cand_if" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1 || true)
+    [[ -n "$PRIMARY_IP" ]] && break
+  fi
+done
+PRIMARY_IP="${PRIMARY_IP:-192.168.1.1}"
 
 cat << ISSUE_EOF > /etc/issue
 ================================================================================

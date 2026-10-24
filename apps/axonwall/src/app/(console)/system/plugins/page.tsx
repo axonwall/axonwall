@@ -223,6 +223,29 @@ export default function PluginManagerPage() {
           magicDnsDomain: 'tailnet.axonwall.local',
         };
         next.headscale.enabled = !isCurrentlyEnabled;
+      } else if (id === 'rosenpass') {
+        next.rosenpass = next.rosenpass || {
+          enabled: false,
+          listenPort: 9999,
+          listenAddresses: ['0.0.0.0:9999', '[::]:9999'],
+          wgDevice: 'wg0',
+          verbosity: 'Quiet',
+          rekeyIntervalSeconds: 120,
+          failClosedBootGuard: true,
+          memfdSecret: true,
+          publicKeyPath: '/etc/rosenpass/pq.pk',
+          secretKeyPath: '/etc/rosenpass/pq.sk',
+          peers: [],
+        };
+        next.rosenpass.enabled = !isCurrentlyEnabled;
+        const plugins = next.plugins || [];
+        const idx = plugins.findIndex((p) => p.id === 'rosenpass');
+        if (idx >= 0) {
+          plugins[idx].enabled = !isCurrentlyEnabled;
+        } else {
+          plugins.push({ id: 'rosenpass', enabled: !isCurrentlyEnabled });
+        }
+        next.plugins = plugins;
       } else if (id === 'haproxy') {
         next.haproxy = next.haproxy || {
           enabled: false,

@@ -237,6 +237,28 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       icon: 'Terminal',
     },
   },
+  {
+    id: 'rosenpass',
+    name: 'Rosenpass Post-Quantum WireGuard (McEliece + ML-KEM)',
+    version: '0.2.2',
+    category: 'extension',
+    description:
+      'Hybrid Dual-KEM post-quantum key exchange daemon (Classic McEliece 460896 static authentication + ephemeral ML-KEM-512 forward secrecy) that rotates kernel WireGuard pre-shared keys every 120s with fail-closed boot protection.',
+    author: 'Rosenpass Project / Axonwall Core',
+    systemdUnits: ['rosenpass.service'],
+    privileges: ['vpn.admin', 'network.interfaces'],
+    nftHooks: [{ table: 'inet axonwall', chain: 'input', priority: 0 }],
+    packages: {
+      debian: ['rosenpass', 'wireguard-tools'],
+      alpine: ['rosenpass', 'wireguard-tools'],
+    },
+    cliBinaries: ['rosenpass', 'wg'],
+    menuEntry: {
+      title: 'Post-Quantum (Rosenpass)',
+      path: '/vpn/rosenpass',
+      icon: 'ShieldCheck',
+    },
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -332,6 +354,9 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   }
   if (pluginId === 'headscale') {
     return Boolean(state.headscale?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'headscale' && p.enabled));
+  }
+  if (pluginId === 'rosenpass') {
+    return Boolean(state.rosenpass?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'rosenpass' && p.enabled));
   }
   if (pluginId === 'haproxy') {
     return Boolean(state.haproxy?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'haproxy' && p.enabled));

@@ -22,7 +22,7 @@ modprobe tcp_bbr 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-axonwall.conf 2>/dev/null || true
 
 # 2. Identify Primary WAN, LAN, OPT1 & OPT2 NICs
-IFACES="$(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vx 'lo' | grep -v '^wg' | grep -v '^ tailscale' | head -n 4 || true)"
+IFACES="$(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' | head -n 4 || true)"
 WAN_IF="$(echo "$IFACES" | sed -n '1p')"
 LAN_IF="$(echo "$IFACES" | sed -n '2p')"
 OPT1_IF="$(echo "$IFACES" | sed -n '3p')"
@@ -93,7 +93,7 @@ iface ${OPT2_IF} inet dhcp
 IFACES_OPT2_EOF
 fi
 
-cp /etc/network/interfaces /etc/network/interfaces.d/axonwall 2>/dev/null || true
+rm -f /etc/network/interfaces.d/axonwall 2>/dev/null || true
 
 # Start a DHCPv4 client on $1 only when the interface has no IPv4 address
 # yet. The boot-runlevel networking service (ifup + dhcpcd, configured by
@@ -111,7 +111,11 @@ dhcp_if_missing() {
     return 0
   fi
   echo "[Axonwall Firstboot] No IPv4 address on ${_dhcp_if}; starting DHCPv4 client..."
-  /sbin/udhcpc -b -i "$_dhcp_if" -p "/var/run/udhcpc.${_dhcp_if}.pid" || true
+  if command -v dhcpcd >/dev/null 2>&1; then
+    dhcpcd -4 "$_dhcp_if" || true
+  else
+    /sbin/udhcpc -b -i "$_dhcp_if" -p "/var/run/udhcpc.${_dhcp_if}.pid" || true
+  fi
 }
 
 # Bring up WAN with DHCP (fallback; networking normally configured it first)
@@ -240,7 +244,6 @@ fi
 # Generate appliance security tokens
 if [ ! -s /etc/axonwall/axonwall.env ]; then
   JWT_SECRET="$(openssl rand -hex 32)"
-  ZTP_TOKEN="$(openssl rand -hex 16)"
   ADMIN_PASS="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
   if [ -f /etc/axonwall/admin.env ]; then
     INSTALL_PASS="$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)"
@@ -255,21 +258,29 @@ AGENT_SOCKET_PATH=/run/axonwall/agent.sock
 AGENT_API_SOCKET=/run/axonwall/agent-api.sock
 ENV_EOF
 
+  case "$ADMIN_PASS" in
+    scrypt\$*) ;;
+    *)
+      if [ ! -f /etc/axonwall/.password_changed ]; then
+        echo "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
+        chmod 0600 /etc/axonwall/initial-admin-password
+      fi
+      ;;
+  esac
+fi
+
+if [ ! -s /etc/axonwall/controller.env ]; then
+  ZTP_TOKEN="$(openssl rand -hex 16)"
   cat << ENV_EOF > /etc/axonwall/controller.env
 AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
 ENV_EOF
-
-  if [ ! -f /etc/axonwall/.password_changed ]; then
-    echo "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
-    chmod 0600 /etc/axonwall/initial-admin-password
-  fi
 fi
 
 chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
 chown axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
 if [ -f /etc/axonwall/controller.env ]; then
-  chown root:root /etc/axonwall/controller.env 2>/dev/null || true
-  chmod 0600 /etc/axonwall/controller.env 2>/dev/null || true
+  chown root:axonwall-controller /etc/axonwall/controller.env 2>/dev/null || true
+  chmod 0640 /etc/axonwall/controller.env 2>/dev/null || true
 fi
 chown -R axonwall:axonwall-api /opt/axonwall 2>/dev/null || true
 
@@ -292,11 +303,17 @@ fi
 
 rm -f "$MARKER"
 
-PRIMARY_IP="192.168.1.1"
-if [ -n "$LAN_IF" ]; then
-  DETECTED_IP="$(ip -4 addr show dev "$LAN_IF" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1 || true)"
-  [ -n "$DETECTED_IP" ] && PRIMARY_IP="$DETECTED_IP"
-fi
+PRIMARY_IP=""
+for _cand_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF" "$WAN_IF"; do
+  if [ -n "$_cand_if" ]; then
+    DETECTED_IP="$(ip -4 addr show dev "$_cand_if" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1 || true)"
+    if [ -n "$DETECTED_IP" ]; then
+      PRIMARY_IP="$DETECTED_IP"
+      break
+    fi
+  fi
+done
+[ -z "$PRIMARY_IP" ] && PRIMARY_IP="192.168.1.1"
 
 cat << ISSUE_EOF > /etc/issue
 ================================================================================

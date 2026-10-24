@@ -175,6 +175,18 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			AlpinePackages:   []string{"ntopng"},
 			RequiredBinaries: []string{"ntopng"},
 		},
+		{
+			ID:               "rosenpass",
+			Name:             "Rosenpass Post-Quantum WireGuard (McEliece + ML-KEM)",
+			Version:          "0.2.2",
+			Category:         "extension",
+			Description:      "Hybrid Dual-KEM post-quantum key exchange daemon (Classic McEliece 460896 static authentication + ephemeral ML-KEM-512 forward secrecy) that rotates kernel WireGuard pre-shared keys every 120s with fail-closed boot protection.",
+			Author:           "Rosenpass Project / Axonwall Core",
+			SystemdUnits:     []string{"rosenpass.service"},
+			DebianPackages:   []string{"rosenpass", "wireguard-tools"},
+			AlpinePackages:   []string{"rosenpass", "wireguard-tools"},
+			RequiredBinaries: []string{"rosenpass", "wg"},
+		},
 	}
 }
 
@@ -312,6 +324,11 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 			}
 		}
 	}
+	if pluginID == "rosenpass" {
+		if err := ProvisionRosenpassEnvironment(DefaultRosenpassDir); err != nil {
+			log.Printf("[PluginManager] Warning provisioning Rosenpass PQ keys: %v", err)
+		}
+	}
 
 	pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
 	pm.saveState()
@@ -400,6 +417,18 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Workstation terminal, ZSH, Starship, and VIM configs re-provisioned successfully.",
+		}
+	}
+	if pluginID == "rosenpass" {
+		if err := ProvisionRosenpassEnvironment(DefaultRosenpassDir); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to provision Rosenpass environment: %v", err),
+			}
+		}
+		return PluginActionResponse{
+			Success: true,
+			Message: "Rosenpass Post-Quantum McEliece 460896 keypair and systemd unit verified.",
 		}
 	}
 	return PluginActionResponse{

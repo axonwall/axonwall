@@ -163,6 +163,7 @@ export const NAV_SECTIONS: NavSection[] = [
     capability: 'firewall',
     items: [
       { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
+      { name: 'Post-Quantum (Rosenpass)', href: '/vpn/rosenpass', icon: ShieldCheck, badge: 'PQ-KEM', pluginId: 'rosenpass' },
       { name: 'Mesh VPN (Headscale)', href: '/vpn/mesh', icon: Network, pluginId: 'headscale' },
       { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
       { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },

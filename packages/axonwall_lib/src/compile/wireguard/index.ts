@@ -1,4 +1,4 @@
-import type { WireGuardConfigSchema } from '../../schemas/index.js';
+import type { WireGuardConfigSchema, RosenpassConfig } from '../../schemas/index.js';
 import { z } from 'zod';
 
 type WireGuardConfig = z.infer<typeof WireGuardConfigSchema>;
@@ -7,7 +7,9 @@ export interface WireGuardCompileResult {
   wgConfig: string;
 }
 
-export function compileWireGuard(wg: WireGuardConfig): WireGuardCompileResult {
+const SAFE_WG_PUBKEY_RE = /^[A-Za-z0-9+/=]{32,64}$/;
+
+export function compileWireGuard(wg: WireGuardConfig, rosenpass?: RosenpassConfig): WireGuardCompileResult {
   const lines: string[] = [];
 
   lines.push('# Axonwall WireGuard Server Configuration');
@@ -19,6 +21,37 @@ export function compileWireGuard(wg: WireGuardConfig): WireGuardCompileResult {
   if (wg.privateKey) {
     lines.push(`PrivateKey = ${wg.privateKey.replace(/[\r\n\s]+/g, '')}`);
   }
+
+  if (rosenpass?.enabled && rosenpass.failClosedBootGuard !== false) {
+    const pqPubKeys = new Set<string>();
+    for (const rpPeer of rosenpass.peers ?? []) {
+      if (!rpPeer.enabled) continue;
+      const cleanKey = rpPeer.wgPeerPublicKey.replace(/[\r\n\s]+/g, '');
+      if (SAFE_WG_PUBKEY_RE.test(cleanKey)) {
+        pqPubKeys.add(cleanKey);
+      }
+    }
+    // If Rosenpass is enabled with failClosedBootGuard and no explicit peer list is populated yet,
+    // protect all enabled WireGuard peers on the interface.
+    if (pqPubKeys.size === 0) {
+      for (const wgPeer of wg.peers) {
+        if (!wgPeer.enabled) continue;
+        const cleanKey = wgPeer.publicKey.replace(/[\r\n\s]+/g, '');
+        if (SAFE_WG_PUBKEY_RE.test(cleanKey)) {
+          pqPubKeys.add(cleanKey);
+        }
+      }
+    }
+    if (pqPubKeys.size > 0) {
+      lines.push('# Fail-Closed Post-Quantum Boot Guard: Seed random 256-bit PSK before Rosenpass completes first Dual-KEM exchange');
+      for (const pubKey of pqPubKeys) {
+        lines.push(
+          `PostUp = sh -c 'head -c 32 /dev/urandom | base64 | wg set %i peer ${pubKey} preshared-key /dev/stdin'`,
+        );
+      }
+    }
+  }
+
   lines.push('');
 
   for (const peer of wg.peers) {

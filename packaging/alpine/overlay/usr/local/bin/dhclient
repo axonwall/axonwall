@@ -26,6 +26,10 @@ fi
 PIDFILE="/var/run/udhcpc.${IFACE}.pid"
 
 if [ "$RELEASE" -eq 1 ]; then
+  if command -v dhcpcd >/dev/null 2>&1; then
+    dhcpcd -k "$IFACE" >/dev/null 2>&1 || true
+    dhcpcd -x "$IFACE" >/dev/null 2>&1 || true
+  fi
   if [ -f "$PIDFILE" ]; then
     kill -USR2 "$(cat "$PIDFILE")" 2>/dev/null || true
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
@@ -38,6 +42,10 @@ fi
 if [ -f "$PIDFILE" ]; then
   kill "$(cat "$PIDFILE")" 2>/dev/null || true
   rm -f "$PIDFILE"
+fi
+
+if command -v dhcpcd >/dev/null 2>&1; then
+  exec dhcpcd -4 "$IFACE" >/dev/null 2>&1
 fi
 
 exec /sbin/udhcpc -b -i "$IFACE" -p "$PIDFILE" >/dev/null 2>&1

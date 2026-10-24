@@ -51,15 +51,25 @@ func stopSystemService(svc string) ([]byte, error) {
 }
 
 // dhcpClientRunning reports whether a DHCP client started by the system
-// networking path (ifup/dhcpcd, dhclient, or an earlier boot-apply) is
+// networking path (ifup/dhcpcd, dhclient, udhcpc, or an earlier boot-apply) is
 // already alive for dev, based on the clients' pidfiles.
 func dhcpClientRunning(dev string) bool {
 	pidFiles := []string{
 		"/var/run/dhclient." + dev + ".pid",
 		"/var/run/dhcpcd/" + dev + ".pid",
+		"/var/run/dhcpcd/" + dev + "-4.pid",
 		"/var/run/dhcpcd-" + dev + ".pid",
+		"/var/run/dhcpcd-" + dev + "-4.pid",
 		"/run/dhcpcd/" + dev + ".pid",
+		"/run/dhcpcd/" + dev + "-4.pid",
 		"/run/dhcpcd-" + dev + ".pid",
+		"/run/dhcpcd-" + dev + "-4.pid",
+		"/var/run/dhcpcd/pid",
+		"/run/dhcpcd/pid",
+		"/var/run/dhcpcd.pid",
+		"/run/dhcpcd.pid",
+		"/var/run/udhcpc." + dev + ".pid",
+		"/run/udhcpc." + dev + ".pid",
 	}
 	for _, pidFile := range pidFiles {
 		data, err := os.ReadFile(pidFile)
@@ -105,6 +115,10 @@ func triggerDhcpClient(dev string) {
 func releaseDhcpLease(dev string) {
 	if dev == "" {
 		return
+	}
+	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
+		_ = exec.Command(dhcpcdPath, "-k", dev).Run()
+		_ = exec.Command(dhcpcdPath, "-x", dev).Run()
 	}
 	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 		_ = exec.Command(dhclientPath, "-r", dev).Run()

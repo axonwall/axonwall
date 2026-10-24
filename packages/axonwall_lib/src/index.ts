@@ -5,6 +5,7 @@ export * from './compile/nft/index.js';
 export * from './compile/kea/index.js';
 export * from './compile/unbound/index.js';
 export * from './compile/wireguard/index.js';
+export * from './compile/rosenpass/index.js';
 export * from './compile/tc/index.js';
 export * from './compile/ipsec/index.js';
 export * from './compile/openvpn/index.js';

@@ -8,6 +8,9 @@ import { compileNas } from '../nas/index.js';
 import { compileK3s } from '../k3s/index.js';
 import { compileKeaDhcp4 } from '../kea/index.js';
 import { compileFrr } from '../frr/index.js';
+import { compileUnbound } from '../unbound/index.js';
+import { compileWireGuard } from '../wireguard/index.js';
+import { compileRosenpass } from '../rosenpass/index.js';
 
 export interface CompileResult {
   nftScript: string;
@@ -149,6 +152,7 @@ export function compileNftables(state: DesiredState): CompileResult {
       path: '/etc/axonwall/managed/sdwan_config.json',
       content: JSON.stringify(
         {
+          enabled: true,
           gateways: state.gateways || [],
           gatewayGroups: state.gatewayGroups || [],
         },
@@ -177,8 +181,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     });
   }
 
-  // Emit Kea DHCPv4 Server configuration
-  if (state.dhcp?.enabled && state.dhcp.subnets && state.dhcp.subnets.length > 0) {
+  // Emit Kea DHCPv4 Server configuration (always emit when state.dhcp is present so removing the last authoritative LAN clears stale subnets)
+  if (state.dhcp) {
     const kea = compileKeaDhcp4(state.dhcp, state.interfaces);
     files.push({
       path: '/etc/kea/kea-dhcp4.conf',
@@ -186,6 +190,17 @@ export function compileNftables(state: DesiredState): CompileResult {
       fileMode: 0o644,
     });
     reloadServices.push('kea-dhcp4-server');
+  }
+
+  // Emit Unbound DNS Resolver configuration
+  if (state.dns?.enabled) {
+    const unbound = compileUnbound(state.dns, state.headscale);
+    files.push({
+      path: '/etc/unbound/unbound.conf.d/axonwall.conf',
+      content: unbound.unboundConfig,
+      fileMode: 0o644,
+    });
+    reloadServices.push('unbound');
   }
 
   // Emit FRRouting (FRR) configuration
@@ -202,6 +217,28 @@ export function compileNftables(state: DesiredState): CompileResult {
       fileMode: 0o640,
     });
     reloadServices.push('frr');
+  }
+
+  // Emit WireGuard configuration (including Rosenpass Fail-Closed PostUp seed when enabled)
+  if (state.wireguard?.enabled) {
+    const wgCompiled = compileWireGuard(state.wireguard, state.rosenpass);
+    files.push({
+      path: '/etc/wireguard/wg0.conf',
+      content: wgCompiled.wgConfig,
+      fileMode: 0o600,
+    });
+    reloadServices.push('wg-quick@wg0');
+  }
+
+  // Emit Rosenpass Post-Quantum Hybrid Dual-KEM configuration
+  if (state.rosenpass?.enabled) {
+    const rpCompiled = compileRosenpass(state.rosenpass);
+    files.push({
+      path: '/etc/rosenpass/config.toml',
+      content: rpCompiled.configToml,
+      fileMode: 0o600,
+    });
+    reloadServices.push('rosenpass');
   }
 
   // Helper to map interfaces to system devices and roles
@@ -476,6 +513,18 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push(`    udp dport ${state.wireguard.listenPort} accept comment "wireguard-service"`);
   }
 
+  // Rosenpass Post-Quantum Dual-KEM listener
+  if (state.rosenpass?.enabled) {
+    const rpPort =
+      typeof state.rosenpass.listenPort === 'number' &&
+      Number.isInteger(state.rosenpass.listenPort) &&
+      state.rosenpass.listenPort >= 1 &&
+      state.rosenpass.listenPort <= 65535
+        ? state.rosenpass.listenPort
+        : 9999;
+    lines.push(`    udp dport ${rpPort} accept comment "rosenpass-pq-kem"`);
+  }
+
   // Headscale listener (WireGuard hole punching)
   if (state.headscale?.enabled) {
     lines.push(`    udp dport 41641 accept comment "headscale-mesh"`);
@@ -485,7 +534,8 @@ export function compileNftables(state: DesiredState): CompileResult {
   for (const iface of state.interfaces) {
     if (!iface.enabled || !isValidDevice(iface.device)) continue;
     const dev = iface.device;
-    lines.push(`    iifname "${dev}" jump input_${iface.name}`);
+    const safeChainName = sanitizeIdentifier(iface.name);
+    lines.push(`    iifname "${dev}" jump input_${safeChainName}`);
   }
   if (state.headscale?.enabled) {
     lines.push(`    iifname "tailscale0" jump input_tailscale`);
@@ -520,7 +570,8 @@ export function compileNftables(state: DesiredState): CompileResult {
   for (const iface of state.interfaces) {
     if (!iface.enabled || !isValidDevice(iface.device)) continue;
     const dev = iface.device;
-    lines.push(`    iifname "${dev}" jump forward_${iface.name}`);
+    const safeChainName = sanitizeIdentifier(iface.name);
+    lines.push(`    iifname "${dev}" jump forward_${safeChainName}`);
   }
   if (state.headscale?.enabled) {
     lines.push(`    iifname "tailscale0" jump forward_tailscale`);
@@ -551,15 +602,13 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Default WAN/Gateway masquerade if no outbound rules configured
   if (!state.nat.some((n) => n.type === 'masquerade' || n.type === 'snat')) {
     const gatewayIfaces = new Set((state.gateways || []).filter((g) => g.enabled).map((g) => g.interface));
+    for (const iface of state.interfaces) {
+      if (iface.enabled && inferInterfaceRole(iface) === 'wan') {
+        gatewayIfaces.add(iface.name);
+      }
+    }
     if (gatewayIfaces.size === 0) {
-      for (const iface of state.interfaces) {
-        if (iface.enabled && inferInterfaceRole(iface) === 'wan') {
-          gatewayIfaces.add(iface.name);
-        }
-      }
-      if (gatewayIfaces.size === 0) {
-        gatewayIfaces.add('wan');
-      }
+      gatewayIfaces.add('wan');
     }
     for (const gwIfaceName of gatewayIfaces) {
       const iface = state.interfaces.find((i) => i.name === gwIfaceName);
@@ -577,6 +626,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   for (const iface of state.interfaces) {
     if (!iface.enabled) continue;
     const isWan = inferInterfaceRole(iface) === 'wan';
+    const safeChainName = sanitizeIdentifier(iface.name);
 
     // For WAN interfaces, local input rules MUST be explicitly assigned to the WAN interface.
     // Floating ('any' / 'floating') rules apply to forwarded transit traffic, but do not open local host input on WAN.
@@ -590,7 +640,7 @@ export function compileNftables(state: DesiredState): CompileResult {
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     // Input chain for interface
-    lines.push(`  chain input_${iface.name} {`);
+    lines.push(`  chain input_${safeChainName} {`);
     for (const rule of inputRules) {
       if (rule.direction === 'in') {
         const stmt = formatRuleStatement(rule, state.aliases);
@@ -601,7 +651,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('');
 
     // Forward chain for interface
-    lines.push(`  chain forward_${iface.name} {`);
+    lines.push(`  chain forward_${safeChainName} {`);
     for (const rule of forwardRules) {
       const stmt = formatRuleStatement(rule, state.aliases);
       if (stmt) lines.push(`    ${stmt}`);
@@ -701,6 +751,8 @@ export function compileSatelliteNftables(node: any): CompileResult {
   lines.push('    type filter hook forward priority filter; policy drop;');
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 daddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
 
   lines.push('    ct state established,related accept');

@@ -1,4 +1,4 @@
-import { normalizeAntiLockoutInterfaces } from '../schemas/index.js';
+import { normalizeAntiLockoutInterfaces, inferInterfaceRole } from '../schemas/index.js';
 import type { Alias, DesiredState, FirewallRule, NatRule, PacketTracerQuery } from '../schemas/index.js';
 
 export interface TraceStep {
@@ -64,9 +64,21 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
     action: 'CONTINUE',
   });
 
-  // 2. Anti-Lockout check
-  const antiLockoutIfaces = normalizeAntiLockoutInterfaces(state.system.antiLockout);
-  if (state.system.antiLockout?.enabled && antiLockoutIfaces.includes(inIface.name)) {
+  const isWanIngress = inferInterfaceRole(inIface) === 'wan';
+  const localHostIps = new Set(
+    state.interfaces
+      .filter((i) => i.enabled && i.ipv4Address)
+      .map((i) => i.ipv4Address!.split('/')[0]),
+  );
+
+  // 2. Anti-Lockout check (never applies on WAN interfaces)
+  const antiLockoutIfaces = new Set(normalizeAntiLockoutInterfaces(state.system.antiLockout));
+  for (const iface of state.interfaces) {
+    if (iface.enabled && inferInterfaceRole(iface) === 'lan') {
+      antiLockoutIfaces.add(iface.name);
+    }
+  }
+  if (!isWanIngress && state.system.antiLockout?.enabled && antiLockoutIfaces.has(inIface.name)) {
     if (
       query.protocol === 'tcp' &&
       state.system.antiLockout.ports.includes(query.dstPort) &&
@@ -116,12 +128,13 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
   }
 
   // 4. Firewall Filter Rules Evaluation
-  // In nftables/Axonwall: rules are evaluated in sortOrder.
+  // On WAN interfaces, floating ('any'/'floating') rules only apply to forwarded transit traffic, not local host input.
+  const isLocalInputOnWan = isWanIngress && natResult?.type !== 'dnat' && localHostIps.has(currentDstIp);
   const applicableRules = state.rules
     .filter(
       (r) =>
         r.enabled &&
-        (r.interface === inIface.name || r.interface === 'any' || r.interface === 'floating') &&
+        (r.interface === inIface.name || (!isLocalInputOnWan && (r.interface === 'any' || r.interface === 'floating'))) &&
         r.direction !== 'out'
     )
     .sort((a, b) => a.sortOrder - b.sortOrder);
@@ -192,6 +205,16 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
         matched: true,
         action: 'TRANSLATE',
       });
+    } else {
+      const defaultWan = state.interfaces.find((i) => i.enabled && inferInterfaceRole(i) === 'wan');
+      if (defaultWan && defaultWan.name !== inIface.name) {
+        steps.push({
+          stage: 'snat',
+          description: `Default outbound masquerade will apply on WAN interface ${defaultWan.name} (${defaultWan.device})`,
+          matched: true,
+          action: 'TRANSLATE',
+        });
+      }
     }
   }
 

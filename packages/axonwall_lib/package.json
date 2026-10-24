@@ -31,6 +31,10 @@
       "types": "./dist/compile/wireguard/index.d.ts",
       "default": "./dist/compile/wireguard/index.js"
     },
+    "./compile/rosenpass": {
+      "types": "./dist/compile/rosenpass/index.d.ts",
+      "default": "./dist/compile/rosenpass/index.js"
+    },
     "./compile/tc": {
       "types": "./dist/compile/tc/index.d.ts",
       "default": "./dist/compile/tc/index.js"
