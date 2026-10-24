@@ -25,8 +25,8 @@ depend() {
 
 start_pre() {
     checkpath -d -m 0770 -o root:axonwall-api /run/axonwall
-    checkpath -d -m 0750 -o axonwall:axonwall /var/lib/axonwall
-    checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
+    checkpath -d -m 0775 -o root:axonwall-api /var/lib/axonwall
+    checkpath -d -m 0770 -o axonwall:axonwall-api /var/log/axonwall
     mkdir -p /var/lib/axonwall/home /home
     if ! grep -q ' /home ' /proc/mounts 2>/dev/null; then
         mount --bind /var/lib/axonwall/home /home 2>/dev/null || true

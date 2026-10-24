@@ -481,6 +481,13 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 	}
 
 	chownOpenLDAPRecursive(LDAPBaseDir)
+	// Ownership without mode is not enough: re-assert 0750 on the ldap
+	// directories so slapd (running as the unprivileged slapd user) can
+	// always read its own config tree, even on images whose shipped
+	// directory modes were looser or tighter than intended.
+	for _, dir := range []string{LDAPBaseDir, LDAPConfigDir, LDAPDataDir, LDAPAccessLogDir, LDAPBackupsDir} {
+		_ = os.Chmod(dir, 0750)
+	}
 	for _, rdir := range []string{"/run/slapd", "/run/openldap", "/var/lib/openldap/run"} {
 		_ = os.MkdirAll(rdir, 0755)
 		chownOpenLDAPRecursive(rdir)

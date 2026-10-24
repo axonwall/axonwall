@@ -48,7 +48,7 @@ load_env_file() {
 
 
 start_pre() {
-    checkpath -d -m 0750 -o axonwall:axonwall /var/log/axonwall
+    checkpath -d -m 0770 -o axonwall:axonwall-api /var/log/axonwall
     load_env_file /etc/axonwall/controller.env
     export NODE_ENV=production
 }
