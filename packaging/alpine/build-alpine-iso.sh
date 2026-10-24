@@ -422,6 +422,14 @@ if [[ "$FLAVOR" == "vault" ]]; then
   rm -f "${OVL}/etc/init.d/axonwall-controller" "${OVL}/etc/init.d/axonwall-firstboot" \
         "${OVL}/etc/init.d/axonwall-ui" "${OVL}/etc/init.d/axonwalld" \
         "${OVL}/etc/init.d/headscale" "${OVL}/usr/local/bin/axonwall-firstboot-alpine"
+  # The stock inittab puts the console TUI on tty1 and ttyS0, but the
+  # vault ships no axonwall-console binary — both consoles would be
+  # respawn loops with no login at all. Give the vault plain gettys
+  # (console + SSH are its only admin surfaces).
+  sed -i \
+    -e 's|^tty1::respawn:/usr/sbin/axonwall-console|tty1::respawn:/sbin/getty 38400 tty1|' \
+    -e 's|^ttyS0::respawn:/usr/sbin/axonwall-console|ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100|' \
+    "${OVL}/etc/inittab"
 fi
 
 # Copy shared scripts and configs from Debian/ISO packaging
