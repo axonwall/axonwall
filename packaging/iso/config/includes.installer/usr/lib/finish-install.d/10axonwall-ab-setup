@@ -35,6 +35,11 @@ if [ -f /var/lib/partman/axonwall-choices ]; then
   . /var/lib/partman/axonwall-choices
 fi
 
+# Clean SYSTEM_RAID_DISKS of any commas or extra whitespace
+if [ -n "$SYSTEM_RAID_DISKS" ]; then
+  SYSTEM_RAID_DISKS="$(echo "$SYSTEM_RAID_DISKS" | tr ',' ' ' | tr -s ' ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+fi
+
 if [ -f /var/lib/partman/axonwall-luks.pass ]; then
   LUKS_PASSPHRASE="$(cat /var/lib/partman/axonwall-luks.pass 2>/dev/null || true)"
 fi
@@ -236,6 +241,32 @@ if [ -f /var/lib/partman/cloud-config.yaml ]; then
     cp /var/lib/partman/network-config /target/var/lib/cloud/seed/nocloud-net/network-config
   fi
   chmod 0600 /target/var/lib/cloud/seed/nocloud-net/*
+
+  # Inject SSH authorized keys for root if specified in cloud-config
+  mkdir -p /target/root/.ssh
+  chmod 0700 /target/root/.ssh
+
+  # Extract top-level or users: ssh_authorized_keys
+  grep -A 20 -E '^\s*ssh_authorized_keys:' /var/lib/partman/cloud-config.yaml 2>/dev/null | \
+    grep -E '^\s*-\s*ssh-' | sed -e 's/^[[:space:]]*-[[:space:]]*//' >> /target/root/.ssh/authorized_keys || true
+
+  # Also check if user admin or root has ssh_authorized_keys
+  awk '/^\s*-\s*name:\s*(root|admin)/,/^\s*-\s*name:|[a-z_]:/' /var/lib/partman/cloud-config.yaml 2>/dev/null | \
+    grep -E '^\s*-\s*ssh-' | sed -e 's/^[[:space:]]*-[[:space:]]*//' >> /target/root/.ssh/authorized_keys || true
+
+  if [ -s /target/root/.ssh/authorized_keys ]; then
+    # Deduplicate keys and set strict 0600 permissions
+    sort -u /target/root/.ssh/authorized_keys > /target/root/.ssh/authorized_keys.tmp
+    mv /target/root/.ssh/authorized_keys.tmp /target/root/.ssh/authorized_keys
+    chmod 0600 /target/root/.ssh/authorized_keys
+    echo "[+] Injected Cloud-Init SSH authorized keys into /target/root/.ssh/authorized_keys"
+  fi
+
+  # Apply admin password hash to /target/etc/shadow if provided and root hash isn't set yet
+  ci_hash="$(grep -A 8 "auth:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep "admin_password_hash:" | head -n1 | sed -e 's/.*admin_password_hash:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+  if [ -n "$ci_hash" ] && [ -f /target/etc/shadow ]; then
+    in-target usermod -p "$ci_hash" root 2>/dev/null || true
+  fi
 fi
 
 # 3. Synchronize Slot A to Slot B for instant standby readiness

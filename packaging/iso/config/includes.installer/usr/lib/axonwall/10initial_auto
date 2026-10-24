@@ -26,7 +26,8 @@ fi
 
 # Check for attached unattended Cloud-Init or Autoinstall media (NoCloud / AXONCFG / kernel cmdline)
 cloud_user_data=""
-cidata_dev="$(blkid -L cidata 2>/dev/null || blkid -L AXONCFG 2>/dev/null || true)"
+cidata_dev="$(blkid -L cidata 2>/dev/null || blkid -L CIDATA 2>/dev/null || blkid -L AXONCFG 2>/dev/null || blkid -L cloud-init 2>/dev/null || true)"
+
 if [ -n "$cidata_dev" ] && [ -b "$cidata_dev" ]; then
 	mkdir -p /tmp/cidata_mnt
 	if mount -o ro "$cidata_dev" /tmp/cidata_mnt 2>/dev/null; then
@@ -38,6 +39,90 @@ if [ -n "$cidata_dev" ] && [ -b "$cidata_dev" ]; then
 			[ -f /tmp/cidata_mnt/network-config ] && cp /tmp/cidata_mnt/network-config /var/lib/partman/network-config
 		fi
 		umount /tmp/cidata_mnt 2>/dev/null || true
+	fi
+fi
+
+# Fallback: probe cdrom or block devices (/dev/sr0, /dev/sr1, /dev/vdb) if not already found
+if [ ! -f /var/lib/partman/cloud-config.yaml ]; then
+	if [ -f /cdrom/user-data ]; then
+		mkdir -p /var/lib/partman
+		cp /cdrom/user-data /var/lib/partman/cloud-config.yaml
+		[ -f /cdrom/meta-data ] && cp /cdrom/meta-data /var/lib/partman/meta-data
+		[ -f /cdrom/network-config ] && cp /cdrom/network-config /var/lib/partman/network-config
+	elif [ -f /cdrom/cloud-config.yaml ]; then
+		mkdir -p /var/lib/partman
+		cp /cdrom/cloud-config.yaml /var/lib/partman/cloud-config.yaml
+	else
+		for probe_dev in /dev/sr0 /dev/sr1 /dev/vdb /dev/sdb; do
+			if [ -b "$probe_dev" ]; then
+				mkdir -p /tmp/probe_mnt
+				if mount -o ro "$probe_dev" /tmp/probe_mnt 2>/dev/null; then
+					if [ -f /tmp/probe_mnt/user-data ]; then
+						mkdir -p /var/lib/partman
+						cp /tmp/probe_mnt/user-data /var/lib/partman/cloud-config.yaml
+						[ -f /tmp/probe_mnt/meta-data ] && cp /tmp/probe_mnt/meta-data /var/lib/partman/meta-data
+						[ -f /tmp/probe_mnt/network-config ] && cp /tmp/probe_mnt/network-config /var/lib/partman/network-config
+						umount /tmp/probe_mnt 2>/dev/null || true
+						break
+					elif [ -f /tmp/probe_mnt/cloud-config.yaml ]; then
+						mkdir -p /var/lib/partman
+						cp /tmp/probe_mnt/cloud-config.yaml /var/lib/partman/cloud-config.yaml
+						umount /tmp/probe_mnt 2>/dev/null || true
+						break
+					fi
+					umount /tmp/probe_mnt 2>/dev/null || true
+				fi
+			fi
+		done
+	fi
+fi
+
+# Fallback: check kernel cmdline for ds=nocloud;s=... or cloud-config-url=...
+if [ ! -f /var/lib/partman/cloud-config.yaml ] && [ -f /proc/cmdline ]; then
+	url_seed="$(grep -oE '(cloud-config-url=[^ ]+|ds=nocloud;s=[^ ]+)' /proc/cmdline 2>/dev/null | head -n1 || true)"
+	if [ -n "$url_seed" ]; then
+		url="$(echo "$url_seed" | sed -E 's/^(cloud-config-url=|ds=nocloud;s=)//')"
+		case "$url" in
+			http://*|https://*)
+				mkdir -p /var/lib/partman
+				if command -v wget >/dev/null 2>&1; then
+					wget -qO /var/lib/partman/cloud-config.yaml "${url%/}/user-data" 2>/dev/null || wget -qO /var/lib/partman/cloud-config.yaml "$url" 2>/dev/null || true
+				elif command -v curl >/dev/null 2>&1; then
+					curl -sSL -o /var/lib/partman/cloud-config.yaml "${url%/}/user-data" 2>/dev/null || curl -sSL -o /var/lib/partman/cloud-config.yaml "$url" 2>/dev/null || true
+				fi
+				;;
+		esac
+	fi
+fi
+
+# If cloud-config.yaml is present, preseed general system debconf parameters (hostname, password, timezone)
+if [ -f /var/lib/partman/cloud-config.yaml ]; then
+	# 1. Hostname
+	ci_hostname="$(awk '/^hostname:/ {print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -d ' "' | head -n1)"
+	if [ -n "$ci_hostname" ]; then
+		db_set netcfg/get_hostname "$ci_hostname" || true
+		echo "netcfg netcfg/get_hostname string $ci_hostname" | debconf-set-selections 2>/dev/null || true
+	fi
+
+	# 2. Timezone
+	ci_tz="$(awk '/^timezone:/ {print $2}' /var/lib/partman/cloud-config.yaml 2>/dev/null | tr -d ' "' | head -n1)"
+	if [ -n "$ci_tz" ]; then
+		db_set time/zone "$ci_tz" || true
+		echo "time/zone time/zone string $ci_tz" | debconf-set-selections 2>/dev/null || true
+	fi
+
+	# 3. Administrator Root Password / Password Hash
+	ci_pass_hash="$(grep -A 8 "auth:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep "admin_password_hash:" | head -n1 | sed -e 's/.*admin_password_hash:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+	ci_pass_plain="$(grep -A 8 "auth:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep "admin_password:" | head -n1 | sed -e 's/.*admin_password:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+
+	if [ -n "$ci_pass_hash" ]; then
+		db_set passwd/root-password-crypted "$ci_pass_hash" || true
+		echo "passwd/root-password-crypted string $ci_pass_hash" | debconf-set-selections 2>/dev/null || true
+	elif [ -n "$ci_pass_plain" ]; then
+		db_set passwd/root-password "$ci_pass_plain" || true
+		db_set passwd/root-password-again "$ci_pass_plain" || true
+		echo "passwd/root-password password $ci_pass_plain" | debconf-set-selections 2>/dev/null || true
+		echo "passwd/root-password-again password $ci_pass_plain" | debconf-set-selections 2>/dev/null || true
 	fi
 fi
 
@@ -96,11 +181,33 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	# 1. Unattended Cloud-Init Seed Mode vs Interactive Prompts
 	if [ -f /var/lib/partman/cloud-config.yaml ]; then
 		logger -t axonwall-installer "Detected attached Cloud-Init seed (/var/lib/partman/cloud-config.yaml); applying declarative storage..."
-		# Try to parse target disk from cloud-config.yaml or fall back to first detected auto disk
-		c_target="$(grep -A 5 'target_disks:' /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -E '^\s*-\s*/dev/' | head -n1 | tr -d ' -"' || true)"
+		# Try to parse target disk(s) from cloud-config.yaml or fall back to first detected auto disk
+		c_target_disks="$(grep -A 8 'target_disks:' /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -E '^\s*-\s*/dev/' | tr -d ' -"' || true)"
+		c_target="$(echo "$c_target_disks" | head -n1)"
 		if [ -n "$c_target" ] && [ -b "$c_target" ]; then
 			dev_name="$c_target"
 			disk="$(dev_to_partman "$c_target" 2>/dev/null || echo "$c_target")"
+		fi
+
+		# Check for declarative system_raid configuration in cloud-config
+		if grep -A 6 "system_raid:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -q "enabled:\s*true"; then
+			if [ -n "$c_target_disks" ]; then
+				valid_raid_disks=""
+				for d_candidate in $c_target_disks; do
+					if [ -b "$d_candidate" ]; then
+						valid_raid_disks="${valid_raid_disks:+$valid_raid_disks }$d_candidate"
+					fi
+				done
+				v_count=$(echo "$valid_raid_disks" | wc -w | tr -d ' ')
+				if [ "$v_count" -ge 2 ]; then
+					system_raid_mode="mirror"
+					system_raid_disks="$valid_raid_disks"
+					first_disk="$(echo "$system_raid_disks" | awk '{print $1}')"
+					dev_name="$first_disk"
+					disk="$(dev_to_partman "$first_disk" 2>/dev/null || echo "$first_disk")"
+					logger -t axonwall-installer "Configured declarative System RAID-1 mirror across: $system_raid_disks"
+				fi
+			fi
 		fi
 
 		# Custom EFI size
@@ -191,8 +298,8 @@ if [ "$method" ] && [ -z "$disks" ]; then
 				;;
 		esac
 
-		# If Custom Wizard and multiple disks detected, offer System RAID-1 mirror
-		if [ "$partition_mode" = "wizard" ] && [ "$disk_count" -ge 2 ]; then
+		# If 2 or more physical disks detected, offer System RAID-1 mirror across disks
+		if [ "$disk_count" -ge 2 ]; then
 			db_input critical axonwall/system_raid_mode || true
 			db_go || true
 			db_get axonwall/system_raid_mode || true
@@ -209,6 +316,9 @@ if [ "$method" ] && [ -z "$disks" ]; then
 						dev_name="$primary_dev"
 						disk="$(dev_to_partman "$primary_dev" 2>/dev/null || echo "$primary_dev")"
 					fi
+					;;
+				*)
+					system_raid_mode="single"
 					;;
 			esac
 		fi
