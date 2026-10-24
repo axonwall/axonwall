@@ -39,7 +39,7 @@ export default function SystemUpdatesPage() {
       name: 'Slot A (Primary Rootfs)',
       isActive: true,
       isHealthy: true,
-      version: '0.11.16',
+      version: '0.11.17',
       kernel: 'Linux 6.12.111+deb13-amd64',
       device: '/dev/sda2',
       label: 'axon_root_a',
@@ -51,7 +51,7 @@ export default function SystemUpdatesPage() {
       name: 'Slot B (Alternate Standby)',
       isActive: false,
       isHealthy: true,
-      version: '0.11.16 (Standby)',
+      version: '0.11.17 (Standby)',
       kernel: 'Linux 6.12.111+deb13-amd64',
       device: '/dev/sda3',
       label: 'axon_root_b',
@@ -209,7 +209,7 @@ export default function SystemUpdatesPage() {
         }
       }
     } catch {
-      alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.11.16.');
+      alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.11.17.');
     } finally {
       setIsCheckingCloud(false);
     }
