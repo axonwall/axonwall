@@ -181,25 +181,37 @@ func getInterfaces() []InterfaceInfo {
 	return list
 }
 
+func normalizeAssignedDevice(dev string) string {
+	dev = strings.TrimSpace(dev)
+	switch strings.ToLower(dev) {
+	case "", "none", "-", "<none>", "unassigned", "disabled", "null", "auto":
+		return ""
+	}
+	return dev
+}
+
 func getInterfaceAssignments() (wan, lan, opt1, opt2 string) {
 	wan = "eth0"
 	lan = "eth1"
+	hasConf := false
 	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+		hasConf = true
+		lan = ""
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "WAN_INTERFACE=") {
-				wan = strings.TrimPrefix(line, "WAN_INTERFACE=")
+				wan = normalizeAssignedDevice(strings.TrimPrefix(line, "WAN_INTERFACE="))
 			} else if strings.HasPrefix(line, "LAN_INTERFACE=") {
-				lan = strings.TrimPrefix(line, "LAN_INTERFACE=")
+				lan = normalizeAssignedDevice(strings.TrimPrefix(line, "LAN_INTERFACE="))
 			} else if strings.HasPrefix(line, "OPT1_INTERFACE=") {
-				opt1 = strings.TrimPrefix(line, "OPT1_INTERFACE=")
+				opt1 = normalizeAssignedDevice(strings.TrimPrefix(line, "OPT1_INTERFACE="))
 			} else if strings.HasPrefix(line, "OPT2_INTERFACE=") {
-				opt2 = strings.TrimPrefix(line, "OPT2_INTERFACE=")
+				opt2 = normalizeAssignedDevice(strings.TrimPrefix(line, "OPT2_INTERFACE="))
 			}
 		}
 	}
-	// Fallback to state.json if opt1 or opt2 are empty in interfaces.conf
-	if opt1 == "" || opt2 == "" {
+	// Fallback to state.json if interfaces.conf was not present
+	if !hasConf && (opt1 == "" || opt2 == "") {
 		for _, p := range []string{"/var/lib/axonwall/state.json", "/etc/axonwall/state.json"} {
 			if data, err := os.ReadFile(p); err == nil {
 				var st map[string]interface{}
@@ -208,7 +220,12 @@ func getInterfaceAssignments() (wan, lan, opt1, opt2 string) {
 						for _, item := range ifaces {
 							if m, ok := item.(map[string]interface{}); ok {
 								n, _ := m["name"].(string)
-								d, _ := m["device"].(string)
+								rawDev, _ := m["device"].(string)
+								enabled, hasEnabled := m["enabled"].(bool)
+								if hasEnabled && !enabled {
+									continue
+								}
+								d := normalizeAssignedDevice(rawDev)
 								if d != "" {
 									if n == "opt1" && opt1 == "" {
 										opt1 = d
@@ -228,8 +245,8 @@ func getInterfaceAssignments() (wan, lan, opt1, opt2 string) {
 			}
 		}
 	}
-	// Fallback to detecting physical interfaces if still empty
-	if opt1 == "" || opt2 == "" {
+	// Fallback to detecting physical interfaces if interfaces.conf was not present
+	if !hasConf && (opt1 == "" || opt2 == "") {
 		allIfaces := getInterfaces()
 		var unassigned []string
 		for _, ifc := range allIfaces {
@@ -248,10 +265,15 @@ func getInterfaceAssignments() (wan, lan, opt1, opt2 string) {
 }
 
 func triggerDhcpClient(dev string) {
+	dev = normalizeAssignedDevice(dev)
 	if dev == "" {
 		return
 	}
 	_ = exec.Command("ip", "link", "set", dev, "up").Run()
+	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
+		_ = exec.Command(dhcpcdPath, "-4", dev).Run()
+		return
+	}
 	if udhcpcPath, err := exec.LookPath("udhcpc"); err == nil {
 		pidFile := "/var/run/udhcpc." + dev + ".pid"
 		_ = exec.Command(udhcpcPath, "-b", "-i", dev, "-p", pidFile).Run()
@@ -382,9 +404,7 @@ func readCurrentNetworkConfig() NetworkConfig {
 			k, v := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 			switch k {
 			case "WAN_INTERFACE":
-				if v != "" {
-					cfg.WanDevice = v
-				}
+				cfg.WanDevice = normalizeAssignedDevice(v)
 			case "WAN_MODE":
 				if v != "" {
 					cfg.WanMode = v
@@ -402,9 +422,7 @@ func readCurrentNetworkConfig() NetworkConfig {
 					cfg.WanDNS2 = v
 				}
 			case "LAN_INTERFACE":
-				if v != "" {
-					cfg.LanDevice = v
-				}
+				cfg.LanDevice = normalizeAssignedDevice(v)
 			case "LAN_MODE":
 				if v != "" {
 					cfg.LanMode = v
@@ -416,13 +434,13 @@ func readCurrentNetworkConfig() NetworkConfig {
 			case "LAN_DHCP_ENABLED":
 				cfg.LanDHCP = strings.ToLower(v) == "true" || v == "1"
 			case "OPT1_INTERFACE":
-				cfg.Opt1Device = v
+				cfg.Opt1Device = normalizeAssignedDevice(v)
 			case "OPT1_MODE":
 				cfg.Opt1Mode = v
 			case "OPT1_IPV4_ADDRESS":
 				cfg.Opt1IP = v
 			case "OPT2_INTERFACE":
-				cfg.Opt2Device = v
+				cfg.Opt2Device = normalizeAssignedDevice(v)
 			case "OPT2_MODE":
 				cfg.Opt2Mode = v
 			case "OPT2_IPV4_ADDRESS":
@@ -434,6 +452,11 @@ func readCurrentNetworkConfig() NetworkConfig {
 }
 
 func updateStateJSON(cfg NetworkConfig) {
+	cfg.WanDevice = normalizeAssignedDevice(cfg.WanDevice)
+	cfg.LanDevice = normalizeAssignedDevice(cfg.LanDevice)
+	cfg.Opt1Device = normalizeAssignedDevice(cfg.Opt1Device)
+	cfg.Opt2Device = normalizeAssignedDevice(cfg.Opt2Device)
+
 	statePath := "/etc/axonwall/state.json"
 	_ = os.MkdirAll("/etc/axonwall", 0755)
 	_ = os.MkdirAll("/var/lib/axonwall", 0755)
@@ -463,15 +486,22 @@ func updateStateJSON(cfg NetworkConfig) {
 		}
 	}
 
-	setIface := func(name, device, ifType string, enabled bool, ipAddr, gw, desc string) {
+	setIface := func(name, role, device, ifType string, enabled, dhcpSrv bool, ipAddr, gw, desc string) {
 		entry, exists := ifacesMap[name]
 		if !exists {
 			entry = make(map[string]interface{})
 		}
+		storedDev := device
+		if storedDev == "" {
+			storedDev = "none"
+			enabled = false
+		}
 		entry["name"] = name
-		entry["device"] = device
+		entry["role"] = role
+		entry["device"] = storedDev
 		entry["type"] = ifType
 		entry["enabled"] = enabled
+		entry["dhcpServer"] = dhcpSrv
 		entry["description"] = desc
 		entry["mtu"] = 1500
 		if ifType == "static" && ipAddr != "" {
@@ -487,13 +517,13 @@ func updateStateJSON(cfg NetworkConfig) {
 		ifacesMap[name] = entry
 	}
 
-	setIface("wan", cfg.WanDevice, cfg.WanMode, true, cfg.WanIP, cfg.WanGateway, "WAN Gateway")
-	setIface("lan", cfg.LanDevice, cfg.LanMode, true, cfg.LanIP, "", "LAN Network")
+	setIface("wan", "wan", cfg.WanDevice, cfg.WanMode, cfg.WanDevice != "", false, cfg.WanIP, cfg.WanGateway, "WAN Gateway")
+	setIface("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanDevice != "", cfg.LanMode == "static" && cfg.LanDHCP, cfg.LanIP, "", "LAN Network")
 	if cfg.Opt1Device != "" {
-		setIface("opt1", cfg.Opt1Device, cfg.Opt1Mode, true, cfg.Opt1IP, "", "OPT1 (Attached Network / Non-authoritative)")
+		setIface("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, true, false, cfg.Opt1IP, "", "OPT1 (Joined Network / Non-authoritative)")
 	}
 	if cfg.Opt2Device != "" {
-		setIface("opt2", cfg.Opt2Device, cfg.Opt2Mode, true, cfg.Opt2IP, "", "OPT2 (Attached Network / Non-authoritative)")
+		setIface("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, true, false, cfg.Opt2IP, "", "OPT2 (Joined Network / Non-authoritative)")
 	}
 
 	var updatedList []interface{}
@@ -514,13 +544,25 @@ func updateStateJSON(cfg NetworkConfig) {
 	}
 	state["interfaces"] = updatedList
 
-	// Ensure antiLockout includes LAN and any configured OPT1/OPT2 interfaces
+	// Ensure antiLockout includes all LAN interfaces
 	allowedIfaces := []string{"lan"}
 	if cfg.Opt1Device != "" {
 		allowedIfaces = append(allowedIfaces, "opt1")
 	}
 	if cfg.Opt2Device != "" {
 		allowedIfaces = append(allowedIfaces, "opt2")
+	}
+	for _, name := range originalOrder {
+		if name == "wan" || name == "lan" || name == "opt1" || name == "opt2" {
+			continue
+		}
+		if entry, ok := ifacesMap[name]; ok {
+			roleStr, _ := entry["role"].(string)
+			en, _ := entry["enabled"].(bool)
+			if en && roleStr != "wan" && !strings.HasPrefix(name, "wan") {
+				allowedIfaces = append(allowedIfaces, name)
+			}
+		}
 	}
 	sysMap, _ := state["system"].(map[string]interface{})
 	if sysMap == nil {
@@ -556,11 +598,18 @@ func updateStateJSON(cfg NetworkConfig) {
 	yamlBuilder.WriteString("# ============================================================================\n\n")
 	yamlBuilder.WriteString("interfaces:\n")
 
-	writeYamlIface := func(name, device, ifType, ipAddr, gw, desc string) {
+	writeYamlIface := func(name, role, device, ifType string, dhcpSrv bool, ipAddr, gw, desc string) {
+		enabled := device != "" && device != "none"
+		storedDev := device
+		if storedDev == "" {
+			storedDev = "none"
+		}
 		yamlBuilder.WriteString(fmt.Sprintf("  - name: %s\n", name))
-		yamlBuilder.WriteString(fmt.Sprintf("    device: %s\n", device))
+		yamlBuilder.WriteString(fmt.Sprintf("    role: %s\n", role))
+		yamlBuilder.WriteString(fmt.Sprintf("    device: %s\n", storedDev))
 		yamlBuilder.WriteString(fmt.Sprintf("    type: %s\n", ifType))
-		yamlBuilder.WriteString("    enabled: true\n")
+		yamlBuilder.WriteString(fmt.Sprintf("    enabled: %t\n", enabled))
+		yamlBuilder.WriteString(fmt.Sprintf("    dhcpServer: %t\n", dhcpSrv))
 		if ifType == "static" && ipAddr != "" {
 			yamlBuilder.WriteString(fmt.Sprintf("    ipv4Address: %s\n", ipAddr))
 		}
@@ -571,13 +620,41 @@ func updateStateJSON(cfg NetworkConfig) {
 		yamlBuilder.WriteString(fmt.Sprintf("    description: %q\n", desc))
 	}
 
-	writeYamlIface("wan", cfg.WanDevice, cfg.WanMode, cfg.WanIP, cfg.WanGateway, "WAN Gateway")
-	writeYamlIface("lan", cfg.LanDevice, cfg.LanMode, cfg.LanIP, "", "LAN Network")
+	writeYamlIface("wan", "wan", cfg.WanDevice, cfg.WanMode, false, cfg.WanIP, cfg.WanGateway, "WAN Gateway")
+	writeYamlIface("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanMode == "static" && cfg.LanDHCP, cfg.LanIP, "", "LAN Network")
 	if cfg.Opt1Device != "" {
-		writeYamlIface("opt1", cfg.Opt1Device, cfg.Opt1Mode, cfg.Opt1IP, "", "OPT1 (Attached Network / Non-authoritative)")
+		writeYamlIface("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, false, cfg.Opt1IP, "", "OPT1 (Joined Network / Non-authoritative)")
 	}
 	if cfg.Opt2Device != "" {
-		writeYamlIface("opt2", cfg.Opt2Device, cfg.Opt2Mode, cfg.Opt2IP, "", "OPT2 (Attached Network / Non-authoritative)")
+		writeYamlIface("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, false, cfg.Opt2IP, "", "OPT2 (Joined Network / Non-authoritative)")
+	}
+	for _, name := range originalOrder {
+		if name == "wan" || name == "lan" || name == "opt1" || name == "opt2" {
+			continue
+		}
+		if entry, ok := ifacesMap[name]; ok {
+			devStr, _ := entry["device"].(string)
+			roleStr, _ := entry["role"].(string)
+			if roleStr == "" {
+				if strings.HasPrefix(name, "wan") {
+					roleStr = "wan"
+				} else {
+					roleStr = "lan"
+				}
+			}
+			typeStr, _ := entry["type"].(string)
+			if typeStr == "" {
+				typeStr = "dhcp"
+			}
+			dhcpSrv, _ := entry["dhcpServer"].(bool)
+			ipStr, _ := entry["ipv4Address"].(string)
+			gwStr, _ := entry["ipv4Gateway"].(string)
+			descStr, _ := entry["description"].(string)
+			if descStr == "" {
+				descStr = strings.ToUpper(name) + " Network"
+			}
+			writeYamlIface(name, roleStr, devStr, typeStr, dhcpSrv, ipStr, gwStr, descStr)
+		}
 	}
 
 	// Preserve existing VLANs, bridges, bonds/laggs, and VRFs from existing file
@@ -613,7 +690,12 @@ func updateStateJSON(cfg NetworkConfig) {
 }
 
 func persistNetworkInterfaces(cfg NetworkConfig) {
-	// 1. Write /etc/axonwall/interfaces.conf
+	cfg.WanDevice = normalizeAssignedDevice(cfg.WanDevice)
+	cfg.LanDevice = normalizeAssignedDevice(cfg.LanDevice)
+	cfg.Opt1Device = normalizeAssignedDevice(cfg.Opt1Device)
+	cfg.Opt2Device = normalizeAssignedDevice(cfg.Opt2Device)
+
+	// 1. Write /etc/axonwall/interfaces.conf and /var/lib/axonwall/etc-axonwall/interfaces.conf
 	var conf strings.Builder
 	conf.WriteString(fmt.Sprintf("WAN_INTERFACE=%s\n", cfg.WanDevice))
 	conf.WriteString(fmt.Sprintf("WAN_MODE=%s\n", cfg.WanMode))
@@ -624,7 +706,7 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	conf.WriteString(fmt.Sprintf("LAN_INTERFACE=%s\n", cfg.LanDevice))
 	conf.WriteString(fmt.Sprintf("LAN_MODE=%s\n", cfg.LanMode))
 	conf.WriteString(fmt.Sprintf("LAN_IPV4_ADDRESS=%s\n", cfg.LanIP))
-	conf.WriteString(fmt.Sprintf("LAN_DHCP_ENABLED=%t\n", cfg.LanDHCP))
+	conf.WriteString(fmt.Sprintf("LAN_DHCP_ENABLED=%t\n", cfg.LanDevice != "" && cfg.LanDHCP))
 	conf.WriteString(fmt.Sprintf("OPT1_INTERFACE=%s\n", cfg.Opt1Device))
 	conf.WriteString(fmt.Sprintf("OPT1_MODE=%s\n", cfg.Opt1Mode))
 	conf.WriteString(fmt.Sprintf("OPT1_IPV4_ADDRESS=%s\n", cfg.Opt1IP))
@@ -634,8 +716,10 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 
 	_ = os.MkdirAll("/etc/axonwall", 0755)
 	_ = os.WriteFile("/etc/axonwall/interfaces.conf", []byte(conf.String()), 0644)
+	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0755)
+	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.conf", []byte(conf.String()), 0644)
 
-	// 2. Write /etc/network/interfaces and /etc/network/interfaces.d/axonwall
+	// 2. Write /etc/network/interfaces
 	var ifaces strings.Builder
 	ifaces.WriteString("# /etc/network/interfaces -- Generated by Axonwall\n")
 	ifaces.WriteString("# This file is managed by Axonwall. Manual changes will be overwritten.\n\n")
@@ -744,9 +828,7 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 
 	_ = os.MkdirAll("/etc/network", 0755)
 	_ = os.WriteFile("/etc/network/interfaces", []byte(ifaces.String()), 0644)
-	if _, err := os.Stat("/etc/network/interfaces.d"); err == nil {
-		_ = os.WriteFile("/etc/network/interfaces.d/axonwall", []byte(ifaces.String()), 0644)
-	}
+	_ = os.Remove("/etc/network/interfaces.d/axonwall")
 
 	// 3. Update Web UI state
 	updateStateJSON(cfg)
@@ -1319,32 +1401,45 @@ func actionAssignInterfaces(reader *bufio.Reader) {
 	currentOpt1 := ""
 	currentOpt2 := ""
 	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+		currentLan = ""
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "WAN_INTERFACE=") {
-				currentWan = strings.TrimPrefix(line, "WAN_INTERFACE=")
+				currentWan = normalizeAssignedDevice(strings.TrimPrefix(line, "WAN_INTERFACE="))
 			} else if strings.HasPrefix(line, "LAN_INTERFACE=") {
-				currentLan = strings.TrimPrefix(line, "LAN_INTERFACE=")
+				currentLan = normalizeAssignedDevice(strings.TrimPrefix(line, "LAN_INTERFACE="))
 			} else if strings.HasPrefix(line, "OPT1_INTERFACE=") {
-				currentOpt1 = strings.TrimPrefix(line, "OPT1_INTERFACE=")
+				currentOpt1 = normalizeAssignedDevice(strings.TrimPrefix(line, "OPT1_INTERFACE="))
 			} else if strings.HasPrefix(line, "OPT2_INTERFACE=") {
-				currentOpt2 = strings.TrimPrefix(line, "OPT2_INTERFACE=")
+				currentOpt2 = normalizeAssignedDevice(strings.TrimPrefix(line, "OPT2_INTERFACE="))
 			}
 		}
 	}
 
-	fmt.Printf("\nEnter WAN interface name [%s]: ", currentWan)
+	wanPrompt := "none"
+	if currentWan != "" {
+		wanPrompt = currentWan
+	}
+	fmt.Printf("\nEnter WAN interface name [%s]: ", wanPrompt)
 	wanIface, _ := reader.ReadString('\n')
 	wanIface = strings.TrimSpace(wanIface)
 	if wanIface == "" {
 		wanIface = currentWan
+	} else {
+		wanIface = normalizeAssignedDevice(wanIface)
 	}
 
-	fmt.Printf("Enter LAN interface name [%s]: ", currentLan)
+	lanPrompt := "none"
+	if currentLan != "" {
+		lanPrompt = currentLan
+	}
+	fmt.Printf("Enter LAN interface name [%s]: ", lanPrompt)
 	lanIface, _ := reader.ReadString('\n')
 	lanIface = strings.TrimSpace(lanIface)
 	if lanIface == "" {
 		lanIface = currentLan
+	} else {
+		lanIface = normalizeAssignedDevice(lanIface)
 	}
 
 	opt1Prompt := "none"
@@ -1356,8 +1451,8 @@ func actionAssignInterfaces(reader *bufio.Reader) {
 	opt1Iface = strings.TrimSpace(opt1Iface)
 	if opt1Iface == "" {
 		opt1Iface = currentOpt1
-	} else if strings.ToLower(opt1Iface) == "none" || opt1Iface == "-" {
-		opt1Iface = ""
+	} else {
+		opt1Iface = normalizeAssignedDevice(opt1Iface)
 	}
 
 	opt2Prompt := "none"
@@ -1369,26 +1464,22 @@ func actionAssignInterfaces(reader *bufio.Reader) {
 	opt2Iface = strings.TrimSpace(opt2Iface)
 	if opt2Iface == "" {
 		opt2Iface = currentOpt2
-	} else if strings.ToLower(opt2Iface) == "none" || opt2Iface == "-" {
-		opt2Iface = ""
+	} else {
+		opt2Iface = normalizeAssignedDevice(opt2Iface)
 	}
 
 	if wanIface != "" || lanIface != "" || opt1Iface != "" || opt2Iface != "" {
 		fmt.Printf("\n%sSaving interface assignments...%s\n", colorYellow, colorReset)
 		cfg := readCurrentNetworkConfig()
-		if wanIface != "" {
-			cfg.WanDevice = wanIface
-		}
-		if lanIface != "" {
-			cfg.LanDevice = lanIface
-		}
+		cfg.WanDevice = wanIface
+		cfg.LanDevice = lanIface
 		cfg.Opt1Device = opt1Iface
 		cfg.Opt2Device = opt2Iface
 		persistNetworkInterfaces(cfg)
 
 		fmt.Printf("%s[✓] Successfully assigned interfaces.%s\n", colorGreen, colorReset)
 		fmt.Printf("    WAN:  %s\n    LAN:  %s\n    OPT1: %s\n    OPT2: %s\n",
-			wanIface, lanIface, valueOrNone(opt1Iface), valueOrNone(opt2Iface))
+			valueOrNone(wanIface), valueOrNone(lanIface), valueOrNone(opt1Iface), valueOrNone(opt2Iface))
 	} else {
 		fmt.Println("No changes made.")
 	}
@@ -1634,37 +1725,49 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		return
 	}
 
+	fmt.Printf("\n%s=== Configure %s Interface (%s) ===%s\n", colorCyan, strings.ToUpper(ifName), iface, colorReset)
+	fmt.Println("Select Network Participation & DHCP Authority Mode:")
+	fmt.Println("  1) Authoritative Network — Static IPv4 + Authoritative DHCP Server")
+	fmt.Println("  2) Join Existing Network — DHCP Client (Non-authoritative)")
+	fmt.Println("  3) Join Existing Network — Static IPv4 (Non-authoritative)")
+	defaultModeChoice := "1"
 	if isOpt {
-		fmt.Printf("\n%s[!] NOTE: %s is an attached network interface.%s\n", colorYellow, strings.ToUpper(ifName), colorReset)
-		fmt.Println("    To prevent network conflicts, Axonwall does NOT serve DHCP on attached networks by default.")
-		fmt.Println("\nSelect IP configuration mode:")
-		fmt.Println("  1) DHCP Client (Get IP from existing upstream network DHCP server)")
-		fmt.Println("  2) Static IPv4")
-		fmt.Print("Enter mode [1-2] (default 1): ")
-		modeChoice, _ := reader.ReadString('\n')
-		modeChoice = strings.TrimSpace(modeChoice)
-
-		if modeChoice != "2" {
-			// DHCP Client mode
-			fmt.Printf("\nConfiguring %s (%s) as DHCP client on attached network...\n", strings.ToUpper(ifName), iface)
-			triggerDhcpClient(iface)
-			cfg := readCurrentNetworkConfig()
-			if ifName == "opt1" {
-				cfg.Opt1Device = iface
-				cfg.Opt1Mode = "dhcp"
-				cfg.Opt1IP = ""
-			} else {
-				cfg.Opt2Device = iface
-				cfg.Opt2Mode = "dhcp"
-				cfg.Opt2IP = ""
-			}
-			persistNetworkInterfaces(cfg)
-			fmt.Printf("%s[✓] Interface %s set to UP in DHCP client mode (configuration persisted).%s\n", colorGreen, iface, colorReset)
-			fmt.Printf("%s[✓] Authoritative DHCP Server is DISABLED for %s.%s\n", colorGreen, strings.ToUpper(ifName), colorReset)
-			pause(reader)
-			return
-		}
+		defaultModeChoice = "2"
 	}
+	fmt.Printf("Enter mode [1-3] (default %s): ", defaultModeChoice)
+	modeChoice, _ := reader.ReadString('\n')
+	modeChoice = strings.TrimSpace(modeChoice)
+	if modeChoice == "" {
+		modeChoice = defaultModeChoice
+	}
+
+	if modeChoice == "2" {
+		// Join Existing Network via DHCP Client (Non-authoritative)
+		fmt.Printf("\nConfiguring %s (%s) to join existing network via DHCP client (Non-authoritative)...\n", strings.ToUpper(ifName), iface)
+		triggerDhcpClient(iface)
+		cfg := readCurrentNetworkConfig()
+		if ifName == "lan" {
+			cfg.LanDevice = iface
+			cfg.LanMode = "dhcp"
+			cfg.LanIP = ""
+			cfg.LanDHCP = false
+		} else if ifName == "opt1" {
+			cfg.Opt1Device = iface
+			cfg.Opt1Mode = "dhcp"
+			cfg.Opt1IP = ""
+		} else {
+			cfg.Opt2Device = iface
+			cfg.Opt2Mode = "dhcp"
+			cfg.Opt2IP = ""
+		}
+		persistNetworkInterfaces(cfg)
+		fmt.Printf("%s[✓] Interface %s set to UP in DHCP client mode (configuration persisted).%s\n", colorGreen, iface, colorReset)
+		fmt.Printf("%s[✓] Authoritative DHCP Server is DISABLED for %s.%s\n", colorGreen, strings.ToUpper(ifName), colorReset)
+		pause(reader)
+		return
+	}
+
+	enableDHCP := modeChoice == "1"
 
 	defaultIP := "192.168.1.1"
 	if isOpt {
@@ -1682,19 +1785,6 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	if !ok {
 		pause(reader)
 		return
-	}
-
-	enableDHCP := false
-	if !isOpt {
-		fmt.Print("Enable authoritative DHCP Server on this subnet? (Y/n): ")
-		dhcpAns, _ := reader.ReadString('\n')
-		dhcpAns = strings.ToLower(strings.TrimSpace(dhcpAns))
-		enableDHCP = dhcpAns != "n"
-	} else {
-		fmt.Printf("%sEnable authoritative DHCP Server on %s? (y/N) [Default: N for attached networks]: %s", colorYellow, strings.ToUpper(ifName), colorReset)
-		dhcpAns, _ := reader.ReadString('\n')
-		dhcpAns = strings.ToLower(strings.TrimSpace(dhcpAns))
-		enableDHCP = dhcpAns == "y"
 	}
 
 	cidrFull := fmt.Sprintf("%s/%s", newIP, cidr)
@@ -1726,9 +1816,9 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		fmt.Printf("%s[✓] IP Address %s assigned to %s successfully.%s\n", colorGreen, cidrFull, iface, colorReset)
 		fmt.Printf("%s[✓] Configuration persisted to /etc/network/interfaces and /etc/axonwall/interfaces.conf.%s\n", colorGreen, colorReset)
 		if enableDHCP {
-			fmt.Printf("%s[✓] DHCP range enabled for %s.%s\n", colorGreen, iface, colorReset)
+			fmt.Printf("%s[✓] Authoritative DHCP Server ENABLED for %s.%s\n", colorGreen, iface, colorReset)
 		} else {
-			fmt.Printf("%s[✓] Authoritative DHCP Server is DISABLED for %s (Safe for attached networks).%s\n", colorGreen, strings.ToUpper(ifName), colorReset)
+			fmt.Printf("%s[✓] Authoritative DHCP Server is DISABLED for %s (Joined existing network).%s\n", colorGreen, strings.ToUpper(ifName), colorReset)
 		}
 	} else {
 		fmt.Printf("%s[!] Failed to assign IP address: %s%s\n", colorRed, string(out), colorReset)

@@ -79,6 +79,14 @@ func LoadRoutingConfig() (*RoutingDomainConfig, error) {
 	return &RoutingDomainConfig{Routes: []StaticRouteConfig{}}, nil
 }
 
+func isPlaceholderNetdev(dev string) bool {
+	switch strings.ToLower(strings.TrimSpace(dev)) {
+	case "", "none", "-", "<none>", "unassigned", "disabled", "null", "auto":
+		return true
+	}
+	return false
+}
+
 // loadInterfaceDeviceMap builds a mapping from logical interface names (wan, lan, opt1, etc.)
 // to system kernel net devices (e.g. ens19, ens18, eth0, etc.).
 func loadInterfaceDeviceMap() map[string]string {
@@ -95,6 +103,9 @@ func loadInterfaceDeviceMap() map[string]string {
 				parts := strings.SplitN(line, "=", 2)
 				k := strings.TrimSpace(parts[0])
 				v := strings.TrimSpace(parts[1])
+				if isPlaceholderNetdev(v) {
+					continue
+				}
 				switch k {
 				case "WAN_INTERFACE":
 					devMap["wan"] = v
@@ -104,6 +115,13 @@ func loadInterfaceDeviceMap() map[string]string {
 					devMap["opt1"] = v
 				case "OPT2_INTERFACE":
 					devMap["opt2"] = v
+				default:
+					if strings.HasPrefix(k, "IFACE_") && strings.HasSuffix(k, "_DEVICE") {
+						rawName := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(k, "IFACE_"), "_DEVICE"))
+						if rawName != "" {
+							devMap[rawName] = v
+						}
+					}
 				}
 			}
 			break
@@ -116,7 +134,7 @@ func loadInterfaceDeviceMap() map[string]string {
 			var ifCfg InterfacesConfigYaml
 			if err := yaml.Unmarshal(data, &ifCfg); err == nil {
 				for _, iface := range ifCfg.Interfaces {
-					if iface.Name != "" && iface.Device != "" {
+					if iface.Name != "" && !isPlaceholderNetdev(iface.Device) {
 						devMap[strings.ToLower(iface.Name)] = iface.Device
 					}
 				}
@@ -136,7 +154,7 @@ func loadInterfaceDeviceMap() map[string]string {
 			}
 			if err := json.Unmarshal(data, &state); err == nil {
 				for _, iface := range state.Interfaces {
-					if iface.Name != "" && iface.Device != "" {
+					if iface.Name != "" && !isPlaceholderNetdev(iface.Device) {
 						if _, exists := devMap[strings.ToLower(iface.Name)]; !exists {
 							devMap[strings.ToLower(iface.Name)] = iface.Device
 						}
@@ -153,7 +171,7 @@ func loadInterfaceDeviceMap() map[string]string {
 // resolveInterfaceDevice resolves an interface string (e.g. "lan" or "ens18") to an actual net device.
 func resolveInterfaceDevice(ifaceName string, devMap map[string]string) string {
 	ifaceName = strings.TrimSpace(ifaceName)
-	if ifaceName == "" || strings.EqualFold(ifaceName, "auto") {
+	if isPlaceholderNetdev(ifaceName) {
 		return ""
 	}
 
@@ -164,7 +182,7 @@ func resolveInterfaceDevice(ifaceName string, devMap map[string]string) string {
 
 	// Check logical name mapping
 	lower := strings.ToLower(ifaceName)
-	if mapped, ok := devMap[lower]; ok && mapped != "" {
+	if mapped, ok := devMap[lower]; ok && !isPlaceholderNetdev(mapped) {
 		if _, err := net.InterfaceByName(mapped); err == nil {
 			return mapped
 		}

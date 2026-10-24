@@ -1,4 +1,4 @@
-import { type DesiredState, type FirewallRule, type NatRule, type Alias, normalizeAntiLockoutInterfaces } from '../../schemas/index.js';
+import { type DesiredState, type FirewallRule, type NatRule, type Alias, normalizeAntiLockoutInterfaces, inferInterfaceRole } from '../../schemas/index.js';
 import { sanitizeIdentifier, isValidDevice } from '../../util/index.js';
 import { resolveCapabilities } from '../../plugins/index.js';
 import { compileSuricata } from '../suricata/index.js';
@@ -24,7 +24,7 @@ function buildNasAndK3sInputRules(
 ): string[] {
   const hostRules: string[] = [];
   const trustedDevs = state.interfaces
-    .filter((i) => i.enabled && i.name !== 'wan' && isValidDevice(i.device))
+    .filter((i) => i.enabled && inferInterfaceRole(i) !== 'wan' && isValidDevice(i.device))
     .map((i) => `"${i.device}"`);
 
   if (state.ha?.enabled && state.ha.syncInterface) {
@@ -204,11 +204,18 @@ export function compileNftables(state: DesiredState): CompileResult {
     reloadServices.push('frr');
   }
 
-  // Helper to map interfaces to system devices
+  // Helper to map interfaces to system devices and roles
   const ifDeviceMap = new Map<string, string>();
+  const ifRoleMap = new Map<string, 'wan' | 'lan'>();
   for (const iface of state.interfaces) {
     ifDeviceMap.set(iface.name, iface.device);
+    ifRoleMap.set(iface.name, inferInterfaceRole(iface));
   }
+  const isWanInterfaceName = (ifaceName: string): boolean => {
+    const mapped = ifRoleMap.get(ifaceName);
+    if (mapped) return mapped === 'wan';
+    return inferInterfaceRole({ name: ifaceName }) === 'wan';
+  };
 
   // When core-firewall plugin is disabled, emit a clean Host-Mode Appliance Ruleset
   if (!capabilities.firewallEnabled) {
@@ -232,7 +239,7 @@ export function compileNftables(state: DesiredState): CompileResult {
       const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
       const ports = state.system.antiLockout.ports.join(', ');
       for (const ifaceName of ifaceList) {
-        if (ifaceName !== 'wan') {
+        if (!isWanInterfaceName(ifaceName)) {
           const dev = ifDeviceMap.get(ifaceName) || ifaceName;
           if (isValidDevice(dev)) {
             const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
@@ -390,7 +397,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     const tlsConfig = state.suricata.tlsDecryption;
     lines.push(`    # TLS Decryption Interception`);
     for (const iface of state.interfaces) {
-      if (iface.enabled && iface.name !== 'wan' && isValidDevice(iface.device)) {
+      if (iface.enabled && inferInterfaceRole(iface) !== 'wan' && isValidDevice(iface.device)) {
         const dev = iface.device;
         lines.push(`    iifname "${dev}" tcp dport 443 redirect to :${tlsConfig.transparentProxyPort} comment "tls-decryption-intercept"`);
       }
@@ -436,7 +443,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
     const ports = state.system.antiLockout.ports.join(', ');
     for (const ifaceName of ifaceList) {
-      if (ifaceName !== 'wan') {
+      if (!isWanInterfaceName(ifaceName)) {
         const dev = ifDeviceMap.get(ifaceName) || ifaceName;
         if (isValidDevice(dev)) {
           lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
@@ -545,7 +552,14 @@ export function compileNftables(state: DesiredState): CompileResult {
   if (!state.nat.some((n) => n.type === 'masquerade' || n.type === 'snat')) {
     const gatewayIfaces = new Set((state.gateways || []).filter((g) => g.enabled).map((g) => g.interface));
     if (gatewayIfaces.size === 0) {
-      gatewayIfaces.add('wan');
+      for (const iface of state.interfaces) {
+        if (iface.enabled && inferInterfaceRole(iface) === 'wan') {
+          gatewayIfaces.add(iface.name);
+        }
+      }
+      if (gatewayIfaces.size === 0) {
+        gatewayIfaces.add('wan');
+      }
     }
     for (const gwIfaceName of gatewayIfaces) {
       const iface = state.interfaces.find((i) => i.name === gwIfaceName);
@@ -562,11 +576,12 @@ export function compileNftables(state: DesiredState): CompileResult {
   // 5. Per-Interface Input and Forward Chains
   for (const iface of state.interfaces) {
     if (!iface.enabled) continue;
+    const isWan = inferInterfaceRole(iface) === 'wan';
 
     // For WAN interfaces, local input rules MUST be explicitly assigned to the WAN interface.
     // Floating ('any' / 'floating') rules apply to forwarded transit traffic, but do not open local host input on WAN.
     const inputRules = state.rules
-      .filter((r) => r.enabled && (r.interface === iface.name || (iface.name !== 'wan' && isFloating(r.interface))))
+      .filter((r) => r.enabled && (r.interface === iface.name || (!isWan && isFloating(r.interface))))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     // Forward chain evaluates interface-specific and floating transit rules

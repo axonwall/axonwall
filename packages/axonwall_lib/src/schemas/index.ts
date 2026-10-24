@@ -12,10 +12,15 @@ export const InterfaceTypeSchema = z.enum([
   'loopback',
 ]);
 
+export const InterfaceRoleSchema = z.enum(['wan', 'lan']);
+export type InterfaceRole = z.infer<typeof InterfaceRoleSchema>;
+
 export const InterfaceSchema = z.object({
   id: z.string().uuid().optional(),
-  name: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid interface name'), // e.g. "wan", "lan", "opt1"
-  device: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.:-]+$/, 'Invalid device identifier'), // e.g. "eth0", "enp1s0"
+  name: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid interface name'), // e.g. "wan1", "wan2", "lan1", "lan2"
+  device: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.:-]+$/, 'Invalid device identifier'), // e.g. "eth0", "enp1s0", "ens18"
+  role: InterfaceRoleSchema.optional(),
+  dhcpServer: z.boolean().optional(),
   type: InterfaceTypeSchema.default('static'),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),
@@ -33,6 +38,28 @@ export const InterfaceSchema = z.object({
   }).optional(),
 });
 export type Interface = z.infer<typeof InterfaceSchema>;
+
+export function inferInterfaceRole(iface: { name: string; role?: 'wan' | 'lan' }): 'wan' | 'lan' {
+  if (iface.role === 'wan' || iface.role === 'lan') return iface.role;
+  const n = (iface.name || '').toLowerCase().trim();
+  if (n === 'wan' || n.startsWith('wan')) return 'wan';
+  return 'lan';
+}
+
+export function isInterfaceAuthoritativeDhcp(
+  iface: { name: string; role?: 'wan' | 'lan'; type?: string; dhcpServer?: boolean },
+  dhcp?: { enabled?: boolean; subnets?: Array<{ interface: string; enabled?: boolean }> },
+): boolean {
+  if (inferInterfaceRole(iface) === 'wan') return false;
+  if (iface.type && iface.type !== 'static') return false;
+  if (typeof iface.dhcpServer === 'boolean') return iface.dhcpServer;
+  if (dhcp?.subnets && dhcp.subnets.length > 0) {
+    return dhcp.subnets.some((s) => s.interface === iface.name && (s.enabled ?? true));
+  }
+  const n = (iface.name || '').toLowerCase().trim();
+  if (n.startsWith('opt')) return false;
+  return n === 'lan' || n === 'lan1';
+}
 
 export const AliasTypeSchema = z.enum(['host', 'network', 'port', 'mac', 'urltable', 'geoip', 'asn', 'fqdn']);
 

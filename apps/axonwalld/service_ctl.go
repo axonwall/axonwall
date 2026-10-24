@@ -58,6 +58,8 @@ func dhcpClientRunning(dev string) bool {
 		"/var/run/dhclient." + dev + ".pid",
 		"/var/run/dhcpcd/" + dev + ".pid",
 		"/var/run/dhcpcd-" + dev + ".pid",
+		"/run/dhcpcd/" + dev + ".pid",
+		"/run/dhcpcd-" + dev + ".pid",
 	}
 	for _, pidFile := range pidFiles {
 		data, err := os.ReadFile(pidFile)
@@ -88,10 +90,10 @@ func triggerDhcpClient(dev string) {
 		return
 	}
 	go func() {
-		if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
+		if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
+			_ = exec.Command(dhcpcdPath, "-4", dev).Run()
+		} else if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 			_ = exec.Command(dhclientPath, "-1", "-v", dev).Run()
-		} else if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
-			_ = exec.Command(dhcpcdPath, "-4", "-n", dev).Run()
 		}
 		// After DHCP client negotiates lease, re-reconcile static routes
 		if err := ReconcileStaticRoutes(); err != nil {

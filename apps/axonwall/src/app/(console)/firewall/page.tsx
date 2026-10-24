@@ -15,7 +15,7 @@ import {
   Sliders,
 } from 'lucide-react';
 import { getCurrentDesiredState, applyDesiredState } from '../../../server/agent';
-import type { DesiredState, FirewallRule } from '@axonwall/lib/schemas';
+import { inferInterfaceRole, type DesiredState, type FirewallRule } from '@axonwall/lib/schemas';
 
 const INITIAL_STATE: DesiredState = {
   version: 1,
@@ -32,10 +32,8 @@ const INITIAL_STATE: DesiredState = {
     },
   },
   interfaces: [
-    { name: 'wan', device: 'eth0', type: 'dhcp', enabled: true, description: 'WAN', mtu: 1500 },
-    { name: 'lan', device: 'eth1', type: 'static', enabled: true, description: 'LAN', ipv4Address: '192.168.1.1/24', mtu: 1500 },
-    { name: 'opt1', device: 'eth2', type: 'dhcp', enabled: false, description: 'OPT1 (Attached)', mtu: 1500 },
-    { name: 'opt2', device: 'eth3', type: 'dhcp', enabled: false, description: 'OPT2 (Attached)', mtu: 1500 },
+    { name: 'wan', role: 'wan', device: 'eth0', type: 'dhcp', enabled: true, description: 'WAN', mtu: 1500 },
+    { name: 'lan', role: 'lan', device: 'eth1', type: 'static', enabled: true, dhcpServer: true, description: 'LAN', ipv4Address: '192.168.1.1/24', mtu: 1500 },
   ],
   aliases: [
     { name: 'web_servers', type: 'host', entries: ['192.168.1.10', '192.168.1.20'], description: 'Internal Web Servers', enabled: true },
@@ -313,8 +311,16 @@ export default function FirewallPage() {
       )}
 
       {/* Interface Tabs */}
-      <div className="flex border-b border-slate-800">
-        {(['lan', 'wan', 'opt1', 'opt2', 'all'] as const).map((iface) => (
+      <div className="flex flex-wrap border-b border-slate-800">
+        {Array.from(
+          new Set([
+            ...state.interfaces
+              .filter((i) => i.enabled || i.name === 'lan' || i.name === 'wan')
+              .map((i) => i.name),
+            ...state.rules.map((r) => r.interface).filter((n) => n && n !== 'any'),
+            'all',
+          ])
+        ).map((iface) => (
           <button
             key={iface}
             type="button"
@@ -331,33 +337,47 @@ export default function FirewallPage() {
       </div>
 
       {/* Interface Security Context Callouts */}
-      {selectedInterface === 'wan' && (
-        <div className="p-4 bg-sky-950/40 border border-sky-500/30 rounded-xl flex items-start gap-3">
-          <Shield className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <h4 className="text-sm font-semibold text-sky-300">
-              Default Deny WAN Policy & Management Isolation
-            </h4>
-            <p className="text-xs text-sky-200/80 leading-relaxed">
-              By default, all unsolicited inbound connections from the WAN to the Axonwall host and Web Management Console (ports 2966, 3000, 80, 443) and SSH (port 22) are strictly blocked. Inbound management is restricted to LAN and internal networks to protect the appliance from internet scanning and unauthorized access.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {selectedInterface === 'lan' && (
-        <div className="p-3 bg-emerald-950/30 border border-emerald-500/20 rounded-xl flex items-center justify-between text-xs">
-          <div className="flex items-center gap-2 text-emerald-300">
-            <Shield className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>
-              <strong>System Anti-Lockout Protected:</strong> Web Console (ports 2966, 443, 80) and SSH (port 22) are permitted from LAN to prevent administrator lockout.
-            </span>
-          </div>
-          <span className="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded font-mono text-[10px] uppercase font-semibold">
-            LAN Anti-Lockout Active
-          </span>
-        </div>
-      )}
+      {(() => {
+        const selectedObj = state.interfaces.find((i) => i.name === selectedInterface);
+        const role = selectedObj
+          ? inferInterfaceRole(selectedObj)
+          : selectedInterface.startsWith('wan')
+            ? 'wan'
+            : selectedInterface === 'all'
+              ? null
+              : 'lan';
+        if (role === 'wan') {
+          return (
+            <div className="p-4 bg-sky-950/40 border border-sky-500/30 rounded-xl flex items-start gap-3">
+              <Shield className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <h4 className="text-sm font-semibold text-sky-300">
+                  Default Deny WAN Policy &amp; Management Isolation ({selectedInterface.toUpperCase()})
+                </h4>
+                <p className="text-xs text-sky-200/80 leading-relaxed">
+                  By default, all unsolicited inbound connections from WAN uplinks to the Axonwall host and Web Management Console (ports 2966, 3000, 80, 443) and SSH (port 22) are strictly blocked. Inbound management is restricted to LAN and internal networks to protect the appliance from internet scanning and unauthorized access.
+                </p>
+              </div>
+            </div>
+          );
+        }
+        if (role === 'lan') {
+          return (
+            <div className="p-3 bg-emerald-950/30 border border-emerald-500/20 rounded-xl flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2 text-emerald-300">
+                <Shield className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>
+                  <strong>System Anti-Lockout Protected ({selectedInterface.toUpperCase()}):</strong> Web Console (ports 2966, 443, 80) and SSH (port 22) are permitted on LAN interfaces to prevent administrator lockout.
+                </span>
+              </div>
+              <span className="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 rounded font-mono text-[10px] uppercase font-semibold">
+                LAN Anti-Lockout Active
+              </span>
+            </div>
+          );
+        }
+        return null;
+      })()}
 
       {/* Rules Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">

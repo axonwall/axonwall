@@ -1,4 +1,4 @@
-import type { DhcpConfig, Interface } from '../../schemas/index.js';
+import { type DhcpConfig, type Interface, inferInterfaceRole } from '../../schemas/index.js';
 import { isValidDevice } from '../../util/index.js';
 
 export interface KeaCompileResult {
@@ -7,11 +7,24 @@ export interface KeaCompileResult {
 
 export function compileKeaDhcp4(dhcp: DhcpConfig, interfaces: Interface[]): KeaCompileResult {
   const ifDeviceMap = new Map<string, string>();
+  const ifaceByName = new Map<string, Interface>();
   for (const iface of interfaces) {
     ifDeviceMap.set(iface.name, iface.device);
+    ifaceByName.set(iface.name, iface);
   }
 
-  const activeSubnets = dhcp.subnets.filter((s) => s.enabled);
+  const activeSubnets = dhcp.subnets.filter((s) => {
+    if (!s.enabled) return false;
+    const iface = ifaceByName.get(s.interface);
+    if (iface) {
+      if (!iface.enabled || !isValidDevice(iface.device)) return false;
+      if (inferInterfaceRole(iface) === 'wan') return false;
+      if (iface.type !== 'static') return false;
+      if (iface.dhcpServer === false) return false;
+    }
+    const dev = ifDeviceMap.get(s.interface) || s.interface;
+    return isValidDevice(dev);
+  });
   const activeInterfaces = Array.from(
     new Set(activeSubnets.map((s) => ifDeviceMap.get(s.interface) || s.interface).filter(isValidDevice))
   );

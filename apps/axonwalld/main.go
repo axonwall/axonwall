@@ -668,29 +668,50 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 	}, nil
 }
 
-func applyBootInterfaces() {
-	confPath := "/etc/axonwall/interfaces.conf"
-	data, err := os.ReadFile(confPath)
+func sanitizeEtcNetworkInterfaces() {
+	_ = os.Remove("/etc/network/interfaces.d/axonwall")
+	ifData, err := os.ReadFile("/etc/network/interfaces")
 	if err != nil {
 		return
 	}
-
-	config := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+	content := string(ifData)
+	if !strings.Contains(content, "auto none") && !strings.Contains(content, "iface none") {
+		return
+	}
+	var cleaned []string
+	skipStanza := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "auto none" {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
-		config[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		if strings.HasPrefix(trimmed, "iface none ") {
+			skipStanza = true
+			continue
+		}
+		if skipStanza {
+			if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+				continue
+			}
+			skipStanza = false
+		}
+		cleaned = append(cleaned, line)
 	}
+	_ = os.WriteFile("/etc/network/interfaces", []byte(strings.Join(cleaned, "\n")), 0644)
+}
 
-	// Validate the file's values before they reach `ip` argv or
-	// /etc/resolv.conf (audit D-S10): interface names follow the same
-	// shape the packet-capture path enforces, DNS servers and the
-	// gateway must be real IPs, static addresses must parse.
+type bootIfaceSpec struct {
+	Name    string
+	Role    string // "wan" or "lan"
+	Device  string
+	Mode    string // "dhcp" or "static"
+	IPv4    string
+	Gateway string
+}
+
+func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 	validDev := func(dev string) string {
-		if dev == "" || strings.HasPrefix(dev, "-") {
+		if dev == "" || strings.HasPrefix(dev, "-") || isPlaceholderNetdev(dev) {
 			return ""
 		}
 		for _, r := range dev {
@@ -715,41 +736,207 @@ func applyBootInterfaces() {
 		return cidr
 	}
 
-	wanDev := validDev(config["WAN_INTERFACE"])
-	wanMode := config["WAN_MODE"]
-	wanIP := validCIDR(config["WAN_IPV4_ADDRESS"])
-	wanGw := validIP(config["WAN_IPV4_GATEWAY"])
+	byName := make(map[string]bootIfaceSpec)
+	var order []string
+	upsert := func(s bootIfaceSpec) {
+		if s.Name == "" || s.Device == "" {
+			return
+		}
+		s.Name = strings.ToLower(s.Name)
+		if s.Role != "wan" && s.Role != "lan" {
+			if strings.HasPrefix(s.Name, "wan") {
+				s.Role = "wan"
+			} else {
+				s.Role = "lan"
+			}
+		}
+		if s.Mode != "static" && s.Mode != "dhcp" {
+			if s.Name == "lan" {
+				s.Mode = "static"
+			} else {
+				s.Mode = "dhcp"
+			}
+		}
+		if _, exists := byName[s.Name]; !exists {
+			order = append(order, s.Name)
+		}
+		byName[s.Name] = s
+	}
+
+	// 1. Legacy 4-slot keys in interfaces.conf
+	if d := validDev(config["WAN_INTERFACE"]); d != "" {
+		upsert(bootIfaceSpec{
+			Name:    "wan",
+			Role:    "wan",
+			Device:  d,
+			Mode:    config["WAN_MODE"],
+			IPv4:    validCIDR(config["WAN_IPV4_ADDRESS"]),
+			Gateway: validIP(config["WAN_IPV4_GATEWAY"]),
+		})
+	}
+	if d := validDev(config["LAN_INTERFACE"]); d != "" {
+		lanMode := config["LAN_MODE"]
+		if lanMode == "" {
+			lanMode = "static"
+		}
+		lanIP := validCIDR(config["LAN_IPV4_ADDRESS"])
+		if lanIP == "" && lanMode == "static" {
+			lanIP = "192.168.1.1/24"
+		}
+		upsert(bootIfaceSpec{
+			Name:   "lan",
+			Role:   "lan",
+			Device: d,
+			Mode:   lanMode,
+			IPv4:   lanIP,
+		})
+	}
+	if d := validDev(config["OPT1_INTERFACE"]); d != "" {
+		upsert(bootIfaceSpec{
+			Name:   "opt1",
+			Role:   "lan",
+			Device: d,
+			Mode:   config["OPT1_MODE"],
+			IPv4:   validCIDR(config["OPT1_IPV4_ADDRESS"]),
+		})
+	}
+	if d := validDev(config["OPT2_INTERFACE"]); d != "" {
+		upsert(bootIfaceSpec{
+			Name:   "opt2",
+			Role:   "lan",
+			Device: d,
+			Mode:   config["OPT2_MODE"],
+			IPv4:   validCIDR(config["OPT2_IPV4_ADDRESS"]),
+		})
+	}
+
+	// 2. N-interface keys (IFACE_<NAME>_DEVICE, etc.) in interfaces.conf
+	for k, v := range config {
+		if strings.HasPrefix(k, "IFACE_") && strings.HasSuffix(k, "_DEVICE") {
+			rawName := strings.TrimSuffix(strings.TrimPrefix(k, "IFACE_"), "_DEVICE")
+			if rawName == "" {
+				continue
+			}
+			dev := validDev(v)
+			if dev == "" {
+				continue
+			}
+			prefix := "IFACE_" + rawName
+			upsert(bootIfaceSpec{
+				Name:    strings.ToLower(rawName),
+				Role:    strings.ToLower(config[prefix+"_ROLE"]),
+				Device:  dev,
+				Mode:    strings.ToLower(config[prefix+"_MODE"]),
+				IPv4:    validCIDR(config[prefix+"_IPV4_ADDRESS"]),
+				Gateway: validIP(config[prefix+"_IPV4_GATEWAY"]),
+			})
+		}
+	}
+
+	// 3. Also merge any enabled interfaces from /etc/axonwall/state.json or /var/lib/axonwall/state.json
+	for _, statePath := range []string{"/etc/axonwall/state.json", "/var/lib/axonwall/state.json"} {
+		raw, err := os.ReadFile(statePath)
+		if err != nil {
+			continue
+		}
+		var parsed struct {
+			Interfaces []struct {
+				Name        string `json:"name"`
+				Role        string `json:"role"`
+				Device      string `json:"device"`
+				Type        string `json:"type"`
+				Enabled     *bool  `json:"enabled"`
+				IPv4Address string `json:"ipv4Address"`
+				IPv4Gateway string `json:"ipv4Gateway"`
+			} `json:"interfaces"`
+		}
+		if json.Unmarshal(raw, &parsed) == nil && len(parsed.Interfaces) > 0 {
+			for _, stIface := range parsed.Interfaces {
+				if stIface.Enabled != nil && !*stIface.Enabled {
+					continue
+				}
+				dev := validDev(stIface.Device)
+				if dev == "" {
+					continue
+				}
+				upsert(bootIfaceSpec{
+					Name:    stIface.Name,
+					Role:    stIface.Role,
+					Device:  dev,
+					Mode:    stIface.Type,
+					IPv4:    validCIDR(stIface.IPv4Address),
+					Gateway: validIP(stIface.IPv4Gateway),
+				})
+			}
+			break
+		}
+	}
+
+	seenDev := make(map[string]bool)
+	var specs []bootIfaceSpec
+	for _, name := range order {
+		s := byName[name]
+		if seenDev[s.Device] {
+			continue
+		}
+		seenDev[s.Device] = true
+		specs = append(specs, s)
+	}
+	return specs
+}
+
+func applyBootInterfaces() {
+	sanitizeEtcNetworkInterfaces()
+
+	config := make(map[string]string)
+	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			config[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+
+	specs := loadAllBootInterfaces(config)
+	if len(specs) == 0 {
+		return
+	}
+
+	validIP := func(ip string) string {
+		if net.ParseIP(ip) == nil {
+			return ""
+		}
+		return ip
+	}
 	wanDNS1 := validIP(config["WAN_DNS1"])
 	wanDNS2 := validIP(config["WAN_DNS2"])
 
-	lanDev := validDev(config["LAN_INTERFACE"])
-	lanIP := validCIDR(config["LAN_IPV4_ADDRESS"])
+	var dhcpDevs []string
+	defaultRouteSet := false
 
-	opt1Dev := validDev(config["OPT1_INTERFACE"])
-	opt1Mode := config["OPT1_MODE"]
-	opt1IP := validCIDR(config["OPT1_IPV4_ADDRESS"])
-
-	opt2Dev := validDev(config["OPT2_INTERFACE"])
-	opt2Mode := config["OPT2_MODE"]
-	opt2IP := validCIDR(config["OPT2_IPV4_ADDRESS"])
-
-	// 1. WAN configuration
-	if wanDev != "" {
-		_ = exec.Command("ip", "link", "set", wanDev, "up").Run()
-		if wanMode == "static" && wanIP != "" {
-			log.Printf("[Agent] Boot-apply: configuring static IP %s on WAN (%s)", wanIP, wanDev)
-			// Check if IP is already configured
-			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", wanDev).CombinedOutput()
-			if !strings.Contains(string(out), strings.Split(wanIP, "/")[0]) {
-				_ = exec.Command("ip", "addr", "flush", "dev", wanDev).Run()
-				if addOut, err := exec.Command("ip", "addr", "add", wanIP, "dev", wanDev).CombinedOutput(); err != nil {
-					log.Printf("[Agent] Boot-apply: failed to assign WAN IP %s: %s", wanIP, string(addOut))
+	for _, spec := range specs {
+		_ = exec.Command("ip", "link", "set", spec.Device, "up").Run()
+		if spec.Mode == "static" && spec.IPv4 != "" {
+			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
+			if !strings.Contains(string(out), strings.Split(spec.IPv4, "/")[0]) {
+				log.Printf("[Agent] Boot-apply: configuring static IP %s on %s (%s, role=%s)", spec.IPv4, spec.Name, spec.Device, spec.Role)
+				if spec.Role == "wan" {
+					_ = exec.Command("ip", "addr", "flush", "dev", spec.Device).Run()
+				}
+				if addOut, err := exec.Command("ip", "addr", "add", spec.IPv4, "dev", spec.Device).CombinedOutput(); err != nil {
+					log.Printf("[Agent] Boot-apply: failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
 				}
 			}
-			if wanGw != "" {
-				_ = exec.Command("ip", "route", "replace", "default", "via", wanGw, "dev", wanDev).Run()
+			if spec.Gateway != "" && (!defaultRouteSet || spec.Role == "wan") {
+				_ = exec.Command("ip", "route", "replace", "default", "via", spec.Gateway, "dev", spec.Device).Run()
+				if spec.Role == "wan" {
+					defaultRouteSet = true
+				}
 			}
-			if wanDNS1 != "" || wanDNS2 != "" {
+			if spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
 				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr != nil || len(strings.TrimSpace(string(rData))) == 0 {
 					var resolv strings.Builder
 					resolv.WriteString("# Generated by Axonwall\n")
@@ -762,120 +949,87 @@ func applyBootInterfaces() {
 					_ = os.WriteFile("/etc/resolv.conf", []byte(resolv.String()), 0644)
 				}
 			}
-		} else if wanMode == "dhcp" {
-			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", wanDev).CombinedOutput()
+		} else if spec.Mode == "dhcp" {
+			dhcpDevs = append(dhcpDevs, spec.Device)
+			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
 			if !strings.Contains(string(out), "inet ") {
-				log.Printf("[Agent] Boot-apply: starting DHCP client on WAN (%s)", wanDev)
-				triggerDhcpClient(wanDev)
+				log.Printf("[Agent] Boot-apply: starting DHCP client on %s (%s, role=%s)", spec.Name, spec.Device, spec.Role)
+				triggerDhcpClient(spec.Device)
 			}
 		}
 	}
 
-	// 2. LAN configuration
-	if lanDev != "" {
-		_ = exec.Command("ip", "link", "set", lanDev, "up").Run()
-		targetLanIP := lanIP
-		if targetLanIP == "" {
-			targetLanIP = "192.168.1.1/24"
-		}
-		out, _ := exec.Command("ip", "-4", "addr", "show", "dev", lanDev).CombinedOutput()
-		if !strings.Contains(string(out), strings.Split(targetLanIP, "/")[0]) {
-			log.Printf("[Agent] Boot-apply: assigning static IP %s to LAN (%s)", targetLanIP, lanDev)
-			_ = exec.Command("ip", "addr", "add", targetLanIP, "dev", lanDev).Run()
-		}
-	}
-
-	// 3. OPT1 configuration
-	if opt1Dev != "" {
-		_ = exec.Command("ip", "link", "set", opt1Dev, "up").Run()
-		if opt1Mode == "static" && opt1IP != "" {
-			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", opt1Dev).CombinedOutput()
-			if !strings.Contains(string(out), strings.Split(opt1IP, "/")[0]) {
-				_ = exec.Command("ip", "addr", "add", opt1IP, "dev", opt1Dev).Run()
-			}
-		} else if opt1Mode == "dhcp" {
-			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", opt1Dev).CombinedOutput()
-			if !strings.Contains(string(out), "inet ") {
-				log.Printf("[Agent] Boot-apply: starting DHCP client on OPT1 (%s)", opt1Dev)
-				triggerDhcpClient(opt1Dev)
-			}
-		}
-	}
-
-	// 4. OPT2 configuration
-	if opt2Dev != "" {
-		_ = exec.Command("ip", "link", "set", opt2Dev, "up").Run()
-		if opt2Mode == "static" && opt2IP != "" {
-			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", opt2Dev).CombinedOutput()
-			if !strings.Contains(string(out), strings.Split(opt2IP, "/")[0]) {
-				_ = exec.Command("ip", "addr", "add", opt2IP, "dev", opt2Dev).Run()
-			}
-		} else if opt2Mode == "dhcp" {
-			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", opt2Dev).CombinedOutput()
-			if !strings.Contains(string(out), "inet ") {
-				log.Printf("[Agent] Boot-apply: starting DHCP client on OPT2 (%s)", opt2Dev)
-				triggerDhcpClient(opt2Dev)
-			}
-		}
-	}
-
-	// 5. Static routes configuration
+	// Static routes configuration
 	if err := ReconcileStaticRoutes(); err != nil {
 		log.Printf("[Agent] Boot-apply: static routes reconciliation: %v", err)
+	}
+
+	// Post-boot DHCP & static route verification once networking.service settles
+	if len(dhcpDevs) > 0 {
+		go func(devs []string) {
+			for _, delay := range []time.Duration{8 * time.Second, 20 * time.Second} {
+				time.Sleep(delay)
+				for _, d := range devs {
+					out, _ := exec.Command("ip", "-4", "addr", "show", "dev", d).CombinedOutput()
+					if !dhcpClientRunning(d) || !strings.Contains(string(out), "inet ") {
+						log.Printf("[Agent] Post-boot check: ensuring DHCP client is active on %s", d)
+						triggerDhcpClient(d)
+					}
+				}
+				_ = ReconcileStaticRoutes()
+			}
+		}(dhcpDevs)
 	}
 }
 
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
-	data, err := os.ReadFile("/etc/axonwall/interfaces.conf")
-	if err != nil {
+	config := make(map[string]string)
+	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			config[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+
+	specs := loadAllBootInterfaces(config)
+	if len(specs) == 0 {
 		return
 	}
-	config := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		config[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-	}
 
-	validDev := func(dev string) string {
-		if dev == "" || strings.HasPrefix(dev, "-") {
-			return ""
-		}
-		for _, r := range dev {
-			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-') {
-				return ""
+	var wanDevs []string
+	wanDevSet := make(map[string]bool)
+	var lanSpecs []bootIfaceSpec
+	internalHasLink := false
+
+	for _, s := range specs {
+		if s.Role == "wan" {
+			wanDevs = append(wanDevs, s.Device)
+			wanDevSet[s.Device] = true
+		} else {
+			lanSpecs = append(lanSpecs, s)
+			if cData, cErr := os.ReadFile(filepath.Join("/sys/class/net", s.Device, "carrier")); cErr == nil && strings.TrimSpace(string(cData)) == "1" {
+				internalHasLink = true
 			}
 		}
-		return dev
 	}
 
-	wanDev := validDev(config["WAN_INTERFACE"])
-	lanDev := validDev(config["LAN_INTERFACE"])
-	opt1Dev := validDev(config["OPT1_INTERFACE"])
-	opt2Dev := validDev(config["OPT2_INTERFACE"])
-
-	internalHasLink := false
-	for _, dev := range []string{lanDev, opt1Dev, opt2Dev} {
-		if dev == "" {
-			continue
-		}
-		if cData, cErr := os.ReadFile(filepath.Join("/sys/class/net", dev, "carrier")); cErr == nil && strings.TrimSpace(string(cData)) == "1" {
-			internalHasLink = true
-			break
-		}
-	}
-
-	// Update /usr/share/axonwall/lockdown.nft so wan_interfaces matches actual topology
+	// Update /usr/share/axonwall/lockdown.nft so wan_interfaces matches actual multi-WAN topology
 	lockdownPath := "/usr/share/axonwall/lockdown.nft"
 	if lData, lErr := os.ReadFile(lockdownPath); lErr == nil {
 		content := string(lData)
-		newElements := `elements = { "wan0" }`
-		if internalHasLink && wanDev != "" && wanDev != "wan0" && wanDev != lanDev && wanDev != opt1Dev && wanDev != opt2Dev {
-			newElements = fmt.Sprintf(`elements = { "wan0", %q }`, wanDev)
+		elems := []string{`"wan0"`}
+		if internalHasLink {
+			for _, wd := range wanDevs {
+				if wd != "" && wd != "wan0" {
+					elems = append(elems, fmt.Sprintf("%q", wd))
+				}
+			}
 		}
+		newElements := fmt.Sprintf("elements = { %s }", strings.Join(elems, ", "))
 		var updatedLines []string
 		for _, line := range strings.Split(content, "\n") {
 			if strings.Contains(line, "elements = {") {
@@ -891,26 +1045,19 @@ func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 		}
 	}
 
-	// Ensure configured internal interfaces (LAN, OPT1, OPT2) are permitted for anti-lockout in inet axonwall input
+	// Ensure all configured LAN interfaces are permitted for anti-lockout in inet axonwall input
 	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
 	currentRules := string(currentRulesOut)
-	for _, entry := range []struct {
-		role string
-		dev  string
-	}{
-		{"lan", lanDev},
-		{"opt1", opt1Dev},
-		{"opt2", opt2Dev},
-	} {
-		if entry.dev == "" || entry.dev == wanDev {
+	for _, entry := range lanSpecs {
+		if entry.Device == "" || wanDevSet[entry.Device] {
 			continue
 		}
-		if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, entry.dev)) {
+		if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, entry.Device)) {
 			_ = exec.Command(
 				"nft", "insert", "rule", "inet", "axonwall", "input",
-				"iifname", entry.dev,
+				"iifname", entry.Device,
 				"tcp", "dport", "{ 22, 80, 443, 2966, 3000 }",
-				"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.role),
+				"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.Name),
 			).Run()
 		}
 	}
@@ -964,9 +1111,10 @@ func syncPersistentYamlConfigs() {
 		}
 	}
 
-	// Also ensure administrative credentials and controller configs are synced
+	// Also ensure administrative credentials, controller configs, and interface assignments are synced
 	syncFile(filepath.Join(srcDir, "admin.env"), filepath.Join(dstDir, "admin.env"), 0600)
 	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0600)
+	syncFile(filepath.Join(srcDir, "interfaces.conf"), filepath.Join(dstDir, "interfaces.conf"), 0644)
 }
 
 func main() {

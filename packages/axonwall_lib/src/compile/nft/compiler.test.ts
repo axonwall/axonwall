@@ -491,4 +491,71 @@ describe('Axonwall nftables Compiler — Device Validation and Flowtable Handlin
     expect(res.nftScript).not.toContain('flowtable ft_fastpath');
     expect(res.nftScript).not.toContain('flow add @ft_fastpath');
   });
+
+  it('supports Multi-WAN, Multi-LAN, and Authoritative vs Joined Network DHCP across N ports', () => {
+    const multiPortState: DesiredState = DesiredStateSchema.parse({
+      system: {
+        flowtableOffload: true,
+        antiLockout: {
+          enabled: true,
+          interface: 'lan1',
+          interfaces: ['lan1', 'lan2', 'mgmt', 'wan1', 'wan2'],
+          ports: [22, 443, 2966],
+        },
+      },
+      interfaces: [
+        { name: 'wan1', role: 'wan', device: 'eth0', type: 'dhcp', enabled: true, dhcpServer: false },
+        { name: 'wan2', role: 'wan', device: 'eth1', type: 'static', enabled: true, dhcpServer: false, ipv4Address: '203.0.113.2/24' },
+        { name: 'lan1', role: 'lan', device: 'eth2', type: 'static', enabled: true, dhcpServer: true, ipv4Address: '192.168.10.1/24' },
+        { name: 'lan2', role: 'lan', device: 'eth3', type: 'static', enabled: true, dhcpServer: false, ipv4Address: '192.168.20.250/24' },
+        { name: 'mgmt', role: 'lan', device: 'eth4', type: 'dhcp', enabled: true, dhcpServer: false },
+      ],
+      dhcp: {
+        enabled: true,
+        subnets: [
+          {
+            interface: 'lan1',
+            subnet: '192.168.10.0/24',
+            poolStart: '192.168.10.100',
+            poolEnd: '192.168.10.200',
+            routers: ['192.168.10.1'],
+          },
+          {
+            interface: 'lan2',
+            subnet: '192.168.20.0/24',
+            poolStart: '192.168.20.100',
+            poolEnd: '192.168.20.200',
+            routers: ['192.168.20.250'],
+          },
+          {
+            interface: 'wan2',
+            subnet: '203.0.113.0/24',
+            poolStart: '203.0.113.100',
+            poolEnd: '203.0.113.200',
+          },
+        ],
+      },
+    });
+
+    const res = compileNftables(multiPortState);
+    // Both WAN interfaces receive outbound NAT masquerading
+    expect(res.nftScript).toContain('oifname "eth0" masquerade comment "default-gateway-masquerade"');
+    expect(res.nftScript).toContain('oifname "eth1" masquerade comment "default-gateway-masquerade"');
+
+    // All LAN interfaces receive anti-lockout rules, while WAN interfaces never do
+    expect(res.nftScript).toContain('iifname "eth2" tcp dport { 22, 443, 2966 } accept comment "anti-lockout-lan1"');
+    expect(res.nftScript).toContain('iifname "eth3" tcp dport { 22, 443, 2966 } accept comment "anti-lockout-lan2"');
+    expect(res.nftScript).toContain('iifname "eth4" tcp dport { 22, 443, 2966 } accept comment "anti-lockout-mgmt"');
+    expect(res.nftScript).not.toContain('anti-lockout-wan1');
+    expect(res.nftScript).not.toContain('anti-lockout-wan2');
+
+    // Kea DHCPv4 only binds to authoritative LAN interfaces (lan1 -> eth2), never joined networks (lan2, mgmt) or WANs (wan2)
+    const keaFile = res.files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
+    expect(keaFile).toBeDefined();
+    const keaParsed = JSON.parse(keaFile!.content);
+    expect(keaParsed.Dhcp4['interfaces-config'].interfaces).toEqual(['eth2']);
+    expect(keaParsed.Dhcp4.subnet4).toHaveLength(1);
+    expect(keaParsed.Dhcp4.subnet4[0].subnet).toBe('192.168.10.0/24');
+  });
 });
+
