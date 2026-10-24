@@ -1,6 +1,6 @@
 {
   "name": "axonwall-monorepo",
-  "version": "0.11.13",
+  "version": "0.11.14",
   "private": true,
   "license": "GPL-2.0-or-later",
   "packageManager": "pnpm@12.9.1",
@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "turbo": "^2.11.8",
+    "turbo": "^2.11.9",
     "typescript": "^5.8.2"
   },
   "resolutions": {

@@ -1,0 +1,6 @@
+# Systemd tmpfiles configuration for Axonwall Vault Edition
+# Type Path Mode User Group Age Argument
+d /var/lib/axonwall/vault 0750 axonwall-vault axonwall-vault - -
+z /etc/axonwall/seaweedfs-s3.json 0640 root axonwall-vault - -
+z /etc/axonwall/certs/hub.key 0640 root axonwall-vault - -
+z /etc/axonwall/certs/hub.crt 0644 root root - -

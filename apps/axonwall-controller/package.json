@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@axonwall/lib": "workspace:*",
-    "ink": "^6.8.0",
+    "ink": "^8.0.0",
     "nastymap": "workspace:*",
     "prom-client": "^15.1.3",
     "react": "^19.3.0",

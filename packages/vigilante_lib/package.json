@@ -19,10 +19,10 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "detect-port": "^2.1.0",
-    "execa": "^8.0.1",
+    "execa": "^10.2.0",
     "fast-xml-parser": "^5.11.0",
     "hostile": "^1.4.0",
-    "ink": "^4.4.1",
+    "ink": "^8.0.0",
     "ink-select-input": "^5.0.0",
     "ink-spinner": "^5.0.0",
     "js-yaml": "^5.3.0",
