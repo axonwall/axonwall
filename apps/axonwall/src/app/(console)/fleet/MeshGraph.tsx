@@ -22,12 +22,26 @@ export function MeshGraph({ nodes }: MeshGraphProps) {
     });
   }, [nodes, cx, cy, radius]);
 
+  if (nodes.length === 0) {
+    return (
+      <div className="w-full flex flex-col justify-center items-center py-12 px-4 bg-slate-900/50 rounded-xl border border-slate-800 text-center">
+        <div className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center mb-3">
+          <div className="w-3 h-3 rounded-full bg-slate-500" />
+        </div>
+        <div className="text-sm font-medium text-slate-300">No SD-WAN Mesh Peers Enrolled</div>
+        <div className="text-xs text-slate-500 mt-1 max-w-md">
+          Enroll a remote OpenWrt or Linux edge appliance via Zero-Touch Provisioning (ZTP) to establish WireGuard mesh tunnels.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="w-full flex justify-center items-center p-4 bg-slate-900/50 rounded-xl border border-slate-800">
       <svg width={width} height={height} className="overflow-visible">
         {/* Draw edges (Full Mesh) */}
         {nodePositions.map((n1, i) =>
-          nodePositions.slice(i + 1).map((n2, j) => (
+          nodePositions.slice(i + 1).map((n2) => (
             <line
               key={`${n1.id}-${n2.id}`}
               x1={n1.x}

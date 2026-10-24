@@ -36394,7 +36394,13 @@ var ZeroTrustAppSchema = external_exports.object({
   publicHostname: external_exports.string().min(1),
   internalUpstream: external_exports.string().min(1),
   // e.g. "http://10.0.0.5:8080"
-  allowedRoles: external_exports.array(external_exports.string()).default(["admin", "user"]),
+  allowedRoles: external_exports.array(external_exports.string()).default(["admin"]),
+  // Deliberate open access: any authenticated session may use the app.
+  // Distinct from an empty allowedRoles list, which the gateway
+  // authorizer treats as admin-only (fail closed, audit B-S3); the
+  // previous 'user' default entry was dropped — it is not an
+  // appliance role (admin | operator | readonly) and never matched.
+  allowAnyAuthenticated: external_exports.boolean().default(false),
   enabled: external_exports.boolean().default(true),
   description: external_exports.string().max(255).default("")
 });
