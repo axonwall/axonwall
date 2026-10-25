@@ -1,6 +1,6 @@
 .PHONY: all clean build-linux-amd64 build-linux-arm64 build-linux-mips
 
-VERSION := 0.11.21
+VERSION := 0.11.22
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 all: clean build-linux-amd64 build-linux-arm64 build-linux-mips
