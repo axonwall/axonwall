@@ -136,7 +136,7 @@ Description: Select OpenZFS pool ('tank') RAID topology:
 
 Template: axonwall/partition_mode
 Type: select
-Choices: Automated A/B Dual-Root (Express - Recommended), Guided A/B Dual-Root (Choose Slot & Swap sizes), Custom Storage Wizard (System RAID-1, OpenZFS, LUKS2, Dedicated /var/log), Manual Partitioning (Debian Custom Partitioner UI)
+Choices: Automated A/B Dual-Root (Express - Recommended), Rolling Standard Linux (Single Root / - No A/B Slots, Full APT Support), Guided A/B Dual-Root (Choose Slot & Swap sizes), Custom Storage Wizard (System RAID-1, OpenZFS, LUKS2, Dedicated /var/log), Manual Partitioning (Debian Custom Partitioner UI)
 Default: Automated A/B Dual-Root (Express - Recommended)
 Description: Select partitioning workflow:
  Choose how you would like to partition the installation drive:
@@ -145,6 +145,10 @@ Description: Select partitioning workflow:
     calculates optimal Slot A, Slot B, and Swap sizes based on disk capacity,
     allocates remaining space to persistent data (/var/lib/axonwall), and
     immediately installs with zero hassle.
+  - Rolling Standard Linux (Single Root /): Standard mutable Debian Linux
+    layout without A/B slots. Allocates a single unified / root filesystem
+    (plus optional ZFS storage pool) so you can install any software and
+    upgrade packages in-place via apt update && apt upgrade.
   - Guided A/B Dual-Root: Classic workflow. Lets you choose your preferred
     system root slot size and swap size, then automatically partitions.
   - Custom Storage Wizard: Granular control over multi-disk RAID-1 mirroring,

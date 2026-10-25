@@ -32,8 +32,9 @@ type HealthCheckResult struct {
 	DurationMs int64       `json:"durationMs"`
 }
 
-// PartitionStatus details the state of the A/B dual-root system and GRUB boot watchdog.
+// PartitionStatus details the state of the A/B dual-root or Rolling single-root system and GRUB boot watchdog.
 type PartitionStatus struct {
+	InstallMode      string              `json:"installMode"`      // "ab" or "rolling"
 	ActiveSlot       string              `json:"activeSlot"`       // "A" or "B"
 	InactiveSlot     string              `json:"inactiveSlot"`     // "B" or "A"
 	ActiveRootDevice string              `json:"activeRootDevice"` // e.g. "/dev/sda2" or "axon_root_a"
@@ -300,13 +301,29 @@ func (we *WatchdogEngine) readSlotVersionFromDiskReal(slot string) string {
 	return readVersionFromDirectory(tmpDir)
 }
 
+func detectInstallMode() string {
+	for _, p := range []string{"/etc/axonwall/install-mode", "/var/lib/axonwall/install-mode"} {
+		if data, err := os.ReadFile(p); err == nil {
+			if strings.Contains(strings.ToLower(string(data)), "rolling") {
+				return "rolling"
+			}
+		}
+	}
+	return "ab"
+}
+
 func (we *WatchdogEngine) detectInitialState() {
 	we.mu.Lock()
 	defer we.mu.Unlock()
 
+	installMode := detectInstallMode()
 	activeSlot, rootDevice := detectActiveSlotFromSystem(we.cmdlinePath)
 	inactiveSlot := "B"
 	if activeSlot == "B" {
+		inactiveSlot = "A"
+	}
+	if installMode == "rolling" {
+		activeSlot = "A"
 		inactiveSlot = "A"
 	}
 
@@ -345,8 +362,10 @@ func (we *WatchdogEngine) detectInitialState() {
 		readDisk = we.readSlotVersionFromDiskReal
 	}
 
-	// The active slot's version is authoritative from the currently running system
-	if activeSlot == "A" {
+	if installMode == "rolling" {
+		slotAVer = appVer
+		slotBVer = "Rolling (Single-Root)"
+	} else if activeSlot == "A" {
 		slotAVer = appVer
 		// For the inactive slot: if missing or identical to active slot (e.g. from previous corrupted persistence),
 		// inspect the physical inactive partition.
@@ -378,6 +397,7 @@ func (we *WatchdogEngine) detectInitialState() {
 	osVer := fmt.Sprintf("Axonwall OS v%s", activeVer)
 
 	we.status = PartitionStatus{
+		InstallMode:      installMode,
 		ActiveSlot:       activeSlot,
 		InactiveSlot:     inactiveSlot,
 		ActiveRootDevice: rootDevice,
@@ -441,6 +461,10 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 	we.mu.Lock()
 	defer we.mu.Unlock()
 
+	if we.status.InstallMode == "" {
+		we.status.InstallMode = detectInstallMode()
+	}
+
 	slotAVer, slotBVer := we.loadSlotVersions()
 	if slotAVer != "" {
 		we.status.SlotAVersion = slotAVer
@@ -450,6 +474,15 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 	}
 
 	appVer := we.getInstalledVersion()
+	if we.status.InstallMode == "rolling" {
+		we.status.ActiveSlot = "A"
+		we.status.InactiveSlot = "A"
+		we.status.SlotAVersion = appVer
+		we.status.SlotBVersion = "Rolling (Single-Root)"
+		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Rolling)", appVer)
+		return we.status
+	}
+
 	readDisk := we.readSlotDiskVersion
 	if readDisk == nil {
 		readDisk = we.readSlotVersionFromDiskReal
@@ -670,6 +703,10 @@ func (we *WatchdogEngine) TriggerRollback() error {
 	we.mu.Lock()
 	defer we.mu.Unlock()
 
+	if we.status.InstallMode == "rolling" || detectInstallMode() == "rolling" {
+		return fmt.Errorf("A/B partition rollback is not available on Rolling Single-Root installations")
+	}
+
 	targetSlot := we.status.InactiveSlot
 	log.Printf("[Watchdog] Triggering safe manual rollback to Slot %s...", targetSlot)
 
@@ -692,6 +729,10 @@ func (we *WatchdogEngine) TriggerRollback() error {
 func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 	we.mu.Lock()
 	defer we.mu.Unlock()
+
+	if we.status.InstallMode == "rolling" || detectInstallMode() == "rolling" {
+		return fmt.Errorf("A/B partition slot switching is not available on Rolling Single-Root installations")
+	}
 
 	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
 	if targetSlot != "A" && targetSlot != "B" {
@@ -720,8 +761,11 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 // ApplyFirmwareUpdate executes the privileged firmware updater for a target slot and version,
 // updates GRUB boot variables, and records the new version on the target slot.
 func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) (string, error) {
+	isRolling := we.status.InstallMode == "rolling" || detectInstallMode() == "rolling"
 	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
-	if targetSlot != "A" && targetSlot != "B" {
+	if isRolling {
+		targetSlot = "A"
+	} else if targetSlot != "A" && targetSlot != "B" {
 		targetSlot = "B"
 	}
 	targetVersion = strings.TrimSpace(strings.TrimPrefix(targetVersion, "v"))
@@ -746,12 +790,17 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 			continue
 		}
 		updaterFound = true
-		cmd := exec.Command(up, "--slot", targetSlot, "--version", targetVersion)
+		var cmd *exec.Cmd
+		if isRolling {
+			cmd = exec.Command(up, "--rolling", "--version", targetVersion)
+		} else {
+			cmd = exec.Command(up, "--slot", targetSlot, "--version", targetVersion)
+		}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("axonwall-update failed for slot %s (v%s): %v: %s", targetSlot, targetVersion, err, strings.TrimSpace(string(out)))
 		}
-		log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s)", targetSlot, targetVersion)
+		log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s, rolling=%v)", targetSlot, targetVersion, isRolling)
 		break
 	}
 	if !updaterFound {
@@ -760,6 +809,18 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 
 	we.mu.Lock()
 	defer we.mu.Unlock()
+
+	if isRolling {
+		we.status.InstallMode = "rolling"
+		we.status.SlotAVersion = targetVersion
+		we.status.SlotBVersion = "Rolling (Single-Root)"
+		we.saveSlotVersionsLocked()
+		if err := os.MkdirAll("/etc/axonwall", 0770); err == nil {
+			_ = os.WriteFile("/etc/axonwall/version", []byte(targetVersion+"\n"), 0644)
+		}
+		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Rolling)", targetVersion)
+		return fmt.Sprintf("Axonwall v%s successfully updated in-place on Rolling Root (/). Services are reloading.", targetVersion), nil
+	}
 
 	_ = we.writeGrubEnvKey("active_slot", targetSlot)
 	_ = we.writeGrubEnvKey("bootcount", "0")

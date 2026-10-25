@@ -1340,6 +1340,97 @@ async function cmdPlugin(args: string[]) {
   }
 }
 
+async function cmdUpdate(args: string[]) {
+  let targetVersion = '';
+  let targetSlot: 'A' | 'B' | undefined;
+  let aptUpgrade = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if ((arg === '--version' || arg === '-v') && args[i + 1]) {
+      targetVersion = args[++i]!;
+    } else if (arg.startsWith('--version=')) {
+      targetVersion = arg.slice('--version='.length);
+    } else if ((arg === '--slot' || arg === '-s') && args[i + 1]) {
+      const s = args[++i]!.toUpperCase();
+      if (s === 'A' || s === 'B') targetSlot = s;
+    } else if (arg === '--apt' || arg === '--apt-upgrade') {
+      aptUpgrade = true;
+    }
+  }
+
+  let installMode: 'ab' | 'rolling' = 'ab';
+  for (const modePath of [path.join(ETC_DIR, 'install-mode'), '/var/lib/axonwall/install-mode']) {
+    try {
+      if (fs.existsSync(modePath) && fs.readFileSync(modePath, 'utf8').toLowerCase().includes('rolling')) {
+        installMode = 'rolling';
+        break;
+      }
+    } catch {}
+  }
+
+  if (installMode === 'rolling') {
+    console.log(`${cCyan}${cBold}=== Axonwall Rolling Standard Linux Updater ===${cReset}`);
+  } else {
+    console.log(`${cCyan}${cBold}=== Axonwall Dual-Root A/B Firmware Updater ===${cReset}`);
+  }
+
+  if (aptUpgrade) {
+    console.log(`[+] Running Debian APT package upgrade (apt-get update && apt-get upgrade -y)...`);
+    const updateRes = spawnSync('apt-get', ['update', '-y'], {
+      stdio: 'inherit',
+      env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+    });
+    if (updateRes.status === 0) {
+      spawnSync(
+        'apt-get',
+        ['-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'upgrade', '-y'],
+        {
+          stdio: 'inherit',
+          env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+        }
+      );
+    }
+  }
+
+  const updaterPaths = ['/usr/local/bin/axonwall-update', '/usr/sbin/axonwall-update'];
+  for (const up of updaterPaths) {
+    if (fs.existsSync(up)) {
+      const cliArgs: string[] = [];
+      if (installMode === 'rolling') {
+        cliArgs.push('--rolling');
+      } else if (targetSlot) {
+        cliArgs.push('--slot', targetSlot);
+      }
+      if (targetVersion) {
+        cliArgs.push('--version', targetVersion);
+      }
+      const res = spawnSync(up, cliArgs, { stdio: 'inherit' });
+      if (res.status !== 0) {
+        process.exit(res.status || 1);
+      }
+      return;
+    }
+  }
+
+  // Fallback to daemon API
+  try {
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/system/update', 'POST', {
+      slot: targetSlot || 'B',
+      version: targetVersion || undefined,
+    });
+    if (resp.success) {
+      console.log(`${cGreen}[✓] ${resp.message}${cReset}`);
+    } else {
+      console.error(`${cRed}[✗] ${resp.message}${cReset}`);
+      process.exit(1);
+    }
+  } catch (err: any) {
+    console.error(`${cRed}[✗] System update failed: ${err?.message || err}${cReset}`);
+    process.exit(1);
+  }
+}
+
 function showHelp() {
   console.log(`${cCyan}${cBold}axonwallctl — Axonwall Declarative YAML CLI (/etc/axonwall/*.yaml)${cReset}
 
@@ -1354,6 +1445,8 @@ ${cBold}COMMANDS:${cReset}
   confirm             Confirm the currently pending configuration commit and disarm auto-rollback
   rollback            Immediately abort pending commit and revert to last-known-good configuration
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
+  update [options]    Update Axonwall packages in-place (Rolling mode) or flash standby slot (A/B mode)
+                      Options: [--apt] [--version <ver>] [--slot <A|B>]
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   cloudinit export    Export running appliance into #cloud-config YAML or bootable NoCloud cidata.iso
@@ -1392,6 +1485,10 @@ async function main() {
       break;
     case 'rollback':
       await cmdRollback();
+      break;
+    case 'update':
+    case 'upgrade':
+      await cmdUpdate(args.slice(1));
       break;
     case 'plugin':
     case 'plugins':

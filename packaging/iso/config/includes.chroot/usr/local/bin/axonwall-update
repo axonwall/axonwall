@@ -7,6 +7,8 @@ set -eu
 TARGET_SLOT="B"
 TARGET_VERSION=""
 UPDATE_CHANNEL="stable"
+FORCE_ROLLING=0
+APT_UPGRADE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -22,21 +24,48 @@ while [ $# -gt 0 ]; do
       UPDATE_CHANNEL="${2:-stable}"
       shift 2
       ;;
+    --rolling)
+      FORCE_ROLLING=1
+      shift
+      ;;
+    --apt|--apt-upgrade)
+      APT_UPGRADE=1
+      shift
+      ;;
     *)
       shift
       ;;
   esac
 done
 
+ROLLING_MODE=0
+if [ "$FORCE_ROLLING" = "1" ]; then
+  ROLLING_MODE=1
+elif [ -f /etc/axonwall/install-mode ] && grep -qi 'rolling' /etc/axonwall/install-mode 2>/dev/null; then
+  ROLLING_MODE=1
+elif [ -f /var/lib/axonwall/install-mode ] && grep -qi 'rolling' /var/lib/axonwall/install-mode 2>/dev/null; then
+  ROLLING_MODE=1
+elif [ ! -e /dev/disk/by-label/axon_root_a ] && [ ! -e /dev/disk/by-label/axon_root_b ] && ! grep -qs -E 'slot=[AB]|axon_root_[ab]' /proc/cmdline 2>/dev/null; then
+  ROLLING_MODE=1
+fi
+
 TARGET_SLOT="$(printf '%s' "$TARGET_SLOT" | tr '[:lower:]' '[:upper:]')"
 if [ "$TARGET_SLOT" != "A" ] && [ "$TARGET_SLOT" != "B" ]; then
-  echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
-  exit 1
+  if [ "$ROLLING_MODE" = "1" ]; then
+    TARGET_SLOT="A"
+  else
+    echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
+    exit 1
+  fi
 fi
 
 echo "================================================================================"
 echo "Axonwall Appliance Firmware Updater"
-echo "  Target Slot   : Slot ${TARGET_SLOT}"
+if [ "$ROLLING_MODE" = "1" ]; then
+  echo "  Install Mode  : Rolling Standard Linux (Single-Root /)"
+else
+  echo "  Install Mode  : Dual-Root A/B (Target: Slot ${TARGET_SLOT})"
+fi
 echo "  Target Version: ${TARGET_VERSION:-latest}"
 echo "  Channel       : ${UPDATE_CHANNEL}"
 echo "================================================================================"
@@ -136,14 +165,17 @@ update_grubenv_file() {
   fi
 }
 
-# 1. Detect target block device
+# 1. Detect target block device (skip when in Rolling Single-Root mode)
 TARGET_LABEL="axon_root_b"
 if [ "$TARGET_SLOT" = "A" ]; then
   TARGET_LABEL="axon_root_a"
 fi
-TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+TARGET_DEV=""
+if [ "$ROLLING_MODE" != "1" ]; then
+  TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+fi
 
-if [ -z "$TARGET_DEV" ]; then
+if [ -z "$TARGET_DEV" ] && [ "$ROLLING_MODE" != "1" ]; then
   # Fallback: identify unlabelled standby partition adjacent to running root partition
   RUNNING_ROOT="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
   if [ -b "$RUNNING_ROOT" ]; then
@@ -455,14 +487,27 @@ if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       rmdir "$SLOT_A_MNT" 2>/dev/null || true
     fi
   fi
-elif [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline; then
+elif [ "$ROLLING_MODE" != "1" ] && ( [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline ); then
   echo "[-] ERROR: Appliance is configured for Dual-Root A/B, but target block device for Slot ${TARGET_SLOT} could not be resolved." >&2
   exit 1
 else
-  echo "[+] Running in standard single-root mode. Performing in-place package update..."
-  mkdir -p /etc/axonwall 2>/dev/null || true
+  echo "[+] Running in Rolling Standard Linux (Single-Root /) mode. Performing in-place update..."
+  mkdir -p /etc/axonwall /var/lib/axonwall 2>/dev/null || true
+
+  if [ "$APT_UPGRADE" = "1" ] || [ "${AXONWALL_APT_UPGRADE:-0}" = "1" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "[+] Updating Debian APT repositories and upgrading system packages..."
+      DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+      DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y || true
+    fi
+  fi
+
   if [ -n "$CLEAN_VER" ]; then
     echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
+    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Rolling",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$SV_TIMESTAMP")"
+    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
   fi
 
   if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
@@ -480,7 +525,13 @@ else
         chown -R axonwall:axonwall-api /opt/axonwall 2>/dev/null || true
       fi
       if [ -d "${PKG_STAGE}/usr/sbin" ]; then
-        cp -f "${PKG_STAGE}/usr/sbin/"* /usr/sbin/ 2>/dev/null || true
+        for sbin_f in "${PKG_STAGE}/usr/sbin/"*; do
+          if [ -e "$sbin_f" ]; then
+            rm -f "/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
+            cp -f "$sbin_f" /usr/sbin/ 2>/dev/null || true
+            chmod 755 "/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
+          fi
+        done
       fi
       if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
         for bin_f in "${PKG_STAGE}/usr/local/bin/axonwall"*; do
@@ -490,11 +541,16 @@ else
           fi
         done
       fi
+      if [ -d "${PKG_STAGE}/lib/systemd/system" ]; then
+        cp -f "${PKG_STAGE}/lib/systemd/system/"*.service /lib/systemd/system/ 2>/dev/null || true
+        cp -f "${PKG_STAGE}/lib/systemd/system/"*.timer /lib/systemd/system/ 2>/dev/null || true
+      fi
     fi
     rm -rf "${PKG_STAGE}"
 
     # Schedule asynchronous service restart after HTTP response finishes so we do not kill axonwall-ui mid-request
     if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload 2>/dev/null || true
       echo "[+] Scheduling asynchronous reload of Axonwall services..."
       nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &
     fi

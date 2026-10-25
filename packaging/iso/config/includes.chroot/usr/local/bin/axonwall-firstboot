@@ -309,20 +309,22 @@ if [[ -f /etc/sudoers.d/axonwall ]]; then
   chmod 0440 /etc/sudoers.d/axonwall 2>/dev/null || true
 fi
 
-# Migrate any existing /home/* into /var/lib/axonwall/home and bind-mount /home
-if ! mountpoint -q /home 2>/dev/null; then
-  if [[ -d /home ]] && [[ -n "$(ls -A /home 2>/dev/null || true)" ]]; then
-    cp -a /home/. /var/lib/axonwall/home/ 2>/dev/null || true
+# Migrate any existing /home/* into /var/lib/axonwall/home and bind-mount /home (only when /var/lib/axonwall is a separate partition in A/B mode)
+if mountpoint -q /var/lib/axonwall 2>/dev/null || [[ -e /dev/disk/by-label/axon_root_b ]]; then
+  if ! mountpoint -q /home 2>/dev/null; then
+    if [[ -d /home ]] && [[ -n "$(ls -A /home 2>/dev/null || true)" ]]; then
+      cp -a /home/. /var/lib/axonwall/home/ 2>/dev/null || true
+    fi
+    chown root:root /var/lib/axonwall/home 2>/dev/null || true
+    chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
+    mount --bind /var/lib/axonwall/home /home 2>/dev/null || true
   fi
-  chown root:root /var/lib/axonwall/home 2>/dev/null || true
-  chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
-  mount --bind /var/lib/axonwall/home /home 2>/dev/null || true
+  if [[ -f /etc/fstab ]] && ! grep -q '/var/lib/axonwall/home' /etc/fstab; then
+    echo '/var/lib/axonwall/home  /home  none  bind  0  0' >> /etc/fstab
+  fi
 fi
 chown root:root /var/lib/axonwall/home /home 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home /home 2>/dev/null || true
-if [[ -f /etc/fstab ]] && ! grep -q '/var/lib/axonwall/home' /etc/fstab; then
-  echo '/var/lib/axonwall/home  /home  none  bind  0  0' >> /etc/fstab
-fi
 
 # Generate secure random appliance secrets if absent
 if [[ ! -s /etc/axonwall/axonwall.env ]]; then

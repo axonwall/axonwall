@@ -2515,6 +2515,7 @@ export interface HealthCheckItem {
 }
 
 export interface SystemPartitionsTelemetry {
+  installMode?: 'ab' | 'rolling';
   slots: PartitionSlotInfo[];
   bootCount: number;
   bootLimit: number;
@@ -2524,47 +2525,78 @@ export interface SystemPartitionsTelemetry {
   checks: HealthCheckItem[];
 }
 
+function detectLocalInstallMode(): 'ab' | 'rolling' {
+  for (const p of ['/etc/axonwall/install-mode', '/var/lib/axonwall/install-mode']) {
+    try {
+      if (fs.existsSync(p) && fs.readFileSync(p, 'utf8').toLowerCase().includes('rolling')) {
+        return 'rolling';
+      }
+    } catch {}
+  }
+  return 'ab';
+}
+
 export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTelemetry> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
   if (session.passwordChangeRequired) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const kernel = os.release() || 'Linux 6.12.111+deb13-amd64';
+  const localInstallMode = detectLocalInstallMode();
 
   // 1. Check daemon API if available
   const daemonData = await callAgentApi<any>('/v1/system/partitions');
   if (daemonData && daemonData.activeSlot) {
+    const installMode: 'ab' | 'rolling' =
+      daemonData.installMode === 'rolling' || localInstallMode === 'rolling' ? 'rolling' : 'ab';
     const activeSlot = daemonData.activeSlot.toUpperCase();
     const defaultInactive = 'Standby';
     const slotAVer = daemonData.slotAVersion || (activeSlot === 'A' ? currentVersion : defaultInactive);
     const slotBVer = daemonData.slotBVersion || (activeSlot === 'B' ? currentVersion : defaultInactive);
     return {
-      slots: [
-        {
-          slot: 'A',
-          name: 'Slot A (Primary Rootfs)',
-          isActive: activeSlot === 'A',
-          isHealthy: daemonData.healthVerified || activeSlot === 'A',
-          version: slotAVer,
-          kernel: daemonData.kernelVersion || kernel,
-          device: activeSlot === 'A' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_a',
-          label: 'axon_root_a',
-          size: '16.0 GB (ext4)',
-          lastUpdated: activeSlot === 'A' ? 'Active Running Slot' : 'Standby Slot',
-        },
-        {
-          slot: 'B',
-          name: 'Slot B (Alternate Standby)',
-          isActive: activeSlot === 'B',
-          isHealthy: daemonData.healthVerified || activeSlot === 'B',
-          version: slotBVer,
-          kernel: daemonData.kernelVersion || kernel,
-          device: activeSlot === 'B' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_b',
-          label: 'axon_root_b',
-          size: '16.0 GB (ext4)',
-          lastUpdated: activeSlot === 'B' ? 'Active Running Slot' : 'Standby Slot',
-        },
-      ],
+      installMode,
+      slots:
+        installMode === 'rolling'
+          ? [
+              {
+                slot: 'A',
+                name: 'Rolling Root Filesystem (/)',
+                isActive: true,
+                isHealthy: true,
+                version: slotAVer,
+                kernel: daemonData.kernelVersion || kernel,
+                device: daemonData.activeRootDevice || '/dev/disk/by-label/axon_root',
+                label: 'axon_root',
+                size: 'Single-Root / (Full Disk ext4)',
+                lastUpdated: 'In-Place Rolling Root + Full APT',
+              },
+            ]
+          : [
+              {
+                slot: 'A',
+                name: 'Slot A (Primary Rootfs)',
+                isActive: activeSlot === 'A',
+                isHealthy: daemonData.healthVerified || activeSlot === 'A',
+                version: slotAVer,
+                kernel: daemonData.kernelVersion || kernel,
+                device: activeSlot === 'A' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_a',
+                label: 'axon_root_a',
+                size: '16.0 GB (ext4)',
+                lastUpdated: activeSlot === 'A' ? 'Active Running Slot' : 'Standby Slot',
+              },
+              {
+                slot: 'B',
+                name: 'Slot B (Alternate Standby)',
+                isActive: activeSlot === 'B',
+                isHealthy: daemonData.healthVerified || activeSlot === 'B',
+                version: slotBVer,
+                kernel: daemonData.kernelVersion || kernel,
+                device: activeSlot === 'B' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_b',
+                label: 'axon_root_b',
+                size: '16.0 GB (ext4)',
+                lastUpdated: activeSlot === 'B' ? 'Active Running Slot' : 'Standby Slot',
+              },
+            ],
       bootCount: daemonData.bootCount ?? 0,
       bootLimit: daemonData.bootLimit ?? 3,
       healthVerified: Boolean(daemonData.healthVerified),
@@ -2605,7 +2637,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
       rootDevice = '/dev/disk/by-label/axon_root_b';
     } else {
       activeSlot = 'A';
-      rootDevice = '/dev/disk/by-label/axon_root_a';
+      rootDevice = localInstallMode === 'rolling' ? '/dev/disk/by-label/axon_root' : '/dev/disk/by-label/axon_root_a';
     }
   } catch {}
 
@@ -2631,32 +2663,49 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   if (activeSlot === 'B') slotBVersion = currentVersion;
 
   return {
-    slots: [
-      {
-        slot: 'A',
-        name: 'Slot A (Primary Rootfs)',
-        isActive: activeSlot === 'A',
-        isHealthy: true,
-        version: slotAVersion,
-        kernel,
-        device: activeSlot === 'A' ? rootDevice : '/dev/disk/by-label/axon_root_a',
-        label: 'axon_root_a',
-        size: '16.0 GB (ext4)',
-        lastUpdated: activeSlot === 'A' ? 'Current System' : 'Standby Slot',
-      },
-      {
-        slot: 'B',
-        name: 'Slot B (Alternate Standby)',
-        isActive: activeSlot === 'B',
-        isHealthy: true,
-        version: slotBVersion,
-        kernel,
-        device: activeSlot === 'B' ? rootDevice : '/dev/disk/by-label/axon_root_b',
-        label: 'axon_root_b',
-        size: '16.0 GB (ext4)',
-        lastUpdated: activeSlot === 'B' ? 'Current System' : 'Standby Slot',
-      },
-    ],
+    installMode: localInstallMode,
+    slots:
+      localInstallMode === 'rolling'
+        ? [
+            {
+              slot: 'A',
+              name: 'Rolling Root Filesystem (/)',
+              isActive: true,
+              isHealthy: true,
+              version: slotAVersion,
+              kernel,
+              device: rootDevice,
+              label: 'axon_root',
+              size: 'Single-Root / (Full Disk ext4)',
+              lastUpdated: 'In-Place Rolling Root + Full APT',
+            },
+          ]
+        : [
+            {
+              slot: 'A',
+              name: 'Slot A (Primary Rootfs)',
+              isActive: activeSlot === 'A',
+              isHealthy: true,
+              version: slotAVersion,
+              kernel,
+              device: activeSlot === 'A' ? rootDevice : '/dev/disk/by-label/axon_root_a',
+              label: 'axon_root_a',
+              size: '16.0 GB (ext4)',
+              lastUpdated: activeSlot === 'A' ? 'Current System' : 'Standby Slot',
+            },
+            {
+              slot: 'B',
+              name: 'Slot B (Alternate Standby)',
+              isActive: activeSlot === 'B',
+              isHealthy: true,
+              version: slotBVersion,
+              kernel,
+              device: activeSlot === 'B' ? rootDevice : '/dev/disk/by-label/axon_root_b',
+              label: 'axon_root_b',
+              size: '16.0 GB (ext4)',
+              lastUpdated: activeSlot === 'B' ? 'Current System' : 'Standby Slot',
+            },
+          ],
     bootCount,
     bootLimit: 3,
     healthVerified: true,
@@ -2804,11 +2853,16 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
     }
 
     // 2. Fallback: Check if system has axonwall-update utility
+    const localInstallMode = detectLocalInstallMode();
     const updaterPaths = ['/usr/local/bin/axonwall-update', '/usr/sbin/axonwall-update'];
     for (const up of updaterPaths) {
       if (fs.existsSync(up)) {
         try {
-          execFileSync(up, ['--slot', cleanSlot, '--version', targetVersion], {
+          const cliArgs =
+            localInstallMode === 'rolling'
+              ? ['--rolling', '--version', targetVersion]
+              : ['--slot', cleanSlot, '--version', targetVersion];
+          execFileSync(up, cliArgs, {
             stdio: 'pipe',
             timeout: 45000,
           });
@@ -2826,14 +2880,16 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       }
     }
 
-    // Update GRUB environment for standby slot
-    try {
-      execFileSync(
-        'grub-editenv',
-        ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
-        { stdio: 'ignore', timeout: 1500 }
-      );
-    } catch {}
+    // Update GRUB environment for standby slot (skip on Rolling Single-Root systems)
+    if (localInstallMode !== 'rolling') {
+      try {
+        execFileSync(
+          'grub-editenv',
+          ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
+          { stdio: 'ignore', timeout: 1500 }
+        );
+      } catch {}
+    }
 
     // Persist per-slot version metadata
     try {

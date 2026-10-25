@@ -160,6 +160,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	disk=""
 	dev_name=""
 	partition_mode="auto"
+	install_mode="ab"
 	efi_mb=512
 	root_fstype="ext4"
 	data_fstype="ext4"
@@ -256,11 +257,22 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		disk_size_gb=$(( disk_sectors * 512 / 1024 / 1024 / 1024 ))
 		[ "$disk_size_gb" -le 0 ] && disk_size_gb=32
 
+		# Detect Rolling Single-Root mode in cloud-config.yaml
+		if grep -qE '(layout|install_mode):[[:space:]]*rolling|ab_slots:[[:space:]]*false' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
+			install_mode="rolling"
+			partition_mode="rolling"
+			logger -t axonwall-installer "Cloud-Init requested Rolling Standard Linux (Single Root / — No A/B Slots)"
+		fi
+
 		root_gb="${root_gb:-16}"
 		swap_gb="${swap_gb:-2}"
 		root_mb=$(( root_gb * 1024 ))
 		swap_mb=$(( swap_gb * 1024 ))
-		remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - logs_gb - 1 ))
+		if [ "$install_mode" = "rolling" ]; then
+			remaining_gb=$(( disk_size_gb - swap_gb - logs_gb - 1 ))
+		else
+			remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - logs_gb - 1 ))
+		fi
 		[ "$remaining_gb" -lt 4 ] && remaining_gb=4
 		data_gb="$remaining_gb"
 
@@ -271,6 +283,11 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			if [ -n "$c_zgb" ] && [ "$c_zgb" -gt 0 ]; then
 				zfs_gb="$c_zgb"
 				data_gb=$(( remaining_gb - zfs_gb ))
+				if [ "$install_mode" = "rolling" ]; then
+					root_gb="$data_gb"
+					[ "$root_gb" -lt 8 ] && root_gb=8
+					root_mb=$(( root_gb * 1024 ))
+				fi
 			fi
 		fi
 		data_mb=$(( data_gb * 1024 ))
@@ -283,18 +300,27 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		case "$RET" in
 			"Automated"*|"Express"*)
 				partition_mode="auto"
+				install_mode="ab"
+				;;
+			"Rolling"*)
+				partition_mode="rolling"
+				install_mode="rolling"
 				;;
 			"Guided"*)
 				partition_mode="guided"
+				install_mode="ab"
 				;;
 			"Custom"*|"Expert"*|"Wizard"*)
 				partition_mode="wizard"
+				install_mode="ab"
 				;;
 			"Manual"*)
 				partition_mode="manual"
+				install_mode="ab"
 				;;
 			*)
 				partition_mode="auto"
+				install_mode="ab"
 				;;
 		esac
 
@@ -339,7 +365,141 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		fi
 
 		# Handle specific partition modes
-		if [ "$partition_mode" = "auto" ]; then
+		if [ "$partition_mode" = "rolling" ]; then
+			# Mode: Rolling Standard Linux (Single Root / — No A/B Slots, Full APT Support)
+			db_input critical axonwall/swap_size || true
+			db_go || true
+			db_get axonwall/swap_size || true
+			swap_choice="$RET"
+
+			swap_gb=2
+			case "$swap_choice" in
+				"No swap"*) swap_gb=0 ;;
+				"4 GB"*) swap_gb=4 ;;
+				"8 GB"*) swap_gb=8 ;;
+				*) swap_gb=2 ;;
+			esac
+			swap_mb=$(( swap_gb * 1024 ))
+
+			remaining_gb=$(( disk_size_gb - swap_gb - 1 ))
+			[ "$remaining_gb" -lt 8 ] && remaining_gb=8
+
+			db_input critical axonwall/zfs_allocation || true
+			db_go || true
+			db_get axonwall/zfs_allocation || true
+			zfs_alloc_choice="$RET"
+
+			zfs_alloc_mode="none"
+			zfs_gb=0
+			root_gb="$remaining_gb"
+
+			case "$zfs_alloc_choice" in
+				"Allocate remaining"*)
+					zfs_alloc_mode="remainder"
+					if [ "$remaining_gb" -ge 48 ]; then
+						root_gb=32
+						zfs_gb=$(( remaining_gb - root_gb ))
+					elif [ "$remaining_gb" -ge 24 ]; then
+						root_gb=16
+						zfs_gb=$(( remaining_gb - root_gb ))
+					else
+						zfs_alloc_mode="none"
+						zfs_gb=0
+					fi
+					;;
+				"Split remaining"*)
+					zfs_alloc_mode="split"
+					root_gb=$(( remaining_gb / 2 ))
+					[ "$root_gb" -lt 8 ] && root_gb=8
+					zfs_gb=$(( remaining_gb - root_gb ))
+					if [ "$zfs_gb" -lt 4 ]; then
+						zfs_gb=0
+						zfs_alloc_mode="none"
+						root_gb="$remaining_gb"
+					fi
+					;;
+				"Custom ZFS"*)
+					zfs_alloc_mode="custom"
+					db_input critical axonwall/custom_zfs_size || true
+					db_go || true
+					db_get axonwall/custom_zfs_size || true
+					c_val="$(echo "$RET" | tr -dc '0-9')"
+					if [ -n "$c_val" ] && [ "$c_val" -ge 1 ] && [ "$remaining_gb" -gt $(( c_val + 8 )) ]; then
+						zfs_gb="$c_val"
+						root_gb=$(( remaining_gb - zfs_gb ))
+					else
+						zfs_gb=0
+						zfs_alloc_mode="none"
+					fi
+					;;
+				*)
+					zfs_alloc_mode="none"
+					zfs_gb=0
+					root_gb="$remaining_gb"
+					;;
+			esac
+
+			root_mb=$(( root_gb * 1024 ))
+			data_gb=0
+			data_mb=0
+			zfs_mb=$(( zfs_gb * 1024 ))
+
+			# Offer extra secondary disks for ZFS if present
+			extra_candidates=""
+			for d in $(get_auto_disks); do
+				d_dev="$(cat "$d/device" 2>/dev/null || echo "$d")"
+				is_sys=0
+				for s_dev in $system_raid_disks; do
+					if [ "$d_dev" = "$s_dev" ]; then
+						is_sys=1
+						break
+					fi
+				done
+				if [ "$is_sys" -eq 0 ] && [ -n "$d_dev" ]; then
+					if [ -z "$extra_candidates" ]; then
+						extra_candidates="$d_dev"
+					else
+						extra_candidates="${extra_candidates}, ${d_dev}"
+					fi
+				fi
+			done
+
+			zfs_extra_disks=""
+			if [ -n "$extra_candidates" ]; then
+				db_subst axonwall/zfs_extra_disks CHOICES "$extra_candidates" || true
+				db_input critical axonwall/zfs_extra_disks || true
+				db_go || true
+				db_get axonwall/zfs_extra_disks || true
+				zfs_extra_disks="$(echo "$RET" | tr -d ',' | tr -s ' ')"
+			fi
+
+			zfs_vdev_count=0
+			if [ "$zfs_mb" -gt 0 ]; then
+				for _s in $system_raid_disks; do
+					zfs_vdev_count=$(( zfs_vdev_count + 1 ))
+				done
+			fi
+			for _e in $zfs_extra_disks; do
+				zfs_vdev_count=$(( zfs_vdev_count + 1 ))
+			done
+
+			zfs_raid_topology="auto"
+			if [ "$zfs_vdev_count" -ge 1 ]; then
+				db_input critical axonwall/zfs_raid_topology || true
+				db_go || true
+				db_get axonwall/zfs_raid_topology || true
+				case "$RET" in
+					"Stripe"*) zfs_raid_topology="stripe" ;;
+					"Mirror"*) zfs_raid_topology="mirror" ;;
+					"RAID-Z1"*) zfs_raid_topology="raidz1" ;;
+					"RAID-Z2"*) zfs_raid_topology="raidz2" ;;
+					"RAID-Z3"*) zfs_raid_topology="raidz3" ;;
+					"dRAID1"*) zfs_raid_topology="draid1" ;;
+					"dRAID2"*) zfs_raid_topology="draid2" ;;
+					*) zfs_raid_topology="auto" ;;
+				esac
+			fi
+		elif [ "$partition_mode" = "auto" ]; then
 			# Mode 1: Express Automated Partitioning (Zero Questions, Optimal Sizing)
 			if [ "$disk_size_gb" -lt 30 ]; then
 				root_gb=8
@@ -736,6 +896,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 
 	cat << EOF > /var/lib/partman/axonwall-choices
 PARTITION_MODE=$(sh_esc "${partition_mode}")
+INSTALL_MODE=$(sh_esc "${install_mode}")
 ROOT_GB=${root_gb}
 ROOT_MB=${root_mb}
 ROOT_FSTYPE=$(sh_esc "${root_fstype}")
@@ -763,8 +924,83 @@ ZFS_RAID_TOPOLOGY=$(sh_esc "${zfs_raid_topology}")
 EOF
 	chmod 0600 /var/lib/partman/axonwall-choices
 
-	# 8. Dynamically construct A/B Dual-Root (+ Optional Logs & ZFS Partition) recipe
-	cat << RECIPE_CONTENT > /tmp/axonwall-ab-recipe
+	# 8. Dynamically construct partition recipe (Rolling Single-Root vs A/B Dual-Root)
+	if [ "$install_mode" = "rolling" ]; then
+		cat << RECIPE_ROLLING_HEADER > /tmp/axonwall-ab-recipe
+axonwall-ab ::
+	1 1 1 free
+		\$iflabel{ gpt }
+		\$reusemethod{ }
+		method{ biosgrub } .
+	${efi_mb} ${efi_mb} ${efi_mb} free
+		\$primary{ }
+		\$iflabel{ msdos gpt }
+		\$reusemethod{ }
+		method{ efi }
+		format{ } .
+RECIPE_ROLLING_HEADER
+
+		if [ "$swap_mb" -gt 0 ]; then
+			cat << SWAP_ROLLING_BLOCK >> /tmp/axonwall-ab-recipe
+	512 ${swap_mb} ${swap_mb} linux-swap
+		method{ swap }
+		format{ } .
+SWAP_ROLLING_BLOCK
+		fi
+
+		if [ "$logs_enabled" -eq 1 ] && [ "$logs_mb" -gt 0 ]; then
+			cat << LOGS_ROLLING_BLOCK >> /tmp/axonwall-ab-recipe
+	512 ${logs_mb} ${logs_mb} ${logs_fstype}
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ${logs_fstype} }
+		mountpoint{ /var/log } .
+LOGS_ROLLING_BLOCK
+		fi
+
+		if [ "$zfs_mb" -gt 0 ]; then
+			if [ "$zfs_alloc_mode" = "custom" ]; then
+				cat << ROOT_ZFS_CUSTOM_BLOCK >> /tmp/axonwall-ab-recipe
+	4096 ${root_mb} ${root_mb} ${root_fstype}
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ${root_fstype} }
+		mountpoint{ / } .
+	1024 ${zfs_mb} ${zfs_mb} ext4
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 } .
+ROOT_ZFS_CUSTOM_BLOCK
+			else
+				cat << ROOT_ZFS_REM_BLOCK >> /tmp/axonwall-ab-recipe
+	4096 ${root_mb} ${root_mb} ${root_fstype}
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ${root_fstype} }
+		mountpoint{ / } .
+	1024 10000 -1 ext4
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 } .
+ROOT_ZFS_REM_BLOCK
+			fi
+		else
+			cat << ROOT_FULL_BLOCK >> /tmp/axonwall-ab-recipe
+	4096 10000 -1 ${root_fstype}
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ${root_fstype} }
+		mountpoint{ / } .
+ROOT_FULL_BLOCK
+		fi
+	else
+		cat << RECIPE_CONTENT > /tmp/axonwall-ab-recipe
 axonwall-ab ::
 	1 1 1 free
 		\$iflabel{ gpt }
@@ -790,16 +1026,16 @@ axonwall-ab ::
 		mountpoint{ /mnt/standby } .
 RECIPE_CONTENT
 
-	if [ "$swap_mb" -gt 0 ]; then
-		cat << SWAP_BLOCK >> /tmp/axonwall-ab-recipe
+		if [ "$swap_mb" -gt 0 ]; then
+			cat << SWAP_BLOCK >> /tmp/axonwall-ab-recipe
 	512 ${swap_mb} ${swap_mb} linux-swap
 		method{ swap }
 		format{ } .
 SWAP_BLOCK
-	fi
+		fi
 
-	if [ "$logs_enabled" -eq 1 ] && [ "$logs_mb" -gt 0 ]; then
-		cat << LOGS_BLOCK >> /tmp/axonwall-ab-recipe
+		if [ "$logs_enabled" -eq 1 ] && [ "$logs_mb" -gt 0 ]; then
+			cat << LOGS_BLOCK >> /tmp/axonwall-ab-recipe
 	512 ${logs_mb} ${logs_mb} ${logs_fstype}
 		method{ format }
 		format{ }
@@ -807,11 +1043,11 @@ SWAP_BLOCK
 		filesystem{ ${logs_fstype} }
 		mountpoint{ /var/log } .
 LOGS_BLOCK
-	fi
+		fi
 
-	if [ "$zfs_mb" -gt 0 ]; then
-		if [ "$zfs_alloc_mode" = "custom" ] || [ "$data_alloc_mode" = "explicit" ]; then
-			cat << DATA_ZFS_CUSTOM_BLOCK >> /tmp/axonwall-ab-recipe
+		if [ "$zfs_mb" -gt 0 ]; then
+			if [ "$zfs_alloc_mode" = "custom" ] || [ "$data_alloc_mode" = "explicit" ]; then
+				cat << DATA_ZFS_CUSTOM_BLOCK >> /tmp/axonwall-ab-recipe
 	512 ${data_mb} ${data_mb} ${data_fstype}
 		method{ format }
 		format{ }
@@ -824,8 +1060,8 @@ LOGS_BLOCK
 		use_filesystem{ }
 		filesystem{ ext4 } .
 DATA_ZFS_CUSTOM_BLOCK
-		else
-			cat << DATA_ZFS_REM_BLOCK >> /tmp/axonwall-ab-recipe
+			else
+				cat << DATA_ZFS_REM_BLOCK >> /tmp/axonwall-ab-recipe
 	512 ${data_mb} ${data_mb} ${data_fstype}
 		method{ format }
 		format{ }
@@ -838,10 +1074,10 @@ DATA_ZFS_CUSTOM_BLOCK
 		use_filesystem{ }
 		filesystem{ ext4 } .
 DATA_ZFS_REM_BLOCK
-		fi
-	else
-		if [ "$data_alloc_mode" = "explicit" ]; then
-			cat << DATA_EXPLICIT_BLOCK >> /tmp/axonwall-ab-recipe
+			fi
+		else
+			if [ "$data_alloc_mode" = "explicit" ]; then
+				cat << DATA_EXPLICIT_BLOCK >> /tmp/axonwall-ab-recipe
 	512 ${data_mb} ${data_mb} ${data_fstype}
 		method{ format }
 		format{ }
@@ -849,8 +1085,8 @@ DATA_ZFS_REM_BLOCK
 		filesystem{ ${data_fstype} }
 		mountpoint{ /var/lib/axonwall } .
 DATA_EXPLICIT_BLOCK
-		else
-			cat << DATA_BLOCK >> /tmp/axonwall-ab-recipe
+			else
+				cat << DATA_BLOCK >> /tmp/axonwall-ab-recipe
 	512 10000 -1 ${data_fstype}
 		method{ format }
 		format{ }
@@ -858,6 +1094,7 @@ DATA_EXPLICIT_BLOCK
 		filesystem{ ${data_fstype} }
 		mountpoint{ /var/lib/axonwall } .
 DATA_BLOCK
+			fi
 		fi
 	fi
 

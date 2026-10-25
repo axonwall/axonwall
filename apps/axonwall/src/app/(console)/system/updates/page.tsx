@@ -60,6 +60,7 @@ export default function SystemUpdatesPage() {
     },
   ]);
 
+  const [installMode, setInstallMode] = useState<'ab' | 'rolling'>('ab');
   const [bootCount, setBootCount] = useState(0);
   const [bootLimit, setBootLimit] = useState(3);
   const [healthVerified, setHealthVerified] = useState(true);
@@ -75,7 +76,8 @@ export default function SystemUpdatesPage() {
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null);
 
   const activeSlot = slots.find((s) => s.isActive) || slots[0];
-  const standbySlot = slots.find((s) => !s.isActive) || slots[1];
+  const standbySlot = slots.find((s) => !s.isActive) || slots[1] || slots[0];
+  const isRollingMode = installMode === 'rolling';
 
   const refreshTelemetryAndRelease = async () => {
     try {
@@ -83,6 +85,9 @@ export default function SystemUpdatesPage() {
       if (resp.ok) {
         const data = await resp.json();
         if (data.telemetry) {
+          if (data.telemetry.installMode === 'rolling' || data.telemetry.installMode === 'ab') {
+            setInstallMode(data.telemetry.installMode);
+          }
           setSlots(data.telemetry.slots);
           setBootCount(data.telemetry.bootCount);
           setBootLimit(data.telemetry.bootLimit);
@@ -103,6 +108,9 @@ export default function SystemUpdatesPage() {
       getReleaseInfo().catch(() => null),
     ]);
     if (telemetry) {
+      if (telemetry.installMode === 'rolling' || telemetry.installMode === 'ab') {
+        setInstallMode(telemetry.installMode);
+      }
       setSlots(telemetry.slots);
       setBootCount(telemetry.bootCount);
       setBootLimit(telemetry.bootLimit);
@@ -216,10 +224,14 @@ export default function SystemUpdatesPage() {
   };
 
   const handleFlashUpgrade = async () => {
-    const targetSlot = standbySlot.slot;
+    const targetSlot = isRollingMode ? 'A' : standbySlot.slot;
     setIsUpgrading(true);
     setUpgradeProgress(15);
-    setUpgradePhase(`Resolving release payload for Slot ${targetSlot}...`);
+    setUpgradePhase(
+      isRollingMode
+        ? 'Resolving release payload for Rolling Root (/)...'
+        : `Resolving release payload for Slot ${targetSlot}...`
+    );
 
     const timer1 = setTimeout(() => {
       setUpgradeProgress(40);
@@ -228,7 +240,11 @@ export default function SystemUpdatesPage() {
 
     const timer2 = setTimeout(() => {
       setUpgradeProgress(75);
-      setUpgradePhase(`Writing firmware payload to ${standbySlot.label} and updating bootloader...`);
+      setUpgradePhase(
+        isRollingMode
+          ? 'Applying in-place package update to / and reloading systemd units...'
+          : `Writing firmware payload to ${standbySlot.label} and updating bootloader...`
+      );
     }, 1500);
 
     try {
@@ -254,10 +270,16 @@ export default function SystemUpdatesPage() {
 
       setTimeout(() => {
         setUpgradeProgress(100);
-        setUpgradePhase('Arming GRUB boot-counting watchdog (bootcount=0, bootlimit=3)...');
+        setUpgradePhase(
+          isRollingMode
+            ? 'In-place update complete! Restarting Axonwall services...'
+            : 'Arming GRUB boot-counting watchdog (bootcount=0, bootlimit=3)...'
+        );
         setTimeout(() => {
           setIsUpgrading(false);
-          setPendingRebootSlot(targetSlot);
+          if (!isRollingMode) {
+            setPendingRebootSlot(targetSlot);
+          }
           setAlertMessage(res.message);
           setSlots((prev) =>
             prev.map((s) =>
@@ -265,7 +287,9 @@ export default function SystemUpdatesPage() {
                 ? {
                     ...s,
                     version: res.newVersion || releaseInfo?.latestVersion || '0.5.0',
-                    lastUpdated: `Updated to v${res.newVersion || releaseInfo?.latestVersion || '0.5.0'} (Next Boot Armed)`,
+                    lastUpdated: isRollingMode
+                      ? `Updated in-place to v${res.newVersion || releaseInfo?.latestVersion || '0.5.0'}`
+                      : `Updated to v${res.newVersion || releaseInfo?.latestVersion || '0.5.0'} (Next Boot Armed)`,
                   }
                 : s
             )
@@ -322,13 +346,17 @@ export default function SystemUpdatesPage() {
             <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
               <RefreshCw className="w-5 h-5" />
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">A/B Dual-Root System Updates</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-white">
+              {isRollingMode ? 'Rolling Standard Linux System Updates' : 'A/B Dual-Root System Updates'}
+            </h1>
             <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              Unbrickable Architecture
+              {isRollingMode ? 'Single-Root / + Full APT' : 'Unbrickable Architecture'}
             </span>
           </div>
           <p className="text-sm text-slate-400 mt-1">
-            Zero-downtime atomic operating system upgrades with GRUB automated boot-counting and kernel health verification.
+            {isRollingMode
+              ? 'Standard Debian 13 single-root (/) installation with in-place Axonwall updates and permanent APT package persistence.'
+              : 'Zero-downtime atomic operating system upgrades with GRUB automated boot-counting and kernel health verification.'}
           </p>
         </div>
 
@@ -347,7 +375,7 @@ export default function SystemUpdatesPage() {
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-xs hover:bg-emerald-400 transition shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
           >
             <UploadCloud className="w-4 h-4" />
-            <span>Flash New Image to Standby</span>
+            <span>{isRollingMode ? 'Apply In-Place Update' : 'Flash New Image to Standby'}</span>
           </button>
         </div>
       </div>
@@ -425,8 +453,8 @@ export default function SystemUpdatesPage() {
         </div>
       )}
 
-      {/* A/B Dual-Root Partition Slots */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      {/* A/B Dual-Root Partition Slots or Single-Root Rolling Card */}
+      <div className={`grid grid-cols-1 ${slots.length > 1 ? 'md:grid-cols-2' : ''} gap-6`}>
         {slots.map((slot) => {
           return (
             <div
@@ -446,7 +474,7 @@ export default function SystemUpdatesPage() {
                         : 'bg-slate-800 text-slate-400 border border-slate-700'
                     }`}
                   >
-                    {slot.slot}
+                    {isRollingMode ? '/' : slot.slot}
                   </div>
                   <div>
                     <h3 className="font-bold text-white text-base flex items-center gap-2">
@@ -460,7 +488,7 @@ export default function SystemUpdatesPage() {
                   {slot.isActive ? (
                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                      Active Boot Partition
+                      {isRollingMode ? 'Active Rolling Root (/)' : 'Active Boot Partition'}
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
@@ -495,11 +523,15 @@ export default function SystemUpdatesPage() {
                 <div className="flex items-center gap-2 text-xs">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   <span className="text-slate-300">
-                    {slot.isActive ? 'Healthy & Committed' : 'Flash Target Ready'}
+                    {isRollingMode
+                      ? 'Standard Debian Root — apt update && apt upgrade supported'
+                      : slot.isActive
+                      ? 'Healthy & Committed'
+                      : 'Flash Target Ready'}
                   </span>
                 </div>
 
-                {!slot.isActive && (
+                {!slot.isActive && !isRollingMode && (
                   <button
                     onClick={handleManualRollback}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer"
