@@ -1,3 +1,11 @@
 #!/bin/sh
-umount /target/media/cdrom0 2>/dev/null || true
-umount /target/media/cdrom 2>/dev/null || true
+while grep -q '/target/media/cdrom' /proc/mounts 2>/dev/null; do
+  umount /target/media/cdrom0 2>/dev/null || umount /target/media/cdrom 2>/dev/null || break
+done
+
+cat > /target/etc/apt/sources.list << 'EOF'
+deb https://deb.debian.org/debian trixie main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware
+EOF
+

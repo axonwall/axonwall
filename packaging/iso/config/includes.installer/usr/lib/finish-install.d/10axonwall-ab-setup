@@ -287,6 +287,17 @@ if [ -f /var/lib/partman/cloud-config.yaml ]; then
 fi
 
 # 3. Synchronize Slot A to Slot B for instant standby readiness
+# Unmount /target/media/cdrom* bind mount now (after pkgsel/grub-installer/10apt-cdrom-setup have finished)
+# and populate standard Debian Trixie APT repositories on /target before cloning to Slot B.
+while grep -q '/target/media/cdrom' /proc/mounts 2>/dev/null; do
+  umount /target/media/cdrom0 2>/dev/null || umount /target/media/cdrom 2>/dev/null || break
+done
+cat > /target/etc/apt/sources.list << 'APT_EOF'
+deb https://deb.debian.org/debian trixie main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware
+APT_EOF
+
 # Ensure stable /boot/vmlinuz and /boot/initrd.img symlinks exist on Slot A before replication
 if [ -d /target/boot ]; then
   LATEST_A_KERN=$(ls -1t /target/boot/vmlinuz-* 2>/dev/null | head -n1 || true)
@@ -321,6 +332,7 @@ if [ -b "$ROOT_B_DEV" ]; then
     if command -v rsync >/dev/null 2>&1; then
       rsync -aAX --delete \
         --exclude=/mnt/standby \
+        --exclude=/media/* \
         --exclude=/var/lib/axonwall \
         --exclude=/boot/efi/* \
         --exclude=/proc/* \

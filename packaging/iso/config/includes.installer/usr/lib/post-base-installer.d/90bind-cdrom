@@ -1,5 +1,46 @@
 #!/bin/sh
-# Ensure CD-ROM pool is accessible inside /target so in-target apt-get never prompts for media change
-mkdir -p /target/media/cdrom /target/media/cdrom0
-mount --bind /cdrom /target/media/cdrom 2>/dev/null || true
-mount --bind /cdrom /target/media/cdrom0 2>/dev/null || true
+# Ensure CD-ROM pool is accessible inside /target via a single in-place bind mount
+# and prevent apt-setup's 40cdrom generator from deleting 00NoMountCDROM or unmounting /cdrom.
+. /usr/share/debconf/confmodule
+
+# Mark media as hybrid/non-ejectable so /usr/lib/apt-setup/generators/40cdrom
+# sets cd_mountable="", preserving 00NoMountCDROM and the /target/media/cdrom bind mount
+# instead of unmounting and failing inside chroot apt-cdrom add.
+db_set cdrom-detect/hybrid true 2>/dev/null || true
+
+# Defense-in-depth: if 40cdrom is already unpacked by anna, force cd_mountable=""
+if [ -f /usr/lib/apt-setup/generators/40cdrom ]; then
+  sed -i 's/^cd_mountable=1$/cd_mountable=""/' /usr/lib/apt-setup/generators/40cdrom 2>/dev/null || true
+fi
+
+# Clean up any duplicate stacked bind mounts on /target/media/cdrom* before ensuring a single mount
+while grep -q '/target/media/cdrom' /proc/mounts 2>/dev/null; do
+  umount /target/media/cdrom0 2>/dev/null || umount /target/media/cdrom 2>/dev/null || break
+done
+
+mkdir -p /target/media/cdrom0
+if [ ! -e /target/media/cdrom ] && [ ! -L /target/media/cdrom ]; then
+  ln -s cdrom0 /target/media/cdrom
+fi
+mount --bind /cdrom /target/media/cdrom0 2>/dev/null || mount --bind /cdrom /target/media/cdrom 2>/dev/null || true
+
+# Ensure APT in /target uses the bind-mounted /media/cdrom without trying to mount/unmount block devices
+mkdir -p /target/etc/apt/apt.conf.d
+cat > /target/etc/apt/apt.conf.d/00CDMountPoint << 'EOT'
+Acquire::cdrom {
+  mount "/media/cdrom";
+};
+Dir::Media::MountPath "/media/cdrom";
+EOT
+
+cat > /target/etc/apt/apt.conf.d/00NoMountCDROM << 'EOT'
+APT::CDROM::NoMount "true";
+Acquire::cdrom {
+  "/media/cdrom/" {
+    Mount  "true";
+    UMount "true";
+  };
+  AutoDetect "false";
+};
+EOT
+
