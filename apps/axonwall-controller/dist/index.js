@@ -39371,9 +39371,13 @@ var AxonwallCloudConfigSchema = external_exports.object({
 var CloudInitUserSchema = external_exports.object({
   name: external_exports.string().regex(LINUX_USERNAME, "Invalid Linux username format"),
   gecos: external_exports.string().optional(),
-  sudo: external_exports.string().optional(),
+  sudo: external_exports.union([external_exports.string(), external_exports.boolean(), external_exports.array(external_exports.string())]).transform((v) => Array.isArray(v) ? v.join(", ") : typeof v === "boolean" ? v ? "ALL=(ALL) NOPASSWD:ALL" : void 0 : v).optional(),
+  groups: external_exports.union([external_exports.string(), external_exports.array(external_exports.string())]).optional(),
+  primary_group: external_exports.string().optional(),
   shell: external_exports.string().default("/usr/bin/zsh"),
   lock_passwd: external_exports.boolean().default(false),
+  plain_text_passwd: external_exports.string().optional(),
+  passwd: external_exports.string().optional(),
   ssh_authorized_keys: external_exports.array(external_exports.string().regex(OPENSSH_PUBKEY, "Invalid OpenSSH public key format")).default([])
 });
 var FullCloudInitSchema = external_exports.object({
@@ -39381,7 +39385,16 @@ var FullCloudInitSchema = external_exports.object({
   fqdn: external_exports.string().optional(),
   manage_etc_hosts: external_exports.boolean().optional(),
   timezone: external_exports.string().optional(),
-  users: external_exports.array(CloudInitUserSchema).optional(),
+  user: external_exports.string().optional(),
+  password: external_exports.string().optional(),
+  ssh_pwauth: external_exports.boolean().optional(),
+  ssh_authorized_keys: external_exports.array(external_exports.string()).optional(),
+  package_upgrade: external_exports.boolean().optional(),
+  chpasswd: external_exports.object({
+    expire: external_exports.boolean().optional(),
+    list: external_exports.union([external_exports.string(), external_exports.array(external_exports.string())]).optional()
+  }).optional(),
+  users: external_exports.preprocess((val) => Array.isArray(val) ? val.filter((item) => typeof item === "object" && item !== null) : val, external_exports.array(CloudInitUserSchema).optional()).optional(),
   packages: external_exports.array(external_exports.string()).optional(),
   runcmd: external_exports.array(external_exports.string()).optional(),
   growpart: external_exports.object({

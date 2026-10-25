@@ -1,0 +1,344 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall Installer — Early Cloud-Init / NoCloud / ConfigDrive Seed Detector
+# ==============================================================================
+# Runs during:
+#   1. file-preseed (Menu-Item 1400) via preseed/include_command (--print-preseed)
+#   2. partman-base (Menu-Item 4200) via 10initial_auto
+#
+# Probes all CD-ROM, USB, VirtIO, SCSI/SATA, and NVMe block devices for
+# Cloud-Init seed media (labels: cidata, CIDATA, AXONCFG, cloud-init, config-2)
+# using explicit filesystem types (-t iso9660, -t vfat, -t ext4) so busybox
+# mount (which lacks libblkid in d-i) reliably mounts the volume.
+# ==============================================================================
+
+PRINT_PRESEED=0
+if [ "${1:-}" = "--print-preseed" ]; then
+	PRINT_PRESEED=1
+fi
+
+mount_ro_any() {
+	_dev="$1"
+	_mnt="$2"
+	[ -b "$_dev" ] || return 1
+	mkdir -p "$_mnt"
+
+	_fstype=""
+	if command -v blkid >/dev/null 2>&1; then
+		_fstype="$(blkid -c /dev/null -o value -s TYPE "$_dev" 2>/dev/null || blkid -o value -s TYPE "$_dev" 2>/dev/null || true)"
+	fi
+	if [ -n "$_fstype" ]; then
+		mount -t "$_fstype" -o ro "$_dev" "$_mnt" 2>/dev/null && return 0
+	fi
+	for _t in iso9660 vfat ext4 ext3 ext2; do
+		mount -t "$_t" -o ro "$_dev" "$_mnt" 2>/dev/null && return 0
+	done
+	mount -o ro "$_dev" "$_mnt" 2>/dev/null && return 0
+	return 1
+}
+
+extract_seed_from_dir() {
+	_dir="$1"
+	_src_dev="${2:-}"
+	[ -d "$_dir" ] || return 1
+
+	_found_ud=""
+	for _cand in \
+		"$_dir/user-data" \
+		"$_dir/USER-DATA" \
+		"$_dir/user_data" \
+		"$_dir/USER_DATA" \
+		"$_dir/user_dat." \
+		"$_dir/USER_DAT." \
+		"$_dir/user_dat.;1" \
+		"$_dir/USER_DAT.;1" \
+		"$_dir/user-data.;1" \
+		"$_dir/USER-DATA.;1" \
+		"$_dir/cloud-config.yaml" \
+		"$_dir/CLOUD-CONFIG.YAML" \
+		"$_dir/autoinstall.yaml" \
+		"$_dir/AUTOINSTALL.YAML" \
+		"$_dir/openstack/latest/user_data" \
+		"$_dir/OPENSTACK/LATEST/USER_DATA"
+	do
+		if [ -f "$_cand" ] && [ -s "$_cand" ]; then
+			_found_ud="$_cand"
+			break
+		fi
+	done
+
+	[ -n "$_found_ud" ] || return 1
+
+	mkdir -p /var/lib/partman
+	cp "$_found_ud" /var/lib/partman/cloud-config.yaml
+	chmod 0600 /var/lib/partman/cloud-config.yaml 2>/dev/null || true
+	if [ -n "$_src_dev" ]; then
+		echo "$_src_dev" > /var/lib/partman/cloudinit-seed-dev
+	fi
+
+	for _mcand in \
+		"$_dir/meta-data" \
+		"$_dir/META-DATA" \
+		"$_dir/meta_data" \
+		"$_dir/META_DATA" \
+		"$_dir/meta_dat." \
+		"$_dir/META_DAT." \
+		"$_dir/meta_dat.;1" \
+		"$_dir/META_DAT.;1" \
+		"$_dir/meta-data.;1" \
+		"$_dir/META-DATA.;1" \
+		"$_dir/openstack/latest/meta_data.json" \
+		"$_dir/OPENSTACK/LATEST/META_DATA.JSON"
+	do
+		if [ -f "$_mcand" ] && [ -s "$_mcand" ]; then
+			cp "$_mcand" /var/lib/partman/meta-data
+			break
+		fi
+	done
+
+	for _ncand in \
+		"$_dir/network-config" \
+		"$_dir/NETWORK-CONFIG" \
+		"$_dir/network_config" \
+		"$_dir/NETWORK_CONFIG" \
+		"$_dir/net_cfg." \
+		"$_dir/NET_CFG." \
+		"$_dir/net_cfg.;1" \
+		"$_dir/NET_CFG.;1" \
+		"$_dir/network-config.;1" \
+		"$_dir/NETWORK-CONFIG.;1" \
+		"$_dir/openstack/latest/network_data.json" \
+		"$_dir/OPENSTACK/LATEST/NETWORK_DATA.JSON"
+	do
+		if [ -f "$_ncand" ] && [ -s "$_ncand" ]; then
+			cp "$_ncand" /var/lib/partman/network-config
+			break
+		fi
+	done
+
+	logger -t axonwall-installer "Detected Cloud-Init seed file: $_found_ud" 2>/dev/null || true
+	return 0
+}
+
+run_detection() {
+	mkdir -p /var/lib/partman
+
+	# 1. Ensure storage and filesystem kernel modules are loaded
+	for _mod in isofs vfat fat nls_cp437 nls_iso8859_1 nls_utf8 nls_ascii ext4 sr_mod cdrom sd_mod virtio_blk virtio_scsi vmw_pvscsi xen-blkfront ahci ata_piix nvme usb-storage uas; do
+		modprobe -q "$_mod" 2>/dev/null || true
+	done
+	update-dev --settle 2>/dev/null || udevadm settle 2>/dev/null || true
+
+	# 2. Check already-mounted /cdrom or /media first
+	if [ ! -s /var/lib/partman/cloud-config.yaml ]; then
+		extract_seed_from_dir /cdrom || extract_seed_from_dir /media || true
+	fi
+
+	# 3. Search by Cloud-Init volume label (cidata, CIDATA, AXONCFG, cloud-init, config-2)
+	if [ ! -s /var/lib/partman/cloud-config.yaml ]; then
+		_label_devs=""
+		if command -v blkid >/dev/null 2>&1; then
+			for _lbl in cidata CIDATA AXONCFG axoncfg cloud-init CLOUD-INIT config-2 CONFIG-2; do
+				_d="$(blkid -L "$_lbl" 2>/dev/null || true)"
+				if [ -n "$_d" ] && [ -b "$_d" ]; then
+					_label_devs="$_label_devs $_d"
+				fi
+			done
+			# Also scan full blkid output (case-insensitive label match without cache)
+			_blkid_scan="$(blkid -c /dev/null 2>/dev/null | grep -iE 'LABEL="(cidata|axoncfg|cloud-init|config-2)"' | cut -d: -f1 || true)"
+			if [ -n "$_blkid_scan" ]; then
+				_label_devs="$_label_devs $_blkid_scan"
+			fi
+		fi
+
+		for _dev in $_label_devs; do
+			[ -b "$_dev" ] || continue
+			_mnt="/tmp/axonwall_ci_mnt"
+			if mount_ro_any "$_dev" "$_mnt"; then
+				if extract_seed_from_dir "$_mnt" "$_dev"; then
+					umount "$_mnt" 2>/dev/null || true
+					break
+				fi
+				umount "$_mnt" 2>/dev/null || true
+			fi
+		done
+	fi
+
+	# 4. Probe all candidate CD-ROM, USB, VirtIO, SCSI/SATA, and NVMe block devices
+	if [ ! -s /var/lib/partman/cloud-config.yaml ]; then
+		_probe_devs=""
+		if command -v list-devices >/dev/null 2>&1; then
+			for _kind in cd maybe-usb-floppy usb-partition partition disk; do
+				_ld="$(list-devices "$_kind" 2>/dev/null || true)"
+				[ -n "$_ld" ] && _probe_devs="$_probe_devs $_ld"
+			done
+		fi
+		for _glob in /dev/sr* /dev/scd* /dev/vd* /dev/sd* /dev/nvme* /dev/xvd* /dev/mmcblk*; do
+			[ -b "$_glob" ] && _probe_devs="$_probe_devs $_glob"
+		done
+
+		_cdrom_dev="$(awk '$2 == "/cdrom" {print $1}' /proc/mounts 2>/dev/null | head -n1 || true)"
+		_seen_devs=" "
+		for _dev in $_probe_devs; do
+			[ -b "$_dev" ] || continue
+			[ "$_dev" = "$_cdrom_dev" ] && continue
+			case "$_seen_devs" in
+				*" $_dev "*) continue ;;
+			esac
+			_seen_devs="${_seen_devs}${_dev} "
+
+			_mnt="/tmp/axonwall_ci_probe"
+			if mount_ro_any "$_dev" "$_mnt"; then
+				if extract_seed_from_dir "$_mnt" "$_dev"; then
+					umount "$_mnt" 2>/dev/null || true
+					break
+				fi
+				umount "$_mnt" 2>/dev/null || true
+			fi
+		done
+	fi
+
+	# 5. Fallback: check kernel cmdline for ds=nocloud;s=... or cloud-config-url=...
+	if [ ! -s /var/lib/partman/cloud-config.yaml ] && [ -f /proc/cmdline ]; then
+		_url_seed="$(grep -oE '(cloud-config-url=[^ ]+|ds=nocloud(-net)?;s=[^ ]+)' /proc/cmdline 2>/dev/null | head -n1 || true)"
+		if [ -n "$_url_seed" ]; then
+			_url="$(echo "$_url_seed" | sed -E 's/^(cloud-config-url=|ds=nocloud(-net)?;s=)//')"
+			case "$_url" in
+				http://*|https://*)
+					mkdir -p /var/lib/partman
+					if command -v wget >/dev/null 2>&1; then
+						wget -qO /var/lib/partman/cloud-config.yaml "${_url%/}/user-data" 2>/dev/null || wget -qO /var/lib/partman/cloud-config.yaml "$_url" 2>/dev/null || true
+					elif command -v curl >/dev/null 2>&1; then
+						curl -sSL -o /var/lib/partman/cloud-config.yaml "${_url%/}/user-data" 2>/dev/null || curl -sSL -o /var/lib/partman/cloud-config.yaml "$_url" 2>/dev/null || true
+					fi
+					[ ! -s /var/lib/partman/cloud-config.yaml ] && rm -f /var/lib/partman/cloud-config.yaml
+					;;
+			esac
+		fi
+	fi
+
+	# 6. Normalize line endings and generate preseed overrides if Cloud-Init config was found
+	if [ -s /var/lib/partman/cloud-config.yaml ]; then
+		sed -i 's/\r$//' /var/lib/partman/cloud-config.yaml 2>/dev/null || true
+		[ -f /var/lib/partman/meta-data ] && sed -i 's/\r$//' /var/lib/partman/meta-data 2>/dev/null || true
+		[ -f /var/lib/partman/network-config ] && sed -i 's/\r$//' /var/lib/partman/network-config 2>/dev/null || true
+
+		# Extract hostname from cloud-config.yaml or meta-data
+		_ci_hostname="$(awk '/^[[:space:]]*hostname:[[:space:]]*/ {sub(/^[[:space:]]*hostname:[[:space:]]*/, ""); gsub(/["'\''[:space:]]/, ""); print; exit}' /var/lib/partman/cloud-config.yaml 2>/dev/null || true)"
+		if [ -z "$_ci_hostname" ] && [ -f /var/lib/partman/meta-data ]; then
+			_ci_hostname="$(awk '/^[[:space:]]*local-hostname:[[:space:]]*/ {sub(/^[[:space:]]*local-hostname:[[:space:]]*/, ""); gsub(/["'\''[:space:]]/, ""); print; exit}' /var/lib/partman/meta-data 2>/dev/null || true)"
+		fi
+
+		# Extract timezone
+		_ci_tz="$(awk '/^[[:space:]]*timezone:[[:space:]]*/ {sub(/^[[:space:]]*timezone:[[:space:]]*/, ""); gsub(/["'\''[:space:]]/, ""); print; exit}' /var/lib/partman/cloud-config.yaml 2>/dev/null || true)"
+
+		# Extract password or hash (supports axonwall.auth, top-level password:, and users: passwd/plain_text_passwd)
+		_ci_pass_hash="$(grep -A 10 "auth:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep "admin_password_hash:" | head -n1 | sed -e 's/.*admin_password_hash:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+		_ci_pass_plain="$(grep -A 10 "auth:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep "admin_password:" | head -n1 | sed -e 's/.*admin_password:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+
+		if [ "$_ci_pass_plain" = "CHANGE_ME_ON_DEPLOY" ]; then
+			_ci_pass_plain=""
+		fi
+
+		# Fallback to top-level password: (used by Proxmox VE Cloud-Init and standard #cloud-config)
+		if [ -z "$_ci_pass_hash" ] && [ -z "$_ci_pass_plain" ]; then
+			_top_pw="$(grep -E '^password:[[:space:]]*' /var/lib/partman/cloud-config.yaml 2>/dev/null | head -n1 | sed -e 's/^password:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+			if [ -n "$_top_pw" ] && [ "$_top_pw" != "CHANGE_ME_ON_DEPLOY" ]; then
+				_ci_pass_plain="$_top_pw"
+			fi
+		fi
+
+		# Fallback to users: plain_text_passwd or passwd
+		if [ -z "$_ci_pass_hash" ] && [ -z "$_ci_pass_plain" ]; then
+			_usr_plain="$(grep -E '^[[:space:]]+plain_text_passwd:[[:space:]]*' /var/lib/partman/cloud-config.yaml 2>/dev/null | head -n1 | sed -e 's/.*plain_text_passwd:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+			_usr_hash="$(grep -E '^[[:space:]]+passwd:[[:space:]]*' /var/lib/partman/cloud-config.yaml 2>/dev/null | head -n1 | sed -e 's/.*passwd:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+			[ -n "$_usr_plain" ] && [ "$_usr_plain" != "CHANGE_ME_ON_DEPLOY" ] && _ci_pass_plain="$_usr_plain"
+			[ -n "$_usr_hash" ] && [ "$_usr_hash" != "!" ] && [ "$_usr_hash" != "*" ] && _ci_pass_hash="$_usr_hash"
+		fi
+
+		_ci_scrypt_hash=""
+		case "$_ci_pass_plain" in
+			scrypt\$*)
+				_ci_scrypt_hash="$_ci_pass_plain"
+				_ci_pass_plain=""
+				;;
+			\$1\$*|\$5\$*|\$6\$*|\$y\$*|\$2a\$*|\$2b\$*|\$2y\$*)
+				_ci_pass_hash="$_ci_pass_plain"
+				_ci_pass_plain=""
+				;;
+		esac
+		case "$_ci_pass_hash" in
+			scrypt\$*)
+				_ci_scrypt_hash="$_ci_pass_hash"
+				_ci_pass_hash=""
+				;;
+		esac
+
+		_ci_has_ssh_keys=0
+		if grep -qE '^[[:space:]]*-[[:space:]]*(ssh-(rsa|ed25519)|ecdsa-sha2-nistp|sk-(ssh-ed25519|ecdsa-sha2))' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
+			_ci_has_ssh_keys=1
+		fi
+
+		: > /tmp/axonwall-cloudinit.cfg
+		chmod 0600 /tmp/axonwall-cloudinit.cfg 2>/dev/null || true
+		echo "d-i netcfg/enable boolean false" >> /tmp/axonwall-cloudinit.cfg
+		echo "d-i clock-setup/ntp boolean false" >> /tmp/axonwall-cloudinit.cfg
+
+		if [ -n "$_ci_hostname" ]; then
+			echo "d-i netcfg/get_hostname string $_ci_hostname" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i netcfg/hostname string $_ci_hostname" >> /tmp/axonwall-cloudinit.cfg
+		fi
+
+		if [ -n "$_ci_tz" ]; then
+			echo "d-i time/zone string $_ci_tz" >> /tmp/axonwall-cloudinit.cfg
+		fi
+
+		if [ -n "$_ci_pass_hash" ]; then
+			echo "d-i passwd/root-login boolean true" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i passwd/make-user boolean false" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i passwd/root-password-crypted password $_ci_pass_hash" >> /tmp/axonwall-cloudinit.cfg
+		elif [ -n "$_ci_pass_plain" ]; then
+			echo "d-i passwd/root-login boolean true" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i passwd/make-user boolean false" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i passwd/root-password password $_ci_pass_plain" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i passwd/root-password-again password $_ci_pass_plain" >> /tmp/axonwall-cloudinit.cfg
+		elif [ -n "$_ci_scrypt_hash" ] || [ "$_ci_has_ssh_keys" = "1" ]; then
+			echo "d-i passwd/root-login boolean true" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i passwd/make-user boolean false" >> /tmp/axonwall-cloudinit.cfg
+			echo "d-i passwd/root-password-crypted password !" >> /tmp/axonwall-cloudinit.cfg
+		fi
+
+		# If db_set is available in current shell scope (e.g. sourced from 10initial_auto), apply directly as well
+		if type db_set >/dev/null 2>&1; then
+			db_set netcfg/enable false 2>/dev/null || true
+			db_set clock-setup/ntp false 2>/dev/null || true
+			if [ -n "$_ci_hostname" ]; then
+				db_set netcfg/get_hostname "$_ci_hostname" 2>/dev/null || true
+				db_fset netcfg/get_hostname seen true 2>/dev/null || true
+			fi
+			if [ -n "$_ci_tz" ]; then
+				db_set time/zone "$_ci_tz" 2>/dev/null || true
+				db_fset time/zone seen true 2>/dev/null || true
+			fi
+			if [ -n "$_ci_pass_hash" ]; then
+				db_set passwd/root-password-crypted "$_ci_pass_hash" 2>/dev/null || true
+				db_fset passwd/root-password-crypted seen true 2>/dev/null || true
+			elif [ -n "$_ci_pass_plain" ]; then
+				db_set passwd/root-password "$_ci_pass_plain" 2>/dev/null || true
+				db_set passwd/root-password-again "$_ci_pass_plain" 2>/dev/null || true
+				db_fset passwd/root-password seen true 2>/dev/null || true
+				db_fset passwd/root-password-again seen true 2>/dev/null || true
+			elif [ -n "$_ci_scrypt_hash" ] || [ "$_ci_has_ssh_keys" = "1" ]; then
+				db_set passwd/root-password-crypted "!" 2>/dev/null || true
+				db_fset passwd/root-password-crypted seen true 2>/dev/null || true
+			fi
+		fi
+	fi
+}
+
+run_detection >/dev/null 2>&1 || true
+
+if [ "$PRINT_PRESEED" = "1" ] && [ -s /tmp/axonwall-cloudinit.cfg ]; then
+	printf 'file:///tmp/axonwall-cloudinit.cfg\n'
+fi
+exit 0

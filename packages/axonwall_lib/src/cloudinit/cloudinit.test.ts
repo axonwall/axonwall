@@ -5,6 +5,7 @@ import {
   buildCloudInitFromSystem,
   exportCloudInitYaml,
   parseCloudInitYaml,
+  parseCloudInitNetworkConfig,
   generateCloudInitMetaData,
   buildNoCloudIso,
   cloudInitStorageToInstallerChoices,
@@ -245,9 +246,97 @@ describe('Cloud-Init Exporter & System Replicator', () => {
       .trim();
     expect(volId).toBe('cidata');
 
-    // Verify embedded payload exists in data sectors
+    // Verify embedded payload and Rock Ridge RRIP_1991A ER extension record exist
     const fullText = new TextDecoder().decode(isoBytes);
+    expect(fullText).toContain('RRIP_1991A');
     expect(fullText).toContain('#cloud-config\nhostname: axonwall-clone');
     expect(fullText).toContain('instance-id: i-axonwall-01');
+  });
+
+  it('parses Proxmox VE and KVM Cloud-Init user-data formats cleanly', () => {
+    const proxmoxUserData = `#cloud-config
+hostname: pve-axonwall
+manage_etc_hosts: true
+fqdn: pve-axonwall.local
+user: admin
+password: $6$rounds=4096$saltsalt$hashedpassword
+chpasswd:
+  expire: false
+users:
+  - default
+ssh_authorized_keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl admin@pve
+package_upgrade: true
+`;
+    const parsed = parseCloudInitYaml(proxmoxUserData);
+    expect(parsed.hostname).toBe('pve-axonwall');
+    expect(parsed.user).toBe('admin');
+    expect(parsed.password).toContain('$6$');
+    expect(parsed.ssh_authorized_keys?.length).toBe(1);
+    expect(parsed.users).toEqual([]);
+  });
+
+  it('parses Cloud-Init network-config v1 (Proxmox) and v2 (Netplan)', () => {
+    const v1Yaml = `version: 1
+config:
+  - type: physical
+    name: eth0
+    subnets:
+      - type: static
+        address: '10.10.20.5'
+        netmask: '255.255.255.0'
+        gateway: '10.10.20.1'
+  - type: physical
+    name: eth1
+    subnets:
+      - type: dhcp4
+  - type: nameserver
+    address:
+      - '1.1.1.1'
+      - '9.9.9.9'
+    search:
+      - 'lab.internal'
+`;
+    const net1 = parseCloudInitNetworkConfig(v1Yaml, ['ens18', 'ens19']);
+    expect(net1).not.toBeNull();
+    expect(net1?.interfaces).toHaveLength(2);
+    expect(net1?.interfaces[0]).toMatchObject({
+      name: 'wan',
+      role: 'wan',
+      device: 'ens18',
+      type: 'static',
+      ipv4Address: '10.10.20.5/24',
+      ipv4Gateway: '10.10.20.1',
+    });
+    expect(net1?.interfaces[1]).toMatchObject({
+      name: 'lan',
+      role: 'lan',
+      device: 'ens19',
+      type: 'dhcp',
+    });
+    expect(net1?.dnsServers).toEqual(['1.1.1.1', '9.9.9.9']);
+    expect(net1?.searchDomain).toBe('lab.internal');
+
+    const v2Yaml = `version: 2
+ethernets:
+  eth0:
+    dhcp4: false
+    addresses: [192.168.50.10/24]
+    gateway4: 192.168.50.1
+    nameservers:
+      addresses: [8.8.8.8]
+      search: [axonwall.lan]
+`;
+    const net2 = parseCloudInitNetworkConfig(v2Yaml, ['enp1s0']);
+    expect(net2).not.toBeNull();
+    expect(net2?.interfaces[0]).toMatchObject({
+      name: 'wan',
+      device: 'enp1s0',
+      type: 'static',
+      ipv4Address: '192.168.50.10/24',
+      ipv4Gateway: '192.168.50.1',
+    });
+    expect(net2?.dnsServers).toEqual(['8.8.8.8']);
+    expect(net2?.searchDomain).toBe('axonwall.lan');
   });
 });

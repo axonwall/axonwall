@@ -17,6 +17,7 @@ import { BUILTIN_PLUGINS, resolveCapabilities } from '@axonwall/lib/plugins';
 import { isValidDevice } from '@axonwall/lib/util';
 import {
   parseCloudInitYaml,
+  parseCloudInitNetworkConfig,
   serializeYaml,
   parseStorageFromLsblk,
   buildCloudInitFromSystem,
@@ -914,11 +915,19 @@ async function cmdCloudInit(userArgs: string[]) {
     }
   }
 
-  // 3. Reconcile SSH keys from privileged users (root, admin, or sudoers)
-  if (cloudConfig.users && cloudConfig.users.length > 0) {
-    const allKeys: string[] = [];
-    const openSshRegex = /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+[A-Za-z0-9+/=]+(\s+[^\r\n]*)?$/;
+  // 3. Reconcile SSH keys from top-level ssh_authorized_keys and privileged users (root, admin, or sudoers)
+  const allKeys: string[] = [];
+  const openSshRegex = /^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)\s+[A-Za-z0-9+/=]+(\s+[^\r\n]*)?$/;
 
+  if (Array.isArray(cloudConfig.ssh_authorized_keys)) {
+    for (const k of cloudConfig.ssh_authorized_keys) {
+      const trimmed = k.trim();
+      if (trimmed && openSshRegex.test(trimmed)) {
+        allKeys.push(trimmed);
+      }
+    }
+  }
+  if (cloudConfig.users && cloudConfig.users.length > 0) {
     for (const u of cloudConfig.users) {
       const isPrivileged = u.name === 'root' || u.name === 'admin' || (u.sudo && u.sudo.includes('ALL'));
       if (isPrivileged && u.ssh_authorized_keys && u.ssh_authorized_keys.length > 0) {
@@ -930,87 +939,174 @@ async function cmdCloudInit(userArgs: string[]) {
         }
       }
     }
-    if (allKeys.length > 0) {
-      console.log(`[+] Found ${allKeys.length} validated administrative SSH public key(s) in cloud-config.`);
-      if (!isDryRun && isRoot) {
-        try {
-          const sshDir = '/root/.ssh';
-          const authKeysPath = path.join(sshDir, 'authorized_keys');
-          fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
-          try { fs.chmodSync(sshDir, 0o700); } catch {}
-          let existingKeys = '';
-          if (fs.existsSync(authKeysPath)) {
-            existingKeys = fs.readFileSync(authKeysPath, 'utf-8');
-          }
-          const newKeys = allKeys.filter((k) => !existingKeys.includes(k));
-          if (newKeys.length > 0) {
-            fs.appendFileSync(authKeysPath, '\n' + newKeys.join('\n') + '\n', { mode: 0o600 });
-            console.log(`[+] Injected ${newKeys.length} SSH public key(s) into /root/.ssh/authorized_keys.`);
-          }
-          try { fs.chmodSync(authKeysPath, 0o600); } catch {}
-        } catch (err: any) {
-          console.warn(`[!] Unable to write SSH keys: ${err.message}`);
+  }
+  if (allKeys.length > 0) {
+    console.log(`[+] Found ${allKeys.length} validated administrative SSH public key(s) in cloud-config.`);
+    if (!isDryRun && isRoot) {
+      try {
+        const sshDir = '/root/.ssh';
+        const authKeysPath = path.join(sshDir, 'authorized_keys');
+        fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+        try { fs.chmodSync(sshDir, 0o700); } catch {}
+        let existingKeys = '';
+        if (fs.existsSync(authKeysPath)) {
+          existingKeys = fs.readFileSync(authKeysPath, 'utf-8');
         }
+        const newKeys = allKeys.filter((k) => !existingKeys.includes(k));
+        if (newKeys.length > 0) {
+          fs.appendFileSync(authKeysPath, '\n' + newKeys.join('\n') + '\n', { mode: 0o600 });
+          console.log(`[+] Injected ${newKeys.length} SSH public key(s) into /root/.ssh/authorized_keys.`);
+        }
+        try { fs.chmodSync(authKeysPath, 0o600); } catch {}
+      } catch (err: any) {
+        console.warn(`[!] Unable to write SSH keys: ${err.message}`);
       }
     }
   }
 
-  // 4. Reconcile Axonwall specific configuration
+  // 4. Reconcile Axonwall specific configuration and standard Cloud-Init credentials / network-config
   const axon = cloudConfig.axonwall;
-  if (axon) {
-    // 4a. Auth
-    if (axon.auth) {
-      if (axon.auth.admin_password) {
-        console.log(`[+] Administrator credentials configured for user '${axon.auth.admin_username || 'admin'}'.`);
-        if (!isDryRun) {
-          try {
-            fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
-            const adminEnvPath = path.join(ETC_DIR, 'admin.env');
-            const envContent = `LOCAL_ADMIN_USER=${axon.auth.admin_username || 'admin'}\nLOCAL_ADMIN_PASSWORD=${axon.auth.admin_password}\n`;
-            fs.writeFileSync(adminEnvPath, envContent, { mode: 0o600 });
-            try { fs.chmodSync(adminEnvPath, 0o600); } catch {}
+  const rawAdminUser = axon?.auth?.admin_username || cloudConfig.user || 'admin';
+  let rawAdminPass = axon?.auth?.admin_password;
+  if (!rawAdminPass || rawAdminPass === 'CHANGE_ME_ON_DEPLOY') {
+    rawAdminPass = cloudConfig.password;
+  }
+  if (!rawAdminPass || rawAdminPass === 'CHANGE_ME_ON_DEPLOY') {
+    rawAdminPass = cloudConfig.users?.find((u) => u.plain_text_passwd)?.plain_text_passwd;
+  }
+  if (rawAdminPass === 'CHANGE_ME_ON_DEPLOY') {
+    rawAdminPass = undefined;
+  }
 
-            // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
-            try {
-              const persistDir = '/var/lib/axonwall/etc-axonwall';
-              fs.mkdirSync(persistDir, { recursive: true, mode: 0o755 });
-              fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o600 });
-              fs.chmodSync(path.join(persistDir, 'admin.env'), 0o600);
-            } catch {}
-          } catch (err: any) {
-            console.warn(`[!] Unable to write admin.env: ${err.message}`);
-          }
+  if (rawAdminPass) {
+    console.log(`[+] Administrator credentials configured for user '${rawAdminUser}'.`);
+    if (!isDryRun) {
+      try {
+        let finalAdminPass = rawAdminPass;
+        if (!rawAdminPass.startsWith('scrypt$') && !/^\$(1|5|6|y|2a|2b|2y)\$/.test(rawAdminPass)) {
+          const salt = crypto.randomBytes(16).toString('hex');
+          const hash = crypto.scryptSync(rawAdminPass, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
+          finalAdminPass = `scrypt$${salt}$${hash}`;
         }
-      }
-      if (axon.auth.ztp?.enabled) {
-        console.log(`[+] Zero-Touch Provisioning (ZTP) enabled via ${axon.auth.ztp.controller_url || '<default-controller>'}.`);
-        if (!isDryRun) {
+        if (!/^\$(1|5|6|y|2a|2b|2y)\$/.test(finalAdminPass)) {
+          fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+          const adminEnvPath = path.join(ETC_DIR, 'admin.env');
+          const envContent = `LOCAL_ADMIN_USER=${rawAdminUser}\nLOCAL_ADMIN_PASSWORD=${finalAdminPass}\n`;
+          fs.writeFileSync(adminEnvPath, envContent, { mode: 0o600 });
+          try { fs.chmodSync(adminEnvPath, 0o600); } catch {}
+
+          const nowIso = new Date().toISOString();
           try {
-            fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
-            const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
-            const content = `AXONWALL_ZTP_TOKEN=${axon.auth.ztp.enrollment_token || ''}\nAXONWALL_CONTROLLER_URL=${axon.auth.ztp.controller_url || ''}\n`;
-            fs.writeFileSync(ctrlEnvPath, content, { mode: 0o600 });
-            try { fs.chmodSync(ctrlEnvPath, 0o600); } catch {}
-          } catch (err: any) {
-            console.warn(`[!] Unable to write controller.env: ${err.message}`);
-          }
+            fs.writeFileSync(path.join(ETC_DIR, '.password_changed'), `${nowIso}\n`, { mode: 0o644 });
+          } catch {}
+
+          // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
+          try {
+            const persistDir = '/var/lib/axonwall/etc-axonwall';
+            fs.mkdirSync(persistDir, { recursive: true, mode: 0o755 });
+            fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o600 });
+            fs.chmodSync(path.join(persistDir, 'admin.env'), 0o600);
+            fs.writeFileSync('/var/lib/axonwall/.password_changed', `${nowIso}\n`, { mode: 0o644 });
+          } catch {}
         }
+      } catch (err: any) {
+        console.warn(`[!] Unable to write admin.env: ${err.message}`);
       }
     }
+  }
 
-    // 4b. Desired State
-    if (axon.desired_state && Object.keys(axon.desired_state).length > 0) {
-      console.log(`[+] Staging declarative desired_state from cloud-config into /etc/axonwall/conf.d/99-cloudinit.yaml...`);
-      if (!isDryRun) {
+  if (axon?.auth?.ztp?.enabled) {
+    console.log(`[+] Zero-Touch Provisioning (ZTP) enabled via ${axon.auth.ztp.controller_url || '<default-controller>'}.`);
+    if (!isDryRun) {
+      try {
+        fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+        const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
+        const tokenVal =
+          axon.auth.ztp.enrollment_token && axon.auth.ztp.enrollment_token !== 'CHANGE_ME_ON_DEPLOY'
+            ? axon.auth.ztp.enrollment_token
+            : '';
+        const content = `AXONWALL_ZTP_TOKEN=${tokenVal}\nAXONWALL_CONTROLLER_URL=${axon.auth.ztp.controller_url || ''}\n`;
+        fs.writeFileSync(ctrlEnvPath, content, { mode: 0o600 });
+        try { fs.chmodSync(ctrlEnvPath, 0o600); } catch {}
+      } catch (err: any) {
+        console.warn(`[!] Unable to write controller.env: ${err.message}`);
+      }
+    }
+  }
+
+  // 4b. Desired State & Cloud-Init network-config reconciliation
+  const mergedDesiredState: Record<string, any> = axon?.desired_state
+    ? structuredClone(axon.desired_state)
+    : {};
+
+  if (cloudConfig.hostname || cloudConfig.timezone) {
+    mergedDesiredState.system = { ...(mergedDesiredState.system || {}) };
+    if (cloudConfig.hostname && !mergedDesiredState.system.hostname) {
+      mergedDesiredState.system.hostname = cloudConfig.hostname;
+    }
+    if (cloudConfig.timezone && !mergedDesiredState.system.timezone) {
+      mergedDesiredState.system.timezone = cloudConfig.timezone;
+    }
+  }
+
+  // Check for companion network-config file (e.g. from Proxmox VE Cloud-Init or NoCloud seed)
+  const netConfigCandidates = [
+    path.join(path.dirname(resolvedPath), 'network-config'),
+    '/var/lib/cloud/seed/nocloud-net/network-config',
+    '/var/lib/cloud/seed/nocloud/network-config',
+    '/var/lib/partman/network-config',
+  ];
+  for (const ncPath of netConfigCandidates) {
+    if (fs.existsSync(ncPath)) {
+      try {
+        const netRaw = fs.readFileSync(ncPath, 'utf-8');
+        let physicalNics: string[] = [];
         try {
-          const confD = path.join(ETC_DIR, 'conf.d');
-          fs.mkdirSync(confD, { recursive: true, mode: 0o755 });
-          const cloudInitYamlPath = path.join(confD, '99-cloudinit.yaml');
-          fs.writeFileSync(cloudInitYamlPath, serializeYaml(axon.desired_state), { mode: 0o600 });
-          try { fs.chmodSync(cloudInitYamlPath, 0o600); } catch {}
-        } catch (err: any) {
-          console.warn(`[!] Unable to write 99-cloudinit.yaml: ${err.message}`);
+          if (fs.existsSync('/sys/class/net')) {
+            physicalNics = fs
+              .readdirSync('/sys/class/net')
+              .filter(
+                (n) =>
+                  !/^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$/.test(
+                    n
+                  )
+              );
+          }
+        } catch {}
+        const parsedNet = parseCloudInitNetworkConfig(netRaw, physicalNics);
+        if (parsedNet) {
+          console.log(`[+] Found Cloud-Init network-config at ${ncPath} (${parsedNet.interfaces.length} interface(s)).`);
+          if (!Array.isArray(mergedDesiredState.interfaces) || mergedDesiredState.interfaces.length === 0) {
+            if (parsedNet.interfaces.length > 0) {
+              mergedDesiredState.interfaces = parsedNet.interfaces;
+            }
+          }
+          if (parsedNet.dnsServers.length > 0 || parsedNet.searchDomain) {
+            mergedDesiredState.system = { ...(mergedDesiredState.system || {}) };
+            if (parsedNet.dnsServers.length > 0 && !mergedDesiredState.system.dnsServers) {
+              mergedDesiredState.system.dnsServers = parsedNet.dnsServers;
+            }
+            if (parsedNet.searchDomain && !mergedDesiredState.system.domain) {
+              mergedDesiredState.system.domain = parsedNet.searchDomain;
+            }
+          }
         }
+      } catch {}
+      break;
+    }
+  }
+
+  if (Object.keys(mergedDesiredState).length > 0) {
+    console.log(`[+] Staging declarative desired_state from cloud-config into /etc/axonwall/conf.d/99-cloudinit.yaml...`);
+    if (!isDryRun) {
+      try {
+        const confD = path.join(ETC_DIR, 'conf.d');
+        fs.mkdirSync(confD, { recursive: true, mode: 0o755 });
+        const cloudInitYamlPath = path.join(confD, '99-cloudinit.yaml');
+        fs.writeFileSync(cloudInitYamlPath, serializeYaml(mergedDesiredState), { mode: 0o600 });
+        try { fs.chmodSync(cloudInitYamlPath, 0o600); } catch {}
+      } catch (err: any) {
+        console.warn(`[!] Unable to write 99-cloudinit.yaml: ${err.message}`);
       }
     }
   }

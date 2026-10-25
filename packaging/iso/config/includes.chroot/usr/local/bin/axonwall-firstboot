@@ -21,6 +21,39 @@ sysctl --system || true
 
 # 1.1 Process Cloud-Init configuration (#cloud-config) if present
 mkdir -p /etc/axonwall
+if [[ ! -s /var/lib/cloud/seed/nocloud-net/user-data && ! -s /var/lib/cloud/instance/user-data.txt && ! -s /etc/axonwall/cloud-config.yaml ]]; then
+  modprobe isofs vfat sr_mod sd_mod virtio_blk virtio_scsi 2>/dev/null || true
+  _ci_devs=""
+  for _lbl in cidata CIDATA AXONCFG axoncfg cloud-init CLOUD-INIT config-2 CONFIG-2; do
+    _d="$(blkid -L "$_lbl" 2>/dev/null || true)"
+    [[ -n "$_d" && -b "$_d" ]] && _ci_devs="$_ci_devs $_d"
+  done
+  for _sr in /dev/sr0 /dev/sr1; do
+    [[ -b "$_sr" ]] && _ci_devs="$_ci_devs $_sr"
+  done
+  for _cdev in $_ci_devs; do
+    mkdir -p /run/axonwall-ci-mnt
+    if mount -o ro "$_cdev" /run/axonwall-ci-mnt 2>/dev/null || mount -t iso9660 -o ro "$_cdev" /run/axonwall-ci-mnt 2>/dev/null || mount -t vfat -o ro "$_cdev" /run/axonwall-ci-mnt 2>/dev/null; then
+      for _ud in user-data USER-DATA user_data user_dat. USER_DAT. "user_dat.;1" "USER_DAT.;1" cloud-config.yaml openstack/latest/user_data; do
+        if [[ -s "/run/axonwall-ci-mnt/$_ud" ]]; then
+          mkdir -p /var/lib/cloud/seed/nocloud-net
+          cp "/run/axonwall-ci-mnt/$_ud" /var/lib/cloud/seed/nocloud-net/user-data
+          chmod 0600 /var/lib/cloud/seed/nocloud-net/user-data
+          for _md in meta-data META-DATA meta_data meta_dat. META_DAT. "meta_dat.;1" "META_DAT.;1"; do
+            [[ -s "/run/axonwall-ci-mnt/$_md" ]] && cp "/run/axonwall-ci-mnt/$_md" /var/lib/cloud/seed/nocloud-net/meta-data && break
+          done
+          for _nc in network-config NETWORK-CONFIG network_config net_cfg. NET_CFG. "net_cfg.;1" "NET_CFG.;1"; do
+            [[ -s "/run/axonwall-ci-mnt/$_nc" ]] && cp "/run/axonwall-ci-mnt/$_nc" /var/lib/cloud/seed/nocloud-net/network-config && break
+          done
+          umount /run/axonwall-ci-mnt 2>/dev/null || true
+          break 2
+        fi
+      done
+      umount /run/axonwall-ci-mnt 2>/dev/null || true
+    fi
+  done
+  rmdir /run/axonwall-ci-mnt 2>/dev/null || true
+fi
 if [[ -x /usr/local/bin/axonwall-cloud-init ]]; then
   echo "[Axonwall Firstboot] Checking for cloud-init provisioning metadata..."
   /usr/local/bin/axonwall-cloud-init --no-apply 2>&1 || true

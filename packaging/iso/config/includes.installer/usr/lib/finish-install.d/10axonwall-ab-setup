@@ -49,6 +49,10 @@ if [ -f /var/lib/partman/axonwall-luks.pass ]; then
   LUKS_PASSPHRASE="$(cat /var/lib/partman/axonwall-luks.pass 2>/dev/null || true)"
 fi
 
+is_mounted() {
+  grep -qE "[[:space:]]${1%/}[[:space:]]" /proc/mounts 2>/dev/null
+}
+
 part_dev() {
   disk_dev="$1"
   p_num="$2"
@@ -171,7 +175,7 @@ if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/de
   STAGE_DATA="/tmp/target_axonwall_staged"
   rm -rf "$STAGE_DATA"
   mkdir -p "$STAGE_DATA"
-  if mountpoint -q /target/var/lib/axonwall 2>/dev/null; then
+  if is_mounted /target/var/lib/axonwall; then
     echo "[+] Staging existing files from /target/var/lib/axonwall before LUKS formatting..."
     cp -a /target/var/lib/axonwall/. "$STAGE_DATA/" 2>/dev/null || true
     umount /target/var/lib/axonwall 2>/dev/null || true
@@ -247,8 +251,10 @@ fi
 # Seed Cloud-Init configuration into target if present from install media
 if [ -f /var/lib/partman/cloud-config.yaml ]; then
   echo "[+] Copying Cloud-Init seed configuration into /target/var/lib/cloud/seed/nocloud-net/..."
-  mkdir -p /target/var/lib/cloud/seed/nocloud-net
+  mkdir -p /target/var/lib/cloud/seed/nocloud-net /target/etc/axonwall
   cp /var/lib/partman/cloud-config.yaml /target/var/lib/cloud/seed/nocloud-net/user-data
+  cp /var/lib/partman/cloud-config.yaml /target/etc/axonwall/cloud-config.yaml
+  chmod 0600 /target/etc/axonwall/cloud-config.yaml 2>/dev/null || true
   if [ -f /var/lib/partman/meta-data ]; then
     cp /var/lib/partman/meta-data /target/var/lib/cloud/seed/nocloud-net/meta-data
   else
@@ -265,11 +271,11 @@ if [ -f /var/lib/partman/cloud-config.yaml ]; then
 
   # Extract top-level or users: ssh_authorized_keys
   grep -A 20 -E '^\s*ssh_authorized_keys:' /var/lib/partman/cloud-config.yaml 2>/dev/null | \
-    grep -E '^\s*-\s*ssh-' | sed -e 's/^[[:space:]]*-[[:space:]]*//' >> /target/root/.ssh/authorized_keys || true
+    grep -E '^\s*-\s*(ssh-|ecdsa-sha2-nistp|sk-)' | sed -e 's/^[[:space:]]*-[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' >> /target/root/.ssh/authorized_keys || true
 
   # Also check if user admin or root has ssh_authorized_keys
   awk '/^\s*-\s*name:\s*(root|admin)/,/^\s*-\s*name:|[a-z_]:/' /var/lib/partman/cloud-config.yaml 2>/dev/null | \
-    grep -E '^\s*-\s*ssh-' | sed -e 's/^[[:space:]]*-[[:space:]]*//' >> /target/root/.ssh/authorized_keys || true
+    grep -E '^\s*-\s*(ssh-|ecdsa-sha2-nistp|sk-)' | sed -e 's/^[[:space:]]*-[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' >> /target/root/.ssh/authorized_keys || true
 
   if [ -s /target/root/.ssh/authorized_keys ]; then
     # Deduplicate keys and set strict 0600 permissions
@@ -279,8 +285,16 @@ if [ -f /var/lib/partman/cloud-config.yaml ]; then
     echo "[+] Injected Cloud-Init SSH authorized keys into /target/root/.ssh/authorized_keys"
   fi
 
-  # Apply admin password hash to /target/etc/shadow if provided and root hash isn't set yet
-  ci_hash="$(grep -A 8 "auth:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep "admin_password_hash:" | head -n1 | sed -e 's/.*admin_password_hash:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+  # Apply admin password hash to /target/etc/shadow if provided
+  ci_hash="$(grep -A 10 "auth:" /var/lib/partman/cloud-config.yaml 2>/dev/null | grep "admin_password_hash:" | head -n1 | sed -e 's/.*admin_password_hash:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+  if [ -z "$ci_hash" ]; then
+    ci_top_pw="$(grep -E '^password:[[:space:]]*' /var/lib/partman/cloud-config.yaml 2>/dev/null | head -n1 | sed -e 's/^password:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+    case "$ci_top_pw" in
+      \$1\$*|\$5\$*|\$6\$*|\$y\$*|\$2a\$*|\$2b\$*|\$2y\$*)
+        ci_hash="$ci_top_pw"
+        ;;
+    esac
+  fi
   if [ -n "$ci_hash" ] && [ -f /target/etc/shadow ]; then
     in-target usermod -p "$ci_hash" root 2>/dev/null || true
   fi
@@ -317,12 +331,12 @@ if [ -b "$ROOT_B_DEV" ]; then
   mkdir -p "$STAGE_B"
   IS_MOUNTED=0
 
-  if mountpoint -q /target/mnt/standby 2>/dev/null; then
+  if is_mounted /target/mnt/standby; then
     STAGE_B="/target/mnt/standby"
     IS_MOUNTED=1
   else
     mount "$ROOT_B_DEV" "$STAGE_B" 2>/dev/null || true
-    if mountpoint -q "$STAGE_B" 2>/dev/null; then
+    if is_mounted "$STAGE_B"; then
       IS_MOUNTED=2
     fi
   fi

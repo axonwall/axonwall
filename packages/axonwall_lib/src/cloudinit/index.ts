@@ -168,9 +168,18 @@ export type AxonwallCloudConfig = z.infer<typeof AxonwallCloudConfigSchema>;
 export const CloudInitUserSchema = z.object({
   name: z.string().regex(LINUX_USERNAME, 'Invalid Linux username format'),
   gecos: z.string().optional(),
-  sudo: z.string().optional(),
+  sudo: z
+    .union([z.string(), z.boolean(), z.array(z.string())])
+    .transform((v) =>
+      Array.isArray(v) ? v.join(', ') : typeof v === 'boolean' ? (v ? 'ALL=(ALL) NOPASSWD:ALL' : undefined) : v
+    )
+    .optional(),
+  groups: z.union([z.string(), z.array(z.string())]).optional(),
+  primary_group: z.string().optional(),
   shell: z.string().default('/usr/bin/zsh'),
   lock_passwd: z.boolean().default(false),
+  plain_text_passwd: z.string().optional(),
+  passwd: z.string().optional(),
   ssh_authorized_keys: z.array(z.string().regex(OPENSSH_PUBKEY, 'Invalid OpenSSH public key format')).default([]),
 });
 
@@ -182,7 +191,23 @@ export const FullCloudInitSchema = z.object({
   fqdn: z.string().optional(),
   manage_etc_hosts: z.boolean().optional(),
   timezone: z.string().optional(),
-  users: z.array(CloudInitUserSchema).optional(),
+  user: z.string().optional(),
+  password: z.string().optional(),
+  ssh_pwauth: z.boolean().optional(),
+  ssh_authorized_keys: z.array(z.string()).optional(),
+  package_upgrade: z.boolean().optional(),
+  chpasswd: z
+    .object({
+      expire: z.boolean().optional(),
+      list: z.union([z.string(), z.array(z.string())]).optional(),
+    })
+    .optional(),
+  users: z
+    .preprocess(
+      (val) => (Array.isArray(val) ? val.filter((item) => typeof item === 'object' && item !== null) : val),
+      z.array(CloudInitUserSchema).optional()
+    )
+    .optional(),
   packages: z.array(z.string()).optional(),
   runcmd: z.array(z.string()).optional(),
   growpart: z
@@ -365,6 +390,199 @@ export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
 export function parseCloudInitYaml(yamlText: string): FullCloudInit {
   const raw = parseYaml(yamlText);
   return FullCloudInitSchema.parse(raw);
+}
+
+export interface ParsedCloudInitNetworkConfig {
+  interfaces: Array<{
+    name: string;
+    role: 'wan' | 'lan';
+    device: string;
+    type: 'dhcp' | 'static';
+    ipv4Address?: string;
+    ipv4Gateway?: string;
+    dhcpServer: boolean;
+    enabled: boolean;
+    mtu: number;
+    description: string;
+  }>;
+  dnsServers: string[];
+  searchDomain?: string;
+}
+
+function netmaskToPrefix(netmask: string): number {
+  const trimmed = netmask.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const n = Number(trimmed);
+    if (n >= 0 && n <= 32) return n;
+  }
+  const parts = trimmed.split('.').map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return 24;
+  let bits = 0;
+  for (const octet of parts) {
+    bits += (octet >>> 0).toString(2).split('1').length - 1;
+  }
+  return bits;
+}
+
+function normalizeCidrAddress(addr: string, netmask?: string): string {
+  const trimmed = addr.trim();
+  if (trimmed.includes('/')) return trimmed;
+  const prefix = netmask ? netmaskToPrefix(netmask) : 24;
+  return `${trimmed}/${prefix}`;
+}
+
+/**
+ * Parses Cloud-Init `network-config` YAML (both Proxmox/ENI v1 and Netplan v2)
+ * into Axonwall interface definitions and DNS settings.
+ */
+export function parseCloudInitNetworkConfig(
+  networkYaml: string,
+  physicalNics: string[] = []
+): ParsedCloudInitNetworkConfig | null {
+  try {
+    const raw = parseYaml(networkYaml) as any;
+    if (!raw || typeof raw !== 'object') return null;
+
+    const rawIfaces: Array<{
+      origName: string;
+      mode: 'dhcp' | 'static';
+      ipv4Address?: string;
+      ipv4Gateway?: string;
+      mtu?: number;
+    }> = [];
+    const dnsServers: string[] = [];
+    let searchDomain: string | undefined;
+
+    if (raw.version === 1 && Array.isArray(raw.config)) {
+      for (const item of raw.config) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.type === 'physical' && typeof item.name === 'string') {
+          let mode: 'dhcp' | 'static' = 'dhcp';
+          let ipv4Address: string | undefined;
+          let ipv4Gateway: string | undefined;
+          if (Array.isArray(item.subnets)) {
+            for (const sub of item.subnets) {
+              if (!sub || typeof sub !== 'object') continue;
+              const stype = String(sub.type || '').toLowerCase();
+              if (stype === 'static' || stype === 'static4') {
+                if (typeof sub.address === 'string' && !sub.address.includes(':')) {
+                  mode = 'static';
+                  ipv4Address = normalizeCidrAddress(sub.address, typeof sub.netmask === 'string' ? sub.netmask : undefined);
+                  if (typeof sub.gateway === 'string' && sub.gateway.trim()) {
+                    ipv4Gateway = sub.gateway.trim();
+                  }
+                }
+              } else if (stype === 'dhcp' || stype === 'dhcp4') {
+                if (!ipv4Address) mode = 'dhcp';
+              }
+              if (Array.isArray(sub.dns_nameservers)) {
+                for (const d of sub.dns_nameservers) {
+                  if (typeof d === 'string' && d.trim() && !d.includes(':')) dnsServers.push(d.trim());
+                }
+              }
+              if (Array.isArray(sub.dns_search) && sub.dns_search[0]) {
+                searchDomain = String(sub.dns_search[0]).trim();
+              }
+            }
+          }
+          rawIfaces.push({
+            origName: item.name.trim(),
+            mode,
+            ipv4Address,
+            ipv4Gateway,
+            mtu: typeof item.mtu === 'number' && item.mtu >= 576 ? item.mtu : 1500,
+          });
+        } else if (item.type === 'nameserver') {
+          const addrs = Array.isArray(item.address) ? item.address : item.address ? [item.address] : [];
+          for (const d of addrs) {
+            if (typeof d === 'string' && d.trim() && !d.includes(':')) dnsServers.push(d.trim());
+          }
+          const srch = Array.isArray(item.search) ? item.search : item.search ? [item.search] : [];
+          if (srch[0] && typeof srch[0] === 'string') {
+            searchDomain = srch[0].trim();
+          }
+        }
+      }
+    } else if (raw.ethernets && typeof raw.ethernets === 'object') {
+      for (const [ifName, spec] of Object.entries<any>(raw.ethernets)) {
+        if (!spec || typeof spec !== 'object') continue;
+        let mode: 'dhcp' | 'static' = spec.dhcp4 === true ? 'dhcp' : 'dhcp';
+        let ipv4Address: string | undefined;
+        let ipv4Gateway: string | undefined;
+
+        if (Array.isArray(spec.addresses)) {
+          const v4 = spec.addresses.find((a: any) => typeof a === 'string' && !a.includes(':'));
+          if (v4) {
+            mode = 'static';
+            ipv4Address = normalizeCidrAddress(v4);
+          }
+        }
+        if (typeof spec.gateway4 === 'string' && spec.gateway4.trim()) {
+          ipv4Gateway = spec.gateway4.trim();
+        } else if (Array.isArray(spec.routes)) {
+          for (const r of spec.routes) {
+            if (r && (r.to === 'default' || r.to === '0.0.0.0/0') && typeof r.via === 'string') {
+              ipv4Gateway = r.via.trim();
+              break;
+            }
+          }
+        }
+        if (spec.nameservers && typeof spec.nameservers === 'object') {
+          if (Array.isArray(spec.nameservers.addresses)) {
+            for (const d of spec.nameservers.addresses) {
+              if (typeof d === 'string' && d.trim() && !d.includes(':')) dnsServers.push(d.trim());
+            }
+          }
+          if (Array.isArray(spec.nameservers.search) && spec.nameservers.search[0]) {
+            searchDomain = String(spec.nameservers.search[0]).trim();
+          }
+        }
+        rawIfaces.push({
+          origName: ifName.trim(),
+          mode,
+          ipv4Address,
+          ipv4Gateway,
+          mtu: typeof spec.mtu === 'number' && spec.mtu >= 576 ? spec.mtu : 1500,
+        });
+      }
+    }
+
+    if (rawIfaces.length === 0 && dnsServers.length === 0) return null;
+
+    const interfaces = rawIfaces.map((ri, idx) => {
+      let device = ri.origName;
+      if (physicalNics.length > 0 && !physicalNics.includes(device)) {
+        const ethMatch = /^eth(\d+)$/i.exec(device) || /^net(\d+)$/i.exec(device);
+        const mappedIdx = ethMatch ? Number(ethMatch[1]) : idx;
+        if (physicalNics[mappedIdx]) {
+          device = physicalNics[mappedIdx]!;
+        }
+      }
+      const isWan = idx === 0;
+      const name = idx === 0 ? 'wan' : idx === 1 ? 'lan' : `opt${idx - 1}`;
+      const role: 'wan' | 'lan' = isWan ? 'wan' : 'lan';
+      return {
+        name,
+        role,
+        device,
+        type: ri.mode,
+        ...(ri.mode === 'static' && ri.ipv4Address ? { ipv4Address: ri.ipv4Address } : {}),
+        ...(ri.mode === 'static' && ri.ipv4Gateway ? { ipv4Gateway: ri.ipv4Gateway } : {}),
+        dhcpServer: false,
+        enabled: true,
+        mtu: ri.mtu || 1500,
+        description: isWan ? 'WAN Uplink (Cloud-Init)' : `${name.toUpperCase()} Network (Cloud-Init)`,
+      };
+    });
+
+    return {
+      interfaces,
+      dnsServers: Array.from(new Set(dnsServers)),
+      searchDomain,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1226,10 +1444,23 @@ export function buildNoCloudIso(
 
   // 1. Build Root Directory Sector (Sector 20)
   const spEntry = new Uint8Array([0x53, 0x50, 7, 1, 0xbe, 0xef, 0]); // SUSP 'SP' signature
+  // RRIP 'ER' (Extensions Reference) entry ("RRIP_1991A") so Linux fs/isofs/rock.c sets s_rock = 1
+  const erId = encoder.encode('RRIP_1991A');
+  const erEntry = new Uint8Array(8 + erId.length);
+  erEntry[0] = 0x45; // 'E'
+  erEntry[1] = 0x52; // 'R'
+  erEntry[2] = erEntry.length;
+  erEntry[3] = 1; // version
+  erEntry[4] = erId.length; // len_id
+  erEntry[5] = 0; // len_des
+  erEntry[6] = 0; // len_src
+  erEntry[7] = 1; // ext_ver
+  erEntry.set(erId, 8);
   const dirPx = buildRockRidgePxEntry(0o040755, 2);
-  const dotSu = new Uint8Array(spEntry.length + dirPx.length);
+  const dotSu = new Uint8Array(spEntry.length + dirPx.length + erEntry.length);
   dotSu.set(spEntry, 0);
   dotSu.set(dirPx, spEntry.length);
+  dotSu.set(erEntry, spEntry.length + dirPx.length);
 
   const dotRecord = buildDirRecord({
     extentSector: ROOT_DIR_SECTOR,
