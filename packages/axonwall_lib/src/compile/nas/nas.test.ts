@@ -155,4 +155,103 @@ describe('Modular Firewall, NAS (ZFS/SMB/NFS/iSCSI), and K3s+OpenEBS Compilers',
     expect(compiled.openEbsManifestYaml).toContain('name: axonwall-replicated-ha');
     expect(compiled.openEbsManifestYaml).toContain('repl: "2"');
   });
+
+  it('prevents lockout and binds NAS/K3s/flannel to eth0 on a 1-NIC Host-Mode node (core-firewall disabled)', () => {
+    const singleNicHostState = DesiredStateSchema.parse({
+      capabilities: {
+        firewallEnabled: false,
+        nasEnabled: true,
+        k3sEnabled: true,
+        virtEnabled: true,
+      },
+      interfaces: [
+        { name: 'wan', role: 'wan', device: 'eth0', enabled: true, mode: 'dhcp' },
+      ],
+      nas: {
+        enabled: true,
+        s3: { enabled: true, listenPort: 9000, consolePort: 9001 },
+      },
+      k3s: {
+        enabled: true,
+        nodeIpInterface: 'lan',
+      },
+      wireguard: {
+        enabled: true,
+        interfaces: [
+          {
+            name: 'wg0',
+            listenPort: 51820,
+            address: '10.99.0.1/24',
+            peers: [],
+          },
+        ],
+      },
+      rosenpass: {
+        enabled: true,
+        interface: 'wg0',
+        listenPort: 9999,
+        peers: [],
+      },
+      headscale: {
+        enabled: true,
+        mode: 'tailscale_client',
+      },
+      dhcp: {
+        enabled: true,
+        subnets: [
+          {
+            id: '11111111-1111-4111-8111-111111111111',
+            interface: 'wan',
+            subnet: '192.168.1.0/24',
+            poolStart: '192.168.1.100',
+            poolEnd: '192.168.1.200',
+          },
+        ],
+      },
+      frr: {
+        enabled: true,
+        bgp: { enabled: true, asn: 65001, routerId: '10.0.0.1', neighbors: [], networks: [] },
+        ospf: { enabled: false, areas: [], interfaces: [] },
+        bfd: { enabled: false, peers: [] },
+      },
+      suricata: {
+        enabled: true,
+        mode: 'ips',
+        interfaces: ['wan'],
+      },
+    });
+
+    const compiled = compileNftables(singleNicHostState);
+
+    // 1. Anti-lockout and NAS/K3s ports must be open on eth0 even though its logical name is 'wan'
+    expect(compiled.nftScript).toContain('iifname "eth0" tcp dport { 80, 443, 22, 3000, 2966 } accept comment "anti-lockout-wan"');
+    expect(compiled.nftScript).toContain('iifname { "eth0" } tcp dport { 139, 445 } accept comment "nas-smb"');
+    expect(compiled.nftScript).toContain('iifname { "eth0" } tcp dport { 6443, 10250, 2379, 2380, 10124, 9500 } accept comment "k3s-and-openebs-tcp"');
+
+    // 2. WireGuard, Rosenpass, Tailscale, and Hypervisor bridges must work in Host Mode
+    expect(compiled.nftScript).toContain('udp dport 51820 accept comment "wireguard-service"');
+    expect(compiled.nftScript).toContain('udp dport 9999 accept comment "rosenpass-pq-kem"');
+    expect(compiled.nftScript).toContain('udp dport 41641 accept comment "headscale-mesh"');
+    expect(compiled.nftScript).toContain('iifname "vmbr*" accept comment "virt-bridge-forward"');
+
+    // 3. NGFW-only daemons (Kea, FRR, Unbound, SD-WAN, Suricata) must be suppressed in Host Mode
+    const filePaths = compiled.files.map((f) => f.path);
+    expect(filePaths).toContain('/etc/axonwall/managed/firewall_config.json');
+    const fwCfg = JSON.parse(
+      compiled.files.find((f) => f.path === '/etc/axonwall/managed/firewall_config.json')!.content
+    );
+    expect(fwCfg.enabled).toBe(false);
+    expect(filePaths).not.toContain('/etc/kea/kea-dhcp4.conf');
+    expect(filePaths).not.toContain('/etc/frr/frr.conf');
+    expect(filePaths).not.toContain('/etc/axonwall/managed/sdwan_config.json');
+    expect(filePaths).not.toContain('/etc/suricata/axonwall-ips.yaml');
+    expect(compiled.reloadServices).not.toContain('kea-dhcp4-server');
+    expect(compiled.reloadServices).not.toContain('frr');
+    expect(compiled.reloadServices).not.toContain('unbound');
+    expect(compiled.reloadServices).not.toContain('suricata');
+
+    // 4. K3s compiler must fall back flannel-iface to eth0 when 'lan' does not exist
+    const k3sCompiled = compileK3s(singleNicHostState);
+    expect(k3sCompiled.k3sConfigYaml).toContain('flannel-iface: "eth0"');
+  });
 });

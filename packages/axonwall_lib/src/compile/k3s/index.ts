@@ -53,7 +53,13 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     `flannel-backend: "${k3s.flannelBackend}"`,
   ];
 
-  const ifaceObj = state.interfaces.find((i) => i.name === k3s.nodeIpInterface);
+  // Resolve flannel-iface: prefer the configured nodeIpInterface ('lan' by default),
+  // falling back to the first enabled host interface on 1-NIC or Host-Mode nodes
+  // where only 'wan' (eth0) exists.
+  const ifaceObj =
+    state.interfaces.find((i) => i.enabled && i.name === k3s.nodeIpInterface && isValidDevice(i.device)) ||
+    state.interfaces.find((i) => i.name === k3s.nodeIpInterface && isValidDevice(i.device)) ||
+    state.interfaces.find((i) => i.enabled && isValidDevice(i.device));
   if (isValidDevice(ifaceObj?.device)) {
     configLines.push(`flannel-iface: "${ifaceObj!.device}"`);
   }

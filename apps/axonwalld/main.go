@@ -284,6 +284,16 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			_ = os.WriteFile(persistPath, []byte(f.Content), mode)
 		}
 
+		if filepath.Base(cleanPath) == "firewall_config.json" {
+			var fwCfg struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal([]byte(f.Content), &fwCfg); err == nil && !fwCfg.Enabled {
+				log.Printf("[Agent] Core-Firewall plugin is disabled (Host Mode); stopping NGFW-only daemons")
+				_ = exec.Command("systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
+			}
+		}
+
 		if filepath.Base(cleanPath) == "zero_trust_apps.json" {
 			log.Printf("[Agent] Applying Zero Trust IAP configuration")
 			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {

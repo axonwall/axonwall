@@ -26,6 +26,25 @@ if [[ -x /usr/local/bin/axonwall-cloud-init ]]; then
   /usr/local/bin/axonwall-cloud-init --no-apply 2>&1 || true
 fi
 
+# Detect Host Mode (core-firewall disabled via cloud-init or system.yaml)
+HOST_MODE=0
+for _cfg_file in /etc/axonwall/conf.d/99-cloudinit.yaml /etc/axonwall/system.yaml /var/lib/cloud/seed/nocloud-net/user-data /var/lib/cloud/seed/nocloud/user-data /etc/axonwall/cloud-config.yaml; do
+  if [[ -f "$_cfg_file" ]] && grep -qE 'firewallEnabled:[[:space:]]*false' "$_cfg_file" 2>/dev/null; then
+    HOST_MODE=1
+    break
+  fi
+done
+if [[ "$HOST_MODE" == "1" ]]; then
+  echo "[Axonwall Firstboot] Host Mode detected (core-firewall disabled) — skipping router LAN gateway & WAN lockdown defaults..."
+  LAN_DEFAULT_MODE="dhcp"
+  LAN_DEFAULT_IPV4=""
+  LAN_DEFAULT_DHCP="false"
+else
+  LAN_DEFAULT_MODE="static"
+  LAN_DEFAULT_IPV4="192.168.1.1/24"
+  LAN_DEFAULT_DHCP="true"
+fi
+
 # 2. Identify physical NICs (excluding loopback and virtual/tunnel netdevs)
 INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' || true))
 WAN_IF="${INTERFACES[0]:-eth0}"
@@ -44,9 +63,9 @@ WAN_IPV4_GATEWAY=
 WAN_DNS1=1.1.1.1
 WAN_DNS2=8.8.8.8
 LAN_INTERFACE=${LAN_IF}
-LAN_MODE=static
-LAN_IPV4_ADDRESS=192.168.1.1/24
-LAN_DHCP_ENABLED=true
+LAN_MODE=${LAN_DEFAULT_MODE}
+LAN_IPV4_ADDRESS=${LAN_DEFAULT_IPV4}
+LAN_DHCP_ENABLED=${LAN_DEFAULT_DHCP}
 OPT1_INTERFACE=${OPT1_IF}
 OPT1_MODE=dhcp
 OPT1_IPV4_ADDRESS=
@@ -69,10 +88,10 @@ if [[ -n "$LAN_IF" ]]; then
 IFACE_LAN_NAME=lan
 IFACE_LAN_DEVICE=${LAN_IF}
 IFACE_LAN_ROLE=lan
-IFACE_LAN_MODE=static
-IFACE_LAN_IPV4_ADDRESS=192.168.1.1/24
+IFACE_LAN_MODE=${LAN_DEFAULT_MODE}
+IFACE_LAN_IPV4_ADDRESS=${LAN_DEFAULT_IPV4}
 IFACE_LAN_IPV4_GATEWAY=
-IFACE_LAN_DHCP_SERVER=true
+IFACE_LAN_DHCP_SERVER=${LAN_DEFAULT_DHCP}
 CONF_LAN_EOF
 fi
 
@@ -109,6 +128,14 @@ iface ${WAN_IF} inet dhcp
 IFACES_EOF
 
 if [[ -n "$LAN_IF" ]]; then
+  if [[ "$HOST_MODE" == "1" ]]; then
+cat << IFACES_LAN_EOF >> /etc/network/interfaces
+# LAN Interface (Host Mode — DHCP Client)
+auto ${LAN_IF}
+iface ${LAN_IF} inet dhcp
+
+IFACES_LAN_EOF
+  else
 cat << IFACES_LAN_EOF >> /etc/network/interfaces
 # LAN Interface
 auto ${LAN_IF}
@@ -117,6 +144,7 @@ iface ${LAN_IF} inet static
     netmask 255.255.255.0
 
 IFACES_LAN_EOF
+  fi
 fi
 
 for (( idx=2; idx<${#INTERFACES[@]}; idx++ )); do
@@ -151,10 +179,14 @@ start_dhcp_if_missing() {
 # Bring up WAN interface and acquire DHCP lease if not already configured
 start_dhcp_if_missing "$WAN_IF"
 
-# 3. Configure default LAN static IP (192.168.1.1/24) only on a real second NIC
+# 3. Configure default LAN IP on a real second NIC (static 192.168.1.1/24 in NGFW mode, DHCP in Host Mode)
 if [[ -n "$LAN_IF" ]] && ip link show "$LAN_IF" &>/dev/null; then
-  ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
-  ip link set up dev "$LAN_IF" || true
+  if [[ "$HOST_MODE" == "1" ]]; then
+    start_dhcp_if_missing "$LAN_IF"
+  else
+    ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
+    ip link set up dev "$LAN_IF" || true
+  fi
 fi
 
 # Configure OPT1, OPT2, and any additional physical NICs as non-authoritative interfaces (link up, DHCP client)
@@ -170,18 +202,20 @@ done
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
   INTERNAL_HAS_LINK=0
-  for _attempt in 1 2 3; do
-    for (( idx=1; idx<${#INTERFACES[@]}; idx++ )); do
-      _int_if="${INTERFACES[$idx]}"
-      if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
-        INTERNAL_HAS_LINK=1
-        break 2
-      fi
+  if [[ "$HOST_MODE" != "1" ]]; then
+    for _attempt in 1 2 3; do
+      for (( idx=1; idx<${#INTERFACES[@]}; idx++ )); do
+        _int_if="${INTERFACES[$idx]}"
+        if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
+          INTERNAL_HAS_LINK=1
+          break 2
+        fi
+      done
+      [[ ${#INTERFACES[@]} -le 1 ]] && break
+      sleep 1
     done
-    [[ ${#INTERFACES[@]} -le 1 ]] && break
-    sleep 1
-  done
-  if [[ "$INTERNAL_HAS_LINK" == "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
+  fi
+  if [[ "$HOST_MODE" != "1" && "$INTERNAL_HAS_LINK" == "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
     if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
       sed -i "s/elements = { [^}]* }/elements = { \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
     fi

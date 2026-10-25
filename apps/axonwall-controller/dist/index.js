@@ -35610,12 +35610,15 @@ var InterfaceTypeSchema = external_exports.enum([
   "wireguard",
   "loopback"
 ]);
+var InterfaceRoleSchema = external_exports.enum(["wan", "lan"]);
 var InterfaceSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
   name: external_exports.string().min(1).max(32).regex(/^[a-zA-Z0-9_.-]+$/, "Invalid interface name"),
-  // e.g. "wan", "lan", "opt1"
+  // e.g. "wan1", "wan2", "lan1", "lan2"
   device: external_exports.string().min(1).max(32).regex(/^[a-zA-Z0-9_.:-]+$/, "Invalid device identifier"),
-  // e.g. "eth0", "enp1s0"
+  // e.g. "eth0", "enp1s0", "ens18"
+  role: InterfaceRoleSchema.optional(),
+  dhcpServer: external_exports.boolean().optional(),
   type: InterfaceTypeSchema.default("static"),
   enabled: external_exports.boolean().default(true),
   description: external_exports.string().max(255).default(""),
@@ -35632,6 +35635,14 @@ var InterfaceSchema = external_exports.object({
     message: "Invalid MAC address"
   }).optional()
 });
+function inferInterfaceRole(iface) {
+  if (iface.role === "wan" || iface.role === "lan")
+    return iface.role;
+  const n = (iface.name || "").toLowerCase().trim();
+  if (n === "wan" || n.startsWith("wan"))
+    return "wan";
+  return "lan";
+}
 var AliasTypeSchema = external_exports.enum(["host", "network", "port", "mac", "urltable", "geoip", "asn", "fqdn"]);
 var AliasSchema = external_exports.object({
   id: external_exports.string().uuid().optional(),
@@ -35721,6 +35732,32 @@ var WireGuardConfigSchema = external_exports.object({
   privateKey: external_exports.string().min(32).optional(),
   address: external_exports.string().default("10.10.0.1/24"),
   peers: external_exports.array(WireGuardPeerSchema).default([])
+});
+var RosenpassPeerSchema = external_exports.object({
+  id: external_exports.string().optional(),
+  name: external_exports.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/, "Peer name must only contain alphanumeric characters, hyphens, and underscores"),
+  wgPeerPublicKey: external_exports.string().min(32),
+  endpoint: external_exports.string().optional(),
+  // host:port e.g. 203.0.113.20:9999
+  pqPublicKeyPath: external_exports.string().default("/etc/rosenpass/peers/peer-pq.pk"),
+  pqPublicKeySha256: external_exports.string().optional(),
+  wgDevice: external_exports.string().default("wg0"),
+  keyOut: external_exports.string().optional(),
+  enabled: external_exports.boolean().default(true)
+});
+var RosenpassConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  listenPort: external_exports.number().int().min(1).max(65535).default(9999),
+  listenAddresses: external_exports.array(external_exports.string()).default(["0.0.0.0:9999", "[::]:9999"]),
+  wgDevice: external_exports.string().default("wg0"),
+  verbosity: external_exports.enum(["Quiet", "Verbose"]).default("Quiet"),
+  rekeyIntervalSeconds: external_exports.number().int().min(30).max(300).default(120),
+  failClosedBootGuard: external_exports.boolean().default(true),
+  memfdSecret: external_exports.boolean().default(true),
+  publicKeyPath: external_exports.string().default("/etc/rosenpass/pq.pk"),
+  secretKeyPath: external_exports.string().default("/etc/rosenpass/pq.sk"),
+  publicKeySha256: external_exports.string().optional(),
+  peers: external_exports.array(RosenpassPeerSchema).default([])
 });
 var AntiLockoutSchema = external_exports.object({
   enabled: external_exports.boolean().default(true),
@@ -36949,6 +36986,7 @@ var DesiredStateSchema = external_exports.object({
   routes: external_exports.array(StaticRouteSchema).default([]),
   trafficShaper: TrafficShaperConfigSchema.optional(),
   wireguard: WireGuardConfigSchema.optional(),
+  rosenpass: RosenpassConfigSchema.optional(),
   ipsec: IpsecConfigSchema.optional(),
   openvpn: OpenVpnConfigSchema.optional(),
   headscale: HeadscaleConfigSchema.optional(),
@@ -37614,7 +37652,7 @@ function compileK3s(state, joinToken) {
     `service-cidr: "${k3s.serviceCidr}"`,
     `flannel-backend: "${k3s.flannelBackend}"`
   ];
-  const ifaceObj = state.interfaces.find((i) => i.name === k3s.nodeIpInterface);
+  const ifaceObj = state.interfaces.find((i) => i.enabled && i.name === k3s.nodeIpInterface && isValidDevice(i.device)) || state.interfaces.find((i) => i.name === k3s.nodeIpInterface && isValidDevice(i.device)) || state.interfaces.find((i) => i.enabled && isValidDevice(i.device));
   if (isValidDevice(ifaceObj?.device)) {
     configLines.push(`flannel-iface: "${ifaceObj.device}"`);
   }
@@ -37745,10 +37783,28 @@ function compileK3s(state, joinToken) {
 // ../../packages/axonwall_lib/dist/compile/kea/index.js
 function compileKeaDhcp4(dhcp, interfaces) {
   const ifDeviceMap = /* @__PURE__ */ new Map();
+  const ifaceByName = /* @__PURE__ */ new Map();
   for (const iface of interfaces) {
     ifDeviceMap.set(iface.name, iface.device);
+    ifaceByName.set(iface.name, iface);
   }
-  const activeSubnets = dhcp.subnets.filter((s) => s.enabled);
+  const activeSubnets = dhcp.subnets.filter((s) => {
+    if (!s.enabled)
+      return false;
+    const iface = ifaceByName.get(s.interface);
+    if (iface) {
+      if (!iface.enabled || !isValidDevice(iface.device))
+        return false;
+      if (inferInterfaceRole(iface) === "wan")
+        return false;
+      if (iface.type !== "static")
+        return false;
+      if (iface.dhcpServer === false)
+        return false;
+    }
+    const dev = ifDeviceMap.get(s.interface) || s.interface;
+    return isValidDevice(dev);
+  });
   const activeInterfaces = Array.from(new Set(activeSubnets.map((s) => ifDeviceMap.get(s.interface) || s.interface).filter(isValidDevice)));
   const keaConfig = {
     Dhcp4: {
@@ -37908,10 +37964,249 @@ function generateDaemonsConf(daemons) {
   ].join("\n");
 }
 
+// ../../packages/axonwall_lib/dist/compile/unbound/index.js
+function compileUnbound(dns, headscale) {
+  const lines = [];
+  lines.push("# Axonwall Unbound DNS Configuration");
+  lines.push("# Generated automatically by @axonwall/lib");
+  lines.push("");
+  lines.push("server:");
+  lines.push(`  port: ${dns.listenPort}`);
+  lines.push("  interface: 0.0.0.0");
+  lines.push("  interface: ::0");
+  lines.push("  access-control: 127.0.0.0/8 allow");
+  lines.push("  access-control: 10.0.0.0/8 allow");
+  lines.push("  access-control: 172.16.0.0/12 allow");
+  lines.push("  access-control: 192.168.0.0/16 allow");
+  lines.push("  access-control: fc00::/7 allow");
+  lines.push("  access-control: fe80::/10 allow");
+  lines.push("");
+  lines.push("  hide-identity: yes");
+  lines.push("  hide-version: yes");
+  lines.push("  harden-glue: yes");
+  lines.push("  harden-dnssec-stripped: yes");
+  if (dns.dnssec) {
+    lines.push('  auto-trust-anchor-file: "/var/lib/unbound/root.key"');
+  }
+  lines.push("");
+  if (dns.hostOverrides.length > 0) {
+    lines.push("  # Local Host Overrides");
+    for (const override of dns.hostOverrides) {
+      const safeHostname = override.hostname.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, "");
+      const safeDomain = override.domain.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, "");
+      const safeIp = override.ip.split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:.]/g, "");
+      if (!safeHostname || !safeDomain || !safeIp)
+        continue;
+      const fqdn = `${safeHostname}.${safeDomain}.`;
+      const recordType = safeIp.includes(":") ? "IN AAAA" : "IN A";
+      lines.push(`  local-data: "${fqdn} ${recordType} ${safeIp}"`);
+      lines.push(`  local-data-ptr: "${safeIp} ${fqdn}"`);
+    }
+    lines.push("");
+  }
+  if (dns.blocklist && dns.blocklist.enabled) {
+    const rawAction = (dns.blocklist.action || "always_null").split(/[\r\n]/)[0].trim();
+    const action = rawAction === "always_nxdomain" ? "always_nxdomain" : "always_null";
+    lines.push("  # AdBlock and Malware Domain Sinkholing");
+    for (const domain2 of dns.blocklist.whitelist) {
+      const safeDomain = domain2.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, "");
+      if (safeDomain) {
+        lines.push(`  local-zone: "${safeDomain}." transparent`);
+      }
+    }
+    for (const domain2 of dns.blocklist.blacklist) {
+      const safeDomain = domain2.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, "");
+      if (safeDomain) {
+        lines.push(`  local-zone: "${safeDomain}." ${action}`);
+      }
+    }
+    lines.push("");
+  }
+  if (dns.dotEnabled && dns.dotUpstreams.length > 0) {
+    lines.push("forward-zone:");
+    lines.push('  name: "."');
+    lines.push("  forward-tls-upstream: yes");
+    for (const upstream of dns.dotUpstreams) {
+      const safeUpstream = upstream.split(/[\r\n]/)[0].trim().replace(/[\r\n\s"';]/g, "");
+      if (safeUpstream) {
+        lines.push(`  forward-addr: ${safeUpstream}`);
+      }
+    }
+  } else if (dns.dotUpstreams.length > 0) {
+    lines.push("forward-zone:");
+    lines.push('  name: "."');
+    for (const upstream of dns.dotUpstreams) {
+      const plain = upstream.split(/[\r\n]/)[0].split("@")[0].trim().replace(/[\r\n\s"';]/g, "");
+      if (plain) {
+        lines.push(`  forward-addr: ${plain}`);
+      }
+    }
+  }
+  if (headscale?.enabled && headscale.magicDnsDomain) {
+    const safeMagicDomain = headscale.magicDnsDomain.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, "");
+    if (safeMagicDomain) {
+      lines.push("");
+      lines.push("# Headscale MagicDNS Forwarding");
+      lines.push("server:");
+      lines.push(`  local-zone: "${safeMagicDomain}." transparent`);
+      lines.push("forward-zone:");
+      lines.push(`  name: "${safeMagicDomain}."`);
+      lines.push("  forward-addr: 127.0.0.1@5353");
+    }
+  }
+  return {
+    unboundConfig: lines.join("\n")
+  };
+}
+
+// ../../packages/axonwall_lib/dist/compile/wireguard/index.js
+var SAFE_WG_PUBKEY_RE = /^[A-Za-z0-9+/=]{32,64}$/;
+function compileWireGuard(wg, rosenpass) {
+  const lines = [];
+  lines.push("# Axonwall WireGuard Server Configuration");
+  lines.push("# Auto-generated by @axonwall/lib");
+  lines.push("");
+  lines.push("[Interface]");
+  lines.push(`Address = ${wg.address.replace(/[\r\n\s]+/g, "")}`);
+  lines.push(`ListenPort = ${wg.listenPort}`);
+  if (wg.privateKey) {
+    lines.push(`PrivateKey = ${wg.privateKey.replace(/[\r\n\s]+/g, "")}`);
+  }
+  if (rosenpass?.enabled && rosenpass.failClosedBootGuard !== false) {
+    const pqPubKeys = /* @__PURE__ */ new Set();
+    for (const rpPeer of rosenpass.peers ?? []) {
+      if (!rpPeer.enabled)
+        continue;
+      const cleanKey = rpPeer.wgPeerPublicKey.replace(/[\r\n\s]+/g, "");
+      if (SAFE_WG_PUBKEY_RE.test(cleanKey)) {
+        pqPubKeys.add(cleanKey);
+      }
+    }
+    if (pqPubKeys.size === 0) {
+      for (const wgPeer of wg.peers) {
+        if (!wgPeer.enabled)
+          continue;
+        const cleanKey = wgPeer.publicKey.replace(/[\r\n\s]+/g, "");
+        if (SAFE_WG_PUBKEY_RE.test(cleanKey)) {
+          pqPubKeys.add(cleanKey);
+        }
+      }
+    }
+    if (pqPubKeys.size > 0) {
+      lines.push("# Fail-Closed Post-Quantum Boot Guard: Seed random 256-bit PSK before Rosenpass completes first Dual-KEM exchange");
+      for (const pubKey of pqPubKeys) {
+        lines.push(`PostUp = sh -c 'head -c 32 /dev/urandom | base64 | wg set %i peer ${pubKey} preshared-key /dev/stdin'`);
+      }
+    }
+  }
+  lines.push("");
+  for (const peer of wg.peers) {
+    if (!peer.enabled)
+      continue;
+    const safeName = peer.name.replace(/[\r\n]+/g, " ").trim();
+    lines.push("# Peer: " + safeName);
+    lines.push("[Peer]");
+    lines.push(`PublicKey = ${peer.publicKey.replace(/[\r\n\s]+/g, "")}`);
+    if (peer.presharedKey) {
+      lines.push(`PresharedKey = ${peer.presharedKey.replace(/[\r\n\s]+/g, "")}`);
+    }
+    const safeAllowed = peer.allowedIps.map((ip) => ip.replace(/[\r\n\s]+/g, "")).join(", ");
+    lines.push(`AllowedIPs = ${safeAllowed}`);
+    if (peer.endpoint) {
+      lines.push(`Endpoint = ${peer.endpoint.replace(/[\r\n\s]+/g, "")}`);
+    }
+    if (peer.persistentKeepalive > 0) {
+      lines.push(`PersistentKeepalive = ${peer.persistentKeepalive}`);
+    }
+    lines.push("");
+  }
+  return {
+    wgConfig: lines.join("\n")
+  };
+}
+
+// ../../packages/axonwall_lib/dist/compile/rosenpass/index.js
+function sanitizeTomlString(input2) {
+  return input2.replace(/[\r\n"\\]+/g, "").trim();
+}
+function compileRosenpass(config2) {
+  const lines = [];
+  const listenPort = config2?.listenPort && config2.listenPort >= 1 && config2.listenPort <= 65535 ? config2.listenPort : 9999;
+  const rawListen = config2?.listenAddresses && config2.listenAddresses.length > 0 ? config2.listenAddresses : [`0.0.0.0:${listenPort}`, `[::]:${listenPort}`];
+  const listenList = rawListen.map((addr) => sanitizeTomlString(addr)).filter(Boolean).map((addr) => `"${addr}"`).join(", ");
+  const pubKeyPath = sanitizeTomlString(config2?.publicKeyPath || "/etc/rosenpass/pq.pk");
+  const secKeyPath = sanitizeTomlString(config2?.secretKeyPath || "/etc/rosenpass/pq.sk");
+  const verbosity = config2?.verbosity === "Verbose" ? "Verbose" : "Quiet";
+  const defaultWgDevice = sanitizeTomlString(config2?.wgDevice || "wg0") || "wg0";
+  lines.push("# Axonwall Rosenpass Post-Quantum Hybrid Dual-KEM Configuration");
+  lines.push("# Primitives: Classic McEliece 460896 (Static KEM Auth) + ML-KEM-512 / Kyber-512 (Ephemeral Forward Secrecy)");
+  lines.push("# Auto-generated by @axonwall/lib \u2014 DO NOT EDIT MANUALLY");
+  lines.push("");
+  lines.push(`public_key = "${pubKeyPath}"`);
+  lines.push(`secret_key = "${secKeyPath}"`);
+  lines.push(`listen = [${listenList}]`);
+  lines.push(`verbosity = "${verbosity}"`);
+  lines.push("");
+  const peers = config2?.peers ?? [];
+  for (const peer of peers) {
+    if (!peer.enabled)
+      continue;
+    const safeName = peer.name.replace(/[^a-zA-Z0-9_-]/g, "");
+    const peerPubPath = sanitizeTomlString(peer.pqPublicKeyPath || `/etc/rosenpass/peers/${safeName || "peer"}-pq.pk`);
+    const wgPeerKey = sanitizeTomlString(peer.wgPeerPublicKey);
+    if (!wgPeerKey)
+      continue;
+    const wgDev = sanitizeTomlString(peer.wgDevice || defaultWgDevice) || defaultWgDevice;
+    lines.push(`# Peer: ${safeName || "unnamed"}${peer.pqPublicKeySha256 ? ` (SHA-256: ${sanitizeTomlString(peer.pqPublicKeySha256).slice(0, 16)}...)` : ""}`);
+    lines.push("[[peers]]");
+    lines.push(`public_key = "${peerPubPath}"`);
+    if (peer.endpoint && sanitizeTomlString(peer.endpoint)) {
+      lines.push(`endpoint = "${sanitizeTomlString(peer.endpoint)}"`);
+    }
+    if (peer.keyOut && sanitizeTomlString(peer.keyOut)) {
+      lines.push(`key_out = "${sanitizeTomlString(peer.keyOut)}"`);
+    } else {
+      lines.push(`wg_device = "${wgDev}"`);
+      lines.push(`wg_peer = "${wgPeerKey}"`);
+    }
+    lines.push("");
+  }
+  const systemdUnit = [
+    "[Unit]",
+    "Description=Rosenpass Post-Quantum Hybrid Dual-KEM Key Exchange Daemon (Axonwall)",
+    "Documentation=https://rosenpass.eu/",
+    `After=network-online.target wg-quick@${defaultWgDevice}.service`,
+    "Wants=network-online.target",
+    "",
+    "[Service]",
+    "Type=simple",
+    "ExecStart=/usr/bin/rosenpass exchange-config /etc/rosenpass/config.toml",
+    "Restart=on-failure",
+    "RestartSec=5s",
+    "CapabilityBoundingSet=CAP_NET_ADMIN",
+    "AmbientCapabilities=CAP_NET_ADMIN",
+    "NoNewPrivileges=true",
+    "PrivateTmp=true",
+    "ProtectHome=true",
+    "ProtectSystem=strict",
+    "ReadWritePaths=/etc/rosenpass /run",
+    "LockPersonality=true",
+    "MemoryDenyWriteExecute=true",
+    "",
+    "[Install]",
+    "WantedBy=multi-user.target",
+    ""
+  ].join("\n");
+  return {
+    configToml: lines.join("\n"),
+    systemdUnit
+  };
+}
+
 // ../../packages/axonwall_lib/dist/compile/nft/index.js
-function buildNasAndK3sInputRules(state, ifDeviceMap, nasEnabled, k3sEnabled) {
+function buildNasAndK3sInputRules(state, ifDeviceMap, nasEnabled, k3sEnabled, firewallEnabled = true) {
   const hostRules = [];
-  const trustedDevs = state.interfaces.filter((i) => i.enabled && i.name !== "wan" && isValidDevice(i.device)).map((i) => `"${i.device}"`);
+  const trustedDevs = state.interfaces.filter((i) => i.enabled && (!firewallEnabled || inferInterfaceRole(i) !== "wan") && isValidDevice(i.device)).map((i) => `"${i.device}"`);
   if (state.ha?.enabled && state.ha.syncInterface) {
     const syncDev = ifDeviceMap.get(state.ha.syncInterface) || state.ha.syncInterface;
     if (isValidDevice(syncDev)) {
@@ -37952,6 +38247,13 @@ function compileNftables(state) {
   const files = [];
   const reloadServices = [];
   const capabilities = resolveCapabilities(state);
+  files.push({
+    path: "/etc/axonwall/managed/firewall_config.json",
+    content: JSON.stringify({
+      enabled: capabilities.firewallEnabled
+    }, null, 2),
+    fileMode: 384
+  });
   if (state.nas || capabilities.nasEnabled) {
     const nasCompiled = compileNas(state.nas);
     files.push({
@@ -37997,10 +38299,11 @@ function compileNftables(state) {
       fileMode: 384
     });
   }
-  if (state.gateways && state.gateways.length > 0 || state.gatewayGroups && state.gatewayGroups.length > 0) {
+  if (capabilities.firewallEnabled && (state.gateways && state.gateways.length > 0 || state.gatewayGroups && state.gatewayGroups.length > 0)) {
     files.push({
       path: "/etc/axonwall/managed/sdwan_config.json",
       content: JSON.stringify({
+        enabled: true,
         gateways: state.gateways || [],
         gatewayGroups: state.gatewayGroups || []
       }, null, 2),
@@ -38021,7 +38324,7 @@ function compileNftables(state) {
       fileMode: 384
     });
   }
-  if (state.dhcp?.enabled && state.dhcp.subnets && state.dhcp.subnets.length > 0) {
+  if (capabilities.firewallEnabled && state.dhcp) {
     const kea = compileKeaDhcp4(state.dhcp, state.interfaces);
     files.push({
       path: "/etc/kea/kea-dhcp4.conf",
@@ -38030,7 +38333,16 @@ function compileNftables(state) {
     });
     reloadServices.push("kea-dhcp4-server");
   }
-  if (state.frr?.enabled) {
+  if (capabilities.firewallEnabled && state.dns?.enabled) {
+    const unbound = compileUnbound(state.dns, state.headscale);
+    files.push({
+      path: "/etc/unbound/unbound.conf.d/axonwall.conf",
+      content: unbound.unboundConfig,
+      fileMode: 420
+    });
+    reloadServices.push("unbound");
+  }
+  if (capabilities.firewallEnabled && state.frr?.enabled) {
     const frr = compileFrr(state.frr);
     files.push({
       path: "/etc/frr/frr.conf",
@@ -38044,14 +38356,40 @@ function compileNftables(state) {
     });
     reloadServices.push("frr");
   }
+  if (state.wireguard?.enabled) {
+    const wgCompiled = compileWireGuard(state.wireguard, state.rosenpass);
+    files.push({
+      path: "/etc/wireguard/wg0.conf",
+      content: wgCompiled.wgConfig,
+      fileMode: 384
+    });
+    reloadServices.push("wg-quick@wg0");
+  }
+  if (state.rosenpass?.enabled) {
+    const rpCompiled = compileRosenpass(state.rosenpass);
+    files.push({
+      path: "/etc/rosenpass/config.toml",
+      content: rpCompiled.configToml,
+      fileMode: 384
+    });
+    reloadServices.push("rosenpass");
+  }
   const ifDeviceMap = /* @__PURE__ */ new Map();
+  const ifRoleMap = /* @__PURE__ */ new Map();
   for (const iface of state.interfaces) {
     ifDeviceMap.set(iface.name, iface.device);
+    ifRoleMap.set(iface.name, inferInterfaceRole(iface));
   }
+  const isWanInterfaceName = (ifaceName) => {
+    const mapped = ifRoleMap.get(ifaceName);
+    if (mapped)
+      return mapped === "wan";
+    return inferInterfaceRole({ name: ifaceName }) === "wan";
+  };
   if (!capabilities.firewallEnabled) {
     lines.push("#!/usr/sbin/nft -f");
     lines.push("# Axonwall Host-Mode Appliance Ruleset (core-firewall plugin disabled)");
-    lines.push(`# Active Roles: NAS=${capabilities.nasEnabled} | K3s=${capabilities.k3sEnabled}`);
+    lines.push(`# Active Roles: NAS=${capabilities.nasEnabled} | K3s=${capabilities.k3sEnabled} | Virt=${capabilities.virtEnabled}`);
     lines.push(`# Version: ${state.version} | Generated: ${(/* @__PURE__ */ new Date()).toISOString()}`);
     lines.push("");
     lines.push("table inet axonwall {}");
@@ -38067,29 +38405,59 @@ function compileNftables(state) {
     if (state.system.antiLockout?.enabled) {
       const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
       const ports = state.system.antiLockout.ports.join(", ");
-      for (const ifaceName of ifaceList) {
-        if (ifaceName !== "wan") {
-          const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-          if (isValidDevice(dev)) {
-            const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
-            lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
-          }
+      const seenDevs = /* @__PURE__ */ new Set();
+      const hostCandidates = [
+        ...ifaceList,
+        ...state.interfaces.filter((i) => i.enabled).map((i) => i.name)
+      ];
+      for (const ifaceName of hostCandidates) {
+        const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+        if (isValidDevice(dev) && !seenDevs.has(dev)) {
+          seenDevs.add(dev);
+          const comment = ifaceName === "lan" ? "anti-lockout" : `anti-lockout-${ifaceName}`;
+          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
         }
       }
     }
-    lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
+    lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled, false));
+    if (state.wireguard?.enabled) {
+      lines.push(`    udp dport ${state.wireguard.listenPort} accept comment "wireguard-service"`);
+      lines.push('    iifname "wg*" accept comment "wireguard-tunnel-input"');
+    }
+    if (state.rosenpass?.enabled) {
+      const rpPort = typeof state.rosenpass.listenPort === "number" && Number.isInteger(state.rosenpass.listenPort) && state.rosenpass.listenPort >= 1 && state.rosenpass.listenPort <= 65535 ? state.rosenpass.listenPort : 9999;
+      lines.push(`    udp dport ${rpPort} accept comment "rosenpass-pq-kem"`);
+    }
+    if (state.headscale?.enabled) {
+      lines.push('    udp dport 41641 accept comment "headscale-mesh"');
+      lines.push('    iifname "tailscale0" accept comment "tailscale-mesh-input"');
+    }
+    if (capabilities.virtEnabled) {
+      lines.push('    iifname "vmbr*" accept comment "virt-bridge-input"');
+    }
     lines.push("  }");
     lines.push("");
     lines.push("  chain forward {");
+    lines.push("    type filter hook forward priority filter; policy drop;");
+    lines.push("    ct state established,related accept");
+    lines.push("    ct state invalid drop");
     if (capabilities.k3sEnabled) {
-      lines.push("    type filter hook forward priority filter; policy drop;");
-      lines.push("    ct state established,related accept");
       lines.push('    iifname "cni0" accept comment "k3s-pod-forward"');
       lines.push('    oifname "cni0" accept comment "k3s-pod-forward"');
       lines.push('    iifname "flannel*" accept comment "k3s-flannel-forward"');
       lines.push('    oifname "flannel*" accept comment "k3s-flannel-forward"');
-    } else {
-      lines.push("    type filter hook forward priority filter; policy drop;");
+    }
+    if (capabilities.virtEnabled) {
+      lines.push('    iifname "vmbr*" accept comment "virt-bridge-forward"');
+      lines.push('    oifname "vmbr*" accept comment "virt-bridge-forward"');
+    }
+    if (state.wireguard?.enabled) {
+      lines.push('    iifname "wg*" accept comment "wireguard-forward"');
+      lines.push('    oifname "wg*" accept comment "wireguard-forward"');
+    }
+    if (state.headscale?.enabled) {
+      lines.push('    iifname "tailscale0" accept comment "tailscale-forward"');
+      lines.push('    oifname "tailscale0" accept comment "tailscale-forward"');
     }
     lines.push("  }");
     lines.push("");
@@ -38198,7 +38566,7 @@ function compileNftables(state) {
     const tlsConfig = state.suricata.tlsDecryption;
     lines.push(`    # TLS Decryption Interception`);
     for (const iface of state.interfaces) {
-      if (iface.enabled && iface.name !== "wan" && isValidDevice(iface.device)) {
+      if (iface.enabled && inferInterfaceRole(iface) !== "wan" && isValidDevice(iface.device)) {
         const dev = iface.device;
         lines.push(`    iifname "${dev}" tcp dport 443 redirect to :${tlsConfig.transparentProxyPort} comment "tls-decryption-intercept"`);
       }
@@ -38237,7 +38605,7 @@ function compileNftables(state) {
     const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
     const ports = state.system.antiLockout.ports.join(", ");
     for (const ifaceName of ifaceList) {
-      if (ifaceName !== "wan") {
+      if (!isWanInterfaceName(ifaceName)) {
         const dev = ifDeviceMap.get(ifaceName) || ifaceName;
         if (isValidDevice(dev)) {
           lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
@@ -38264,6 +38632,10 @@ function compileNftables(state) {
   if (state.wireguard?.enabled) {
     lines.push(`    udp dport ${state.wireguard.listenPort} accept comment "wireguard-service"`);
   }
+  if (state.rosenpass?.enabled) {
+    const rpPort = typeof state.rosenpass.listenPort === "number" && Number.isInteger(state.rosenpass.listenPort) && state.rosenpass.listenPort >= 1 && state.rosenpass.listenPort <= 65535 ? state.rosenpass.listenPort : 9999;
+    lines.push(`    udp dport ${rpPort} accept comment "rosenpass-pq-kem"`);
+  }
   if (state.headscale?.enabled) {
     lines.push(`    udp dport 41641 accept comment "headscale-mesh"`);
   }
@@ -38271,7 +38643,8 @@ function compileNftables(state) {
     if (!iface.enabled || !isValidDevice(iface.device))
       continue;
     const dev = iface.device;
-    lines.push(`    iifname "${dev}" jump input_${iface.name}`);
+    const safeChainName = sanitizeIdentifier(iface.name);
+    lines.push(`    iifname "${dev}" jump input_${safeChainName}`);
   }
   if (state.headscale?.enabled) {
     lines.push(`    iifname "tailscale0" jump input_tailscale`);
@@ -38300,7 +38673,8 @@ function compileNftables(state) {
     if (!iface.enabled || !isValidDevice(iface.device))
       continue;
     const dev = iface.device;
-    lines.push(`    iifname "${dev}" jump forward_${iface.name}`);
+    const safeChainName = sanitizeIdentifier(iface.name);
+    lines.push(`    iifname "${dev}" jump forward_${safeChainName}`);
   }
   if (state.headscale?.enabled) {
     lines.push(`    iifname "tailscale0" jump forward_tailscale`);
@@ -38328,6 +38702,11 @@ function compileNftables(state) {
   }
   if (!state.nat.some((n) => n.type === "masquerade" || n.type === "snat")) {
     const gatewayIfaces = new Set((state.gateways || []).filter((g) => g.enabled).map((g) => g.interface));
+    for (const iface of state.interfaces) {
+      if (iface.enabled && inferInterfaceRole(iface) === "wan") {
+        gatewayIfaces.add(iface.name);
+      }
+    }
     if (gatewayIfaces.size === 0) {
       gatewayIfaces.add("wan");
     }
@@ -38344,9 +38723,11 @@ function compileNftables(state) {
   for (const iface of state.interfaces) {
     if (!iface.enabled)
       continue;
-    const inputRules = state.rules.filter((r) => r.enabled && (r.interface === iface.name || iface.name !== "wan" && isFloating(r.interface))).sort((a, b) => a.sortOrder - b.sortOrder);
+    const isWan = inferInterfaceRole(iface) === "wan";
+    const safeChainName = sanitizeIdentifier(iface.name);
+    const inputRules = state.rules.filter((r) => r.enabled && (r.interface === iface.name || !isWan && isFloating(r.interface))).sort((a, b) => a.sortOrder - b.sortOrder);
     const forwardRules = state.rules.filter((r) => r.enabled && (r.interface === iface.name || isFloating(r.interface))).sort((a, b) => a.sortOrder - b.sortOrder);
-    lines.push(`  chain input_${iface.name} {`);
+    lines.push(`  chain input_${safeChainName} {`);
     for (const rule of inputRules) {
       if (rule.direction === "in") {
         const stmt = formatRuleStatement(rule, state.aliases);
@@ -38356,7 +38737,7 @@ function compileNftables(state) {
     }
     lines.push("  }");
     lines.push("");
-    lines.push(`  chain forward_${iface.name} {`);
+    lines.push(`  chain forward_${safeChainName} {`);
     for (const rule of forwardRules) {
       const stmt = formatRuleStatement(rule, state.aliases);
       if (stmt)
@@ -38441,6 +38822,8 @@ function compileSatelliteNftables(node2) {
   lines.push("    type filter hook forward priority filter; policy drop;");
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
+  lines.push('    ip6 daddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
   lines.push("    ct state established,related accept");
   lines.push("    ct state invalid drop");
@@ -38639,13 +39022,16 @@ function lintRuleset(state) {
       }
     }
   }
+  const wanIfaces = new Set(state.interfaces.filter((i) => inferInterfaceRole(i) === "wan").map((i) => i.name));
+  wanIfaces.add("wan");
   if (state.system?.antiLockout?.enabled) {
     const antiLockoutIfaces = normalizeAntiLockoutInterfaces(state.system.antiLockout);
-    if (antiLockoutIfaces.includes("wan")) {
+    const badWan = antiLockoutIfaces.find((n) => wanIfaces.has(n));
+    if (badWan) {
       issues.push({
         type: "anti_lockout_on_wan",
         severity: "error",
-        message: "Anti-Lockout rule cannot be bound to the 'wan' interface. Management services must be isolated to LAN/internal networks."
+        message: `Anti-Lockout rule cannot be bound to WAN interface '${badWan}'. Management services must be isolated to LAN/internal networks.`
       });
     }
   }
@@ -38654,7 +39040,7 @@ function lintRuleset(state) {
   for (const rule of state.rules) {
     if (!rule.enabled || rule.action !== "pass" || rule.direction !== "in")
       continue;
-    if (rule.interface !== "wan")
+    if (!wanIfaces.has(rule.interface))
       continue;
     if (rule.protocol !== "tcp" && rule.protocol !== "tcp_udp" && rule.protocol !== "any")
       continue;
@@ -38823,9 +39209,9 @@ var AXONWALL_YAML_DOMAINS = [
   },
   {
     filename: "vpn.yaml",
-    title: "Axonwall Virtual Private Networks (WireGuard, IPsec, OpenVPN, Mesh)",
-    description: "Controls WireGuard kernel tunnels & peers, route/policy-based IPsec (strongSwan IKEv2), OpenVPN DCO servers, and Headscale Zero-Config Mesh VPN.",
-    keys: ["wireguard", "ipsec", "openvpn", "headscale"]
+    title: "Axonwall Virtual Private Networks (WireGuard, Rosenpass PQ-KEM, IPsec, OpenVPN, Mesh)",
+    description: "Controls WireGuard kernel tunnels & peers, Rosenpass Hybrid Post-Quantum Dual-KEM (Classic McEliece + ML-KEM), route/policy-based IPsec (strongSwan IKEv2), OpenVPN DCO servers, and Headscale Zero-Config Mesh VPN.",
+    keys: ["wireguard", "rosenpass", "ipsec", "openvpn", "headscale"]
   },
   {
     filename: "security.yaml",

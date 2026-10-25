@@ -174,6 +174,9 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		return nil
 	}
 
+	// Ensure IP forwarding and loose reverse-path filtering (rp_filter=2) are active for K3s CNI overlay pod traffic
+	_ = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.default.rp_filter=2").Run()
+
 	_ = os.MkdirAll("/etc/rancher/k3s", 0755)
 	_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
 	_ = os.MkdirAll("/var/lib/axonwall", 0755)

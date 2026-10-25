@@ -24,10 +24,13 @@ function buildNasAndK3sInputRules(
   ifDeviceMap: Map<string, string>,
   nasEnabled: boolean,
   k3sEnabled: boolean,
+  firewallEnabled = true,
 ): string[] {
   const hostRules: string[] = [];
+  // In Host Mode (core-firewall disabled), there is no WAN perimeter: all enabled host interfaces
+  // (including eth0 on 1-NIC nodes) are trusted cluster/storage interfaces.
   const trustedDevs = state.interfaces
-    .filter((i) => i.enabled && inferInterfaceRole(i) !== 'wan' && isValidDevice(i.device))
+    .filter((i) => i.enabled && (!firewallEnabled || inferInterfaceRole(i) !== 'wan') && isValidDevice(i.device))
     .map((i) => `"${i.device}"`);
 
   if (state.ha?.enabled && state.ha.syncInterface) {
@@ -84,6 +87,19 @@ export function compileNftables(state: DesiredState): CompileResult {
   const reloadServices: string[] = [];
 
   const capabilities = resolveCapabilities(state);
+
+  // Emit core-firewall runtime state so axonwalld can stop NGFW-only daemons in Host Mode
+  files.push({
+    path: '/etc/axonwall/managed/firewall_config.json',
+    content: JSON.stringify(
+      {
+        enabled: capabilities.firewallEnabled,
+      },
+      null,
+      2,
+    ),
+    fileMode: 0o600,
+  });
 
   // Emit NAS and K3s runtime bundles whenever state is compiled
   if (state.nas || capabilities.nasEnabled) {
@@ -146,8 +162,11 @@ export function compileNftables(state: DesiredState): CompileResult {
     });
   }
 
-  // Emit SD-WAN Gateway & probe configuration
-  if ((state.gateways && state.gateways.length > 0) || (state.gatewayGroups && state.gatewayGroups.length > 0)) {
+  // Emit SD-WAN Gateway & probe configuration (only when core-firewall is enabled)
+  if (
+    capabilities.firewallEnabled &&
+    ((state.gateways && state.gateways.length > 0) || (state.gatewayGroups && state.gatewayGroups.length > 0))
+  ) {
     files.push({
       path: '/etc/axonwall/managed/sdwan_config.json',
       content: JSON.stringify(
@@ -181,8 +200,9 @@ export function compileNftables(state: DesiredState): CompileResult {
     });
   }
 
-  // Emit Kea DHCPv4 Server configuration (always emit when state.dhcp is present so removing the last authoritative LAN clears stale subnets)
-  if (state.dhcp) {
+  // Emit Kea DHCPv4 Server configuration only when core-firewall is enabled
+  // (Host-Mode storage/K3s nodes must never run a rogue DHCP server on the attached network)
+  if (capabilities.firewallEnabled && state.dhcp) {
     const kea = compileKeaDhcp4(state.dhcp, state.interfaces);
     files.push({
       path: '/etc/kea/kea-dhcp4.conf',
@@ -192,8 +212,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     reloadServices.push('kea-dhcp4-server');
   }
 
-  // Emit Unbound DNS Resolver configuration
-  if (state.dns?.enabled) {
+  // Emit Unbound DNS Resolver configuration (only when core-firewall is enabled)
+  if (capabilities.firewallEnabled && state.dns?.enabled) {
     const unbound = compileUnbound(state.dns, state.headscale);
     files.push({
       path: '/etc/unbound/unbound.conf.d/axonwall.conf',
@@ -203,8 +223,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     reloadServices.push('unbound');
   }
 
-  // Emit FRRouting (FRR) configuration
-  if (state.frr?.enabled) {
+  // Emit FRRouting (FRR) configuration (only when core-firewall is enabled)
+  if (capabilities.firewallEnabled && state.frr?.enabled) {
     const frr = compileFrr(state.frr);
     files.push({
       path: '/etc/frr/frr.conf',
@@ -258,7 +278,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   if (!capabilities.firewallEnabled) {
     lines.push('#!/usr/sbin/nft -f');
     lines.push('# Axonwall Host-Mode Appliance Ruleset (core-firewall plugin disabled)');
-    lines.push(`# Active Roles: NAS=${capabilities.nasEnabled} | K3s=${capabilities.k3sEnabled}`);
+    lines.push(`# Active Roles: NAS=${capabilities.nasEnabled} | K3s=${capabilities.k3sEnabled} | Virt=${capabilities.virtEnabled}`);
     lines.push(`# Version: ${state.version} | Generated: ${new Date().toISOString()}`);
     lines.push('');
     lines.push('table inet axonwall {}');
@@ -275,30 +295,79 @@ export function compileNftables(state: DesiredState): CompileResult {
     if (state.system.antiLockout?.enabled) {
       const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
       const ports = state.system.antiLockout.ports.join(', ');
-      for (const ifaceName of ifaceList) {
-        if (!isWanInterfaceName(ifaceName)) {
-          const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-          if (isValidDevice(dev)) {
-            const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
-            lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
-          }
+      const seenDevs = new Set<string>();
+
+      // In Host Mode (core-firewall disabled), there is no untrusted WAN router perimeter:
+      // allow anti-lockout on configured anti-lockout interfaces AND all enabled host interfaces
+      // so 1-NIC nodes (where eth0 is named 'wan') are never locked out of SSH/Web Console.
+      const hostCandidates = [
+        ...ifaceList,
+        ...state.interfaces.filter((i) => i.enabled).map((i) => i.name),
+      ];
+      for (const ifaceName of hostCandidates) {
+        const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+        if (isValidDevice(dev) && !seenDevs.has(dev)) {
+          seenDevs.add(dev);
+          const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
+          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
         }
       }
     }
 
-    lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
+    lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled, false));
+
+    // WireGuard listener & tunnel input in Host Mode
+    if (state.wireguard?.enabled) {
+      lines.push(`    udp dport ${state.wireguard.listenPort} accept comment "wireguard-service"`);
+      lines.push('    iifname "wg*" accept comment "wireguard-tunnel-input"');
+    }
+
+    // Rosenpass Post-Quantum Dual-KEM listener in Host Mode
+    if (state.rosenpass?.enabled) {
+      const rpPort =
+        typeof state.rosenpass.listenPort === 'number' &&
+        Number.isInteger(state.rosenpass.listenPort) &&
+        state.rosenpass.listenPort >= 1 &&
+        state.rosenpass.listenPort <= 65535
+          ? state.rosenpass.listenPort
+          : 9999;
+      lines.push(`    udp dport ${rpPort} accept comment "rosenpass-pq-kem"`);
+    }
+
+    // Headscale / Tailscale mesh in Host Mode
+    if (state.headscale?.enabled) {
+      lines.push('    udp dport 41641 accept comment "headscale-mesh"');
+      lines.push('    iifname "tailscale0" accept comment "tailscale-mesh-input"');
+    }
+
+    // Hypervisor (core-virt) bridge input in Host Mode
+    if (capabilities.virtEnabled) {
+      lines.push('    iifname "vmbr*" accept comment "virt-bridge-input"');
+    }
+
     lines.push('  }');
     lines.push('');
     lines.push('  chain forward {');
+    lines.push('    type filter hook forward priority filter; policy drop;');
+    lines.push('    ct state established,related accept');
+    lines.push('    ct state invalid drop');
     if (capabilities.k3sEnabled) {
-      lines.push('    type filter hook forward priority filter; policy drop;');
-      lines.push('    ct state established,related accept');
       lines.push('    iifname "cni0" accept comment "k3s-pod-forward"');
       lines.push('    oifname "cni0" accept comment "k3s-pod-forward"');
       lines.push('    iifname "flannel*" accept comment "k3s-flannel-forward"');
       lines.push('    oifname "flannel*" accept comment "k3s-flannel-forward"');
-    } else {
-      lines.push('    type filter hook forward priority filter; policy drop;');
+    }
+    if (capabilities.virtEnabled) {
+      lines.push('    iifname "vmbr*" accept comment "virt-bridge-forward"');
+      lines.push('    oifname "vmbr*" accept comment "virt-bridge-forward"');
+    }
+    if (state.wireguard?.enabled) {
+      lines.push('    iifname "wg*" accept comment "wireguard-forward"');
+      lines.push('    oifname "wg*" accept comment "wireguard-forward"');
+    }
+    if (state.headscale?.enabled) {
+      lines.push('    iifname "tailscale0" accept comment "tailscale-forward"');
+      lines.push('    oifname "tailscale0" accept comment "tailscale-forward"');
     }
     lines.push('  }');
     lines.push('');

@@ -12,7 +12,8 @@ import {
   validateYamlConfigFiles,
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
-import { DesiredStateSchema, inferInterfaceRole, type DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, VigilanteConfigSchema, inferInterfaceRole, type DesiredState } from '@axonwall/lib/schemas';
+import { BUILTIN_PLUGINS, resolveCapabilities } from '@axonwall/lib/plugins';
 import { isValidDevice } from '@axonwall/lib/util';
 import {
   parseCloudInitYaml,
@@ -1066,6 +1067,96 @@ async function cmdCloudInit(userArgs: string[]) {
   }
 }
 
+const CORE_ROLE_PLUGIN_IDS = new Set(['core-firewall', 'core-nas', 'core-k3s', 'core-virt', 'core-vigilante']);
+
+async function setCoreRolePlugin(pluginId: string, enable: boolean) {
+  const state = cmdValidate(true);
+  const currentCaps = resolveCapabilities(state);
+  const nextCaps = {
+    firewallEnabled: pluginId === 'core-firewall' ? enable : currentCaps.firewallEnabled,
+    nasEnabled: pluginId === 'core-nas' ? enable : currentCaps.nasEnabled,
+    k3sEnabled: pluginId === 'core-k3s' ? enable : currentCaps.k3sEnabled,
+    virtEnabled: pluginId === 'core-virt' ? enable : currentCaps.virtEnabled,
+    vigilanteEnabled: pluginId === 'core-vigilante' ? enable : currentCaps.vigilanteEnabled,
+  };
+  state.capabilities = nextCaps;
+
+  if (pluginId === 'core-nas') {
+    state.nas = state.nas || {
+      enabled: enable,
+      workgroup: 'WORKGROUP',
+      serverString: 'Axonwall Enterprise ZFS NAS',
+      pools: [],
+      datasets: [],
+      snapshotPolicies: [],
+      smbShares: [],
+      nfsExports: [],
+      iscsiTargets: [],
+    };
+    state.nas.enabled = enable;
+  } else if (pluginId === 'core-k3s') {
+    state.k3s = state.k3s || {
+      enabled: enable,
+      clusterCidr: '10.42.0.0/16',
+      serviceCidr: '10.43.0.0/16',
+      nodeIpInterface: 'lan',
+      flannelBackend: 'wireguard-native',
+      disableTraefik: false,
+      autoJoinHaPeer: true,
+      openEbs: {
+        enabled: true,
+        zfsLocalPvEnabled: true,
+        zfsLocalPvPool: 'tank',
+        replicatedStorageEnabled: true,
+        defaultReplicaCount: 2,
+        replicatedBackingPool: 'tank/openebs-replicated',
+      },
+      workloads: [],
+    };
+    state.k3s.enabled = enable;
+  } else if (pluginId === 'core-virt') {
+    state.virt = state.virt || {
+      enabled: enable,
+      defaultPool: 'tank',
+      isoPool: 'tank',
+      vms: [],
+      containers: [],
+      isos: [],
+      pciDevices: [],
+      backupJobs: [],
+      vxlanZones: [],
+    };
+    state.virt.enabled = enable;
+  } else if (pluginId === 'core-vigilante') {
+    state.vigilante =
+      state.vigilante ||
+      VigilanteConfigSchema.parse({
+        enabled: enable,
+      });
+    state.vigilante.enabled = enable;
+  }
+
+  const yamlFiles = serializeDesiredStateToYamlFiles(state);
+  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+    try {
+      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
+      for (const [filename, content] of Object.entries(yamlFiles)) {
+        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o644 });
+      }
+      // Remove stale conf.d/99-cloudinit.yaml override now that state is persisted to canonical domain files
+      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+      if (fs.existsSync(ciOverride)) {
+        fs.rmSync(ciOverride, { force: true });
+      }
+    } catch {}
+  }
+
+  console.log(
+    `[+] ${enable ? 'Enabling' : 'Disabling'} core role '${pluginId}' (capabilities: firewall=${nextCaps.firewallEnabled}, nas=${nextCaps.nasEnabled}, k3s=${nextCaps.k3sEnabled}, virt=${nextCaps.virtEnabled}, vigilante=${nextCaps.vigilanteEnabled})...`
+  );
+  await cmdApply(true);
+}
+
 async function cmdPlugin(args: string[]) {
   const subcmd = (args[0] || 'list').toLowerCase();
   const pluginId = args[1];
@@ -1073,6 +1164,33 @@ async function cmdPlugin(args: string[]) {
   switch (subcmd) {
     case 'list':
     case 'ls': {
+      const state = cmdValidate(true);
+      const caps = resolveCapabilities(state);
+      const coreRoles = BUILTIN_PLUGINS.filter((p) => p.category === 'core_role');
+
+      console.log(`\n${cCyan}${cBold}=== Axonwall Core Appliance Roles (/etc/axonwall/system.yaml) ===${cReset}\n`);
+      console.log(
+        `  ${cBold}${'ID'.padEnd(28)} ${'NAME'.padEnd(46)} ${'STATUS'.padEnd(16)} SYSTEMD UNITS${cReset}`
+      );
+      console.log(`  ${'-'.repeat(105)}`);
+      for (const role of coreRoles) {
+        const enabled =
+          role.id === 'core-firewall'
+            ? caps.firewallEnabled
+            : role.id === 'core-nas'
+              ? caps.nasEnabled
+              : role.id === 'core-k3s'
+                ? caps.k3sEnabled
+                : role.id === 'core-virt'
+                  ? caps.virtEnabled
+                  : caps.vigilanteEnabled;
+        const statusStr = enabled ? `${cGreen}ENABLED${cReset}` : `${cDim}DISABLED${cReset}`;
+        const unitsList = (role.systemdUnits || []).join(' ');
+        console.log(
+          `  ${role.id.padEnd(28)} ${role.name.padEnd(46)} ${statusStr.padEnd(25)} ${cDim}${unitsList}${cReset}`
+        );
+      }
+
       try {
         const res = await sendAgentSocketRequest<{ plugins: any[]; osFamily: string }>('/v1/system/plugins', 'GET');
         console.log(`\n${cCyan}${cBold}=== Axonwall Extension Plugins (${res.osFamily.toUpperCase()} Host) ===${cReset}\n`);
@@ -1094,7 +1212,36 @@ async function cmdPlugin(args: string[]) {
         }
         console.log('');
       } catch (err: any) {
-        console.error(`${cRed}Failed to fetch plugins from agent daemon:${cReset}`, err?.message || err);
+        console.log(`\n  ${cDim}(Extension plugin package status unavailable — agent daemon offline)${cReset}\n`);
+      }
+      break;
+    }
+    case 'enable': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin enable <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      if (CORE_ROLE_PLUGIN_IDS.has(pluginId)) {
+        await setCoreRolePlugin(pluginId, true);
+      } else {
+        console.error(
+          `${cRed}Unknown core role '${pluginId}'. Valid core roles: ${Array.from(CORE_ROLE_PLUGIN_IDS).join(', ')}${cReset}`
+        );
+        process.exit(1);
+      }
+      break;
+    }
+    case 'disable': {
+      if (!pluginId) {
+        console.error(`${cRed}Usage: axonwallctl plugin disable <plugin-id>${cReset}`);
+        process.exit(1);
+      }
+      if (CORE_ROLE_PLUGIN_IDS.has(pluginId)) {
+        await setCoreRolePlugin(pluginId, false);
+      } else {
+        console.error(
+          `${cRed}Unknown core role '${pluginId}'. Valid core roles: ${Array.from(CORE_ROLE_PLUGIN_IDS).join(', ')}${cReset}`
+        );
         process.exit(1);
       }
       break;
@@ -1104,6 +1251,10 @@ async function cmdPlugin(args: string[]) {
       if (!pluginId) {
         console.error(`${cRed}Usage: axonwallctl plugin install <plugin-id>${cReset}`);
         process.exit(1);
+      }
+      if (CORE_ROLE_PLUGIN_IDS.has(pluginId)) {
+        await setCoreRolePlugin(pluginId, true);
+        break;
       }
       console.log(`[+] Installing plugin '${pluginId}'...`);
       try {
@@ -1131,6 +1282,10 @@ async function cmdPlugin(args: string[]) {
       if (!pluginId) {
         console.error(`${cRed}Usage: axonwallctl plugin remove <plugin-id>${cReset}`);
         process.exit(1);
+      }
+      if (CORE_ROLE_PLUGIN_IDS.has(pluginId)) {
+        await setCoreRolePlugin(pluginId, false);
+        break;
       }
       console.log(`[+] Removing plugin '${pluginId}'...`);
       try {
@@ -1180,7 +1335,7 @@ async function cmdPlugin(args: string[]) {
     }
     default:
       console.error(`${cRed}Unknown plugin subcommand: ${subcmd}${cReset}`);
-      console.log(`Usage: axonwallctl plugin <list|install|remove|re-sync> [plugin-id]`);
+      console.log(`Usage: axonwallctl plugin <list|enable|disable|install|remove|re-sync> [plugin-id]`);
       process.exit(1);
   }
 }
@@ -1199,7 +1354,7 @@ ${cBold}COMMANDS:${cReset}
   confirm             Confirm the currently pending configuration commit and disarm auto-rollback
   rollback            Immediately abort pending commit and revert to last-known-good configuration
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
-  plugin <cmd> [id]   Manage extension plugins (list, install, remove, re-sync)
+  plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   cloudinit export    Export running appliance into #cloud-config YAML or bootable NoCloud cidata.iso
                       Options: [-o <file.yaml>] [--iso <cidata.iso>] [--template] [--no-redact] [--hostname <name>]
