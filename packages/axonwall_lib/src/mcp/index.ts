@@ -22,7 +22,7 @@ export const McpScopeSchema = z.enum(MCP_SCOPES);
 export type McpScope = z.infer<typeof McpScopeSchema>;
 
 export const McpSettingsSchema = z.object({
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
   disabledReason: z.string().optional(),
   disabledAt: z.string().optional(),
   disabledBy: z.string().optional(),
@@ -30,7 +30,7 @@ export const McpSettingsSchema = z.object({
 export type McpSettings = z.infer<typeof McpSettingsSchema>;
 
 export const McpConfigSchema = z.object({
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
   disabledReason: z.string().optional(),
 });
 export type McpConfig = z.infer<typeof McpConfigSchema>;
@@ -589,7 +589,12 @@ export function getMcpServerStatus(settingsPath?: string): McpServerStatus {
 
   if (envEnabled !== undefined) {
     const isEn = envEnabled.toLowerCase() === 'true' || envEnabled === '1';
-    if (!isEn) {
+    if (isEn) {
+      return {
+        enabled: true,
+        source: 'env',
+      };
+    } else {
       return {
         enabled: false,
         disabledReason: 'Disabled unconditionally via AXONWALL_MCP_ENABLED=false environment variable',
@@ -621,12 +626,13 @@ export function getMcpServerStatus(settingsPath?: string): McpServerStatus {
         };
       }
     } catch {
-      // In case of read/parse failure, default to enabled
+      // In case of read/parse failure, fall through to default disabled
     }
   }
 
   return {
-    enabled: true,
+    enabled: false,
+    disabledReason: 'Disabled by default; must be explicitly enabled via Web Console or AXONWALL_MCP_ENABLED=true',
     source: 'default',
   };
 }

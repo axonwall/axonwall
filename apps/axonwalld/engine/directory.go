@@ -132,6 +132,12 @@ func seedUserZshrc(homeDir string, uid, gid int) {
 			_ = os.Chown(zshrcPath, uid, gid)
 		}
 	}
+	omzLink := filepath.Join(homeDir, ".oh-my-zsh")
+	if _, err := os.Lstat(omzLink); os.IsNotExist(err) {
+		if info, statErr := os.Stat("/usr/share/oh-my-zsh"); statErr == nil && info.IsDir() {
+			_ = os.Symlink("/usr/share/oh-my-zsh", omzLink)
+		}
+	}
 }
 
 // Bootstrap initializes OpenLDAP, SSSD, migrates any existing local human accounts,

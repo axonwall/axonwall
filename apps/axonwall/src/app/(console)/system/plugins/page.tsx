@@ -276,11 +276,15 @@ export default function PluginManagerPage() {
         const plugins = next.plugins || [];
         const idx = plugins.findIndex((p) => p.id === id);
         if (idx >= 0) {
-          plugins[idx].enabled = !plugins[idx].enabled;
+          plugins[idx].enabled = !isCurrentlyEnabled;
         } else {
-          plugins.push({ id, enabled: true });
+          plugins.push({ id, enabled: !isCurrentlyEnabled });
         }
         next.plugins = plugins;
+      }
+
+      if (id === 'cli-workstation') {
+        await executePluginAction('cli-workstation', !isCurrentlyEnabled ? 'enable' : 'disable').catch(() => {});
       }
 
       const res = await applyDesiredState(next);

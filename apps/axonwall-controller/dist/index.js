@@ -36305,6 +36305,7 @@ var PluginManifestSchema = external_exports.object({
   name: external_exports.string().min(1),
   version: external_exports.string().min(1),
   category: PluginCategorySchema.default("extension").optional(),
+  defaultEnabled: external_exports.boolean().optional(),
   description: external_exports.string().default(""),
   author: external_exports.string().default("Axonwall Community"),
   systemdUnits: external_exports.array(external_exports.string()).default([]),
@@ -39422,13 +39423,13 @@ var MCP_SCOPES = [
 ];
 var McpScopeSchema = external_exports.enum(MCP_SCOPES);
 var McpSettingsSchema = external_exports.object({
-  enabled: external_exports.boolean().default(true),
+  enabled: external_exports.boolean().default(false),
   disabledReason: external_exports.string().optional(),
   disabledAt: external_exports.string().optional(),
   disabledBy: external_exports.string().optional()
 });
 var McpConfigSchema = external_exports.object({
-  enabled: external_exports.boolean().default(true),
+  enabled: external_exports.boolean().default(false),
   disabledReason: external_exports.string().optional()
 });
 var McpPolicyLimitsSchema = external_exports.object({
@@ -39867,7 +39868,12 @@ function getMcpServerStatus(settingsPath) {
   }
   if (envEnabled !== void 0) {
     const isEn = envEnabled.toLowerCase() === "true" || envEnabled === "1";
-    if (!isEn) {
+    if (isEn) {
+      return {
+        enabled: true,
+        source: "env"
+      };
+    } else {
       return {
         enabled: false,
         disabledReason: "Disabled unconditionally via AXONWALL_MCP_ENABLED=false environment variable",
@@ -39900,7 +39906,8 @@ function getMcpServerStatus(settingsPath) {
     }
   }
   return {
-    enabled: true,
+    enabled: false,
+    disabledReason: "Disabled by default; must be explicitly enabled via Web Console or AXONWALL_MCP_ENABLED=true",
     source: "default"
   };
 }

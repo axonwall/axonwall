@@ -47,7 +47,7 @@ export async function getExtensionPlugins(): Promise<PluginsApiResponse> {
 
 export async function executePluginAction(
   pluginId: string,
-  action: 'install' | 'uninstall' | 'reconfigure'
+  action: 'install' | 'uninstall' | 'reconfigure' | 'enable' | 'disable'
 ): Promise<PluginActionResult> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');

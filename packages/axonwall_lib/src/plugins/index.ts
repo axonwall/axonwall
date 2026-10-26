@@ -1,6 +1,14 @@
 import { PluginManifestSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
 export type { PluginManifest };
 
+export const CORE_ROLE_PLUGIN_IDS = new Set([
+  'core-firewall',
+  'core-nas',
+  'core-k3s',
+  'core-virt',
+  'core-vigilante',
+]);
+
 export const BUILTIN_PLUGINS: PluginManifest[] = [
   {
     id: 'core-firewall',
@@ -204,16 +212,42 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
   },
   {
     id: 'cli-workstation',
-    name: 'Modern Operator Shell & Editor (ZSH, Starship & VIM)',
-    version: '1.0.0',
+    name: 'Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship & VIM)',
+    version: '1.1.0',
     category: 'extension',
-    description: 'Pre-configured productivity environment with ZSH, Starship cyber-emerald prompt, live Commit-Confirm rollback indicator, VIM syntax defaults, and Tmux terminal multiplexer.',
+    defaultEnabled: true,
+    description:
+      'Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, live Commit-Confirm rollback & Kubernetes indicators, VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui). Can be disabled to minimize attack surface.',
     author: 'Axonwall Core',
     systemdUnits: [],
     privileges: ['system.users', 'system.hardware'],
     packages: {
-      debian: ['zsh', 'vim', 'tmux'],
-      alpine: ['zsh', 'vim', 'starship', 'tmux'],
+      debian: [
+        'zsh',
+        'vim',
+        'tmux',
+        'zsh-autosuggestions',
+        'zsh-syntax-highlighting',
+        'fzf',
+        'zoxide',
+        'bat',
+        'ripgrep',
+        'fd-find',
+        'git',
+      ],
+      alpine: [
+        'zsh',
+        'vim',
+        'starship',
+        'tmux',
+        'zsh-vcs',
+        'fzf',
+        'zoxide',
+        'bat',
+        'ripgrep',
+        'fd',
+        'git',
+      ],
     },
     cliBinaries: ['zsh', 'vim', 'starship', 'tmux'],
   },
@@ -329,7 +363,9 @@ export function isPluginAllowed(manifest: PluginManifest, grantedPrivileges: str
 }
 
 export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> | null): boolean {
-  if (!state) return false;
+  if (!state) {
+    return pluginId === 'core-firewall' || pluginId === 'cli-workstation';
+  }
 
   // Check core roles
   if (pluginId === 'core-firewall') {
@@ -346,6 +382,12 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   }
   if (pluginId === 'core-vigilante') {
     return Boolean(state.capabilities?.vigilanteEnabled ?? state.vigilante?.enabled);
+  }
+
+  // Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM) is enabled by default
+  if (pluginId === 'cli-workstation') {
+    const entry = state.plugins?.find((p) => p.id === 'cli-workstation');
+    return entry ? entry.enabled !== false : true;
   }
 
   // Check specific service/extension plugins

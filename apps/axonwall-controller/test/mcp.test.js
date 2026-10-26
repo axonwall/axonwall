@@ -8,6 +8,7 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-mcp-test-'));
 process.env.AXONWALL_MCP_KEYS_PATH = path.join(tmpDir, 'mcp-keys.json');
 process.env.AXONWALL_MCP_AUDIT_PATH = path.join(tmpDir, 'mcp-audit.jsonl');
 process.env.AXONWALL_AGENT_API_SOCK = path.join(tmpDir, 'nonexistent-agent.sock');
+process.env.AXONWALL_MCP_ENABLED = 'true';
 
 const {
   createMcpApiKeyRecord,
@@ -115,7 +116,7 @@ test('MCP AuthZ, Blast-Radius Guardrails & Hash-Chained Audit Verification', asy
   assert.equal(chainStatus.totalEntries, 3);
 });
 
-test('MCP Master Kill-Switch / Disable Subsystem Verification', async () => {
+test('MCP Master Kill-Switch / Disable Subsystem Verification (Disabled by Default)', async () => {
   const {
     createMcpApiKeyRecord,
     authenticateMcpToken,
@@ -128,12 +129,26 @@ test('MCP Master Kill-Switch / Disable Subsystem Verification', async () => {
     scopes: ['mcp:telemetry:read'],
   });
 
-  // Verify default enabled
-  const authBefore = authenticateMcpToken(rawToken, '127.0.0.1');
-  assert.equal(authBefore.authenticated, true);
+  // 1. Verify disabled by default without env vars or settings file
+  delete process.env.AXONWALL_MCP_ENABLED;
+  delete process.env.AXONWALL_DISABLE_MCP;
+  delete process.env.AXONWALL_MCP_SETTINGS_PATH;
+
+  assert.equal(isMcpServerEnabled(), false);
+
+  const authDefault = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(authDefault.authenticated, false);
+  assert.equal(authDefault.errorStatus, 503);
+  assert.ok(authDefault.errorMessage?.toLowerCase().includes('disabled by default'));
+
+  // 2. Explicitly enable via environment variable AXONWALL_MCP_ENABLED=true
+  process.env.AXONWALL_MCP_ENABLED = 'true';
   assert.equal(isMcpServerEnabled(), true);
 
-  // 1. Disable via environment variable AXONWALL_MCP_ENABLED=false
+  const authEnv = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(authEnv.authenticated, true);
+
+  // 3. Disable via environment variable AXONWALL_MCP_ENABLED=false
   process.env.AXONWALL_MCP_ENABLED = 'false';
   assert.equal(isMcpServerEnabled(), false);
 
@@ -145,7 +160,7 @@ test('MCP Master Kill-Switch / Disable Subsystem Verification', async () => {
   // JSON-RPC message rejected when disabled
   const rpcRespEnv = await processMcpJsonRpcMessage(
     { jsonrpc: '2.0', id: 10, method: 'tools/list', params: {} },
-    { key: authBefore.key, clientIp: '127.0.0.1' }
+    { key: authEnv.key, clientIp: '127.0.0.1' }
   );
   assert.ok(rpcRespEnv?.error);
   assert.equal(rpcRespEnv.error.code, -32000);
@@ -153,7 +168,7 @@ test('MCP Master Kill-Switch / Disable Subsystem Verification', async () => {
 
   delete process.env.AXONWALL_MCP_ENABLED;
 
-  // 2. Disable via AXONWALL_DISABLE_MCP=1
+  // 4. Disable via AXONWALL_DISABLE_MCP=1
   process.env.AXONWALL_DISABLE_MCP = '1';
   assert.equal(isMcpServerEnabled(), false);
 
@@ -163,10 +178,18 @@ test('MCP Master Kill-Switch / Disable Subsystem Verification', async () => {
 
   delete process.env.AXONWALL_DISABLE_MCP;
 
-  // 3. Disable via persistent configuration file
+  // 5. Explicitly enable and disable via persistent configuration file
   const settingsFile = path.join(tmpDir, 'mcp-settings.json');
   process.env.AXONWALL_MCP_SETTINGS_PATH = settingsFile;
 
+  // Explicitly enable via file
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: true }));
+  assert.equal(isMcpServerEnabled(), true);
+
+  const reEnabledAuth = authenticateMcpToken(rawToken, '127.0.0.1');
+  assert.equal(reEnabledAuth.authenticated, true);
+
+  // Explicitly disable via file
   fs.writeFileSync(settingsFile, JSON.stringify({
     enabled: false,
     disabledReason: 'Emergency maintenance lockdown',
@@ -181,11 +204,6 @@ test('MCP Master Kill-Switch / Disable Subsystem Verification', async () => {
   assert.equal(disabledAuthFile.errorStatus, 503);
   assert.ok(disabledAuthFile.errorMessage?.includes('Emergency maintenance lockdown'));
 
-  // Re-enable via file
-  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: true }));
-  assert.equal(isMcpServerEnabled(), true);
-
-  const reEnabledAuth = authenticateMcpToken(rawToken, '127.0.0.1');
-  assert.equal(reEnabledAuth.authenticated, true);
+  delete process.env.AXONWALL_MCP_SETTINGS_PATH;
 });
 

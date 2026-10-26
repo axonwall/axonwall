@@ -2284,6 +2284,10 @@ func main() {
 				resp = pluginManager.UninstallPlugin(req.PluginID)
 			case "reconfigure", "re-sync":
 				resp = pluginManager.ReconfigurePlugin(req.PluginID)
+			case "enable":
+				resp = pluginManager.EnablePlugin(req.PluginID)
+			case "disable":
+				resp = pluginManager.DisablePlugin(req.PluginID)
 			default:
 				resp = engine.PluginActionResponse{
 					Success: false,

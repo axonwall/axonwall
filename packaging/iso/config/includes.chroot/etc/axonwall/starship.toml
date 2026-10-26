@@ -18,6 +18,7 @@ $hostname\
 $directory\
 $git_branch\
 $git_status\
+$kubernetes\
 $cmd_duration\
 $jobs\
 $status\
@@ -54,6 +55,12 @@ format = "on [$symbol$branch]($style) "
 [git_status]
 style = "bold #f59e0b"
 format = '([\[$all_status$ahead_behind\]]($style) )'
+
+[kubernetes]
+disabled = false
+symbol = "☸ "
+style = "bold #38bdf8"
+format = '[$symbol$context( \($namespace\))]($style) '
 
 [cmd_duration]
 min_time = 2000

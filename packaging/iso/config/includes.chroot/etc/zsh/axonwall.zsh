@@ -1,6 +1,7 @@
 # ==============================================================================
 # Axonwall Appliance Modern ZSH Configuration (/etc/zsh/axonwall.zsh)
-# Sourced by /etc/zsh/zshrc and ~/.zshrc for interactive shell sessions
+# Powered by Oh My Zsh (https://ohmyz.sh) + Starship + Full Stack Completions
+# Sourced by /etc/zsh/zshrc and ~/.zshrc for all interactive ZSH shells
 # ==============================================================================
 
 # Guard against double-sourcing when both /etc/zsh/zshrc and ~/.zshrc source this file
@@ -13,42 +14,65 @@ export EDITOR="vim"
 export VISUAL="vim"
 export PAGER="less -FRX"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Auto-detect K3s kubeconfig if present so kubectl / helm / k9s work immediately
+if [[ -z "${KUBECONFIG:-}" ]] && [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
+  export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+fi
+
+# Respect explicit workstation plugin disablement (attack-surface reduction mode)
+if [[ -f /etc/axonwall/workstation.disabled ]]; then
+  PROMPT='%n@%m:%~%# '
+  return 0
+fi
+
 export STARSHIP_CONFIG="/etc/axonwall/starship.toml"
 export STARSHIP_LOG="error"
 
-# History configuration
-HISTFILE="${HOME}/.zsh_history"
-HISTSIZE=25000
-SAVEHIST=25000
-setopt APPEND_HISTORY
-setopt INC_APPEND_HISTORY
-setopt SHARE_HISTORY
-setopt HIST_IGNORE_DUPS
-setopt HIST_IGNORE_ALL_DUPS
-setopt HIST_IGNORE_SPACE
-setopt HIST_REDUCE_BLANKS
-setopt AUTO_CD
+# ==============================================================================
+# 1. Oh My Zsh (https://ohmyz.sh) Initialization & Plugins
+# ==============================================================================
+export ZSH="${ZSH:-/usr/share/oh-my-zsh}"
+export ZSH_CUSTOM="${ZSH_CUSTOM:-$ZSH/custom}"
+export ZSH_CACHE_DIR="${HOME}/.cache/oh-my-zsh"
+DISABLE_AUTO_UPDATE="true"
+DISABLE_UPDATE_PROMPT="true"
+
+# Ensure ~/.oh-my-zsh symlink exists for per-user tool compatibility
+if [[ -d /usr/share/oh-my-zsh ]] && [[ -n "${HOME:-}" ]] && [[ -d "${HOME}" ]] && [[ ! -e "${HOME}/.oh-my-zsh" ]]; then
+  ln -s /usr/share/oh-my-zsh "${HOME}/.oh-my-zsh" 2>/dev/null || true
+fi
+
+# Enabled Oh My Zsh plugins across the Axonwall stack
+plugins=(
+  git
+  kubectl
+  helm
+  docker
+  systemd
+  sudo
+  tmux
+  extract
+  colored-man-pages
+  axonwall
+)
+
+if [[ -f "$ZSH/oh-my-zsh.sh" ]]; then
+  source "$ZSH/oh-my-zsh.sh"
+else
+  # Fallback completion initialization if Oh My Zsh directory is missing
+  autoload -Uz compinit
+  compinit -u -d "${HOME}/.zcompdump" 2>/dev/null || compinit -u 2>/dev/null || true
+  zstyle ':completion:*' menu select
+  zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*'
+fi
+
 setopt INTERACTIVE_COMMENTS
 setopt PROMPT_SUBST
 
-# Completion system
-autoload -Uz compinit
-compinit -u -d "${HOME}/.zcompdump" 2>/dev/null || compinit -u 2>/dev/null || true
-zstyle ':completion:*' menu select
-zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*'
-zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
-
-# Keybindings (Emacs/standard navigation + Home/End/Delete/Ctrl-Left/Ctrl-Right)
-bindkey -e
-bindkey '^[[3~' delete-char
-bindkey '^[[H' beginning-of-line
-bindkey '^[[F' end-of-line
-bindkey '^[[1~' beginning-of-line
-bindkey '^[[4~' end-of-line
-bindkey '^[[1;5C' forward-word
-bindkey '^[[1;5D' backward-word
-
-# Helper to detect primary default interface and subnet for intelligent CLI defaults
+# ==============================================================================
+# 2. Intelligent Network & Appliance Helpers
+# ==============================================================================
 _axonwall_default_if() {
   local def_if
   def_if="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
@@ -78,48 +102,9 @@ _axonwall_lan_cidr() {
   echo "${cidr:-192.168.1.0/24}"
 }
 
-# Custom ZSH Tab Completion for axonwallctl & axonwall-tui
-_axonwallctl_completion() {
-  local -a subcmds
-  subcmds=(
-    'status:Show live appliance health, interfaces, and commit-confirm status'
-    'validate:Validate syntax and schema of /etc/axonwall/*.yaml'
-    'diff:Show pending changes between /etc/axonwall/*.yaml and live state'
-    'apply:Compile and apply /etc/axonwall/*.yaml with Commit-Confirm safety'
-    'confirm:Confirm active candidate configuration before rollback timer expires'
-    'rollback:Immediately revert to Last-Known-Good (LKG) configuration'
-    'export:Export running state to declarative /etc/axonwall/*.yaml files'
-    'import:Import configuration bundle or legacy config'
-    'cloudinit:Reconcile cloud-init (#cloud-config) metadata'
-  )
-  _describe 'axonwallctl command' subcmds
-}
-compdef _axonwallctl_completion axonwallctl ctl 2>/dev/null || true
-
-_axonwall_tui_completion() {
-  local -a tabs
-  tabs=(
-    'dashboard:System Telemetry & Gateways Overview'
-    'interfaces:Interfaces, VLANs & Bridges'
-    'routing:Gateways, Static Routes & FRR BGP/OSPF'
-    'firewall:Zone Policies & Lockdown Control'
-    'nat:SNAT Masquerade & Port Forwards (DNAT)'
-    'services:DHCPv4 (Kea), DNS (Unbound) & HA Sync'
-    'vpn:WireGuard & Headscale Mesh'
-    'nastymap:NastyMap Interactive Nmap Scanner & Topology'
-    'cli-tools:CLI Ops Toolkit (btop, slurm, iftop, iotop, sysstat, dig)'
-    'logs:Live System & Daemon Journal Logs'
-  )
-  _arguments \
-    '--tab[Open directly to specific TUI workspace tab]:tab:->tabs' \
-    '--help[Show TUI usage help]'
-  if [[ "$state" == "tabs" ]]; then
-    _describe 'TUI tab' tabs
-  fi
-}
-compdef _axonwall_tui_completion axonwall-tui tui 2>/dev/null || true
-
-# Intelligent Axonwall & CLI Utility Aliases
+# ==============================================================================
+# 3. Axonwall Operator Aliases & Modern CLI Integrations
+# ==============================================================================
 alias tui='axonwall-tui'
 alias webtui='axonwall-tui'
 alias nastymap='axonwall-tui --tab nastymap'
@@ -131,11 +116,14 @@ alias vi='vim'
 alias ll='ls -lah --color=auto'
 alias la='ls -A --color=auto'
 alias l='ls -CF --color=auto'
+alias diff='diff --color=auto'
 alias grep='grep --color=auto'
 alias ip='ip -color=auto'
 alias ports='ss -tulnp'
 alias routes='ip -c route show'
+alias ifaces='ip -brief -c addr'
 alias rules='nft list ruleset'
+alias fw='nft list ruleset'
 alias arptable='ip -c neigh show'
 alias bw='slurm -z -i $(_axonwall_default_if)'
 alias ifbw='iftop -nNP -i $(_axonwall_default_if)'
@@ -178,6 +166,17 @@ if command -v fzf >/dev/null 2>&1; then
   fconn() {
     ss -tulnp 2>/dev/null | fzf --header-lines=1 --prompt='Sockets > ' --layout=reverse
   }
+
+  # Fuzzy-search Kubernetes pods across all namespaces
+  kpod() {
+    local pod_line ns pod
+    pod_line="$(kubectl get pods --all-namespaces --no-headers 2>/dev/null | fzf --prompt='K8s Pod > ' --height=40% --layout=reverse --border)"
+    if [[ -n "$pod_line" ]]; then
+      ns="$(echo "$pod_line" | awk '{print $1}')"
+      pod="$(echo "$pod_line" | awk '{print $2}')"
+      kubectl describe pod "$pod" -n "$ns"
+    fi
+  }
 fi
 
 if command -v zoxide >/dev/null 2>&1; then
@@ -193,7 +192,9 @@ if [[ -f /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
   source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 fi
 
-# Initialize Starship Cross-Shell Prompt (https://starship.rs/guide/)
+# ==============================================================================
+# 4. Initialize Starship Cross-Shell Prompt (https://starship.rs/guide/)
+# ==============================================================================
 if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
 else
@@ -207,16 +208,17 @@ else
   RPROMPT='%F{242}[$(_axonwall_default_if)]%f'
 fi
 
-# Display concise interactive welcome banner on login
+# ==============================================================================
+# 5. Interactive Login Banner
+# ==============================================================================
 if [[ -o interactive ]] && [[ -z "${AXONWALL_BANNER_SHOWN:-}" ]]; then
   export AXONWALL_BANNER_SHOWN=1
   echo "\033[1;32m================================================================================\033[0m"
-  echo "\033[1;37m  Axonwall Appliance ZSH + Starship\033[0m — NIC: \033[1;36m$(_axonwall_default_if)\033[0m | Subnet: \033[1;36m$(_axonwall_lan_cidr)\033[0m"
-  echo "  • \033[1;33maxonwall-tui\033[0m   : Full Interactive Ink TUI (Web Console + NastyMap + Ops)"
-  echo "  • \033[1;33mnastymap\033[0m       : NastyMap Interactive Nmap Scanner & Topology TUI"
-  echo "  • \033[1;33maxonwallctl\033[0m    : YAML CLI (\033[36mstatus\033[0m | \033[36mdiff\033[0m | \033[36mapply\033[0m | \033[36mconfirm\033[0m | \033[36mrollback\033[0m)"
+  echo "\033[1;37m  Axonwall Appliance ZSH + Oh My Zsh + Starship\033[0m — NIC: \033[1;36m$(_axonwall_default_if)\033[0m | Subnet: \033[1;36m$(_axonwall_lan_cidr)\033[0m"
+  echo "  • \033[1;33maxonwall-tui\033[0m   : Full Interactive Ink TUI (10-Tab Console + NastyMap + Ops)"
+  echo "  • \033[1;33maxonwallctl\033[0m    : YAML CLI (\033[36mstatus\033[0m | \033[36mdiff\033[0m | \033[36mapply\033[0m | \033[36mconfirm\033[0m | \033[36mplugin\033[0m | \033[36mmcp\033[0m)"
+  echo "  • \033[1;33mOh My Zsh\033[0m      : \033[36mkubectl\033[0m (\033[36mk\033[0m/\033[36mkgp\033[0m/\033[36mklf\033[0m), \033[36mhelm\033[0m, \033[36mzfs\033[0m/\033[36mzpool\033[0m, \033[36mnft\033[0m, \033[36mwg\033[0m, \033[36mvirsh\033[0m, \033[36msystemd\033[0m, \033[36mgit\033[0m"
   echo "  • \033[1;33mfconf / flog\033[0m   : Fuzzy-edit \033[36m/etc/axonwall/*.yaml\033[0m or search logs (\033[36mfzf\033[0m)"
-  echo "  • \033[1;33mbtop / htop\033[0m    : Live telemetry | \033[1;33mbw\033[0m (\033[36mslurm\033[0m) / \033[1;33mifbw\033[0m (\033[36miftop\033[0m) : Live NIC"
   if [[ -f /run/axonwall/commit-confirm.pending ]]; then
     echo "  \033[1;33;41m ⚠ COMMIT-CONFIRM TIMER ACTIVE: Run 'confirm' (or 'axonwallctl confirm') now! \033[0m"
   fi

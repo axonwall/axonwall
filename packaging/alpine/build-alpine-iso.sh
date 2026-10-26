@@ -372,7 +372,7 @@ cp "${REPO_ROOT}/packaging/debian/headscale-config.yaml" "${OVL}/etc/headscale/c
 cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
 
 if [[ "$MINIMAL" -eq 0 ]]; then
-  mkdir -p "${OVL}/etc/zsh" "${OVL}/etc/skel" "${OVL}/etc/vim"
+  mkdir -p "${OVL}/etc/zsh" "${OVL}/etc/skel" "${OVL}/etc/vim" "${OVL}/usr/share/oh-my-zsh"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/starship.toml" "${OVL}/etc/axonwall/starship.toml"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zsh/axonwall.zsh" "${OVL}/etc/zsh/axonwall.zsh"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zsh/zshenv" "${OVL}/etc/zsh/zshenv"
@@ -380,6 +380,9 @@ if [[ "$MINIMAL" -eq 0 ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/skel/.zshrc" "${OVL}/root/.zshrc"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/vim/vimrc.local" "${OVL}/etc/vim/vimrc.local"
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/tmux.conf" "${OVL}/etc/tmux.conf"
+  if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh" ]]; then
+    cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh/." "${OVL}/usr/share/oh-my-zsh/"
+  fi
 else
   # On minimal Alpine (no zsh installed), symlink /usr/bin/zsh -> /bin/ash so SSO users
   # replicated with loginShell=/usr/bin/zsh can SSH into minimal Alpine seamlessly.

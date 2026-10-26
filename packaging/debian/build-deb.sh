@@ -174,6 +174,11 @@ if [[ -f "${CHROOT_SRC}/etc/skel/.zshrc" ]]; then
   cp "${CHROOT_SRC}/etc/skel/.zshrc" "${WORK_DIR}/etc/skel/.zshrc"
   chmod 0644 "${WORK_DIR}/etc/skel/.zshrc"
 fi
+if [[ -d "${CHROOT_SRC}/usr/share/oh-my-zsh" ]]; then
+  mkdir -p "${WORK_DIR}/usr/share/oh-my-zsh"
+  cp -a "${CHROOT_SRC}/usr/share/oh-my-zsh/." "${WORK_DIR}/usr/share/oh-my-zsh/"
+  chmod -R a+rX "${WORK_DIR}/usr/share/oh-my-zsh"
+fi
 if [[ -f "${CHROOT_SRC}/etc/vim/vimrc.local" ]]; then
   cp "${CHROOT_SRC}/etc/vim/vimrc.local" "${WORK_DIR}/etc/vim/vimrc.local"
   chmod 0644 "${WORK_DIR}/etc/vim/vimrc.local"

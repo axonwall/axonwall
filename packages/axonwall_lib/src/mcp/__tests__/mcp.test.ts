@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   McpPolicyLimitsSchema,
@@ -133,11 +136,21 @@ describe('Axonwall MCP Safety Guard & Blast-Radius Validator', () => {
     expect(blockedIpsIdx).toBeGreaterThan(antiLockoutIdx);
   });
 
-  it('correctly reports master switch status via env vars and settings file', async () => {
+  it('correctly reports master switch status via env vars and settings file (disabled by default)', async () => {
     const { isMcpServerEnabled, getMcpServerStatus } = await import('../index.js');
     
-    // Default enabled
+    // Default disabled
+    expect(isMcpServerEnabled('/nonexistent/mcp-settings.json')).toBe(false);
+    const defaultStatus = getMcpServerStatus('/nonexistent/mcp-settings.json');
+    expect(defaultStatus.enabled).toBe(false);
+    expect(defaultStatus.source).toBe('default');
+    expect(defaultStatus.disabledReason).toMatch(/disabled by default/i);
+
+    // Explicitly enabled via AXONWALL_MCP_ENABLED=true
+    process.env.AXONWALL_MCP_ENABLED = 'true';
     expect(isMcpServerEnabled('/nonexistent/mcp-settings.json')).toBe(true);
+    expect(getMcpServerStatus('/nonexistent/mcp-settings.json').source).toBe('env');
+    delete process.env.AXONWALL_MCP_ENABLED;
 
     // Disabled via AXONWALL_MCP_ENABLED=false
     process.env.AXONWALL_MCP_ENABLED = 'false';
@@ -149,5 +162,23 @@ describe('Axonwall MCP Safety Guard & Blast-Radius Validator', () => {
     process.env.AXONWALL_DISABLE_MCP = '1';
     expect(isMcpServerEnabled('/nonexistent/mcp-settings.json')).toBe(false);
     delete process.env.AXONWALL_DISABLE_MCP;
+
+    // Test persistent settings file
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-lib-mcp-test-'));
+    const settingsPath = path.join(tmpDir, 'mcp-settings.json');
+
+    // Explicitly enabled via settings file
+    fs.writeFileSync(settingsPath, JSON.stringify({ enabled: true }));
+    expect(isMcpServerEnabled(settingsPath)).toBe(true);
+    expect(getMcpServerStatus(settingsPath).source).toBe('settings_file');
+
+    // Explicitly disabled via settings file
+    fs.writeFileSync(settingsPath, JSON.stringify({ enabled: false, disabledReason: 'Emergency maintenance' }));
+    expect(isMcpServerEnabled(settingsPath)).toBe(false);
+    const fileStatus = getMcpServerStatus(settingsPath);
+    expect(fileStatus.source).toBe('settings_file');
+    expect(fileStatus.disabledReason).toBe('Emergency maintenance');
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });

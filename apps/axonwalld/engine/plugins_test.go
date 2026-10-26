@@ -28,6 +28,12 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 			if len(p.RequiredBinaries) == 0 {
 				t.Errorf("cli-workstation missing required binaries metadata")
 			}
+			if !p.DefaultEnabled {
+				t.Errorf("expected cli-workstation to have DefaultEnabled=true")
+			}
+			if !p.Enabled {
+				t.Errorf("expected cli-workstation to be Enabled=true by default")
+			}
 		}
 		if p.ID == "cli-diagnostics-nastymap" {
 			foundNastyMap = true

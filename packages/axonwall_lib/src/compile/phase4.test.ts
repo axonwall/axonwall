@@ -367,6 +367,13 @@ describe('Phase 4: Plugin Framework & Registry', () => {
     // Generic extension plugin
     expect(isPluginEnabled('tailscale', { plugins: [{ id: 'tailscale', enabled: true }] })).toBe(true);
     expect(isPluginEnabled('tailscale', { plugins: [{ id: 'tailscale', enabled: false }] })).toBe(false);
+
+    // Modern Operator Shell & Editor (cli-workstation) is enabled by default and can be explicitly disabled
+    expect(isPluginEnabled('cli-workstation', undefined)).toBe(true);
+    expect(isPluginEnabled('cli-workstation', {})).toBe(true);
+    expect(isPluginEnabled('cli-workstation', { plugins: [] })).toBe(true);
+    expect(isPluginEnabled('cli-workstation', { plugins: [{ id: 'cli-workstation', enabled: true }] })).toBe(true);
+    expect(isPluginEnabled('cli-workstation', { plugins: [{ id: 'cli-workstation', enabled: false }] })).toBe(false);
   });
 });
 

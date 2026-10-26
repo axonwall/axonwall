@@ -19,6 +19,7 @@ type PluginDefinition struct {
 	Category         string   `json:"category"`
 	Description      string   `json:"description"`
 	Author           string   `json:"author"`
+	DefaultEnabled   bool     `json:"defaultEnabled"`
 	SystemdUnits     []string `json:"systemdUnits"`
 	Privileges       []string `json:"privileges"`
 	DebianPackages   []string `json:"debianPackages"`
@@ -33,6 +34,8 @@ type PluginStatus struct {
 	Category         string   `json:"category"`
 	Description      string   `json:"description"`
 	Author           string   `json:"author"`
+	Enabled          bool     `json:"enabled"`
+	DefaultEnabled   bool     `json:"defaultEnabled"`
 	Installed        bool     `json:"installed"`
 	Bundled          bool     `json:"bundled"`
 	RequiredBinaries []string `json:"requiredBinaries"`
@@ -44,7 +47,7 @@ type PluginStatus struct {
 
 type PluginActionRequest struct {
 	PluginID string `json:"pluginId"`
-	Action   string `json:"action"` // "install", "uninstall", "reconfigure"
+	Action   string `json:"action"` // "install", "uninstall", "reconfigure", "enable", "disable"
 }
 
 type PluginActionResponse struct {
@@ -55,9 +58,12 @@ type PluginActionResponse struct {
 
 type PluginManager struct {
 	mu           sync.RWMutex
+	baseDataDir  string
 	stateFile    string
+	disabledFile string
 	osFamily     string
 	installedMap map[string]string // pluginID -> installedAt
+	disabledMap  map[string]bool   // pluginID -> explicitly disabled
 }
 
 func DetectOSFamily() string {
@@ -70,14 +76,39 @@ func DetectOSFamily() string {
 func GetExtensionPluginDefinitions() []PluginDefinition {
 	return []PluginDefinition{
 		{
-			ID:               "cli-workstation",
-			Name:             "Modern Operator Shell & Editor (ZSH, Starship & VIM)",
-			Version:          "1.0.0",
-			Category:         "extension",
-			Description:      "Pre-configured productivity environment with ZSH, Starship cyber-emerald prompt, live Commit-Confirm rollback indicator, VIM syntax defaults, and Tmux terminal multiplexer.",
-			Author:           "Axonwall Core",
-			DebianPackages:   []string{"zsh", "vim", "tmux"},
-			AlpinePackages:   []string{"zsh", "vim", "starship", "tmux"},
+			ID:             "cli-workstation",
+			Name:           "Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship & VIM)",
+			Version:        "1.1.0",
+			Category:       "extension",
+			Description:    "Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, live Commit-Confirm rollback & Kubernetes indicators, VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui). Can be disabled to minimize attack surface.",
+			Author:         "Axonwall Core",
+			DefaultEnabled: true,
+			DebianPackages: []string{
+				"zsh",
+				"vim",
+				"tmux",
+				"zsh-autosuggestions",
+				"zsh-syntax-highlighting",
+				"fzf",
+				"zoxide",
+				"bat",
+				"ripgrep",
+				"fd-find",
+				"git",
+			},
+			AlpinePackages: []string{
+				"zsh",
+				"vim",
+				"starship",
+				"tmux",
+				"zsh-vcs",
+				"fzf",
+				"zoxide",
+				"bat",
+				"ripgrep",
+				"fd",
+				"git",
+			},
 			RequiredBinaries: []string{"zsh", "vim", "starship", "tmux"},
 		},
 		{
@@ -192,10 +223,14 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 
 func NewPluginManager(baseDataDir string) *PluginManager {
 	statePath := filepath.Join(baseDataDir, "plugins.json")
+	disabledPath := filepath.Join(baseDataDir, "plugins-disabled.json")
 	pm := &PluginManager{
+		baseDataDir:  baseDataDir,
 		stateFile:    statePath,
+		disabledFile: disabledPath,
 		osFamily:     DetectOSFamily(),
 		installedMap: make(map[string]string),
+		disabledMap:  make(map[string]bool),
 	}
 	pm.loadState()
 	return pm
@@ -204,13 +239,17 @@ func NewPluginManager(baseDataDir string) *PluginManager {
 func (pm *PluginManager) loadState() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	data, err := os.ReadFile(pm.stateFile)
-	if err != nil {
-		return
+	if data, err := os.ReadFile(pm.stateFile); err == nil {
+		var saved map[string]string
+		if err := json.Unmarshal(data, &saved); err == nil {
+			pm.installedMap = saved
+		}
 	}
-	var saved map[string]string
-	if err := json.Unmarshal(data, &saved); err == nil {
-		pm.installedMap = saved
+	if data, err := os.ReadFile(pm.disabledFile); err == nil {
+		var savedDis map[string]bool
+		if err := json.Unmarshal(data, &savedDis); err == nil {
+			pm.disabledMap = savedDis
+		}
 	}
 }
 
@@ -219,6 +258,25 @@ func (pm *PluginManager) saveState() {
 	if data, err := json.MarshalIndent(pm.installedMap, "", "  "); err == nil {
 		_ = os.WriteFile(pm.stateFile, data, 0644)
 	}
+	if data, err := json.MarshalIndent(pm.disabledMap, "", "  "); err == nil {
+		_ = os.WriteFile(pm.disabledFile, data, 0644)
+	}
+}
+
+func (pm *PluginManager) IsPluginEnabled(pluginID string) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if pm.disabledMap[pluginID] {
+		return false
+	}
+	if pluginID == "cli-workstation" {
+		if _, err := os.Stat("/etc/axonwall/workstation.disabled"); err == nil {
+			return false
+		}
+		return true
+	}
+	return pm.installedMap[pluginID] != ""
 }
 
 func (pm *PluginManager) ListPlugins() []PluginStatus {
@@ -245,6 +303,17 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 		installedAt := pm.installedMap[d.ID]
 		bundled := installed && installedAt == ""
 
+		enabled := d.DefaultEnabled
+		if pm.disabledMap[d.ID] {
+			enabled = false
+		} else if d.ID == "cli-workstation" {
+			if _, err := os.Stat("/etc/axonwall/workstation.disabled"); err == nil {
+				enabled = false
+			}
+		} else if installedAt != "" {
+			enabled = true
+		}
+
 		results = append(results, PluginStatus{
 			ID:               d.ID,
 			Name:             d.Name,
@@ -252,6 +321,8 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			Category:         d.Category,
 			Description:      d.Description,
 			Author:           d.Author,
+			Enabled:          enabled,
+			DefaultEnabled:   d.DefaultEnabled,
 			Installed:        installed,
 			Bundled:          bundled,
 			RequiredBinaries: d.RequiredBinaries,
@@ -262,6 +333,50 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 		})
 	}
 	return results
+}
+
+func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
+	pm.mu.Lock()
+	delete(pm.disabledMap, pluginID)
+	pm.saveState()
+	pm.mu.Unlock()
+
+	if pluginID == "cli-workstation" {
+		_ = os.Remove("/etc/axonwall/workstation.disabled")
+		if err := pm.provisionWorkstationConfigs(); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to enable workstation shell environment: %v", err),
+			}
+		}
+		return PluginActionResponse{
+			Success: true,
+			Message: "Enabled Modern Operator Shell & Editor (ZSH + Oh My Zsh + Starship + VIM + Full Stack Completions).",
+		}
+	}
+
+	return pm.ReconfigurePlugin(pluginID)
+}
+
+func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
+	pm.mu.Lock()
+	pm.disabledMap[pluginID] = true
+	pm.saveState()
+	pm.mu.Unlock()
+
+	if pluginID == "cli-workstation" {
+		_ = os.MkdirAll("/etc/axonwall", 0755)
+		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
+		return PluginActionResponse{
+			Success: true,
+			Message: "Disabled Modern Operator Shell & Editor (attack-surface reduction mode active).",
+		}
+	}
+
+	return PluginActionResponse{
+		Success: true,
+		Message: fmt.Sprintf("Disabled plugin %s.", pluginID),
+	}
 }
 
 func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
@@ -313,6 +428,8 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 
 	// Post-install configuration hooks
 	if pluginID == "cli-workstation" {
+		_ = os.Remove("/etc/axonwall/workstation.disabled")
+		delete(pm.disabledMap, pluginID)
 		if err := pm.provisionWorkstationConfigs(); err != nil {
 			log.Printf("[PluginManager] Warning provisioning workstation configs: %v", err)
 		}
@@ -388,11 +505,16 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	}
 
 	// Post-removal cleanup hooks
-	if pluginID == "cli-workstation" && pm.osFamily == "alpine" {
-		// Restore /usr/bin/zsh -> /bin/ash fallback so OpenLDAP SSO users with loginShell=/usr/bin/zsh can always SSH in!
-		_ = os.Remove("/usr/bin/zsh")
-		if _, err := os.Stat("/bin/ash"); err == nil {
-			_ = os.Symlink("/bin/ash", "/usr/bin/zsh")
+	if pluginID == "cli-workstation" {
+		pm.disabledMap[pluginID] = true
+		_ = os.MkdirAll("/etc/axonwall", 0755)
+		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
+		if pm.osFamily == "alpine" {
+			// Restore /usr/bin/zsh -> /bin/ash fallback so OpenLDAP SSO users with loginShell=/usr/bin/zsh can always SSH in!
+			_ = os.Remove("/usr/bin/zsh")
+			if _, err := os.Stat("/bin/ash"); err == nil {
+				_ = os.Symlink("/bin/ash", "/usr/bin/zsh")
+			}
 		}
 	}
 
@@ -408,6 +530,11 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 
 func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse {
 	if pluginID == "cli-workstation" {
+		_ = os.Remove("/etc/axonwall/workstation.disabled")
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		pm.saveState()
+		pm.mu.Unlock()
 		if err := pm.provisionWorkstationConfigs(); err != nil {
 			return PluginActionResponse{
 				Success: false,
@@ -416,7 +543,7 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		}
 		return PluginActionResponse{
 			Success: true,
-			Message: "Workstation terminal, ZSH, Starship, and VIM configs re-provisioned successfully.",
+			Message: "Workstation terminal, ZSH, Oh My Zsh (kubectl + stack plugins), Starship, VIM, and Tmux configs re-provisioned successfully.",
 		}
 	}
 	if pluginID == "rosenpass" {
@@ -443,6 +570,11 @@ func (pm *PluginManager) provisionWorkstationConfigs() error {
 	_ = os.MkdirAll("/etc/skel", 0755)
 	_ = os.MkdirAll("/etc/vim", 0755)
 	_ = os.MkdirAll("/root", 0700)
+	_ = os.MkdirAll("/usr/share/oh-my-zsh/lib", 0755)
+	_ = os.MkdirAll("/usr/share/oh-my-zsh/custom/plugins", 0755)
+	for _, plug := range []string{"kubectl", "helm", "git", "systemd", "sudo", "tmux", "extract", "colored-man-pages", "docker", "axonwall"} {
+		_ = os.MkdirAll(filepath.Join("/usr/share/oh-my-zsh/plugins", plug), 0755)
+	}
 
 	// 1. /etc/axonwall/starship.toml
 	starshipConf := `# ==============================================================================
@@ -465,15 +597,28 @@ $hostname\
 $directory\
 $git_branch\
 $git_status\
+$kubernetes\
+$cmd_duration\
+$jobs\
+$status\
+$line_break\
 $character"""
 
-right_format = """$cmd_duration"""
+right_format = """${custom.axonwall_if}$time"""
 
 [custom.axonwall_commit]
-command = "cat /run/axonwall/commit-confirm.pending 2>/dev/null"
-when = "test -s /run/axonwall/commit-confirm.pending"
+command = "cat /run/axonwall/commit-confirm.pending 2>/dev/null || echo 'COMMIT-CONFIRM ACTIVE'"
+when = "test -f /run/axonwall/commit-confirm.pending"
 style = "bold #f59e0b"
-format = "[$output]($style) "
+format = '[⚠ $output — run ` + "`confirm`" + ` ]($style)'
+shell = ["/bin/sh", "-c"]
+
+[custom.axonwall_if]
+when = "true"
+command = "ip route show default 2>/dev/null | awk '{print $5; exit}'"
+style = "dimmed #38bdf8"
+format = '([\[$output\]]($style) )'
+shell = ["/bin/sh", "-c"]
 
 [username]
 show_always = true
@@ -483,8 +628,9 @@ format = "[$user]($style)"
 
 [hostname]
 ssh_only = false
-style = "bold #94a3b8"
+style = "bold #f8fafc"
 format = "[$hostname]($style)"
+trim_at = "."
 
 [directory]
 truncation_length = 4
@@ -492,15 +638,106 @@ truncate_to_repo = false
 style = "bold #06b6d4"
 format = "[$path]($style) "
 
+[git_branch]
+symbol = "git:"
+style = "bold #a855f7"
+format = "on [$symbol$branch]($style) "
+
+[git_status]
+style = "bold #f59e0b"
+format = '([\[$all_status$ahead_behind\]]($style) )'
+
+[kubernetes]
+disabled = false
+symbol = "☸ "
+style = "bold #38bdf8"
+format = '[$symbol$context( \($namespace\))]($style) '
+
 [character]
 success_symbol = "[❯](bold #10b981)"
 error_symbol = "[❯](bold #ef4444)"
+vimcmd_symbol = "[❮](bold #38bdf8)"
 `
 	_ = os.WriteFile("/etc/axonwall/starship.toml", []byte(starshipConf), 0644)
 
-	// 2. /etc/zsh/axonwall.zsh
+	// 2. Provision Oh My Zsh loader if not already present on disk
+	omzLoaderPath := "/usr/share/oh-my-zsh/oh-my-zsh.sh"
+	if _, err := os.Stat(omzLoaderPath); os.IsNotExist(err) {
+		omzLoader := `# Oh My Zsh (https://ohmyz.sh) — Axonwall System-Wide Distribution Loader
+export ZSH="${ZSH:-/usr/share/oh-my-zsh}"
+export ZSH_CUSTOM="${ZSH_CUSTOM:-$ZSH/custom}"
+export ZSH_CACHE_DIR="${ZSH_CACHE_DIR:-${HOME}/.cache/oh-my-zsh}"
+mkdir -p "${ZSH_CACHE_DIR}/completions" 2>/dev/null || true
+fpath=("$ZSH/functions" "$ZSH/completions" "${ZSH_CACHE_DIR}/completions" $fpath)
+for _omz_plugin in ${plugins[@]}; do
+  if [[ -d "$ZSH_CUSTOM/plugins/$_omz_plugin" ]]; then
+    fpath=("$ZSH_CUSTOM/plugins/$_omz_plugin" $fpath)
+  elif [[ -d "$ZSH/plugins/$_omz_plugin" ]]; then
+    fpath=("$ZSH/plugins/$_omz_plugin" $fpath)
+  fi
+done
+unset _omz_plugin
+autoload -Uz compinit
+compinit -u -d "${ZSH_CACHE_DIR}/.zcompdump-${ZSH_VERSION:-zsh}" 2>/dev/null || compinit -u 2>/dev/null || true
+for _omz_lib in "$ZSH"/lib/*.zsh(N); do
+  source "$_omz_lib"
+done
+unset _omz_lib
+for _omz_plugin in ${plugins[@]}; do
+  if [[ -f "$ZSH_CUSTOM/plugins/$_omz_plugin/$_omz_plugin.plugin.zsh" ]]; then
+    source "$ZSH_CUSTOM/plugins/$_omz_plugin/$_omz_plugin.plugin.zsh"
+  elif [[ -f "$ZSH/plugins/$_omz_plugin/$_omz_plugin.plugin.zsh" ]]; then
+    source "$ZSH/plugins/$_omz_plugin/$_omz_plugin.plugin.zsh"
+  fi
+done
+unset _omz_plugin
+`
+		_ = os.WriteFile(omzLoaderPath, []byte(omzLoader), 0644)
+	}
+
+	// Ensure kubectl Oh My Zsh plugin exists
+	kubectlPluginPath := "/usr/share/oh-my-zsh/plugins/kubectl/kubectl.plugin.zsh"
+	if _, err := os.Stat(kubectlPluginPath); os.IsNotExist(err) {
+		kubectlPlug := `# Oh My Zsh — kubectl plugin
+if [[ -z "${KUBECONFIG:-}" ]] && [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
+  export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+fi
+if ! (( $+commands[kubectl] )) && (( $+commands[k3s] )); then
+  function kubectl() { command k3s kubectl "$@"; }
+fi
+if (( $+commands[kubectl] )) || (( $+commands[k3s] )); then
+  if [[ ! -f "${ZSH_CACHE_DIR}/completions/_kubectl" ]]; then
+    kubectl completion zsh 2>/dev/null >| "${ZSH_CACHE_DIR}/completions/_kubectl" &|
+  fi
+  [[ -s "${ZSH_CACHE_DIR}/completions/_kubectl" ]] && source "${ZSH_CACHE_DIR}/completions/_kubectl" 2>/dev/null
+fi
+alias k='kubectl'
+alias kgp='kubectl get pods'
+alias kgpa='kubectl get pods --all-namespaces'
+alias kgs='kubectl get svc'
+alias kgsa='kubectl get svc --all-namespaces'
+alias kgn='kubectl get nodes -o wide'
+alias kgd='kubectl get deployment'
+alias kgpvc='kubectl get pvc'
+alias kdp='kubectl describe pods'
+alias kds='kubectl describe svc'
+alias kdno='kubectl describe node'
+alias kl='kubectl logs'
+alias klf='kubectl logs -f'
+alias kex='kubectl exec -it'
+alias kaf='kubectl apply -f'
+alias kdel='kubectl delete'
+alias kctx='kubectl config get-contexts'
+alias kns='kubectl config set-context --current --namespace'
+alias kroll='kubectl rollout restart deployment'
+`
+		_ = os.WriteFile(kubectlPluginPath, []byte(kubectlPlug), 0644)
+	}
+
+	// 3. /etc/zsh/axonwall.zsh (preserve packaged rich version if already present and non-empty, otherwise write full config)
 	zshConf := `# ==============================================================================
 # Axonwall Appliance Modern ZSH Configuration (/etc/zsh/axonwall.zsh)
+# Powered by Oh My Zsh (https://ohmyz.sh) + Starship + Full Stack Completions
 # Sourced by /etc/zsh/zshrc and ~/.zshrc for interactive shell sessions
 # ==============================================================================
 
@@ -513,8 +750,45 @@ export EDITOR="vim"
 export VISUAL="vim"
 export PAGER="less -FRX"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+if [[ -z "${KUBECONFIG:-}" ]] && [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
+  export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+fi
+
+if [[ -f /etc/axonwall/workstation.disabled ]]; then
+  PROMPT='%n@%m:%~%# '
+  return 0
+fi
+
 export STARSHIP_CONFIG="/etc/axonwall/starship.toml"
 export STARSHIP_LOG="error"
+
+export ZSH="${ZSH:-/usr/share/oh-my-zsh}"
+export ZSH_CUSTOM="${ZSH_CUSTOM:-$ZSH/custom}"
+export ZSH_CACHE_DIR="${HOME}/.cache/oh-my-zsh"
+DISABLE_AUTO_UPDATE="true"
+DISABLE_UPDATE_PROMPT="true"
+
+if [[ -d /usr/share/oh-my-zsh ]] && [[ -n "${HOME:-}" ]] && [[ -d "${HOME}" ]] && [[ ! -e "${HOME}/.oh-my-zsh" ]]; then
+  ln -s /usr/share/oh-my-zsh "${HOME}/.oh-my-zsh" 2>/dev/null || true
+fi
+
+plugins=(
+  git
+  kubectl
+  helm
+  docker
+  systemd
+  sudo
+  tmux
+  extract
+  colored-man-pages
+  axonwall
+)
+
+if [[ -f "$ZSH/oh-my-zsh.sh" ]]; then
+  source "$ZSH/oh-my-zsh.sh"
+fi
 
 HISTFILE="${HOME}/.zsh_history"
 HISTSIZE=50000
@@ -524,35 +798,56 @@ setopt SHARE_HISTORY
 setopt HIST_IGNORE_DUPS
 setopt HIST_IGNORE_SPACE
 
+if [[ -f /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]]; then
+  ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=242'
+  source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+fi
+if [[ -f /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+  source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+fi
+
 if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
 fi
 
+alias tui='axonwall-tui'
+alias webtui='axonwall-tui'
+alias nastymap='axonwall-tui --tab nastymap'
+alias ctl='axonwallctl'
+alias confirm='axonwallctl confirm'
+alias rollback='axonwallctl rollback'
+alias vi='vim'
 alias ll='ls -lah --color=auto'
 alias la='ls -A --color=auto'
 alias l='ls -CF --color=auto'
 alias diff='diff --color=auto'
 alias grep='grep --color=auto'
-alias ports='netstat -tulnp'
+alias ports='ss -tulnp'
 alias fw='nft list ruleset'
-alias routes='ip route show'
-alias ifaces='ip -brief addr'
+alias rules='nft list ruleset'
+alias routes='ip -c route show'
+alias ifaces='ip -brief -c addr'
 `
-	_ = os.WriteFile("/etc/zsh/axonwall.zsh", []byte(zshConf), 0644)
+	if existing, err := os.ReadFile("/etc/zsh/axonwall.zsh"); err != nil || !strings.Contains(string(existing), "oh-my-zsh") {
+		_ = os.WriteFile("/etc/zsh/axonwall.zsh", []byte(zshConf), 0644)
+	}
 
-	// 3. /etc/zsh/zshenv
+	// 4. /etc/zsh/zshenv
 	_ = os.WriteFile("/etc/zsh/zshenv", []byte("export STARSHIP_CONFIG=/etc/axonwall/starship.toml\n"), 0644)
 
-	// 4. /etc/skel/.zshrc and /root/.zshrc
-	userZshrc := `# Axonwall ZSH User Profile
-[ -f /etc/zsh/axonwall.zsh ] && source /etc/zsh/axonwall.zsh
+	// 5. /etc/skel/.zshrc and /root/.zshrc and /root/.oh-my-zsh
+	userZshrc := `# Axonwall ZSH User Profile (Oh My Zsh + Starship + Stack Completions)
+[[ -f /etc/zsh/axonwall.zsh ]] && source /etc/zsh/axonwall.zsh
 `
 	_ = os.WriteFile("/etc/skel/.zshrc", []byte(userZshrc), 0644)
 	if _, err := os.Stat("/root/.zshrc"); os.IsNotExist(err) {
 		_ = os.WriteFile("/root/.zshrc", []byte(userZshrc), 0640)
 	}
+	if _, err := os.Lstat("/root/.oh-my-zsh"); os.IsNotExist(err) {
+		_ = os.Symlink("/usr/share/oh-my-zsh", "/root/.oh-my-zsh")
+	}
 
-	// 5. /etc/vim/vimrc.local
+	// 6. /etc/vim/vimrc.local
 	vimConf := `" Axonwall Appliance Modern VIM Configuration (/etc/vim/vimrc.local)
 syntax on
 filetype plugin indent on
@@ -571,9 +866,10 @@ set incsearch
 `
 	_ = os.WriteFile("/etc/vim/vimrc.local", []byte(vimConf), 0644)
 
-	// 6. /etc/tmux.conf
+	// 7. /etc/tmux.conf
 	tmuxConf := `# Axonwall Appliance Modern tmux Configuration (/etc/tmux.conf)
 set -g default-terminal "screen-256color"
+set -g default-shell /usr/bin/zsh
 set -g history-limit 50000
 set -g mouse on
 set -g status-interval 5

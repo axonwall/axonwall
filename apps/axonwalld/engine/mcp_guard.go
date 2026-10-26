@@ -312,11 +312,15 @@ func ValidateRedirectDestination(dest string) (hostIP string, port int, isV6 boo
 // IsMcpSubsystemEnabled checks if the MCP control plane is enabled on this system.
 // It checks AXONWALL_DISABLE_MCP / AXONWALL_MCP_ENABLED environment variables
 // and the persistent /var/lib/axonwall/mcp-settings.json configuration file.
+// The MCP server is disabled by default and must be explicitly enabled.
 func IsMcpSubsystemEnabled() (bool, string) {
 	if dis := os.Getenv("AXONWALL_DISABLE_MCP"); dis == "1" || strings.EqualFold(dis, "true") {
 		return false, "MCP server is disabled via AXONWALL_DISABLE_MCP environment variable"
 	}
 	if en := os.Getenv("AXONWALL_MCP_ENABLED"); en != "" {
+		if strings.EqualFold(en, "true") || en == "1" {
+			return true, ""
+		}
 		if strings.EqualFold(en, "false") || en == "0" {
 			return false, "MCP server is disabled via AXONWALL_MCP_ENABLED=false environment variable"
 		}
@@ -340,9 +344,10 @@ func IsMcpSubsystemEnabled() (bool, string) {
 				}
 				return false, reason
 			}
+			return true, ""
 		}
 	}
 
-	return true, ""
+	return false, "MCP server is disabled by default; must be explicitly enabled via Web Console or AXONWALL_MCP_ENABLED=true"
 }
 

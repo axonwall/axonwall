@@ -864,6 +864,7 @@ export const PluginManifestSchema = z.object({
   name: z.string().min(1),
   version: z.string().min(1),
   category: PluginCategorySchema.default('extension').optional(),
+  defaultEnabled: z.boolean().optional(),
   description: z.string().default(''),
   author: z.string().default('Axonwall Community'),
   systemdUnits: z.array(z.string()).default([]),

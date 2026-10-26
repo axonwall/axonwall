@@ -13,7 +13,8 @@ import {
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { DesiredStateSchema, VigilanteConfigSchema, inferInterfaceRole, type DesiredState } from '@axonwall/lib/schemas';
-import { BUILTIN_PLUGINS, resolveCapabilities } from '@axonwall/lib/plugins';
+import { BUILTIN_PLUGINS, resolveCapabilities, isPluginEnabled } from '@axonwall/lib/plugins';
+import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
 import { isValidDevice } from '@axonwall/lib/util';
 import {
   parseCloudInitYaml,
@@ -1253,6 +1254,101 @@ async function setCoreRolePlugin(pluginId: string, enable: boolean) {
   await cmdApply(true);
 }
 
+async function setExtensionPlugin(pluginId: string, enable: boolean) {
+  const manifest = BUILTIN_PLUGINS.find((p) => p.id === pluginId && p.category !== 'core_role');
+  if (!manifest) {
+    console.error(
+      `${cRed}Unknown plugin '${pluginId}'. Valid plugins: ${BUILTIN_PLUGINS.map((p) => p.id).join(', ')}${cReset}`
+    );
+    process.exit(1);
+  }
+
+  const state = cmdValidate(true);
+
+  const nextPlugins = (state.plugins || []).filter((p: any) => p.id !== pluginId);
+  nextPlugins.push({ id: pluginId, enabled: enable, config: {} });
+  state.plugins = nextPlugins;
+
+  if (pluginId === 'rosenpass') {
+    state.rosenpass = {
+      ...(state.rosenpass || {
+        listenPort: 9999,
+        listenAddresses: ['0.0.0.0:9999', '[::]:9999'],
+        wgDevice: 'wg0',
+        verbosity: 'Quiet',
+        rekeyIntervalSeconds: 120,
+        failClosedBootGuard: true,
+        memfdSecret: true,
+        publicKeyPath: '/etc/rosenpass/pq.pk',
+        secretKeyPath: '/etc/rosenpass/pq.sk',
+        peers: [],
+      }),
+      enabled: enable,
+    };
+  } else if (pluginId === 'haproxy') {
+    state.haproxy = {
+      ...(state.haproxy || { mode: 'http', frontends: [], backends: [] }),
+      enabled: enable,
+    };
+  } else if (pluginId === 'freeradius') {
+    state.freeradius = {
+      ...(state.freeradius || { authPort: 1812, acctPort: 1813, clients: [], ldapSync: true }),
+      enabled: enable,
+    };
+  } else if (pluginId === 'snmp') {
+    state.snmp = {
+      ...(state.snmp || {
+        community: 'public',
+        sysLocation: 'Server Room',
+        sysContact: 'admin@axonwall.local',
+        listenPort: 161,
+      }),
+      enabled: enable,
+    };
+  } else if (pluginId === 'nut-ups') {
+    state.ups = {
+      ...(state.ups || {
+        name: 'ups',
+        driver: 'usbhid-ups',
+        port: 'auto',
+        shutdownBatteryPct: 20,
+        lowBatteryRuntimeSec: 300,
+      }),
+      enabled: enable,
+    };
+  } else if (pluginId === 'headscale') {
+    state.headscale = {
+      ...(state.headscale || {
+        magicDnsDomain: 'mesh.axonwall.local',
+      }),
+      enabled: enable,
+    };
+  }
+
+  const yamlFiles = serializeDesiredStateToYamlFiles(state);
+  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+    try {
+      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
+      for (const [filename, content] of Object.entries(yamlFiles)) {
+        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o644 });
+      }
+    } catch {}
+  }
+
+  console.log(`[+] ${enable ? 'Enabling' : 'Disabling'} extension plugin '${pluginId}' (${manifest.name})...`);
+
+  try {
+    await sendAgentSocketRequest('/v1/system/plugins/action', 'POST', {
+      pluginId,
+      action: enable ? 'enable' : 'disable',
+    });
+  } catch {
+    // Daemon may be offline in test/chroot environments
+  }
+
+  await cmdApply(true);
+}
+
 async function cmdPlugin(args: string[]) {
   const subcmd = (args[0] || 'list').toLowerCase();
   const pluginId = args[1];
@@ -1291,24 +1387,33 @@ async function cmdPlugin(args: string[]) {
         const res = await sendAgentSocketRequest<{ plugins: any[]; osFamily: string }>('/v1/system/plugins', 'GET');
         console.log(`\n${cCyan}${cBold}=== Axonwall Extension Plugins (${res.osFamily.toUpperCase()} Host) ===${cReset}\n`);
         console.log(
-          `  ${cBold}${'ID'.padEnd(28)} ${'NAME'.padEnd(46)} ${'STATUS'.padEnd(16)} PACKAGES${cReset}`
+          `  ${cBold}${'ID'.padEnd(28)} ${'NAME'.padEnd(46)} ${'STATE'.padEnd(14)} ${'INSTALL'.padEnd(14)} PACKAGES${cReset}`
         );
-        console.log(`  ${'-'.repeat(105)}`);
+        console.log(`  ${'-'.repeat(115)}`);
         for (const p of res.plugins) {
-          let statusStr = `${cDim}Available${cReset}`;
+          const enabled = isPluginEnabled(p.id, state);
+          const stateStr = enabled ? `${cGreen}ENABLED${cReset}` : `${cDim}DISABLED${cReset}`;
+          let installStr = `${cDim}Available${cReset}`;
           if (p.bundled) {
-            statusStr = `${cGreen}Bundled (OS)${cReset}`;
+            installStr = `${cGreen}Bundled (OS)${cReset}`;
           } else if (p.installed) {
-            statusStr = `${cCyan}Installed${cReset}`;
+            installStr = `${cCyan}Installed${cReset}`;
           }
           const pkgList = (p.packages || []).join(' ');
           console.log(
-            `  ${p.id.padEnd(28)} ${p.name.padEnd(46)} ${statusStr.padEnd(25)} ${cDim}${pkgList}${cReset}`
+            `  ${p.id.padEnd(28)} ${p.name.padEnd(46)} ${stateStr.padEnd(23)} ${installStr.padEnd(23)} ${cDim}${pkgList}${cReset}`
           );
         }
         console.log('');
       } catch (err: any) {
-        console.log(`\n  ${cDim}(Extension plugin package status unavailable — agent daemon offline)${cReset}\n`);
+        const extPlugins = BUILTIN_PLUGINS.filter((p) => p.category !== 'core_role');
+        console.log(`\n${cCyan}${cBold}=== Axonwall Extension Plugins (/etc/axonwall/system.yaml) ===${cReset}\n`);
+        for (const p of extPlugins) {
+          const enabled = isPluginEnabled(p.id, state);
+          const stateStr = enabled ? `${cGreen}ENABLED${cReset}` : `${cDim}DISABLED${cReset}`;
+          console.log(`  ${p.id.padEnd(28)} ${p.name.padEnd(46)} ${stateStr}`);
+        }
+        console.log('');
       }
       break;
     }
@@ -1320,10 +1425,7 @@ async function cmdPlugin(args: string[]) {
       if (CORE_ROLE_PLUGIN_IDS.has(pluginId)) {
         await setCoreRolePlugin(pluginId, true);
       } else {
-        console.error(
-          `${cRed}Unknown core role '${pluginId}'. Valid core roles: ${Array.from(CORE_ROLE_PLUGIN_IDS).join(', ')}${cReset}`
-        );
-        process.exit(1);
+        await setExtensionPlugin(pluginId, true);
       }
       break;
     }
@@ -1335,10 +1437,7 @@ async function cmdPlugin(args: string[]) {
       if (CORE_ROLE_PLUGIN_IDS.has(pluginId)) {
         await setCoreRolePlugin(pluginId, false);
       } else {
-        console.error(
-          `${cRed}Unknown core role '${pluginId}'. Valid core roles: ${Array.from(CORE_ROLE_PLUGIN_IDS).join(', ')}${cReset}`
-        );
-        process.exit(1);
+        await setExtensionPlugin(pluginId, false);
       }
       break;
     }
@@ -1527,6 +1626,129 @@ async function cmdUpdate(args: string[]) {
   }
 }
 
+async function cmdMcp(args: string[]) {
+  const subcmd = (args[0] || 'status').toLowerCase();
+  switch (subcmd) {
+    case 'status': {
+      try {
+        const res = await sendAgentSocketRequest<any>('/v1/mcp/status', 'GET');
+        console.log(`\n${cCyan}${cBold}=== Axonwall MCP Server Status ===${cReset}\n`);
+        console.log(
+          `  Master Switch : ${res.masterEnabled ? `${cGreen}ENABLED${cReset}` : `${cRed}DISABLED${cReset}`} ${res.disabledReason ? `(${res.disabledReason})` : ''}`
+        );
+        console.log(`  Active Leases : ${(res.leases || []).length}`);
+        for (const l of res.leases || []) {
+          console.log(`    - [${l.id}] ${l.clientName} (${l.transport}) expires ${l.expiresAt}`);
+        }
+        console.log('');
+      } catch (err: any) {
+        console.error(`${cRed}Failed to fetch MCP status:${cReset}`, err?.message || err);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'enable': {
+      console.log(`[+] Enabling Axonwall MCP Server...`);
+      const res = await sendAgentSocketRequest<any>('/v1/mcp/toggle', 'POST', { enabled: true });
+      console.log(
+        `${cGreen}[✓] MCP Master Switch is now ${res.masterEnabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
+      );
+      break;
+    }
+    case 'disable': {
+      console.log(`[+] Disabling Axonwall MCP Server and revoking active leases...`);
+      const res = await sendAgentSocketRequest<any>('/v1/mcp/toggle', 'POST', {
+        enabled: false,
+        reason: 'Disabled via axonwallctl',
+      });
+      console.log(
+        `${cGreen}[✓] MCP Master Switch is now ${res.masterEnabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
+      );
+      break;
+    }
+    case 'flush': {
+      console.log(`[+] Flushing all active MCP session leases...`);
+      await sendAgentSocketRequest<any>('/v1/mcp/leases/flush', 'POST', {});
+      console.log(`${cGreen}[✓] All MCP leases revoked.${cReset}`);
+      break;
+    }
+    default:
+      console.error(`${cRed}Unknown mcp subcommand: ${subcmd}${cReset}`);
+      console.log(`Usage: axonwallctl mcp <status|enable|disable|flush>`);
+      process.exit(1);
+  }
+}
+
+function cmdCompletion(args: string[]) {
+  const shell = (args[0] || 'zsh').toLowerCase();
+  const pluginIds = BUILTIN_PLUGINS.map((p) => p.id).join(' ');
+  const sections = AXONWALL_YAML_DOMAINS.map((d) => d.filename.replace(/\.ya?ml$/, '')).join(' ');
+
+  if (shell === 'zsh') {
+    const omzPlugin = '/usr/share/oh-my-zsh/plugins/axonwall/axonwall.plugin.zsh';
+    if (fs.existsSync(omzPlugin)) {
+      console.log(fs.readFileSync(omzPlugin, 'utf8'));
+      return;
+    }
+    console.log(`#compdef axonwallctl ctl
+_axonwallctl() {
+  local -a commands
+  commands=(
+    'status:Show status of /etc/axonwall/*.yaml files and daemon connectivity'
+    'validate:Validate all /etc/axonwall/*.yaml files against Zod schemas'
+    'diff:Show uncommitted YAML changes and preview compiled nftables ruleset'
+    'apply:Compile and apply /etc/axonwall/*.yaml'
+    'confirm:Confirm pending configuration commit and disarm auto-rollback'
+    'rollback:Abort pending commit and revert to last-known-good configuration'
+    'reload:Reload all services and Web GUI state from /etc/axonwall/*.yaml'
+    'update:Update Axonwall packages in-place or flash standby A/B slot'
+    'plugin:Manage core appliance roles and extension plugins'
+    'mcp:Manage Axonwall MCP server master switch and leases'
+    'cloudinit:Reconcile or export cloud-init (#cloud-config) user-data'
+    'edit:Open /etc/axonwall/<section>.yaml in \$EDITOR, validate, and apply'
+    'export:Output complete unified configuration as a single YAML document'
+    'completion:Generate shell completion script (zsh, bash)'
+    'help:Display help information'
+  )
+  _describe -t commands 'axonwallctl command' commands
+}
+compdef _axonwallctl axonwallctl ctl`);
+  } else if (shell === 'bash') {
+    console.log(`# bash completion for axonwallctl
+_axonwallctl_completions() {
+  local cur prev words cword
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  case "\${prev}" in
+    axonwallctl|ctl)
+      COMPREPLY=( $(compgen -W "status validate diff apply confirm rollback reload update plugin mcp cloudinit edit export completion help" -- "\${cur}") )
+      return 0
+      ;;
+    edit)
+      COMPREPLY=( $(compgen -W "${sections}" -- "\${cur}") )
+      return 0
+      ;;
+    plugin|plugins)
+      COMPREPLY=( $(compgen -W "list enable disable install remove re-sync" -- "\${cur}") )
+      return 0
+      ;;
+    enable|disable|install|remove|re-sync)
+      COMPREPLY=( $(compgen -W "${pluginIds}" -- "\${cur}") )
+      return 0
+      ;;
+    mcp)
+      COMPREPLY=( $(compgen -W "status enable disable flush" -- "\${cur}") )
+      return 0
+      ;;
+  esac
+}
+complete -F _axonwallctl_completions axonwallctl ctl`);
+  } else {
+    console.error(`${cRed}Unsupported shell '${shell}'. Supported shells: zsh, bash${cReset}`);
+    process.exit(1);
+  }
+}
+
 function showHelp() {
   console.log(`${cCyan}${cBold}axonwallctl — Axonwall Declarative YAML CLI (/etc/axonwall/*.yaml)${cReset}
 
@@ -1544,11 +1766,13 @@ ${cBold}COMMANDS:${cReset}
   update [options]    Update Axonwall packages in-place (Rolling mode) or flash standby slot (A/B mode)
                       Options: [--apt] [--version <ver>] [--slot <A|B>]
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
+  mcp <cmd>           Manage MCP server (status, enable, disable, flush) — disabled by default
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   cloudinit export    Export running appliance into #cloud-config YAML or bootable NoCloud cidata.iso
                       Options: [-o <file.yaml>] [--iso <cidata.iso>] [--template] [--no-redact] [--hostname <name>]
   edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR, then automatically validate and apply
   export              Output the complete unified configuration as a single YAML document to stdout
+  completion [shell]  Output shell completion script for zsh or bash
 
 ${cBold}SECTIONS (/etc/axonwall/<section>.yaml):${cReset}
   ${AXONWALL_YAML_DOMAINS.map((d) => d.filename.replace(/\.ya?ml$/, '')).join(', ')}
@@ -1590,6 +1814,9 @@ async function main() {
     case 'plugins':
       await cmdPlugin(args.slice(1));
       break;
+    case 'mcp':
+      await cmdMcp(args.slice(1));
+      break;
     case 'cloudinit':
     case 'cloud-init':
       await cmdCloudInit(args.slice(1));
@@ -1599,6 +1826,9 @@ async function main() {
       break;
     case 'export':
       cmdExport();
+      break;
+    case 'completion':
+      cmdCompletion(args.slice(1));
       break;
     case '-h':
     case '--help':
