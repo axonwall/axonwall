@@ -39100,6 +39100,8 @@ import * as https from "node:https";
 import * as fs6 from "node:fs";
 import * as net from "node:net";
 import * as path4 from "node:path";
+import * as os from "node:os";
+import * as child_process from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // src/headscale.ts
@@ -41691,6 +41693,131 @@ function buildArtifactBundle(jobId, state) {
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
+function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath = "/etc/axonwall/certs/hub.key", caPath = "/etc/axonwall/certs/ca.crt") {
+  if (process.env.AXONWALL_INSECURE_HTTP === "1") {
+    console.warn("[Axonwall Controller] AXONWALL_INSECURE_HTTP=1 is set: running in plaintext mode (DEV/TEST ONLY)");
+    return null;
+  }
+  if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
+    try {
+      const certStat = fs6.statSync(certPath);
+      const keyStat = fs6.statSync(keyPath);
+      if (certStat.size > 0 && keyStat.size > 0) {
+        const cert = fs6.readFileSync(certPath);
+        const key = fs6.readFileSync(keyPath);
+        const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+        return { cert, key, ca };
+      }
+    } catch (err) {
+      console.warn("[Axonwall Controller] Existing cert files could not be read:", err);
+    }
+  }
+  const rotateCandidates = ["/usr/local/bin/axonwall-rotate-hub-cert", "/usr/bin/axonwall-rotate-hub-cert"];
+  const rotateBin = rotateCandidates.find((p) => fs6.existsSync(p));
+  if (rotateBin) {
+    try {
+      console.log(`[Axonwall Controller] Running ${rotateBin} --ensure to provision hub TLS certificate...`);
+      child_process.execFileSync(rotateBin, ["--ensure"], { timeout: 15e3, stdio: "ignore" });
+      if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
+        const cert = fs6.readFileSync(certPath);
+        const key = fs6.readFileSync(keyPath);
+        if (cert.length > 0 && key.length > 0) {
+          const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+          return { cert, key, ca };
+        }
+      }
+    } catch (err) {
+      console.warn("[Axonwall Controller] axonwall-rotate-hub-cert execution failed:", err);
+    }
+  }
+  try {
+    const certDir = path4.dirname(certPath);
+    if (!fs6.existsSync(certDir)) {
+      fs6.mkdirSync(certDir, { recursive: true, mode: 488 });
+    }
+    const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
+    child_process.execFileSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        keyPath,
+        "-out",
+        certPath,
+        "-days",
+        "3650",
+        "-subj",
+        "/O=Axonwall/OU=Appliance/CN=axonwall",
+        "-addext",
+        `subjectAltName=${san}`
+      ],
+      { timeout: 15e3, stdio: "ignore" }
+    );
+    if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
+      const cert = fs6.readFileSync(certPath);
+      const key = fs6.readFileSync(keyPath);
+      try {
+        fs6.chmodSync(keyPath, 384);
+        fs6.chmodSync(certPath, 420);
+      } catch {
+      }
+      if (cert.length > 0 && key.length > 0) {
+        console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
+        return { cert, key };
+      }
+    }
+  } catch (err) {
+    console.warn("[Axonwall Controller] Generating certificate in target directory failed:", err);
+  }
+  try {
+    const tmpDir = fs6.mkdtempSync(path4.join(os.tmpdir(), "axonwall-tls-"));
+    const tmpKey = path4.join(tmpDir, "hub.key");
+    const tmpCert = path4.join(tmpDir, "hub.crt");
+    const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
+    child_process.execFileSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        tmpKey,
+        "-out",
+        tmpCert,
+        "-days",
+        "30",
+        "-subj",
+        "/O=Axonwall/OU=Appliance/CN=axonwall",
+        "-addext",
+        `subjectAltName=${san}`
+      ],
+      { timeout: 15e3, stdio: "ignore" }
+    );
+    const cert = fs6.readFileSync(tmpCert);
+    const key = fs6.readFileSync(tmpKey);
+    try {
+      fs6.unlinkSync(tmpKey);
+      fs6.unlinkSync(tmpCert);
+      fs6.rmdirSync(tmpDir);
+    } catch {
+    }
+    if (cert.length > 0 && key.length > 0) {
+      console.warn(
+        "[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted"
+      );
+      return { cert, key, isFallback: true };
+    }
+  } catch (err) {
+    console.error("[Axonwall Controller] Critical error generating emergency TLS certificate:", err);
+  }
+  return null;
+}
 function getSafeRedirectUrl(req, targetPort) {
   const rawHostHeader = (req.headers.host || "").trim();
   let hostname3 = "localhost";
@@ -42144,13 +42271,14 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     });
     req.pipe(uiReq);
   };
-  if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
+  const tlsConfig = ensureControllerTls(certPath, keyPath, caPath);
+  if (tlsConfig) {
     console.log(`[Axonwall Controller] Starting in SECURE mTLS mode (HTTP auto-upgrade enabled on port ${port})`);
     const httpsServer = https.createServer({
-      cert: fs6.readFileSync(certPath),
-      key: fs6.readFileSync(keyPath),
-      ca: fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0,
-      requestCert: fs6.existsSync(caPath),
+      cert: tlsConfig.cert,
+      key: tlsConfig.key,
+      ca: tlsConfig.ca ? tlsConfig.ca : void 0,
+      requestCert: Boolean(tlsConfig.ca),
       // Client certificates are enforced per-path, not at the TLS layer:
       // this listener is shared by the web console (browsers have no
       // client cert) and by satellites that only receive their cert
@@ -42164,7 +42292,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     mainServer = httpsServer;
     server = tcpMultiplexer;
   } else {
-    console.log("[Axonwall Controller] Starting in INSECURE HTTP mode");
+    console.warn("[Axonwall Controller] WARNING: Starting in INSECURE HTTP mode (Plaintext HTTP enabled)");
     mainServer = http2.createServer(requestHandler);
     server = mainServer;
   }
@@ -42468,6 +42596,7 @@ export {
   createHttpRedirectServer,
   createMcpApiKeyRecord,
   createPortMultiplexer,
+  ensureControllerTls,
   getMcpServerStatus,
   isMcpServerEnabled,
   listMcpApiKeys,

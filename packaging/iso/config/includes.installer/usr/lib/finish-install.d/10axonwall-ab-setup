@@ -300,6 +300,24 @@ if [ -f /var/lib/partman/cloud-config.yaml ]; then
   fi
 fi
 
+# Provision appliance TLS certificate pair early so Web Console (port 2966) is always secure from first boot
+mkdir -p /target/etc/axonwall/certs
+if [ ! -s /target/etc/axonwall/certs/hub.crt ] || [ ! -s /target/etc/axonwall/certs/hub.key ]; then
+  if in-target /usr/local/bin/axonwall-rotate-hub-cert --ensure 2>/dev/null; then
+    echo "[+] Generated appliance hub TLS certificate via axonwall-rotate-hub-cert"
+  elif in-target openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout /etc/axonwall/certs/hub.key \
+      -out /etc/axonwall/certs/hub.crt \
+      -days 3650 \
+      -subj "/O=Axonwall/OU=Appliance/CN=axonwall" \
+      -addext "subjectAltName=DNS:axonwall.local,DNS:localhost,IP:127.0.0.1" 2>/dev/null; then
+    echo "[+] Generated fallback self-signed appliance hub TLS certificate via openssl"
+  fi
+  in-target chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+  in-target chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
+  in-target chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
+fi
+
 # 3. Synchronize Slot A to Slot B for instant standby readiness
 # Unmount /target/media/cdrom* bind mount now (after pkgsel/grub-installer/10apt-cdrom-setup have finished)
 # and populate standard Debian Trixie APT repositories on /target before cloning to Slot B.

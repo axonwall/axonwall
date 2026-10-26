@@ -5,7 +5,9 @@ import * as https from 'node:https';
 import * as net from 'node:net';
 import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import { createHttpRedirectServer, createPortMultiplexer } from '../dist/index.js';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { createHttpRedirectServer, createPortMultiplexer, ensureControllerTls } from '../dist/index.js';
 
 test('createHttpRedirectServer redirects plaintext HTTP to HTTPS on port 2966', async (t) => {
   const targetPort = 2966;
@@ -192,5 +194,175 @@ test('createHttpRedirectServer sanitizes malicious Host headers and escapes XSS 
   assert.ok(
     body.includes('\\u003c/script\\u003e'),
     'JavaScript redirect must contain escaped unicode tag'
+  );
+});
+
+test('ensureControllerTls auto-generates certificates when missing, preventing plaintext HTTP fallback', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axon_tls_test_'));
+  const testCertPath = path.join(tmpDir, 'test_hub.crt');
+  const testKeyPath = path.join(tmpDir, 'test_hub.key');
+
+  t.after(() => {
+    try {
+      if (fs.existsSync(testCertPath)) fs.unlinkSync(testCertPath);
+      if (fs.existsSync(testKeyPath)) fs.unlinkSync(testKeyPath);
+      fs.rmdirSync(tmpDir);
+    } catch {}
+  });
+
+  // Verify files do not exist initially
+  assert.equal(fs.existsSync(testCertPath), false);
+  assert.equal(fs.existsSync(testKeyPath), false);
+
+  // ensureControllerTls should detect missing files and generate valid TLS credentials
+  const tlsConfig = ensureControllerTls(testCertPath, testKeyPath);
+  assert.ok(tlsConfig, 'ensureControllerTls must return a valid TLS configuration');
+  assert.ok(tlsConfig.cert, 'TLS config must include cert');
+  assert.ok(tlsConfig.key, 'TLS config must include key');
+
+  // Verify the cert and key were written to disk and are non-empty
+  assert.equal(fs.existsSync(testCertPath), true);
+  assert.equal(fs.existsSync(testKeyPath), true);
+  assert.ok(fs.statSync(testCertPath).size > 100);
+  assert.ok(fs.statSync(testKeyPath).size > 100);
+
+  // Verify that an https.Server initializes and successfully performs a TLS handshake with these credentials
+  const httpsServer = https.createServer({ cert: tlsConfig.cert, key: tlsConfig.key }, (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('HTTPS_OK');
+  });
+
+  await new Promise((resolve) => httpsServer.listen(0, '127.0.0.1', resolve));
+  const serverPort = httpsServer.address().port;
+
+  t.after(() => {
+    if (typeof httpsServer.closeAllConnections === 'function') {
+      httpsServer.closeAllConnections();
+    }
+    httpsServer.close();
+  });
+
+  const httpsRes = await new Promise((resolve, reject) => {
+    const req = https.get(
+      {
+        hostname: '127.0.0.1',
+        port: serverPort,
+        path: '/login',
+        rejectUnauthorized: false,
+        headers: { connection: 'close' },
+        agent: false,
+      },
+      resolve
+    );
+    req.on('error', reject);
+  });
+
+  assert.equal(httpsRes.statusCode, 200);
+  let respBody = '';
+  httpsRes.on('data', (chunk) => (respBody += chunk));
+  await new Promise((resolve) => httpsRes.on('end', resolve));
+  assert.equal(respBody, 'HTTPS_OK');
+});
+
+test('controller port multiplexer end-to-end: plaintext HTTP /login is redirected with 301 and HTTPS /login never errors', async (t) => {
+  // Simulate the appliance scenario: missing certs auto-provisioned, port 2966 multiplexed
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axon_mpx_test_'));
+  const testCertPath = path.join(tmpDir, 'hub.crt');
+  const testKeyPath = path.join(tmpDir, 'hub.key');
+
+  t.after(() => {
+    try {
+      if (fs.existsSync(testCertPath)) fs.unlinkSync(testCertPath);
+      if (fs.existsSync(testKeyPath)) fs.unlinkSync(testKeyPath);
+      fs.rmdirSync(tmpDir);
+    } catch {}
+  });
+
+  const tlsConfig = ensureControllerTls(testCertPath, testKeyPath);
+  assert.ok(tlsConfig, 'Must auto-provision TLS config when certs missing');
+
+  // Upstream UI handler simulating Next.js on port 3000
+  const mockUiHandler = (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<!DOCTYPE html><html><body>Next.js Web Console Login</body></html>');
+  };
+
+  const httpsServer = https.createServer(
+    { cert: tlsConfig.cert, key: tlsConfig.key, rejectUnauthorized: false },
+    mockUiHandler
+  );
+  const redirectServer = createHttpRedirectServer(2966);
+  const multiplexer = createPortMultiplexer(httpsServer, redirectServer);
+
+  await new Promise((resolve) => multiplexer.listen(0, '127.0.0.1', resolve));
+  const assignedPort = multiplexer.address().port;
+
+  t.after(() => {
+    if (typeof httpsServer.closeAllConnections === 'function') {
+      httpsServer.closeAllConnections();
+    }
+    if (typeof redirectServer.closeAllConnections === 'function') {
+      redirectServer.closeAllConnections();
+    }
+    multiplexer.close();
+    httpsServer.close();
+    redirectServer.close();
+  });
+
+  // 1. Client connects via plaintext HTTP: http://127.0.0.1:<port>/login
+  // MUST NEVER return the login page over HTTP; MUST return 301 Location: https://...:2966/login
+  const httpRes = await new Promise((resolve, reject) => {
+    const req = http.get(
+      {
+        hostname: '127.0.0.1',
+        port: assignedPort,
+        path: '/login',
+        headers: { host: `10.80.0.104:2966`, connection: 'close' },
+        agent: false,
+      },
+      resolve
+    );
+    req.on('error', reject);
+  });
+
+  assert.equal(httpRes.statusCode, 301, 'Plaintext HTTP to /login must receive 301 redirect');
+  assert.equal(
+    httpRes.headers.location,
+    'https://10.80.0.104:2966/login',
+    'Plaintext HTTP must be redirected to HTTPS on port 2966'
+  );
+
+  let redirectHtml = '';
+  httpRes.on('data', (chunk) => (redirectHtml += chunk));
+  await new Promise((resolve) => httpRes.on('end', resolve));
+  assert.ok(
+    !redirectHtml.includes('Next.js Web Console Login'),
+    'Plaintext HTTP response must NEVER expose the upstream UI page directly'
+  );
+
+  // 2. Client connects via HTTPS: https://127.0.0.1:<port>/login
+  // MUST succeed with valid TLS handshake and proxy upstream response without ERR_SSL_PROTOCOL_ERROR
+  const httpsRes = await new Promise((resolve, reject) => {
+    const req = https.get(
+      {
+        hostname: '127.0.0.1',
+        port: assignedPort,
+        path: '/login',
+        rejectUnauthorized: false,
+        headers: { host: `10.80.0.104:2966`, connection: 'close' },
+        agent: false,
+      },
+      resolve
+    );
+    req.on('error', reject);
+  });
+
+  assert.equal(httpsRes.statusCode, 200, 'HTTPS request to /login must succeed with 200 OK');
+  let secureHtml = '';
+  httpsRes.on('data', (chunk) => (secureHtml += chunk));
+  await new Promise((resolve) => httpsRes.on('end', resolve));
+  assert.ok(
+    secureHtml.includes('Next.js Web Console Login'),
+    'HTTPS request must receive the upstream Next.js login page'
   );
 });

@@ -124,7 +124,10 @@ case "$1" in
         # the CA model, and leaves operator-CA installs untouched. The
         # inline fallback (the previous self-signed generation) covers
         # the tool being unavailable.
-        if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
+        mkdir -p /etc/axonwall/certs
+        if [ -x /usr/local/bin/axonwall-rotate-hub-cert ]; then
+            /usr/local/bin/axonwall-rotate-hub-cert --ensure || true
+        elif command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
             axonwall-rotate-hub-cert --ensure || true
         elif [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
             if command -v openssl >/dev/null 2>&1; then
