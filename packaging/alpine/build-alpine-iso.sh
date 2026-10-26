@@ -200,6 +200,7 @@ if [[ "$MINIMAL" -eq 0 ]]; then
     iftop
     sysstat
     vim
+    neovim
     zsh
     starship
     tmux
@@ -383,6 +384,10 @@ if [[ "$MINIMAL" -eq 0 ]]; then
   if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh" ]]; then
     cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh/." "${OVL}/usr/share/oh-my-zsh/"
   fi
+  if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim" ]]; then
+    mkdir -p "${OVL}/etc/axonwall/nvim"
+    cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim/." "${OVL}/etc/axonwall/nvim/"
+  fi
 else
   # On minimal Alpine (no zsh installed), symlink /usr/bin/zsh -> /bin/ash so SSO users
   # replicated with loginShell=/usr/bin/zsh can SSH into minimal Alpine seamlessly.
@@ -395,6 +400,9 @@ cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-upd
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwallctl" "${OVL}/usr/local/bin/"
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" "${OVL}/usr/local/bin/"
+fi
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" ]]; then
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" "${OVL}/usr/local/bin/"
 fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-opshell" ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-opshell" "${OVL}/usr/local/bin/"

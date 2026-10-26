@@ -222,6 +222,10 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-opshell ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-opshell
 fi
 
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-config ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-config
+fi
+
 if [[ -f config/includes.chroot/etc/sudoers.d/axonwall ]]; then
   chmod 0440 config/includes.chroot/etc/sudoers.d/axonwall
 fi
@@ -427,6 +431,7 @@ dnsutils
 nmap
 zsh
 vim
+neovim
 btop
 htop
 sysstat
@@ -518,6 +523,7 @@ dnsutils
 nmap
 zsh
 vim
+neovim
 btop
 htop
 sysstat

@@ -107,6 +107,9 @@ _axonwall_lan_cidr() {
 # ==============================================================================
 alias tui='axonwall-tui'
 alias webtui='axonwall-tui'
+alias nui='axonwall-config'
+alias cfg='axonwall-config'
+alias superedit='axonwall-config'
 alias nastymap='axonwall-tui --tab nastymap'
 alias ctl='axonwallctl'
 alias confirm='axonwallctl confirm'
@@ -216,6 +219,7 @@ if [[ -o interactive ]] && [[ -z "${AXONWALL_BANNER_SHOWN:-}" ]]; then
   echo "\033[1;32m================================================================================\033[0m"
   echo "\033[1;37m  Axonwall Appliance ZSH + Oh My Zsh + Starship\033[0m — NIC: \033[1;36m$(_axonwall_default_if)\033[0m | Subnet: \033[1;36m$(_axonwall_lan_cidr)\033[0m"
   echo "  • \033[1;33maxonwall-tui\033[0m   : Full Interactive Ink TUI (10-Tab Console + NastyMap + Ops)"
+  echo "  • \033[1;33maxonwall-config\033[0m: Neovim Super Configurator (\033[36mnui\033[0m / \033[36maxonwallctl config\033[0m — Zero-Chrome Form + Vim Motions)"
   echo "  • \033[1;33maxonwallctl\033[0m    : YAML CLI (\033[36mstatus\033[0m | \033[36mdiff\033[0m | \033[36mapply\033[0m | \033[36mconfirm\033[0m | \033[36mplugin\033[0m | \033[36mmcp\033[0m)"
   echo "  • \033[1;33mOh My Zsh\033[0m      : \033[36mkubectl\033[0m (\033[36mk\033[0m/\033[36mkgp\033[0m/\033[36mklf\033[0m), \033[36mhelm\033[0m, \033[36mzfs\033[0m/\033[36mzpool\033[0m, \033[36mnft\033[0m, \033[36mwg\033[0m, \033[36mvirsh\033[0m, \033[36msystemd\033[0m, \033[36mgit\033[0m"
   echo "  • \033[1;33mfconf / flog\033[0m   : Fuzzy-edit \033[36m/etc/axonwall/*.yaml\033[0m or search logs (\033[36mfzf\033[0m)"

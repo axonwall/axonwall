@@ -29,7 +29,7 @@ import {
   type CloudInitExportOptions,
 } from '@axonwall/lib/cloudinit';
 
-const ETC_DIR = process.env.AXONWALL_ETC_DIR || '/etc/axonwall';
+const ETC_DIR = process.env.AXONWALL_ETC_DIR || process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
 const PERSIST_YAML_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
 const STATE_JSON_PATH = process.env.AXONWALL_STATE_FILE || '/var/lib/axonwall/state.json';
 const GITOPS_DIR = process.env.AXONWALL_GITOPS_DIR || '/var/lib/axonwall/gitops';
@@ -535,7 +535,11 @@ async function cmdApply(autoConfirm = true) {
   }
 }
 
-async function cmdEdit(domainArg?: string) {
+async function cmdEdit(domainArg?: string, extraArgs: string[] = []) {
+  if (extraArgs.includes('--nvim') || extraArgs.includes('--super') || process.env.AXONWALL_SUPER_EDITOR === '1') {
+    await cmdConfig(domainArg);
+    return;
+  }
   ensureInitializedYamlFiles();
   const domainNames = AXONWALL_YAML_DOMAINS.map((d) => d.filename.replace(/\.ya?ml$/, ''));
   const domain = (domainArg || 'firewall').replace(/\.ya?ml$/i, '').toLowerCase();
@@ -563,6 +567,127 @@ async function cmdEdit(domainArg?: string) {
 
   console.log(`\n${cCyan}Validating modified /etc/axonwall/${domain}.yaml...${cReset}`);
   await cmdApply(true);
+}
+
+async function cmdConfig(domainArg?: string) {
+  ensureInitializedYamlFiles();
+  const domain = (domainArg || 'firewall').replace(/\.ya?ml$/i, '').toLowerCase();
+  const initLocations = [
+    process.env.AXONWALL_NVIM_INIT || '',
+    '/etc/axonwall/nvim/init.lua',
+    path.resolve(process.cwd(), 'packaging/iso/config/includes.chroot/etc/axonwall/nvim/init.lua'),
+  ].filter(Boolean);
+
+  const initLua = initLocations.find((p) => fs.existsSync(p));
+  if (!initLua) {
+    console.error(`${cRed}Neovim Super Configurator init.lua not found at /etc/axonwall/nvim/init.lua${cReset}`);
+    process.exit(1);
+  }
+
+  const res = spawnSync('nvim', ['--clean', '-u', initLua], {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      AXONWALL_NVIM_DOMAIN: domain,
+      AXONWALL_CONFIG_DIR: ETC_DIR,
+    },
+  });
+  if (res.status !== 0) {
+    process.exit(res.status || 1);
+  }
+}
+
+function cmdDumpJson() {
+  ensureInitializedYamlFiles();
+  const state = cmdValidate(true);
+  process.stdout.write(JSON.stringify(state, null, 2) + '\n');
+}
+
+function cmdSaveJson(fileArg?: string) {
+  let raw = '';
+  try {
+    if (fileArg && fileArg !== '-') {
+      raw = fs.readFileSync(fileArg, 'utf-8');
+    } else {
+      raw = fs.readFileSync(0, 'utf-8');
+    }
+  } catch (err: any) {
+    process.stdout.write(JSON.stringify({ ok: false, errors: [`Failed to read JSON input: ${err?.message || err}`] }) + '\n');
+    process.exit(1);
+  }
+
+  let parsedJson: any;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch (err: any) {
+    process.stdout.write(JSON.stringify({ ok: false, errors: [`Invalid JSON syntax: ${err?.message || err}`] }) + '\n');
+    process.exit(1);
+  }
+
+  // Normalize empty Lua tables (`[]`) back to `{}` for record/object fields
+  if (parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)) {
+    const objectKeys = [
+      'capabilities',
+      'plugins',
+      'system',
+      'frr',
+      'dhcp',
+      'dns',
+      'wireguard',
+      'rosenpass',
+      'headscale',
+      'suricata',
+      'crowdsec',
+      'geoip',
+      'ha',
+      'nas',
+      'k3s',
+      'virt',
+      'vigilante',
+      'aiCopilot',
+      'observability',
+      'snmp',
+      'nut',
+      'acme',
+    ];
+    for (const k of objectKeys) {
+      if (Array.isArray(parsedJson[k]) && parsedJson[k].length === 0) {
+        parsedJson[k] = {};
+      }
+    }
+  }
+
+  const validation = DesiredStateSchema.safeParse(parsedJson);
+  if (!validation.success) {
+    const errors = validation.error.issues.map((i) => `${i.path.join('.') || 'root'}: ${i.message}`);
+    process.stdout.write(JSON.stringify({ ok: false, errors }) + '\n');
+    process.exit(1);
+  }
+
+  const state = validation.data;
+  const serialized = serializeDesiredStateToYamlFiles(state);
+  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+    try {
+      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o700 });
+      for (const [fn, content] of Object.entries(serialized)) {
+        const fp = path.join(dir, fn);
+        fs.writeFileSync(fp, content, { encoding: 'utf-8', mode: 0o600 });
+        try { fs.chmodSync(fp, 0o600); } catch {}
+      }
+    } catch {}
+  }
+  try {
+    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  } catch {}
+
+  process.stdout.write(
+    JSON.stringify({
+      ok: true,
+      rulesCount: state.rules.length,
+      interfacesCount: state.interfaces.length,
+    }) + '\n'
+  );
 }
 
 function cmdExport() {
@@ -1770,7 +1895,8 @@ ${cBold}COMMANDS:${cReset}
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   cloudinit export    Export running appliance into #cloud-config YAML or bootable NoCloud cidata.iso
                       Options: [-o <file.yaml>] [--iso <cidata.iso>] [--template] [--no-redact] [--hostname <name>]
-  edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR, then automatically validate and apply
+  config [section]    Launch the Neovim Super Configurator (form-driven Lua TUI with full Vim field motions)
+  edit [section]      Open /etc/axonwall/<section>.yaml in \$EDITOR (or pass --nvim for Super Configurator)
   export              Output the complete unified configuration as a single YAML document to stdout
   completion [shell]  Output shell completion script for zsh or bash
 
@@ -1821,9 +1947,22 @@ async function main() {
     case 'cloud-init':
       await cmdCloudInit(args.slice(1));
       break;
-    case 'edit':
-      await cmdEdit(args[1]);
+    case 'config':
+    case 'nvim':
+    case 'super':
+      await cmdConfig(args[1]);
       break;
+    case 'dump-json':
+      cmdDumpJson();
+      break;
+    case 'save-json':
+      cmdSaveJson(args[1]);
+      break;
+    case 'edit': {
+      const domainArg = args.slice(1).find((a) => !a.startsWith('-'));
+      await cmdEdit(domainArg, args.slice(1));
+      break;
+    }
     case 'export':
       cmdExport();
       break;

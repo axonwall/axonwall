@@ -212,12 +212,12 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
   },
   {
     id: 'cli-workstation',
-    name: 'Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship & VIM)',
-    version: '1.1.0',
+    name: 'Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM & Neovim Super Configurator)',
+    version: '1.2.0',
     category: 'extension',
     defaultEnabled: true,
     description:
-      'Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, live Commit-Confirm rollback & Kubernetes indicators, VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui). Can be disabled to minimize attack surface.',
+      'Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, Neovim Super Configurator (axonwall-config / nui — zero-chrome Lua form TUI with full Vim motions), VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui, axonwall-config). Can be disabled to minimize attack surface.',
     author: 'Axonwall Core',
     systemdUnits: [],
     privileges: ['system.users', 'system.hardware'],
@@ -225,6 +225,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       debian: [
         'zsh',
         'vim',
+        'neovim',
         'tmux',
         'zsh-autosuggestions',
         'zsh-syntax-highlighting',
@@ -238,6 +239,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       alpine: [
         'zsh',
         'vim',
+        'neovim',
         'starship',
         'tmux',
         'zsh-vcs',
@@ -249,7 +251,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'git',
       ],
     },
-    cliBinaries: ['zsh', 'vim', 'starship', 'tmux'],
+    cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux'],
   },
   {
     id: 'cli-diagnostics-nastymap',

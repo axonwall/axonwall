@@ -31,7 +31,12 @@ _axonwallctl_completion() {
     'mcp:Manage Model Context Protocol (MCP) server status & tactical leases'
     'cloudinit:Reconcile or export cloud-init (#cloud-config) & NoCloud ISO'
     'cloud-init:Alias for cloudinit'
+    'config:Launch Neovim Super Configurator (zero-chrome Lua TUI + full Vim motions)'
+    'nvim:Alias for config — launch Neovim Super Configurator'
+    'super:Alias for config — launch Neovim Super Configurator'
     'edit:Open /etc/axonwall/<section>.yaml in $EDITOR, validate, and apply'
+    'dump-json:Export validated DesiredState as JSON to stdout'
+    'save-json:Validate and persist DesiredState JSON to /etc/axonwall/*.yaml'
     'export:Export unified running configuration to stdout as YAML'
     'completion:Output shell completion script (zsh, bash, fish)'
     'help:Show axonwallctl usage and available YAML sections'
@@ -91,7 +96,7 @@ _axonwallctl_completion() {
   fi
 
   case "${words[2]}" in
-    edit)
+    edit|config|nvim|super)
       _describe 'YAML configuration section' sections
       ;;
     plugin|plugins)
@@ -176,6 +181,29 @@ _axonwall_tui_completion() {
   fi
 }
 compdef _axonwall_tui_completion axonwall-tui tui webtui 2>/dev/null || true
+
+# ------------------------------------------------------------------------------
+# 2b. axonwall-config / nui / cfg (Neovim Super Configurator) completion
+# ------------------------------------------------------------------------------
+_axonwall_config_completion() {
+  local -a domains
+  domains=(
+    'system:Appliance Hostname, DNS, Anti-Lockout, Capabilities & Plugins'
+    'interfaces:Physical NICs, IPv4 CIDR, Gateways & MTUs'
+    'firewall:Stateful Zone Firewall Rules (Pass/Block/Reject)'
+    'nat:Port Forwarding (DNAT) & Outbound NAT'
+    'aliases:Host, Network & Port Group Aliases'
+    'routing:Static Routes, BGP Autonomous System & OSPF'
+    'services:Kea DHCPv4 Server & Unbound DNS Resolver (DNSSEC/DoT)'
+    'vpn:WireGuard, Rosenpass Post-Quantum & Headscale Mesh'
+    'security:Suricata IDS/IPS, CrowdSec & GeoIP Country Blocking'
+    'ha:Active/Passive High Availability (VRRP + Conntrackd)'
+    'storage:TrueNAS-Grade OpenZFS Pools, Datasets & SMB/NFS'
+    'compute:Kubernetes (K3s), KVM/LXC Hypervisor & Vigilante SOC'
+  )
+  _describe 'Super Configurator domain' domains
+}
+compdef _axonwall_config_completion axonwall-config nui cfg superedit 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
 # 3. axonwall-update, axonwall-import, axonwall-rotate-hub-cert completions

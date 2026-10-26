@@ -77,15 +77,16 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 	return []PluginDefinition{
 		{
 			ID:             "cli-workstation",
-			Name:           "Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship & VIM)",
-			Version:        "1.1.0",
+			Name:           "Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM & Neovim Super Configurator)",
+			Version:        "1.2.0",
 			Category:       "extension",
-			Description:    "Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, live Commit-Confirm rollback & Kubernetes indicators, VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui). Can be disabled to minimize attack surface.",
+			Description:    "Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, Neovim Super Configurator (axonwall-config / nui — zero-chrome Lua form TUI with full Vim motions), VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui, axonwall-config). Can be disabled to minimize attack surface.",
 			Author:         "Axonwall Core",
 			DefaultEnabled: true,
 			DebianPackages: []string{
 				"zsh",
 				"vim",
+				"neovim",
 				"tmux",
 				"zsh-autosuggestions",
 				"zsh-syntax-highlighting",
@@ -99,6 +100,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			AlpinePackages: []string{
 				"zsh",
 				"vim",
+				"neovim",
 				"starship",
 				"tmux",
 				"zsh-vcs",

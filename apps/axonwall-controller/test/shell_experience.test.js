@@ -127,3 +127,79 @@ test('axonwallctl completion outputs zsh and bash completion scripts', () => {
     'bash completion output must register complete -F _axonwallctl_completions'
   );
 });
+
+test('Neovim Super Configurator (axonwall-config / init.lua) provides zero-chrome UI with native Vim motions and saves to /etc/axonwall/*.yaml', (t) => {
+  const initLua = path.join(repoRoot, 'packaging/iso/config/includes.chroot/etc/axonwall/nvim/init.lua');
+  const launcherBin = path.join(repoRoot, 'packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config');
+  const ctlBin = path.join(repoRoot, 'apps/axonwall-controller/dist/axonwallctl.js');
+
+  assert.ok(fs.existsSync(initLua), 'Neovim Super Configurator init.lua must exist');
+  assert.ok(fs.existsSync(launcherBin), 'axonwall-config launcher script must exist');
+
+  // Check if nvim is installed on this test host
+  let hasNvim = false;
+  try {
+    execFileSync('nvim', ['--version'], { stdio: 'ignore' });
+    hasNvim = true;
+  } catch {}
+  if (!hasNvim) {
+    t.skip('nvim binary not installed on test runner');
+    return;
+  }
+
+  const tmpDir = fs.mkdtempSync('/tmp/axonwall-nvim-test-');
+  try {
+    const env = {
+      ...process.env,
+      AXONWALL_CONFIG_DIR: tmpDir,
+      AXONWALL_ETC_DIR: tmpDir,
+      AXONWALLCTL_BIN: ctlBin,
+      AXONWALL_NVIM_DOMAIN: 'system',
+    };
+
+    // Initialize default YAML files via dump-json -> save-json
+    const dumped = execFileSync('node', [ctlBin, 'dump-json'], { env, encoding: 'utf-8' });
+    execFileSync('node', [ctlBin, 'save-json', '-'], { env, input: dumped, encoding: 'utf-8' });
+
+    // Launch headless Neovim with our Super Configurator, verify zero-chrome options,
+    // use native Vim `normal! ciw` motion to change hostname, add a firewall rule card, and save
+    const nvimOut = execFileSync(
+      'nvim',
+      [
+        '--headless',
+        '--clean',
+        '-u',
+        initLua,
+        '-c',
+        'lua assert(vim.o.number == false and vim.o.cmdheight == 0 and vim.o.laststatus == 0, "Expected zero-chrome options")',
+        '-c',
+        'lua assert(#_G.AxonwallSuperConfig.DOMAINS == 12, "Expected 12 configuration domains")',
+        '-c',
+        'normal! ciwaxonwall-nvim-super',
+        '-c',
+        'lua _G.AxonwallSuperConfig.load_domain(3)',
+        '-c',
+        'lua _G.AxonwallSuperConfig.add_card()',
+        '-c',
+        'lua assert(_G.AxonwallSuperConfig.save(false) == true, "Expected save(false) to succeed: " .. tostring(_G.AxonwallSuperConfig.App.status_msg))',
+        '-c',
+        'qa!',
+      ],
+      { env, encoding: 'utf-8' }
+    );
+
+    const systemYaml = fs.readFileSync(path.join(tmpDir, 'system.yaml'), 'utf-8');
+    assert.ok(
+      systemYaml.includes('hostname: axonwall-nvim-super'),
+      `system.yaml must contain updated hostname edited via Vim 'ciw' motion, got:\n${systemYaml}`
+    );
+
+    const firewallYaml = fs.readFileSync(path.join(tmpDir, 'firewall.yaml'), 'utf-8');
+    assert.ok(
+      firewallYaml.includes('Custom Firewall Rule #'),
+      `firewall.yaml must contain newly added Firewall Rule card, got:\n${firewallYaml}`
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

@@ -32,7 +32,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, nmap
+Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, nmap
 Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
@@ -147,6 +147,15 @@ fi
 if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-tui" ]]; then
   cp "${CHROOT_SRC}/usr/local/bin/axonwall-tui" "${WORK_DIR}/usr/local/bin/"
   chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-tui"
+fi
+if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-config" ]]; then
+  cp "${CHROOT_SRC}/usr/local/bin/axonwall-config" "${WORK_DIR}/usr/local/bin/"
+  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-config"
+fi
+if [[ -d "${CHROOT_SRC}/etc/axonwall/nvim" ]]; then
+  mkdir -p "${WORK_DIR}/etc/axonwall/nvim"
+  cp -a "${CHROOT_SRC}/etc/axonwall/nvim/." "${WORK_DIR}/etc/axonwall/nvim/"
+  chmod -R a+rX "${WORK_DIR}/etc/axonwall/nvim"
 fi
 if [[ -f "${CHROOT_SRC}/etc/axonwall/starship.toml" ]]; then
   cp "${CHROOT_SRC}/etc/axonwall/starship.toml" "${WORK_DIR}/etc/axonwall/starship.toml"

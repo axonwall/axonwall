@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# 🛡️ Axonwall Neovim Super Configurator Launcher (axonwall-config)
+# Launches Neovim with the zero-chrome Lua form & table TUI (/etc/axonwall/nvim/init.lua)
+# ==============================================================================
+set -euo pipefail
+
+DOMAIN="${1:-firewall}"
+DOMAIN="${DOMAIN%.yaml}"
+DOMAIN="${DOMAIN%.yml}"
+
+INIT_LUA="${AXONWALL_NVIM_INIT:-/etc/axonwall/nvim/init.lua}"
+if [[ ! -f "${INIT_LUA}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_CANDIDATE="$(cd "${SCRIPT_DIR}/../../../.." 2>/dev/null && pwd)/etc/axonwall/nvim/init.lua"
+  if [[ -f "${REPO_CANDIDATE}" ]]; then
+    INIT_LUA="${REPO_CANDIDATE}"
+  fi
+fi
+
+if ! command -v nvim >/dev/null 2>&1; then
+  echo "[!] Neovim (nvim) is not installed; falling back to axonwallctl edit ${DOMAIN}" >&2
+  exec axonwallctl edit "${DOMAIN}"
+fi
+
+export AXONWALL_NVIM_DOMAIN="${DOMAIN}"
+exec nvim --clean -u "${INIT_LUA}"
