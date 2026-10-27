@@ -13,7 +13,13 @@ import {
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { DesiredStateSchema, VigilanteConfigSchema, inferInterfaceRole, type DesiredState } from '@axonwall/lib/schemas';
-import { BUILTIN_PLUGINS, resolveCapabilities, isPluginEnabled } from '@axonwall/lib/plugins';
+import {
+  BUILTIN_PLUGINS,
+  resolveCapabilities,
+  isPluginEnabled,
+  enablePluginWithDependencies,
+  disablePluginWithDependents,
+} from '@axonwall/lib/plugins';
 import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
 import { isValidDevice } from '@axonwall/lib/util';
 import {
@@ -1336,6 +1342,15 @@ async function setCoreRolePlugin(pluginId: string, enable: boolean) {
       workloads: [],
     };
     state.k3s.enabled = enable;
+    if (!enable) {
+      const depRes = disablePluginWithDependents('core-k3s', state);
+      Object.assign(state, depRes.state);
+      if (depRes.autoDisabledDependents.length > 0) {
+        console.log(
+          `${cYellow}[!] Auto-disabled dependent plugins requiring core-k3s: ${depRes.autoDisabledDependents.join(', ')}${cReset}`
+        );
+      }
+    }
   } else if (pluginId === 'core-virt') {
     state.virt = state.virt || {
       enabled: enable,
@@ -1448,6 +1463,19 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
       }),
       enabled: enable,
     };
+  } else if (pluginId === 'vigilant-octo-waffle') {
+    if (enable) {
+      const depRes = enablePluginWithDependencies('vigilant-octo-waffle', state);
+      Object.assign(state, depRes.state);
+      if (depRes.autoEnabledDependencies.length > 0) {
+        console.log(
+          `${cCyan}[+] Auto-enabled required plugin dependency: ${depRes.autoEnabledDependencies.join(', ')}${cReset}`
+        );
+      }
+    } else {
+      const depRes = disablePluginWithDependents('vigilant-octo-waffle', state);
+      Object.assign(state, depRes.state);
+    }
   }
 
   const yamlFiles = serializeDesiredStateToYamlFiles(state);

@@ -31,6 +31,7 @@ export * from './compile/sdwan/index.js';
 export * from './compile/geoip/index.js';
 export * from './compile/nas/index.js';
 export * from './compile/k3s/index.js';
+export * from './compile/vow/index.js';
 export * from './compile/virt/index.js';
 export * from './compile/vigilante/index.js';
 export * from './yaml/index.js';

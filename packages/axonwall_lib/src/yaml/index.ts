@@ -88,10 +88,10 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
   },
   {
     filename: 'k3s.yaml',
-    title: 'Axonwall Embedded K3s Kubernetes & OpenEBS CSI Storage',
+    title: 'Axonwall Embedded K3s Kubernetes, OpenEBS CSI & Vigilant Octo Waffle GitOps',
     description:
-      'Controls the embedded K3s Kubernetes cluster, WireGuard flannel CNI, OpenEBS ZFS-LocalPV & Replicated StorageClasses, and container workloads.',
-    keys: ['k3s'],
+      'Controls the embedded K3s Kubernetes cluster, WireGuard flannel CNI, OpenEBS ZFS-LocalPV & Replicated StorageClasses, container workloads, and Vigilant Octo Waffle (VOW) GitOps platform.',
+    keys: ['k3s', 'vow'],
   },
   {
     filename: 'virt.yaml',

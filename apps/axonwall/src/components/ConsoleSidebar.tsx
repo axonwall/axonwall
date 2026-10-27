@@ -191,6 +191,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'Cluster & HA Join', href: '/k3s/cluster', icon: Cpu, badge: 'HA' },
       { name: 'OpenEBS Storage', href: '/k3s/storage', icon: Database },
       { name: 'Workloads & Apps', href: '/k3s/workloads', icon: Boxes },
+      { name: 'Vigilant Octo Waffle', href: '/k3s/vow', icon: Layers, badge: 'GitOps', pluginId: 'vigilant-octo-waffle' },
     ],
   },
   {

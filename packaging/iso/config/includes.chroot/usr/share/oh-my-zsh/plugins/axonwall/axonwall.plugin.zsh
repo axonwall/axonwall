@@ -80,6 +80,7 @@ _axonwallctl_completion() {
     'headscale:Headscale Mesh VPN Coordination Server'
     'tailscale:Tailscale Mesh VPN'
     'ntopng:ntopng High-Speed Flow Analysis'
+    'vigilant-octo-waffle:Vigilant Octo Waffle K8s GitOps & App Platform (requires core-k3s)'
   )
   mcp_cmds=(
     'status:Show MCP server master switch status (disabled by default)'

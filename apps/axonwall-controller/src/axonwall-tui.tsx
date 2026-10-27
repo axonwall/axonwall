@@ -18,6 +18,8 @@ import {
   CORE_ROLE_PLUGIN_IDS,
   isPluginEnabled,
   resolveCapabilities,
+  enablePluginWithDependencies,
+  disablePluginWithDependents,
 } from '@axonwall/lib';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { App as NastyMapApp } from './tui/nastymap/App.js';
@@ -365,28 +367,43 @@ export function AxonwallTuiApp({
   };
 
   const toggleExtensionPluginInState = async (pluginId: string) => {
-    const next = structuredClone(state);
+    let next = structuredClone(state);
     const currentlyEnabled = isPluginEnabled(pluginId, next);
     const nextEnabled = !currentlyEnabled;
-    const filtered = (next.plugins || []).filter((p: any) => p.id !== pluginId);
-    filtered.push({ id: pluginId, enabled: nextEnabled, config: {} });
-    next.plugins = filtered;
+    let depNotice = '';
 
-    if (pluginId === 'rosenpass') {
-      next.rosenpass = { ...(next.rosenpass || ({} as any)), enabled: nextEnabled };
-    } else if (pluginId === 'haproxy') {
-      next.haproxy = { ...(next.haproxy || ({} as any)), enabled: nextEnabled };
-    } else if (pluginId === 'freeradius') {
-      next.freeradius = { ...(next.freeradius || ({} as any)), enabled: nextEnabled };
-    } else if (pluginId === 'snmp') {
-      next.snmp = { ...(next.snmp || ({} as any)), enabled: nextEnabled };
-    } else if (pluginId === 'nut-ups') {
-      next.ups = { ...(next.ups || ({} as any)), enabled: nextEnabled };
-    } else if (pluginId === 'headscale') {
-      next.headscale = {
-        ...(next.headscale || ({} as any)),
-        enabled: nextEnabled,
-      };
+    if (pluginId === 'vigilant-octo-waffle') {
+      if (nextEnabled) {
+        const depRes = enablePluginWithDependencies('vigilant-octo-waffle', next);
+        next = depRes.state;
+        if (depRes.autoEnabledDependencies.length > 0) {
+          depNotice = ` (auto-enabled dependency: ${depRes.autoEnabledDependencies.join(', ')})`;
+        }
+      } else {
+        const depRes = disablePluginWithDependents('vigilant-octo-waffle', next);
+        next = depRes.state;
+      }
+    } else {
+      const filtered = (next.plugins || []).filter((p: any) => p.id !== pluginId);
+      filtered.push({ id: pluginId, enabled: nextEnabled, config: {} });
+      next.plugins = filtered;
+
+      if (pluginId === 'rosenpass') {
+        next.rosenpass = { ...(next.rosenpass || ({} as any)), enabled: nextEnabled };
+      } else if (pluginId === 'haproxy') {
+        next.haproxy = { ...(next.haproxy || ({} as any)), enabled: nextEnabled };
+      } else if (pluginId === 'freeradius') {
+        next.freeradius = { ...(next.freeradius || ({} as any)), enabled: nextEnabled };
+      } else if (pluginId === 'snmp') {
+        next.snmp = { ...(next.snmp || ({} as any)), enabled: nextEnabled };
+      } else if (pluginId === 'nut-ups') {
+        next.ups = { ...(next.ups || ({} as any)), enabled: nextEnabled };
+      } else if (pluginId === 'headscale') {
+        next.headscale = {
+          ...(next.headscale || ({} as any)),
+          enabled: nextEnabled,
+        };
+      }
     }
 
     setState(next);
@@ -396,7 +413,7 @@ export function AxonwallTuiApp({
       action: nextEnabled ? 'enable' : 'disable',
     });
     setStatusMessage(
-      `Toggled plugin '${pluginId}' -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+      `Toggled plugin '${pluginId}' -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}${depNotice}. Press [a] to apply.`
     );
     await refreshAll();
   };
@@ -1324,7 +1341,10 @@ export function AxonwallTuiApp({
                 <Text bold={sel} color={sel ? 'white' : 'cyan'}>
                   {p.id.padEnd(26, ' ')}
                 </Text>
-                <Text color="white">{p.name}</Text>
+                <Text color="white">
+                  {p.name}
+                  {p.dependencies && p.dependencies.length > 0 ? ` [requires: ${p.dependencies.join(', ')}]` : ''}
+                </Text>
               </Box>
             );
           })}

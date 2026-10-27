@@ -1,4 +1,4 @@
-import { PluginManifestSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
+import { PluginManifestSchema, VowConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
 export type { PluginManifest };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
@@ -295,6 +295,29 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       icon: 'ShieldCheck',
     },
   },
+  {
+    id: 'vigilant-octo-waffle',
+    name: 'Vigilant Octo Waffle (K8s GitOps & App Platform)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    dependencies: ['core-k3s'],
+    description:
+      'Cloud-native Kubernetes GitOps & App Platform for K3s with dual ArgoCD + FluxCD runners (automatic Argo-to-Flux synthesis), 45+ curated apps (Harbor, Rancher, Keycloak, OpenBao, Supabase, Kubeflow, Ollama, vLLM, Nextcloud), Waffle Blueprints, local mkcert TLS + Unbound DNS auto-zones, and 33-permission CASL authorization.',
+    author: 'DeployCoop / Axonwall Core',
+    systemdUnits: ['k3s.service'],
+    privileges: ['k3s.cluster', 'services.vow', 'security.certificates', 'services.dns'],
+    menuEntry: {
+      title: 'Vigilant Octo Waffle',
+      path: '/k3s/vow',
+      icon: 'Layers',
+    },
+    packages: {
+      debian: ['mkcert', 'libnss3-tools', 'gettext-base', 'git', 'curl', 'jq'],
+      alpine: ['mkcert', 'nss-tools', 'gettext', 'git', 'curl', 'jq'],
+    },
+    cliBinaries: ['vow', 'kubectl', 'mkcert'],
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -364,9 +387,41 @@ export function isPluginAllowed(manifest: PluginManifest, grantedPrivileges: str
   return manifest.privileges.every((priv) => grantedPrivileges.includes(priv));
 }
 
+export function getPluginDependencies(pluginId: string): string[] {
+  const manifest = findPluginById(pluginId);
+  return manifest?.dependencies ?? [];
+}
+
+export function getDependentPlugins(pluginId: string): PluginManifest[] {
+  return BUILTIN_PLUGINS.filter((p) => (p.dependencies ?? []).includes(pluginId));
+}
+
+export function arePluginDependenciesMet(
+  pluginId: string,
+  state?: Partial<DesiredState> | null
+): { met: boolean; missing: string[] } {
+  const deps = getPluginDependencies(pluginId);
+  if (deps.length === 0) {
+    return { met: true, missing: [] };
+  }
+  const missing = deps.filter((depId) => !isPluginEnabled(depId, state));
+  return {
+    met: missing.length === 0,
+    missing,
+  };
+}
+
 export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> | null): boolean {
   if (!state) {
     return pluginId === 'core-firewall' || pluginId === 'cli-workstation';
+  }
+
+  // Enforce plugin dependencies first (e.g., vigilant-octo-waffle requires core-k3s)
+  const deps = getPluginDependencies(pluginId);
+  for (const depId of deps) {
+    if (depId !== pluginId && !isPluginEnabled(depId, state)) {
+      return false;
+    }
   }
 
   // Check core roles
@@ -393,6 +448,9 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   }
 
   // Check specific service/extension plugins
+  if (pluginId === 'vigilant-octo-waffle') {
+    return Boolean(state.vow?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled));
+  }
   if (pluginId === 'nut-ups') {
     return Boolean(state.ups?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'nut-ups' && p.enabled));
   }
@@ -414,5 +472,122 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
 
   // Generic extension plugin check
   return Boolean(state.plugins?.some((p) => p.id === pluginId && p.enabled));
+}
+
+/**
+ * Enables a plugin in DesiredState and automatically enables any required plugin dependencies
+ * (such as enabling `core-k3s` when `vigilant-octo-waffle` is enabled).
+ */
+export function enablePluginWithDependencies(
+  pluginId: string,
+  inputState: DesiredState
+): { state: DesiredState; autoEnabledDependencies: string[] } {
+  const next = structuredClone(inputState);
+  const autoEnabledDependencies: string[] = [];
+
+  const enableSingle = (id: string, isAutoDep = false) => {
+    // Recursively enable dependencies first
+    for (const depId of getPluginDependencies(id)) {
+      if (!isPluginEnabled(depId, next)) {
+        enableSingle(depId, true);
+      }
+    }
+
+    if (isAutoDep && !autoEnabledDependencies.includes(id)) {
+      autoEnabledDependencies.push(id);
+    }
+
+    if (id === 'core-k3s') {
+      next.capabilities = {
+        firewallEnabled: next.capabilities?.firewallEnabled !== false,
+        nasEnabled: Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled),
+        k3sEnabled: true,
+        virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
+        vigilanteEnabled: Boolean(next.capabilities?.vigilanteEnabled ?? next.vigilante?.enabled),
+      };
+      next.k3s = next.k3s || {
+        enabled: true,
+        clusterCidr: '10.42.0.0/16',
+        serviceCidr: '10.43.0.0/16',
+        nodeIpInterface: 'lan',
+        flannelBackend: 'wireguard-native',
+        disableTraefik: false,
+        autoJoinHaPeer: true,
+        openEbs: {
+          enabled: true,
+          zfsLocalPvEnabled: true,
+          zfsLocalPvPool: 'tank',
+          replicatedStorageEnabled: true,
+          defaultReplicaCount: 2,
+          replicatedBackingPool: 'tank/openebs-replicated',
+        },
+        workloads: [],
+      };
+      next.k3s.enabled = true;
+    } else if (id === 'vigilant-octo-waffle') {
+      next.vow = next.vow ? { ...next.vow, enabled: true } : VowConfigSchema.parse({ enabled: true });
+    }
+
+    const plugins = next.plugins || [];
+    const idx = plugins.findIndex((p) => p.id === id);
+    if (idx >= 0) {
+      plugins[idx].enabled = true;
+    } else {
+      plugins.push({ id, enabled: true, installedAt: new Date().toISOString() });
+    }
+    next.plugins = plugins;
+  };
+
+  enableSingle(pluginId, false);
+  return { state: next, autoEnabledDependencies };
+}
+
+/**
+ * Disables a plugin in DesiredState and automatically disables any plugins that depend on it
+ * (such as disabling `vigilant-octo-waffle` when `core-k3s` is disabled).
+ */
+export function disablePluginWithDependents(
+  pluginId: string,
+  inputState: DesiredState
+): { state: DesiredState; autoDisabledDependents: string[] } {
+  const next = structuredClone(inputState);
+  const autoDisabledDependents: string[] = [];
+
+  const disableSingle = (id: string, isAutoDependent = false) => {
+    for (const depPlugin of getDependentPlugins(id)) {
+      if (isPluginEnabled(depPlugin.id, next) || (depPlugin.id === 'vigilant-octo-waffle' && next.vow?.enabled)) {
+        disableSingle(depPlugin.id, true);
+      }
+    }
+
+    if (isAutoDependent && !autoDisabledDependents.includes(id)) {
+      autoDisabledDependents.push(id);
+    }
+
+    if (id === 'core-k3s') {
+      if (next.capabilities) {
+        next.capabilities.k3sEnabled = false;
+      }
+      if (next.k3s) {
+        next.k3s.enabled = false;
+      }
+    } else if (id === 'vigilant-octo-waffle') {
+      if (next.vow) {
+        next.vow.enabled = false;
+      }
+    }
+
+    const plugins = next.plugins || [];
+    const idx = plugins.findIndex((p) => p.id === id);
+    if (idx >= 0) {
+      plugins[idx].enabled = false;
+    } else {
+      plugins.push({ id, enabled: false });
+    }
+    next.plugins = plugins;
+  };
+
+  disableSingle(pluginId, false);
+  return { state: next, autoDisabledDependents };
 }
 

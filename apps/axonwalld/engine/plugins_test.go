@@ -22,6 +22,7 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 
 	foundWorkstation := false
 	foundNastyMap := false
+	foundVow := false
 	for _, p := range plugins {
 		if p.ID == "cli-workstation" {
 			foundWorkstation = true
@@ -38,6 +39,12 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 		if p.ID == "cli-diagnostics-nastymap" {
 			foundNastyMap = true
 		}
+		if p.ID == "vigilant-octo-waffle" {
+			foundVow = true
+			if len(p.Dependencies) != 1 || p.Dependencies[0] != "core-k3s" {
+				t.Errorf("expected vigilant-octo-waffle to have Dependencies=[core-k3s], got %v", p.Dependencies)
+			}
+		}
 	}
 
 	if !foundWorkstation {
@@ -45,6 +52,9 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 	}
 	if !foundNastyMap {
 		t.Errorf("expected cli-diagnostics-nastymap plugin in definitions")
+	}
+	if !foundVow {
+		t.Errorf("expected vigilant-octo-waffle plugin in definitions")
 	}
 }
 

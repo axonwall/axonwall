@@ -18,7 +18,14 @@ import {
   Terminal,
   Settings,
 } from 'lucide-react';
-import { BUILTIN_PLUGINS, isPluginEnabled, type PluginManifest } from '@axonwall/lib/plugins';
+import {
+  BUILTIN_PLUGINS,
+  isPluginEnabled,
+  enablePluginWithDependencies,
+  disablePluginWithDependents,
+  arePluginDependenciesMet,
+  type PluginManifest,
+} from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import { getExtensionPlugins, executePluginAction, type ExtensionPluginLiveStatus } from '@/server/plugins';
 import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas';
@@ -107,6 +114,7 @@ export default function PluginManagerPage() {
         next.nas.enabled = nextCaps.nasEnabled;
       }
 
+      let autoDisabledNote = '';
       if (id === 'core-k3s') {
         next.k3s = next.k3s || {
           enabled: nextCaps.k3sEnabled,
@@ -127,6 +135,13 @@ export default function PluginManagerPage() {
           workloads: [],
         };
         next.k3s.enabled = nextCaps.k3sEnabled;
+        if (!nextCaps.k3sEnabled) {
+          const depRes = disablePluginWithDependents('core-k3s', next);
+          Object.assign(next, depRes.state);
+          if (depRes.autoDisabledDependents.length > 0) {
+            autoDisabledNote = ` • Auto-disabled dependent plugins: ${depRes.autoDisabledDependents.join(', ')}`;
+          }
+        }
       }
 
       if (id === 'core-virt') {
@@ -156,7 +171,7 @@ export default function PluginManagerPage() {
       window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       setStatusBanner({
         type: 'success',
-        text: `${id} toggled (${res.message})`,
+        text: `${id} toggled (${res.message})${autoDisabledNote}`,
       });
     } catch (err: any) {
       setStatusBanner({
@@ -204,10 +219,22 @@ export default function PluginManagerPage() {
     setStatusBanner(null);
 
     try {
-      const next = structuredClone(state);
+      let next = structuredClone(state);
       const isCurrentlyEnabled = isPluginEnabled(id, next);
+      let depNotice = '';
 
-      if (id === 'nut-ups') {
+      if (id === 'vigilant-octo-waffle') {
+        if (!isCurrentlyEnabled) {
+          const depRes = enablePluginWithDependencies('vigilant-octo-waffle', next);
+          next = depRes.state;
+          if (depRes.autoEnabledDependencies.length > 0) {
+            depNotice = ` [Auto-enabled required dependency: ${depRes.autoEnabledDependencies.join(', ')}]`;
+          }
+        } else {
+          const depRes = disablePluginWithDependents('vigilant-octo-waffle', next);
+          next = depRes.state;
+        }
+      } else if (id === 'nut-ups') {
         next.ups = next.ups || {
           enabled: false,
           name: 'axonups',
@@ -283,8 +310,8 @@ export default function PluginManagerPage() {
         next.plugins = plugins;
       }
 
-      if (id === 'cli-workstation') {
-        await executePluginAction('cli-workstation', !isCurrentlyEnabled ? 'enable' : 'disable').catch(() => {});
+      if (id === 'cli-workstation' || id === 'vigilant-octo-waffle') {
+        await executePluginAction(id, !isCurrentlyEnabled ? 'enable' : 'disable').catch(() => {});
       }
 
       const res = await applyDesiredState(next);
@@ -294,7 +321,7 @@ export default function PluginManagerPage() {
       }
       setStatusBanner({
         type: 'success',
-        text: `${id} is now ${!isCurrentlyEnabled ? 'enabled' : 'disabled'} (${res.message})`,
+        text: `${id} is now ${!isCurrentlyEnabled ? 'enabled' : 'disabled'}${depNotice} (${res.message})`,
       });
     } catch (err: any) {
       setStatusBanner({
@@ -533,6 +560,22 @@ export default function PluginManagerPage() {
                   </p>
 
                   <div className="flex flex-wrap gap-1.5 pt-1">
+                    {plugin.dependencies && plugin.dependencies.map((depId) => {
+                      const depMet = isPluginEnabled(depId, state);
+                      return (
+                        <span
+                          key={depId}
+                          title={depMet ? `Required dependency ${depId} is active` : `Requires ${depId} (will be auto-enabled when enabling ${plugin.id})`}
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold border flex items-center gap-1 ${
+                            depMet
+                              ? 'bg-sky-500/15 border-sky-500/30 text-sky-300'
+                              : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                          }`}
+                        >
+                          <Cpu className="w-2.5 h-2.5" /> Requires: {depId}
+                        </span>
+                      );
+                    })}
                     {plugin.systemdUnits.map((u) => (
                       <span key={u} className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] font-mono text-slate-400">
                         {u}
@@ -565,7 +608,7 @@ export default function PluginManagerPage() {
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {(isInstalled || isBundled) && (
+                    {(isInstalled || isBundled || plugin.id === 'vigilant-octo-waffle') && (
                       <button
                         disabled={isSaving}
                         onClick={() => toggleExtensionPlugin(plugin.id)}
@@ -660,6 +703,28 @@ export default function PluginManagerPage() {
                 <span className="text-slate-500 block">ID & VERSION</span>
                 <span className="text-white font-mono">{selectedPlugin.id} @ {selectedPlugin.version}</span>
               </div>
+              {selectedPlugin.dependencies && selectedPlugin.dependencies.length > 0 && (
+                <div>
+                  <span className="text-slate-500 block">REQUIRED PLUGIN DEPENDENCIES</span>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {selectedPlugin.dependencies.map((depId) => {
+                      const depMet = isPluginEnabled(depId, state);
+                      return (
+                        <span
+                          key={depId}
+                          className={`px-2 py-0.5 rounded font-mono border ${
+                            depMet
+                              ? 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                              : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          }`}
+                        >
+                          {depId} ({depMet ? 'Active' : 'Will Auto-Enable'})
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <div>
                 <span className="text-slate-500 block">REQUIRED PRIVILEGES</span>
                 <div className="flex flex-wrap gap-1 mt-1">

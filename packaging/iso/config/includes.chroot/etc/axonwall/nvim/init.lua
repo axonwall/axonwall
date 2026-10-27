@@ -224,6 +224,7 @@ local function default_state()
     ha = { enabled = false, nodeRole = "master", syncInterface = "lan", peerIp = "", virtualRouterId = 51 },
     nas = { enabled = false, workgroup = "WORKGROUP", serverString = "Axonwall ZFS NAS", pools = {}, datasets = {}, smbShares = {}, nfsExports = {} },
     k3s = { enabled = false, clusterCidr = "10.42.0.0/16", serviceCidr = "10.43.0.0/16", flannelBackend = "wireguard-native", disableTraefik = false },
+    vow = { enabled = false, cdRunner = "argocd", domain = "vow.axonwall.local", activePreset = "minimal", localTlsMkcert = true, syncUnboundDns = true, authzEnabled = false },
     virt = { enabled = false, defaultPool = "tank", isoPool = "tank", vms = {}, containers = {} },
     vigilante = { enabled = false, autoBlockCritical = false, defaultBlockTtlSeconds = 3600 },
   }
@@ -1261,6 +1262,7 @@ local function build_domain_fields(domain_id)
 
   elseif domain_id == "compute" then
     st.k3s = st.k3s or { enabled = false, clusterCidr = "10.42.0.0/16", serviceCidr = "10.43.0.0/16", flannelBackend = "wireguard-native", disableTraefik = false }
+    st.vow = st.vow or { enabled = false, cdRunner = "argocd", domain = "vow.axonwall.local", activePreset = "minimal", localTlsMkcert = true, syncUnboundDns = true, authzEnabled = false }
     st.virt = st.virt or { enabled = false, defaultPool = "tank", isoPool = "tank" }
     st.vigilante = st.vigilante or { enabled = false, autoBlockCritical = false, defaultBlockTtlSeconds = 3600 }
 
@@ -1275,6 +1277,9 @@ local function build_domain_fields(domain_id)
         st.k3s.enabled = v
         st.capabilities = st.capabilities or {}
         st.capabilities.k3sEnabled = v
+        if not v and st.vow then
+          st.vow.enabled = false
+        end
       end,
     })
     add({
@@ -1298,6 +1303,67 @@ local function build_domain_fields(domain_id)
       desc = "Pod network encapsulation backend (wireguard-native recommended).",
       get = function() return st.k3s.flannelBackend or "wireguard-native" end,
       set = function(v) st.k3s.flannelBackend = v end,
+    })
+
+    add({
+      card_title = "🧇 Vigilant Octo Waffle (VOW) — K8s GitOps & App Platform",
+      card_subtitle = "/etc/axonwall/k3s.yaml • Requires plugin dependency: core-k3s",
+      label = "VOW Platform Enabled",
+      vtype = "boolean",
+      desc = "Enable Vigilant Octo Waffle GitOps platform (auto-enables required core-k3s dependency).",
+      get = function() return tostring(Boolean(st.vow.enabled and st.k3s.enabled)) end,
+      set = function(v)
+        st.vow.enabled = v
+        if v then
+          st.k3s.enabled = true
+          st.capabilities = st.capabilities or {}
+          st.capabilities.k3sEnabled = true
+        end
+      end,
+    })
+    add({
+      label = "GitOps CD Runner",
+      vtype = "enum",
+      options = { "argocd", "flux", "both" },
+      desc = "Continuous delivery controller (ArgoCD, FluxCD v2 with Argo-to-Flux synthesis, or both).",
+      get = function() return st.vow.cdRunner or "argocd" end,
+      set = function(v) st.vow.cdRunner = v end,
+    })
+    add({
+      label = "VOW Ingress Domain",
+      vtype = "hostname",
+      desc = "Base domain for VOW app subdomains and Unbound DNS local-zone overrides.",
+      get = function() return st.vow.domain or "vow.axonwall.local" end,
+      set = function(v) st.vow.domain = v end,
+    })
+    add({
+      label = "Deployment Preset",
+      vtype = "enum",
+      options = { "minimal", "storage", "observability", "ai", "collaboration", "full", "custom" },
+      desc = "Curated application stack preset from the 37+ VOW Kubernetes catalog.",
+      get = function() return st.vow.activePreset or "minimal" end,
+      set = function(v) st.vow.activePreset = v end,
+    })
+    add({
+      label = "Local TLS (mkcert CA)",
+      vtype = "boolean",
+      desc = "Provision local mkcert CA and Cert-Manager TLS certificates for VOW ingresses.",
+      get = function() return tostring(st.vow.localTlsMkcert ~= false) end,
+      set = function(v) st.vow.localTlsMkcert = v end,
+    })
+    add({
+      label = "Sync Unbound DNS Zone",
+      vtype = "boolean",
+      desc = "Automatically publish A records for enabled VOW app subdomains in Unbound DNS.",
+      get = function() return tostring(st.vow.syncUnboundDns ~= false) end,
+      set = function(v) st.vow.syncUnboundDns = v end,
+    })
+    add({
+      label = "CASL 34-Perm AuthZ Guard",
+      vtype = "boolean",
+      desc = "Enforce Paperclip/CASL role-based authorization (.vow/authz.yaml).",
+      get = function() return tostring(Boolean(st.vow.authzEnabled)) end,
+      set = function(v) st.vow.authzEnabled = v end,
     })
 
     add({

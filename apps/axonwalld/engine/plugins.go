@@ -20,6 +20,7 @@ type PluginDefinition struct {
 	Description      string   `json:"description"`
 	Author           string   `json:"author"`
 	DefaultEnabled   bool     `json:"defaultEnabled"`
+	Dependencies     []string `json:"dependencies,omitempty"`
 	SystemdUnits     []string `json:"systemdUnits"`
 	Privileges       []string `json:"privileges"`
 	DebianPackages   []string `json:"debianPackages"`
@@ -36,6 +37,7 @@ type PluginStatus struct {
 	Author           string   `json:"author"`
 	Enabled          bool     `json:"enabled"`
 	DefaultEnabled   bool     `json:"defaultEnabled"`
+	Dependencies     []string `json:"dependencies,omitempty"`
 	Installed        bool     `json:"installed"`
 	Bundled          bool     `json:"bundled"`
 	RequiredBinaries []string `json:"requiredBinaries"`
@@ -220,6 +222,20 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			AlpinePackages:   []string{"rosenpass", "wireguard-tools"},
 			RequiredBinaries: []string{"rosenpass", "wg"},
 		},
+		{
+			ID:               "vigilant-octo-waffle",
+			Name:             "Vigilant Octo Waffle (K8s GitOps & App Platform)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			Description:      "Cloud-native Kubernetes GitOps & App Platform for K3s with dual ArgoCD + FluxCD runners (automatic Argo-to-Flux synthesis), 45+ curated apps (Harbor, Rancher, Keycloak, OpenBao, Supabase, Kubeflow, Ollama, vLLM, Nextcloud), Waffle Blueprints, local mkcert TLS + Unbound DNS auto-zones, and 33-permission CASL authorization.",
+			Author:           "DeployCoop / Axonwall Core",
+			Dependencies:     []string{"core-k3s"},
+			SystemdUnits:     []string{"k3s.service"},
+			Privileges:       []string{"k3s.cluster", "services.vow", "security.certificates", "services.dns"},
+			DebianPackages:   []string{"mkcert", "libnss3-tools", "gettext-base", "git", "curl", "jq"},
+			AlpinePackages:   []string{"mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
+			RequiredBinaries: []string{"kubectl", "git", "envsubst"},
+		},
 	}
 }
 
@@ -325,6 +341,7 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			Author:           d.Author,
 			Enabled:          enabled,
 			DefaultEnabled:   d.DefaultEnabled,
+			Dependencies:     d.Dependencies,
 			Installed:        installed,
 			Bundled:          bundled,
 			RequiredBinaries: d.RequiredBinaries,
@@ -558,6 +575,19 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Rosenpass Post-Quantum McEliece 460896 keypair and systemd unit verified.",
+		}
+	}
+	if pluginID == "vigilant-octo-waffle" {
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "Vigilant Octo Waffle (K8s GitOps & App Platform) enabled and verified (Dependency: core-k3s).",
 		}
 	}
 	return PluginActionResponse{

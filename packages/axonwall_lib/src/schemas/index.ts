@@ -865,6 +865,7 @@ export const PluginManifestSchema = z.object({
   version: z.string().min(1),
   category: PluginCategorySchema.default('extension').optional(),
   defaultEnabled: z.boolean().optional(),
+  dependencies: z.array(z.string()).default([]).optional(),
   description: z.string().default(''),
   author: z.string().default('Axonwall Community'),
   systemdUnits: z.array(z.string()).default([]),
@@ -1256,6 +1257,40 @@ export const K3sConfigSchema = z.object({
   workloads: z.array(K3sWorkloadSpecSchema).default([]),
 });
 export type K3sConfig = z.infer<typeof K3sConfigSchema>;
+
+// =============================================================================
+// Vigilant Octo Waffle (VOW) — K8s GitOps & App Platform (Requires core-k3s)
+// =============================================================================
+
+export const VowCdRunnerSchema = z.enum(['argocd', 'flux', 'both']);
+export type VowCdRunner = z.infer<typeof VowCdRunnerSchema>;
+
+export const VowAppOverrideSchema = z.object({
+  appId: z.string().min(1),
+  namespace: z.string().default('default'),
+  storageClass: z.enum(['axonwall-replicated-ha', 'axonwall-zfs-local', 'openebs-hostpath', 'default']).default('axonwall-zfs-local'),
+  customValuesYaml: z.string().default(''),
+  customSubdomain: z.string().optional(),
+});
+export type VowAppOverride = z.infer<typeof VowAppOverrideSchema>;
+
+export const VowConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  cdRunner: VowCdRunnerSchema.default('argocd'),
+  domain: z.string().default('vow.axonwall.local'),
+  gitRepoUrl: z.string().default('https://github.com/DeployCoop/vigilant-octo-waffle.git'),
+  gitBranch: z.string().default('main'),
+  fluxInterval: z.string().default('5m'),
+  localTlsMkcert: z.boolean().default(true),
+  syncUnboundDns: z.boolean().default(true),
+  authzEnabled: z.boolean().default(false),
+  defaultRole: z.enum(['owner', 'admin', 'operator', 'viewer', 'webhook']).default('admin'),
+  activePreset: z.enum(['minimal', 'storage', 'observability', 'ai', 'collaboration', 'full', 'custom']).default('minimal'),
+  activeBlueprint: z.string().optional(),
+  enabledApps: z.array(z.string()).default(['argocd', 'certmanager']),
+  appOverrides: z.array(VowAppOverrideSchema).default([]),
+});
+export type VowConfig = z.infer<typeof VowConfigSchema>;
 
 // =============================================================================
 // Virtualization, KVM/QEMU VMs, LXC Containers, VFIO & Deduplicated Backups
@@ -1709,6 +1744,7 @@ export const DesiredStateSchema = z.object({
   zeroTrust: ZeroTrustConfigSchema.optional(),
   nas: NasConfigSchema.optional(),
   k3s: K3sConfigSchema.optional(),
+  vow: VowConfigSchema.optional(),
   virt: VirtConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional(),
