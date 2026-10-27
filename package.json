@@ -1,6 +1,6 @@
 {
   "name": "axonwall-monorepo",
-  "version": "0.11.26",
+  "version": "0.11.27",
   "private": true,
   "license": "GPL-2.0-or-later",
   "packageManager": "pnpm@12.9.1",
