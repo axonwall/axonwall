@@ -1,4 +1,4 @@
-import { PluginManifestSchema, VowConfigSchema, HostMalwareDefenseConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
+import { PluginManifestSchema, VowConfigSchema, HostMalwareDefenseConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
 export type { PluginManifest };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
@@ -381,6 +381,29 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       'audit_hidden_bpf_prog_idr.py',
     ],
   },
+  {
+    id: 'eluvix',
+    name: 'Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Enterprise-wide LLM routing gateway (git@github.com:Eluvixrouter/eluvix.git) delivering up to 85% tokenomics savings via Switchyard cost-complexity routing, sub-2ms Semantic Caching, and DeepSeek MLA FP8 / RDMA KV-cache disaggregation (vLLM NIXL & SGLang Mooncake), paired with inline PromptGuard injection defense, PrivacyGuard PII/secret DLP redaction, confidential TEE attestation, and an 8-harness agent mesh (OpenCode, ACP, TrueForge, OpenHands, Mastra, Letta, A2A, Hermes).',
+    author: 'Eluvix Router / Axonwall Core',
+    systemdUnits: ['eluvix.service'],
+    privileges: ['system.ai', 'security.forensics', 'services.dns'],
+    nftHooks: [{ table: 'inet axonwall', chain: 'input', priority: 0 }],
+    menuEntry: {
+      title: 'Eluvix AI Router & DLP',
+      path: '/ai/eluvix',
+      icon: 'Sparkles',
+    },
+    packages: {
+      debian: ['nodejs', 'git', 'curl', 'jq', 'sqlite3'],
+      alpine: ['nodejs', 'git', 'curl', 'jq', 'sqlite'],
+    },
+    cliBinaries: ['eluvix', 'opencode', 'agy'],
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -527,6 +550,9 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   if (pluginId === 'vigilant-octo-waffle') {
     return Boolean(state.vow?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled));
   }
+  if (pluginId === 'eluvix') {
+    return Boolean(state.eluvix?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'eluvix' && p.enabled));
+  }
   if (pluginId === 'nut-ups') {
     return Boolean(state.ups?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'nut-ups' && p.enabled));
   }
@@ -606,6 +632,10 @@ export function enablePluginWithDependencies(
       next.hostDefense = next.hostDefense
         ? { ...next.hostDefense, enabled: true }
         : HostMalwareDefenseConfigSchema.parse({ enabled: true });
+    } else if (id === 'eluvix') {
+      next.eluvix = next.eluvix
+        ? { ...next.eluvix, enabled: true }
+        : EluvixConfigSchema.parse({ enabled: true });
     }
 
     const plugins = next.plugins || [];
@@ -658,6 +688,10 @@ export function disablePluginWithDependents(
     } else if (id === 'host-malware-rootkit') {
       if (next.hostDefense) {
         next.hostDefense.enabled = false;
+      }
+    } else if (id === 'eluvix') {
+      if (next.eluvix) {
+        next.eluvix.enabled = false;
       }
     }
 

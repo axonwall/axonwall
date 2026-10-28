@@ -1602,9 +1602,9 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
       }),
       enabled: enable,
     };
-  } else if (pluginId === 'vigilant-octo-waffle') {
+  } else if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix') {
     if (enable) {
-      const depRes = enablePluginWithDependencies('vigilant-octo-waffle', state);
+      const depRes = enablePluginWithDependencies(pluginId, state);
       Object.assign(state, depRes.state);
       if (depRes.autoEnabledDependencies.length > 0) {
         console.log(
@@ -1612,7 +1612,7 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
         );
       }
     } else {
-      const depRes = disablePluginWithDependents('vigilant-octo-waffle', state);
+      const depRes = disablePluginWithDependents(pluginId, state);
       Object.assign(state, depRes.state);
     }
   }

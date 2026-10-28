@@ -513,6 +513,44 @@ local function build_domain_fields(domain_id)
       end,
     })
 
+    st.eluvix = st.eluvix or {}
+    st.eluvix.tokenomics = st.eluvix.tokenomics or {}
+    st.eluvix.promptGuard = st.eluvix.promptGuard or {}
+    st.eluvix.privacyGuard = st.eluvix.privacyGuard or {}
+    add({
+      card_title = "✨ Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard",
+      card_subtitle = "git@github.com:Eluvixrouter/eluvix.git · Switchyard Cost-Complexity, MLA KV & Inline DLP",
+      label = "Eluvix Router Enabled",
+      vtype = "boolean",
+      desc = "Enable Eluvix Sovereign AI Gateway (:3588) & Switchyard Coordinator (:8080).",
+      get = function() return tostring(Boolean(st.eluvix.enabled)) end,
+      set = function(v) st.eluvix.enabled = v end,
+    })
+    add({
+      label = "Switchyard Tokenomics Strategy",
+      vtype = "enum",
+      options = { "cost-complexity", "prefill-isolation", "lowest-latency", "round-robin", "priority" },
+      desc = "Cost-complexity routing offloads Tier 1-2 prompts to local SGLang/vLLM and reserves frontier for Tier 4.",
+      get = function() return st.eluvix.tokenomics.strategy or "cost-complexity" end,
+      set = function(v) st.eluvix.tokenomics.strategy = v end,
+    })
+    add({
+      label = "PromptGuard Enforcement Action",
+      vtype = "enum",
+      options = { "block", "strip", "divert", "warn" },
+      desc = "Action when instruction override, DAN jailbreak, system prompt leak, or obfuscation is detected.",
+      get = function() return st.eluvix.promptGuard.enforcementAction or "block" end,
+      set = function(v) st.eluvix.promptGuard.enforcementAction = v end,
+    })
+    add({
+      label = "PrivacyGuard DLP Action",
+      vtype = "enum",
+      options = { "anonymize", "block", "warn" },
+      desc = "Inline redaction/blocking of API keys (sk-*, AKIA*, ghp_*), SSNs, credit cards, emails, and phones.",
+      get = function() return st.eluvix.privacyGuard.action or "anonymize" end,
+      set = function(v) st.eluvix.privacyGuard.action = v end,
+    })
+
   elseif domain_id == "interfaces" then
     st.interfaces = st.interfaces or {}
     for idx, iface in ipairs(st.interfaces) do

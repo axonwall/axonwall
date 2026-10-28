@@ -23,6 +23,7 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 	foundWorkstation := false
 	foundNastyMap := false
 	foundVow := false
+	foundEluvix := false
 	for _, p := range plugins {
 		if p.ID == "cli-workstation" {
 			foundWorkstation = true
@@ -45,6 +46,9 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 				t.Errorf("expected vigilant-octo-waffle to have Dependencies=[core-k3s], got %v", p.Dependencies)
 			}
 		}
+		if p.ID == "eluvix" {
+			foundEluvix = true
+		}
 	}
 
 	if !foundWorkstation {
@@ -55,6 +59,9 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 	}
 	if !foundVow {
 		t.Errorf("expected vigilant-octo-waffle plugin in definitions")
+	}
+	if !foundEluvix {
+		t.Errorf("expected eluvix plugin in definitions")
 	}
 }
 

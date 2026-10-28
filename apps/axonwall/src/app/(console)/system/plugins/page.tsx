@@ -223,15 +223,15 @@ export default function PluginManagerPage() {
       const isCurrentlyEnabled = isPluginEnabled(id, next);
       let depNotice = '';
 
-      if (id === 'vigilant-octo-waffle') {
+      if (id === 'vigilant-octo-waffle' || id === 'host-malware-rootkit' || id === 'eluvix') {
         if (!isCurrentlyEnabled) {
-          const depRes = enablePluginWithDependencies('vigilant-octo-waffle', next);
+          const depRes = enablePluginWithDependencies(id, next);
           next = depRes.state;
           if (depRes.autoEnabledDependencies.length > 0) {
             depNotice = ` [Auto-enabled required dependency: ${depRes.autoEnabledDependencies.join(', ')}]`;
           }
         } else {
-          const depRes = disablePluginWithDependents('vigilant-octo-waffle', next);
+          const depRes = disablePluginWithDependents(id, next);
           next = depRes.state;
         }
       } else if (id === 'nut-ups') {

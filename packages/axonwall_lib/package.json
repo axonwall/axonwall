@@ -187,6 +187,10 @@
       "types": "./dist/compile/rootkit/index.d.ts",
       "default": "./dist/compile/rootkit/index.js"
     },
+    "./compile/eluvix": {
+      "types": "./dist/compile/eluvix/index.d.ts",
+      "default": "./dist/compile/eluvix/index.js"
+    },
     "./cloudinit": {
       "types": "./dist/cloudinit/index.d.ts",
       "default": "./dist/cloudinit/index.js"

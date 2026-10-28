@@ -1774,6 +1774,124 @@ export const IdentityConfigSchema = z.object({
 });
 export type IdentityConfig = z.infer<typeof IdentityConfigSchema>;
 
+// =============================================================================
+// Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard Suite
+// =============================================================================
+
+export const EluvixTokenomicsSchema = z.object({
+  strategy: z.enum(['cost-complexity', 'prefill-isolation', 'lowest-latency', 'round-robin', 'priority']).default('cost-complexity'),
+  semanticCacheEnabled: z.boolean().default(true),
+  semanticCacheSimilarityThreshold: z.number().min(0.5).max(1.0).default(0.92),
+  semanticCacheBackend: z.enum(['sqlite', 'redis', 'milvus']).default('sqlite'),
+  kvPrefixAffinityEnabled: z.boolean().default(true),
+  prefillIsolationThresholdTokens: z.number().int().min(128).max(131072).default(1024),
+  kvArchitecture: z.enum(['deepseek-mla-fp8', 'gqa-fp8', 'gqa-bf16']).default('deepseek-mla-fp8'),
+  rdmaConnector: z.enum(['none', 'vllm-nixl', 'sglang-mooncake']).default('vllm-nixl'),
+  monthlyPromptVolumeMillions: z.number().min(0.1).max(100000).default(50),
+  localOffloadTargetPct: z.number().min(0).max(100).default(70),
+});
+export type EluvixTokenomics = z.infer<typeof EluvixTokenomicsSchema>;
+
+export const EluvixPromptGuardSchema = z.object({
+  enabled: z.boolean().default(true),
+  mode: z.enum(['heuristic', 'classifier', 'llm-guard']).default('heuristic'),
+  threshold: z.number().min(0.1).max(1.0).default(0.80),
+  enforcementAction: z.enum(['block', 'strip', 'divert', 'warn']).default('block'),
+  instructionOverride: z.boolean().default(true),
+  danJailbreak: z.boolean().default(true),
+  systemPromptLeak: z.boolean().default(true),
+  obfuscation: z.boolean().default(true),
+  bannedPhrases: z.array(z.string()).default([]),
+});
+export type EluvixPromptGuard = z.infer<typeof EluvixPromptGuardSchema>;
+
+export const EluvixPrivacyGuardSchema = z.object({
+  enabled: z.boolean().default(true),
+  action: z.enum(['anonymize', 'block', 'warn']).default('anonymize'),
+  redactionStyle: z.enum(['token', 'asterisk', 'hash']).default('token'),
+  detectEmail: z.boolean().default(true),
+  detectSsn: z.boolean().default(true),
+  detectCreditCard: z.boolean().default(true),
+  detectApiKey: z.boolean().default(true),
+  detectIpAddress: z.boolean().default(false),
+  detectPhone: z.boolean().default(true),
+  auditLogging: z.boolean().default(true),
+  whitelist: z.array(z.string()).default([]),
+});
+export type EluvixPrivacyGuard = z.infer<typeof EluvixPrivacyGuardSchema>;
+
+export const EluvixHarnessMeshSchema = z.object({
+  enabled: z.boolean().default(true),
+  defaultHarness: z.enum(['opencode', 'trueforge', 'acp', 'openhands', 'mastra', 'letta', 'a2a', 'hermes']).default('opencode'),
+  enabledHarnesses: z.array(
+    z.enum(['opencode', 'trueforge', 'acp', 'openhands', 'mastra', 'letta', 'a2a', 'hermes']),
+  ).default(['opencode', 'trueforge', 'acp', 'openhands']),
+  approvalPolicy: z.enum(['auto-deny', 'auto-approve-readonly', 'read-only', 'surface']).default('auto-approve-readonly'),
+  sandboxBackend: z.enum(['docker-local', 'gvisor', 'firecracker']).default('gvisor'),
+  memoryEngine: z.enum(['graphiti', 'mem0', 'letta', 'lightrag']).default('graphiti'),
+  injectAxonwallMcp: z.boolean().default(true),
+});
+export type EluvixHarnessMesh = z.infer<typeof EluvixHarnessMeshSchema>;
+
+export const EluvixConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  deploymentMode: z.enum(['systemd', 'docker', 'k3s-helm']).default('systemd'),
+  listenPort: z.number().int().min(1).max(65535).default(3588),
+  switchyardPort: z.number().int().min(1).max(65535).default(8080),
+  domain: z.string().default('eluvix.axonwall.local'),
+  gitRepoUrl: z.string().default('git@github.com:Eluvixrouter/eluvix.git'),
+  samePortTlsAutoUpgrade: z.boolean().default(true),
+  syncUnboundDns: z.boolean().default(true),
+  routeAxonwallCopilotThroughEluvix: z.boolean().default(true),
+  teePolicy: z.enum(['disabled', 'prefer-tee', 'require-tee', 'require-dual-attestation']).default('prefer-tee'),
+  tokenomics: EluvixTokenomicsSchema.default({
+    strategy: 'cost-complexity',
+    semanticCacheEnabled: true,
+    semanticCacheSimilarityThreshold: 0.92,
+    semanticCacheBackend: 'sqlite',
+    kvPrefixAffinityEnabled: true,
+    prefillIsolationThresholdTokens: 1024,
+    kvArchitecture: 'deepseek-mla-fp8',
+    rdmaConnector: 'vllm-nixl',
+    monthlyPromptVolumeMillions: 50,
+    localOffloadTargetPct: 70,
+  }),
+  promptGuard: EluvixPromptGuardSchema.default({
+    enabled: true,
+    mode: 'heuristic',
+    threshold: 0.80,
+    enforcementAction: 'block',
+    instructionOverride: true,
+    danJailbreak: true,
+    systemPromptLeak: true,
+    obfuscation: true,
+    bannedPhrases: [],
+  }),
+  privacyGuard: EluvixPrivacyGuardSchema.default({
+    enabled: true,
+    action: 'anonymize',
+    redactionStyle: 'token',
+    detectEmail: true,
+    detectSsn: true,
+    detectCreditCard: true,
+    detectApiKey: true,
+    detectIpAddress: false,
+    detectPhone: true,
+    auditLogging: true,
+    whitelist: [],
+  }),
+  harnessMesh: EluvixHarnessMeshSchema.default({
+    enabled: true,
+    defaultHarness: 'opencode',
+    enabledHarnesses: ['opencode', 'trueforge', 'acp', 'openhands'],
+    approvalPolicy: 'auto-approve-readonly',
+    sandboxBackend: 'gvisor',
+    memoryEngine: 'graphiti',
+    injectAxonwallMcp: true,
+  }),
+});
+export type EluvixConfig = z.infer<typeof EluvixConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -1823,6 +1941,7 @@ export const DesiredStateSchema = z.object({
   virt: VirtConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
   hostDefense: HostMalwareDefenseConfigSchema.optional(),
+  eluvix: EluvixConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;

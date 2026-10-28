@@ -27,8 +27,8 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     filename: 'system.yaml',
     title: 'Axonwall System & Appliance Configuration',
     description:
-      'Controls appliance hostname, DNS, management ports, hardware capabilities, plugins, AI copilot, observability, SNMP, NUT UPS, and ACME certificates.',
-    keys: ['version', 'capabilities', 'system', 'plugins', 'ai', 'observability', 'snmp', 'ups', 'acme'],
+      'Controls appliance hostname, DNS, management ports, hardware capabilities, plugins, AI copilot, Eluvix Sovereign AI Router, observability, SNMP, NUT UPS, and ACME certificates.',
+    keys: ['version', 'capabilities', 'system', 'plugins', 'ai', 'eluvix', 'observability', 'snmp', 'ups', 'acme'],
   },
   {
     filename: 'interfaces.yaml',

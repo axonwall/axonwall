@@ -274,6 +274,20 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			},
 			RequiredBinaries: []string{"rkhunter", "chkrootkit", "yara"},
 		},
+		{
+			ID:               "eluvix",
+			Name:             "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Description:      "Enterprise-wide LLM routing gateway (git@github.com:Eluvixrouter/eluvix.git) delivering up to 85% tokenomics savings via Switchyard cost-complexity routing, sub-2ms Semantic Caching, and DeepSeek MLA FP8 / RDMA KV-cache disaggregation (vLLM NIXL & SGLang Mooncake), paired with inline PromptGuard injection defense, PrivacyGuard PII/secret DLP redaction, confidential TEE attestation, and an 8-harness agent mesh (OpenCode, ACP, TrueForge, OpenHands, Mastra, Letta, A2A, Hermes).",
+			Author:           "Eluvix Router / Axonwall Core",
+			SystemdUnits:     []string{"eluvix.service"},
+			Privileges:       []string{"system.ai", "security.forensics", "services.dns"},
+			DebianPackages:   []string{"nodejs", "git", "curl", "jq", "sqlite3"},
+			AlpinePackages:   []string{"nodejs", "git", "curl", "jq", "sqlite"},
+			RequiredBinaries: []string{"node", "git"},
+		},
 	}
 }
 
@@ -642,6 +656,20 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter enabled and verified.",
+		}
+	}
+	if pluginID == "eluvix" {
+		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard enabled and verified.",
 		}
 	}
 	return PluginActionResponse{

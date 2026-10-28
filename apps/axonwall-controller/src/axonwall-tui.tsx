@@ -372,15 +372,15 @@ export function AxonwallTuiApp({
     const nextEnabled = !currentlyEnabled;
     let depNotice = '';
 
-    if (pluginId === 'vigilant-octo-waffle') {
+    if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix') {
       if (nextEnabled) {
-        const depRes = enablePluginWithDependencies('vigilant-octo-waffle', next);
+        const depRes = enablePluginWithDependencies(pluginId, next);
         next = depRes.state;
         if (depRes.autoEnabledDependencies.length > 0) {
           depNotice = ` (auto-enabled dependency: ${depRes.autoEnabledDependencies.join(', ')})`;
         }
       } else {
-        const depRes = disablePluginWithDependents('vigilant-octo-waffle', next);
+        const depRes = disablePluginWithDependents(pluginId, next);
         next = depRes.state;
       }
     } else {

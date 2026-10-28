@@ -82,6 +82,7 @@ _axonwallctl_completion() {
     'ntopng:ntopng High-Speed Flow Analysis'
     'vigilant-octo-waffle:Vigilant Octo Waffle K8s GitOps & App Platform (requires core-k3s)'
     'host-malware-rootkit:Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter (rkhunter, AIDE, YARA, io_uring, eBPF)'
+    'eluvix:Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard (:3588)'
   )
   mcp_cmds=(
     'status:Show MCP server master switch status (disabled by default)'

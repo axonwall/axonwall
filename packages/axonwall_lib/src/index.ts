@@ -35,6 +35,7 @@ export * from './compile/vow/index.js';
 export * from './compile/virt/index.js';
 export * from './compile/vigilante/index.js';
 export * from './compile/rootkit/index.js';
+export * from './compile/eluvix/index.js';
 export * from './yaml/index.js';
 export * from './cloudinit/index.js';
 export * from './mcp/index.js';

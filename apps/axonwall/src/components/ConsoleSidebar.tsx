@@ -249,6 +249,7 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Sparkles,
     items: [
       { name: 'AI Copilot', href: '/ai', icon: Sparkles },
+      { name: 'Eluvix AI Router & DLP', href: '/ai/eluvix', icon: Sparkles, badge: 'Tokenomics', pluginId: 'eluvix' },
       { name: 'Fleet & Satellites', href: '/fleet', icon: Wifi },
     ],
   },
