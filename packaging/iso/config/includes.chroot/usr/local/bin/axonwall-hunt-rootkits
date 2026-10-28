@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Axonwall Unified Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter
+# Executes classic scanners (rkhunter, chkrootkit, clamscan, aide, lynis, yara,
+# unhide, debsums) + Ring-0 io_uring & eBPF rootkit telemetry checks.
+# =============================================================================
+set -uo pipefail
+
+echo "============================================================================="
+echo " AXONWALL HOST MALWARE, ROOTKIT & GHOST-IN-THE-RING KERNEL AUDIT"
+echo " Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+echo "============================================================================="
+
+if command -v rkhunter >/dev/null 2>&1; then
+  echo -e "\n>>> [1/9] Running Rootkit Hunter (rkhunter)..."
+  rkhunter --check --sk --rwo || true
+fi
+
+if command -v chkrootkit >/dev/null 2>&1; then
+  echo -e "\n>>> [2/9] Running Check Rootkit (chkrootkit)..."
+  chkrootkit -q || true
+fi
+
+if command -v unhide >/dev/null 2>&1; then
+  echo -e "\n>>> [3/9] Running Unhide Forensic Process Hunter..."
+  unhide sys proc || true
+fi
+
+if command -v yara >/dev/null 2>&1 && [[ -f /etc/axonwall/yara/ghost_in_the_ring.yar ]]; then
+  echo -e "\n>>> [4/9] Running YARA Ghost-in-the-Ring Signature Scan..."
+  yara -r /etc/axonwall/yara/ghost_in_the_ring.yar /tmp /dev/shm /var/tmp 2>/dev/null || true
+fi
+
+if command -v aide >/dev/null 2>&1 && [[ -f /var/lib/aide/aide.db ]]; then
+  echo -e "\n>>> [5/9] Running AIDE Cryptographic File Integrity Check..."
+  aide --check --config=/etc/aide/aide.conf || true
+fi
+
+if command -v lynis >/dev/null 2>&1; then
+  echo -e "\n>>> [6/9] Running Lynis CIS & Host Hardening Audit..."
+  lynis audit system --quick --no-colors || true
+fi
+
+if command -v clamscan >/dev/null 2>&1; then
+  echo -e "\n>>> [7/9] Running ClamAV Malware & Trojan Scan..."
+  clamscan --infected --recursive /tmp /var/tmp /dev/shm || true
+fi
+
+if [[ -x /usr/local/bin/hunt-io-uring-implants.sh ]]; then
+  echo -e "\n>>> [8/9] Running Ghost-in-the-Ring io_uring Implant & SQPOLL Hunter..."
+  /usr/local/bin/hunt-io-uring-implants.sh || true
+fi
+
+if [[ -x /usr/local/bin/hunt-ebpf-rootkits.sh ]]; then
+  echo -e "\n>>> [9/9] Running Ghost-in-the-Ring eBPF Rootkit & PMU LBR Auditor..."
+  /usr/local/bin/hunt-ebpf-rootkits.sh || true
+fi
+
+echo -e "\n[+] Axonwall Host Malware & Kernel Rootkit Hunt Completed."

@@ -40,7 +40,13 @@ export const ROOTKIT_SIGNATURES = [
   { name: 'Adore-ng', prefix: 'adore', signal: 0, technique: 'T1014', desc: 'Adore-ng process/file stealth rootkit' },
   { name: 'KBeast', prefix: 'kbeast', signal: 0, technique: 'T1014', desc: 'Kernel Beast LKM rootkit' },
   { name: 'Vlany', prefix: 'vlany', signal: 0, technique: 'T1574.006', desc: 'Vlany LD_PRELOAD userspace rootkit' },
-  { name: 'Suterusu', prefix: 'suterusu', signal: 0, technique: 'T1014', desc: 'Suterusu kernel inline hooking framework' }
+  { name: 'Suterusu', prefix: 'suterusu', signal: 0, technique: 'T1014', desc: 'Suterusu kernel inline hooking framework' },
+  { name: 'TripleCross', prefix: 'triplecross', signal: 0, technique: 'T1014', desc: 'TripleCross offensive eBPF rootkit (bpf_probe_write_user + XDP C2)' },
+  { name: 'Boopkit', prefix: 'boopkit', signal: 0, technique: 'T1014', desc: 'Boopkit eBPF getdents64/TCP trigger rootkit' },
+  { name: 'Symbiote', prefix: 'symbiote', signal: 0, technique: 'T1574.006', desc: 'Symbiote parasitic LD_PRELOAD + BPF filter rootkit' },
+  { name: 'Curing', prefix: 'curing', signal: 0, technique: 'T1014', desc: 'Curing syscall-less io_uring rootkit bypassing tracepoints' },
+  { name: 'RingReaper', prefix: 'ringreaper', signal: 0, technique: 'T1014', desc: 'RingReaper io_uring SQPOLL/FIXED_FILE post-exploitation agent' },
+  { name: 'BPFDoor', prefix: 'bpfdoor', signal: 0, technique: 'T1205.001', desc: 'BPFDoor passive magic-packet socket filter backdoor' }
 ];
 
 /**

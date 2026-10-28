@@ -183,6 +183,10 @@
       "types": "./dist/compile/vigilante/index.d.ts",
       "default": "./dist/compile/vigilante/index.js"
     },
+    "./compile/rootkit": {
+      "types": "./dist/compile/rootkit/index.d.ts",
+      "default": "./dist/compile/rootkit/index.js"
+    },
     "./cloudinit": {
       "types": "./dist/cloudinit/index.d.ts",
       "default": "./dist/cloudinit/index.js"

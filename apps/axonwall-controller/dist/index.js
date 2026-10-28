@@ -36848,6 +36848,35 @@ var McpServerConfigSchema = external_exports.object({
   enabled: external_exports.boolean().default(true),
   disabledReason: external_exports.string().optional()
 });
+var HostMalwareDefenseConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(true),
+  // Classic Host Malware, Rootkit & File Integrity Scanners
+  rkhunterEnabled: external_exports.boolean().default(true),
+  chkrootkitEnabled: external_exports.boolean().default(true),
+  clamavEnabled: external_exports.boolean().default(false),
+  aideEnabled: external_exports.boolean().default(true),
+  lynisEnabled: external_exports.boolean().default(true),
+  yaraEnabled: external_exports.boolean().default(true),
+  unhideEnabled: external_exports.boolean().default(true),
+  debsumsEnabled: external_exports.boolean().default(true),
+  scheduledScanCron: external_exports.string().default("0 3 * * *"),
+  // Ghost in the Ring: io_uring Syscall-Less Implant Hardening & Hunting (Curing / RingReaper)
+  ioUringDisabledMode: external_exports.enum(["0", "1", "2"]).default("1"),
+  ioUringAllowedGid: external_exports.number().int().min(0).max(65535).default(994),
+  blockIoUringSqpoll: external_exports.boolean().default(true),
+  // Ghost in the Ring: Offensive eBPF Rootkit Lockdown & Out-of-Band Detection (TripleCross / Boopkit / Symbiote)
+  unprivilegedBpfDisabled: external_exports.boolean().default(true),
+  bpfJitHardenMode: external_exports.enum(["0", "1", "2"]).default("2"),
+  kernelLockdownMode: external_exports.enum(["none", "integrity", "confidentiality"]).default("confidentiality"),
+  bpfLsmGuardEnabled: external_exports.boolean().default(true),
+  trustedBpfLoaderPaths: external_exports.array(external_exports.string()).default([
+    "/usr/sbin/bpftool",
+    "/usr/local/bin/axonwalld"
+  ]),
+  progIdrKcoreDiffEnabled: external_exports.boolean().default(true),
+  pmuLbrBranchTracingEnabled: external_exports.boolean().default(true),
+  autoQuarantineOnCritical: external_exports.boolean().default(true)
+});
 var VigilanteDeceptionConfigSchema = external_exports.object({
   enabled: external_exports.boolean().default(true),
   canaryServiceAccounts: external_exports.array(external_exports.string()).default(["cluster-admin-backup", "vault-sync-sa"]),
@@ -37040,6 +37069,7 @@ var DesiredStateSchema = external_exports.object({
   vow: VowConfigSchema.optional(),
   virt: VirtConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
+  hostDefense: HostMalwareDefenseConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional()
 });
 
@@ -39969,8 +39999,8 @@ var AXONWALL_YAML_DOMAINS = [
   {
     filename: "security.yaml",
     title: "Axonwall Threat Defense & Zero-Trust Security",
-    description: "Controls Suricata IDS/IPS, CrowdSec Threat Intelligence, GeoIP filtering, Zero-Trust Identity-Aware Proxy (IAP), Enterprise SSO (OIDC/SAML/LDAP), and TLS Decryption.",
-    keys: ["suricata", "crowdsec", "geoip", "zeroTrust", "sso", "tlsDecryption"]
+    description: "Controls Suricata IDS/IPS, CrowdSec Threat Intelligence, GeoIP filtering, Zero-Trust Identity-Aware Proxy (IAP), Enterprise SSO (OIDC/SAML/LDAP), TLS Decryption, and Host Malware / Rootkit / Ghost-in-the-Ring Kernel Defense.",
+    keys: ["suricata", "crowdsec", "geoip", "zeroTrust", "sso", "tlsDecryption", "hostDefense"]
   },
   {
     filename: "ha.yaml",

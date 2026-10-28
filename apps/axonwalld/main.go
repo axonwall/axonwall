@@ -2661,6 +2661,29 @@ func main() {
 			})
 		})
 
+		// =====================================================================
+		// Host Malware, Rootkit & Ghost-in-the-Ring Kernel Telemetry APIs
+		// =====================================================================
+		mux.HandleFunc("/v1/security/rootkit/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			audit := engine.RunHostRootkitAudit()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(audit)
+		})
+
+		mux.HandleFunc("/v1/security/rootkit/scan", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			audit := engine.RunHostRootkitAudit()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(audit)
+		})
+
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}
 		go func() {
 			log.Printf("[Agent] Listening on REST Unix socket: %s", apiSocketPath)

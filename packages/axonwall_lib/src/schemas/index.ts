@@ -1531,6 +1531,41 @@ export const McpServerConfigSchema = z.object({
 });
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 
+// =============================================================================
+// Host Malware, Rootkit & Ring-0 ("Ghost in the Ring") Defense Suite
+// =============================================================================
+
+export const HostMalwareDefenseConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  // Classic Host Malware, Rootkit & File Integrity Scanners
+  rkhunterEnabled: z.boolean().default(true),
+  chkrootkitEnabled: z.boolean().default(true),
+  clamavEnabled: z.boolean().default(false),
+  aideEnabled: z.boolean().default(true),
+  lynisEnabled: z.boolean().default(true),
+  yaraEnabled: z.boolean().default(true),
+  unhideEnabled: z.boolean().default(true),
+  debsumsEnabled: z.boolean().default(true),
+  scheduledScanCron: z.string().default('0 3 * * *'),
+  // Ghost in the Ring: io_uring Syscall-Less Implant Hardening & Hunting (Curing / RingReaper)
+  ioUringDisabledMode: z.enum(['0', '1', '2']).default('1'),
+  ioUringAllowedGid: z.number().int().min(0).max(65535).default(994),
+  blockIoUringSqpoll: z.boolean().default(true),
+  // Ghost in the Ring: Offensive eBPF Rootkit Lockdown & Out-of-Band Detection (TripleCross / Boopkit / Symbiote)
+  unprivilegedBpfDisabled: z.boolean().default(true),
+  bpfJitHardenMode: z.enum(['0', '1', '2']).default('2'),
+  kernelLockdownMode: z.enum(['none', 'integrity', 'confidentiality']).default('confidentiality'),
+  bpfLsmGuardEnabled: z.boolean().default(true),
+  trustedBpfLoaderPaths: z.array(z.string()).default([
+    '/usr/sbin/bpftool',
+    '/usr/local/bin/axonwalld',
+  ]),
+  progIdrKcoreDiffEnabled: z.boolean().default(true),
+  pmuLbrBranchTracingEnabled: z.boolean().default(true),
+  autoQuarantineOnCritical: z.boolean().default(true),
+});
+export type HostMalwareDefenseConfig = z.infer<typeof HostMalwareDefenseConfigSchema>;
+
 export const VigilanteDeceptionConfigSchema = z.object({
   enabled: z.boolean().default(true),
   canaryServiceAccounts: z.array(z.string()).default(['cluster-admin-backup', 'vault-sync-sa']),
@@ -1747,6 +1782,7 @@ export const DesiredStateSchema = z.object({
   vow: VowConfigSchema.optional(),
   virt: VirtConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
+  hostDefense: HostMalwareDefenseConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;

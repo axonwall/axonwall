@@ -1185,6 +1185,49 @@ local function build_domain_fields(domain_id)
       set = function(v) st.geoip.countries = v end,
     })
 
+    st.hostDefense = st.hostDefense or {
+      enabled = true,
+      rkhunterEnabled = true,
+      chkrootkitEnabled = true,
+      aideEnabled = true,
+      yaraEnabled = true,
+      ioUringDisabledMode = "1",
+      kernelLockdownMode = "confidentiality",
+      bpfLsmGuardEnabled = true,
+    }
+    add({
+      card_title = "👻 Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter",
+      card_subtitle = "rkhunter, chkrootkit, AIDE, YARA + io_uring SQPOLL & /proc/kcore prog_idr",
+      label = "Host Rootkit Hunter Enabled",
+      vtype = "boolean",
+      desc = "Enable 12-layer host malware, rootkit, io_uring & eBPF Ring-0 defense suite.",
+      get = function() return tostring(st.hostDefense.enabled ~= false) end,
+      set = function(v) st.hostDefense.enabled = v end,
+    })
+    add({
+      label = "io_uring Lockdown Mode",
+      vtype = "enum",
+      options = { "0", "1", "2" },
+      desc = "kernel.io_uring_disabled: 1 = restrict to GID, 2 = disable system-wide.",
+      get = function() return tostring(st.hostDefense.ioUringDisabledMode or "1") end,
+      set = function(v) st.hostDefense.ioUringDisabledMode = v end,
+    })
+    add({
+      label = "Kernel Lockdown Mode",
+      vtype = "enum",
+      options = { "none", "integrity", "confidentiality" },
+      desc = "confidentiality blocks bpf_probe_write_user (#36) & bpf_override_return (#58).",
+      get = function() return st.hostDefense.kernelLockdownMode or "confidentiality" end,
+      set = function(v) st.hostDefense.kernelLockdownMode = v end,
+    })
+    add({
+      label = "Preventive BPF_LSM Guard",
+      vtype = "boolean",
+      desc = "Enforce SEC('lsm/bpf') inode allowlist and SEC('lsm/uring_sqpoll') -EPERM.",
+      get = function() return tostring(st.hostDefense.bpfLsmGuardEnabled ~= false) end,
+      set = function(v) st.hostDefense.bpfLsmGuardEnabled = v end,
+    })
+
   elseif domain_id == "ha" then
     st.ha = st.ha or { enabled = false, nodeRole = "master", syncInterface = "lan", peerIp = "", virtualRouterId = 51 }
     add({

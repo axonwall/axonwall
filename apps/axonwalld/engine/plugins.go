@@ -236,6 +236,44 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			AlpinePackages:   []string{"mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
 			RequiredBinaries: []string{"kubectl", "git", "envsubst"},
 		},
+		{
+			ID:             "host-malware-rootkit",
+			Name:           "Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter",
+			Version:        "1.0.0",
+			Category:       "extension",
+			DefaultEnabled: true,
+			Description:    "Defense-in-depth host malware, rootkit, and Ring-0 implant suite combining classic scanners (rkhunter, chkrootkit, ClamAV, AIDE, Lynis, YARA, unhide, debsums) with Ghost-in-the-Ring telemetry: io_uring SQPOLL/FIXED_FILE implant hunting (Curing/RingReaper), drgn /proc/kcore prog_idr XArray vs sys_bpf diffing for self-hiding eBPF rootkits (TripleCross/Boopkit/Symbiote), Silicon PMU LBR/BRS branch tracing, and preventive BPF_LSM + sysctl kernel lockdown.",
+			Author:         "Tekromancy / Axonwall Core",
+			SystemdUnits:   []string{"clamav-freshclam.service"},
+			Privileges:     []string{"security.forensics", "system.hardware", "system.monitoring"},
+			DebianPackages: []string{
+				"rkhunter",
+				"chkrootkit",
+				"clamav",
+				"clamav-freshclam",
+				"lynis",
+				"aide",
+				"yara",
+				"unhide",
+				"debsums",
+				"bpftool",
+				"bpftrace",
+				"python3-drgn",
+				"linux-perf",
+			},
+			AlpinePackages: []string{
+				"rkhunter",
+				"chkrootkit",
+				"clamav",
+				"lynis",
+				"aide",
+				"yara",
+				"bpftool",
+				"bpftrace",
+				"perf",
+			},
+			RequiredBinaries: []string{"rkhunter", "chkrootkit", "yara"},
+		},
 	}
 }
 
@@ -292,6 +330,9 @@ func (pm *PluginManager) IsPluginEnabled(pluginID string) bool {
 		if _, err := os.Stat("/etc/axonwall/workstation.disabled"); err == nil {
 			return false
 		}
+		return true
+	}
+	if pluginID == "host-malware-rootkit" {
 		return true
 	}
 	return pm.installedMap[pluginID] != ""
@@ -588,6 +629,19 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Vigilant Octo Waffle (K8s GitOps & App Platform) enabled and verified (Dependency: core-k3s).",
+		}
+	}
+	if pluginID == "host-malware-rootkit" {
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter enabled and verified.",
 		}
 	}
 	return PluginActionResponse{

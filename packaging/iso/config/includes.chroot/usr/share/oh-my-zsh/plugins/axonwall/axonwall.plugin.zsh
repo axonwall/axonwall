@@ -81,6 +81,7 @@ _axonwallctl_completion() {
     'tailscale:Tailscale Mesh VPN'
     'ntopng:ntopng High-Speed Flow Analysis'
     'vigilant-octo-waffle:Vigilant Octo Waffle K8s GitOps & App Platform (requires core-k3s)'
+    'host-malware-rootkit:Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter (rkhunter, AIDE, YARA, io_uring, eBPF)'
   )
   mcp_cmds=(
     'status:Show MCP server master switch status (disabled by default)'
@@ -553,3 +554,7 @@ alias frrroutes='vtysh -c "show ip route"'
 alias idsstatus='systemctl status suricata'
 alias vms='virsh list --all'
 alias cts='lxc-ls -f'
+alias hunt-rootkits='/usr/local/bin/axonwall-hunt-rootkits'
+alias hunt-iouring='/usr/local/bin/hunt-io-uring-implants.sh'
+alias hunt-ebpf='/usr/local/bin/hunt-ebpf-rootkits.sh'
+alias kcore-bpf-diff='drgn /usr/local/bin/audit_hidden_bpf_prog_idr.py'

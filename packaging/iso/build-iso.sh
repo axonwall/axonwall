@@ -226,6 +226,12 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-config ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-config
 fi
 
+for rk_script in axonwall-hunt-rootkits hunt-io-uring-implants.sh hunt-ebpf-rootkits.sh audit_hidden_bpf_prog_idr.py; do
+  if [[ -f "config/includes.chroot/usr/local/bin/${rk_script}" ]]; then
+    chmod +x "config/includes.chroot/usr/local/bin/${rk_script}"
+  fi
+done
+
 if [[ -f config/includes.chroot/etc/sudoers.d/axonwall ]]; then
   chmod 0440 config/includes.chroot/etc/sudoers.d/axonwall
 fi
@@ -471,6 +477,13 @@ openssh-server
 openssh-client
 libpam-modules
 chrony
+rkhunter
+chkrootkit
+yara
+unhide
+lynis
+debsums
+bpftool
 EOF
 else
 cat << 'EOF' > config/package-lists/axonwall.list.chroot
@@ -574,6 +587,13 @@ libnss-sss
 libpam-sss
 libpam-modules
 chrony
+rkhunter
+chkrootkit
+yara
+unhide
+lynis
+debsums
+bpftool
 EOF
 fi
 

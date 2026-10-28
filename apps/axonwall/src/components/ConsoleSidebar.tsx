@@ -132,6 +132,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'DNS Sinkhole (RPZ)', href: '/security/dns-blocklist', icon: Ban },
       { name: 'TLS Decryption', href: '/security/tls-decryption', icon: Eye },
       { name: 'Identity-Aware Proxy', href: '/security/iap', icon: Lock },
+      { name: 'Rootkit & Kernel Hunter', href: '/security/rootkit-hunter', icon: ShieldAlert, badge: 'Ring-0', pluginId: 'host-malware-rootkit' },
     ],
   },
   {
@@ -263,6 +264,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'K3s & OpenEBS', href: '/docs/k3s-kubernetes', icon: Layers },
       { name: 'High Availability (HA)', href: '/docs/high-availability', icon: ArrowRightLeft },
       { name: 'Threat Defense & RPZ', href: '/docs/threat-defense', icon: ShieldAlert },
+      { name: 'Ghost in the Ring (Rootkits)', href: '/docs/ghost-in-the-ring-rootkits', icon: ShieldAlert, badge: 'Ring-0' },
       { name: 'Migration Studio', href: '/docs/migration', icon: FileText },
       { name: 'Observability & eBPF', href: '/docs/observability', icon: Activity },
       { name: 'Hardware & Web Shell', href: '/docs/hardware-telemetry', icon: Terminal },

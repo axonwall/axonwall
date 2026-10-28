@@ -1,4 +1,4 @@
-import { PluginManifestSchema, VowConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
+import { PluginManifestSchema, VowConfigSchema, HostMalwareDefenseConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
 export type { PluginManifest };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
@@ -318,6 +318,69 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
     cliBinaries: ['vow', 'kubectl', 'mkcert'],
   },
+  {
+    id: 'host-malware-rootkit',
+    name: 'Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: true,
+    description:
+      'Defense-in-depth host malware, rootkit, and Ring-0 implant suite combining classic scanners (rkhunter, chkrootkit, ClamAV, AIDE, Lynis, YARA, unhide, debsums) with Ghost-in-the-Ring telemetry: io_uring SQPOLL/FIXED_FILE implant hunting (Curing/RingReaper), drgn /proc/kcore prog_idr XArray vs sys_bpf diffing for self-hiding eBPF rootkits (TripleCross/Boopkit/Symbiote), Silicon PMU LBR/BRS branch tracing, and preventive BPF_LSM + sysctl kernel lockdown.',
+    author: 'Tekromancy / Axonwall Core',
+    systemdUnits: ['clamav-freshclam.service'],
+    privileges: ['security.forensics', 'system.hardware', 'system.monitoring'],
+    menuEntry: {
+      title: 'Rootkit & Kernel Hunter',
+      path: '/security/rootkit-hunter',
+      icon: 'ShieldAlert',
+    },
+    packages: {
+      debian: [
+        'rkhunter',
+        'chkrootkit',
+        'clamav',
+        'clamav-freshclam',
+        'lynis',
+        'aide',
+        'yara',
+        'unhide',
+        'debsums',
+        'bpftool',
+        'bpftrace',
+        'python3-drgn',
+        'linux-perf',
+      ],
+      alpine: [
+        'rkhunter',
+        'chkrootkit',
+        'clamav',
+        'lynis',
+        'aide',
+        'yara',
+        'bpftool',
+        'bpftrace',
+        'perf',
+      ],
+    },
+    cliBinaries: [
+      'rkhunter',
+      'chkrootkit',
+      'clamscan',
+      'lynis',
+      'aide',
+      'yara',
+      'unhide',
+      'debsums',
+      'bpftool',
+      'bpftrace',
+      'drgn',
+      'perf',
+      'axonwall-hunt-rootkits',
+      'hunt-io-uring-implants.sh',
+      'hunt-ebpf-rootkits.sh',
+      'audit_hidden_bpf_prog_idr.py',
+    ],
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -413,7 +476,11 @@ export function arePluginDependenciesMet(
 
 export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> | null): boolean {
   if (!state) {
-    return pluginId === 'core-firewall' || pluginId === 'cli-workstation';
+    return (
+      pluginId === 'core-firewall' ||
+      pluginId === 'cli-workstation' ||
+      pluginId === 'host-malware-rootkit'
+    );
   }
 
   // Enforce plugin dependencies first (e.g., vigilant-octo-waffle requires core-k3s)
@@ -444,6 +511,15 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   // Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM) is enabled by default
   if (pluginId === 'cli-workstation') {
     const entry = state.plugins?.find((p) => p.id === 'cli-workstation');
+    return entry ? entry.enabled !== false : true;
+  }
+
+  // Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter is enabled by default
+  if (pluginId === 'host-malware-rootkit') {
+    if (state.hostDefense?.enabled !== undefined) {
+      return state.hostDefense.enabled;
+    }
+    const entry = state.plugins?.find((p) => p.id === 'host-malware-rootkit');
     return entry ? entry.enabled !== false : true;
   }
 
@@ -526,6 +602,10 @@ export function enablePluginWithDependencies(
       next.k3s.enabled = true;
     } else if (id === 'vigilant-octo-waffle') {
       next.vow = next.vow ? { ...next.vow, enabled: true } : VowConfigSchema.parse({ enabled: true });
+    } else if (id === 'host-malware-rootkit') {
+      next.hostDefense = next.hostDefense
+        ? { ...next.hostDefense, enabled: true }
+        : HostMalwareDefenseConfigSchema.parse({ enabled: true });
     }
 
     const plugins = next.plugins || [];
@@ -574,6 +654,10 @@ export function disablePluginWithDependents(
     } else if (id === 'vigilant-octo-waffle') {
       if (next.vow) {
         next.vow.enabled = false;
+      }
+    } else if (id === 'host-malware-rootkit') {
+      if (next.hostDefense) {
+        next.hostDefense.enabled = false;
       }
     }
 
