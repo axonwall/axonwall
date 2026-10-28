@@ -513,42 +513,53 @@ local function build_domain_fields(domain_id)
       end,
     })
 
-    st.eluvix = st.eluvix or {}
-    st.eluvix.tokenomics = st.eluvix.tokenomics or {}
-    st.eluvix.promptGuard = st.eluvix.promptGuard or {}
-    st.eluvix.privacyGuard = st.eluvix.privacyGuard or {}
     add({
       card_title = "✨ Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard",
       card_subtitle = "git@github.com:Eluvixrouter/eluvix.git · Switchyard Cost-Complexity, MLA KV & Inline DLP",
       label = "Eluvix Router Enabled",
       vtype = "boolean",
       desc = "Enable Eluvix Sovereign AI Gateway (:3588) & Switchyard Coordinator (:8080).",
-      get = function() return tostring(Boolean(st.eluvix.enabled)) end,
-      set = function(v) st.eluvix.enabled = v end,
+      get = function() return tostring(Boolean(st.eluvix and st.eluvix.enabled)) end,
+      set = function(v)
+        st.eluvix = st.eluvix or {}
+        st.eluvix.enabled = v
+      end,
     })
     add({
       label = "Switchyard Tokenomics Strategy",
       vtype = "enum",
       options = { "cost-complexity", "prefill-isolation", "lowest-latency", "round-robin", "priority" },
       desc = "Cost-complexity routing offloads Tier 1-2 prompts to local SGLang/vLLM and reserves frontier for Tier 4.",
-      get = function() return st.eluvix.tokenomics.strategy or "cost-complexity" end,
-      set = function(v) st.eluvix.tokenomics.strategy = v end,
+      get = function() return (st.eluvix and st.eluvix.tokenomics and st.eluvix.tokenomics.strategy) or "cost-complexity" end,
+      set = function(v)
+        st.eluvix = st.eluvix or {}
+        st.eluvix.tokenomics = st.eluvix.tokenomics or {}
+        st.eluvix.tokenomics.strategy = v
+      end,
     })
     add({
       label = "PromptGuard Enforcement Action",
       vtype = "enum",
       options = { "block", "strip", "divert", "warn" },
       desc = "Action when instruction override, DAN jailbreak, system prompt leak, or obfuscation is detected.",
-      get = function() return st.eluvix.promptGuard.enforcementAction or "block" end,
-      set = function(v) st.eluvix.promptGuard.enforcementAction = v end,
+      get = function() return (st.eluvix and st.eluvix.promptGuard and st.eluvix.promptGuard.enforcementAction) or "block" end,
+      set = function(v)
+        st.eluvix = st.eluvix or {}
+        st.eluvix.promptGuard = st.eluvix.promptGuard or {}
+        st.eluvix.promptGuard.enforcementAction = v
+      end,
     })
     add({
       label = "PrivacyGuard DLP Action",
       vtype = "enum",
       options = { "anonymize", "block", "warn" },
       desc = "Inline redaction/blocking of API keys (sk-*, AKIA*, ghp_*), SSNs, credit cards, emails, and phones.",
-      get = function() return st.eluvix.privacyGuard.action or "anonymize" end,
-      set = function(v) st.eluvix.privacyGuard.action = v end,
+      get = function() return (st.eluvix and st.eluvix.privacyGuard and st.eluvix.privacyGuard.action) or "anonymize" end,
+      set = function(v)
+        st.eluvix = st.eluvix or {}
+        st.eluvix.privacyGuard = st.eluvix.privacyGuard or {}
+        st.eluvix.privacyGuard.action = v
+      end,
     })
 
   elseif domain_id == "interfaces" then
@@ -2077,6 +2088,21 @@ local function save_state_to_yaml(trigger_apply)
       App.status_msg = string.format("✖ Fix validation error on line %d before saving: %s", lnum, err)
       render_inspector()
       return false
+    end
+  end
+
+  if App.state and App.state.eluvix then
+    if App.state.eluvix.tokenomics and next(App.state.eluvix.tokenomics) == nil then
+      App.state.eluvix.tokenomics = nil
+    end
+    if App.state.eluvix.promptGuard and next(App.state.eluvix.promptGuard) == nil then
+      App.state.eluvix.promptGuard = nil
+    end
+    if App.state.eluvix.privacyGuard and next(App.state.eluvix.privacyGuard) == nil then
+      App.state.eluvix.privacyGuard = nil
+    end
+    if not App.state.eluvix.enabled and next(App.state.eluvix) == nil then
+      App.state.eluvix = nil
     end
   end
 

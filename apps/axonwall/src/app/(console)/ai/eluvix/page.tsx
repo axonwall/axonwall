@@ -23,7 +23,7 @@ import {
   evaluateEluvixGuards,
   resolveEluvixConfig,
   type EluvixHarnessMetadata,
-} from '@axonwall/lib';
+} from '@axonwall/lib/compile/eluvix';
 import { enablePluginWithDependencies, disablePluginWithDependents } from '@axonwall/lib/plugins';
 import { EluvixConfigSchema, type DesiredState, type EluvixConfig } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
