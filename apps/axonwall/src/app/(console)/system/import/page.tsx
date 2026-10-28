@@ -526,8 +526,15 @@ export default function ImportPage() {
       }
 
       const rules = res.state.rules || [];
+      rules.forEach((rule, idx) => {
+        if (!rule.id) {
+          rule.id = `imported-rule-${idx + 1}`;
+        }
+      });
+
       for (const rule of rules) {
-        if (detectedReviewsMap.has(rule.id)) continue;
+        const ruleId = rule.id || 'unknown-rule';
+        if (detectedReviewsMap.has(ruleId)) continue;
         const desc = rule.description || '';
         const isDisabledReview =
           rule.enabled === false &&
@@ -540,8 +547,8 @@ export default function ImportPage() {
         );
         if (isDisabledReview || hasNegatedWarning) {
           rule.enabled = false;
-          detectedReviewsMap.set(rule.id, {
-            ruleId: rule.id,
+          detectedReviewsMap.set(ruleId, {
+            ruleId,
             reason:
               'Source config used a negated (NOT / !) match. Automatic positive conversion would invert your security policy, so Axonwall imported this rule disabled for your review.',
             status: 'pending',
@@ -560,13 +567,14 @@ export default function ImportPage() {
               const matchedRule = rules.find((r) =>
                 (r.description || '').toLowerCase().includes(rawDescr.toLowerCase())
               );
-              if (matchedRule && !detectedReviewsMap.has(matchedRule.id)) {
+              const matchedRuleId = matchedRule?.id;
+              if (matchedRule && matchedRuleId && !detectedReviewsMap.has(matchedRuleId)) {
                 matchedRule.enabled = false;
                 if (!matchedRule.description?.includes('[REVIEW')) {
                   matchedRule.description = `[REVIEW: Negated Match] ${matchedRule.description}`;
                 }
-                detectedReviewsMap.set(matchedRule.id, {
-                  ruleId: matchedRule.id,
+                detectedReviewsMap.set(matchedRuleId, {
+                  ruleId: matchedRuleId,
                   reason:
                     'Source config used a negated (NOT / !) match. Automatic positive conversion would invert your security policy, so Axonwall imported this rule disabled for your review.',
                   status: 'pending',
@@ -641,7 +649,7 @@ export default function ImportPage() {
             destinationPort:
               editDraft.destinationPort.trim() && editDraft.destinationPort.trim() !== 'any'
                 ? editDraft.destinationPort.trim()
-                : undefined,
+                : '',
             description: editDraft.description.trim() || r.description,
           }
         : r
@@ -684,7 +692,7 @@ export default function ImportPage() {
             destinationPort:
               editDraft.destinationPort.trim() && editDraft.destinationPort.trim() !== 'any'
                 ? editDraft.destinationPort.trim()
-                : undefined,
+                : '',
             description: cleanDescription || 'Reviewed Rule',
           }
         : r
