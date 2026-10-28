@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -65,7 +66,18 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify WebSocket upgrade request
+	// Verify WebSocket upgrade request and Origin header
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			http.Error(w, "Invalid Origin header", http.StatusForbidden)
+			return
+		}
+		if r.Host != "" && !strings.EqualFold(u.Host, r.Host) && !strings.EqualFold(u.Hostname(), strings.Split(r.Host, ":")[0]) {
+			http.Error(w, "Cross-origin WebSocket connection rejected", http.StatusForbidden)
+			return
+		}
+	}
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		http.Error(w, "Upgrade header must be websocket", http.StatusBadRequest)
 		return
@@ -219,6 +231,9 @@ func readWSFrame(r io.Reader) ([]byte, byte, error) {
 		var extLen uint64
 		if err := binary.Read(r, binary.BigEndian, &extLen); err != nil {
 			return nil, 0, err
+		}
+		if extLen > 10*1024*1024 {
+			return nil, 0, fmt.Errorf("websocket frame payload exceeds 10MB limit")
 		}
 		payloadLen = int64(extLen)
 	}

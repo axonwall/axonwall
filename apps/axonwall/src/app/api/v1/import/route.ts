@@ -13,6 +13,9 @@ export async function POST(req: Request) {
     if (session.passwordChangeRequired) {
       return NextResponse.json({ error: 'Forbidden: Password change required' }, { status: 403 });
     }
+    if (!session.roles?.includes('admin') && !session.roles?.includes('operator')) {
+      return NextResponse.json({ error: 'Forbidden: Operator or Admin role required' }, { status: 403 });
+    }
 
     // Limit incoming request size to 10MB to prevent memory exhaustion
     const contentLength = Number(req.headers.get('content-length') || '0');
@@ -57,6 +60,13 @@ export async function POST(req: Request) {
       if (body.confirmTimeoutSeconds) {
         confirmTimeoutSeconds = Number(body.confirmTimeoutSeconds) || 120;
       }
+    }
+
+    if (shouldApply && !session.roles?.includes('admin')) {
+      return NextResponse.json(
+        { status: 'error', error: 'Forbidden: Admin role required to apply configuration' },
+        { status: 403 }
+      );
     }
 
     if (!configText || configText.trim() === '') {

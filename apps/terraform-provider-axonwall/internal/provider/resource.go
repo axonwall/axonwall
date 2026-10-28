@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -103,7 +104,7 @@ func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadReques
 
 	httpResp, err := r.client.Client.Do(httpReq)
 	if err != nil {
-		// If daemon is unreachable during drift detection, keep existing state
+		resp.Diagnostics.AddError("Failed to read state from Axonwall API", err.Error())
 		return
 	}
 	defer httpResp.Body.Close()
@@ -113,14 +114,25 @@ func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadReques
 		return
 	}
 
-	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
-		bodyBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 10<<20))
-		if err == nil && len(bodyBytes) > 0 {
-			var jsonObj interface{}
-			if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
-				if normBytes, err := json.Marshal(jsonObj); err == nil {
-					data.StateJSON = types.StringValue(string(normBytes))
-				}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+		resp.Diagnostics.AddError(
+			"Axonwall API returned error on state read",
+			fmt.Sprintf("HTTP %d: %s", httpResp.StatusCode, string(respBody)),
+		)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 10<<20))
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read /state response body", err.Error())
+		return
+	}
+	if len(bodyBytes) > 0 {
+		var jsonObj interface{}
+		if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
+			if normBytes, err := json.Marshal(jsonObj); err == nil {
+				data.StateJSON = types.StringValue(string(normBytes))
 			}
 		}
 	}
@@ -154,8 +166,9 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 		return fmt.Errorf("invalid json payload: %w", err)
 	}
 
+	jobID := fmt.Sprintf("terraform-%d", time.Now().UnixNano())
 	payload := map[string]interface{}{
-		"jobId":                 "terraform",
+		"jobId":                 jobID,
 		"state":                 parsedState,
 		"confirmTimeoutSeconds": 120,
 	}
@@ -187,7 +200,8 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 
 	// Confirm the configuration so it does not auto-rollback after the timeout
 	confirmUrl := r.client.Endpoint + "/confirm"
-	confirmReq, err := http.NewRequest("POST", confirmUrl, bytes.NewReader([]byte(`{"jobId":"terraform"}`)))
+	confirmPayload, _ := json.Marshal(map[string]string{"jobId": jobID})
+	confirmReq, err := http.NewRequest("POST", confirmUrl, bytes.NewReader(confirmPayload))
 	if err != nil {
 		return fmt.Errorf("failed to create confirm request: %w", err)
 	}

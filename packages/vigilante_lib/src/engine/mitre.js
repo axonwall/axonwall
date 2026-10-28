@@ -205,3 +205,5 @@ export async function saveMitreReport(options = {}) {
 
   return { matrix, markdown, reportId };
 }
+
+export { renderMitreHeatmapGrid } from '../ui/canvas.js';

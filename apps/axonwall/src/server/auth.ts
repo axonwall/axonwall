@@ -74,7 +74,7 @@ export async function getSession(): Promise<UserSession | null> {
 // actually persisted the secret (audit B-08), MFA could never be on.
 const MFA_ENV_PATHS = ['/var/lib/axonwall/etc-axonwall/mfa.env', '/etc/axonwall/mfa.env'];
 
-function writeAuthFileSafe(filePath: string, content: string, mode = 0o660): void {
+function writeAuthFileSafe(filePath: string, content: string, mode = 0o600): void {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
@@ -119,7 +119,7 @@ function writeMfaEnv(updates: Record<string, string>): void {
   const content = [...values.entries()].map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
   for (const mfaPath of MFA_ENV_PATHS) {
     try {
-      writeAuthFileSafe(mfaPath, content, 0o660);
+      writeAuthFileSafe(mfaPath, content, 0o600);
     } catch {}
   }
 }
@@ -343,7 +343,10 @@ export async function logoutAction() {
 
 export async function generateMfaSetup() {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
+  if (session.source !== 'local_admin') {
+    throw new Error('Forbidden: Only the local break-glass administrator can configure local MFA');
+  }
 
   const { generateSecret, generateURI } = require('otplib');
   const plugins = totpPlugins();
@@ -358,7 +361,10 @@ export async function generateMfaSetup() {
 
 export async function verifyMfaSetup(secret: string, token: string) {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
+  if (session.source !== 'local_admin') {
+    throw new Error('Forbidden: Only the local break-glass administrator can configure local MFA');
+  }
 
   const { verify } = require('otplib');
   const result = await verify({ secret, token, ...totpPlugins(), epochTolerance: 30 });
@@ -485,11 +491,11 @@ export async function changeAdminPasswordAction(formData: FormData) {
 
   try {
     const envContent = `LOCAL_ADMIN_USER=${localAdminUser}\nLOCAL_ADMIN_PASSWORD=${hashedSecret}\n`;
-    writeAuthFileSafe('/etc/axonwall/admin.env', envContent, 0o660);
+    writeAuthFileSafe('/etc/axonwall/admin.env', envContent, 0o600);
 
     // Mirror to /var/lib/axonwall/etc-axonwall/admin.env for A/B rootfs persistence
     try {
-      writeAuthFileSafe('/var/lib/axonwall/etc-axonwall/admin.env', envContent, 0o660);
+      writeAuthFileSafe('/var/lib/axonwall/etc-axonwall/admin.env', envContent, 0o600);
     } catch {}
 
     const now = new Date().toISOString();

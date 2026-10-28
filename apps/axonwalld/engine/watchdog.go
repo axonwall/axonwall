@@ -280,9 +280,13 @@ func (we *WatchdogEngine) readSlotVersionFromDiskReal(slot string) string {
 	}
 
 	// 2. Temporarily mount read-only
-	tmpDir, err := os.MkdirTemp("", "axon_slot_check_*")
+	_ = os.MkdirAll("/run/axonwall", 0750)
+	tmpDir, err := os.MkdirTemp("/run/axonwall", "axon_slot_check_*")
 	if err != nil {
-		return ""
+		tmpDir, err = os.MkdirTemp("", "axon_slot_check_*")
+		if err != nil {
+			return ""
+		}
 	}
 	defer os.Remove(tmpDir)
 
@@ -822,9 +826,15 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		return fmt.Sprintf("Axonwall v%s successfully updated in-place on Rolling Root (/). Services are reloading.", targetVersion), nil
 	}
 
-	_ = we.writeGrubEnvKey("active_slot", targetSlot)
-	_ = we.writeGrubEnvKey("bootcount", "0")
-	_ = we.writeGrubEnvKey("bootlimit", "3")
+	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
+		return "", fmt.Errorf("failed to set active_slot in grubenv: %w", err)
+	}
+	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
+		return "", fmt.Errorf("failed to reset bootcount in grubenv: %w", err)
+	}
+	if err := we.writeGrubEnvKey("bootlimit", "3"); err != nil {
+		return "", fmt.Errorf("failed to set bootlimit in grubenv: %w", err)
+	}
 
 	currentRunningVer := readInstalledVersion()
 	if targetSlot == "A" {
@@ -886,7 +896,8 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 		slotADev := resolveLabelDevice("axon_root_a")
 		if info, statErr := os.Stat(slotADev); statErr == nil && (info.Mode()&os.ModeDevice) != 0 {
 			if cmdlineBytes, cErr := os.ReadFile(we.cmdlinePath); cErr == nil && strings.Contains(string(cmdlineBytes), "axon_root_b") {
-				mntDir := "/tmp/axonwall-grubsync-a"
+				_ = os.MkdirAll("/run/axonwall", 0750)
+				mntDir := "/run/axonwall/grubsync-a"
 				_ = os.MkdirAll(mntDir, 0700)
 				if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr == nil {
 					targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")

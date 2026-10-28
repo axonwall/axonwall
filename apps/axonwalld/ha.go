@@ -184,9 +184,8 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.config = cfg
-
 	if !cfg.Enabled {
+		e.config = cfg
 		slog.Info("High Availability is disabled. Stopping Keepalived, Conntrackd, and SQLite sync.")
 		_, _ = stopSystemService("keepalived")
 		_, _ = stopSystemService("conntrackd")
@@ -233,6 +232,8 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 	if err := e.generateConntrackd(cfg); err != nil {
 		return fmt.Errorf("conntrackd: %w", err)
 	}
+
+	e.config = cfg
 
 	slog.Info("Restarting HA services (Keepalived & Conntrackd)")
 	if out, err := reloadOrRestartService("keepalived"); err != nil {

@@ -31,6 +31,9 @@ export async function GET(req: NextRequest) {
       status: session?.passwordChangeRequired ? 403 : 401,
     });
   }
+  if (!session.roles?.includes('admin')) {
+    return new Response('Forbidden: Admin role required', { status: 403 });
+  }
 
   const { searchParams } = new URL(req.url);
   const iface = searchParams.get('interface') || 'any';

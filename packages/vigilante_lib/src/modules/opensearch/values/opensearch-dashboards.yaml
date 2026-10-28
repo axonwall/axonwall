@@ -16,13 +16,13 @@ resources:
     memory: "1024Mi"
 
 opensearch_security:
-  enabled: false
+  enabled: true
 
 extraEnvs:
   - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
-    value: "true"
+    value: "false"
   - name: DISABLE_SECURITY_PLUGIN
-    value: "true"
+    value: "false"
 
 ingress:
   enabled: true

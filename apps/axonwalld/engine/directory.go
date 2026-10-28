@@ -2,7 +2,9 @@ package engine
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -188,8 +190,17 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 			}
 		}
 		if !hasAdmin {
-			adminPass := d.readInitialAdminPassword()
+			adminPass, hasExistingScrypt := d.readInitialAdminPasswordWithState()
 			log.Printf("[Directory] No active admin user found in LDAP; seeding default 'admin' account...")
+			var savedEnv map[string][]byte
+			if hasExistingScrypt {
+				savedEnv = make(map[string][]byte)
+				for _, p := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
+					if b, err := os.ReadFile(p); err == nil {
+						savedEnv[p] = b
+					}
+				}
+			}
 			_ = d.CreateUser(CreateUserRequest{
 				Username:      "admin",
 				Comment:       "Axonwall Break-Glass Administrator",
@@ -197,6 +208,9 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 				ApplianceRole: "admin",
 				Shell:         "/usr/bin/zsh",
 			})
+			for p, b := range savedEnv {
+				_ = os.WriteFile(p, b, 0600)
+			}
 		}
 	}
 
@@ -217,7 +231,13 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 }
 
 func (d *DirectoryManager) readInitialAdminPassword() string {
-	for _, path := range []string{"/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
+	pw, _ := d.readInitialAdminPasswordWithState()
+	return pw
+}
+
+func (d *DirectoryManager) readInitialAdminPasswordWithState() (string, bool) {
+	sawScrypt := false
+	for _, path := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -227,17 +247,32 @@ func (d *DirectoryManager) readInitialAdminPassword() string {
 			if strings.HasPrefix(line, "LOCAL_ADMIN_PASSWORD=") {
 				pw := strings.TrimSpace(strings.TrimPrefix(line, "LOCAL_ADMIN_PASSWORD="))
 				pw = strings.Trim(pw, `"'`)
+				if strings.HasPrefix(pw, "scrypt$") {
+					sawScrypt = true
+					continue
+				}
 				if pw != "" {
-					return pw
+					return pw, false
 				}
 			}
 		}
 	}
-	return "axonwall-admin-pass"
+	randBytes := make([]byte, 16)
+	if _, err := rand.Read(randBytes); err == nil {
+		return hex.EncodeToString(randBytes), sawScrypt
+	}
+	return fmt.Sprintf("axonwall-%d", time.Now().UnixNano()), sawScrypt
 }
 
 func (d *DirectoryManager) syncBreakGlassPasswordFile(password string) {
-	for _, path := range []string{"/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
+	if strings.ContainsAny(password, "\n\r\x00") {
+		return
+	}
+	for _, path := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
+		info, lerr := os.Lstat(path)
+		if lerr != nil || (info.Mode()&os.ModeSymlink) != 0 {
+			continue
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -632,16 +667,27 @@ func (d *DirectoryManager) CreateUser(req CreateUserRequest) error {
 	if shell == "" {
 		shell = DefaultShellForRole(role)
 	}
+	if strings.ContainsAny(shell, "\n\r\x00") || !allowedLoginShells[shell] {
+		return fmt.Errorf("invalid or disallowed login shell '%s'", shell)
+	}
+
+	comment := strings.TrimSpace(req.Comment)
+	if strings.ContainsAny(comment, "\n\r\x00") {
+		return fmt.Errorf("invalid characters in user comment")
+	}
+	if comment == "" {
+		comment = username
+	}
+	for _, k := range req.SSHKeys {
+		if strings.ContainsAny(k, "\n\r\x00") {
+			return fmt.Errorf("invalid newline or control character in SSH public key")
+		}
+	}
 
 	uid := d.AllocateNextUID()
 	gid, err := d.EnsureLDAPGroupExists(username, uid)
 	if err != nil {
 		return err
-	}
-
-	comment := strings.TrimSpace(req.Comment)
-	if comment == "" {
-		comment = username
 	}
 	homeDir := "/home/" + username
 
@@ -760,6 +806,9 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 
 	var mods []string
 	if req.Comment != nil {
+		if strings.ContainsAny(*req.Comment, "\n\r\x00") {
+			return fmt.Errorf("invalid characters in user comment")
+		}
 		c := strings.TrimSpace(*req.Comment)
 		if c == "" {
 			c = username
@@ -768,7 +817,11 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 	}
 
 	if req.Shell != nil && strings.TrimSpace(*req.Shell) != "" {
-		mods = append(mods, fmt.Sprintf("replace: loginShell\nloginShell: %s", strings.TrimSpace(*req.Shell)))
+		sh := strings.TrimSpace(*req.Shell)
+		if strings.ContainsAny(sh, "\n\r\x00") || !allowedLoginShells[sh] {
+			return fmt.Errorf("invalid or disallowed login shell '%s'", sh)
+		}
+		mods = append(mods, fmt.Sprintf("replace: loginShell\nloginShell: %s", sh))
 	} else if req.ApplianceRole != nil && req.Shell == nil {
 		mods = append(mods, fmt.Sprintf("replace: loginShell\nloginShell: %s", DefaultShellForRole(*req.ApplianceRole)))
 	}
@@ -793,6 +846,9 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 		var keyBlock strings.Builder
 		keyBlock.WriteString("replace: sshPublicKey\n")
 		for _, k := range *req.SSHKeys {
+			if strings.ContainsAny(k, "\n\r\x00") {
+				return fmt.Errorf("invalid newline or control character in SSH public key")
+			}
 			k = strings.TrimSpace(k)
 			if k != "" {
 				keyBlock.WriteString("sshPublicKey: " + k + "\n")
@@ -1390,17 +1446,20 @@ func (d *DirectoryManager) MigrateLocalHumanUsers() ([]string, error) {
 
 		_, _ = d.EnsureLDAPGroupExists(u.Username, u.GID)
 
-		comment := strings.TrimSpace(u.Comment)
+		comment := cleanNSSField(strings.TrimSpace(u.Comment))
 		if comment == "" {
 			comment = u.Username
 		}
-		shell := u.Shell
-		if shell == "" || shell == "/bin/bash" {
+		shell := strings.TrimSpace(u.Shell)
+		if shell == "" || shell == "/bin/bash" || !allowedLoginShells[shell] {
 			shell = "/usr/bin/zsh"
 		}
 
 		var sshLines strings.Builder
 		for _, k := range u.SSHKeys {
+			if strings.ContainsAny(k, "\n\r\x00") {
+				continue
+			}
 			k = strings.TrimSpace(k)
 			if k != "" {
 				sshLines.WriteString("sshPublicKey: " + k + "\n")

@@ -40,6 +40,7 @@ const xmlParserOptions = {
   parseNodeValue: true,
   parseAttributeValue: true,
   trimValues: true,
+  processEntities: false,
   isArray: (tagName: string) => arrayTags.has(tagName.toLowerCase()),
 };
 

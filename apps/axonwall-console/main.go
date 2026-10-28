@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -182,10 +183,15 @@ func getInterfaces() []InterfaceInfo {
 	return list
 }
 
+var validIfNameRe = regexp.MustCompile(`^[a-zA-Z0-9_.:-]{1,15}$`)
+
 func normalizeAssignedDevice(dev string) string {
 	dev = strings.TrimSpace(dev)
 	switch strings.ToLower(dev) {
 	case "", "none", "-", "<none>", "unassigned", "disabled", "null", "auto":
+		return ""
+	}
+	if !validIfNameRe.MatchString(dev) {
 		return ""
 	}
 	return dev
@@ -879,13 +885,24 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 
 func writeSharedConfigFile(path string, data []byte, mode os.FileMode) {
 	dir := filepath.Dir(path)
+	if dfi, err := os.Lstat(dir); err == nil && (dfi.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
 	_ = os.MkdirAll(dir, 0775)
-	_ = os.WriteFile(path, data, mode)
-	_ = os.Chmod(path, mode)
+	if fi, err := os.Lstat(path); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(data)
+	_ = f.Chmod(mode)
+	_ = f.Close()
 	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
 		if gid, err := strconv.Atoi(grp.Gid); err == nil {
-			_ = os.Chown(dir, -1, gid)
-			_ = os.Chown(path, -1, gid)
+			_ = os.Lchown(dir, -1, gid)
+			_ = os.Lchown(path, -1, gid)
 		}
 	}
 }
@@ -1951,6 +1968,11 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	if iface == "" {
 		iface = defaultDevice
 	}
+	if !validIfNameRe.MatchString(iface) {
+		fmt.Printf("%s[!] Invalid network interface name: %s%s\n", colorRed, iface, colorReset)
+		pause(reader)
+		return
+	}
 
 	if isWan {
 		fmt.Printf("\n%s=== Configure WAN Interface (%s) ===%s\n", colorCyan, iface, colorReset)
@@ -2028,12 +2050,22 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		if dns1 == "" {
 			dns1 = "1.1.1.1"
 		}
+		if net.ParseIP(dns1) == nil {
+			fmt.Printf("%s[!] Invalid Primary DNS IP address: %s%s\n", colorRed, dns1, colorReset)
+			pause(reader)
+			return
+		}
 
 		fmt.Print("Enter Secondary DNS Server [8.8.8.8]: ")
 		dns2, _ := reader.ReadString('\n')
 		dns2 = strings.TrimSpace(dns2)
 		if dns2 == "" {
 			dns2 = "8.8.8.8"
+		}
+		if net.ParseIP(dns2) == nil {
+			fmt.Printf("%s[!] Invalid Secondary DNS IP address: %s%s\n", colorRed, dns2, colorReset)
+			pause(reader)
+			return
 		}
 
 		cidrFull := fmt.Sprintf("%s/%s", wanIP, cidr)
@@ -2247,7 +2279,10 @@ func actionResetMFA(reader *bufio.Reader) {
 		_ = os.Remove("/etc/axonwall/mfa.env")
 		_ = os.Remove("/var/lib/axonwall/etc-axonwall/mfa.env")
 
-		stripMfaFromEnv := func(path string) {
+		stripMfaFromEnv := func(path string, shared bool) {
+			if fi, lerr := os.Lstat(path); lerr != nil || (fi.Mode()&os.ModeSymlink) != 0 {
+				return
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return
@@ -2258,11 +2293,21 @@ func actionResetMFA(reader *bufio.Reader) {
 					lines = append(lines, l)
 				}
 			}
-			writeSharedConfigFile(path, []byte(strings.Join(lines, "\n")), 0660)
+			outBytes := []byte(strings.Join(lines, "\n"))
+			if shared {
+				writeSharedConfigFile(path, outBytes, 0660)
+			} else {
+				if f, ferr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0600); ferr == nil {
+					_, _ = f.Write(outBytes)
+					_ = f.Chmod(0600)
+					_ = f.Close()
+					_ = os.Lchown(path, 0, 0)
+				}
+			}
 		}
-		stripMfaFromEnv("/etc/axonwall/admin.env")
-		stripMfaFromEnv("/var/lib/axonwall/etc-axonwall/admin.env")
-		stripMfaFromEnv("/etc/axonwall/axonwall.env")
+		stripMfaFromEnv("/etc/axonwall/admin.env", true)
+		stripMfaFromEnv("/var/lib/axonwall/etc-axonwall/admin.env", true)
+		stripMfaFromEnv("/etc/axonwall/axonwall.env", false)
 
 		fmt.Printf("\n%s[✓] MFA enforcement removed. Admin login will now only require username/password.%s\n", colorGreen, colorReset)
 		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()

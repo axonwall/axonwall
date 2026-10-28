@@ -1,6 +1,15 @@
 import { NextResponse } from 'next/server';
+import { getSession } from '@/server/auth';
 
 export async function GET() {
+  const session = await getSession();
+  if (!session || session.passwordChangeRequired) {
+    return NextResponse.json(
+      { error: session?.passwordChangeRequired ? 'Forbidden: Password change required' : 'Unauthorized' },
+      { status: session?.passwordChangeRequired ? 403 : 401 }
+    );
+  }
+
   const spec = {
     openapi: '3.1.0',
     info: {

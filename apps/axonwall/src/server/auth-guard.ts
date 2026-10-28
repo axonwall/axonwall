@@ -1,5 +1,11 @@
 import type { UserSession } from '@axonwall/lib/rbac';
 
+const ROLE_HIERARCHY: Record<string, number> = {
+  readonly: 1,
+  operator: 2,
+  admin: 3,
+};
+
 /**
  * Asserts that a valid authenticated session exists and that any
  * required roles or password changes are satisfied.
@@ -14,7 +20,18 @@ export function assertActionPermitted(
   if (session.passwordChangeRequired) {
     throw new Error('Forbidden: Password change required before performing this action');
   }
-  if (requiredRole && (!session.roles || !session.roles.includes(requiredRole))) {
-    throw new Error(`Forbidden: ${requiredRole} role required`);
+  if (requiredRole) {
+    if (session.privileges?.includes('*')) {
+      return;
+    }
+    const roles = session.roles || [];
+    const requiredRank = ROLE_HIERARCHY[requiredRole];
+    const isPermitted =
+      requiredRank !== undefined
+        ? roles.some((r) => (ROLE_HIERARCHY[r] ?? 0) >= requiredRank)
+        : roles.includes(requiredRole);
+    if (!isPermitted) {
+      throw new Error(`Forbidden: ${requiredRole} role required`);
+    }
   }
 }

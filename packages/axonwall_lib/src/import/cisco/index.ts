@@ -151,13 +151,13 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
 
       // Source
       let src = 'any';
-      if (tokens[idx] === 'any' || tokens[idx] === 'any4') {
+      if (tokens[idx] === 'any' || tokens[idx] === 'any4' || tokens[idx] === 'any6') {
         src = 'any';
         idx++;
       } else if (tokens[idx] === 'host' && tokens[idx + 1]) {
         src = tokens[idx + 1];
         idx += 2;
-      } else if (tokens[idx] === 'object-group' && tokens[idx + 1]) {
+      } else if ((tokens[idx] === 'object-group' || tokens[idx] === 'object') && tokens[idx + 1]) {
         src = `$${tokens[idx + 1]}`;
         idx += 2;
       } else if (tokens[idx] && tokens[idx + 1]) {
@@ -168,13 +168,13 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
       // Destination
       let dst = 'any';
       let dstPort = '';
-      if (tokens[idx] === 'any' || tokens[idx] === 'any4') {
+      if (tokens[idx] === 'any' || tokens[idx] === 'any4' || tokens[idx] === 'any6') {
         dst = 'any';
         idx++;
       } else if (tokens[idx] === 'host' && tokens[idx + 1]) {
         dst = tokens[idx + 1];
         idx += 2;
-      } else if (tokens[idx] === 'object-group' && tokens[idx + 1]) {
+      } else if ((tokens[idx] === 'object-group' || tokens[idx] === 'object') && tokens[idx + 1]) {
         dst = `$${tokens[idx + 1]}`;
         idx += 2;
       } else if (tokens[idx] && tokens[idx + 1] && !tokens[idx].startsWith('eq')) {
@@ -207,7 +207,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
         quick: true,
         protocol: ruleProto,
         source: src,
-        sourcePort: 'any',
+        sourcePort: '',
         destination: dst,
         destinationPort: dstPort,
         log: false,
@@ -230,9 +230,9 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
           interface: outIface === 'outside' ? 'wan' : outIface,
           protocol: 'any',
           source: 'any',
-          sourcePort: 'any',
+          sourcePort: '',
           destination: 'any',
-          destinationPort: 'any',
+          destinationPort: '',
           log: false,
           sortOrder: nat.length + 1,
           enabled: true,
@@ -244,9 +244,9 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
           interface: inIface === 'outside' ? 'wan' : inIface,
           protocol: 'tcp',
           source: 'any',
-          sourcePort: 'any',
+          sourcePort: '',
           destination: 'wan_ip',
-          destinationPort: 'any',
+          destinationPort: '',
           log: false,
           sortOrder: nat.length + 1,
           enabled: true,

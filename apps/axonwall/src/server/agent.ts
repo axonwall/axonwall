@@ -814,10 +814,126 @@ async function getDesiredStateInternal(): Promise<DesiredState> {
   return structuredClone(BASELINE_STATE);
 }
 
+function redactDesiredStateForSession(state: DesiredState, session: UserSession): DesiredState {
+  if (session.roles?.includes('admin') || session.privileges?.includes('*')) {
+    return state;
+  }
+  const redacted: any = structuredClone(state);
+  const MASK = '********';
+
+  if (redacted.vpn?.wireguard) {
+    if (redacted.vpn.wireguard.privateKey) {
+      redacted.vpn.wireguard.privateKey = MASK;
+    }
+    if (Array.isArray(redacted.vpn.wireguard.peers)) {
+      for (const peer of redacted.vpn.wireguard.peers) {
+        if (peer?.presharedKey) {
+          peer.presharedKey = MASK;
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(redacted.vpn?.ipsec?.connections)) {
+    for (const conn of redacted.vpn.ipsec.connections) {
+      if (conn?.psk) {
+        conn.psk = MASK;
+      }
+    }
+  }
+
+  if (Array.isArray(redacted.certificates?.cas)) {
+    for (const ca of redacted.certificates.cas) {
+      if (ca?.privateKeyPem) {
+        ca.privateKeyPem = MASK;
+      }
+    }
+  }
+
+  if (Array.isArray(redacted.certificates?.certs)) {
+    for (const cert of redacted.certificates.certs) {
+      if (cert?.privateKeyPem) {
+        cert.privateKeyPem = MASK;
+      }
+    }
+  }
+
+  if (redacted.ha) {
+    if (redacted.ha.authPassword) {
+      redacted.ha.authPassword = MASK;
+    }
+    if (redacted.ha.sqliteSync?.authToken) {
+      redacted.ha.sqliteSync.authToken = MASK;
+    }
+    if (redacted.ha.stateSync?.litestreamSecretAccessKey) {
+      redacted.ha.stateSync.litestreamSecretAccessKey = MASK;
+    }
+  }
+
+  if (redacted.ai?.providers && typeof redacted.ai.providers === 'object') {
+    for (const provider of Object.values(redacted.ai.providers) as any[]) {
+      if (provider && typeof provider === 'object' && provider.apiKey) {
+        provider.apiKey = MASK;
+      }
+    }
+  }
+
+  if (Array.isArray(redacted.dynamicRouting?.bgp?.neighbors)) {
+    for (const neighbor of redacted.dynamicRouting.bgp.neighbors) {
+      if (neighbor?.password) {
+        neighbor.password = MASK;
+      }
+    }
+  }
+
+  if (Array.isArray(redacted.dynamicRouting?.ospf?.areas)) {
+    for (const area of redacted.dynamicRouting.ospf.areas) {
+      if (area?.authKey) {
+        area.authKey = MASK;
+      }
+    }
+  }
+
+  if (redacted.captivePortal?.radiusSecret) {
+    redacted.captivePortal.radiusSecret = MASK;
+  }
+
+  if (redacted.observability?.clickhouse?.password) {
+    redacted.observability.clickhouse.password = MASK;
+  }
+
+  if (redacted.observability?.s3?.secretAccessKey) {
+    redacted.observability.s3.secretAccessKey = MASK;
+  }
+
+  if (redacted.snmp?.community) {
+    redacted.snmp.community = MASK;
+  }
+
+  if (Array.isArray(redacted.virt?.vms)) {
+    for (const vm of redacted.virt.vms) {
+      if (vm?.cloudInit?.password) {
+        vm.cloudInit.password = MASK;
+      }
+    }
+  }
+
+  if (Array.isArray(redacted.virt?.backupJobs)) {
+    for (const job of redacted.virt.backupJobs) {
+      if (job?.encryptionKey) {
+        job.encryptionKey = MASK;
+      }
+    }
+  }
+
+  return redacted as DesiredState;
+}
+
 export async function getCurrentDesiredState(): Promise<DesiredState> {
   const session = await getSession();
   assertActionPermitted(session);
-  return getDesiredStateInternal();
+  const state = await getDesiredStateInternal();
+  return redactDesiredStateForSession(state, session);
 }
 
 export async function getYamlConfigFilesSnapshot(): Promise<{
@@ -825,7 +941,7 @@ export async function getYamlConfigFilesSnapshot(): Promise<{
   files: Record<string, string>;
 }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const state = await getCurrentDesiredState();
   const generated = serializeDesiredStateToYamlFiles(state);
@@ -878,7 +994,7 @@ export async function saveYamlDomainFile(
 
 export async function exportUnifiedYamlConfig(): Promise<string> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
   const state = await getCurrentDesiredState();
   return serializeDesiredStateToSingleYaml(state);
 }

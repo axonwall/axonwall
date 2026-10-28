@@ -10,9 +10,11 @@ import type {
   UpdateLocalUserRequest,
 } from '@axonwall/lib/schemas';
 
+const USERNAME_REGEX = /^[a-z_][a-z0-9_-]{0,31}$/i;
+
 export async function getLocalUsers(): Promise<LocalUser[]> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<{ users: LocalUser[] }>('/v1/system/users', 'GET');
   if (!res || !res.users) {
@@ -23,7 +25,7 @@ export async function getLocalUsers(): Promise<LocalUser[]> {
 
 export async function getLocalGroups(): Promise<LocalGroup[]> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<{ groups: LocalGroup[] }>('/v1/system/groups', 'GET');
   if (!res || !res.groups) {
@@ -53,6 +55,9 @@ export async function updateLocalUser(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  if (!USERNAME_REGEX.test(username)) {
+    throw new Error('Invalid username format');
+  }
 
   const res = await callAgentApi<{ success?: boolean; message?: string }>(
     `/v1/system/users/${encodeURIComponent(username)}`,
@@ -71,6 +76,9 @@ export async function deleteLocalUser(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  if (!USERNAME_REGEX.test(username)) {
+    throw new Error('Invalid username format');
+  }
 
   const res = await callAgentApi<{ success?: boolean; message?: string }>(
     `/v1/system/users/${encodeURIComponent(username)}?removeHome=${removeHome}`,
@@ -127,7 +135,7 @@ export interface DirectoryStatus {
 
 export async function getDirectoryStatus(): Promise<DirectoryStatus | null> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<DirectoryStatus>('/v1/system/directory/status', 'GET');
   return res || null;

@@ -36,9 +36,7 @@ export function resolveMcpKeysPath(): string {
         return candidate;
       }
     }
-    const fallbackDir = '/tmp/axonwall';
-    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o775 });
-    return path.join(fallbackDir, 'mcp-keys.json');
+    return primaryFile;
   }
 }
 

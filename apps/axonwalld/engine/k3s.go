@@ -96,7 +96,20 @@ func (m *K3sManager) GetClusterNodeToken() (string, error) {
 
 // FetchPeerClusterToken contacts the primary HA node's sync endpoint to retrieve the K3s join token.
 func FetchPeerClusterToken(peerIp string, syncPort int, authToken string) (string, error) {
-	return FetchPeerClusterTokenWithClient(peerIp, syncPort, authToken, &http.Client{Timeout: 8 * time.Second}, "http")
+	cleanPeer := strings.TrimSpace(peerIp)
+	if parsed := net.ParseIP(cleanPeer); parsed == nil || parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsUnspecified() {
+		return "", fmt.Errorf("invalid or disallowed HA peer IP: %s", peerIp)
+	}
+	if HasHAPKI() {
+		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
+			client := &http.Client{
+				Timeout:   8 * time.Second,
+				Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			}
+			return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, client, "https")
+		}
+	}
+	return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, &http.Client{Timeout: 8 * time.Second}, "http")
 }
 
 // FetchPeerClusterTokenWithClient is FetchPeerClusterToken over a

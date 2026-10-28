@@ -4,7 +4,7 @@ import type {
   FirewallRule,
   NatRule,
 } from '../../schemas/index.js';
-import type { ImportReport } from '../types.js';
+import type { ImportReport, ImportReviewItem } from '../types.js';
 
 function parseIptablesTokens(line: string): string[] {
   const tokens: string[] = [];
@@ -24,6 +24,7 @@ function parseIptablesTokens(line: string): string[] {
 
 export function importIptablesConfig(rulesContent: string): ImportReport {
   const warnings: string[] = [];
+  const reviewItems: ImportReviewItem[] = [];
   const lines = rulesContent.split('\n');
 
   let currentTable = 'filter';
@@ -59,6 +60,8 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
       let proto = 'any';
       let src = 'any';
       let dst = 'any';
+      let negatedSrc = false;
+      let negatedDst = false;
       let sport = '';
       let dport = '';
       let target = '';
@@ -68,7 +71,15 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
 
       for (let i = 2; i < parts.length; i++) {
         const p = parts[i];
-        if (p === '-i' && i + 1 < parts.length) {
+        if (p === '!' && i + 2 < parts.length && (parts[i + 1] === '-s' || parts[i + 1] === '--source')) {
+          negatedSrc = true;
+          src = parts[i + 2].replace(/^!/, '');
+          i += 2;
+        } else if (p === '!' && i + 2 < parts.length && (parts[i + 1] === '-d' || parts[i + 1] === '--destination')) {
+          negatedDst = true;
+          dst = parts[i + 2].replace(/^!/, '');
+          i += 2;
+        } else if (p === '-i' && i + 1 < parts.length) {
           inIface = parts[++i];
           detectedIfaces.add(inIface);
         } else if (p === '-o' && i + 1 < parts.length) {
@@ -76,10 +87,34 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
           detectedIfaces.add(outIface);
         } else if (p === '-p' && i + 1 < parts.length) {
           proto = parts[++i].toLowerCase();
-        } else if (p === '-s' && i + 1 < parts.length) {
-          src = parts[++i];
-        } else if (p === '-d' && i + 1 < parts.length) {
-          dst = parts[++i];
+        } else if ((p === '-s' || p === '--source') && i + 1 < parts.length) {
+          if (parts[i + 1] === '!' && i + 2 < parts.length) {
+            negatedSrc = true;
+            src = parts[i + 2].replace(/^!/, '');
+            i += 2;
+          } else {
+            const rawVal = parts[++i];
+            if (rawVal.startsWith('!')) {
+              negatedSrc = true;
+              src = rawVal.slice(1);
+            } else {
+              src = rawVal;
+            }
+          }
+        } else if ((p === '-d' || p === '--destination') && i + 1 < parts.length) {
+          if (parts[i + 1] === '!' && i + 2 < parts.length) {
+            negatedDst = true;
+            dst = parts[i + 2].replace(/^!/, '');
+            i += 2;
+          } else {
+            const rawVal = parts[++i];
+            if (rawVal.startsWith('!')) {
+              negatedDst = true;
+              dst = rawVal.slice(1);
+            } else {
+              dst = rawVal;
+            }
+          }
         } else if ((p === '--sport' || p === '--source-port') && i + 1 < parts.length) {
           sport = parts[++i].replace(':', '-');
         } else if ((p === '--dport' || p === '--destination-port') && i + 1 < parts.length) {
@@ -169,6 +204,32 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
         else if (proto === 'udp') ruleProto = 'udp';
         else if (proto.includes('icmp')) ruleProto = 'icmp';
 
+        const hasNegation = (negatedSrc && src !== 'any') || (negatedDst && dst !== 'any');
+        const ruleIndex = rules.length;
+        const baseDesc = comment || `Imported ${chain} rule (${target})`;
+        const finalDesc = hasNegation ? `[REVIEW: Negated match] ${baseDesc}` : baseDesc;
+
+        if (hasNegation) {
+          const reason: ImportReviewItem['reason'] =
+            negatedSrc && negatedDst
+              ? 'negated_both'
+              : negatedSrc
+                ? 'negated_source'
+                : 'negated_destination';
+          const matchSummary = `${action.toUpperCase()} ${ruleProto} from ${negatedSrc ? `!${src}` : src} to ${negatedDst ? `!${dst}` : dst}`;
+          const explanation = `iptables rule "${baseDesc}" uses an inverted (!) ${reason === 'negated_both' ? 'source and destination' : reason === 'negated_source' ? 'source' : 'destination'} match (${matchSummary}). Imported with enabled: false so it cannot silently activate with inverted semantics.`;
+          const suggestedResolution = `Split into an explicit preceding rule matching ${negatedSrc ? src : dst} with the opposite action, followed by a broader rule matching 'any', then enable the reviewed rules.`;
+          warnings.push(explanation + ' ' + suggestedResolution);
+          reviewItems.push({
+            ruleId: `rule-${ruleIndex + 1}`,
+            ruleIndex,
+            reason,
+            originalMatchSummary: matchSummary,
+            explanation,
+            suggestedResolution,
+          });
+        }
+
         rules.push({
           action,
           direction: chain === 'OUTPUT' ? 'out' : 'in',
@@ -180,8 +241,8 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
           destination: dst,
           destinationPort: dport,
           log: false,
-          enabled: true,
-          description: comment || `Imported ${chain} rule (${target})`,
+          enabled: !hasNegation,
+          description: finalDesc,
           sortOrder,
         });
         sortOrder += 10;
@@ -277,6 +338,7 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
     dnsOverridesCount: 0,
     routesCount: 0,
     warnings,
+    reviewItems,
     state,
   };
 }

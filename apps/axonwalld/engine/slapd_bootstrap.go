@@ -136,7 +136,7 @@ func chownOpenLDAPRecursive(path string) {
 	gid, _ := strconv.Atoi(u.Gid)
 	_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
 		if err == nil {
-			_ = os.Chown(p, uid, gid)
+			_ = os.Lchown(p, uid, gid)
 		}
 		return nil
 	})
@@ -282,7 +282,7 @@ olcDbIndex: uidNumber,gidNumber eq
 olcDbIndex: member,memberUid eq
 olcDbIndex: entryCSN,entryUUID eq
 olcAccess: {0}to attrs=userPassword,shadowLastChange by self write by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,%s" read by anonymous auth by * none
-olcAccess: {1}to * by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,%s" read by users read by anonymous read
+olcAccess: {1}to * by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,%s" read by users read by * none
 
 dn: olcOverlay={0}syncprov,olcDatabase={1}mdb,cn=config
 objectClass: olcOverlayConfig

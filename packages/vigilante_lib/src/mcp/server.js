@@ -27,7 +27,8 @@ import { getPodsWide, getPodLogs, describePod } from '../engine/pods.js';
 import { listInstances, loadInstanceMetadata, getDeployedNamespaces } from '../engine/instances.js';
 import { listK3dClusters, getClusterInfo } from '../engine/cluster.js';
 import { checkCertificates } from '../engine/certs.js';
-import { loadConfig } from '../engine/config.js';
+import path from 'node:path';
+import { loadConfig, getVigilanteConfigDir, resolvePathInside } from '../engine/config.js';
 import { globalModuleRegistry } from '../modules/registry.js';
 import { listAvailablePlaybooks, executeThreatPlaybook } from '../engine/threats.js';
 import {
@@ -95,7 +96,7 @@ import { runZapScan, listSavedZapScans, checkZapAvailable } from '../engine/zap.
 import { getHostDossier, buildHostDossier, listHostDossiers } from '../engine/dossier.js';
 import { replayPcap, listPcapRecordings, parseSuricataEve, parseZeekConnLogs, summarizeTrafficAlerts } from '../engine/traffic.js';
 import { ingestBloodhoundData, listBloodhoundIngests, checkBloodhoundAvailable } from '../engine/bloodhound.js';
-import { generateMitreCoverageMatrix, generateMitreMarkdownReport, saveMitreReport } from '../engine/mitre.js';
+import { generateMitreCoverageMatrix, generateMitreMarkdownReport, saveMitreReport, renderMitreHeatmapGrid } from '../engine/mitre.js';
 import {
   isolatePod,
   freezePod,
@@ -145,6 +146,62 @@ import {
   evaluateFalcoSoarAction
 } from '../engine/falco.js';
 import { FalcoModule } from '../modules/falco/index.js';
+
+const SENSITIVE_SYSTEM_PREFIXES = ['/etc', '/root', '/var', '/proc', '/sys', '/boot', '/usr', '/dev'];
+
+function assertConfinedMcpPath(inputPath, label = 'path', allowedBaseDir = null) {
+  if (!inputPath || typeof inputPath !== 'string') {
+    throw new Error(`Argument '${label}' must be a non-empty string`);
+  }
+  const normalizedRaw = inputPath.replace(/\\/g, '/');
+  if (normalizedRaw.split('/').includes('..')) {
+    throw new Error(`Refusing '${label}': path traversal ('..') is not allowed`);
+  }
+  const resolved = path.resolve(inputPath);
+  for (const prefix of SENSITIVE_SYSTEM_PREFIXES) {
+    if (resolved === prefix || resolved.startsWith(`${prefix}/`)) {
+      throw new Error(`Refusing '${label}': access to sensitive system directory '${prefix}' is forbidden`);
+    }
+  }
+  if (allowedBaseDir) {
+    return resolvePathInside(allowedBaseDir, resolved);
+  }
+  const cwd = path.resolve(process.cwd());
+  const cfgDir = path.resolve(getVigilanteConfigDir());
+  const inCwd = resolved === cwd || resolved.startsWith(cwd + path.sep);
+  const inCfg = resolved === cfgDir || resolved.startsWith(cfgDir + path.sep);
+  if (!inCwd && !inCfg) {
+    throw new Error(`Refusing '${label}': path '${resolved}' must reside within the workspace or Vigilante config directory`);
+  }
+  return resolved;
+}
+
+function redactConfigForMcp(cfg) {
+  if (!cfg || typeof cfg !== 'object') return cfg;
+  const clone = JSON.parse(JSON.stringify(cfg));
+  if (clone.ctf && typeof clone.ctf === 'object' && clone.ctf.flagSecret) {
+    clone.ctf.flagSecret = '[REDACTED]';
+  }
+  if (clone.ledger && typeof clone.ledger === 'object' && clone.ledger.signingSecret) {
+    clone.ledger.signingSecret = '[REDACTED]';
+  }
+  if (clone.evidencepack && typeof clone.evidencepack === 'object' && clone.evidencepack.tsaKey) {
+    clone.evidencepack.tsaKey = '[REDACTED]';
+  }
+  if (clone.snapshot && typeof clone.snapshot === 'object' && clone.snapshot.sealingKey) {
+    clone.snapshot.sealingKey = '[REDACTED]';
+  }
+  if (clone.ai && typeof clone.ai === 'object') {
+    for (const [k, v] of Object.entries(clone.ai)) {
+      if (v && typeof v === 'object' && v.apiKey) {
+        clone.ai[k].apiKey = '[REDACTED]';
+      } else if (/key|secret|token|password/i.test(k) && typeof v === 'string') {
+        clone.ai[k] = '[REDACTED]';
+      }
+    }
+  }
+  return clone;
+}
 
 /**
  * Creates and configures the Vigilante MCP Server
@@ -484,7 +541,7 @@ export function createVigilanteMcpServer() {
 
     // H. Config Settings
     if (uri === 'vigilante://config') {
-      const cfg = loadConfig();
+      const cfg = redactConfigForMcp(loadConfig());
       const gpgKeys = await listSecretKeys();
       return {
         contents: [
@@ -3291,11 +3348,19 @@ export function createVigilanteMcpServer() {
     if (name === 'get_openvas_credentials') {
       const { namespace = null, clusterName = 'vigilante-dev' } = args;
       const creds = await getOpenVasCredentials({ namespace, clusterName });
+      const safeCreds = creds
+        ? {
+            username: creds.username,
+            password: process.env.VIGILANTE_CLI_ADMIN === '1' ? creds.password : '********',
+            passwordConfigured: Boolean(creds.password),
+            namespace: creds.namespace
+          }
+        : { error: 'OpenVAS admin credentials secret not found' };
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(creds || { error: 'OpenVAS admin credentials secret not found' }, null, 2)
+            text: JSON.stringify(safeCreds, null, 2)
           }
         ]
       };
@@ -3613,7 +3678,8 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
       const { binaryPath, base64Data, fileName = 'target_binary' } = args;
       let buf;
       if (binaryPath) {
-        buf = await fs.readFile(binaryPath);
+        const safePath = assertConfinedMcpPath(binaryPath, 'binaryPath');
+        buf = await fs.readFile(safePath);
       } else if (base64Data) {
         buf = Buffer.from(base64Data, 'base64');
       } else {
@@ -4315,7 +4381,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: scan_file_entropy
     if (name === 'scan_file_entropy') {
-      const entropyResult = calculateFileEntropy(args.content || args.filePath);
+      const targetInput = args.content
+        ? args.content
+        : (args.filePath ? assertConfinedMcpPath(args.filePath, 'filePath') : '');
+      const entropyResult = calculateFileEntropy(targetInput);
       return {
         content: [{ type: 'text', text: JSON.stringify(entropyResult, null, 2) }]
       };
@@ -4323,7 +4392,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: deploy_ransomware_canaries
     if (name === 'deploy_ransomware_canaries') {
-      const canaries = await generateRansomwareCanaryFiles(args.targetDirectory, args);
+      const safeDir = args.targetDirectory
+        ? assertConfinedMcpPath(args.targetDirectory, 'targetDirectory')
+        : path.join(getVigilanteConfigDir(), 'canary', 'ransomware');
+      const canaries = await generateRansomwareCanaryFiles(safeDir, args);
       return {
         content: [{ type: 'text', text: JSON.stringify(canaries, null, 2) }]
       };
@@ -4351,11 +4423,14 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: append_audit_ledger
     if (name === 'append_audit_ledger') {
+      const safeLedgerDir = args.ledgerDir
+        ? assertConfinedMcpPath(args.ledgerDir, 'ledgerDir', getVigilanteConfigDir())
+        : undefined;
       const entry = await appendLedgerEntry(
         args.entryType,
         args.payload,
         { role: args.signerRole || 'IncidentCommander' },
-        args
+        safeLedgerDir ? { ledgerDir: safeLedgerDir } : {}
       );
       return {
         content: [{ type: 'text', text: JSON.stringify(entry, null, 2) }]
@@ -4364,7 +4439,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: verify_ledger_integrity
     if (name === 'verify_ledger_integrity') {
-      const verification = await verifyLedgerIntegrity(args.ledgerDir);
+      const safeLedgerDir = args.ledgerDir
+        ? assertConfinedMcpPath(args.ledgerDir, 'ledgerDir', getVigilanteConfigDir())
+        : undefined;
+      const verification = await verifyLedgerIntegrity(safeLedgerDir);
       return {
         content: [{ type: 'text', text: JSON.stringify(verification, null, 2) }]
       };
@@ -4478,7 +4556,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: plant_deception_breadcrumbs
     if (name === 'plant_deception_breadcrumbs') {
-      const planted = await plantBreadcrumbs(args.targetDir, args.types);
+      const safeDir = args.targetDir
+        ? assertConfinedMcpPath(args.targetDir, 'targetDir')
+        : path.join(getVigilanteConfigDir(), 'canary', 'breadcrumbs');
+      const planted = await plantBreadcrumbs(safeDir, args.types);
       return {
         content: [{ type: 'text', text: JSON.stringify(planted, null, 2) }]
       };
@@ -4486,7 +4567,15 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: capture_container_snapshot
     if (name === 'capture_container_snapshot') {
-      const snap = await createForensicsSnapshot(args);
+      const safeArgs = { ...args };
+      delete safeArgs.sealingKey;
+      if (safeArgs.rootfsDir) {
+        safeArgs.rootfsDir = assertConfinedMcpPath(safeArgs.rootfsDir, 'rootfsDir');
+      }
+      if (safeArgs.outputDir) {
+        safeArgs.outputDir = assertConfinedMcpPath(safeArgs.outputDir, 'outputDir', getVigilanteConfigDir());
+      }
+      const snap = await createForensicsSnapshot(safeArgs);
       return {
         content: [{ type: 'text', text: JSON.stringify(snap, null, 2) }]
       };
@@ -4494,9 +4583,15 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: export_rfc3161_evidence_pack
     if (name === 'export_rfc3161_evidence_pack') {
+      const safeItems = (args.evidenceItems || []).map(item => {
+        if (item && item.path) {
+          return { ...item, path: assertConfinedMcpPath(item.path, 'evidenceItems[].path') };
+        }
+        return item;
+      });
       const pack = await createEvidenceBundle(
         { caseNumber: args.caseNumber, title: args.title },
-        args.evidenceItems || []
+        safeItems
       );
       return {
         content: [{ type: 'text', text: JSON.stringify(pack, null, 2) }]
@@ -4591,7 +4686,7 @@ export async function runMcpServer() {
 }
 
 // Auto-run if executed directly as entrypoint
-if (process.argv[1] && (process.argv[1].endsWith('mcp/server.js') || process.argv[1].endsWith('server.js'))) {
+if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('mcp/server.js')) {
   runMcpServer().catch((err) => {
     console.error('Fatal MCP Server error:', err);
     process.exit(1);

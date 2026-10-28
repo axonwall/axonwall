@@ -9,7 +9,7 @@ import type {
   DnsHostOverride,
   StaticRoute,
 } from '../../schemas/index.js';
-import type { ImportReport } from '../types.js';
+import type { ImportReport, ImportReviewItem } from '../types.js';
 
 function parseLineKeyValue(line: string): Record<string, string> {
   const result: Record<string, string> = {};
@@ -29,6 +29,7 @@ function parseLineKeyValue(line: string): Record<string, string> {
 
 export function importMikrotikConfig(rscContent: string): ImportReport {
   const warnings: string[] = [];
+  const reviewItems: ImportReviewItem[] = [];
   const lines = rscContent.split('\n');
 
   let currentSection = '';
@@ -128,19 +129,60 @@ export function importMikrotikConfig(rscContent: string): ImportReport {
         else iface = inIface;
       }
 
+      let rawSrc = kv['src-address'] || (kv['src-address-list'] ? (kv['src-address-list'].startsWith('!') ? `!$${kv['src-address-list'].slice(1)}` : `$${kv['src-address-list']}`) : 'any');
+      let negatedSrc = false;
+      if (rawSrc.startsWith('!')) {
+        negatedSrc = true;
+        rawSrc = rawSrc.slice(1) || 'any';
+      }
+
+      let rawDst = kv['dst-address'] || (kv['dst-address-list'] ? (kv['dst-address-list'].startsWith('!') ? `!$${kv['dst-address-list'].slice(1)}` : `$${kv['dst-address-list']}`) : 'any');
+      let negatedDst = false;
+      if (rawDst.startsWith('!')) {
+        negatedDst = true;
+        rawDst = rawDst.slice(1) || 'any';
+      }
+
+      const hasNegation = (negatedSrc && rawSrc !== 'any') || (negatedDst && rawDst !== 'any');
+      const ruleIndex = rules.length;
+      const baseDesc = kv.comment || `RouterOS Rule (${kv.chain || 'filter'})`;
+      const finalDesc = hasNegation ? `[REVIEW: Negated match] ${baseDesc}` : baseDesc;
+      const isEnabled = hasNegation ? false : kv.disabled !== 'yes';
+
+      if (hasNegation) {
+        const reason: ImportReviewItem['reason'] =
+          negatedSrc && negatedDst
+            ? 'negated_both'
+            : negatedSrc
+              ? 'negated_source'
+              : 'negated_destination';
+        const matchSummary = `${action.toUpperCase()} ${proto} from ${negatedSrc ? `!${rawSrc}` : rawSrc} to ${negatedDst ? `!${rawDst}` : rawDst}`;
+        const explanation = `RouterOS rule "${baseDesc}" uses an inverted (!) ${reason === 'negated_both' ? 'source and destination' : reason === 'negated_source' ? 'source' : 'destination'} match (${matchSummary}). Imported with enabled: false so it cannot silently activate with inverted semantics.`;
+        const suggestedResolution = `Split into an explicit preceding rule matching ${negatedSrc ? rawSrc : rawDst} with the opposite action, followed by a broader rule matching 'any', then enable the reviewed rules.`;
+        warnings.push(explanation + ' ' + suggestedResolution);
+        reviewItems.push({
+          ruleId: `rule-${ruleIndex + 1}`,
+          ruleIndex,
+          reason,
+          originalMatchSummary: matchSummary,
+          explanation,
+          suggestedResolution,
+        });
+      }
+
       rules.push({
         action,
         direction: 'in',
         interface: iface,
         quick: true,
         protocol: proto,
-        source: kv['src-address'] || (kv['src-address-list'] ? `$${kv['src-address-list']}` : 'any'),
+        source: rawSrc,
         sourcePort: kv['src-port'] || '',
-        destination: kv['dst-address'] || (kv['dst-address-list'] ? `$${kv['dst-address-list']}` : 'any'),
+        destination: rawDst,
         destinationPort: kv['dst-port'] || '',
         log: kv.log === 'yes',
-        enabled: kv.disabled !== 'yes',
-        description: kv.comment || `RouterOS Rule (${kv.chain || 'filter'})`,
+        enabled: isEnabled,
+        description: finalDesc,
         sortOrder,
       });
       sortOrder += 10;
@@ -376,6 +418,7 @@ export function importMikrotikConfig(rscContent: string): ImportReport {
     dnsOverridesCount: dnsOverrides.length,
     routesCount: routes.length,
     warnings,
+    reviewItems,
     state,
   };
 }

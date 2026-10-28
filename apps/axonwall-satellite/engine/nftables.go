@@ -57,15 +57,22 @@ func (e *NftablesEngine) Apply(scriptContent string) error {
 
 	slog.Info("Successfully applied nftables ruleset.")
 
-	// If it succeeds, update currentScript and lastKnownGood
-	if e.currentScript != "" {
-		e.lastKnownGood = e.currentScript
-	} else if e.lastKnownGood == "" {
+	// Keep lastKnownGood untouched until Confirm() is called (unless no baseline existed at all)
+	if e.lastKnownGood == "" {
 		e.lastKnownGood = scriptContent
 	}
 	e.currentScript = scriptContent
 
 	return nil
+}
+
+// Confirm promotes the currently applied ruleset to lastKnownGood.
+func (e *NftablesEngine) Confirm() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.currentScript != "" {
+		e.lastKnownGood = e.currentScript
+	}
 }
 
 // Rollback restores the last known good configuration
@@ -79,6 +86,7 @@ func (e *NftablesEngine) Rollback() error {
 	}
 
 	slog.Info("Initiating nftables rollback...")
+	_ = e.Flush()
 
 	tmp, err := os.CreateTemp("", "axonwall-sat-rollback-*.nft")
 	if err != nil {

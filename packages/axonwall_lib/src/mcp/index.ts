@@ -267,6 +267,30 @@ export function parseIpOrCidr(input: string): ParsedIpOrCidr | null {
   const addrPart = slashIdx === -1 ? raw : raw.slice(0, slashIdx);
   const prefixPart = slashIdx === -1 ? null : raw.slice(slashIdx + 1);
 
+  // Detect IPv4-mapped IPv6 in dotted-quad notation (e.g. ::ffff:127.0.0.1 or 0:0:0:0:0:ffff:192.168.1.1)
+  const mappedDottedMatch = addrPart.match(
+    /^(?:(?:0{1,4}:){0,5}:ffff:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i,
+  );
+  if (mappedDottedMatch) {
+    const v4Addr = mappedDottedMatch[1]!;
+    const v4Val = parseIpv4ToUint32(v4Addr);
+    if (v4Val === null) return null;
+    let v4Prefix = 32;
+    if (prefixPart !== null) {
+      if (!/^\d{1,3}$/.test(prefixPart)) return null;
+      const rawPrefix = Number(prefixPart);
+      if (rawPrefix < 0 || rawPrefix > 128) return null;
+      v4Prefix = rawPrefix >= 96 ? rawPrefix - 96 : rawPrefix <= 32 ? rawPrefix : 0;
+    }
+    return {
+      family: 4,
+      address: v4Addr,
+      prefixLen: v4Prefix,
+      normalizedCidr: `${v4Addr}/${v4Prefix}`,
+      isSingleHost: v4Prefix === 32,
+    };
+  }
+
   if (addrPart.includes(':')) {
     const v6Val = parseIpv6ToBigInt(addrPart);
     if (v6Val === null) return null;
@@ -275,6 +299,19 @@ export function parseIpOrCidr(input: string): ParsedIpOrCidr | null {
       if (!/^\d{1,3}$/.test(prefixPart)) return null;
       prefixLen = Number(prefixPart);
       if (prefixLen < 0 || prefixLen > 128) return null;
+    }
+    // Detect IPv4-mapped IPv6 in hex notation (e.g. ::ffff:7f00:0001 or ::ffff:c0a8:0101)
+    if ((v6Val >> 32n) === 0xffffn) {
+      const v4Uint = Number(v6Val & 0xffffffffn) >>> 0;
+      const v4Addr = `${(v4Uint >>> 24) & 0xff}.${(v4Uint >>> 16) & 0xff}.${(v4Uint >>> 8) & 0xff}.${v4Uint & 0xff}`;
+      const v4Prefix = prefixPart === null ? 32 : prefixLen >= 96 ? prefixLen - 96 : 0;
+      return {
+        family: 4,
+        address: v4Addr,
+        prefixLen: v4Prefix,
+        normalizedCidr: `${v4Addr}/${v4Prefix}`,
+        isSingleHost: v4Prefix === 32,
+      };
     }
     return {
       family: 6,
@@ -317,24 +354,39 @@ export function ipv4CidrOverlaps(cidrA: string, cidrB: string): boolean {
 }
 
 export function ipv6CidrOverlaps(cidrA: string, cidrB: string): boolean {
-  const a = parseIpOrCidr(cidrA);
-  const b = parseIpOrCidr(cidrB);
-  if (!a || !b || a.family !== 6 || b.family !== 6) return false;
-  const valA = parseIpv6ToBigInt(a.address);
-  const valB = parseIpv6ToBigInt(b.address);
-  if (valA === null || valB === null) return false;
+  const parseRawV6 = (c: string): { val: bigint; prefixLen: number } | null => {
+    const raw = c.trim();
+    const slashIdx = raw.indexOf('/');
+    const addrPart = slashIdx === -1 ? raw : raw.slice(0, slashIdx);
+    const prefixPart = slashIdx === -1 ? null : raw.slice(slashIdx + 1);
+    const val = parseIpv6ToBigInt(addrPart);
+    if (val === null) return null;
+    let prefixLen = 128;
+    if (prefixPart !== null) {
+      if (!/^\d{1,3}$/.test(prefixPart)) return null;
+      prefixLen = Number(prefixPart);
+      if (prefixLen < 0 || prefixLen > 128) return null;
+    }
+    return { val, prefixLen };
+  };
+  const a = parseRawV6(cidrA);
+  const b = parseRawV6(cidrB);
+  if (!a || !b) return false;
 
   const minPrefix = Math.min(a.prefixLen, b.prefixLen);
   if (minPrefix === 0) return true;
   const shift = BigInt(128 - minPrefix);
-  return (valA >> shift) === (valB >> shift);
+  return (a.val >> shift) === (b.val >> shift);
 }
 
 export function cidrOverlaps(cidrA: string, cidrB: string): boolean {
+  if (cidrA.includes(':') && cidrB.includes(':') && (cidrA.toLowerCase().includes('::ffff:0:0') || cidrB.toLowerCase().includes('::ffff:0:0'))) {
+    return ipv6CidrOverlaps(cidrA, cidrB);
+  }
   const a = parseIpOrCidr(cidrA);
   const b = parseIpOrCidr(cidrB);
   if (!a || !b || a.family !== b.family) return false;
-  return a.family === 4 ? ipv4CidrOverlaps(cidrA, cidrB) : ipv6CidrOverlaps(cidrA, cidrB);
+  return a.family === 4 ? ipv4CidrOverlaps(a.normalizedCidr, b.normalizedCidr) : ipv6CidrOverlaps(a.normalizedCidr, b.normalizedCidr);
 }
 
 export function isIpInCidr(ip: string, cidr: string): boolean {
@@ -356,6 +408,7 @@ export const IMMUTABLE_PROTECTED_CIDRS_V4 = [
 export const IMMUTABLE_PROTECTED_CIDRS_V6 = [
   '::/128',          // Unspecified
   '::1/128',         // Loopback
+  '::ffff:0:0/96',   // IPv4-mapped IPv6 space
   'fe80::/10',       // Link-local
   'ff00::/8',        // IPv6 Multicast
 ] as const;
@@ -507,16 +560,43 @@ export function validateRedirectTargetAllowlist(
   }
 
   const trimmed = targetDestination.trim();
-  // Extract IP part from "ip:port" or "[ipv6]:port" or plain "ip"
+  if (!trimmed || /[;\r\n\s"'`$&|<>]/.test(trimmed)) {
+    return {
+      valid: false,
+      reason: `Malformed redirect target destination: '${targetDestination}'`,
+    };
+  }
+
+  // Extract IP part and optional port from "ip:port" or "[ipv6]:port" or plain "ip"
   let ipPart = trimmed;
+  let targetPort: number | null = null;
   if (trimmed.startsWith('[')) {
     const closeIdx = trimmed.indexOf(']');
     if (closeIdx === -1) {
       return { valid: false, reason: `Malformed IPv6 redirect target: '${trimmed}'` };
     }
     ipPart = trimmed.slice(1, closeIdx);
-  } else if (trimmed.split(':').length === 2) {
-    ipPart = trimmed.split(':')[0]!;
+    const suffix = trimmed.slice(closeIdx + 1);
+    if (suffix !== '') {
+      const m = suffix.match(/^:(\d{1,5})$/);
+      if (!m) {
+        return { valid: false, reason: `Invalid redirect target port suffix in '${trimmed}'` };
+      }
+      targetPort = Number(m[1]);
+      if (targetPort < 1 || targetPort > 65535) {
+        return { valid: false, reason: `Redirect target port ${targetPort} out of range (1-65535)` };
+      }
+    }
+  } else if (trimmed.includes(':') && !trimmed.includes('::') && trimmed.split(':').length === 2) {
+    const [hostStr, portStr] = trimmed.split(':');
+    ipPart = hostStr!;
+    if (!/^\d{1,5}$/.test(portStr!)) {
+      return { valid: false, reason: `Invalid redirect target port '${portStr}' in '${trimmed}'` };
+    }
+    targetPort = Number(portStr);
+    if (targetPort < 1 || targetPort > 65535) {
+      return { valid: false, reason: `Redirect target port ${targetPort} out of range (1-65535)` };
+    }
   }
 
   const parsedDest = parseIpOrCidr(ipPart);
@@ -529,12 +609,31 @@ export function validateRedirectTargetAllowlist(
 
   for (const allowed of allowedRedirectTargets) {
     const trimmedAllowed = allowed.trim();
+    if (!trimmedAllowed) continue;
     if (trimmedAllowed === trimmed) {
       return { valid: true, normalizedTarget: trimmed };
     }
-    const allowedIpPart = trimmedAllowed.includes(':') && !trimmedAllowed.includes('::')
-      ? trimmedAllowed.split(':')[0]!
-      : trimmedAllowed;
+
+    let allowedIpPart = trimmedAllowed;
+    let allowedPort: number | null = null;
+    if (trimmedAllowed.startsWith('[')) {
+      const closeIdx = trimmedAllowed.indexOf(']');
+      if (closeIdx === -1) continue;
+      allowedIpPart = trimmedAllowed.slice(1, closeIdx);
+      const suffix = trimmedAllowed.slice(closeIdx + 1);
+      if (suffix.startsWith(':')) {
+        allowedPort = Number(suffix.slice(1));
+      }
+    } else if (trimmedAllowed.includes(':') && !trimmedAllowed.includes('::') && trimmedAllowed.split(':').length === 2) {
+      const [h, p] = trimmedAllowed.split(':');
+      allowedIpPart = h!;
+      allowedPort = Number(p);
+    }
+
+    if (allowedPort !== null && targetPort !== allowedPort) {
+      continue;
+    }
+
     if (cidrOverlaps(parsedDest.address, allowedIpPart)) {
       return { valid: true, normalizedTarget: trimmed };
     }
@@ -570,9 +669,7 @@ export function resolveMcpSettingsPath(): string {
         return candidate;
       }
     }
-    const fallbackDir = '/tmp/axonwall';
-    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o775 });
-    return path.join(fallbackDir, 'mcp-settings.json');
+    return primaryFile;
   }
 }
 

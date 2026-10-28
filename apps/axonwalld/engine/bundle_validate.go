@@ -39,23 +39,29 @@ import (
 // --- Samba ---------------------------------------------------------------
 
 var smbDeniedDirectives = map[string]bool{
-	"root preexec": true, "root postexec": true,
-	"preexec": true, "postexec": true, "preexec close": true,
-	"add share command": true, "change share command": true,
-	"delete share command": true,
-	"add printer command": true, "delete printer command": true,
-	"print command": true, "lpq command": true, "lprm command": true,
-	"lppause command": true, "lpresume command": true,
-	"queuepause command": true, "queueresume command": true,
-	"include": true, "config file": true,
-	"smb passwd file": true, "passwd program": true, "passwd chat": true,
-	"add user script": true, "delete user script": true,
-	"add group script": true, "delete group script": true,
-	"add user to group script": true, "set primary group script": true,
-	"add machine script": true, "check password script": true,
-	"username map script": true,
-	"shutdown script": true, "abort shutdown script": true,
-	"logon script": true,
+	"rootpreexec": true, "rootpostexec": true, "rootexec": true,
+	"preexec": true, "postexec": true, "preexecclose": true, "exec": true,
+	"addsharecommand": true, "changesharecommand": true,
+	"deletesharecommand": true,
+	"addprintercommand": true, "deleteprintercommand": true,
+	"printcommand": true, "lpqcommand": true, "lprmcommand": true,
+	"lppausecommand": true, "lpresumecommand": true,
+	"queuepausecommand": true, "queueresumecommand": true,
+	"dfreecommand": true, "getquotacommand": true, "setquotacommand": true,
+	"messagecommand": true, "panicaction": true,
+	"include": true, "configfile": true, "copy": true,
+	"smbpasswdfile": true, "passwdprogram": true, "passwdchat": true,
+	"adduserscript": true, "deleteuserscript": true,
+	"addgroupscript": true, "deletegroupscript": true,
+	"addusertogroupscript": true, "setprimarygroupscript": true,
+	"addmachinescript": true, "checkpasswordscript": true,
+	"usernamemapscript": true,
+	"shutdownscript": true, "abortshutdownscript": true,
+	"logonscript": true, "magicscript": true,
+}
+
+func normalizeSmbKey(raw string) string {
+	return strings.NewReplacer(" ", "", "\t", "", "_", "").Replace(strings.ToLower(strings.TrimSpace(raw)))
 }
 
 var smbAllowedVfsObjects = map[string]bool{
@@ -71,6 +77,10 @@ func underMnt(p string) bool {
 
 func validateSmbConf(content string) error {
 	for lineNo, raw := range strings.Split(content, "\n") {
+		trimmedRight := strings.TrimRight(raw, " \t\r")
+		if strings.HasSuffix(trimmedRight, "\\") {
+			return fmt.Errorf("smb.conf line %d: backslash line continuations are not permitted in a bundle", lineNo+1)
+		}
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue
@@ -83,16 +93,17 @@ func validateSmbConf(content string) error {
 			return fmt.Errorf("smb.conf line %d: not a key = value directive", lineNo+1)
 		}
 		key := strings.Join(strings.Fields(strings.ToLower(line[:eq])), " ")
+		normKey := normalizeSmbKey(line[:eq])
 		value := strings.TrimSpace(line[eq+1:])
-		if smbDeniedDirectives[key] {
+		if smbDeniedDirectives[normKey] {
 			return fmt.Errorf("smb.conf line %d: directive %q is not permitted in a bundle", lineNo+1, key)
 		}
-		switch key {
-		case "path":
+		switch normKey {
+		case "path", "directory":
 			if !underMnt(value) {
 				return fmt.Errorf("smb.conf line %d: share path %q is outside /mnt", lineNo+1, value)
 			}
-		case "vfs objects":
+		case "vfsobject", "vfsobjects":
 			for _, mod := range strings.Fields(value) {
 				if !smbAllowedVfsObjects[mod] {
 					return fmt.Errorf("smb.conf line %d: vfs object %q is not permitted in a bundle", lineNo+1, mod)
@@ -115,6 +126,10 @@ var nfsAllowedOptions = map[string]bool{
 
 func validateNfsExports(content string) error {
 	for lineNo, raw := range strings.Split(content, "\n") {
+		trimmedRight := strings.TrimRight(raw, " \t\r")
+		if strings.HasSuffix(trimmedRight, "\\") {
+			return fmt.Errorf("exports line %d: backslash line continuations are not permitted in a bundle", lineNo+1)
+		}
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -203,6 +218,16 @@ func validateK3sManifest(content string) error {
 	}
 }
 
+var k3sDeniedManifestKinds = map[string]bool{
+	"helmchart":          true,
+	"helmchartconfig":    true,
+	"persistentvolume":   true,
+	"clusterrole":        true,
+	"clusterrolebinding": true,
+	"role":               true,
+	"rolebinding":        true,
+}
+
 // walkManifest rejects the primitives that turn a manifest into host
 // control, anywhere in the document tree.
 func walkManifest(node any) error {
@@ -210,6 +235,12 @@ func walkManifest(node any) error {
 	case map[string]any:
 		for key, val := range v {
 			switch key {
+			case "kind":
+				if kStr, ok := val.(string); ok {
+					if k3sDeniedManifestKinds[strings.ToLower(strings.TrimSpace(kStr))] {
+						return fmt.Errorf("k3s manifest: resource kind %q is not permitted in a bundle", kStr)
+					}
+				}
 			case "hostPath":
 				return fmt.Errorf("k3s manifest: hostPath volumes are not permitted in a bundle")
 			case "hostPID", "hostNetwork", "hostIPC":
@@ -219,6 +250,14 @@ func walkManifest(node any) error {
 			case "privileged":
 				if b, ok := val.(bool); ok && b {
 					return fmt.Errorf("k3s manifest: privileged containers are not permitted in a bundle")
+				}
+			case "capabilities":
+				if capMap, ok := val.(map[string]any); ok {
+					if addVal, hasAdd := capMap["add"]; hasAdd && addVal != nil {
+						if list, isSlice := addVal.([]any); !isSlice || len(list) > 0 {
+							return fmt.Errorf("k3s manifest: capabilities.add is not permitted in a bundle")
+						}
+					}
 				}
 			case "roleRef":
 				if ref, ok := val.(map[string]any); ok {

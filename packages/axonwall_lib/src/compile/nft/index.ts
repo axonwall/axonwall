@@ -1,4 +1,4 @@
-import { type DesiredState, type FirewallRule, type NatRule, type Alias, normalizeAntiLockoutInterfaces, inferInterfaceRole } from '../../schemas/index.js';
+import { type DesiredState, type FirewallRule, type NatRule, type Alias, normalizeAntiLockoutInterfaces, inferInterfaceRole, isValidFirewallEndpoint } from '../../schemas/index.js';
 import { sanitizeIdentifier, isValidDevice } from '../../util/index.js';
 import { resolveCapabilities } from '../../plugins/index.js';
 import { compileSuricata } from '../suricata/index.js';
@@ -55,6 +55,9 @@ function buildNasAndK3sInputRules(
     }
   }
 
+  if (firewallEnabled && trustedDevs.length === 0) {
+    return [];
+  }
   const devSet = trustedDevs.length > 0 ? `iifname { ${trustedDevs.join(', ')} } ` : '';
 
   if (nasEnabled) {
@@ -512,24 +515,34 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   for (const nat of state.nat) {
     if (!nat.enabled || nat.type !== 'dnat' || !nat.targetIp) continue;
+    if (/[;\r\n#{}'"]/.test(nat.targetIp)) continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
     if (!isValidDevice(ifaceDev)) continue;
+    const hasDport = Boolean(nat.destinationPort && nat.destinationPort !== 'any');
+    const hasSport = Boolean(nat.sourcePort && nat.sourcePort !== 'any');
     let protoMatch = '';
     if (nat.protocol === 'any' || nat.protocol === 'tcp_udp') {
-      protoMatch = nat.destinationPort
-        ? `meta l4proto { tcp, udp } th dport ${formatPort(nat.destinationPort)}`
+      const portClauses: string[] = [];
+      if (hasSport) portClauses.push(`th sport ${formatPort(nat.sourcePort)}`);
+      if (hasDport) portClauses.push(`th dport ${formatPort(nat.destinationPort)}`);
+      protoMatch = portClauses.length > 0
+        ? `meta l4proto { tcp, udp } ${portClauses.join(' ')}`
         : 'meta l4proto { tcp, udp }';
     } else if (nat.protocol === 'tcp' || nat.protocol === 'udp') {
-      protoMatch = nat.destinationPort
-        ? `${nat.protocol} dport ${formatPort(nat.destinationPort)}`
+      const portClauses: string[] = [];
+      if (hasSport) portClauses.push(`${nat.protocol} sport ${formatPort(nat.sourcePort)}`);
+      if (hasDport) portClauses.push(`${nat.protocol} dport ${formatPort(nat.destinationPort)}`);
+      protoMatch = portClauses.length > 0
+        ? portClauses.join(' ')
         : `meta l4proto ${nat.protocol}`;
     } else {
       protoMatch = `meta l4proto ${nat.protocol}`;
     }
+    const hasTargetPort = Boolean(nat.targetPort && nat.targetPort !== 'any');
     const isV6 = nat.targetIp.includes(':');
     const family = isV6 ? 'ip6' : 'ip';
-    const formattedIp = isV6 && nat.targetPort ? `[${nat.targetIp}]` : nat.targetIp;
-    const dnatTarget = nat.targetPort ? `${formattedIp}:${nat.targetPort}` : formattedIp;
+    const formattedIp = isV6 && hasTargetPort ? `[${nat.targetIp}]` : nat.targetIp;
+    const dnatTarget = hasTargetPort ? `${formattedIp}:${nat.targetPort}` : formattedIp;
     lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat ${family} to ${dnatTarget}`);
   }
   lines.push('  }');
@@ -855,6 +868,15 @@ function formatPort(val: string): string {
 function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
   const parts: string[] = [];
 
+  if (
+    (rule.source && (!isValidFirewallEndpoint(rule.source) || /[;\r\n#{}'"]/.test(rule.source))) ||
+    (rule.destination && (!isValidFirewallEndpoint(rule.destination) || /[;\r\n#{}'"]/.test(rule.destination))) ||
+    (rule.sourcePort && /[;\r\n#{}'"]/.test(rule.sourcePort)) ||
+    (rule.destinationPort && /[;\r\n#{}'"]/.test(rule.destinationPort))
+  ) {
+    return '';
+  }
+
   // Source Address
   if (rule.source && rule.source !== 'any') {
     if (rule.source.startsWith('$')) {
@@ -908,7 +930,8 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
 
   // Logging
   if (rule.log) {
-    parts.push(`log prefix "axonwall-rule:${rule.id?.slice(0, 8) || 'log'}: " group 0`);
+    const safeRuleId = (rule.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 8) || 'log';
+    parts.push(`log prefix "axonwall-rule:${safeRuleId}: " group 0`);
   }
 
   // Policy Routing: Mark packets for Linux ip rule / multi-WAN routing tables
@@ -928,7 +951,7 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
     block: 'drop',
     reject: 'reject',
   };
-  parts.push(actionMap[rule.action] || 'accept');
+  parts.push(actionMap[rule.action] || 'drop');
 
   // Comment
   if (rule.description) {

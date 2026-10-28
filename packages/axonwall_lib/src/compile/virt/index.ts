@@ -55,6 +55,21 @@ function sanitizeIdentifier(v: string): string {
   return v.replace(/[^a-zA-Z0-9_.-]/g, '_');
 }
 
+function sanitizeCloudInitScalar(val: string): string {
+  const singleLine = String(val).replace(/[\r\n\0]+/g, ' ').trim();
+  if (/[:#{}[\]&*?|>'"%@`]/.test(singleLine) || /\s/.test(singleLine)) {
+    return JSON.stringify(singleLine);
+  }
+  return singleLine;
+}
+
+const SAFE_POOL_REGEX = /^[a-zA-Z0-9_.-]+$/;
+const SAFE_ZVOL_PATH_REGEX = /^\/dev\/[a-zA-Z0-9_./-]+$/;
+const SAFE_ISO_PATH_REGEX = /^\/[a-zA-Z0-9_./-]+$/;
+const SAFE_MAC_REGEX = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+const SAFE_PCI_BDF_REGEX = /^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/;
+const SAFE_IFACE_REGEX = /^[a-zA-Z0-9_.:-]+$/;
+
 export function generateDeterministicMac(vmid: number, nicIdx: number): string {
   const hexVmid = vmid.toString(16).padStart(4, '0');
   const b1 = hexVmid.slice(0, 2);
@@ -142,9 +157,21 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
 
   // Storage Disks
   vm.disks.forEach((disk, idx) => {
+    const pool = disk.pool || 'tank';
+    if (!SAFE_POOL_REGEX.test(pool) || pool.includes('..')) {
+      throw new Error(`Invalid VM disk storage pool: ${pool}`);
+    }
     const driveId = `drive-disk${idx}`;
     const zvolPath =
-      disk.zvol || `/dev/zvol/${disk.pool || 'tank'}/vms/vm-${vm.vmid}-disk-${idx}`;
+      disk.zvol || `/dev/zvol/${pool}/vms/vm-${vm.vmid}-disk-${idx}`;
+    if (
+      zvolPath.includes(',') ||
+      zvolPath.includes('..') ||
+      /[\r\n\0]/.test(zvolPath) ||
+      !SAFE_ZVOL_PATH_REGEX.test(zvolPath)
+    ) {
+      throw new Error(`Invalid VM disk zvol path: ${zvolPath}`);
+    }
     const cache = disk.cache || 'none';
     const discardOpt = disk.discard ? ',discard=unmap' : '';
     const aioOpt = cache === 'none' ? ',aio=native' : '';
@@ -193,6 +220,14 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
 
   // ISO / Optical Drive
   if (vm.iso) {
+    if (
+      vm.iso.includes(',') ||
+      vm.iso.includes('..') ||
+      /[\r\n\0]/.test(vm.iso) ||
+      !SAFE_ISO_PATH_REGEX.test(vm.iso)
+    ) {
+      throw new Error(`Invalid VM ISO image path: ${vm.iso}`);
+    }
     args.push(
       '-drive',
       `file=${vm.iso},media=cdrom,id=cdrom0,readonly=on`
@@ -212,6 +247,9 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
     const netId = `net${idx}`;
     const tapName = `tap${vm.vmid}i${idx}`;
     const mac = nic.mac || generateDeterministicMac(vm.vmid, idx);
+    if (!SAFE_MAC_REGEX.test(mac)) {
+      throw new Error(`Invalid VM NIC MAC address: ${mac}`);
+    }
 
     args.push(
       '-netdev',
@@ -231,6 +269,9 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
 
   // PCIe Passthrough
   vm.pciPassthrough.forEach((pciAddr) => {
+    if (!SAFE_PCI_BDF_REGEX.test(pciAddr)) {
+      throw new Error(`Invalid PCIe passthrough BDF address: ${pciAddr}`);
+    }
     args.push('-device', `vfio-pci,host=${pciAddr}`);
   });
 
@@ -253,7 +294,7 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
   if (!vm.cloudInit) return null;
 
   const hostname = sanitizeIdentifier(vm.name);
-  const user = vm.cloudInit.user || 'axonadmin';
+  const user = sanitizeCloudInitScalar(vm.cloudInit.user || 'axonadmin');
 
   const metaDataYaml = [
     '# Axonwall Cloud-Init Meta-Data',
@@ -275,12 +316,14 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
   if (vm.cloudInit.sshAuthorizedKeys && vm.cloudInit.sshAuthorizedKeys.length > 0) {
     userDataLines.push('    ssh_authorized_keys:');
     for (const key of vm.cloudInit.sshAuthorizedKeys) {
-      userDataLines.push(`      - ${key.trim()}`);
+      const safeKey = String(key).replace(/[\r\n\0]+/g, ' ').trim();
+      userDataLines.push(`      - ${safeKey}`);
     }
   }
 
   if (vm.cloudInit.password) {
-    userDataLines.push(`    plain_text_passwd: ${vm.cloudInit.password}`);
+    const safePassword = sanitizeCloudInitScalar(vm.cloudInit.password);
+    userDataLines.push(`    plain_text_passwd: ${safePassword}`);
     userDataLines.push('    lock_passwd: false');
   }
 
@@ -295,18 +338,20 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
   if (vm.cloudInit.ipConfig === 'dhcp') {
     networkLines.push('    dhcp4: true');
   } else {
+    const safeIpCfg = sanitizeCloudInitScalar(vm.cloudInit.ipConfig);
     networkLines.push('    dhcp4: false');
-    networkLines.push(`    addresses: [${vm.cloudInit.ipConfig}]`);
+    networkLines.push(`    addresses: [${safeIpCfg}]`);
     if (vm.cloudInit.gateway) {
-      networkLines.push(`    gateway4: ${vm.cloudInit.gateway}`);
+      networkLines.push(`    gateway4: ${sanitizeCloudInitScalar(vm.cloudInit.gateway)}`);
     }
   }
 
   if (vm.cloudInit.nameservers && vm.cloudInit.nameservers.length > 0) {
+    const safeNs = vm.cloudInit.nameservers.map((ns) => sanitizeCloudInitScalar(ns));
     networkLines.push('    nameservers:');
-    networkLines.push(`      addresses: [${vm.cloudInit.nameservers.join(', ')}]`);
+    networkLines.push(`      addresses: [${safeNs.join(', ')}]`);
     if (vm.cloudInit.searchDomain) {
-      networkLines.push(`      search: [${vm.cloudInit.searchDomain}]`);
+      networkLines.push(`      search: [${sanitizeCloudInitScalar(vm.cloudInit.searchDomain)}]`);
     }
   }
   networkLines.push('');
@@ -321,7 +366,11 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
 }
 
 export function compileLxcContainer(ct: LxcContainer): CompiledLxcContainer {
-  const rootfsPath = `/mnt/${ct.rootfsPool || 'tank'}/lxc/subvol-${ct.ctid}-disk-0`;
+  const pool = ct.rootfsPool || 'tank';
+  if (!SAFE_POOL_REGEX.test(pool) || pool.includes('..')) {
+    throw new Error(`Invalid LXC rootfs pool: ${pool}`);
+  }
+  const rootfsPath = `/mnt/${pool}/lxc/subvol-${ct.ctid}-disk-0`;
   const cores = Math.max(1, ct.cores || 1);
   const memoryMb = Math.max(256, ct.memoryMb || 1024);
   const swapMb = ct.swapMb ?? 512;
@@ -354,11 +403,18 @@ export function compileLxcContainer(ct: LxcContainer): CompiledLxcContainer {
   // Network Interfaces
   ct.nics.forEach((nic, idx) => {
     const mac = nic.mac || generateDeterministicMac(ct.ctid, idx);
+    if (!SAFE_MAC_REGEX.test(mac)) {
+      throw new Error(`Invalid LXC NIC MAC address: ${mac}`);
+    }
+    const bridge = nic.bridge || 'br0';
+    if (!SAFE_IFACE_REGEX.test(bridge)) {
+      throw new Error(`Invalid LXC bridge interface: ${bridge}`);
+    }
     lines.push(
       `# Network Interface net${idx}`,
       `lxc.net.${idx}.type = veth`,
       `lxc.net.${idx}.flags = up`,
-      `lxc.net.${idx}.link = ${nic.bridge || 'br0'}`,
+      `lxc.net.${idx}.link = ${bridge}`,
       `lxc.net.${idx}.hwaddr = ${mac}`
     );
     if (nic.vlanTag) {
@@ -368,6 +424,19 @@ export function compileLxcContainer(ct: LxcContainer): CompiledLxcContainer {
 
   // Mount Points
   ct.mountPoints.forEach((mp) => {
+    if (
+      !mp.hostPath ||
+      !mp.mountPath ||
+      /[\r\n\0\s]/.test(mp.hostPath) ||
+      /[\r\n\0\s]/.test(mp.mountPath) ||
+      mp.hostPath.includes('..') ||
+      mp.mountPath.includes('..') ||
+      !mp.hostPath.startsWith('/mnt/') ||
+      !/^\/mnt\/[a-zA-Z0-9_./-]+$/.test(mp.hostPath) ||
+      !/^\/?[a-zA-Z0-9_./-]+$/.test(mp.mountPath)
+    ) {
+      throw new Error(`Invalid or unsafe LXC mount point: ${mp.hostPath} -> ${mp.mountPath}`);
+    }
     const flags = mp.readOnly ? 'ro,bind,create=dir' : 'rw,bind,create=dir';
     lines.push(`lxc.mount.entry = ${mp.hostPath} ${mp.mountPath.replace(/^\//, '')} none ${flags} 0 0`);
   });
@@ -430,6 +499,9 @@ export function compileVxlan(zones: VxlanZone[]): CompiledVxlan {
     const name = sanitizeIdentifier(zone.name);
     const port = zone.port || 4789;
     const dev = zone.underlayInterface || 'lan';
+    if (!SAFE_IFACE_REGEX.test(dev)) {
+      throw new Error(`Invalid VXLAN underlay interface: ${dev}`);
+    }
     const mtu = zone.mtu || 1450;
 
     ipCommands.push(
@@ -439,6 +511,9 @@ export function compileVxlan(zones: VxlanZone[]): CompiledVxlan {
     ipCommands.push(`ip link set ${name} up`);
 
     if (zone.bridge) {
+      if (!SAFE_IFACE_REGEX.test(zone.bridge)) {
+        throw new Error(`Invalid VXLAN bridge interface: ${zone.bridge}`);
+      }
       ipCommands.push(`ip link set ${name} master ${zone.bridge}`);
     }
   }

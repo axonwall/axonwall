@@ -11,15 +11,29 @@ import (
 // daemon (and optional HA peer failover URI) with RFC 2307 schema and SSH public key support.
 func BuildSSSDConfig(baseDN string, peerLDAPURI string) string {
 	ldapURI := "ldap://127.0.0.1:389"
-	tlsBlock := `ldap_id_use_start_tls = False
-ldap_tls_reqcert = allow
-ldap_auth_disable_tls_never_use_in_production = True`
+	caCertPath := ""
+	if _, err := os.Stat("/etc/axonwall/pki/ca.crt"); err == nil {
+		caCertPath = "/etc/axonwall/pki/ca.crt"
+	} else if _, err := os.Stat(HAPKICACertPath); err == nil {
+		caCertPath = HAPKICACertPath
+	}
+
+	var tlsBlock string
 	if peerLDAPURI != "" {
 		ldapURI = fmt.Sprintf("ldap://127.0.0.1:389, %s", peerLDAPURI)
+		if caCertPath == "" {
+			caCertPath = HAPKICACertPath
+		}
 		tlsBlock = fmt.Sprintf(`ldap_id_use_start_tls = False
 ldap_tls_reqcert = demand
-ldap_tls_cacert = %s
-ldap_auth_disable_tls_never_use_in_production = True`, HAPKICACertPath)
+ldap_tls_cacert = %s`, caCertPath)
+	} else if caCertPath != "" {
+		tlsBlock = fmt.Sprintf(`ldap_id_use_start_tls = False
+ldap_tls_reqcert = demand
+ldap_tls_cacert = %s`, caCertPath)
+	} else {
+		tlsBlock = `ldap_id_use_start_tls = False
+ldap_tls_reqcert = never`
 	}
 	return fmt.Sprintf(`[sssd]
 services = nss, pam, ssh

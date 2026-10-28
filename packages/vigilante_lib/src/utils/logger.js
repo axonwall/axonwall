@@ -2,10 +2,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-const LOG_FILE_PATH = path.join(os.tmpdir(), '.vigilante.log');
+const LOG_DIR_PATH = path.join(os.homedir(), '.config', 'vigilante');
+const LOG_FILE_PATH = path.join(LOG_DIR_PATH, 'vigilante.log');
+const FALLBACK_LOG_DIR_PATH = path.join(os.tmpdir(), `vigilante-logs-${typeof process.getuid === 'function' ? process.getuid() : process.pid}`);
+const FALLBACK_LOG_FILE_PATH = path.join(FALLBACK_LOG_DIR_PATH, 'vigilante.log');
+
+function resolveSafeLogFile() {
+  for (const [dirPath, filePath] of [[LOG_DIR_PATH, LOG_FILE_PATH], [FALLBACK_LOG_DIR_PATH, FALLBACK_LOG_FILE_PATH]]) {
+    try {
+      fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+      const dirStat = fs.lstatSync(dirPath);
+      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) continue;
+      if (fs.existsSync(filePath)) {
+        const fileStat = fs.lstatSync(filePath);
+        if (fileStat.isSymbolicLink() || !fileStat.isFile()) continue;
+      }
+      return filePath;
+    } catch {
+      // Try fallback directory
+    }
+  }
+  return null;
+}
 
 /**
- * Append a formatted log entry to /tmp/.vigilante.log
+ * Append a formatted log entry to ~/.config/vigilante/vigilante.log
  * @param {string} level - 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
  * @param {string} tag - Component or action tag, e.g. 'UI:KEY' or 'CLUSTER'
  * @param {string} message - Primary log text
@@ -32,8 +53,11 @@ export function writeDebugLog(level, tag, message, details = null) {
 
     entry += '\n';
 
+    const targetLogPath = resolveSafeLogFile();
+    if (!targetLogPath) return;
+
     // Synchronous append so logs are never lost on immediate exit or crash
-    fs.appendFileSync(LOG_FILE_PATH, entry, 'utf8');
+    fs.appendFileSync(targetLogPath, entry, { encoding: 'utf8', mode: 0o600 });
   } catch {
     // Fail-safe: silently continue if logging fails
   }

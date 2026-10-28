@@ -229,6 +229,16 @@ export function filterHaSyncState(state: DesiredState, sync: HaSyncSections): Pa
 export function compileKeaHaHook(ha: HighAvailabilityConfig, localIp: string): Record<string, any> | null {
   if (!ha.enabled) return null;
 
+  const safePeer = (ha.peerAddress || '').trim();
+  const safeLocal = (localIp || '').trim();
+  const safeHostRegex = /^[a-zA-Z0-9.:-]+$/;
+  if (!safePeer || !safeHostRegex.test(safePeer)) {
+    throw new Error(`Invalid HA peerAddress for Kea HA hook: ${ha.peerAddress}`);
+  }
+  if (!safeLocal || !safeHostRegex.test(safeLocal)) {
+    throw new Error(`Invalid localIp for Kea HA hook: ${localIp}`);
+  }
+
   const isPrimary = ha.nodeRole === 'master';
   return {
     library: '/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_ha.so',
@@ -244,13 +254,13 @@ export function compileKeaHaHook(ha: HighAvailabilityConfig, localIp: string): R
           peers: [
             {
               name: 'axon-primary',
-              url: `http://${isPrimary ? localIp : ha.peerAddress}:8001/`,
+              url: `http://${isPrimary ? safeLocal : safePeer}:8001/`,
               role: 'primary',
               auto_failover: true,
             },
             {
               name: 'axon-secondary',
-              url: `http://${!isPrimary ? localIp : ha.peerAddress}:8001/`,
+              url: `http://${!isPrimary ? safeLocal : safePeer}:8001/`,
               role: 'standby',
               auto_failover: true,
             },
@@ -284,31 +294,31 @@ export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
   for (const dbPath of sync.databases) {
     const safeDbPath = (dbPath || '').replace(/[\r\n\0]/g, '').trim();
     if (!safeDbPath) continue;
-    lines.push(`  - path: ${safeDbPath}`);
+    lines.push(`  - path: ${JSON.stringify(safeDbPath)}`);
     lines.push('    replicas:');
     if (sync.litestreamBucket) {
       const safeBucket = (sync.litestreamBucket || '').replace(/[\r\n\0]/g, '').trim();
       const safeS3Path = safeDbPath.replace(/\//g, '_');
       lines.push(`      - type: s3`);
-      lines.push(`        bucket: ${safeBucket}`);
-      lines.push(`        path: ${safeS3Path}`);
+      lines.push(`        bucket: ${JSON.stringify(safeBucket)}`);
+      lines.push(`        path: ${JSON.stringify(safeS3Path)}`);
       if (sync.litestreamEndpoint) {
         const safeEndpoint = (sync.litestreamEndpoint || '').replace(/[\r\n\0]/g, '').trim();
-        lines.push(`        endpoint: ${safeEndpoint}`);
+        lines.push(`        endpoint: ${JSON.stringify(safeEndpoint)}`);
       }
       if (sync.litestreamAccessKeyId) {
         const safeKeyId = (sync.litestreamAccessKeyId || '').replace(/[\r\n\0]/g, '').trim();
-        lines.push(`        access-key-id: ${safeKeyId}`);
+        lines.push(`        access-key-id: ${JSON.stringify(safeKeyId)}`);
       }
       if (sync.litestreamSecretAccessKey) {
         const safeSecret = (sync.litestreamSecretAccessKey || '').replace(/[\r\n\0]/g, '').trim();
-        lines.push(`        secret-access-key: ${safeSecret}`);
+        lines.push(`        secret-access-key: ${JSON.stringify(safeSecret)}`);
       }
     } else {
       // Local/peer directory replica
       const replicaDir = safeDbPath.replace('.sqlite', '.replica');
       lines.push(`      - type: file`);
-      lines.push(`        path: ${replicaDir}`);
+      lines.push(`        path: ${JSON.stringify(replicaDir)}`);
     }
     const safeInterval = Math.max(1, Math.min(86400, Number(sync.syncIntervalSeconds) || 5));
     lines.push(`        sync-interval: ${safeInterval}s`);

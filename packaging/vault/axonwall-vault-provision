@@ -45,6 +45,13 @@ BUCKET="${VAULT_BUCKET:-backups}"
 RETENTION_DAYS="${VAULT_RETENTION_DAYS:-30}"
 ENDPOINT="${VAULT_S3_ENDPOINT:-http://127.0.0.1:8333}"
 CACERT="${VAULT_S3_CACERT:-}"
+S3_HDRS=""
+trap '[ -n "${S3_HDRS:-}" ] && rm -f "$S3_HDRS"' EXIT
+
+if ! printf '%s\n' "$BUCKET" | grep -Eq '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'; then
+    echo "invalid VAULT_BUCKET '$BUCKET': must be a valid S3 bucket name (3-63 lowercase alphanumerics, dots, or hyphens)" >&2
+    exit 2
+fi
 
 ADMIN_ENV="$CONF_DIR/vault-admin.env"
 WRITER_ENV="$CONF_DIR/vault-writer.env"
@@ -112,6 +119,7 @@ $_canon_hash"
     _auth="AWS4-HMAC-SHA256 Credential=$_ak/$_scope, SignedHeaders=$_signed, Signature=$_signature"
     _url="$ENDPOINT$_path"
     [ -n "$_query" ] && _url="$_url?$_query"
+    [ -n "${S3_HDRS:-}" ] && rm -f "$S3_HDRS"
     S3_HDRS="$(mktemp)"
     _curl_hdr_args=""
     while IFS= read -r _line; do

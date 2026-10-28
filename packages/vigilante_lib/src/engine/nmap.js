@@ -317,6 +317,20 @@ function extractTargetFromFilename(filename) {
   return clean ? clean.replace(/_/g, '/') : 'unknown-target';
 }
 
+const FORBIDDEN_NMAP_ARGS = /^(?:--script|--script-args|--script-args-file|--datadir|--servicedb|--versiondb|-iL|-iR|--excludefile|-oN|-oX|-oG|-oA|-oS|--resume|-resume)(?:=|$)/i;
+
+function sanitizeNmapCustomArgs(customArgs) {
+  const tokens = Array.isArray(customArgs)
+    ? customArgs.map(a => String(a).trim()).filter(Boolean)
+    : String(customArgs || '').trim().split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    if (FORBIDDEN_NMAP_ARGS.test(token)) {
+      throw new Error(`Forbidden nmap custom argument '${token}': script execution and file I/O flags are not allowed`);
+    }
+  }
+  return tokens;
+}
+
 /**
  * Execute an nmap scan against a single IP, hostname, or CIDR network block
  * @param {Object} options
@@ -350,7 +364,7 @@ export async function runNmapScan({
   const xmlFilePath = path.join(nmapsDir, `${baseName}.xml`);
 
   const profileDef = SCAN_PROFILES.find(p => p.id === profile) || SCAN_PROFILES[0];
-  const profileArgs = profile === 'custom' ? customArgs : profileDef.args;
+  const profileArgs = profile === 'custom' ? sanitizeNmapCustomArgs(customArgs) : profileDef.args;
 
   const nmapArgs = [
     ...profileArgs,

@@ -127,7 +127,7 @@ function loadLocalDesiredState(): DesiredState | null {
         const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
         const parsed = DesiredStateSchema.safeParse(raw);
         if (parsed.success) return parsed.data;
-        return raw as DesiredState;
+        return null;
       }
     } catch {
       // continue
@@ -1272,20 +1272,58 @@ export async function handleMcpCallTool(
 
       const { ctx } = await buildGuardContext(env.key, env.clientIp);
       if (req.rule.action === 'block' || req.rule.action === 'reject') {
-        if (req.rule.source && req.rule.source !== 'any' && !req.rule.source.startsWith('$')) {
+        const isSpecialEndpoint = (v: string) =>
+          v === 'any' || v === 'wan_ip' || v === 'lan_net' || v === 'self' || v.startsWith('$');
+        if (req.rule.source && !isSpecialEndpoint(req.rule.source)) {
           const srcCheck = validateMcpTarget(req.rule.source, ctx);
           if (!srcCheck.valid) {
             return deny('mcp:firewall:write', `Rule source rejected by guard: ${srcCheck.reason}`, req.audit);
           }
         }
-        if (req.rule.destinationPort && /^\d+$/.test(req.rule.destinationPort)) {
-          const portNum = Number(req.rule.destinationPort);
-          if ((ctx.antiLockoutPorts ?? [2966, 22, 9876]).includes(portNum)) {
-            return deny(
-              'mcp:firewall:write',
-              `Blocking anti-lockout port ${portNum} is prohibited`,
-              req.audit
-            );
+        if (req.rule.destination && !isSpecialEndpoint(req.rule.destination)) {
+          const dstCheck = validateMcpTarget(req.rule.destination, ctx);
+          if (!dstCheck.valid) {
+            return deny('mcp:firewall:write', `Rule destination rejected by guard: ${dstCheck.reason}`, req.audit);
+          }
+        }
+
+        const protectedPorts = ctx.antiLockoutPorts ?? [2966, 22, 9876];
+        const rawDport = (req.rule.destinationPort || '').trim();
+        const affectsTcp =
+          req.rule.protocol === 'any' || req.rule.protocol === 'tcp' || req.rule.protocol === 'tcp_udp';
+        if (affectsTcp && (!rawDport || rawDport === 'any')) {
+          return deny(
+            'mcp:firewall:write',
+            `Wildcard/empty destinationPort on ${req.rule.action} rule covers protected anti-lockout ports (${protectedPorts.join(', ')})`,
+            req.audit,
+          );
+        }
+        if (rawDport && rawDport !== 'any') {
+          for (const part of rawDport.split(',').map((s) => s.trim()).filter(Boolean)) {
+            if (/^\d+$/.test(part)) {
+              const portNum = Number(part);
+              if (protectedPorts.includes(portNum)) {
+                return deny(
+                  'mcp:firewall:write',
+                  `Blocking anti-lockout port ${portNum} is prohibited`,
+                  req.audit,
+                );
+              }
+            } else {
+              const rangeMatch = part.match(/^(\d+)\s*[-:]\s*(\d+)$/);
+              if (rangeMatch) {
+                const start = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
+                const end = Math.max(Number(rangeMatch[1]), Number(rangeMatch[2]));
+                const hit = protectedPorts.find((p) => p >= start && p <= end);
+                if (hit !== undefined) {
+                  return deny(
+                    'mcp:firewall:write',
+                    `Port range ${part} overlaps protected anti-lockout port ${hit}`,
+                    req.audit,
+                  );
+                }
+              }
+            }
           }
         }
       }
@@ -1306,10 +1344,12 @@ export async function handleMcpCallTool(
       if (req.applyImmediately) {
         const compiled = compileNftables(state);
         const applyRes = await callAxonwalldApi('POST', '/v1/apply', {
+          nftScript: compiled.nftScript,
+          confirmTimeoutSeconds: req.confirmTimeoutSeconds,
+          files: compiled.files,
           jobId: `mcp_apply_${Date.now()}`,
           bundleHash: crypto.createHash('sha256').update(compiled.nftScript).digest('hex'),
           nftablesRuleset: compiled.nftScript,
-          files: compiled.files,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds,
         });

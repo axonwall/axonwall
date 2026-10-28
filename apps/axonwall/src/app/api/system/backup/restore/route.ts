@@ -27,6 +27,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'No backup file provided' }, { status: 400 });
     }
 
+    if (file.size > 10 * 1024 * 1024) {
+      return NextResponse.json(
+        { success: false, error: 'Backup file exceeds maximum allowed size (10 MB)' },
+        { status: 413 }
+      );
+    }
+
     if (!passphrase) {
       return NextResponse.json({ success: false, error: 'Passphrase is required for decryption' }, { status: 400 });
     }

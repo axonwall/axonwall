@@ -166,9 +166,23 @@ func ParseTargetIPOrCIDR(target string) (net.IP, *net.IPNet, bool, int, string, 
 			return nil, nil, false, 0, "", fmt.Errorf("invalid CIDR '%s': %w", trimmed, err)
 		}
 		ones, bits := ipNet.Mask.Size()
-		isV6 := bits == 128 && ip.To4() == nil
-		// If single host CIDR (/32 or /128), canonicalize to plain IP for nftables compatibility where appropriate
-		if ( !isV6 && ones == 32 ) || ( isV6 && ones == 128 ) {
+		if ip4 := ip.To4(); ip4 != nil {
+			if bits == 128 {
+				if ones < 96 {
+					return nil, nil, false, 0, "", fmt.Errorf("invalid IPv4-mapped IPv6 CIDR prefix /%d in '%s'", ones, trimmed)
+				}
+				ones -= 96
+			}
+			mask := net.CIDRMask(ones, 32)
+			maskedIP := ip4.Mask(mask)
+			ipNet = &net.IPNet{IP: maskedIP, Mask: mask}
+			if ones == 32 {
+				return maskedIP, ipNet, false, 32, maskedIP.String(), nil
+			}
+			return maskedIP, ipNet, false, ones, ipNet.String(), nil
+		}
+		isV6 := true
+		if ones == 128 {
 			return ip, ipNet, isV6, ones, ip.String(), nil
 		}
 		return ip, ipNet, isV6, ones, ipNet.String(), nil

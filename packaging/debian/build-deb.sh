@@ -176,8 +176,8 @@ if [[ -f "${CHROOT_SRC}/etc/zsh/axonwall.zsh" ]]; then
   chmod 0644 "${WORK_DIR}/etc/zsh/axonwall.zsh"
 fi
 if [[ -f "${CHROOT_SRC}/etc/zsh/zshenv" ]]; then
-  cp "${CHROOT_SRC}/etc/zsh/zshenv" "${WORK_DIR}/etc/zsh/zshenv"
-  chmod 0644 "${WORK_DIR}/etc/zsh/zshenv"
+  cp "${CHROOT_SRC}/etc/zsh/zshenv" "${WORK_DIR}/usr/share/axonwall/zshenv"
+  chmod 0644 "${WORK_DIR}/usr/share/axonwall/zshenv"
 fi
 if [[ -f "${CHROOT_SRC}/etc/skel/.zshrc" ]]; then
   cp "${CHROOT_SRC}/etc/skel/.zshrc" "${WORK_DIR}/etc/skel/.zshrc"
@@ -253,6 +253,12 @@ if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
 fi
 if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
+fi
+
+# 7b. Declare all packaged /etc files in DEBIAN/conffiles so dpkg preserves operator edits
+if [[ -d "${WORK_DIR}/etc" ]]; then
+  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | LC_ALL=C sort) > "${WORK_DIR}/DEBIAN/conffiles"
+  chmod 0644 "${WORK_DIR}/DEBIAN/conffiles"
 fi
 
 # 8. Build Debian Archive via dpkg-deb (or docker fallback if dpkg-deb is absent)

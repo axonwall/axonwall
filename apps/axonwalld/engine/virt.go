@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -134,6 +135,22 @@ func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
 
 // RegisterVMSpec stores or updates the compiled specification for a VM
 func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) {
+	switch spec.Binary {
+	case "", "qemu-system-x86_64", "/usr/bin/qemu-system-x86_64":
+		spec.Binary = "/usr/bin/qemu-system-x86_64"
+	case "qemu-system-aarch64", "/usr/bin/qemu-system-aarch64":
+		spec.Binary = "/usr/bin/qemu-system-aarch64"
+	default:
+		return
+	}
+	for _, disk := range spec.Disks {
+		if disk.Pool != "" && !validZfsPoolName(disk.Pool) {
+			return
+		}
+		if disk.Zvol != "" && !validZfsPath(disk.Zvol, true) {
+			return
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.vmSpecs[spec.VMID] = spec
@@ -260,9 +277,15 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			if pool == "" {
 				pool = m.defaultPool
 			}
+			if !validZfsPoolName(pool) {
+				return fmt.Errorf("invalid ZFS pool name: %s", pool)
+			}
 			zvolName := disk.Zvol
 			if zvolName == "" {
 				zvolName = fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, vmid, idx)
+			}
+			if !validZfsPath(zvolName, true) {
+				return fmt.Errorf("invalid ZFS zvol path: %s", zvolName)
 			}
 			devPath := fmt.Sprintf("/dev/zvol/%s", zvolName)
 
@@ -284,7 +307,8 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 
 		// 2. Prepare Cloud-Init ISO if configured
 		if spec.CloudInit != nil {
-			ciDir := fmt.Sprintf("/tmp/axonwall-ci-vm-%d", vmid)
+			_ = os.MkdirAll("/run/axonwall", 0750)
+			ciDir := fmt.Sprintf("/run/axonwall/ci-vm-%d", vmid)
 			_ = os.MkdirAll(ciDir, 0700)
 			defer os.RemoveAll(ciDir)
 
@@ -335,8 +359,13 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 
 		// 4. Launch QEMU daemon
 		binary := spec.Binary
-		if binary == "" {
-			binary = "qemu-system-x86_64"
+		switch binary {
+		case "", "qemu-system-x86_64", "/usr/bin/qemu-system-x86_64":
+			binary = "/usr/bin/qemu-system-x86_64"
+		case "qemu-system-aarch64", "/usr/bin/qemu-system-aarch64":
+			binary = "/usr/bin/qemu-system-aarch64"
+		default:
+			return fmt.Errorf("disallowed QEMU binary: %s", binary)
 		}
 
 		logger("Executing %s with %d arguments...", binary, len(spec.Args))
@@ -579,6 +608,9 @@ func (m *VirtManager) ListISOs(pool string) []ISOInfo {
 	if pool == "" {
 		pool = m.defaultPool
 	}
+	if !validZfsPoolName(pool) {
+		return []ISOInfo{}
+	}
 
 	dirs := []string{
 		fmt.Sprintf("/mnt/%s/isos", pool),
@@ -621,11 +653,49 @@ func (m *VirtManager) ListISOs(pool string) []ISOInfo {
 	return result
 }
 
-// DownloadISO streams an ISO from a URL into the storage pool
-func (m *VirtManager) DownloadISO(url, filename, pool, expectedSha256, user string) (string, error) {
+// DeleteISO safely deletes an ISO or disk image from the specified storage pool.
+func (m *VirtManager) DeleteISO(pool, filename string) error {
 	if pool == "" {
 		pool = m.defaultPool
 	}
+	if !validZfsPoolName(pool) {
+		return fmt.Errorf("invalid ZFS pool name: %s", pool)
+	}
+	safeName := filepath.Base(strings.TrimSpace(filename))
+	if safeName == "" || safeName == "." || safeName == ".." || (!strings.HasSuffix(safeName, ".iso") && !strings.HasSuffix(safeName, ".img")) {
+		return fmt.Errorf("invalid ISO filename: %s", filename)
+	}
+	for _, dir := range []string{fmt.Sprintf("/mnt/%s/isos", pool), "/var/lib/axonwall/isos"} {
+		candidate := filepath.Join(dir, safeName)
+		if info, err := os.Lstat(candidate); err == nil && !info.IsDir() {
+			return os.Remove(candidate)
+		}
+	}
+	return fmt.Errorf("ISO %s not found in pool %s", safeName, pool)
+}
+
+// DownloadISO streams an ISO from a URL into the storage pool
+func (m *VirtManager) DownloadISO(rawURL, filename, pool, expectedSha256, user string) (string, error) {
+	if pool == "" {
+		pool = m.defaultPool
+	}
+	if !validZfsPoolName(pool) {
+		return "", fmt.Errorf("invalid ZFS pool name: %s", pool)
+	}
+	parsedURL, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
+		return "", fmt.Errorf("invalid ISO download URL: must be http or https")
+	}
+	hostOnly := parsedURL.Hostname()
+	if strings.EqualFold(hostOnly, "localhost") {
+		return "", fmt.Errorf("disallowed loopback ISO download host")
+	}
+	if ip := net.ParseIP(hostOnly); ip != nil {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return "", fmt.Errorf("disallowed loopback or link-local ISO download IP: %s", hostOnly)
+		}
+	}
+
 	targetDir := fmt.Sprintf("/mnt/%s/isos", pool)
 	_ = os.MkdirAll(targetDir, 0755)
 
@@ -636,9 +706,10 @@ func (m *VirtManager) DownloadISO(url, filename, pool, expectedSha256, user stri
 	destPath := filepath.Join(targetDir, safeName)
 
 	upid := m.taskMgr.StartTask("isodownload", safeName, user, func(logger func(format string, args ...any)) error {
-		logger("Downloading ISO from %s to %s...", url, destPath)
+		logger("Downloading ISO from %s to %s...", rawURL, destPath)
 
-		resp, err := http.Get(url)
+		client := &http.Client{Timeout: 30 * time.Minute}
+		resp, err := client.Get(rawURL)
 		if err != nil {
 			logger("HTTP request error: %v", err)
 			return err
@@ -664,9 +735,10 @@ func (m *VirtManager) DownloadISO(url, filename, pool, expectedSha256, user stri
 		buf := make([]byte, 65536)
 		var downloaded int64
 		lastLog := time.Now()
+		limitedBody := io.LimitReader(resp.Body, 16*1024*1024*1024)
 
 		for {
-			n, rErr := resp.Body.Read(buf)
+			n, rErr := limitedBody.Read(buf)
 			if n > 0 {
 				_, wErr := writer.Write(buf[:n])
 				if wErr != nil {
@@ -717,6 +789,12 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 	if pool == "" {
 		pool = m.defaultPool
 	}
+	if !validZfsPoolName(pool) {
+		return "", fmt.Errorf("invalid ZFS pool name: %s", pool)
+	}
+	if targetType != "vm" && targetType != "lxc" {
+		return "", fmt.Errorf("invalid backup target type '%s': must be 'vm' or 'lxc'", targetType)
+	}
 	ts := time.Now().Format("20060102-150405")
 	snapName := fmt.Sprintf("backup-%s", ts)
 
@@ -740,7 +818,7 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 			}
 
 			logger("Streaming snapshot to compressed archive %s...", archivePath)
-			sendCmd := fmt.Sprintf("zfs send %s | zstd -3 > %s", snapFull, archivePath)
+			sendCmd := fmt.Sprintf("set -o pipefail; zfs send %s | zstd -3 > %s", snapFull, archivePath)
 			cmdStream := exec.Command("/bin/bash", "-c", sendCmd)
 			if out, err := cmdStream.CombinedOutput(); err != nil {
 				logger("Stream error: %s (%v)", string(out), err)
@@ -758,7 +836,7 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 			}
 
 			logger("Streaming container snapshot to archive %s...", archivePath)
-			sendCmd := fmt.Sprintf("zfs send %s | zstd -3 > %s", snapFull, archivePath)
+			sendCmd := fmt.Sprintf("set -o pipefail; zfs send %s | zstd -3 > %s", snapFull, archivePath)
 			cmdStream := exec.Command("/bin/bash", "-c", sendCmd)
 			if out, err := cmdStream.CombinedOutput(); err != nil {
 				logger("Stream error: %s (%v)", string(out), err)
@@ -777,6 +855,9 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 func (m *VirtManager) ListBackups(pool string) []BackupRecord {
 	if pool == "" {
 		pool = m.defaultPool
+	}
+	if !validZfsPoolName(pool) {
+		return []BackupRecord{}
 	}
 	backupDir := fmt.Sprintf("/mnt/%s/backups", pool)
 	entries, err := os.ReadDir(backupDir)

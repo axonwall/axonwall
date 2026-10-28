@@ -1215,6 +1215,20 @@ export function compileVowArgoApplicationYaml(
   return stringifyYaml(argoDoc).trim();
 }
 
+const SAFE_DNS_DOMAIN_REGEX =
+  /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+const SAFE_DNS_LABEL_REGEX = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+
+function escapeEnvDoubleQuoted(val: unknown): string {
+  return String(val ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`')
+    .replace(/\r/g, '')
+    .replace(/\n/g, '\\n');
+}
+
 /**
  * Compiles Unbound DNS local-zone and local-data A records for all enabled VOW application subdomains.
  */
@@ -1228,11 +1242,17 @@ export function compileVowUnboundOverrides(state: DesiredState): string {
   }
 
   const domain = vow.domain || 'vow.axonwall.local';
+  if (!SAFE_DNS_DOMAIN_REGEX.test(domain)) {
+    throw new Error(`Invalid VOW DNS domain: ${domain}`);
+  }
   const lanIface =
     state.interfaces.find((i) => i.enabled && i.name.toLowerCase() === 'lan' && i.ipv4Address) ||
     state.interfaces.find((i) => i.enabled && inferInterfaceRole(i) === 'lan' && i.ipv4Address) ||
     state.interfaces.find((i) => i.name.toLowerCase() === 'lan');
   const lanIp = lanIface?.ipv4Address?.split('/')[0] || '192.168.1.1';
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(lanIp)) {
+    throw new Error(`Invalid LAN IPv4 address for Unbound override: ${lanIp}`);
+  }
 
   const { resolvedApps } = resolveVowAppDependencies(vow.enabledApps ?? []);
   const lines: string[] = [
@@ -1248,6 +1268,9 @@ export function compileVowUnboundOverrides(state: DesiredState): string {
     const override = vow.appOverrides?.find((o) => o.appId === appId);
     const sub = override?.customSubdomain || app.subdomain;
     if (!sub) continue;
+    if (!SAFE_DNS_LABEL_REGEX.test(sub)) {
+      throw new Error(`Invalid VOW custom subdomain label: ${sub}`);
+    }
     lines.push(`  local-data: "${sub}.${domain}. IN A ${lanIp}"`);
   }
 
@@ -1267,12 +1290,12 @@ export function compileVowEnablerEnv(config: VowConfig): string {
     '# Vigilant Octo Waffle (VOW) — Auto-Generated Environment & Enabler Flags',
     '# Managed by Axonwall Plugin: vigilant-octo-waffle (Requires: core-k3s)',
     '# =============================================================================',
-    `CD_RUNNER="${config.cdRunner}"`,
+    `CD_RUNNER="${escapeEnvDoubleQuoted(config.cdRunner)}"`,
     `K8S_DISTRO="k3s"`,
-    `THIS_DOMAIN_NAME="${config.domain}"`,
-    `THIS_REPO_URL="${config.gitRepoUrl}"`,
-    `THIS_FLUX_BRANCH="${config.gitBranch}"`,
-    `THIS_FLUX_INTERVAL="${config.fluxInterval}"`,
+    `THIS_DOMAIN_NAME="${escapeEnvDoubleQuoted(config.domain)}"`,
+    `THIS_REPO_URL="${escapeEnvDoubleQuoted(config.gitRepoUrl)}"`,
+    `THIS_FLUX_BRANCH="${escapeEnvDoubleQuoted(config.gitBranch)}"`,
+    `THIS_FLUX_INTERVAL="${escapeEnvDoubleQuoted(config.fluxInterval)}"`,
     `LOCAL_TLS_MKCERT="${config.localTlsMkcert ? 'true' : 'false'}"`,
     `VOW_AUTHZ_ENABLED="${config.authzEnabled ? 'true' : 'false'}"`,
     '',

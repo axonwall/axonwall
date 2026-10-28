@@ -63,11 +63,28 @@ export function isInterfaceAuthoritativeDhcp(
 
 export const AliasTypeSchema = z.enum(['host', 'network', 'port', 'mac', 'urltable', 'geoip', 'asn', 'fqdn']);
 
+export function isValidFirewallEndpoint(val: string): boolean {
+  if (!val || /[;#\r\n"'{}]/.test(val)) return false;
+  if (val === 'any' || val === 'wan_ip' || val === 'lan_net' || val === 'self') return true;
+  if (isValidIPv4(val) || isValidIPv6(val) || isValidCIDR(val)) return true;
+  if (/^\$[a-zA-Z0-9_-]+$/.test(val)) return true;
+  return false;
+}
+
+export function isValidPortSpec(val: string): boolean {
+  if (!val || /[;#\r\n"'{}]/.test(val)) return false;
+  return isValidPortRange(val) || /^\$[a-zA-Z0-9_-]+$/.test(val);
+}
+
 export const AliasSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().regex(/^[a-zA-Z0-9_]+$/, 'Alias name must be alphanumeric or underscore'),
   type: AliasTypeSchema,
-  entries: z.array(z.string().min(1)),
+  entries: z.array(
+    z.string().min(1).refine((v) => !/[;\r\n{}"']/.test(v), {
+      message: 'Alias entry contains invalid characters',
+    }),
+  ),
   url: z.string().optional(),
   refreshIntervalHours: z.number().int().optional(),
   description: z.string().max(255).default(''),
@@ -86,12 +103,16 @@ export const FirewallRuleSchema = z.object({
   interface: z.string().min(1).default('lan'), // interface name or 'any' or 'floating'
   quick: z.boolean().default(true),
   protocol: RuleProtocolSchema.default('any'),
-  source: z.string().default('any'), // 'any', IP, CIDR, or '$alias_name'
-  sourcePort: z.string().refine((val) => val === '' || val === 'any' || isValidPortRange(val) || val.startsWith('$'), {
+  source: z.string().refine(isValidFirewallEndpoint, {
+    message: 'Invalid source endpoint (must be any, wan_ip, lan_net, self, IP, CIDR, or $alias)',
+  }).default('any'), // 'any', IP, CIDR, or '$alias_name'
+  sourcePort: z.string().refine((val) => val === '' || val === 'any' || isValidPortSpec(val), {
     message: 'Invalid source port range or alias',
   }).default(''),
-  destination: z.string().default('any'),
-  destinationPort: z.string().refine((val) => val === '' || val === 'any' || isValidPortRange(val) || val.startsWith('$'), {
+  destination: z.string().refine(isValidFirewallEndpoint, {
+    message: 'Invalid destination endpoint (must be any, wan_ip, lan_net, self, IP, CIDR, or $alias)',
+  }).default('any'),
+  destinationPort: z.string().refine((val) => val === '' || val === 'any' || isValidPortSpec(val), {
     message: 'Invalid destination port range or alias',
   }).default(''),
   gateway: z.string().optional(), // for policy routing
@@ -110,12 +131,24 @@ export const NatRuleSchema = z.object({
   type: NatTypeSchema.default('dnat'),
   interface: z.string().min(1).default('wan'),
   protocol: RuleProtocolSchema.default('tcp'),
-  source: z.string().default('any'),
-  sourcePort: z.string().default(''),
-  destination: z.string().default('wan_ip'),
-  destinationPort: z.string().default(''),
-  targetIp: z.string().optional(), // translated internal IP
-  targetPort: z.string().optional(), // translated internal port
+  source: z.string().refine(isValidFirewallEndpoint, {
+    message: 'Invalid NAT source endpoint',
+  }).default('any'),
+  sourcePort: z.string().refine((v) => !v || isValidPortSpec(v) || v === 'any', {
+    message: 'Invalid NAT source port',
+  }).default(''),
+  destination: z.string().refine(isValidFirewallEndpoint, {
+    message: 'Invalid NAT destination endpoint',
+  }).default('wan_ip'),
+  destinationPort: z.string().refine((v) => !v || isValidPortSpec(v) || v === 'any', {
+    message: 'Invalid NAT destination port',
+  }).default(''),
+  targetIp: z.string().refine((v) => !v || isValidIPv4(v) || isValidIPv6(v) || isValidCIDR(v) || v === 'wan_ip', {
+    message: 'Invalid NAT target IP',
+  }).optional(), // translated internal IP
+  targetPort: z.string().refine((v) => !v || isValidPortSpec(v) || v === 'any', {
+    message: 'Invalid NAT target port',
+  }).optional(), // translated internal port
   log: z.boolean().default(false),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),
@@ -594,6 +627,7 @@ export const CaptivePortalZoneSchema = z.object({
   interface: z.string().min(1),
   listenPort: z.number().int().default(8999),
   authServers: z.array(z.string()).default(['ldap_internal']),
+  radiusSecret: z.string().optional(),
   sessionTimeoutMinutes: z.number().int().min(1).default(720),
   idleTimeoutMinutes: z.number().int().min(1).default(60),
   passThroughMacs: z.array(z.string()).default([]),
@@ -607,6 +641,7 @@ export type CaptivePortalZone = z.infer<typeof CaptivePortalZoneSchema>;
 
 export const CaptivePortalConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  radiusSecret: z.string().optional(),
   zones: z.array(CaptivePortalZoneSchema).default([]),
 });
 export type CaptivePortalConfig = z.infer<typeof CaptivePortalConfigSchema>;
@@ -1546,7 +1581,10 @@ export const HostMalwareDefenseConfigSchema = z.object({
   yaraEnabled: z.boolean().default(true),
   unhideEnabled: z.boolean().default(true),
   debsumsEnabled: z.boolean().default(true),
-  scheduledScanCron: z.string().default('0 3 * * *'),
+  scheduledScanCron: z.string().regex(
+    /^[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+$/,
+    'Invalid 5-field cron expression',
+  ).default('0 3 * * *'),
   // Ghost in the Ring: io_uring Syscall-Less Implant Hardening & Hunting (Curing / RingReaper)
   ioUringDisabledMode: z.enum(['0', '1', '2']).default('1'),
   ioUringAllowedGid: z.number().int().min(0).max(65535).default(994),
@@ -1556,7 +1594,9 @@ export const HostMalwareDefenseConfigSchema = z.object({
   bpfJitHardenMode: z.enum(['0', '1', '2']).default('2'),
   kernelLockdownMode: z.enum(['none', 'integrity', 'confidentiality']).default('confidentiality'),
   bpfLsmGuardEnabled: z.boolean().default(true),
-  trustedBpfLoaderPaths: z.array(z.string()).default([
+  trustedBpfLoaderPaths: z.array(
+    z.string().regex(/^\/[a-zA-Z0-9._/-]+$/, 'Trusted BPF loader path must be a safe absolute path'),
+  ).default([
     '/usr/sbin/bpftool',
     '/usr/local/bin/axonwalld',
   ]),

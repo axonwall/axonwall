@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,7 +88,7 @@ func (m *IAPManager) generateCaddyfile(config ZeroTrustConfig) string {
 
 		out += fmt.Sprintf("%s {\n", app.PublicHostname)
 		out += fmt.Sprintf("\tforward_auth http://localhost:3000 {\n")
-		out += fmt.Sprintf("\t\turi /api/auth/gateway\n")
+		out += fmt.Sprintf("\t\turi /api/auth/gateway?app_id=%s&roles=%s\n", url.QueryEscape(app.ID), url.QueryEscape(strings.Join(app.AllowedRoles, ",")))
 		out += fmt.Sprintf("\t\tcopy_headers X-Remote-User X-Remote-Roles\n")
 		out += fmt.Sprintf("\t}\n")
 		out += fmt.Sprintf("\treverse_proxy %s\n", app.InternalUpstream)

@@ -46,14 +46,19 @@ case "$1" in
         fi
 
         # 2. Ensure directories exist with strict permissions
-        mkdir -p /var/lib/axonwall /var/log/axonwall /run/axonwall /etc/axonwall/certs /opt/axonwall
+        mkdir -p /var/lib/axonwall /var/log/axonwall /var/cache/axonwall-ui /run/axonwall /etc/axonwall/certs /opt/axonwall
         mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /run/headscale
         mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
         mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 
         chown root:axonwall-api /var/lib/axonwall /etc/axonwall
-        chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /opt/axonwall
-        chmod 2775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /etc/axonwall 2>/dev/null || true
+        chown -R root:root /opt/axonwall
+        chmod -R go-w /opt/axonwall 2>/dev/null || true
+        chown -R axonwall:axonwall /var/cache/axonwall-ui
+        chmod 0750 /var/cache/axonwall-ui
+        chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups
+        chmod 3775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
+        chmod 1770 /etc/axonwall 2>/dev/null || true
         for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed /var/lib/axonwall/mcp-keys.json /var/lib/axonwall/mcp-settings.json /var/lib/axonwall/mcp-audit.jsonl; do
             if [ -e "$f" ]; then
                 chown axonwall:axonwall-api "$f" 2>/dev/null || true
@@ -72,9 +77,10 @@ case "$1" in
             chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
         fi
         chown root:root /var/lib/axonwall/home
-        chmod 0775 /var/lib/axonwall
+        chmod 1775 /var/lib/axonwall
         chmod 0755 /var/lib/axonwall/home
-        chmod 750 /var/log/axonwall /opt/axonwall
+        chmod 0750 /var/log/axonwall
+        chmod 0755 /opt/axonwall
         chmod 770 /var/lib/axonwall/headscale /run/headscale
         chmod 0700 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
         chown -R root:root /var/lib/axonwall/secrets
@@ -113,7 +119,7 @@ case "$1" in
         chmod 0755 /var/lib/axonwall/home /home 2>/dev/null || true
 
         chown root:axonwall-api /etc/axonwall /etc/axonwall/certs
-        chmod 0770 /etc/axonwall
+        chmod 1770 /etc/axonwall
         chmod 0750 /etc/axonwall/certs
         if [ -f /etc/axonwall/admin.env ]; then
             chown axonwall /etc/axonwall/admin.env 2>/dev/null || true
@@ -152,9 +158,13 @@ case "$1" in
 
         # 4. Generate default environment secrets if absent
         if [ ! -s /etc/axonwall/axonwall.env ]; then
-            JWT_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || echo "axonwall-secret-token")
-            ZTP_TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' 2>/dev/null || echo "axonwall-ztp")
+            JWT_SECRET="$(openssl rand -hex 32 2>/dev/null || od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+            ZTP_TOKEN="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
             ADMIN_PASS="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+            if [ "${#JWT_SECRET}" -lt 64 ] || [ "${#ZTP_TOKEN}" -lt 32 ] || [ "${#ADMIN_PASS}" -lt 16 ]; then
+                echo "Error: CSPRNG failed to generate required entropy for Axonwall secrets" >&2
+                exit 1
+            fi
 
             cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
@@ -225,6 +235,10 @@ ENV_EOF
             fi
             if [ -f /etc/zsh/zshrc ] && ! grep -q '/etc/zsh/axonwall.zsh' /etc/zsh/zshrc; then
                 printf '\n# Load Axonwall ZSH environment\n[ -f /etc/zsh/axonwall.zsh ] && source /etc/zsh/axonwall.zsh\n' >> /etc/zsh/zshrc
+            fi
+            mkdir -p /etc/zsh
+            if [ ! -f /etc/zsh/zshenv ] || ! grep -q '/usr/share/axonwall/zshenv' /etc/zsh/zshenv; then
+                printf '\n# Load Axonwall ZSH env defaults\n[ -f /usr/share/axonwall/zshenv ] && source /usr/share/axonwall/zshenv\n' >> /etc/zsh/zshenv
             fi
             mkdir -p /etc/skel
             if [ ! -f /etc/skel/.zshrc ]; then

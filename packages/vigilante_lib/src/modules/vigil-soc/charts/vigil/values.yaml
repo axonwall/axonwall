@@ -648,8 +648,9 @@ secrets:
 # Non-secret config (rendered into a ConfigMap)
 # -----------------------------------------------------------------------------
 config:
-  # Development Mode — MUST be false in production. Enabled for local dev sandbox.
-  DEV_MODE: "true"
+  # Development Mode — MUST be false in production.
+  DEV_MODE: "false"
+  VIGIL_COOKIE_SECURE: "true"
 
   # Secrets / auth policy
   SECRETS_BACKEND: "dotenv"

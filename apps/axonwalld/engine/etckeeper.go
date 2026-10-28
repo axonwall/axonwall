@@ -5,10 +5,13 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+var validGitCommitHashRe = regexp.MustCompile(`^[0-9a-fA-F]{4,64}$`)
 
 // EtckeeperStatus provides health and commit state information for etckeeper.
 type EtckeeperStatus struct {
@@ -232,7 +235,10 @@ func (m *EtckeeperManager) GetDiff(commitHash string) (string, error) {
 	var cmd *exec.Cmd
 	if commitHash != "" {
 		cleanHash := strings.TrimSpace(commitHash)
-		cmd = m.execCmd("git", "-C", m.etcDir, "show", cleanHash)
+		if !validGitCommitHashRe.MatchString(cleanHash) {
+			return "", fmt.Errorf("invalid commit hash %q: must be 4-64 hexadecimal characters", cleanHash)
+		}
+		cmd = m.execCmd("git", "-C", m.etcDir, "show", cleanHash, "--")
 	} else {
 		cmd = m.execCmd("git", "-C", m.etcDir, "diff")
 	}

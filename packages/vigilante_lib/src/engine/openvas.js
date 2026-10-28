@@ -15,6 +15,8 @@ export function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
+export const xmlEscape = escapeXml;
+
 /**
  * Build the in-pod gvm-cli invocation. kubectl exec runs this through
  * `sh -c` inside the openvas pod, so every interpolated value — credentials
@@ -300,6 +302,44 @@ export function generateVulnerabilityFindings(host, profileId = 'full-and-fast')
 }
 
 /**
+ * Parse GMP XML <get_reports> output into structured findings
+ */
+function parseGmpReportFindings(reportXml = '') {
+  if (!reportXml || typeof reportXml !== 'string') return [];
+  const results = [];
+  const resultBlocks = reportXml.match(/<result\b[\s\S]*?<\/result>/g) || [];
+  for (const block of resultBlocks) {
+    const idMatch = block.match(/<result[^>]*\bid="([^"]+)"/);
+    const nameMatch = block.match(/<name>([\s\S]*?)<\/name>/);
+    const portMatch = block.match(/<port>([\s\S]*?)<\/port>/);
+    const sevMatch = block.match(/<severity>([\s\S]*?)<\/severity>/);
+    const descMatch = block.match(/<description>([\s\S]*?)<\/description>/);
+    const cveMatches = Array.from(block.matchAll(/<ref[^>]*type="cve"[^>]*id="([^"]+)"/gi)).map(m => m[1]);
+    const cvss = sevMatch ? parseFloat(sevMatch[1]) || 0 : 0;
+    const sevInfo = getCvssSeverity(cvss);
+    const portText = portMatch ? portMatch[1].trim() : '0/tcp';
+    const portNum = parseInt(portText.split('/')[0], 10) || 0;
+    const proto = (portText.split('/')[1] || 'tcp').toLowerCase();
+    results.push({
+      id: idMatch ? idMatch[1] : `OVAS-${results.length + 1}`,
+      cve: cveMatches[0] || 'N/A',
+      cvss,
+      severity: sevInfo.level,
+      port: portNum,
+      protocol: proto,
+      service: 'detected',
+      title: nameMatch ? nameMatch[1].trim() : 'OpenVAS NVT Finding',
+      description: descMatch ? descMatch[1].trim() : '',
+      solution: 'Refer to Greenbone NVT advisory.',
+      impact: '',
+      references: cveMatches.map(c => `https://nvd.nist.gov/vuln/detail/${c}`),
+      synthetic: false
+    });
+  }
+  return results;
+}
+
+/**
  * Execute vulnerability scan against target host
  */
 export async function runHostVulnerabilityScan({
@@ -308,12 +348,14 @@ export async function runHostVulnerabilityScan({
   networkTarget = 'local_network',
   namespace = null,
   clusterName = 'vigilante-dev',
+  simulate = false,
   onProgress = null,
   onLog = null
 } = {}) {
   const hostIp = typeof host === 'string' ? host : host?.ip || '127.0.0.1';
   const profileObj = SCAN_PROFILES.find(p => p.id === profile) || SCAN_PROFILES[0];
   const startTime = Date.now();
+  const useSimulation = Boolean(simulate || process.env.VIGILANTE_SIMULATE_SCANS === '1');
 
   logger.info('OPENVAS:SCAN', `Initiating vulnerability scan against host ${hostIp} (Profile: ${profileObj.name})`);
   if (onLog) onLog(`[openvas] Launching scan against ${hostIp} using profile '${profileObj.name}'...`);
@@ -328,13 +370,16 @@ export async function runHostVulnerabilityScan({
   const effectiveNamespace = status.namespace || namespace || 'default';
 
   let gmpTaskCreated = null;
+  let gmpFindings = [];
   if (status.ready) {
     if (onLog) onLog(`[openvas] Cluster pods ready in namespace '${effectiveNamespace}'. Connecting to gvmd via GMP.`);
-    try {
-      const creds = await getOpenVasCredentials({ namespace: effectiveNamespace, clusterName });
-      const username = creds?.username || 'admin';
-      const password = creds?.password || 'admin';
+    const creds = await getOpenVasCredentials({ namespace: effectiveNamespace, clusterName });
+    if (!creds || !creds.username || !creds.password) {
+      throw new Error(`Failed to retrieve OpenVAS admin credentials from Kubernetes secret 'openvas-admin' in namespace '${effectiveNamespace}'`);
+    }
+    const { username, password } = creds;
 
+    try {
       // Map profile to known Greenbone config UUID
       const configMap = {
         'full-and-fast': 'daba56c8-73ec-11df-a475-002264764cea',
@@ -345,7 +390,7 @@ export async function runHostVulnerabilityScan({
       };
       const configId = configMap[profile] || 'daba56c8-73ec-11df-a475-002264764cea';
 
-      const targetXml = `<create_target><name>Target_${hostIp.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}</name><hosts>${escapeXml(hostIp)}</hosts><port_list id="33d0cd82-57c6-11e1-8ed1-406186ea4fc5"/></create_target>`;
+      const targetXml = `<create_target><name>Target_${hostIp.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}</name><hosts>${xmlEscape(hostIp)}</hosts><port_list id="33d0cd82-57c6-11e1-8ed1-406186ea4fc5"/></create_target>`;
       const { stdout: targetRes } = await execa('kubectl', [
         'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
         '--context', `k3d-${clusterName}`,
@@ -357,7 +402,7 @@ export async function runHostVulnerabilityScan({
       const targetId = targetIdMatch ? targetIdMatch[1] : null;
 
       if (targetId) {
-        const taskXml = `<create_task><name>Scan_${hostIp.replace(/[^a-zA-Z0-9]/g, '_')}</name><config id="${configId}"/><target id="${targetId}"/><scanner id="08b69003-5fc2-4037-a479-93b440211c73"/></create_task>`;
+        const taskXml = `<create_task><name>Scan_${hostIp.replace(/[^a-zA-Z0-9]/g, '_')}</name><config id="${xmlEscape(configId)}"/><target id="${xmlEscape(targetId)}"/><scanner id="08b69003-5fc2-4037-a479-93b440211c73"/></create_task>`;
         const { stdout: taskRes } = await execa('kubectl', [
           'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
           '--context', `k3d-${clusterName}`,
@@ -366,15 +411,51 @@ export async function runHostVulnerabilityScan({
         ]);
         const taskIdMatch = taskRes.match(/id="([^"]+)"/);
         if (taskIdMatch) {
-          gmpTaskCreated = { taskId: taskIdMatch[1], targetId };
-          if (onLog) onLog(`[openvas] Registered GMP task ${gmpTaskCreated.taskId} in gvmd scheduler.`);
+          const taskId = taskIdMatch[1];
+          const startXml = `<start_task task_id="${xmlEscape(taskId)}"/>`;
+          const { stdout: startRes } = await execa('kubectl', [
+            'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
+            '--context', `k3d-${clusterName}`,
+            '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
+            gvmCliCommand(username, password, startXml)
+          ]);
+          const reportIdMatch = startRes.match(/<report_id>([^<]+)<\/report_id>/);
+          const reportId = reportIdMatch ? reportIdMatch[1] : null;
+          gmpTaskCreated = { taskId, targetId, reportId, started: true };
+          if (onLog) onLog(`[openvas] Started GMP task ${taskId} in gvmd scheduler${reportId ? ` (report ${reportId})` : ''}.`);
+
+          const statusXml = `<get_tasks task_id="${xmlEscape(taskId)}"/>`;
+          const { stdout: statusRes } = await execa('kubectl', [
+            'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
+            '--context', `k3d-${clusterName}`,
+            '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
+            gvmCliCommand(username, password, statusXml)
+          ]);
+          const taskStatusMatch = statusRes.match(/<status>([^<]+)<\/status>/);
+          if (taskStatusMatch) {
+            gmpTaskCreated.status = taskStatusMatch[1];
+          }
+
+          if (reportId) {
+            const getReportXml = `<get_reports report_id="${xmlEscape(reportId)}" details="1"/>`;
+            const { stdout: reportXmlOut } = await execa('kubectl', [
+              'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
+              '--context', `k3d-${clusterName}`,
+              '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
+              gvmCliCommand(username, password, getReportXml)
+            ]);
+            gmpFindings = parseGmpReportFindings(reportXmlOut);
+          }
         }
       }
     } catch (gmpErr) {
-      logger.warn('OPENVAS:GMP', `GMP dispatch failed: ${gmpErr.message}; continuing with vulnerability evaluator`);
+      logger.warn('OPENVAS:GMP', `GMP dispatch failed: ${gmpErr.message}`);
+      if (!useSimulation) {
+        throw new Error(`OpenVAS GMP scan execution failed: ${gmpErr.message}`);
+      }
     }
   } else {
-    if (onLog) onLog(`[openvas] Cluster pods offline or standby. Running standalone vulnerability evaluator.`);
+    if (onLog) onLog(`[openvas] Cluster pods offline or standby.${useSimulation ? ' Running simulated vulnerability evaluator.' : ''}`);
   }
   await new Promise(r => setTimeout(r, 500));
 
@@ -387,7 +468,10 @@ export async function runHostVulnerabilityScan({
   await new Promise(r => setTimeout(r, 600));
 
   // Step 5: Report Synthesis (100%)
-  const findings = generateVulnerabilityFindings(host, profile);
+  const findings = gmpFindings.length > 0
+    ? gmpFindings
+    : (useSimulation ? generateVulnerabilityFindings(host, profile) : []);
+  const isSimulated = gmpFindings.length === 0 && useSimulation;
   const criticalCount = findings.filter(f => f.severity === 'CRITICAL').length;
   const highCount = findings.filter(f => f.severity === 'HIGH').length;
   const mediumCount = findings.filter(f => f.severity === 'MEDIUM').length;
@@ -403,11 +487,9 @@ export async function runHostVulnerabilityScan({
     target: hostIp,
     networkTarget,
     profile: profileObj,
-    // The findings payload is always produced by the heuristic port
-    // evaluator (generateVulnerabilityFindings), even when a GMP task was
-    // registered — say so on the result that gets saved as a report.
-    synthetic: true,
-    findingsSource: 'heuristic-port-evaluation',
+    simulated: isSimulated,
+    synthetic: isSimulated,
+    findingsSource: gmpFindings.length > 0 ? 'gvmd-gmp-report' : (isSimulated ? 'simulated-heuristic-evaluation' : 'gvmd-no-findings'),
     timestamp: new Date().toISOString(),
     durationMs,
     clusterStatus: status,

@@ -40,6 +40,11 @@ certs/
 apps/axonwalld/axonwalld
 apps/axonwall-satellite/axonwall-satellite
 apps/axonwall-console/axonwall-console
+apps/terraform-provider-axonwall/terraform-provider-axonwall
+test-tf/terraform
+test-tf/*.zip
+test-tf/*.tfstate*
+test-tf/.terraform/
 package.json.tmp
 
 # ISO build artifacts

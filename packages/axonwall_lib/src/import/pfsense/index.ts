@@ -11,10 +11,11 @@ import type {
   StaticRoute,
   Gateway,
 } from '../../schemas/index.js';
-import type { ImportReport } from '../types.js';
+import type { ImportReport, ImportReviewItem } from '../types.js';
 
 export function importPfsenseConfig(xmlContent: string): ImportReport {
   const warnings: string[] = [];
+  const reviewItems: ImportReviewItem[] = [];
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
@@ -171,6 +172,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
       // Source parsing
       let src = 'any';
       let srcPort = '';
+      let negatedSrc = false;
       if (r.source) {
         if (r.source.any !== undefined) {
           src = 'any';
@@ -180,7 +182,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
           src = String(r.source.address);
         }
         if (r.source.not !== undefined && src !== 'any') {
-          warnings.push(`Rule "${r.descr || sortOrder}": Inverted source not directly supported in nftables table; converted to positive match.`);
+          negatedSrc = true;
         }
         if (r.source.port) {
           srcPort = String(r.source.port);
@@ -190,6 +192,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
       // Destination parsing
       let dst = 'any';
       let dstPort = '';
+      let negatedDst = false;
       if (r.destination) {
         if (r.destination.any !== undefined) {
           dst = 'any';
@@ -199,11 +202,42 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
           dst = String(r.destination.address);
         }
         if (r.destination.not !== undefined && dst !== 'any') {
-          warnings.push(`Rule "${r.descr || sortOrder}": Inverted destination not directly supported; converted to positive match.`);
+          negatedDst = true;
         }
         if (r.destination.port) {
           dstPort = String(r.destination.port);
         }
+      }
+
+      const hasNegation = negatedSrc || negatedDst;
+      const ruleIndex = rules.length;
+      const baseDescr = r.descr ? String(r.descr) : '';
+      const finalDescr = hasNegation
+        ? `[REVIEW: Negated match] ${baseDescr}`.trim()
+        : baseDescr;
+      const isEnabled = hasNegation
+        ? false
+        : r.disabled !== '1' && r.disabled !== 'yes';
+
+      if (hasNegation) {
+        const reason: ImportReviewItem['reason'] =
+          negatedSrc && negatedDst
+            ? 'negated_both'
+            : negatedSrc
+              ? 'negated_source'
+              : 'negated_destination';
+        const matchSummary = `${action.toUpperCase()} ${proto} from ${negatedSrc ? `!${src}` : src} to ${negatedDst ? `!${dst}` : dst}`;
+        const explanation = `Rule "${baseDescr || sortOrder}" uses an inverted (NOT) ${reason === 'negated_both' ? 'source and destination' : reason === 'negated_source' ? 'source' : 'destination'} match (${matchSummary}). Imported with enabled: false so it cannot silently activate with inverted semantics.`;
+        const suggestedResolution = `Split into an explicit preceding rule matching ${negatedSrc ? src : dst} with the opposite action, followed by a broader rule matching 'any', then enable the reviewed rules.`;
+        warnings.push(explanation + ' ' + suggestedResolution);
+        reviewItems.push({
+          ruleId: String(r.tracker || `rule-${ruleIndex + 1}`),
+          ruleIndex,
+          reason,
+          originalMatchSummary: matchSummary,
+          explanation,
+          suggestedResolution,
+        });
       }
 
       rules.push({
@@ -218,8 +252,8 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
         destinationPort: dstPort,
         gateway: r.gateway ? String(r.gateway) : undefined,
         log: Boolean(r.log),
-        enabled: r.disabled !== '1' && r.disabled !== 'yes',
-        description: r.descr || '',
+        enabled: isEnabled,
+        description: finalDescr,
         sortOrder,
       });
       sortOrder += 10;
@@ -427,6 +461,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
     dnsOverridesCount: hostOverrides.length,
     routesCount: routes.length,
     warnings,
+    reviewItems,
     state,
   };
 }

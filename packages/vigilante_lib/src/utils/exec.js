@@ -5,10 +5,20 @@ import path from 'node:path';
 import { logger } from './logger.js';
 
 /**
+ * Redact sensitive credentials and tokens from command strings before logging
+ */
+export function redactCommandArgs(commandStr) {
+  return String(commandStr || '')
+    .replace(/(--(?:gmp-)?password(?:=|\s+))(?:'[^']*'|"[^"]*"|\S+)/gi, '$1[REDACTED]')
+    .replace(/(--(?:token|authkey|api-key|secret)(?:=|\s+))(?:'[^']*'|"[^"]*"|\S+)/gi, '$1[REDACTED]')
+    .replace(/(Authorization:\s*(?:Bearer|Basic|Token)?\s*)[^\s'"]+/gi, '$1[REDACTED]');
+}
+
+/**
  * Execute a command with options and formatted errors
  */
 export async function exec(file, args = [], options = {}) {
-  const commandStr = [file, ...args].join(' ');
+  const commandStr = redactCommandArgs([file, ...args].join(' '));
   logger.debug('EXEC', `Running: ${commandStr}`);
   try {
     const result = await execa(file, args, {
@@ -30,7 +40,7 @@ export async function exec(file, args = [], options = {}) {
  * Execute a command with line-by-line output streaming
  */
 export async function execStream(file, args = [], { onLog, ...options } = {}) {
-  const commandStr = [file, ...args].join(' ');
+  const commandStr = redactCommandArgs([file, ...args].join(' '));
   logger.debug('EXEC:STREAM', `Starting stream: ${commandStr}`);
   try {
     const subprocess = execa(file, args, {

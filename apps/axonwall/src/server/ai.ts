@@ -52,10 +52,20 @@ function resolveAiApiKey(
   defaultEndpoint: string,
   isClientConfig: boolean
 ): string {
+  const cleanConfigured =
+    configuredKey && configuredKey !== '********' ? configuredKey.trim() : '';
   if (isClientConfig && endpoint !== defaultEndpoint) {
-    return (configuredKey || '').trim();
+    return cleanConfigured;
   }
-  return (configuredKey || envKey || '').trim();
+  return (cleanConfigured || envKey || '').trim();
+}
+
+function formatUpstreamHttpError(providerLabel: string, res: Response): string {
+  const safeStatusText = (res.statusText || 'Request Failed')
+    .replace(/[^\w\s.-]/g, '')
+    .trim()
+    .slice(0, 64);
+  return `${providerLabel} returned HTTP ${res.status}${safeStatusText ? ` (${safeStatusText})` : ''}`;
 }
 
 export async function testAiProviderProbe(
@@ -63,7 +73,7 @@ export async function testAiProviderProbe(
   currentConfig?: AiConfig
 ): Promise<AiProbeResult> {
   const session = await getSession();
-  assertActionPermitted(session, currentConfig ? 'admin' : undefined);
+  assertActionPermitted(session, currentConfig ? 'admin' : 'operator');
 
   const state = await getCurrentDesiredState();
   const aiCfg = currentConfig || state.ai;
@@ -96,12 +106,11 @@ export async function testAiProviderProbe(
         });
         const latencyMs = Date.now() - start;
         if (!res.ok) {
-          const text = await res.text().catch(() => '');
           return {
             ok: false,
             status: `HTTP ${res.status} (${res.statusText || 'Auth Failed'})`,
             latencyMs,
-            error: text.slice(0, 200) || `Endpoint returned HTTP ${res.status}`,
+            error: formatUpstreamHttpError('Gemini endpoint', res),
           };
         }
         const data = (await res.json().catch(() => ({}))) as any;
@@ -173,12 +182,11 @@ export async function testAiProviderProbe(
         });
         const latencyMs = Date.now() - start;
         if (!res.ok) {
-          const text = await res.text().catch(() => '');
           return {
             ok: false,
             status: `HTTP ${res.status} (${res.statusText || 'Auth Failed'})`,
             latencyMs,
-            error: text.slice(0, 200) || `Anthropic endpoint returned HTTP ${res.status}`,
+            error: formatUpstreamHttpError('Anthropic endpoint', res),
           };
         }
         const data = (await res.json().catch(() => ({}))) as any;
@@ -220,12 +228,11 @@ export async function testAiProviderProbe(
         });
         const latencyMs = Date.now() - start;
         if (!res.ok) {
-          const text = await res.text().catch(() => '');
           return {
             ok: false,
             status: `HTTP ${res.status} (${res.statusText || 'Auth Failed'})`,
             latencyMs,
-            error: text.slice(0, 200) || `OpenAI endpoint returned HTTP ${res.status}`,
+            error: formatUpstreamHttpError('OpenAI endpoint', res),
           };
         }
         const data = (await res.json().catch(() => ({}))) as any;
@@ -300,7 +307,7 @@ export async function generateAiCompletion(
   currentConfig?: AiConfig
 ): Promise<string> {
   const session = await getSession();
-  assertActionPermitted(session, (currentConfig || mode === 'audit') ? 'admin' : undefined);
+  assertActionPermitted(session, (currentConfig || mode === 'audit') ? 'admin' : 'operator');
 
   const state = await getCurrentDesiredState();
   const aiCfg = currentConfig || state.ai;
@@ -363,8 +370,7 @@ export async function generateAiCompletion(
       );
 
       if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
-        throw new Error(`Gemini API HTTP ${res.status}: ${errBody.slice(0, 300) || res.statusText}`);
+        throw new Error(formatUpstreamHttpError('Gemini API', res));
       }
 
       const data = (await res.json()) as any;
@@ -398,8 +404,7 @@ export async function generateAiCompletion(
       });
 
       if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
-        throw new Error(`Ollama HTTP ${res.status}: ${errBody.slice(0, 300) || res.statusText}`);
+        throw new Error(formatUpstreamHttpError('Ollama', res));
       }
 
       const data = (await res.json()) as any;
@@ -443,8 +448,7 @@ export async function generateAiCompletion(
       });
 
       if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
-        throw new Error(`Anthropic API HTTP ${res.status}: ${errBody.slice(0, 300) || res.statusText}`);
+        throw new Error(formatUpstreamHttpError('Anthropic API', res));
       }
 
       const data = (await res.json()) as any;
@@ -491,8 +495,7 @@ export async function generateAiCompletion(
       });
 
       if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
-        throw new Error(`OpenAI API HTTP ${res.status}: ${errBody.slice(0, 300) || res.statusText}`);
+        throw new Error(formatUpstreamHttpError('OpenAI API', res));
       }
 
       const data = (await res.json()) as any;
@@ -535,8 +538,7 @@ export async function generateAiCompletion(
       });
 
       if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
-        throw new Error(`vLLM HTTP ${res.status}: ${errBody.slice(0, 300) || res.statusText}`);
+        throw new Error(formatUpstreamHttpError('vLLM', res));
       }
 
       const data = (await res.json()) as any;

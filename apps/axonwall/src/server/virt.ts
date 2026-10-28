@@ -475,11 +475,59 @@ export async function getPciInventoryAction(): Promise<PciDeviceItem[]> {
   return [];
 }
 
+function validatePoolName(pool: string): void {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(pool) || pool.includes('..')) {
+    throw new Error('Invalid storage pool name');
+  }
+}
+
+function validateIsoFilename(filename: string): void {
+  if (
+    !filename ||
+    filename.includes('/') ||
+    filename.includes('\\') ||
+    filename.includes('..') ||
+    !/^[a-zA-Z0-9_.-]+$/.test(filename)
+  ) {
+    throw new Error('Invalid ISO filename');
+  }
+}
+
+function validateIsoDownloadUrl(rawUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL((rawUrl || '').trim());
+  } catch {
+    throw new Error('Invalid ISO download URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('ISO download URL must use http: or https:');
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host.startsWith('127.') ||
+    host.startsWith('169.254.') ||
+    host === 'metadata.google.internal'
+  ) {
+    throw new Error('ISO download from loopback or link-local/metadata addresses is prohibited');
+  }
+}
+
+function validatePciBdf(bdf: string): void {
+  if (!/^(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/.test((bdf || '').trim())) {
+    throw new Error('Invalid PCI BDF address');
+  }
+}
+
 export async function bindPciVfioAction(
   bdf: string
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  validatePciBdf(bdf);
 
   const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'bind',
@@ -497,6 +545,7 @@ export async function unbindPciVfioAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  validatePciBdf(bdf);
 
   const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'unbind',
@@ -515,6 +564,7 @@ export async function configureSriovAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  validatePciBdf(bdf);
 
   const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'sriov',
@@ -531,6 +581,9 @@ export async function configureSriovAction(
 export async function getIsoListAction(pool?: string): Promise<IsoItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  if (pool) {
+    validatePoolName(pool);
+  }
 
   const path = pool ? `/v1/virt/isos?pool=${encodeURIComponent(pool)}` : '/v1/virt/isos';
   const daemonResp = await callAgentApi<{ isos: IsoItem[] }>(path);
@@ -548,6 +601,9 @@ export async function downloadIsoAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  validatePoolName(pool);
+  validateIsoFilename(filename);
+  validateIsoDownloadUrl(url);
 
   const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/isos',
@@ -565,6 +621,9 @@ export async function downloadIsoAction(
 export async function getBackupListAction(pool?: string): Promise<BackupItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  if (pool) {
+    validatePoolName(pool);
+  }
 
   const path = pool ? `/v1/virt/backups?pool=${encodeURIComponent(pool)}` : '/v1/virt/backups';
   const daemonResp = await callAgentApi<{ backups: BackupItem[] }>(path);
@@ -582,6 +641,9 @@ export async function triggerBackupAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  if (pool) {
+    validatePoolName(pool);
+  }
 
   const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/backups',

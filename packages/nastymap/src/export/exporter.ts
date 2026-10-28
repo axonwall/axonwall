@@ -140,13 +140,18 @@ export function generateHeadlessSvg(
     const strokeWidth = link.type === 'traceroute' ? 2 : 1.5;
     const strokeDash = link.type === 'subnet' ? 'stroke-dasharray="4,4"' : '';
 
+    const sx = Number(s.x) || 0;
+    const sy = Number(s.y) || 0;
+    const tx = Number(t.x) || 0;
+    const ty = Number(t.y) || 0;
+
     linksSvg += `
-      <line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${strokeColor}" stroke-width="${strokeWidth}" ${strokeDash} opacity="0.6" />
+      <line x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" stroke="${strokeColor}" stroke-width="${strokeWidth}" ${strokeDash} opacity="0.6" />
     `;
 
     if (link.label) {
-      const midX = (s.x + t.x) / 2;
-      const midY = (s.y + t.y) / 2;
+      const midX = (sx + tx) / 2;
+      const midY = (sy + ty) / 2;
       linksSvg += `
         <text x="${midX}" y="${midY - 4}" fill="#94a3b8" font-size="10" font-family="sans-serif" text-anchor="middle">${escapeXml(link.label)}</text>
       `;
@@ -156,14 +161,17 @@ export function generateHeadlessSvg(
   let nodesSvg = '';
   for (const node of graph.nodes) {
     const isScanner = node.nodeType === 'scanner';
-    const fill = node.color || '#3b82f6';
+    const fill = escapeXml(node.color || '#3b82f6');
     const stroke = isScanner ? '#a855f7' : node.status === 'up' ? '#22c55e' : '#ef4444';
+    const nx = Number(node.x) || 0;
+    const ny = Number(node.y) || 0;
+    const r = Number(node.radius) || 10;
 
     nodesSvg += `
-      <g transform="translate(${node.x}, ${node.y})">
-        <circle r="${node.radius}" fill="${fill}" stroke="${stroke}" stroke-width="2.5" />
-        <text y="${node.radius + 14}" fill="#f8fafc" font-size="11" font-family="sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
-        <text y="${node.radius + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
+      <g transform="translate(${nx}, ${ny})">
+        <circle r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2.5" />
+        <text y="${r + 14}" fill="#f8fafc" font-size="11" font-family="sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
+        <text y="${r + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
       </g>
     `;
   }

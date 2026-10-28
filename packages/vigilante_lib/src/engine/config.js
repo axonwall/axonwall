@@ -776,33 +776,34 @@ export async function ensureVigilanteConfig() {
   let created = false;
 
   try {
-    await fs.mkdir(valuesDir, { recursive: true });
-    await fs.mkdir(nmapsDir, { recursive: true });
-    await fs.mkdir(oobscansDir, { recursive: true });
-    await fs.mkdir(reconDir, { recursive: true });
-    await fs.mkdir(nucleiDir, { recursive: true });
-    await fs.mkdir(trivyDir, { recursive: true });
-    await fs.mkdir(kubeauditDir, { recursive: true });
-    await fs.mkdir(netexecDir, { recursive: true });
-    await fs.mkdir(zapDir, { recursive: true });
-    await fs.mkdir(pcapDir, { recursive: true });
-    await fs.mkdir(dossiersDir, { recursive: true });
-    await fs.mkdir(bloodhoundDir, { recursive: true });
-    await fs.mkdir(containmentsDir, { recursive: true });
-    await fs.mkdir(ctiDir, { recursive: true });
-    await fs.mkdir(canaryDir, { recursive: true });
-    await fs.mkdir(carveDir, { recursive: true });
-    await fs.mkdir(datalakeDir, { recursive: true });
-    await fs.mkdir(wasmDir, { recursive: true });
-    await fs.mkdir(purpleDir, { recursive: true });
-    await fs.mkdir(evidenceDir, { recursive: true });
-    await fs.mkdir(playbooksDir, { recursive: true });
-    await fs.mkdir(scenariosDir, { recursive: true });
-    await fs.mkdir(instancesDir, { recursive: true });
+    await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(valuesDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(nmapsDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(oobscansDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(reconDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(nucleiDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(trivyDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(kubeauditDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(netexecDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(zapDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(pcapDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(dossiersDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(bloodhoundDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(containmentsDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(ctiDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(canaryDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(carveDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(datalakeDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(wasmDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(purpleDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(evidenceDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(playbooksDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(scenariosDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(instancesDir, { recursive: true, mode: 0o700 });
     try {
       await fs.access(configFile);
     } catch {
-      await fs.writeFile(configFile, DEFAULT_CONFIG_YAML, 'utf8');
+      await fs.writeFile(configFile, DEFAULT_CONFIG_YAML, { encoding: 'utf8', mode: 0o600 });
       created = true;
       logger.info('CONFIG', `Initialized default config.yaml at ${configFile}`);
     }
@@ -871,77 +872,18 @@ export function ensureVigilanteConfigSync() {
   const configFile = getVigilanteConfigFile();
 
   try {
-    if (!fsSync.existsSync(valuesDir)) {
-      fsSync.mkdirSync(valuesDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(nmapsDir)) {
-      fsSync.mkdirSync(nmapsDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(oobscansDir)) {
-      fsSync.mkdirSync(oobscansDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(reconDir)) {
-      fsSync.mkdirSync(reconDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(nucleiDir)) {
-      fsSync.mkdirSync(nucleiDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(trivyDir)) {
-      fsSync.mkdirSync(trivyDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(kubeauditDir)) {
-      fsSync.mkdirSync(kubeauditDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(netexecDir)) {
-      fsSync.mkdirSync(netexecDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(zapDir)) {
-      fsSync.mkdirSync(zapDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(pcapDir)) {
-      fsSync.mkdirSync(pcapDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(dossiersDir)) {
-      fsSync.mkdirSync(dossiersDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(bloodhoundDir)) {
-      fsSync.mkdirSync(bloodhoundDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(containmentsDir)) {
-      fsSync.mkdirSync(containmentsDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(ctiDir)) {
-      fsSync.mkdirSync(ctiDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(canaryDir)) {
-      fsSync.mkdirSync(canaryDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(carveDir)) {
-      fsSync.mkdirSync(carveDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(datalakeDir)) {
-      fsSync.mkdirSync(datalakeDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(wasmDir)) {
-      fsSync.mkdirSync(wasmDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(purpleDir)) {
-      fsSync.mkdirSync(purpleDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(evidenceDir)) {
-      fsSync.mkdirSync(evidenceDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(playbooksDir)) {
-      fsSync.mkdirSync(playbooksDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(scenariosDir)) {
-      fsSync.mkdirSync(scenariosDir, { recursive: true });
-    }
-    if (!fsSync.existsSync(instancesDir)) {
-      fsSync.mkdirSync(instancesDir, { recursive: true });
+    for (const d of [
+      configDir, valuesDir, nmapsDir, oobscansDir, reconDir, nucleiDir, trivyDir,
+      kubeauditDir, netexecDir, zapDir, pcapDir, dossiersDir, bloodhoundDir,
+      containmentsDir, ctiDir, canaryDir, carveDir, datalakeDir, wasmDir,
+      purpleDir, evidenceDir, playbooksDir, scenariosDir, instancesDir
+    ]) {
+      if (!fsSync.existsSync(d)) {
+        fsSync.mkdirSync(d, { recursive: true, mode: 0o700 });
+      }
     }
     if (!fsSync.existsSync(configFile)) {
-      fsSync.writeFileSync(configFile, DEFAULT_CONFIG_YAML, 'utf8');
+      fsSync.writeFileSync(configFile, DEFAULT_CONFIG_YAML, { encoding: 'utf8', mode: 0o600 });
     }
   } catch (err) {
     // Ignore sync fallback error
@@ -1029,8 +971,13 @@ export function loadConfig() {
 export async function saveConfig(config) {
   const configFile = getVigilanteConfigFile();
   const dir = getVigilanteConfigDir();
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const yamlStr = yamlDump(config, { indent: 2 });
-  await fs.writeFile(configFile, yamlStr, 'utf8');
+  await fs.writeFile(configFile, yamlStr, { encoding: 'utf8', mode: 0o600 });
+  try {
+    await fs.chmod(configFile, 0o600);
+  } catch {
+    // Ignore on platforms without POSIX chmod
+  }
   logger.info('CONFIG', `Saved configuration to ${configFile}`);
 }

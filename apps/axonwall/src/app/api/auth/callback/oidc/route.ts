@@ -61,17 +61,21 @@ export async function GET(request: NextRequest) {
       expectedNonce
     );
 
+    const verifiedEmail =
+      claims.email_verified !== false && typeof claims.email === 'string' && claims.email
+        ? claims.email.trim()
+        : '';
     const email =
-      (typeof claims.email === 'string' && claims.email) ||
-      (typeof claims.preferred_username === 'string' &&
-        claims.preferred_username) ||
+      verifiedEmail ||
+      (typeof claims.preferred_username === 'string' && claims.preferred_username.trim()) ||
       '';
-    const username =
-      email.split('@')[0] ||
-      (typeof claims.preferred_username === 'string' &&
-        claims.preferred_username) ||
-      claims.sub ||
-      'sso-user';
+    let username =
+      verifiedEmail ||
+      (typeof claims.preferred_username === 'string' && claims.preferred_username.trim()) ||
+      (typeof claims.sub === 'string' && claims.sub ? `oidc:${claims.sub}` : 'oidc:sso-user');
+    if (username.toLowerCase() === 'admin' || username.toLowerCase() === 'root') {
+      username = `oidc:${username}`;
+    }
 
     // Map the verified IdP group claim to an Axonwall RBAC role
     const role = roleFromGroups(claims.groups);
@@ -83,7 +87,7 @@ export async function GET(request: NextRequest) {
       displayName:
         (typeof claims.name === 'string' && claims.name) || `${username} (SSO)`,
       email,
-      source: 'sso_oidc' as any,
+      source: 'oidc',
       roles: [role],
       privileges: [...roleObj.privileges],
       exp: Math.floor(Date.now() / 1000) + 8 * 3600, // 8 hours

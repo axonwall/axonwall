@@ -12,10 +12,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 var validUsernameRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 var validGroupNameRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+var allowedLoginShells = map[string]bool{
+	"/bin/bash":                       true,
+	"/usr/bin/zsh":                    true,
+	"/bin/zsh":                        true,
+	"/bin/sh":                         true,
+	"/usr/sbin/nologin":               true,
+	"/bin/false":                      true,
+	"/usr/bin/fish":                   true,
+	"/usr/local/bin/axonwall-opshell": true,
+}
 
 type LocalUser struct {
 	Username       string   `json:"username"`
@@ -406,9 +418,27 @@ func (m *UserManager) writeUserSSHKeys(username, homeDir string, keys []string) 
 	if homeDir == "" {
 		return fmt.Errorf("user %s has no home directory", username)
 	}
+	for _, k := range keys {
+		if strings.ContainsAny(k, "\n\r\x00") {
+			return fmt.Errorf("invalid characters in SSH key")
+		}
+	}
+	if info, err := os.Lstat(homeDir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write SSH keys: home directory %s is a symlink", homeDir)
+		}
+	}
 	sshDir := filepath.Join(homeDir, ".ssh")
+	if info, err := os.Lstat(sshDir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write SSH keys: %s is a symlink", sshDir)
+		}
+	}
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		return fmt.Errorf("failed to create %s: %w", sshDir, err)
+	}
+	if info, err := os.Lstat(sshDir); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write SSH keys: %s is invalid or a symlink", sshDir)
 	}
 
 	// Lookup user uid and gid
@@ -416,23 +446,35 @@ func (m *UserManager) writeUserSSHKeys(username, homeDir string, keys []string) 
 	if err == nil {
 		uid, _ := strconv.Atoi(u.Uid)
 		gid, _ := strconv.Atoi(u.Gid)
-		_ = os.Chown(sshDir, uid, gid)
+		_ = os.Lchown(sshDir, uid, gid)
 	}
 
 	authKeyPath := filepath.Join(sshDir, "authorized_keys")
+	if info, err := os.Lstat(authKeyPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write SSH keys: %s is a symlink", authKeyPath)
+		}
+	}
 	content := strings.Join(keys, "\n")
 	if len(keys) > 0 {
 		content += "\n"
 	}
 
-	if err := os.WriteFile(authKeyPath, []byte(content), 0600); err != nil {
+	f, err := os.OpenFile(authKeyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open %s safely: %w", authKeyPath, err)
+	}
+	if _, err := f.Write([]byte(content)); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("failed to write %s: %w", authKeyPath, err)
 	}
+	_ = f.Chmod(0600)
+	_ = f.Close()
 
 	if u != nil {
 		uid, _ := strconv.Atoi(u.Uid)
 		gid, _ := strconv.Atoi(u.Gid)
-		_ = os.Chown(authKeyPath, uid, gid)
+		_ = os.Lchown(authKeyPath, uid, gid)
 	}
 
 	return nil
@@ -481,7 +523,11 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 		}
 	}
 
-	shell := req.Shell
+	if strings.ContainsAny(req.Comment, ":\n\r\x00") {
+		return fmt.Errorf("invalid characters in user comment")
+	}
+
+	shell := strings.TrimSpace(req.Shell)
 	if shell == "" {
 		if _, err := os.Stat("/usr/bin/zsh"); err == nil {
 			shell = "/usr/bin/zsh"
@@ -492,6 +538,9 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 		} else {
 			shell = "/bin/sh"
 		}
+	}
+	if !allowedLoginShells[shell] {
+		return fmt.Errorf("disallowed login shell: %s", shell)
 	}
 
 	// Determine groups to attach
@@ -578,6 +627,12 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 	}
 
 	// Update comment / shell / groups via usermod if available
+	if req.Comment != nil && strings.ContainsAny(*req.Comment, ":\n\r\x00") {
+		return fmt.Errorf("invalid characters in user comment")
+	}
+	if req.Shell != nil && !allowedLoginShells[strings.TrimSpace(*req.Shell)] {
+		return fmt.Errorf("disallowed login shell: %s", *req.Shell)
+	}
 	if req.Comment != nil || req.Shell != nil || req.Groups != nil || req.ApplianceRole != nil {
 		if usermodPath, err := exec.LookPath("usermod"); err == nil {
 			var args []string
@@ -585,7 +640,7 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 				args = append(args, "-c", *req.Comment)
 			}
 			if req.Shell != nil {
-				args = append(args, "-s", *req.Shell)
+				args = append(args, "-s", strings.TrimSpace(*req.Shell))
 			}
 			if req.Groups != nil || req.ApplianceRole != nil {
 				// Collect groups
@@ -718,6 +773,9 @@ func (m *UserManager) DeleteUser(username string, removeHome bool) error {
 
 // SetPassword sets a user's password using chpasswd
 func (m *UserManager) SetPassword(username, password string) error {
+	if strings.ContainsAny(username, ":\n\r\x00") || strings.ContainsAny(password, "\n\r\x00") {
+		return fmt.Errorf("invalid characters in username or password")
+	}
 	chpasswdPath, err := exec.LookPath("chpasswd")
 	if err != nil {
 		return fmt.Errorf("chpasswd not found: %w", err)
@@ -741,6 +799,9 @@ func (m *UserManager) Authenticate(req AuthUserRequest) AuthUserResponse {
 	if username == "" || password == "" {
 		return AuthUserResponse{Success: false, Message: "Username and password required"}
 	}
+	if strings.ContainsRune(username, '\x00') || strings.ContainsRune(password, '\x00') || strings.ContainsAny(username, ":\n\r") {
+		return AuthUserResponse{Success: false, Message: "Invalid credentials"}
+	}
 
 	// 1. Get user shadow entry
 	shadowMap, err := m.parseShadowInternal()
@@ -757,24 +818,26 @@ func (m *UserManager) Authenticate(req AuthUserRequest) AuthUserResponse {
 		return AuthUserResponse{Success: false, Message: "Account or password locked"}
 	}
 
-	// Verify password using stdin only (never pass password or hash via argv)
+	// Verify password using stdin for password and env for shadow hash (never pass via argv or concatenated NUL stream)
 	verified := false
 
-	// Strategy A: perl crypt() reading password and hash from stdin separated by NUL
+	// Strategy A: perl crypt() reading password from stdin and hash from AXONWALL_SHADOW_HASH
 	if perlPath, err := exec.LookPath("perl"); err == nil {
-		cmd := exec.Command(perlPath, "-e", `local $/ = "\0"; my $pw = <STDIN>; chomp($pw); my $h = <STDIN>; chomp($h); exit(crypt($pw, $h) eq $h ? 0 : 1);`)
-		cmd.Stdin = bytes.NewReader([]byte(password + "\x00" + hash + "\x00"))
+		cmd := exec.Command(perlPath, "-e", `local $/ = undef; my $pw = <STDIN>; my $h = $ENV{AXONWALL_SHADOW_HASH}; exit(defined($h) && $h ne "" && crypt($pw, $h) eq $h ? 0 : 1);`)
+		cmd.Env = append(os.Environ(), "AXONWALL_SHADOW_HASH="+hash)
+		cmd.Stdin = strings.NewReader(password)
 		if err := cmd.Run(); err == nil {
 			verified = true
 		}
 	}
 
-	// Strategy B: python3 crypt reading password and hash from stdin separated by NUL
+	// Strategy B: python3 crypt reading password from stdin and hash from AXONWALL_SHADOW_HASH
 	if !verified {
 		if pyPath, err := exec.LookPath("python3"); err == nil {
-			script := `import crypt, sys; parts = sys.stdin.buffer.read().split(b'\x00'); pw = parts[0].decode('utf-8'); h = parts[1].decode('utf-8'); sys.exit(0 if crypt.crypt(pw, h) == h else 1)`
+			script := `import crypt, os, sys; pw = sys.stdin.buffer.read().decode('utf-8'); h = os.environ.get('AXONWALL_SHADOW_HASH', ''); sys.exit(0 if h and crypt.crypt(pw, h) == h else 1)`
 			cmd := exec.Command(pyPath, "-c", script)
-			cmd.Stdin = bytes.NewReader([]byte(password + "\x00" + hash + "\x00"))
+			cmd.Env = append(os.Environ(), "AXONWALL_SHADOW_HASH="+hash)
+			cmd.Stdin = strings.NewReader(password)
 			if err := cmd.Run(); err == nil {
 				verified = true
 			}

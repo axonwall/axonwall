@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -250,11 +251,24 @@ func main() {
 						}
 					}
 
+				case "CONFIRM_CONFIG", "CONFIRM_NFTABLES":
+					nftEngine.Confirm()
+					slog.Info("Confirmed active nftables ruleset as last-known-good")
+
 				case "SYNC_HEADSCALE":
 					var hsCfg HeadscaleSyncPayload
 					if err := json.Unmarshal(env.Payload, &hsCfg); err == nil && hsCfg.AuthKey != "" {
-						slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsCfg.ServerURL)
-						cmd := exec.Command("tailscale", "up", "--login-server="+hsCfg.ServerURL, "--authkey="+hsCfg.AuthKey, "--reset")
+						hsURL := strings.TrimSpace(hsCfg.ServerURL)
+						hsKey := strings.TrimSpace(hsCfg.AuthKey)
+						parsedHS, urlErr := url.Parse(hsURL)
+						if urlErr != nil || (parsedHS.Scheme != "http" && parsedHS.Scheme != "https") || parsedHS.Host == "" ||
+							strings.HasPrefix(hsURL, "-") || strings.ContainsAny(hsURL, " \t\r\n") ||
+							strings.HasPrefix(hsKey, "-") || strings.ContainsAny(hsKey, " \t\r\n") {
+							slog.Error("Rejected invalid Headscale serverUrl or authKey")
+							continue
+						}
+						slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsURL)
+						cmd := exec.Command("tailscale", "up", "--login-server="+hsURL, "--authkey="+hsKey, "--reset")
 						out, err := cmd.CombinedOutput()
 						if err != nil {
 							slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))

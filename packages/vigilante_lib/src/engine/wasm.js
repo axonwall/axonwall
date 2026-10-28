@@ -311,7 +311,7 @@ export async function generateBinaryTriageReport({
   }
 
   const { checksec } = await import('./ctf-tools.js');
-  const sec = checksec(binaryBuffer);
+  const sec = await checksec(binaryBuffer);
 
   // Extract strings
   const rawString = binaryBuffer.toString('latin1');

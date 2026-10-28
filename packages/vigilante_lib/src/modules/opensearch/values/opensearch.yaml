@@ -23,11 +23,11 @@ opensearchJavaOpts: "-Xms512m -Xmx1024m"
 securityConfig:
   action:
     auto_create_indices: true
-  enabled: false
+  enabled: true
 
 extraEnvs:
   - name: DISABLE_SECURITY_PLUGIN
-    value: "true"
+    value: "false"
   - name: DISABLE_INSTALL_DEMO_CONFIG
     value: "true"
   - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD

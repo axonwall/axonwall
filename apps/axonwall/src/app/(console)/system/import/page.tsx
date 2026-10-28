@@ -13,6 +13,11 @@ import {
   FileCode,
   Check,
   RefreshCw,
+  ShieldAlert,
+  ChevronLeft,
+  ChevronRight,
+  Trash2,
+  Lock,
 } from 'lucide-react';
 import {
   importFirewallConfig,
@@ -98,6 +103,14 @@ const SAMPLE_CONFIGS: Record<FirewallVendor, string> = {
       <protocol>any</protocol>
       <destination><network>10.0.0.0/8</network></destination>
       <descr>Block Access to Legacy Intranet</descr>
+    </rule>
+    <rule>
+      <type>block</type>
+      <interface>opt1</interface>
+      <protocol>any</protocol>
+      <source><any/></source>
+      <destination><not/><network>lan</network></destination>
+      <descr>Isolate DMZ from Non-LAN Subnets</descr>
     </rule>
   </filter>
   <nat>
@@ -399,6 +412,21 @@ route inside 10.0.0.0 255.0.0.0 192.168.10.254 1`,
 </zone>`,
 };
 
+interface ReviewRuleItem {
+  ruleId: string;
+  reason: string;
+  originalSummary?: string;
+  status: 'pending' | 'kept_disabled' | 'enabled' | 'deleted';
+}
+
+interface RuleEditDraft {
+  action: 'pass' | 'block' | 'reject';
+  source: string;
+  destination: string;
+  destinationPort: string;
+  description: string;
+}
+
 export default function ImportPage() {
   const [selectedVendor, setSelectedVendor] = useState<FirewallVendor | 'auto'>('auto');
   const [detectedVendor, setDetectedVendor] = useState<FirewallVendor | null>(null);
@@ -409,7 +437,38 @@ export default function ImportPage() {
   const [error, setError] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<string | null>(null);
+  const [reviewItems, setReviewItems] = useState<ReviewRuleItem[]>([]);
+  const [activeReviewIndex, setActiveReviewIndex] = useState(0);
+  const [editDraft, setEditDraft] = useState<RuleEditDraft>({
+    action: 'block',
+    source: 'any',
+    destination: 'any',
+    destinationPort: 'any',
+    description: '',
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function loadDraftForRule(rules: any[], ruleId?: string) {
+    if (!ruleId) return;
+    const target = rules.find((r) => r.id === ruleId);
+    if (!target) return;
+    setEditDraft({
+      action: target.action || 'block',
+      source: target.source || 'any',
+      destination: target.destination || 'any',
+      destinationPort: target.destinationPort || 'any',
+      description: (target.description || '').replace(/^\[REVIEW[^\]]*\]\s*/i, ''),
+    });
+  }
+
+  function selectReviewStep(nextIndex: number, currentReport = report, items = reviewItems) {
+    if (items.length === 0) return;
+    const clamped = Math.max(0, Math.min(items.length - 1, nextIndex));
+    setActiveReviewIndex(clamped);
+    if (currentReport) {
+      loadDraftForRule(currentReport.state.rules || [], items[clamped]?.ruleId);
+    }
+  }
 
   function handleSelectVendor(vendor: FirewallVendor | 'auto') {
     setSelectedVendor(vendor);
@@ -446,6 +505,85 @@ export default function ImportPage() {
     try {
       const targetVendor = selectedVendor === 'auto' ? undefined : selectedVendor;
       const res = importFirewallConfig(configInput, targetVendor);
+
+      // Inspect res.reviewItems and res.state.rules for rules flagged for review
+      const detectedReviewsMap = new Map<string, ReviewRuleItem>();
+      const reportReviewItems = (res as any).reviewItems as Array<any> | undefined;
+      if (Array.isArray(reportReviewItems)) {
+        for (const item of reportReviewItems) {
+          const rId = item.ruleId || item.id;
+          if (rId) {
+            detectedReviewsMap.set(rId, {
+              ruleId: rId,
+              reason:
+                item.reason ||
+                'Source config used a negated (NOT / !) match. Automatic positive conversion would invert your security policy, so Axonwall imported this rule disabled for your review.',
+              originalSummary: item.originalMatch || item.originalSummary,
+              status: 'pending',
+            });
+          }
+        }
+      }
+
+      const rules = res.state.rules || [];
+      for (const rule of rules) {
+        if (detectedReviewsMap.has(rule.id)) continue;
+        const desc = rule.description || '';
+        const isDisabledReview =
+          rule.enabled === false &&
+          (desc.includes('[REVIEW') || /negat|invert/i.test(desc));
+        const hasNegatedWarning = (res.warnings || []).some(
+          (w) =>
+            /negat|invert/i.test(w) &&
+            desc &&
+            w.toLowerCase().includes(desc.replace(/^\[REVIEW[^\]]*\]\s*/i, '').toLowerCase())
+        );
+        if (isDisabledReview || hasNegatedWarning) {
+          rule.enabled = false;
+          detectedReviewsMap.set(rule.id, {
+            ruleId: rule.id,
+            reason:
+              'Source config used a negated (NOT / !) match. Automatic positive conversion would invert your security policy, so Axonwall imported this rule disabled for your review.',
+            status: 'pending',
+          });
+        }
+      }
+
+      // Also detect XML <not/> or <not> blocks in raw source config if not yet flagged by parser
+      if (detectedReviewsMap.size === 0 && /<not\s*\/?>/i.test(configInput)) {
+        const ruleBlocks = configInput.match(/<rule>[\s\S]*?<\/rule>/gi) || [];
+        for (const block of ruleBlocks) {
+          if (/<not\s*\/?>/i.test(block)) {
+            const descrMatch = block.match(/<descr>([\s\S]*?)<\/descr>/i);
+            const rawDescr = descrMatch?.[1]?.trim();
+            if (rawDescr) {
+              const matchedRule = rules.find((r) =>
+                (r.description || '').toLowerCase().includes(rawDescr.toLowerCase())
+              );
+              if (matchedRule && !detectedReviewsMap.has(matchedRule.id)) {
+                matchedRule.enabled = false;
+                if (!matchedRule.description?.includes('[REVIEW')) {
+                  matchedRule.description = `[REVIEW: Negated Match] ${matchedRule.description}`;
+                }
+                detectedReviewsMap.set(matchedRule.id, {
+                  ruleId: matchedRule.id,
+                  reason:
+                    'Source config used a negated (NOT / !) match. Automatic positive conversion would invert your security policy, so Axonwall imported this rule disabled for your review.',
+                  status: 'pending',
+                });
+              }
+            }
+          }
+        }
+      }
+
+      const nextReviewItems = Array.from(detectedReviewsMap.values());
+      setReviewItems(nextReviewItems);
+      setActiveReviewIndex(0);
+      if (nextReviewItems.length > 0) {
+        loadDraftForRule(rules, nextReviewItems[0]?.ruleId);
+      }
+
       setReport(res);
       setDetectedVendor(res.vendor);
 
@@ -459,7 +597,139 @@ export default function ImportPage() {
       setReport(null);
       setRuleAnalysis(null);
       setCompiledNft(null);
+      setReviewItems([]);
     }
+  }
+
+  function advanceToNextReviewStep(updatedReport: ImportReport, updatedItems: ReviewRuleItem[], currentIdx: number) {
+    // Prefer next pending item, otherwise next sequential item
+    let nextIdx = currentIdx;
+    for (let offset = 1; offset < updatedItems.length; offset++) {
+      const candidate = (currentIdx + offset) % updatedItems.length;
+      if (updatedItems[candidate]?.status === 'pending') {
+        nextIdx = candidate;
+        break;
+      }
+    }
+    if (nextIdx === currentIdx && currentIdx < updatedItems.length - 1) {
+      nextIdx = currentIdx + 1;
+    }
+    selectReviewStep(nextIdx, updatedReport, updatedItems);
+  }
+
+  function recomputeReportAndNft(updatedReport: ImportReport) {
+    setReport(updatedReport);
+    const analysis = analyzeRuleShadowing(updatedReport.state.rules || []);
+    setRuleAnalysis(analysis);
+    const { nftScript } = compileNftables(updatedReport.state);
+    setCompiledNft(nftScript);
+  }
+
+  function handleKeepRuleDisabled() {
+    if (!report || reviewItems.length === 0) return;
+    const activeItem = reviewItems[activeReviewIndex];
+    if (!activeItem) return;
+
+    const updatedRules = (report.state.rules || []).map((r) =>
+      r.id === activeItem.ruleId
+        ? {
+            ...r,
+            enabled: false,
+            action: editDraft.action,
+            source: editDraft.source.trim() || 'any',
+            destination: editDraft.destination.trim() || 'any',
+            destinationPort:
+              editDraft.destinationPort.trim() && editDraft.destinationPort.trim() !== 'any'
+                ? editDraft.destinationPort.trim()
+                : undefined,
+            description: editDraft.description.trim() || r.description,
+          }
+        : r
+    );
+
+    const updatedReport: ImportReport = {
+      ...report,
+      state: {
+        ...report.state,
+        rules: updatedRules,
+      },
+    };
+
+    const updatedItems = reviewItems.map((item, idx) =>
+      idx === activeReviewIndex ? { ...item, status: 'kept_disabled' as const } : item
+    );
+
+    setReviewItems(updatedItems);
+    recomputeReportAndNft(updatedReport);
+    advanceToNextReviewStep(updatedReport, updatedItems, activeReviewIndex);
+  }
+
+  function handleSaveAndEnableRule() {
+    if (!report || reviewItems.length === 0) return;
+    const activeItem = reviewItems[activeReviewIndex];
+    if (!activeItem) return;
+
+    const cleanDescription = editDraft.description
+      .replace(/^\[REVIEW[^\]]*\]\s*/i, '')
+      .trim();
+
+    const updatedRules = (report.state.rules || []).map((r) =>
+      r.id === activeItem.ruleId
+        ? {
+            ...r,
+            enabled: true,
+            action: editDraft.action,
+            source: editDraft.source.trim() || 'any',
+            destination: editDraft.destination.trim() || 'any',
+            destinationPort:
+              editDraft.destinationPort.trim() && editDraft.destinationPort.trim() !== 'any'
+                ? editDraft.destinationPort.trim()
+                : undefined,
+            description: cleanDescription || 'Reviewed Rule',
+          }
+        : r
+    );
+
+    const updatedReport: ImportReport = {
+      ...report,
+      state: {
+        ...report.state,
+        rules: updatedRules,
+      },
+    };
+
+    const updatedItems = reviewItems.map((item, idx) =>
+      idx === activeReviewIndex ? { ...item, status: 'enabled' as const } : item
+    );
+
+    setReviewItems(updatedItems);
+    recomputeReportAndNft(updatedReport);
+    advanceToNextReviewStep(updatedReport, updatedItems, activeReviewIndex);
+  }
+
+  function handleDeleteReviewRule() {
+    if (!report || reviewItems.length === 0) return;
+    const activeItem = reviewItems[activeReviewIndex];
+    if (!activeItem) return;
+
+    const updatedRules = (report.state.rules || []).filter((r) => r.id !== activeItem.ruleId);
+
+    const updatedReport: ImportReport = {
+      ...report,
+      rulesCount: updatedRules.length,
+      state: {
+        ...report.state,
+        rules: updatedRules,
+      },
+    };
+
+    const updatedItems = reviewItems.map((item, idx) =>
+      idx === activeReviewIndex ? { ...item, status: 'deleted' as const } : item
+    );
+
+    setReviewItems(updatedItems);
+    recomputeReportAndNft(updatedReport);
+    advanceToNextReviewStep(updatedReport, updatedItems, activeReviewIndex);
   }
 
   function handleDownloadJson() {
@@ -492,6 +762,14 @@ export default function ImportPage() {
 
   async function handleApplyLive() {
     if (!report) return;
+    const pendingReviewsCount = reviewItems.filter((item) => item.status === 'pending').length;
+    if (pendingReviewsCount > 0) {
+      const proceedUnreviewed = window.confirm(
+        `Warning: ${pendingReviewsCount} flagged rule(s) with negated/inverted matches have not yet been reviewed in the Guided Rule Review Walkthrough and are currently disabled.\n\nDo you still want to proceed with applying this configuration?`
+      );
+      if (!proceedUnreviewed) return;
+    }
+
     const confirm = window.confirm(
       `Apply this converted configuration directly to the live Axonwall system?\n\nSafety rollback is automatically armed for 120 seconds.`
     );
@@ -830,6 +1108,268 @@ export default function ImportPage() {
           )}
         </div>
       </div>
+
+      {/* Guided Rule Review Walkthrough Card */}
+      {report && reviewItems.length > 0 && (() => {
+        const activeItem = reviewItems[activeReviewIndex] || reviewItems[0];
+        const currentRule = (report.state.rules || []).find((r) => r.id === activeItem?.ruleId);
+        const resolvedCount = reviewItems.filter((i) => i.status !== 'pending').length;
+        const progressPct = Math.round((resolvedCount / reviewItems.length) * 100);
+
+        return (
+          <div className="bg-amber-950/20 border border-amber-500/40 rounded-xl p-5 space-y-4 shadow-lg">
+            {/* Walkthrough Header & Step Progress */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/20 pb-3.5">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-amber-500/20 border border-amber-500/30 text-amber-400">
+                  <ShieldAlert className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-bold text-white">
+                      Guided Rule Review Walkthrough
+                    </h2>
+                    <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300">
+                      Reviewing Rule {activeReviewIndex + 1} of {reviewItems.length}
+                    </span>
+                    <span
+                      className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${
+                        resolvedCount === reviewItems.length
+                          ? 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
+                          : 'bg-slate-900 border-slate-700 text-slate-300'
+                      }`}
+                    >
+                      {resolvedCount} of {reviewItems.length} Resolved
+                    </span>
+                  </div>
+                  <p className="text-xs text-amber-200/80 mt-0.5">
+                    Step through rules that used negated or inverted matches in your legacy firewall before enabling them in production.
+                  </p>
+                </div>
+              </div>
+
+              {/* Previous / Next Navigation */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => selectReviewStep(activeReviewIndex - 1)}
+                  disabled={activeReviewIndex <= 0}
+                  className="bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <span>Previous</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectReviewStep(activeReviewIndex + 1)}
+                  disabled={activeReviewIndex >= reviewItems.length - 1}
+                  className="bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-slate-200 border border-slate-700 px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition cursor-pointer"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Progress Bar & Step Pills */}
+            <div className="space-y-2">
+              <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
+                <div
+                  className="h-full bg-gradient-to-r from-amber-500 to-emerald-500 transition-all duration-300"
+                  style={{ width: `${Math.max(progressPct, 6)}%` }}
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {reviewItems.map((item, idx) => {
+                  const isCurrent = idx === activeReviewIndex;
+                  const statusBadgeColor =
+                    item.status === 'enabled'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : item.status === 'kept_disabled'
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                      : item.status === 'deleted'
+                      ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                      : 'bg-slate-900 text-amber-300 border-amber-500/30';
+                  return (
+                    <button
+                      key={item.ruleId}
+                      type="button"
+                      onClick={() => selectReviewStep(idx)}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-mono border transition cursor-pointer ${statusBadgeColor} ${
+                        isCurrent ? 'ring-2 ring-amber-400/70 font-bold' : 'opacity-80 hover:opacity-100'
+                      }`}
+                    >
+                      Rule #{idx + 1}:{' '}
+                      {item.status === 'pending'
+                        ? 'Needs Review'
+                        : item.status === 'kept_disabled'
+                        ? 'Kept Disabled'
+                        : item.status === 'enabled'
+                        ? 'Enabled'
+                        : 'Deleted'}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Policy Inversion Explanation Banner */}
+            <div className="p-3 rounded-lg bg-slate-950/90 border border-amber-500/30 text-xs text-amber-200 space-y-1">
+              <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 shrink-0" />
+                <span>Why was this rule imported with enabled: false?</span>
+              </div>
+              <p className="text-slate-300 leading-relaxed">
+                Source config used a negated (<code className="text-amber-300">NOT</code> / <code className="text-amber-300">!</code>) match. Automatic positive conversion would invert your security policy, so Axonwall imported this rule disabled for your review.
+              </p>
+            </div>
+
+            {/* Current Rule Context & Inline Editor */}
+            {activeItem?.status === 'deleted' || !currentRule ? (
+              <div className="p-4 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 flex items-center justify-between">
+                <span>This rule was removed from the imported ruleset during review.</span>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/30">
+                  Deleted
+                </span>
+              </div>
+            ) : (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-4">
+                {/* Context Summary Row */}
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs border-b border-slate-800/80 pb-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-slate-400">Interface:</span>
+                    <span className="font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-cyan-300">
+                      {currentRule.interface}
+                    </span>
+                    <span className="text-slate-400">Protocol:</span>
+                    <span className="font-mono px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-200 uppercase">
+                      {currentRule.protocol}
+                    </span>
+                    <span className="text-slate-400">Current State:</span>
+                    <span
+                      className={`font-mono px-2 py-0.5 rounded border ${
+                        currentRule.enabled
+                          ? 'bg-emerald-950 border-emerald-700 text-emerald-300'
+                          : 'bg-amber-950 border-amber-700 text-amber-300'
+                      }`}
+                    >
+                      {currentRule.enabled ? 'ENABLED' : 'DISABLED (SAFE)'}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-500">
+                    ID: {currentRule.id}
+                  </span>
+                </div>
+
+                {/* Inline Editable Fields */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Action</label>
+                    <select
+                      value={editDraft.action}
+                      onChange={(e) =>
+                        setEditDraft({
+                          ...editDraft,
+                          action: e.target.value as 'pass' | 'block' | 'reject',
+                        })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-amber-500"
+                    >
+                      <option value="block">block</option>
+                      <option value="reject">reject</option>
+                      <option value="pass">pass</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Source (CIDR / Alias / any)
+                    </label>
+                    <input
+                      type="text"
+                      value={editDraft.source}
+                      onChange={(e) => setEditDraft({ ...editDraft, source: e.target.value })}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      placeholder="any or 192.168.10.0/24"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Destination (CIDR / Alias / any)
+                    </label>
+                    <input
+                      type="text"
+                      value={editDraft.destination}
+                      onChange={(e) => setEditDraft({ ...editDraft, destination: e.target.value })}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      placeholder="e.g. 10.0.0.0/8 or Alias"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Destination Port
+                    </label>
+                    <input
+                      type="text"
+                      value={editDraft.destinationPort}
+                      onChange={(e) =>
+                        setEditDraft({ ...editDraft, destinationPort: e.target.value })
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      placeholder="any or 443"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Rule Description
+                    </label>
+                    <input
+                      type="text"
+                      value={editDraft.description}
+                      onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-amber-500"
+                      placeholder="Rule description"
+                    />
+                  </div>
+                </div>
+
+                {/* 3 Resolution Action Buttons */}
+                <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2 border-t border-slate-800/80">
+                  <button
+                    type="button"
+                    onClick={handleKeepRuleDisabled}
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Lock className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Keep Disabled (Safe)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveAndEnableRule}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer shadow"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Save Edits &amp; Enable Rule</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDeleteReviewRule}
+                    className="bg-red-950/70 hover:bg-red-900/70 text-red-300 border border-red-800/60 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Rule</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Generated nftables Ruleset Preview */}
       {compiledNft && (

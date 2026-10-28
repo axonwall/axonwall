@@ -1,11 +1,12 @@
 import { XMLParser } from 'fast-xml-parser';
 import type { DesiredState, Interface, Vlan, Alias, FirewallRule, NatRule, DhcpSubnet, DnsHostOverride } from '../../schemas/index.js';
-import type { ImportReport } from '../types.js';
+import type { ImportReport, ImportReviewItem } from '../types.js';
 
 export type { ImportReport } from '../types.js';
 
 export function importOpnsenseConfig(xmlContent: string): ImportReport {
   const warnings: string[] = [];
+  const reviewItems: ImportReviewItem[] = [];
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
@@ -83,7 +84,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
       else if (opnType.includes('url')) aliasType = 'urltable';
 
       aliases.push({
-        name: a.name,
+        name: String(a.name).replace(/[^a-zA-Z0-9_]/g, '_'),
         type: aliasType,
         entries: rawEntries,
         description: a.descr || '',
@@ -100,27 +101,58 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     for (const r of rawRules) {
       const action = r.type === 'block' ? 'block' : r.type === 'reject' ? 'reject' : 'pass';
       const iface = r.interface || 'any';
-      const proto = r.protocol || 'any';
-      const descr = r.descr || '';
+      const rawProto = String(r.protocol || 'any').toLowerCase();
+      const proto = rawProto === 'tcp/udp' || rawProto === 'tcp_udp' ? 'tcp_udp' : rawProto;
+      const descr = r.descr ? String(r.descr) : '';
 
       // Parse source
       let src = 'any';
       let srcPort = '';
+      let negatedSrc = false;
       if (r.source) {
         if (r.source.any !== undefined) src = 'any';
-        else if (r.source.network) src = `$${r.source.network}`;
-        else if (r.source.address) src = r.source.address;
+        else if (r.source.network) src = `$${String(r.source.network).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        else if (r.source.address) src = String(r.source.address);
+        if (r.source.not !== undefined && src !== 'any') negatedSrc = true;
         if (r.source.port) srcPort = String(r.source.port);
       }
 
       // Parse destination
       let dst = 'any';
       let dstPort = '';
+      let negatedDst = false;
       if (r.destination) {
         if (r.destination.any !== undefined) dst = 'any';
-        else if (r.destination.network) dst = `$${r.destination.network}`;
-        else if (r.destination.address) dst = r.destination.address;
+        else if (r.destination.network) dst = `$${String(r.destination.network).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        else if (r.destination.address) dst = String(r.destination.address);
+        if (r.destination.not !== undefined && dst !== 'any') negatedDst = true;
         if (r.destination.port) dstPort = String(r.destination.port);
+      }
+
+      const hasNegation = negatedSrc || negatedDst;
+      const ruleIndex = rules.length;
+      const finalDescr = hasNegation ? `[REVIEW: Negated match] ${descr}`.trim() : descr;
+      const isEnabled = hasNegation ? false : r.disabled !== '1';
+
+      if (hasNegation) {
+        const reason: ImportReviewItem['reason'] =
+          negatedSrc && negatedDst
+            ? 'negated_both'
+            : negatedSrc
+              ? 'negated_source'
+              : 'negated_destination';
+        const matchSummary = `${action.toUpperCase()} ${proto} from ${negatedSrc ? `!${src}` : src} to ${negatedDst ? `!${dst}` : dst}`;
+        const explanation = `Rule "${descr || sortOrder}" uses an inverted (NOT) ${reason === 'negated_both' ? 'source and destination' : reason === 'negated_source' ? 'source' : 'destination'} match (${matchSummary}). Imported with enabled: false so it cannot silently activate with inverted semantics.`;
+        const suggestedResolution = `Split into an explicit preceding rule matching ${negatedSrc ? src : dst} with the opposite action, followed by a broader rule matching 'any', then enable the reviewed rules.`;
+        warnings.push(explanation + ' ' + suggestedResolution);
+        reviewItems.push({
+          ruleId: String(r['@_uuid'] || r.uuid || `rule-${ruleIndex + 1}`),
+          ruleIndex,
+          reason,
+          originalMatchSummary: matchSummary,
+          explanation,
+          suggestedResolution,
+        });
       }
 
       rules.push({
@@ -134,8 +166,8 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
         destination: dst,
         destinationPort: dstPort,
         log: Boolean(r.log),
-        enabled: r.disabled !== '1',
-        description: descr,
+        enabled: isEnabled,
+        description: finalDescr,
         sortOrder,
       });
       sortOrder += 10;
@@ -271,6 +303,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     dnsOverridesCount: hostOverrides.length,
     routesCount: 0,
     warnings,
+    reviewItems,
     state,
   };
 }

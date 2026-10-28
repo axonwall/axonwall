@@ -5,35 +5,50 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/cilium/ebpf/link"
-	
+
 	"github.com/axonwall/monorepo/apps/axonwalld/ebpf"
 )
 
 type EBPFManager struct {
-	objs     ebpf.FlowTrackerObjects
-	links    []link.Link
-	ch       driver.Conn
-	stopChan chan struct{}
+	objs        ebpf.FlowTrackerObjects
+	links       []link.Link
+	ch          driver.Conn
+	stopChan    chan struct{}
+	prevPackets map[ebpf.FlowTrackerFlowKey]uint64
 }
 
 func NewEBPFManager() *EBPFManager {
 	return &EBPFManager{
-		stopChan: make(chan struct{}),
+		stopChan:    make(chan struct{}),
+		prevPackets: make(map[ebpf.FlowTrackerFlowKey]uint64),
 	}
 }
 
 func (m *EBPFManager) initClickHouse() error {
+	chAddr := os.Getenv("CLICKHOUSE_ADDR")
+	if chAddr == "" {
+		chAddr = "127.0.0.1:9000"
+	}
+	chUser := os.Getenv("CLICKHOUSE_USER")
+	if chUser == "" {
+		chUser = "admin"
+	}
+	chPass := os.Getenv("CLICKHOUSE_PASSWORD")
+	if chPass == "" {
+		chPass = "axonwallclickhouse"
+	}
 	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{"127.0.0.1:9000"}, // Should be configurable
+		Addr: []string{chAddr},
 		Auth: clickhouse.Auth{
 			Database: "axonwall",
-			Username: "admin",
-			Password: "axonwallclickhouse",
+			Username: chUser,
+			Password: chPass,
 		},
 		MaxOpenConns:    5,
 		MaxIdleConns:    5,
@@ -106,15 +121,19 @@ func (m *EBPFManager) monitorFlows() {
 		case <-m.stopChan:
 			return
 		case <-ticker.C:
-			if m.ch == nil {
-				continue // ClickHouse not connected
+			if m.objs.FlowMap == nil {
+				continue
 			}
 
-			ctx := context.Background()
-			batch, err := m.ch.PrepareBatch(ctx, "INSERT INTO flows (timestamp, src_ip, dst_ip, protocol, packets, bytes)")
-			if err != nil {
-				log.Printf("ClickHouse prepare batch error: %v", err)
-				continue
+			var batch driver.Batch
+			if m.ch != nil {
+				ctx := context.Background()
+				var err error
+				batch, err = m.ch.PrepareBatch(ctx, "INSERT INTO flows (timestamp, src_ip, dst_ip, protocol, packets, bytes)")
+				if err != nil {
+					log.Printf("ClickHouse prepare batch error: %v", err)
+					batch = nil
+				}
 			}
 
 			iter := m.objs.FlowMap.Iterate()
@@ -136,18 +155,26 @@ func (m *EBPFManager) monitorFlows() {
 					dstIP[i] = byte(key.DstIp >> (i * 8))
 				}
 
-				if val.Packets > 10000 {
-					log.Printf("DDoS Mitigation: Threshold exceeded (%d packets). Blocking IP %s via XDP", val.Packets, srcIP.String())
-					m.objs.BlocklistMap.Put(key.SrcIp, uint8(1))
+				deltaPackets := val.Packets
+				if prev, ok := m.prevPackets[key]; ok && val.Packets >= prev {
+					deltaPackets = val.Packets - prev
+				}
+				m.prevPackets[key] = val.Packets
 
-					// Optional: push to CrowdSec or alert here
-				} else {
+				if deltaPackets > 10000 {
+					if _, _, _, err := ValidateTargetSafety(srcIP.String(), "", 0, 24, 64); err == nil {
+						log.Printf("DDoS Mitigation: Threshold exceeded (%d packets/10s). Blocking IP %s via XDP", deltaPackets, srcIP.String())
+						if m.objs.BlocklistMap != nil {
+							_ = m.objs.BlocklistMap.Put(key.SrcIp, uint8(1))
+						}
+					}
+				} else if batch != nil {
 					err := batch.Append(
 						now,
 						srcIP.String(),
 						dstIP.String(),
 						key.Protocol,
-						val.Packets,
+						deltaPackets,
 						val.Bytes,
 					)
 					if err == nil {
@@ -159,17 +186,21 @@ func (m *EBPFManager) monitorFlows() {
 			}
 
 			for i := range keysToDelete {
-				_ = m.objs.FlowMap.Delete(&keysToDelete[i])
+				if err := m.objs.FlowMap.Delete(&keysToDelete[i]); err == nil {
+					delete(m.prevPackets, keysToDelete[i])
+				}
 			}
 
-			if count > 0 {
-				if err := batch.Send(); err != nil {
-					log.Printf("ClickHouse send batch error: %v", err)
+			if batch != nil {
+				if count > 0 {
+					if err := batch.Send(); err != nil {
+						log.Printf("ClickHouse send batch error: %v", err)
+					} else {
+						log.Printf("Exported %d flow records to ClickHouse", count)
+					}
 				} else {
-					log.Printf("Exported %d flow records to ClickHouse", count)
+					_ = batch.Abort()
 				}
-			} else {
-				_ = batch.Abort()
 			}
 		}
 	}

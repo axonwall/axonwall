@@ -135,57 +135,24 @@ export function roleFromGroups(groups: unknown): 'admin' | 'operator' | 'readonl
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
 
-  const adminSet = new Set([
-    'admin',
-    'admins',
-    'administrator',
-    'administrators',
-    'axonwall-admin',
-    'axonwall-admins',
-    'netops-admin',
-    'secops-admin',
-    'superadmin',
-    'superadmins',
-    ...envAdminGroups,
-  ]);
+  const adminSet =
+    envAdminGroups.length > 0
+      ? new Set(envAdminGroups)
+      : new Set(['axonwall-admin', 'axonwall-admins']);
 
-  const operatorSet = new Set([
-    'operator',
-    'operators',
-    'axonwall-operator',
-    'axonwall-operators',
-    'noc',
-    'netops',
-    'operations',
-    ...envOperatorGroups,
-  ]);
+  const operatorSet =
+    envOperatorGroups.length > 0
+      ? new Set(envOperatorGroups)
+      : new Set(['axonwall-operator', 'axonwall-operators']);
 
   const normalizedList = list.map((g) => g.trim().toLowerCase());
 
-  // 1. Direct match on configured/standard sets
   for (const group of normalizedList) {
     if (adminSet.has(group)) return 'admin';
   }
 
-  // 2. Tokenized match on compound names (e.g. "Firewall Admins", "it-admins", "secops_admin")
-  // Explicitly ignore negative prefixes like "non-admin", "not-admin"
-  for (const group of normalizedList) {
-    if (/\b(non|not|unprivileged)[-_ ]admin/i.test(group)) {
-      continue;
-    }
-    if (/(^|[._\s/-])(admin|admins|administrator|administrators|superadmin|superadmins)([._\s/-]|$)/i.test(group)) {
-      return 'admin';
-    }
-  }
-
-  // 3. Operator checks
   for (const group of normalizedList) {
     if (operatorSet.has(group)) return 'operator';
-  }
-  for (const group of normalizedList) {
-    if (/(^|[._\s/-])(operator|operators|noc|operations)([._\s/-]|$)/i.test(group)) {
-      return 'operator';
-    }
   }
 
   return 'readonly';

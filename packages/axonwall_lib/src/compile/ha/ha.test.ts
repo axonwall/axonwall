@@ -114,11 +114,11 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     };
 
     const yml = compileLitestreamConfig(s3HaConfig);
-    expect(yml).toContain('path: /var/lib/axonwall/headscale/db.sqlite');
-    expect(yml).toContain('bucket: axonwall-ha-backup');
-    expect(yml).toContain('endpoint: https://s3.eu-west-1.amazonaws.com');
-    expect(yml).toContain('access-key-id: AKIA12345678');
-    expect(yml).toContain('secret-access-key: SECRET98765432');
+    expect(yml).toContain('path: "/var/lib/axonwall/headscale/db.sqlite"');
+    expect(yml).toContain('bucket: "axonwall-ha-backup"');
+    expect(yml).toContain('endpoint: "https://s3.eu-west-1.amazonaws.com"');
+    expect(yml).toContain('access-key-id: "AKIA12345678"');
+    expect(yml).toContain('secret-access-key: "SECRET98765432"');
     expect(yml).toContain('sync-interval: 5s');
   });
 

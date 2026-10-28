@@ -27,15 +27,35 @@ const (
 	HAPKICAKeyPath    = "/var/lib/axonwall/secrets/ha-pki/ca.key"
 	HAPKINodeCertPath = "/var/lib/axonwall/secrets/ha-pki/node.crt"
 	HAPKINodeKeyPath  = "/var/lib/axonwall/secrets/ha-pki/node.key"
+	HAPKIPeerCertPath = "/var/lib/axonwall/secrets/ha-pki/peer-node.crt"
 )
 
 type HAPKIBundle struct {
 	CACertPEM      string `json:"caCertPem"`
-	CAKeyPEM       string `json:"caKeyPem"`
+	CAKeyPEM       string `json:"caKeyPem,omitempty"`
 	NodeCertPEM    string `json:"nodeCertPem"`
-	NodeKeyPEM     string `json:"nodeKeyPem"`
+	NodeKeyPEM     string `json:"nodeKeyPem,omitempty"`
 	LDAPReplSecret string `json:"ldapReplSecret"`
 	LDAPBaseDN     string `json:"ldapBaseDn"`
+}
+
+type HAPKICSRRequest struct {
+	CSRPEM   string   `json:"csrPem"`
+	ExtraIPs []string `json:"extraIps,omitempty"`
+}
+
+type HAPKICSRResponse struct {
+	CACertPEM         string `json:"caCertPem"`
+	SignedCertPEM     string `json:"signedCertPem"`
+	PeerSignerCertPEM string `json:"peerSignerCertPem"`
+	LDAPReplSecret    string `json:"ldapReplSecret"`
+	LDAPBaseDN        string `json:"ldapBaseDn"`
+}
+
+// HasHAPKI reports whether valid HA PKI mTLS certificates and keys are installed on this node.
+func HasHAPKI() bool {
+	_, err := LoadHAPKITLSConfig()
+	return err == nil
 }
 
 // EnsureHAPKICerts generates or loads the internal HA Root CA and node leaf certificate
@@ -202,7 +222,7 @@ func fixHAPKIPermissions() {
 	}
 }
 
-// ExportHAPKIBundle exports the HA CA and issues a leaf certificate for a peer node enrolling over the HA sync link.
+// ExportHAPKIBundle exports the public HA CA and node certificate (never private keys) for a peer node.
 func ExportHAPKIBundle(peerIP string) (*HAPKIBundle, error) {
 	if err := EnsureHAPKICerts("axonwall-primary", "", peerIP); err != nil {
 		return nil, err
@@ -211,15 +231,7 @@ func ExportHAPKIBundle(peerIP string) (*HAPKIBundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	caKeyBytes, err := os.ReadFile(HAPKICAKeyPath)
-	if err != nil {
-		return nil, err
-	}
 	nodeCertBytes, err := os.ReadFile(HAPKINodeCertPath)
-	if err != nil {
-		return nil, err
-	}
-	nodeKeyBytes, err := os.ReadFile(HAPKINodeKeyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -228,12 +240,224 @@ func ExportHAPKIBundle(peerIP string) (*HAPKIBundle, error) {
 
 	return &HAPKIBundle{
 		CACertPEM:      string(caCertBytes),
-		CAKeyPEM:       string(caKeyBytes),
+		CAKeyPEM:       "",
 		NodeCertPEM:    string(nodeCertBytes),
-		NodeKeyPEM:     string(nodeKeyBytes),
+		NodeKeyPEM:     "",
 		LDAPReplSecret: strings.TrimSpace(string(replPass)),
 		LDAPBaseDN:     strings.TrimSpace(string(baseDN)),
 	}, nil
+}
+
+// GenerateHAPKICSR generates or loads the local node ECDSA P-256 private key (mode 0600)
+// and creates a PEM-encoded X.509 Certificate Signing Request (CSR) for HA PKI enrollment.
+func GenerateHAPKICSR(extraIPs []string) ([]byte, error) {
+	if err := os.MkdirAll(HAPKIDir, 0750); err != nil {
+		return nil, err
+	}
+	var nodeKey *ecdsa.PrivateKey
+	if keyBytes, err := os.ReadFile(HAPKINodeKeyPath); err == nil {
+		if block, _ := pem.Decode(keyBytes); block != nil {
+			nodeKey, _ = x509.ParseECPrivateKey(block.Bytes)
+		}
+	}
+	if nodeKey == nil {
+		var err error
+		nodeKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate HA node key: %w", err)
+		}
+		keyDER, err := x509.MarshalECPrivateKey(nodeKey)
+		if err != nil {
+			return nil, err
+		}
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+		if err := os.WriteFile(HAPKINodeKeyPath, keyPEM, 0600); err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll("/etc/axonwall/pki", 0750); err == nil {
+			_ = os.WriteFile("/etc/axonwall/pki/node.key", keyPEM, 0600)
+		}
+	}
+
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "axonwall-ha-backup"
+	}
+	ips := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	for _, rawIP := range extraIPs {
+		clean := strings.Split(strings.TrimSpace(rawIP), "/")[0]
+		if parsed := net.ParseIP(clean); parsed != nil {
+			ips = append(ips, parsed)
+		}
+	}
+
+	csrTmpl := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			Organization: []string{"Axonwall High Availability Cluster"},
+			CommonName:   hostname,
+		},
+		DNSNames:    []string{hostname, "localhost", "axonwall.local"},
+		IPAddresses: ips,
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTmpl, nodeKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HA CSR: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), nil
+}
+
+// SignHAPKICSR validates a peer's CSR, signs a 3-year client/server certificate with the local HA CA,
+// persists the peer's leaf certificate to peer-node.crt, and returns the public certs and LDAP repl secret.
+func SignHAPKICSR(csrPEM []byte, extraIPs []string) (*HAPKICSRResponse, error) {
+	peerIP := ""
+	if len(extraIPs) > 0 {
+		peerIP = extraIPs[0]
+	}
+	if err := EnsureHAPKICerts("axonwall-primary", "", peerIP); err != nil {
+		return nil, err
+	}
+
+	block, _ := pem.Decode(csrPEM)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, fmt.Errorf("invalid CSR PEM")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSR: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("CSR signature verification failed: %w", err)
+	}
+
+	caCertBytes, err := os.ReadFile(HAPKICACertPath)
+	if err != nil {
+		return nil, err
+	}
+	caKeyBytes, err := os.ReadFile(HAPKICAKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	caCertBlock, _ := pem.Decode(caCertBytes)
+	caKeyBlock, _ := pem.Decode(caKeyBytes)
+	if caCertBlock == nil || caKeyBlock == nil {
+		return nil, fmt.Errorf("invalid CA cert or key PEM")
+	}
+	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	caKey, err := x509.ParseECPrivateKey(caKeyBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	ipMap := make(map[string]net.IP)
+	var ips []net.IP
+	addIP := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		s := ip.String()
+		if _, exists := ipMap[s]; !exists {
+			ipMap[s] = ip
+			ips = append(ips, ip)
+		}
+	}
+	addIP(net.ParseIP("127.0.0.1"))
+	addIP(net.ParseIP("::1"))
+	for _, ip := range csr.IPAddresses {
+		addIP(ip)
+	}
+	for _, rawIP := range extraIPs {
+		clean := strings.Split(strings.TrimSpace(rawIP), "/")[0]
+		addIP(net.ParseIP(clean))
+	}
+
+	dnsNames := csr.DNSNames
+	if len(dnsNames) == 0 {
+		cn := csr.Subject.CommonName
+		if cn == "" {
+			cn = "axonwall-ha-peer"
+		}
+		dnsNames = []string{cn, "localhost", "axonwall.local"}
+	}
+
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      csr.Subject,
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(3 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		DNSNames:     dnsNames,
+		IPAddresses:  ips,
+	}
+
+	signedDER, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, csr.PublicKey, caKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign peer CSR: %w", err)
+	}
+	signedPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: signedDER})
+
+	_ = os.WriteFile(HAPKIPeerCertPath, signedPEM, 0644)
+	if err := os.MkdirAll("/etc/axonwall/pki", 0750); err == nil {
+		_ = os.WriteFile("/etc/axonwall/pki/peer-node.crt", signedPEM, 0644)
+		_ = os.WriteFile("/etc/axonwall/pki/ca.crt", caCertBytes, 0644)
+	}
+
+	primaryNodeCertBytes, err := os.ReadFile(HAPKINodeCertPath)
+	if err != nil {
+		return nil, err
+	}
+	replPass, _ := os.ReadFile(LDAPReplPassFile)
+	baseDN, _ := os.ReadFile(LDAPBaseDNFile)
+
+	return &HAPKICSRResponse{
+		CACertPEM:         string(caCertBytes),
+		SignedCertPEM:     string(signedPEM),
+		PeerSignerCertPEM: string(primaryNodeCertBytes),
+		LDAPReplSecret:    strings.TrimSpace(string(replPass)),
+		LDAPBaseDN:        strings.TrimSpace(string(baseDN)),
+	}, nil
+}
+
+// InstallHAPKICSRResponse installs the CA certificate, signed local leaf certificate,
+// peer signer certificate, and LDAP replication secret received from CSR enrollment.
+func InstallHAPKICSRResponse(resp *HAPKICSRResponse) error {
+	if resp == nil || resp.CACertPEM == "" || resp.SignedCertPEM == "" {
+		return fmt.Errorf("incomplete CSR enrollment response")
+	}
+	if err := os.MkdirAll(HAPKIDir, 0750); err != nil {
+		return err
+	}
+	if err := os.WriteFile(HAPKICACertPath, []byte(resp.CACertPEM), 0644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(HAPKINodeCertPath, []byte(resp.SignedCertPEM), 0644); err != nil {
+		return err
+	}
+	if resp.PeerSignerCertPEM != "" {
+		_ = os.WriteFile(HAPKIPeerCertPath, []byte(resp.PeerSignerCertPEM), 0644)
+	}
+	if err := os.MkdirAll("/etc/axonwall/pki", 0750); err == nil {
+		_ = os.WriteFile("/etc/axonwall/pki/ca.crt", []byte(resp.CACertPEM), 0644)
+		_ = os.WriteFile("/etc/axonwall/pki/node.crt", []byte(resp.SignedCertPEM), 0644)
+		if resp.PeerSignerCertPEM != "" {
+			_ = os.WriteFile("/etc/axonwall/pki/peer-node.crt", []byte(resp.PeerSignerCertPEM), 0644)
+		}
+	}
+	fixHAPKIPermissions()
+
+	if resp.LDAPReplSecret != "" {
+		_ = os.MkdirAll(LDAPSecretsDir, 0700)
+		_ = os.WriteFile(LDAPReplPassFile, []byte(resp.LDAPReplSecret+"\n"), 0600)
+	}
+	if resp.LDAPBaseDN != "" {
+		_ = os.MkdirAll(LDAPBaseDir, 0750)
+		_ = os.WriteFile(LDAPBaseDNFile, []byte(resp.LDAPBaseDN+"\n"), 0644)
+	}
+	return nil
 }
 
 // ImportHAPKIBundle installs the HA PKI bundle and LDAP replication secret received from the primary HA node.
@@ -454,10 +678,21 @@ func signPayloadDigestFromPKI(digest []byte) (string, error) {
 	return signPayloadDigest(key, digest)
 }
 
-// verifyPayloadSignatureFromPKI verifies against the packaged HA node
-// certificate. Any error (no PKI, unparsable signature) is a failed
-// verification.
+// verifyPayloadSignatureFromPKI verifies against the peer's enrolled HA node
+// certificate (or the local HA node certificate if peer-node.crt is absent).
+// Any error (no PKI, unparsable signature) is a failed verification.
 func verifyPayloadSignatureFromPKI(digest []byte, sigB64 string) bool {
+	for _, p := range []string{HAPKIPeerCertPath, "/etc/axonwall/pki/peer-node.crt"} {
+		if data, err := os.ReadFile(p); err == nil {
+			if block, _ := pem.Decode(data); block != nil {
+				if peerCert, err := x509.ParseCertificate(block.Bytes); err == nil {
+					if verifyPayloadSignatureWithCert(peerCert, digest, sigB64) {
+						return true
+					}
+				}
+			}
+		}
+	}
 	cert, err := loadHANodeCert()
 	if err != nil {
 		return false

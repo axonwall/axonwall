@@ -67,12 +67,16 @@ export const CloudInitZfsDatasetSchema = z.object({
   properties: z.record(z.string(), z.string()).optional(),
 });
 
+const SAFE_DEV_DISK_PATH = /^\/dev\/[a-zA-Z0-9/_-]+$/;
+
 export const CloudInitZfsStorageSchema = z.object({
   enabled: z.boolean().default(false),
   pool_name: z.string().default('tank'),
   allocate_system_disk_remainder: z.boolean().default(true),
   system_disk_size_gb: z.number().min(0).default(0),
-  extra_disks: z.array(z.string()).default([]),
+  extra_disks: z.array(
+    z.string().regex(SAFE_DEV_DISK_PATH, 'Invalid device disk path').refine((s) => !s.includes('..'), 'Disk path cannot contain ..'),
+  ).default([]),
   topology: z
     .enum(['auto', 'stripe', 'mirror', 'raidz1', 'raidz2', 'raidz3', 'draid1', 'draid2'])
     .default('auto'),
@@ -83,7 +87,9 @@ export const CloudInitStorageSchema = z.object({
   layout_mode: z
     .enum(['standard_ab', 'compact_ab', 'single_root', 'custom'])
     .default('standard_ab'),
-  target_disks: z.array(z.string()).min(1).default(['/dev/sda']),
+  target_disks: z.array(
+    z.string().regex(SAFE_DEV_DISK_PATH, 'Invalid target disk device path').refine((s) => !s.includes('..'), 'Disk path cannot contain ..'),
+  ).min(1).default(['/dev/sda']),
   system_raid: SystemRaidSchema.default(() => ({ enabled: false, level: 'raid1' as const })),
   encryption: EncryptionSchema.default(() => ({
     enabled: false,
@@ -1045,6 +1051,37 @@ export function prepareDesiredStateForCloudInit(
       }
       if (cloned.nas.s3?.secretKey) {
         cloned.nas.s3.secretKey = REDACTED_SECRET_PLACEHOLDER;
+      }
+    }
+    if (cloned.snmp?.community) {
+      cloned.snmp.community = REDACTED_SECRET_PLACEHOLDER;
+    }
+    if (cloned.virt) {
+      if (Array.isArray(cloned.virt.vms)) {
+        for (const vm of cloned.virt.vms) {
+          if (vm.cloudInit?.password) {
+            vm.cloudInit.password = REDACTED_SECRET_PLACEHOLDER;
+          }
+        }
+      }
+      if (Array.isArray(cloned.virt.backupJobs)) {
+        for (const job of cloned.virt.backupJobs) {
+          if (job.encryptionKey) {
+            job.encryptionKey = REDACTED_SECRET_PLACEHOLDER;
+          }
+        }
+      }
+    }
+    if (cloned.captivePortal) {
+      if ((cloned.captivePortal as any).radiusSecret) {
+        (cloned.captivePortal as any).radiusSecret = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (Array.isArray(cloned.captivePortal.zones)) {
+        for (const zone of cloned.captivePortal.zones as Array<{ radiusSecret?: string }>) {
+          if (zone.radiusSecret) {
+            zone.radiusSecret = REDACTED_SECRET_PLACEHOLDER;
+          }
+        }
       }
     }
   }

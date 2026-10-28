@@ -236,7 +236,6 @@ jobs:
 
       - name: Upload ISO Checksum Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        continue-on-error: true
         with:
           name: axonwall-debian13-amd64-checksum
           path: packaging/iso/output/axonwall-debian13-amd64.iso.sha256
@@ -302,7 +301,6 @@ jobs:
 
       - name: Download Cloud Appliance QCOW2 Artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        continue-on-error: true
         with:
           name: axonwall-cloud-qcow2
           path: packaging/cloud-image/output

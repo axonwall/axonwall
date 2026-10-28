@@ -42,6 +42,7 @@ type AgentServer struct {
 	lastGoodScript   string
 	candidateScript  string
 	pendingConfirm   bool
+	pendingJobID     string
 	confirmDeadline  time.Time
 	rollbackTimer    *time.Timer
 	nodeId           string
@@ -97,14 +98,16 @@ func resolveAxonwallApiGid() int {
 }
 
 func ensureSharedConfigPerm(path string, mode os.FileMode) {
+	fi, err := os.Lstat(path)
+	if err != nil || (fi.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
 	_ = os.Chmod(path, mode)
 	if gid := resolveAxonwallApiGid(); gid >= 0 {
-		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink == 0 {
-			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-				_ = os.Chown(path, int(st.Uid), gid)
-			} else {
-				_ = os.Chown(path, -1, gid)
-			}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			_ = os.Lchown(path, int(st.Uid), gid)
+		} else {
+			_ = os.Lchown(path, -1, gid)
 		}
 	}
 }
@@ -231,11 +234,16 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 	}
 	if lastGoodScript == "" {
 		if out, err := exec.Command("nft", "list", "ruleset").CombinedOutput(); err == nil && len(out) > 0 {
-			h := sha256.Sum256(out)
+			scriptStr := string(out)
+			if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
+				scriptStr = "flush ruleset\n" + scriptStr
+			}
+			scriptBytes := []byte(scriptStr)
+			h := sha256.Sum256(scriptBytes)
 			initHash = hex.EncodeToString(h[:])
-			lastGoodScript = string(out)
+			lastGoodScript = scriptStr
 			if err := os.MkdirAll(bundleDir, 0700); err == nil {
-				_ = os.WriteFile(filepath.Join(bundleDir, "last-known-good.nft"), out, 0600)
+				_ = os.WriteFile(filepath.Join(bundleDir, "last-known-good.nft"), scriptBytes, 0600)
 			}
 		}
 	}
@@ -328,6 +336,17 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		if !allowed {
 			return nil, status.Errorf(codes.PermissionDenied, "disallowed destination file path: %s", cleanPath)
 		}
+		if cleanPath == "/etc/axonwall/admin.env" ||
+			cleanPath == "/etc/axonwall/axonwall.env" ||
+			cleanPath == "/etc/axonwall/mfa.env" ||
+			cleanPath == "/etc/axonwall/slapd.seed" ||
+			cleanPath == "/etc/axonwall/pki" ||
+			strings.HasPrefix(cleanPath, "/etc/axonwall/pki/") {
+			return nil, status.Errorf(codes.PermissionDenied, "protected credential or PKI file cannot be overwritten via bundle: %s", cleanPath)
+		}
+		if fi, lerr := os.Lstat(cleanPath); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+			return nil, status.Errorf(codes.PermissionDenied, "destination path is a symlink: %s", cleanPath)
+		}
 		// Reject symlinked intermediate directories (audit D-S02): the
 		// prefix check and O_NOFOLLOW leaf open do not stop a planted
 		// symlink one level up from redirecting the write outside the
@@ -401,13 +420,26 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
 			persistPath := filepath.Join("/var/lib/axonwall/etc-axonwall", relPath)
 			_ = os.MkdirAll(filepath.Dir(persistPath), 0775)
-			_ = os.WriteFile(persistPath, []byte(f.Content), mode)
-			if isSharedAxonwallCfg {
-				ensureSharedConfigPerm(persistPath, mode)
+			if fi, lerr := os.Lstat(persistPath); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
+				if pf, perr := os.OpenFile(persistPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode); perr == nil {
+					_, _ = pf.Write([]byte(f.Content))
+					_ = pf.Chmod(mode)
+					_ = pf.Close()
+				}
+				if isSharedAxonwallCfg {
+					ensureSharedConfigPerm(persistPath, mode)
+				}
 			}
 			if filepath.Base(cleanPath) == "state.json" {
-				_ = os.WriteFile("/var/lib/axonwall/state.json", []byte(f.Content), 0660)
-				ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+				varStatePath := "/var/lib/axonwall/state.json"
+				if fi, lerr := os.Lstat(varStatePath); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
+					if sf, serr := os.OpenFile(varStatePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0660); serr == nil {
+						_, _ = sf.Write([]byte(f.Content))
+						_ = sf.Chmod(0660)
+						_ = sf.Close()
+					}
+					ensureSharedConfigPerm(varStatePath, 0660)
+				}
 			}
 		}
 
@@ -478,7 +510,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// 4. Apply ruleset atomically
 	applyCmd := exec.Command("nft", "-f", tmpFile.Name())
 	if out, err := applyCmd.CombinedOutput(); err != nil {
-		log.Printf("[Agent] Failed to apply nftables ruleset: %s", string(out))
+		log.Printf("[Agent] Failed to apply nftables ruleset: %s; rolling back config files and services", string(out))
+		_ = s.executeRollback("nftables apply failed")
 		return &pb.ApplyBundleResponse{
 			Success: false,
 			Message: fmt.Sprintf("failed to execute atomic nft application: %s", string(out)),
@@ -514,6 +547,7 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	}
 
 	s.pendingConfirm = true
+	s.pendingJobID = req.JobId
 	s.confirmDeadline = time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	_ = os.MkdirAll("/run/axonwall", 0755)
 	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (%ds)", timeoutSec)), 0644)
@@ -570,12 +604,14 @@ func (s *AgentServer) executeRollback(reason string) error {
 	// Restore LKG configuration files & state
 	restoreLkgConfig(s.bundleDir)
 
-	// Reconcile static routes with the restored configuration
+	// Re-apply restored physical/logical interfaces and reconcile static routes
+	applyBootInterfaces()
 	if err := ReconcileStaticRoutes(); err != nil {
 		log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
 	}
 
 	s.pendingConfirm = false
+	s.pendingJobID = ""
 	s.candidateScript = ""
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 	log.Printf("[Agent] Successfully rolled back to last known good configuration (reason: %s).", reason)
@@ -602,12 +638,26 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 
 	log.Printf("[Agent] Received Confirm request for job %s", req.JobId)
 
+	if !s.pendingConfirm {
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: "No pending configuration to confirm (already confirmed or rolled back).",
+		}, nil
+	}
+	if req.JobId != "" && s.pendingJobID != "" && req.JobId != s.pendingJobID {
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: fmt.Sprintf("Job ID mismatch for pending confirmation: expected %s, got %s", s.pendingJobID, req.JobId),
+		}, nil
+	}
+
 	if s.rollbackTimer != nil {
 		s.rollbackTimer.Stop()
 		s.rollbackTimer = nil
 	}
 
 	s.pendingConfirm = false
+	s.pendingJobID = ""
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 	if s.candidateScript != "" {
 		s.lastGoodScript = s.candidateScript
@@ -1474,7 +1524,7 @@ func main() {
 
 	// Start eBPF Manager
 	ebpfManager := engine.NewEBPFManager()
-	if err := ebpfManager.Start([]string{"eth0", "lo"}); err != nil {
+	if err := ebpfManager.Start([]string{"eth0"}); err != nil {
 		log.Printf("[Agent] Warning: Failed to start eBPF manager: %v", err)
 	}
 
@@ -2025,6 +2075,28 @@ func main() {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				return
+			}
+			if r.Method == http.MethodDelete {
+				pool := r.URL.Query().Get("pool")
+				filename := r.URL.Query().Get("filename")
+				if filename == "" {
+					var req struct {
+						Pool     string `json:"pool"`
+						Filename string `json:"filename"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					if pool == "" {
+						pool = req.Pool
+					}
+					filename = req.Filename
+				}
+				if err := virtManager.DeleteISO(pool, filename); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 				return
 			}
 			pool := r.URL.Query().Get("pool")

@@ -435,6 +435,20 @@ function extractTargetFromFilename(filename) {
   return clean ? clean.replace(/_/g, '/') : 'unknown-target';
 }
 
+const FORBIDDEN_OOBSCAN_ARGS = /^(?:-o|--output|-nmap-cli|--nmap-cli|-list|--list|-iL|--input-list)(?:=|$)/i;
+
+function sanitizeOobCustomArgs(customArgs) {
+  const tokens = Array.isArray(customArgs)
+    ? customArgs.map(a => String(a).trim()).filter(Boolean)
+    : String(customArgs || '').trim().split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    if (FORBIDDEN_OOBSCAN_ARGS.test(token)) {
+      throw new Error(`Forbidden oobscan custom argument '${token}': output path and external binary flags are not allowed`);
+    }
+  }
+  return tokens;
+}
+
 /**
  * Execute an OOBscan against an IP, CIDR block, or IPv6 multicast group
  * @param {Object} options
@@ -477,7 +491,8 @@ export async function runOobScan({
   // dropping -targets entirely and letting the two flag spellings drift.
   let args;
   if (profile === 'custom') {
-    args = [...customArgs, '-o', jsonlFilePath, '-v'];
+    const safeCustomArgs = sanitizeOobCustomArgs(customArgs);
+    args = [...safeCustomArgs, '-o', jsonlFilePath, '-v'];
     if (disableLogins && !args.includes('-no-logins')) args.push('-no-logins');
     if (ipmiFull && !args.includes('-ipmi-full')) args.push('-ipmi-full');
     // Target goes last for custom argument vectors

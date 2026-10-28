@@ -6,7 +6,9 @@ cd "${REPO_ROOT}"
 
 CERTS_DIR="certs"
 mkdir -p "$CERTS_DIR"
+chmod 0700 "$CERTS_DIR"
 cd "$CERTS_DIR"
+umask 077
 
 echo "Generating Axonwall Root CA..."
 # Root CA Key
@@ -63,6 +65,8 @@ openssl x509 -req -in satellite.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 
 # Cleanup CSRs and ext files
 rm *.csr *_ext.cnf
+chmod 0600 *.key
+chmod 0644 *.crt
 
 echo "====================================="
 echo "mTLS Certificates generated in ./certs/"

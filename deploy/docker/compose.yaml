@@ -46,7 +46,7 @@ services:
     container_name: axonwall-ldap
     restart: unless-stopped
     ports:
-      - "389:389"
+      - "127.0.0.1:389:389"
     environment:
       - LDAP_ORGANISATION=Axonwall
       - LDAP_DOMAIN=axonwall.internal
@@ -60,7 +60,7 @@ services:
     container_name: axonwall-supabase
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_PASSWORD=postgrespassword
       - POSTGRES_DB=postgres
@@ -72,7 +72,7 @@ services:
     container_name: axonwall-vm
     restart: unless-stopped
     ports:
-      - "8428:8428"
+      - "127.0.0.1:8428:8428"
     command:
       - "-retentionPeriod=30d"
       - "-storageDataPath=/vm-data"
@@ -84,7 +84,7 @@ services:
     container_name: axonwall-vl
     restart: unless-stopped
     ports:
-      - "9428:9428"
+      - "127.0.0.1:9428:9428"
     command:
       - "-retentionPeriod=14d"
       - "-storageDataPath=/vl-data"

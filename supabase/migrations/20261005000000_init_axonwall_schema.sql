@@ -6,14 +6,22 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Auth Helpers for RLS
 CREATE OR REPLACE FUNCTION auth.jwt_claims()
-RETURNS jsonb AS $$
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = public, pg_temp
+AS $$
 BEGIN
   RETURN COALESCE(NULLIF(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb);
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$;
 
 CREATE OR REPLACE FUNCTION auth.has_priv(priv text)
-RETURNS boolean AS $$
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SET search_path = public, pg_temp
+AS $$
 DECLARE
   claims jsonb;
   privs jsonb;
@@ -37,10 +45,14 @@ BEGIN
   -- Specific privilege check
   RETURN privs ? priv;
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$;
 
 CREATE OR REPLACE FUNCTION auth.has_role(r text)
-RETURNS boolean AS $$
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SET search_path = public, pg_temp
+AS $$
 DECLARE
   claims jsonb;
   roles jsonb;
@@ -55,7 +67,7 @@ BEGIN
   END IF;
   RETURN roles ? r;
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$;
 
 -- 1. Nodes Table
 CREATE TABLE IF NOT EXISTS public.nodes (
@@ -273,7 +285,7 @@ CREATE POLICY "Allow write apply_jobs" ON public.apply_jobs FOR ALL USING (auth.
 
 -- Audit log
 CREATE POLICY "Allow read audit_log" ON public.audit_log FOR SELECT USING (auth.has_priv('system.status.read'));
-CREATE POLICY "Allow insert audit_log" ON public.audit_log FOR INSERT WITH CHECK (true);
+CREATE POLICY "Allow insert audit_log" ON public.audit_log FOR INSERT WITH CHECK ((auth.jwt_claims()->>'role') = 'service_role' OR (auth.jwt_claims()->>'sub') IS NOT NULL);
 
 -- Seed Initial Data
 INSERT INTO public.roles (id, name, description) VALUES

@@ -11,8 +11,8 @@ global:
   imagePullPolicy: IfNotPresent
 
 config:
-  DEV_MODE: "true"
-  VIGIL_COOKIE_SECURE: "false"
+  DEV_MODE: "false"
+  VIGIL_COOKIE_SECURE: "true"
   BIND_HOST: "0.0.0.0"
 
 backend:

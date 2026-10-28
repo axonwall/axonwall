@@ -78,6 +78,9 @@ export async function restoreEncryptedBackup(
   if (buffer.length < 48) {
     throw new Error('Invalid backup file: file truncated or too small');
   }
+  if (buffer.length > 10 * 1024 * 1024) {
+    throw new Error('Backup file exceeds maximum allowed size (10 MB)');
+  }
 
   const magic = buffer.subarray(0, 4);
   let iterations: number;

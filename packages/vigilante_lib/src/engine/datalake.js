@@ -235,6 +235,36 @@ export function ingestSecurityEvents(eventType, events = []) {
   return inserted;
 }
 
+const FORBIDDEN_DATALAKE_SQL = /\b(ATTACH|DETACH|PRAGMA|COPY|EXPORT|IMPORT|INSTALL|LOAD|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM|read_text|read_blob|read_csv|read_csv_auto|read_json|read_parquet|parquet_scan|sqlite_master|sqlite_temp_master)\b/i;
+
+/**
+ * Validate that a Data Lake SQL query is a single read-only SELECT/WITH statement
+ * @param {string} sql
+ * @returns {string} Cleaned SQL string
+ */
+export function assertReadOnlyDataLakeSql(sql) {
+  if (typeof sql !== 'string' || !sql.trim()) {
+    throw new Error('Data Lake query must be a non-empty SQL string');
+  }
+  const stripped = sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--[^\r\n]*/g, ' ')
+    .trim()
+    .replace(/;+\s*$/, '')
+    .trim();
+
+  if (!stripped || stripped.includes(';')) {
+    throw new Error('Data Lake queries must contain a single read-only SQL statement');
+  }
+  if (!/^(SELECT|WITH)\b/i.test(stripped)) {
+    throw new Error('Only read-only SELECT or WITH queries are permitted against the Security Data Lake');
+  }
+  if (FORBIDDEN_DATALAKE_SQL.test(stripped)) {
+    throw new Error('Query contains forbidden DDL, DML, or filesystem access keywords');
+  }
+  return stripped;
+}
+
 /**
  * Execute an analytical SQL query across Data Lake events
  * @param {string} sql 
@@ -242,8 +272,9 @@ export function ingestSecurityEvents(eventType, events = []) {
  * @returns {Array<Object>} Row results
  */
 export async function queryDataLake(sql, params = []) {
+  const safeSql = assertReadOnlyDataLakeSql(sql);
   const db = initDataLake();
-  const stmt = db.prepare(sql);
+  const stmt = db.prepare(safeSql);
   // Awaited uniformly: the SQLite backend resolves synchronously, the
   // DuckDB backend returns a Promise.
   return await stmt.all(...params);

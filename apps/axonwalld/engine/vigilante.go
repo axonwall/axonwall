@@ -86,6 +86,9 @@ func (vm *VigilanteManager) BlockIP(rawIP string, timeoutSec int) error {
 	if err != nil {
 		return err
 	}
+	if _, _, _, err := ValidateTargetSafety(cleanIP, "", 0, 24, 64); err != nil {
+		return err
+	}
 
 	if timeoutSec <= 0 {
 		timeoutSec = 86400 // Default 24 hours
@@ -101,8 +104,10 @@ func (vm *VigilanteManager) BlockIP(rawIP string, timeoutSec int) error {
 	elementSpec := fmt.Sprintf("{ %s timeout %ds }", cleanIP, timeoutSec)
 	cmd := exec.Command("nft", "add", "element", "inet", "axonwall", setName, elementSpec)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		// Log warning but don't fail completely if nftables set hasn't been loaded yet in dev mode
 		log.Printf("[VigilanteManager] nft add element warning: %v, out: %s", err, string(out))
+		if os.Geteuid() == 0 {
+			return fmt.Errorf("failed to add IP %s to nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
+		}
 	}
 
 	vm.mu.Lock()

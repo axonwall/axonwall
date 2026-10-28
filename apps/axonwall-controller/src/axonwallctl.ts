@@ -1245,6 +1245,9 @@ async function cmdCloudInit(userArgs: string[]) {
           finalAdminPass = `scrypt$${salt}$${hash}`;
         }
         if (!/^\$(1|5|6|y|2a|2b|2y)\$/.test(finalAdminPass)) {
+          if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(rawAdminUser)) {
+            throw new Error(`Invalid administrator username: ${rawAdminUser}`);
+          }
           fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
           const adminEnvPath = path.join(ETC_DIR, 'admin.env');
           const envContent = `LOCAL_ADMIN_USER=${rawAdminUser}\nLOCAL_ADMIN_PASSWORD=${finalAdminPass}\n`;
@@ -1514,7 +1517,7 @@ async function setCoreRolePlugin(pluginId: string, enable: boolean) {
     try {
       fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
       for (const [filename, content] of Object.entries(yamlFiles)) {
-        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o644 });
+        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o660 });
       }
       // Remove stale conf.d/99-cloudinit.yaml override now that state is persisted to canonical domain files
       const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
@@ -1619,7 +1622,7 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
     try {
       fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
       for (const [filename, content] of Object.entries(yamlFiles)) {
-        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o644 });
+        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o660 });
       }
     } catch {}
   }

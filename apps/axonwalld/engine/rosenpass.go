@@ -90,11 +90,16 @@ func GenerateRosenpassKeypair(baseDir string, force bool) (string, int64, error)
 	generatedByBinary := false
 	if binPath, err := exec.LookPath("rosenpass"); err == nil && binPath != "" {
 		cmd := exec.Command(binPath, "gen-keys", "--secret-key", skPath, "--public-key", pkPath)
-		if err := cmd.Run(); err == nil {
-			if st, statErr := os.Stat(pkPath); statErr == nil && st.Size() > 0 {
-				generatedByBinary = true
-			}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", 0, fmt.Errorf("rosenpass gen-keys failed: %s (%w)", string(out), err)
 		}
+		if st, statErr := os.Stat(pkPath); statErr == nil && st.Size() > 0 {
+			generatedByBinary = true
+		} else {
+			return "", 0, fmt.Errorf("rosenpass gen-keys did not produce a valid public key at %s", pkPath)
+		}
+	} else if baseDir == DefaultRosenpassDir && os.Getenv("AXONWALL_TEST_MODE") != "1" {
+		return "", 0, fmt.Errorf("rosenpass binary not found in PATH; refusing to generate fallback random keypair in production")
 	}
 
 	if !generatedByBinary {
@@ -163,6 +168,15 @@ func ProvisionRosenpassEnvironment(baseDir string) error {
 	}
 
 	if baseDir == DefaultRosenpassDir {
+		cfgPath := filepath.Join(baseDir, "config.toml")
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			defaultToml := fmt.Sprintf(`public_key = "%s/pq.pk"
+secret_key = "%s/pq.sk"
+listen = ["0.0.0.0:9999"]
+verbosity = "Quiet"
+`, baseDir, baseDir)
+			_ = os.WriteFile(cfgPath, []byte(defaultToml), 0600)
+		}
 		unitContent := `[Unit]
 Description=Rosenpass Post-Quantum Hybrid Dual-KEM Key Exchange Daemon (Axonwall)
 Documentation=https://rosenpass.eu/

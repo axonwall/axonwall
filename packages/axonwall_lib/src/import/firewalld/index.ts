@@ -6,7 +6,7 @@ import type {
   FirewallRule,
   NatRule,
 } from '../../schemas/index.js';
-import type { ImportReport } from '../types.js';
+import type { ImportReport, ImportReviewItem } from '../types.js';
 
 export interface FirewalldServiceDef {
   protocol: 'tcp' | 'udp' | 'tcp_udp' | 'icmp' | 'esp' | 'ah' | 'gre';
@@ -138,12 +138,15 @@ function parseRichRule(
   natSortOrder: number,
   customServices: Map<string, FirewalldServiceDef>,
   warnings: string[],
-): { rule?: FirewallRule; natRule?: NatRule } {
+  ruleIndex = 0,
+): { rule?: FirewallRule; natRule?: NatRule; reviewItem?: ImportReviewItem } {
   const text = richText.trim().replace(/\s+/g, ' ');
   if (!text) return {};
 
+  const negatedSrc = /source\s+not\s+/i.test(text);
+  const negatedDst = /destination\s+not\s+/i.test(text);
   const srcMatch = text.match(/source\s+(?:not\s+)?address=["']([^"']+)["']/i);
-  const srcIpsetMatch = text.match(/source\s+ipset=["']([^"']+)["']/i);
+  const srcIpsetMatch = text.match(/source\s+(?:not\s+)?ipset=["']([^"']+)["']/i);
   const dstMatch = text.match(/destination\s+(?:not\s+)?address=["']([^"']+)["']/i);
   const svcMatch = text.match(/service\s+name=["']([^"']+)["']/i);
   const portMatch = text.match(/port\s+port=["']([^"']+)["']\s+protocol=["']([^"']+)["']/i)
@@ -237,6 +240,32 @@ function parseRichRule(
     descDetail = `Rich Rule: proto ${protoMatch[1]}`;
   }
 
+  const hasNegation = (negatedSrc && source !== 'any') || (negatedDst && destination !== 'any');
+  const baseDesc = `${descDetail} (${ifaceName})`;
+  const finalDesc = hasNegation ? `[REVIEW: Negated match] ${baseDesc}` : baseDesc;
+
+  let reviewItem: ImportReviewItem | undefined;
+  if (hasNegation) {
+    const reason: ImportReviewItem['reason'] =
+      negatedSrc && negatedDst
+        ? 'negated_both'
+        : negatedSrc
+          ? 'negated_source'
+          : 'negated_destination';
+    const matchSummary = `${action.toUpperCase()} ${protocol} from ${negatedSrc ? `!${source}` : source} to ${negatedDst ? `!${destination}` : destination}`;
+    const explanation = `Firewalld rich rule "${baseDesc}" uses an inverted (not) ${reason === 'negated_both' ? 'source and destination' : reason === 'negated_source' ? 'source' : 'destination'} match (${matchSummary}). Imported with enabled: false so it cannot silently activate with inverted semantics.`;
+    const suggestedResolution = `Split into an explicit preceding rule matching ${negatedSrc ? source : destination} with the opposite action, followed by a broader rule matching 'any', then enable the reviewed rules.`;
+    warnings.push(explanation + ' ' + suggestedResolution);
+    reviewItem = {
+      ruleId: `rule-${ruleIndex + 1}`,
+      ruleIndex,
+      reason,
+      originalMatchSummary: matchSummary,
+      explanation,
+      suggestedResolution,
+    };
+  }
+
   return {
     rule: {
       action,
@@ -249,10 +278,11 @@ function parseRichRule(
       destination,
       destinationPort,
       log: hasLog,
-      enabled: true,
-      description: `${descDetail} (${ifaceName})`,
+      enabled: !hasNegation,
+      description: finalDesc,
       sortOrder,
     },
+    reviewItem,
   };
 }
 
@@ -480,11 +510,13 @@ function parseFirewalldXml(
         const parts: string[] = ['rule'];
         if (r['@_family']) parts.push(`family="${r['@_family']}"`);
         const srcObj = Array.isArray(r.source) ? r.source[0] : r.source;
-        if (srcObj?.['@_address']) parts.push(`source address="${srcObj['@_address']}"`);
-        else if (srcObj?.['@_ipset']) parts.push(`source ipset="${srcObj['@_ipset']}"`);
+        const srcNot = srcObj?.['@_not'] !== undefined || srcObj?.['@_NOT'] !== undefined || srcObj?.not !== undefined ? 'not ' : '';
+        if (srcObj?.['@_address']) parts.push(`source ${srcNot}address="${srcObj['@_address']}"`);
+        else if (srcObj?.['@_ipset']) parts.push(`source ${srcNot}ipset="${srcObj['@_ipset']}"`);
 
         const dstObj = Array.isArray(r.destination) ? r.destination[0] : r.destination;
-        if (dstObj?.['@_address']) parts.push(`destination address="${dstObj['@_address']}"`);
+        const dstNot = dstObj?.['@_not'] !== undefined || dstObj?.['@_NOT'] !== undefined || dstObj?.not !== undefined ? 'not ' : '';
+        if (dstObj?.['@_address']) parts.push(`destination ${dstNot}address="${dstObj['@_address']}"`);
 
         const svcObj = Array.isArray(r.service) ? r.service[0] : r.service;
         if (svcObj?.['@_name']) parts.push(`service name="${svcObj['@_name']}"`);
@@ -785,6 +817,7 @@ export function importFirewalldConfig(content: string): ImportReport {
   const interfaces: Interface[] = [];
   const rules: FirewallRule[] = [];
   const nat: NatRule[] = [];
+  const reviewItems: ImportReviewItem[] = [];
   const seenIfaces = new Set<string>();
 
   let sortOrder = 10;
@@ -971,9 +1004,12 @@ export function importFirewalldConfig(content: string): ImportReport {
 
     // 7. Rich Rules
     for (const rr of zone.richRules) {
-      const parsedRr = parseRichRule(rr, ifaceName, sortOrder, natSort, customServices, warnings);
+      const parsedRr = parseRichRule(rr, ifaceName, sortOrder, natSort, customServices, warnings, rules.length);
       if (parsedRr.rule) {
         rules.push(parsedRr.rule);
+        if (parsedRr.reviewItem) {
+          reviewItems.push(parsedRr.reviewItem);
+        }
         sortOrder += 10;
       }
       if (parsedRr.natRule) {
@@ -1115,6 +1151,7 @@ export function importFirewalldConfig(content: string): ImportReport {
     dnsOverridesCount: 0,
     routesCount: 0,
     warnings,
+    reviewItems,
     state,
   };
 }

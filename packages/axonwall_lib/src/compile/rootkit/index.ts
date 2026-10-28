@@ -244,7 +244,9 @@ export function compileKernelHardeningSysctl(state?: Partial<DesiredState> | nul
  */
 export function compileBpfLsmGuardC(state?: Partial<DesiredState> | null): string {
   const cfg = resolveHostDefenseConfig(state);
-  const trustedPathsComment = cfg.trustedBpfLoaderPaths.map((p) => ` *   - ${p}`).join('\n');
+  const trustedPathsComment = cfg.trustedBpfLoaderPaths
+    .map((p) => ` *   - ${String(p).replace(/[\r\n]+/g, '')}`)
+    .join('\n');
   const sqpollReturn = cfg.blockIoUringSqpoll ? '-EPERM' : '0';
 
   return `// SPDX-License-Identifier: GPL-2.0
@@ -440,10 +442,11 @@ fi
 
 echo -e "\\n=== [5] Sampling Silicon Hardware PMU Last Branch Records (Intel LBR / AMD BRS) ==="
 if command -v perf >/dev/null 2>&1; then
-  perf record -e branches:k -j any,k -a -o /tmp/axonwall-lbr.data -- sleep 1 >/dev/null 2>&1 && \\
-    perf script -i /tmp/axonwall-lbr.data --fields comm,pid,brstacksym 2>/dev/null | grep -E "bpf_trampoline|bpf_prog_" | head -n 20 || \\
+  mkdir -p -m 0700 /run/axonwall
+  perf record -e branches:k -j any,k -a -o /run/axonwall/axonwall-lbr.data -- sleep 1 >/dev/null 2>&1 && \\
+    perf script -i /run/axonwall/axonwall-lbr.data --fields comm,pid,brstacksym 2>/dev/null | grep -E "bpf_trampoline|bpf_prog_" | head -n 20 || \\
     echo "[+] No unexpected PMU LBR jumps into bpf_trampoline detected (or PMU LBR unsupported in VM)."
-  rm -f /tmp/axonwall-lbr.data
+  rm -f /run/axonwall/axonwall-lbr.data
 else
   echo "[i] linux-perf not installed."
 fi
@@ -516,6 +519,9 @@ export function compileRkhunterConfig(state?: Partial<DesiredState> | null): {
   unifiedRunnerScript: string;
 } {
   const cfg = resolveHostDefenseConfig(state);
+  if (!/^[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+$/.test(cfg.scheduledScanCron)) {
+    throw new Error(`Invalid scheduledScanCron expression: ${cfg.scheduledScanCron}`);
+  }
 
   const rkhunterConfLocal = [
     '# =============================================================================',

@@ -920,8 +920,12 @@ func (m *McpTrafficManager) SinkholeDNS(req McpDnsSinkholeReq) (*McpTacticalLeas
 	if sinkIP == "" {
 		sinkIP = "0.0.0.0"
 	}
-	if net.ParseIP(sinkIP) == nil {
-		return nil, fmt.Errorf("invalid sinkhole IP '%s'", sinkIP)
+	parsedSinkIP := net.ParseIP(sinkIP)
+	if parsedSinkIP == nil || parsedSinkIP.To4() == nil {
+		return nil, fmt.Errorf("invalid sinkhole IP '%s': must be a valid IPv4 address", sinkIP)
+	}
+	if sinkIP != "0.0.0.0" && sinkIP != "127.0.0.1" && !parsedSinkIP.IsPrivate() && !parsedSinkIP.IsLoopback() {
+		return nil, fmt.Errorf("disallowed sinkhole IP '%s': must be 0.0.0.0, loopback, or RFC1918 private IPv4", sinkIP)
 	}
 	if req.TTLSeconds < 10 {
 		req.TTLSeconds = 3600

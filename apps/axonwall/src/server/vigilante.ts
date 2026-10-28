@@ -1,5 +1,6 @@
 'use server';
 
+import net from 'node:net';
 import {
   type VigilanteConfig,
   type VigilanteModuleConfig,
@@ -10,6 +11,34 @@ import { getCurrentDesiredState, applyDesiredState } from './agent';
 import { callAgentApi } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+
+function validateIpOrCidr(raw: string): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) {
+    throw new Error('Invalid IP or CIDR address');
+  }
+  const parts = trimmed.split('/');
+  if (parts.length > 2) {
+    throw new Error('Invalid IP or CIDR address');
+  }
+  const ipPart = parts[0] || '';
+  const family = net.isIP(ipPart);
+  if (family === 0) {
+    throw new Error('Invalid IP or CIDR address');
+  }
+  if (parts.length === 2) {
+    const prefixStr = parts[1] || '';
+    if (!/^\d+$/.test(prefixStr)) {
+      throw new Error('Invalid CIDR prefix length');
+    }
+    const prefix = Number(prefixStr);
+    const maxPrefix = family === 4 ? 32 : 128;
+    if (prefix < 0 || prefix > maxPrefix) {
+      throw new Error('Invalid CIDR prefix length');
+    }
+  }
+  return trimmed;
+}
 
 export interface SoarBlockedIP {
   ip: string;
@@ -129,11 +158,12 @@ export async function soarBlockIPAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  const validIp = validateIpOrCidr(ip);
 
   const res = await callAgentApi<{ success: boolean; message: string }>(
     '/v1/vigilante/soar/block-ip',
     'POST',
-    { ip, timeoutSec }
+    { ip: validIp, timeoutSec }
   );
 
   return res ?? { success: false, message: 'Failed to contact agent daemon' };
@@ -144,11 +174,12 @@ export async function soarUnblockIPAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  const validIp = validateIpOrCidr(ip);
 
   const res = await callAgentApi<{ success: boolean; message: string }>(
     '/v1/vigilante/soar/unblock-ip',
     'POST',
-    { ip }
+    { ip: validIp }
   );
 
   return res ?? { success: false, message: 'Failed to contact agent daemon' };

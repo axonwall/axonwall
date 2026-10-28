@@ -61,9 +61,16 @@ func (m *TaskManager) GenerateUPID(taskType, targetId, user string) string {
 	pstart := m.counter
 	m.mu.Unlock()
 
-	cleanType := strings.ReplaceAll(taskType, ":", "_")
-	cleanId := strings.ReplaceAll(targetId, ":", "_")
-	cleanUser := strings.ReplaceAll(user, ":", "_")
+	sanitizeUPIDToken := func(s string) string {
+		s = strings.ReplaceAll(s, ":", "_")
+		s = strings.ReplaceAll(s, "/", "_")
+		s = strings.ReplaceAll(s, "\\", "_")
+		s = strings.ReplaceAll(s, "..", "_")
+		return s
+	}
+	cleanType := sanitizeUPIDToken(taskType)
+	cleanId := sanitizeUPIDToken(targetId)
+	cleanUser := sanitizeUPIDToken(user)
 	if cleanUser == "" {
 		cleanUser = "root@axonwall"
 	}

@@ -149,7 +149,9 @@ fi
 
 # Ensure firstboot marker directory and service enable symlink exist
 mkdir -p config/includes.chroot/etc/axonwall/
-touch config/includes.chroot/etc/axonwall/.firstboot
+if [[ "${FLAVOR}" == "axonwall" ]]; then
+  touch config/includes.chroot/etc/axonwall/.firstboot
+fi
 mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants/
 if [[ -f config/includes.chroot/etc/systemd/system/axonwall-firstboot.service ]]; then
   ln -sf /etc/systemd/system/axonwall-firstboot.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-firstboot.service

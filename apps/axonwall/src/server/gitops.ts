@@ -49,13 +49,13 @@ export interface EtckeeperCommitLog {
 
 export async function getEtckeeperStatus(): Promise<EtckeeperStatus | null> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
   return await callAgentApi<EtckeeperStatus>('/v1/system/etckeeper/status', 'GET');
 }
 
 export async function getEtckeeperHistory(limit = 25): Promise<EtckeeperCommitLog[]> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
   const resp = await callAgentApi<{ history: EtckeeperCommitLog[] }>(
     `/v1/system/etckeeper/history`,
     'GET'
@@ -65,7 +65,12 @@ export async function getEtckeeperHistory(limit = 25): Promise<EtckeeperCommitLo
 
 export async function getEtckeeperDiff(commitHash?: string): Promise<string> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
+  if (commitHash !== undefined && commitHash !== '') {
+    if (!/^[0-9a-fA-F]{4,64}$/.test(commitHash)) {
+      throw new Error('Invalid commit hash format');
+    }
+  }
   const q = commitHash ? `?commit=${encodeURIComponent(commitHash)}` : '';
   const resp = await callAgentApi<{ diff: string }>(
     `/v1/system/etckeeper/diff${q}`,
@@ -195,7 +200,7 @@ export async function getGitOpsHistory(): Promise<GitOpsHistory> {
 
 export async function getCommitDiff(commitHash: string): Promise<string> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
   try {

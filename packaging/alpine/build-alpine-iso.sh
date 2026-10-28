@@ -46,7 +46,7 @@ if [[ "$IN_CONTAINER" -eq 0 ]] && [[ ! -f /etc/alpine-release ]]; then
     -v "${REPO_ROOT}:/repo" \
     -w /repo \
     alpine:3.21 \
-    /bin/sh -c "apk add --no-cache bash >/dev/null && exec /bin/bash /repo/packaging/alpine/build-alpine-iso.sh --in-container ${ARGS[*]}"
+    /bin/sh -c 'apk add --no-cache bash >/dev/null && exec /bin/bash /repo/packaging/alpine/build-alpine-iso.sh --in-container "$@"' -- "${ARGS[@]}"
 fi
 
 ALPINE_BRANCH="v3.21"

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
@@ -402,6 +403,25 @@ func (m *SqliteSyncManager) handlePkiEnroll(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	peerIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if r.Method == http.MethodPost {
+		var csrReq HAPKICSRRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&csrReq); err != nil || csrReq.CSRPEM == "" {
+			http.Error(w, "Invalid CSR enrollment request", http.StatusBadRequest)
+			return
+		}
+		extraIPs := append([]string{}, csrReq.ExtraIPs...)
+		if peerIP != "" {
+			extraIPs = append(extraIPs, peerIP)
+		}
+		csrResp, err := SignHAPKICSR([]byte(csrReq.CSRPEM), extraIPs)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to sign HA PKI CSR: %v", err), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(csrResp)
+		return
+	}
 	bundle, err := ExportHAPKIBundle(peerIP)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to export HA PKI bundle: %v", err), http.StatusInternalServerError)
@@ -409,6 +429,45 @@ func (m *SqliteSyncManager) handlePkiEnroll(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// EnrollPKIFromPeer generates a local HA node CSR, submits it to the primary peer's
+// /api/v1/sync/pki-enroll endpoint, and installs the returned certificates and LDAP secret.
+func EnrollPKIFromPeer(peerAddr string, peerPort int, authToken string) (*HAPKICSRResponse, error) {
+	csrPEM, err := GenerateHAPKICSR(nil)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(HAPKICSRRequest{CSRPEM: string(csrPEM)})
+	if err != nil {
+		return nil, err
+	}
+	enrollUrl := fmt.Sprintf("http://%s/api/v1/sync/pki-enroll", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)))
+	req, err := http.NewRequest(http.MethodPost, enrollUrl, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authToken != "" {
+		req.Header.Set("X-Axonwall-Sync-Token", authToken)
+	}
+	plainClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := plainClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("pki-enroll returned status %d", resp.StatusCode)
+	}
+	var csrResp HAPKICSRResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&csrResp); err != nil {
+		return nil, err
+	}
+	if err := InstallHAPKICSRResponse(&csrResp); err != nil {
+		return nil, err
+	}
+	return &csrResp, nil
 }
 
 func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -633,25 +692,10 @@ func (m *SqliteSyncManager) pollAndSync() {
 	// shared token, even when the mtls transport is selected: a node that
 	// has no certificate yet cannot present one.
 	if _, err := os.Stat(HAPKICACertPath); os.IsNotExist(err) {
-		enrollUrl := fmt.Sprintf("http://%s/api/v1/sync/pki-enroll", net.JoinHostPort(cfg.PeerAddress, strconv.Itoa(peerPort)))
-		if enrollReq, err := http.NewRequest("GET", enrollUrl, nil); err == nil {
-			if cfg.AuthToken != "" {
-				enrollReq.Header.Set("X-Axonwall-Sync-Token", cfg.AuthToken)
-			}
-			plainClient := &http.Client{Timeout: 10 * time.Second}
-			if enrollResp, err := plainClient.Do(enrollReq); err == nil {
-				if enrollResp.StatusCode == http.StatusOK {
-					var bundle HAPKIBundle
-					if json.NewDecoder(enrollResp.Body).Decode(&bundle) == nil && bundle.CACertPEM != "" {
-						if err := ImportHAPKIBundle(bundle); err == nil {
-							slog.Info("HA Backup Poller: Enrolled HA PKI bundle & LDAP replication credentials from primary peer")
-							_, _ = EnsureOpenLDAPBootstrapped(bundle.LDAPBaseDN, 2, DefaultPasswordPolicyConfig())
-							_ = ConfigureMultiProviderSyncrepl(2, cfg.PeerAddress, bundle.LDAPBaseDN)
-						}
-					}
-				}
-				_ = enrollResp.Body.Close()
-			}
+		if csrResp, err := EnrollPKIFromPeer(cfg.PeerAddress, peerPort, cfg.AuthToken); err == nil && csrResp != nil {
+			slog.Info("HA Backup Poller: Enrolled HA PKI via CSR & LDAP replication credentials from primary peer")
+			_, _ = EnsureOpenLDAPBootstrapped(csrResp.LDAPBaseDN, 2, DefaultPasswordPolicyConfig())
+			_ = ConfigureMultiProviderSyncrepl(2, cfg.PeerAddress, csrResp.LDAPBaseDN)
 		}
 	}
 
@@ -841,10 +885,13 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *htt
 // would lose write access to its own database after the first sync.
 // Failures are logged, not fatal — but loudly, for that reason.
 func preserveFileOwnership(newPath, targetPath string) {
-	stat, err := os.Stat(targetPath)
+	stat, err := os.Lstat(targetPath)
+	if err == nil && (stat.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
 	if err != nil {
-		stat, err = os.Stat(filepath.Dir(targetPath))
-		if err != nil {
+		stat, err = os.Lstat(filepath.Dir(targetPath))
+		if err != nil || (stat.Mode()&os.ModeSymlink) != 0 {
 			return
 		}
 	}
@@ -852,7 +899,7 @@ func preserveFileOwnership(newPath, targetPath string) {
 	if !ok {
 		return
 	}
-	if err := os.Chown(newPath, int(sys.Uid), int(sys.Gid)); err != nil {
+	if err := os.Lchown(newPath, int(sys.Uid), int(sys.Gid)); err != nil {
 		slog.Warn("HA sync: could not preserve ownership on applied database", "path", targetPath, "error", err)
 	}
 }
@@ -877,6 +924,9 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 		return fmt.Errorf("refusing to apply database to unallowed or unsafe path: %s", cleanDbPath)
 	}
 	dbPath = cleanDbPath
+	if info, lerr := os.Lstat(dbPath); lerr == nil && (info.Mode()&os.ModeSymlink) != 0 {
+		return fmt.Errorf("refusing to overwrite symlink database path: %s", dbPath)
+	}
 
 	downloadUrl := fmt.Sprintf("%s://%s/api/v1/sync/db?path=%s", scheme, net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)), url.QueryEscape(dbPath))
 	req, err := http.NewRequest("GET", downloadUrl, nil)
@@ -897,7 +947,10 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 		return fmt.Errorf("server returned error %d", resp.StatusCode)
 	}
 
-	expectedSha := resp.Header.Get("X-Checksum-SHA256")
+	expectedSha := strings.TrimSpace(resp.Header.Get("X-Checksum-SHA256"))
+	if expectedSha == "" {
+		return fmt.Errorf("server response missing required X-Checksum-SHA256 header")
+	}
 
 	// Ensure destination directory exists
 	dir := filepath.Dir(dbPath)
@@ -914,7 +967,7 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 	hasher := sha256.New()
 	writer := io.MultiWriter(out, hasher)
 
-	if _, err := io.Copy(writer, resp.Body); err != nil {
+	if _, err := io.Copy(writer, io.LimitReader(resp.Body, 256*1024*1024)); err != nil {
 		out.Close()
 		os.Remove(tmpFile)
 		return fmt.Errorf("failed to stream db payload: %w", err)
@@ -922,7 +975,7 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 	out.Close()
 
 	actualSha := hex.EncodeToString(hasher.Sum(nil))
-	if expectedSha != "" && actualSha != expectedSha {
+	if actualSha != expectedSha {
 		os.Remove(tmpFile)
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedSha, actualSha)
 	}

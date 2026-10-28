@@ -248,7 +248,7 @@ if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
       sleep 1
     done
   fi
-  if [[ "$HOST_MODE" != "1" && "$INTERNAL_HAS_LINK" == "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
+  if [[ "$HOST_MODE" != "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
     if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
       sed -i "s/elements = { [^}]* }/elements = { \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
     fi
@@ -302,18 +302,20 @@ fi
 # Always fix ownership: the controller (its own user since B-12) reads the key
 chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
 chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
-chmod 2775 /etc/axonwall 2>/dev/null || true
+chmod 1770 /etc/axonwall 2>/dev/null || true
 chmod 750 /etc/axonwall/certs 2>/dev/null || true
 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
 chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
 # Initialize persistent directories on /var/lib/axonwall (Headscale, OpenLDAP, HA PKI, shared /home)
-mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /run/headscale
+mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /var/cache/axonwall-ui /run/headscale
 mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
 mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 chown root:axonwall-api /var/lib/axonwall 2>/dev/null || true
+chown -R axonwall:axonwall /var/cache/axonwall-ui 2>/dev/null || true
+chmod 0750 /var/cache/axonwall-ui 2>/dev/null || true
 chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
-chmod 2775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
+chmod 3775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
 for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed /var/lib/axonwall/mcp-keys.json /var/lib/axonwall/mcp-settings.json /var/lib/axonwall/mcp-audit.jsonl; do
   if [[ -e "$f" ]]; then
     chown axonwall:axonwall-api "$f" 2>/dev/null || true
@@ -321,7 +323,7 @@ for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/
   fi
 done
 chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
-chmod 0775 /var/lib/axonwall 2>/dev/null || true
+chmod 1775 /var/lib/axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
 chown root:root /var/lib/axonwall/home 2>/dev/null || true
 chown -R root:root /var/lib/axonwall/secrets 2>/dev/null || true
@@ -411,8 +413,9 @@ if [[ -f /etc/axonwall/controller.env ]]; then
   chmod 0640 /etc/axonwall/controller.env 2>/dev/null || true
 fi
 
-# Ensure proper ownership of Axonwall application directory (Next.js writes .next/cache)
-chown -R axonwall:axonwall-api /opt/axonwall 2>/dev/null || true
+# Ensure immutable root ownership of Axonwall application code directory
+chown -R root:root /opt/axonwall 2>/dev/null || true
+chmod -R go-w /opt/axonwall 2>/dev/null || true
 
 # Initialize etckeeper if installed
 if command -v etckeeper &>/dev/null; then
