@@ -302,20 +302,22 @@ fi
 # Always fix ownership: the controller (its own user since B-12) reads the key
 chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
 chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
-chmod 0770 /etc/axonwall 2>/dev/null || true
+chmod 2775 /etc/axonwall 2>/dev/null || true
 chmod 750 /etc/axonwall/certs 2>/dev/null || true
 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
 chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
 # Initialize persistent directories on /var/lib/axonwall (Headscale, OpenLDAP, HA PKI, shared /home)
-mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /run/headscale
+mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /run/headscale
 mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
 mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 chown root:axonwall-api /var/lib/axonwall 2>/dev/null || true
-chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops 2>/dev/null || true
-for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed; do
+chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
+chmod 2775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
+for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed /var/lib/axonwall/mcp-keys.json /var/lib/axonwall/mcp-settings.json /var/lib/axonwall/mcp-audit.jsonl; do
   if [[ -e "$f" ]]; then
     chown axonwall:axonwall-api "$f" 2>/dev/null || true
+    chmod 0660 "$f" 2>/dev/null || true
   fi
 done
 chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
@@ -395,8 +397,12 @@ ENV_EOF
 fi
 
 if [[ -f /etc/axonwall/admin.env ]]; then
-  chown axonwall /etc/axonwall/admin.env 2>/dev/null || true
-  chmod 0600 /etc/axonwall/admin.env 2>/dev/null || true
+  chown axonwall:axonwall-api /etc/axonwall/admin.env 2>/dev/null || true
+  chmod 0660 /etc/axonwall/admin.env 2>/dev/null || true
+fi
+if [[ -f /var/lib/axonwall/etc-axonwall/admin.env ]]; then
+  chown axonwall:axonwall-api /var/lib/axonwall/etc-axonwall/admin.env 2>/dev/null || true
+  chmod 0660 /var/lib/axonwall/etc-axonwall/admin.env 2>/dev/null || true
 fi
 chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
 chown axonwall /etc/axonwall/axonwall.env 2>/dev/null || true

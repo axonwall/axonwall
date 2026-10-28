@@ -373,8 +373,60 @@ function readAllYamlConfigFiles(): {
   return { files, fingerprint: hash.digest('hex') };
 }
 
+function writeConfigFileSafe(targetPath: string, content: string, mode = 0o660): boolean {
+  try {
+    const parent = path.dirname(targetPath);
+    if (!fs.existsSync(parent)) {
+      fs.mkdirSync(parent, { recursive: true, mode: 0o775 });
+    }
+    try {
+      fs.writeFileSync(targetPath, content, { mode });
+      return true;
+    } catch {
+      try {
+        if (fs.existsSync(targetPath)) {
+          fs.unlinkSync(targetPath);
+        }
+        fs.writeFileSync(targetPath, content, { mode });
+        return true;
+      } catch {}
+    }
+  } catch {}
+  return false;
+}
+
 function persistDesiredStateToDisk(state: DesiredState): Record<string, string> {
   const normalized = DesiredStateSchema.parse(state);
+
+  // Ensure any enabled authoritative LAN interface with a static CIDR has a matching subnet in normalized.dhcp.subnets
+  if (normalized.dhcp?.enabled !== false) {
+    if (!normalized.dhcp) {
+      normalized.dhcp = { enabled: true, subnets: [] };
+    }
+    for (const iface of normalized.interfaces || []) {
+      if (!iface.enabled || !isValidDevice(iface.device)) continue;
+      if (inferInterfaceRole(iface) === 'wan') continue;
+      if (iface.type !== 'static' || iface.dhcpServer !== true || !iface.ipv4Address) continue;
+      const hasSubnet = (normalized.dhcp.subnets || []).some((s) => s.interface === iface.name);
+      if (!hasSubnet) {
+        const subnetInfo = computeSubnetAndDefaultPool(iface.ipv4Address);
+        if (subnetInfo) {
+          normalized.dhcp.subnets.push({
+            id: crypto.randomUUID(),
+            interface: iface.name,
+            subnet: subnetInfo.subnetCidr,
+            poolStart: subnetInfo.poolStart,
+            poolEnd: subnetInfo.poolEnd,
+            routers: [subnetInfo.routerIp],
+            dnsServers: [subnetInfo.routerIp],
+            staticMappings: [],
+            enabled: true,
+          });
+        }
+      }
+    }
+  }
+
   const yamlFiles = serializeDesiredStateToYamlFiles(normalized);
   const daemonFileMap: Record<string, string> = {};
 
@@ -385,24 +437,26 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
   for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
     try {
       if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+        fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
       }
       for (const [filename, content] of Object.entries(yamlFiles)) {
-        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o640 });
+        writeConfigFileSafe(path.join(dir, filename), content, 0o660);
       }
     } catch {}
   }
 
   const jsonSerialized = JSON.stringify(normalized, null, 2);
-  for (const jsonPath of ['/var/lib/axonwall/state.json', '/etc/axonwall/state.json']) {
-    try {
-      const parent = path.dirname(jsonPath);
-      if (!fs.existsSync(parent)) {
-        fs.mkdirSync(parent, { recursive: true, mode: 0o755 });
-      }
-      fs.writeFileSync(jsonPath, jsonSerialized, { mode: 0o600 });
-    } catch {}
+  for (const jsonPath of [
+    '/var/lib/axonwall/state.json',
+    '/var/lib/axonwall/etc-axonwall/state.json',
+    '/etc/axonwall/state.json',
+  ]) {
+    writeConfigFileSafe(jsonPath, jsonSerialized, 0o660);
   }
+
+  // Keep interfaces.conf and /etc/network/interfaces synchronized whenever desired state is persisted
+  const { confContent } = syncNetworkInterfacesFiles(normalized);
+  daemonFileMap['/etc/axonwall/interfaces.conf'] = confContent;
 
   cachedDesiredState = normalized;
   const { fingerprint } = readAllYamlConfigFiles();
@@ -466,10 +520,7 @@ function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: strin
   const confContent = confLines.join('\n') + '\n';
 
   for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
-    try {
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
-      fs.writeFileSync(path.join(dir, 'interfaces.conf'), confContent, { mode: 0o644 });
-    } catch {}
+    writeConfigFileSafe(path.join(dir, 'interfaces.conf'), confContent, 0o664);
   }
 
   const cidrToNetmask = (cidr: number): string => {
@@ -561,6 +612,165 @@ function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: strin
   return { ifacesContent: ifaces, confContent };
 }
 
+function reconcileStateWithInterfacesConf(state: DesiredState): boolean {
+  let rawConf = '';
+  let activeConfPath = '';
+  for (const confPath of ['/var/lib/axonwall/etc-axonwall/interfaces.conf', '/etc/axonwall/interfaces.conf']) {
+    try {
+      if (fs.existsSync(confPath)) {
+        const text = fs.readFileSync(confPath, 'utf8');
+        if (text && text.includes('AXONWALL_INTERFACES=')) {
+          rawConf = text;
+          activeConfPath = confPath;
+          break;
+        }
+        if (!rawConf && text) {
+          rawConf = text;
+          activeConfPath = confPath;
+        }
+      }
+    } catch {}
+  }
+  if (!rawConf) return false;
+
+  // If interfaces.yaml was edited more recently than interfaces.conf (e.g. via CLI/vim),
+  // do not resurrect deleted interfaces from a stale interfaces.conf.
+  try {
+    if (activeConfPath && fs.existsSync(activeConfPath) && Array.isArray(state.interfaces) && state.interfaces.length > 0) {
+      const confMtimeMs = fs.statSync(activeConfPath).mtimeMs;
+      for (const yamlPath of ['/etc/axonwall/interfaces.yaml', '/var/lib/axonwall/etc-axonwall/interfaces.yaml']) {
+        if (fs.existsSync(yamlPath)) {
+          const yamlMtimeMs = fs.statSync(yamlPath).mtimeMs;
+          if (yamlMtimeMs > confMtimeMs + 2000) {
+            return false;
+          }
+        }
+      }
+    }
+  } catch {}
+
+  const kv: Record<string, string> = {};
+  for (const line of rawConf.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) continue;
+    const idx = trimmed.indexOf('=');
+    kv[trimmed.slice(0, idx).trim()] = trimmed.slice(idx + 1).trim();
+  }
+
+  if (!('AXONWALL_INTERFACES' in kv)) return false;
+
+  const activeNames = (kv.AXONWALL_INTERFACES || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (activeNames.length === 0) return false;
+
+  let changed = false;
+  if (!Array.isArray(state.interfaces)) {
+    state.interfaces = [];
+  }
+
+  for (const name of activeNames) {
+    const keyPrefix = `IFACE_${name.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}`;
+    const dev = (kv[`${keyPrefix}_DEVICE`] || '').trim();
+    if (!isValidDevice(dev)) continue;
+
+    const rawRole = (kv[`${keyPrefix}_ROLE`] || '').trim().toLowerCase();
+    const role: InterfaceRole = rawRole === 'wan' ? 'wan' : rawRole === 'lan' ? 'lan' : name.startsWith('wan') ? 'wan' : 'lan';
+    const rawMode = (kv[`${keyPrefix}_MODE`] || '').trim().toLowerCase();
+    const mode: 'dhcp' | 'static' = rawMode === 'static' ? 'static' : 'dhcp';
+    const ipv4Address = (kv[`${keyPrefix}_IPV4_ADDRESS`] || '').trim() || undefined;
+    const ipv4Gateway = (kv[`${keyPrefix}_IPV4_GATEWAY`] || '').trim() || undefined;
+    const dhcpServer = role === 'lan' && mode === 'static' && (kv[`${keyPrefix}_DHCP_SERVER`] || '').trim().toLowerCase() === 'true';
+
+    const existingIdx = state.interfaces.findIndex((i) => i.name.toLowerCase() === name);
+    const devUsedElsewhere = state.interfaces.some(
+      (i, idx) => idx !== existingIdx && i.enabled && i.device === dev,
+    );
+    if (devUsedElsewhere) continue;
+
+    const defaultDesc =
+      role === 'wan'
+        ? `${name.toUpperCase()} WAN Uplink`
+        : dhcpServer
+          ? `${name.toUpperCase()} LAN (Authoritative DHCP)`
+          : `${name.toUpperCase()} LAN (Joined Network)`;
+
+    if (existingIdx < 0) {
+      state.interfaces.push(
+        InterfaceSchema.parse({
+          name,
+          role,
+          device: dev,
+          enabled: true,
+          type: mode,
+          dhcpServer,
+          ipv4Address: mode === 'static' ? ipv4Address : undefined,
+          ipv4Gateway: mode === 'static' ? ipv4Gateway : undefined,
+          description: defaultDesc,
+          mtu: 1500,
+        }),
+      );
+      changed = true;
+    } else {
+      const cur = state.interfaces[existingIdx];
+      if (!cur.enabled || !isValidDevice(cur.device)) {
+        state.interfaces[existingIdx] = InterfaceSchema.parse({
+          ...cur,
+          name,
+          role,
+          device: dev,
+          enabled: true,
+          type: mode,
+          dhcpServer,
+          ipv4Address: mode === 'static' ? ipv4Address || cur.ipv4Address : undefined,
+          ipv4Gateway: mode === 'static' ? ipv4Gateway || cur.ipv4Gateway : undefined,
+          description: cur.description || defaultDesc,
+          mtu: cur.mtu || 1500,
+        });
+        changed = true;
+      }
+    }
+
+    if (role === 'lan' && mode === 'static' && dhcpServer && ipv4Address) {
+      if (!state.dhcp) {
+        state.dhcp = { enabled: true, subnets: [] };
+      }
+      const hasSubnet = (state.dhcp.subnets || []).some((s) => s.interface === name);
+      if (!hasSubnet) {
+        const subnetInfo = computeSubnetAndDefaultPool(ipv4Address);
+        if (subnetInfo) {
+          state.dhcp.subnets.push({
+            id: crypto.randomUUID(),
+            interface: name,
+            subnet: subnetInfo.subnetCidr,
+            poolStart: subnetInfo.poolStart,
+            poolEnd: subnetInfo.poolEnd,
+            routers: [subnetInfo.routerIp],
+            dnsServers: [subnetInfo.routerIp],
+            staticMappings: [],
+            enabled: true,
+          });
+          state.dhcp.enabled = true;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  if (changed && state.system?.antiLockout) {
+    const lanNames = state.interfaces
+      .filter((i) => inferInterfaceRole(i) === 'lan' && i.enabled && isValidDevice(i.device))
+      .map((i) => i.name);
+    if (lanNames.length > 0) {
+      state.system.antiLockout.interfaces = Array.from(new Set(lanNames));
+      state.system.antiLockout.interface = lanNames[0] || 'lan';
+    }
+  }
+
+  return changed;
+}
+
 async function getDesiredStateInternal(): Promise<DesiredState> {
   // 1. Read overlaid /var/lib/axonwall/etc-axonwall and /etc/axonwall YAML configuration
   const { files, fingerprint } = readAllYamlConfigFiles();
@@ -571,9 +781,13 @@ async function getDesiredStateInternal(): Promise<DesiredState> {
     }
     try {
       const parsed = parseDesiredStateFromYamlFiles(files);
-      cachedDesiredState = parsed;
-      lastLoadedFingerprint = fingerprint;
-      return structuredClone(cachedDesiredState);
+      if (reconcileStateWithInterfacesConf(parsed)) {
+        persistDesiredStateToDisk(parsed);
+      } else {
+        cachedDesiredState = parsed;
+        lastLoadedFingerprint = fingerprint;
+      }
+      return structuredClone(cachedDesiredState!);
     } catch (err: any) {
       console.error('[axonwall] Failed to parse YAML files:', err?.message || err);
     }
@@ -940,14 +1154,14 @@ export async function applyDesiredState(
     ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
       path: filePath,
       content,
-      fileMode: 0o600,
-      file_mode: 0o600,
+      fileMode: 0o660,
+      file_mode: 0o660,
     })),
     {
       path: '/etc/axonwall/interfaces.conf',
       content: confContent,
-      fileMode: 0o644,
-      file_mode: 0o644,
+      fileMode: 0o664,
+      file_mode: 0o664,
     },
     {
       path: '/etc/network/interfaces',
@@ -958,8 +1172,8 @@ export async function applyDesiredState(
     {
       path: '/etc/axonwall/state.json',
       content: JSON.stringify(normalizedState, null, 2),
-      fileMode: 0o600,
-      file_mode: 0o600,
+      fileMode: 0o660,
+      file_mode: 0o660,
     },
   ];
 
@@ -1119,6 +1333,21 @@ export async function runDiagnostic(
       });
     });
   }
+
+  // Delegate ping diagnostic to privileged axonwalld first
+  try {
+    const pingRes = await callAgentApi<{ success: boolean; output: string }>('/v1/diagnostic', 'POST', {
+      type: 1, // DIAGNOSTIC_TYPE_PING
+      target: cleanTarget,
+      count: 3,
+    });
+    if (pingRes && typeof pingRes.output === 'string' && pingRes.output.trim().length > 0) {
+      return {
+        success: Boolean(pingRes.success),
+        output: pingRes.output,
+      };
+    }
+  } catch {}
 
   // Ping fallback
   return {
@@ -2064,6 +2293,15 @@ export async function saveInterfaceAssignment(data: {
     );
   }
 
+  // Reconcile gateway IP if WAN static gateway was updated
+  if (role === 'wan' && data.type === 'static' && data.ipv4Gateway) {
+    for (const g of state.gateways || []) {
+      if (g.interface === cleanName || g.interface === lookupName) {
+        g.gatewayIp = data.ipv4Gateway;
+      }
+    }
+  }
+
   // Reconcile anti-lockout interfaces across all LAN ports
   const lanNames = state.interfaces
     .filter((i) => inferInterfaceRole(i) === 'lan' && i.enabled && isValidDevice(i.device))
@@ -2074,12 +2312,65 @@ export async function saveInterfaceAssignment(data: {
     state.system.antiLockout.interface = lanNames[0] || 'lan';
   }
 
-  persistDesiredStateToDisk(state);
+  const normalizedState = DesiredStateSchema.parse(state);
+  const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
+
+  // Persist device mappings and interface configuration into /etc/axonwall/interfaces.conf and /etc/network/interfaces
+  const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
+
+  // Delegate persistence, interface bring-up, Kea reload, and nftables commit to root axonwalld daemon
+  try {
+    const { nftScript, files, reloadServices } = compileNftables(normalizedState);
+    const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
+    const allFiles = [
+      ...files.map((f: any) => ({
+        ...f,
+        fileMode: f.fileMode ?? f.file_mode ?? 0o600,
+        file_mode: f.file_mode ?? f.fileMode ?? 0o600,
+      })),
+      ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
+        path: filePath,
+        content,
+        fileMode: 0o660,
+        file_mode: 0o660,
+      })),
+      {
+        path: '/etc/axonwall/interfaces.conf',
+        content: confContent,
+        fileMode: 0o664,
+        file_mode: 0o664,
+      },
+      {
+        path: '/etc/network/interfaces',
+        content: ifacesContent,
+        fileMode: 0o644,
+        file_mode: 0o644,
+      },
+      {
+        path: '/etc/axonwall/state.json',
+        content: JSON.stringify(normalizedState, null, 2),
+        fileMode: 0o660,
+        file_mode: 0o660,
+      },
+    ];
+
+    const applyResp = await callAgentApi<any>('/v1/apply', 'POST', {
+      job_id: `iface-${Date.now()}`,
+      bundle_hash: bundleHash,
+      nft_script: nftScript,
+      files: allFiles,
+      reload_services: reloadServices,
+      confirm_timeout_seconds: 120,
+    });
+    if (applyResp?.success) {
+      await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
+    }
+  } catch {}
 
   try {
     const { recordGitOpsChange } = await import('./gitops');
     await recordGitOpsChange(
-      state,
+      normalizedState,
       session?.username || 'admin',
       `Updated interface ${cleanName.toUpperCase()} (${role.toUpperCase()}, ${
         role === 'lan' ? (dhcpServer ? 'Authoritative DHCP' : 'Joined Network') : data.type.toUpperCase()
@@ -2087,14 +2378,9 @@ export async function saveInterfaceAssignment(data: {
     );
   } catch {}
 
-  // Persist device mappings and interface configuration into /etc/axonwall/interfaces.conf and /etc/network/interfaces
+  // Sync Kea DHCPv4 config directly if running in standalone/dev mode
   try {
-    syncNetworkInterfacesFiles(state);
-  } catch {}
-
-  // Sync Kea DHCPv4 config if present on system
-  try {
-    const { files } = compileNftables(state);
+    const { files } = compileNftables(normalizedState);
     const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
     if (keaFile && fs.existsSync('/etc/kea')) {
       fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
@@ -2176,13 +2462,60 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
     state.system.antiLockout.interface = lanNames[0] || 'lan';
   }
 
-  persistDesiredStateToDisk(state);
+  const normalizedState = DesiredStateSchema.parse(state);
+  const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
+  const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
+
   try {
-    syncNetworkInterfacesFiles(state);
+    const { nftScript, files, reloadServices } = compileNftables(normalizedState);
+    const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
+    const allFiles = [
+      ...files.map((f: any) => ({
+        ...f,
+        fileMode: f.fileMode ?? f.file_mode ?? 0o600,
+        file_mode: f.file_mode ?? f.fileMode ?? 0o600,
+      })),
+      ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
+        path: filePath,
+        content,
+        fileMode: 0o660,
+        file_mode: 0o660,
+      })),
+      {
+        path: '/etc/axonwall/interfaces.conf',
+        content: confContent,
+        fileMode: 0o664,
+        file_mode: 0o664,
+      },
+      {
+        path: '/etc/network/interfaces',
+        content: ifacesContent,
+        fileMode: 0o644,
+        file_mode: 0o644,
+      },
+      {
+        path: '/etc/axonwall/state.json',
+        content: JSON.stringify(normalizedState, null, 2),
+        fileMode: 0o660,
+        file_mode: 0o660,
+      },
+    ];
+
+    const applyResp = await callAgentApi<any>('/v1/apply', 'POST', {
+      job_id: `iface-del-${Date.now()}`,
+      bundle_hash: bundleHash,
+      nft_script: nftScript,
+      files: allFiles,
+      reload_services: reloadServices,
+      confirm_timeout_seconds: 120,
+    });
+    if (applyResp?.success) {
+      await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
+    }
   } catch {}
 
   try {
-    const { files } = compileNftables(state);
+    const { files } = compileNftables(normalizedState);
     const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
     if (keaFile && fs.existsSync('/etc/kea')) {
       fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
@@ -2195,7 +2528,7 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
   try {
     const { recordGitOpsChange } = await import('./gitops');
     await recordGitOpsChange(
-      state,
+      normalizedState,
       session?.username || 'admin',
       `Removed interface ${cleanName.toUpperCase()}`
     );
@@ -4036,54 +4369,83 @@ const MCP_GENESIS_HASH = '000000000000000000000000000000000000000000000000000000
 function getMcpKeysStoragePath(): string {
   if (process.env.AXONWALL_MCP_KEYS_PATH) return process.env.AXONWALL_MCP_KEYS_PATH;
   const primary = '/var/lib/axonwall';
+  const primaryFile = path.join(primary, 'mcp-keys.json');
   try {
-    fs.mkdirSync(primary, { recursive: true, mode: 0o700 });
+    if (fs.existsSync(primaryFile)) {
+      fs.accessSync(primaryFile, fs.constants.R_OK);
+      return primaryFile;
+    }
+    fs.mkdirSync(primary, { recursive: true, mode: 0o775 });
     fs.accessSync(primary, fs.constants.W_OK);
-    return path.join(primary, 'mcp-keys.json');
+    return primaryFile;
   } catch {
+    for (const candidate of ['/var/lib/axonwall/etc-axonwall/mcp-keys.json', '/etc/axonwall/mcp-keys.json']) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
     const fallback = '/tmp/axonwall';
-    fs.mkdirSync(fallback, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(fallback, { recursive: true, mode: 0o775 });
     return path.join(fallback, 'mcp-keys.json');
   }
 }
 
 function getMcpAuditStoragePath(): string {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) return process.env.AXONWALL_MCP_AUDIT_PATH;
-  const primary = '/var/log/axonwall';
-  try {
-    fs.mkdirSync(primary, { recursive: true, mode: 0o700 });
-    fs.accessSync(primary, fs.constants.W_OK);
-    return path.join(primary, 'mcp-audit.jsonl');
-  } catch {
-    const fallback = '/tmp/axonwall';
-    fs.mkdirSync(fallback, { recursive: true, mode: 0o700 });
-    return path.join(fallback, 'mcp-audit.jsonl');
+  for (const dir of ['/var/lib/axonwall', '/var/log/axonwall']) {
+    const file = path.join(dir, 'mcp-audit.jsonl');
+    try {
+      if (fs.existsSync(file)) {
+        fs.accessSync(file, fs.constants.R_OK);
+        return file;
+      }
+      fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+      fs.accessSync(dir, fs.constants.W_OK);
+      return file;
+    } catch {}
   }
+  const fallback = '/tmp/axonwall';
+  fs.mkdirSync(fallback, { recursive: true, mode: 0o775 });
+  return path.join(fallback, 'mcp-audit.jsonl');
 }
 
 function readStoredMcpKeys(): McpApiKey[] {
-  const filePath = getMcpKeysStoragePath();
-  if (!fs.existsSync(filePath)) return [];
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    if (!Array.isArray(parsed)) return [];
-    const out: McpApiKey[] = [];
-    for (const item of parsed) {
-      const res = McpApiKeySchema.safeParse(item);
-      if (res.success) out.push(res.data);
-    }
-    return out;
-  } catch {
-    return [];
+  const candidates = process.env.AXONWALL_MCP_KEYS_PATH
+    ? [process.env.AXONWALL_MCP_KEYS_PATH]
+    : Array.from(
+        new Set([
+          getMcpKeysStoragePath(),
+          '/var/lib/axonwall/mcp-keys.json',
+          '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
+          '/etc/axonwall/mcp-keys.json',
+        ]),
+      );
+  for (const filePath of candidates) {
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (!Array.isArray(parsed)) continue;
+      const out: McpApiKey[] = [];
+      for (const item of parsed) {
+        const res = McpApiKeySchema.safeParse(item);
+        if (res.success) out.push(res.data);
+      }
+      return out;
+    } catch {}
   }
+  return [];
 }
 
 function writeStoredMcpKeys(keys: McpApiKey[]): void {
-  const filePath = getMcpKeysStoragePath();
-  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.tmp.${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(keys, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, filePath);
+  const serialized = JSON.stringify(keys, null, 2);
+  const targets = process.env.AXONWALL_MCP_KEYS_PATH
+    ? [process.env.AXONWALL_MCP_KEYS_PATH]
+    : [
+        getMcpKeysStoragePath(),
+        '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
+        '/etc/axonwall/mcp-keys.json',
+      ];
+  for (const filePath of Array.from(new Set(targets))) {
+    writeConfigFileSafe(filePath, serialized, 0o660);
+  }
 }
 
 function readAndVerifyMcpAuditLog(limit = 100): {
@@ -4367,10 +4729,17 @@ export async function toggleMcpServerMasterSwitchAction(
   };
 
   try {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true, mode: 0o700 });
-    const tmp = `${settingsPath}.tmp.${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, settingsPath);
+    const serialized = JSON.stringify(payload, null, 2);
+    const targets = process.env.AXONWALL_MCP_SETTINGS_PATH
+      ? [process.env.AXONWALL_MCP_SETTINGS_PATH]
+      : [
+          settingsPath,
+          '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
+          '/etc/axonwall/mcp-settings.json',
+        ];
+    for (const target of Array.from(new Set(targets))) {
+      writeConfigFileSafe(target, serialized, 0o660);
+    }
 
     // If disabled, automatically flush active kernel leases for safety
     if (!enabled) {

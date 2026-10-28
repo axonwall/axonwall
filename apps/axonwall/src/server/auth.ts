@@ -4,6 +4,7 @@ import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 import {
   authenticateLdap,
@@ -71,17 +72,40 @@ export async function getSession(): Promise<UserSession | null> {
 // file the console's MFA reset removes -- with LOCAL_ADMIN_MFA_SECRET in
 // the process environment as an operator override. Until enrollment
 // actually persisted the secret (audit B-08), MFA could never be on.
-const MFA_ENV_PATH = '/etc/axonwall/mfa.env';
+const MFA_ENV_PATHS = ['/var/lib/axonwall/etc-axonwall/mfa.env', '/etc/axonwall/mfa.env'];
+
+function writeAuthFileSafe(filePath: string, content: string, mode = 0o660): void {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+  }
+  try {
+    fs.writeFileSync(filePath, content, { mode });
+  } catch {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    fs.writeFileSync(filePath, content, { mode });
+  }
+  try {
+    fs.chmodSync(filePath, mode);
+  } catch {}
+}
 
 function readMfaEnv(): Map<string, string> {
   const values = new Map<string, string>();
-  try {
-    for (const line of fs.readFileSync(MFA_ENV_PATH, 'utf-8').split('\n')) {
-      const trimmed = line.trim();
-      const eq = trimmed.indexOf('=');
-      if (eq > 0) values.set(trimmed.substring(0, eq), trimmed.substring(eq + 1));
-    }
-  } catch {}
+  for (const mfaPath of MFA_ENV_PATHS) {
+    try {
+      if (!fs.existsSync(mfaPath)) continue;
+      for (const line of fs.readFileSync(mfaPath, 'utf-8').split('\n')) {
+        const trimmed = line.trim();
+        const eq = trimmed.indexOf('=');
+        if (eq > 0 && !values.has(trimmed.substring(0, eq))) {
+          values.set(trimmed.substring(0, eq), trimmed.substring(eq + 1));
+        }
+      }
+    } catch {}
+  }
   return values;
 }
 
@@ -93,8 +117,11 @@ function writeMfaEnv(updates: Record<string, string>): void {
   const values = readMfaEnv();
   for (const [k, v] of Object.entries(updates)) values.set(k, v);
   const content = [...values.entries()].map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
-  fs.writeFileSync(MFA_ENV_PATH, content, { mode: 0o600 });
-  try { fs.chmodSync(MFA_ENV_PATH, 0o600); } catch {}
+  for (const mfaPath of MFA_ENV_PATHS) {
+    try {
+      writeAuthFileSafe(mfaPath, content, 0o660);
+    } catch {}
+  }
 }
 
 // otplib v13 is plugin-based; the v12 'authenticator' export the MFA
@@ -457,27 +484,17 @@ export async function changeAdminPasswordAction(formData: FormData) {
   const hashedSecret = `scrypt$${salt}$${hash}`;
 
   try {
-    if (!fs.existsSync('/etc/axonwall')) {
-      fs.mkdirSync('/etc/axonwall', { recursive: true, mode: 0o755 });
-    }
-
     const envContent = `LOCAL_ADMIN_USER=${localAdminUser}\nLOCAL_ADMIN_PASSWORD=${hashedSecret}\n`;
-    fs.writeFileSync('/etc/axonwall/admin.env', envContent, { mode: 0o600 });
-    try { fs.chmodSync('/etc/axonwall/admin.env', 0o600); } catch {}
+    writeAuthFileSafe('/etc/axonwall/admin.env', envContent, 0o660);
 
     // Mirror to /var/lib/axonwall/etc-axonwall/admin.env for A/B rootfs persistence
     try {
-      const persistentDir = '/var/lib/axonwall/etc-axonwall';
-      if (!fs.existsSync(persistentDir)) {
-        fs.mkdirSync(persistentDir, { recursive: true, mode: 0o755 });
-      }
-      fs.writeFileSync(`${persistentDir}/admin.env`, envContent, { mode: 0o600 });
-      fs.chmodSync(`${persistentDir}/admin.env`, 0o600);
+      writeAuthFileSafe('/var/lib/axonwall/etc-axonwall/admin.env', envContent, 0o660);
     } catch {}
 
     const now = new Date().toISOString();
-    try { fs.writeFileSync('/etc/axonwall/.password_changed', now, { mode: 0o644 }); } catch {}
-    try { fs.writeFileSync('/var/lib/axonwall/.password_changed', now, { mode: 0o644 }); } catch {}
+    try { writeAuthFileSafe('/etc/axonwall/.password_changed', now, 0o664); } catch {}
+    try { writeAuthFileSafe('/var/lib/axonwall/.password_changed', now, 0o664); } catch {}
 
     try {
       if (fs.existsSync('/etc/axonwall/initial-admin-password')) {

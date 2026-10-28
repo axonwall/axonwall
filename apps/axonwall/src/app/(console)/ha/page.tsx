@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   ShieldAlert,
   RefreshCw,
@@ -15,6 +16,7 @@ import {
   Cpu,
   Save,
   Check,
+  BookOpen,
 } from 'lucide-react';
 import { getCurrentDesiredState, applyDesiredState, getHASyncTrustStatus, type HASyncTrustStatus } from '@/server/agent';
 
@@ -167,7 +169,15 @@ export default function HighAvailabilityPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <Link
+            href="/docs/high-availability#two-host-setup"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold transition"
+          >
+            <BookOpen className="w-4 h-4 text-emerald-400" />
+            <span>2-Host Setup Guide</span>
+          </Link>
+
           {enabled ? (
             <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-sm">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />

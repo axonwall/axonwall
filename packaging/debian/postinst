@@ -47,15 +47,17 @@ case "$1" in
 
         # 2. Ensure directories exist with strict permissions
         mkdir -p /var/lib/axonwall /var/log/axonwall /run/axonwall /etc/axonwall/certs /opt/axonwall
-        mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /run/headscale
+        mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /run/headscale
         mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
         mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 
-        chown root:axonwall-api /var/lib/axonwall
-        chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /opt/axonwall
-        for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed; do
+        chown root:axonwall-api /var/lib/axonwall /etc/axonwall
+        chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /opt/axonwall
+        chmod 2775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /etc/axonwall 2>/dev/null || true
+        for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed /var/lib/axonwall/mcp-keys.json /var/lib/axonwall/mcp-settings.json /var/lib/axonwall/mcp-audit.jsonl; do
             if [ -e "$f" ]; then
                 chown axonwall:axonwall-api "$f" 2>/dev/null || true
+                chmod 0660 "$f" 2>/dev/null || true
             fi
         done
         chown -R axonwall:axonwall /var/log/axonwall

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -14,9 +15,7 @@ import (
 // restart, or stop on behalf of bundle/API callers (audit D-S03). Before
 // this list existed, any name surviving a "/" check reached systemctl as
 // argv, so a name like "--all" was parsed as a systemctl OPTION and any
-// unit on the box could be bounced by a socket caller. The compiler only
-// ever requests suricata and crowdsec-firewall-bouncer; the rest are the
-// daemons whose configuration this daemon writes or supervises.
+// unit on the box could be bounced by a socket caller.
 var managedServices = map[string]bool{
 	"suricata": true, "crowdsec": true, "crowdsec-firewall-bouncer": true,
 	"kea-dhcp4-server": true, "kea-dhcp-ddns-server": true,
@@ -24,20 +23,48 @@ var managedServices = map[string]bool{
 	"keepalived": true, "conntrackd": true, "nftables": true,
 	"ssh": true, "sshd": true,
 	"slapd": true, "sssd": true, "chrony": true,
+	"wg-quick@wg0": true, "rosenpass": true,
+	"haproxy": true, "freeradius": true,
+	"openvpn": true, "openvpn@server": true,
+	"strongswan": true, "strongswan-starter": true,
+	"smbd": true, "nmbd": true, "nfs-server": true, "nfs-kernel-server": true, "tgt": true,
+	"k3s": true, "libvirtd": true, "nut-server": true, "nut-monitor": true, "snmpd": true,
 }
 
 func validServiceName(svc string) bool {
 	return managedServices[strings.TrimSuffix(svc, ".service")]
 }
 
+func keaHasActiveInterfaces() bool {
+	raw, err := os.ReadFile("/etc/kea/kea-dhcp4.conf")
+	if err != nil {
+		return false
+	}
+	var parsed struct {
+		Dhcp4 struct {
+			InterfacesConfig struct {
+				Interfaces []string `json:"interfaces"`
+			} `json:"interfaces-config"`
+		} `json:"Dhcp4"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return false
+	}
+	return len(parsed.Dhcp4.InterfacesConfig.Interfaces) > 0
+}
+
 func reloadOrRestartService(svc string) ([]byte, error) {
 	if !validServiceName(svc) {
 		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
 	}
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		return exec.Command("systemctl", "try-reload-or-restart", svc).CombinedOutput()
+	unit := strings.TrimSuffix(svc, ".service")
+	if unit == "kea-dhcp4-server" && !keaHasActiveInterfaces() {
+		return stopSystemService(svc)
 	}
-	return exec.Command("service", strings.TrimSuffix(svc, ".service"), "restart").CombinedOutput()
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		return exec.Command("systemctl", "reload-or-restart", svc).CombinedOutput()
+	}
+	return exec.Command("service", unit, "restart").CombinedOutput()
 }
 
 func stopSystemService(svc string) ([]byte, error) {

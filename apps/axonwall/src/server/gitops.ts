@@ -89,16 +89,19 @@ export async function commitEtckeeper(message: string): Promise<{ success: boole
   return { success: false, message: 'Failed to record commit via etckeeper.' };
 }
 
+const GIT_BASE_ARGS = ['-c', `safe.directory=${GITOPS_DIR}`];
+
 function ensureGitOpsRepo() {
   try {
     if (!fs.existsSync(GITOPS_DIR)) {
-      fs.mkdirSync(GITOPS_DIR, { recursive: true, mode: 0o750 });
+      fs.mkdirSync(GITOPS_DIR, { recursive: true, mode: 0o775 });
     }
     const gitDir = path.join(GITOPS_DIR, '.git');
     if (!fs.existsSync(gitDir)) {
-      execFileSync('git', ['init', '--initial-branch=main'], { cwd: GITOPS_DIR, stdio: 'ignore' });
-      execFileSync('git', ['config', 'user.name', 'Axonwall System'], { cwd: GITOPS_DIR, stdio: 'ignore' });
-      execFileSync('git', ['config', 'user.email', 'gitops@axonwall.internal'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...GIT_BASE_ARGS, 'init', '--initial-branch=main'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...GIT_BASE_ARGS, 'config', 'user.name', 'Axonwall System'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...GIT_BASE_ARGS, 'config', 'user.email', 'gitops@axonwall.internal'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...GIT_BASE_ARGS, 'config', 'core.sharedRepository', 'group'], { cwd: GITOPS_DIR, stdio: 'ignore' });
     }
   } catch {}
 }
@@ -115,21 +118,21 @@ export async function recordGitOpsChange(
     ensureGitOpsRepo();
     const yamlFiles = serializeDesiredStateToYamlFiles(state);
     for (const [filename, content] of Object.entries(yamlFiles)) {
-      fs.writeFileSync(path.join(GITOPS_DIR, filename), content, { mode: 0o640 });
+      fs.writeFileSync(path.join(GITOPS_DIR, filename), content, { mode: 0o660 });
     }
 
     const stateFile = path.join(GITOPS_DIR, 'state.json');
-    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o640 });
+    fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: 0o660 });
 
-    execFileSync('git', ['add', ...AXONWALL_YAML_FILENAMES, 'state.json'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+    execFileSync('git', [...GIT_BASE_ARGS, 'add', ...AXONWALL_YAML_FILENAMES, 'state.json'], { cwd: GITOPS_DIR, stdio: 'ignore' });
     const safeAuthor = (session.username || 'admin').replace(/[^a-zA-Z0-9._-]/g, '') || 'admin';
     const safeMsg = (commitMsg || 'Firewall state updated').replace(/[\r\n]+/g, ' ').slice(0, 200);
-    execFileSync('git', ['commit', '-m', safeMsg, `--author=${safeAuthor} <${safeAuthor}@axonwall.local>`], {
+    execFileSync('git', [...GIT_BASE_ARGS, 'commit', '-m', safeMsg, `--author=${safeAuthor} <${safeAuthor}@axonwall.local>`], {
       cwd: GITOPS_DIR,
       stdio: 'ignore',
     });
 
-    const hash = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: GITOPS_DIR, encoding: 'utf8' }).trim();
+    const hash = execFileSync('git', [...GIT_BASE_ARGS, 'rev-parse', 'HEAD'], { cwd: GITOPS_DIR, encoding: 'utf8' }).trim();
     return hash;
   } catch {
     return null;
@@ -142,7 +145,7 @@ export async function getGitOpsHistory(): Promise<GitOpsHistory> {
 
   ensureGitOpsRepo();
   try {
-    const rawLog = execFileSync('git', ['log', '-n', '25', '--pretty=format:%H|%h|%an|%ai|%s'], {
+    const rawLog = execFileSync('git', [...GIT_BASE_ARGS, 'log', '-n', '25', '--pretty=format:%H|%h|%an|%ai|%s'], {
       cwd: GITOPS_DIR,
       encoding: 'utf8',
       timeout: 1500,
@@ -196,7 +199,7 @@ export async function getCommitDiff(commitHash: string): Promise<string> {
 
   const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
   try {
-    const yamlDiff = execFileSync('git', ['show', safeHash, '--color=never', '--', '*.yaml'], {
+    const yamlDiff = execFileSync('git', [...GIT_BASE_ARGS, 'show', safeHash, '--color=never', '--', '*.yaml'], {
       cwd: GITOPS_DIR,
       encoding: 'utf8',
       timeout: 2000,
@@ -205,7 +208,7 @@ export async function getCommitDiff(commitHash: string): Promise<string> {
     if (yamlDiff && yamlDiff.includes('diff --git')) {
       return yamlDiff;
     }
-    const diff = execFileSync('git', ['show', safeHash, '--color=never'], {
+    const diff = execFileSync('git', [...GIT_BASE_ARGS, 'show', safeHash, '--color=never'], {
       cwd: GITOPS_DIR,
       encoding: 'utf8',
       timeout: 2000,
@@ -229,7 +232,7 @@ export async function rollbackToGitOpsCommit(
     const yamlMap: Record<string, string> = {};
     for (const filename of AXONWALL_YAML_FILENAMES) {
       try {
-        const rawYaml = execFileSync('git', ['show', `${safeHash}:${filename}`], {
+        const rawYaml = execFileSync('git', [...GIT_BASE_ARGS, 'show', `${safeHash}:${filename}`], {
           cwd: GITOPS_DIR,
           encoding: 'utf8',
           timeout: 1500,
@@ -242,7 +245,7 @@ export async function rollbackToGitOpsCommit(
     if (Object.keys(yamlMap).length > 0) {
       state = parseDesiredStateFromYamlFiles(yamlMap);
     } else {
-      const rawJson = execFileSync('git', ['show', `${safeHash}:state.json`], {
+      const rawJson = execFileSync('git', [...GIT_BASE_ARGS, 'show', `${safeHash}:state.json`], {
         cwd: GITOPS_DIR,
         encoding: 'utf8',
         timeout: 2000,

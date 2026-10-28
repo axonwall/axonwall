@@ -21,6 +21,8 @@ import {
   Palette,
   Database,
   HardDrive,
+  KeyRound,
+  Bug,
 } from 'lucide-react';
 
 export interface DocItem {
@@ -42,7 +44,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     items: [
       { title: 'Overview & Introduction', href: '/docs' },
       { title: 'Installation Guide (ISO, KVM, Docker)', href: '/docs#installation' },
-      { title: 'Multi-Disk RAID & ZFS Install', href: '/docs/installer-raid-zfs', badge: 'New' },
+      { title: 'Multi-Disk RAID & ZFS Install', href: '/docs/installer-raid-zfs', badge: 'RAID' },
       { title: 'Quickstart & First Boot', href: '/docs#quickstart' },
       { title: 'Hardware Compatibility List', href: '/docs#hardware' },
     ],
@@ -55,8 +57,41 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'Modular Roles (FW, ZFS, K3s)', href: '/docs/modular-architecture', badge: 'Core' },
       { title: 'Multi-Core vs FreeBSD pf', href: '/docs/architecture#comparison' },
       { title: 'Junos Commit-Confirm Rollback', href: '/docs/architecture#commit-confirm' },
-      { title: 'A/B Dual-Root Partitioning', href: '/docs/architecture#ab-dual-root' },
+      { title: 'A/B Dual-Root & Single-Root Modes', href: '/docs/architecture#ab-dual-root' },
       { title: 'Privileged Go Daemon (axonwalld)', href: '/docs/architecture#daemon' },
+    ],
+  },
+  {
+    title: 'High Availability (HA)',
+    icon: ArrowRightLeft,
+    items: [
+      { title: 'Cluster Overview & Full Sync', href: '/docs/high-availability' },
+      { title: '2-Host Setup Walkthrough', href: '/docs/high-availability#two-host-setup', badge: 'Guide' },
+      { title: 'HA PKI & mTLS Security', href: '/docs/high-availability#pki-mtls' },
+      { title: 'Keepalived VRRP v2/v3', href: '/docs/high-availability#keepalived' },
+      { title: 'conntrackd Stateful Sync', href: '/docs/high-availability#conntrackd' },
+      { title: 'ZFS, SQLite, NTP & K3s Sync', href: '/docs/high-availability#zfs-k3s-sync', badge: 'HA' },
+      { title: 'Zero-Drop TCP & VoIP Failover', href: '/docs/high-availability#failover' },
+    ],
+  },
+  {
+    title: 'Ring-0 & Host Defense',
+    icon: Bug,
+    items: [
+      { title: 'Ghost-in-the-Ring & rkhunter', href: '/docs/ghost-in-the-ring-rootkits', badge: 'Ring-0' },
+      { title: '6-Engine Malware Suite', href: '/docs/ghost-in-the-ring-rootkits#host-scanners' },
+      { title: 'io_uring Syscall-Less Implants', href: '/docs/ghost-in-the-ring-rootkits#io-uring' },
+      { title: 'eBPF Rootkits & Silicon PMU LBR', href: '/docs/ghost-in-the-ring-rootkits#ebpf-pmu' },
+      { title: 'Preventive BPF_LSM Lockdown', href: '/docs/ghost-in-the-ring-rootkits#lsm-bpf' },
+    ],
+  },
+  {
+    title: 'Post-Quantum & VPN',
+    icon: KeyRound,
+    items: [
+      { title: 'Rosenpass Dual-KEM VPN', href: '/docs/post-quantum-rosenpass', badge: 'PQ-KEM' },
+      { title: 'McEliece 460896 + Kyber-768', href: '/docs/post-quantum-rosenpass#architecture' },
+      { title: 'Peer & PSK Rotation Setup', href: '/docs/post-quantum-rosenpass#configuration' },
     ],
   },
   {
@@ -72,10 +107,11 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     ],
   },
   {
-    title: 'Kubernetes (K3s)',
+    title: 'Kubernetes (K3s) & VOW',
     icon: Layers,
     items: [
       { title: 'K3s & OpenEBS Overview', href: '/docs/k3s-kubernetes' },
+      { title: 'Vigilant Octo Waffle & SOC', href: '/docs/vigilant-octo-waffle', badge: 'New' },
       { title: 'WireGuard Flannel Mesh', href: '/docs/k3s-kubernetes#wireguard' },
       { title: 'Automated 2-Node HA Join', href: '/docs/k3s-kubernetes#ha-join', badge: 'HA' },
       { title: 'OpenEBS ZFS-LocalPV CSI', href: '/docs/k3s-kubernetes#zfs-localpv' },
@@ -83,14 +119,12 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     ],
   },
   {
-    title: 'High Availability (HA)',
-    icon: ArrowRightLeft,
+    title: 'CLI & Super Configurator',
+    icon: Terminal,
     items: [
-      { title: 'Cluster Overview & Full Sync', href: '/docs/high-availability' },
-      { title: 'Keepalived VRRP v2/v3', href: '/docs/high-availability#keepalived' },
-      { title: 'conntrackd Stateful Sync', href: '/docs/high-availability#conntrackd' },
-      { title: 'ZFS Snapshot Stream & K3s Token', href: '/docs/high-availability#zfs-k3s-sync', badge: 'HA' },
-      { title: 'Zero-Drop TCP & VoIP Failover', href: '/docs/high-availability#failover' },
+      { title: 'Neovim Super Configurator', href: '/docs/cli-super-configurator', badge: 'TUI' },
+      { title: 'NastyMap Topology Simulator', href: '/docs/cli-super-configurator#nastymap-tui' },
+      { title: 'ZSH Power-User Workstation', href: '/docs/cli-super-configurator#zsh-workstation' },
     ],
   },
   {
@@ -130,7 +164,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
   },
   {
     title: 'Appliance & Telemetry',
-    icon: Terminal,
+    icon: HardDrive,
     items: [
       { title: 'Hardware Monitoring Overview', href: '/docs/hardware-telemetry' },
       { title: 'HWMON Sensors (Temp/Fan/Volt)', href: '/docs/hardware-telemetry#hwmon' },
@@ -264,8 +298,8 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.1.7</span>
-        <span className="text-emerald-400 font-medium">Docs 1.0</span>
+        <span className="font-mono">Axonwall v0.11.28</span>
+        <span className="text-emerald-400 font-medium">Docs 2.0</span>
       </div>
     </aside>
   );

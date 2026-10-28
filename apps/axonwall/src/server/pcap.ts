@@ -1,4 +1,5 @@
 import { getSession } from './auth';
+import { callAgentApi } from './agent-client';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -31,19 +32,20 @@ export interface CaptureResult {
 const recentCaptures = new Map<string, CaptureResult>();
 
 function getCaptureDir(): string {
-  const prodDir = '/var/log/axonwall/captures';
-  try {
-    if (!fs.existsSync(prodDir)) {
-      fs.mkdirSync(prodDir, { recursive: true });
-    }
-    return prodDir;
-  } catch {
-    const tmpDir = path.join(os.tmpdir(), 'axonwall-captures');
-    if (!fs.existsSync(tmpDir)) {
-      fs.mkdirSync(tmpDir, { recursive: true });
-    }
-    return tmpDir;
+  for (const prodDir of ['/var/lib/axonwall/captures', '/var/log/axonwall/captures']) {
+    try {
+      if (!fs.existsSync(prodDir)) {
+        fs.mkdirSync(prodDir, { recursive: true, mode: 0o775 });
+      }
+      fs.accessSync(prodDir, fs.constants.W_OK);
+      return prodDir;
+    } catch {}
   }
+  const tmpDir = path.join(os.tmpdir(), 'axonwall-captures');
+  if (!fs.existsSync(tmpDir)) {
+    fs.mkdirSync(tmpDir, { recursive: true, mode: 0o775 });
+  }
+  return tmpDir;
 }
 
 /**
@@ -170,6 +172,24 @@ export async function runLivePacketCapture({
   }
 
   const boundedCount = Math.max(1, Math.min(200, count));
+
+  // Delegate live capture to privileged axonwalld (CAP_NET_RAW) first
+  try {
+    const daemonResp = await callAgentApi<{ success: boolean; output: string }>('/v1/diagnostic', 'POST', {
+      type: 4, // DIAGNOSTIC_TYPE_PACKET_CAPTURE
+      interface: cleanIface,
+      target: cleanFilter,
+      count: boundedCount,
+    });
+    if (daemonResp?.success && daemonResp.output) {
+      const parsed = JSON.parse(daemonResp.output) as CaptureResult;
+      if (parsed && parsed.id && Array.isArray(parsed.packets)) {
+        recentCaptures.set(parsed.id, parsed);
+        return parsed;
+      }
+    }
+  } catch {}
+
   const captureId = `pcap-${Date.now()}-${cleanIface.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
   const captureDir = getCaptureDir();
   const pcapFilePath = path.join(captureDir, `${captureId}.pcap`);
@@ -316,19 +336,25 @@ export function getCaptureFile(id: string): { filePath: string; exists: boolean 
   if (!sanitizedId || sanitizedId !== id) {
     return { filePath: '', exists: false };
   }
-  const captureDir = getCaptureDir();
-  let filePath = path.resolve(captureDir, `${sanitizedId}.pcap`);
-  if (!filePath.startsWith(path.resolve(captureDir))) {
-    return { filePath: '', exists: false };
-  }
-  if (!fs.existsSync(filePath)) {
-    const altPath = path.resolve(captureDir, `${sanitizedId.replace(/\./g, '_')}.pcap`);
-    if (altPath.startsWith(path.resolve(captureDir)) && fs.existsSync(altPath)) {
-      filePath = altPath;
+  const candidateDirs = [
+    getCaptureDir(),
+    '/var/lib/axonwall/captures',
+    '/var/log/axonwall/captures',
+    path.join(os.tmpdir(), 'axonwall-captures'),
+  ];
+  for (const dir of candidateDirs) {
+    const resolvedDir = path.resolve(dir);
+    for (const candidateName of [`${sanitizedId}.pcap`, `${sanitizedId.replace(/\./g, '_')}.pcap`]) {
+      const candidatePath = path.resolve(resolvedDir, candidateName);
+      if (candidatePath.startsWith(resolvedDir) && fs.existsSync(candidatePath)) {
+        return { filePath: candidatePath, exists: true };
+      }
     }
   }
+  const captureDir = getCaptureDir();
+  const filePath = path.resolve(captureDir, `${sanitizedId}.pcap`);
   return {
     filePath,
-    exists: fs.existsSync(filePath),
+    exists: false,
   };
 }

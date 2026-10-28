@@ -37838,6 +37838,74 @@ function compileK3s(state, joinToken) {
 }
 
 // ../../packages/axonwall_lib/dist/compile/kea/index.js
+function ipToUint32(ip) {
+  const parts = ip.trim().split(".");
+  if (parts.length !== 4)
+    return null;
+  let val = 0;
+  for (const p of parts) {
+    if (!/^\d+$/.test(p))
+      return null;
+    const n = Number.parseInt(p, 10);
+    if (Number.isNaN(n) || n < 0 || n > 255)
+      return null;
+    val = (val << 8 | n) >>> 0;
+  }
+  return val >>> 0;
+}
+function uint32ToIp(val) {
+  return `${val >>> 24 & 255}.${val >>> 16 & 255}.${val >>> 8 & 255}.${val & 255}`;
+}
+function synthesizeDefaultDhcpSubnet(iface) {
+  if (!iface.ipv4Address)
+    return null;
+  const parts = iface.ipv4Address.trim().split("/");
+  const ipStr = parts[0] || "";
+  const prefix = parts[1] ? Number.parseInt(parts[1], 10) : 24;
+  const ipInt = ipToUint32(ipStr);
+  if (ipInt === null || Number.isNaN(prefix) || prefix < 8 || prefix > 30) {
+    return null;
+  }
+  const mask = prefix === 0 ? 0 : 4294967295 << 32 - prefix >>> 0;
+  const netInt = (ipInt & mask) >>> 0;
+  const bcastInt = (netInt | ~mask >>> 0) >>> 0;
+  const firstUsableInt = netInt + 1 >>> 0;
+  const lastUsableInt = bcastInt - 1 >>> 0;
+  const subnetCidr = `${uint32ToIp(netInt)}/${prefix}`;
+  let startInt = firstUsableInt;
+  let endInt = lastUsableInt;
+  if (prefix <= 24) {
+    const base24 = (ipInt & 4294967040) >>> 0;
+    startInt = base24 + 100 >>> 0;
+    endInt = base24 + 200 >>> 0;
+    if (ipInt >= startInt && ipInt <= endInt) {
+      startInt = base24 + 10 >>> 0;
+      endInt = base24 + 99 >>> 0;
+    }
+  } else if (ipInt === firstUsableInt && firstUsableInt < lastUsableInt) {
+    startInt = firstUsableInt + 1 >>> 0;
+  } else if (ipInt === lastUsableInt && lastUsableInt > firstUsableInt) {
+    endInt = lastUsableInt - 1 >>> 0;
+  } else if (ipInt > firstUsableInt && ipInt < lastUsableInt) {
+    const lowerSpan = ipInt - firstUsableInt;
+    const upperSpan = lastUsableInt - ipInt;
+    if (upperSpan >= lowerSpan) {
+      startInt = ipInt + 1 >>> 0;
+    } else {
+      endInt = ipInt - 1 >>> 0;
+    }
+  }
+  return {
+    interface: iface.name,
+    subnet: subnetCidr,
+    poolStart: uint32ToIp(Math.min(startInt, endInt)),
+    poolEnd: uint32ToIp(Math.max(startInt, endInt)),
+    routers: [ipStr],
+    dnsServers: [ipStr],
+    staticMappings: [],
+    enabled: true
+  };
+}
 function compileKeaDhcp4(dhcp, interfaces) {
   const ifDeviceMap = /* @__PURE__ */ new Map();
   const ifaceByName = /* @__PURE__ */ new Map();
@@ -37845,7 +37913,25 @@ function compileKeaDhcp4(dhcp, interfaces) {
     ifDeviceMap.set(iface.name, iface.device);
     ifaceByName.set(iface.name, iface);
   }
-  const activeSubnets = dhcp.subnets.filter((s) => {
+  const candidateSubnets = [...dhcp.subnets || []];
+  if (dhcp.enabled !== false) {
+    for (const iface of interfaces) {
+      if (!iface.enabled || !isValidDevice(iface.device))
+        continue;
+      if (inferInterfaceRole(iface) === "wan")
+        continue;
+      if (iface.type !== "static" || iface.dhcpServer !== true || !iface.ipv4Address)
+        continue;
+      const alreadyConfigured = candidateSubnets.some((s) => s.interface === iface.name);
+      if (!alreadyConfigured) {
+        const synthesized = synthesizeDefaultDhcpSubnet(iface);
+        if (synthesized) {
+          candidateSubnets.push(synthesized);
+        }
+      }
+    }
+  }
+  const activeSubnets = dhcp.enabled === false ? [] : candidateSubnets.filter((s) => {
     if (!s.enabled)
       return false;
     const iface = ifaceByName.get(s.interface);
@@ -37872,7 +37958,7 @@ function compileKeaDhcp4(dhcp, interfaces) {
       "lease-database": {
         type: "memfile",
         persist: true,
-        name: "/var/lib/axonwall/kea/dhcp4.leases"
+        name: "/var/lib/kea/kea-leases4.csv"
       },
       "valid-lifetime": 7200,
       "renew-timer": 1800,
@@ -40626,13 +40712,23 @@ function resolveMcpSettingsPath() {
     return process.env.AXONWALL_MCP_SETTINGS_PATH;
   }
   const primaryDir = "/var/lib/axonwall";
+  const primaryFile = path.join(primaryDir, "mcp-settings.json");
   try {
-    fs.mkdirSync(primaryDir, { recursive: true, mode: 448 });
+    if (fs.existsSync(primaryFile)) {
+      fs.accessSync(primaryFile, fs.constants.R_OK);
+      return primaryFile;
+    }
+    fs.mkdirSync(primaryDir, { recursive: true, mode: 509 });
     fs.accessSync(primaryDir, fs.constants.W_OK);
-    return path.join(primaryDir, "mcp-settings.json");
+    return primaryFile;
   } catch {
+    for (const candidate of ["/var/lib/axonwall/etc-axonwall/mcp-settings.json", "/etc/axonwall/mcp-settings.json"]) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
     const fallbackDir = "/tmp/axonwall";
-    fs.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
+    fs.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
     return path.join(fallbackDir, "mcp-settings.json");
   }
 }
@@ -40661,8 +40757,15 @@ function getMcpServerStatus(settingsPath) {
       };
     }
   }
-  const filePath = settingsPath || resolveMcpSettingsPath();
-  if (fs.existsSync(filePath)) {
+  const candidatePaths = settingsPath ? [settingsPath] : Array.from(/* @__PURE__ */ new Set([
+    resolveMcpSettingsPath(),
+    "/var/lib/axonwall/mcp-settings.json",
+    "/var/lib/axonwall/etc-axonwall/mcp-settings.json",
+    "/etc/axonwall/mcp-settings.json"
+  ]));
+  for (const filePath of candidatePaths) {
+    if (!fs.existsSync(filePath))
+      continue;
     try {
       const raw = fs.readFileSync(filePath, "utf8");
       const parsed = JSON.parse(raw);
@@ -40805,43 +40908,79 @@ function resolveMcpKeysPath() {
     return process.env.AXONWALL_MCP_KEYS_PATH;
   }
   const primaryDir = "/var/lib/axonwall";
+  const primaryFile = path2.join(primaryDir, "mcp-keys.json");
   try {
-    fs3.mkdirSync(primaryDir, { recursive: true, mode: 448 });
+    if (fs3.existsSync(primaryFile)) {
+      fs3.accessSync(primaryFile, fs3.constants.R_OK);
+      return primaryFile;
+    }
+    fs3.mkdirSync(primaryDir, { recursive: true, mode: 509 });
     fs3.accessSync(primaryDir, fs3.constants.W_OK);
-    return path2.join(primaryDir, "mcp-keys.json");
+    return primaryFile;
   } catch {
+    for (const candidate of ["/var/lib/axonwall/etc-axonwall/mcp-keys.json", "/etc/axonwall/mcp-keys.json"]) {
+      if (fs3.existsSync(candidate)) {
+        return candidate;
+      }
+    }
     const fallbackDir = "/tmp/axonwall";
-    fs3.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
+    fs3.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
     return path2.join(fallbackDir, "mcp-keys.json");
   }
 }
 function loadMcpKeysInternal() {
-  const keysPath = resolveMcpKeysPath();
-  if (!fs3.existsSync(keysPath)) {
-    return [];
-  }
-  try {
-    const raw = fs3.readFileSync(keysPath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const valid = [];
-    for (const item of parsed) {
-      const res = McpApiKeySchema.safeParse(item);
-      if (res.success) {
-        valid.push(res.data);
+  const candidatePaths = process.env.AXONWALL_MCP_KEYS_PATH ? [process.env.AXONWALL_MCP_KEYS_PATH] : Array.from(
+    /* @__PURE__ */ new Set([
+      resolveMcpKeysPath(),
+      "/var/lib/axonwall/mcp-keys.json",
+      "/var/lib/axonwall/etc-axonwall/mcp-keys.json",
+      "/etc/axonwall/mcp-keys.json"
+    ])
+  );
+  for (const keysPath of candidatePaths) {
+    if (!fs3.existsSync(keysPath)) continue;
+    try {
+      const raw = fs3.readFileSync(keysPath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      const valid = [];
+      for (const item of parsed) {
+        const res = McpApiKeySchema.safeParse(item);
+        if (res.success) {
+          valid.push(res.data);
+        }
       }
+      return valid;
+    } catch {
     }
-    return valid;
-  } catch {
-    return [];
   }
+  return [];
 }
 function saveMcpKeysInternal(keys) {
-  const keysPath = resolveMcpKeysPath();
-  fs3.mkdirSync(path2.dirname(keysPath), { recursive: true, mode: 448 });
-  const tmpPath = `${keysPath}.tmp.${process.pid}`;
-  fs3.writeFileSync(tmpPath, JSON.stringify(keys, null, 2), { mode: 384 });
-  fs3.renameSync(tmpPath, keysPath);
+  const serialized = JSON.stringify(keys, null, 2);
+  const targetPaths = process.env.AXONWALL_MCP_KEYS_PATH ? [process.env.AXONWALL_MCP_KEYS_PATH] : [
+    resolveMcpKeysPath(),
+    "/var/lib/axonwall/etc-axonwall/mcp-keys.json",
+    "/etc/axonwall/mcp-keys.json"
+  ];
+  for (const keysPath of Array.from(new Set(targetPaths))) {
+    try {
+      fs3.mkdirSync(path2.dirname(keysPath), { recursive: true, mode: 509 });
+      const tmpPath = `${keysPath}.tmp.${process.pid}`;
+      fs3.writeFileSync(tmpPath, serialized, { mode: 432 });
+      try {
+        fs3.chmodSync(tmpPath, 432);
+      } catch {
+      }
+      fs3.renameSync(tmpPath, keysPath);
+    } catch {
+      try {
+        fs3.writeFileSync(keysPath, serialized, { mode: 432 });
+        fs3.chmodSync(keysPath, 432);
+      } catch {
+      }
+    }
+  }
 }
 function hashMcpToken(rawToken) {
   return crypto2.createHash("sha256").update(rawToken.trim()).digest("hex");
@@ -41044,16 +41183,22 @@ function resolveMcpAuditPath() {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) {
     return process.env.AXONWALL_MCP_AUDIT_PATH;
   }
-  const primaryDir = "/var/log/axonwall";
-  try {
-    fs4.mkdirSync(primaryDir, { recursive: true, mode: 448 });
-    fs4.accessSync(primaryDir, fs4.constants.W_OK);
-    return path3.join(primaryDir, "mcp-audit.jsonl");
-  } catch {
-    const fallbackDir = "/tmp/axonwall";
-    fs4.mkdirSync(fallbackDir, { recursive: true, mode: 448 });
-    return path3.join(fallbackDir, "mcp-audit.jsonl");
+  for (const dir of ["/var/lib/axonwall", "/var/log/axonwall"]) {
+    const file2 = path3.join(dir, "mcp-audit.jsonl");
+    try {
+      if (fs4.existsSync(file2)) {
+        fs4.accessSync(file2, fs4.constants.W_OK);
+        return file2;
+      }
+      fs4.mkdirSync(dir, { recursive: true, mode: 509 });
+      fs4.accessSync(dir, fs4.constants.W_OK);
+      return file2;
+    } catch {
+    }
   }
+  const fallbackDir = "/tmp/axonwall";
+  fs4.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
+  return path3.join(fallbackDir, "mcp-audit.jsonl");
 }
 function computeEntryHash(entryWithoutHash) {
   const canonical = JSON.stringify({
@@ -41115,8 +41260,12 @@ function recordMcpAuditEntry(input2) {
     entryHash
   };
   try {
-    fs4.mkdirSync(path3.dirname(auditPath), { recursive: true, mode: 448 });
-    fs4.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 384 });
+    fs4.mkdirSync(path3.dirname(auditPath), { recursive: true, mode: 509 });
+    fs4.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 432 });
+    try {
+      fs4.chmodSync(auditPath, 432);
+    } catch {
+    }
   } catch (err) {
     console.error("[MCP Audit] Failed to append audit entry:", err);
   }

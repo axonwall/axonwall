@@ -555,13 +555,23 @@ export function resolveMcpSettingsPath(): string {
     return process.env.AXONWALL_MCP_SETTINGS_PATH;
   }
   const primaryDir = '/var/lib/axonwall';
+  const primaryFile = path.join(primaryDir, 'mcp-settings.json');
   try {
-    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o700 });
+    if (fs.existsSync(primaryFile)) {
+      fs.accessSync(primaryFile, fs.constants.R_OK);
+      return primaryFile;
+    }
+    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o775 });
     fs.accessSync(primaryDir, fs.constants.W_OK);
-    return path.join(primaryDir, 'mcp-settings.json');
+    return primaryFile;
   } catch {
+    for (const candidate of ['/var/lib/axonwall/etc-axonwall/mcp-settings.json', '/etc/axonwall/mcp-settings.json']) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
     const fallbackDir = '/tmp/axonwall';
-    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o775 });
     return path.join(fallbackDir, 'mcp-settings.json');
   }
 }
@@ -603,9 +613,20 @@ export function getMcpServerStatus(settingsPath?: string): McpServerStatus {
     }
   }
 
-  // 2. Check persistent configuration file
-  const filePath = settingsPath || resolveMcpSettingsPath();
-  if (fs.existsSync(filePath)) {
+  // 2. Check persistent configuration file(s)
+  const candidatePaths = settingsPath
+    ? [settingsPath]
+    : Array.from(
+        new Set([
+          resolveMcpSettingsPath(),
+          '/var/lib/axonwall/mcp-settings.json',
+          '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
+          '/etc/axonwall/mcp-settings.json',
+        ]),
+      );
+
+  for (const filePath of candidatePaths) {
+    if (!fs.existsSync(filePath)) continue;
     try {
       const raw = fs.readFileSync(filePath, 'utf8');
       const parsed = JSON.parse(raw);
@@ -626,7 +647,7 @@ export function getMcpServerStatus(settingsPath?: string): McpServerStatus {
         };
       }
     } catch {
-      // In case of read/parse failure, fall through to default disabled
+      // In case of read/parse failure, try next candidate
     }
   }
 

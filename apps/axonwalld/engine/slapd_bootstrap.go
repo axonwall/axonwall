@@ -428,8 +428,8 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 		return "", fmt.Errorf("slapd binary not installed: %w", err)
 	}
 
-	// Ensure /var/lib/axonwall is traversable by openldap and SSSD/SSH users
-	_ = os.Chmod("/var/lib/axonwall", 0755)
+	// Ensure /var/lib/axonwall is traversable by openldap and SSSD/SSH users while keeping group write for axonwall-api
+	_ = os.Chmod("/var/lib/axonwall", 0775|os.ModeSetgid)
 	for _, dir := range []string{LDAPBaseDir, LDAPConfigDir, LDAPDataDir, LDAPAccessLogDir, LDAPBackupsDir} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return "", fmt.Errorf("failed to create %s: %w", dir, err)

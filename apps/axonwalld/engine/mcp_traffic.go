@@ -286,6 +286,9 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 
 	for _, ipStr := range append(posture.ApplianceIPs, posture.GatewayAndHaIPs...) {
 		if parsed := net.ParseIP(ipStr); parsed != nil {
+			if parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsMulticast() {
+				continue
+			}
 			if parsed.To4() != nil {
 				protectedV4 = append(protectedV4, parsed.String())
 			} else {
@@ -310,13 +313,13 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 	nft.WriteString("table inet axonwall_mcp {\n")
 
 	// Protected immunity sets
-	nft.WriteString("  set mcp_protected_v4 {\n    type ipv4_addr;\n    flags interval;\n")
+	nft.WriteString("  set mcp_protected_v4 {\n    type ipv4_addr;\n    flags interval;\n    auto-merge;\n")
 	if len(protectedV4) > 0 {
 		nft.WriteString(fmt.Sprintf("    elements = { %s };\n", strings.Join(protectedV4, ", ")))
 	}
 	nft.WriteString("  }\n")
 
-	nft.WriteString("  set mcp_protected_v6 {\n    type ipv6_addr;\n    flags interval;\n")
+	nft.WriteString("  set mcp_protected_v6 {\n    type ipv6_addr;\n    flags interval;\n    auto-merge;\n")
 	if len(protectedV6) > 0 {
 		nft.WriteString(fmt.Sprintf("    elements = { %s };\n", strings.Join(protectedV6, ", ")))
 	}

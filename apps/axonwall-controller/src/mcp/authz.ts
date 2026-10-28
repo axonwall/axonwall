@@ -21,45 +21,85 @@ export function resolveMcpKeysPath(): string {
     return process.env.AXONWALL_MCP_KEYS_PATH;
   }
   const primaryDir = '/var/lib/axonwall';
+  const primaryFile = path.join(primaryDir, 'mcp-keys.json');
   try {
-    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o700 });
+    if (fs.existsSync(primaryFile)) {
+      fs.accessSync(primaryFile, fs.constants.R_OK);
+      return primaryFile;
+    }
+    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o775 });
     fs.accessSync(primaryDir, fs.constants.W_OK);
-    return path.join(primaryDir, 'mcp-keys.json');
+    return primaryFile;
   } catch {
+    for (const candidate of ['/var/lib/axonwall/etc-axonwall/mcp-keys.json', '/etc/axonwall/mcp-keys.json']) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
     const fallbackDir = '/tmp/axonwall';
-    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o775 });
     return path.join(fallbackDir, 'mcp-keys.json');
   }
 }
 
 function loadMcpKeysInternal(): McpApiKey[] {
-  const keysPath = resolveMcpKeysPath();
-  if (!fs.existsSync(keysPath)) {
-    return [];
-  }
-  try {
-    const raw = fs.readFileSync(keysPath, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const valid: McpApiKey[] = [];
-    for (const item of parsed) {
-      const res = McpApiKeySchema.safeParse(item);
-      if (res.success) {
-        valid.push(res.data);
+  const candidatePaths = process.env.AXONWALL_MCP_KEYS_PATH
+    ? [process.env.AXONWALL_MCP_KEYS_PATH]
+    : Array.from(
+        new Set([
+          resolveMcpKeysPath(),
+          '/var/lib/axonwall/mcp-keys.json',
+          '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
+          '/etc/axonwall/mcp-keys.json',
+        ]),
+      );
+
+  for (const keysPath of candidatePaths) {
+    if (!fs.existsSync(keysPath)) continue;
+    try {
+      const raw = fs.readFileSync(keysPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      const valid: McpApiKey[] = [];
+      for (const item of parsed) {
+        const res = McpApiKeySchema.safeParse(item);
+        if (res.success) {
+          valid.push(res.data);
+        }
       }
+      return valid;
+    } catch {
+      // try next candidate
     }
-    return valid;
-  } catch {
-    return [];
   }
+  return [];
 }
 
 function saveMcpKeysInternal(keys: McpApiKey[]): void {
-  const keysPath = resolveMcpKeysPath();
-  fs.mkdirSync(path.dirname(keysPath), { recursive: true, mode: 0o700 });
-  const tmpPath = `${keysPath}.tmp.${process.pid}`;
-  fs.writeFileSync(tmpPath, JSON.stringify(keys, null, 2), { mode: 0o600 });
-  fs.renameSync(tmpPath, keysPath);
+  const serialized = JSON.stringify(keys, null, 2);
+  const targetPaths = process.env.AXONWALL_MCP_KEYS_PATH
+    ? [process.env.AXONWALL_MCP_KEYS_PATH]
+    : [
+        resolveMcpKeysPath(),
+        '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
+        '/etc/axonwall/mcp-keys.json',
+      ];
+  for (const keysPath of Array.from(new Set(targetPaths))) {
+    try {
+      fs.mkdirSync(path.dirname(keysPath), { recursive: true, mode: 0o775 });
+      const tmpPath = `${keysPath}.tmp.${process.pid}`;
+      fs.writeFileSync(tmpPath, serialized, { mode: 0o660 });
+      try {
+        fs.chmodSync(tmpPath, 0o660);
+      } catch {}
+      fs.renameSync(tmpPath, keysPath);
+    } catch {
+      try {
+        fs.writeFileSync(keysPath, serialized, { mode: 0o660 });
+        fs.chmodSync(keysPath, 0o660);
+      } catch {}
+    }
+  }
 }
 
 export function hashMcpToken(rawToken: string): string {

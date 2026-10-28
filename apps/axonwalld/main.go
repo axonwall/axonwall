@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -86,6 +87,98 @@ func snapshotLkgConfig(bundleDir string) {
 	}
 }
 
+func resolveAxonwallApiGid() int {
+	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
+		if gid, err := strconv.Atoi(grp.Gid); err == nil {
+			return gid
+		}
+	}
+	return -1
+}
+
+func ensureSharedConfigPerm(path string, mode os.FileMode) {
+	_ = os.Chmod(path, mode)
+	if gid := resolveAxonwallApiGid(); gid >= 0 {
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+				_ = os.Chown(path, int(st.Uid), gid)
+			} else {
+				_ = os.Chown(path, -1, gid)
+			}
+		}
+	}
+}
+
+func normalizeConfigTreePermissions() {
+	gid := resolveAxonwallApiGid()
+	dirs := []string{
+		"/etc/axonwall",
+		"/etc/axonwall/conf.d",
+		"/etc/axonwall/managed",
+		"/var/lib/axonwall",
+		"/var/lib/axonwall/etc-axonwall",
+		"/var/lib/axonwall/etc-axonwall/conf.d",
+		"/var/lib/axonwall/etc-axonwall/managed",
+		"/var/lib/axonwall/captures",
+		"/var/lib/axonwall/backups",
+		"/var/lib/axonwall/gitops",
+	}
+	for _, d := range dirs {
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			if gid >= 0 {
+				_ = os.Chown(d, -1, gid)
+			}
+			_ = os.Chmod(d, 0775|os.ModeSetgid)
+		}
+	}
+
+	for _, dir := range []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			fullPath := filepath.Join(dir, name)
+			if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") ||
+				name == "state.json" || name == "admin.env" || name == "mfa.env" ||
+				name == "mcp-keys.json" || name == "mcp-settings.json" {
+				ensureSharedConfigPerm(fullPath, 0660)
+			} else if name == "controller.env" {
+				ensureSharedConfigPerm(fullPath, 0640)
+			} else if name == "interfaces.conf" || name == "slot_versions.json" {
+				ensureSharedConfigPerm(fullPath, 0664)
+			}
+		}
+	}
+
+	for _, sharedVarFile := range []string{
+		"/var/lib/axonwall/state.json",
+		"/var/lib/axonwall/mcp-keys.json",
+		"/var/lib/axonwall/mcp-settings.json",
+		"/var/lib/axonwall/mcp-audit.jsonl",
+		"/var/lib/axonwall/session-epoch",
+		"/var/lib/axonwall/revoked-jtis",
+		"/var/lib/axonwall/users.json",
+		"/var/lib/axonwall/backups.json",
+	} {
+		if _, err := os.Stat(sharedVarFile); err == nil {
+			ensureSharedConfigPerm(sharedVarFile, 0660)
+		}
+	}
+	for _, readableVarFile := range []string{
+		"/var/lib/axonwall/slot_versions.json",
+		"/var/lib/axonwall/.password_changed",
+	} {
+		if _, err := os.Stat(readableVarFile); err == nil {
+			ensureSharedConfigPerm(readableVarFile, 0664)
+		}
+	}
+}
+
 func restoreLkgConfig(bundleDir string) {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
 	entries, err := os.ReadDir(lkgConfigDir)
@@ -104,10 +197,21 @@ func restoreLkgConfig(bundleDir string) {
 			continue
 		}
 
+		mode := os.FileMode(0660)
+		if name == "interfaces.conf" {
+			mode = 0664
+		}
+
 		targetDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
 		for _, dir := range targetDirs {
-			_ = os.MkdirAll(dir, 0700)
-			_ = os.WriteFile(filepath.Join(dir, name), data, 0600)
+			_ = os.MkdirAll(dir, 0775)
+			dst := filepath.Join(dir, name)
+			_ = os.WriteFile(dst, data, mode)
+			ensureSharedConfigPerm(dst, mode)
+		}
+		if name == "state.json" {
+			_ = os.WriteFile("/var/lib/axonwall/state.json", data, 0660)
+			ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
 		}
 	}
 }
@@ -251,17 +355,30 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			return nil, status.Errorf(codes.Internal, "failed to create directories for %s: %v", cleanPath, err)
 		}
 		// Sanitize the caller-chosen mode (audit D-S02): plain permission
-		// bits only (drops setuid/setgid/sticky), and never group- or
-		// world-writable under the config tree.
+		// bits only (drops setuid/setgid/sticky), and never world-writable.
+		// Shared config files under /etc/axonwall (*.yaml, *.yml, state.json, interfaces.conf)
+		// must remain group-readable and group-writable (0660 / 0664) for group axonwall-api
+		// so axonwall-ui and axonwall-controller can read and update them across reboots.
+		isSharedAxonwallCfg := strings.HasPrefix(cleanPath, "/etc/axonwall/") &&
+			(strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml") || filepath.Base(cleanPath) == "state.json" || filepath.Base(cleanPath) == "interfaces.conf")
 		mode := os.FileMode(f.FileMode).Perm()
-		if mode == 0 {
-			if strings.HasPrefix(cleanPath, "/etc/axonwall/") && (strings.HasSuffix(cleanPath, ".json") || strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml")) {
-				mode = 0600
+		if isSharedAxonwallCfg {
+			if filepath.Base(cleanPath) == "interfaces.conf" {
+				mode = 0664
 			} else {
-				mode = 0644
+				mode = 0660
 			}
+			mode &^= 0o002
+		} else {
+			if mode == 0 {
+				if strings.HasPrefix(cleanPath, "/etc/axonwall/") && strings.HasSuffix(cleanPath, ".json") {
+					mode = 0600
+				} else {
+					mode = 0644
+				}
+			}
+			mode &^= 0o022
 		}
-		mode &^= 0o022
 
 		// Use syscall.O_NOFOLLOW to prevent symlink TOCTOU attacks
 		file, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
@@ -274,14 +391,24 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 		_ = file.Chmod(mode)
 		file.Close()
+		if isSharedAxonwallCfg {
+			ensureSharedConfigPerm(cleanPath, mode)
+		}
 
 		// Mirror /etc/axonwall/*.yaml, *.json, and interfaces.conf to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence
 		if strings.HasPrefix(cleanPath, "/etc/axonwall/") &&
 			(strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml") || strings.HasSuffix(cleanPath, ".json") || filepath.Base(cleanPath) == "interfaces.conf") {
 			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
 			persistPath := filepath.Join("/var/lib/axonwall/etc-axonwall", relPath)
-			_ = os.MkdirAll(filepath.Dir(persistPath), 0755)
+			_ = os.MkdirAll(filepath.Dir(persistPath), 0775)
 			_ = os.WriteFile(persistPath, []byte(f.Content), mode)
+			if isSharedAxonwallCfg {
+				ensureSharedConfigPerm(persistPath, mode)
+			}
+			if filepath.Base(cleanPath) == "state.json" {
+				_ = os.WriteFile("/var/lib/axonwall/state.json", []byte(f.Content), 0660)
+				ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+			}
 		}
 
 		if filepath.Base(cleanPath) == "firewall_config.json" {
@@ -334,7 +461,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 	}
 
-	// Reconcile static routes whenever a bundle is applied
+	// Reconcile physical/logical interfaces and static routes whenever a bundle is applied
+	applyBootInterfaces()
 	if err := ReconcileStaticRoutes(); err != nil {
 		log.Printf("[Agent] Warning: Static routes reconciliation: %v", err)
 	}
@@ -876,7 +1004,9 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 	}
 
 	// 3. Merge interfaces from /etc/axonwall/interfaces.yaml or /var/lib/axonwall/etc-axonwall/interfaces.yaml
+	confStat, errConfStat := os.Stat("/etc/axonwall/interfaces.conf")
 	for _, yamlPath := range []string{"/etc/axonwall/interfaces.yaml", "/var/lib/axonwall/etc-axonwall/interfaces.yaml"} {
+		yamlStat, errYamlStat := os.Stat(yamlPath)
 		raw, err := os.ReadFile(yamlPath)
 		if err != nil || len(raw) == 0 {
 			continue
@@ -894,6 +1024,19 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 			} `yaml:"interfaces"`
 		}
 		if yaml.Unmarshal(raw, &parsed) == nil && len(parsed.Interfaces) > 0 {
+			// If interfaces.yaml was modified more recently than interfaces.conf, treat interfaces.yaml
+			// as authoritative and prune any stale interfaces from interfaces.conf that were deleted.
+			if errYamlStat == nil && (errConfStat != nil || yamlStat.ModTime().After(confStat.ModTime().Add(2*time.Second))) {
+				presentInYaml := make(map[string]bool)
+				for _, yIface := range parsed.Interfaces {
+					presentInYaml[strings.ToLower(strings.TrimSpace(yIface.Name))] = true
+				}
+				for existingName := range byName {
+					if !presentInYaml[existingName] {
+						remove(existingName)
+					}
+				}
+			}
 			for _, yIface := range parsed.Interfaces {
 				if yIface.Enabled != nil && !*yIface.Enabled {
 					remove(yIface.Name)
@@ -1161,6 +1304,13 @@ func syncFile(srcPath, dstPath string, perm os.FileMode) {
 	if err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime()) {
 		if data, err := os.ReadFile(srcPath); err == nil {
 			_ = os.WriteFile(dstPath, data, perm)
+			ensureSharedConfigPerm(dstPath, perm)
+		}
+	} else if dstInfo.ModTime().After(srcInfo.ModTime()) {
+		// Also sync newer /etc/axonwall edits back to /var/lib/axonwall/etc-axonwall
+		if data, err := os.ReadFile(dstPath); err == nil {
+			_ = os.WriteFile(srcPath, data, perm)
+			ensureSharedConfigPerm(srcPath, perm)
 		}
 	}
 }
@@ -1168,12 +1318,14 @@ func syncFile(srcPath, dstPath string, perm os.FileMode) {
 func syncPersistentYamlConfigs() {
 	srcDir := "/var/lib/axonwall/etc-axonwall"
 	dstDir := "/etc/axonwall"
+	_ = os.MkdirAll(srcDir, 0775)
+	_ = os.MkdirAll(dstDir, 0775)
+	_ = os.MkdirAll(filepath.Join(dstDir, "conf.d"), 0775)
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
+		normalizeConfigTreePermissions()
 		return
 	}
-	_ = os.MkdirAll(dstDir, 0755)
-	_ = os.MkdirAll(filepath.Join(dstDir, "conf.d"), 0755)
 
 	for _, entry := range entries {
 		name := entry.Name()
@@ -1187,7 +1339,7 @@ func syncPersistentYamlConfigs() {
 						}
 						cName := ce.Name()
 						if strings.HasSuffix(cName, ".yaml") || strings.HasSuffix(cName, ".yml") {
-							syncFile(filepath.Join(srcDir, "conf.d", cName), filepath.Join(dstDir, "conf.d", cName), 0600)
+							syncFile(filepath.Join(srcDir, "conf.d", cName), filepath.Join(dstDir, "conf.d", cName), 0660)
 						}
 					}
 				}
@@ -1195,15 +1347,19 @@ func syncPersistentYamlConfigs() {
 			continue
 		}
 
-		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-			syncFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name), 0600)
+		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || name == "state.json" {
+			syncFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name), 0660)
 		}
 	}
 
-	// Also ensure administrative credentials, controller configs, and interface assignments are synced
-	syncFile(filepath.Join(srcDir, "admin.env"), filepath.Join(dstDir, "admin.env"), 0600)
-	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0600)
-	syncFile(filepath.Join(srcDir, "interfaces.conf"), filepath.Join(dstDir, "interfaces.conf"), 0644)
+	// Also ensure administrative credentials, MFA secrets, MCP configs, controller configs, and interface assignments are synced
+	syncFile(filepath.Join(srcDir, "admin.env"), filepath.Join(dstDir, "admin.env"), 0660)
+	syncFile(filepath.Join(srcDir, "mfa.env"), filepath.Join(dstDir, "mfa.env"), 0660)
+	syncFile(filepath.Join(srcDir, "mcp-keys.json"), filepath.Join(dstDir, "mcp-keys.json"), 0660)
+	syncFile(filepath.Join(srcDir, "mcp-settings.json"), filepath.Join(dstDir, "mcp-settings.json"), 0660)
+	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0640)
+	syncFile(filepath.Join(srcDir, "interfaces.conf"), filepath.Join(dstDir, "interfaces.conf"), 0664)
+	normalizeConfigTreePermissions()
 }
 
 func main() {
@@ -1243,6 +1399,9 @@ func main() {
 		reconcileBootAntiLockoutNft(hasLkg)
 		if err := ReconcileStaticRoutes(); err != nil {
 			log.Printf("[Agent] Early-boot: static routes reconciliation: %v", err)
+		}
+		if keaHasActiveInterfaces() {
+			_, _ = reloadOrRestartService("kea-dhcp4-server")
 		}
 	}
 

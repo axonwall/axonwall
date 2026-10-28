@@ -9,16 +9,23 @@ export function resolveMcpAuditPath(): string {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) {
     return process.env.AXONWALL_MCP_AUDIT_PATH;
   }
-  const primaryDir = '/var/log/axonwall';
-  try {
-    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o700 });
-    fs.accessSync(primaryDir, fs.constants.W_OK);
-    return path.join(primaryDir, 'mcp-audit.jsonl');
-  } catch {
-    const fallbackDir = '/tmp/axonwall';
-    fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
-    return path.join(fallbackDir, 'mcp-audit.jsonl');
+  for (const dir of ['/var/lib/axonwall', '/var/log/axonwall']) {
+    const file = path.join(dir, 'mcp-audit.jsonl');
+    try {
+      if (fs.existsSync(file)) {
+        fs.accessSync(file, fs.constants.W_OK);
+        return file;
+      }
+      fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+      fs.accessSync(dir, fs.constants.W_OK);
+      return file;
+    } catch {
+      // try next candidate
+    }
   }
+  const fallbackDir = '/tmp/axonwall';
+  fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o775 });
+  return path.join(fallbackDir, 'mcp-audit.jsonl');
 }
 
 function computeEntryHash(entryWithoutHash: Omit<McpAuditLogEntry, 'entryHash'>): string {
@@ -101,8 +108,11 @@ export function recordMcpAuditEntry(input: RecordAuditInput): McpAuditLogEntry {
   };
 
   try {
-    fs.mkdirSync(path.dirname(auditPath), { recursive: true, mode: 0o700 });
-    fs.appendFileSync(auditPath, JSON.stringify(fullEntry) + '\n', { mode: 0o600 });
+    fs.mkdirSync(path.dirname(auditPath), { recursive: true, mode: 0o775 });
+    fs.appendFileSync(auditPath, JSON.stringify(fullEntry) + '\n', { mode: 0o660 });
+    try {
+      fs.chmodSync(auditPath, 0o660);
+    } catch {}
   } catch (err) {
     console.error('[MCP Audit] Failed to append audit entry:', err);
   }

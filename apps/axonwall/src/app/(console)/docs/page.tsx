@@ -16,6 +16,8 @@ import {
   Download,
   CheckCircle2,
   Lock,
+  KeyRound,
+  Bug,
 } from 'lucide-react';
 import { Callout } from './components/Callout';
 import { CodeBlock } from './components/CodeBlock';
@@ -23,7 +25,7 @@ import { CodeBlock } from './components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Documentation | Overview & Quickstart',
   description:
-    'Comprehensive documentation for Axonwall, the modern Linux-based Next-Generation Firewall and Router powered by nftables, commit-confirm rollback, and autonomous observability.',
+    'Comprehensive documentation for Axonwall v0.11.28: Linux 6.12 LTS nftables firewall, 2-Host High Availability setup guide, Ghost-in-the-Ring kernel rootkit hunter, Post-Quantum Rosenpass Dual-KEM VPN, OpenZFS NAS, K3s + Vigilant Octo Waffle, and Neovim Super Configurator TUI.',
 };
 
 export default function DocsOverviewPage() {
@@ -33,25 +35,108 @@ export default function DocsOverviewPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Documentation Portal
+          Documentation Portal • v0.11.28
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Axonwall Documentation
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Welcome to the official Axonwall documentation. Axonwall is an enterprise-grade open-source router and Next-Generation Firewall (NGFW) engineered on modern Linux, <code className="text-emerald-400 font-mono">nftables</code>, and Next.js.
+          Welcome to the official Axonwall documentation. Axonwall is an enterprise-grade open-source router,
+          Next-Generation Firewall (NGFW), OpenZFS NAS, and K3s SecOps platform engineered on modern Linux,{' '}
+          <code className="text-emerald-400 font-mono">nftables</code>, Post-Quantum Dual-KEM cryptography, and Ring-0
+          eBPF telemetry.
         </p>
       </div>
 
       {/* Feature Navigation Grid */}
       <section className="space-y-6">
         <h2 className="text-xl font-bold text-white flex items-center gap-2">
-          <Layers className="w-5 h-5 text-emerald-400" /> Explore Core Subsystems
+          <Layers className="w-5 h-5 text-emerald-400" /> Explore Core Subsystems &amp; Setup Guides
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Link
-            href="/docs/modular-architecture"
+            href="/docs/high-availability#two-host-setup"
             className="p-5 rounded-xl bg-slate-900/60 border border-emerald-500/40 hover:border-emerald-500 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <ArrowRightLeft className="w-4 h-4 text-emerald-400" />
+                <span>High Availability &amp; 2-Host Setup Guide</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Step-by-step 2-host walkthrough: Keepalived VRRP, conntrackd FTFW sync, mTLS HA PKI enrollment, Chrony NTP peering, OpenLDAP syncrepl, SQLite WAL streaming, and ZFS Send/Recv.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/ghost-in-the-ring-rootkits"
+            className="p-5 rounded-xl bg-slate-900/60 border border-emerald-500/40 hover:border-emerald-500 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Bug className="w-4 h-4 text-emerald-400" />
+                <span>Ghost-in-the-Ring &amp; rkhunter Defense</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              6-engine malware suite (rkhunter, chkrootkit, ClamAV, AIDE, YARA, Lynis) paired with Ring-0 io_uring &amp; eBPF rootkit detection via BPF_LSM, /proc/kcore prog_idr, and Silicon PMU LBR.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/post-quantum-rosenpass"
+            className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <KeyRound className="w-4 h-4 text-emerald-400" />
+                <span>Post-Quantum Rosenpass Dual-KEM VPN</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Hybrid Classic McEliece 460896 + Kyber-768 (ML-KEM) key exchange rotating kernel WireGuard Pre-Shared Keys every 120 seconds against Harvest-Now-Decrypt-Later quantum threats.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/cli-super-configurator"
+            className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Terminal className="w-4 h-4 text-emerald-400" />
+                <span>Neovim Super Configurator &amp; ZSH Shell</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Hyperfocused Lua form TUI (axonwall-config) with native Vim motions across 11 domains, NastyMap topology simulator (axonwallctl tui), and Oh My Zsh + Starship workstation.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/vigilant-octo-waffle"
+            className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Shield className="w-4 h-4 text-emerald-400" />
+                <span>Vigilant Octo Waffle &amp; Vigilante SOC</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Turnkey K3s DevSecOps &amp; GitOps stack (Gitea, Tekton, Vault, DefectDojo, Wazuh, Cilium, Tetragon) plus the Vigilante BattleStation, Attack Graph, Deception, and Purple Team suite.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/modular-architecture"
+            className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
           >
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
@@ -61,7 +146,7 @@ export default function DocsOverviewPage() {
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Run Axonwall as a dedicated NGFW, a pure TrueNAS-grade ZFS NAS, or a hyper-converged Kubernetes (K3s) node.
+              Run Axonwall as a dedicated NGFW, disable core-firewall to run a pure Host-Mode ZFS NAS or K3s node, or converge all roles on bare metal.
             </p>
           </Link>
 
@@ -72,12 +157,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Layers className="w-4 h-4 text-emerald-400" />
-                <span>ZFS NAS Storage Management</span>
+                <span>ZFS NAS Storage &amp; Axonwall Vault</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              OpenZFS Stripe/Mirror/RAID-Z pools, datasets, POSIX ACLs, Samba SMB3 with VSS shadow copies, and NFSv4/iSCSI.
+              OpenZFS Stripe/Mirror/RAID-Z pools, datasets, POSIX ACLs, Samba SMB3 with VSS shadow copies, NFSv4/iSCSI, and SeaweedFS S3 Vault with B-14 Internal PKI CA.
             </p>
           </Link>
 
@@ -88,7 +173,7 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Server className="w-4 h-4 text-emerald-400" />
-                <span>Kubernetes (K3s) & OpenEBS</span>
+                <span>Kubernetes (K3s) &amp; OpenEBS</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
@@ -104,12 +189,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Download className="w-4 h-4 text-emerald-400" />
-                <span>Multi-Disk RAID & ZFS Install</span>
+                <span>Multi-Disk RAID &amp; ZFS Install</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              mdadm RAID-1 system disk mirroring across Slot A, Slot B, Swap, and Data, plus dedicated ZFS storage partitioning.
+              mdadm RAID-1 system disk mirroring across Slot A, Slot B, Swap, and Data, plus Standard Single-Root rolling Linux mode and cloud-init autoinstall.
             </p>
           </Link>
 
@@ -120,28 +205,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Cpu className="w-4 h-4 text-emerald-400" />
-                <span>Architecture & nftables</span>
+                <span>Architecture &amp; nftables</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Why Linux multi-core line-rate scaling replaces FreeBSD pf, A/B dual-root unbrickable updates, and Junos-style commit-confirm.
-            </p>
-          </Link>
-
-          <Link
-            href="/docs/high-availability"
-            className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2.5 font-bold text-white text-base">
-                <ArrowRightLeft className="w-4 h-4 text-emerald-400" />
-                <span>High Availability (HA)</span>
-              </div>
-              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
-            </div>
-            <p className="text-xs text-slate-400 leading-relaxed">
-              Keepalived VRRP v2/v3 failover paired with conntrackd stateful connection replication over FTFW multicast & unicast links.
+              Why Linux multi-core line-rate scaling replaces FreeBSD pf, A/B dual-root unbrickable updates, N-port Multi-WAN/Multi-LAN fabric, and Junos-style commit-confirm.
             </p>
           </Link>
 
@@ -152,7 +221,7 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <ShieldAlert className="w-4 h-4 text-emerald-400" />
-                <span>Threat Feeds & DNS RPZ</span>
+                <span>Threat Feeds &amp; DNS RPZ</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
@@ -184,44 +253,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Activity className="w-4 h-4 text-emerald-400" />
-                <span>Live Observability & eBPF</span>
+                <span>Live Observability &amp; eBPF</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
               Real-time NFLOG/eBPF kernel packet tracing, SSE live protocol dissector, VictoriaMetrics time-series, and Insight Flow.
-            </p>
-          </Link>
-
-          <Link
-            href="/docs/hardware-telemetry"
-            className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2.5 font-bold text-white text-base">
-                <Terminal className="w-4 h-4 text-emerald-400" />
-                <span>Hardware Sensors & Web Shell</span>
-              </div>
-              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
-            </div>
-            <p className="text-xs text-slate-400 leading-relaxed">
-              HWMON thermal & fan telemetry, SFP+/QSFP optical transceiver DOM diagnostics, and root web PTY terminal.
-            </p>
-          </Link>
-
-          <Link
-            href="/docs/gitops-audit"
-            className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2.5 font-bold text-white text-base">
-                <GitBranch className="w-4 h-4 text-emerald-400" />
-                <span>GitOps Configuration Versioning</span>
-              </div>
-              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
-            </div>
-            <p className="text-xs text-slate-400 leading-relaxed">
-              Automated Git repository backing for every configuration commit, unified diff previews, and 1-click historical rollback.
             </p>
           </Link>
 
@@ -232,7 +269,7 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Server className="w-4 h-4 text-emerald-400" />
-                <span>REST & Agent API Reference</span>
+                <span>REST &amp; Agent API Reference</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
@@ -246,34 +283,42 @@ export default function DocsOverviewPage() {
       {/* Installation Guide */}
       <section id="installation" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Download className="w-6 h-6 text-emerald-400" /> Installation & Deployment
+          <Download className="w-6 h-6 text-emerald-400" /> Installation &amp; Deployment
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Axonwall can be installed as bare-metal appliance firmware via bootable UEFI ISO, deployed inside standard virtualization platforms (Proxmox VE, KVM, ESXi), or run as a containerized network router via Docker Compose.
+          Axonwall can be installed as bare-metal appliance firmware via bootable UEFI ISO (available in both{' '}
+          <strong>Debian 13 Trixie</strong> and lightweight <strong>Alpine Linux</strong> flavors, plus the dedicated{' '}
+          <strong>Axonwall Vault</strong> S3 backup ISO), deployed inside virtualization platforms (Proxmox VE, KVM,
+          ESXi), or installed on existing Debian/Ubuntu systems via <code className="text-emerald-400 font-mono">.deb</code>.
         </p>
 
         <div className="space-y-4">
           <h3 className="text-base font-semibold text-white">Option 1: Bare Metal UEFI Appliance (Recommended)</h3>
           <p className="text-xs text-slate-400">
-            Flash the Axonwall ISO to a USB flash drive using BalenaEtcher, Rufus (DD mode), or the Linux <code className="text-slate-300">dd</code> utility:
+            Flash the Axonwall ISO to a USB flash drive using BalenaEtcher, Rufus (DD mode), or the Linux{' '}
+            <code className="text-slate-300">dd</code> utility:
           </p>
           <CodeBlock
             title="Flash ISO to USB Drive"
             language="bash"
             code={`# Replace /dev/sdX with your destination USB drive
-sudo dd if=axonwall-v0.1.7-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync`}
+sudo dd if=axonwall-v0.11.28-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync`}
           />
-          <Callout type="tip" title="Interactive A/B Dual-Root Partitioning">
-            During installation, the installer prompts you to select your target disk and choose your preferred system partition size:
+          <Callout type="tip" title="Interactive A/B Dual-Root OR Standard Single-Root Partitioning">
+            During installation (or via <code className="font-mono">cloud-init</code> preseed), choose between two
+            partitioning layouts:
             <ul className="list-disc list-inside mt-2 space-y-1 text-slate-300">
-              <li><strong>Standard (16 GB per slot):</strong> Recommended default for SSD appliances.</li>
-              <li><strong>Compact (8 GB per slot):</strong> For embedded systems, eMMC, or 16-32 GB flash drives.</li>
-              <li><strong>Expanded (32 GB per slot):</strong> For enterprise systems with high telemetry or container loads.</li>
-              <li><strong>Custom:</strong> User-defined size in gigabytes.</li>
+              <li>
+                <strong>A/B Dual-Root Appliance Mode (Default):</strong> Allocates two identical root slots (
+                <code className="text-emerald-300 font-mono">axon_root_a</code> and{' '}
+                <code className="text-emerald-300 font-mono">axon_root_b</code>—8 GB, 16 GB, 32 GB, or custom) with
+                hardware watchdog fallback and dedicated persistent data (<code className="text-emerald-300 font-mono">/var/lib/axonwall</code>).
+              </li>
+              <li>
+                <strong>Standard Linux Single-Root Rolling Mode:</strong> Traditional single root filesystem for
+                operators who prefer standard <code className="font-mono">apt</code> rolling upgrades on large single disks.
+              </li>
             </ul>
-            <p className="mt-2 text-slate-400">
-              <strong>Why Two Identical Slots?</strong> Axonwall maintains an active and standby system slot (<code className="text-emerald-300 font-mono">axon_root_a</code> and <code className="text-emerald-300 font-mono">axon_root_b</code>). When firmware upgrades are installed, they are flashed to the inactive slot. If an upgrade encounters a kernel panic or failure, the watchdog automatically falls back to the alternate slot, preventing appliance lockouts. The chosen size is allocated twice, and the rest of the disk is dedicated to persistent storage (<code className="text-emerald-300 font-mono">/var/lib/axonwall</code>).
-            </p>
           </Callout>
 
           <h3 className="text-base font-semibold text-white pt-4">Option 2: Proxmox VE / KVM Virtual Machine</h3>
@@ -284,22 +329,23 @@ sudo dd if=axonwall-v0.1.7-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsyn
             <li><strong>CPU:</strong> Host (minimum 2 vCPUs, 4+ recommended)</li>
             <li><strong>Memory:</strong> 4096 MB RAM (minimum 2048 MB)</li>
             <li><strong>Disk:</strong> 32 GB+ SCSI (VirtIO SCSI single with discard enabled)</li>
-            <li><strong>Network:</strong> VirtIO (net0 mapped to WAN bridge, net1 mapped to LAN bridge)</li>
+            <li><strong>Network:</strong> VirtIO (net0 mapped to WAN bridge, net1 mapped to LAN bridge, optional net3 for HA Sync)</li>
           </ul>
 
           <h3 className="text-base font-semibold text-white pt-4">Option 3: Debian / Ubuntu Package (.deb)</h3>
           <p className="text-xs text-slate-400">
-            For existing Debian 12 (Bookworm) / 13 (Trixie) or Ubuntu 24.04 LTS servers, install Axonwall directly using the official standalone package:
+            For existing Debian 12 (Bookworm) / 13 (Trixie) or Ubuntu 24.04 LTS servers, install Axonwall directly using
+            the official standalone package:
           </p>
           <CodeBlock
             title="Install Debian Package"
             language="bash"
             code={`# Download the latest .deb release artifact from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/latest/download/axonwall_0.1.7_amd64.deb
+wget https://github.com/axonwall/axonwall_monorepo/releases/latest/download/axonwall_0.11.28_amd64.deb
 
 # Install package with dependencies
 sudo apt-get update
-sudo apt-get install -y ./axonwall_0.1.7_amd64.deb
+sudo apt-get install -y ./axonwall_0.11.28_amd64.deb
 
 # Verify running services
 sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
@@ -311,7 +357,7 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
             language="yaml"
             code={`services:
   axonwall:
-    image: ghcr.io/axonwall/axonwall:v0.1.7
+    image: ghcr.io/axonwall/axonwall:v0.11.28
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -327,25 +373,34 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
       {/* Quickstart Guide */}
       <section id="quickstart" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Zap className="w-6 h-6 text-emerald-400" /> Quickstart & First Boot
+          <Zap className="w-6 h-6 text-emerald-400" /> Quickstart &amp; First Boot
         </h2>
         <div className="space-y-4 text-xs sm:text-sm text-slate-300 leading-relaxed">
           <p>
-            Upon initial startup, Axonwall configures the primary Ethernet adapter (usually the first physical port) as LAN with DHCP server enabled:
+            Upon initial startup, Axonwall configures the primary Ethernet adapter as LAN with DHCP server enabled and
+            starts the TLS-multiplexed Web Console on port <code className="text-emerald-400 font-mono">2966</code>:
           </p>
-          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
             <div>
               <span className="text-slate-500 font-medium">Default Web Console:</span>
               <p className="font-mono text-emerald-400 font-semibold mt-0.5">https://192.168.1.1:2966</p>
             </div>
             <div>
               <span className="text-slate-500 font-medium">Default Credentials:</span>
-              <p className="font-mono text-white mt-0.5">Username: <code className="text-emerald-400">admin</code> | Password: <code className="text-emerald-400">axonwall</code></p>
+              <p className="font-mono text-white mt-0.5">
+                Username: <code className="text-emerald-400">admin</code> | Password: <code className="text-emerald-400">axonwall</code>
+              </p>
+            </div>
+            <div>
+              <span className="text-slate-500 font-medium">Neovim Super Configurator:</span>
+              <p className="font-mono text-emerald-400 font-semibold mt-0.5">axonwall-config</p>
             </div>
           </div>
 
           <Callout type="warning" title="Commit-Confirm Safety">
-            Whenever you modify interface assignments, IP addresses, or firewall rules in the console, Axonwall initiates a <strong>60-second Commit-Confirm timer</strong>. If your changes interrupt connectivity, the system automatically rolls back to the previous verified configuration bundle without locking you out.
+            Whenever you modify interface assignments, IP addresses, or firewall rules in the console or TUI, Axonwall
+            initiates a <strong>60-second Commit-Confirm timer</strong>. If your changes interrupt connectivity, the
+            system automatically rolls back to the previous verified configuration bundle without locking you out.
           </Callout>
         </div>
       </section>
@@ -353,7 +408,7 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
       {/* Hardware Requirements */}
       <section id="hardware" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Server className="w-6 h-6 text-emerald-400" /> Hardware Compatibility & Sizing
+          <Server className="w-6 h-6 text-emerald-400" /> Hardware Compatibility &amp; Sizing
         </h2>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs border border-slate-800 rounded-xl overflow-hidden">

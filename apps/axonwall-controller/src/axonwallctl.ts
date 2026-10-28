@@ -12,6 +12,7 @@ import {
   validateYamlConfigFiles,
 } from '@axonwall/lib/yaml';
 import { compileNftables } from '@axonwall/lib/compile/nft';
+import { synthesizeDefaultDhcpSubnet } from '@axonwall/lib/compile/kea';
 import { DesiredStateSchema, VigilanteConfigSchema, inferInterfaceRole, type DesiredState } from '@axonwall/lib/schemas';
 import {
   BUILTIN_PLUGINS,
@@ -260,6 +261,24 @@ function loadFallbackState(): DesiredState {
   });
 }
 
+function fixSharedConfigOwnership(): void {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    try {
+      execFileSync(
+        'chgrp',
+        ['-R', 'axonwall-api', ETC_DIR, PERSIST_YAML_DIR, STATE_JSON_PATH],
+        { stdio: 'ignore' }
+      );
+    } catch {}
+    try {
+      if (fs.existsSync(GITOPS_DIR)) {
+        execFileSync('chown', ['-R', 'axonwall:axonwall-api', GITOPS_DIR], { stdio: 'ignore' });
+        execFileSync('chmod', ['-R', 'g+rwX', GITOPS_DIR], { stdio: 'ignore' });
+      }
+    } catch {}
+  }
+}
+
 function ensureInitializedYamlFiles(): void {
   const files = readYamlConfigFiles();
   if (Object.keys(files).length > 0) return;
@@ -268,12 +287,15 @@ function ensureInitializedYamlFiles(): void {
   const serialized = serializeDesiredStateToYamlFiles(fallback);
   for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
     try {
-      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
       for (const [filename, content] of Object.entries(serialized)) {
-        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o644 });
+        const p = path.join(dir, filename);
+        fs.writeFileSync(p, content, { mode: 0o660 });
+        try { fs.chmodSync(p, 0o660); } catch {}
       }
     } catch {}
   }
+  fixSharedConfigOwnership();
 }
 
 // axonwalld requires a per-install token on every agent API call.
@@ -335,23 +357,26 @@ function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body
 
 function commitToGitOps(state: DesiredState, message: string): string | null {
   try {
-    fs.mkdirSync(GITOPS_DIR, { recursive: true });
+    fs.mkdirSync(GITOPS_DIR, { recursive: true, mode: 0o775 });
+    const gitBaseArgs = ['-c', `safe.directory=${GITOPS_DIR}`];
     if (!fs.existsSync(path.join(GITOPS_DIR, '.git'))) {
-      execFileSync('git', ['init'], { cwd: GITOPS_DIR, stdio: 'ignore' });
-      execFileSync('git', ['config', 'user.name', 'Axonwall CLI'], { cwd: GITOPS_DIR, stdio: 'ignore' });
-      execFileSync('git', ['config', 'user.email', 'cli@axonwall.local'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...gitBaseArgs, 'init'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...gitBaseArgs, 'config', 'user.name', 'Axonwall CLI'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...gitBaseArgs, 'config', 'user.email', 'cli@axonwall.local'], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...gitBaseArgs, 'config', 'core.sharedRepository', 'group'], { cwd: GITOPS_DIR, stdio: 'ignore' });
     }
-    fs.writeFileSync(path.join(GITOPS_DIR, 'state.json'), JSON.stringify(state, null, 2), 'utf-8');
+    fs.writeFileSync(path.join(GITOPS_DIR, 'state.json'), JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o660 });
     const yamlFiles = serializeDesiredStateToYamlFiles(state);
     for (const [filename, content] of Object.entries(yamlFiles)) {
-      fs.writeFileSync(path.join(GITOPS_DIR, filename), content, 'utf-8');
+      fs.writeFileSync(path.join(GITOPS_DIR, filename), content, { encoding: 'utf-8', mode: 0o660 });
     }
-    execFileSync('git', ['add', 'state.json', ...AXONWALL_YAML_FILENAMES], { cwd: GITOPS_DIR, stdio: 'ignore' });
-    const status = execFileSync('git', ['status', '--porcelain'], { cwd: GITOPS_DIR }).toString().trim();
+    execFileSync('git', [...gitBaseArgs, 'add', 'state.json', ...AXONWALL_YAML_FILENAMES], { cwd: GITOPS_DIR, stdio: 'ignore' });
+    const status = execFileSync('git', [...gitBaseArgs, 'status', '--porcelain'], { cwd: GITOPS_DIR }).toString().trim();
     if (status.length > 0) {
-      execFileSync('git', ['commit', '-m', message], { cwd: GITOPS_DIR, stdio: 'ignore' });
+      execFileSync('git', [...gitBaseArgs, 'commit', '-m', message], { cwd: GITOPS_DIR, stdio: 'ignore' });
     }
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: GITOPS_DIR }).toString().trim();
+    fixSharedConfigOwnership();
+    return execFileSync('git', [...gitBaseArgs, 'rev-parse', '--short', 'HEAD'], { cwd: GITOPS_DIR }).toString().trim();
   } catch {
     return null;
   }
@@ -405,6 +430,97 @@ async function cmdStatus() {
   }
 }
 
+function reconcileInterfacesFromConf(state: DesiredState): void {
+  try {
+    const confPath = fs.existsSync(path.join(PERSIST_YAML_DIR, 'interfaces.conf'))
+      ? path.join(PERSIST_YAML_DIR, 'interfaces.conf')
+      : path.join(ETC_DIR, 'interfaces.conf');
+    if (!fs.existsSync(confPath)) return;
+
+    // If interfaces.yaml was edited more recently than interfaces.conf (e.g. via vim /etc/axonwall/interfaces.yaml),
+    // treat interfaces.yaml as authoritative so deleted interfaces are not resurrected from a stale interfaces.conf.
+    const confMtimeMs = fs.statSync(confPath).mtimeMs;
+    for (const yamlPath of [path.join(ETC_DIR, 'interfaces.yaml'), path.join(PERSIST_YAML_DIR, 'interfaces.yaml')]) {
+      if (fs.existsSync(yamlPath)) {
+        const yamlMtimeMs = fs.statSync(yamlPath).mtimeMs;
+        if (yamlMtimeMs > confMtimeMs + 2000 && state.interfaces.length > 0) {
+          return;
+        }
+      }
+    }
+
+    const rawKv: Record<string, string> = {};
+    for (const rawLine of fs.readFileSync(confPath, 'utf-8').split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#') || !line.includes('=')) continue;
+      const eqIdx = line.indexOf('=');
+      rawKv[line.slice(0, eqIdx).trim()] = line.slice(eqIdx + 1).trim();
+    }
+    if (!('AXONWALL_INTERFACES' in rawKv)) return;
+    const activeNames = (rawKv.AXONWALL_INTERFACES || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    for (const name of activeNames) {
+      const keyPrefix = `IFACE_${name.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}`;
+      const dev = (rawKv[`${keyPrefix}_DEVICE`] || '').trim();
+      if (!isValidDevice(dev)) continue;
+      const roleRaw = (rawKv[`${keyPrefix}_ROLE`] || '').toLowerCase();
+      const role: 'wan' | 'lan' = roleRaw === 'wan' || name.startsWith('wan') ? 'wan' : 'lan';
+      const modeRaw = (rawKv[`${keyPrefix}_MODE`] || '').toLowerCase();
+      const type: 'dhcp' | 'static' = modeRaw === 'static' ? 'static' : 'dhcp';
+      const ipv4Address = rawKv[`${keyPrefix}_IPV4_ADDRESS`] || undefined;
+      const ipv4Gateway = rawKv[`${keyPrefix}_IPV4_GATEWAY`] || undefined;
+      const dhcpServer = role === 'lan' && type === 'static' && rawKv[`${keyPrefix}_DHCP_SERVER`] === 'true';
+
+      const existingIdx = state.interfaces.findIndex((i) => i.name.toLowerCase() === name);
+      const devUsedElsewhere = state.interfaces.some(
+        (i, idx) => idx !== existingIdx && i.enabled && i.device === dev
+      );
+      if (devUsedElsewhere) continue;
+
+      if (existingIdx < 0) {
+        state.interfaces.push({
+          name,
+          role,
+          device: dev,
+          type,
+          enabled: true,
+          dhcpServer,
+          ipv4Address: type === 'static' ? ipv4Address : undefined,
+          ipv4Gateway: type === 'static' ? ipv4Gateway : undefined,
+          mtu: 1500,
+          description: `${name.toUpperCase()} ${role === 'wan' ? 'WAN Uplink' : dhcpServer ? 'LAN (Authoritative DHCP)' : 'LAN (Joined Network)'}`,
+        });
+      }
+      if (role === 'lan' && state.system?.antiLockout?.interfaces && !state.system.antiLockout.interfaces.includes(name)) {
+        state.system.antiLockout.interfaces.push(name);
+      }
+    }
+  } catch {}
+
+  // Ensure any enabled static LAN interface with dhcpServer: true has a matching subnet in state.dhcp.subnets
+  try {
+    if (state.dhcp?.enabled !== false) {
+      if (!state.dhcp) {
+        state.dhcp = { enabled: true, subnets: [] };
+      }
+      for (const iface of state.interfaces || []) {
+        if (!iface.enabled || !isValidDevice(iface.device)) continue;
+        if (inferInterfaceRole(iface) === 'wan') continue;
+        if (iface.type !== 'static' || iface.dhcpServer !== true || !iface.ipv4Address) continue;
+        const hasSubnet = (state.dhcp.subnets || []).some((s) => s.interface === iface.name);
+        if (!hasSubnet) {
+          const synth = synthesizeDefaultDhcpSubnet(iface);
+          if (synth) {
+            state.dhcp.subnets.push(synth);
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
 function cmdValidate(silent = false): DesiredState {
   ensureInitializedYamlFiles();
   const files = readYamlConfigFiles();
@@ -417,6 +533,8 @@ function cmdValidate(silent = false): DesiredState {
     }
     process.exit(1);
   }
+
+  reconcileInterfacesFromConf(result.state);
 
   if (!silent) {
     console.log(`${cGreen}${cBold}[✓] All /etc/axonwall/*.yaml files passed schema and syntax validation.${cReset}`);
@@ -477,20 +595,23 @@ async function cmdApply(autoConfirm = true) {
 
   for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
     try {
-      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
       for (const [filename, content] of Object.entries(yamlFiles)) {
         const target = path.join(dir, filename);
-        fs.writeFileSync(target, content, { mode: 0o644 });
+        fs.writeFileSync(target, content, { mode: 0o660 });
+        try { fs.chmodSync(target, 0o660); } catch {}
       }
     } catch {}
   }
 
-  for (const jsonTarget of [STATE_JSON_PATH, path.join(ETC_DIR, 'state.json')]) {
+  for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
     try {
-      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true });
-      fs.writeFileSync(jsonTarget, serializedJson, { mode: 0o600 });
+      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(jsonTarget, serializedJson, { mode: 0o660 });
+      try { fs.chmodSync(jsonTarget, 0o660); } catch {}
     } catch {}
   }
+  fixSharedConfigOwnership();
 
   // Compile artifacts via compileNftables(state)
   const { nftScript, files, reloadServices } = compileNftables(state);
@@ -502,10 +623,10 @@ async function cmdApply(autoConfirm = true) {
     ...Object.entries(yamlFiles).map(([filename, content]) => ({
       path: `/etc/axonwall/${filename}`,
       content,
-      fileMode: 0o600,
-      file_mode: 0o600,
+      fileMode: 0o660,
+      file_mode: 0o660,
     })),
-    { path: '/etc/axonwall/state.json', content: serializedJson, fileMode: 0o600, file_mode: 0o600 },
+    { path: '/etc/axonwall/state.json', content: serializedJson, fileMode: 0o660, file_mode: 0o660 },
   ];
 
   try {
@@ -560,9 +681,10 @@ async function cmdEdit(domainArg?: string, extraArgs: string[] = []) {
   if (!fs.existsSync(targetPath)) {
     const state = loadFallbackState();
     const serialized = serializeDesiredStateToYamlFiles(state) as Record<string, string>;
-    fs.mkdirSync(ETC_DIR, { recursive: true });
-    fs.writeFileSync(targetPath, serialized[`${domain}.yaml`] || '', { mode: 0o600 });
-    try { fs.chmodSync(targetPath, 0o600); } catch {}
+    fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
+    fs.writeFileSync(targetPath, serialized[`${domain}.yaml`] || '', { mode: 0o660 });
+    try { fs.chmodSync(targetPath, 0o660); } catch {}
+    fixSharedConfigOwnership();
   }
 
   const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
@@ -674,18 +796,20 @@ function cmdSaveJson(fileArg?: string) {
   const serialized = serializeDesiredStateToYamlFiles(state);
   for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
     try {
-      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
       for (const [fn, content] of Object.entries(serialized)) {
         const fp = path.join(dir, fn);
-        fs.writeFileSync(fp, content, { encoding: 'utf-8', mode: 0o600 });
-        try { fs.chmodSync(fp, 0o600); } catch {}
+        fs.writeFileSync(fp, content, { encoding: 'utf-8', mode: 0o660 });
+        try { fs.chmodSync(fp, 0o660); } catch {}
       }
     } catch {}
   }
   try {
-    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o775 });
+    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o660 });
+    try { fs.chmodSync(STATE_JSON_PATH, 0o660); } catch {}
   } catch {}
+  fixSharedConfigOwnership();
 
   process.stdout.write(
     JSON.stringify({
@@ -1121,11 +1245,11 @@ async function cmdCloudInit(userArgs: string[]) {
           finalAdminPass = `scrypt$${salt}$${hash}`;
         }
         if (!/^\$(1|5|6|y|2a|2b|2y)\$/.test(finalAdminPass)) {
-          fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+          fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
           const adminEnvPath = path.join(ETC_DIR, 'admin.env');
           const envContent = `LOCAL_ADMIN_USER=${rawAdminUser}\nLOCAL_ADMIN_PASSWORD=${finalAdminPass}\n`;
-          fs.writeFileSync(adminEnvPath, envContent, { mode: 0o600 });
-          try { fs.chmodSync(adminEnvPath, 0o600); } catch {}
+          fs.writeFileSync(adminEnvPath, envContent, { mode: 0o660 });
+          try { fs.chmodSync(adminEnvPath, 0o660); } catch {}
 
           const nowIso = new Date().toISOString();
           try {
@@ -1135,11 +1259,12 @@ async function cmdCloudInit(userArgs: string[]) {
           // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
           try {
             const persistDir = '/var/lib/axonwall/etc-axonwall';
-            fs.mkdirSync(persistDir, { recursive: true, mode: 0o755 });
-            fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o600 });
-            fs.chmodSync(path.join(persistDir, 'admin.env'), 0o600);
+            fs.mkdirSync(persistDir, { recursive: true, mode: 0o775 });
+            fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o660 });
+            fs.chmodSync(path.join(persistDir, 'admin.env'), 0o660);
             fs.writeFileSync('/var/lib/axonwall/.password_changed', `${nowIso}\n`, { mode: 0o644 });
           } catch {}
+          fixSharedConfigOwnership();
         }
       } catch (err: any) {
         console.warn(`[!] Unable to write admin.env: ${err.message}`);
@@ -1151,15 +1276,22 @@ async function cmdCloudInit(userArgs: string[]) {
     console.log(`[+] Zero-Touch Provisioning (ZTP) enabled via ${axon.auth.ztp.controller_url || '<default-controller>'}.`);
     if (!isDryRun) {
       try {
-        fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o770 });
+        fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
         const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
         const tokenVal =
           axon.auth.ztp.enrollment_token && axon.auth.ztp.enrollment_token !== 'CHANGE_ME_ON_DEPLOY'
             ? axon.auth.ztp.enrollment_token
             : '';
         const content = `AXONWALL_ZTP_TOKEN=${tokenVal}\nAXONWALL_CONTROLLER_URL=${axon.auth.ztp.controller_url || ''}\n`;
-        fs.writeFileSync(ctrlEnvPath, content, { mode: 0o600 });
-        try { fs.chmodSync(ctrlEnvPath, 0o600); } catch {}
+        fs.writeFileSync(ctrlEnvPath, content, { mode: 0o640 });
+        try { fs.chmodSync(ctrlEnvPath, 0o640); } catch {}
+        try {
+          const persistDir = '/var/lib/axonwall/etc-axonwall';
+          fs.mkdirSync(persistDir, { recursive: true, mode: 0o775 });
+          fs.writeFileSync(path.join(persistDir, 'controller.env'), content, { mode: 0o640 });
+          fs.chmodSync(path.join(persistDir, 'controller.env'), 0o640);
+        } catch {}
+        fixSharedConfigOwnership();
       } catch (err: any) {
         console.warn(`[!] Unable to write controller.env: ${err.message}`);
       }
@@ -1232,11 +1364,15 @@ async function cmdCloudInit(userArgs: string[]) {
     console.log(`[+] Staging declarative desired_state from cloud-config into /etc/axonwall/conf.d/99-cloudinit.yaml...`);
     if (!isDryRun) {
       try {
-        const confD = path.join(ETC_DIR, 'conf.d');
-        fs.mkdirSync(confD, { recursive: true, mode: 0o755 });
-        const cloudInitYamlPath = path.join(confD, '99-cloudinit.yaml');
-        fs.writeFileSync(cloudInitYamlPath, serializeYaml(mergedDesiredState), { mode: 0o600 });
-        try { fs.chmodSync(cloudInitYamlPath, 0o600); } catch {}
+        const yamlPayload = serializeYaml(mergedDesiredState);
+        for (const baseDir of [ETC_DIR, PERSIST_YAML_DIR]) {
+          const confD = path.join(baseDir, 'conf.d');
+          fs.mkdirSync(confD, { recursive: true, mode: 0o775 });
+          const cloudInitYamlPath = path.join(confD, '99-cloudinit.yaml');
+          fs.writeFileSync(cloudInitYamlPath, yamlPayload, { mode: 0o660 });
+          try { fs.chmodSync(cloudInitYamlPath, 0o660); } catch {}
+        }
+        fixSharedConfigOwnership();
       } catch (err: any) {
         console.warn(`[!] Unable to write 99-cloudinit.yaml: ${err.message}`);
       }

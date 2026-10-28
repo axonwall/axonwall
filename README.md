@@ -13,7 +13,7 @@
 [![Controller](https://img.shields.io/badge/Control_Plane-Go_1.24-00ADD8.svg)](https://golang.org/)
 [![Appliance](https://img.shields.io/badge/Appliance-Debian_13_Trixie-A80030.svg)](https://www.debian.org/)
 
-[Website](https://axonwall.com) • [Documentation](https://axonwall.com/docs) • [Business Plan](business-plan.md) • [Architecture](https://axonwall.com/architecture) • [Appliance ISOs](#installation--quickstart)
+[Website](https://axonwall.com) • [Documentation](https://axonwall.com/docs) • [2-Host HA Setup Guide](docs/HIGH_AVAILABILITY_SETUP.md) • [Business Plan](business-plan.md) • [Architecture](https://axonwall.com/architecture) • [Appliance ISOs](#installation--quickstart)
 
 </div>
 
@@ -81,7 +81,7 @@ Axonwall matches OPNsense across all core firewall, networking, and security fea
 | **IDS / IPS** | Suricata via FreeBSD Netmap | **Suricata 7+ via AF_PACKET & eBPF/XDP** |
 | **DDoS Protection** | Basic pf synproxy | **XDP Line-Rate Drop + CrowdSec IPS Bouncer** |
 | **DHCP & DNS** | ISC DHCP (EOL) / Dnsmasq / Unbound | **Kea DHCPv4/v6 + Unbound DNS Sinkhole (RPZ)** |
-| **High Availability** | CARP + pfsync (multicast required) | **Keepalived (VRRP) + conntrackd state synchronization** |
+| **High Availability** | CARP + pfsync (multicast required) | **Keepalived (VRRP) + conntrackd FTFW + mTLS SQLite/ZFS Sync ([2-Host Setup Guide](docs/HIGH_AVAILABILITY_SETUP.md))** |
 | **Traffic Shaper / QoS** | FreeBSD ALTQ / dummynet | **Linux CAKE, FQ_CoDel, & HTB Traffic Control (tc)** |
 | **Diagnostics** | Packet capture (pcap dump) | **Interactive eBPF Packet Tracer & Live NetFlow** |
 | **AI Copilot** | None | **Native Antigravity, Ollama, Claude, Codex, vLLM** |

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -550,8 +551,8 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	cfg.Opt2Device = normalizeAssignedDevice(cfg.Opt2Device)
 
 	statePath := "/etc/axonwall/state.json"
-	_ = os.MkdirAll("/etc/axonwall", 0755)
-	_ = os.MkdirAll("/var/lib/axonwall", 0755)
+	_ = os.MkdirAll("/etc/axonwall", 0775)
+	_ = os.MkdirAll("/var/lib/axonwall", 0775)
 
 	var state map[string]interface{}
 	if data, err := os.ReadFile(statePath); err == nil {
@@ -764,8 +765,9 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	state["system"] = sysMap
 
 	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
-		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
-		_ = os.WriteFile("/var/lib/axonwall/state.json", out, 0600)
+		writeSharedConfigFile("/etc/axonwall/state.json", out, 0660)
+		writeSharedConfigFile("/var/lib/axonwall/state.json", out, 0660)
+		writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/state.json", out, 0660)
 	}
 
 	writeSystemYamlAntiLockout(allowedIfaces)
@@ -869,12 +871,23 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	}
 
 	yamlBytes := []byte(yamlBuilder.String())
-	_ = os.MkdirAll("/etc/axonwall", 0700)
-	_ = os.WriteFile("/etc/axonwall/interfaces.yaml", yamlBytes, 0600)
-	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0700)
-	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml", yamlBytes, 0600)
+	writeSharedConfigFile("/etc/axonwall/interfaces.yaml", yamlBytes, 0660)
+	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml", yamlBytes, 0660)
 
 	return extraIfaces
+}
+
+func writeSharedConfigFile(path string, data []byte, mode os.FileMode) {
+	dir := filepath.Dir(path)
+	_ = os.MkdirAll(dir, 0775)
+	_ = os.WriteFile(path, data, mode)
+	_ = os.Chmod(path, mode)
+	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
+		if gid, err := strconv.Atoi(grp.Gid); err == nil {
+			_ = os.Chown(dir, -1, gid)
+			_ = os.Chown(path, -1, gid)
+		}
+	}
 }
 
 func sanitizeConfKey(name string) string {
@@ -967,10 +980,8 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	}
 	conf.WriteString(fmt.Sprintf("AXONWALL_INTERFACES=%s\n", strings.Join(allNames, ",")))
 
-	_ = os.MkdirAll("/etc/axonwall", 0755)
-	_ = os.WriteFile("/etc/axonwall/interfaces.conf", []byte(conf.String()), 0644)
-	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0755)
-	_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/interfaces.conf", []byte(conf.String()), 0644)
+	writeSharedConfigFile("/etc/axonwall/interfaces.conf", []byte(conf.String()), 0664)
+	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/interfaces.conf", []byte(conf.String()), 0664)
 
 	// 3. Write /etc/network/interfaces
 	var ifaces strings.Builder
@@ -1165,7 +1176,7 @@ func writeSystemYamlAntiLockout(allowedIfaces []string) {
 				if suffix != "" {
 					updated += suffix + "\n"
 				}
-				_ = os.WriteFile(yamlPath, []byte(updated), 0600)
+				writeSharedConfigFile(yamlPath, []byte(updated), 0660)
 				continue
 			}
 		}
@@ -1174,7 +1185,7 @@ func writeSystemYamlAntiLockout(allowedIfaces []string) {
 			hostname = "axonwall"
 		}
 		defaultYaml := fmt.Sprintf("# ============================================================================\n# Axonwall Firewall Configuration — /etc/axonwall/system.yaml\n# ============================================================================\n\nsystem:\n  hostname: %s\n  domain: local\n  timezone: UTC\n  flowtableOffload: true\n  dnsServers:\n    - 1.1.1.1\n    - 8.8.8.8\n%s\n", hostname, newAntiLockoutBlock)
-		_ = os.WriteFile(yamlPath, []byte(defaultYaml), 0600)
+		writeSharedConfigFile(yamlPath, []byte(defaultYaml), 0660)
 	}
 }
 
@@ -2200,24 +2211,26 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 		return
 	}
 
-	// Update local credential environment override in /etc/axonwall/admin.env
-	_ = os.MkdirAll("/etc/axonwall", 0755)
-	_ = os.MkdirAll("/var/lib/axonwall", 0755)
+	// Update local credential environment override in /etc/axonwall/admin.env and /var/lib/axonwall/etc-axonwall/admin.env
+	_ = os.MkdirAll("/etc/axonwall", 0775)
+	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0775)
 	envContent := fmt.Sprintf("LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n", hashed)
-	if err := os.WriteFile("/etc/axonwall/admin.env", []byte(envContent), 0640); err == nil {
-		_ = os.Chmod("/etc/axonwall/admin.env", 0640)
-		_ = exec.Command("chown", "root:axonwall", "/etc/axonwall/admin.env").Run()
+	writeSharedConfigFile("/etc/axonwall/admin.env", []byte(envContent), 0660)
+	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/admin.env", []byte(envContent), 0660)
+	if _, errEtc := os.Stat("/etc/axonwall/admin.env"); errEtc == nil {
 		_ = os.Remove("/etc/axonwall/initial-admin-password")
 		timestamp := []byte(time.Now().UTC().Format(time.RFC3339))
-		_ = os.WriteFile("/etc/axonwall/.password_changed", timestamp, 0644)
-		_ = os.WriteFile("/var/lib/axonwall/.password_changed", timestamp, 0644)
+		writeSharedConfigFile("/etc/axonwall/.password_changed", timestamp, 0664)
+		writeSharedConfigFile("/var/lib/axonwall/.password_changed", timestamp, 0664)
+		epoch := []byte(strconv.FormatInt(time.Now().UnixMilli(), 10))
+		writeSharedConfigFile("/var/lib/axonwall/session-epoch", epoch, 0660)
 
 		fmt.Printf("\n%s[✓] Admin password updated successfully (hashed with scrypt).%s\n", colorGreen, colorReset)
 		fmt.Println("Restarting Web UI to apply new credentials...")
 		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
 		fmt.Printf("%s[✓] Web UI reloaded.%s\n", colorGreen, colorReset)
 	} else {
-		fmt.Printf("%s[!] Failed to save credentials: %v%s\n", colorRed, err, colorReset)
+		fmt.Printf("%s[!] Failed to save credentials: %v%s\n", colorRed, errEtc, colorReset)
 	}
 
 	pause(reader)
@@ -2231,8 +2244,8 @@ func actionResetMFA(reader *bufio.Reader) {
 	fmt.Print("\nAre you sure you want to disable MFA? (y/N): ")
 	ans, _ := reader.ReadString('\n')
 	if strings.ToLower(strings.TrimSpace(ans)) == "y" {
-		mfaEnvPath := "/etc/axonwall/mfa.env"
-		_ = os.Remove(mfaEnvPath)
+		_ = os.Remove("/etc/axonwall/mfa.env")
+		_ = os.Remove("/var/lib/axonwall/etc-axonwall/mfa.env")
 
 		stripMfaFromEnv := func(path string) {
 			data, err := os.ReadFile(path)
@@ -2245,11 +2258,10 @@ func actionResetMFA(reader *bufio.Reader) {
 					lines = append(lines, l)
 				}
 			}
-			_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0640)
-			_ = os.Chmod(path, 0640)
-			_ = exec.Command("chown", "root:axonwall", path).Run()
+			writeSharedConfigFile(path, []byte(strings.Join(lines, "\n")), 0660)
 		}
 		stripMfaFromEnv("/etc/axonwall/admin.env")
+		stripMfaFromEnv("/var/lib/axonwall/etc-axonwall/admin.env")
 		stripMfaFromEnv("/etc/axonwall/axonwall.env")
 
 		fmt.Printf("\n%s[✓] MFA enforcement removed. Admin login will now only require username/password.%s\n", colorGreen, colorReset)
@@ -2436,9 +2448,9 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 	}
 
 	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
-		_ = os.WriteFile(statePath, out, 0600)
-		_ = os.WriteFile("/etc/axonwall/state.json", out, 0600)
-		_ = os.WriteFile("/var/lib/axonwall/etc-axonwall/state.json", out, 0600)
+		writeSharedConfigFile(statePath, out, 0660)
+		writeSharedConfigFile("/etc/axonwall/state.json", out, 0660)
+		writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/state.json", out, 0660)
 	}
 
 	// Update /etc/axonwall/system.yaml and /var/lib/axonwall/etc-axonwall/system.yaml
