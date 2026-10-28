@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Multi-Disk RAID & ZFS Partitioning Installer | Axonwall Documentation',
   description:
-    'Documentation for the Axonwall ISO and Alpine installers: mdadm RAID-1 system disk mirroring across Slot A, Slot B, Swap, and Data, plus dedicated ZFS storage partition allocation and RAID-Z topologies.',
+    'Documentation for the Axonwall ISO and Alpine installers: mdadm RAID-1 system disk mirroring across Slot A, Slot B, Swap, and Data, plus dedicated ZFS storage partition allocation, and native ZFSBootMenu Root-on-ZFS boot environments.',
 };
 
 export default function InstallerRaidZfsDocPage() {
@@ -137,11 +137,11 @@ Enter ZFS pool name [default: tank]: tank`}
       {/* Disk Partition Table Layout */}
       <section className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Layers className="w-6 h-6 text-emerald-400" /> GPT Partition Structure (Single vs. Mirrored)
+          <Layers className="w-6 h-6 text-emerald-400" /> GPT Partition Structure (Single vs. Mirrored A/B)
         </h2>
 
         <CodeBlock
-          title="Physical Disk Partition Layout (GPT)"
+          title="Physical Disk Partition Layout (GPT) - A/B Dual-Root Mode"
           language="text"
           code={`Drive /dev/sda (and /dev/sdb if RAID-1):
 +-------------------------------------------------------------------------------+
@@ -154,6 +154,72 @@ Enter ZFS pool name [default: tank]: tank`}
 | p5   | axon_data     | 32 GB   | ext4 (or md3)  | Persistent /var/lib/axonwall|
 | p6   | axon_zfs_1    | Rest    | ZFS Member     | OpenZFS Storage Pool (tank) |
 +-------------------------------------------------------------------------------+`}
+        />
+      </section>
+
+      {/* ZFSBootMenu (Root-on-ZFS) Mode */}
+      <section className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <RefreshCw className="w-6 h-6 text-emerald-400" /> ZFSBootMenu Root-on-ZFS Mode (v3.1.x)
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          As an alternative to traditional ext4 A/B dual-root slots, Axonwall provides native{' '}
+          <strong className="text-white">ZFSBootMenu (ZBM)</strong> support (<code className="text-emerald-400 font-mono">installMode: "zbm"</code>). 
+          Under ZBM, the entire operating system boots directly from an OpenZFS root pool (<code className="text-slate-200 font-mono">zroot</code>) with native support for any zpool topology (<code className="text-slate-200">stripe</code>, <code className="text-slate-200">mirror</code>, <code className="text-slate-200">raidz1/2/3</code>, <code className="text-slate-200">draid1/2/3</code>).
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+            <div className="flex items-center gap-2 font-bold text-white text-base">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+              <span>Native Boot Environments (BEs)</span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-1.2.0@pre-update-v1.3.0</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-1.3.0</code>).
+            </p>
+            <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
+              <li>Instantaneous atomic updates and rollbacks</li>
+              <li>Multiple historical versions retained simultaneously</li>
+              <li>Non-root data isolated in <code className="text-slate-200 font-mono">zroot/data</code></li>
+            </ul>
+          </div>
+
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+            <div className="flex items-center gap-2 font-bold text-white text-base">
+              <ShieldAlert className="w-5 h-5 text-emerald-400" />
+              <span>Autonomous Pre-Boot Watchdog</span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              ZFSBootMenu hooks execute before the Linux kernel is loaded. Hook <code className="text-slate-200 font-mono">20-axonwall-watchdog.sh</code> inspects <code className="text-slate-200 font-mono">org.axonwall:bootcount</code> and <code className="text-slate-200 font-mono">org.axonwall:bootlimit=3</code>.
+            </p>
+            <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
+              <li>Reverts <code className="text-slate-200 font-mono">bootfs</code> to <code className="text-slate-200 font-mono">org.axonwall:fallback_be</code> on 3 failures</li>
+              <li>Autonomous promotion (<code className="text-slate-200 font-mono">zfs promote</code>) upon verified daemon quorum</li>
+              <li>Full Web Console UI under <strong>System &gt; Updates</strong> for snapshot, clone, and activation</li>
+            </ul>
+          </div>
+        </div>
+
+        <CodeBlock
+          title="Physical Disk Partition Layout (GPT) - ZFSBootMenu Mode"
+          language="text"
+          code={`Physical Disks (Single, Mirror, RAID-Z, or dRAID pool):
++-------------------------------------------------------------------------------+
+| Part | Label         | Size    | Filesystem     | Purpose                     |
++-------------------------------------------------------------------------------+
+| p1   | EFI System    | 1024 MB | FAT32 (vfat)   | UEFI ESP: EFI/ZBM/VMLINUZ.EFI|
+| p2   | axon_swap     | 4 GB    | swap           | Linux Kernel Swap (Optional)|
+| p3   | axon_zbm_root | Rest    | OpenZFS VDEV   | zroot (Root Pool VDEV member)|
++-------------------------------------------------------------------------------+
+
+Dataset Hierarchy:
+zroot
+├── ROOT
+│   ├── axonwall-1.2.0          (mountpoint=/, org.zfsbootmenu:commandline="...")
+│   │   └── @pre-update-v1.3.0  (Point-in-time snapshot)
+│   └── axonwall-1.3.0          (mountpoint=/, clone/promoted next-boot BE)
+└── data
+    └── axonwall                (mountpoint=/var/lib/axonwall, persistent config & logs)`}
         />
       </section>
     </div>

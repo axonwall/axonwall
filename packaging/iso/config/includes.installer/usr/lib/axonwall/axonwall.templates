@@ -122,7 +122,7 @@ Description: Select additional dedicated disks for the ZFS storage pool (Optiona
 
 Template: axonwall/zfs_raid_topology
 Type: select
-Choices: Auto (Recommended based on disk/partition count), Stripe (RAID-0 - Max capacity, no parity), Mirror (RAID-1 / RAID-10 - 2+ VDEVs, 1-drive fault tolerance), RAID-Z1 (Single Parity - min 3 VDEVs, 1-drive fault tolerance), RAID-Z2 (Dual Parity - min 4 VDEVs, 2-drive fault tolerance), RAID-Z3 (Triple Parity - min 5 VDEVs, 3-drive fault tolerance), dRAID1 (Distributed RAID-Z1 - min 4 VDEVs, integrated spare), dRAID2 (Distributed RAID-Z2 - min 6 VDEVs, dual parity + integrated spare)
+Choices: Auto (Recommended based on disk/partition count), Stripe (RAID-0 - Max capacity, no parity), Mirror (RAID-1 / RAID-10 - 2+ VDEVs, 1-drive fault tolerance), RAID-Z1 (Single Parity - min 3 VDEVs, 1-drive fault tolerance), RAID-Z2 (Dual Parity - min 4 VDEVs, 2-drive fault tolerance), RAID-Z3 (Triple Parity - min 5 VDEVs, 3-drive fault tolerance), dRAID1 (Distributed RAID-Z1 - min 4 VDEVs, integrated spare), dRAID2 (Distributed RAID-Z2 - min 6 VDEVs, dual parity + integrated spare), dRAID3 (Distributed RAID-Z3 - min 8 VDEVs, triple parity + integrated spare)
 Default: Auto (Recommended based on disk/partition count)
 Description: Select OpenZFS pool ('tank') RAID topology:
  Choose the ZFS redundancy level across your selected ZFS partitions and/or
@@ -132,11 +132,11 @@ Description: Select OpenZFS pool ('tank') RAID topology:
     RAID-Z1 (3-4 VDEVs), or RAID-Z2 (5+ VDEVs).
   - Mirror: Ideal for 2-disk systems or low-latency IOPS workloads.
   - RAID-Z1 / RAID-Z2 / RAID-Z3: Single, dual, or triple parity across 3+ VDEVs.
-  - dRAID1 / dRAID2: Next-gen Distributed RAID-Z with rapid rebuild times.
+  - dRAID1 / dRAID2 / dRAID3: Next-gen Distributed RAID-Z with rapid rebuild times.
 
 Template: axonwall/partition_mode
 Type: select
-Choices: Automated A/B Dual-Root (Express - Recommended), Rolling Standard Linux (Single Root / - No A/B Slots, Full APT Support), Guided A/B Dual-Root (Choose Slot & Swap sizes), Custom Storage Wizard (System RAID-1, OpenZFS, LUKS2, Dedicated /var/log), Manual Partitioning (Debian Custom Partitioner UI)
+Choices: Automated A/B Dual-Root (Express - Recommended), ZFSBootMenu Root-on-ZFS (Boot Environments, Snapshots & Full ZFS RAID), Rolling Standard Linux (Single Root / - No A/B Slots, Full APT Support), Guided A/B Dual-Root (Choose Slot & Swap sizes), Custom Storage Wizard (System RAID-1, OpenZFS, LUKS2, Dedicated /var/log), Manual Partitioning (Debian Custom Partitioner UI)
 Default: Automated A/B Dual-Root (Express - Recommended)
 Description: Select partitioning workflow:
  Choose how you would like to partition the installation drive:
@@ -145,6 +145,9 @@ Description: Select partitioning workflow:
     calculates optimal Slot A, Slot B, and Swap sizes based on disk capacity,
     allocates remaining space to persistent data (/var/lib/axonwall), and
     immediately installs with zero hassle.
+  - ZFSBootMenu Root-on-ZFS: Enterprise Boot Environments (BEs) and native
+    OpenZFS snapshot management. Supports full ZFS pool RAID topologies (stripe,
+    mirror, raidz1/2/3, draid1/2/3) across all system drives with UEFI ZBM UKI.
   - Rolling Standard Linux (Single Root /): Standard mutable Debian Linux
     layout without A/B slots. Allocates a single unified / root filesystem
     (plus optional ZFS storage pool) so you can install any software and

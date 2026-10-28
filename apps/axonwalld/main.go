@@ -1651,6 +1651,105 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(status)
 		})
+		mux.HandleFunc("/v1/system/zbm", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				bes, err := watchdog.ListBootEnvironments()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"bootEnvironments": bes,
+					"status":           watchdog.GetStatus(),
+				})
+				return
+			}
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Action    string `json:"action"` // "list", "snapshot", "clone", "activate", "delete"
+				BeName    string `json:"beName,omitempty"`
+				Label     string `json:"label,omitempty"`
+				Snapshot  string `json:"snapshot,omitempty"`
+				NewBeName string `json:"newBeName,omitempty"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			action := strings.ToLower(strings.TrimSpace(req.Action))
+			switch action {
+			case "list":
+				bes, err := watchdog.ListBootEnvironments()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"bootEnvironments": bes,
+				})
+			case "snapshot":
+				snap, err := watchdog.CreateBootEnvironmentSnapshot(req.BeName, req.Label)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				bes, _ := watchdog.ListBootEnvironments()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"message":          fmt.Sprintf("Created snapshot %s", snap),
+					"snapshot":         snap,
+					"bootEnvironments": bes,
+				})
+			case "clone":
+				target, err := watchdog.CloneSnapshotToBootEnvironment(req.Snapshot, req.NewBeName)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				bes, _ := watchdog.ListBootEnvironments()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"message":          fmt.Sprintf("Cloned snapshot %s to Boot Environment %s", req.Snapshot, target),
+					"dataset":          target,
+					"bootEnvironments": bes,
+				})
+			case "activate":
+				if err := watchdog.ActivateBootEnvironment(req.BeName); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				bes, _ := watchdog.ListBootEnvironments()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"message":          fmt.Sprintf("Boot Environment %s armed for next boot", req.BeName),
+					"bootEnvironments": bes,
+				})
+			case "delete":
+				if err := watchdog.DeleteBootEnvironment(req.BeName); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				bes, _ := watchdog.ListBootEnvironments()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"message":          fmt.Sprintf("Boot Environment %s deleted", req.BeName),
+					"bootEnvironments": bes,
+				})
+			default:
+				http.Error(w, fmt.Sprintf("unknown action: %s", action), http.StatusBadRequest)
+			}
+		})
 		mux.HandleFunc("/v1/system/slot/activate", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

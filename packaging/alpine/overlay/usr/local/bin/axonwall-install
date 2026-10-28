@@ -59,6 +59,20 @@ else
   echo "[+] System RAID Mode: Single Disk (${PRIMARY_DISK})"
 fi
 
+INSTALL_MODE="ab"
+echo ""
+echo "Select Installation Architecture:"
+echo "  [1] Dual-Root A/B (Unbrickable Dual Slots + Data Partition) [Default]"
+echo "  [2] ZFSBootMenu Root-on-ZFS (Boot Environments, Snapshots & Full ZFS RAID)"
+echo "  [3] Rolling Standard Linux (Single Root /)"
+printf "Choice [1-3] (default 1): "
+read -r ARCH_CHOICE
+case "${ARCH_CHOICE:-1}" in
+  2) INSTALL_MODE="zbm" ;;
+  3) INSTALL_MODE="rolling" ;;
+  *) INSTALL_MODE="ab" ;;
+esac
+
 printf "Select Slot Size for A/B Dual-Root [1=2GB Compact, 2=4GB Standard, 3=8GB Expanded, 4=16GB Enterprise] (default 2): "
 read -r SLOT_CHOICE
 case "${SLOT_CHOICE:-2}" in
@@ -319,7 +333,8 @@ ln -sf "initramfs-${KERNEL_FLAVOR}" /mnt/slot_a/boot/initrd.img
 ln -sf boot/vmlinuz /mnt/slot_a/vmlinuz 2>/dev/null || true
 ln -sf boot/initrd.img /mnt/slot_a/initrd.img 2>/dev/null || true
 
-mkdir -p /mnt/data/home /mnt/data/ldap /mnt/data/secrets /mnt/slot_a/home
+mkdir -p /mnt/data/home /mnt/data/ldap /mnt/data/secrets /mnt/slot_a/home /mnt/slot_a/etc/axonwall
+echo "${INSTALL_MODE}" > /mnt/slot_a/etc/axonwall/install-mode 2>/dev/null || true
 cp -a /mnt/slot_a/home/. /mnt/data/home/ 2>/dev/null || true
 
 cat << 'FSTAB_EOF' > /mnt/slot_a/etc/fstab

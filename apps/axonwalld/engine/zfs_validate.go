@@ -29,6 +29,7 @@ var (
 var zfsTopologies = map[string]bool{
 	"": true, "stripe": true, "mirror": true,
 	"raidz": true, "raidz1": true, "raidz2": true, "raidz3": true,
+	"draid": true, "draid1": true, "draid2": true, "draid3": true,
 }
 
 var zfsCompressions = map[string]bool{

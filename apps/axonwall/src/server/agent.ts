@@ -2963,8 +2963,19 @@ export interface HealthCheckItem {
   durationMs: number;
 }
 
+export interface ZfsBootEnvironmentTelemetry {
+  name: string;
+  dataset: string;
+  activeNow: boolean;
+  activeNext: boolean;
+  version: string;
+  usedSize: string;
+  createdAt: string;
+  snapshots: string[];
+}
+
 export interface SystemPartitionsTelemetry {
-  installMode?: 'ab' | 'rolling';
+  installMode?: 'ab' | 'rolling' | 'zbm';
   slots: PartitionSlotInfo[];
   bootCount: number;
   bootLimit: number;
@@ -2972,13 +2983,26 @@ export interface SystemPartitionsTelemetry {
   kernelVersion: string;
   osVersion: string;
   checks: HealthCheckItem[];
+  zbmPoolName?: string;
+  zbmPoolTopology?: string;
+  zbmPoolHealth?: string;
+  bootEnvironments?: ZfsBootEnvironmentTelemetry[];
 }
 
-function detectLocalInstallMode(): 'ab' | 'rolling' {
+function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' {
   for (const p of ['/etc/axonwall/install-mode', '/var/lib/axonwall/install-mode']) {
     try {
-      if (fs.existsSync(p) && fs.readFileSync(p, 'utf8').toLowerCase().includes('rolling')) {
-        return 'rolling';
+      if (fs.existsSync(p)) {
+        const content = fs.readFileSync(p, 'utf8').toLowerCase();
+        if (content.includes('zbm') || content.includes('zfsbootmenu')) {
+          return 'zbm';
+        }
+        if (content.includes('rolling')) {
+          return 'rolling';
+        }
+        if (content.includes('ab')) {
+          return 'ab';
+        }
       }
     } catch {}
   }
@@ -2996,14 +3020,33 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   // 1. Check daemon API if available
   const daemonData = await callAgentApi<any>('/v1/system/partitions');
   if (daemonData && daemonData.activeSlot) {
-    const installMode: 'ab' | 'rolling' =
-      daemonData.installMode === 'rolling' || localInstallMode === 'rolling' ? 'rolling' : 'ab';
+    const installMode: 'ab' | 'rolling' | 'zbm' =
+      daemonData.installMode === 'zbm' || localInstallMode === 'zbm'
+        ? 'zbm'
+        : daemonData.installMode === 'rolling' || localInstallMode === 'rolling'
+          ? 'rolling'
+          : 'ab';
     const activeSlot = daemonData.activeSlot.toUpperCase();
     const defaultInactive = 'Standby';
     const slotAVer = daemonData.slotAVersion || (activeSlot === 'A' ? currentVersion : defaultInactive);
     const slotBVer = daemonData.slotBVersion || (activeSlot === 'B' ? currentVersion : defaultInactive);
     return {
       installMode,
+      zbmPoolName: daemonData.zbmPoolName || 'zroot',
+      zbmPoolTopology: daemonData.zbmPoolTopology || 'mirror',
+      zbmPoolHealth: daemonData.zbmPoolHealth || 'ONLINE',
+      bootEnvironments: daemonData.bootEnvironments || [
+        {
+          name: `axonwall-${currentVersion}`,
+          dataset: `zroot/ROOT/axonwall-${currentVersion}`,
+          activeNow: true,
+          activeNext: true,
+          version: currentVersion,
+          usedSize: '6.4G',
+          createdAt: new Date().toISOString(),
+          snapshots: [],
+        },
+      ],
       slots:
         installMode === 'rolling'
           ? [
@@ -3020,7 +3063,34 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                 lastUpdated: 'In-Place Rolling Root + Full APT',
               },
             ]
-          : [
+          : installMode === 'zbm'
+            ? [
+                {
+                  slot: 'A',
+                  name: `Boot Environment (${slotAVer})`,
+                  isActive: true,
+                  isHealthy: daemonData.healthVerified ?? true,
+                  version: slotAVer,
+                  kernel: daemonData.kernelVersion || kernel,
+                  device: daemonData.activeRootDevice || `zroot/ROOT/axonwall-${slotAVer}`,
+                  label: 'zroot/ROOT',
+                  size: 'Root-on-ZFS (Copy-on-Write)',
+                  lastUpdated: 'Active Running Boot Environment',
+                },
+                {
+                  slot: 'B',
+                  name: `Standby BE (${slotBVer})`,
+                  isActive: false,
+                  isHealthy: true,
+                  version: slotBVer,
+                  kernel: daemonData.kernelVersion || kernel,
+                  device: `zroot/ROOT/axonwall-${slotBVer}`,
+                  label: 'zroot/ROOT',
+                  size: 'Root-on-ZFS (Copy-on-Write)',
+                  lastUpdated: 'Standby Boot Environment',
+                },
+              ]
+            : [
               {
                 slot: 'A',
                 name: 'Slot A (Primary Rootfs)',
@@ -3308,9 +3378,11 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       if (fs.existsSync(up)) {
         try {
           const cliArgs =
-            localInstallMode === 'rolling'
-              ? ['--rolling', '--version', targetVersion]
-              : ['--slot', cleanSlot, '--version', targetVersion];
+            localInstallMode === 'zbm'
+              ? ['--zbm', '--version', targetVersion]
+              : localInstallMode === 'rolling'
+                ? ['--rolling', '--version', targetVersion]
+                : ['--slot', cleanSlot, '--version', targetVersion];
           execFileSync(up, cliArgs, {
             stdio: 'pipe',
             timeout: 45000,
@@ -3398,6 +3470,60 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       newVersion: getCurrentInstalledVersion(),
     };
   }
+}
+
+export async function createZbmSnapshot(
+  beName: string,
+  label: string
+): Promise<{ success: boolean; message: string; snapshot?: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return { success: false, message: 'Unauthorized: Administrator credentials required' };
+  }
+  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'snapshot', beName, label });
+  if (daemonResp && daemonResp.success) {
+    return { success: true, message: daemonResp.message, snapshot: daemonResp.snapshot };
+  }
+  return { success: false, message: daemonResp?.message || 'Failed to create ZBM snapshot' };
+}
+
+export async function cloneZbmSnapshot(
+  snapshot: string,
+  newBeName: string
+): Promise<{ success: boolean; message: string; dataset?: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return { success: false, message: 'Unauthorized: Administrator credentials required' };
+  }
+  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'clone', snapshot, newBeName });
+  if (daemonResp && daemonResp.success) {
+    return { success: true, message: daemonResp.message, dataset: daemonResp.dataset };
+  }
+  return { success: false, message: daemonResp?.message || 'Failed to clone ZBM snapshot' };
+}
+
+export async function activateZbmBootEnvironment(beName: string): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return { success: false, message: 'Unauthorized: Administrator credentials required' };
+  }
+  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'activate', beName });
+  if (daemonResp && daemonResp.success) {
+    return { success: true, message: daemonResp.message };
+  }
+  return { success: false, message: daemonResp?.message || 'Failed to activate Boot Environment' };
+}
+
+export async function deleteZbmBootEnvironment(beName: string): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return { success: false, message: 'Unauthorized: Administrator credentials required' };
+  }
+  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'delete', beName });
+  if (daemonResp && daemonResp.success) {
+    return { success: true, message: daemonResp.message };
+  }
+  return { success: false, message: daemonResp?.message || 'Failed to delete Boot Environment' };
 }
 
 export interface PowerActionResult {

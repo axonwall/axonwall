@@ -38,6 +38,8 @@ fi
 
 if [ "$PARTITION_MODE" = "rolling" ]; then
   INSTALL_MODE="rolling"
+elif [ "$PARTITION_MODE" = "zbm" ]; then
+  INSTALL_MODE="zbm"
 fi
 
 # Clean SYSTEM_RAID_DISKS of any commas or extra whitespace
@@ -449,7 +451,10 @@ fi
 chown 0:0 /target/var/lib/axonwall/home 2>/dev/null || true
 chmod 0755 /target/var/lib/axonwall /target/var/lib/axonwall/home 2>/dev/null || true
 if [ -f /target/etc/fstab ]; then
-  if [ "$INSTALL_MODE" = "rolling" ]; then
+  if [ "$INSTALL_MODE" = "zbm" ]; then
+    sed -i '\#/mnt/standby#d' /target/etc/fstab
+    sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|zroot/ROOT/axonwall\1|' /target/etc/fstab 2>/dev/null || true
+  elif [ "$INSTALL_MODE" = "rolling" ]; then
     sed -i '\#/mnt/standby#d' /target/etc/fstab
     if [ "$LOGS_ENABLED" = "1" ] && [ -b "$LOGS_DEV" ] && ! grep -qE '[[:space:]]/var/log[[:space:]]' /target/etc/fstab; then
       echo "LABEL=axon_logs  /var/log  ${LOGS_FSTYPE:-xfs}  defaults,noatime  0  2" >> /target/etc/fstab
@@ -619,9 +624,26 @@ ZFS_JSON_EOF
     tank $ZPOOL_ARGS $ZFS_VDEVS 2>/dev/null || true
 fi
 
-# 7. Initialize GRUB environment (Rolling Single-Root vs A/B boot counting)
+# 7. Initialize Bootloader (ZFSBootMenu Root-on-ZFS vs Rolling Single-Root vs A/B boot counting)
 mkdir -p /target/boot/grub
-if [ "$INSTALL_MODE" = "rolling" ]; then
+if [ "$INSTALL_MODE" = "zbm" ]; then
+  echo "[+] Configuring ZFSBootMenu v3.1.x Root-on-ZFS bootloader and UEFI UKI..."
+  mkdir -p /target/boot/efi/EFI/ZBM /target/boot/efi/EFI/BOOT
+  if [ -f /target/usr/lib/zfsbootmenu/vmlinuz.efi ]; then
+    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/ZBM/VMLINUZ.EFI 2>/dev/null || true
+    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null || true
+  fi
+  # Install ZBM watchdog hook into /target/etc/zfsbootmenu/hooks/setup.d/
+  mkdir -p /target/etc/zfsbootmenu/hooks/setup.d /target/etc/zfsbootmenu/dracut.conf.d
+  if [ -f /etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh ]; then
+    cp -f /etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh /target/etc/zfsbootmenu/hooks/setup.d/
+    chmod +x /target/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh
+  fi
+  if [ -f /etc/zfsbootmenu/config.yaml ]; then
+    cp -f /etc/zfsbootmenu/config.yaml /target/etc/zfsbootmenu/
+  fi
+  rm -f /target/etc/grub.d/40_axonwall_ab 2>/dev/null || true
+elif [ "$INSTALL_MODE" = "rolling" ]; then
   echo "[+] Configuring standard Debian GRUB bootloader for Rolling Single-Root mode..."
   rm -f /target/etc/grub.d/40_axonwall_ab 2>/dev/null || true
 else

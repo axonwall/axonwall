@@ -28,6 +28,10 @@ while [ $# -gt 0 ]; do
       FORCE_ROLLING=1
       shift
       ;;
+    --zbm|--zfsbootmenu)
+      FORCE_ZBM=1
+      shift
+      ;;
     --apt|--apt-upgrade)
       APT_UPGRADE=1
       shift
@@ -38,8 +42,23 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+ZBM_MODE=0
+if [ "$FORCE_ZBM" = "1" ]; then
+  ZBM_MODE=1
+elif [ -f /etc/axonwall/install-mode ] && grep -qiE 'zbm|zfsbootmenu' /etc/axonwall/install-mode 2>/dev/null; then
+  ZBM_MODE=1
+elif [ -f /var/lib/axonwall/install-mode ] && grep -qiE 'zbm|zfsbootmenu' /var/lib/axonwall/install-mode 2>/dev/null; then
+  ZBM_MODE=1
+elif grep -qs -E 'zfs=zroot/ROOT|boot=zfs' /proc/cmdline 2>/dev/null; then
+  ZBM_MODE=1
+elif command -v findmnt >/dev/null 2>&1 && findmnt -n -o FSTYPE / 2>/dev/null | grep -q 'zfs'; then
+  ZBM_MODE=1
+fi
+
 ROLLING_MODE=0
-if [ "$FORCE_ROLLING" = "1" ]; then
+if [ "$ZBM_MODE" = "1" ]; then
+  ROLLING_MODE=0
+elif [ "$FORCE_ROLLING" = "1" ]; then
   ROLLING_MODE=1
 elif [ -f /etc/axonwall/install-mode ] && grep -qi 'rolling' /etc/axonwall/install-mode 2>/dev/null; then
   ROLLING_MODE=1
@@ -51,7 +70,7 @@ fi
 
 TARGET_SLOT="$(printf '%s' "$TARGET_SLOT" | tr '[:lower:]' '[:upper:]')"
 if [ "$TARGET_SLOT" != "A" ] && [ "$TARGET_SLOT" != "B" ]; then
-  if [ "$ROLLING_MODE" = "1" ]; then
+  if [ "$ROLLING_MODE" = "1" ] || [ "$ZBM_MODE" = "1" ]; then
     TARGET_SLOT="A"
   else
     echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
@@ -61,7 +80,9 @@ fi
 
 echo "================================================================================"
 echo "Axonwall Appliance Firmware Updater"
-if [ "$ROLLING_MODE" = "1" ]; then
+if [ "$ZBM_MODE" = "1" ]; then
+  echo "  Install Mode  : ZFSBootMenu Root-on-ZFS (Boot Environments & Snapshots)"
+elif [ "$ROLLING_MODE" = "1" ]; then
   echo "  Install Mode  : Rolling Standard Linux (Single-Root /)"
 else
   echo "  Install Mode  : Dual-Root A/B (Target: Slot ${TARGET_SLOT})"
@@ -269,8 +290,94 @@ if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ -f /etc/axonwall/version ] && [
   exit 1
 fi
 
-# 3. Check if running in Dual-Root or Single-Disk Appliance mode
-if [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
+# 3. Check if running in ZFSBootMenu, Dual-Root, or Rolling Single-Disk mode
+if [ "$ZBM_MODE" = "1" ]; then
+  echo "[+] Running in ZFSBootMenu Root-on-ZFS mode. Performing atomic snapshot & clone Boot Environment update..."
+  POOL_NAME="zroot"
+  PARENT_DS="${POOL_NAME}/ROOT"
+
+  # Detect currently mounted running BE
+  CURRENT_BE_DS="$(findmnt -n -o SOURCE / 2>/dev/null || awk '$2 == "/" {print $1}' /proc/mounts 2>/dev/null || true)"
+  if [ -z "$CURRENT_BE_DS" ] || ! echo "$CURRENT_BE_DS" | grep -q "${PARENT_DS}/"; then
+    CURRENT_BE_DS="$(zpool get -H -o value bootfs ${POOL_NAME} 2>/dev/null || true)"
+  fi
+  CURRENT_BE="$(basename "$CURRENT_BE_DS")"
+  if [ -z "$CURRENT_BE" ] || [ "$CURRENT_BE" = "ROOT" ]; then
+    CURRENT_BE="axonwall-$(cat /etc/axonwall/version 2>/dev/null || echo "current")"
+  fi
+
+  TARGET_BE="axonwall-${CLEAN_VER}"
+  TARGET_BE_DS="${PARENT_DS}/${TARGET_BE}"
+  PRE_SNAP="${CURRENT_BE_DS}@pre-update-v${CLEAN_VER}"
+
+  echo "[+] Active Boot Environment : ${CURRENT_BE_DS} (${CURRENT_BE})"
+  echo "[+] Target Boot Environment : ${TARGET_BE_DS} (${TARGET_BE})"
+
+  if command -v zfs >/dev/null 2>&1; then
+    if zfs list -H -o name -t snapshot "$PRE_SNAP" >/dev/null 2>&1; then
+      echo "[+] Snapshot ${PRE_SNAP} already exists, reusing."
+    else
+      echo "[+] Creating pre-update snapshot: ${PRE_SNAP}..."
+      zfs snapshot "$PRE_SNAP"
+    fi
+
+    if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
+      echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Recreating clone..."
+      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
+    fi
+
+    echo "[+] Cloning ${PRE_SNAP} -> ${TARGET_BE_DS}..."
+    zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_DS"
+
+    ZBM_STAGE_MNT="/tmp/axonwall-zbm-stage-${CLEAN_VER}"
+    rm -rf "${ZBM_STAGE_MNT}"
+    mkdir -p "${ZBM_STAGE_MNT}"
+    mount -t zfs "$TARGET_BE_DS" "${ZBM_STAGE_MNT}"
+
+    if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
+      echo "[+] Extracting firmware payload into ${TARGET_BE_DS}..."
+      extract_deb "${DEB_TMP}" "${ZBM_STAGE_MNT}"
+    fi
+
+    mkdir -p "${ZBM_STAGE_MNT}/etc/axonwall" "${ZBM_STAGE_MNT}/var/lib/axonwall"
+    echo "$CLEAN_VER" > "${ZBM_STAGE_MNT}/etc/axonwall/version"
+    echo "zbm" > "${ZBM_STAGE_MNT}/etc/axonwall/install-mode"
+    echo "zbm" > "${ZBM_STAGE_MNT}/var/lib/axonwall/install-mode"
+
+    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$CURRENT_BE" "$SV_TIMESTAMP")"
+    printf '%s' "$SV_JSON" > "${ZBM_STAGE_MNT}/etc/axonwall/slot_versions.json" 2>/dev/null || true
+    printf '%s' "$SV_JSON" > "${ZBM_STAGE_MNT}/var/lib/axonwall/slot_versions.json" 2>/dev/null || true
+
+    if [ -d "${ZBM_STAGE_MNT}/boot" ]; then
+      LATEST_KERN="$(ls -1t "${ZBM_STAGE_MNT}/boot/vmlinuz-"* 2>/dev/null | head -n1 || true)"
+      if [ -n "$LATEST_KERN" ]; then
+        ln -sf "$(basename "$LATEST_KERN")" "${ZBM_STAGE_MNT}/boot/vmlinuz" 2>/dev/null || true
+        ln -sf "boot/$(basename "$LATEST_KERN")" "${ZBM_STAGE_MNT}/vmlinuz" 2>/dev/null || true
+      fi
+      LATEST_INITRD="$(ls -1t "${ZBM_STAGE_MNT}/boot/initrd.img-"* 2>/dev/null | head -n1 || true)"
+      if [ -n "$LATEST_INITRD" ]; then
+        ln -sf "$(basename "$LATEST_INITRD")" "${ZBM_STAGE_MNT}/boot/initrd.img" 2>/dev/null || true
+        ln -sf "boot/$(basename "$LATEST_INITRD")" "${ZBM_STAGE_MNT}/initrd.img" 2>/dev/null || true
+      fi
+    fi
+
+    umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+    rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+
+    echo "[+] Arming ZFSBootMenu bootfs and autonomous watchdog..."
+    zpool set bootfs="${TARGET_BE_DS}" "${POOL_NAME}" 2>/dev/null || true
+    zfs set org.axonwall:fallback_be="${CURRENT_BE_DS}" "${PARENT_DS}" 2>/dev/null || true
+    zfs set org.axonwall:active_be="${TARGET_BE_DS}" "${PARENT_DS}" 2>/dev/null || true
+    zfs set org.axonwall:bootcount=0 "${PARENT_DS}" 2>/dev/null || true
+    zfs set org.axonwall:bootlimit=3 "${PARENT_DS}" 2>/dev/null || true
+
+    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
+
+    echo "[✓] Boot Environment ${TARGET_BE} successfully staged and armed. Reboot to activate."
+  fi
+elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
   echo "[+] Detected Dual-Root target partition: ${TARGET_DEV} (${TARGET_LABEL})"
   echo "[+] Mounting standby partition to staging directory..."
   STAGE_DIR="/tmp/axonwall-update-slot-${TARGET_SLOT}"

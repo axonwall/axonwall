@@ -11,6 +11,7 @@ import {
   type ReleaseInfo,
   type PartitionSlotInfo,
   type HealthCheckItem,
+  type ZfsBootEnvironmentTelemetry,
 } from '@/server/agent';
 import {
   RefreshCw,
@@ -30,6 +31,15 @@ import {
   RotateCcw,
   Check,
   Power,
+  Database,
+  Camera,
+  Copy,
+  Plus,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+  FolderGit2,
+  Sparkles,
 } from 'lucide-react';
 
 export default function SystemUpdatesPage() {
@@ -60,7 +70,11 @@ export default function SystemUpdatesPage() {
     },
   ]);
 
-  const [installMode, setInstallMode] = useState<'ab' | 'rolling'>('ab');
+  const [installMode, setInstallMode] = useState<'ab' | 'rolling' | 'zbm'>('ab');
+  const [zbmPool, setZbmPool] = useState<{ name: string; topology: string; health: string } | null>(null);
+  const [bootEnvironments, setBootEnvironments] = useState<ZfsBootEnvironmentTelemetry[]>([]);
+  const [expandedSnapshots, setExpandedSnapshots] = useState<Record<string, boolean>>({});
+  const [isZbmActionLoading, setIsZbmActionLoading] = useState(false);
   const [bootCount, setBootCount] = useState(0);
   const [bootLimit, setBootLimit] = useState(3);
   const [healthVerified, setHealthVerified] = useState(true);
@@ -78,6 +92,7 @@ export default function SystemUpdatesPage() {
   const activeSlot = slots.find((s) => s.isActive) || slots[0];
   const standbySlot = slots.find((s) => !s.isActive) || slots[1] || slots[0];
   const isRollingMode = installMode === 'rolling';
+  const isZbmMode = installMode === 'zbm';
 
   const refreshTelemetryAndRelease = async () => {
     try {
@@ -85,8 +100,18 @@ export default function SystemUpdatesPage() {
       if (resp.ok) {
         const data = await resp.json();
         if (data.telemetry) {
-          if (data.telemetry.installMode === 'rolling' || data.telemetry.installMode === 'ab') {
+          if (data.telemetry.installMode) {
             setInstallMode(data.telemetry.installMode);
+          }
+          if (data.telemetry.zbmPoolName) {
+            setZbmPool({
+              name: data.telemetry.zbmPoolName,
+              topology: data.telemetry.zbmPoolTopology || 'mirror',
+              health: data.telemetry.zbmPoolHealth || 'ONLINE',
+            });
+          }
+          if (data.telemetry.bootEnvironments) {
+            setBootEnvironments(data.telemetry.bootEnvironments);
           }
           setSlots(data.telemetry.slots);
           setBootCount(data.telemetry.bootCount);
@@ -108,8 +133,18 @@ export default function SystemUpdatesPage() {
       getReleaseInfo().catch(() => null),
     ]);
     if (telemetry) {
-      if (telemetry.installMode === 'rolling' || telemetry.installMode === 'ab') {
+      if (telemetry.installMode) {
         setInstallMode(telemetry.installMode);
+      }
+      if (telemetry.zbmPoolName) {
+        setZbmPool({
+          name: telemetry.zbmPoolName,
+          topology: telemetry.zbmPoolTopology || 'mirror',
+          health: telemetry.zbmPoolHealth || 'ONLINE',
+        });
+      }
+      if (telemetry.bootEnvironments) {
+        setBootEnvironments(telemetry.bootEnvironments);
       }
       setSlots(telemetry.slots);
       setBootCount(telemetry.bootCount);
@@ -127,6 +162,99 @@ export default function SystemUpdatesPage() {
   useEffect(() => {
     refreshTelemetryAndRelease().catch(() => {});
   }, []);
+
+  const toggleSnapshots = (dataset: string) => {
+    setExpandedSnapshots((prev) => ({
+      ...prev,
+      [dataset]: !prev[dataset],
+    }));
+  };
+
+  const handleCreateSnapshot = async (beName: string) => {
+    const defaultLabel = `manual-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
+    const label = prompt(`Enter snapshot label for Boot Environment '${beName}':`, defaultLabel);
+    if (!label) return;
+    setIsZbmActionLoading(true);
+    try {
+      const resp = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'zbm-snapshot', beName, label }),
+      });
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message);
+      setAlertMessage(data.message || `Snapshot ${data.snapshot} created successfully.`);
+      await refreshTelemetryAndRelease();
+    } catch (err: any) {
+      alert(`Failed to create snapshot: ${err?.message || String(err)}`);
+    } finally {
+      setIsZbmActionLoading(false);
+    }
+  };
+
+  const handleCloneSnapshot = async (snapshot: string) => {
+    const defaultNewName = `axonwall-${new Date().toISOString().slice(0, 10)}-clone`;
+    const newBeName = prompt(`Enter new Boot Environment name for snapshot '${snapshot}':`, defaultNewName);
+    if (!newBeName) return;
+    setIsZbmActionLoading(true);
+    try {
+      const resp = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'zbm-clone', snapshot, newBeName }),
+      });
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message);
+      setAlertMessage(data.message || `Cloned snapshot to ${data.dataset}.`);
+      await refreshTelemetryAndRelease();
+    } catch (err: any) {
+      alert(`Failed to clone snapshot: ${err?.message || String(err)}`);
+    } finally {
+      setIsZbmActionLoading(false);
+    }
+  };
+
+  const handleActivateBootEnvironment = async (beName: string) => {
+    if (!confirm(`Arm Boot Environment '${beName}' as active for the next reboot?`)) return;
+    setIsZbmActionLoading(true);
+    try {
+      const resp = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'zbm-activate', beName }),
+      });
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message);
+      setAlertMessage(data.message || `Boot Environment ${beName} armed for next boot.`);
+      await refreshTelemetryAndRelease();
+    } catch (err: any) {
+      alert(`Failed to activate Boot Environment: ${err?.message || String(err)}`);
+    } finally {
+      setIsZbmActionLoading(false);
+    }
+  };
+
+  const handleDeleteBootEnvironment = async (beName: string) => {
+    if (!confirm(`Are you sure you want to permanently delete Boot Environment '${beName}'? This cannot be undone.`)) {
+      return;
+    }
+    setIsZbmActionLoading(true);
+    try {
+      const resp = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'zbm-delete', beName }),
+      });
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message);
+      setAlertMessage(data.message || `Boot Environment ${beName} deleted.`);
+      await refreshTelemetryAndRelease();
+    } catch (err: any) {
+      alert(`Failed to delete Boot Environment: ${err?.message || String(err)}`);
+    } finally {
+      setIsZbmActionLoading(false);
+    }
+  };
 
   const handleRebootIntoSlot = async (slot: 'A' | 'B') => {
     if (
@@ -347,16 +475,26 @@ export default function SystemUpdatesPage() {
               <RefreshCw className="w-5 h-5" />
             </div>
             <h1 className="text-2xl font-bold tracking-tight text-white">
-              {isRollingMode ? 'Rolling Standard Linux System Updates' : 'A/B Dual-Root System Updates'}
+              {isZbmMode
+                ? 'ZFSBootMenu Root-on-ZFS System Updates & Boot Environments'
+                : isRollingMode
+                  ? 'Rolling Standard Linux System Updates'
+                  : 'A/B Dual-Root System Updates'}
             </h1>
             <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              {isRollingMode ? 'Single-Root / + Full APT' : 'Unbrickable Architecture'}
+              {isZbmMode
+                ? 'ZFSBootMenu v3.1.x UKI • CoW Snapshots • Full ZFS RAID'
+                : isRollingMode
+                  ? 'Single-Root / + Full APT'
+                  : 'Unbrickable Architecture'}
             </span>
           </div>
           <p className="text-sm text-slate-400 mt-1">
-            {isRollingMode
-              ? 'Standard Debian 13 single-root (/) installation with in-place Axonwall updates and permanent APT package persistence.'
-              : 'Zero-downtime atomic operating system upgrades with GRUB automated boot-counting and kernel health verification.'}
+            {isZbmMode
+              ? 'OpenZFS root pool with instant Copy-on-Write Boot Environments (BEs), point-in-time snapshots, and 3-strike autonomous watchdog recovery.'
+              : isRollingMode
+                ? 'Standard Debian 13 single-root (/) installation with in-place Axonwall updates and permanent APT package persistence.'
+                : 'Zero-downtime atomic operating system upgrades with GRUB automated boot-counting and kernel health verification.'}
           </p>
         </div>
 
@@ -375,7 +513,13 @@ export default function SystemUpdatesPage() {
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-xs hover:bg-emerald-400 transition shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
           >
             <UploadCloud className="w-4 h-4" />
-            <span>{isRollingMode ? 'Apply In-Place Update' : 'Flash New Image to Standby'}</span>
+            <span>
+              {isZbmMode
+                ? 'Flash Image to New Boot Environment'
+                : isRollingMode
+                  ? 'Apply In-Place Update'
+                  : 'Flash New Image to Standby'}
+            </span>
           </button>
         </div>
       </div>
@@ -453,100 +597,317 @@ export default function SystemUpdatesPage() {
         </div>
       )}
 
-      {/* A/B Dual-Root Partition Slots or Single-Root Rolling Card */}
-      <div className={`grid grid-cols-1 ${slots.length > 1 ? 'md:grid-cols-2' : ''} gap-6`}>
-        {slots.map((slot) => {
-          return (
-            <div
-              key={slot.slot}
-              className={`p-6 rounded-2xl border transition-all ${
-                slot.isActive
-                  ? 'bg-slate-900/90 border-emerald-500/40 shadow-lg shadow-emerald-500/5'
-                  : 'bg-slate-900/50 border-slate-800'
-              }`}
-            >
-              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-                <div className="flex items-center gap-3">
+      {/* ZFSBootMenu Root-on-ZFS Dashboard */}
+      {isZbmMode && (
+        <div className="space-y-6">
+          {/* ZFS Root Pool Banner */}
+          <div className="p-6 rounded-2xl bg-slate-900/90 border border-emerald-500/30 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                  <Database className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-bold text-white font-mono">
+                      Root Pool: {zbmPool?.name || 'zroot'}
+                    </h2>
+                    <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      {zbmPool?.health || 'ONLINE'}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full text-xs font-mono font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 uppercase">
+                      {zbmPool?.topology || 'Mirror'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    UEFI Unified Kernel Image (EFI/ZBM/VMLINUZ.EFI) • Native OpenZFS Module • Ashift 12 • zstd Compression
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const activeBe = bootEnvironments.find((b) => b.activeNow)?.name || 'axonwall-active';
+                    handleCreateSnapshot(activeBe);
+                  }}
+                  disabled={isZbmActionLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer disabled:opacity-50"
+                >
+                  <Camera className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Snapshot Active BE</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Metrics */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                <span className="text-slate-500 block mb-0.5">Boot Environments:</span>
+                <span className="font-bold text-white text-sm">{bootEnvironments.length} Staged</span>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                <span className="text-slate-500 block mb-0.5">Watchdog Bootcount:</span>
+                <span className="font-bold text-emerald-400 font-mono text-sm">
+                  {bootCount} / {bootLimit} (Quorum {healthVerified ? 'Verified' : 'Pending'})
+                </span>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                <span className="text-slate-500 block mb-0.5">Bootfs Property:</span>
+                <span className="font-semibold text-slate-300 font-mono truncate block" title={bootEnvironments.find(b => b.activeNext)?.dataset || 'zroot/ROOT/axonwall'}>
+                  {bootEnvironments.find(b => b.activeNext)?.name || 'axonwall'}
+                </span>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                <span className="text-slate-500 block mb-0.5">Dataset Container:</span>
+                <span className="font-semibold text-slate-300 font-mono">zroot/ROOT</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Boot Environments Grid */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FolderGit2 className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-bold text-white">OpenZFS Boot Environments</h3>
+                <span className="text-xs text-slate-500">({bootEnvironments.length} total)</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {bootEnvironments.map((be) => {
+                const isExpanded = Boolean(expandedSnapshots[be.dataset]);
+                return (
                   <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg font-mono ${
-                      slot.isActive
-                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    key={be.dataset}
+                    className={`p-5 rounded-2xl border transition-all ${
+                      be.activeNow
+                        ? 'bg-slate-900/90 border-emerald-500/40 shadow-lg shadow-emerald-500/5'
+                        : be.activeNext
+                          ? 'bg-slate-900/80 border-amber-500/40 shadow-lg shadow-amber-500/5'
+                          : 'bg-slate-900/50 border-slate-800'
                     }`}
                   >
-                    {isRollingMode ? '/' : slot.slot}
+                    <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                      <div>
+                        <h4 className="font-bold text-white text-sm font-mono flex items-center gap-2">
+                          <span>{be.name}</span>
+                          <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-normal">
+                            v{be.version}
+                          </span>
+                        </h4>
+                        <div className="text-[11px] font-mono text-slate-400 mt-0.5">{be.dataset}</div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        {be.activeNow && (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            Active Now (/)
+                          </span>
+                        )}
+                        {be.activeNext && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                            <Sparkles className="w-3 h-3 text-amber-400" />
+                            Next Boot
+                          </span>
+                        )}
+                        {!be.activeNow && !be.activeNext && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
+                            Standby
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 py-3 text-xs border-b border-slate-800">
+                      <div>
+                        <span className="text-slate-500 block mb-0.5">Used Space:</span>
+                        <span className="font-semibold text-white font-mono">{be.usedSize || '0 B'}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block mb-0.5">Created:</span>
+                        <span className="text-slate-300 truncate block">{be.createdAt || 'Initial Install'}</span>
+                      </div>
+                    </div>
+
+                    {/* Snapshots Toggle */}
+                    <div className="py-2.5">
+                      <button
+                        onClick={() => toggleSnapshots(be.dataset)}
+                        className="flex items-center justify-between w-full text-xs text-slate-400 hover:text-white transition cursor-pointer"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <Camera className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>Snapshots ({be.snapshots?.length || 0})</span>
+                        </span>
+                        {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                      </button>
+
+                      {isExpanded && (
+                        <div className="mt-2 space-y-1.5 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                          {be.snapshots && be.snapshots.length > 0 ? (
+                            be.snapshots.map((snap) => (
+                              <div
+                                key={snap}
+                                className="flex items-center justify-between text-xs py-1 px-1.5 rounded hover:bg-slate-900 transition"
+                              >
+                                <span className="font-mono text-slate-300 truncate">@{snap}</span>
+                                <button
+                                  onClick={() => handleCloneSnapshot(`${be.dataset}@${snap}`)}
+                                  disabled={isZbmActionLoading}
+                                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-cyan-500 hover:text-slate-950 text-cyan-300 text-[11px] font-medium transition cursor-pointer disabled:opacity-50"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                  <span>Clone BE</span>
+                                </button>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-slate-500 text-[11px] italic py-1">No snapshots taken yet</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Card Actions */}
+                    <div className="pt-2 flex items-center justify-between gap-2 border-t border-slate-800">
+                      <button
+                        onClick={() => handleCreateSnapshot(be.name)}
+                        disabled={isZbmActionLoading}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition cursor-pointer disabled:opacity-50"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Snapshot</span>
+                      </button>
+
+                      <div className="flex items-center gap-2">
+                        {!be.activeNext && (
+                          <button
+                            onClick={() => handleActivateBootEnvironment(be.name)}
+                            disabled={isZbmActionLoading}
+                            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-300 border border-amber-500/30 text-xs font-medium transition cursor-pointer disabled:opacity-50"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Boot Next</span>
+                          </button>
+                        )}
+                        {!be.activeNow && !be.activeNext && (
+                          <button
+                            onClick={() => handleDeleteBootEnvironment(be.name)}
+                            disabled={isZbmActionLoading}
+                            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-red-500/20 text-red-400 border border-red-500/30 text-xs font-medium transition cursor-pointer disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* A/B Dual-Root Partition Slots or Single-Root Rolling Card (Hidden in ZBM mode) */}
+      {!isZbmMode && (
+        <div className={`grid grid-cols-1 ${slots.length > 1 ? 'md:grid-cols-2' : ''} gap-6`}>
+          {slots.map((slot) => {
+            return (
+              <div
+                key={slot.slot}
+                className={`p-6 rounded-2xl border transition-all ${
+                  slot.isActive
+                    ? 'bg-slate-900/90 border-emerald-500/40 shadow-lg shadow-emerald-500/5'
+                    : 'bg-slate-900/50 border-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg font-mono ${
+                        slot.isActive
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                          : 'bg-slate-800 text-slate-400 border border-slate-700'
+                      }`}
+                    >
+                      {isRollingMode ? '/' : slot.slot}
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-white text-base flex items-center gap-2">
+                        {slot.name}
+                      </h3>
+                      <div className="text-xs font-mono text-slate-400">{slot.label}</div>
+                    </div>
+                  </div>
+
                   <div>
-                    <h3 className="font-bold text-white text-base flex items-center gap-2">
-                      {slot.name}
-                    </h3>
-                    <div className="text-xs font-mono text-slate-400">{slot.label}</div>
+                    {slot.isActive ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        {isRollingMode ? 'Active Rolling Root (/)' : 'Active Boot Partition'}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
+                        Standby Target
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                <div>
-                  {slot.isActive ? (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                      {isRollingMode ? 'Active Rolling Root (/)' : 'Active Boot Partition'}
+                <div className="grid grid-cols-2 gap-4 py-4 text-xs border-b border-slate-800">
+                  <div>
+                    <span className="text-slate-500 block mb-0.5">OS Version:</span>
+                    <span className="font-semibold text-white font-mono">{slot.version}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block mb-0.5">Linux Kernel:</span>
+                    <span className="text-slate-300 font-mono truncate block" title={slot.kernel}>
+                      {slot.kernel}
                     </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
-                      Standby Target
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block mb-0.5">Block Device:</span>
+                    <span className="text-slate-300 font-mono">{slot.device} ({slot.size})</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block mb-0.5">Last Installed / Flashed:</span>
+                    <span className="text-slate-300">{slot.lastUpdated}</span>
+                  </div>
+                </div>
+
+                <div className="pt-4 flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span className="text-slate-300">
+                      {isRollingMode
+                        ? 'Standard Debian Root — apt update && apt upgrade supported'
+                        : slot.isActive
+                        ? 'Healthy & Committed'
+                        : 'Flash Target Ready'}
                     </span>
+                  </div>
+
+                  {!slot.isActive && !isRollingMode && (
+                    <button
+                      onClick={handleManualRollback}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Boot This Slot Next</span>
+                    </button>
                   )}
                 </div>
               </div>
+            );
+          })}
+        </div>
+      )}
 
-              <div className="grid grid-cols-2 gap-4 py-4 text-xs border-b border-slate-800">
-                <div>
-                  <span className="text-slate-500 block mb-0.5">OS Version:</span>
-                  <span className="font-semibold text-white font-mono">{slot.version}</span>
-                </div>
-                <div>
-                  <span className="text-slate-500 block mb-0.5">Linux Kernel:</span>
-                  <span className="text-slate-300 font-mono truncate block" title={slot.kernel}>
-                    {slot.kernel}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-500 block mb-0.5">Block Device:</span>
-                  <span className="text-slate-300 font-mono">{slot.device} ({slot.size})</span>
-                </div>
-                <div>
-                  <span className="text-slate-500 block mb-0.5">Last Installed / Flashed:</span>
-                  <span className="text-slate-300">{slot.lastUpdated}</span>
-                </div>
-              </div>
-
-              <div className="pt-4 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-xs">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span className="text-slate-300">
-                    {isRollingMode
-                      ? 'Standard Debian Root — apt update && apt upgrade supported'
-                      : slot.isActive
-                      ? 'Healthy & Committed'
-                      : 'Flash Target Ready'}
-                  </span>
-                </div>
-
-                {!slot.isActive && !isRollingMode && (
-                  <button
-                    onClick={handleManualRollback}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Boot This Slot Next</span>
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* GRUB Watchdog & Health Quorum Dashboard */}
+      {/* Watchdog & Health Quorum Dashboard */}
       <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
           <div className="flex items-center gap-2.5">
@@ -554,9 +915,13 @@ export default function SystemUpdatesPage() {
               <Shield className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-white">GRUB Watchdog & Health Quorum</h2>
+              <h2 className="text-lg font-bold text-white">
+                {isZbmMode ? 'ZFSBootMenu Autonomous Watchdog & Health Quorum' : 'GRUB Watchdog & Health Quorum'}
+              </h2>
               <p className="text-xs text-slate-400">
-                Autonomous multi-stage verification confirming stability before committing partitions
+                {isZbmMode
+                  ? 'Autonomous pre-boot verification confirming Boot Environment stability before clearing org.axonwall:bootcount'
+                  : 'Autonomous multi-stage verification confirming stability before committing partitions'}
               </p>
             </div>
           </div>

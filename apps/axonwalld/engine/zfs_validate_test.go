@@ -12,6 +12,13 @@ func TestValidateZfsPoolSpec(t *testing.T) {
 	if err := ValidateZfsPoolSpec(valid); err != nil {
 		t.Fatalf("valid pool rejected: %v", err)
 	}
+	draidPool := ZfsPoolSpec{
+		Name: "tank", Topology: "draid2", Compression: "zstd",
+		DataDisks: []string{"/dev/sda", "/dev/sdb", "/dev/sdc", "/dev/sdd", "/dev/sde", "/dev/sdf"},
+	}
+	if err := ValidateZfsPoolSpec(draidPool); err != nil {
+		t.Fatalf("valid draid2 pool rejected: %v", err)
+	}
 	for name, pool := range map[string]ZfsPoolSpec{
 		"dash name (option injection)": {Name: "-f", DataDisks: []string{"/dev/sda"}},
 		"traversal name":               {Name: "../etc", DataDisks: []string{"/dev/sda"}},

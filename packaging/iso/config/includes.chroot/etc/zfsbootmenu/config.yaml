@@ -1,0 +1,14 @@
+Global:
+  ManageImages: true
+  BootMountPoint: /boot/efi
+  DracutConfDir: /etc/zfsbootmenu/dracut.conf.d
+Components:
+  ImageDir: /boot/efi/EFI/ZBM
+  Versions: 2
+  Enabled: true
+EFI:
+  ImageDir: /boot/efi/EFI/ZBM
+  Versions: 2
+  Enabled: true
+Kernel:
+  CommandLine: "ro quiet loglevel=3 net.ifnames=0"

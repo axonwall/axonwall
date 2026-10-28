@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,21 +33,37 @@ type HealthCheckResult struct {
 	DurationMs int64       `json:"durationMs"`
 }
 
-// PartitionStatus details the state of the A/B dual-root or Rolling single-root system and GRUB boot watchdog.
+// ZfsBootEnvironment represents an OpenZFS Boot Environment managed by ZFSBootMenu v3.1.x.
+type ZfsBootEnvironment struct {
+	Name       string   `json:"name"`       // e.g. "axonwall-0.11.30"
+	Dataset    string   `json:"dataset"`    // e.g. "zroot/ROOT/axonwall-0.11.30"
+	ActiveNow  bool     `json:"activeNow"`  // Currently mounted on /
+	ActiveNext bool     `json:"activeNext"` // Staged in zpool bootfs for next reboot
+	Version    string   `json:"version"`
+	UsedSize   string   `json:"usedSize"`
+	CreatedAt  string   `json:"createdAt"`
+	Snapshots  []string `json:"snapshots"`
+}
+
+// PartitionStatus details the state of the A/B dual-root, Rolling single-root, or ZFSBootMenu system and boot watchdog.
 type PartitionStatus struct {
-	InstallMode      string              `json:"installMode"`      // "ab" or "rolling"
-	ActiveSlot       string              `json:"activeSlot"`       // "A" or "B"
-	InactiveSlot     string              `json:"inactiveSlot"`     // "B" or "A"
-	ActiveRootDevice string              `json:"activeRootDevice"` // e.g. "/dev/sda2" or "axon_root_a"
-	BootCount        int                 `json:"bootCount"`        // Current boot attempt count
-	BootLimit        int                 `json:"bootLimit"`        // Maximum attempts before fallback
-	HealthVerified   bool                `json:"healthVerified"`   // True once quorum passes and bootcount is cleared
-	LastVerifiedAt   time.Time           `json:"lastVerifiedAt"`   // Time verification finished
-	KernelVersion    string              `json:"kernelVersion"`    // Linux kernel release
-	OsVersion        string              `json:"osVersion"`        // OS release string
-	SlotAVersion     string              `json:"slotAVersion"`     // Installed OS version on Slot A
-	SlotBVersion     string              `json:"slotBVersion"`     // Installed OS version on Slot B
-	Checks           []HealthCheckResult `json:"checks"`
+	InstallMode      string               `json:"installMode"`      // "ab", "rolling", or "zbm"
+	ActiveSlot       string               `json:"activeSlot"`       // "A" or "B" (or "ZBM")
+	InactiveSlot     string               `json:"inactiveSlot"`     // "B" or "A"
+	ActiveRootDevice string               `json:"activeRootDevice"` // e.g. "/dev/sda2" or "zroot/ROOT/axonwall-0.11.30"
+	BootCount        int                  `json:"bootCount"`        // Current boot attempt count
+	BootLimit        int                  `json:"bootLimit"`        // Maximum attempts before fallback
+	HealthVerified   bool                 `json:"healthVerified"`   // True once quorum passes and bootcount is cleared
+	LastVerifiedAt   time.Time            `json:"lastVerifiedAt"`   // Time verification finished
+	KernelVersion    string               `json:"kernelVersion"`    // Linux kernel release
+	OsVersion        string               `json:"osVersion"`        // OS release string
+	SlotAVersion     string               `json:"slotAVersion"`     // Installed OS version on Slot A / Active BE
+	SlotBVersion     string               `json:"slotBVersion"`     // Installed OS version on Slot B / Standby BE
+	Checks           []HealthCheckResult  `json:"checks"`
+	ZbmPoolName      string               `json:"zbmPoolName,omitempty"`
+	ZbmPoolTopology  string               `json:"zbmPoolTopology,omitempty"`
+	ZbmPoolHealth    string               `json:"zbmPoolHealth,omitempty"`
+	BootEnvironments []ZfsBootEnvironment `json:"bootEnvironments,omitempty"`
 }
 
 type PersistedSlotVersions struct {
@@ -71,6 +88,8 @@ type WatchdogEngine struct {
 	checkControlPlane   func() HealthCheckResult
 	readSlotDiskVersion func(slot string) string
 	readInstalledVer    func() string
+	runZfsCmd           func(args ...string) ([]byte, error)
+	runZpoolCmd         func(args ...string) ([]byte, error)
 }
 
 // NewWatchdogEngine initializes the A/B system watchdog engine with default paths.
@@ -96,6 +115,12 @@ func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEn
 	we.checkControlPlane = we.verifyControlPlane
 	we.readSlotDiskVersion = we.readSlotVersionFromDiskReal
 	we.readInstalledVer = readInstalledVersion
+	we.runZfsCmd = func(args ...string) ([]byte, error) {
+		return exec.Command("zfs", args...).CombinedOutput()
+	}
+	we.runZpoolCmd = func(args ...string) ([]byte, error) {
+		return exec.Command("zpool", args...).CombinedOutput()
+	}
 	we.detectInitialState()
 	return we
 }
@@ -305,22 +330,59 @@ func (we *WatchdogEngine) readSlotVersionFromDiskReal(slot string) string {
 	return readVersionFromDirectory(tmpDir)
 }
 
-func detectInstallMode() string {
+var (
+	zbmIdentifierRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+	zbmSnapshotRegex   = regexp.MustCompile(`^([a-zA-Z0-9._/-]+@)?[a-zA-Z0-9._-]+$`)
+)
+
+func detectInstallModeCustom(cmdlinePath string) string {
 	for _, p := range []string{"/etc/axonwall/install-mode", "/var/lib/axonwall/install-mode"} {
 		if data, err := os.ReadFile(p); err == nil {
-			if strings.Contains(strings.ToLower(string(data)), "rolling") {
+			content := strings.ToLower(strings.TrimSpace(string(data)))
+			if strings.Contains(content, "zbm") || strings.Contains(content, "zfsbootmenu") {
+				return "zbm"
+			}
+			if strings.Contains(content, "rolling") {
 				return "rolling"
+			}
+			if strings.Contains(content, "ab") {
+				return "ab"
+			}
+		}
+	}
+	if cmdlineBytes, err := os.ReadFile(cmdlinePath); err == nil {
+		cmdline := string(cmdlineBytes)
+		if strings.Contains(cmdline, "zfs=") || strings.Contains(cmdline, "zroot/ROOT") || strings.Contains(cmdline, "boot=zfs") {
+			return "zbm"
+		}
+		if strings.Contains(cmdline, "rolling") {
+			return "rolling"
+		}
+	}
+	if mountsData, err := os.ReadFile("/proc/mounts"); err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(mountsData))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) >= 3 && fields[1] == "/" {
+				if fields[2] == "zfs" || strings.Contains(fields[0], "zroot/ROOT") {
+					return "zbm"
+				}
+				break
 			}
 		}
 	}
 	return "ab"
 }
 
+func detectInstallMode() string {
+	return detectInstallModeCustom("/proc/cmdline")
+}
+
 func (we *WatchdogEngine) detectInitialState() {
 	we.mu.Lock()
 	defer we.mu.Unlock()
 
-	installMode := detectInstallMode()
+	installMode := detectInstallModeCustom(we.cmdlinePath)
 	activeSlot, rootDevice := detectActiveSlotFromSystem(we.cmdlinePath)
 	inactiveSlot := "B"
 	if activeSlot == "B" {
@@ -329,17 +391,37 @@ func (we *WatchdogEngine) detectInitialState() {
 	if installMode == "rolling" {
 		activeSlot = "A"
 		inactiveSlot = "A"
+	} else if installMode == "zbm" {
+		activeSlot = "A"
+		inactiveSlot = "B"
 	}
 
-	// 2. Read GRUB environment variables
-	grubEnv := we.readGrubEnvInternal()
+	// 2. Read boot-counting parameters
 	bootCount := 1
-	if val, ok := grubEnv["bootcount"]; ok {
-		fmt.Sscanf(val, "%d", &bootCount)
-	}
 	bootLimit := 3
-	if val, ok := grubEnv["bootlimit"]; ok {
-		fmt.Sscanf(val, "%d", &bootLimit)
+	if installMode == "zbm" {
+		if bcOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:bootcount", "zroot/ROOT"); err == nil {
+			val := strings.TrimSpace(string(bcOut))
+			var c int
+			if n, pErr := fmt.Sscanf(val, "%d", &c); pErr == nil && n == 1 {
+				bootCount = c
+			}
+		}
+		if blOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:bootlimit", "zroot/ROOT"); err == nil {
+			val := strings.TrimSpace(string(blOut))
+			var l int
+			if n, pErr := fmt.Sscanf(val, "%d", &l); pErr == nil && n == 1 {
+				bootLimit = l
+			}
+		}
+	} else {
+		grubEnv := we.readGrubEnvInternal()
+		if val, ok := grubEnv["bootcount"]; ok {
+			fmt.Sscanf(val, "%d", &bootCount)
+		}
+		if val, ok := grubEnv["bootlimit"]; ok {
+			fmt.Sscanf(val, "%d", &bootLimit)
+		}
 	}
 
 	// 3. Detect Kernel and OS versions
@@ -366,13 +448,46 @@ func (we *WatchdogEngine) detectInitialState() {
 		readDisk = we.readSlotVersionFromDiskReal
 	}
 
+	var zbmPoolName, zbmPoolTopology, zbmPoolHealth string
+	var bootEnvironments []ZfsBootEnvironment
+
 	if installMode == "rolling" {
 		slotAVer = appVer
 		slotBVer = "Rolling (Single-Root)"
+	} else if installMode == "zbm" {
+		zbmPoolName = "zroot"
+		zbmPoolTopology = "mirror"
+		zbmPoolHealth = "ONLINE"
+
+		if topOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:topology", "zroot/ROOT"); err == nil {
+			top := strings.TrimSpace(string(topOut))
+			if top != "" && top != "-" {
+				zbmPoolTopology = top
+			}
+		}
+		if hlthOut, err := we.runZpoolCmd("list", "-H", "-o", "health", "zroot"); err == nil {
+			hlth := strings.TrimSpace(string(hlthOut))
+			if hlth != "" {
+				zbmPoolHealth = hlth
+			}
+		}
+
+		bootEnvironments = we.listBootEnvironmentsLocked()
+		slotAVer = appVer
+		slotBVer = "Standby BE"
+		for _, be := range bootEnvironments {
+			if be.ActiveNow {
+				rootDevice = be.Dataset
+				slotAVer = be.Version
+			} else if slotBVer == "Standby BE" || slotBVer == "" {
+				slotBVer = be.Version
+			}
+		}
+		if rootDevice == "" {
+			rootDevice = "zroot/ROOT/axonwall-" + appVer
+		}
 	} else if activeSlot == "A" {
 		slotAVer = appVer
-		// For the inactive slot: if missing or identical to active slot (e.g. from previous corrupted persistence),
-		// inspect the physical inactive partition.
 		if slotBVer == "" || slotBVer == slotAVer {
 			if diskVer := readDisk("B"); diskVer != "" {
 				slotBVer = diskVer
@@ -383,7 +498,6 @@ func (we *WatchdogEngine) detectInitialState() {
 		}
 	} else if activeSlot == "B" {
 		slotBVer = appVer
-		// For the inactive slot: if missing or identical to active slot, inspect physical partition.
 		if slotAVer == "" || slotAVer == slotBVer {
 			if diskVer := readDisk("A"); diskVer != "" {
 				slotAVer = diskVer
@@ -395,10 +509,15 @@ func (we *WatchdogEngine) detectInitialState() {
 	}
 
 	activeVer := slotAVer
-	if activeSlot == "B" {
+	if activeSlot == "B" && installMode != "zbm" {
 		activeVer = slotBVer
 	}
 	osVer := fmt.Sprintf("Axonwall OS v%s", activeVer)
+	if installMode == "rolling" {
+		osVer = fmt.Sprintf("Axonwall OS v%s (Rolling)", activeVer)
+	} else if installMode == "zbm" {
+		osVer = fmt.Sprintf("Axonwall OS v%s (Root-on-ZFS)", activeVer)
+	}
 
 	we.status = PartitionStatus{
 		InstallMode:      installMode,
@@ -413,6 +532,10 @@ func (we *WatchdogEngine) detectInitialState() {
 		SlotAVersion:     slotAVer,
 		SlotBVersion:     slotBVer,
 		Checks:           []HealthCheckResult{},
+		ZbmPoolName:      zbmPoolName,
+		ZbmPoolTopology:  zbmPoolTopology,
+		ZbmPoolHealth:    zbmPoolHealth,
+		BootEnvironments: bootEnvironments,
 	}
 	we.saveSlotVersionsLocked()
 }
@@ -485,6 +608,29 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 		we.status.SlotBVersion = "Rolling (Single-Root)"
 		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Rolling)", appVer)
 		return we.status
+	} else if we.status.InstallMode == "zbm" {
+		we.status.ActiveSlot = "A"
+		we.status.InactiveSlot = "B"
+		bes := we.listBootEnvironmentsLocked()
+		if len(bes) > 0 {
+			we.status.BootEnvironments = bes
+			for _, be := range bes {
+				if be.ActiveNow {
+					we.status.ActiveRootDevice = be.Dataset
+					we.status.SlotAVersion = be.Version
+				} else if we.status.SlotBVersion == "Standby BE" || we.status.SlotBVersion == "" {
+					we.status.SlotBVersion = be.Version
+				}
+			}
+		}
+		if we.status.SlotAVersion == "" {
+			we.status.SlotAVersion = appVer
+		}
+		if we.status.SlotBVersion == "" {
+			we.status.SlotBVersion = "Standby BE"
+		}
+		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Root-on-ZFS)", we.status.SlotAVersion)
+		return we.status
 	}
 
 	readDisk := we.readSlotDiskVersion
@@ -528,6 +674,249 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 	return we.status
 }
 
+func (we *WatchdogEngine) listBootEnvironmentsLocked() []ZfsBootEnvironment {
+	if we.runZfsCmd == nil {
+		return we.status.BootEnvironments
+	}
+
+	// 1. Get next boot dataset from bootfs
+	nextBootDataset := ""
+	if we.runZpoolCmd != nil {
+		if out, err := we.runZpoolCmd("get", "-H", "-o", "value", "bootfs", "zroot"); err == nil {
+			nextBootDataset = strings.TrimSpace(string(out))
+		}
+	}
+
+	// 2. Get active now dataset from /proc/mounts
+	nowDataset := ""
+	if mountsData, err := os.ReadFile("/proc/mounts"); err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(mountsData))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) >= 2 && fields[1] == "/" {
+				nowDataset = fields[0]
+				break
+			}
+		}
+	}
+
+	// 3. Query filesystems under zroot/ROOT
+	out, err := we.runZfsCmd("list", "-H", "-o", "name,used,creation", "-t", "filesystem", "-r", "zroot/ROOT")
+	if err != nil {
+		if len(we.status.BootEnvironments) > 0 {
+			return we.status.BootEnvironments
+		}
+		return nil
+	}
+
+	// 4. Query all snapshots under zroot/ROOT
+	snapMap := make(map[string][]string)
+	if snapOut, snapErr := we.runZfsCmd("list", "-H", "-o", "name", "-t", "snapshot", "-r", "zroot/ROOT"); snapErr == nil {
+		snapScanner := bufio.NewScanner(bytes.NewReader(snapOut))
+		for snapScanner.Scan() {
+			snapLine := strings.TrimSpace(snapScanner.Text())
+			if snapLine == "" {
+				continue
+			}
+			parts := strings.SplitN(snapLine, "@", 2)
+			if len(parts) == 2 {
+				ds := parts[0]
+				sName := parts[1]
+				snapMap[ds] = append(snapMap[ds], sName)
+			}
+		}
+	}
+
+	var results []ZfsBootEnvironment
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 3 {
+			fields = strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+		}
+		dsName := strings.TrimSpace(fields[0])
+		if dsName == "zroot/ROOT" || !strings.HasPrefix(dsName, "zroot/ROOT/") {
+			continue
+		}
+		beName := strings.TrimPrefix(dsName, "zroot/ROOT/")
+		usedSize := strings.TrimSpace(fields[1])
+		createdAt := strings.TrimSpace(strings.Join(fields[2:], " "))
+
+		isActiveNow := (dsName == nowDataset)
+		isActiveNext := (dsName == nextBootDataset)
+		if !isActiveNow && len(results) == 0 && nowDataset == "" {
+			isActiveNow = true
+		}
+
+		ver := strings.TrimPrefix(beName, "axonwall-")
+		ver = strings.TrimPrefix(ver, "v")
+
+		be := ZfsBootEnvironment{
+			Name:       beName,
+			Dataset:    dsName,
+			ActiveNow:  isActiveNow,
+			ActiveNext: isActiveNext,
+			Version:    ver,
+			UsedSize:   usedSize,
+			CreatedAt:  createdAt,
+			Snapshots:  snapMap[dsName],
+		}
+		results = append(results, be)
+	}
+
+	if len(results) == 0 && len(we.status.BootEnvironments) > 0 {
+		return we.status.BootEnvironments
+	}
+	return results
+}
+
+// ListBootEnvironments returns all OpenZFS boot environments.
+func (we *WatchdogEngine) ListBootEnvironments() ([]ZfsBootEnvironment, error) {
+	we.mu.Lock()
+	defer we.mu.Unlock()
+	bes := we.listBootEnvironmentsLocked()
+	we.status.BootEnvironments = bes
+	return bes, nil
+}
+
+// CreateBootEnvironmentSnapshot creates a point-in-time ZFS snapshot on a Boot Environment dataset.
+func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (string, error) {
+	beName = strings.TrimSpace(beName)
+	label = strings.TrimSpace(label)
+	if !zbmIdentifierRegex.MatchString(beName) {
+		return "", fmt.Errorf("invalid boot environment name: %q", beName)
+	}
+	if !zbmIdentifierRegex.MatchString(label) {
+		return "", fmt.Errorf("invalid snapshot label: %q", label)
+	}
+	fullSnap := fmt.Sprintf("zroot/ROOT/%s@%s", beName, label)
+	out, err := we.runZfsCmd("snapshot", fullSnap)
+	if err != nil {
+		return "", fmt.Errorf("zfs snapshot failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[Watchdog/ZBM] Created Boot Environment snapshot: %s", fullSnap)
+
+	we.mu.Lock()
+	we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+	we.mu.Unlock()
+
+	return fullSnap, nil
+}
+
+// CloneSnapshotToBootEnvironment clones an existing snapshot into a new standalone Boot Environment.
+func (we *WatchdogEngine) CloneSnapshotToBootEnvironment(snapshot, newBeName string) (string, error) {
+	snapshot = strings.TrimSpace(snapshot)
+	newBeName = strings.TrimSpace(newBeName)
+	if !zbmIdentifierRegex.MatchString(newBeName) {
+		return "", fmt.Errorf("invalid target boot environment name: %q", newBeName)
+	}
+	if !zbmSnapshotRegex.MatchString(snapshot) {
+		return "", fmt.Errorf("invalid snapshot name: %q", snapshot)
+	}
+	fullSnap := snapshot
+	if !strings.HasPrefix(fullSnap, "zroot/ROOT/") && !strings.Contains(fullSnap, "/") {
+		fullSnap = "zroot/ROOT/" + fullSnap
+	} else if !strings.HasPrefix(fullSnap, "zroot/") {
+		fullSnap = "zroot/ROOT/" + strings.TrimPrefix(fullSnap, "/")
+	}
+
+	targetDataset := "zroot/ROOT/" + newBeName
+	out, err := we.runZfsCmd("clone", "-o", "canmount=noauto", "-o", "mountpoint=/", fullSnap, targetDataset)
+	if err != nil {
+		return "", fmt.Errorf("zfs clone failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[Watchdog/ZBM] Cloned snapshot %s to new Boot Environment: %s", fullSnap, targetDataset)
+
+	we.mu.Lock()
+	we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+	we.mu.Unlock()
+
+	return targetDataset, nil
+}
+
+// ActivateBootEnvironment sets the targeted Boot Environment as the active bootfs for next reboot.
+func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
+	beName = strings.TrimSpace(beName)
+	if !zbmIdentifierRegex.MatchString(beName) {
+		return fmt.Errorf("invalid boot environment name: %q", beName)
+	}
+	targetDataset := "zroot/ROOT/" + beName
+	out, err := we.runZpoolCmd("set", "bootfs="+targetDataset, "zroot")
+	if err != nil {
+		return fmt.Errorf("zpool set bootfs failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := we.runZfsCmd("set", "org.axonwall:active_be="+targetDataset, "zroot/ROOT"); err != nil {
+		log.Printf("[Watchdog/ZBM] Warning: Failed to set org.axonwall:active_be: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := we.runZfsCmd("set", "org.axonwall:bootcount=0", "zroot/ROOT"); err != nil {
+		log.Printf("[Watchdog/ZBM] Warning: Failed to reset org.axonwall:bootcount: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := we.runZfsCmd("set", "org.axonwall:bootlimit=3", "zroot/ROOT"); err != nil {
+		log.Printf("[Watchdog/ZBM] Warning: Failed to set org.axonwall:bootlimit: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	we.mu.Lock()
+	we.status.BootCount = 0
+	we.status.BootLimit = 3
+	we.status.HealthVerified = false
+	for i := range we.status.BootEnvironments {
+		we.status.BootEnvironments[i].ActiveNext = (we.status.BootEnvironments[i].Dataset == targetDataset)
+	}
+	we.mu.Unlock()
+
+	log.Printf("[Watchdog/ZBM] Successfully activated Boot Environment %s for next boot.", targetDataset)
+	return nil
+}
+
+// DeleteBootEnvironment deletes a standby Boot Environment.
+func (we *WatchdogEngine) DeleteBootEnvironment(beName string) error {
+	beName = strings.TrimSpace(beName)
+	if !zbmIdentifierRegex.MatchString(beName) {
+		return fmt.Errorf("invalid boot environment name: %q", beName)
+	}
+	targetDataset := "zroot/ROOT/" + beName
+
+	we.mu.RLock()
+	for _, be := range we.status.BootEnvironments {
+		if be.Dataset == targetDataset {
+			if be.ActiveNow {
+				we.mu.RUnlock()
+				return fmt.Errorf("cannot delete currently running Boot Environment (%s)", beName)
+			}
+			if be.ActiveNext {
+				we.mu.RUnlock()
+				return fmt.Errorf("cannot delete Boot Environment staged for next boot (%s); activate another BE first", beName)
+			}
+		}
+	}
+	we.mu.RUnlock()
+
+	out, err := we.runZfsCmd("destroy", "-r", targetDataset)
+	if err != nil {
+		return fmt.Errorf("zfs destroy failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[Watchdog/ZBM] Destroyed Boot Environment: %s", targetDataset)
+
+	we.mu.Lock()
+	updated := make([]ZfsBootEnvironment, 0, len(we.status.BootEnvironments))
+	for _, be := range we.status.BootEnvironments {
+		if be.Dataset != targetDataset {
+			updated = append(updated, be)
+		}
+	}
+	we.status.BootEnvironments = updated
+	we.mu.Unlock()
+
+	return nil
+}
+
 // runVerificationSequence executes the three-step health quorum tests.
 func (we *WatchdogEngine) runVerificationSequence() {
 	time.Sleep(1 * time.Second) // Initial grace period for systemd services
@@ -569,13 +958,36 @@ func (we *WatchdogEngine) runVerificationSequence() {
 	if allPassed {
 		we.status.HealthVerified = true
 		we.status.BootCount = 0
-		log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s.", we.status.ActiveSlot)
+		log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s (mode=%s).", we.status.ActiveSlot, we.status.InstallMode)
 
-		// Reset bootcount in GRUB environment
-		if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
-			log.Printf("[Watchdog] Warning: Failed to commit bootcount to grubenv: %v", err)
+		if we.status.InstallMode == "zbm" {
+			if _, err := we.runZfsCmd("set", "org.axonwall:bootcount=0", "zroot/ROOT"); err != nil {
+				log.Printf("[Watchdog] Warning: Failed to commit bootcount=0 to zroot/ROOT: %v", err)
+			} else {
+				log.Printf("[Watchdog] Committed bootcount=0 to zroot/ROOT. Boot Environment is marked permanently healthy.")
+			}
+			activeBe := we.status.ActiveRootDevice
+			if strings.HasPrefix(activeBe, "zroot/ROOT/") {
+				if originOut, err := we.runZfsCmd("get", "-H", "-o", "value", "origin", activeBe); err == nil {
+					origin := strings.TrimSpace(string(originOut))
+					if origin != "" && origin != "-" {
+						log.Printf("[Watchdog] Active Boot Environment %s is a clone of %s; promoting to independent dataset...", activeBe, origin)
+						if promOut, promErr := we.runZfsCmd("promote", activeBe); promErr != nil {
+							log.Printf("[Watchdog] Warning: Failed to promote %s: %v (%s)", activeBe, promErr, string(promOut))
+						} else {
+							log.Printf("[Watchdog] Successfully promoted %s.", activeBe)
+						}
+					}
+				}
+				_, _ = we.runZfsCmd("set", "org.axonwall:fallback_be="+activeBe, "zroot/ROOT")
+			}
 		} else {
-			log.Printf("[Watchdog] Committed bootcount=0 to %s. Partition is marked permanently healthy.", we.grubenvPath)
+			// Reset bootcount in GRUB environment
+			if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
+				log.Printf("[Watchdog] Warning: Failed to commit bootcount to grubenv: %v", err)
+			} else {
+				log.Printf("[Watchdog] Committed bootcount=0 to %s. Partition is marked permanently healthy.", we.grubenvPath)
+			}
 		}
 	} else {
 		we.status.HealthVerified = false
@@ -702,13 +1114,42 @@ func (we *WatchdogEngine) verifyControlPlane() HealthCheckResult {
 	}
 }
 
-// TriggerRollback manually switches the target boot slot to the alternate partition and reboots.
+// TriggerRollback manually switches the target boot slot to the alternate partition or fallback BE and reboots.
 func (we *WatchdogEngine) TriggerRollback() error {
 	we.mu.Lock()
 	defer we.mu.Unlock()
 
-	if we.status.InstallMode == "rolling" || detectInstallMode() == "rolling" {
+	mode := we.status.InstallMode
+	if mode == "" {
+		mode = detectInstallModeCustom(we.cmdlinePath)
+	}
+
+	if mode == "rolling" {
 		return fmt.Errorf("A/B partition rollback is not available on Rolling Single-Root installations")
+	}
+
+	if mode == "zbm" {
+		fallbackOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:fallback_be", "zroot/ROOT")
+		fallbackBe := ""
+		if err == nil {
+			fallbackBe = strings.TrimSpace(string(fallbackOut))
+		}
+		if fallbackBe == "" || fallbackBe == "-" {
+			for _, be := range we.status.BootEnvironments {
+				if !be.ActiveNow {
+					fallbackBe = be.Dataset
+					break
+				}
+			}
+		}
+		if fallbackBe == "" || fallbackBe == "-" {
+			return fmt.Errorf("no fallback Boot Environment available for rollback")
+		}
+		beName := strings.TrimPrefix(fallbackBe, "zroot/ROOT/")
+		we.mu.Unlock()
+		err = we.ActivateBootEnvironment(beName)
+		we.mu.Lock()
+		return err
 	}
 
 	targetSlot := we.status.InactiveSlot
@@ -729,13 +1170,41 @@ func (we *WatchdogEngine) TriggerRollback() error {
 	return nil
 }
 
-// ActivateSlot sets a specific slot for the next boot.
+// ActivateSlot sets a specific slot or Boot Environment for the next boot.
 func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 	we.mu.Lock()
 	defer we.mu.Unlock()
 
-	if we.status.InstallMode == "rolling" || detectInstallMode() == "rolling" {
+	mode := we.status.InstallMode
+	if mode == "" {
+		mode = detectInstallModeCustom(we.cmdlinePath)
+	}
+
+	if mode == "rolling" {
 		return fmt.Errorf("A/B partition slot switching is not available on Rolling Single-Root installations")
+	}
+
+	if mode == "zbm" {
+		targetBE := strings.TrimSpace(targetSlot)
+		if strings.EqualFold(targetBE, "A") {
+			for _, be := range we.status.BootEnvironments {
+				if be.ActiveNow {
+					targetBE = be.Name
+					break
+				}
+			}
+		} else if strings.EqualFold(targetBE, "B") {
+			for _, be := range we.status.BootEnvironments {
+				if !be.ActiveNow {
+					targetBE = be.Name
+					break
+				}
+			}
+		}
+		we.mu.Unlock()
+		err := we.ActivateBootEnvironment(targetBE)
+		we.mu.Lock()
+		return err
 	}
 
 	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
@@ -763,12 +1232,15 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 }
 
 // ApplyFirmwareUpdate executes the privileged firmware updater for a target slot and version,
-// updates GRUB boot variables, and records the new version on the target slot.
+// updates bootloader variables, and records the new version on the target slot or Boot Environment.
 func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) (string, error) {
-	isRolling := we.status.InstallMode == "rolling" || detectInstallMode() == "rolling"
+	isZbm := we.status.InstallMode == "zbm" || detectInstallModeCustom(we.cmdlinePath) == "zbm"
+	isRolling := we.status.InstallMode == "rolling" || detectInstallModeCustom(we.cmdlinePath) == "rolling"
 	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
 	if isRolling {
 		targetSlot = "A"
+	} else if isZbm {
+		targetSlot = "B"
 	} else if targetSlot != "A" && targetSlot != "B" {
 		targetSlot = "B"
 	}
@@ -783,11 +1255,6 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		}
 	}
 
-	// The flash must actually happen before anything is armed or
-	// stamped. Previously a failed -- or entirely missing -- updater
-	// was logged as a "warning" and the function went on to arm the
-	// target slot in grubenv, record the new version, and report
-	// success for a flash that never occurred.
 	updaterFound := false
 	for _, up := range we.updaterPaths {
 		if _, err := os.Stat(up); err != nil {
@@ -795,7 +1262,9 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		}
 		updaterFound = true
 		var cmd *exec.Cmd
-		if isRolling {
+		if isZbm {
+			cmd = exec.Command(up, "--zbm", "--version", targetVersion)
+		} else if isRolling {
 			cmd = exec.Command(up, "--rolling", "--version", targetVersion)
 		} else {
 			cmd = exec.Command(up, "--slot", targetSlot, "--version", targetVersion)
@@ -804,7 +1273,7 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		if err != nil {
 			return "", fmt.Errorf("axonwall-update failed for slot %s (v%s): %v: %s", targetSlot, targetVersion, err, strings.TrimSpace(string(out)))
 		}
-		log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s, rolling=%v)", targetSlot, targetVersion, isRolling)
+		log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s, rolling=%v, zbm=%v)", targetSlot, targetVersion, isRolling, isZbm)
 		break
 	}
 	if !updaterFound {
@@ -824,6 +1293,16 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		}
 		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Rolling)", targetVersion)
 		return fmt.Sprintf("Axonwall v%s successfully updated in-place on Rolling Root (/). Services are reloading.", targetVersion), nil
+	}
+
+	if isZbm {
+		we.status.InstallMode = "zbm"
+		we.status.SlotBVersion = targetVersion
+		we.status.BootCount = 0
+		we.status.BootLimit = 3
+		we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+		we.saveSlotVersionsLocked()
+		return fmt.Sprintf("Firmware v%s successfully staged to new ZFS Boot Environment (axonwall-%s)! Watchdog bootcount armed (bootlimit=3). Reboot when ready.", targetVersion, targetVersion), nil
 	}
 
 	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {

@@ -213,8 +213,12 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		disk_size_gb=$(( disk_sectors * 512 / 1024 / 1024 / 1024 ))
 		[ "$disk_size_gb" -le 0 ] && disk_size_gb=32
 
-		# Detect Rolling Single-Root mode in cloud-config.yaml
-		if grep -qE '(layout|layout_mode|install_mode):[[:space:]]*(rolling|single_root)|ab_slots:[[:space:]]*false' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
+		# Detect ZBM Root-on-ZFS or Rolling Single-Root mode in cloud-config.yaml
+		if grep -qE '(layout|layout_mode|install_mode):[[:space:]]*(zbm|zfsbootmenu|root_on_zfs)' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
+			install_mode="zbm"
+			partition_mode="zbm"
+			logger -t axonwall-installer "Cloud-Init requested ZFSBootMenu Root-on-ZFS mode"
+		elif grep -qE '(layout|layout_mode|install_mode):[[:space:]]*(rolling|single_root)|ab_slots:[[:space:]]*false' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
 			install_mode="rolling"
 			partition_mode="rolling"
 			logger -t axonwall-installer "Cloud-Init requested Rolling Standard Linux (Single Root / — No A/B Slots)"
@@ -250,8 +254,10 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		zfs_mb=$(( zfs_gb * 1024 ))
 	else
 		# Interactive Mode: Select Partitioning Workflow
-		# If cloud-config.yaml hints at rolling/single_root mode, pre-select it as the default choice
-		if [ -f /var/lib/partman/cloud-config.yaml ] && grep -qE '(layout|layout_mode|install_mode):[[:space:]]*(rolling|single_root)|ab_slots:[[:space:]]*false' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
+		# If cloud-config.yaml hints at zbm or rolling mode, pre-select it as the default choice
+		if [ -f /var/lib/partman/cloud-config.yaml ] && grep -qE '(layout|layout_mode|install_mode):[[:space:]]*(zbm|zfsbootmenu|root_on_zfs)' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
+			db_set axonwall/partition_mode "ZFSBootMenu Root-on-ZFS (Boot Environments, Snapshots & Full ZFS RAID)" 2>/dev/null || true
+		elif [ -f /var/lib/partman/cloud-config.yaml ] && grep -qE '(layout|layout_mode|install_mode):[[:space:]]*(rolling|single_root)|ab_slots:[[:space:]]*false' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
 			db_set axonwall/partition_mode "Rolling Standard Linux (Single Root / - No A/B Slots, Full APT Support)" 2>/dev/null || true
 		fi
 		ask_critical axonwall/partition_mode
@@ -260,6 +266,10 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			"Automated"*|"Express"*)
 				partition_mode="auto"
 				install_mode="ab"
+				;;
+			"ZFSBootMenu"*|"Root-on-ZFS"*|"zbm"*)
+				partition_mode="zbm"
+				install_mode="zbm"
 				;;
 			"Rolling"*)
 				partition_mode="rolling"
@@ -815,8 +825,28 @@ ZFS_RAID_TOPOLOGY=$(sh_esc "${zfs_raid_topology}")
 EOF
 	chmod 0600 /var/lib/partman/axonwall-choices
 
-	# 8. Dynamically construct partition recipe (Rolling Single-Root vs A/B Dual-Root)
-	if [ "$install_mode" = "rolling" ]; then
+	# 8. Dynamically construct partition recipe (ZFSBootMenu Root-on-ZFS vs Rolling Single-Root vs A/B Dual-Root)
+	if [ "$install_mode" = "zbm" ]; then
+		cat << RECIPE_ZBM > /tmp/axonwall-ab-recipe
+axonwall-ab ::
+	1 1 1 free
+		\$iflabel{ gpt }
+		\$reusemethod{ }
+		method{ biosgrub } .
+	${efi_mb} ${efi_mb} ${efi_mb} free
+		\$primary{ }
+		\$iflabel{ msdos gpt }
+		\$reusemethod{ }
+		method{ efi }
+		format{ } .
+	1024 10000 -1 ext4
+		method{ format }
+		format{ }
+		use_filesystem{ }
+		filesystem{ ext4 }
+		mountpoint{ / } .
+RECIPE_ZBM
+	elif [ "$install_mode" = "rolling" ]; then
 		cat << RECIPE_ROLLING_HEADER > /tmp/axonwall-ab-recipe
 axonwall-ab ::
 	1 1 1 free

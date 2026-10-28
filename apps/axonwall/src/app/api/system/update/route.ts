@@ -5,6 +5,10 @@ import {
   applySystemFirmwareUpdate,
   activatePartitionSlot,
   verifySystemHealthQuorum,
+  createZbmSnapshot,
+  cloneZbmSnapshot,
+  activateZbmBootEnvironment,
+  deleteZbmBootEnvironment,
 } from '@/server/agent';
 
 export const dynamic = 'force-dynamic';
@@ -64,6 +68,30 @@ export async function POST(req: NextRequest) {
     if (action === 'verify') {
       const result = await verifySystemHealthQuorum();
       return NextResponse.json({ success: true, ...result });
+    }
+
+    if (action === 'zbm-snapshot') {
+      const result = await createZbmSnapshot(body?.beName || '', body?.label || '');
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'zbm-clone') {
+      const result = await cloneZbmSnapshot(body?.snapshot || '', body?.newBeName || '');
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'zbm-activate') {
+      const result = await activateZbmBootEnvironment(body?.beName || '');
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'zbm-delete') {
+      const result = await deleteZbmBootEnvironment(body?.beName || '');
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
     }
 
     return NextResponse.json(

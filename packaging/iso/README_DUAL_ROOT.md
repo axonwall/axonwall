@@ -113,7 +113,50 @@ Immediately after boot, the privileged daemon `axonwalld` initiates an autonomou
 
 ### Commitment
 If all three checks pass within the 180-second health window:
-```bash
-grub-editenv /boot/grub/grubenv set bootcount=0
-```
-The active slot is marked **permanently healthy and committed**.
+- In A/B mode:
+  ```bash
+  grub-editenv /boot/grub/grubenv set bootcount=0
+  ```
+- In ZFSBootMenu mode:
+  ```bash
+  zfs set org.axonwall:bootcount=0 <active_be>
+  zfs promote <active_be> # if staged from snapshot clone
+  ```
+The active slot or Boot Environment is marked **permanently healthy and committed**.
+
+---
+
+## 7. ZFSBootMenu (Root-on-ZFS) Alternative (`installMode: "zbm"`)
+
+In addition to traditional ext4 A/B dual-root slots, Axonwall provides first-class support for **ZFSBootMenu (v3.1.x)**.
+
+### Architecture Highlights
+- **Native OpenZFS Root Pool (`zroot`):** The entire operating system is hosted within OpenZFS datasets. Any zpool topology is supported directly for root (`stripe`, `mirror`, `raidz1`, `raidz2`, `raidz3`, `draid1`, `draid2`, `draid3`).
+- **UEFI Unified Kernel Image (UKI):** ZFSBootMenu provides a standalone EFI binary (`/boot/efi/EFI/ZBM/VMLINUZ.EFI`) containing its own Linux kernel, OpenZFS modules, and discovery userland. The motherboard UEFI firmware boots ZBM directly, completely bypassing GRUB.
+- **Boot Environment Dataset Hierarchy:**
+  ```text
+  zroot
+  ├── ROOT
+  │   ├── axonwall-1.2.0          (mountpoint=/, org.zfsbootmenu:commandline="...")
+  │   │   └── @pre-update-v1.3.0  (Point-in-time snapshot)
+  │   └── axonwall-1.3.0          (mountpoint=/, clone/promoted next-boot BE)
+  └── data
+      └── axonwall                (mountpoint=/var/lib/axonwall, persistent config & logs)
+  ```
+- **Zero-Copy OTA Firmware Updates:**
+  When applying an update via `axonwall-update --zbm <pkg.deb>`:
+  1. The running BE is snapshotted: `zroot/ROOT/<current>@pre-update-v<target>`.
+  2. A new BE is cloned instantaneously: `zroot/ROOT/<target>`.
+  3. The target BE is mounted to `/mnt/axonwall-update-target`, update packages are unpacked, and kernel/initramfs generated.
+  4. The boot target is updated atomically via `zpool set bootfs=zroot/ROOT/<target> zroot`.
+  5. Watchdog properties are armed:
+     ```bash
+     zfs set org.axonwall:bootcount=0 zroot/ROOT/<target>
+     zfs set org.axonwall:bootlimit=3 zroot/ROOT/<target>
+     zfs set org.axonwall:fallback_be=zroot/ROOT/<current> zroot/ROOT/<target>
+     ```
+- **ZBM Pre-Boot Watchdog (`20-axonwall-watchdog.sh`):**
+  Runs inside the ZFSBootMenu pre-boot hook prior to `kexec`. It checks `org.axonwall:bootcount`. If 3 consecutive boot attempts fail before `axonwalld` marks the system healthy, ZBM automatically reverts `bootfs` to `fallback_be` and boots the previously working environment.
+- **Web Console UI:**
+  Under **System > Updates**, administrators can view pool topology and health, create point-in-time snapshots, clone historical snapshots into new boot environments, switch active boot environments, and safely delete obsolete BEs.
+
