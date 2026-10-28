@@ -414,7 +414,7 @@ func (we *WatchdogEngine) detectInitialState() {
 }
 
 func readInstalledVersion() string {
-	appVer := "0.11.27"
+	appVer := "0.11.28"
 	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json", "./package.json", "../package.json"} {
 		if data, err := os.ReadFile(vpath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
