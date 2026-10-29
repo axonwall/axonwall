@@ -83,4 +83,30 @@ describe('Eluvix Sovereign AI Router, Tokenomics & Prompt/PII Guard compiler', (
     expect(bundle.systemdUnit).toContain('ExecStart=/usr/bin/env node /opt/eluvix/apps/server/dist/index.js');
     expect(bundle.unboundOverrides.length).toBe(3);
   });
+
+  it('compiles local OpenLDAP integration into eluvix.json, systemd service, and Helm values', () => {
+    const state = DesiredStateSchema.parse({
+      system: { domain: 'corp.axonwall.local' },
+      eluvix: {
+        enabled: true,
+        ldapAuth: {
+          enabled: true,
+          autoBindLocalLdap: true,
+          adminGroups: ['axonwall-admin', 'eluvix-admin'],
+        },
+      },
+      plugins: [{ id: 'eluvix', enabled: true }],
+    });
+    const bundle = compileEluvixBundle(state);
+    const parsed = JSON.parse(bundle.eluvixJson);
+    expect(parsed.auth?.ldap?.enabled).toBe(true);
+    expect(parsed.auth?.ldap?.baseDn).toBe('dc=corp,dc=axonwall,dc=local');
+    expect(parsed.auth?.ldap?.userSearchBase).toBe('ou=users,dc=corp,dc=axonwall,dc=local');
+    expect(parsed.auth?.ldap?.groupSearchBase).toBe('ou=groups,dc=corp,dc=axonwall,dc=local');
+    expect(parsed.auth?.ldap?.adminGroups).toContain('eluvix-admin');
+    expect(bundle.systemdUnit).toContain('EnvironmentFile=-/etc/axonwall/ldap-plugins/eluvix.env');
+    expect(bundle.systemdUnit).toContain('ELUVIX_LDAP_BINDING_FILE=/etc/axonwall/ldap-plugins/eluvix.json');
+    expect(bundle.systemdUnit).toContain('slapd.service');
+    expect(bundle.helmValuesYaml).toContain('baseDn: dc=corp,dc=axonwall,dc=local');
+  });
 });

@@ -129,6 +129,20 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Network RADIUS / Axonwall Core',
     systemdUnits: ['freeradius.service'],
     privileges: ['services.freeradius', 'system.users'],
+    ldapIntegration: {
+      enabledByDefault: true,
+      serviceAccountCn: 'svc-freeradius',
+      inheritApplianceRoleGroups: true,
+      envPrefix: 'FREERADIUS_LDAP_',
+      groups: [
+        {
+          cn: 'radius-users',
+          gidNumber: 10210,
+          description: 'FreeRADIUS 802.1X and VPN Authenticated Users',
+          role: 'operator',
+        },
+      ],
+    },
     menuEntry: {
       title: 'FreeRADIUS Server',
       path: '/services/freeradius',
@@ -392,6 +406,32 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Eluvix Router / Axonwall Core',
     systemdUnits: ['eluvix.service'],
     privileges: ['system.ai', 'security.forensics', 'services.dns'],
+    ldapIntegration: {
+      enabledByDefault: true,
+      serviceAccountCn: 'svc-eluvix',
+      inheritApplianceRoleGroups: true,
+      envPrefix: 'ELUVIX_LDAP_',
+      groups: [
+        {
+          cn: 'eluvix-admin',
+          gidNumber: 10200,
+          description: 'Eluvix AI Router Full Administrators',
+          role: 'admin',
+        },
+        {
+          cn: 'eluvix-operator',
+          gidNumber: 10201,
+          description: 'Eluvix AI Router Operators (Chat & Playground)',
+          role: 'operator',
+        },
+        {
+          cn: 'eluvix-readonly',
+          gidNumber: 10202,
+          description: 'Eluvix AI Router Read-Only Auditors',
+          role: 'readonly',
+        },
+      ],
+    },
     nftHooks: [{ table: 'inet axonwall', chain: 'input', priority: 0 }],
     menuEntry: {
       title: 'Eluvix AI Router & DLP',

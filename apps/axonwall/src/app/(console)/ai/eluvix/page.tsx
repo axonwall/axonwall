@@ -53,7 +53,7 @@ const TEST_PROMPT_PRESETS = [
 export default function EluvixRouterStudioPage() {
   const [state, setState] = useState<DesiredState | null>(null);
   const [config, setConfig] = useState<EluvixConfig>(() => EluvixConfigSchema.parse({ enabled: true }));
-  const [activeTab, setActiveTab] = useState<'tokenomics' | 'guards' | 'harnesses' | 'artifacts'>('tokenomics');
+  const [activeTab, setActiveTab] = useState<'tokenomics' | 'guards' | 'harnesses' | 'identity' | 'artifacts'>('tokenomics');
   const [saving, setSaving] = useState(false);
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [testPrompt, setTestPrompt] = useState<string>(TEST_PROMPT_PRESETS[1]!.prompt);
@@ -257,7 +257,8 @@ export default function EluvixRouterStudioPage() {
           { id: 'tokenomics', label: '1. Enterprise Tokenomics & KV Disaggregation', icon: Coins },
           { id: 'guards', label: '2. Prompt Injection & PII DLP Guard + Live Sandbox', icon: ShieldCheck },
           { id: 'harnesses', label: '3. 8-Harness Agent Mesh & Deep-Fork Architecture', icon: Layers },
-          { id: 'artifacts', label: '4. Compiled Config, Helm & Systemd Artifacts', icon: Code2 },
+          { id: 'identity', label: '4. Local OpenLDAP & Multi-User Identity', icon: Lock },
+          { id: 'artifacts', label: '5. Compiled Config, Helm & Systemd Artifacts', icon: Code2 },
         ].map((t) => {
           const Icon = t.icon;
           const active = activeTab === t.id;
@@ -828,7 +829,130 @@ export default function EluvixRouterStudioPage() {
         </div>
       )}
 
-      {/* TAB 4: COMPILED ARTIFACTS */}
+      {/* TAB 4: LOCAL OPENLDAP IDENTITY & RBAC */}
+      {activeTab === 'identity' && (
+        <div className="space-y-6">
+          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div>
+                <h2 className="text-base font-semibold text-slate-100 flex items-center gap-2">
+                  <Lock className="h-4 w-4 text-emerald-400" />
+                  Local OpenLDAP Directory Integration & Multi-User RBAC
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Automatically provision dedicated read-only LDAP service credentials, POSIX role groups, and per-user memory & session scoping.
+                </p>
+              </div>
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400 border border-emerald-500/20">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Zero-Touch Provisioning Active
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6">
+              <div className="space-y-4">
+                <label className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 p-4">
+                  <div>
+                    <div className="text-sm font-medium text-slate-200">Enable LDAP Authentication</div>
+                    <div className="text-xs text-slate-400">Allow users to sign in with their appliance OpenLDAP credentials</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config.ldapAuth.enabled}
+                    onChange={(e) =>
+                      setConfig((c) => ({
+                        ...c,
+                        ldapAuth: { ...c.ldapAuth, enabled: e.target.checked },
+                      }))
+                    }
+                    className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500/20"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 p-4">
+                  <div>
+                    <div className="text-sm font-medium text-slate-200">Auto-Bind Local Axonwall Directory</div>
+                    <div className="text-xs text-slate-400">Inject credentials via /etc/axonwall/ldap-plugins/eluvix.json</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config.ldapAuth.autoBindLocalLdap}
+                    onChange={(e) =>
+                      setConfig((c) => ({
+                        ...c,
+                        ldapAuth: { ...c.ldapAuth, autoBindLocalLdap: e.target.checked },
+                      }))
+                    }
+                    className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500/20"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 p-4">
+                  <div>
+                    <div className="text-sm font-medium text-slate-200">Allow Local Admin Break-Glass</div>
+                    <div className="text-xs text-slate-400">Permit fallback login using ADMIN_PASSWORD / auth.json if LDAP is unreachable</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config.ldapAuth.allowLocalBreakGlass}
+                    onChange={(e) =>
+                      setConfig((c) => ({
+                        ...c,
+                        ldapAuth: { ...c.ldapAuth, allowLocalBreakGlass: e.target.checked },
+                      }))
+                    }
+                    className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500/20"
+                  />
+                </label>
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-lg border border-slate-800 bg-slate-950 p-4 text-xs space-y-2">
+                  <div className="font-semibold text-slate-300">Managed Appliance Directory Contract</div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>LDAP URL:</span>
+                    <span className="font-mono text-emerald-400">{config.ldapAuth.url}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Service Bind Account:</span>
+                    <span className="font-mono text-slate-200">cn=svc-eluvix,ou=services,&lt;baseDN&gt;</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Client Credentials:</span>
+                    <span className="font-mono text-slate-200">/etc/axonwall/ldap-plugins/eluvix.json (0640)</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Environment File:</span>
+                    <span className="font-mono text-slate-200">/etc/axonwall/ldap-plugins/eluvix.env</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Systemd Bind:</span>
+                    <span className="font-mono text-slate-200">slapd.service dependency</span>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-800 bg-slate-950 p-4 text-xs space-y-2">
+                  <div className="font-semibold text-slate-300">POSIX Group RBAC Mapping</div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Administrator Role:</span>
+                    <span className="font-mono text-emerald-400">{config.ldapAuth.adminGroups.join(', ')}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Operator Role:</span>
+                    <span className="font-mono text-blue-400">{config.ldapAuth.operatorGroups.join(', ')}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Read-Only Auditor:</span>
+                    <span className="font-mono text-amber-400">{config.ldapAuth.readonlyGroups.join(', ')}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 5: COMPILED ARTIFACTS */}
       {activeTab === 'artifacts' && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/70 p-5">

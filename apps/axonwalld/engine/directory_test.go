@@ -101,6 +101,19 @@ func TestDefaultShellForRole(t *testing.T) {
 	}
 }
 
+func TestBuildSlapdSeedDITLDIF_ContainsServicesOU(t *testing.T) {
+	dit := BuildSlapdSeedDITLDIF("dc=axonwall,dc=local", "axonwall", "{SSHA}test", DefaultPasswordPolicyConfig())
+	if !strings.Contains(dit, "dn: ou=services,dc=axonwall,dc=local") {
+		t.Errorf("BuildSlapdSeedDITLDIF missing ou=services definition")
+	}
+	if !strings.Contains(dit, "ou: services") {
+		t.Errorf("BuildSlapdSeedDITLDIF missing ou: services attribute")
+	}
+	if !strings.Contains(dit, "dn: cn=axonwall-admin,ou=groups,dc=axonwall,dc=local") {
+		t.Errorf("BuildSlapdSeedDITLDIF missing axonwall-admin group")
+	}
+}
+
 func TestHAPKICertGeneration(t *testing.T) {
 	tmpDir := t.TempDir()
 	caPath := filepath.Join(tmpDir, "ca.crt")

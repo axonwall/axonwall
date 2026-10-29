@@ -1536,6 +1536,7 @@ func main() {
 	userManager := engine.NewUserManager(etckeeperManager)
 	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
 	pluginManager := engine.NewPluginManager("/var/lib/axonwall")
+	pluginManager.SetDirectoryManager(directoryManager)
 	mcpTrafficManager := engine.NewMcpTrafficManager()
 	haEngine.SetDirectoryManager(directoryManager)
 

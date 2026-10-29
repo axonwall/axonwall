@@ -56,6 +56,36 @@ type DirectoryStatus struct {
 	PasswordPolicy      PasswordPolicyConfig `json:"passwordPolicy"`
 }
 
+type PluginLdapGroupSpec struct {
+	CN          string `json:"cn"`
+	GIDNumber   int    `json:"gidNumber"`
+	Description string `json:"description"`
+	Role        string `json:"role"` // "admin", "operator", "readonly"
+}
+
+type PluginLDAPSpec struct {
+	EnabledByDefault           bool                  `json:"enabledByDefault"`
+	ServiceAccountCN           string                `json:"serviceAccountCn"`
+	Groups                     []PluginLdapGroupSpec `json:"groups"`
+	InheritApplianceRoleGroups bool                  `json:"inheritApplianceRoleGroups"`
+	EnvPrefix                  string                `json:"envPrefix"`
+}
+
+type PluginLDAPBinding struct {
+	PluginID          string              `json:"pluginId"`
+	Enabled           bool                `json:"enabled"`
+	URL               string              `json:"url"`
+	BaseDN            string              `json:"baseDn"`
+	BindDN            string              `json:"bindDn"`
+	BindPassword      string              `json:"bindPassword"`
+	UserSearchBase    string              `json:"userSearchBase"`
+	UserSearchFilter  string              `json:"userSearchFilter"`
+	GroupSearchBase   string              `json:"groupSearchBase"`
+	GroupSearchFilter string              `json:"groupSearchFilter"`
+	RoleGroups        map[string][]string `json:"roleGroups"`
+	UpdatedAt         string              `json:"updatedAt"`
+}
+
 type DirectoryManager struct {
 	mu          sync.RWMutex
 	baseDN      string
@@ -1611,4 +1641,150 @@ func (d *DirectoryManager) GetStatus() DirectoryStatus {
 
 	_ = time.Now()
 	return status
+}
+
+// EnsurePluginLDAPIntegration idempotently provisions a dedicated least-privilege LDAP
+// service bind account in ou=services,<baseDN>, creates plugin POSIX groups in ou=groups,<baseDN>,
+// and writes standard credentials to /etc/axonwall/ldap-plugins/<pluginId>.json and .env.
+func (d *DirectoryManager) EnsurePluginLDAPIntegration(pluginID string, spec PluginLDAPSpec) (*PluginLDAPBinding, error) {
+	d.mu.RLock()
+	baseDN := d.baseDN
+	d.mu.RUnlock()
+
+	if baseDN == "" {
+		var err error
+		baseDN, _, err = ResolveOrCreateBaseDN("axonwall.local")
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve LDAP base DN: %w", err)
+		}
+		d.mu.Lock()
+		d.baseDN = baseDN
+		d.mu.Unlock()
+	}
+
+	_ = os.MkdirAll(LDAPPluginClientsDir, 0755)
+	_ = os.MkdirAll(LDAPPluginSecretsDir, 0700)
+
+	// Ensure ou=services,<baseDN> exists
+	ouLdif := fmt.Sprintf("dn: ou=services,%s\nobjectClass: top\nobjectClass: organizationalUnit\nou: services\n", baseDN)
+	ouCmd := exec.Command("ldapadd", "-c", "-Y", "EXTERNAL", "-H", "ldapi:///")
+	ouCmd.Stdin = strings.NewReader(ouLdif)
+	_ = ouCmd.Run()
+
+	svcCN := spec.ServiceAccountCN
+	if svcCN == "" {
+		svcCN = "svc-" + pluginID
+	}
+	svcDN := fmt.Sprintf("cn=%s,ou=services,%s", svcCN, baseDN)
+
+	secretFile := filepath.Join(LDAPPluginSecretsDir, pluginID+".pw")
+	secret, err := ensureRandomSecretFile(secretFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate plugin LDAP secret: %w", err)
+	}
+
+	sshaHash, err := HashSSHA(secret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash plugin LDAP secret: %w", err)
+	}
+
+	// Ensure service account exists
+	addLdif := fmt.Sprintf(`dn: %s
+objectClass: top
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: %s
+description: Axonwall Dedicated LDAP Service Account for %s
+userPassword: %s
+`, svcDN, svcCN, pluginID, sshaHash)
+	cmd := exec.Command("ldapadd", "-c", "-Y", "EXTERNAL", "-H", "ldapi:///")
+	cmd.Stdin = strings.NewReader(addLdif)
+	out, addErr := cmd.CombinedOutput()
+	if addErr != nil && strings.Contains(string(out), "Already exists") {
+		modLdif := fmt.Sprintf("dn: %s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n", svcDN, sshaHash)
+		mCmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+		mCmd.Stdin = strings.NewReader(modLdif)
+		_ = mCmd.Run()
+	}
+
+	roleGroups := make(map[string][]string)
+	if spec.InheritApplianceRoleGroups {
+		roleGroups["admin"] = append(roleGroups["admin"], "axonwall-admin")
+		roleGroups["operator"] = append(roleGroups["operator"], "axonwall-operator")
+		roleGroups["readonly"] = append(roleGroups["readonly"], "axonwall-readonly")
+	}
+
+	// Ensure groups exist
+	for _, g := range spec.Groups {
+		if g.CN != "" {
+			_, _ = d.EnsureLDAPGroupExists(g.CN, g.GIDNumber)
+			if g.Role != "" {
+				roleGroups[g.Role] = append(roleGroups[g.Role], g.CN)
+			}
+		}
+	}
+
+	binding := &PluginLDAPBinding{
+		PluginID:          pluginID,
+		Enabled:           true,
+		URL:               "ldap://127.0.0.1:389",
+		BaseDN:            baseDN,
+		BindDN:            svcDN,
+		BindPassword:      secret,
+		UserSearchBase:    "ou=users," + baseDN,
+		UserSearchFilter:  "(uid={username})",
+		GroupSearchBase:   "ou=groups," + baseDN,
+		GroupSearchFilter: "(|(memberUid={username})(member={userDn}))",
+		RoleGroups:        roleGroups,
+		UpdatedAt:         time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Write /etc/axonwall/ldap-plugins/<pluginId>.json
+	jsonPath := filepath.Join(LDAPPluginClientsDir, pluginID+".json")
+	jsonData, _ := json.MarshalIndent(binding, "", "  ")
+	_ = os.WriteFile(jsonPath, append(jsonData, '\n'), 0640)
+
+	// Write /etc/axonwall/ldap-plugins/<pluginId>.env
+	envPrefix := spec.EnvPrefix
+	if envPrefix == "" {
+		envPrefix = strings.ToUpper(strings.ReplaceAll(pluginID, "-", "_")) + "_LDAP_"
+	}
+	var envBuf strings.Builder
+	envBuf.WriteString(fmt.Sprintf("# Managed by Axonwall Identity Engine for %s\n", pluginID))
+	envBuf.WriteString(fmt.Sprintf("%sENABLED=true\n", envPrefix))
+	envBuf.WriteString(fmt.Sprintf("%sURL=ldap://127.0.0.1:389\n", envPrefix))
+	envBuf.WriteString(fmt.Sprintf("%sBASE_DN=%s\n", envPrefix, baseDN))
+	envBuf.WriteString(fmt.Sprintf("%sBIND_DN=%s\n", envPrefix, svcDN))
+	envBuf.WriteString(fmt.Sprintf("%sBIND_PASSWORD=%s\n", envPrefix, secret))
+	envBuf.WriteString(fmt.Sprintf("%sUSER_SEARCH_BASE=ou=users,%s\n", envPrefix, baseDN))
+	envBuf.WriteString(fmt.Sprintf("%sUSER_SEARCH_FILTER=(uid={username})\n", envPrefix))
+	envBuf.WriteString(fmt.Sprintf("%sGROUP_SEARCH_BASE=ou=groups,%s\n", envPrefix, baseDN))
+	envBuf.WriteString(fmt.Sprintf("%sADMIN_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["admin"], ",")))
+	envBuf.WriteString(fmt.Sprintf("%sOPERATOR_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["operator"], ",")))
+	envBuf.WriteString(fmt.Sprintf("%sREADONLY_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["readonly"], ",")))
+
+	envPath := filepath.Join(LDAPPluginClientsDir, pluginID+".env")
+	_ = os.WriteFile(envPath, []byte(envBuf.String()), 0640)
+
+	// Also ensure per-plugin destination config dir exists and has copy if standard
+	if pluginID == "eluvix" {
+		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
+		_ = os.WriteFile("/etc/axonwall/eluvix/ldap.json", append(jsonData, '\n'), 0640)
+	}
+
+	return binding, nil
+}
+
+// GetPluginLDAPBinding reads the persisted plugin LDAP binding configuration.
+func (d *DirectoryManager) GetPluginLDAPBinding(pluginID string) (*PluginLDAPBinding, error) {
+	jsonPath := filepath.Join(LDAPPluginClientsDir, pluginID+".json")
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return nil, err
+	}
+	var binding PluginLDAPBinding
+	if err := json.Unmarshal(data, &binding); err != nil {
+		return nil, err
+	}
+	return &binding, nil
 }

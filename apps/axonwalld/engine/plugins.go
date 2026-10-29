@@ -23,28 +23,30 @@ type PluginDefinition struct {
 	Dependencies     []string `json:"dependencies,omitempty"`
 	SystemdUnits     []string `json:"systemdUnits"`
 	Privileges       []string `json:"privileges"`
-	DebianPackages   []string `json:"debianPackages"`
-	AlpinePackages   []string `json:"alpinePackages"`
-	RequiredBinaries []string `json:"requiredBinaries"`
+	DebianPackages   []string        `json:"debianPackages"`
+	AlpinePackages   []string        `json:"alpinePackages"`
+	RequiredBinaries []string        `json:"requiredBinaries"`
+	LdapIntegration  *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
 }
 
 type PluginStatus struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Version          string   `json:"version"`
-	Category         string   `json:"category"`
-	Description      string   `json:"description"`
-	Author           string   `json:"author"`
-	Enabled          bool     `json:"enabled"`
-	DefaultEnabled   bool     `json:"defaultEnabled"`
-	Dependencies     []string `json:"dependencies,omitempty"`
-	Installed        bool     `json:"installed"`
-	Bundled          bool     `json:"bundled"`
-	RequiredBinaries []string `json:"requiredBinaries"`
-	MissingBinaries  []string `json:"missingBinaries"`
-	Packages         []string `json:"packages"`
-	InstalledAt      string   `json:"installedAt,omitempty"`
-	SystemdUnits     []string `json:"systemdUnits"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Version          string          `json:"version"`
+	Category         string          `json:"category"`
+	Description      string          `json:"description"`
+	Author           string          `json:"author"`
+	Enabled          bool            `json:"enabled"`
+	DefaultEnabled   bool            `json:"defaultEnabled"`
+	Dependencies     []string        `json:"dependencies,omitempty"`
+	Installed        bool            `json:"installed"`
+	Bundled          bool            `json:"bundled"`
+	RequiredBinaries []string        `json:"requiredBinaries"`
+	MissingBinaries  []string        `json:"missingBinaries"`
+	Packages         []string        `json:"packages"`
+	InstalledAt      string          `json:"installedAt,omitempty"`
+	SystemdUnits     []string        `json:"systemdUnits"`
+	LdapIntegration  *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
 }
 
 type PluginActionRequest struct {
@@ -64,8 +66,33 @@ type PluginManager struct {
 	stateFile    string
 	disabledFile string
 	osFamily     string
+	dirMgr       *DirectoryManager
 	installedMap map[string]string // pluginID -> installedAt
 	disabledMap  map[string]bool   // pluginID -> explicitly disabled
+}
+
+func (pm *PluginManager) SetDirectoryManager(dm *DirectoryManager) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.dirMgr = dm
+}
+
+func (pm *PluginManager) ensurePluginLDAP(pluginID string) {
+	pm.mu.RLock()
+	dm := pm.dirMgr
+	pm.mu.RUnlock()
+	if dm == nil {
+		return
+	}
+	defs := GetExtensionPluginDefinitions()
+	for _, d := range defs {
+		if d.ID == pluginID && d.LdapIntegration != nil {
+			if _, err := dm.EnsurePluginLDAPIntegration(pluginID, *d.LdapIntegration); err != nil {
+				log.Printf("[Plugins] Warning: failed to ensure LDAP integration for %s: %v", pluginID, err)
+			}
+			break
+		}
+	}
 }
 
 func DetectOSFamily() string {
@@ -149,6 +176,20 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			DebianPackages:   []string{"freeradius", "freeradius-ldap"},
 			AlpinePackages:   []string{"freeradius"},
 			RequiredBinaries: []string{"freeradius"},
+			LdapIntegration: &PluginLDAPSpec{
+				EnabledByDefault:           true,
+				ServiceAccountCN:           "svc-freeradius",
+				InheritApplianceRoleGroups: true,
+				EnvPrefix:                  "FREERADIUS_LDAP_",
+				Groups: []PluginLdapGroupSpec{
+					{
+						CN:          "radius-users",
+						GIDNumber:   10210,
+						Description: "FreeRADIUS 802.1X and VPN Authenticated Users",
+						Role:        "operator",
+					},
+				},
+			},
 		},
 		{
 			ID:               "snmp",
@@ -287,6 +328,32 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			DebianPackages:   []string{"nodejs", "git", "curl", "jq", "sqlite3"},
 			AlpinePackages:   []string{"nodejs", "git", "curl", "jq", "sqlite"},
 			RequiredBinaries: []string{"node", "git"},
+			LdapIntegration: &PluginLDAPSpec{
+				EnabledByDefault:           true,
+				ServiceAccountCN:           "svc-eluvix",
+				InheritApplianceRoleGroups: true,
+				EnvPrefix:                  "ELUVIX_LDAP_",
+				Groups: []PluginLdapGroupSpec{
+					{
+						CN:          "eluvix-admin",
+						GIDNumber:   10200,
+						Description: "Eluvix AI Router Full Administrators",
+						Role:        "admin",
+					},
+					{
+						CN:          "eluvix-operator",
+						GIDNumber:   10201,
+						Description: "Eluvix AI Router Operators (Chat & Playground)",
+						Role:        "operator",
+					},
+					{
+						CN:          "eluvix-readonly",
+						GIDNumber:   10202,
+						Description: "Eluvix AI Router Read-Only Auditors",
+						Role:        "readonly",
+					},
+				},
+			},
 		},
 	}
 }
@@ -404,6 +471,7 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			Packages:         pkgs,
 			InstalledAt:      installedAt,
 			SystemdUnits:     d.SystemdUnits,
+			LdapIntegration:  d.LdapIntegration,
 		})
 	}
 	return results
@@ -523,6 +591,9 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 
 	pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
 	pm.saveState()
+
+	// Ensure LDAP integration is provisioned if declared by the plugin
+	go pm.ensurePluginLDAP(pluginID)
 
 	return PluginActionResponse{
 		Success: true,
@@ -667,11 +738,13 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		}
 		pm.saveState()
 		pm.mu.Unlock()
+		pm.ensurePluginLDAP(pluginID)
 		return PluginActionResponse{
 			Success: true,
 			Message: "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard enabled and verified.",
 		}
 	}
+	pm.ensurePluginLDAP(pluginID)
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Plugin %s is already up-to-date.", pluginID),

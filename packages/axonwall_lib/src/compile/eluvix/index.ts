@@ -245,6 +245,21 @@ function portableHash10(str: string): string {
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(10, '0').slice(0, 10);
 }
 
+function deriveBaseDn(domain?: string): string {
+  const cleaned = (domain || 'axonwall.local').trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+  if (!cleaned || cleaned === 'local' || cleaned === 'localhost') {
+    return 'dc=axonwall,dc=local';
+  }
+  const parts = cleaned.split('.').filter((p) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(p));
+  if (parts.length === 0) {
+    return 'dc=axonwall,dc=local';
+  }
+  if (parts.length === 1) {
+    parts.push('local');
+  }
+  return parts.map((p) => `dc=${p}`).join(',');
+}
+
 function redactMatch(match: string, token: string, style: 'token' | 'asterisk' | 'hash'): string {
   if (style === 'asterisk') {
     if (match.length <= 4) return '****';
@@ -479,6 +494,12 @@ export function compileEluvixBundle(state: Partial<DesiredState>): CompiledEluvi
   const config = resolveEluvixConfig(state);
   const tokenomics = estimateEluvixTokenomics(config);
 
+  const domain = state.system?.domain || 'axonwall.local';
+  const derivedBaseDn = deriveBaseDn(domain);
+  const baseDn = config.ldapAuth.baseDn || derivedBaseDn;
+  const userSearchBase = config.ldapAuth.userSearchBase || `ou=users,${baseDn}`;
+  const groupSearchBase = config.ldapAuth.groupSearchBase || `ou=groups,${baseDn}`;
+
   const lanIface = (state.interfaces ?? []).find((i) => i.name === 'lan' || i.role === 'lan');
   const lanIp = lanIface?.ipv4Address?.split('/')[0] || '192.168.1.1';
 
@@ -491,6 +512,22 @@ export function compileEluvixBundle(state: Partial<DesiredState>): CompiledEluvi
       domain: config.domain,
       samePortTlsAutoUpgrade: config.samePortTlsAutoUpgrade,
       teePolicy: config.teePolicy,
+    },
+    auth: {
+      ldap: {
+        enabled: config.ldapAuth.enabled,
+        autoBindLocalLdap: config.ldapAuth.autoBindLocalLdap,
+        allowLocalBreakGlass: config.ldapAuth.allowLocalBreakGlass,
+        bindingFile: '/etc/axonwall/ldap-plugins/eluvix.json',
+        url: config.ldapAuth.url,
+        baseDn,
+        userSearchBase,
+        groupSearchBase,
+        adminGroups: config.ldapAuth.adminGroups,
+        operatorGroups: config.ldapAuth.operatorGroups,
+        readonlyGroups: config.ldapAuth.readonlyGroups,
+        defaultRole: config.ldapAuth.defaultRole,
+      },
     },
     switchyard: {
       strategy: config.tokenomics.strategy,
@@ -559,6 +596,12 @@ export function compileEluvixBundle(state: Partial<DesiredState>): CompiledEluvi
     `  memoryEngine: ${config.harnessMesh.memoryEngine}`,
     `  enabledHarnesses:`,
     ...config.harnessMesh.enabledHarnesses.map((h) => `    - ${h}`),
+    `auth:`,
+    `  ldap:`,
+    `    enabled: ${config.ldapAuth.enabled}`,
+    `    url: ${config.ldapAuth.url}`,
+    `    baseDn: ${baseDn}`,
+    `    allowLocalBreakGlass: ${config.ldapAuth.allowLocalBreakGlass}`,
     ``,
   ].join('\n');
 
@@ -566,7 +609,7 @@ export function compileEluvixBundle(state: Partial<DesiredState>): CompiledEluvi
     `[Unit]`,
     `Description=Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard Gateway`,
     `Documentation=https://github.com/Eluvixrouter/eluvix`,
-    `After=network-online.target unbound.service`,
+    `After=network-online.target unbound.service slapd.service`,
     `Wants=network-online.target`,
     ``,
     `[Service]`,
@@ -575,6 +618,8 @@ export function compileEluvixBundle(state: Partial<DesiredState>): CompiledEluvi
     `Group=axonwall`,
     `WorkingDirectory=/opt/eluvix`,
     `Environment="ELUVIX_CONFIG=/etc/axonwall/eluvix/eluvix.json"`,
+    `Environment="ELUVIX_LDAP_BINDING_FILE=/etc/axonwall/ldap-plugins/eluvix.json"`,
+    `EnvironmentFile=-/etc/axonwall/ldap-plugins/eluvix.env`,
     `Environment="ELUVIX_PORT=${config.listenPort}"`,
     `Environment="ELUVIX_SWITCHYARD_PORT=${config.switchyardPort}"`,
     `Environment="ELUVIX_TEE_POLICY=${config.teePolicy}"`,

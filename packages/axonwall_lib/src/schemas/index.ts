@@ -896,6 +896,23 @@ export type SnmpPluginConfig = z.infer<typeof SnmpPluginConfigSchema>;
 export const PluginCategorySchema = z.enum(['core_role', 'extension']);
 export type PluginCategory = z.infer<typeof PluginCategorySchema>;
 
+export const PluginLdapGroupSpecSchema = z.object({
+  cn: z.string().min(1),
+  gidNumber: z.number().int().min(1000).max(65535),
+  description: z.string().default(''),
+  role: z.enum(['admin', 'operator', 'readonly']),
+});
+export type PluginLdapGroupSpec = z.infer<typeof PluginLdapGroupSpecSchema>;
+
+export const PluginLdapIntegrationSpecSchema = z.object({
+  enabledByDefault: z.boolean().default(true),
+  serviceAccountCn: z.string().min(1),
+  groups: z.array(PluginLdapGroupSpecSchema).default([]),
+  inheritApplianceRoleGroups: z.boolean().default(true),
+  envPrefix: z.string().optional(),
+});
+export type PluginLdapIntegrationSpec = z.infer<typeof PluginLdapIntegrationSpecSchema>;
+
 export const PluginManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -907,6 +924,7 @@ export const PluginManifestSchema = z.object({
   author: z.string().default('Axonwall Community'),
   systemdUnits: z.array(z.string()).default([]),
   privileges: z.array(z.string()).default([]),
+  ldapIntegration: PluginLdapIntegrationSpecSchema.optional(),
   nftHooks: z.array(z.object({
     table: z.string(),
     chain: z.string(),
@@ -1889,6 +1907,22 @@ export const EluvixHarnessMeshSchema = z.object({
 });
 export type EluvixHarnessMesh = z.infer<typeof EluvixHarnessMeshSchema>;
 
+export const EluvixLdapAuthSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoBindLocalLdap: z.boolean().default(true),
+  allowLocalBreakGlass: z.boolean().default(true),
+  url: z.string().default('ldap://127.0.0.1:389'),
+  baseDn: z.string().optional(),
+  bindDn: z.string().optional(),
+  userSearchBase: z.string().optional(),
+  groupSearchBase: z.string().optional(),
+  adminGroups: z.array(z.string()).default(['axonwall-admin', 'eluvix-admin']),
+  operatorGroups: z.array(z.string()).default(['axonwall-operator', 'eluvix-operator']),
+  readonlyGroups: z.array(z.string()).default(['axonwall-readonly', 'eluvix-readonly']),
+  defaultRole: z.enum(['admin', 'operator', 'readonly', 'none']).default('readonly'),
+});
+export type EluvixLdapAuth = z.infer<typeof EluvixLdapAuthSchema>;
+
 export const EluvixConfigSchema = z.object({
   enabled: z.boolean().default(false),
   deploymentMode: z.enum(['systemd', 'docker', 'k3s-helm']).default('systemd'),
@@ -1900,6 +1934,16 @@ export const EluvixConfigSchema = z.object({
   syncUnboundDns: z.boolean().default(true),
   routeAxonwallCopilotThroughEluvix: z.boolean().default(true),
   teePolicy: z.enum(['disabled', 'prefer-tee', 'require-tee', 'require-dual-attestation']).default('prefer-tee'),
+  ldapAuth: EluvixLdapAuthSchema.default({
+    enabled: true,
+    autoBindLocalLdap: true,
+    allowLocalBreakGlass: true,
+    url: 'ldap://127.0.0.1:389',
+    adminGroups: ['axonwall-admin', 'eluvix-admin'],
+    operatorGroups: ['axonwall-operator', 'eluvix-operator'],
+    readonlyGroups: ['axonwall-readonly', 'eluvix-readonly'],
+    defaultRole: 'readonly',
+  }),
   tokenomics: EluvixTokenomicsSchema.default({
     strategy: 'cost-complexity',
     semanticCacheEnabled: true,

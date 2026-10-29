@@ -19,15 +19,17 @@ import (
 )
 
 const (
-	LDAPBaseDir       = "/var/lib/axonwall/ldap"
-	LDAPConfigDir     = "/var/lib/axonwall/ldap/config"
-	LDAPDataDir       = "/var/lib/axonwall/ldap/data"
-	LDAPAccessLogDir  = "/var/lib/axonwall/ldap/accesslog"
-	LDAPBackupsDir    = "/var/lib/axonwall/ldap/backups"
-	LDAPBaseDNFile    = "/var/lib/axonwall/ldap/BASE_DN"
-	LDAPSecretsDir    = "/var/lib/axonwall/secrets/ldap"
-	LDAPAdminPassFile = "/var/lib/axonwall/secrets/ldap/admin.pw"
-	LDAPReplPassFile  = "/var/lib/axonwall/secrets/ldap/repl.pw"
+	LDAPBaseDir          = "/var/lib/axonwall/ldap"
+	LDAPConfigDir        = "/var/lib/axonwall/ldap/config"
+	LDAPDataDir          = "/var/lib/axonwall/ldap/data"
+	LDAPAccessLogDir     = "/var/lib/axonwall/ldap/accesslog"
+	LDAPBackupsDir       = "/var/lib/axonwall/ldap/backups"
+	LDAPBaseDNFile       = "/var/lib/axonwall/ldap/BASE_DN"
+	LDAPSecretsDir       = "/var/lib/axonwall/secrets/ldap"
+	LDAPAdminPassFile    = "/var/lib/axonwall/secrets/ldap/admin.pw"
+	LDAPReplPassFile     = "/var/lib/axonwall/secrets/ldap/repl.pw"
+	LDAPPluginClientsDir = "/etc/axonwall/ldap-plugins"
+	LDAPPluginSecretsDir = "/var/lib/axonwall/secrets/ldap/plugins"
 )
 
 var validDomainLabelRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -329,6 +331,11 @@ objectClass: top
 objectClass: organizationalUnit
 ou: groups
 
+dn: ou=services,%s
+objectClass: top
+objectClass: organizationalUnit
+ou: services
+
 dn: ou=policies,%s
 objectClass: top
 objectClass: organizationalUnit
@@ -397,7 +404,7 @@ objectClass: posixGroup
 cn: adm
 gidNumber: 10004
 description: System Monitoring Logs Group
-`, baseDN, firstDC, baseDN, baseDN, baseDN, baseDN, baseDN, replHash, baseDN,
+`, baseDN, firstDC, baseDN, baseDN, baseDN, baseDN, baseDN, baseDN, replHash, baseDN,
 		policy.MinLength, policy.HistoryCount, policy.MaxFailures, policy.LockoutDurationSeconds, maxAgeSeconds,
 		baseDN, baseDN, baseDN, baseDN, baseDN)
 }
@@ -438,6 +445,8 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 	if err := os.MkdirAll(LDAPSecretsDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create %s: %w", LDAPSecretsDir, err)
 	}
+	_ = os.MkdirAll(LDAPPluginClientsDir, 0755)
+	_ = os.MkdirAll(LDAPPluginSecretsDir, 0700)
 
 	baseDN, firstDC, err := ResolveOrCreateBaseDN(domain)
 	if err != nil {
