@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/axonwall/monorepo/apps/axonwalld/engine"
+	"github.com/axonwall/axonwall/apps/axonwalld/engine"
 )
 
 type VRRPInstanceConfig struct {

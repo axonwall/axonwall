@@ -1,4 +1,4 @@
-module github.com/axonwall/monorepo/apps/axonwalld
+module github.com/axonwall/axonwall/apps/axonwalld
 
 go 1.25.0
 

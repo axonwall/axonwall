@@ -922,7 +922,7 @@ const file_agent_v1_agent_proto_rawDesc = "" +
 	"\aConfirm\x12!.axonwall.agent.v1.ConfirmRequest\x1a\".axonwall.agent.v1.ConfirmResponse\x12S\n" +
 	"\bRollback\x12\".axonwall.agent.v1.RollbackRequest\x1a#.axonwall.agent.v1.RollbackResponse\x12V\n" +
 	"\tGetStatus\x12#.axonwall.agent.v1.GetStatusRequest\x1a$.axonwall.agent.v1.GetStatusResponse\x12`\n" +
-	"\x11ExecuteDiagnostic\x12$.axonwall.agent.v1.DiagnosticRequest\x1a%.axonwall.agent.v1.DiagnosticResponseBBZ@github.com/axonwall/monorepo/apps/axonwalld/gen/agent/v1;agentv1b\x06proto3"
+	"\x11ExecuteDiagnostic\x12$.axonwall.agent.v1.DiagnosticRequest\x1a%.axonwall.agent.v1.DiagnosticResponseBBZ@github.com/axonwall/axonwall/apps/axonwalld/gen/agent/v1;agentv1b\x06proto3"
 
 var (
 	file_agent_v1_agent_proto_rawDescOnce sync.Once

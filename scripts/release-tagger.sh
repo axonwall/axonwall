@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Axonwall Monorepo Release & Version Tagger
+# Axonwall Release & Version Tagger
 # ==============================================================================
 # Usage:
 #   ./scripts/release-tagger.sh patch      # e.g. 0.1.8 -> 0.1.9 (no confirm)

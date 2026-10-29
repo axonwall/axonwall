@@ -12,7 +12,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/cilium/ebpf/link"
 
-	"github.com/axonwall/monorepo/apps/axonwalld/ebpf"
+	"github.com/axonwall/axonwall/apps/axonwalld/ebpf"
 )
 
 type EBPFManager struct {

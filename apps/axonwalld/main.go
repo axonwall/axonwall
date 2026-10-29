@@ -24,8 +24,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/axonwall/monorepo/apps/axonwalld/engine"
-	pb "github.com/axonwall/monorepo/apps/axonwalld/gen/agent/v1"
+	"github.com/axonwall/axonwall/apps/axonwalld/engine"
+	pb "github.com/axonwall/axonwall/apps/axonwalld/gen/agent/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

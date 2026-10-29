@@ -1,4 +1,4 @@
-module github.com/axonwall/monorepo/apps/axonwall-console
+module github.com/axonwall/axonwall/apps/axonwall-console
 
 go 1.26.0
 

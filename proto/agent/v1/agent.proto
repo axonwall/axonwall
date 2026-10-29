@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package axonwall.agent.v1;
 
-option go_package = "github.com/axonwall/monorepo/apps/axonwalld/gen/agent/v1;agentv1";
+option go_package = "github.com/axonwall/axonwall/apps/axonwalld/gen/agent/v1;agentv1";
 
 service AgentService {
   // Apply a signed configuration bundle with commit-confirm

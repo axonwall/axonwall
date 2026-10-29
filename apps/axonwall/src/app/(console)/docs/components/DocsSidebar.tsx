@@ -43,8 +43,8 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: BookOpen,
     items: [
       { title: 'Overview & Introduction', href: '/docs' },
-      { title: 'Installation Guide (ISO, KVM, Docker)', href: '/docs#installation' },
-      { title: 'Multi-Disk RAID & ZFS Install', href: '/docs/installer-raid-zfs', badge: 'RAID' },
+      { title: 'Installation Guide (ISO, UKI, Cloud)', href: '/docs#installation' },
+      { title: 'Multi-Disk RAID & ZFSBootMenu', href: '/docs/installer-raid-zfs', badge: 'ZBM' },
       { title: 'Quickstart & First Boot', href: '/docs#quickstart' },
       { title: 'Hardware Compatibility List', href: '/docs#hardware' },
     ],
@@ -54,10 +54,11 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Cpu,
     items: [
       { title: 'Linux nftables Architecture', href: '/docs/architecture' },
+      { title: 'Super-Slim Edge NGFW (UEFI UKI)', href: '/docs/edge-uki-ngfw', badge: 'NEW' },
       { title: 'Modular Roles (FW, ZFS, K3s)', href: '/docs/modular-architecture', badge: 'Core' },
       { title: 'Multi-Core vs FreeBSD pf', href: '/docs/architecture#comparison' },
       { title: 'Junos Commit-Confirm Rollback', href: '/docs/architecture#commit-confirm' },
-      { title: 'A/B Dual-Root & Single-Root Modes', href: '/docs/architecture#ab-dual-root' },
+      { title: 'A/B Dual-Root & ZFSBootMenu Modes', href: '/docs/architecture#ab-dual-root' },
       { title: 'Privileged Go Daemon (axonwalld)', href: '/docs/architecture#daemon' },
     ],
   },
@@ -119,10 +120,11 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     ],
   },
   {
-    title: 'CLI & Super Configurator',
+    title: 'CLI & Sovereign AI',
     icon: Terminal,
     items: [
       { title: 'Neovim Super Configurator', href: '/docs/cli-super-configurator', badge: 'TUI' },
+      { title: 'Eluvix Sovereign AI Router & DLP', href: '/docs/eluvix-ai-router', badge: 'NEW' },
       { title: 'NastyMap Topology Simulator', href: '/docs/cli-super-configurator#nastymap-tui' },
       { title: 'ZSH Power-User Workstation', href: '/docs/cli-super-configurator#zsh-workstation' },
     ],
@@ -298,7 +300,7 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.11.28</span>
+        <span className="font-mono">Axonwall v0.11.32</span>
         <span className="text-emerald-400 font-medium">Docs 2.0</span>
       </div>
     </aside>

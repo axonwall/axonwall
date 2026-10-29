@@ -18,6 +18,7 @@ import {
   Lock,
   KeyRound,
   Bug,
+  Sparkles,
 } from 'lucide-react';
 import { Callout } from './components/Callout';
 import { CodeBlock } from './components/CodeBlock';
@@ -25,7 +26,7 @@ import { CodeBlock } from './components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Documentation | Overview & Quickstart',
   description:
-    'Comprehensive documentation for Axonwall v0.11.28: Linux 6.12 LTS nftables firewall, 2-Host High Availability setup guide, Ghost-in-the-Ring kernel rootkit hunter, Post-Quantum Rosenpass Dual-KEM VPN, OpenZFS NAS, K3s + Vigilant Octo Waffle, and Neovim Super Configurator TUI.',
+    'Comprehensive documentation for Axonwall v0.11.32: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, ZFSBootMenu Root-on-ZFS, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
 };
 
 export default function DocsOverviewPage() {
@@ -35,16 +36,16 @@ export default function DocsOverviewPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Documentation Portal • v0.11.28
+          Documentation Portal • v0.11.32
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Axonwall Documentation
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
           Welcome to the official Axonwall documentation. Axonwall is an enterprise-grade open-source router,
-          Next-Generation Firewall (NGFW), OpenZFS NAS, and K3s SecOps platform engineered on modern Linux,{' '}
-          <code className="text-emerald-400 font-mono">nftables</code>, Post-Quantum Dual-KEM cryptography, and Ring-0
-          eBPF telemetry.
+          Next-Generation Firewall (NGFW), Zero-Surface Edge UKI, OpenZFS NAS, Sovereign AI Gateway, and K3s SecOps
+          platform engineered on modern Linux, <code className="text-emerald-400 font-mono">nftables</code>,
+          Post-Quantum Dual-KEM cryptography, and Ring-0 eBPF telemetry.
         </p>
       </div>
 
@@ -54,6 +55,37 @@ export default function DocsOverviewPage() {
           <Layers className="w-5 h-5 text-emerald-400" /> Explore Core Subsystems &amp; Setup Guides
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Link
+            href="/docs/edge-uki-ngfw"
+            className="p-5 rounded-xl bg-slate-900/60 border border-emerald-500/40 hover:border-emerald-500 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Cpu className="w-4 h-4 text-emerald-400" />
+                <span>Super-Slim Edge NGFW (Single-File UEFI UKI)</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Zero-surface perimeter UKI running axonwall-satellite as pure-Go PID 1 with CONFIG_MODULES=n, zero shell/userland, sub-1.2s RAM boot, pure-Go Cloud-Init, Dual-Stack IPv6, and Active-Standby Edge HA.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/eluvix-ai-router"
+            className="p-5 rounded-xl bg-slate-900/60 border border-purple-500/40 hover:border-purple-500 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Sparkles className="w-4 h-4 text-purple-400" />
+                <span>Eluvix Sovereign AI Router &amp; DLP Guard</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-purple-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Switchyard 4-tier local/frontier model routing, PrivacyGuard reversible PII &amp; secret tokenization before cloud egress, PromptGuard injection filter, and 8 autonomous agent harnesses.
+            </p>
+          </Link>
           <Link
             href="/docs/high-availability#two-host-setup"
             className="p-5 rounded-xl bg-slate-900/60 border border-emerald-500/40 hover:border-emerald-500 hover:bg-slate-900 transition group block"
@@ -189,12 +221,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Download className="w-4 h-4 text-emerald-400" />
-                <span>Multi-Disk RAID &amp; ZFS Install</span>
+                <span>Multi-Disk RAID &amp; ZFSBootMenu Install</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              mdadm RAID-1 system disk mirroring across Slot A, Slot B, Swap, and Data, plus Standard Single-Root rolling Linux mode and cloud-init autoinstall.
+              Choose between ZFSBootMenu v3.1.x Root-on-ZFS Boot Environments (Stripe/Mirror/RAID-Z/dRAID), mdadm RAID-1 A/B Dual-Root slots, or Standard Single-Root rolling Linux mode.
             </p>
           </Link>
 
@@ -299,13 +331,18 @@ export default function DocsOverviewPage() {
             <code className="text-slate-300">dd</code> utility:
           </p>
           <CodeBlock
-            title="Flash ISO to USB Drive"
+            title="Flash ISO to USB Drive & Verify SHA-256"
             language="bash"
-            code={`# Replace /dev/sdX with your destination USB drive
-sudo dd if=axonwall-v0.11.28-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync`}
+            code={`# Download and verify the v0.11.32 Debian 13 Appliance ISO
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-debian13-amd64.iso.sha256
+sha256sum -c axonwall-debian13-amd64.iso.sha256
+
+# Replace /dev/sdX with your destination USB drive
+sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync`}
           />
-          <Callout type="tip" title="Interactive A/B Dual-Root OR Standard Single-Root Partitioning">
-            During installation (or via <code className="font-mono">cloud-init</code> preseed), choose between two
+          <Callout type="tip" title="Three Partitioning & Boot Modes: A/B Dual-Root, ZFSBootMenu (ZBM), or Rolling Single-Root">
+            During installation (or via <code className="font-mono">cloud-init</code> preseed), choose between three
             partitioning layouts:
             <ul className="list-disc list-inside mt-2 space-y-1 text-slate-300">
               <li>
@@ -315,22 +352,32 @@ sudo dd if=axonwall-v0.11.28-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
                 hardware watchdog fallback and dedicated persistent data (<code className="text-emerald-300 font-mono">/var/lib/axonwall</code>).
               </li>
               <li>
+                <strong>ZFSBootMenu Root-on-ZFS Mode (<code className="text-emerald-300 font-mono">zbm</code>):</strong>{' '}
+                Boots directly from an OpenZFS root pool (<code className="text-emerald-300 font-mono">zroot/ROOT/*</code>)
+                across Stripe, Mirror, RAID-Z, or dRAID topologies with zero-copy snapshot Boot Environments and
+                pre-boot watchdog auto-revert.
+              </li>
+              <li>
                 <strong>Standard Linux Single-Root Rolling Mode:</strong> Traditional single root filesystem for
                 operators who prefer standard <code className="font-mono">apt</code> rolling upgrades on large single disks.
               </li>
             </ul>
           </Callout>
 
-          <h3 className="text-base font-semibold text-white pt-4">Option 2: Proxmox VE / KVM Virtual Machine</h3>
+          <h3 className="text-base font-semibold text-white pt-4">Option 2: Proxmox VE / KVM Cloud QCOW2 Image &amp; Edge UKI</h3>
           <p className="text-xs text-slate-400">
-            Create a VM with standard VirtIO hardware acceleration:
+            Import the pre-built Cloud-Init QCOW2 image (<code className="text-slate-300 font-mono">axonwall-debian13-amd64-cloud.qcow2</code>)
+            or boot the stateless 7 MB <code className="text-slate-300 font-mono">axonwall-edge-sku-vm-virtio.efi</code>{' '}
+            Unified Kernel Image directly into RAM:
           </p>
-          <ul className="list-disc list-inside text-xs text-slate-300 space-y-1.5 ml-2">
-            <li><strong>CPU:</strong> Host (minimum 2 vCPUs, 4+ recommended)</li>
-            <li><strong>Memory:</strong> 4096 MB RAM (minimum 2048 MB)</li>
-            <li><strong>Disk:</strong> 32 GB+ SCSI (VirtIO SCSI single with discard enabled)</li>
-            <li><strong>Network:</strong> VirtIO (net0 mapped to WAN bridge, net1 mapped to LAN bridge, optional net3 for HA Sync)</li>
-          </ul>
+          <CodeBlock
+            title="Proxmox VE Cloud-Init QCOW2 Import"
+            language="bash"
+            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-debian13-amd64-cloud.qcow2
+qm create 9000 --name axonwall-ngfw --memory 4096 --cores 4 --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1
+qm importdisk 9000 axonwall-debian13-amd64-cloud.qcow2 local-zfs
+qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard=on --ide2 local-zfs:cloudinit --boot c --bootdisk scsi0`}
+          />
 
           <h3 className="text-base font-semibold text-white pt-4">Option 3: Debian / Ubuntu Package (.deb)</h3>
           <p className="text-xs text-slate-400">
@@ -341,11 +388,13 @@ sudo dd if=axonwall-v0.11.28-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
             title="Install Debian Package"
             language="bash"
             code={`# Download the latest .deb release artifact from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/latest/download/axonwall_0.11.28_amd64.deb
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall_0.11.32_amd64.deb
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall_0.11.32_amd64.deb.sha256
+sha256sum -c axonwall_0.11.32_amd64.deb.sha256
 
 # Install package with dependencies
 sudo apt-get update
-sudo apt-get install -y ./axonwall_0.11.28_amd64.deb
+sudo apt-get install -y ./axonwall_0.11.32_amd64.deb
 
 # Verify running services
 sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
@@ -357,7 +406,7 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
             language="yaml"
             code={`services:
   axonwall:
-    image: ghcr.io/axonwall/axonwall:v0.11.28
+    image: ghcr.io/axonwall/axonwall:v0.11.32
     cap_add:
       - NET_ADMIN
       - NET_RAW
