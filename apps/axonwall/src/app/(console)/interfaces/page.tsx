@@ -23,6 +23,7 @@ import {
   deleteInterfaceAssignment,
   type LogicalInterfaceView,
 } from '@/server/agent';
+import type { InterfaceRole } from '@axonwall/lib/schemas';
 
 function suggestPoolFromCidr(cidr: string): { start: string; end: string } | null {
   const parts = (cidr || '').trim().split('/');
@@ -91,7 +92,7 @@ export default function InterfacesPage() {
   const [editForm, setEditForm] = useState({
     name: '',
     originalName: '',
-    role: 'lan' as 'wan' | 'lan',
+    role: 'lan' as InterfaceRole,
     device: '',
     enabled: true,
     type: 'dhcp' as 'dhcp' | 'static',
@@ -122,14 +123,15 @@ export default function InterfacesPage() {
     loadData();
   }, []);
 
-  const getNextInterfaceName = (role: 'wan' | 'lan'): string => {
+  const getNextInterfaceName = (role: InterfaceRole): string => {
+    const basePrefix = role === 'wan-delegated' ? 'wan' : role;
     const existingNames = new Set(interfaces.map((i) => i.name.toLowerCase()));
-    if (!existingNames.has(role)) return role;
+    if (!existingNames.has(basePrefix)) return basePrefix;
     let idx = 2;
-    while (existingNames.has(`${role}${idx}`)) {
+    while (existingNames.has(`${basePrefix}${idx}`)) {
       idx += 1;
     }
-    return `${role}${idx}`;
+    return `${basePrefix}${idx}`;
   };
 
   const getFirstUnassignedDevice = (): string => {
@@ -139,13 +141,14 @@ export default function InterfacesPage() {
     return physicalDevs.find((d) => !usedDevs.has(d)) || '';
   };
 
-  const openAddModal = (presetRole: 'wan' | 'lan', presetDevice?: string) => {
+  const openAddModal = (presetRole: InterfaceRole, presetDevice?: string) => {
     const nextName = getNextInterfaceName(presetRole);
     const dev = presetDevice ?? getFirstUnassignedDevice();
     const lanIndex = interfaces.filter((i) => i.role === 'lan').length + 1;
     const defaultStaticIp = `192.168.${lanIndex === 1 ? 1 : 10 + lanIndex}.1/24`;
     const pool = suggestPoolFromCidr(defaultStaticIp);
 
+    const isWanLike = presetRole === 'wan' || presetRole === 'wan-delegated';
     setIsCreatingNew(true);
     setEditingIface({
       name: nextName,
@@ -153,14 +156,14 @@ export default function InterfacesPage() {
       role: presetRole,
       device: dev,
       enabled: true,
-      type: presetRole === 'wan' ? 'dhcp' : 'static',
+      type: isWanLike ? 'dhcp' : 'static',
       dhcpServer: presetRole === 'lan',
       dhcpPoolStart: pool?.start || '',
       dhcpPoolEnd: pool?.end || '',
       ipv4Address: presetRole === 'lan' ? defaultStaticIp : '',
       ipv4Gateway: '',
       description:
-        presetRole === 'wan'
+        isWanLike
           ? `${nextName.toUpperCase()} WAN Uplink`
           : `${nextName.toUpperCase()} Local Network`,
       mtu: 1500,
@@ -180,14 +183,14 @@ export default function InterfacesPage() {
       role: presetRole,
       device: dev,
       enabled: true,
-      type: presetRole === 'wan' ? 'dhcp' : 'static',
+      type: isWanLike ? 'dhcp' : 'static',
       dhcpServer: presetRole === 'lan',
       dhcpPoolStart: pool?.start || '',
       dhcpPoolEnd: pool?.end || '',
       ipv4Address: presetRole === 'lan' ? defaultStaticIp : '',
       ipv4Gateway: '',
       description:
-        presetRole === 'wan'
+        isWanLike
           ? `${nextName.toUpperCase()} WAN Uplink`
           : `${nextName.toUpperCase()} Local Network`,
       mtu: 1500,
@@ -397,9 +400,9 @@ export default function InterfacesPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {interfaces.map((iface) => {
-            const isWan = iface.role === 'wan';
+            const isWan = iface.role === 'wan' || iface.role === 'wan-delegated';
             const isAuthDhcp = iface.role === 'lan' && iface.isAuthoritativeDhcp;
-            const isJoinedLan = iface.role === 'lan' && !iface.isAuthoritativeDhcp;
+            const isJoinedLan = (iface.role === 'lan' || iface.role === 'dmz' || iface.role === 'opt' || iface.role === 'mgmt' || iface.role === 'ha-sync') && !iface.isAuthoritativeDhcp;
 
             return (
               <div
@@ -436,7 +439,19 @@ export default function InterfacesPage() {
                                 : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
                           }`}
                         >
-                          {isWan ? 'WAN Uplink' : isAuthDhcp ? 'LAN • Authoritative DHCP' : 'LAN • Joined Network'}
+                          {iface.role === 'wan-delegated'
+                            ? 'WAN • Delegated'
+                            : isWan
+                              ? 'WAN Uplink'
+                              : iface.role === 'dmz'
+                                ? 'DMZ'
+                                : iface.role === 'mgmt'
+                                  ? 'Management'
+                                  : iface.role === 'ha-sync'
+                                    ? 'HA Sync'
+                                    : isAuthDhcp
+                                      ? 'LAN • Authoritative DHCP'
+                                      : 'LAN • Joined Network'}
                         </span>
                         <span className="text-xs bg-slate-800 text-slate-300 font-mono px-2 py-0.5 rounded border border-slate-700">
                           {iface.device && iface.device !== 'none' ? iface.device : 'Unassigned'}
@@ -655,7 +670,7 @@ export default function InterfacesPage() {
                 </div>
               </div>
 
-              {/* Role Selector: WAN vs LAN */}
+              {/* Role Selector: WAN vs LAN vs Other Roles */}
               <div>
                 <label className="text-xs font-medium text-slate-300 block mb-1.5">
                   Interface Role
@@ -676,7 +691,7 @@ export default function InterfacesPage() {
                       });
                     }}
                     className={`p-3 rounded-xl border text-left cursor-pointer transition ${
-                      editForm.role === 'wan'
+                      editForm.role === 'wan' || editForm.role === 'wan-delegated'
                         ? 'border-indigo-500 bg-indigo-500/15 text-white'
                         : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200'
                     }`}
@@ -704,7 +719,7 @@ export default function InterfacesPage() {
                       });
                     }}
                     className={`p-3 rounded-xl border text-left cursor-pointer transition ${
-                      editForm.role === 'lan'
+                      editForm.role === 'lan' || editForm.role === 'dmz' || editForm.role === 'opt' || editForm.role === 'mgmt' || editForm.role === 'ha-sync'
                         ? 'border-emerald-500 bg-emerald-500/15 text-white'
                         : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200'
                     }`}
@@ -748,7 +763,7 @@ export default function InterfacesPage() {
               </div>
 
               {/* Network Participation / Addressing Mode */}
-              {editForm.role === 'wan' ? (
+              {editForm.role === 'wan' || editForm.role === 'wan-delegated' ? (
                 <div>
                   <label className="text-xs font-medium text-slate-300 block mb-1.5">
                     WAN Addressing Mode
