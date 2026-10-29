@@ -94,7 +94,7 @@ Axonwall matches OPNsense across all core firewall, networking, and security fea
 Axonwall is engineered as an enterprise-grade Turborepo monorepo:
 
 ```
-axonwall_monorepo/
+axonwall/
 ├── apps/
 │   ├── axonwall/             # Next.js 16 reactive web console & API gateway
 │   ├── axonwall-controller/  # TypeScript/Node control plane & fleet WebSocket hub
@@ -143,8 +143,8 @@ To run the development console and control plane on an existing Linux workstatio
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/axonwall/axonwall_monorepo.git
-cd axonwall_monorepo
+git clone https://github.com/axonwall/axonwall.git
+cd axonwall
 
 # 2. Install dependencies via pnpm
 pnpm install

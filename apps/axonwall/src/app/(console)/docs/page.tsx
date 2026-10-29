@@ -341,7 +341,7 @@ sudo dd if=axonwall-v0.11.28-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
             title="Install Debian Package"
             language="bash"
             code={`# Download the latest .deb release artifact from GitHub Releases
-wget https://github.com/axonwall/axonwall_monorepo/releases/latest/download/axonwall_0.11.28_amd64.deb
+wget https://github.com/axonwall/axonwall/releases/latest/download/axonwall_0.11.28_amd64.deb
 
 # Install package with dependencies
 sudo apt-get update

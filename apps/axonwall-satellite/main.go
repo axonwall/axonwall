@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/axonwall/axonwall_monorepo/apps/axonwall-satellite/engine"
+	"github.com/axonwall/axonwall/apps/axonwall-satellite/engine"
 	"github.com/gorilla/websocket"
 )
 

@@ -106,7 +106,7 @@ jobs:
             cd - >/dev/null
           fi
 
-      - name: Build Axonwall Monorepo Artifacts
+      - name: Build Axonwall Artifacts
         run: |
           pnpm build
 

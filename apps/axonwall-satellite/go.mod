@@ -1,4 +1,4 @@
-module github.com/axonwall/axonwall_monorepo/apps/axonwall-satellite
+module github.com/axonwall/axonwall/apps/axonwall-satellite
 
 go 1.24.4
 

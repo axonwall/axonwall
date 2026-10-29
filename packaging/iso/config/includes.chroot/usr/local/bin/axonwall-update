@@ -234,7 +234,7 @@ fi
 CLEAN_VER="${TARGET_VERSION#v}"
 DEB_TMP=""
 if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
-  DEB_URL="https://github.com/axonwall/axonwall_monorepo/releases/download/v${CLEAN_VER}/axonwall_${CLEAN_VER}_amd64.deb"
+  DEB_URL="https://github.com/axonwall/axonwall/releases/download/v${CLEAN_VER}/axonwall_${CLEAN_VER}_amd64.deb"
   SHA_URL="${DEB_URL}.sha256"
   SIG_URL="${SHA_URL}.sig"
   RELEASE_PUBKEY="/etc/axonwall/release-signing.pub"

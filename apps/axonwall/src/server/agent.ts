@@ -2878,13 +2878,13 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
   let latestVersion = currentVersion;
   let releaseNotes = 'You are running the latest stable release of Axonwall.';
   let publishedAt = new Date().toISOString();
-  let downloadUrl = 'https://github.com/axonwall/axonwall_monorepo/releases';
+  let downloadUrl = 'https://github.com/axonwall/axonwall/releases';
 
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-    const res = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/releases/latest', {
+    const res = await fetch('https://api.github.com/repos/axonwall/axonwall/releases/latest', {
       headers: {
         'User-Agent': 'Axonwall-Appliance-Updater/0.11.32',
         Accept: 'application/vnd.github.v3+json',
@@ -2903,7 +2903,7 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
       }
     } else {
       // Fallback: Check tags
-      const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall_monorepo/tags?per_page=5', {
+      const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall/tags?per_page=5', {
         headers: {
           'User-Agent': 'Axonwall-Appliance-Updater/0.11.32',
           Accept: 'application/vnd.github.v3+json',
