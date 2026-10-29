@@ -272,11 +272,73 @@ describe('Axonwall nftables Compiler', () => {
     expect(res.nftScript).not.toContain('dport 9000');
   });
 
-  it('compiles satellite nftables for both nested and top-level tunnelIp', () => {
+  it('compiles satellite nftables for both nested and top-level tunnelIp and Super-Slim Edge NGFW UKI role', () => {
     const sat1 = compileSatelliteNftables({ id: 'sat-1', tunnelIp: '10.99.0.5/24' });
     expect(sat1.nftScript).toContain('udp dport 51820 accept comment "allow-wireguard"');
+    expect(sat1.nftScript).toContain('tcp dport 22 accept comment "allow-ssh"');
     const sat2 = compileSatelliteNftables({ id: 'sat-2', wireguard: { tunnelIp: '10.99.0.6/24' } });
     expect(sat2.nftScript).toContain('udp dport 51820 accept comment "allow-wireguard"');
+
+    const edgeUki = compileSatelliteNftables({
+      id: 'edge-n100-01',
+      role: 'edge-ngfw',
+      skuProfile: 'sku-x86-intel-n100-i226',
+      wanInterface: 'eth0',
+      lanInterface: 'eth1',
+      fastpathOffload: true,
+      wireguard: { tunnelIp: '10.99.0.10/24' },
+    });
+    expect(edgeUki.nftScript).toContain('flowtable fastpath {');
+    expect(edgeUki.nftScript).toContain('devices = { "eth0", "eth1" };');
+    expect(edgeUki.nftScript).toContain('meta l4proto { tcp, udp } ct state established flow add @fastpath comment "wire-speed-flowtable-offload"');
+    expect(edgeUki.nftScript).toContain('icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept comment "rfc4890-icmpv6"');
+    expect(edgeUki.nftScript).toContain('iifname "eth0" meta l4proto udp udp sport 547 udp dport 546 accept comment "allow-dhcpv6-client"');
+    expect(edgeUki.nftScript).toContain('oifname "eth0" masquerade comment "edge-ngfw-wan-masquerade"');
+    expect(edgeUki.nftScript).toContain('log prefix "axonwall-rule:wan-drop: "');
+    // The terminal WAN drop must come after the WireGuard / Headscale accepts
+    const wanDropIdx = edgeUki.nftScript.indexOf('log-and-drop-wan-input');
+    expect(wanDropIdx).toBeGreaterThan(edgeUki.nftScript.indexOf('headscale-mesh'));
+    if (edgeUki.nftScript.includes('allow-wireguard')) {
+      expect(wanDropIdx).toBeGreaterThan(edgeUki.nftScript.indexOf('allow-wireguard'));
+    }
+    expect(edgeUki.nftScript).not.toContain('tcp dport 22 accept');
+  });
+
+  it('compiles satellite nftables with disabledIpv6Interfaces, hardwareOffload, portForwards, ipv6Allow, and VLAN zones', () => {
+    const edgeEnterprise = compileSatelliteNftables({
+      id: 'edge-10g-01',
+      role: 'edge-ngfw',
+      skuProfile: 'sku-x86-enterprise-10g-25g',
+      wanInterface: 'eth0',
+      lanInterface: 'eth1',
+      fastpathOffload: true,
+      hardwareOffload: true,
+      disabledIpv6Interfaces: ['eth0'],
+      portForwards: [
+        { proto: 'tcp', wanPort: 443, targetIp: '10.0.0.2', targetPort: 443, comment: 'k3s-https-ingress' },
+        { proto: 'udp', wanPort: 51820, targetIp: '10.0.0.2', targetPort: 51820 },
+      ],
+      ipv6Allow: [
+        { proto: 'tcp', dstIp6: '2001:db8:1::2', dstPort: 443, comment: 'allow-v6-https' },
+      ],
+      zones: [
+        { name: 'iot', vlanId: 40, ipv4Cidr: '10.0.40.1/24', ipv6Mode: 'disabled', isolateClients: true, allowInternet: true },
+        { name: 'trusted', vlanId: 20, ipv4Cidr: '10.0.20.1/24', ipv6Mode: 'delegated', isolateClients: false, allowInternet: true },
+      ],
+    });
+
+    expect(edgeEnterprise.nftScript).toContain('flags offload;');
+    expect(edgeEnterprise.nftScript).toContain('iifname "eth0" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"');
+    expect(edgeEnterprise.nftScript).toContain('oifname "eth0" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"');
+    expect(edgeEnterprise.nftScript).toContain('iifname "eth1.40" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"');
+    expect(edgeEnterprise.nftScript).toContain('oifname "eth1.40" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"');
+    expect(edgeEnterprise.nftScript).toContain('chain prerouting {');
+    expect(edgeEnterprise.nftScript).toContain('iifname "eth0" tcp dport 443 dnat ip to 10.0.0.2:443 comment "k3s-https-ingress"');
+    expect(edgeEnterprise.nftScript).toContain('iifname "eth0" ip daddr 10.0.0.2 tcp dport 443 accept comment "k3s-https-ingress"');
+    expect(edgeEnterprise.nftScript).toContain('ip6 daddr 2001:db8:1::2 tcp dport 443 accept comment "allow-v6-https"');
+    expect(edgeEnterprise.nftScript).toContain('iifname "eth1.40" oifname "eth0" accept comment "zone-iot-to-wan"');
+    expect(edgeEnterprise.nftScript).toContain('iifname "eth1.40" oifname != "eth0" drop comment "zone-iot-east-west-drop"');
+    expect(edgeEnterprise.nftScript).toContain('iifname "eth1.20" oifname "eth0" accept comment "zone-trusted-to-wan"');
   });
 
   it('detects shadowed rules and unused aliases via linter', () => {

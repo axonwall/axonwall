@@ -1,7 +1,7 @@
 import promClient from 'prom-client';
 import { compileNftables, compileSatelliteNftables } from '@axonwall/lib/compile/nft';
 import { lintRuleset } from '@axonwall/lib/lint';
-import type { DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import * as crypto from 'node:crypto';
 
 export interface CompiledBundle {
@@ -373,6 +373,11 @@ async function main() {
     id: string;
     connectedAt: string;
     lastSeen: string;
+    role?: 'satellite' | 'edge-ngfw';
+    skuProfile?: string;
+    wanInterface?: string;
+    lanInterface?: string;
+    fastpathOffload?: boolean;
     ip?: string;
     arch?: string;
     wgPrivateKey?: string;
@@ -388,10 +393,162 @@ async function main() {
       activeConns: number;
       rxBytesTotal: number;
       txBytesTotal: number;
+      pid1Mode?: boolean;
+      kernelVersion?: string;
+      skuProfile?: string;
     };
+    edgeFlows?: any[];
+    edgeFirewallLogs?: any[];
   }
 
   const activeSatellites = new Map<string, SatelliteState>();
+
+  function loadLocalDesiredState(): DesiredState | null {
+    const candidates = ['/etc/axonwall/state.json', '/var/lib/axonwall/state.json'];
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p)) {
+          const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+          const parsed = DesiredStateSchema.safeParse(raw);
+          if (parsed.success) return parsed.data;
+        }
+      } catch {
+        // Ignore parse/read error
+      }
+    }
+    return null;
+  }
+
+  function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null) {
+    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return;
+
+    const localState = desiredState !== undefined ? desiredState : loadLocalDesiredState();
+    const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
+    const hostedEdge = localState?.hostedEdge;
+    const isEdge =
+      sat.role === 'edge-ngfw' ||
+      fleetNode?.role === 'edge-ngfw' ||
+      sat.id.startsWith('edge-') ||
+      sat.id === 'edge';
+
+    if (isEdge) {
+      sat.role = 'edge-ngfw';
+    }
+
+    const mergedNode = {
+      ...fleetNode,
+      ...sat,
+      role: isEdge ? ('edge-ngfw' as const) : (fleetNode?.role || sat.role || 'satellite'),
+      skuProfile: fleetNode?.skuProfile || sat.skuProfile || hostedEdge?.skuProfile || 'sku-vm-virtio',
+      wanInterface: fleetNode?.wanInterface || sat.wanInterface || 'eth0',
+      lanInterface: fleetNode?.lanInterface || sat.lanInterface || 'eth1',
+      portForwards: fleetNode?.portForwards || hostedEdge?.portForwards || [],
+      ipv6Allow: fleetNode?.ipv6Allow || hostedEdge?.ipv6Allow || [],
+      zones: fleetNode?.zones || [],
+      disabledIpv6Interfaces:
+        fleetNode?.disabledIpv6Interfaces ||
+        [
+          ...(hostedEdge?.wan?.ipv6Mode === 'disabled' ? ['eth0'] : []),
+          ...(hostedEdge?.lan?.ipv6Mode === 'disabled' ? ['eth1'] : []),
+        ],
+    };
+
+    const { nftScript } = compileSatelliteNftables(mergedNode);
+    sat.ws.send(
+      JSON.stringify({
+        type: 'SYNC_NFTABLES',
+        payload: {
+          script: nftScript,
+        },
+      }),
+    );
+
+    if (isEdge) {
+      const wanDev = mergedNode.wanInterface || 'eth0';
+      const lanDev = mergedNode.lanInterface || 'eth1';
+      const wanAddress =
+        fleetNode?.wanAddress ||
+        (hostedEdge?.wan?.ipv4Mode === 'static' && hostedEdge.wan.ipv4Address
+          ? hostedEdge.wan.ipv4Address
+          : 'dhcp');
+      const wanGateway =
+        hostedEdge?.wan?.ipv4Mode === 'static' ? hostedEdge.wan.ipv4Gateway : undefined;
+      const lanAddress =
+        fleetNode?.lanAddress || hostedEdge?.lan?.edgeAddress || '10.0.0.1/24';
+      const wanIpv6Mode =
+        hostedEdge?.wan?.ipv6Mode || fleetNode?.ipv6Mode || 'auto';
+      const lanIpv6Mode =
+        hostedEdge?.lan?.ipv6Mode || fleetNode?.ipv6Mode || 'delegated';
+
+      const interfaces: Array<{
+        name: string;
+        device: string;
+        address?: string;
+        gateway?: string;
+        ipv6Mode?: string;
+        mtu: number;
+        enabled: boolean;
+      }> = [
+        {
+          name: 'wan',
+          device: wanDev,
+          address: wanAddress,
+          ...(wanGateway ? { gateway: wanGateway } : {}),
+          ipv6Mode: wanIpv6Mode,
+          mtu: 1500,
+          enabled: true,
+        },
+        {
+          name: 'lan',
+          device: lanDev,
+          address: lanAddress,
+          ipv6Mode: lanIpv6Mode,
+          mtu: 1500,
+          enabled: true,
+        },
+      ];
+
+      if (Array.isArray(mergedNode.zones)) {
+        for (const z of mergedNode.zones) {
+          if (z && typeof z.vlanId === 'number' && z.ipv4Cidr) {
+            interfaces.push({
+              name: z.name,
+              device: `${lanDev}.${z.vlanId}`,
+              address: z.ipv4Cidr,
+              ipv6Mode: z.ipv6Mode || 'delegated',
+              mtu: 1500,
+              enabled: true,
+            });
+          }
+        }
+      }
+
+      sat.ws.send(
+        JSON.stringify({
+          type: 'SYNC_INTERFACES',
+          payload: { interfaces },
+        }),
+      );
+
+      if (localState?.routes && localState.routes.length > 0) {
+        const enabledRoutes = localState.routes
+          .filter((r) => r.enabled)
+          .map((r) => ({
+            destination: r.network,
+            gateway: r.gateway,
+            ...(r.interface ? { device: r.interface } : {}),
+          }));
+        if (enabledRoutes.length > 0) {
+          sat.ws.send(
+            JSON.stringify({
+              type: 'SYNC_ROUTES',
+              payload: { routes: enabledRoutes },
+            }),
+          );
+        }
+      }
+    }
+  }
 
 // Prometheus Metrics Definition
 const prometheusRegistry = new promClient.Registry();
@@ -435,6 +592,13 @@ const satRxBytesGauge = new promClient.Counter({
 const satTxBytesGauge = new promClient.Counter({
   name: 'axonwall_satellite_tx_bytes_total',
   help: 'Total transmitted bytes on the satellite',
+  labelNames: ['satellite_id'],
+  registers: [prometheusRegistry]
+});
+
+const satFlowsCounter = new promClient.Counter({
+  name: 'axonwall_satellite_flow_events_total',
+  help: 'Total stateless conntrack flow and firewall log records streamed from Edge NGFWs',
   labelNames: ['satellite_id'],
   registers: [prometheusRegistry]
 });
@@ -514,6 +678,21 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       return;
     }
 
+    if (pathname === '/api/v1/fleet/flows' && req.method === 'GET') {
+      if (!verifyFleetAuth(req, res)) return;
+      const nodesData: Record<string, { flows: any[]; firewallLogs: any[]; lastSeen: string }> = {};
+      for (const [id, sat] of activeSatellites.entries()) {
+        nodesData[id] = {
+          flows: sat.edgeFlows || [],
+          firewallLogs: sat.edgeFirewallLogs || [],
+          lastSeen: sat.lastSeen,
+        };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ nodes: nodesData }));
+      return;
+    }
+
     if (pathname === '/api/v1/fleet/block' && req.method === 'POST') {
       if (!verifyFleetAuth(req, res)) return;
       let body = '';
@@ -589,6 +768,90 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         totalEnrolled: activeSatellites.size,
         satellites: satellitesData,
       }));
+      return;
+    }
+
+    if (pathname === '/api/v1/fleet/ha-transition' && req.method === 'POST') {
+      if (!verifyFleetAuth(req, res)) return;
+      let body = '';
+      req.on('data', (chunk: any) => {
+        body += chunk.toString();
+        if (body.length > 65536) {
+          req.destroy();
+          return;
+        }
+      });
+      req.on('end', () => {
+        try {
+          const payload = body ? JSON.parse(body) : {};
+          const rawRole = String(payload.role || payload.state || '').toLowerCase();
+          const msgType = rawRole === 'master' || rawRole === 'active' || payload.type === 'PROMOTE' ? 'PROMOTE' : 'DEMOTE';
+          const normalizedRole = msgType === 'PROMOTE' ? 'active' : 'standby';
+          const sharedWanMac = typeof payload.sharedWanMac === 'string' ? payload.sharedWanMac : undefined;
+          const lanVip = typeof payload.lanVip === 'string' ? payload.lanVip : '10.0.0.1/24';
+          const targetId = typeof payload.satelliteId === 'string' ? payload.satelliteId.trim() : '';
+
+          let notified = 0;
+          for (const sat of activeSatellites.values()) {
+            const isTarget = targetId
+              ? sat.id === targetId
+              : sat.role === 'edge-ngfw' || sat.id.startsWith('edge-') || sat.id === 'edge';
+            if (isTarget && sat.ws && sat.ws.readyState === WebSocket.OPEN) {
+              sat.ws.send(
+                JSON.stringify({
+                  type: msgType,
+                  payload: {
+                    role: normalizedRole,
+                    sharedWanMac,
+                    lanVip,
+                  },
+                }),
+              );
+              notified++;
+            }
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/v1/fleet/sync' && req.method === 'POST') {
+      if (!verifyFleetAuth(req, res)) return;
+      let body = '';
+      req.on('data', (chunk: any) => {
+        body += chunk.toString();
+        if (body.length > 524288) {
+          req.destroy();
+          return;
+        }
+      });
+      req.on('end', () => {
+        try {
+          let desired: DesiredState | null = null;
+          if (body.trim()) {
+            const parsed = DesiredStateSchema.safeParse(JSON.parse(body));
+            if (parsed.success) desired = parsed.data;
+          }
+          let synced = 0;
+          for (const sat of activeSatellites.values()) {
+            if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
+              syncSatelliteDesiredState(sat, desired);
+              synced++;
+            }
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, syncedSatellites: synced }));
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+      });
       return;
     }
 
@@ -1012,6 +1275,11 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       id: satId,
       connectedAt: new Date().toISOString(),
       lastSeen: new Date().toISOString(),
+      role: existing?.role || (satId.startsWith('edge-') || satId === 'edge' ? 'edge-ngfw' : 'satellite'),
+      skuProfile: existing?.skuProfile,
+      wanInterface: existing?.wanInterface,
+      lanInterface: existing?.lanInterface,
+      fastpathOffload: existing?.fastpathOffload,
       ip: remoteIp.replace(/^::ffff:/, ''),
       arch: (request.headers['user-agent']?.includes('arm') ? 'arm64' : 'amd64'),
       wgPrivateKey,
@@ -1037,6 +1305,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
               report = parsed.payload;
           }
           state.metrics = report.metrics;
+          if (report.metrics?.pid1Mode) {
+            state.role = 'edge-ngfw';
+          }
+          if (report.metrics?.skuProfile) {
+            state.skuProfile = report.metrics.skuProfile;
+          }
           console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics.activeConns}`);
           
           // Update Prometheus metrics
@@ -1057,6 +1331,17 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'PING', payload: {} }));
+          }
+        } else if (parsed.type === 'EDGE_FLOW_BATCH') {
+          const batch = typeof parsed.payload === 'string' ? JSON.parse(parsed.payload) : parsed.payload;
+          if (Array.isArray(batch?.flows)) {
+            state.edgeFlows = batch.flows.slice(0, 100);
+            satFlowsCounter.inc({ satellite_id: satId }, batch.flows.length);
+          }
+          if (Array.isArray(batch?.firewallLogs) && batch.firewallLogs.length > 0) {
+            const existingLogs = state.edgeFirewallLogs || [];
+            state.edgeFirewallLogs = [...batch.firewallLogs, ...existingLogs].slice(0, 100);
+            satFlowsCounter.inc({ satellite_id: satId }, batch.firewallLogs.length);
           }
         }
       } catch {
@@ -1108,15 +1393,9 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       }
     }
 
-    // 2. Push initial compiled nftables ruleset
+    // 2. Push initial compiled nftables ruleset (and SYNC_INTERFACES / SYNC_ROUTES for edge-ngfw)
     if (ws.readyState === WebSocket.OPEN) {
-      const { nftScript } = compileSatelliteNftables(state);
-      ws.send(JSON.stringify({
-        type: 'SYNC_NFTABLES',
-        payload: {
-          script: nftScript
-        }
-      }));
+      syncSatelliteDesiredState(state);
     }
 
     // 3. Broadcast mesh update to all satellites (including the new one)

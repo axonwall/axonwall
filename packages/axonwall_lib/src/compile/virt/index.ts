@@ -5,9 +5,13 @@ import type {
   PciPassthroughDevice,
   VxlanZone,
   VirtConfig,
+  Bridge,
 } from '../../schemas/index.js';
+import { HostedEdgeConfigSchema } from '../../schemas/index.js';
+import { compileSatelliteNftables } from '../nft/index.js';
 
 export interface CompiledVmProcess {
+  id?: string;
   vmid: number;
   name: string;
   qemuBinary: string;
@@ -16,6 +20,17 @@ export interface CompiledVmProcess {
   vncSocket: string;
   serialSocket: string;
   pidFile: string;
+}
+
+export type VmProcessSpec = CompiledVmProcess;
+
+export interface CompiledHostedEdge {
+  vmSpec: VmProcessSpec;
+  userData: string;
+  metaData: string;
+  baselineNftScript: string;
+  wanBridge: Bridge;
+  lanBridge: Bridge;
 }
 
 export interface CompiledCloudInit {
@@ -68,7 +83,9 @@ const SAFE_ZVOL_PATH_REGEX = /^\/dev\/[a-zA-Z0-9_./-]+$/;
 const SAFE_ISO_PATH_REGEX = /^\/[a-zA-Z0-9_./-]+$/;
 const SAFE_MAC_REGEX = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
 const SAFE_PCI_BDF_REGEX = /^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/;
+const SAFE_PCI_SLOT_REGEX = /^0x[0-9a-fA-F]+$/;
 const SAFE_IFACE_REGEX = /^[a-zA-Z0-9_.:-]+$/;
+const SAFE_FWCFG_NAME_REGEX = /^[a-zA-Z0-9_./-]+$/;
 
 export function generateDeterministicMac(vmid: number, nicIdx: number): string {
   const hexVmid = vmid.toString(16).padStart(4, '0');
@@ -114,13 +131,63 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
     `unix:${vncSocket}`,
   ];
 
-  if (vm.bios === 'ovmf') {
+  if (vm.bios === 'ovmf' && !vm.kernelPath) {
     args.push(
       '-drive',
       'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd',
       '-drive',
       `if=pflash,format=raw,file=/var/lib/axonwall/nvram/vm-${vm.vmid}.fd`
     );
+  }
+
+  if (vm.kernelPath) {
+    if (
+      vm.kernelPath.includes(',') ||
+      vm.kernelPath.includes('..') ||
+      /[\r\n\0]/.test(vm.kernelPath) ||
+      !SAFE_ISO_PATH_REGEX.test(vm.kernelPath)
+    ) {
+      throw new Error(`Invalid VM kernel path: ${vm.kernelPath}`);
+    }
+    args.push('-kernel', vm.kernelPath);
+    if (vm.initrdPath) {
+      if (
+        vm.initrdPath.includes(',') ||
+        vm.initrdPath.includes('..') ||
+        /[\r\n\0]/.test(vm.initrdPath) ||
+        !SAFE_ISO_PATH_REGEX.test(vm.initrdPath)
+      ) {
+        throw new Error(`Invalid VM initrd path: ${vm.initrdPath}`);
+      }
+      args.push('-initrd', vm.initrdPath);
+    }
+    if (vm.kernelArgs) {
+      args.push('-append', String(vm.kernelArgs).replace(/[\r\n\0]+/g, ' ').trim());
+    }
+  }
+
+  if (vm.fwCfg && vm.fwCfg.length > 0) {
+    for (const entry of vm.fwCfg) {
+      if (
+        !entry.name ||
+        !entry.file ||
+        entry.name.includes(',') ||
+        entry.file.includes(',') ||
+        entry.name.includes('..') ||
+        entry.file.includes('..') ||
+        !SAFE_FWCFG_NAME_REGEX.test(entry.name) ||
+        !SAFE_ISO_PATH_REGEX.test(entry.file)
+      ) {
+        throw new Error(`Invalid VM fw_cfg entry: ${entry.name}=${entry.file}`);
+      }
+      args.push('-fw_cfg', `name=${entry.name},file=${entry.file}`);
+    }
+  }
+
+  if (vm.watchdog === 'i6300esb') {
+    args.push('-device', 'i6300esb', '-watchdog-action', 'reset');
+  } else if (vm.watchdog === 'ib700') {
+    args.push('-device', 'ib700', '-watchdog-action', 'reset');
   }
 
   if (vm.tpm2) {
@@ -149,74 +216,75 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
     );
   }
 
-  // SCSI Controller if needed
-  const hasScsi = vm.disks.some((d) => d.bus === 'scsi');
-  if (hasScsi) {
-    args.push('-device', 'virtio-scsi-pci,id=scsihw0');
+  // Storage Disks (skipped when vm.diskless is true)
+  if (!vm.diskless) {
+    const hasScsi = vm.disks.some((d) => d.bus === 'scsi');
+    if (hasScsi) {
+      args.push('-device', 'virtio-scsi-pci,id=scsihw0');
+    }
+
+    vm.disks.forEach((disk, idx) => {
+      const pool = disk.pool || 'tank';
+      if (!SAFE_POOL_REGEX.test(pool) || pool.includes('..')) {
+        throw new Error(`Invalid VM disk storage pool: ${pool}`);
+      }
+      const driveId = `drive-disk${idx}`;
+      const zvolPath =
+        disk.zvol || `/dev/zvol/${pool}/vms/vm-${vm.vmid}-disk-${idx}`;
+      if (
+        zvolPath.includes(',') ||
+        zvolPath.includes('..') ||
+        /[\r\n\0]/.test(zvolPath) ||
+        !SAFE_ZVOL_PATH_REGEX.test(zvolPath)
+      ) {
+        throw new Error(`Invalid VM disk zvol path: ${zvolPath}`);
+      }
+      const cache = disk.cache || 'none';
+      const discardOpt = disk.discard ? ',discard=unmap' : '';
+      const aioOpt = cache === 'none' ? ',aio=native' : '';
+      const roOpt = disk.readOnly ? ',readonly=on' : '';
+
+      args.push(
+        '-drive',
+        `file=${zvolPath},if=none,id=${driveId},format=raw,cache=${cache}${discardOpt}${aioOpt}${roOpt}`
+      );
+
+      const bootIndex = idx + 1;
+      switch (disk.bus) {
+        case 'scsi':
+          args.push(
+            '-device',
+            `scsi-hd,bus=scsihw0.0,drive=${driveId},id=scsi${idx},bootindex=${bootIndex}`
+          );
+          break;
+        case 'sata':
+          args.push(
+            '-device',
+            `ide-hd,drive=${driveId},id=sata${idx},bootindex=${bootIndex}`
+          );
+          break;
+        case 'nvme':
+          args.push(
+            '-device',
+            `nvme,drive=${driveId},id=nvme${idx},serial=AXON${vm.vmid}D${idx},bootindex=${bootIndex}`
+          );
+          break;
+        case 'ide':
+          args.push(
+            '-device',
+            `ide-hd,drive=${driveId},id=ide${idx},bootindex=${bootIndex}`
+          );
+          break;
+        case 'virtio':
+        default:
+          args.push(
+            '-device',
+            `virtio-blk-pci,drive=${driveId},id=virtio${idx},bootindex=${bootIndex}`
+          );
+          break;
+      }
+    });
   }
-
-  // Storage Disks
-  vm.disks.forEach((disk, idx) => {
-    const pool = disk.pool || 'tank';
-    if (!SAFE_POOL_REGEX.test(pool) || pool.includes('..')) {
-      throw new Error(`Invalid VM disk storage pool: ${pool}`);
-    }
-    const driveId = `drive-disk${idx}`;
-    const zvolPath =
-      disk.zvol || `/dev/zvol/${pool}/vms/vm-${vm.vmid}-disk-${idx}`;
-    if (
-      zvolPath.includes(',') ||
-      zvolPath.includes('..') ||
-      /[\r\n\0]/.test(zvolPath) ||
-      !SAFE_ZVOL_PATH_REGEX.test(zvolPath)
-    ) {
-      throw new Error(`Invalid VM disk zvol path: ${zvolPath}`);
-    }
-    const cache = disk.cache || 'none';
-    const discardOpt = disk.discard ? ',discard=unmap' : '';
-    const aioOpt = cache === 'none' ? ',aio=native' : '';
-    const roOpt = disk.readOnly ? ',readonly=on' : '';
-
-    args.push(
-      '-drive',
-      `file=${zvolPath},if=none,id=${driveId},format=raw,cache=${cache}${discardOpt}${aioOpt}${roOpt}`
-    );
-
-    const bootIndex = idx + 1;
-    switch (disk.bus) {
-      case 'scsi':
-        args.push(
-          '-device',
-          `scsi-hd,bus=scsihw0.0,drive=${driveId},id=scsi${idx},bootindex=${bootIndex}`
-        );
-        break;
-      case 'sata':
-        args.push(
-          '-device',
-          `ide-hd,drive=${driveId},id=sata${idx},bootindex=${bootIndex}`
-        );
-        break;
-      case 'nvme':
-        args.push(
-          '-device',
-          `nvme,drive=${driveId},id=nvme${idx},serial=AXON${vm.vmid}D${idx},bootindex=${bootIndex}`
-        );
-        break;
-      case 'ide':
-        args.push(
-          '-device',
-          `ide-hd,drive=${driveId},id=ide${idx},bootindex=${bootIndex}`
-        );
-        break;
-      case 'virtio':
-      default:
-        args.push(
-          '-device',
-          `virtio-blk-pci,drive=${driveId},id=virtio${idx},bootindex=${bootIndex}`
-        );
-        break;
-    }
-  });
 
   // ISO / Optical Drive
   if (vm.iso) {
@@ -245,26 +313,36 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
   // NICs
   vm.nics.forEach((nic, idx) => {
     const netId = `net${idx}`;
-    const tapName = `tap${vm.vmid}i${idx}`;
+    const tapName = nic.vnet && SAFE_IFACE_REGEX.test(nic.vnet) ? nic.vnet : `tap${vm.vmid}i${idx}`;
     const mac = nic.mac || generateDeterministicMac(vm.vmid, idx);
     if (!SAFE_MAC_REGEX.test(mac)) {
       throw new Error(`Invalid VM NIC MAC address: ${mac}`);
     }
 
-    args.push(
-      '-netdev',
-      `tap,id=${netId},ifname=${tapName},script=no,downscript=no`
-    );
+    let netdevSpec = `tap,id=${netId},ifname=${tapName},script=no,downscript=no,vhost=on`;
+    if (nic.queues && nic.queues > 1) {
+      netdevSpec += `,queues=${nic.queues}`;
+    }
+
+    args.push('-netdev', netdevSpec);
 
     let devModel = 'virtio-net-pci';
     if (nic.model === 'e1000') devModel = 'e1000';
     if (nic.model === 'e1000e') devModel = 'e1000e';
     if (nic.model === 'vmxnet3') devModel = 'vmxnet3';
 
-    args.push(
-      '-device',
-      `${devModel},netdev=${netId},mac=${mac},id=nic${idx}`
-    );
+    let devSpec = `${devModel},netdev=${netId},mac=${mac},id=nic${idx}`;
+    if (nic.queues && nic.queues > 1 && devModel === 'virtio-net-pci') {
+      devSpec += `,mq=on,vectors=${2 * nic.queues + 2}`;
+    }
+    if (nic.pciAddr) {
+      if (!SAFE_PCI_SLOT_REGEX.test(nic.pciAddr)) {
+        throw new Error(`Invalid VM NIC PCI slot address: ${nic.pciAddr}`);
+      }
+      devSpec += `,addr=${nic.pciAddr}`;
+    }
+
+    args.push('-device', devSpec);
   });
 
   // PCIe Passthrough
@@ -279,6 +357,7 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
   args.push('-vga', 'std');
 
   return {
+    ...(vm.id ? { id: vm.id } : {}),
     vmid: vm.vmid,
     name: vm.name,
     qemuBinary,
@@ -519,6 +598,211 @@ export function compileVxlan(zones: VxlanZone[]): CompiledVxlan {
   }
 
   return { ipCommands };
+}
+
+export function compileHostedEdge(
+  state: DesiredState,
+  opts?: { ztpToken?: string; caCertPem?: string; hostname?: string }
+): CompiledHostedEdge {
+  const edgeCfg = HostedEdgeConfigSchema.parse(state.hostedEdge ?? {});
+  const slot = edgeCfg.ukiSlot || 'A';
+  const sku = edgeCfg.skuProfile || 'sku-vm-virtio';
+  const hostHostname = sanitizeIdentifier(opts?.hostname || state.system?.hostname || 'axonwall');
+  const edgeId = `edge-${hostHostname}`;
+  const ztpToken = opts?.ztpToken || 'ztp_hosted_edge_bootstrap';
+  const hubIpOnly = (edgeCfg.lan.hostAddress || '10.0.0.2/24').split('/')[0] || '10.0.0.2';
+  const hubPort = state.fleet?.listenPort || 2966;
+  const hubUrl = `wss://${hubIpOnly}:${hubPort}/ws/satellite`;
+
+  const wanBridgeName = edgeCfg.wan.bridgeName || 'br-wan';
+  const lanBridgeName = edgeCfg.lan.bridgeName || 'br-lan';
+  const wanMac =
+    edgeCfg.ha.sharedWanMac ||
+    edgeCfg.wan.macAddress ||
+    generateDeterministicMac(100, 0);
+  const lanMac = generateDeterministicMac(100, 1);
+
+  const disabledIpv6Interfaces: string[] = [];
+  if (edgeCfg.wan.ipv6Mode === 'disabled') {
+    disabledIpv6Interfaces.push('eth0');
+  }
+  if (edgeCfg.lan.ipv6Mode === 'disabled') {
+    disabledIpv6Interfaces.push('eth1');
+  }
+
+  const { nftScript: baselineNftScript } = compileSatelliteNftables({
+    id: edgeId,
+    role: 'edge-ngfw',
+    skuProfile: sku,
+    wanInterface: 'eth0',
+    lanInterface: 'eth1',
+    fastpathOffload: true,
+    hardwareOffload: sku === 'sku-x86-enterprise-10g-25g',
+    disabledIpv6Interfaces,
+    portForwards: edgeCfg.portForwards,
+    ipv6Allow: edgeCfg.ipv6Allow,
+  });
+
+  const edgeVm: VirtualMachine = {
+    id: 'edge',
+    vmid: 100,
+    name: 'axonwall-edge-ngfw',
+    description: 'Hosted Super-Slim Edge NGFW (UKI PID 1)',
+    osType: 'linux',
+    bios: 'ovmf',
+    secureBoot: false,
+    tpm2: false,
+    sockets: 1,
+    cores: edgeCfg.vcpus || 2,
+    cpuType: 'host',
+    memoryMb: edgeCfg.memoryMiB || 256,
+    balloonMinMb: 0,
+    disks: [],
+    diskless: true,
+    kernelPath: `/usr/lib/axonwall/edge/slot-${slot}/axonwall-edge-${sku}.efi`,
+    fwCfg: [
+      { name: 'opt/org.axonwall/user-data', file: '/run/axonwall/edge/user-data' },
+      { name: 'opt/org.axonwall/meta-data', file: '/run/axonwall/edge/meta-data' },
+    ],
+    watchdog: 'i6300esb',
+    nics: [
+      {
+        id: 'wan',
+        mac: wanMac,
+        bridge: wanBridgeName,
+        vnet: 'tap-edge-wan',
+        model: 'virtio',
+        firewall: false,
+        rateLimitMbps: 0,
+        attachMode: edgeCfg.wan.attachMode || 'bridge',
+        hostDevice: edgeCfg.wan.hostDevice || 'eth0',
+        pciAddr: '0x3',
+      },
+      {
+        id: 'lan',
+        mac: lanMac,
+        bridge: lanBridgeName,
+        vnet: 'tap-edge-lan',
+        model: 'virtio',
+        firewall: false,
+        rateLimitMbps: 0,
+        attachMode: 'bridge',
+        queues: 2,
+        pciAddr: '0x4',
+      },
+    ],
+    pciPassthrough: [],
+    usbPassthrough: [],
+    autostart: true,
+    haManaged: edgeCfg.ha.enabled,
+    agent: false,
+    enabled: true,
+  };
+
+  const vmSpec = compileVmProcess(edgeVm);
+
+  const wanAddrSpec =
+    edgeCfg.wan.ipv4Mode === 'static' && edgeCfg.wan.ipv4Address
+      ? edgeCfg.wan.ipv4Address
+      : 'dhcp';
+
+  const nftB64 = Buffer.from(baselineNftScript, 'utf8').toString('base64');
+
+  const userDataLines: string[] = [
+    '#cloud-config',
+    `hostname: ${edgeId}`,
+    'axonwall:',
+    `  hub: ${hubUrl}`,
+    `  id: ${edgeId}`,
+    `  token: ${sanitizeCloudInitScalar(ztpToken)}`,
+    `  sku: ${sku}`,
+    `  slot: ${slot}`,
+  ];
+
+  if (opts?.caCertPem && opts.caCertPem.trim()) {
+    userDataLines.push('  ca_cert: |');
+    for (const line of opts.caCertPem.trim().split(/\r?\n/)) {
+      userDataLines.push(`    ${line}`);
+    }
+  }
+
+  userDataLines.push(
+    '  interfaces:',
+    '    - name: wan',
+    '      device: eth0',
+    `      address: ${wanAddrSpec}`,
+  );
+  if (edgeCfg.wan.ipv4Mode === 'static' && edgeCfg.wan.ipv4Gateway) {
+    userDataLines.push(`      gateway: ${edgeCfg.wan.ipv4Gateway}`);
+  }
+  userDataLines.push(
+    `      ipv6_mode: ${edgeCfg.wan.ipv6Mode}`,
+    '    - name: lan',
+    '      device: eth1',
+    `      address: ${edgeCfg.lan.edgeAddress}`,
+    `      ipv6_mode: ${edgeCfg.lan.ipv6Mode}`,
+    'write_files:',
+    '  - path: /etc/nftables.conf',
+    '    permissions: "0600"',
+    '    encoding: b64',
+    `    content: ${nftB64}`,
+    '',
+  );
+
+  const metaData = [
+    '# Axonwall Hosted Edge NGFW Cloud-Init Meta-Data',
+    `instance-id: ${edgeId}`,
+    `local-hostname: ${edgeId}`,
+    '',
+  ].join('\n');
+
+  const wanBridge: Bridge = {
+    name: wanBridgeName,
+    members: [
+      {
+        interface: edgeCfg.wan.hostDevice || 'eth0',
+        stp: false,
+        cost: 100,
+        priority: 32,
+      },
+    ],
+    vlanFiltering: false,
+    stp: false,
+    description: 'Hardened L2 WAN Transit Bridge (no host L3 stack)',
+  };
+
+  const lanHostDevs = (state.interfaces || [])
+    .filter(
+      (i) =>
+        i.enabled &&
+        i.role !== 'wan-delegated' &&
+        i.device !== edgeCfg.wan.hostDevice &&
+        i.device !== wanBridgeName &&
+        i.device !== lanBridgeName,
+    )
+    .map((i) => ({
+      interface: i.device,
+      stp: false,
+      cost: 100,
+      priority: 32,
+    }));
+
+  const lanBridge: Bridge = {
+    name: lanBridgeName,
+    members: lanHostDevs,
+    vlanFiltering: true,
+    stp: false,
+    description: 'Internal LAN & Service Bridge (Edge + Host + NAS + K3s)',
+  };
+
+  return {
+    vmSpec,
+    userData: userDataLines.join('\n'),
+    metaData,
+    baselineNftScript,
+    wanBridge,
+    lanBridge,
+  };
 }
 
 export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {

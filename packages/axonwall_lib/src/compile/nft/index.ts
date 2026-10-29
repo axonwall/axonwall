@@ -784,9 +784,64 @@ export function compileSatelliteNftables(node: any): CompileResult {
   const files: { path: string; content: string; fileMode: number }[] = [];
   const reloadServices: string[] = [];
 
+  const isEdgeNgfw = node?.role === 'edge-ngfw';
+  const wanDev = isValidDevice(node?.wanInterface || 'eth0') ? (node?.wanInterface || 'eth0') : 'eth0';
+  const lanDev = isValidDevice(node?.lanInterface || 'eth1') ? (node?.lanInterface || 'eth1') : 'eth1';
+  const fastpathOffload = isEdgeNgfw ? node?.fastpathOffload !== false : Boolean(node?.fastpathOffload);
+  const hwOffload = Boolean(node?.hardwareOffload || node?.skuProfile === 'sku-x86-enterprise-10g-25g');
+
+  const disabledV6Set = new Set<string>();
+  if (Array.isArray(node?.disabledIpv6Interfaces)) {
+    for (const dev of node.disabledIpv6Interfaces) {
+      if (typeof dev === 'string' && isValidDevice(dev)) {
+        disabledV6Set.add(dev);
+      }
+    }
+  }
+  if (node?.ipv6Mode === 'disabled') {
+    disabledV6Set.add(wanDev);
+    disabledV6Set.add(lanDev);
+  }
+  const zones: Array<{
+    name: string;
+    vlanId: number;
+    ipv4Cidr: string;
+    ipv6Mode?: string;
+    isolateClients?: boolean;
+    allowInternet?: boolean;
+  }> = Array.isArray(node?.zones) ? node.zones : [];
+  for (const zone of zones) {
+    if (zone && typeof zone.vlanId === 'number' && zone.vlanId >= 1 && zone.vlanId <= 4094) {
+      const zDev = `${lanDev}.${zone.vlanId}`;
+      if (zone.ipv6Mode === 'disabled' && isValidDevice(zDev)) {
+        disabledV6Set.add(zDev);
+      }
+    }
+  }
+  const disabledV6Devs = Array.from(disabledV6Set);
+
+  const portForwards: Array<{
+    proto: 'tcp' | 'udp';
+    wanPort: number;
+    targetIp: string;
+    targetPort: number;
+    comment?: string;
+  }> = Array.isArray(node?.portForwards) ? node.portForwards : [];
+
+  const ipv6Allow: Array<{
+    proto: 'tcp' | 'udp' | 'ipv6-icmp';
+    dstIp6: string;
+    dstPort?: number;
+    comment?: string;
+  }> = Array.isArray(node?.ipv6Allow) ? node.ipv6Allow : [];
+
   lines.push('#!/usr/sbin/nft -f');
-  lines.push('# Axonwall Auto-Generated Satellite nftables configuration');
-  lines.push(`# Node: ${node.id} | Generated: ${new Date().toISOString()}`);
+  lines.push(
+    isEdgeNgfw
+      ? `# Axonwall Auto-Generated Super-Slim Edge NGFW (PID 1 UKI) nftables configuration`
+      : '# Axonwall Auto-Generated Satellite nftables configuration',
+  );
+  lines.push(`# Node: ${node.id} | Role: ${isEdgeNgfw ? 'edge-ngfw' : 'satellite'} | SKU: ${node.skuProfile || 'generic'} | Generated: ${new Date().toISOString()}`);
   lines.push('');
   lines.push('flush ruleset');
   lines.push('table inet axonwall {');
@@ -802,8 +857,42 @@ export function compileSatelliteNftables(node: any): CompileResult {
   lines.push('    type ether_addr;');
   lines.push('  }');
   lines.push('');
+
+  if (fastpathOffload && wanDev !== lanDev) {
+    lines.push('  flowtable fastpath {');
+    lines.push('    hook ingress priority 0;');
+    lines.push(`    devices = { "${wanDev}", "${lanDev}" };`);
+    if (hwOffload) {
+      lines.push('    flags offload;');
+    }
+    lines.push('  }');
+    lines.push('');
+  }
+
+  if (isEdgeNgfw && portForwards.length > 0) {
+    lines.push('  chain prerouting {');
+    lines.push('    type nat hook prerouting priority dstnat; policy accept;');
+    for (const pf of portForwards) {
+      if (!pf || (pf.proto !== 'tcp' && pf.proto !== 'udp')) continue;
+      if (!Number.isInteger(pf.wanPort) || pf.wanPort < 1 || pf.wanPort > 65535) continue;
+      if (!Number.isInteger(pf.targetPort) || pf.targetPort < 1 || pf.targetPort > 65535) continue;
+      if (!pf.targetIp || /[;\r\n#{}'"]/.test(pf.targetIp)) continue;
+      const safeComment = pf.comment
+        ? pf.comment.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim()
+        : `port-forward-${pf.wanPort}`;
+      lines.push(
+        `    iifname "${wanDev}" ${pf.proto} dport ${pf.wanPort} dnat ip to ${pf.targetIp}:${pf.targetPort} comment "${safeComment}"`,
+      );
+    }
+    lines.push('  }');
+    lines.push('');
+  }
+
   lines.push('  chain input {');
   lines.push('    type filter hook input priority filter; policy drop;');
+  for (const dev of disabledV6Devs) {
+    lines.push(`    iifname "${dev}" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"`);
+  }
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
@@ -811,43 +900,129 @@ export function compileSatelliteNftables(node: any): CompileResult {
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
   lines.push('    iif "lo" accept');
-  
-  lines.push('    # Allow management protocols');
-  lines.push('    tcp dport 22 accept comment "allow-ssh"');
-  
+
+  if (!isEdgeNgfw) {
+    lines.push('    # Allow management protocols');
+    lines.push('    tcp dport 22 accept comment "allow-ssh"');
+  } else {
+    lines.push('    # Zero-Shell Edge NGFW UKI: no SSH daemon; permit RFC 4890 ICMPv6, DHCPv6 client & LAN control-plane');
+    lines.push(
+      '    icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept comment "rfc4890-icmpv6"',
+    );
+    lines.push(
+      `    iifname "${wanDev}" meta l4proto udp udp sport 547 udp dport 546 accept comment "allow-dhcpv6-client"`,
+    );
+    lines.push(`    iifname "${lanDev}" accept comment "allow-lan-control-plane"`);
+  }
+
   const wgTunnelIp = node.wireguard?.tunnelIp || node.tunnelIp;
   if (wgTunnelIp) {
     lines.push('    udp dport 51820 accept comment "allow-wireguard"');
     lines.push('    iifname "wg-axon0" accept comment "allow-wg-mesh-traffic"');
   }
-  
+
   // Headscale listener (WireGuard hole punching)
   lines.push('    udp dport 41641 accept comment "headscale-mesh"');
   lines.push('    iifname "tailscale0" accept comment "allow-tailscale-mesh-traffic"');
-  
+
+  if (isEdgeNgfw) {
+    // Must be the LAST input rule: a terminal drop placed earlier would shadow the
+    // WireGuard / Headscale accepts above and cut the edge off from the Hub.
+    lines.push(`    iifname "${wanDev}" limit rate 10/second log prefix "axonwall-rule:wan-drop: " drop comment "log-and-drop-wan-input"`);
+  }
+
   lines.push('  }');
   lines.push('');
-  
 
   lines.push('  chain forward {');
   lines.push('    type filter hook forward priority filter; policy drop;');
+  for (const dev of disabledV6Devs) {
+    lines.push(`    iifname "${dev}" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"`);
+    lines.push(`    oifname "${dev}" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"`);
+  }
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip daddr @blocked_ips drop comment "ai-micro-segmentation"');
   lines.push('    ip6 saddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ip6 daddr @blocked_ips6 drop comment "ai-micro-segmentation"');
   lines.push('    ether saddr @blocked_macs drop comment "ai-micro-segmentation"');
 
+  if (fastpathOffload && wanDev !== lanDev) {
+    // Only offload flows conntrack has already confirmed; offloading on the first
+    // packet would bypass the accept/drop decision below.
+    lines.push('    meta l4proto { tcp, udp } ct state established flow add @fastpath comment "wire-speed-flowtable-offload"');
+  }
+
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
+  if (isEdgeNgfw) {
+    lines.push(
+      '    icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, echo-reply } accept comment "rfc4890-icmpv6-forward"',
+    );
+    lines.push(`    iifname "${lanDev}" oifname "${wanDev}" accept comment "allow-lan-to-wan"`);
+
+    for (const zone of zones) {
+      if (!zone || typeof zone.vlanId !== 'number' || zone.vlanId < 1 || zone.vlanId > 4094) continue;
+      const zDev = `${lanDev}.${zone.vlanId}`;
+      if (!isValidDevice(zDev)) continue;
+      const zName = sanitizeIdentifier(zone.name || `vlan${zone.vlanId}`);
+      const isIsolated =
+        Boolean(zone.isolateClients) ||
+        zName.toLowerCase() === 'iot' ||
+        zName.toLowerCase() === 'guest';
+      if (zone.allowInternet !== false) {
+        lines.push(`    iifname "${zDev}" oifname "${wanDev}" accept comment "zone-${zName}-to-wan"`);
+      }
+      if (isIsolated) {
+        lines.push(`    iifname "${zDev}" oifname != "${wanDev}" drop comment "zone-${zName}-east-west-drop"`);
+      }
+    }
+
+    for (const pf of portForwards) {
+      if (!pf || (pf.proto !== 'tcp' && pf.proto !== 'udp')) continue;
+      if (!Number.isInteger(pf.targetPort) || pf.targetPort < 1 || pf.targetPort > 65535) continue;
+      if (!pf.targetIp || /[;\r\n#{}'"]/.test(pf.targetIp)) continue;
+      const safeComment = pf.comment
+        ? pf.comment.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim()
+        : `allow-dnat-${pf.wanPort}`;
+      lines.push(
+        `    iifname "${wanDev}" ip daddr ${pf.targetIp} ${pf.proto} dport ${pf.targetPort} accept comment "${safeComment}"`,
+      );
+    }
+
+    for (const rule of ipv6Allow) {
+      if (!rule || !rule.dstIp6 || /[;\r\n#{}'"]/.test(rule.dstIp6)) continue;
+      const safeComment = rule.comment
+        ? rule.comment.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim()
+        : 'ipv6-pinhole';
+      if (rule.proto === 'ipv6-icmp') {
+        lines.push(`    ip6 daddr ${rule.dstIp6} meta l4proto ipv6-icmp accept comment "${safeComment}"`);
+      } else if ((rule.proto === 'tcp' || rule.proto === 'udp') && rule.dstPort) {
+        lines.push(`    ip6 daddr ${rule.dstIp6} ${rule.proto} dport ${rule.dstPort} accept comment "${safeComment}"`);
+      } else if (rule.proto === 'tcp' || rule.proto === 'udp') {
+        lines.push(`    ip6 daddr ${rule.dstIp6} meta l4proto ${rule.proto} accept comment "${safeComment}"`);
+      }
+    }
+  }
   lines.push('    iifname "wg-axon0" accept');
   lines.push('    iifname "tailscale0" accept');
   lines.push('  }');
   lines.push('');
-  
+
   lines.push('  chain output {');
   lines.push('    type filter hook output priority filter; policy accept;');
+  for (const dev of disabledV6Devs) {
+    lines.push(`    oifname "${dev}" meta nfproto ipv6 drop comment "ipv6-disabled-on-interface"`);
+  }
   lines.push('  }');
-  
+
+  if (isEdgeNgfw) {
+    lines.push('');
+    lines.push('  chain postrouting {');
+    lines.push('    type nat hook postrouting priority srcnat; policy accept;');
+    lines.push(`    oifname "${wanDev}" masquerade comment "edge-ngfw-wan-masquerade"`);
+    lines.push('  }');
+  }
+
   lines.push('}');
   lines.push('');
 

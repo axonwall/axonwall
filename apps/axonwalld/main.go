@@ -945,7 +945,8 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 			return
 		}
 		s.Name = strings.ToLower(s.Name)
-		if s.Role != "wan" && s.Role != "lan" {
+		s.Role = strings.ToLower(strings.TrimSpace(s.Role))
+		if s.Role != "wan" && s.Role != "lan" && s.Role != "wan-delegated" {
 			if strings.HasPrefix(s.Name, "wan") {
 				s.Role = "wan"
 			} else {
@@ -974,9 +975,13 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 
 	// 1. Legacy 4-slot keys in interfaces.conf
 	if d := validDev(config["WAN_INTERFACE"]); d != "" {
+		wanRole := strings.ToLower(strings.TrimSpace(config["WAN_ROLE"]))
+		if wanRole == "" {
+			wanRole = "wan"
+		}
 		upsert(bootIfaceSpec{
 			Name:    "wan",
-			Role:    "wan",
+			Role:    wanRole,
 			Device:  d,
 			Mode:    config["WAN_MODE"],
 			IPv4:    validCIDR(config["WAN_IPV4_ADDRESS"]),
@@ -1201,6 +1206,22 @@ func applyBootInterfaces() {
 	defaultRouteSet := false
 
 	for _, spec := range specs {
+		if spec.Role == "wan-delegated" {
+			log.Printf("[Agent] Boot-apply: delegating WAN device %s (%s) to br-wan (host L3 disabled)", spec.Device, spec.Name)
+			if err := engine.HardenDelegatedWAN(spec.Device, "br-wan"); err != nil {
+				log.Printf("[Agent] Boot-apply: warning hardening delegated WAN %s: %v", spec.Device, err)
+			}
+			if err := engine.EnsureBridge(engine.BridgeSpec{
+				Name:             "br-wan",
+				Members:          []string{spec.Device},
+				DisableNetfilter: true,
+				IsolateHostStack: true,
+			}); err != nil {
+				log.Printf("[Agent] Boot-apply: warning ensuring br-wan for %s: %v", spec.Device, err)
+			}
+			continue
+		}
+
 		_ = exec.Command("ip", "link", "set", spec.Device, "up").Run()
 		if spec.Mode == "static" && spec.IPv4 != "" {
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
@@ -1288,6 +1309,10 @@ func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 	internalHasLink := false
 
 	for _, s := range specs {
+		if s.Role == "wan-delegated" {
+			wanDevSet[s.Device] = true
+			continue
+		}
 		if s.Role == "wan" {
 			wanDevs = append(wanDevs, s.Device)
 			wanDevSet[s.Device] = true
@@ -1498,6 +1523,7 @@ func main() {
 	terminalMgr := engine.NewTerminalManager()
 	taskManager := engine.NewTaskManager()
 	virtManager := engine.NewVirtManager(taskManager, nasManager)
+	go virtManager.AutostartAll()
 	vfioManager := engine.NewVFIOManager()
 	consoleProxy := engine.NewConsoleProxy()
 	watchdog := engine.NewWatchdogEngine()
@@ -2006,6 +2032,12 @@ func main() {
 				}
 				if req.Action == "register" && req.Spec != nil {
 					virtManager.RegisterVMSpec(*req.Spec)
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+					return
+				}
+				if req.Action == "unregister" {
+					virtManager.UnregisterVMSpec(req.VMID)
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 					return

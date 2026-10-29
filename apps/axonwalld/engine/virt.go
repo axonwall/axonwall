@@ -12,12 +12,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// VirtSpecsPath is the persistent file storing compiled VM specifications across daemon restarts.
+var VirtSpecsPath = "/var/lib/axonwall/virt-specs.json"
 
 type VMStatus struct {
 	VMID          int    `json:"vmid"`
@@ -74,15 +78,21 @@ type VirtManager struct {
 }
 
 type CompiledVmSpec struct {
-	VMID      int      `json:"vmid"`
-	Name      string   `json:"name"`
-	Binary    string   `json:"binary"`
-	Args      []string `json:"args"`
-	Disks     []VmDisk `json:"disks"`
-	Cores     int      `json:"cores"`
-	MemoryMb  int      `json:"memoryMb"`
-	CloudInit *CloudInitSpec
+	VMID      int               `json:"vmid"`
+	Name      string            `json:"name"`
+	Binary    string            `json:"binary"`
+	Args      []string          `json:"args"`
+	Disks     []VmDisk          `json:"disks"`
+	Cores     int               `json:"cores"`
+	MemoryMb  int               `json:"memoryMb"`
+	CloudInit *CloudInitSpec    `json:"cloudInit,omitempty"`
+	Autostart bool              `json:"autostart,omitempty"`
+	Bridges   map[string]string `json:"bridges,omitempty"`
+	FwCfg     map[string]string `json:"fwCfg,omitempty"`
 }
+
+// VMSpec is an alias for CompiledVmSpec.
+type VMSpec = CompiledVmSpec
 
 type VmDisk struct {
 	Name   string `json:"name"`
@@ -99,6 +109,9 @@ type CloudInitSpec struct {
 	Gateway       string   `json:"gateway"`
 	Nameservers   []string `json:"nameservers"`
 	CustomPayload string   `json:"customPayload"`
+	UserData      string   `json:"userData,omitempty"`
+	MetaData      string   `json:"metaData,omitempty"`
+	NetworkConfig string   `json:"networkConfig,omitempty"`
 }
 
 type CompiledCtSpec struct {
@@ -118,12 +131,13 @@ func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
 	_ = os.MkdirAll("/run/axonwall/pids", 0755)
 	_ = os.MkdirAll("/run/axonwall/qga", 0755)
 	_ = os.MkdirAll("/run/axonwall/lxc", 0755)
+	_ = os.MkdirAll("/run/axonwall/fwcfg", 0700)
 	_ = os.MkdirAll("/var/lib/axonwall/nvram", 0755)
 	_ = os.MkdirAll("/var/lib/axonwall/cloudinit", 0755)
 	_ = os.MkdirAll("/var/lib/axonwall/isos", 0755)
 	_ = os.MkdirAll("/var/lib/axonwall/backups", 0755)
 
-	return &VirtManager{
+	m := &VirtManager{
 		taskMgr:      taskMgr,
 		nasMgr:       nasMgr,
 		vmSpecs:      make(map[int]CompiledVmSpec),
@@ -131,9 +145,50 @@ func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
 		vmStartTimes: make(map[int]int64),
 		defaultPool:  "tank",
 	}
+	m.loadPersistedSpecs()
+	return m
 }
 
-// RegisterVMSpec stores or updates the compiled specification for a VM
+func (m *VirtManager) savePersistedSpecsLocked() {
+	if VirtSpecsPath == "" {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(VirtSpecsPath), 0755)
+	data, err := json.MarshalIndent(m.vmSpecs, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(VirtSpecsPath, data, 0600)
+}
+
+func (m *VirtManager) loadPersistedSpecs() {
+	if VirtSpecsPath == "" {
+		return
+	}
+	data, err := os.ReadFile(VirtSpecsPath)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	var loaded map[int]CompiledVmSpec
+	if err := json.Unmarshal(data, &loaded); err == nil && loaded != nil {
+		m.mu.Lock()
+		for id, spec := range loaded {
+			m.vmSpecs[id] = spec
+		}
+		m.mu.Unlock()
+		return
+	}
+	var list []CompiledVmSpec
+	if err := json.Unmarshal(data, &list); err == nil {
+		m.mu.Lock()
+		for _, spec := range list {
+			m.vmSpecs[spec.VMID] = spec
+		}
+		m.mu.Unlock()
+	}
+}
+
+// RegisterVMSpec stores or updates the compiled specification for a VM and persists to disk.
 func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) {
 	switch spec.Binary {
 	case "", "qemu-system-x86_64", "/usr/bin/qemu-system-x86_64":
@@ -154,6 +209,120 @@ func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.vmSpecs[spec.VMID] = spec
+	m.savePersistedSpecsLocked()
+}
+
+// UnregisterVMSpec removes a VM specification and updates persisted state.
+func (m *VirtManager) UnregisterVMSpec(vmid int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.vmSpecs, vmid)
+	m.savePersistedSpecsLocked()
+}
+
+// AutostartAll starts all registered VMs with Autostart: true, booting any "edge" VM first.
+func (m *VirtManager) AutostartAll() {
+	m.mu.RLock()
+	var specs []CompiledVmSpec
+	for _, s := range m.vmSpecs {
+		if s.Autostart {
+			specs = append(specs, s)
+		}
+	}
+	m.mu.RUnlock()
+
+	isEdge := func(s CompiledVmSpec) bool {
+		nameLower := strings.ToLower(s.Name)
+		return nameLower == "edge" || strings.HasPrefix(nameLower, "edge-") || strings.Contains(nameLower, "edge")
+	}
+
+	sort.Slice(specs, func(i, j int) bool {
+		ei := isEdge(specs[i])
+		ej := isEdge(specs[j])
+		if ei != ej {
+			return ei
+		}
+		return specs[i].VMID < specs[j].VMID
+	})
+
+	for _, s := range specs {
+		_, _ = m.StartVM(s.VMID, "system@autostart")
+	}
+}
+
+func extractTapDevicesFromArgs(args []string) []string {
+	var taps []string
+	seen := make(map[string]bool)
+	for _, arg := range args {
+		for _, part := range strings.Split(arg, ",") {
+			if strings.HasPrefix(part, "ifname=") {
+				tap := strings.TrimSpace(strings.TrimPrefix(part, "ifname="))
+				if tap != "" && ValidNetdevName(tap) && !seen[tap] {
+					seen[tap] = true
+					taps = append(taps, tap)
+				}
+			}
+		}
+	}
+	return taps
+}
+
+func ensureDaemonizeArg(args []string) []string {
+	for _, a := range args {
+		if a == "-daemonize" {
+			return args
+		}
+	}
+	out := make([]string, len(args), len(args)+1)
+	copy(out, args)
+	return append(out, "-daemonize")
+}
+
+func ensureOvmfNvram(vmid int, args []string) {
+	needsNvram := false
+	nvramPath := fmt.Sprintf("/var/lib/axonwall/nvram/vm-%d.fd", vmid)
+	for _, a := range args {
+		if strings.Contains(a, "/var/lib/axonwall/nvram/") || strings.Contains(a, "OVMF") {
+			needsNvram = true
+			for _, part := range strings.Split(a, ",") {
+				if strings.HasPrefix(part, "file=/var/lib/axonwall/nvram/") {
+					p := strings.TrimPrefix(part, "file=")
+					if filepath.Clean(p) == p {
+						nvramPath = p
+					}
+				}
+			}
+		}
+	}
+	if !needsNvram {
+		return
+	}
+	if _, err := os.Stat(nvramPath); err == nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(nvramPath), 0755)
+	for _, src := range []string{"/usr/share/OVMF/OVMF_VARS_4M.fd", "/usr/share/OVMF/OVMF_VARS.fd"} {
+		if data, err := os.ReadFile(src); err == nil && len(data) > 0 {
+			_ = os.WriteFile(nvramPath, data, 0600)
+			return
+		}
+	}
+}
+
+func writeFwCfgFiles(fwCfg map[string]string) error {
+	for rawPath, content := range fwCfg {
+		cleanPath := filepath.Clean(strings.TrimSpace(rawPath))
+		if !strings.HasPrefix(cleanPath, "/run/axonwall/") && !strings.HasPrefix(cleanPath, "/var/lib/axonwall/cloudinit/") {
+			cleanPath = filepath.Join("/run/axonwall/fwcfg", filepath.Base(cleanPath))
+		}
+		if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
+			return fmt.Errorf("failed to create fw_cfg directory for %s: %w", cleanPath, err)
+		}
+		if err := os.WriteFile(cleanPath, []byte(content), 0600); err != nil {
+			return fmt.Errorf("failed to write fw_cfg file %s: %w", cleanPath, err)
+		}
+	}
+	return nil
 }
 
 // RegisterCTSpec stores or updates the compiled specification for an LXC container
@@ -312,27 +481,41 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			_ = os.MkdirAll(ciDir, 0700)
 			defer os.RemoveAll(ciDir)
 
-			metaYaml := fmt.Sprintf("instance-id: vm-%d\nlocal-hostname: %s\n", vmid, spec.Name)
+			metaYaml := spec.CloudInit.MetaData
+			if metaYaml == "" {
+				metaYaml = fmt.Sprintf("instance-id: vm-%d\nlocal-hostname: %s\n", vmid, spec.Name)
+			}
 			_ = os.WriteFile(filepath.Join(ciDir, "meta-data"), []byte(metaYaml), 0644)
 
-			userYaml := fmt.Sprintf("#cloud-config\nhostname: %s\nmanage_etc_hosts: true\nusers:\n  - name: %s\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n",
-				spec.Name, spec.CloudInit.User)
-			if spec.CloudInit.Password != "" {
-				userYaml += fmt.Sprintf("    plain_text_passwd: %s\n    lock_passwd: false\n", spec.CloudInit.Password)
-			}
-			if len(spec.CloudInit.SshKeys) > 0 {
-				userYaml += "    ssh_authorized_keys:\n"
-				for _, k := range spec.CloudInit.SshKeys {
-					userYaml += fmt.Sprintf("      - %s\n", strings.TrimSpace(k))
+			var userYaml string
+			if spec.CloudInit.UserData != "" {
+				userYaml = spec.CloudInit.UserData
+			} else {
+				userYaml = fmt.Sprintf("#cloud-config\nhostname: %s\nmanage_etc_hosts: true\nusers:\n  - name: %s\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n",
+					spec.Name, spec.CloudInit.User)
+				if spec.CloudInit.Password != "" {
+					userYaml += fmt.Sprintf("    plain_text_passwd: %s\n    lock_passwd: false\n", spec.CloudInit.Password)
+				}
+				if len(spec.CloudInit.SshKeys) > 0 {
+					userYaml += "    ssh_authorized_keys:\n"
+					for _, k := range spec.CloudInit.SshKeys {
+						userYaml += fmt.Sprintf("      - %s\n", strings.TrimSpace(k))
+					}
+				}
+				if spec.CloudInit.CustomPayload != "" {
+					userYaml += "\n" + spec.CloudInit.CustomPayload + "\n"
 				}
 			}
 			_ = os.WriteFile(filepath.Join(ciDir, "user-data"), []byte(userYaml), 0644)
 
-			netYaml := "version: 2\nethernets:\n  eth0:\n    dhcp4: true\n"
-			if spec.CloudInit.IpConfig != "dhcp" && spec.CloudInit.IpConfig != "" {
-				netYaml = fmt.Sprintf("version: 2\nethernets:\n  eth0:\n    dhcp4: false\n    addresses: [%s]\n", spec.CloudInit.IpConfig)
-				if spec.CloudInit.Gateway != "" {
-					netYaml += fmt.Sprintf("    gateway4: %s\n", spec.CloudInit.Gateway)
+			netYaml := spec.CloudInit.NetworkConfig
+			if netYaml == "" {
+				netYaml = "version: 2\nethernets:\n  eth0:\n    dhcp4: true\n"
+				if spec.CloudInit.IpConfig != "dhcp" && spec.CloudInit.IpConfig != "" {
+					netYaml = fmt.Sprintf("version: 2\nethernets:\n  eth0:\n    dhcp4: false\n    addresses: [%s]\n", spec.CloudInit.IpConfig)
+					if spec.CloudInit.Gateway != "" {
+						netYaml += fmt.Sprintf("    gateway4: %s\n", spec.CloudInit.Gateway)
+					}
 				}
 			}
 			_ = os.WriteFile(filepath.Join(ciDir, "network-config"), []byte(netYaml), 0644)
@@ -351,6 +534,17 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			}
 		}
 
+		// 2b. Write fw_cfg files if present (with 0600 permissions)
+		if len(spec.FwCfg) > 0 {
+			if err := writeFwCfgFiles(spec.FwCfg); err != nil {
+				logger("Failed to write fw_cfg files: %v", err)
+				return err
+			}
+		}
+
+		// 2c. Initialize OVMF NVRAM if needed
+		ensureOvmfNvram(vmid, spec.Args)
+
 		// 3. Clear stale sockets
 		_ = os.Remove(fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid))
 		_ = os.Remove(fmt.Sprintf("/run/axonwall/vnc/vm-%d.sock", vmid))
@@ -368,11 +562,37 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			return fmt.Errorf("disallowed QEMU binary: %s", binary)
 		}
 
-		logger("Executing %s with %d arguments...", binary, len(spec.Args))
-		cmd := exec.Command(binary, spec.Args...)
+		qemuArgs := ensureDaemonizeArg(spec.Args)
+		logger("Executing %s with %d arguments...", binary, len(qemuArgs))
+		cmd := exec.Command(binary, qemuArgs...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			logger("QEMU launch error: %s (%v)", string(out), err)
 			return fmt.Errorf("qemu failed: %s (%v)", string(out), err)
+		}
+
+		// 4b. Attach TAP interfaces to their target host bridges
+		for _, tapDev := range extractTapDevicesFromArgs(qemuArgs) {
+			bridgeName := ""
+			if spec.Bridges != nil {
+				bridgeName = strings.TrimSpace(spec.Bridges[tapDev])
+			}
+			if bridgeName == "" {
+				if strings.Contains(tapDev, "wan") {
+					bridgeName = "br-wan"
+				} else {
+					bridgeName = "br-lan"
+				}
+			}
+			if err := AttachTapToBridge(tapDev, bridgeName, 0); err != nil {
+				// Fallback to br0 if br-lan does not exist yet
+				if bridgeName == "br-lan" {
+					_ = AttachTapToBridge(tapDev, "br0", 0)
+				} else {
+					logger("Warning: failed to attach tap %s to bridge %s: %v", tapDev, bridgeName, err)
+				}
+			} else {
+				logger("Attached tap %s to bridge %s.", tapDev, bridgeName)
+			}
 		}
 
 		// Wait briefly and verify QMP socket

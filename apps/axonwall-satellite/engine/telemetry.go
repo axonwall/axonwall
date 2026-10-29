@@ -18,12 +18,26 @@ type SatelliteMetrics struct {
 	ActiveConns     int64   `json:"activeConns"`
 	RxBytesTotal    int64   `json:"rxBytesTotal"`
 	TxBytesTotal    int64   `json:"txBytesTotal"`
+	Pid1Mode        bool    `json:"pid1Mode,omitempty"`
+	KernelVersion   string  `json:"kernelVersion,omitempty"`
+	SkuProfile      string  `json:"skuProfile,omitempty"`
 }
 
 // CollectMetrics gathers metrics from the Linux kernel (/proc)
 func CollectMetrics() SatelliteMetrics {
 	metrics := SatelliteMetrics{
 		Timestamp: time.Now().Unix(),
+		Pid1Mode:  os.Getpid() == 1,
+	}
+
+	if kver, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		metrics.KernelVersion = strings.TrimSpace(string(kver))
+	}
+	if cmdline, err := os.ReadFile("/proc/cmdline"); err == nil {
+		bootCfg := ParseKernelCmdline(string(cmdline))
+		if bootCfg.SkuProfile != "" {
+			metrics.SkuProfile = bootCfg.SkuProfile
+		}
 	}
 
 	// 1. Read Uptime

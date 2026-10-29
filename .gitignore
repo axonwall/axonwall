@@ -47,11 +47,13 @@ test-tf/*.tfstate*
 test-tf/.terraform/
 package.json.tmp
 
-# ISO build artifacts
+# ISO & Edge UKI build artifacts
 packaging/iso/output/
 packaging/iso/build/
 packaging/alpine/output/
 packaging/alpine/build/
+packaging/edge-uki/output/
+packaging/edge-uki/.cache/
 *.iso
 *.iso.sha256
 

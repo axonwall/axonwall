@@ -12,7 +12,7 @@ export const InterfaceTypeSchema = z.enum([
   'loopback',
 ]);
 
-export const InterfaceRoleSchema = z.enum(['wan', 'lan']);
+export const InterfaceRoleSchema = z.enum(['wan', 'wan-delegated', 'lan', 'dmz', 'opt', 'mgmt', 'ha-sync']);
 export type InterfaceRole = z.infer<typeof InterfaceRoleSchema>;
 
 export const InterfaceSchema = z.object({
@@ -20,6 +20,7 @@ export const InterfaceSchema = z.object({
   name: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid interface name'), // e.g. "wan1", "wan2", "lan1", "lan2"
   device: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.:-]+$/, 'Invalid device identifier'), // e.g. "eth0", "enp1s0", "ens18"
   role: InterfaceRoleSchema.optional(),
+  ipv6Mode: z.enum(['disabled', 'auto', 'static', 'delegated', 'ula-only']).optional(),
   dhcpServer: z.boolean().optional(),
   type: InterfaceTypeSchema.default('static'),
   enabled: z.boolean().default(true),
@@ -39,15 +40,16 @@ export const InterfaceSchema = z.object({
 });
 export type Interface = z.infer<typeof InterfaceSchema>;
 
-export function inferInterfaceRole(iface: { name: string; role?: 'wan' | 'lan' }): 'wan' | 'lan' {
-  if (iface.role === 'wan' || iface.role === 'lan') return iface.role;
+export function inferInterfaceRole(iface: { name: string; role?: InterfaceRole }): 'wan' | 'lan' {
+  if (iface.role === 'wan' || iface.role === 'wan-delegated') return 'wan';
+  if (iface.role === 'lan' || iface.role === 'dmz' || iface.role === 'opt' || iface.role === 'mgmt' || iface.role === 'ha-sync') return 'lan';
   const n = (iface.name || '').toLowerCase().trim();
   if (n === 'wan' || n.startsWith('wan')) return 'wan';
   return 'lan';
 }
 
 export function isInterfaceAuthoritativeDhcp(
-  iface: { name: string; role?: 'wan' | 'lan'; type?: string; dhcpServer?: boolean },
+  iface: { name: string; role?: InterfaceRole; type?: string; dhcpServer?: boolean },
   dhcp?: { enabled?: boolean; subnets?: Array<{ interface: string; enabled?: boolean }> },
 ): boolean {
   if (inferInterfaceRole(iface) === 'wan') return false;
@@ -997,6 +999,46 @@ export type AiConfig = z.infer<typeof AiConfigSchema>;
 export const SatelliteNodeSchema = z.object({
   id: z.string(),
   name: z.string(),
+  role: z.enum(['satellite', 'edge-ngfw']).default('satellite').optional(),
+  edgePlacement: z.enum(['hosted', 'dedicated']).default('hosted').optional(),
+  haState: z.enum(['active', 'standby', 'standalone']).default('standalone').optional(),
+  ipv6Mode: z.enum(['disabled', 'auto', 'static', 'delegated', 'ula-only']).default('auto').optional(),
+  wanIpv6Prefix: z.string().optional(),
+  disabledIpv6Interfaces: z.array(z.string()).optional(),
+  hardwareOffload: z.boolean().default(false).optional(),
+  portForwards: z.array(z.object({
+    proto: z.enum(['tcp', 'udp']),
+    wanPort: z.number().int().min(1).max(65535),
+    targetIp: z.string(),
+    targetPort: z.number().int().min(1).max(65535),
+    comment: z.string().optional(),
+  })).optional(),
+  ipv6Allow: z.array(z.object({
+    proto: z.enum(['tcp', 'udp', 'ipv6-icmp']),
+    dstIp6: z.string(),
+    dstPort: z.number().int().min(1).max(65535).optional(),
+    comment: z.string().optional(),
+  })).optional(),
+  zones: z.array(z.object({
+    name: z.string(),
+    vlanId: z.number().int().min(1).max(4094),
+    ipv4Cidr: z.string(),
+    ipv6Mode: z.enum(['disabled', 'auto', 'static', 'delegated', 'ula-only']).default('delegated'),
+    isolateClients: z.boolean().default(false).optional(),
+    allowInternet: z.boolean().default(true).optional(),
+  })).optional(),
+  skuProfile: z.enum([
+    'sku-vm-virtio',
+    'sku-x86-intel-n100-i226',
+    'sku-x86-enterprise-10g-25g',
+    'sku-arm64-router',
+    'generic-edge',
+  ]).default('sku-vm-virtio').optional(),
+  fastpathOffload: z.boolean().default(true).optional(),
+  wanInterface: z.string().default('eth0').optional(),
+  lanInterface: z.string().default('eth1').optional(),
+  wanAddress: z.string().optional(),
+  lanAddress: z.string().optional(),
   arch: z.enum(['mipsle', 'arm64', 'amd64', 'armv7', 'unknown']).default('unknown'),
   os: z.string().default('Linux'),
   ip: z.string().default('127.0.0.1'),
@@ -1026,8 +1068,12 @@ export const SatelliteNodeSchema = z.object({
     memUsagePercent: z.number().default(0),
     uptimeSeconds: z.number().int().default(0),
     activeConns: z.number().int().default(0),
+    offloadedConns: z.number().int().default(0).optional(),
     rxBytesTotal: z.number().int().default(0),
     txBytesTotal: z.number().int().default(0),
+    pid1Mode: z.boolean().optional(),
+    kernelVersion: z.string().optional(),
+    skuProfile: z.string().optional(),
   }).optional(),
   activePolicyVersion: z.number().int().default(1),
 });
@@ -1365,6 +1411,10 @@ export const VmNicSchema = z.object({
   model: VmNicModelSchema.default('virtio'),
   firewall: z.boolean().default(true),
   rateLimitMbps: z.number().int().min(0).default(0),
+  attachMode: z.enum(['bridge', 'macvtap-passthru', 'vfio']).default('bridge').optional(),
+  hostDevice: z.string().optional(),
+  queues: z.number().int().min(1).max(16).optional(),
+  pciAddr: z.string().optional(),
 });
 export type VmNic = z.infer<typeof VmNicSchema>;
 
@@ -1392,9 +1442,15 @@ export const VirtualMachineSchema = z.object({
   sockets: z.number().int().min(1).max(8).default(1),
   cores: z.number().int().min(1).max(128).default(2),
   cpuType: z.enum(['host', 'x86-64-v2-AES', 'kvm64', 'qemu64']).default('host'),
-  memoryMb: z.number().int().min(512).default(2048),
+  memoryMb: z.number().int().min(128).default(2048),
   balloonMinMb: z.number().int().min(0).default(0),
   disks: z.array(VmDiskSchema).default([]),
+  diskless: z.boolean().default(false).optional(),
+  kernelPath: z.string().optional(),
+  initrdPath: z.string().optional(),
+  kernelArgs: z.string().optional(),
+  fwCfg: z.array(z.object({ name: z.string(), file: z.string() })).optional(),
+  watchdog: z.enum(['none', 'i6300esb', 'ib700']).default('none').optional(),
   nics: z.array(VmNicSchema).default([]),
   iso: z.string().optional(),
   cloudInit: CloudInitConfigSchema.optional(),
@@ -1892,6 +1948,54 @@ export const EluvixConfigSchema = z.object({
 });
 export type EluvixConfig = z.infer<typeof EluvixConfigSchema>;
 
+export const HostedEdgeConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  placement: z.enum(['hosted', 'dedicated']).default('hosted'),
+  ukiSlot: z.enum(['A', 'B']).default('A'),
+  skuProfile: z.enum(['sku-vm-virtio', 'sku-x86-intel-n100-i226', 'sku-x86-enterprise-10g-25g', 'sku-arm64-router']).default('sku-vm-virtio'),
+  vcpus: z.number().int().min(1).max(64).default(2),
+  memoryMiB: z.number().int().min(128).max(65536).default(256),
+  wan: z.object({
+    hostDevice: z.string().default('eth0'),
+    bridgeName: z.string().default('br-wan'),
+    attachMode: z.enum(['bridge', 'macvtap-passthru', 'vfio']).default('bridge'),
+    macAddress: z.string().optional(),
+    ipv4Mode: z.enum(['dhcp', 'static', 'disabled']).default('dhcp'),
+    ipv4Address: z.string().optional(),
+    ipv4Gateway: z.string().optional(),
+    ipv6Mode: z.enum(['disabled', 'auto', 'static']).default('auto'),
+    ipv6RequestPrefix: z.number().int().min(48).max(64).default(56),
+  }).prefault({}),
+  lan: z.object({
+    bridgeName: z.string().default('br-lan'),
+    edgeAddress: z.string().default('10.0.0.1/24'),
+    hostAddress: z.string().default('10.0.0.2/24'),
+    ipv6Mode: z.enum(['disabled', 'delegated', 'ula-only', 'static']).default('delegated'),
+    ulaPrefix: z.string().optional(),
+  }).prefault({}),
+  ha: z.object({
+    enabled: z.boolean().default(true),
+    role: z.enum(['active', 'standby']).default('active'),
+    syncVlanId: z.number().int().min(1).max(4094).default(4001),
+    wanTransitVlanId: z.number().int().min(1).max(4094).default(4000),
+    sharedWanMac: z.string().optional(),
+  }).prefault({}),
+  portForwards: z.array(z.object({
+    proto: z.enum(['tcp', 'udp']),
+    wanPort: z.number().int().min(1).max(65535),
+    targetIp: z.string(),
+    targetPort: z.number().int().min(1).max(65535),
+    comment: z.string().optional(),
+  })).default([]),
+  ipv6Allow: z.array(z.object({
+    proto: z.enum(['tcp', 'udp', 'ipv6-icmp']),
+    dstIp6: z.string(),
+    dstPort: z.number().int().min(1).max(65535).optional(),
+    comment: z.string().optional(),
+  })).default([]),
+});
+export type HostedEdgeConfig = z.infer<typeof HostedEdgeConfigSchema>;
+
 export const DesiredStateSchema = z.object({
   version: z.number().int().default(1),
   capabilities: CoreCapabilitiesSchema.optional(),
@@ -1939,6 +2043,7 @@ export const DesiredStateSchema = z.object({
   k3s: K3sConfigSchema.optional(),
   vow: VowConfigSchema.optional(),
   virt: VirtConfigSchema.optional(),
+  hostedEdge: HostedEdgeConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
   hostDefense: HostMalwareDefenseConfigSchema.optional(),
   eluvix: EluvixConfigSchema.optional(),

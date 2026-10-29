@@ -55,6 +55,18 @@ func (w *WireGuardEngine) ConfigureMesh(cfg WireGuardConfig) error {
 
 	slog.Info("Configuring WireGuard SD-Branch mesh...", "interface", cfg.InterfaceName, "tunnelIp", cfg.TunnelIP, "peers", len(cfg.Peers))
 
+	// 1. Primary path: Pure-Go RTNETLINK + Generic Netlink ("wireguard" WG_CMD_SET_DEVICE)
+	// Requires zero /usr/bin/wg, /usr/bin/wg-quick, or /sbin/ip binaries in the Edge UKI.
+	if nlErr := ConfigureWireGuardNetlink(cfg); nlErr == nil {
+		slog.Info("WireGuard mesh configured via native Generic Netlink", "interface", cfg.InterfaceName, "tunnelIp", cfg.TunnelIP)
+		return nil
+	} else {
+		slog.Debug("Native WireGuard Generic Netlink note, checking wg/wg-quick fallback", "note", nlErr)
+		if _, lookErr := exec.LookPath("wg"); lookErr != nil {
+			return fmt.Errorf("native WireGuard Generic Netlink failed (%w) and no wg binary installed", nlErr)
+		}
+	}
+
 	var wgQuickConf bytes.Buffer
 	wgQuickConf.WriteString(fmt.Sprintf("[Interface]\nPrivateKey = %s\nAddress = %s\nListenPort = %d\n\n", cfg.PrivateKey, cfg.TunnelIP, cfg.ListenPort))
 

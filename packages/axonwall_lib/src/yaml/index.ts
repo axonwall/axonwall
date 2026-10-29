@@ -97,8 +97,8 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     filename: 'virt.yaml',
     title: 'Axonwall Hypervisor, Virtual Machines (KVM/QEMU) & LXC Containers',
     description:
-      'Controls KVM virtual machines, Cloud-Init, LXC system containers, ISO images, PCIe VFIO / SR-IOV passthrough, VXLAN SDN zones, and deduplicated backup schedules.',
-    keys: ['virt'],
+      'Controls KVM virtual machines, Hosted Edge NGFW UKI, Cloud-Init, LXC system containers, ISO images, PCIe VFIO / SR-IOV passthrough, VXLAN SDN zones, and deduplicated backup schedules.',
+    keys: ['virt', 'hostedEdge'],
   },
   {
     filename: 'vigilante.yaml',

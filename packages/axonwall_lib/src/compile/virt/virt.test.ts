@@ -6,6 +6,7 @@ import {
   compileVfio,
   compileVxlan,
   compileVirtBundle,
+  compileHostedEdge,
   generateDeterministicMac,
 } from './index.js';
 import {
@@ -268,5 +269,75 @@ describe('Virt / Hypervisor Compilers', () => {
     expect(parsed.virt?.vms[0].name).toBe('test-vm');
     expect(parsed.virt?.containers).toHaveLength(1);
     expect(parsed.virt?.containers[0].hostname).toBe('web-ct');
+  });
+
+  it('compiles Hosted Edge NGFW UKI with direct -kernel, -fw_cfg, i6300esb watchdog, br-wan/br-lan NICs, and baseline /etc/nftables.conf', () => {
+    const state = DesiredStateSchema.parse({
+      system: {
+        hostname: 'router-box-a',
+      },
+      interfaces: [
+        { name: 'wan', device: 'eth0', role: 'wan-delegated', type: 'dhcp', enabled: true, ipv6Mode: 'disabled' },
+        { name: 'lan1', device: 'eth1', role: 'lan', type: 'static', enabled: true },
+        { name: 'lan2', device: 'eth2', role: 'lan', type: 'static', enabled: true },
+      ],
+      hostedEdge: {
+        enabled: true,
+        ukiSlot: 'A',
+        skuProfile: 'sku-vm-virtio',
+        vcpus: 2,
+        memoryMiB: 256,
+        wan: {
+          hostDevice: 'eth0',
+          bridgeName: 'br-wan',
+          attachMode: 'bridge',
+          ipv4Mode: 'dhcp',
+          ipv6Mode: 'auto',
+          ipv6RequestPrefix: 56,
+        },
+        lan: {
+          bridgeName: 'br-lan',
+          edgeAddress: '10.0.0.1/24',
+          hostAddress: '10.0.0.2/24',
+          ipv6Mode: 'delegated',
+        },
+        portForwards: [
+          { proto: 'tcp', wanPort: 443, targetIp: '10.0.0.2', targetPort: 443, comment: 'k3s-ingress' },
+        ],
+      },
+    });
+
+    const compiled = compileHostedEdge(state, {
+      ztpToken: 'ztp_secret_123',
+      caCertPem: '-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----',
+    });
+
+    expect(compiled.vmSpec.id).toBe('edge');
+    expect(compiled.vmSpec.name).toBe('axonwall-edge-ngfw');
+    const argsStr = compiled.vmSpec.args.join(' ');
+    expect(argsStr).toContain('-kernel /usr/lib/axonwall/edge/slot-A/axonwall-edge-sku-vm-virtio.efi');
+    expect(argsStr).toContain('-fw_cfg name=opt/org.axonwall/user-data,file=/run/axonwall/edge/user-data');
+    expect(argsStr).toContain('-fw_cfg name=opt/org.axonwall/meta-data,file=/run/axonwall/edge/meta-data');
+    expect(argsStr).toContain('-device i6300esb -watchdog-action reset');
+    expect(argsStr).toContain('ifname=tap-edge-wan,script=no,downscript=no,vhost=on');
+    expect(argsStr).toContain('addr=0x3');
+    expect(argsStr).toContain('ifname=tap-edge-lan,script=no,downscript=no,vhost=on,queues=2');
+    expect(argsStr).toContain('mq=on,vectors=6,addr=0x4');
+    expect(argsStr).not.toContain('/dev/zvol/');
+
+    expect(compiled.wanBridge.name).toBe('br-wan');
+    expect(compiled.wanBridge.members.map((m) => m.interface)).toEqual(['eth0']);
+    expect(compiled.lanBridge.name).toBe('br-lan');
+    expect(compiled.lanBridge.members.map((m) => m.interface)).toEqual(['eth1', 'eth2']);
+
+    expect(compiled.userData).toContain('#cloud-config');
+    expect(compiled.userData).toContain('hostname: edge-router-box-a');
+    expect(compiled.userData).toContain('hub: wss://10.0.0.2:2966/ws/satellite');
+    expect(compiled.userData).toContain('token: ztp_secret_123');
+    expect(compiled.userData).toContain('path: /etc/nftables.conf');
+
+    expect(compiled.baselineNftScript).toContain('iifname "eth1" oifname "eth0" accept comment "allow-lan-to-wan"');
+    expect(compiled.baselineNftScript).toContain('oifname "eth0" masquerade comment "edge-ngfw-wan-masquerade"');
+    expect(compiled.baselineNftScript).toContain('iifname "eth0" tcp dport 443 dnat ip to 10.0.0.2:443 comment "k3s-ingress"');
   });
 });

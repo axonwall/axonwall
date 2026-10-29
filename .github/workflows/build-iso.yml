@@ -125,6 +125,67 @@ jobs:
           cd apps/axonwall-satellite
           make all
 
+      - name: Install ISO Build Dependencies
+        shell: bash
+        run: |
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo mkdir -p /var/lib/apt/lists/partial
+
+          # Retry update up to 5 times with exponential backoff
+          for attempt in 1 2 3 4 5; do
+            echo "Update attempt $attempt..."
+            if sudo apt-get update -y; then
+              echo "Update successful"
+              break
+            fi
+            if [ $attempt -lt 5 ]; then
+              echo "Update attempt $attempt failed, retrying..."
+              sudo rm -rf /var/lib/apt/lists/*
+              sudo mkdir -p /var/lib/apt/lists/partial
+              sleep $((attempt * 15))
+            else
+              echo "All update attempts failed"
+              exit 1
+            fi
+          done
+
+          # Install basic dependencies first (including Linux kernel UKI build deps)
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            -o APT::Immediate-Configure=false \
+            -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
+            bc \
+            bison \
+            cpio \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            xz-utils \
+            debootstrap \
+            debian-archive-keyring \
+            xorriso \
+            isolinux \
+            syslinux-efi \
+            syslinux-common \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            dosfstools \
+            mtools \
+            qemu-utils || sudo apt-get install -fy --fix-broken
+
+          # Download and install live-build directly. HTTPS + a pinned
+          # SHA-256 (cross-checked against the hash published for
+          # 1:20250814 in Debian sid's signed Packages index, 2026-10-16):
+          # this .deb is installed as root in the release pipeline.
+          curl -fsSL -o /tmp/live-build.deb https://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
+          echo "a4bffb8e6436ffba260f2e1c37be9dd04a4dacf52c38d7bbe454ec826ba52a4b  /tmp/live-build.deb" | sha256sum -c -
+          sudo dpkg -i /tmp/live-build.deb
+          rm -f /tmp/live-build.deb
+
+      - name: Build Super-Slim Edge NGFW UKI (sku-vm-virtio)
+        run: |
+          ./packaging/edge-uki/build-edge-uki.sh --sku sku-vm-virtio --mode full-uki
+
       - name: Build Debian (.deb) Package
         run: |
           ./packaging/debian/build-deb.sh
@@ -151,56 +212,6 @@ jobs:
             packaging/debian/output/*.deb.sha256.sig
           retention-days: 7
 
-      - name: Install ISO Build Dependencies
-        shell: bash
-        run: |
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo mkdir -p /var/lib/apt/lists/partial
-
-          # Retry update up to 5 times with exponential backoff
-          for attempt in 1 2 3 4 5; do
-            echo "Update attempt $attempt..."
-            if sudo apt-get update -y; then
-              echo "Update successful"
-              break
-            fi
-            if [ $attempt -lt 5 ]; then
-              echo "Update attempt $attempt failed, retrying..."
-              sudo rm -rf /var/lib/apt/lists/*
-              sudo mkdir -p /var/lib/apt/lists/partial
-              sleep $((attempt * 15))
-            else
-              echo "All update attempts failed"
-              exit 1
-            fi
-          done
-
-          # Install basic dependencies first
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            -o APT::Immediate-Configure=false \
-            -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
-            debootstrap \
-            debian-archive-keyring \
-            xorriso \
-            isolinux \
-            syslinux-efi \
-            syslinux-common \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            dosfstools \
-            mtools \
-            qemu-utils || sudo apt-get install -fy --fix-broken
-
-          # Download and install live-build directly. HTTPS + a pinned
-          # SHA-256 (cross-checked against the hash published for
-          # 1:20250814 in Debian sid's signed Packages index, 2026-10-16):
-          # this .deb is installed as root in the release pipeline.
-          curl -fsSL -o /tmp/live-build.deb https://deb.debian.org/debian/pool/main/l/live-build/live-build_20250814_all.deb
-          echo "a4bffb8e6436ffba260f2e1c37be9dd04a4dacf52c38d7bbe454ec826ba52a4b  /tmp/live-build.deb" | sha256sum -c -
-          sudo dpkg -i /tmp/live-build.deb
-          rm -f /tmp/live-build.deb
-
       - name: Build Hybrid Appliance ISO
         run: |
           sudo ./packaging/iso/build-iso.sh
@@ -218,9 +229,9 @@ jobs:
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-vault-debian13-amd64.iso > axonwall-vault-debian13-amd64.iso.sha256 && chmod 644 axonwall-vault-debian13-amd64.iso.sha256'
           sudo bash -c 'if [ -d packaging/cloud-image/output ]; then cd packaging/cloud-image/output && sha256sum axonwall-debian13-amd64-cloud.qcow2 > axonwall-debian13-amd64-cloud.qcow2.sha256 && chmod 644 axonwall-debian13-amd64-cloud.qcow2.sha256; fi'
-          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output 2>/dev/null || true
+          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output packaging/edge-uki/output 2>/dev/null || true
 
-      - name: Sign ISO & Cloud Image Checksums (if signing key configured)
+      - name: Sign ISO, Cloud Image & Edge UKI Checksums (if signing key configured)
         env:
           AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
         if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
@@ -228,11 +239,24 @@ jobs:
           key_file="$(mktemp)"
           trap 'rm -f "$key_file"' EXIT
           printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
-          for sha in packaging/iso/output/*.iso.sha256 packaging/cloud-image/output/*.qcow2.sha256; do
+          for sha in packaging/iso/output/*.iso.sha256 packaging/cloud-image/output/*.qcow2.sha256 packaging/edge-uki/output/*.sha256; do
             if [ -f "$sha" ]; then
               openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
             fi
           done
+
+      - name: Upload Super-Slim Edge NGFW UKI Artifact (release handoff)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: axonwall-edge-uki
+          path: |
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig
+          retention-days: 7
 
       - name: Upload ISO Checksum Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -287,6 +311,12 @@ jobs:
           name: axonwall-debian-package
           path: packaging/debian/output
 
+      - name: Download Super-Slim Edge NGFW UKI Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-edge-uki
+          path: packaging/edge-uki/output
+
       - name: Download Debian ISO Artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -322,23 +352,32 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256.sig
             packaging/cloud-image/output/*.qcow2.sha256.sig
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig
 
       - name: Publish Rolling Latest Pre-Release (on main)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: rolling-latest
-          name: "Axonwall Appliance ISO, Cloud QCOW2 & Debian Package (Rolling Latest)"
+          name: "Axonwall Appliance ISO, Cloud QCOW2, Edge UKI & Debian Package (Rolling Latest)"
           body: |
             ### Automated Continuous Build
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
             - **Distribution**:
               - Debian 13 (Trixie) amd64 (Bare-Metal Hybrid ISO + Cloud QCOW2 + .deb Package)
+              - Super-Slim Edge NGFW UEFI Unified Kernel Image (`sku-vm-virtio` default virtual appliance)
             - **Artifacts**:
               - `axonwall-debian13-amd64.iso`
               - `axonwall-vault-debian13-amd64.iso`
               - `axonwall-debian13-amd64-cloud.qcow2`
+              - `axonwall-edge-sku-vm-virtio.efi` (Single-File EFI UKI with embedded Go PID 1)
+              - `axonwall-edge-sku-vm-virtio-initramfs.cpio.gz`
               - `axonwall_*.deb`
           prerelease: true
           files: |
@@ -354,3 +393,9 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
             packaging/iso/output/axonwall-vault-debian13-amd64.iso.sha256.sig
             packaging/cloud-image/output/*.qcow2.sha256.sig
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig

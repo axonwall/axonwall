@@ -150,6 +150,16 @@ func (e *HAEngine) OnTransition(state string) {
 	defer e.mu.Unlock()
 
 	slog.Info("HAEngine handling transition", "state", state)
+	if state == "BACKUP" || state == "FAULT" {
+		if err := engine.SetEdgeWanPortGate("tap-edge-wan", false); err != nil {
+			slog.Debug("HA WAN port gate disable skipped or failed", "error", err)
+		}
+	} else if state == "MASTER" {
+		if err := engine.SetEdgeWanPortGate("tap-edge-wan", true); err != nil {
+			slog.Debug("HA WAN port gate enable skipped or failed", "error", err)
+		}
+	}
+
 	e.sqliteSync.OnStateChange(state)
 	if e.directoryManager != nil {
 		serverID := 1

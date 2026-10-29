@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -54,17 +56,24 @@ func TestTaskManagerUPIDAndExecution(t *testing.T) {
 }
 
 func TestVirtManagerRegistrationAndListing(t *testing.T) {
+	oldPath := VirtSpecsPath
+	VirtSpecsPath = filepath.Join(t.TempDir(), "virt-specs.json")
+	defer func() { VirtSpecsPath = oldPath }()
+
 	taskMgr := NewTaskManager()
 	nasMgr := NewNasManager()
 	virtMgr := NewVirtManager(taskMgr, nasMgr)
 
 	virtMgr.RegisterVMSpec(CompiledVmSpec{
-		VMID:     105,
-		Name:     "database-vm",
-		Binary:   "qemu-system-x86_64",
-		Cores:    4,
-		MemoryMb: 8192,
-		Args:     []string{"-name", "database-vm"},
+		VMID:      105,
+		Name:      "database-vm",
+		Binary:    "qemu-system-x86_64",
+		Cores:     4,
+		MemoryMb:  8192,
+		Autostart: true,
+		Bridges:   map[string]string{"tap105i0": "br-lan"},
+		FwCfg:     map[string]string{"/run/axonwall/fwcfg/test": "secret"},
+		Args:      []string{"-name", "database-vm", "-netdev", "tap,id=net0,ifname=tap105i0,script=no"},
 		Disks: []VmDisk{
 			{Name: "disk0", Pool: "tank", SizeGb: 100},
 		},
@@ -81,6 +90,18 @@ func TestVirtManagerRegistrationAndListing(t *testing.T) {
 		t.Fatalf("expected stopped VM in test environment, got: %s", vms[0].Status)
 	}
 
+	// Verify persistence across VirtManager reloads
+	virtMgr2 := NewVirtManager(taskMgr, nasMgr)
+	vms2 := virtMgr2.ListVMs()
+	if len(vms2) != 1 || vms2[0].VMID != 105 {
+		t.Fatalf("expected persisted VM 105 after reload, got: %+v", vms2)
+	}
+
+	virtMgr2.UnregisterVMSpec(105)
+	if len(virtMgr2.ListVMs()) != 0 {
+		t.Fatalf("expected 0 VMs after UnregisterVMSpec")
+	}
+
 	virtMgr.RegisterCTSpec(CompiledCtSpec{
 		CTID:     205,
 		Hostname: "redis-ct",
@@ -94,6 +115,39 @@ func TestVirtManagerRegistrationAndListing(t *testing.T) {
 	}
 	if cts[0].CTID != 205 || cts[0].Name != "redis-ct" {
 		t.Fatalf("unexpected CT info: %+v", cts[0])
+	}
+}
+
+func TestVirtHelpers(t *testing.T) {
+	args := []string{
+		"-name", "edge",
+		"-netdev", "tap,id=wan,ifname=tap-edge-wan,script=no,downscript=no",
+		"-netdev", "tap,id=lan,ifname=tap-edge-lan,script=no,downscript=no",
+	}
+	taps := extractTapDevicesFromArgs(args)
+	if len(taps) != 2 || taps[0] != "tap-edge-wan" || taps[1] != "tap-edge-lan" {
+		t.Fatalf("unexpected taps extracted: %v", taps)
+	}
+
+	withDaemon := ensureDaemonizeArg(args)
+	if withDaemon[len(withDaemon)-1] != "-daemonize" {
+		t.Fatalf("expected -daemonize appended, got: %v", withDaemon)
+	}
+	again := ensureDaemonizeArg(withDaemon)
+	if len(again) != len(withDaemon) {
+		t.Fatalf("expected -daemonize not to be duplicated")
+	}
+
+	tmpFwFile := filepath.Join("/run/axonwall/fwcfg", "unit-test-userdata")
+	defer os.Remove(tmpFwFile)
+	if err := writeFwCfgFiles(map[string]string{tmpFwFile: "#cloud-config\n"}); err == nil {
+		info, statErr := os.Stat(tmpFwFile)
+		if statErr != nil {
+			t.Fatalf("expected fw_cfg file to exist: %v", statErr)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("expected 0600 permissions on fw_cfg file, got %o", info.Mode().Perm())
+		}
 	}
 }
 

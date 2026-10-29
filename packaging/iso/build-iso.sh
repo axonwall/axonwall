@@ -317,6 +317,11 @@ mkdir -p config/includes.chroot/usr/share/axonwall/satellites/
 if [[ -d "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin" ]]; then
   cp -r "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/"* config/includes.chroot/usr/share/axonwall/satellites/ 2>/dev/null || true
 fi
+if [[ -f "${SCRIPT_DIR}/../edge-uki/output/axonwall-edge-sku-vm-virtio.efi" ]]; then
+  mkdir -p config/includes.chroot/usr/lib/axonwall/edge/slot-A
+  cp "${SCRIPT_DIR}/../edge-uki/output/axonwall-edge-sku-vm-virtio.efi" config/includes.chroot/usr/lib/axonwall/edge/slot-A/axonwall-edge-sku-vm-virtio.efi
+  chmod 0644 config/includes.chroot/usr/lib/axonwall/edge/slot-A/axonwall-edge-sku-vm-virtio.efi
+fi
 fi
 
 if [[ "${FLAVOR}" == "axonwall" ]]; then
@@ -570,6 +575,11 @@ smartmontools
 zfsutils-linux
 cloud-init
 cloud-guest-utils
+qemu-system-x86
+qemu-utils
+ovmf
+xorriso
+bridge-utils
 cryptsetup
 systemd-cryptsetup
 tpm2-tools

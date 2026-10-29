@@ -33,7 +33,7 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
 Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, nmap
-Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git
+Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
  Axonwall replaces legacy BSD/PHP firewalls (OPNsense/pfSense) with a
@@ -87,6 +87,12 @@ chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-rotate-hub-cert"
 
 if [[ -d "${ROOT_DIR}/apps/axonwall-satellite/bin" ]]; then
   cp -r "${ROOT_DIR}/apps/axonwall-satellite/bin/"* "${WORK_DIR}/usr/share/axonwall/satellites/" 2>/dev/null || true
+fi
+
+if [[ -f "${ROOT_DIR}/packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi" ]]; then
+  mkdir -p "${WORK_DIR}/usr/lib/axonwall/edge/slot-A"
+  cp "${ROOT_DIR}/packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi" "${WORK_DIR}/usr/lib/axonwall/edge/slot-A/axonwall-edge-sku-vm-virtio.efi"
+  chmod 0644 "${WORK_DIR}/usr/lib/axonwall/edge/slot-A/axonwall-edge-sku-vm-virtio.efi"
 fi
 
 # Fetch Headscale binary if absent

@@ -31,6 +31,11 @@ interface WifiRadioInfo {
 interface SatelliteNodeView {
   id: string;
   name: string;
+  role: 'satellite' | 'edge-ngfw';
+  skuProfile?: 'sku-x86-intel-n100-i226' | 'sku-x86-enterprise-10g-25g' | 'sku-vm-virtio' | 'sku-arm64-router' | 'generic-edge';
+  fastpathOffload?: boolean;
+  wanInterface?: string;
+  lanInterface?: string;
   arch: 'mipsle' | 'arm64' | 'amd64' | 'armv7' | 'unknown';
   os: string;
   ip: string;
@@ -40,6 +45,8 @@ interface SatelliteNodeView {
   cpuPercent: number;
   memPercent: number;
   activeConns: number;
+  offloadedConns: number;
+  pid1Mode: boolean;
   uptimeSeconds: number;
   wifiRadios: WifiRadioInfo[];
   wifiClients: number;
@@ -74,7 +81,12 @@ export default function FleetPage() {
   const [generatedToken, setGeneratedToken] = useState('');
   const [newNodeId, setNewNodeId] = useState('');
   const [newNodeName, setNewNodeName] = useState('');
-  const [newNodeArch, setNewNodeArch] = useState<'amd64' | 'arm64' | 'mipsle' | 'armv7'>('arm64');
+  const [newNodeRole, setNewNodeRole] = useState<'edge-ngfw' | 'satellite'>('edge-ngfw');
+  const [newNodeSku, setNewNodeSku] = useState<'sku-vm-virtio' | 'sku-x86-intel-n100-i226' | 'sku-x86-enterprise-10g-25g' | 'sku-arm64-router'>('sku-vm-virtio');
+  const [newNodeArch, setNewNodeArch] = useState<'amd64' | 'arm64' | 'mipsle' | 'armv7'>('amd64');
+  const [newNodeWan, setNewNodeWan] = useState('eth0');
+  const [newNodeLan, setNewNodeLan] = useState('eth1');
+  const [newNodeFastpath, setNewNodeFastpath] = useState(true);
   const [copied, setCopied] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [hubHostname, setHubHostname] = useState('127.0.0.1');
@@ -103,11 +115,17 @@ export default function FleetPage() {
           clientsCount: w.clientsCount ?? 0,
           enabled: w.enabled ?? true,
         }));
+        const role = s.role ?? 'satellite';
         return {
           id: s.id,
           name: s.name,
+          role,
+          skuProfile: s.skuProfile,
+          fastpathOffload: s.fastpathOffload ?? true,
+          wanInterface: s.wanInterface || 'eth0',
+          lanInterface: s.lanInterface || 'eth1',
           arch: s.arch ?? 'unknown',
-          os: s.os || 'Linux',
+          os: s.os || (role === 'edge-ngfw' ? 'AxonWall Edge UKI (PID 1 Go)' : 'Linux'),
           ip: s.ip || '—',
           tunnelIp: s.wireguard?.tunnelIp || '—',
           wgConnected: Boolean(s.wireguard?.connected || s.status === 'online'),
@@ -115,6 +133,8 @@ export default function FleetPage() {
           cpuPercent: s.metrics?.cpuUsagePercent ?? 0,
           memPercent: s.metrics?.memUsagePercent ?? 0,
           activeConns: s.metrics?.activeConns ?? 0,
+          offloadedConns: s.metrics?.offloadedConns ?? 0,
+          pid1Mode: s.metrics?.pid1Mode ?? role === 'edge-ngfw',
           uptimeSeconds: s.metrics?.uptimeSeconds ?? 0,
           wifiRadios,
           wifiClients: wifiRadios.reduce((sum, w) => sum + (w.clientsCount || 0), 0),
@@ -155,6 +175,11 @@ export default function FleetPage() {
           nodes: nextSatellites.map((s, idx) => ({
             id: s.id,
             name: s.name,
+            role: s.role,
+            skuProfile: s.skuProfile,
+            fastpathOffload: s.fastpathOffload ?? true,
+            wanInterface: s.wanInterface,
+            lanInterface: s.lanInterface,
             arch: s.arch,
             os: s.os,
             ip: s.ip === '—' ? '127.0.0.1' : s.ip,
@@ -170,6 +195,8 @@ export default function FleetPage() {
               memUsagePercent: s.memPercent,
               uptimeSeconds: s.uptimeSeconds,
               activeConns: s.activeConns,
+              offloadedConns: s.offloadedConns,
+              pid1Mode: s.pid1Mode,
               rxBytesTotal: 0,
               txBytesTotal: 0,
             },
@@ -196,7 +223,7 @@ export default function FleetPage() {
   };
 
   const handleEnrollNode = async () => {
-    const cleanId = newNodeId.trim() || `sat-node-${satellites.length + 1}`;
+    const cleanId = newNodeId.trim() || `${newNodeRole === 'edge-ngfw' ? 'edge-ngfw' : 'sat-node'}-${satellites.length + 1}`;
     const cleanName = newNodeName.trim() || cleanId;
     if (satellites.some((s) => s.id === cleanId)) {
       alert(`Satellite node ID "${cleanId}" is already registered.`);
@@ -206,8 +233,13 @@ export default function FleetPage() {
     const created: SatelliteNodeView = {
       id: cleanId,
       name: cleanName,
-      arch: newNodeArch,
-      os: 'Linux Edge Appliance',
+      role: newNodeRole,
+      skuProfile: newNodeRole === 'edge-ngfw' ? newNodeSku : 'generic-edge',
+      fastpathOffload: newNodeFastpath,
+      wanInterface: newNodeWan.trim() || 'eth0',
+      lanInterface: newNodeLan.trim() || 'eth1',
+      arch: newNodeRole === 'edge-ngfw' && newNodeSku === 'sku-arm64-router' ? 'arm64' : newNodeArch,
+      os: newNodeRole === 'edge-ngfw' ? `AxonWall Edge UKI (${newNodeSku})` : 'Linux Edge Appliance',
       ip: '—',
       tunnelIp: `10.99.0.${nextTunnelOctet}/24`,
       wgConnected: false,
@@ -215,6 +247,8 @@ export default function FleetPage() {
       cpuPercent: 0,
       memPercent: 0,
       activeConns: 0,
+      offloadedConns: 0,
+      pid1Mode: newNodeRole === 'edge-ngfw',
       uptimeSeconds: 0,
       wifiRadios: [],
       wifiClients: 0,
@@ -268,13 +302,16 @@ export default function FleetPage() {
   const totalWifiClients = satellites.reduce((acc, s) => acc + s.wifiClients, 0);
   const wifiApCount = satellites.filter((s) => s.wifiRadios.some((r) => r.enabled)).length;
 
-  const bootstrapNodeId = newNodeId.trim() || 'sat-node-$(cat /sys/class/net/eth0/address | tr -d \':\')';
-  const bootstrapCommand = `./axonwall-satellite \\\n  -core wss://${hubHostname}:${listenPort}/ws/satellite \\\n  -id ${bootstrapNodeId} \\\n  -token ${generatedToken}`;
+  const bootstrapNodeId = newNodeId.trim() || (newNodeRole === 'edge-ngfw' ? 'edge-ngfw-01' : 'sat-node-$(cat /sys/class/net/eth0/address | tr -d \':\')');
+  const ukiCmdline = `console=ttyS0,115200 quiet loglevel=3 axonwall.hub=wss://${hubHostname}:${listenPort}/ws/satellite axonwall.id=${bootstrapNodeId} axonwall.token=${generatedToken} axonwall.sku=${newNodeSku} axonwall.slot=A axonwall.wan=${newNodeWan}:dhcp axonwall.lan=${newNodeLan}:192.168.1.1/24`;
+  const cloudInitSnippet = `#cloud-config\nhostname: ${bootstrapNodeId}\naxonwall:\n  hub: wss://${hubHostname}:${listenPort}/ws/satellite\n  id: ${bootstrapNodeId}\n  token: ${generatedToken}\n  sku: ${newNodeSku}\n  interfaces:\n    - name: wan\n      device: ${newNodeWan}\n      address: dhcp\n    - name: lan\n      device: ${newNodeLan}\n      address: 192.168.1.1/24`;
+  const bootstrapCommand =
+    newNodeRole === 'edge-ngfw'
+      ? `./packaging/edge-uki/build-edge-uki.sh \\\n  --sku ${newNodeSku} \\\n  --cmdline "${ukiCmdline}"`
+      : `./axonwall-satellite \\\n  -core wss://${hubHostname}:${listenPort}/ws/satellite \\\n  -id ${bootstrapNodeId} \\\n  -token ${generatedToken}`;
 
   const handleCopyZtp = () => {
-    navigator.clipboard.writeText(
-      `./axonwall-satellite -core wss://${hubHostname}:${listenPort}/ws/satellite -id ${bootstrapNodeId} -token ${generatedToken}`
-    );
+    navigator.clipboard.writeText(newNodeRole === 'edge-ngfw' ? cloudInitSnippet : bootstrapCommand);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -478,6 +515,11 @@ export default function FleetPage() {
                         <td className="px-4 py-3.5">
                           <div className="font-medium text-white flex items-center gap-2">
                             {sat.name}
+                            {sat.role === 'edge-ngfw' && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                                UKI NGFW
+                              </span>
+                            )}
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                               v{sat.activePolicyVersion}
                             </span>
@@ -609,6 +651,11 @@ export default function FleetPage() {
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 <Radio className="w-5 h-5 text-emerald-400" />
                 Edge Node Inspector: {selectedSat.name}
+                {selectedSat.role === 'edge-ngfw' && (
+                  <span className="px-2 py-0.5 rounded text-xs font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                    Super-Slim Edge NGFW (Single-File EFI UKI)
+                  </span>
+                )}
               </h2>
               <div className="flex flex-wrap items-center gap-2 mt-1">
                 <span className="text-xs text-slate-400 font-mono">
@@ -617,6 +664,11 @@ export default function FleetPage() {
                 <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                   Policy rev: v{selectedSat.activePolicyVersion}
                 </span>
+                {selectedSat.skuProfile && selectedSat.skuProfile !== 'generic-edge' && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                    SKU: {selectedSat.skuProfile}
+                  </span>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -651,35 +703,52 @@ export default function FleetPage() {
                 Policy v{selectedSat.activePolicyVersion} (atomic)
               </div>
               <div className="text-[11px] text-slate-500 mt-0.5">
-                Watchdog Timer: {watchdogTimeoutSec}s
+                {selectedSat.role === 'edge-ngfw'
+                  ? `nf_flowtable fastpath: ${selectedSat.fastpathOffload !== false ? 'Enabled' : 'Disabled'} (${selectedSat.wanInterface || 'eth0'} ↔ ${selectedSat.lanInterface || 'eth1'})`
+                  : `Watchdog Timer: ${watchdogTimeoutSec}s`}
               </div>
             </div>
 
-            <div className="p-3.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
-              <div className="text-xs font-medium text-slate-400 flex items-center gap-1.5">
-                <Wifi className="w-3.5 h-3.5 text-purple-400" />
-                Wireless Radios (mac80211)
+            {selectedSat.role === 'edge-ngfw' ? (
+              <div className="p-3.5 rounded-lg bg-slate-950/60 border border-cyan-500/20">
+                <div className="text-xs font-medium text-cyan-300 flex items-center gap-1.5">
+                  <Shield className="w-3.5 h-3.5 text-cyan-400" />
+                  Hardened Monolithic UKI Posture
+                </div>
+                <div className="text-sm font-semibold text-white mt-1">
+                  PID 1 Static Go (/init) • CONFIG_MODULES=n
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  Zero /bin/sh • Zero glibc • Diskless RAM-only Streamer
+                </div>
               </div>
-              <div className="text-sm font-semibold text-white mt-1">
-                {selectedSat.wifiRadios.length > 0
-                  ? `${selectedSat.wifiRadios.length} SSID${selectedSat.wifiRadios.length === 1 ? '' : 's'} Configured`
-                  : 'No Wi-Fi Radios'}
+            ) : (
+              <div className="p-3.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
+                <div className="text-xs font-medium text-slate-400 flex items-center gap-1.5">
+                  <Wifi className="w-3.5 h-3.5 text-purple-400" />
+                  Wireless Radios (mac80211)
+                </div>
+                <div className="text-sm font-semibold text-white mt-1">
+                  {selectedSat.wifiRadios.length > 0
+                    ? `${selectedSat.wifiRadios.length} SSID${selectedSat.wifiRadios.length === 1 ? '' : 's'} Configured`
+                    : 'No Wi-Fi Radios'}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5">
+                  {selectedSat.wifiClients} Connected Clients
+                </div>
               </div>
-              <div className="text-[11px] text-slate-500 mt-0.5">
-                {selectedSat.wifiClients} Connected Clients
-              </div>
-            </div>
+            )}
 
             <div className="p-3.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
               <div className="text-xs font-medium text-slate-400 flex items-center gap-1.5">
                 <Activity className="w-3.5 h-3.5 text-cyan-400" />
-                Kernel Uptime & Health
+                Kernel Uptime & Conntrack
               </div>
               <div className="text-sm font-semibold text-white mt-1">
                 {formatUptime(selectedSat.uptimeSeconds)}
               </div>
               <div className="text-[11px] text-slate-500 mt-0.5">
-                {selectedSat.activeConns} conntrack sessions
+                {selectedSat.activeConns} active flows ({selectedSat.offloadedConns || 0} HW/SW offloaded)
               </div>
             </div>
           </div>
@@ -689,15 +758,17 @@ export default function FleetPage() {
       {/* ZTP Enrollment Modal */}
       {isZtpModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full p-6 space-y-6 shadow-2xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-800 pb-4">
               <div className="flex items-center gap-2.5">
                 <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
                   <Plus className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-white">Enroll New Satellite (ZTP)</h3>
-                  <p className="text-xs text-slate-400">Zero-Touch Provisioning bootstrap for OpenWrt or Linux</p>
+                  <h3 className="text-lg font-bold text-white">Enroll Edge NGFW or Satellite (ZTP)</h3>
+                  <p className="text-xs text-slate-400">
+                    Provision a Super-Slim Single-File EFI UKI NGFW (PID 1 Go) or a standard OpenWrt/Linux satellite
+                  </p>
                 </div>
               </div>
               <button
@@ -709,6 +780,42 @@ export default function FleetPage() {
             </div>
 
             <div className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-1.5">
+                  Appliance Role & Operating Mode
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setNewNodeRole('edge-ngfw')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                      newNodeRole === 'edge-ngfw'
+                        ? 'bg-cyan-500/10 border-cyan-500/40 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="text-xs font-bold text-cyan-300">Super-Slim Edge NGFW (Single-File EFI UKI)</div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Custom monolithic kernel (CONFIG_MODULES=n) + static Go PID 1 (/init). Zero local storage.
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewNodeRole('satellite')}
+                    className={`p-3 rounded-xl border text-left transition cursor-pointer ${
+                      newNodeRole === 'satellite'
+                        ? 'bg-emerald-500/10 border-emerald-500/40 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="text-xs font-bold text-emerald-300">Branch / Wireless Satellite</div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Runs on existing OpenWrt, Alpine, or Debian routers with optional Wi-Fi AP telemetry.
+                    </div>
+                  </button>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-1">
@@ -716,7 +823,7 @@ export default function FleetPage() {
                   </label>
                   <input
                     type="text"
-                    placeholder="sat-branch-01"
+                    placeholder={newNodeRole === 'edge-ngfw' ? 'edge-ngfw-01' : 'sat-branch-01'}
                     value={newNodeId}
                     onChange={(e) => setNewNodeId(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm font-mono text-slate-200 focus:outline-none focus:border-emerald-500"
@@ -728,7 +835,7 @@ export default function FleetPage() {
                   </label>
                   <input
                     type="text"
-                    placeholder="Branch Edge Router"
+                    placeholder={newNodeRole === 'edge-ngfw' ? 'Perimeter Edge NGFW' : 'Branch Edge Router'}
                     value={newNodeName}
                     onChange={(e) => setNewNodeName(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
@@ -743,13 +850,82 @@ export default function FleetPage() {
                     onChange={(e) => setNewNodeArch(e.target.value as 'amd64' | 'arm64' | 'mipsle' | 'armv7')}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 focus:outline-none focus:border-emerald-500"
                   >
-                    <option value="arm64">arm64</option>
                     <option value="amd64">amd64</option>
+                    <option value="arm64">arm64</option>
                     <option value="mipsle">mipsle</option>
                     <option value="armv7">armv7</option>
                   </select>
                 </div>
               </div>
+
+              {newNodeRole === 'edge-ngfw' && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                  <div className="sm:col-span-3">
+                    <label className="text-xs font-semibold text-cyan-300 uppercase tracking-wider block mb-1">
+                      Manufacturing Hardware SKU Profile (Monolithic Kernel)
+                    </label>
+                    <select
+                      value={newNodeSku}
+                      onChange={(e) =>
+                        setNewNodeSku(
+                          e.target.value as
+                            | 'sku-x86-intel-n100-i226'
+                            | 'sku-x86-enterprise-10g-25g'
+                            | 'sku-vm-virtio'
+                            | 'sku-arm64-router'
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="sku-vm-virtio">
+                        sku-vm-virtio (Default — Minimalist KVM / QEMU / Proxmox / Cloud VirtIO, GOAMD64=v1)
+                      </option>
+                      <option value="sku-x86-intel-n100-i226">
+                        sku-x86-intel-n100-i226 (Intel N100/N305 + i225/i226 2.5GbE, GOAMD64=v3)
+                      </option>
+                      <option value="sku-x86-enterprise-10g-25g">
+                        sku-x86-enterprise-10g-25g (1U Xeon/EPYC + X520/X710/E810/ConnectX-6, GOAMD64=v3)
+                      </option>
+                      <option value="sku-arm64-router">
+                        sku-arm64-router (MediaTek Filogic / Marvell Armada DSA, GOARCH=arm64)
+                      </option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-400 uppercase block mb-1">
+                      WAN Interface
+                    </label>
+                    <input
+                      type="text"
+                      value={newNodeWan}
+                      onChange={(e) => setNewNodeWan(e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono text-slate-200"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-400 uppercase block mb-1">
+                      LAN Interface
+                    </label>
+                    <input
+                      type="text"
+                      value={newNodeLan}
+                      onChange={(e) => setNewNodeLan(e.target.value)}
+                      className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono text-slate-200"
+                    />
+                  </div>
+                  <div className="flex items-end pb-1">
+                    <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={newNodeFastpath}
+                        onChange={(e) => setNewNodeFastpath(e.target.checked)}
+                        className="rounded border-slate-700 bg-slate-900 text-cyan-500"
+                      />
+                      <span>Enable nf_flowtable Fastpath</span>
+                    </label>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-1.5">
@@ -775,11 +951,13 @@ export default function FleetPage() {
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-1.5">
-                  Bootstrapping Command (Run on edge device)
+                  {newNodeRole === 'edge-ngfw'
+                    ? 'Autonomous Cloud-Init User-Data (#cloud-config for Proxmox / KVM / AWS / GCP)'
+                    : 'Bootstrapping Command (Run on edge device)'}
                 </label>
                 <div className="relative">
-                  <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto">
-                    {bootstrapCommand}
+                  <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap break-all">
+                    {newNodeRole === 'edge-ngfw' ? cloudInitSnippet : bootstrapCommand}
                   </pre>
                   <button
                     onClick={handleCopyZtp}
@@ -789,6 +967,16 @@ export default function FleetPage() {
                     <span>{copied ? 'Copied' : 'Copy'}</span>
                   </button>
                 </div>
+                {newNodeRole === 'edge-ngfw' && (
+                  <div className="mt-2">
+                    <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
+                      Or Custom Single-File EFI UKI Builder Command (6.4 MB BOOTX64.EFI)
+                    </label>
+                    <pre className="p-2.5 bg-slate-950/60 border border-slate-800/80 rounded-lg text-[11px] font-mono text-slate-400 overflow-x-auto whitespace-pre-wrap break-all">
+                      {bootstrapCommand}
+                    </pre>
+                  </div>
+                )}
               </div>
             </div>
 
