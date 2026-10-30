@@ -17,7 +17,7 @@
     "./ui/*": "./src/ui/*"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "detect-port": "^2.1.0",
     "execa": "^10.2.0",
     "fast-xml-parser": "^5.11.0",
