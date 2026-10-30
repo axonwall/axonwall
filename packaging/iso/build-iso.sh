@@ -496,6 +496,9 @@ grub-pc
 grub-pc-bin
 grub-efi-amd64-bin
 efibootmgr
+dosfstools
+mtools
+e2fsprogs
 squashfs-tools
 ucf
 os-prober
@@ -589,6 +592,9 @@ grub-pc
 grub-pc-bin
 grub-efi-amd64-bin
 efibootmgr
+dosfstools
+mtools
+e2fsprogs
 squashfs-tools
 ucf
 os-prober

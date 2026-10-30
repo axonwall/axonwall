@@ -1496,9 +1496,15 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 
 	drawProgress := func(statusMsg string, finished bool, failed bool) {
 		clearScreen()
-		fmt.Printf("%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", colorEmerald, colorBold, colorReset)
-		fmt.Printf("%s%s║  ⚡ AXONWALL NEXT-GEN DIRECT-IMAGING INSTALLER — LIVE PROGRESS               ║%s\n", colorEmerald, colorBold, colorReset)
-		fmt.Printf("%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n\n", colorEmerald, colorBold, colorReset)
+		hdrColor := colorEmerald
+		hdrTitle := "⚡ AXONWALL NEXT-GEN DIRECT-IMAGING INSTALLER — LIVE PROGRESS              "
+		if failed {
+			hdrColor = colorRed
+			hdrTitle = "✗  AXONWALL INSTALLER — INSTALLATION FAILED (DO NOT BOOT TARGET DISK)      "
+		}
+		fmt.Printf("%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", hdrColor, colorBold, colorReset)
+		fmt.Printf("%s%s║  %s║%s\n", hdrColor, colorBold, hdrTitle, colorReset)
+		fmt.Printf("%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n\n", hdrColor, colorBold, colorReset)
 
 		pct := ((currentPhase - 1) * 100) / totalPhases
 		if finished && !failed {
@@ -1509,11 +1515,17 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 		if filled > barWidth {
 			filled = barWidth
 		}
-		bar := colorEmerald + colorBold + strings.Repeat("█", filled) + colorReset + colorDim + strings.Repeat("░", barWidth-filled) + colorReset
+		barColor := colorEmerald
+		statusColor := colorCyan
+		if failed {
+			barColor = colorRed
+			statusColor = colorRed
+		}
+		bar := barColor + colorBold + strings.Repeat("█", filled) + colorReset + colorDim + strings.Repeat("░", barWidth-filled) + colorReset
 		elapsed := time.Since(startTime).Round(time.Second)
 
 		fmt.Printf("  Progress: [%s] %s%3d%%%s  (%s)\n", bar, colorBold, pct, colorReset, elapsed)
-		fmt.Printf("  Status  : %s%s%s\n\n", colorCyan+colorBold, statusMsg, colorReset)
+		fmt.Printf("  Status  : %s%s%s\n\n", statusColor+colorBold, statusMsg, colorReset)
 
 		fmt.Println("  Installation Phases:")
 		for i, p := range phases {

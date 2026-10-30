@@ -603,9 +603,30 @@ sleep 1
 # ==============================================================================
 emit_phase 2 8 "Formatting filesystems, RAID-1 mirrors & LUKS2 encryption..."
 
+format_esp() {
+  _esp_dev="$1"
+  if ! command -v mkfs.vfat >/dev/null 2>&1 && ! command -v mkfs.fat >/dev/null 2>&1; then
+    for _deb in /run/live/medium/pool*/main/d/dosfstools/dosfstools*.*deb /cdrom/pool*/main/d/dosfstools/dosfstools*.*deb; do
+      if [ -f "$_deb" ] && command -v dpkg-deb >/dev/null 2>&1; then
+        echo "[+] Extracting fallback dosfstools package (${_deb}) into live environment..."
+        dpkg-deb -x "$_deb" / 2>/dev/null || true
+        break
+      fi
+    done
+  fi
+  if command -v mkfs.vfat >/dev/null 2>&1; then
+    mkfs.vfat -F 32 -n AXON_EFI "$_esp_dev" >/dev/null 2>&1 || mkfs.vfat -F 32 "$_esp_dev"
+  elif command -v mkfs.fat >/dev/null 2>&1; then
+    mkfs.fat -F 32 -n AXON_EFI "$_esp_dev" >/dev/null 2>&1 || mkfs.fat -F 32 "$_esp_dev"
+  else
+    echo "[!] FATAL: Neither mkfs.vfat nor mkfs.fat is available to format EFI System Partition ${_esp_dev}." >&2
+    exit 1
+  fi
+}
+
 for sys_disk in $SYSTEM_DISKS; do
   EFI_P=$(part_dev "$sys_disk" 2)
-  mkfs.vfat -F 32 -n AXON_EFI "$EFI_P" >/dev/null 2>&1 || mkfs.vfat -F 32 "$EFI_P"
+  format_esp "$EFI_P"
 done
 
 ROOT_A_DEV=$(part_dev "$PRIMARY_DISK" "$ROOT_A_PART_NUM")
@@ -948,6 +969,12 @@ APT_EOF
 fi
 
 # Configure Admin & Root Credentials
+CUSTOM_PW_SET=1
+if [ -z "$ADMIN_PASSWORD" ]; then
+  ADMIN_PASSWORD="axonwall"
+  CUSTOM_PW_SET=0
+fi
+
 if [ -n "$ADMIN_PASSWORD" ]; then
   PW_TMP="/mnt/slot_a/tmp/.axonwall_pw_install.tmp"
   printf '%s' "$ADMIN_PASSWORD" > "$PW_TMP"
@@ -979,11 +1006,20 @@ if [ -n "$ADMIN_PASSWORD" ]; then
     chmod 0600 /mnt/slot_a/etc/axonwall/admin.env
     cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
     chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
-    rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
-    NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "installed")"
-    printf '%s\n' "$NOW_TS" > /mnt/slot_a/etc/axonwall/.password_changed
-    printf '%s\n' "$NOW_TS" > /mnt/data/.password_changed
-    echo "[+] Provisioned scrypt administrator credentials for '${ADMIN_USER:-admin}'."
+    if [ "$CUSTOM_PW_SET" -eq 1 ]; then
+      rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
+      NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "installed")"
+      printf '%s\n' "$NOW_TS" > /mnt/slot_a/etc/axonwall/.password_changed
+      printf '%s\n' "$NOW_TS" > /mnt/data/.password_changed
+      echo "[+] Provisioned custom scrypt administrator credentials for '${ADMIN_USER:-admin}'."
+    else
+      rm -f /mnt/slot_a/etc/axonwall/.password_changed /mnt/data/.password_changed
+      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
+      chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
+      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+      chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+      echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first web login)."
+    fi
   fi
 
   case "$ADMIN_PASSWORD" in
@@ -1273,6 +1309,26 @@ resolve_zfs_topology() {
   fi
 }
 
+init_zroot_datasets() {
+  _zroot_topo="${1:-stripe}"
+  _has_separate_tank="${2:-0}"
+  _app_ver="$(head -n1 /mnt/slot_a/etc/axonwall/version 2>/dev/null | tr -d '\r\n ' || true)"
+  [ -z "$_app_ver" ] && _app_ver="0.11.41"
+  _init_be="zroot/ROOT/axonwall-${_app_ver}"
+  zfs create -o canmount=off -o mountpoint=none zroot/ROOT 2>/dev/null || true
+  zfs create -o canmount=noauto -o mountpoint=/ "$_init_be" 2>/dev/null || true
+  if [ "$_has_separate_tank" = "0" ]; then
+    zfs create -o mountpoint=/mnt/tank zroot/tank 2>/dev/null || true
+  fi
+  zpool set "bootfs=${_init_be}" zroot 2>/dev/null || true
+  zfs set "org.axonwall:active_be=${_init_be}" zroot/ROOT 2>/dev/null || true
+  zfs set "org.axonwall:fallback_be=${_init_be}" zroot/ROOT 2>/dev/null || true
+  zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
+  zfs set "org.axonwall:bootlimit=3" zroot/ROOT 2>/dev/null || true
+  zfs set "org.axonwall:topology=${_zroot_topo}" zroot/ROOT 2>/dev/null || true
+  zfs snapshot "${_init_be}@factory-initial" 2>/dev/null || true
+}
+
 if [ "$INSTALL_MODE" = "zbm" ] && [ -n "$EXTRA_DATA_VDEVS" ]; then
   # Dual-Pool ZBM Architecture: 'zroot' on System Disks + Dedicated 'tank' on Extra Data Disks
   ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
@@ -1315,13 +1371,15 @@ ZFS_JSON_EOF
       ZROOT_ARGS=""
       [ "$ZROOT_TOPO" != "stripe" ] && ZROOT_ARGS="$ZROOT_TOPO"
       # shellcheck disable=SC2086
-      zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $ZROOT_ARGS $SYS_ZFS_VDEVS 2>/dev/null || true
+      if zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $ZROOT_ARGS $SYS_ZFS_VDEVS 2>/dev/null; then
+        init_zroot_datasets "$ZROOT_TOPO" 1
+      fi
     fi
     echo "[+] Creating Dedicated OpenZFS Storage Pool 'tank' (topology=${RESOLVED_TOPOLOGY}, vdevs=${EXTRA_DATA_VDEVS}, accel=${ZPOOL_ACCEL_ARGS})..."
     TANK_ARGS=""
     [ "$RESOLVED_TOPOLOGY" != "stripe" ] && TANK_ARGS="$RESOLVED_TOPOLOGY"
     # shellcheck disable=SC2086
-    zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O mountpoint=/mnt/tank tank $TANK_ARGS $EXTRA_DATA_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
+    zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank tank $TANK_ARGS $EXTRA_DATA_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
   fi
 else
   ZFS_VDEVS=$(echo "${SYS_ZFS_VDEVS} ${EXTRA_DATA_VDEVS}" | tr -s ' ' | sed 's/^ //;s/ $//')
@@ -1363,8 +1421,15 @@ ZFS_JSON_EOF
       if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
         ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
       fi
-      # shellcheck disable=SC2086
-      zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O mountpoint=/mnt/tank "${TARGET_POOL_NAME}" $ZPOOL_ARGS $ZFS_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
+      if [ "$TARGET_POOL_NAME" = "zroot" ]; then
+        # shellcheck disable=SC2086
+        if zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $ZPOOL_ARGS $ZFS_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null; then
+          init_zroot_datasets "$RESOLVED_TOPOLOGY" 0
+        fi
+      else
+        # shellcheck disable=SC2086
+        zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank "${TARGET_POOL_NAME}" $ZPOOL_ARGS $ZFS_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
+      fi
     fi
   fi
 fi

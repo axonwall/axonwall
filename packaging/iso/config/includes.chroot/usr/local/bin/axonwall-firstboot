@@ -409,26 +409,32 @@ if [[ -s /var/lib/axonwall/install-zfs.json ]] && command -v zpool &>/dev/null; 
       if [[ "$_zfs_pool" == "zroot" ]]; then
         echo "[Axonwall Firstboot] Creating ZFSBootMenu Root-on-ZFS pool 'zroot' (${_zfs_topo}: ${_zfs_vdevs})..."
         # shellcheck disable=SC2086
-        if zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $_topo_arg $_zfs_vdevs $_accel_args 2>/dev/null; then
-          _app_ver="$(head -n1 /etc/axonwall/version 2>/dev/null | tr -d '\r\n ' || echo "0.11.32")"
-          [[ -z "$_app_ver" ]] && _app_ver="0.11.32"
-          _init_be="zroot/ROOT/axonwall-${_app_ver}"
-          zfs create -o canmount=off -o mountpoint=none zroot/ROOT 2>/dev/null || true
-          zfs create -o canmount=noauto -o mountpoint=/ "$_init_be" 2>/dev/null || true
-          zfs create -o mountpoint=/mnt/tank zroot/tank 2>/dev/null || true
-          zpool set "bootfs=${_init_be}" zroot 2>/dev/null || true
-          zfs set "org.axonwall:active_be=${_init_be}" zroot/ROOT 2>/dev/null || true
-          zfs set "org.axonwall:fallback_be=${_init_be}" zroot/ROOT 2>/dev/null || true
-          zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
-          zfs set "org.axonwall:bootlimit=3" zroot/ROOT 2>/dev/null || true
-          zfs set "org.axonwall:topology=${_zfs_topo}" zroot/ROOT 2>/dev/null || true
-          zfs snapshot "${_init_be}@factory-initial" 2>/dev/null || true
-        fi
+        zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $_topo_arg $_zfs_vdevs $_accel_args 2>/dev/null || true
       else
         echo "[Axonwall Firstboot] Creating OpenZFS storage pool '${_zfs_pool}' (${_zfs_topo}: ${_zfs_vdevs}, accel: ${_accel_args})..."
         # shellcheck disable=SC2086
         zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank "$_zfs_pool" $_topo_arg $_zfs_vdevs $_accel_args 2>/dev/null || true
       fi
+    fi
+    if zpool list -H zroot &>/dev/null && ! zfs list -H zroot/ROOT &>/dev/null; then
+      echo "[Axonwall Firstboot] Initializing ZFSBootMenu boot environment datasets on 'zroot'..."
+      _app_ver="$(head -n1 /etc/axonwall/version 2>/dev/null | tr -d '\r\n ' || echo "0.11.41")"
+      [[ -z "$_app_ver" ]] && _app_ver="0.11.41"
+      _init_be="zroot/ROOT/axonwall-${_app_ver}"
+      zfs set canmount=off zroot 2>/dev/null || true
+      zfs set mountpoint=none zroot 2>/dev/null || true
+      zfs create -o canmount=off -o mountpoint=none zroot/ROOT 2>/dev/null || true
+      zfs create -o canmount=noauto -o mountpoint=/ "$_init_be" 2>/dev/null || true
+      if ! zpool list -H tank &>/dev/null; then
+        zfs create -o mountpoint=/mnt/tank zroot/tank 2>/dev/null || true
+      fi
+      zpool set "bootfs=${_init_be}" zroot 2>/dev/null || true
+      zfs set "org.axonwall:active_be=${_init_be}" zroot/ROOT 2>/dev/null || true
+      zfs set "org.axonwall:fallback_be=${_init_be}" zroot/ROOT 2>/dev/null || true
+      zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
+      zfs set "org.axonwall:bootlimit=3" zroot/ROOT 2>/dev/null || true
+      zfs set "org.axonwall:topology=${_zfs_topo:-stripe}" zroot/ROOT 2>/dev/null || true
+      zfs snapshot "${_init_be}@factory-initial" 2>/dev/null || true
     fi
   fi
 fi
@@ -442,10 +448,13 @@ if [[ ! -s /etc/axonwall/axonwall.env ]]; then
   if [[ -f /etc/axonwall/admin.env ]]; then
     INSTALL_PASS=$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)
   fi
-  if [[ -z "$INSTALL_PASS" ]] && { [[ -d /run/live/medium ]] || grep -qE 'boot=live|axonwall_install=1|axonwall\.install=1' /proc/cmdline 2>/dev/null; }; then
+  if [[ -z "$INSTALL_PASS" && -f /etc/axonwall/initial-admin-password ]]; then
+    INSTALL_PASS=$(head -n1 /etc/axonwall/initial-admin-password 2>/dev/null | tr -d '\r\n' || true)
+  fi
+  if [[ -z "$INSTALL_PASS" ]]; then
     INSTALL_PASS="axonwall"
   fi
-  ADMIN_PASS="${INSTALL_PASS:-${LOCAL_ADMIN_PASSWORD:-$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')}}"
+  ADMIN_PASS="${INSTALL_PASS:-${LOCAL_ADMIN_PASSWORD:-axonwall}}"
 
   cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
