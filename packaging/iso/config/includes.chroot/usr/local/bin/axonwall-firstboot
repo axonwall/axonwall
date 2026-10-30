@@ -369,6 +369,36 @@ if [[ -s /var/lib/axonwall/install-zfs.json ]] && command -v zpool &>/dev/null; 
   _zfs_pool="$(jq -r '.poolName // "tank"' /var/lib/axonwall/install-zfs.json 2>/dev/null || echo "tank")"
   _zfs_topo="$(jq -r '.topology // "stripe"' /var/lib/axonwall/install-zfs.json 2>/dev/null || echo "stripe")"
   _zfs_vdevs="$(jq -r '(.vdevs // []) | join(" ")' /var/lib/axonwall/install-zfs.json 2>/dev/null || true)"
+  _zroot_vdevs="$(jq -r '(.zrootVdevs // []) | join(" ")' /var/lib/axonwall/install-zfs.json 2>/dev/null || true)"
+  _zroot_topo="$(jq -r '.zrootTopology // "stripe"' /var/lib/axonwall/install-zfs.json 2>/dev/null || echo "stripe")"
+  _slog_vdevs="$(jq -r '(.slogVdevs // []) | join(" ")' /var/lib/axonwall/install-zfs.json 2>/dev/null || true)"
+  _l2arc_vdevs="$(jq -r '(.l2arcVdevs // []) | join(" ")' /var/lib/axonwall/install-zfs.json 2>/dev/null || true)"
+  _spare_vdevs="$(jq -r '(.spareVdevs // []) | join(" ")' /var/lib/axonwall/install-zfs.json 2>/dev/null || true)"
+
+  _accel_args=""
+  if [[ -n "$_slog_vdevs" ]]; then
+    _slog_cnt=$(echo "$_slog_vdevs" | wc -w | tr -d ' ')
+    if [[ "$_slog_cnt" -ge 2 ]]; then
+      _accel_args="${_accel_args} log mirror ${_slog_vdevs}"
+    else
+      _accel_args="${_accel_args} log ${_slog_vdevs}"
+    fi
+  fi
+  [[ -n "$_l2arc_vdevs" ]] && _accel_args="${_accel_args} cache ${_l2arc_vdevs}"
+  [[ -n "$_spare_vdevs" ]] && _accel_args="${_accel_args} spare ${_spare_vdevs}"
+
+  if [[ -n "$_zroot_vdevs" ]]; then
+    if ! zpool list -H zroot &>/dev/null; then
+      zpool import -f zroot 2>/dev/null || true
+    fi
+    if ! zpool list -H zroot &>/dev/null; then
+      _ztopo_arg=""
+      [[ "$_zroot_topo" != "stripe" && "$_zroot_topo" != "auto" && -n "$_zroot_topo" ]] && _ztopo_arg="$_zroot_topo"
+      # shellcheck disable=SC2086
+      zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $_ztopo_arg $_zroot_vdevs 2>/dev/null || true
+    fi
+  fi
+
   if [[ -n "$_zfs_pool" && -n "$_zfs_vdevs" ]]; then
     if ! zpool list -H "$_zfs_pool" &>/dev/null; then
       zpool import -f "$_zfs_pool" 2>/dev/null || true
@@ -379,7 +409,7 @@ if [[ -s /var/lib/axonwall/install-zfs.json ]] && command -v zpool &>/dev/null; 
       if [[ "$_zfs_pool" == "zroot" ]]; then
         echo "[Axonwall Firstboot] Creating ZFSBootMenu Root-on-ZFS pool 'zroot' (${_zfs_topo}: ${_zfs_vdevs})..."
         # shellcheck disable=SC2086
-        if zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $_topo_arg $_zfs_vdevs 2>/dev/null; then
+        if zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $_topo_arg $_zfs_vdevs $_accel_args 2>/dev/null; then
           _app_ver="$(head -n1 /etc/axonwall/version 2>/dev/null | tr -d '\r\n ' || echo "0.11.32")"
           [[ -z "$_app_ver" ]] && _app_ver="0.11.32"
           _init_be="zroot/ROOT/axonwall-${_app_ver}"
@@ -395,9 +425,9 @@ if [[ -s /var/lib/axonwall/install-zfs.json ]] && command -v zpool &>/dev/null; 
           zfs snapshot "${_init_be}@factory-initial" 2>/dev/null || true
         fi
       else
-        echo "[Axonwall Firstboot] Creating OpenZFS storage pool '${_zfs_pool}' (${_zfs_topo}: ${_zfs_vdevs})..."
+        echo "[Axonwall Firstboot] Creating OpenZFS storage pool '${_zfs_pool}' (${_zfs_topo}: ${_zfs_vdevs}, accel: ${_accel_args})..."
         # shellcheck disable=SC2086
-        zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank "$_zfs_pool" $_topo_arg $_zfs_vdevs 2>/dev/null || true
+        zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank "$_zfs_pool" $_topo_arg $_zfs_vdevs $_accel_args 2>/dev/null || true
       fi
     fi
   fi
