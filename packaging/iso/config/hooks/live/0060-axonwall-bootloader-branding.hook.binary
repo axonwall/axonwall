@@ -1,0 +1,322 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall ISO Bootloader Branding Hook (GRUB2 UEFI & ISOLINUX BIOS)
+# ==============================================================================
+set -e
+
+echo "[Binary Hook] Applying Axonwall Next-Gen Bootloader Branding (GRUB2 & ISOLINUX)..."
+
+FLAVOR_TITLE="Axonwall OS"
+LIVE_HOST="axonwall"
+SPLASH_SRC="/etc/axonwall/branding/splash.png"
+
+if [ -f chroot/etc/axonwall/.vault-edition ] || grep -qi "Vault" binary/.disk/info 2>/dev/null; then
+  FLAVOR_TITLE="Axonwall Vault OS"
+  LIVE_HOST="axonwall-vault"
+  if [ -f chroot/etc/axonwall/branding/splash-vault.png ]; then
+    SPLASH_SRC="chroot/etc/axonwall/branding/splash-vault.png"
+  fi
+elif [ -f chroot/etc/axonwall/branding/splash.png ]; then
+  SPLASH_SRC="chroot/etc/axonwall/branding/splash.png"
+fi
+
+# Detect exact live kernel & initrd paths inside binary/live/
+LIVE_KERN="/live/vmlinuz"
+LIVE_INITRD="/live/initrd.img"
+if [ -d binary/live ]; then
+  K_CAND=$(ls -1t binary/live/vmlinuz-* 2>/dev/null | head -n1 || true)
+  if [ -n "$K_CAND" ]; then
+    LIVE_KERN="/live/$(basename "$K_CAND")"
+  fi
+  I_CAND=$(ls -1t binary/live/initrd.img-* 2>/dev/null | head -n1 || true)
+  if [ -n "$I_CAND" ]; then
+    LIVE_INITRD="/live/$(basename "$I_CAND")"
+  fi
+fi
+
+COMMON_LIVE_ARGS="boot=live components hostname=${LIVE_HOST} username=axonwall live-config.user-default-groups=sudo,adm,dialout console=tty0 console=ttyS0,115200"
+
+# 1. Install Splash PNG into GRUB and ISOLINUX
+if [ -f "$SPLASH_SRC" ]; then
+  if [ -d binary/boot/grub ]; then
+    cp -f "$SPLASH_SRC" binary/boot/grub/splash.png
+  fi
+  if [ -d binary/isolinux ]; then
+    cp -f "$SPLASH_SRC" binary/isolinux/splash.png
+  fi
+  # Remove stock live-Session splash symlink Inside chroot if we only staged it for binary build
+  rm -rf chroot/etc/axonwall/branding 2>/dev/null || true
+fi
+
+# 2. Configure GRUB2 (UEFI / Hybrid) Theme & Menus
+if [ -d binary/boot/grub ]; then
+  mkdir -p binary/boot/grub/live-theme
+
+  cat > binary/boot/grub/live-theme/theme.txt << 'GRUB_THEME_EOF'
+desktop-image: "../splash.png"
+title-color: "#34d399"
+title-font: "Unifont Regular 16"
+title-text: ""
+message-font: "Unifont Regular 16"
+terminal-font: "Unifont Regular 16"
+
+# Help bar above footer
++ label {
+	top = 100%-66
+	left = 0
+	width = 100%
+	height = 20
+	text = "@KEYMAP_SHORT@"
+	align = "center"
+	color = "#94a3b8"
+	font = "Unifont Regular 16"
+}
+
+# Branded Axonwall Boot Menu inside viewport frame
++ boot_menu {
+	left = 9%
+	width = 82%
+	top = 34%
+	height = 46%
+	item_color = "#cbd5e1"
+	item_font = "Unifont Regular 16"
+	selected_item_color = "#34d399"
+	selected_item_font = "Unifont Regular 16"
+	item_height = 20
+	item_padding = 2
+	item_spacing = 6
+	icon_width = 0
+	icon_height = 0
+	item_icon_space = 0
+}
+
+# Branded Emerald/Cyan Timeout Progress Bar
++ progress_bar {
+	id = "__timeout__"
+	left = 10%
+	top = 100%-92
+	height = 18
+	width = 80%
+	font = "Unifont Regular 16"
+	text_color = "#f8fafc"
+	fg_color = "#10b981"
+	bg_color = "#0f172a"
+	border_color = "#34d399"
+	text = "@TIMEOUT_NOTIFICATION_LONG@"
+}
+GRUB_THEME_EOF
+
+  cat > binary/boot/grub/theme.cfg << 'THEME_CFG_EOF'
+set color_normal=light-gray/black
+set color_highlight=light-green/dark-gray
+
+if [ -e /boot/grub/splash.png ]; then
+    set theme=/boot/grub/live-theme/theme.txt
+else
+    set menu_color_normal=light-cyan/black
+    set menu_color_highlight=light-green/dark-gray
+fi
+THEME_CFG_EOF
+
+  cat > binary/boot/grub/config.cfg << 'CONFIG_CFG_EOF'
+set default=0
+set timeout=5
+
+if [ x$feature_default_font_path = xy ] ; then
+    font=unicode
+else
+    font=$prefix/unicode.pf2
+fi
+
+if loadfont $font ; then
+    set gfxmode=640x480,800x600,auto
+    set gfxpayload=keep
+    insmod efi_gop
+    insmod efi_uga
+    insmod video_bochs
+    insmod video_cirrus
+else
+    set gfxmode=auto
+    insmod all_video
+fi
+
+insmod gfxterm
+insmod png
+
+source /boot/grub/theme.cfg
+
+terminal_output gfxterm
+CONFIG_CFG_EOF
+
+  cat > binary/boot/grub/install_start.cfg << INSTALL_START_EOF
+menuentry "Install ${FLAVOR_TITLE} (Next-Gen TUI Installer)" --hotkey=i {
+	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 findiso=\${iso_path}
+	initrd	${LIVE_INITRD}
+}
+menuentry "Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)" --hotkey=z {
+	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall.unattended=1 findiso=\${iso_path}
+	initrd	${LIVE_INITRD}
+}
+INSTALL_START_EOF
+
+  cat > binary/boot/grub/install.cfg << INSTALL_SUB_EOF
+menuentry "Install ${FLAVOR_TITLE} via Serial Console (ttyS0 115200)" --hotkey=s {
+	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 console=ttyS0,115200n8 findiso=\${iso_path}
+	initrd	${LIVE_INITRD}
+}
+menuentry "Legacy Debian Installer (d-i Preseed Dark Theme)" --hotkey=d {
+	linux	/install/vmlinuz vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
+	initrd	/install/initrd.gz
+}
+menuentry "Legacy Debian Installer (Expert Mode)" --hotkey=x {
+	linux	/install/vmlinuz priority=low vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg
+	initrd	/install/initrd.gz
+}
+menuentry "Legacy Rescue Mode" --hotkey=r {
+	linux	/install/vmlinuz rescue/enable=true vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
+	initrd	/install/initrd.gz
+}
+INSTALL_SUB_EOF
+
+  cat > binary/boot/grub/grub.cfg << GRUB_MAIN_EOF
+source /boot/grub/config.cfg
+
+# Primary Next-Gen Installer & Live Boot Options
+source /boot/grub/install_start.cfg
+
+menuentry "Boot ${FLAVOR_TITLE} Live Appliance (Evaluation & Console)" --hotkey=l {
+	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} findiso=\${iso_path}
+	initrd	${LIVE_INITRD}
+}
+
+submenu "Advanced & Legacy Install Options ..." --hotkey=a {
+	source /boot/grub/theme.cfg
+	source /boot/grub/install.cfg
+	menuentry "Boot ${FLAVOR_TITLE} Live (Fail-Safe Mode)" {
+		linux	${LIVE_KERN} boot=live components memtest noapic noapm nodma nomce nosmp nosplash vga=788
+		initrd	${LIVE_INITRD}
+	}
+}
+
+submenu "Hardware & Firmware Utilities ..." --hotkey=u {
+	source /boot/grub/theme.cfg
+	if [ "\${grub_platform}" = "efi" ]; then
+		menuentry "UEFI Firmware Settings" --hotkey=f {
+			fwsetup
+		}
+	fi
+	menuentry "Verify Integrity of Boot Medium" --hotkey=v {
+		linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} findiso=\${iso_path} verify-checksums
+		initrd	${LIVE_INITRD}
+	}
+}
+GRUB_MAIN_EOF
+fi
+
+# 3. Configure ISOLINUX (BIOS) Theme & Menus
+if [ -d binary/isolinux ]; then
+  cat > binary/isolinux/stdmenu.cfg << 'ISOLINUX_STD_EOF'
+menu background splash.png
+menu color title	* #ff34d399 *
+menu color border	* #00000000 #00000000 none
+menu color sel		* #ffffffff #ee0d9488 *
+menu color hotsel	1;7;37;40 #ff34d399 #ee0d9488 *
+menu color unsel	* #ffcbd5e1 #00000000 *
+menu color tabmsg	* #ff38bdf8 #00000000 *
+menu color help		37;40 #ff94a3b8 #00000000 none
+menu color timeout_msg	37;40 #ff94a3b8 #00000000 none
+menu color timeout	1;37;40 #ff34d399 #00000000 none
+menu vshift 9
+menu rows 10
+menu helpmsgrow 20
+menu cmdlinerow 21
+menu timeoutrow 21
+menu tabmsgrow 22
+menu tabmsg Press ENTER to boot or TAB to edit kernel parameters
+ISOLINUX_STD_EOF
+
+  cat > binary/isolinux/live.cfg << ISOLINUX_LIVE_EOF
+label install-tui
+	menu label ^Install ${FLAVOR_TITLE} (Next-Gen TUI Installer)
+	menu default
+	linux /live/vmlinuz
+	initrd /live/initrd.img
+	append ${COMMON_LIVE_ARGS} axonwall_install=1
+
+label install-unattended
+	menu label ^Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)
+	linux /live/vmlinuz
+	initrd /live/initrd.img
+	append ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall.unattended=1
+
+label live-amd64
+	menu label Boot ${FLAVOR_TITLE} ^Live Appliance (Evaluation & Console)
+	linux /live/vmlinuz
+	initrd /live/initrd.img
+	append ${COMMON_LIVE_ARGS}
+
+label live-amd64-failsafe
+	menu label Boot ${FLAVOR_TITLE} Live (Fail-Safe Mode)
+	linux /live/vmlinuz
+	initrd /live/initrd.img
+	append boot=live components memtest noapic noapm nodma nomce nosmp nosplash vga=788
+ISOLINUX_LIVE_EOF
+
+  cat > binary/isolinux/install.cfg << ISOLINUX_INSTALL_EOF
+menu begin legacy-install
+	menu label ^Advanced & Legacy Debian Installer Options
+	menu title Advanced & Legacy Debian Installer Options
+	include stdmenu.cfg
+	label mainmenu
+		menu label ^Back..
+		menu exit
+
+	label serial-install
+		menu label Install ${FLAVOR_TITLE} via ^Serial Console (ttyS0 115200)
+		linux /live/vmlinuz
+		initrd /live/initrd.img
+		append ${COMMON_LIVE_ARGS} axonwall_install=1 console=ttyS0,115200n8
+
+	label darkinstall
+		menu label Legacy ^Debian Installer (d-i Preseed Dark Theme)
+		linux /install/vmlinuz
+		initrd /install/initrd.gz
+		append vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
+
+	label darkexpert
+		menu label Legacy Debian E^xpert Install
+		linux /install/vmlinuz
+		initrd /install/initrd.gz
+		append priority=low vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg
+
+	label darkrescue
+		menu label Legacy Debian ^Rescue Mode
+		linux /install/vmlinuz
+		initrd /install/initrd.gz
+		append rescue/enable=true vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
+menu end
+ISOLINUX_INSTALL_EOF
+
+  cat > binary/isolinux/menu.cfg << ISOLINUX_MENU_EOF
+menu hshift 0
+menu width 82
+
+menu title ${FLAVOR_TITLE} Boot Menu
+include stdmenu.cfg
+include live.cfg
+include install.cfg
+menu begin utilities
+	menu label ^Utilities
+	menu title Utilities
+	include stdmenu.cfg
+	label mainmenu
+		menu label ^Back..
+		menu exit
+	include utilities.cfg
+menu end
+
+menu clear
+ISOLINUX_MENU_EOF
+fi
+
+echo "[Binary Hook] Axonwall Bootloader Branding applied successfully."

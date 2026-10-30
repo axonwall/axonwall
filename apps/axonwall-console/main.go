@@ -1571,12 +1571,21 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 }
 
 func isLiveMode() bool {
+	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+		cmd := string(data)
+		if strings.Contains(cmd, "slot=A") || strings.Contains(cmd, "slot=B") || strings.Contains(cmd, "root=LABEL=axon_root") {
+			return false
+		}
+		if strings.Contains(cmd, "boot=live") || strings.Contains(cmd, "axonwall_install=1") || strings.Contains(cmd, "axonwall.install=1") || strings.Contains(cmd, "axonwall.unattended=1") {
+			return true
+		}
+	}
+	if _, err := os.Stat("/run/live/medium"); err == nil {
+		return true
+	}
 	if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
-		if data, err := os.ReadFile("/proc/cmdline"); err == nil {
-			cmd := string(data)
-			if strings.Contains(cmd, "slot=A") || strings.Contains(cmd, "slot=B") || strings.Contains(cmd, "root=LABEL=axon_root") {
-				return false
-			}
+		if _, errMode := os.Stat("/etc/axonwall/install-mode"); errMode == nil {
+			return false
 		}
 		return true
 	}
@@ -1699,37 +1708,7 @@ func printHeader() {
 }
 
 func actionInstallToDisk(reader *bufio.Reader) {
-	clearScreen()
-	installerPath := "/usr/local/bin/axonwall-install"
-	if _, err := os.Stat(installerPath); err != nil {
-		fmt.Printf("%s[!] Installer utility '%s' not found on this system.%s\n", colorRed, installerPath, colorReset)
-		fmt.Println("If Axonwall OS is already installed on permanent storage, re-installation is not required.")
-		pause(reader)
-		return
-	}
-
-	fmt.Printf("%s=== Axonwall Appliance Disk Installer ===%s\n\n", colorCyan+colorBold, colorReset)
-	fmt.Println("This interactive utility installs Axonwall OS to permanent storage with:")
-	fmt.Println("  • A/B Dual-Root redundancy (Zero-downtime atomic firmware upgrades)")
-	fmt.Println("  • Multi-Disk System RAID-1 Mirroring (optional)")
-	fmt.Println("  • OpenZFS Storage Pool ('tank') with Mirror / RAIDZ redundancy (optional)")
-	fmt.Printf("\n%sWARNING: All existing data on the chosen target disk(s) will be partitioned!%s\n\n", colorYellow+colorBold, colorReset)
-	fmt.Print("Launch installer now? (y/N): ")
-
-	ans, _ := reader.ReadString('\n')
-	if strings.ToLower(strings.TrimSpace(ans)) != "y" {
-		fmt.Println("Installation cancelled.")
-		pause(reader)
-		return
-	}
-
-	cmd := exec.Command("/bin/sh", installerPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
-
-	pause(reader)
+	RunNextGenInstallerTUI(reader)
 }
 
 func pause(reader *bufio.Reader) {
@@ -2689,23 +2668,42 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--install", "-i":
+			RunNextGenInstallerTUI(reader)
+			return
+		case "--unattended":
+			if err := RunUnattendedInstall(); err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Unattended installation failed: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
+	autoInstallHandled := false
+
 	for {
+		// Check for auto-install or unattended kernel boot flags on Live media before requiring console authentication
+		if !autoInstallHandled && isLiveMode() {
+			autoInstallHandled = true
+			if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+				cmd := string(data)
+				if strings.Contains(cmd, "axonwall.unattended=1") {
+					_ = RunUnattendedInstall()
+				} else if strings.Contains(cmd, "axonwall_install=1") || strings.Contains(cmd, "axonwall.install=1") {
+					RunNextGenInstallerTUI(reader)
+				}
+			}
+		}
+
 		// Require authentication before entering console menu
 		user, ok := authenticateConsole(reader)
 		if !ok {
 			continue
 		}
 		currentSessionUser = user
-
-		// Check for auto-install kernel boot flag
-		if isLiveMode() {
-			if data, err := os.ReadFile("/proc/cmdline"); err == nil {
-				cmd := string(data)
-				if strings.Contains(cmd, "axonwall_install=1") || strings.Contains(cmd, "axonwall.install=1") {
-					actionInstallToDisk(reader)
-				}
-			}
-		}
 
 		sessionActive := true
 		for sessionActive {

@@ -245,6 +245,9 @@ fi
 if [ ! -s /etc/axonwall/axonwall.env ]; then
   JWT_SECRET="$(openssl rand -hex 32)"
   ADMIN_PASS="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+  if [ ! -f /etc/axonwall/install-mode ] && ! grep -qE 'slot=A|slot=B|root=LABEL=axon_root' /proc/cmdline 2>/dev/null; then
+    ADMIN_PASS="axonwall"
+  fi
   if [ -f /etc/axonwall/admin.env ]; then
     INSTALL_PASS="$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)"
     [ -n "$INSTALL_PASS" ] && ADMIN_PASS="$INSTALL_PASS"

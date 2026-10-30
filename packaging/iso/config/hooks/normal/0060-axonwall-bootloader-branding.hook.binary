@@ -1,0 +1,9 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall ISO Bootloader Branding Hook (GRUB2 UEFI & ISOLINUX BIOS)
+# ==============================================================================
+set -e
+
+if [ -x "$(dirname "$0")/../live/0060-axonwall-bootloader-branding.hook.binary" ]; then
+  exec "$(dirname "$0")/../live/0060-axonwall-bootloader-branding.hook.binary" "$@"
+fi

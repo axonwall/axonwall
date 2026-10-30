@@ -539,43 +539,89 @@ chmod 0750 \
   "${OVL}/var/lib/axonwall/secrets/ldap" \
   "${OVL}/var/lib/axonwall/secrets/ha-pki"
 
+# Stage branded splash artwork into overlay before packing apkovl
+if [[ -f "${REPO_ROOT}/packaging/iso/branding/splash.png" ]]; then
+  mkdir -p "${OVL}/etc/axonwall/branding"
+  cp "${REPO_ROOT}/packaging/iso/branding/splash.png" "${OVL}/etc/axonwall/branding/splash.png"
+fi
+
 # Pack axonwall.apkovl.tar.gz into ISO root with maximum compression
 (cd "${OVL}" && tar -cf - . | gzip -9 > "${WORK_DIR}/iso/axonwall.apkovl.tar.gz")
 
-# 5. Update bootloader configs (SYSLINUX & GRUB EFI) with comprehensive storage drivers, live & install options
+# 5. Update bootloader configs (SYSLINUX & GRUB EFI) with Axonwall branding, Next-Gen TUI Installer & Live modes
 STORAGE_MODULES="loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci"
 
 mkdir -p "${WORK_DIR}/iso/boot/syslinux" "${WORK_DIR}/iso/boot/grub"
+if [[ -f "${REPO_ROOT}/packaging/iso/branding/splash.png" ]]; then
+  cp "${REPO_ROOT}/packaging/iso/branding/splash.png" "${WORK_DIR}/iso/boot/syslinux/splash.png"
+  cp "${REPO_ROOT}/packaging/iso/branding/splash.png" "${WORK_DIR}/iso/boot/grub/splash.png"
+fi
 
 cat << SYSLINUX_EOF > "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+UI vesamenu.c32
 TIMEOUT 50
-PROMPT 1
-DEFAULT live
+PROMPT 0
+DEFAULT install
+
+MENU BACKGROUND splash.png
+MENU TITLE Axonwall Next-Gen Appliance Boot Menu (Alpine Linux)
+MENU COLOR screen       37;40      #80ffffff #00000000 std
+MENU COLOR border       30;44      #4010b981 #00000000 std
+MENU COLOR title        1;36;44    #ff34d399 #00000000 std
+MENU COLOR sel          7;37;40    #ff06101e #ff10b981 all
+MENU COLOR unsel        37;44      #ffe2e8f0 #00000000 std
+
+LABEL install
+  MENU LABEL ^Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)
+  MENU DEFAULT
+  KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
+  INITRD /boot/initramfs-${ALPINE_FLAVOR}
+  APPEND modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
 
 LABEL live
-  MENU LABEL Axonwall Appliance (Live Mode)
+  MENU LABEL ^Live Appliance Mode (Evaluate & Web UI on 192.168.1.1:2966)
   KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_FLAVOR}
   APPEND modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
 
-LABEL install
-  MENU LABEL Install Axonwall to Storage Disk (A/B + RAID + ZFS)
+LABEL unattended
+  MENU LABEL ^Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)
   KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_FLAVOR}
-  APPEND modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  APPEND modules=${STORAGE_MODULES} axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
 SYSLINUX_EOF
 
 cat << GRUB_EOF > "${WORK_DIR}/iso/boot/grub/grub.cfg"
 set default=0
 set timeout=5
 
-menuentry "Axonwall Appliance (Live Mode)" {
+insmod all_video
+insmod gfxterm
+insmod png
+set gfxmode=auto
+terminal_output gfxterm
+
+set menu_color_normal=white/black
+set menu_color_highlight=black/green
+set color_normal=cyan/black
+set color_highlight=black/green
+
+if [ -f /boot/grub/splash.png ]; then
+  background_image /boot/grub/splash.png
+fi
+
+menuentry "Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)" {
+  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_FLAVOR}
+}
+
+menuentry "Axonwall Live Appliance Mode (Evaluate & Web UI)" {
   linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_FLAVOR}
 }
 
-menuentry "Install Axonwall to Storage Disk (A/B + RAID + ZFS)" {
-  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+menuentry "Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)" {
+  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_FLAVOR}
 }
 GRUB_EOF

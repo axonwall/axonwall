@@ -1,0 +1,51 @@
+desktop-image: "../splash.png"
+title-color: "#34d399"
+title-font: "Unifont Regular 16"
+title-text: ""
+message-font: "Unifont Regular 16"
+terminal-font: "Unifont Regular 16"
+
+# Help bar above footer
++ label {
+	top = 100%-66
+	left = 0
+	width = 100%
+	height = 20
+	text = "@KEYMAP_SHORT@"
+	align = "center"
+	color = "#94a3b8"
+	font = "Unifont Regular 16"
+}
+
+# Branded Axonwall Boot Menu inside viewport frame
++ boot_menu {
+	left = 9%
+	width = 82%
+	top = 34%
+	height = 46%
+	item_color = "#cbd5e1"
+	item_font = "Unifont Regular 16"
+	selected_item_color = "#34d399"
+	selected_item_font = "Unifont Regular 16"
+	item_height = 20
+	item_padding = 2
+	item_spacing = 6
+	icon_width = 0
+	icon_height = 0
+	item_icon_space = 0
+}
+
+# Branded Emerald/Cyan Timeout Progress Bar
++ progress_bar {
+	id = "__timeout__"
+	left = 10%
+	top = 100%-92
+	height = 18
+	width = 80%
+	font = "Unifont Regular 16"
+	text_color = "#f8fafc"
+	fg_color = "#10b981"
+	bg_color = "#0f172a"
+	border_color = "#34d399"
+	text = "@TIMEOUT_NOTIFICATION_LONG@"
+}

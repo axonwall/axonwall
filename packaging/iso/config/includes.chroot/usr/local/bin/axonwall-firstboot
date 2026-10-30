@@ -412,6 +412,9 @@ if [[ ! -s /etc/axonwall/axonwall.env ]]; then
   if [[ -f /etc/axonwall/admin.env ]]; then
     INSTALL_PASS=$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)
   fi
+  if [[ -z "$INSTALL_PASS" ]] && { [[ -d /run/live/medium ]] || grep -qE 'boot=live|axonwall_install=1|axonwall\.install=1' /proc/cmdline 2>/dev/null; }; then
+    INSTALL_PASS="axonwall"
+  fi
   ADMIN_PASS="${INSTALL_PASS:-${LOCAL_ADMIN_PASSWORD:-$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')}}"
 
   cat << ENV_EOF > /etc/axonwall/axonwall.env

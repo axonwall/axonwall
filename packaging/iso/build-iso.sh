@@ -120,6 +120,31 @@ if [[ -d "${SCRIPT_DIR}/config/hooks" ]]; then
 fi
 chmod +x config/hooks/live/* config/hooks/normal/* 2>/dev/null || true
 
+# Copy branded GRUB2 & ISOLINUX bootloader templates and splash artwork
+mkdir -p config/bootloaders/isolinux config/bootloaders/grub-pc/live-theme config/includes.chroot/etc/axonwall/branding
+if [[ -d "${SCRIPT_DIR}/config/bootloaders" ]]; then
+  cp -r "${SCRIPT_DIR}/config/bootloaders/"* config/bootloaders/
+fi
+SPLASH_SRC="${SCRIPT_DIR}/branding/splash.png"
+if [[ "${FLAVOR}" == "vault" && -f "${SCRIPT_DIR}/branding/splash-vault.png" ]]; then
+  SPLASH_SRC="${SCRIPT_DIR}/branding/splash-vault.png"
+fi
+if [[ ! -f "${SPLASH_SRC}" ]] && command -v python3 &>/dev/null && [[ -f "${SCRIPT_DIR}/branding/generate-splash.py" ]]; then
+  python3 "${SCRIPT_DIR}/branding/generate-splash.py" || true
+fi
+if [[ -f "${SPLASH_SRC}" ]]; then
+  cp "${SPLASH_SRC}" config/includes.chroot/etc/axonwall/branding/splash.png
+  cp "${SPLASH_SRC}" config/bootloaders/isolinux/splash.png
+  cp "${SPLASH_SRC}" config/bootloaders/grub-pc/live-theme/splash.png
+fi
+
+# Stage detect-cloudinit into Live chroot so unattended/live installer can discover NoCloud seeds
+if [[ -f "${SCRIPT_DIR}/config/includes.installer/usr/lib/axonwall/detect-cloudinit" ]]; then
+  mkdir -p config/includes.chroot/usr/lib/axonwall
+  cp "${SCRIPT_DIR}/config/includes.installer/usr/lib/axonwall/detect-cloudinit" config/includes.chroot/usr/lib/axonwall/detect-cloudinit
+  chmod +x config/includes.chroot/usr/lib/axonwall/detect-cloudinit
+fi
+
 if [[ "${FLAVOR}" == "vault" ]]; then
   echo "[+] Applying Vault Edition overlay (firewall payload removed)..."
   # The firewall stack is ABSENT from a vault image, not disabled:
@@ -228,6 +253,10 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-config ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-config
 fi
 
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-install ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-install
+fi
+
 for rk_script in axonwall-hunt-rootkits hunt-io-uring-implants.sh hunt-ebpf-rootkits.sh audit_hidden_bpf_prog_idr.py; do
   if [[ -f "config/includes.chroot/usr/local/bin/${rk_script}" ]]; then
     chmod +x "config/includes.chroot/usr/local/bin/${rk_script}"
@@ -302,7 +331,7 @@ if [[ "${FLAVOR}" == "axonwall" && -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/ax
   chmod +x config/includes.chroot/usr/sbin/axonwalld
 fi
 
-if [[ "${FLAVOR}" == "axonwall" && -f "${SCRIPT_DIR}/../../apps/axonwall-console/bin/axonwall-console" ]]; then
+if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-console/bin/axonwall-console" ]]; then
   cp "${SCRIPT_DIR}/../../apps/axonwall-console/bin/axonwall-console" config/includes.chroot/usr/sbin/
   chmod +x config/includes.chroot/usr/sbin/axonwall-console
 fi
@@ -426,6 +455,9 @@ systemd
 systemd-sysv
 grub-pc
 grub-pc-bin
+grub-efi-amd64-bin
+efibootmgr
+squashfs-tools
 ucf
 os-prober
 isolinux
@@ -516,6 +548,9 @@ systemd
 systemd-sysv
 grub-pc
 grub-pc-bin
+grub-efi-amd64-bin
+efibootmgr
+squashfs-tools
 ucf
 os-prober
 isolinux
