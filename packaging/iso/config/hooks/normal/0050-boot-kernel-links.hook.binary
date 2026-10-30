@@ -1,25 +1,6 @@
 #!/bin/sh
 set -e
 
-echo "[Binary Hook] Ensuring /boot/vmlinuz and /boot/initrd.img exist on ISO binary root..."
-mkdir -p binary/boot
-
-# Hard link or symlink vmlinuz to /boot/vmlinuz on the binary ISO
-if [ -f binary/live/vmlinuz ]; then
-  cp -l binary/live/vmlinuz binary/boot/vmlinuz 2>/dev/null || ln -sf ../live/vmlinuz binary/boot/vmlinuz
-elif ls binary/live/vmlinuz-* >/dev/null 2>&1; then
-  KERN=$(ls -1t binary/live/vmlinuz-* | head -n1)
-  cp -l "$KERN" binary/boot/vmlinuz 2>/dev/null || ln -sf "../live/$(basename "$KERN")" binary/boot/vmlinuz
-elif [ -f binary/install/vmlinuz ]; then
-  cp -l binary/install/vmlinuz binary/boot/vmlinuz 2>/dev/null || ln -sf ../install/vmlinuz binary/boot/vmlinuz
-fi
-
-# Hard link or symlink initrd to /boot/initrd.img on the binary ISO
-if [ -f binary/live/initrd.img ]; then
-  cp -l binary/live/initrd.img binary/boot/initrd.img 2>/dev/null || ln -sf ../live/initrd.img binary/boot/initrd.img
-elif ls binary/live/initrd.img-* >/dev/null 2>&1; then
-  INITRD=$(ls -1t binary/live/initrd.img-* | head -n1)
-  cp -l "$INITRD" binary/boot/initrd.img 2>/dev/null || ln -sf "../live/$(basename "$INITRD")" binary/boot/initrd.img
-elif [ -f binary/install/initrd.gz ]; then
-  cp -l binary/install/initrd.gz binary/boot/initrd.img 2>/dev/null || ln -sf ../install/initrd.gz binary/boot/initrd.img
+if [ -x "$(dirname "$0")/../live/0050-boot-kernel-links.hook.binary" ]; then
+  exec "$(dirname "$0")/../live/0050-boot-kernel-links.hook.binary" "$@"
 fi

@@ -6,6 +6,9 @@ Requires=local-fs.target
 Before=network.target
 Wants=network-pre.target
 DefaultDependencies=no
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
 
 [Service]
 Type=simple

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -1200,6 +1201,16 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 
 // RunUnattendedInstall executes zero-touch Cloud-Init installation and streams progress to stdout.
 func RunUnattendedInstall() error {
+	_ = os.MkdirAll("/run", 0755)
+	if lockFile, err := os.OpenFile("/run/axonwall-unattended.lock", os.O_CREATE|os.O_RDWR, 0600); err == nil {
+		defer lockFile.Close()
+		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			// Another console instance (e.g. tty1 vs ttyS0) is already executing the unattended installer
+			for {
+				time.Sleep(5 * time.Second)
+			}
+		}
+	}
 	cmd := exec.Command("/bin/sh", "/usr/local/bin/axonwall-install", "--unattended")
 	cmd.Env = append(os.Environ(), "AXONWALL_INSTALL_BACKEND=1")
 	cmd.Stdin = os.Stdin

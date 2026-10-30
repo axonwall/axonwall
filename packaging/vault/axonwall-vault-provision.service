@@ -3,6 +3,9 @@ Description=Axonwall Vault bucket provisioning and posture verification
 After=seaweedfs.service network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/axonwall/.vault-firstboot
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
 
 [Service]
 Type=oneshot

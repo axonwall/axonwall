@@ -7,6 +7,9 @@ Wants=network-online.target
 # identity config; the ordering edge lives here (never in the firstboot
 # unit) so no service ever starts a unit it is ordered against.
 ConditionPathExists=/etc/axonwall/seaweedfs-s3.json
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
 
 [Service]
 Type=simple

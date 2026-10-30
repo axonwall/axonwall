@@ -2,6 +2,9 @@
 Description=headscale coordination server for Tailscale clients
 After=network-online.target axonwall-firstboot.service
 Wants=network-online.target
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
 
 [Service]
 Type=simple

@@ -3,6 +3,9 @@ Description=Axonwall Firstboot Appliance Provisioner
 After=network.target cloud-init.service
 Before=axonwall-controller.service axonwall-ui.service headscale.service
 ConditionPathExists=/etc/axonwall/.firstboot
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
 
 [Service]
 Type=oneshot

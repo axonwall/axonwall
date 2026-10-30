@@ -6,53 +6,74 @@ set -e
 
 echo "[Binary Hook] Applying Axonwall Next-Gen Bootloader Branding (GRUB2 & ISOLINUX)..."
 
+# live-build's binary_hooks runs 'cd binary' before invoking '../config/hooks/.../*.binary'.
+# Support both pwd=binary (BIN_DIR=".") and pwd=build (BIN_DIR="binary").
+BIN_DIR="."
+CHROOT_DIR="../chroot"
+if [ -d binary/boot ] || [ -d binary/live ] || [ -d binary/isolinux ]; then
+  BIN_DIR="binary"
+  CHROOT_DIR="chroot"
+fi
+
 FLAVOR_TITLE="Axonwall OS"
 LIVE_HOST="axonwall"
-SPLASH_SRC="/etc/axonwall/branding/splash.png"
+SPLASH_SRC=""
 
-if [ -f chroot/etc/axonwall/.vault-edition ] || grep -qi "Vault" binary/.disk/info 2>/dev/null; then
+if [ -f "${CHROOT_DIR}/etc/axonwall/.vault-edition" ] || grep -qi "Vault" "${BIN_DIR}/.disk/info" 2>/dev/null; then
   FLAVOR_TITLE="Axonwall Vault OS"
   LIVE_HOST="axonwall-vault"
-  if [ -f chroot/etc/axonwall/branding/splash-vault.png ]; then
-    SPLASH_SRC="chroot/etc/axonwall/branding/splash-vault.png"
-  fi
-elif [ -f chroot/etc/axonwall/branding/splash.png ]; then
-  SPLASH_SRC="chroot/etc/axonwall/branding/splash.png"
 fi
 
-# Detect exact live kernel & initrd paths inside binary/live/
+for cand in \
+  "${CHROOT_DIR}/etc/axonwall/branding/splash.png" \
+  "${BIN_DIR}/boot/grub/live-theme/splash.png" \
+  "${BIN_DIR}/isolinux/splash.png" \
+  "../config/bootloaders/isolinux/splash.png" \
+  "config/bootloaders/isolinux/splash.png"
+do
+  if [ -f "$cand" ]; then
+    SPLASH_SRC="$cand"
+    break
+  fi
+done
+
+# Detect exact live kernel & initrd paths inside ${BIN_DIR}/live/
 LIVE_KERN="/live/vmlinuz"
 LIVE_INITRD="/live/initrd.img"
-if [ -d binary/live ]; then
-  K_CAND=$(ls -1t binary/live/vmlinuz-* 2>/dev/null | head -n1 || true)
-  if [ -n "$K_CAND" ]; then
-    LIVE_KERN="/live/$(basename "$K_CAND")"
+if [ -d "${BIN_DIR}/live" ]; then
+  if [ ! -e "${BIN_DIR}/live/vmlinuz" ]; then
+    K_CAND=$(ls -1t "${BIN_DIR}"/live/vmlinuz-* 2>/dev/null | head -n1 || true)
+    if [ -n "$K_CAND" ]; then
+      LIVE_KERN="/live/$(basename "$K_CAND")"
+    fi
   fi
-  I_CAND=$(ls -1t binary/live/initrd.img-* 2>/dev/null | head -n1 || true)
-  if [ -n "$I_CAND" ]; then
-    LIVE_INITRD="/live/$(basename "$I_CAND")"
+  if [ ! -e "${BIN_DIR}/live/initrd.img" ]; then
+    I_CAND=$(ls -1t "${BIN_DIR}"/live/initrd.img-* 2>/dev/null | head -n1 || true)
+    if [ -n "$I_CAND" ]; then
+      LIVE_INITRD="/live/$(basename "$I_CAND")"
+    fi
   fi
 fi
 
-COMMON_LIVE_ARGS="boot=live components hostname=${LIVE_HOST} username=axonwall live-config.user-default-groups=sudo,adm,dialout console=tty0 console=ttyS0,115200"
+COMMON_LIVE_ARGS="boot=live components quiet hostname=${LIVE_HOST} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0"
 
 # 1. Install Splash PNG into GRUB and ISOLINUX
-if [ -f "$SPLASH_SRC" ]; then
-  if [ -d binary/boot/grub ]; then
-    cp -f "$SPLASH_SRC" binary/boot/grub/splash.png
+if [ -n "$SPLASH_SRC" ] && [ -f "$SPLASH_SRC" ]; then
+  if [ -d "${BIN_DIR}/boot/grub" ]; then
+    cp -f "$SPLASH_SRC" "${BIN_DIR}/boot/grub/splash.png"
+    mkdir -p "${BIN_DIR}/boot/grub/live-theme"
+    cp -f "$SPLASH_SRC" "${BIN_DIR}/boot/grub/live-theme/splash.png"
   fi
-  if [ -d binary/isolinux ]; then
-    cp -f "$SPLASH_SRC" binary/isolinux/splash.png
+  if [ -d "${BIN_DIR}/isolinux" ]; then
+    cp -f "$SPLASH_SRC" "${BIN_DIR}/isolinux/splash.png"
   fi
-  # Remove stock live-Session splash symlink Inside chroot if we only staged it for binary build
-  rm -rf chroot/etc/axonwall/branding 2>/dev/null || true
 fi
 
 # 2. Configure GRUB2 (UEFI / Hybrid) Theme & Menus
-if [ -d binary/boot/grub ]; then
-  mkdir -p binary/boot/grub/live-theme
+if [ -d "${BIN_DIR}/boot/grub" ]; then
+  mkdir -p "${BIN_DIR}/boot/grub/live-theme"
 
-  cat > binary/boot/grub/live-theme/theme.txt << 'GRUB_THEME_EOF'
+  cat > "${BIN_DIR}/boot/grub/live-theme/theme.txt" << 'GRUB_THEME_EOF'
 desktop-image: "../splash.png"
 title-color: "#34d399"
 title-font: "Unifont Regular 16"
@@ -106,7 +127,7 @@ terminal-font: "Unifont Regular 16"
 }
 GRUB_THEME_EOF
 
-  cat > binary/boot/grub/theme.cfg << 'THEME_CFG_EOF'
+  cat > "${BIN_DIR}/boot/grub/theme.cfg" << 'THEME_CFG_EOF'
 set color_normal=light-gray/black
 set color_highlight=light-green/dark-gray
 
@@ -118,7 +139,7 @@ else
 fi
 THEME_CFG_EOF
 
-  cat > binary/boot/grub/config.cfg << 'CONFIG_CFG_EOF'
+  cat > "${BIN_DIR}/boot/grub/config.cfg" << 'CONFIG_CFG_EOF'
 set default=0
 set timeout=5
 
@@ -148,7 +169,7 @@ source /boot/grub/theme.cfg
 terminal_output gfxterm
 CONFIG_CFG_EOF
 
-  cat > binary/boot/grub/install_start.cfg << INSTALL_START_EOF
+  cat > "${BIN_DIR}/boot/grub/install_start.cfg" << INSTALL_START_EOF
 menuentry "Install ${FLAVOR_TITLE} (Next-Gen TUI Installer)" --hotkey=i {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
@@ -159,7 +180,7 @@ menuentry "Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)" --hotkey
 }
 INSTALL_START_EOF
 
-  cat > binary/boot/grub/install.cfg << INSTALL_SUB_EOF
+  cat > "${BIN_DIR}/boot/grub/install.cfg" << INSTALL_SUB_EOF
 menuentry "Install ${FLAVOR_TITLE} via Serial Console (ttyS0 115200)" --hotkey=s {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 console=ttyS0,115200n8 findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
@@ -178,7 +199,7 @@ menuentry "Legacy Rescue Mode" --hotkey=r {
 }
 INSTALL_SUB_EOF
 
-  cat > binary/boot/grub/grub.cfg << GRUB_MAIN_EOF
+  cat > "${BIN_DIR}/boot/grub/grub.cfg" << GRUB_MAIN_EOF
 source /boot/grub/config.cfg
 
 # Primary Next-Gen Installer & Live Boot Options
@@ -211,11 +232,12 @@ submenu "Hardware & Firmware Utilities ..." --hotkey=u {
 	}
 }
 GRUB_MAIN_EOF
+  echo "[Binary Hook] Updated GRUB2 config in ${BIN_DIR}/boot/grub/grub.cfg (kernel=${LIVE_KERN})"
 fi
 
 # 3. Configure ISOLINUX (BIOS) Theme & Menus
-if [ -d binary/isolinux ]; then
-  cat > binary/isolinux/stdmenu.cfg << 'ISOLINUX_STD_EOF'
+if [ -d "${BIN_DIR}/isolinux" ]; then
+  cat > "${BIN_DIR}/isolinux/stdmenu.cfg" << 'ISOLINUX_STD_EOF'
 menu background splash.png
 menu color title	* #ff34d399 *
 menu color border	* #00000000 #00000000 none
@@ -235,34 +257,34 @@ menu tabmsgrow 22
 menu tabmsg Press ENTER to boot or TAB to edit kernel parameters
 ISOLINUX_STD_EOF
 
-  cat > binary/isolinux/live.cfg << ISOLINUX_LIVE_EOF
+  cat > "${BIN_DIR}/isolinux/live.cfg" << ISOLINUX_LIVE_EOF
 label install-tui
 	menu label ^Install ${FLAVOR_TITLE} (Next-Gen TUI Installer)
 	menu default
-	linux /live/vmlinuz
-	initrd /live/initrd.img
+	linux ${LIVE_KERN}
+	initrd ${LIVE_INITRD}
 	append ${COMMON_LIVE_ARGS} axonwall_install=1
 
 label install-unattended
 	menu label ^Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)
-	linux /live/vmlinuz
-	initrd /live/initrd.img
+	linux ${LIVE_KERN}
+	initrd ${LIVE_INITRD}
 	append ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall.unattended=1
 
 label live-amd64
 	menu label Boot ${FLAVOR_TITLE} ^Live Appliance (Evaluation & Console)
-	linux /live/vmlinuz
-	initrd /live/initrd.img
+	linux ${LIVE_KERN}
+	initrd ${LIVE_INITRD}
 	append ${COMMON_LIVE_ARGS}
 
 label live-amd64-failsafe
 	menu label Boot ${FLAVOR_TITLE} Live (Fail-Safe Mode)
-	linux /live/vmlinuz
-	initrd /live/initrd.img
+	linux ${LIVE_KERN}
+	initrd ${LIVE_INITRD}
 	append boot=live components memtest noapic noapm nodma nomce nosmp nosplash vga=788
 ISOLINUX_LIVE_EOF
 
-  cat > binary/isolinux/install.cfg << ISOLINUX_INSTALL_EOF
+  cat > "${BIN_DIR}/isolinux/install.cfg" << ISOLINUX_INSTALL_EOF
 menu begin legacy-install
 	menu label ^Advanced & Legacy Debian Installer Options
 	menu title Advanced & Legacy Debian Installer Options
@@ -273,8 +295,8 @@ menu begin legacy-install
 
 	label serial-install
 		menu label Install ${FLAVOR_TITLE} via ^Serial Console (ttyS0 115200)
-		linux /live/vmlinuz
-		initrd /live/initrd.img
+		linux ${LIVE_KERN}
+		initrd ${LIVE_INITRD}
 		append ${COMMON_LIVE_ARGS} axonwall_install=1 console=ttyS0,115200n8
 
 	label darkinstall
@@ -297,7 +319,7 @@ menu begin legacy-install
 menu end
 ISOLINUX_INSTALL_EOF
 
-  cat > binary/isolinux/menu.cfg << ISOLINUX_MENU_EOF
+  cat > "${BIN_DIR}/isolinux/menu.cfg" << ISOLINUX_MENU_EOF
 menu hshift 0
 menu width 82
 
@@ -317,6 +339,7 @@ menu end
 
 menu clear
 ISOLINUX_MENU_EOF
+  echo "[Binary Hook] Updated ISOLINUX config in ${BIN_DIR}/isolinux/menu.cfg"
 fi
 
 echo "[Binary Hook] Axonwall Bootloader Branding applied successfully."

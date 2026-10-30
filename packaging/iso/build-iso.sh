@@ -86,7 +86,7 @@ lb config \
   --chroot-squashfs-compression-type xz \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
-  --bootappend-live "boot=live components hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout console=tty0 console=ttyS0,115200" \
+  --bootappend-live "boot=live components quiet hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0" \
   --bootappend-install "auto=true priority=critical preseed/file=/preseed.cfg" \
   --debian-installer live \
   --debian-installer-distribution trixie \
@@ -184,6 +184,9 @@ fi
 
 # Copy systemd units for the flavor
 mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants/
+# Appliance console & Next-Gen TUI Installer unit ships in BOTH flavors
+cp "${SCRIPT_DIR}/../debian/axonwall-console.service" config/includes.chroot/etc/systemd/system/ || true
+ln -sf /etc/systemd/system/axonwall-console.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-console.service
 if [[ "${FLAVOR}" == "axonwall" ]]; then
   cp "${SCRIPT_DIR}/../debian/axonwalld.service" config/includes.chroot/etc/systemd/system/ || true
   ln -sf /etc/systemd/system/axonwalld.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwalld.service
@@ -191,8 +194,6 @@ if [[ "${FLAVOR}" == "axonwall" ]]; then
   ln -sf /etc/systemd/system/axonwall-controller.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-controller.service
   cp "${SCRIPT_DIR}/../debian/axonwall-ui.service" config/includes.chroot/etc/systemd/system/ || true
   ln -sf /etc/systemd/system/axonwall-ui.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-ui.service
-  cp "${SCRIPT_DIR}/../debian/axonwall-console.service" config/includes.chroot/etc/systemd/system/ || true
-  ln -sf /etc/systemd/system/axonwall-console.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-console.service
   cp "${SCRIPT_DIR}/../debian/headscale.service" config/includes.chroot/etc/systemd/system/ || true
   ln -sf /etc/systemd/system/headscale.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/headscale.service
 
@@ -331,9 +332,16 @@ if [[ "${FLAVOR}" == "axonwall" && -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/ax
   chmod +x config/includes.chroot/usr/sbin/axonwalld
 fi
 
+if [[ ! -f "${SCRIPT_DIR}/../../apps/axonwall-console/bin/axonwall-console" ]] && command -v go &>/dev/null; then
+  echo "[+] Compiling axonwall-console TUI & Next-Gen Installer..."
+  (cd "${SCRIPT_DIR}/../../apps/axonwall-console" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/axonwall-console .)
+fi
 if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-console/bin/axonwall-console" ]]; then
   cp "${SCRIPT_DIR}/../../apps/axonwall-console/bin/axonwall-console" config/includes.chroot/usr/sbin/
   chmod +x config/includes.chroot/usr/sbin/axonwall-console
+else
+  echo "[!] ERROR: apps/axonwall-console/bin/axonwall-console is missing; cannot build ISO without Next-Gen Installer TUI." >&2
+  exit 1
 fi
 
 if [[ "${FLAVOR}" == "axonwall" && -f "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
