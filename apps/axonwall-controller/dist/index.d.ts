@@ -1,4 +1,4 @@
-import type { DesiredState } from '@axonwall/lib/schemas';
+import { type DesiredState } from '@axonwall/lib/schemas';
 export interface CompiledBundle {
     jobId: string;
     bundleHash: string;
