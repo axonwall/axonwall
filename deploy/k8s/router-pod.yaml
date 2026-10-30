@@ -11,7 +11,7 @@ metadata:
 spec:
   containers:
     - name: router
-      image: ghcr.io/axonwall/axonwalld:v0.11.35
+      image: ghcr.io/axonwall/axonwalld:v0.11.36
       securityContext:
         capabilities:
           add:
