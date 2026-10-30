@@ -2,8 +2,8 @@ apiVersion: v2
 name: axonwall
 description: Modern Linux Router & Next-Gen Firewall on Kubernetes
 type: application
-version: 0.11.40
-appVersion: 0.11.40
+version: 0.11.41
+appVersion: 0.11.41
 keywords:
   - firewall
   - router
