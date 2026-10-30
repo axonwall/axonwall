@@ -88,3 +88,63 @@ func TestRenderPartitionBarAndFormatConfig(t *testing.T) {
 		t.Errorf("expected properly shell-escaped single quote in LUKS_PASSPHRASE:\n%s", serialized)
 	}
 }
+
+func TestAutoAssignDiskRolesAndAccelerators(t *testing.T) {
+	// Scenario: 2x 32 GB system disks + 2x 1 TB data disks + 1x 64 GB SLOG + 1x 256 GB L2ARC
+	disks := []DiskDevice{
+		{Name: "sda", Path: "/dev/sda", SizeMB: 32768, SizeGB: 32.0},
+		{Name: "sdb", Path: "/dev/sdb", SizeMB: 32768, SizeGB: 32.0},
+		{Name: "sdc", Path: "/dev/sdc", SizeMB: 1048576, SizeGB: 1024.0},
+		{Name: "sdd", Path: "/dev/sdd", SizeMB: 1048576, SizeGB: 1024.0},
+		{Name: "nvme0n1", Path: "/dev/nvme0n1", SizeMB: 65536, SizeGB: 64.0},
+		{Name: "nvme1n1", Path: "/dev/nvme1n1", SizeMB: 262144, SizeGB: 256.0},
+	}
+
+	tiered := AutoAssignDiskRoles(disks)
+	if tiered[0].Role != "system" || tiered[1].Role != "system" {
+		t.Fatalf("expected 2x 32GB disks to be auto-assigned 'system', got %s, %s", tiered[0].Role, tiered[1].Role)
+	}
+	if tiered[2].Role != "zfs-data" || tiered[3].Role != "zfs-data" {
+		t.Fatalf("expected 2x 1TB disks to be auto-assigned 'zfs-data', got %s, %s", tiered[2].Role, tiered[3].Role)
+	}
+
+	// User assigns nvme0n1 as SLOG and nvme1n1 as L2ARC
+	setDiskRole(&tiered[4], "zfs-slog")
+	setDiskRole(&tiered[5], "zfs-l2arc")
+
+	cfg := DefaultInstallerConfig()
+	cfg.InstallMode = "zbm"
+	primaryMB := syncDiskRolesAndConfig(tiered, &cfg)
+	if primaryMB != 32768 {
+		t.Errorf("expected primaryMB=32768, got %d", primaryMB)
+	}
+	if strings.Join(cfg.SystemDisks, " ") != "/dev/sda /dev/sdb" {
+		t.Errorf("unexpected SystemDisks: %v", cfg.SystemDisks)
+	}
+	if strings.Join(cfg.ZfsExtraDisks, " ") != "/dev/sdc /dev/sdd" {
+		t.Errorf("unexpected ZfsExtraDisks: %v", cfg.ZfsExtraDisks)
+	}
+	if strings.Join(cfg.ZfsSlogDisks, " ") != "/dev/nvme0n1" {
+		t.Errorf("unexpected ZfsSlogDisks: %v", cfg.ZfsSlogDisks)
+	}
+	if strings.Join(cfg.ZfsL2arcDisks, " ") != "/dev/nvme1n1" {
+		t.Errorf("unexpected ZfsL2arcDisks: %v", cfg.ZfsL2arcDisks)
+	}
+
+	layout := ComputePartitionLayout(primaryMB, cfg)
+	bar := RenderPartitionBar(layout, cfg, 64)
+	if !strings.Contains(bar, "ZBM-Boot") || !strings.Contains(bar, "ZFS:zroot") {
+		t.Errorf("expected ZBM-Boot and ZFS:zroot in zbm partition bar, got: %s", bar)
+	}
+
+	serialized := FormatInstallerConfig(cfg)
+	if !strings.Contains(serialized, "ZFS_EXTRA_DISKS='/dev/sdc /dev/sdd'") {
+		t.Errorf("missing ZFS_EXTRA_DISKS in serialized config:\n%s", serialized)
+	}
+	if !strings.Contains(serialized, "ZFS_SLOG_DISKS='/dev/nvme0n1'") {
+		t.Errorf("missing ZFS_SLOG_DISKS in serialized config:\n%s", serialized)
+	}
+	if !strings.Contains(serialized, "ZFS_L2ARC_DISKS='/dev/nvme1n1'") {
+		t.Errorf("missing ZFS_L2ARC_DISKS in serialized config:\n%s", serialized)
+	}
+}

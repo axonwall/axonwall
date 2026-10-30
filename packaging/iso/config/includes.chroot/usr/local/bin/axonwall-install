@@ -111,6 +111,9 @@ DATA_FSTYPE="ext4"
 ZFS_ALLOC_MODE="remainder"
 CUSTOM_ZFS_GB=0
 ZFS_EXTRA_DISKS=""
+ZFS_SLOG_DISKS=""
+ZFS_L2ARC_DISKS=""
+ZFS_SPARE_DISKS=""
 ZFS_RAID_TOPOLOGY="auto"
 LOGS_ENABLED=0
 LOGS_GB=8
@@ -218,6 +221,26 @@ elif [ "$MODE" = "unattended" ]; then
     ci_zfs_topo="$(grep -E '^[[:space:]]*zfs_raid_topology:' "$CI_FILE" 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
     if [ -n "$ci_zfs_topo" ]; then
       ZFS_RAID_TOPOLOGY="$ci_zfs_topo"
+    fi
+
+    ci_extra_disks="$(grep -E '^[[:space:]]*zfs_extra_disks:' "$CI_FILE" 2>/dev/null | head -n1 | cut -d: -f2- | tr -d '[]"'"'"'\r' | tr ',' ' ' || true)"
+    if [ -n "$ci_extra_disks" ] && [ "$ci_extra_disks" != "none" ]; then
+      ZFS_EXTRA_DISKS="$ci_extra_disks"
+    fi
+
+    ci_slog_disks="$(grep -E '^[[:space:]]*zfs_slog_disks:' "$CI_FILE" 2>/dev/null | head -n1 | cut -d: -f2- | tr -d '[]"'"'"'\r' | tr ',' ' ' || true)"
+    if [ -n "$ci_slog_disks" ] && [ "$ci_slog_disks" != "none" ]; then
+      ZFS_SLOG_DISKS="$ci_slog_disks"
+    fi
+
+    ci_l2arc_disks="$(grep -E '^[[:space:]]*zfs_l2arc_disks:' "$CI_FILE" 2>/dev/null | head -n1 | cut -d: -f2- | tr -d '[]"'"'"'\r' | tr ',' ' ' || true)"
+    if [ -n "$ci_l2arc_disks" ] && [ "$ci_l2arc_disks" != "none" ]; then
+      ZFS_L2ARC_DISKS="$ci_l2arc_disks"
+    fi
+
+    ci_spare_disks="$(grep -E '^[[:space:]]*zfs_spare_disks:' "$CI_FILE" 2>/dev/null | head -n1 | cut -d: -f2- | tr -d '[]"'"'"'\r' | tr ',' ' ' || true)"
+    if [ -n "$ci_spare_disks" ] && [ "$ci_spare_disks" != "none" ]; then
+      ZFS_SPARE_DISKS="$ci_spare_disks"
     fi
 
     ci_luks="$(grep -E '^[[:space:]]*luks_enabled:' "$CI_FILE" 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
@@ -328,8 +351,14 @@ else
   fi
 
   echo ""
-  printf "Optional: Enter any additional dedicated whole disks for ZFS pool (space-separated, or press Enter for none): "
+  printf "Optional: Enter any dedicated whole disks for ZFS Data Pool 'tank' (space-separated, or Enter for none): "
   read -r ZFS_EXTRA_DISKS
+  printf "Optional: Enter any dedicated ZFS SLOG (ZIL write log) disks (space-separated, or Enter for none): "
+  read -r ZFS_SLOG_DISKS
+  printf "Optional: Enter any dedicated ZFS L2ARC (read cache) disks (space-separated, or Enter for none): "
+  read -r ZFS_L2ARC_DISKS
+  printf "Optional: Enter any dedicated ZFS Hot Spare disks (space-separated, or Enter for none): "
+  read -r ZFS_SPARE_DISKS
 
   echo ""
   printf "Enable LUKS2 disk encryption on persistent data volume (/var/lib/axonwall)? (y/N): "
@@ -389,6 +418,9 @@ fi
 # Validate system disks
 SYSTEM_DISKS=$(echo "$SYSTEM_DISKS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
 ZFS_EXTRA_DISKS=$(echo "${ZFS_EXTRA_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+ZFS_SLOG_DISKS=$(echo "${ZFS_SLOG_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+ZFS_L2ARC_DISKS=$(echo "${ZFS_L2ARC_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+ZFS_SPARE_DISKS=$(echo "${ZFS_SPARE_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
 SYS_DISK_COUNT=0
 PRIMARY_DISK=""
 for d in $SYSTEM_DISKS; do
@@ -1153,54 +1185,122 @@ if [ "$OS_FAMILY" = "debian" ] && { [ "$SYSTEM_RAID_MODE" = "mirror" ] || [ "${L
 fi
 
 # ==============================================================================
-# PHASE 7: Bootstrap OpenZFS Storage Pool (tank / zroot)
+# PHASE 7: Bootstrap OpenZFS Storage Pool (tank / zroot) + SLOG / L2ARC / Spares
 # ==============================================================================
-emit_phase 7 8 "Configuring OpenZFS storage pool topology..."
+emit_phase 7 8 "Configuring OpenZFS storage pool topology & accelerators..."
 
+SYS_ZFS_VDEVS=$(echo "$ZFS_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+EXTRA_DATA_VDEVS=""
 for xd in $ZFS_EXTRA_DISKS; do
   if [ -b "$xd" ]; then
     wipefs -a "$xd" 2>/dev/null || true
-    ZFS_VDEVS="${ZFS_VDEVS} ${xd}"
+    EXTRA_DATA_VDEVS="${EXTRA_DATA_VDEVS} ${xd}"
   fi
 done
-ZFS_VDEVS=$(echo "$ZFS_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+EXTRA_DATA_VDEVS=$(echo "$EXTRA_DATA_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
 
-if [ -n "$ZFS_VDEVS" ]; then
-  VDEV_COUNT=$(echo "$ZFS_VDEVS" | wc -w | tr -d ' ')
-  RESOLVED_TOPOLOGY="${ZFS_RAID_TOPOLOGY:-auto}"
-  if [ "$RESOLVED_TOPOLOGY" = "auto" ]; then
-    if [ "$VDEV_COUNT" -le 1 ]; then
-      RESOLVED_TOPOLOGY="stripe"
-    elif [ "$VDEV_COUNT" -eq 2 ]; then
-      RESOLVED_TOPOLOGY="mirror"
-    elif [ "$VDEV_COUNT" -le 4 ]; then
-      RESOLVED_TOPOLOGY="raidz1"
-    else
-      RESOLVED_TOPOLOGY="raidz2"
-    fi
+SLOG_VDEVS=""
+for sd in ${ZFS_SLOG_DISKS:-}; do
+  if [ -b "$sd" ]; then
+    wipefs -a "$sd" 2>/dev/null || true
+    SLOG_VDEVS="${SLOG_VDEVS} ${sd}"
   fi
+done
+SLOG_VDEVS=$(echo "$SLOG_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
 
-  JSON_VDEVS=""
-  for v in $ZFS_VDEVS; do
-    if [ -z "$JSON_VDEVS" ]; then
-      JSON_VDEVS="\"${v}\""
+L2ARC_VDEVS=""
+for cd in ${ZFS_L2ARC_DISKS:-}; do
+  if [ -b "$cd" ]; then
+    wipefs -a "$cd" 2>/dev/null || true
+    L2ARC_VDEVS="${L2ARC_VDEVS} ${cd}"
+  fi
+done
+L2ARC_VDEVS=$(echo "$L2ARC_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+
+SPARE_VDEVS=""
+for hd in ${ZFS_SPARE_DISKS:-}; do
+  if [ -b "$hd" ]; then
+    wipefs -a "$hd" 2>/dev/null || true
+    SPARE_VDEVS="${SPARE_VDEVS} ${hd}"
+  fi
+done
+SPARE_VDEVS=$(echo "$SPARE_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+
+# Build zpool tail arguments for SLOG (log / log mirror), L2ARC (cache), and Hot Spares (spare)
+ZPOOL_ACCEL_ARGS=""
+if [ -n "$SLOG_VDEVS" ]; then
+  SLOG_COUNT=$(echo "$SLOG_VDEVS" | wc -w | tr -d ' ')
+  if [ "$SLOG_COUNT" -ge 2 ]; then
+    ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} log mirror ${SLOG_VDEVS}"
+  else
+    ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} log ${SLOG_VDEVS}"
+  fi
+fi
+if [ -n "$L2ARC_VDEVS" ]; then
+  ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} cache ${L2ARC_VDEVS}"
+fi
+if [ -n "$SPARE_VDEVS" ]; then
+  ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} spare ${SPARE_VDEVS}"
+fi
+
+to_json_array() {
+  _out=""
+  for _item in $1; do
+    if [ -z "$_out" ]; then
+      _out="\"${_item}\""
     else
-      JSON_VDEVS="${JSON_VDEVS}, \"${v}\""
+      _out="${_out}, \"${_item}\""
     fi
   done
+  echo "$_out"
+}
 
-  TARGET_POOL_NAME="tank"
-  if [ "$INSTALL_MODE" = "zbm" ]; then
-    TARGET_POOL_NAME="zroot"
+resolve_zfs_topology() {
+  _req="$1"
+  _cnt="$2"
+  if [ "$_req" = "auto" ] || [ -z "$_req" ]; then
+    if [ "$_cnt" -le 1 ]; then
+      echo "stripe"
+    elif [ "$_cnt" -eq 2 ]; then
+      echo "mirror"
+    elif [ "$_cnt" -le 4 ]; then
+      echo "raidz1"
+    else
+      echo "raidz2"
+    fi
+  else
+    echo "$_req"
   fi
+}
+
+if [ "$INSTALL_MODE" = "zbm" ] && [ -n "$EXTRA_DATA_VDEVS" ]; then
+  # Dual-Pool ZBM Architecture: 'zroot' on System Disks + Dedicated 'tank' on Extra Data Disks
+  ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
+  ZROOT_TOPO="stripe"
+  [ "$ZROOT_CNT" -ge 2 ] && ZROOT_TOPO="mirror"
+
+  TANK_CNT=$(echo "$EXTRA_DATA_VDEVS" | wc -w | tr -d ' ')
+  RESOLVED_TOPOLOGY=$(resolve_zfs_topology "${ZFS_RAID_TOPOLOGY:-auto}" "$TANK_CNT")
+
+  JSON_VDEVS=$(to_json_array "$EXTRA_DATA_VDEVS")
+  JSON_ZROOT_VDEVS=$(to_json_array "$SYS_ZFS_VDEVS")
+  JSON_SLOG=$(to_json_array "$SLOG_VDEVS")
+  JSON_L2ARC=$(to_json_array "$L2ARC_VDEVS")
+  JSON_SPARE=$(to_json_array "$SPARE_VDEVS")
 
   ZFS_GB=$(( ZFS_MB / 1024 ))
   cat << ZFS_JSON_EOF > /mnt/data/install-zfs.json
 {
-  "poolName": "${TARGET_POOL_NAME}",
+  "poolName": "tank",
+  "zrootPoolName": "zroot",
   "installMode": "${INSTALL_MODE}",
   "topology": "${RESOLVED_TOPOLOGY}",
+  "zrootTopology": "${ZROOT_TOPO}",
   "vdevs": [${JSON_VDEVS}],
+  "zrootVdevs": [${JSON_ZROOT_VDEVS}],
+  "slogVdevs": [${JSON_SLOG}],
+  "l2arcVdevs": [${JSON_L2ARC}],
+  "spareVdevs": [${JSON_SPARE}],
   "sizeGb": ${ZFS_GB},
   "systemRaidMode": "${SYSTEM_RAID_MODE}",
   "systemRaidDisks": "${SYSTEM_DISKS}",
@@ -1210,13 +1310,62 @@ ZFS_JSON_EOF
 
   if command -v zpool >/dev/null 2>&1; then
     modprobe zfs 2>/dev/null || true
-    echo "[+] Creating OpenZFS pool '${TARGET_POOL_NAME}' (topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS})..."
-    ZPOOL_ARGS=""
-    if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
-      ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
+    if [ -n "$SYS_ZFS_VDEVS" ]; then
+      echo "[+] Creating OpenZFS System Root Pool 'zroot' (topology=${ZROOT_TOPO}, vdevs=${SYS_ZFS_VDEVS})..."
+      ZROOT_ARGS=""
+      [ "$ZROOT_TOPO" != "stripe" ] && ZROOT_ARGS="$ZROOT_TOPO"
+      # shellcheck disable=SC2086
+      zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $ZROOT_ARGS $SYS_ZFS_VDEVS 2>/dev/null || true
     fi
+    echo "[+] Creating Dedicated OpenZFS Storage Pool 'tank' (topology=${RESOLVED_TOPOLOGY}, vdevs=${EXTRA_DATA_VDEVS}, accel=${ZPOOL_ACCEL_ARGS})..."
+    TANK_ARGS=""
+    [ "$RESOLVED_TOPOLOGY" != "stripe" ] && TANK_ARGS="$RESOLVED_TOPOLOGY"
     # shellcheck disable=SC2086
-    zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O mountpoint=/mnt/tank "${TARGET_POOL_NAME}" $ZPOOL_ARGS $ZFS_VDEVS 2>/dev/null || true
+    zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O mountpoint=/mnt/tank tank $TANK_ARGS $EXTRA_DATA_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
+  fi
+else
+  ZFS_VDEVS=$(echo "${SYS_ZFS_VDEVS} ${EXTRA_DATA_VDEVS}" | tr -s ' ' | sed 's/^ //;s/ $//')
+  if [ -n "$ZFS_VDEVS" ]; then
+    VDEV_COUNT=$(echo "$ZFS_VDEVS" | wc -w | tr -d ' ')
+    RESOLVED_TOPOLOGY=$(resolve_zfs_topology "${ZFS_RAID_TOPOLOGY:-auto}" "$VDEV_COUNT")
+
+    JSON_VDEVS=$(to_json_array "$ZFS_VDEVS")
+    JSON_SLOG=$(to_json_array "$SLOG_VDEVS")
+    JSON_L2ARC=$(to_json_array "$L2ARC_VDEVS")
+    JSON_SPARE=$(to_json_array "$SPARE_VDEVS")
+
+    TARGET_POOL_NAME="tank"
+    if [ "$INSTALL_MODE" = "zbm" ]; then
+      TARGET_POOL_NAME="zroot"
+    fi
+
+    ZFS_GB=$(( ZFS_MB / 1024 ))
+    cat << ZFS_JSON_EOF > /mnt/data/install-zfs.json
+{
+  "poolName": "${TARGET_POOL_NAME}",
+  "installMode": "${INSTALL_MODE}",
+  "topology": "${RESOLVED_TOPOLOGY}",
+  "vdevs": [${JSON_VDEVS}],
+  "slogVdevs": [${JSON_SLOG}],
+  "l2arcVdevs": [${JSON_L2ARC}],
+  "spareVdevs": [${JSON_SPARE}],
+  "sizeGb": ${ZFS_GB},
+  "systemRaidMode": "${SYSTEM_RAID_MODE}",
+  "systemRaidDisks": "${SYSTEM_DISKS}",
+  "autoCreatePool": true
+}
+ZFS_JSON_EOF
+
+    if command -v zpool >/dev/null 2>&1; then
+      modprobe zfs 2>/dev/null || true
+      echo "[+] Creating OpenZFS pool '${TARGET_POOL_NAME}' (topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS}, accel=${ZPOOL_ACCEL_ARGS})..."
+      ZPOOL_ARGS=""
+      if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
+        ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
+      fi
+      # shellcheck disable=SC2086
+      zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O mountpoint=/mnt/tank "${TARGET_POOL_NAME}" $ZPOOL_ARGS $ZFS_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
+    fi
   fi
 fi
 
@@ -1226,6 +1375,9 @@ fi
 emit_phase 8 8 "Finalizing installation & flushing storage caches..."
 
 cleanup_secrets
+if command -v zpool >/dev/null 2>&1; then
+  zpool export -a 2>/dev/null || true
+fi
 umount /mnt/slot_a/boot/efi 2>/dev/null || true
 umount /mnt/slot_a 2>/dev/null || true
 umount /mnt/data 2>/dev/null || true

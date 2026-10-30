@@ -34,6 +34,7 @@ type DiskDevice struct {
 	SizeGB     float64
 	Removable  bool
 	Mounted    bool
+	Role       string // "system", "zfs-data", "zfs-slog", "zfs-l2arc", "zfs-spare", "none"
 	SystemDisk bool
 	ZfsExtra   bool
 }
@@ -49,7 +50,10 @@ type InstallerConfig struct {
 	SystemDisks    []string // e.g. ["/dev/nvme0n1", "/dev/nvme1n1"]
 	ZfsAllocMode   string   // "remainder", "split", "custom", "none"
 	CustomZfsGB    int      // custom GB when ZfsAllocMode == "custom"
-	ZfsExtraDisks  []string // additional whole disks for ZFS pool
+	ZfsExtraDisks  []string // dedicated whole disks for ZFS Data VDEVs
+	ZfsSlogDisks   []string // dedicated whole disks for ZFS Separate Intent Log (ZIL / SLOG)
+	ZfsL2arcDisks  []string // dedicated whole disks for ZFS Level 2 ARC (L2ARC read cache)
+	ZfsSpareDisks  []string // dedicated whole disks for ZFS Hot Spares
 	ZfsTopology    string   // "auto", "stripe", "mirror", "raidz1", "raidz2", "raidz3"
 	LogsEnabled    bool     // dedicated /var/log partition (axon_logs)
 	LogsGB         int      // size of /var/log in GB (default 8)
@@ -236,12 +240,185 @@ func FilterCandidateDisks(devices []DiskDevice) []DiskDevice {
 		if d.Mounted {
 			continue
 		}
+		if d.Role == "" {
+			if d.SystemDisk {
+				d.Role = "system"
+			} else if d.ZfsExtra {
+				d.Role = "zfs-data"
+			} else {
+				d.Role = "none"
+			}
+		}
 		filtered = append(filtered, d)
 	}
 	sort.Slice(filtered, func(i, j int) bool {
 		return filtered[i].Path < filtered[j].Path
 	})
 	return filtered
+}
+
+// setDiskRole sets a DiskDevice's Role and keeps legacy boolean flags in sync.
+func setDiskRole(d *DiskDevice, role string) {
+	switch role {
+	case "system", "zfs-data", "zfs-slog", "zfs-l2arc", "zfs-spare", "none":
+		d.Role = role
+	default:
+		d.Role = "none"
+	}
+	d.SystemDisk = d.Role == "system"
+	d.ZfsExtra = d.Role == "zfs-data"
+}
+
+// cycleDiskRole cycles a disk through all supported appliance storage roles.
+func cycleDiskRole(d *DiskDevice) {
+	order := []string{"system", "zfs-data", "zfs-slog", "zfs-l2arc", "zfs-spare", "none"}
+	cur := d.Role
+	if cur == "" {
+		if d.SystemDisk {
+			cur = "system"
+		} else if d.ZfsExtra {
+			cur = "zfs-data"
+		} else {
+			cur = "none"
+		}
+	}
+	for i, r := range order {
+		if r == cur {
+			setDiskRole(d, order[(i+1)%len(order)])
+			return
+		}
+	}
+	setDiskRole(d, "system")
+}
+
+// formatDiskRoleBadge returns an ANSI-colored fixed-width badge for a disk's assigned role.
+func formatDiskRoleBadge(d DiskDevice) string {
+	role := d.Role
+	if role == "" {
+		if d.SystemDisk {
+			role = "system"
+		} else if d.ZfsExtra {
+			role = "zfs-data"
+		} else {
+			role = "none"
+		}
+	}
+	switch role {
+	case "system":
+		return colorEmerald + colorBold + "[OS SYSTEM]" + colorReset
+	case "zfs-data":
+		return colorGreen + colorBold + "[ZFS DATA ]" + colorReset
+	case "zfs-slog":
+		return colorYellow + colorBold + "[ZFS SLOG ]" + colorReset
+	case "zfs-l2arc":
+		return colorBrightCya + colorBold + "[ZFS L2ARC]" + colorReset
+	case "zfs-spare":
+		return colorMagenta + colorBold + "[ZFS SPARE]" + colorReset
+	default:
+		return colorDim + "[ UNUSED  ]" + colorReset
+	}
+}
+
+// AutoAssignDiskRoles automatically assigns roles based on disk capacity tiers.
+// For heterogeneous servers (e.g. 2x 32 GB boot disks + 2x 1 TB data disks), the smallest
+// tier (1-2 disks) is assigned as "system" (OS RAID-1 Mirror) and the larger capacity tier
+// is assigned as "zfs-data" (Dedicated OpenZFS storage pool).
+func AutoAssignDiskRoles(disks []DiskDevice) []DiskDevice {
+	if len(disks) == 0 {
+		return disks
+	}
+	out := make([]DiskDevice, len(disks))
+	copy(out, disks)
+	for i := range out {
+		setDiskRole(&out[i], "none")
+	}
+
+	minMB := out[0].SizeMB
+	for _, d := range out {
+		if d.SizeMB > 0 && d.SizeMB < minMB {
+			minMB = d.SizeMB
+		}
+	}
+	if minMB <= 0 {
+		setDiskRole(&out[0], "system")
+		return out
+	}
+
+	var smallIdxs []int
+	var largeIdxs []int
+	for i, d := range out {
+		if d.SizeMB <= (minMB*125)/100 {
+			smallIdxs = append(smallIdxs, i)
+		} else if d.SizeMB >= (minMB*150)/100 {
+			largeIdxs = append(largeIdxs, i)
+		}
+	}
+
+	// Heterogeneous storage layout (e.g. 2x 32GB OS + 2x 1TB Data)
+	if len(smallIdxs) >= 1 && len(smallIdxs) <= 2 && len(largeIdxs) >= 1 {
+		for _, idx := range smallIdxs {
+			setDiskRole(&out[idx], "system")
+		}
+		// Find largest capacity tier among largeIdxs for primary ZFS Data pool
+		maxMB := 0
+		for _, idx := range largeIdxs {
+			if out[idx].SizeMB > maxMB {
+				maxMB = out[idx].SizeMB
+			}
+		}
+		for _, idx := range largeIdxs {
+			if out[idx].SizeMB >= (maxMB*80)/100 {
+				setDiskRole(&out[idx], "zfs-data")
+			}
+		}
+		return out
+	}
+
+	// Homogeneous disks: default first disk (or pair if 2+ identical disks) to system
+	setDiskRole(&out[0], "system")
+	return out
+}
+
+// syncDiskRolesAndConfig synchronizes DiskDevice roles into InstallerConfig disk slices.
+func syncDiskRolesAndConfig(disks []DiskDevice, cfg *InstallerConfig) (primaryMB int) {
+	primaryMB = 32768
+	var sysDisks, dataDisks, slogDisks, l2arcDisks, spareDisks []string
+	for i := range disks {
+		d := &disks[i]
+		if d.Role == "" {
+			if d.SystemDisk {
+				d.Role = "system"
+			} else if d.ZfsExtra {
+				d.Role = "zfs-data"
+			} else {
+				d.Role = "none"
+			}
+		}
+		d.SystemDisk = d.Role == "system"
+		d.ZfsExtra = d.Role == "zfs-data"
+
+		switch d.Role {
+		case "system":
+			sysDisks = append(sysDisks, d.Path)
+			if len(sysDisks) == 1 && d.SizeMB > 0 {
+				primaryMB = d.SizeMB
+			}
+		case "zfs-data":
+			dataDisks = append(dataDisks, d.Path)
+		case "zfs-slog":
+			slogDisks = append(slogDisks, d.Path)
+		case "zfs-l2arc":
+			l2arcDisks = append(l2arcDisks, d.Path)
+		case "zfs-spare":
+			spareDisks = append(spareDisks, d.Path)
+		}
+	}
+	cfg.SystemDisks = sysDisks
+	cfg.ZfsExtraDisks = dataDisks
+	cfg.ZfsSlogDisks = slogDisks
+	cfg.ZfsL2arcDisks = l2arcDisks
+	cfg.ZfsSpareDisks = spareDisks
+	return primaryMB
 }
 
 // ComputePartitionLayout calculates the exact partition sizes in MiB for the given disk capacity and config.
@@ -340,9 +517,15 @@ func RenderPartitionBar(layout PartitionLayout, cfg InstallerConfig, width int) 
 		color string
 		char  string
 	}
+	slotALabel := "Slot A"
+	if cfg.InstallMode == "zbm" {
+		slotALabel = "ZBM-Boot"
+	} else if cfg.InstallMode == "rolling" {
+		slotALabel = "Root OS"
+	}
 	segments := []seg{
 		{label: "EFI", mb: layout.EfiMB, color: colorBlue + colorBold, char: "█"},
-		{label: "Slot A", mb: layout.SlotAMB, color: colorEmerald + colorBold, char: "█"},
+		{label: slotALabel, mb: layout.SlotAMB, color: colorEmerald + colorBold, char: "█"},
 	}
 	if layout.SlotBMB > 0 {
 		segments = append(segments, seg{label: "Slot B", mb: layout.SlotBMB, color: colorCyan + colorBold, char: "█"})
@@ -351,7 +534,12 @@ func RenderPartitionBar(layout PartitionLayout, cfg InstallerConfig, width int) 
 		segments = append(segments, seg{label: "Logs", mb: layout.LogsMB, color: colorYellow + colorBold, char: "█"})
 	}
 	dataLabel := "Data"
-	if cfg.LuksEnabled {
+	if cfg.InstallMode == "zbm" {
+		dataLabel = "Aux/Boot"
+		if cfg.LuksEnabled {
+			dataLabel = "Aux[LUKS2]"
+		}
+	} else if cfg.LuksEnabled {
 		dataLabel = "Data[LUKS2]"
 	}
 	segments = append(segments, seg{label: dataLabel, mb: layout.DataMB, color: colorMagenta + colorBold, char: "█"})
@@ -444,6 +632,9 @@ func FormatInstallerConfig(cfg InstallerConfig) string {
 		fmt.Sprintf("ZFS_ALLOC_MODE=%s", shellQuote(cfg.ZfsAllocMode)),
 		fmt.Sprintf("CUSTOM_ZFS_GB=%d", cfg.CustomZfsGB),
 		fmt.Sprintf("ZFS_EXTRA_DISKS=%s", shellQuote(strings.Join(cfg.ZfsExtraDisks, " "))),
+		fmt.Sprintf("ZFS_SLOG_DISKS=%s", shellQuote(strings.Join(cfg.ZfsSlogDisks, " "))),
+		fmt.Sprintf("ZFS_L2ARC_DISKS=%s", shellQuote(strings.Join(cfg.ZfsL2arcDisks, " "))),
+		fmt.Sprintf("ZFS_SPARE_DISKS=%s", shellQuote(strings.Join(cfg.ZfsSpareDisks, " "))),
 		fmt.Sprintf("ZFS_RAID_TOPOLOGY=%s", shellQuote(cfg.ZfsTopology)),
 		fmt.Sprintf("LOGS_ENABLED=%d", logsEnabled),
 		fmt.Sprintf("LOGS_GB=%d", cfg.LogsGB),
@@ -545,7 +736,7 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 
 	steps := []string{
 		"1. Edition & Arch",
-		"2. Target Disks",
+		"2. Disk Roles & RAID",
 		"3. Storage & ZFS",
 		"4. Security & Auth",
 		"5. Review & Install",
@@ -579,10 +770,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 	}
 
 	cfg := DefaultInstallerConfig()
-	disks := DiscoverDisks()
-	if len(disks) > 0 {
-		disks[0].SystemDisk = true
-		cfg.SystemDisks = []string{disks[0].Path}
+	disks := AutoAssignDiskRoles(DiscoverDisks())
+	syncDiskRolesAndConfig(disks, &cfg)
+	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+		cfg.ZfsAllocMode = "none"
 	}
 
 	step := 1
@@ -621,8 +812,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				},
 				{
 					mode:  "zbm",
-					title: "ZFSBootMenu Root-on-ZFS (zroot)",
-					desc:  "Copy-on-write ZFS Boot Environments, atomic pre-upgrade snapshots & full ZFS pool boot",
+					title: "ZFSBootMenu Root-on-ZFS (All-in-ZFS zroot)",
+					desc:  "Copy-on-write ZFS Boot Environments, atomic pre-upgrade snapshots & 100% OpenZFS root pool boot",
 				},
 				{
 					mode:  "rolling",
@@ -647,11 +838,20 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 
 			slotGB := cfg.SlotMB / 1024
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %s[S] Root Slot Size:%s %s%d GB%s    %s[F] Root/Data Filesystem:%s %s%s%s\n",
-				colorBold, colorReset, colorCyan+colorBold, slotGB, colorReset,
-				colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.RootFSType), colorReset)
+			if cfg.InstallMode == "zbm" {
+				fmt.Printf(" %sFilesystem Architecture:%s %s100%% OpenZFS (zroot Boot Environments + Datasets, lz4)%s\n",
+					colorBold, colorReset, colorEmerald+colorBold, colorReset)
+			} else {
+				fmt.Printf(" %s[S] Root Slot Size:%s %s%d GB%s    %s[F] Root/Data Filesystem:%s %s%s%s\n",
+					colorBold, colorReset, colorCyan+colorBold, slotGB, colorReset,
+					colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.RootFSType), colorReset)
+			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+			if cfg.InstallMode == "zbm" {
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+			} else {
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+			}
 
 			key := readRawKey()
 			switch key {
@@ -682,23 +882,27 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "SPACE":
 				cfg.InstallMode = archOptions[archCursor].mode
 			case "S":
-				switch cfg.SlotMB {
-				case 2048:
-					cfg.SlotMB = 4096
-				case 4096:
-					cfg.SlotMB = 8192
-				case 8192:
-					cfg.SlotMB = 16384
-				default:
-					cfg.SlotMB = 2048
+				if cfg.InstallMode != "zbm" {
+					switch cfg.SlotMB {
+					case 2048:
+						cfg.SlotMB = 4096
+					case 4096:
+						cfg.SlotMB = 8192
+					case 8192:
+						cfg.SlotMB = 16384
+					default:
+						cfg.SlotMB = 2048
+					}
 				}
 			case "F":
-				if cfg.RootFSType == "ext4" {
-					cfg.RootFSType = "xfs"
-					cfg.DataFSType = "xfs"
-				} else {
-					cfg.RootFSType = "ext4"
-					cfg.DataFSType = "ext4"
+				if cfg.InstallMode != "zbm" {
+					if cfg.RootFSType == "ext4" {
+						cfg.RootFSType = "xfs"
+						cfg.DataFSType = "xfs"
+					} else {
+						cfg.RootFSType = "ext4"
+						cfg.DataFSType = "ext4"
+					}
 				}
 			case "ENTER", "RIGHT":
 				cfg.InstallMode = archOptions[archCursor].mode
@@ -712,8 +916,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 
 		case 2:
 			renderInstallerBanner(cfg, 2)
-			fmt.Printf(" %sSelect Target System Disk(s):%s\n", colorBold, colorReset)
-			fmt.Printf(" %sSelect 1 disk for Single-Disk mode, or 2+ disks for automatic mdadm RAID-1 System Mirroring.%s\n\n", colorDim, colorReset)
+			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
+
+			fmt.Printf(" %sAssign Storage Disk Roles (System Boot, Dedicated ZFS Pool, SLOG & L2ARC):%s\n", colorBold, colorReset)
+			fmt.Printf(" %sExample: Assign 2x 32GB disks as [OS SYSTEM] RAID-1, 2x 1TB disks as [ZFS DATA], plus optional [ZFS SLOG] & [ZFS L2ARC].%s\n\n", colorDim, colorReset)
 
 			if len(disks) == 0 {
 				fmt.Printf(" %s[!] No unmounted target storage disks (>= 2 GB) detected.%s\n", colorRed+colorBold, colorReset)
@@ -724,46 +930,67 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					if i == diskCursor {
 						cursor = colorEmerald + colorBold + "➜ " + colorReset
 					}
-					check := "[ ]"
-					if d.SystemDisk {
-						check = colorEmerald + colorBold + "[✓]" + colorReset
-					}
+					badge := formatDiskRoleBadge(d)
 					remTag := ""
 					if d.Removable {
 						remTag = colorYellow + " [Removable]" + colorReset
 					}
-					fmt.Printf(" %s%s %s%-14s%s  %8.1f GB  %-8s  %s%s\n",
-						cursor, check, colorBold, d.Path, colorReset, d.SizeGB, d.Transport, d.Model, remTag)
+					fmt.Printf(" %s%s  %s%-12s%s  %8.1f GB  %-8s  %s%s\n",
+						cursor, badge, colorBold, d.Path, colorReset, d.SizeGB, d.Transport, d.Model, remTag)
 				}
 			}
 
-			var selectedPaths []string
-			primaryMB := 32768
-			for _, d := range disks {
-				if d.SystemDisk {
-					selectedPaths = append(selectedPaths, d.Path)
-					if len(selectedPaths) == 1 {
-						primaryMB = d.SizeMB
-					}
+			raidSummary := colorYellow + "None selected (assign at least 1 disk as [OS SYSTEM])" + colorReset
+			if len(cfg.SystemDisks) == 1 {
+				if cfg.InstallMode == "zbm" {
+					raidSummary = fmt.Sprintf("%sSingle-Disk ZFS Root Pool zroot (%s)%s", colorCyan+colorBold, cfg.SystemDisks[0], colorReset)
+				} else {
+					raidSummary = fmt.Sprintf("%sSingle System Disk (%s)%s", colorCyan+colorBold, cfg.SystemDisks[0], colorReset)
+				}
+			} else if len(cfg.SystemDisks) >= 2 {
+				if cfg.InstallMode == "zbm" {
+					raidSummary = fmt.Sprintf("%sMirrored ZFS Root Pool zroot across %d disks (%s)%s", colorEmerald+colorBold, len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "), colorReset)
+				} else {
+					raidSummary = fmt.Sprintf("%smdadm RAID-1 System Mirror across %d disks (%s)%s", colorEmerald+colorBold, len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "), colorReset)
 				}
 			}
-			cfg.SystemDisks = selectedPaths
 
-			raidSummary := colorYellow + "None selected (select at least 1 disk)" + colorReset
-			if len(selectedPaths) == 1 {
-				raidSummary = fmt.Sprintf("%sSingle System Disk (%s)%s", colorCyan+colorBold, selectedPaths[0], colorReset)
-			} else if len(selectedPaths) >= 2 {
-				raidSummary = fmt.Sprintf("%sRAID-1 Mirror across %d disks (%s)%s", colorEmerald+colorBold, len(selectedPaths), strings.Join(selectedPaths, ", "), colorReset)
+			zfsDataSummary := colorDim + "No dedicated data disks (uses System Disk ZFS partition if enabled)" + colorReset
+			if len(cfg.ZfsExtraDisks) > 0 {
+				zfsDataSummary = fmt.Sprintf("%s%d Dedicated Data VDEV(s) for pool 'tank' (%s)%s",
+					colorGreen+colorBold, len(cfg.ZfsExtraDisks), strings.Join(cfg.ZfsExtraDisks, ", "), colorReset)
+			}
+
+			slogStr := "None"
+			if len(cfg.ZfsSlogDisks) == 1 {
+				slogStr = cfg.ZfsSlogDisks[0]
+			} else if len(cfg.ZfsSlogDisks) >= 2 {
+				slogStr = "Mirror(" + strings.Join(cfg.ZfsSlogDisks, ",") + ")"
+			}
+			l2arcStr := "None"
+			if len(cfg.ZfsL2arcDisks) > 0 {
+				l2arcStr = strings.Join(cfg.ZfsL2arcDisks, ",")
+			}
+			spareStr := "None"
+			if len(cfg.ZfsSpareDisks) > 0 {
+				spareStr = strings.Join(cfg.ZfsSpareDisks, ",")
 			}
 
 			fmt.Println("\n────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sSystem RAID Topology:%s %s\n", colorBold, colorReset, raidSummary)
-			if len(selectedPaths) > 0 {
+			fmt.Printf(" %sSystem Boot OS :%s %s\n", colorBold, colorReset, raidSummary)
+			fmt.Printf(" %sZFS Data Pool  :%s %s\n", colorBold, colorReset, zfsDataSummary)
+			fmt.Printf(" %sZFS Accel/Spare:%s %sSLOG (ZIL):%s %-16s %sL2ARC (Cache):%s %-16s %sSpare:%s %s\n",
+				colorBold, colorReset,
+				colorYellow+colorBold, colorReset, slogStr,
+				colorBrightCya+colorBold, colorReset, l2arcStr,
+				colorMagenta+colorBold, colorReset, spareStr)
+			if len(cfg.SystemDisks) > 0 {
 				layout := ComputePartitionLayout(primaryMB, cfg)
 				fmt.Println(RenderPartitionBar(layout, cfg, 64))
 			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sControls:%s [↑/↓] Move  [Space] Toggle Disk  [R] Rescan  [B] Back  [Enter] Next\n", colorDim, colorReset)
+			fmt.Printf(" %sRole Keys:%s [Space] Cycle Role  [S] System OS  [D] ZFS Data  [G] ZFS SLOG  [C] ZFS L2ARC  [H] Hot Spare  [U] Unused\n", colorDim, colorReset)
+			fmt.Printf(" %sNavigation:%s [↑/↓] Move  [A] Auto-Tier by Size  [R] Rescan  [B] Back  [Enter] Next\n", colorDim, colorReset)
 
 			key := readRawKey()
 			switch key {
@@ -777,30 +1004,90 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				}
 			case "SPACE":
 				if len(disks) > 0 && diskCursor < len(disks) {
-					disks[diskCursor].SystemDisk = !disks[diskCursor].SystemDisk
-					if disks[diskCursor].SystemDisk {
-						disks[diskCursor].ZfsExtra = false
+					cycleDiskRole(&disks[diskCursor])
+				}
+			case "S":
+				if len(disks) > 0 && diskCursor < len(disks) {
+					if disks[diskCursor].Role == "system" {
+						setDiskRole(&disks[diskCursor], "none")
+					} else {
+						setDiskRole(&disks[diskCursor], "system")
+					}
+				}
+			case "D":
+				if len(disks) > 0 && diskCursor < len(disks) {
+					if disks[diskCursor].Role == "zfs-data" {
+						setDiskRole(&disks[diskCursor], "none")
+					} else {
+						setDiskRole(&disks[diskCursor], "zfs-data")
+					}
+				}
+			case "G":
+				if len(disks) > 0 && diskCursor < len(disks) {
+					if disks[diskCursor].Role == "zfs-slog" {
+						setDiskRole(&disks[diskCursor], "none")
+					} else {
+						setDiskRole(&disks[diskCursor], "zfs-slog")
+					}
+				}
+			case "C":
+				if len(disks) > 0 && diskCursor < len(disks) {
+					if disks[diskCursor].Role == "zfs-l2arc" {
+						setDiskRole(&disks[diskCursor], "none")
+					} else {
+						setDiskRole(&disks[diskCursor], "zfs-l2arc")
+					}
+				}
+			case "H":
+				if len(disks) > 0 && diskCursor < len(disks) {
+					if disks[diskCursor].Role == "zfs-spare" {
+						setDiskRole(&disks[diskCursor], "none")
+					} else {
+						setDiskRole(&disks[diskCursor], "zfs-spare")
+					}
+				}
+			case "U":
+				if len(disks) > 0 && diskCursor < len(disks) {
+					setDiskRole(&disks[diskCursor], "none")
+				}
+			case "A":
+				disks = AutoAssignDiskRoles(disks)
+				// If all disks are homogeneous and user pressed [A], mirror first 2 as system and rest as zfs-data
+				sysCount := 0
+				dataCount := 0
+				for _, d := range disks {
+					if d.Role == "system" {
+						sysCount++
+					} else if d.Role == "zfs-data" {
+						dataCount++
+					}
+				}
+				if sysCount == 1 && dataCount == 0 && len(disks) >= 2 {
+					setDiskRole(&disks[0], "system")
+					setDiskRole(&disks[1], "system")
+					for i := 2; i < len(disks); i++ {
+						setDiskRole(&disks[i], "zfs-data")
 					}
 				}
 			case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 				idx, _ := strconv.Atoi(key)
 				if idx >= 1 && idx <= len(disks) {
 					diskCursor = idx - 1
-					disks[diskCursor].SystemDisk = !disks[diskCursor].SystemDisk
-					if disks[diskCursor].SystemDisk {
-						disks[diskCursor].ZfsExtra = false
-					}
+					cycleDiskRole(&disks[diskCursor])
 				}
 			case "R":
-				disks = DiscoverDisks()
-				if len(disks) > 0 {
-					disks[0].SystemDisk = true
-				}
+				disks = AutoAssignDiskRoles(DiscoverDisks())
 				diskCursor = 0
 			case "B", "BACKSPACE", "LEFT":
 				step = 1
 			case "ENTER", "RIGHT":
+				syncDiskRolesAndConfig(disks, &cfg)
 				if len(cfg.SystemDisks) > 0 {
+					// If dedicated ZFS Data disks are assigned in A/B or Rolling mode, default System Disk to 100% OS & System Data
+					if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+						cfg.ZfsAllocMode = "none"
+						zfsCursor = 3
+					}
 					step = 3
 				}
 			case "Q", "ESC":
@@ -809,119 +1096,181 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 
 		case 3:
 			renderInstallerBanner(cfg, 3)
-			primaryMB := 32768
-			for _, d := range disks {
-				if d.SystemDisk {
-					primaryMB = d.SizeMB
-					break
-				}
-			}
+			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
 			layout := ComputePartitionLayout(primaryMB, cfg)
 
-			fmt.Printf(" %sConfigure OpenZFS Storage Pool & Partition Layout:%s\n\n", colorBold, colorReset)
-			fmt.Println(RenderPartitionBar(layout, cfg, 64))
-			fmt.Println()
-
-			zfsModes := []struct {
-				mode  string
-				title string
-			}{
-				{"remainder", "Reserve Remaining Space for OpenZFS Pool (8 GB System Data + Remainder ZFS)"},
-				{"split", "Split Remaining Space 50/50 between System Data & OpenZFS Pool"},
-				{"custom", fmt.Sprintf("Custom OpenZFS Partition Size (%d GB)", cfg.CustomZfsGB)},
-				{"none", "No OpenZFS Partition on System Disk (100% System Data)"},
-			}
-
-			for i, zm := range zfsModes {
-				cursor := "  "
-				if i == zfsCursor {
-					cursor = colorEmerald + colorBold + "➜ " + colorReset
-				}
-				radio := "( )"
-				if cfg.ZfsAllocMode == zm.mode {
-					radio = colorEmerald + colorBold + "(●)" + colorReset
-				}
-				fmt.Printf(" %s%s [%d] %s\n", cursor, radio, i+1, zm.title)
-			}
-
-			// Count unused disks available as dedicated ZFS VDEVs
-			var extraCandidates []int
-			var extraPaths []string
-			for i, d := range disks {
-				if !d.SystemDisk {
-					extraCandidates = append(extraCandidates, i)
-					if d.ZfsExtra {
-						extraPaths = append(extraPaths, d.Path)
-					}
-				}
-			}
-			cfg.ZfsExtraDisks = extraPaths
-
-			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			logsStatus := colorDim + "Disabled (Unified on Root)" + colorReset
 			if cfg.LogsEnabled {
 				logsStatus = fmt.Sprintf("%sEnabled (%d GB %s axon_logs)%s", colorYellow+colorBold, cfg.LogsGB, strings.ToUpper(cfg.LogsFSType), colorReset)
 			}
-			fmt.Printf(" %s[L] Dedicated /var/log Partition:%s %s\n", colorBold, colorReset, logsStatus)
-			fmt.Printf(" %s[T] OpenZFS Pool Topology:%s        %s%s%s\n", colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.ZfsTopology), colorReset)
-			if len(extraCandidates) > 0 {
-				extraDesc := "None"
-				if len(extraPaths) > 0 {
-					extraDesc = strings.Join(extraPaths, ", ")
-				}
-				fmt.Printf(" %s[X] Toggle Extra ZFS Disks (%d available):%s %s%s%s\n",
-					colorBold, len(extraCandidates), colorReset, colorGreen, extraDesc, colorReset)
-			}
-			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-4] Select  [C] Set Custom ZFS GB  [L] Toggle /var/log  [T] Cycle Topology  [B] Back  [Enter] Next\n", colorDim, colorReset)
 
-			key := readRawKey()
-			switch key {
-			case "UP":
-				if zfsCursor > 0 {
-					zfsCursor--
+			slogDesc := colorDim + "None (Internal Pool ZIL)" + colorReset
+			if len(cfg.ZfsSlogDisks) == 1 {
+				slogDesc = fmt.Sprintf("%sDedicated SLOG Device (%s)%s", colorYellow+colorBold, cfg.ZfsSlogDisks[0], colorReset)
+			} else if len(cfg.ZfsSlogDisks) >= 2 {
+				slogDesc = fmt.Sprintf("%sMirrored SLOG VDEV (%s)%s", colorYellow+colorBold, strings.Join(cfg.ZfsSlogDisks, ", "), colorReset)
+			}
+
+			l2arcDesc := colorDim + "None (RAM ARC Only)" + colorReset
+			if len(cfg.ZfsL2arcDisks) > 0 {
+				l2arcDesc = fmt.Sprintf("%sDedicated L2ARC Cache (%s)%s", colorBrightCya+colorBold, strings.Join(cfg.ZfsL2arcDisks, ", "), colorReset)
+			}
+
+			spareDesc := colorDim + "None" + colorReset
+			if len(cfg.ZfsSpareDisks) > 0 {
+				spareDesc = fmt.Sprintf("%sHot Spare (%s)%s", colorMagenta+colorBold, strings.Join(cfg.ZfsSpareDisks, ", "), colorReset)
+			}
+
+			if cfg.InstallMode == "zbm" {
+				// All-in-ZFS (ZFSBootMenu Root-on-ZFS) — no ext4/ZFS split prompts needed!
+				fmt.Printf(" %sAll-in-ZFS Storage Architecture (ZFSBootMenu Root-on-ZFS):%s\n\n", colorBold, colorReset)
+				fmt.Println(RenderPartitionBar(layout, cfg, 64))
+				fmt.Println()
+
+				zrootTopo := "Single-Disk VDEV"
+				if len(cfg.SystemDisks) >= 2 {
+					zrootTopo = fmt.Sprintf("RAID-1 Mirror (%d System Disks)", len(cfg.SystemDisks))
 				}
-			case "DOWN":
-				if zfsCursor < len(zfsModes)-1 {
-					zfsCursor++
+				fmt.Printf(" %s%s[●] System Root Pool (zroot):%s 100%% of remaining space on [%s] (%s)\n",
+					colorEmerald, colorBold, colorReset, strings.Join(cfg.SystemDisks, ", "), zrootTopo)
+				fmt.Printf("     %sDatasets: zroot/ROOT/axonwall (Boot Environment) + zroot/var/lib/axonwall (lz4)%s\n\n", colorDim, colorReset)
+
+				if len(cfg.ZfsExtraDisks) > 0 {
+					fmt.Printf(" %s%s[●] Dedicated Storage Pool (tank):%s %d Whole-Disk Data VDEV(s) [%s] mounted at /mnt/tank\n",
+						colorGreen, colorBold, colorReset, len(cfg.ZfsExtraDisks), strings.Join(cfg.ZfsExtraDisks, ", "))
+					fmt.Printf("     %sDatasets: tank/axonwall, tank/backups, tank/pcap, tank/logs (Topology: %s)%s\n",
+						colorDim, strings.ToUpper(cfg.ZfsTopology), colorReset)
+				} else {
+					fmt.Printf(" %s[i] Dedicated Storage Pool (tank):%s None — all datasets reside inside unified 'zroot' pool.\n",
+						colorCyan+colorBold, colorReset)
+					fmt.Printf("     %sTip: Press [D] to assign dedicated [ZFS DATA], [ZFS SLOG], or [ZFS L2ARC] disks in Step 2.%s\n",
+						colorDim, colorReset)
 				}
-			case "1", "2", "3", "4":
-				idx, _ := strconv.Atoi(key)
-				zfsCursor = idx - 1
-				cfg.ZfsAllocMode = zfsModes[zfsCursor].mode
-			case "SPACE":
-				cfg.ZfsAllocMode = zfsModes[zfsCursor].mode
-			case "C":
-				cfg.ZfsAllocMode = "custom"
-				zfsCursor = 2
-				fmt.Print("\n Enter custom OpenZFS size in GB [16]: ")
-				line, _ := reader.ReadString('\n')
-				if val, err := strconv.Atoi(strings.TrimSpace(line)); err == nil && val >= 1 {
-					cfg.CustomZfsGB = val
-				}
-			case "L":
-				cfg.LogsEnabled = !cfg.LogsEnabled
-			case "T":
-				topos := []string{"auto", "mirror", "raidz1", "raidz2", "raidz3", "stripe"}
-				for i, t := range topos {
-					if cfg.ZfsTopology == t {
-						cfg.ZfsTopology = topos[(i+1)%len(topos)]
-						break
+
+				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+				fmt.Printf(" %s[T] OpenZFS Pool Topology   :%s %s%s%s\n", colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.ZfsTopology), colorReset)
+				fmt.Printf(" %s[L] Dedicated /var/log Part :%s %s\n", colorBold, colorReset, logsStatus)
+				fmt.Printf(" %s    SLOG (Separate ZIL Log) :%s %s\n", colorBold, colorReset, slogDesc)
+				fmt.Printf(" %s    L2ARC (Read Cache)      :%s %s\n", colorBold, colorReset, l2arcDesc)
+				fmt.Printf(" %s    Hot Spare Devices       :%s %s\n", colorBold, colorReset, spareDesc)
+				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+				fmt.Printf(" %sControls:%s [T] Cycle Topology  [L] Toggle /var/log  [D] Edit Disk Roles (Data/SLOG/L2ARC)  [B] Back  [Enter] Next\n", colorDim, colorReset)
+
+				key := readRawKey()
+				switch key {
+				case "L":
+					cfg.LogsEnabled = !cfg.LogsEnabled
+				case "T":
+					topos := []string{"auto", "mirror", "raidz1", "raidz2", "raidz3", "stripe"}
+					for i, t := range topos {
+						if cfg.ZfsTopology == t {
+							cfg.ZfsTopology = topos[(i+1)%len(topos)]
+							break
+						}
 					}
+				case "D", "B", "BACKSPACE", "LEFT":
+					step = 2
+				case "ENTER", "RIGHT":
+					step = 4
+				case "Q", "ESC":
+					return
 				}
-			case "X":
-				if len(extraCandidates) > 0 {
-					allSelected := len(extraPaths) == len(extraCandidates)
-					for _, idx := range extraCandidates {
-						disks[idx].ZfsExtra = !allSelected
+			} else {
+				// Dual-Root A/B or Rolling Single-Root
+				fmt.Printf(" %sConfigure System Disk Partition Layout & OpenZFS Pool (tank):%s\n\n", colorBold, colorReset)
+				fmt.Println(RenderPartitionBar(layout, cfg, 64))
+				fmt.Println()
+
+				noneTitle := "No OpenZFS Partition on System Disk (100% OS & System Data)"
+				if len(cfg.ZfsExtraDisks) > 0 {
+					noneTitle = fmt.Sprintf("Dedicated ZFS Disks Only — Keep System Disk 100%% OS & Data (Pool 'tank' on %s)", strings.Join(cfg.ZfsExtraDisks, ", "))
+				}
+
+				zfsModes := []struct {
+					mode  string
+					title string
+				}{
+					{"remainder", "Reserve Remaining System Disk Space for OpenZFS (8 GB System Data + Remainder ZFS)"},
+					{"split", "Split Remaining System Disk Space 50/50 between System Data & OpenZFS"},
+					{"custom", fmt.Sprintf("Custom OpenZFS Partition Size on System Disk (%d GB)", cfg.CustomZfsGB)},
+					{"none", noneTitle},
+				}
+
+				for i, zm := range zfsModes {
+					cursor := "  "
+					if i == zfsCursor {
+						cursor = colorEmerald + colorBold + "➜ " + colorReset
 					}
+					radio := "( )"
+					if cfg.ZfsAllocMode == zm.mode {
+						radio = colorEmerald + colorBold + "(●)" + colorReset
+					}
+					fmt.Printf(" %s%s [%d] %s\n", cursor, radio, i+1, zm.title)
 				}
-			case "B", "BACKSPACE", "LEFT":
-				step = 2
-			case "ENTER", "RIGHT":
-				step = 4
-			case "Q", "ESC":
-				return
+
+				var dataVdevParts []string
+				if layout.ZfsMB > 0 {
+					dataVdevParts = append(dataVdevParts, fmt.Sprintf("System Disk ZFS Partition (%d GB)", layout.ZfsMB/1024))
+				}
+				if len(cfg.ZfsExtraDisks) > 0 {
+					dataVdevParts = append(dataVdevParts, fmt.Sprintf("Dedicated Disks [%s]", strings.Join(cfg.ZfsExtraDisks, ", ")))
+				}
+				dataVdevSummary := colorDim + "Disabled (No ZFS Data VDEVs selected)" + colorReset
+				if len(dataVdevParts) > 0 {
+					dataVdevSummary = colorGreen + colorBold + strings.Join(dataVdevParts, " + ") + colorReset
+				}
+
+				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+				fmt.Printf(" %sOpenZFS Pool 'tank' Data VDEVs:%s %s\n", colorBold, colorReset, dataVdevSummary)
+				fmt.Printf(" %s[T] OpenZFS Pool Topology     :%s %s%s%s\n", colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.ZfsTopology), colorReset)
+				fmt.Printf(" %s[L] Dedicated /var/log Part   :%s %s\n", colorBold, colorReset, logsStatus)
+				fmt.Printf(" %s    SLOG (Separate ZIL Log)   :%s %s\n", colorBold, colorReset, slogDesc)
+				fmt.Printf(" %s    L2ARC (Read Cache)        :%s %s\n", colorBold, colorReset, l2arcDesc)
+				fmt.Printf(" %s    Hot Spare Devices         :%s %s\n", colorBold, colorReset, spareDesc)
+				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+				fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-4] Select  [C] Custom GB  [T] Topology  [L] /var/log  [D] Disk Roles  [B] Back  [Enter] Next\n", colorDim, colorReset)
+
+				key := readRawKey()
+				switch key {
+				case "UP":
+					if zfsCursor > 0 {
+						zfsCursor--
+					}
+				case "DOWN":
+					if zfsCursor < len(zfsModes)-1 {
+						zfsCursor++
+					}
+				case "1", "2", "3", "4":
+					idx, _ := strconv.Atoi(key)
+					zfsCursor = idx - 1
+					cfg.ZfsAllocMode = zfsModes[zfsCursor].mode
+				case "SPACE":
+					cfg.ZfsAllocMode = zfsModes[zfsCursor].mode
+				case "C":
+					cfg.ZfsAllocMode = "custom"
+					zfsCursor = 2
+					fmt.Print("\n Enter custom OpenZFS size in GB [16]: ")
+					line, _ := reader.ReadString('\n')
+					if val, err := strconv.Atoi(strings.TrimSpace(line)); err == nil && val >= 1 {
+						cfg.CustomZfsGB = val
+					}
+				case "L":
+					cfg.LogsEnabled = !cfg.LogsEnabled
+				case "T":
+					topos := []string{"auto", "mirror", "raidz1", "raidz2", "raidz3", "stripe"}
+					for i, t := range topos {
+						if cfg.ZfsTopology == t {
+							cfg.ZfsTopology = topos[(i+1)%len(topos)]
+							break
+						}
+					}
+				case "D", "B", "BACKSPACE", "LEFT":
+					step = 2
+				case "ENTER", "RIGHT":
+					step = 4
+				case "Q", "ESC":
+					return
+				}
 			}
 
 		case 4:
@@ -1037,13 +1386,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 
 		case 5:
 			renderInstallerBanner(cfg, 5)
-			primaryMB := 32768
-			for _, d := range disks {
-				if d.SystemDisk {
-					primaryMB = d.SizeMB
-					break
-				}
-			}
+			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
 			layout := ComputePartitionLayout(primaryMB, cfg)
 
 			raidMode := "Single Disk"
@@ -1060,18 +1403,42 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				}
 			}
 
+			archSummary := fmt.Sprintf("%s (Slot=%d GB, FS=%s)", strings.ToUpper(cfg.InstallMode), cfg.SlotMB/1024, cfg.RootFSType)
+			if cfg.InstallMode == "zbm" {
+				archSummary = "ZBM All-in-ZFS Root (zroot Boot Environments, lz4)"
+			}
+
+			zfsSummary := fmt.Sprintf("SysAlloc=%s, Topology=%s, DataDisks=%v", cfg.ZfsAllocMode, strings.ToUpper(cfg.ZfsTopology), cfg.ZfsExtraDisks)
+			if cfg.InstallMode == "zbm" {
+				if len(cfg.ZfsExtraDisks) > 0 {
+					zfsSummary = fmt.Sprintf("zroot on System Disks + Dedicated 'tank' (%s) on %v", strings.ToUpper(cfg.ZfsTopology), cfg.ZfsExtraDisks)
+				} else {
+					zfsSummary = fmt.Sprintf("Unified 'zroot' Pool (100%% System Disks, Topology=%s)", strings.ToUpper(cfg.ZfsTopology))
+				}
+			}
+
 			fmt.Printf(" %sInstallation Summary — Ready to Image Target Storage:%s\n\n", colorBold, colorReset)
 			fmt.Printf("   • %-24s : %s%s (%s)%s\n", "Appliance Edition", colorEmerald+colorBold, strings.ToUpper(cfg.Edition), cfg.OSFamily, colorReset)
-			fmt.Printf("   • %-24s : %s%s (Slot=%d GB, FS=%s)%s\n", "Architecture", colorCyan+colorBold, strings.ToUpper(cfg.InstallMode), cfg.SlotMB/1024, cfg.RootFSType, colorReset)
-			fmt.Printf("   • %-24s : %s%s — %s%s\n", "Target System Disk(s)", colorBold, raidMode, strings.Join(cfg.SystemDisks, ", "), colorReset)
-			fmt.Printf("   • %-24s : %sAlloc=%s, Topology=%s, ExtraDisks=%v%s\n", "OpenZFS Storage Pool", colorCyan, cfg.ZfsAllocMode, cfg.ZfsTopology, cfg.ZfsExtraDisks, colorReset)
+			fmt.Printf("   • %-24s : %s%s%s\n", "Architecture", colorCyan+colorBold, archSummary, colorReset)
+			fmt.Printf("   • %-24s : %s%s — %s%s\n", "System OS Disk(s)", colorBold, raidMode, strings.Join(cfg.SystemDisks, ", "), colorReset)
+			fmt.Printf("   • %-24s : %s%s%s\n", "OpenZFS Storage Pool", colorGreen+colorBold, zfsSummary, colorReset)
+			if len(cfg.ZfsSlogDisks) > 0 || len(cfg.ZfsL2arcDisks) > 0 || len(cfg.ZfsSpareDisks) > 0 {
+				fmt.Printf("   • %-24s : %sSLOG=%v  L2ARC=%v  Spare=%v%s\n", "OpenZFS Accelerators", colorYellow+colorBold, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks, colorReset)
+			}
 			fmt.Printf("   • %-24s : %s%s%s\n", "Data Volume Encryption", colorMagenta+colorBold, luksSummary, colorReset)
 			fmt.Printf("   • %-24s : %s%s%s\n\n", "Appliance Hostname", colorBold, cfg.Hostname, colorReset)
 
 			fmt.Println(RenderPartitionBar(layout, cfg, 64))
+			var allTargetDisks []string
+			allTargetDisks = append(allTargetDisks, cfg.SystemDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsExtraDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsSlogDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsL2arcDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsSpareDisks...)
+
 			fmt.Println("\n────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %s⚠️  WARNING: ALL EXISTING DATA ON [%s] WILL BE PERMANENTLY ERASED!%s\n",
-				colorRed+colorBold, strings.Join(append(append([]string{}, cfg.SystemDisks...), cfg.ZfsExtraDisks...), ", "), colorReset)
+				colorRed+colorBold, strings.Join(allTargetDisks, ", "), colorReset)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %sControls:%s [I / Enter] Begin Installation Now   [B] Back   [W] Shell Wizard   [Q] Cancel\n", colorDim, colorReset)
 
