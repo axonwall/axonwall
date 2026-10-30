@@ -55,6 +55,11 @@ is_mounted() {
   grep -qE "[[:space:]]${1%/}[[:space:]]" /proc/mounts 2>/dev/null
 }
 
+mount_dev() {
+  mnt_path="${1%/}"
+  awk -v mp="$mnt_path" '$2 == mp {print $1}' /proc/mounts 2>/dev/null | tail -n1
+}
+
 part_dev() {
   disk_dev="$1"
   p_num="$2"
@@ -65,61 +70,72 @@ part_dev() {
   fi
 }
 
-# 1. Identify installed block devices on primary disk
-ROOT_A_DEV=$(df /target | tail -n1 | awk '{print $1}')
-ROOT_B_DEV=$(df /target/mnt/standby 2>/dev/null | tail -n1 | awk '{print $1}')
-DATA_DEV=$(df /target/var/lib/axonwall 2>/dev/null | tail -n1 | awk '{print $1}')
-LOGS_DEV=$(df /target/var/log 2>/dev/null | tail -n1 | awk '{print $1}')
+# 1. Identify installed block devices on primary disk using exact mountpoint lookups
+ROOT_A_DEV=$(mount_dev /target)
+if [ -z "$ROOT_A_DEV" ]; then
+  ROOT_A_DEV=$(df /target 2>/dev/null | tail -n1 | awk '{print $1}')
+fi
+ROOT_B_DEV=$(mount_dev /target/mnt/standby)
+DATA_DEV=$(mount_dev /target/var/lib/axonwall)
+LOGS_DEV=$(mount_dev /target/var/log)
+ZFS_DEV=$(mount_dev /target/mnt/tank)
+
+# If partman mounted the staging ZFS partition at /target/mnt/tank, unmount it immediately so it can be wiped for OpenZFS
+if [ -n "$ZFS_DEV" ] && is_mounted /target/mnt/tank; then
+  umount /target/mnt/tank 2>/dev/null || umount -l /target/mnt/tank 2>/dev/null || true
+fi
+rmdir /target/mnt/tank 2>/dev/null || true
 
 if [ -z "$TARGET_DISK" ]; then
   TARGET_DISK=$(echo "$ROOT_A_DEV" | sed -E 's/p?[0-9]+$//')
 fi
 
-# Fallback detection for Slot B device if not mounted at /target/mnt/standby
-if [ "$INSTALL_MODE" = "rolling" ]; then
-  ROOT_B_DEV=""
-  DATA_DEV=""
-elif [ -z "$ROOT_B_DEV" ] || [ "$ROOT_B_DEV" = "$ROOT_A_DEV" ]; then
-  if [ "$PARTITION_MODE" = "manual" ]; then
-    # In manual mode, only use candidate if specifically mounted or labeled
-    CANDIDATE_B=$(blkid -L axon_root_b 2>/dev/null || true)
-    if [ -n "$CANDIDATE_B" ] && [ -b "$CANDIDATE_B" ]; then
-      ROOT_B_DEV="$CANDIDATE_B"
-    else
-      ROOT_B_DEV=""
-    fi
-  else
-    PART_NUM=$(echo "$ROOT_A_DEV" | grep -oE '[0-9]+$')
-    NEXT_NUM=$(( PART_NUM + 1 ))
-    ROOT_B_DEV=$(part_dev "$TARGET_DISK" "$NEXT_NUM")
-  fi
-fi
-
-# Fallback detection for Logs, Data and Optional ZFS partition
+# Fallback detection for Logs, Data, Slot B, and Optional ZFS partition
 ALL_PARTS=$(ls "${TARGET_DISK}"* 2>/dev/null | grep -E "${TARGET_DISK}(p?[0-9]+)$" | sort -V || true)
 LAST_PART=$(echo "$ALL_PARTS" | tail -n1)
 SECOND_LAST_PART=$(echo "$ALL_PARTS" | tail -n2 | head -n1)
 THIRD_LAST_PART=$(echo "$ALL_PARTS" | tail -n3 | head -n1)
 
-ZFS_DEV=""
-if [ "$INSTALL_MODE" = "rolling" ]; then
-  if [ "${ZFS_MB:-0}" -gt 0 ]; then
-    ZFS_DEV="$LAST_PART"
-  fi
-elif [ "${ZFS_MB:-0}" -gt 0 ]; then
-  ZFS_DEV="$LAST_PART"
-  if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
-    DATA_DEV="$SECOND_LAST_PART"
-  fi
-  if [ "$LOGS_ENABLED" = "1" ] && [ -z "$LOGS_DEV" ]; then
-    LOGS_DEV="$THIRD_LAST_PART"
+if [ "$INSTALL_MODE" = "rolling" ] || [ "$INSTALL_MODE" = "zbm" ]; then
+  ROOT_B_DEV=""
+  DATA_DEV=""
+  if [ -z "$ZFS_DEV" ] && { [ "${ZFS_MB:-0}" -gt 0 ] || [ "$INSTALL_MODE" = "zbm" ]; }; then
+    if [ -n "$LAST_PART" ] && [ "$LAST_PART" != "$ROOT_A_DEV" ] && [ "$LAST_PART" != "$LOGS_DEV" ]; then
+      ZFS_DEV="$LAST_PART"
+    fi
   fi
 else
-  if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
-    DATA_DEV="$LAST_PART"
+  # A/B Dual-Root Mode
+  if [ -z "$ROOT_B_DEV" ] || [ "$ROOT_B_DEV" = "$ROOT_A_DEV" ]; then
+    if [ "$PARTITION_MODE" = "manual" ]; then
+      CANDIDATE_B=$(blkid -L axon_root_b 2>/dev/null || true)
+      if [ -n "$CANDIDATE_B" ] && [ -b "$CANDIDATE_B" ]; then
+        ROOT_B_DEV="$CANDIDATE_B"
+      else
+        ROOT_B_DEV=""
+      fi
+    else
+      PART_NUM=$(echo "$ROOT_A_DEV" | grep -oE '[0-9]+$')
+      NEXT_NUM=$(( PART_NUM + 1 ))
+      ROOT_B_DEV=$(part_dev "$TARGET_DISK" "$NEXT_NUM")
+    fi
   fi
-  if [ "$LOGS_ENABLED" = "1" ] && [ -z "$LOGS_DEV" ]; then
-    LOGS_DEV="$SECOND_LAST_PART"
+
+  if [ "${ZFS_MB:-0}" -gt 0 ]; then
+    [ -z "$ZFS_DEV" ] && ZFS_DEV="$LAST_PART"
+    if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
+      DATA_DEV="$SECOND_LAST_PART"
+    fi
+    if [ "$LOGS_ENABLED" = "1" ] && [ -z "$LOGS_DEV" ]; then
+      LOGS_DEV="$THIRD_LAST_PART"
+    fi
+  else
+    if [ -z "$DATA_DEV" ] || [ "$DATA_DEV" = "$ROOT_A_DEV" ]; then
+      DATA_DEV="$LAST_PART"
+    fi
+    if [ "$LOGS_ENABLED" = "1" ] && [ -z "$LOGS_DEV" ]; then
+      LOGS_DEV="$SECOND_LAST_PART"
+    fi
   fi
 fi
 
@@ -127,7 +143,7 @@ echo "[+] Install Mode      : ${INSTALL_MODE}"
 echo "[+] Target Disk       : ${TARGET_DISK}"
 echo "[+] System RAID Mode  : ${SYSTEM_RAID_MODE} (${SYSTEM_RAID_DISKS:-$TARGET_DISK})"
 echo "[+] Root Partition    : ${ROOT_A_DEV} (${ROOT_FSTYPE})"
-echo "[+] Slot B (Standby)  : ${ROOT_B_DEV:-<none (Rolling Single-Root)>} (${ROOT_FSTYPE})"
+echo "[+] Slot B (Standby)  : ${ROOT_B_DEV:-<none (${INSTALL_MODE})>} (${ROOT_FSTYPE})"
 echo "[+] Persistent Data   : ${DATA_DEV:-<unified on />} (${DATA_FSTYPE}, LUKS2=${LUKS_ENABLED})"
 echo "[+] Dedicated Logs    : ${LOGS_DEV:-<none>} (${LOGS_FSTYPE})"
 echo "[+] ZFS Partition     : ${ZFS_DEV:-<none>} (${ZFS_GB:-0} GB)"
@@ -135,7 +151,7 @@ echo "[+] ZFS Partition     : ${ZFS_DEV:-<none>} (${ZFS_GB:-0} GB)"
 # 2. Label filesystems and configure LUKS2 Encryption
 if [ -b "$ROOT_A_DEV" ]; then
   ROOT_LABEL="axon_root_a"
-  if [ "$INSTALL_MODE" = "rolling" ]; then
+  if [ "$INSTALL_MODE" = "rolling" ] || [ "$INSTALL_MODE" = "zbm" ]; then
     ROOT_LABEL="axon_root"
   fi
   echo "[+] Setting filesystem label: ${ROOT_A_DEV} -> ${ROOT_LABEL}"
@@ -146,25 +162,39 @@ if [ -b "$ROOT_A_DEV" ]; then
   fi
 fi
 
-if [ -b "$ROOT_B_DEV" ]; then
+if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
   udevadm settle 2>/dev/null || true
-  sleep 1
-  echo "[+] Formatting Slot B standby partition: ${ROOT_B_DEV} as ${ROOT_FSTYPE}..."
-  if [ "$ROOT_FSTYPE" = "xfs" ]; then
-    mkfs.xfs -f -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+  if is_mounted /target/mnt/standby; then
+    echo "[+] Labeling mounted Slot B standby partition: ${ROOT_B_DEV} -> axon_root_b"
+    if [ "$ROOT_FSTYPE" != "xfs" ]; then
+      e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    fi
   else
-    mkfs.ext4 -F -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
-    e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    sleep 1
+    echo "[+] Formatting Slot B standby partition: ${ROOT_B_DEV} as ${ROOT_FSTYPE}..."
+    if [ "$ROOT_FSTYPE" = "xfs" ]; then
+      mkfs.xfs -f -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    else
+      mkfs.ext4 -F -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+      e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    fi
   fi
 fi
 
 # Configure dedicated /var/log partition if enabled
 if [ "$LOGS_ENABLED" = "1" ] && [ -b "$LOGS_DEV" ] && [ "$LOGS_DEV" != "$ROOT_A_DEV" ]; then
-  echo "[+] Formatting dedicated logs partition: ${LOGS_DEV} as ${LOGS_FSTYPE}..."
-  if [ "$LOGS_FSTYPE" = "xfs" ]; then
-    mkfs.xfs -f -L axon_logs "$LOGS_DEV" 2>/dev/null || true
+  if is_mounted /target/var/log; then
+    echo "[+] Labeling dedicated logs partition: ${LOGS_DEV} -> axon_logs"
+    if [ "$LOGS_FSTYPE" != "xfs" ]; then
+      e2label "$LOGS_DEV" axon_logs 2>/dev/null || tune2fs -L axon_logs "$LOGS_DEV" 2>/dev/null || true
+    fi
   else
-    mkfs.ext4 -F -L axon_logs "$LOGS_DEV" 2>/dev/null || true
+    echo "[+] Formatting dedicated logs partition: ${LOGS_DEV} as ${LOGS_FSTYPE}..."
+    if [ "$LOGS_FSTYPE" = "xfs" ]; then
+      mkfs.xfs -f -L axon_logs "$LOGS_DEV" 2>/dev/null || true
+    else
+      mkfs.ext4 -F -L axon_logs "$LOGS_DEV" 2>/dev/null || true
+    fi
   fi
 fi
 
@@ -346,7 +376,12 @@ if [ -d /target/boot ]; then
   fi
 fi
 
-if [ -b "$ROOT_B_DEV" ]; then
+INSTALL_VER="0.11.32"
+if [ -f /target/etc/axonwall/version ]; then
+  INSTALL_VER="$(head -n1 /target/etc/axonwall/version | tr -d '\r\n ')"
+fi
+
+if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
   STAGE_B="/tmp/stage_slot_b"
   mkdir -p "$STAGE_B"
   IS_MOUNTED=0
@@ -366,6 +401,7 @@ if [ -b "$ROOT_B_DEV" ]; then
     if command -v rsync >/dev/null 2>&1; then
       rsync -aAX --delete \
         --exclude=/mnt/standby \
+        --exclude=/mnt/tank \
         --exclude=/media/* \
         --exclude=/var/lib/axonwall \
         --exclude=/boot/efi/* \
@@ -383,6 +419,7 @@ if [ -b "$ROOT_B_DEV" ]; then
     if [ -f "$STAGE_B/etc/fstab" ]; then
       sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root_b\1|' "$STAGE_B/etc/fstab" 2>/dev/null || true
       sed -i '\#/mnt/standby#d' "$STAGE_B/etc/fstab"
+      sed -i '\#/mnt/tank#d' "$STAGE_B/etc/fstab"
       if [ "$LUKS_ENABLED" = "1" ]; then
         sed -i '\#[[:space:]]/var/lib/axonwall[[:space:]]#d' "$STAGE_B/etc/fstab"
       fi
@@ -419,10 +456,6 @@ if [ -b "$ROOT_B_DEV" ]; then
     fi
 
     # Persist initial per-slot versions
-    INSTALL_VER="0.8.13"
-    if [ -f /target/etc/axonwall/version ]; then
-      INSTALL_VER="$(head -n1 /target/etc/axonwall/version | tr -d '\r\n ')"
-    fi
     INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
     mkdir -p /target/etc/axonwall /target/var/lib/axonwall "$STAGE_B/etc/axonwall" 2>/dev/null || true
     printf '%s' "$INIT_SLOT_JSON" > /target/etc/axonwall/slot_versions.json 2>/dev/null || true
@@ -432,18 +465,35 @@ if [ -b "$ROOT_B_DEV" ]; then
     # Unmount standby staging
     if [ $IS_MOUNTED -eq 1 ]; then
       umount /target/mnt/standby 2>/dev/null || true
+      rmdir /target/mnt/standby 2>/dev/null || true
     elif [ $IS_MOUNTED -eq 2 ]; then
       umount "$STAGE_B" 2>/dev/null || true
     fi
+
+    # Ensure filesystem label axon_root_b is set after unmounting
+    if [ "$ROOT_FSTYPE" = "xfs" ] && command -v xfs_admin >/dev/null 2>&1; then
+      xfs_admin -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    else
+      e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
+    fi
   fi
+else
+  SLOT_B_DESC="Rolling (Single-Root)"
+  if [ "$INSTALL_MODE" = "zbm" ]; then
+    SLOT_B_DESC="axonwall-${INSTALL_VER}@factory-initial"
+  fi
+  INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$SLOT_B_DESC" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
+  mkdir -p /target/etc/axonwall /target/var/lib/axonwall 2>/dev/null || true
+  printf '%s' "$INIT_SLOT_JSON" > /target/etc/axonwall/slot_versions.json 2>/dev/null || true
+  printf '%s' "$INIT_SLOT_JSON" > /target/var/lib/axonwall/slot_versions.json 2>/dev/null || true
 fi
 
-# Clean up /mnt/standby mountpoint in fstab and configure /var/lib/axonwall/home bind-mount (A/B mode only)
+# Clean up /mnt/standby and /mnt/tank mountpoints in fstab and configure /var/lib/axonwall/home bind-mount (A/B mode only)
 mkdir -p /target/etc/axonwall /target/var/lib/axonwall/home /target/var/lib/axonwall/ldap/config /target/var/lib/axonwall/ldap/data /target/var/lib/axonwall/ldap/accesslog /target/var/lib/axonwall/ldap/backups /target/var/lib/axonwall/secrets/ldap /target/var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
 echo "${INSTALL_MODE}" > /target/etc/axonwall/install-mode 2>/dev/null || true
 echo "${INSTALL_MODE}" > /target/var/lib/axonwall/install-mode 2>/dev/null || true
 
-if [ "$INSTALL_MODE" != "rolling" ]; then
+if [ "$INSTALL_MODE" = "ab" ]; then
   if [ -d /target/home ] && [ -n "$(ls -A /target/home 2>/dev/null || true)" ]; then
     cp -a /target/home/. /target/var/lib/axonwall/home/ 2>/dev/null || true
   fi
@@ -451,17 +501,15 @@ fi
 chown 0:0 /target/var/lib/axonwall/home 2>/dev/null || true
 chmod 0755 /target/var/lib/axonwall /target/var/lib/axonwall/home 2>/dev/null || true
 if [ -f /target/etc/fstab ]; then
-  if [ "$INSTALL_MODE" = "zbm" ]; then
-    sed -i '\#/mnt/standby#d' /target/etc/fstab
-    sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|zroot/ROOT/axonwall\1|' /target/etc/fstab 2>/dev/null || true
-  elif [ "$INSTALL_MODE" = "rolling" ]; then
-    sed -i '\#/mnt/standby#d' /target/etc/fstab
+  sed -i '\#/mnt/standby#d' /target/etc/fstab 2>/dev/null || true
+  sed -i '\#/mnt/tank#d' /target/etc/fstab 2>/dev/null || true
+  if [ "$INSTALL_MODE" = "zbm" ] || [ "$INSTALL_MODE" = "rolling" ]; then
+    sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root\1|' /target/etc/fstab 2>/dev/null || true
     if [ "$LOGS_ENABLED" = "1" ] && [ -b "$LOGS_DEV" ] && ! grep -qE '[[:space:]]/var/log[[:space:]]' /target/etc/fstab; then
       echo "LABEL=axon_logs  /var/log  ${LOGS_FSTYPE:-xfs}  defaults,noatime  0  2" >> /target/etc/fstab
     fi
   else
     sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root_a\1|' /target/etc/fstab 2>/dev/null || true
-    sed -i '\#/mnt/standby#d' /target/etc/fstab
     if [ "$LUKS_ENABLED" = "1" ]; then
       sed -i '\#[[:space:]]/var/lib/axonwall[[:space:]]#d' /target/etc/fstab
     fi
@@ -556,7 +604,7 @@ for extra_d in $ZFS_EXTRA_DISKS; do
   fi
 done
 
-# 6. Resolve ZFS RAID Topology & Persist / Bootstrap Initial ZFS Pool ('tank')
+# 6. Resolve ZFS RAID Topology & Persist / Bootstrap Initial ZFS Pool ('zroot' in ZBM mode, 'tank' otherwise)
 if [ -n "$ZFS_VDEVS" ]; then
   VDEV_COUNT=$(echo "$ZFS_VDEVS" | wc -w | tr -d ' ')
   RESOLVED_TOPOLOGY="$ZFS_RAID_TOPOLOGY"
@@ -583,7 +631,7 @@ if [ -n "$ZFS_VDEVS" ]; then
     RESOLVED_TOPOLOGY="raidz2"
   fi
 
-  # Construct JSON array of VDEV paths for axonwalld firstboot bootstrap
+  # Construct JSON array of VDEV paths for axonwalld & axonwall-firstboot bootstrap
   JSON_VDEVS=""
   for v in $ZFS_VDEVS; do
     if [ -z "$JSON_VDEVS" ]; then
@@ -593,10 +641,16 @@ if [ -n "$ZFS_VDEVS" ]; then
     fi
   done
 
+  TARGET_POOL_NAME="tank"
+  if [ "$INSTALL_MODE" = "zbm" ]; then
+    TARGET_POOL_NAME="zroot"
+  fi
+
   mkdir -p /target/var/lib/axonwall
   cat << ZFS_JSON_EOF > /target/var/lib/axonwall/install-zfs.json
 {
-  "poolName": "tank",
+  "poolName": "${TARGET_POOL_NAME}",
+  "installMode": "${INSTALL_MODE}",
   "topology": "${RESOLVED_TOPOLOGY}",
   "vdevs": [${JSON_VDEVS}],
   "sizeGb": ${ZFS_GB:-0},
@@ -606,32 +660,56 @@ if [ -n "$ZFS_VDEVS" ]; then
 }
 ZFS_JSON_EOF
 
-  echo "[+] Recorded ZFS pool bootstrap specification in /var/lib/axonwall/install-zfs.json (topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS})"
+  echo "[+] Recorded ZFS pool bootstrap specification in /var/lib/axonwall/install-zfs.json (pool=${TARGET_POOL_NAME}, topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS})"
 
-  # If zpool is already installed in /target, create the pool immediately
+  # If zpool & zfs kernel module are available now, create the pool immediately (otherwise axonwall-firstboot / axonwalld creates it on first boot)
   ZPOOL_ARGS=""
   if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
     ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
   fi
-  in-target zpool create -f \
-    -o ashift=12 \
-    -o autotrim=on \
-    -O compression=lz4 \
-    -O acltype=posixacl \
-    -O xattr=sa \
-    -O normalization=formD \
-    -O mountpoint=/mnt/tank \
-    tank $ZPOOL_ARGS $ZFS_VDEVS 2>/dev/null || true
+  if [ "$INSTALL_MODE" = "zbm" ]; then
+    if in-target zpool create -f \
+      -o ashift=12 \
+      -o autotrim=on \
+      -O compression=lz4 \
+      -O acltype=posixacl \
+      -O xattr=sa \
+      -O normalization=formD \
+      -O canmount=off \
+      -O mountpoint=none \
+      zroot $ZPOOL_ARGS $ZFS_VDEVS 2>/dev/null; then
+      INIT_BE="zroot/ROOT/axonwall-${INSTALL_VER}"
+      in-target zfs create -o canmount=off -o mountpoint=none zroot/ROOT 2>/dev/null || true
+      in-target zfs create -o canmount=noauto -o mountpoint=/ "$INIT_BE" 2>/dev/null || true
+      in-target zfs create -o mountpoint=/mnt/tank zroot/tank 2>/dev/null || true
+      in-target zpool set bootfs="$INIT_BE" zroot 2>/dev/null || true
+      in-target zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT 2>/dev/null || true
+      in-target zfs set "org.axonwall:fallback_be=${INIT_BE}" zroot/ROOT 2>/dev/null || true
+      in-target zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
+      in-target zfs set "org.axonwall:bootlimit=3" zroot/ROOT 2>/dev/null || true
+      in-target zfs set "org.axonwall:topology=${RESOLVED_TOPOLOGY}" zroot/ROOT 2>/dev/null || true
+      in-target zfs snapshot "${INIT_BE}@factory-initial" 2>/dev/null || true
+    fi
+  else
+    in-target zpool create -f \
+      -o ashift=12 \
+      -o autotrim=on \
+      -O compression=lz4 \
+      -O acltype=posixacl \
+      -O xattr=sa \
+      -O normalization=formD \
+      -O mountpoint=/mnt/tank \
+      tank $ZPOOL_ARGS $ZFS_VDEVS 2>/dev/null || true
+  fi
 fi
 
 # 7. Initialize Bootloader (ZFSBootMenu Root-on-ZFS vs Rolling Single-Root vs A/B boot counting)
 mkdir -p /target/boot/grub
 if [ "$INSTALL_MODE" = "zbm" ]; then
-  echo "[+] Configuring ZFSBootMenu v3.1.x Root-on-ZFS bootloader and UEFI UKI..."
-  mkdir -p /target/boot/efi/EFI/ZBM /target/boot/efi/EFI/BOOT
+  echo "[+] Configuring ZFSBootMenu v3.1.x Root-on-ZFS hooks & bootloader..."
+  mkdir -p /target/boot/efi/EFI/ZBM
   if [ -f /target/usr/lib/zfsbootmenu/vmlinuz.efi ]; then
     cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/ZBM/VMLINUZ.EFI 2>/dev/null || true
-    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null || true
   fi
   # Install ZBM watchdog hook into /target/etc/zfsbootmenu/hooks/setup.d/
   mkdir -p /target/etc/zfsbootmenu/hooks/setup.d /target/etc/zfsbootmenu/dracut.conf.d

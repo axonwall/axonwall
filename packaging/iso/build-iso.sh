@@ -473,7 +473,10 @@ mdadm
 gdisk
 parted
 smartmontools
+linux-headers-amd64
+zfs-dkms
 zfsutils-linux
+zfs-initramfs
 cryptsetup
 systemd-cryptsetup
 tpm2-tools
@@ -572,7 +575,10 @@ mdadm
 gdisk
 parted
 smartmontools
+linux-headers-amd64
+zfs-dkms
 zfsutils-linux
+zfs-initramfs
 cloud-init
 cloud-guest-utils
 qemu-system-x86

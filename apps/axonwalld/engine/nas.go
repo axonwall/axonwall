@@ -268,6 +268,26 @@ func (m *NasManager) BootstrapInstallZfsPool() {
 	slog.Info("Creating install-time ZFS pool from installer layout", "pool", spec.PoolName, "topology", spec.Topology, "vdevs", spec.Vdevs)
 	if out, err := exec.Command("zpool", args...).CombinedOutput(); err != nil {
 		slog.Warn("Failed to create install-time ZFS pool", "error", err, "output", string(out))
+		return
+	}
+	if spec.PoolName == "zroot" {
+		appVer := "0.11.32"
+		if vBytes, err := os.ReadFile("/etc/axonwall/version"); err == nil {
+			if v := strings.TrimSpace(string(vBytes)); v != "" {
+				appVer = v
+			}
+		}
+		initBe := "zroot/ROOT/axonwall-" + appVer
+		_ = exec.Command("zfs", "create", "-o", "canmount=off", "-o", "mountpoint=none", "zroot/ROOT").Run()
+		_ = exec.Command("zfs", "create", "-o", "canmount=noauto", "-o", "mountpoint=/", initBe).Run()
+		_ = exec.Command("zfs", "create", "-o", "mountpoint=/mnt/tank", "zroot/tank").Run()
+		_ = exec.Command("zpool", "set", "bootfs="+initBe, "zroot").Run()
+		_ = exec.Command("zfs", "set", "org.axonwall:active_be="+initBe, "zroot/ROOT").Run()
+		_ = exec.Command("zfs", "set", "org.axonwall:fallback_be="+initBe, "zroot/ROOT").Run()
+		_ = exec.Command("zfs", "set", "org.axonwall:bootcount=0", "zroot/ROOT").Run()
+		_ = exec.Command("zfs", "set", "org.axonwall:bootlimit=3", "zroot/ROOT").Run()
+		_ = exec.Command("zfs", "set", "org.axonwall:topology="+spec.Topology, "zroot/ROOT").Run()
+		_ = exec.Command("zfs", "snapshot", initBe+"@factory-initial").Run()
 	}
 }
 
