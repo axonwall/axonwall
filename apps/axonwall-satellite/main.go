@@ -206,7 +206,7 @@ func main() {
 		}
 	}
 
-	slog.Info("Starting Axonwall Satellite / Edge NGFW Agent", "version", "0.11.36", "id", *satID, "pid1", engine.IsPID1() || *pid1Mode)
+	slog.Info("Starting Axonwall Satellite / Edge NGFW Agent", "version", "0.11.37", "id", *satID, "pid1", engine.IsPID1() || *pid1Mode)
 
 	if *satID == "" || *token == "" {
 		slog.Error("Missing required ZTP parameters. Must provide -id and -token (or axonwall.id / axonwall.token on kernel cmdline).")
