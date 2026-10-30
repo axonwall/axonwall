@@ -19,7 +19,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "detect-port": "^2.1.0",
-    "execa": "^10.2.0",
+    "execa": "^10.2.1",
     "fast-xml-parser": "^5.11.0",
     "hostile": "^1.4.0",
     "ink": "^8.0.0",
