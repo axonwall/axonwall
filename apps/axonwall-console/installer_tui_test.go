@@ -61,6 +61,7 @@ func TestComputePartitionLayout(t *testing.T) {
 
 func TestRenderPartitionBarAndFormatConfig(t *testing.T) {
 	cfg := DefaultInstallerConfig()
+	cfg.Edition = "vault"
 	cfg.SystemDisks = []string{"/dev/nvme0n1", "/dev/nvme1n1"}
 	cfg.LuksEnabled = true
 	cfg.LuksTPM2 = true
@@ -74,6 +75,9 @@ func TestRenderPartitionBarAndFormatConfig(t *testing.T) {
 	}
 
 	serialized := FormatInstallerConfig(cfg)
+	if !strings.Contains(serialized, "INSTALL_EDITION='vault'") {
+		t.Errorf("expected INSTALL_EDITION='vault' in serialized config:\n%s", serialized)
+	}
 	if !strings.Contains(serialized, "SYSTEM_DISKS='/dev/nvme0n1 /dev/nvme1n1'") {
 		t.Errorf("unexpected SYSTEM_DISKS in serialized config:\n%s", serialized)
 	}

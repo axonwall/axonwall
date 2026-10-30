@@ -96,8 +96,10 @@ if [ -f /etc/alpine-release ]; then
 fi
 
 EDITION_LABEL="Axonwall NGFW Appliance"
-if [ -f /etc/axonwall/.vault-edition ]; then
+INSTALL_EDITION="axonwall"
+if [ -f /etc/axonwall/.vault-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
   EDITION_LABEL="Axonwall Vault Edition"
+  INSTALL_EDITION="vault"
 fi
 
 # Default installation parameters
@@ -170,6 +172,17 @@ elif [ "$MODE" = "unattended" ]; then
 
   if [ -n "$CI_FILE" ]; then
     echo "[+] Loaded Cloud-Init seed from ${CI_FILE}"
+    ci_edition="$(grep -E '^[[:space:]]*edition:' "$CI_FILE" 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
+    case "$ci_edition" in
+      vault|s3|storage)
+        INSTALL_EDITION="vault"
+        EDITION_LABEL="Axonwall Vault Edition"
+        ;;
+      axonwall|ngfw|firewall)
+        INSTALL_EDITION="axonwall"
+        EDITION_LABEL="Axonwall NGFW Appliance"
+        ;;
+    esac
     ci_mode="$(grep -E '^[[:space:]]*install_mode:' "$CI_FILE" 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
     case "$ci_mode" in
       ab|dual|dual-root) INSTALL_MODE="ab" ;;
@@ -248,6 +261,23 @@ else
     printf "Enter system disk(s) to install Axonwall (space-separated for RAID-1 Mirror, e.g. '/dev/vda' or '/dev/nvme0n1 /dev/nvme1n1'): "
     read -r SYSTEM_DISKS
   fi
+
+  echo ""
+  echo "Select Appliance Edition:"
+  echo "  [1] Axonwall NGFW & Router Appliance [Default]"
+  echo "  [2] Axonwall Vault Edition (Immutable S3 Object-Lock Backup Appliance)"
+  printf "Choice [1-2] (default 1): "
+  read -r EDITION_CHOICE
+  case "${EDITION_CHOICE:-1}" in
+    2|vault|VAULT)
+      INSTALL_EDITION="vault"
+      EDITION_LABEL="Axonwall Vault Edition"
+      ;;
+    *)
+      INSTALL_EDITION="axonwall"
+      EDITION_LABEL="Axonwall NGFW Appliance"
+      ;;
+  esac
 
   echo ""
   echo "Select Installation Architecture:"
@@ -732,11 +762,82 @@ emit_phase 4 8 "Configuring fstab, LUKS2/TPM2, Cloud-Init & administrator creden
 mkdir -p /mnt/data/home /mnt/data/ldap /mnt/data/secrets /mnt/data/etc-axonwall /mnt/slot_a/home /mnt/slot_a/etc/axonwall
 echo "${INSTALL_MODE}" > /mnt/slot_a/etc/axonwall/install-mode
 echo "${INSTALL_MODE}" > /mnt/data/install-mode
-if [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
-  touch /mnt/slot_a/etc/axonwall/.vault-firstboot
+
+if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
+  echo "[+] Configuring target as Axonwall Vault Edition (hardened immutable S3 storage appliance)..."
+  mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/etc/systemd/system/multi-user.target.wants
+  touch /mnt/slot_a/etc/axonwall/.vault-edition /mnt/slot_a/etc/axonwall/.vault-firstboot
+  rm -f /mnt/slot_a/etc/axonwall/.firstboot
+
+  if [ -d /mnt/slot_a/usr/share/axonwall/vault ]; then
+    VSTAGE="/mnt/slot_a/usr/share/axonwall/vault"
+    if [ -f "${VSTAGE}/weed" ]; then
+      cp -f "${VSTAGE}/weed" /mnt/slot_a/usr/sbin/weed
+      chmod 0755 /mnt/slot_a/usr/sbin/weed
+    fi
+    for vunit in seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service; do
+      if [ -f "${VSTAGE}/${vunit}" ]; then
+        cp -f "${VSTAGE}/${vunit}" "/mnt/slot_a/etc/systemd/system/${vunit}"
+        ln -sf "/etc/systemd/system/${vunit}" "/mnt/slot_a/etc/systemd/system/multi-user.target.wants/${vunit}"
+      fi
+    done
+    ln -sf /lib/systemd/system/nftables.service /mnt/slot_a/etc/systemd/system/multi-user.target.wants/nftables.service
+    mkdir -p /mnt/slot_a/usr/lib/sysusers.d /mnt/slot_a/usr/lib/tmpfiles.d /mnt/slot_a/usr/local/bin
+    [ -f "${VSTAGE}/axonwall-vault.sysusers" ] && cp -f "${VSTAGE}/axonwall-vault.sysusers" /mnt/slot_a/usr/lib/sysusers.d/axonwall-vault.conf
+    [ -f "${VSTAGE}/axonwall-vault.tmpfiles" ] && cp -f "${VSTAGE}/axonwall-vault.tmpfiles" /mnt/slot_a/usr/lib/tmpfiles.d/axonwall-vault.conf
+    for vbin in axonwall-vault-provision axonwall-vault-status axonwall-vault-firstboot; do
+      if [ -f "${VSTAGE}/${vbin}" ]; then
+        cp -f "${VSTAGE}/${vbin}" "/mnt/slot_a/usr/local/bin/${vbin}"
+        chmod 0755 "/mnt/slot_a/usr/local/bin/${vbin}"
+      fi
+    done
+    [ -f "${VSTAGE}/nftables.conf" ] && cp -f "${VSTAGE}/nftables.conf" /mnt/slot_a/etc/nftables.conf
+    if [ -f "${VSTAGE}/splash-vault.png" ]; then
+      mkdir -p /mnt/slot_a/etc/axonwall/branding
+      cp -f "${VSTAGE}/splash-vault.png" /mnt/slot_a/etc/axonwall/branding/splash.png
+    fi
+  fi
+
+  # Strip firewall & router stack so it is completely absent from the Vault image
+  for fw_unit in axonwall-firstboot.service axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service; do
+    rm -f "/mnt/slot_a/etc/systemd/system/${fw_unit}" "/mnt/slot_a/etc/systemd/system/multi-user.target.wants/${fw_unit}"
+  done
+  rm -rf /mnt/slot_a/opt/axonwall \
+         /mnt/slot_a/usr/sbin/axonwalld \
+         /mnt/slot_a/usr/sbin/headscale \
+         /mnt/slot_a/usr/sbin/litestream \
+         /mnt/slot_a/usr/sbin/axonwall-satellite \
+         /mnt/slot_a/usr/share/axonwall/satellites \
+         /mnt/slot_a/usr/share/axonwall/lockdown.nft \
+         /mnt/slot_a/usr/lib/axonwall/edge \
+         /mnt/slot_a/usr/local/bin/axonwall-firstboot \
+         /mnt/slot_a/usr/local/bin/axonwallctl \
+         /mnt/slot_a/usr/local/bin/axonwall-tui \
+         /mnt/slot_a/usr/local/bin/axonwall-ha-notify \
+         /mnt/slot_a/usr/local/bin/axonwall-cloud-init \
+         /mnt/slot_a/usr/local/bin/axonwall-import \
+         /mnt/slot_a/etc/headscale \
+         /mnt/slot_a/etc/systemd/system/suricata.service.d
+
+  if [ "$OS_FAMILY" = "debian" ] && [ -x /mnt/slot_a/usr/bin/dpkg ]; then
+    echo "[+] Purging firewall packages from Vault target..."
+    chroot /mnt/slot_a /usr/bin/dpkg --purge --force-all \
+      suricata kea-dhcp4-server kea-common unbound frr strongswan strongswan-charon strongswan-starter \
+      openvpn conntrackd keepalived wireguard-tools samba samba-common-bin nfs-kernel-server open-iscsi \
+      slapd ldap-utils sssd-ldap sssd-common sssd-tools libnss-sss libpam-sss nodejs \
+      qemu-system-x86 qemu-utils ovmf xorriso bridge-utils >/dev/null 2>&1 || true
+  fi
+
+  chroot /mnt/slot_a systemd-sysusers >/dev/null 2>&1 || \
+    chroot /mnt/slot_a useradd -r -U -d /var/lib/axonwall/vault -s /usr/sbin/nologin axonwall-vault >/dev/null 2>&1 || true
+
+  if [ -z "${HOSTNAME_OVERRIDE:-}" ] || [ "${HOSTNAME_OVERRIDE:-}" = "axonwall" ]; then
+    HOSTNAME_OVERRIDE="axonwall-vault"
+  fi
 else
   touch /mnt/slot_a/etc/axonwall/.firstboot
 fi
+rm -rf /mnt/slot_a/usr/share/axonwall/vault
 
 # Preserve any live-configured network interfaces if modified during Live session
 if [ -s /etc/axonwall/interfaces.conf ]; then
@@ -815,7 +916,7 @@ APT_EOF
 fi
 
 # Configure Admin & Root Credentials
-if [ -n "$ADMIN_PASSWORD" ] && [ ! -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
+if [ -n "$ADMIN_PASSWORD" ]; then
   PW_TMP="/mnt/slot_a/tmp/.axonwall_pw_install.tmp"
   printf '%s' "$ADMIN_PASSWORD" > "$PW_TMP"
   chmod 0600 "$PW_TMP"
@@ -946,7 +1047,9 @@ done
 grub-install --target=x86_64-efi --efi-directory=/mnt/slot_a/boot/efi --boot-directory=/mnt/slot_a/boot --removable --no-nvram 2>/dev/null || true
 
 # Copy branded Axonwall splash image into installed /boot/grub/ if present
-if [ -f /etc/axonwall/branding/splash.png ]; then
+if [ -f /mnt/slot_a/etc/axonwall/branding/splash.png ]; then
+  cp /mnt/slot_a/etc/axonwall/branding/splash.png /mnt/slot_a/boot/grub/splash.png 2>/dev/null || true
+elif [ -f /etc/axonwall/branding/splash.png ]; then
   cp /etc/axonwall/branding/splash.png /mnt/slot_a/boot/grub/splash.png 2>/dev/null || true
 fi
 

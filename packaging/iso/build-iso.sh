@@ -306,6 +306,37 @@ if [[ ! -f config/includes.chroot/usr/sbin/litestream ]]; then
   chmod +x config/includes.chroot/usr/sbin/litestream
   rm -f "${LITE_TAR}"
 fi
+
+# Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
+# main ISO can install EITHER Axonwall NGFW OR Axonwall Vault Edition.
+mkdir -p config/includes.chroot/usr/share/axonwall/vault
+WEED_VERSION="4.48"
+WEED_SHA256="4a7d108384d044d95212d1342cdda9533fa55842c1c9b41f606ca3c8a9561124"
+if [[ ! -f config/includes.chroot/usr/share/axonwall/vault/weed ]]; then
+  echo "[+] Fetching SeaweedFS v${WEED_VERSION} for unified Vault Edition installer support..."
+  WEED_TAR="$(mktemp -t seaweedfs-XXXXXX.tar.gz)"
+  curl -fsSL -o "${WEED_TAR}" "https://github.com/seaweedfs/seaweedfs/releases/download/${WEED_VERSION}/linux_amd64.tar.gz"
+  echo "${WEED_SHA256}  ${WEED_TAR}" | sha256sum -c -
+  tar -xzf "${WEED_TAR}" -C config/includes.chroot/usr/share/axonwall/vault/ weed
+  chmod +x config/includes.chroot/usr/share/axonwall/vault/weed
+  rm -f "${WEED_TAR}"
+fi
+cp "${SCRIPT_DIR}/../vault/seaweedfs.service" \
+   "${SCRIPT_DIR}/../vault/axonwall-vault-firstboot.service" \
+   "${SCRIPT_DIR}/../vault/axonwall-vault-provision.service" \
+   "${SCRIPT_DIR}/../vault/axonwall-vault.sysusers" \
+   "${SCRIPT_DIR}/../vault/axonwall-vault.tmpfiles" \
+   "${SCRIPT_DIR}/../vault/axonwall-vault-provision" \
+   "${SCRIPT_DIR}/../vault/axonwall-vault-status" \
+   "${SCRIPT_DIR}/../vault/axonwall-vault-firstboot" \
+   "${SCRIPT_DIR}/../vault/nftables.conf" \
+   config/includes.chroot/usr/share/axonwall/vault/
+chmod +x config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-provision \
+         config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-status \
+         config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-firstboot
+if [[ -f "${SCRIPT_DIR}/branding/splash-vault.png" ]]; then
+  cp "${SCRIPT_DIR}/branding/splash-vault.png" config/includes.chroot/usr/share/axonwall/vault/splash-vault.png
+fi
 else
 # Fetch SeaweedFS binary (Vault Edition storage engine)
 WEED_VERSION="4.48"

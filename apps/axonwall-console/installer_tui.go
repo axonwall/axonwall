@@ -80,6 +80,12 @@ func DefaultInstallerConfig() InstallerConfig {
 	if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {
 		edition = "vault"
 		hostname = "axonwall-vault"
+	} else if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+		cmd := string(data)
+		if strings.Contains(cmd, "axonwall_edition=vault") || strings.Contains(cmd, "axonwall.edition=vault") {
+			edition = "vault"
+			hostname = "axonwall-vault"
+		}
 	}
 	osFamily := "debian"
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
@@ -422,8 +428,14 @@ func FormatInstallerConfig(cfg InstallerConfig) string {
 		luksTPM2 = 1
 	}
 
+	edition := cfg.Edition
+	if edition == "" {
+		edition = "axonwall"
+	}
+
 	lines := []string{
 		"# Axonwall Next-Gen Installer Configuration",
+		fmt.Sprintf("INSTALL_EDITION=%s", shellQuote(edition)),
 		fmt.Sprintf("SYSTEM_DISKS=%s", shellQuote(strings.Join(cfg.SystemDisks, " "))),
 		fmt.Sprintf("INSTALL_MODE=%s", shellQuote(cfg.InstallMode)),
 		fmt.Sprintf("SLOT_MB=%d", cfg.SlotMB),
@@ -502,12 +514,20 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 	accent := colorEmerald
 	if cfg.Edition == "vault" {
 		title = "AXONWALL VAULT EDITION INSTALLER"
-		subtitle = "Hardened Identity, PKI & Secrets Appliance"
+		subtitle = "Hardened Immutable S3 Object-Lock Backup Appliance (SeaweedFS)"
 		accent = colorBrightCya
 	}
 
+	versionStr := "v0.11.38"
+	if data, err := os.ReadFile("/etc/axonwall/version"); err == nil {
+		v := strings.TrimSpace(string(data))
+		if v != "" {
+			versionStr = "v" + strings.TrimPrefix(v, "v")
+		}
+	}
+
 	fmt.Printf("%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", accent, colorBold, colorReset)
-	fmt.Printf("%s%s║  🛡️  %-54s %15s  ║%s\n", accent, colorBold, title, "v0.11.32", colorReset)
+	fmt.Printf("%s%s║  🛡️  %-54s %15s  ║%s\n", accent, colorBold, title, versionStr, colorReset)
 	fmt.Printf("%s%s║      %-70s  ║%s\n", colorCyan, colorBold, subtitle, colorReset)
 	fmt.Printf("%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n", accent, colorBold, colorReset)
 
@@ -524,7 +544,7 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 	fmt.Println()
 
 	steps := []string{
-		"1. Architecture",
+		"1. Edition & Arch",
 		"2. Target Disks",
 		"3. Storage & ZFS",
 		"4. Security & Auth",
@@ -575,6 +595,18 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 		switch step {
 		case 1:
 			renderInstallerBanner(cfg, 1)
+			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
+			vaultBadge := colorDim + "( ) Axonwall Vault S3 Storage" + colorReset
+			editionDesc := "Full NGFW, SD-WAN, WireGuard/Headscale, IDS/IPS, BGP/OSPF, Web UI & Controller"
+			if cfg.Edition == "vault" {
+				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3 Storage" + colorReset
+				editionDesc = "Immutable S3 Object-Lock Backup Appliance (SeaweedFS; firewall stack stripped)"
+			} else {
+				ngfwBadge = colorEmerald + colorBold + "(●) Axonwall NGFW & Router" + colorReset
+			}
+			fmt.Printf(" %s[E] Appliance Edition:%s  %s    %s\n", colorBold, colorReset, ngfwBadge, vaultBadge)
+			fmt.Printf("     %s%s%s\n", colorDim, editionDesc, colorReset)
+			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %sSelect Appliance Storage & Boot Architecture:%s\n\n", colorBold, colorReset)
 
 			archOptions := []struct {
@@ -619,10 +651,22 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				colorBold, colorReset, colorCyan+colorBold, slotGB, colorReset,
 				colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.RootFSType), colorReset)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-3] Select  [S] Cycle Slot Size  [F] Toggle ext4/xfs  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+			fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
 
 			key := readRawKey()
 			switch key {
+			case "E":
+				if cfg.Edition == "vault" {
+					cfg.Edition = "axonwall"
+					if cfg.Hostname == "" || cfg.Hostname == "axonwall-vault" {
+						cfg.Hostname = "axonwall"
+					}
+				} else {
+					cfg.Edition = "vault"
+					if cfg.Hostname == "" || cfg.Hostname == "axonwall" {
+						cfg.Hostname = "axonwall-vault"
+					}
+				}
 			case "UP":
 				if archCursor > 0 {
 					archCursor--
