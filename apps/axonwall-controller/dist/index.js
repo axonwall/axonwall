@@ -37909,9 +37909,9 @@ function compileNfsExports(nas) {
     const syncMode = exp.async ? "async" : "sync";
     const squash = exp.mapRootUser === "root" ? "no_root_squash" : "root_squash";
     const rawNets = exp.allowedNetworks && exp.allowedNetworks.length > 0 ? exp.allowedNetworks : ["*"];
-    const nets = rawNets.map(sanitizeIniVal).filter(Boolean);
+    const nets = rawNets.map((n) => sanitizeIniVal(n).replace(/[\s()]/g, "")).filter(Boolean);
     const clientSpecs = nets.map((net2) => `${net2}(${mode},${syncMode},no_subtree_check,${squash})`).join(" ");
-    lines.push(`${sanitizeIniVal(exp.path)} ${clientSpecs}`);
+    lines.push(`${sanitizeIniVal(exp.path).replace(/[\s()]/g, "")} ${clientSpecs}`);
   }
   lines.push("");
   return lines.join("\n");
@@ -37926,6 +37926,7 @@ function compileIscsiConfig(nas) {
       allowedInitiators: t.allowedInitiators,
       chapEnabled: Boolean(t.chapUser && t.chapSecret),
       chapUser: t.chapUser || void 0,
+      chapSecret: t.chapSecret || void 0,
       luns: t.luns.map((l) => ({
         lunId: l.lunId,
         zvolDevice: l.zvolPath.startsWith("/dev/") ? l.zvolPath : `/dev/zvol/${l.zvolPath.replace(/^\/+/, "")}`,
@@ -38970,7 +38971,7 @@ function compileNftables(state) {
       const elements = alias.entries.join(", ");
       lines.push(`  set ${setName} {`);
       lines.push(`    type ${setType};`);
-      if (alias.type === "network" || alias.type === "host" || alias.type === "port") {
+      if (alias.type === "network" || alias.type === "host" || alias.type === "port" || alias.type === "urltable") {
         lines.push("    flags interval;");
       }
       lines.push(`    elements = { ${elements} };`);
@@ -39430,8 +39431,12 @@ function formatRuleStatement(rule, aliases) {
       const rawName = rule.source.slice(1);
       const aliasName = sanitizeIdentifier(rawName);
       const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      const isV6 = matchedAlias?.entries.some((e) => e.includes(":"));
-      parts.push(`${isV6 ? "ip6" : "ip"} saddr @set_${aliasName}`);
+      if (matchedAlias?.type === "mac") {
+        parts.push(`ether saddr @set_${aliasName}`);
+      } else {
+        const isV6 = matchedAlias?.entries.some((e) => e.includes(":"));
+        parts.push(`${isV6 ? "ip6" : "ip"} saddr @set_${aliasName}`);
+      }
     } else if (rule.source.includes(":")) {
       parts.push(`ip6 saddr ${rule.source}`);
     } else {
@@ -39443,8 +39448,12 @@ function formatRuleStatement(rule, aliases) {
       const rawName = rule.destination.slice(1);
       const aliasName = sanitizeIdentifier(rawName);
       const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      const isV6 = matchedAlias?.entries.some((e) => e.includes(":"));
-      parts.push(`${isV6 ? "ip6" : "ip"} daddr @set_${aliasName}`);
+      if (matchedAlias?.type === "mac") {
+        parts.push(`ether daddr @set_${aliasName}`);
+      } else {
+        const isV6 = matchedAlias?.entries.some((e) => e.includes(":"));
+        parts.push(`${isV6 ? "ip6" : "ip"} daddr @set_${aliasName}`);
+      }
     } else if (rule.destination.includes(":")) {
       parts.push(`ip6 daddr ${rule.destination}`);
     } else {
@@ -41494,7 +41503,7 @@ function saveMcpKeysInternal(keys) {
   for (const keysPath of Array.from(new Set(targetPaths))) {
     try {
       fs3.mkdirSync(path2.dirname(keysPath), { recursive: true, mode: 509 });
-      const tmpPath = `${keysPath}.tmp.${process.pid}`;
+      const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
       fs3.writeFileSync(tmpPath, serialized, { mode: 432 });
       try {
         fs3.chmodSync(tmpPath, 432);
@@ -42400,6 +42409,16 @@ async function handleMcpReadResource(uri, env) {
     default:
       throw new Error(`Unknown MCP resource URI: ${uri}`);
   }
+  recordMcpAuditEntry({
+    keyId: env.key.id,
+    keyName: env.key.name,
+    agentType: env.key.agentType,
+    clientIp: env.clientIp,
+    toolName: `resource:${uri}`,
+    requiredScope: "mcp:telemetry:read",
+    decision: "allowed",
+    paramsSummary: { uri }
+  });
   return {
     contents: [
       {
@@ -42826,12 +42845,44 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       const req = parsed.data;
       const scopeErr = requireScope("mcp:traffic:redirect", req.audit);
       if (scopeErr) return scopeErr;
-      if (req.domain.endsWith(".axonwall.local") || req.domain === "localhost") {
+      const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+      if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
+        return deny(
+          "mcp:traffic:redirect",
+          `Maximum active tactical leases (${env.key.policyLimits.maxActiveLeases}) reached for key '${env.key.name}'`,
+          req.audit
+        );
+      }
+      const normDomain = req.domain.trim().toLowerCase().replace(/\.+$/, "");
+      const localState = loadLocalDesiredState();
+      const sysDomain = localState?.system?.domain?.trim().toLowerCase().replace(/\.+$/, "");
+      if (normDomain === "localhost" || normDomain.endsWith(".localhost") || normDomain === "axonwall.local" || normDomain.endsWith(".axonwall.local") || normDomain === "home.arpa" || normDomain.endsWith(".home.arpa") || sysDomain && (normDomain === sysDomain || normDomain.endsWith(`.${sysDomain}`))) {
         return deny("mcp:traffic:redirect", `Cannot sinkhole internal appliance domain '${req.domain}'`, req.audit);
+      }
+      const cleanSinkholeIp = req.sinkholeIp.trim();
+      const isNullSinkhole = cleanSinkholeIp === "0.0.0.0" || cleanSinkholeIp === "::" || cleanSinkholeIp === "127.0.0.1";
+      if (!isNullSinkhole) {
+        const allowCheck = validateRedirectTargetAllowlist(
+          cleanSinkholeIp,
+          env.key.policyLimits.allowedRedirectTargets
+        );
+        if (!allowCheck.valid) {
+          return deny(
+            "mcp:traffic:redirect",
+            allowCheck.reason || `Custom sinkholeIp '${cleanSinkholeIp}' must be in allowedRedirectTargets`,
+            req.audit
+          );
+        }
+        const targetCheck = validateMcpTarget(cleanSinkholeIp, ctx);
+        if (!targetCheck.valid) {
+          return deny("mcp:traffic:redirect", targetCheck.reason || "Sinkhole IP rejected by safety guard", req.audit);
+        }
       }
       const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/sinkhole-dns", {
         ...req,
+        domain: normDomain,
+        sinkholeIp: cleanSinkholeIp,
         ttlSeconds: boundedTtl,
         keyId: env.key.id,
         keyName: env.key.name
@@ -42847,8 +42898,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         ttlSeconds: boundedTtl,
         createdByKeyId: env.key.id,
         createdByKeyName: env.key.name,
-        targetSummary: `DNS Sinkhole ${req.domain} -> ${req.sinkholeIp}`,
-        parameters: { ...req, ttlSeconds: boundedTtl },
+        targetSummary: `DNS Sinkhole ${normDomain} -> ${cleanSinkholeIp}`,
+        parameters: { ...req, domain: normDomain, sinkholeIp: cleanSinkholeIp, ttlSeconds: boundedTtl },
         audit: req.audit
       };
       const auditEntry = recordMcpAuditEntry({
@@ -42860,8 +42911,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         requiredScope: "mcp:traffic:redirect",
         decision: "allowed",
         paramsSummary: {
-          domain: req.domain,
-          sinkholeIp: req.sinkholeIp,
+          domain: normDomain,
+          sinkholeIp: cleanSinkholeIp,
           ttlSeconds: boundedTtl
         },
         auditMetadata: req.audit,
@@ -42887,6 +42938,9 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         return deny("mcp:traffic:*", "leaseId is required");
       }
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/revert", { leaseId });
+      if (!daemonRes.ok && daemonRes.status !== 503) {
+        return deny("mcp:traffic:*", daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
+      }
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -42912,9 +42966,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       };
     }
     case "mcp_emergency_clear_all": {
-      const hasAnyWriteScope = hasMcpScope(env.key, "mcp:traffic:blackhole") || hasMcpScope(env.key, "mcp:traffic:shape") || hasMcpScope(env.key, "mcp:traffic:redirect") || hasMcpScope(env.key, "mcp:firewall:write");
-      if (!hasAnyWriteScope) {
-        return deny("mcp:traffic:*", "MCP key lacks any traffic control write scope to flush leases");
+      if (!hasMcpScope(env.key, "mcp:firewall:apply")) {
+        return deny("mcp:firewall:apply", "Authorization denied: 'mcp_emergency_clear_all' requires scope 'mcp:firewall:apply'");
       }
       const reason = typeof args.reason === "string" ? args.reason.trim() : "Emergency flush via MCP";
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/flush", {});
@@ -42924,7 +42977,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         agentType: env.key.agentType,
         clientIp: env.clientIp,
         toolName,
-        requiredScope: "mcp:traffic:*",
+        requiredScope: "mcp:firewall:apply",
         decision: "allowed",
         paramsSummary: { reason }
       });
@@ -42957,28 +43010,63 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         const applyErr = requireScope("mcp:firewall:apply", req.audit);
         if (applyErr) return applyErr;
       }
+      const state = loadLocalDesiredState();
+      if (!state) {
+        return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
+      }
       const { ctx } = await buildGuardContext(env.key, env.clientIp);
       if (req.rule.action === "block" || req.rule.action === "reject") {
-        const isSpecialEndpoint = (v) => v === "any" || v === "wan_ip" || v === "lan_net" || v === "self" || v.startsWith("$");
-        if (req.rule.source && !isSpecialEndpoint(req.rule.source)) {
-          const srcCheck = validateMcpTarget(req.rule.source, ctx);
-          if (!srcCheck.valid) {
-            return deny("mcp:firewall:write", `Rule source rejected by guard: ${srcCheck.reason}`, req.audit);
+        const checkEndpoint = (endpointVal, label) => {
+          if (!endpointVal || endpointVal === "any") {
+            return `Wildcard '${endpointVal || "any"}' ${label} on ${req.rule.action} rule exceeds blast-radius policy and is prohibited via MCP`;
           }
-        }
-        if (req.rule.destination && !isSpecialEndpoint(req.rule.destination)) {
-          const dstCheck = validateMcpTarget(req.rule.destination, ctx);
-          if (!dstCheck.valid) {
-            return deny("mcp:firewall:write", `Rule destination rejected by guard: ${dstCheck.reason}`, req.audit);
+          if (endpointVal === "self" || endpointVal === "wan_ip") {
+            return `Targeting appliance endpoint '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
           }
+          if (endpointVal === "lan_net") {
+            return `Targeting entire '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
+          }
+          if (endpointVal.startsWith("$")) {
+            const aliasName = endpointVal.slice(1);
+            const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
+            if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+              return `Referenced alias '${endpointVal}' in ${label} does not exist or has no entries`;
+            }
+            for (const entry of aliasObj.entries) {
+              const entryCheck = validateMcpTarget(entry, ctx);
+              if (!entryCheck.valid) {
+                return `Alias '${endpointVal}' entry '${entry}' in ${label} rejected by guard: ${entryCheck.reason}`;
+              }
+            }
+            return null;
+          }
+          const directCheck = validateMcpTarget(endpointVal, ctx);
+          if (!directCheck.valid) {
+            return `Rule ${label} rejected by guard: ${directCheck.reason}`;
+          }
+          return null;
+        };
+        const srcErr = checkEndpoint(req.rule.source, "source");
+        if (srcErr) return deny("mcp:firewall:write", srcErr, req.audit);
+        if (req.rule.destination && req.rule.destination !== "any") {
+          const dstErr = checkEndpoint(req.rule.destination, "destination");
+          if (dstErr) return deny("mcp:firewall:write", dstErr, req.audit);
         }
-        const protectedPorts = ctx.antiLockoutPorts ?? [2966, 22, 9876];
+        const protectedTcpPorts = ctx.antiLockoutPorts ?? [2966, 22, 9876];
+        const protectedUdpPorts = [53, 67, 68, 51820];
         const rawDport = (req.rule.destinationPort || "").trim();
         const affectsTcp = req.rule.protocol === "any" || req.rule.protocol === "tcp" || req.rule.protocol === "tcp_udp";
-        if (affectsTcp && (!rawDport || rawDport === "any")) {
+        const affectsUdp = req.rule.protocol === "any" || req.rule.protocol === "udp" || req.rule.protocol === "tcp_udp";
+        const protectedPorts = Array.from(
+          /* @__PURE__ */ new Set([
+            ...affectsTcp ? protectedTcpPorts : [],
+            ...affectsUdp ? protectedUdpPorts : []
+          ])
+        );
+        if ((affectsTcp || affectsUdp) && (!rawDport || rawDport === "any")) {
           return deny(
             "mcp:firewall:write",
-            `Wildcard/empty destinationPort on ${req.rule.action} rule covers protected anti-lockout ports (${protectedPorts.join(", ")})`,
+            `Wildcard/empty destinationPort on ${req.rule.action} rule covers protected ports (${protectedPorts.join(", ")})`,
             req.audit
           );
         }
@@ -42989,7 +43077,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
               if (protectedPorts.includes(portNum)) {
                 return deny(
                   "mcp:firewall:write",
-                  `Blocking anti-lockout port ${portNum} is prohibited`,
+                  `Blocking protected port ${portNum} is prohibited`,
                   req.audit
                 );
               }
@@ -43002,7 +43090,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 if (hit !== void 0) {
                   return deny(
                     "mcp:firewall:write",
-                    `Port range ${part} overlaps protected anti-lockout port ${hit}`,
+                    `Port range ${part} overlaps protected port ${hit}`,
                     req.audit
                   );
                 }
@@ -43010,10 +43098,6 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
             }
           }
         }
-      }
-      const state = loadLocalDesiredState();
-      if (!state) {
-        return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
       }
       state.rules.push(req.rule);
       try {
@@ -43676,14 +43760,20 @@ async function main() {
     if (pathname === "/api/v1/fleet/block" && req.method === "POST") {
       if (!verifyFleetAuth(req, res)) return;
       let body = "";
+      let aborted2 = false;
       req.on("data", (chunk) => {
+        if (aborted2) return;
         body += chunk.toString();
         if (body.length > 65536) {
+          aborted2 = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Payload too large" }));
           req.destroy();
           return;
         }
       });
       req.on("end", () => {
+        if (aborted2) return;
         try {
           const payload = JSON.parse(body);
           const rawTarget = typeof payload.target === "string" ? payload.target.trim() : "";
@@ -43701,11 +43791,29 @@ async function main() {
             }
             target = rawTarget.toLowerCase().replace(/-/g, ":");
           } else {
-            const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}(\/([0-9]|[12][0-9]|3[0-2]))?$/;
-            const ipv6Regex = /^[0-9a-fA-F:]+(\/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$/;
-            if (!ipv4Regex.test(rawTarget) && !ipv6Regex.test(rawTarget)) {
+            const slashParts = rawTarget.split("/");
+            if (slashParts.length > 2) {
               res.writeHead(400, { "Content-Type": "application/json" });
               return res.end(JSON.stringify({ error: "Invalid IP address or CIDR target" }));
+            }
+            const ipPart = slashParts[0] || "";
+            const prefixStr = slashParts[1];
+            const ipFamily = net.isIP(ipPart);
+            if (ipFamily !== 4 && ipFamily !== 6) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              return res.end(JSON.stringify({ error: "Invalid IP address or CIDR target" }));
+            }
+            if (prefixStr !== void 0) {
+              if (!/^\d{1,3}$/.test(prefixStr)) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ error: "Invalid CIDR prefix length" }));
+              }
+              const prefixNum = Number(prefixStr);
+              const maxPrefix = ipFamily === 4 ? 32 : 128;
+              if (prefixNum < 0 || prefixNum > maxPrefix) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                return res.end(JSON.stringify({ error: "Invalid CIDR prefix length" }));
+              }
             }
           }
           console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
@@ -43745,14 +43853,20 @@ async function main() {
     if (pathname === "/api/v1/fleet/ha-transition" && req.method === "POST") {
       if (!verifyFleetAuth(req, res)) return;
       let body = "";
+      let aborted2 = false;
       req.on("data", (chunk) => {
+        if (aborted2) return;
         body += chunk.toString();
         if (body.length > 65536) {
+          aborted2 = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Payload too large" }));
           req.destroy();
           return;
         }
       });
       req.on("end", () => {
+        if (aborted2) return;
         try {
           const payload = body ? JSON.parse(body) : {};
           const rawRole = String(payload.role || payload.state || "").toLowerCase();
@@ -43790,14 +43904,20 @@ async function main() {
     if (pathname === "/api/v1/fleet/sync" && req.method === "POST") {
       if (!verifyFleetAuth(req, res)) return;
       let body = "";
+      let aborted2 = false;
       req.on("data", (chunk) => {
+        if (aborted2) return;
         body += chunk.toString();
         if (body.length > 524288) {
+          aborted2 = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Payload too large" }));
           req.destroy();
           return;
         }
       });
       req.on("end", () => {
+        if (aborted2) return;
         try {
           let desired = null;
           if (body.trim()) {
@@ -43883,6 +44003,7 @@ data: /api/v1/mcp
         let body = "";
         let aborted2 = false;
         req.on("data", (chunk) => {
+          if (aborted2) return;
           body += chunk.toString();
           if (body.length > 262144) {
             aborted2 = true;
@@ -44175,15 +44296,20 @@ ${headerLines.join("\r\n")}\r
     let tunnelIp = existing?.tunnelIp;
     if (!tunnelIp) {
       const usedIps = new Set(Array.from(activeSatellites.values()).map((s) => s.tunnelIp?.split("/")[0]).filter(Boolean));
-      for (let i = 2; i <= 254; i++) {
-        const candidate = `10.99.0.${i}`;
-        if (!usedIps.has(candidate)) {
-          tunnelIp = `${candidate}/24`;
-          break;
+      for (let thirdOctet = 0; thirdOctet <= 255 && !tunnelIp; thirdOctet++) {
+        for (let fourthOctet = thirdOctet === 0 ? 2 : 1; fourthOctet <= 254; fourthOctet++) {
+          const candidate = `10.99.${thirdOctet}.${fourthOctet}`;
+          if (!usedIps.has(candidate)) {
+            tunnelIp = `${candidate}/16`;
+            break;
+          }
         }
       }
       if (!tunnelIp) {
-        tunnelIp = `10.99.0.${ipCounter++ % 250 + 2}/24`;
+        const idx = ipCounter++;
+        const thirdOctet = Math.floor(idx / 250) % 256;
+        const fourthOctet = idx % 250 + 2;
+        tunnelIp = `10.99.${thirdOctet}.${fourthOctet}/16`;
       }
     }
     const state = {
