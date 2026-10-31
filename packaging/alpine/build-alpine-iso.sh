@@ -551,10 +551,14 @@ fi
 # 5. Update bootloader configs (SYSLINUX & GRUB EFI) with Axonwall branding, Next-Gen TUI Installer & Live modes
 STORAGE_MODULES="loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci"
 
-mkdir -p "${WORK_DIR}/iso/boot/syslinux" "${WORK_DIR}/iso/boot/grub"
+mkdir -p "${WORK_DIR}/iso/boot/syslinux" "${WORK_DIR}/iso/boot/grub/themes/axonwall"
 if [[ -f "${REPO_ROOT}/packaging/iso/branding/splash.png" ]]; then
   cp "${REPO_ROOT}/packaging/iso/branding/splash.png" "${WORK_DIR}/iso/boot/syslinux/splash.png"
   cp "${REPO_ROOT}/packaging/iso/branding/splash.png" "${WORK_DIR}/iso/boot/grub/splash.png"
+  cp "${REPO_ROOT}/packaging/iso/branding/splash.png" "${WORK_DIR}/iso/boot/grub/themes/axonwall/splash.png"
+fi
+if [[ -f "${REPO_ROOT}/packaging/iso/config/bootloaders/grub-pc/live-theme/theme.txt" ]]; then
+  cp "${REPO_ROOT}/packaging/iso/config/bootloaders/grub-pc/live-theme/theme.txt" "${WORK_DIR}/iso/boot/grub/themes/axonwall/theme.txt"
 fi
 
 cat << SYSLINUX_EOF > "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
@@ -598,17 +602,19 @@ set timeout=5
 insmod all_video
 insmod gfxterm
 insmod png
-set gfxmode=auto
-terminal_output gfxterm
+insmod gfxmenu
+set gfxmode=640x480,800x600,auto
 
-set menu_color_normal=white/black
-set menu_color_highlight=black/green
-set color_normal=cyan/black
-set color_highlight=black/green
-
-if [ -f /boot/grub/splash.png ]; then
+if [ -f /boot/grub/themes/axonwall/theme.txt ]; then
+  set theme=/boot/grub/themes/axonwall/theme.txt
+  export theme
+elif [ -f /boot/grub/splash.png ]; then
   background_image /boot/grub/splash.png
 fi
+
+set color_normal=light-gray/black
+set color_highlight=light-green/dark-gray
+terminal_output gfxterm
 
 menuentry "Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)" {
   linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200

@@ -195,6 +195,13 @@ chroot "${TARGET}" grub-install --target=x86_64-efi --efi-directory=/boot/efi --
 # Install GRUB for Legacy BIOS
 chroot "${TARGET}" grub-install --target=i386-pc --recheck "${LOOP_DEV}" 2>/dev/null || true
 
+# Configure GRUB theme & fonts
+mkdir -p "${TARGET}/boot/grub/themes/axonwall"
+if [[ -f "${TARGET}/usr/share/grub/unicode.pf2" ]]; then
+  cp -n "${TARGET}/usr/share/grub/unicode.pf2" "${TARGET}/boot/grub/unicode.pf2" 2>/dev/null || true
+  cp -n "${TARGET}/usr/share/grub/unicode.pf2" "${TARGET}/boot/grub/themes/axonwall/unicode.pf2" 2>/dev/null || true
+fi
+
 # Update GRUB configuration
 chroot "${TARGET}" update-grub 2>/dev/null || true
 

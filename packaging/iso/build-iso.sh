@@ -121,7 +121,7 @@ fi
 chmod +x config/hooks/live/* config/hooks/normal/* 2>/dev/null || true
 
 # Copy branded GRUB2 & ISOLINUX bootloader templates and splash artwork
-mkdir -p config/bootloaders/isolinux config/bootloaders/grub-pc/live-theme config/includes.chroot/etc/axonwall/branding
+mkdir -p config/bootloaders/isolinux config/bootloaders/grub-pc/live-theme config/includes.chroot/etc/axonwall/branding config/includes.chroot/boot/grub/themes/axonwall config/includes.chroot/etc/default/grub.d
 if [[ -d "${SCRIPT_DIR}/config/bootloaders" ]]; then
   cp -r "${SCRIPT_DIR}/config/bootloaders/"* config/bootloaders/
 fi
@@ -134,8 +134,14 @@ if [[ ! -f "${SPLASH_SRC}" ]] && command -v python3 &>/dev/null && [[ -f "${SCRI
 fi
 if [[ -f "${SPLASH_SRC}" ]]; then
   cp "${SPLASH_SRC}" config/includes.chroot/etc/axonwall/branding/splash.png
+  cp "${SPLASH_SRC}" config/includes.chroot/boot/grub/themes/axonwall/splash.png
+  cp "${SPLASH_SRC}" config/includes.chroot/boot/grub/splash.png
   cp "${SPLASH_SRC}" config/bootloaders/isolinux/splash.png
   cp "${SPLASH_SRC}" config/bootloaders/grub-pc/live-theme/splash.png
+fi
+if [[ -f "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" ]]; then
+  cp "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" config/includes.chroot/boot/grub/themes/axonwall/theme.txt
+  cp "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" config/includes.chroot/etc/axonwall/branding/theme.txt
 fi
 
 # Stage detect-cloudinit into Live chroot so unattended/live installer can discover NoCloud seeds
