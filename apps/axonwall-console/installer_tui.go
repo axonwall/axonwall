@@ -437,6 +437,38 @@ func ComputePartitionLayout(diskMB int, cfg InstallerConfig) PartitionLayout {
 	if diskMB <= 0 {
 		diskMB = 32768
 	}
+	if cfg.InstallMode == "zbm" {
+		efiMB := 512
+		logsMB := 0
+		if cfg.LogsEnabled && cfg.LogsGB >= 1 {
+			logsMB = cfg.LogsGB * 1024
+		}
+		remMB := diskMB - efiMB - 16
+		if remMB < 1024 {
+			remMB = 1024
+		}
+		dataMB := 0
+		zfsMB := remMB
+		if cfg.LuksEnabled {
+			dataMB = 4096
+			if remMB > 6144 {
+				zfsMB = remMB - dataMB
+			} else {
+				dataMB = remMB / 2
+				zfsMB = remMB - dataMB
+			}
+		}
+		return PartitionLayout{
+			TotalMB: diskMB,
+			EfiMB:   efiMB,
+			SlotAMB: 0,
+			SlotBMB: 0,
+			LogsMB:  logsMB,
+			DataMB:  dataMB,
+			ZfsMB:   zfsMB,
+		}
+	}
+
 	efiMB := 260
 	slotAMB := cfg.SlotMB
 	if slotAMB < 2048 {
@@ -460,44 +492,34 @@ func ComputePartitionLayout(diskMB int, cfg InstallerConfig) PartitionLayout {
 	dataMB := remMB
 	zfsMB := 0
 
-	if cfg.InstallMode == "zbm" {
-		dataMB = 4096
-		if remMB > 6144 {
+	switch cfg.ZfsAllocMode {
+	case "split":
+		dataMB = remMB / 2
+		zfsMB = remMB - dataMB
+	case "custom":
+		if cfg.CustomZfsGB >= 1 {
+			zfsMB = cfg.CustomZfsGB * 1024
+			if zfsMB > remMB-2048 {
+				zfsMB = remMB - 2048
+			}
+			if zfsMB < 0 {
+				zfsMB = 0
+			}
+			dataMB = remMB - zfsMB
+		}
+	case "none":
+		zfsMB = 0
+		dataMB = remMB
+	default: // "remainder"
+		if remMB > 10240 {
+			dataMB = 8192
+			zfsMB = remMB - dataMB
+		} else if remMB > 4096 {
+			dataMB = 2048
 			zfsMB = remMB - dataMB
 		} else {
-			dataMB = remMB / 2
-			zfsMB = remMB - dataMB
-		}
-	} else {
-		switch cfg.ZfsAllocMode {
-		case "split":
-			dataMB = remMB / 2
-			zfsMB = remMB - dataMB
-		case "custom":
-			if cfg.CustomZfsGB >= 1 {
-				zfsMB = cfg.CustomZfsGB * 1024
-				if zfsMB > remMB-2048 {
-					zfsMB = remMB - 2048
-				}
-				if zfsMB < 0 {
-					zfsMB = 0
-				}
-				dataMB = remMB - zfsMB
-			}
-		case "none":
 			zfsMB = 0
 			dataMB = remMB
-		default: // "remainder"
-			if remMB > 10240 {
-				dataMB = 8192
-				zfsMB = remMB - dataMB
-			} else if remMB > 4096 {
-				dataMB = 2048
-				zfsMB = remMB - dataMB
-			} else {
-				zfsMB = 0
-				dataMB = remMB
-			}
 		}
 	}
 
@@ -528,32 +550,34 @@ func RenderPartitionBar(layout PartitionLayout, cfg InstallerConfig, width int) 
 		color string
 		char  string
 	}
-	slotALabel := "Slot A"
-	if cfg.InstallMode == "zbm" {
-		slotALabel = "ZBM-Boot"
-	} else if cfg.InstallMode == "rolling" {
-		slotALabel = "Root OS"
-	}
 	segments := []seg{
-		{label: "EFI", mb: layout.EfiMB, color: colorBlue + colorBold, char: "█"},
-		{label: slotALabel, mb: layout.SlotAMB, color: colorEmerald + colorBold, char: "█"},
+		{label: func() string {
+			if cfg.InstallMode == "zbm" {
+				return "ZBM-EFI"
+			}
+			return "EFI"
+		}(), mb: layout.EfiMB, color: colorBlue + colorBold, char: "█"},
+	}
+	if layout.SlotAMB > 0 {
+		slotALabel := "Slot A"
+		if cfg.InstallMode == "rolling" {
+			slotALabel = "Root OS"
+		}
+		segments = append(segments, seg{label: slotALabel, mb: layout.SlotAMB, color: colorEmerald + colorBold, char: "█"})
 	}
 	if layout.SlotBMB > 0 {
 		segments = append(segments, seg{label: "Slot B", mb: layout.SlotBMB, color: colorCyan + colorBold, char: "█"})
 	}
-	if layout.LogsMB > 0 {
+	if layout.LogsMB > 0 && cfg.InstallMode != "zbm" {
 		segments = append(segments, seg{label: "Logs", mb: layout.LogsMB, color: colorYellow + colorBold, char: "█"})
 	}
-	dataLabel := "Data"
-	if cfg.InstallMode == "zbm" {
-		dataLabel = "Aux/Boot"
+	if layout.DataMB > 0 {
+		dataLabel := "Data"
 		if cfg.LuksEnabled {
-			dataLabel = "Aux[LUKS2]"
+			dataLabel = "Data[LUKS2]"
 		}
-	} else if cfg.LuksEnabled {
-		dataLabel = "Data[LUKS2]"
+		segments = append(segments, seg{label: dataLabel, mb: layout.DataMB, color: colorMagenta + colorBold, char: "█"})
 	}
-	segments = append(segments, seg{label: dataLabel, mb: layout.DataMB, color: colorMagenta + colorBold, char: "█"})
 	if layout.ZfsMB > 0 {
 		poolName := "ZFS:tank"
 		if cfg.InstallMode == "zbm" {
@@ -1522,9 +1546,21 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 		"Direct-imaging pristine Axonwall OS SquashFS to Slot A",
 		"Configuring fstab, crypttab, TPM 2.0, Cloud-Init & credentials",
 		"Cloning Slot A into Standby Slot B & recording slot metadata",
-		"Installing BIOS & UEFI GRUB2 / ZFSBootMenu bootloaders",
-		"Bootstrapping OpenZFS storage pool (tank / zroot)",
+		"Installing BIOS & UEFI GRUB2 bootloaders",
+		"Bootstrapping OpenZFS storage pool (tank)",
 		"Finalizing installation & flushing storage caches",
+	}
+	if cfg.InstallMode == "zbm" {
+		phases = []string{
+			"Partitioning target disk(s) (GPT + ZFSBootMenu ESP + OpenZFS zroot)",
+			"Formatting ZBM ESP & creating OpenZFS Root Pool (zroot)",
+			"Direct-imaging pristine Axonwall OS into ZFS Boot Environment",
+			"Configuring fstab, hostid, TPM 2.0, Cloud-Init & credentials",
+			"Recording Boot Environment & watchdog metadata",
+			"Installing ZFSBootMenu (UEFI UKI & Legacy BIOS Syslinux — No GRUB)",
+			"Configuring OpenZFS storage datasets & factory snapshot",
+			"Finalizing installation & exporting ZFS pools",
+		}
 	}
 
 	currentPhase := 1

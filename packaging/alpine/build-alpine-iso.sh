@@ -160,6 +160,8 @@ CORE_PKGS=(
   sgdisk
   e2fsprogs
   dosfstools
+  syslinux
+  efibootmgr
   grub
   grub-bios
   grub-efi
@@ -449,6 +451,32 @@ elif [[ ! -f "${OVL}/usr/sbin/headscale" ]]; then
   echo "${HEADSCALE_SHA256}  ${OVL}/usr/sbin/headscale" | sha256sum -c -
   strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
   chmod 0755 "${OVL}/usr/sbin/headscale"
+fi
+
+# Fetch ZFSBootMenu v3.1.0 Unified Kernel Image (UKI) for Root-on-ZFS installations
+ZBM_VERSION="3.1.0"
+ZBM_KVER="linux6.12"
+ZBM_SHA256="131d55c7b385df8cd319d267b6aa15d97f8c32c94f5149bd906556715fadf4e7"
+ZBM_CACHE="${REPO_ROOT}/packaging/iso/build/cache/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
+mkdir -p "${OVL}/usr/lib/zfsbootmenu" "${OVL}/etc/zfsbootmenu/hooks/setup.d" "${OVL}/etc/zfsbootmenu/dracut.conf.d"
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" ]]; then
+  echo "${ZBM_SHA256}  ${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" | sha256sum -c -
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
+elif [[ -f "${ZBM_CACHE}" ]]; then
+  echo "${ZBM_SHA256}  ${ZBM_CACHE}" | sha256sum -c -
+  cp -f "${ZBM_CACHE}" "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
+else
+  echo "[+] Fetching ZFSBootMenu v${ZBM_VERSION} (${ZBM_KVER}) UKI for Alpine overlay..."
+  curl -fsSL -o "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
+  echo "${ZBM_SHA256}  ${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" | sha256sum -c -
+fi
+chmod 0644 "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/config.yaml" ]]; then
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/config.yaml" "${OVL}/etc/zfsbootmenu/config.yaml"
+fi
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh" ]]; then
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh" "${OVL}/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh"
+  chmod 0755 "${OVL}/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh"
 fi
 
 # Copy Next.js standalone UI & Controller

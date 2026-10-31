@@ -1,6 +1,24 @@
 #!/bin/sh
 set -e
 
+echo "[Hook] Ensuring OpenZFS DKMS modules & zfs-initramfs are built for target chroot kernel(s)..."
+if [ ! -f /etc/hostid ]; then
+  zgenhostid -f 0x00bab10c 2>/dev/null || printf '\x0c\xb1\xba\x00' > /etc/hostid
+fi
+
+for kdir in /lib/modules/*; do
+  if [ -d "$kdir" ]; then
+    kver="$(basename "$kdir")"
+    if command -v dkms >/dev/null 2>&1; then
+      dkms autoinstall -k "$kver" || true
+    fi
+    depmod -a "$kver" || true
+    if command -v update-initramfs >/dev/null 2>&1; then
+      update-initramfs -u -k "$kver" || true
+    fi
+  fi
+done
+
 echo "[Hook] Creating stable /boot/vmlinuz and /boot/initrd.img symlinks in chroot..."
 LATEST_KERN="$(ls -1t /boot/vmlinuz-* 2>/dev/null | head -n1 || true)"
 if [ -n "$LATEST_KERN" ]; then

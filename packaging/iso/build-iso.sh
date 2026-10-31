@@ -282,6 +282,22 @@ echo "${VERSION}" > config/includes.chroot/etc/axonwall/version
 # Copy compiled daemon binaries if present
 mkdir -p config/includes.chroot/usr/sbin/
 
+# Fetch ZFSBootMenu v3.1.0 Unified Kernel Image (UKI) for Root-on-ZFS installations (ships in both flavors)
+ZBM_VERSION="3.1.0"
+ZBM_KVER="linux6.12"
+ZBM_SHA256="131d55c7b385df8cd319d267b6aa15d97f8c32c94f5149bd906556715fadf4e7"
+ZBM_CACHE="${WORK_DIR}/cache/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
+mkdir -p "${WORK_DIR}/cache" config/includes.chroot/usr/lib/zfsbootmenu
+if [[ ! -f config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi ]]; then
+  if [[ ! -f "${ZBM_CACHE}" ]]; then
+    echo "[+] Fetching ZFSBootMenu v${ZBM_VERSION} (${ZBM_KVER}) UKI..."
+    curl -fsSL -o "${ZBM_CACHE}" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
+  fi
+  echo "${ZBM_SHA256}  ${ZBM_CACHE}" | sha256sum -c -
+  cp -f "${ZBM_CACHE}" config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
+  chmod 0644 config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
+fi
+
 if [[ "${FLAVOR}" == "axonwall" ]]; then
 # Fetch Headscale binary
 HEADSCALE_VERSION="0.29.4"
@@ -509,7 +525,9 @@ squashfs-tools
 ucf
 os-prober
 isolinux
+syslinux
 syslinux-common
+extlinux
 nftables
 iproute2
 ethtool
@@ -605,7 +623,9 @@ squashfs-tools
 ucf
 os-prober
 isolinux
+syslinux
 syslinux-common
+extlinux
 nftables
 iproute2
 wireguard-tools

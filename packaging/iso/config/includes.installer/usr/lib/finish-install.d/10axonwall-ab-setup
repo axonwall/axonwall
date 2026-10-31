@@ -720,12 +720,14 @@ ZFS_JSON_EOF
 fi
 
 # 7. Initialize Bootloader (ZFSBootMenu Root-on-ZFS vs Rolling Single-Root vs A/B boot counting)
-mkdir -p /target/boot/grub
 if [ "$INSTALL_MODE" = "zbm" ]; then
-  echo "[+] Configuring ZFSBootMenu v3.1.x Root-on-ZFS hooks & bootloader..."
-  mkdir -p /target/boot/efi/EFI/ZBM
+  echo "[+] Configuring ZFSBootMenu v3.1.0 Root-on-ZFS hooks & bootloader (removing GRUB)..."
+  rm -rf /target/boot/grub /target/boot/efi/EFI/debian /target/boot/efi/EFI/grub /target/etc/grub.d/40_axonwall_ab 2>/dev/null || true
+  mkdir -p /target/boot/efi/EFI/ZBM /target/boot/efi/EFI/BOOT
   if [ -f /target/usr/lib/zfsbootmenu/vmlinuz.efi ]; then
     cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/ZBM/VMLINUZ.EFI 2>/dev/null || true
+    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI 2>/dev/null || true
+    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null || true
   fi
   # Install ZBM watchdog hook into /target/etc/zfsbootmenu/hooks/setup.d/
   mkdir -p /target/etc/zfsbootmenu/hooks/setup.d /target/etc/zfsbootmenu/dracut.conf.d
@@ -736,11 +738,12 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   if [ -f /etc/zfsbootmenu/config.yaml ]; then
     cp -f /etc/zfsbootmenu/config.yaml /target/etc/zfsbootmenu/
   fi
-  rm -f /target/etc/grub.d/40_axonwall_ab 2>/dev/null || true
 elif [ "$INSTALL_MODE" = "rolling" ]; then
   echo "[+] Configuring standard Debian GRUB bootloader for Rolling Single-Root mode..."
+  mkdir -p /target/boot/grub
   rm -f /target/etc/grub.d/40_axonwall_ab 2>/dev/null || true
 else
+  mkdir -p /target/boot/grub
   in-target grub-editenv /boot/grub/grubenv create 2>/dev/null || true
   in-target grub-editenv /boot/grub/grubenv set active_slot=A 2>/dev/null || true
   in-target grub-editenv /boot/grub/grubenv set bootcount=0 2>/dev/null || true
@@ -768,47 +771,48 @@ link_in_boot = yes
 relative_links = yes
 KCONF_EOF
 
-# 9. Configure branded GRUB theme & visual styling
-mkdir -p /target/boot/grub/themes/axonwall /target/etc/axonwall/branding /target/etc/default/grub.d
+# 9. Configure branded GRUB theme & visual styling (A/B and Rolling modes only; ZBM uses ZFSBootMenu directly)
+if [ "$INSTALL_MODE" != "zbm" ]; then
+  mkdir -p /target/boot/grub/themes/axonwall /target/etc/axonwall/branding /target/etc/default/grub.d
 
-SPLASH_IMG="splash.png"
-if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.vault-edition ]; then
-  SPLASH_IMG="splash-vault.png"
-fi
-
-for cand in \
-  "/target/etc/axonwall/branding/${SPLASH_IMG}" \
-  "/etc/axonwall/branding/${SPLASH_IMG}" \
-  "/cdrom/boot/grub/live-theme/${SPLASH_IMG}" \
-  "/cdrom/boot/grub/${SPLASH_IMG}" \
-  "/target/boot/grub/themes/axonwall/${SPLASH_IMG}" \
-  "/target/boot/grub/splash.png" \
-  "/target/etc/axonwall/branding/splash.png" \
-  "/etc/axonwall/branding/splash.png"; do
-  if [ -f "$cand" ]; then
-    cp -f "$cand" /target/boot/grub/themes/axonwall/splash.png 2>/dev/null || true
-    cp -f "$cand" /target/boot/grub/splash.png 2>/dev/null || true
-    cp -f "$cand" /target/etc/axonwall/branding/splash.png 2>/dev/null || true
-    break
+  SPLASH_IMG="splash.png"
+  if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.vault-edition ]; then
+    SPLASH_IMG="splash-vault.png"
   fi
-done
 
-THEME_COPIED=0
-for tcand in \
-  "/target/boot/grub/themes/axonwall/theme.txt" \
-  "/target/etc/axonwall/branding/theme.txt" \
-  "/etc/axonwall/branding/theme.txt" \
-  "/cdrom/boot/grub/live-theme/theme.txt"; do
-  if [ -f "$tcand" ]; then
-    cp -f "$tcand" /target/boot/grub/themes/axonwall/theme.txt 2>/dev/null || true
-    cp -f "$tcand" /target/etc/axonwall/branding/theme.txt 2>/dev/null || true
-    THEME_COPIED=1
-    break
-  fi
-done
+  for cand in \
+    "/target/etc/axonwall/branding/${SPLASH_IMG}" \
+    "/etc/axonwall/branding/${SPLASH_IMG}" \
+    "/cdrom/boot/grub/live-theme/${SPLASH_IMG}" \
+    "/cdrom/boot/grub/${SPLASH_IMG}" \
+    "/target/boot/grub/themes/axonwall/${SPLASH_IMG}" \
+    "/target/boot/grub/splash.png" \
+    "/target/etc/axonwall/branding/splash.png" \
+    "/etc/axonwall/branding/splash.png"; do
+    if [ -f "$cand" ]; then
+      cp -f "$cand" /target/boot/grub/themes/axonwall/splash.png 2>/dev/null || true
+      cp -f "$cand" /target/boot/grub/splash.png 2>/dev/null || true
+      cp -f "$cand" /target/etc/axonwall/branding/splash.png 2>/dev/null || true
+      break
+    fi
+  done
 
-if [ "$THEME_COPIED" = "0" ] || [ ! -s /target/boot/grub/themes/axonwall/theme.txt ]; then
-  cat << 'THEME_EOF' > /target/boot/grub/themes/axonwall/theme.txt
+  THEME_COPIED=0
+  for tcand in \
+    "/target/boot/grub/themes/axonwall/theme.txt" \
+    "/target/etc/axonwall/branding/theme.txt" \
+    "/etc/axonwall/branding/theme.txt" \
+    "/cdrom/boot/grub/live-theme/theme.txt"; do
+    if [ -f "$tcand" ]; then
+      cp -f "$tcand" /target/boot/grub/themes/axonwall/theme.txt 2>/dev/null || true
+      cp -f "$tcand" /target/etc/axonwall/branding/theme.txt 2>/dev/null || true
+      THEME_COPIED=1
+      break
+    fi
+  done
+
+  if [ "$THEME_COPIED" = "0" ] || [ ! -s /target/boot/grub/themes/axonwall/theme.txt ]; then
+    cat << 'THEME_EOF' > /target/boot/grub/themes/axonwall/theme.txt
 desktop-image: "splash.png"
 title-color: "#34d399"
 title-font: "Unifont Regular 16"
@@ -858,21 +862,21 @@ terminal-font: "Unifont Regular 16"
 	text = "@TIMEOUT_NOTIFICATION_LONG@"
 }
 THEME_EOF
-  cp -f /target/boot/grub/themes/axonwall/theme.txt /target/etc/axonwall/branding/theme.txt 2>/dev/null || true
-fi
-
-for fcand in \
-  /target/usr/share/grub/unicode.pf2 \
-  /usr/share/grub/unicode.pf2 \
-  /target/boot/grub/unicode.pf2; do
-  if [ -f "$fcand" ]; then
-    cp -n "$fcand" /target/boot/grub/unicode.pf2 2>/dev/null || true
-    cp -n "$fcand" /target/boot/grub/themes/axonwall/unicode.pf2 2>/dev/null || true
-    break
+    cp -f /target/boot/grub/themes/axonwall/theme.txt /target/etc/axonwall/branding/theme.txt 2>/dev/null || true
   fi
-done
 
-cat << 'CFG_EOF' > /target/etc/default/grub.d/axonwall-theme.cfg
+  for fcand in \
+    /target/usr/share/grub/unicode.pf2 \
+    /usr/share/grub/unicode.pf2 \
+    /target/boot/grub/unicode.pf2; do
+    if [ -f "$fcand" ]; then
+      cp -n "$fcand" /target/boot/grub/unicode.pf2 2>/dev/null || true
+      cp -n "$fcand" /target/boot/grub/themes/axonwall/unicode.pf2 2>/dev/null || true
+      break
+    fi
+  done
+
+  cat << 'CFG_EOF' > /target/etc/default/grub.d/axonwall-theme.cfg
 # Axonwall Branded GRUB Theme & Visual Styling
 GRUB_THEME="/boot/grub/themes/axonwall/theme.txt"
 GRUB_BACKGROUND="/boot/grub/themes/axonwall/splash.png"
@@ -882,8 +886,9 @@ GRUB_COLOR_NORMAL="light-gray/black"
 GRUB_COLOR_HIGHLIGHT="light-green/dark-gray"
 CFG_EOF
 
-# 10. Refresh GRUB configuration
-in-target update-grub 2>/dev/null || true
+  # 10. Refresh GRUB configuration
+  in-target update-grub 2>/dev/null || true
+fi
 
 # 10. Clean up sensitive installer state files
 cleanup_secrets

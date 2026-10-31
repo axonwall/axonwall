@@ -132,9 +132,15 @@ func TestAutoAssignDiskRolesAndAccelerators(t *testing.T) {
 	}
 
 	layout := ComputePartitionLayout(primaryMB, cfg)
+	if layout.SlotAMB != 0 || layout.SlotBMB != 0 || layout.DataMB != 0 {
+		t.Errorf("expected pure ZBM layout to have zero ext4 slot/data partitions, got %+v", layout)
+	}
+	if layout.EfiMB != 512 {
+		t.Errorf("expected EfiMB=512 in zbm mode, got %d", layout.EfiMB)
+	}
 	bar := RenderPartitionBar(layout, cfg, 64)
-	if !strings.Contains(bar, "ZBM-Boot") || !strings.Contains(bar, "ZFS:zroot") {
-		t.Errorf("expected ZBM-Boot and ZFS:zroot in zbm partition bar, got: %s", bar)
+	if !strings.Contains(bar, "ZBM-EFI") || !strings.Contains(bar, "ZFS:zroot") {
+		t.Errorf("expected ZBM-EFI and ZFS:zroot in zbm partition bar, got: %s", bar)
 	}
 
 	serialized := FormatInstallerConfig(cfg)

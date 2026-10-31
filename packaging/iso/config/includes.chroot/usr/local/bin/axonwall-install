@@ -456,10 +456,16 @@ if [ "$DISK_MB" -le 0 ]; then
 fi
 
 END_EFI=260
-END_A=$((END_EFI + SLOT_MB))
-if [ "$INSTALL_MODE" = "ab" ]; then
+if [ "$INSTALL_MODE" = "zbm" ]; then
+  END_EFI=513
+  SLOT_MB=0
+  END_A="$END_EFI"
+  END_B="$END_EFI"
+elif [ "$INSTALL_MODE" = "ab" ]; then
+  END_A=$((END_EFI + SLOT_MB))
   END_B=$((END_A + SLOT_MB))
 else
+  END_A=$((END_EFI + SLOT_MB))
   END_B="$END_A"
 fi
 
@@ -467,7 +473,11 @@ LOGS_MB=0
 if [ "${LOGS_ENABLED:-0}" = "1" ] && [ "${LOGS_GB:-0}" -ge 1 ]; then
   LOGS_MB=$(( LOGS_GB * 1024 ))
 fi
-END_LOGS=$((END_B + LOGS_MB))
+if [ "$INSTALL_MODE" = "zbm" ]; then
+  END_LOGS="$END_B"
+else
+  END_LOGS=$((END_B + LOGS_MB))
+fi
 
 REM_MB=$((DISK_MB - END_LOGS - 16))
 if [ "$REM_MB" -lt 1024 ]; then
@@ -478,12 +488,17 @@ ZFS_MB=0
 DATA_MB="$REM_MB"
 
 if [ "$INSTALL_MODE" = "zbm" ]; then
-  DATA_MB=4096
-  if [ "$REM_MB" -gt 6144 ]; then
-    ZFS_MB=$(( REM_MB - DATA_MB ))
+  if [ "${LUKS_ENABLED:-0}" = "1" ]; then
+    DATA_MB=4096
+    if [ "$REM_MB" -gt 6144 ]; then
+      ZFS_MB=$(( REM_MB - DATA_MB ))
+    else
+      DATA_MB=$(( REM_MB / 2 ))
+      ZFS_MB=$(( REM_MB - DATA_MB ))
+    fi
   else
-    DATA_MB=$(( REM_MB / 2 ))
-    ZFS_MB=$(( REM_MB - DATA_MB ))
+    DATA_MB=0
+    ZFS_MB="$REM_MB"
   fi
 else
   case "${ZFS_ALLOC_MODE:-remainder}" in
@@ -526,8 +541,12 @@ END_DATA=$((END_LOGS + DATA_MB))
 # ==============================================================================
 emit_phase 1 8 "Partitioning target disk(s) (${SYSTEM_DISKS})..."
 
-# Stop any pre-existing mdadm or crypt mappings from previous runs
-umount /mnt/slot_a/boot/efi /mnt/slot_a /mnt/slot_b /mnt/data /mnt/logs /mnt/squash_ro 2>/dev/null || true
+# Stop any pre-existing ZFS pools, mdadm arrays, or crypt mappings from previous runs
+umount /mnt/slot_a/boot/efi /mnt/slot_a/var/log /mnt/slot_a /mnt/slot_b /mnt/data /mnt/logs /mnt/squash_ro 2>/dev/null || true
+if command -v zpool >/dev/null 2>&1; then
+  zpool destroy -f zroot 2>/dev/null || zpool export -f zroot 2>/dev/null || true
+  zpool destroy -f tank 2>/dev/null || zpool export -f tank 2>/dev/null || true
+fi
 cryptsetup close axon_crypt_data 2>/dev/null || true
 for md_dev in /dev/md0 /dev/md1 /dev/md2 /dev/md3; do
   if [ -b "$md_dev" ]; then
@@ -537,59 +556,96 @@ done
 
 ZFS_VDEVS=""
 DISK_IDX=0
+EFI_PART_NUM=2
+ROOT_A_PART_NUM=""
+ROOT_B_PART_NUM=""
+LOGS_PART_NUM=""
+DATA_PART_NUM=""
+ZFS_PART_NUM=""
 
 for sys_disk in $SYSTEM_DISKS; do
   DISK_IDX=$(( DISK_IDX + 1 ))
   wipefs -a "$sys_disk" 2>/dev/null || true
   dd if=/dev/zero of="$sys_disk" bs=1M count=16 conv=notrunc 2>/dev/null || true
 
-  echo "[+] Creating GPT partition table on ${sys_disk} (Mode=${INSTALL_MODE}, Slot=${SLOT_MB}MB, Logs=${LOGS_MB}MB, Data=${DATA_MB}MB, ZFS=${ZFS_MB}MB)..."
-  parted -s "$sys_disk" \
-    mklabel gpt \
-    mkpart bios_grub 1MiB 4MiB \
-    set 1 bios_grub on \
-    mkpart ESP fat32 4MiB ${END_EFI}MiB \
-    set 2 esp on
+  if [ "$INSTALL_MODE" = "zbm" ]; then
+    echo "[+] Creating pure ZFSBootMenu GPT partition table on ${sys_disk} (ESP=512MB, LUKS_Data=${DATA_MB}MB, ZFS_zroot=${ZFS_MB}MB)..."
+    EFI_PART_NUM=1
+    parted -s "$sys_disk" \
+      mklabel gpt \
+      mkpart ESP fat32 1MiB ${END_EFI}MiB \
+      set 1 esp on \
+      set 1 legacy_boot on
 
-  NEXT_PART=3
-  CUR_START="$END_EFI"
+    NEXT_PART=2
+    CUR_START="$END_EFI"
+    ROOT_A_PART_NUM=""
+    ROOT_B_PART_NUM=""
+    LOGS_PART_NUM=""
+    DATA_PART_NUM=""
 
-  # Partition 3: Slot A / Primary Root
-  ROOT_A_PART_NUM="$NEXT_PART"
-  parted -s "$sys_disk" mkpart axon_root_a "${ROOT_FSTYPE}" "${CUR_START}MiB" "${END_A}MiB"
-  CUR_START="$END_A"
-  NEXT_PART=$(( NEXT_PART + 1 ))
+    if [ "$DATA_MB" -gt 0 ]; then
+      DATA_PART_NUM="$NEXT_PART"
+      parted -s "$sys_disk" mkpart axon_data "${DATA_FSTYPE}" "${CUR_START}MiB" "${END_DATA}MiB"
+      CUR_START="$END_DATA"
+      NEXT_PART=$(( NEXT_PART + 1 ))
+    fi
 
-  # Optional Slot B (A/B mode)
-  ROOT_B_PART_NUM=""
-  if [ "$INSTALL_MODE" = "ab" ]; then
-    ROOT_B_PART_NUM="$NEXT_PART"
-    parted -s "$sys_disk" mkpart axon_root_b "${ROOT_FSTYPE}" "${CUR_START}MiB" "${END_B}MiB"
-    CUR_START="$END_B"
-    NEXT_PART=$(( NEXT_PART + 1 ))
-  fi
-
-  # Optional Dedicated /var/log Partition
-  LOGS_PART_NUM=""
-  if [ "$LOGS_MB" -gt 0 ]; then
-    LOGS_PART_NUM="$NEXT_PART"
-    parted -s "$sys_disk" mkpart axon_logs "${LOGS_FSTYPE}" "${CUR_START}MiB" "${END_LOGS}MiB"
-    CUR_START="$END_LOGS"
-    NEXT_PART=$(( NEXT_PART + 1 ))
-  fi
-
-  # Persistent Data Partition (/var/lib/axonwall)
-  DATA_PART_NUM="$NEXT_PART"
-  if [ "$ZFS_MB" -gt 0 ]; then
-    parted -s "$sys_disk" mkpart axon_data "${DATA_FSTYPE}" "${CUR_START}MiB" "${END_DATA}MiB"
-    NEXT_PART=$(( NEXT_PART + 1 ))
     ZFS_PART_NUM="$NEXT_PART"
-    parted -s "$sys_disk" mkpart "axon_zfs_${DISK_IDX}" "${END_DATA}MiB" 100%
+    parted -s "$sys_disk" mkpart "axon_zfs_${DISK_IDX}" "${CUR_START}MiB" 100%
     sgdisk -t "${ZFS_PART_NUM}:bf01" "$sys_disk" 2>/dev/null || true
     ZFS_PART=$(part_dev "$sys_disk" "$ZFS_PART_NUM")
     ZFS_VDEVS="${ZFS_VDEVS} ${ZFS_PART}"
   else
-    parted -s "$sys_disk" mkpart axon_data "${DATA_FSTYPE}" "${CUR_START}MiB" 100%
+    echo "[+] Creating GPT partition table on ${sys_disk} (Mode=${INSTALL_MODE}, Slot=${SLOT_MB}MB, Logs=${LOGS_MB}MB, Data=${DATA_MB}MB, ZFS=${ZFS_MB}MB)..."
+    EFI_PART_NUM=2
+    parted -s "$sys_disk" \
+      mklabel gpt \
+      mkpart bios_grub 1MiB 4MiB \
+      set 1 bios_grub on \
+      mkpart ESP fat32 4MiB ${END_EFI}MiB \
+      set 2 esp on
+
+    NEXT_PART=3
+    CUR_START="$END_EFI"
+
+    # Partition 3: Slot A / Primary Root
+    ROOT_A_PART_NUM="$NEXT_PART"
+    parted -s "$sys_disk" mkpart axon_root_a "${ROOT_FSTYPE}" "${CUR_START}MiB" "${END_A}MiB"
+    CUR_START="$END_A"
+    NEXT_PART=$(( NEXT_PART + 1 ))
+
+    # Optional Slot B (A/B mode)
+    ROOT_B_PART_NUM=""
+    if [ "$INSTALL_MODE" = "ab" ]; then
+      ROOT_B_PART_NUM="$NEXT_PART"
+      parted -s "$sys_disk" mkpart axon_root_b "${ROOT_FSTYPE}" "${CUR_START}MiB" "${END_B}MiB"
+      CUR_START="$END_B"
+      NEXT_PART=$(( NEXT_PART + 1 ))
+    fi
+
+    # Optional Dedicated /var/log Partition
+    LOGS_PART_NUM=""
+    if [ "$LOGS_MB" -gt 0 ]; then
+      LOGS_PART_NUM="$NEXT_PART"
+      parted -s "$sys_disk" mkpart axon_logs "${LOGS_FSTYPE}" "${CUR_START}MiB" "${END_LOGS}MiB"
+      CUR_START="$END_LOGS"
+      NEXT_PART=$(( NEXT_PART + 1 ))
+    fi
+
+    # Persistent Data Partition (/var/lib/axonwall)
+    DATA_PART_NUM="$NEXT_PART"
+    if [ "$ZFS_MB" -gt 0 ]; then
+      parted -s "$sys_disk" mkpart axon_data "${DATA_FSTYPE}" "${CUR_START}MiB" "${END_DATA}MiB"
+      NEXT_PART=$(( NEXT_PART + 1 ))
+      ZFS_PART_NUM="$NEXT_PART"
+      parted -s "$sys_disk" mkpart "axon_zfs_${DISK_IDX}" "${END_DATA}MiB" 100%
+      sgdisk -t "${ZFS_PART_NUM}:bf01" "$sys_disk" 2>/dev/null || true
+      ZFS_PART=$(part_dev "$sys_disk" "$ZFS_PART_NUM")
+      ZFS_VDEVS="${ZFS_VDEVS} ${ZFS_PART}"
+    else
+      parted -s "$sys_disk" mkpart axon_data "${DATA_FSTYPE}" "${CUR_START}MiB" 100%
+    fi
   fi
 
   partprobe "$sys_disk" 2>/dev/null || true
@@ -601,7 +657,7 @@ sleep 1
 # ==============================================================================
 # PHASE 2: Format Filesystems, Assemble RAID-1 & Configure LUKS2 + TPM2
 # ==============================================================================
-emit_phase 2 8 "Formatting filesystems, RAID-1 mirrors & LUKS2 encryption..."
+emit_phase 2 8 "Formatting filesystems, RAID-1/ZFS pools & LUKS2 encryption..."
 
 format_esp() {
   _esp_dev="$1"
@@ -625,60 +681,9 @@ format_esp() {
 }
 
 for sys_disk in $SYSTEM_DISKS; do
-  EFI_P=$(part_dev "$sys_disk" 2)
+  EFI_P=$(part_dev "$sys_disk" "$EFI_PART_NUM")
   format_esp "$EFI_P"
 done
-
-ROOT_A_DEV=$(part_dev "$PRIMARY_DISK" "$ROOT_A_PART_NUM")
-ROOT_B_DEV=""
-if [ -n "$ROOT_B_PART_NUM" ]; then
-  ROOT_B_DEV=$(part_dev "$PRIMARY_DISK" "$ROOT_B_PART_NUM")
-fi
-LOGS_DEV=""
-if [ -n "$LOGS_PART_NUM" ]; then
-  LOGS_DEV=$(part_dev "$PRIMARY_DISK" "$LOGS_PART_NUM")
-fi
-DATA_DEV=$(part_dev "$PRIMARY_DISK" "$DATA_PART_NUM")
-
-if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
-  echo "[+] Assembling mdadm RAID-1 mirrors across ${SYS_DISK_COUNT} system disks..."
-  RAID_A_MEMBERS=""
-  RAID_B_MEMBERS=""
-  RAID_LOGS_MEMBERS=""
-  RAID_DATA_MEMBERS=""
-  for sys_disk in $SYSTEM_DISKS; do
-    RAID_A_MEMBERS="${RAID_A_MEMBERS} $(part_dev "$sys_disk" "$ROOT_A_PART_NUM")"
-    if [ -n "$ROOT_B_PART_NUM" ]; then
-      RAID_B_MEMBERS="${RAID_B_MEMBERS} $(part_dev "$sys_disk" "$ROOT_B_PART_NUM")"
-    fi
-    if [ -n "$LOGS_PART_NUM" ]; then
-      RAID_LOGS_MEMBERS="${RAID_LOGS_MEMBERS} $(part_dev "$sys_disk" "$LOGS_PART_NUM")"
-    fi
-    RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" "$DATA_PART_NUM")"
-  done
-
-  # Zero superblocks before creation
-  for mbr in $RAID_A_MEMBERS $RAID_B_MEMBERS $RAID_LOGS_MEMBERS $RAID_DATA_MEMBERS; do
-    mdadm --zero-superblock "$mbr" 2>/dev/null || true
-  done
-
-  # shellcheck disable=SC2086
-  mdadm --create /dev/md0 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_A_MEMBERS
-  ROOT_A_DEV="/dev/md0"
-  if [ -n "$ROOT_B_PART_NUM" ]; then
-    # shellcheck disable=SC2086
-    mdadm --create /dev/md1 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_B_MEMBERS
-    ROOT_B_DEV="/dev/md1"
-  fi
-  # shellcheck disable=SC2086
-  mdadm --create /dev/md2 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_DATA_MEMBERS
-  DATA_DEV="/dev/md2"
-  if [ -n "$LOGS_PART_NUM" ]; then
-    # shellcheck disable=SC2086
-    mdadm --create /dev/md3 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_LOGS_MEMBERS
-    LOGS_DEV="/dev/md3"
-  fi
-fi
 
 format_fs() {
   dev="$1"
@@ -691,13 +696,86 @@ format_fs() {
   fi
 }
 
+ROOT_A_DEV=""
+if [ -n "$ROOT_A_PART_NUM" ]; then
+  ROOT_A_DEV=$(part_dev "$PRIMARY_DISK" "$ROOT_A_PART_NUM")
+fi
+ROOT_B_DEV=""
+if [ -n "$ROOT_B_PART_NUM" ]; then
+  ROOT_B_DEV=$(part_dev "$PRIMARY_DISK" "$ROOT_B_PART_NUM")
+fi
+LOGS_DEV=""
+if [ -n "$LOGS_PART_NUM" ]; then
+  LOGS_DEV=$(part_dev "$PRIMARY_DISK" "$LOGS_PART_NUM")
+fi
+DATA_DEV=""
+if [ -n "$DATA_PART_NUM" ]; then
+  DATA_DEV=$(part_dev "$PRIMARY_DISK" "$DATA_PART_NUM")
+fi
+
+if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
+  if [ "$INSTALL_MODE" != "zbm" ]; then
+    echo "[+] Assembling mdadm RAID-1 mirrors across ${SYS_DISK_COUNT} system disks..."
+    RAID_A_MEMBERS=""
+    RAID_B_MEMBERS=""
+    RAID_LOGS_MEMBERS=""
+    RAID_DATA_MEMBERS=""
+    for sys_disk in $SYSTEM_DISKS; do
+      RAID_A_MEMBERS="${RAID_A_MEMBERS} $(part_dev "$sys_disk" "$ROOT_A_PART_NUM")"
+      if [ -n "$ROOT_B_PART_NUM" ]; then
+        RAID_B_MEMBERS="${RAID_B_MEMBERS} $(part_dev "$sys_disk" "$ROOT_B_PART_NUM")"
+      fi
+      if [ -n "$LOGS_PART_NUM" ]; then
+        RAID_LOGS_MEMBERS="${RAID_LOGS_MEMBERS} $(part_dev "$sys_disk" "$LOGS_PART_NUM")"
+      fi
+      RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" "$DATA_PART_NUM")"
+    done
+
+    # Zero superblocks before creation
+    for mbr in $RAID_A_MEMBERS $RAID_B_MEMBERS $RAID_LOGS_MEMBERS $RAID_DATA_MEMBERS; do
+      mdadm --zero-superblock "$mbr" 2>/dev/null || true
+    done
+
+    # shellcheck disable=SC2086
+    mdadm --create /dev/md0 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_A_MEMBERS
+    ROOT_A_DEV="/dev/md0"
+    if [ -n "$ROOT_B_PART_NUM" ]; then
+      # shellcheck disable=SC2086
+      mdadm --create /dev/md1 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_B_MEMBERS
+      ROOT_B_DEV="/dev/md1"
+    fi
+    # shellcheck disable=SC2086
+    mdadm --create /dev/md2 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_DATA_MEMBERS
+    DATA_DEV="/dev/md2"
+    if [ -n "$LOGS_PART_NUM" ]; then
+      # shellcheck disable=SC2086
+      mdadm --create /dev/md3 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_LOGS_MEMBERS
+      LOGS_DEV="/dev/md3"
+    fi
+  elif [ -n "$DATA_PART_NUM" ]; then
+    echo "[+] Assembling mdadm RAID-1 mirror for LUKS2 data partition across ${SYS_DISK_COUNT} system disks..."
+    RAID_DATA_MEMBERS=""
+    for sys_disk in $SYSTEM_DISKS; do
+      RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" "$DATA_PART_NUM")"
+    done
+    for mbr in $RAID_DATA_MEMBERS; do
+      mdadm --zero-superblock "$mbr" 2>/dev/null || true
+    done
+    # shellcheck disable=SC2086
+    mdadm --create /dev/md2 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_DATA_MEMBERS
+    DATA_DEV="/dev/md2"
+  fi
+fi
+
 ROOT_A_LABEL="axon_root_a"
-if [ "$INSTALL_MODE" = "rolling" ] || [ "$INSTALL_MODE" = "zbm" ]; then
+if [ "$INSTALL_MODE" = "rolling" ]; then
   ROOT_A_LABEL="axon_root"
 fi
 
-echo "[+] Formatting Root (${ROOT_A_DEV} -> ${ROOT_A_LABEL}, ${ROOT_FSTYPE})..."
-format_fs "$ROOT_A_DEV" "$ROOT_FSTYPE" "$ROOT_A_LABEL"
+if [ "$INSTALL_MODE" != "zbm" ] && [ -n "$ROOT_A_DEV" ]; then
+  echo "[+] Formatting Root (${ROOT_A_DEV} -> ${ROOT_A_LABEL}, ${ROOT_FSTYPE})..."
+  format_fs "$ROOT_A_DEV" "$ROOT_FSTYPE" "$ROOT_A_LABEL"
+fi
 
 if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
   echo "[+] Formatting Standby Slot B (${ROOT_B_DEV} -> axon_root_b, ${ROOT_FSTYPE})..."
@@ -711,38 +789,180 @@ fi
 
 TARGET_DATA_MAPPER="$DATA_DEV"
 TEMP_LUKS_KEY=""
-if [ "${LUKS_ENABLED:-0}" = "1" ] && command -v cryptsetup >/dev/null 2>&1; then
-  echo "[+] Initializing LUKS2 AES-XTS-512 encryption on ${DATA_DEV}..."
-  TEMP_LUKS_KEY="/tmp/axonwall-luks.key"
-  rm -f "$TEMP_LUKS_KEY"
-  if [ -n "$LUKS_PASSPHRASE" ]; then
-    printf '%s' "$LUKS_PASSPHRASE" > "$TEMP_LUKS_KEY"
-  else
-    dd if=/dev/urandom of="$TEMP_LUKS_KEY" bs=32 count=1 2>/dev/null
+if [ -n "$DATA_DEV" ]; then
+  if [ "${LUKS_ENABLED:-0}" = "1" ] && command -v cryptsetup >/dev/null 2>&1; then
+    echo "[+] Initializing LUKS2 AES-XTS-512 encryption on ${DATA_DEV}..."
+    TEMP_LUKS_KEY="/tmp/axonwall-luks.key"
+    rm -f "$TEMP_LUKS_KEY"
+    if [ -n "$LUKS_PASSPHRASE" ]; then
+      printf '%s' "$LUKS_PASSPHRASE" > "$TEMP_LUKS_KEY"
+    else
+      dd if=/dev/urandom of="$TEMP_LUKS_KEY" bs=32 count=1 2>/dev/null
+    fi
+    chmod 0400 "$TEMP_LUKS_KEY"
+
+    cryptsetup luksFormat --type luks2 --batch-mode --cipher aes-xts-plain64 -s 512 -d "$TEMP_LUKS_KEY" "$DATA_DEV"
+    cryptsetup open -d "$TEMP_LUKS_KEY" "$DATA_DEV" axon_crypt_data
+    TARGET_DATA_MAPPER="/dev/mapper/axon_crypt_data"
   fi
-  chmod 0400 "$TEMP_LUKS_KEY"
 
-  cryptsetup luksFormat --type luks2 --batch-mode --cipher aes-xts-plain64 -s 512 -d "$TEMP_LUKS_KEY" "$DATA_DEV"
-  cryptsetup open -d "$TEMP_LUKS_KEY" "$DATA_DEV" axon_crypt_data
-  TARGET_DATA_MAPPER="/dev/mapper/axon_crypt_data"
+  echo "[+] Formatting Persistent Data (${TARGET_DATA_MAPPER} -> axon_data, ${DATA_FSTYPE})..."
+  format_fs "$TARGET_DATA_MAPPER" "$DATA_FSTYPE" "axon_data"
 fi
-
-echo "[+] Formatting Persistent Data (${TARGET_DATA_MAPPER} -> axon_data, ${DATA_FSTYPE})..."
-format_fs "$TARGET_DATA_MAPPER" "$DATA_FSTYPE" "axon_data"
 
 udevadm settle 2>/dev/null || mdev -s 2>/dev/null || true
 
 # ==============================================================================
-# PHASE 3: Image Axonwall OS onto Slot A
+# PHASE 3: Image Axonwall OS onto Slot A (or ZFS Boot Environment in zbm mode)
 # ==============================================================================
-emit_phase 3 8 "Imaging ${EDITION_LABEL} root filesystem to Slot A..."
+emit_phase 3 8 "Imaging ${EDITION_LABEL} root filesystem..."
 
-PRIMARY_EFI=$(part_dev "$PRIMARY_DISK" 2)
+PRIMARY_EFI=$(part_dev "$PRIMARY_DISK" "$EFI_PART_NUM")
 mkdir -p /mnt/slot_a /mnt/slot_b /mnt/data
-mount "$ROOT_A_DEV" /mnt/slot_a
-mkdir -p /mnt/slot_a/boot/efi /mnt/slot_a/var/lib/axonwall
-mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi
-mount "$TARGET_DATA_MAPPER" /mnt/data
+
+INSTALL_VER="0.11.41"
+if [ -f /etc/axonwall/version ]; then
+  INSTALL_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
+fi
+INIT_BE="zroot/ROOT/axonwall-${INSTALL_VER}"
+ZROOT_TOPO="stripe"
+
+if [ "$INSTALL_MODE" = "zbm" ]; then
+  if ! command -v zpool >/dev/null 2>&1 || ! command -v zfs >/dev/null 2>&1; then
+    echo "[!] FATAL: OpenZFS utilities (zpool/zfs) are not available in this live environment." >&2
+    exit 1
+  fi
+  modprobe zfs 2>/dev/null || true
+  # Write deterministic /etc/hostid (0x00bab10c -> LE \x0c\xb1\xba\x00) so ZFSBootMenu imports zroot cleanly without hostid mismatch
+  printf '\x0c\xb1\xba\x00' > /etc/hostid
+
+  SYS_ZFS_VDEVS=$(echo "$ZFS_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+  EXTRA_DATA_VDEVS=""
+  for xd in $ZFS_EXTRA_DISKS; do
+    if [ -b "$xd" ]; then
+      wipefs -a "$xd" 2>/dev/null || true
+      EXTRA_DATA_VDEVS="${EXTRA_DATA_VDEVS} ${xd}"
+    fi
+  done
+  EXTRA_DATA_VDEVS=$(echo "$EXTRA_DATA_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+
+  SLOG_VDEVS=""
+  for sd in ${ZFS_SLOG_DISKS:-}; do
+    if [ -b "$sd" ]; then
+      wipefs -a "$sd" 2>/dev/null || true
+      SLOG_VDEVS="${SLOG_VDEVS} ${sd}"
+    fi
+  done
+  SLOG_VDEVS=$(echo "$SLOG_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+
+  L2ARC_VDEVS=""
+  for cd in ${ZFS_L2ARC_DISKS:-}; do
+    if [ -b "$cd" ]; then
+      wipefs -a "$cd" 2>/dev/null || true
+      L2ARC_VDEVS="${L2ARC_VDEVS} ${cd}"
+    fi
+  done
+  L2ARC_VDEVS=$(echo "$L2ARC_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+
+  SPARE_VDEVS=""
+  for hd in ${ZFS_SPARE_DISKS:-}; do
+    if [ -b "$hd" ]; then
+      wipefs -a "$hd" 2>/dev/null || true
+      SPARE_VDEVS="${SPARE_VDEVS} ${hd}"
+    fi
+  done
+  SPARE_VDEVS=$(echo "$SPARE_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
+
+  ZPOOL_ACCEL_ARGS=""
+  if [ -n "$SLOG_VDEVS" ]; then
+    SLOG_COUNT=$(echo "$SLOG_VDEVS" | wc -w | tr -d ' ')
+    if [ "$SLOG_COUNT" -ge 2 ]; then
+      ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} log mirror ${SLOG_VDEVS}"
+    else
+      ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} log ${SLOG_VDEVS}"
+    fi
+  fi
+  if [ -n "$L2ARC_VDEVS" ]; then
+    ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} cache ${L2ARC_VDEVS}"
+  fi
+  if [ -n "$SPARE_VDEVS" ]; then
+    ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} spare ${SPARE_VDEVS}"
+  fi
+
+  ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
+  ZROOT_TOPO="stripe"
+  if [ "$ZROOT_CNT" -eq 2 ]; then
+    ZROOT_TOPO="mirror"
+  elif [ "$ZROOT_CNT" -ge 3 ]; then
+    case "${ZFS_RAID_TOPOLOGY:-auto}" in
+      stripe|mirror|raidz1|raidz2|raidz3) ZROOT_TOPO="$ZFS_RAID_TOPOLOGY" ;;
+      *) ZROOT_TOPO="raidz1" ;;
+    esac
+  fi
+  ZROOT_ARGS=""
+  [ "$ZROOT_TOPO" != "stripe" ] && ZROOT_ARGS="$ZROOT_TOPO"
+
+  ZROOT_ACCEL=""
+  if [ -z "$EXTRA_DATA_VDEVS" ]; then
+    ZROOT_ACCEL="$ZPOOL_ACCEL_ARGS"
+  fi
+
+  mkdir -p /etc/zfs
+  echo "[+] Creating OpenZFS Root Pool 'zroot' (topology=${ZROOT_TOPO}, vdevs=${SYS_ZFS_VDEVS})..."
+  # shellcheck disable=SC2086
+  zpool create -f \
+    -o ashift=12 \
+    -o autotrim=on \
+    -o cachefile=/etc/zfs/zpool.cache \
+    -O compression=lz4 \
+    -O acltype=posixacl \
+    -O xattr=sa \
+    -O dnodesize=auto \
+    -O normalization=formD \
+    -O relatime=on \
+    -O canmount=off \
+    -O mountpoint=none \
+    -R /mnt/slot_a \
+    zroot $ZROOT_ARGS $SYS_ZFS_VDEVS $ZROOT_ACCEL
+
+  zfs create -o canmount=off -o mountpoint=none zroot/ROOT
+  zfs create -o canmount=noauto -o mountpoint=/ "$INIT_BE"
+  zfs mount "$INIT_BE"
+
+  zpool set "bootfs=${INIT_BE}" zroot
+  if [ "$OS_FAMILY" = "alpine" ]; then
+    ZBM_CMDLINE="ro rootfstype=zfs modules=sd-mod,usb-storage,virtio_blk,nvme,zfs quiet console=tty0 console=ttyS0,115200"
+  else
+    ZBM_CMDLINE="ro quiet console=tty0 console=ttyS0,115200"
+  fi
+  zfs set "org.zfsbootmenu:commandline=${ZBM_CMDLINE}" zroot/ROOT
+  zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT
+  zfs set "org.axonwall:fallback_be=${INIT_BE}" zroot/ROOT
+  zfs set "org.axonwall:bootcount=0" zroot/ROOT
+  zfs set "org.axonwall:bootlimit=3" zroot/ROOT
+  zfs set "org.axonwall:topology=${ZROOT_TOPO}" zroot/ROOT
+
+  mkdir -p /mnt/slot_a/boot/efi /mnt/slot_a/var/lib/axonwall /mnt/slot_a/var/log
+  mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi
+
+  if [ -n "$TARGET_DATA_MAPPER" ]; then
+    mount "$TARGET_DATA_MAPPER" /mnt/data
+  else
+    zfs create -o canmount=off -o mountpoint=none zroot/data
+    zfs create -o mountpoint=legacy zroot/data/axonwall
+    mount -t zfs zroot/data/axonwall /mnt/data
+  fi
+
+  if [ "$LOGS_MB" -gt 0 ]; then
+    zfs create -o mountpoint=legacy -o quota="${LOGS_MB}M" zroot/var-log
+    mount -t zfs zroot/var-log /mnt/slot_a/var/log
+  fi
+else
+  mount "$ROOT_A_DEV" /mnt/slot_a
+  mkdir -p /mnt/slot_a/boot/efi /mnt/slot_a/var/lib/axonwall
+  mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi
+  mount "$TARGET_DATA_MAPPER" /mnt/data
+fi
 
 SQUASH_MOUNT=""
 for sq_dir in /run/live/rootfs/filesystem.squashfs /lib/live/mount/rootfs/filesystem.squashfs; do
@@ -934,7 +1154,29 @@ if [ "${LUKS_ENABLED:-0}" = "1" ] && [ -n "$TEMP_LUKS_KEY" ] && [ -f "$TEMP_LUKS
 fi
 
 # Generate /etc/fstab on Slot A
-cat << FSTAB_EOF > /mnt/slot_a/etc/fstab
+if [ "$INSTALL_MODE" = "zbm" ]; then
+  printf '\x0c\xb1\xba\x00' > /mnt/slot_a/etc/hostid
+  mkdir -p /mnt/slot_a/etc/zfs
+  [ -f /etc/zfs/zpool.cache ] && cp -f /etc/zfs/zpool.cache /mnt/slot_a/etc/zfs/zpool.cache 2>/dev/null || true
+
+  if [ -n "$TARGET_DATA_MAPPER" ]; then
+    ZBM_DATA_FSTAB_LINE="${DATA_FSTAB_SRC}   /var/lib/axonwall   ${DATA_FSTYPE}    defaults,noatime        0 2"
+  else
+    ZBM_DATA_FSTAB_LINE="zroot/data/axonwall /var/lib/axonwall   zfs     defaults,noatime        0 0"
+  fi
+
+  cat << FSTAB_EOF > /mnt/slot_a/etc/fstab
+# /etc/fstab: ZFSBootMenu Root-on-ZFS (/ is mounted automatically from ${INIT_BE})
+LABEL=AXON_EFI      /boot/efi           vfat    umask=0077              0 2
+${ZBM_DATA_FSTAB_LINE}
+/var/lib/axonwall/home /home            none    bind,nofail             0 0
+tmpfs               /tmp                tmpfs   nosuid,nodev            0 0
+FSTAB_EOF
+  if [ "$LOGS_MB" -gt 0 ]; then
+    echo "zroot/var-log       /var/log            zfs     defaults,noatime        0 0" >> /mnt/slot_a/etc/fstab
+  fi
+else
+  cat << FSTAB_EOF > /mnt/slot_a/etc/fstab
 LABEL=${ROOT_A_LABEL}   /                   ${ROOT_FSTYPE}    defaults,noatime        0 1
 LABEL=AXON_EFI      /boot/efi           vfat    umask=0077              0 2
 ${DATA_FSTAB_SRC}   /var/lib/axonwall   ${DATA_FSTYPE}    defaults,noatime        0 2
@@ -942,8 +1184,9 @@ ${DATA_FSTAB_SRC}   /var/lib/axonwall   ${DATA_FSTYPE}    defaults,noatime      
 tmpfs               /tmp                tmpfs   nosuid,nodev            0 0
 FSTAB_EOF
 
-if [ -n "$LOGS_DEV" ]; then
-  echo "LABEL=axon_logs     /var/log            ${LOGS_FSTYPE}    defaults,noatime        0 2" >> /mnt/slot_a/etc/fstab
+  if [ -n "$LOGS_DEV" ]; then
+    echo "LABEL=axon_logs     /var/log            ${LOGS_FSTYPE}    defaults,noatime        0 2" >> /mnt/slot_a/etc/fstab
+  fi
 fi
 
 # Persist mdadm configuration if System RAID-1 is active
@@ -1111,60 +1354,216 @@ else
 fi
 
 # ==============================================================================
-# PHASE 6: Install BIOS & UEFI Bootloaders (GRUB2 / ZFSBootMenu)
+# PHASE 6: Install BIOS & UEFI Bootloaders (ZFSBootMenu or GRUB2)
 # ==============================================================================
-emit_phase 6 8 "Installing BIOS & UEFI bootloaders onto system disk(s)..."
+if [ "$INSTALL_MODE" = "zbm" ]; then
+  emit_phase 6 8 "Installing ZFSBootMenu (UEFI UKI & Legacy BIOS Syslinux) onto system disk(s)..."
 
-mkdir -p /mnt/slot_a/boot/grub
-for sys_disk in $SYSTEM_DISKS; do
-  grub-install --target=i386-pc --boot-directory=/mnt/slot_a/boot "$sys_disk" 2>/dev/null || true
-done
-grub-install --target=x86_64-efi --efi-directory=/mnt/slot_a/boot/efi --boot-directory=/mnt/slot_a/boot --removable --no-nvram 2>/dev/null || true
+  # Completely eliminate GRUB on ZFSBootMenu installations
+  rm -rf /mnt/slot_a/boot/grub /mnt/slot_a/boot/efi/EFI/debian /mnt/slot_a/boot/efi/EFI/grub /mnt/slot_a/etc/grub.d/40_axonwall_ab 2>/dev/null || true
 
-# Copy branded Axonwall splash image, fonts, and theme into installed /boot/grub/
-mkdir -p /mnt/slot_a/boot/grub/themes/axonwall /mnt/slot_a/etc/axonwall/branding
+  # Locate bundled ZFSBootMenu v3.1.0 Unified Kernel Image (vmlinuz.efi)
+  ZBM_UKI=""
+  for zcand in \
+    /mnt/slot_a/usr/lib/zfsbootmenu/vmlinuz.efi \
+    /usr/lib/zfsbootmenu/vmlinuz.efi \
+    /run/live/medium/live/vmlinuz.efi \
+    /cdrom/live/vmlinuz.efi; do
+    if [ -f "$zcand" ]; then
+      ZBM_UKI="$zcand"
+      break
+    fi
+  done
 
-SPLASH_IMG="splash.png"
-if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
-  SPLASH_IMG="splash-vault.png"
-fi
-
-for cand in \
-  "/mnt/slot_a/etc/axonwall/branding/${SPLASH_IMG}" \
-  "/mnt/slot_a/usr/share/axonwall/branding/${SPLASH_IMG}" \
-  "/mnt/slot_a/boot/grub/themes/axonwall/${SPLASH_IMG}" \
-  "/etc/axonwall/branding/${SPLASH_IMG}" \
-  "/boot/grub/themes/axonwall/${SPLASH_IMG}" \
-  "/boot/grub/live-theme/${SPLASH_IMG}" \
-  "/mnt/slot_a/etc/axonwall/branding/splash.png" \
-  "/etc/axonwall/branding/splash.png" \
-  "/boot/grub/splash.png" \
-  "/run/live/medium/boot/grub/splash.png"; do
-  if [ -f "$cand" ]; then
-    cp -f "$cand" /mnt/slot_a/boot/grub/themes/axonwall/splash.png 2>/dev/null || true
-    cp -f "$cand" /mnt/slot_a/boot/grub/splash.png 2>/dev/null || true
-    cp -f "$cand" /mnt/slot_a/etc/axonwall/branding/splash.png 2>/dev/null || true
-    break
+  if [ -z "$ZBM_UKI" ]; then
+    echo "[!] FATAL: ZFSBootMenu image (/usr/lib/zfsbootmenu/vmlinuz.efi) not found!" >&2
+    exit 1
   fi
-done
 
-THEME_COPIED=0
-for tcand in \
-  "/mnt/slot_a/boot/grub/themes/axonwall/theme.txt" \
-  "/mnt/slot_a/etc/axonwall/branding/theme.txt" \
-  "/etc/axonwall/branding/theme.txt" \
-  "/boot/grub/themes/axonwall/theme.txt" \
-  "/boot/grub/live-theme/theme.txt"; do
-  if [ -f "$tcand" ]; then
-    cp -f "$tcand" /mnt/slot_a/boot/grub/themes/axonwall/theme.txt 2>/dev/null || true
-    cp -f "$tcand" /mnt/slot_a/etc/axonwall/branding/theme.txt 2>/dev/null || true
-    THEME_COPIED=1
-    break
+  mkdir -p /mnt/slot_a/boot/efi/EFI/ZBM /mnt/slot_a/boot/efi/EFI/BOOT
+  cp -f "$ZBM_UKI" /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI
+  cp -f "$ZBM_UKI" /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
+  cp -f "$ZBM_UKI" /mnt/slot_a/boot/efi/EFI/BOOT/BOOTX64.EFI
+
+  # Extract .linux (bzImage) and .initrd (cpio.xz) PE sections from ZBM UKI for Legacy BIOS Syslinux boot (zero GRUB)
+  extract_pe_sections() {
+    _efi_file="$1"
+    _out_linux="$2"
+    _out_initrd="$3"
+    if command -v objcopy >/dev/null 2>&1; then
+      objcopy -O binary --only-section=.linux "$_efi_file" "$_out_linux" 2>/dev/null || true
+      objcopy -O binary --only-section=.initrd "$_efi_file" "$_out_initrd" 2>/dev/null || true
+      [ -s "$_out_linux" ] && [ -s "$_out_initrd" ] && return 0
+    fi
+    if command -v node >/dev/null 2>&1; then
+      node -e '
+        const fs = require("fs");
+        const buf = fs.readFileSync(process.argv[1]);
+        const peOff = buf.readUInt32LE(0x3c);
+        const numSec = buf.readUInt16LE(peOff + 6);
+        const optHdrSize = buf.readUInt16LE(peOff + 20);
+        const secTableOff = peOff + 24 + optHdrSize;
+        for (let i = 0; i < numSec; i++) {
+          const off = secTableOff + i * 40;
+          const name = buf.slice(off, off + 8).toString("ascii").replace(/\0+$/, "");
+          const vsize = buf.readUInt32LE(off + 8);
+          const rawSize = buf.readUInt32LE(off + 16);
+          const rawPtr = buf.readUInt32LE(off + 20);
+          const len = (vsize > 0 && vsize < rawSize) ? vsize : rawSize;
+          if (name === ".linux") {
+            fs.writeFileSync(process.argv[2], buf.slice(rawPtr, rawPtr + len));
+          } else if (name === ".initrd") {
+            fs.writeFileSync(process.argv[3], buf.slice(rawPtr, rawPtr + len));
+          }
+        }
+      ' "$_efi_file" "$_out_linux" "$_out_initrd" 2>/dev/null && [ -s "$_out_linux" ] && [ -s "$_out_initrd" ] && return 0
+    fi
+    # Fallback to pinned ZFSBootMenu v3.1.0 linux6.12 PE section offsets
+    dd if="$_efi_file" of="$_out_linux" bs=4096 skip=12416 count=3422 2>/dev/null || true
+    dd if="$_efi_file" of="$_out_initrd" bs=512 skip=118 count=99215 2>/dev/null || true
+  }
+
+  extract_pe_sections \
+    "$ZBM_UKI" \
+    /mnt/slot_a/boot/efi/EFI/ZBM/vmlinuz-bootmenu \
+    /mnt/slot_a/boot/efi/EFI/ZBM/initramfs-bootmenu.img
+
+  cat << 'ZBM_SYSLINUX_EOF' > /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg
+DEFAULT zbm
+PROMPT 0
+TIMEOUT 20
+
+LABEL zbm
+  LINUX /EFI/ZBM/vmlinuz-bootmenu
+  INITRD /EFI/ZBM/initramfs-bootmenu.img
+  APPEND zfsbootmenu quiet loglevel=4 console=tty0 console=ttyS0,115200
+
+LABEL zbm_backup
+  LINUX /EFI/ZBM/vmlinuz-bootmenu
+  INITRD /EFI/ZBM/initramfs-bootmenu.img
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=4 console=tty0 console=ttyS0,115200
+ZBM_SYSLINUX_EOF
+  cp -f /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg /mnt/slot_a/boot/efi/syslinux.cfg 2>/dev/null || true
+
+  # Install Syslinux / Extlinux VBR & GPT MBR boot code for Legacy BIOS boot (zero GRUB)
+  sync
+  if command -v extlinux >/dev/null 2>&1; then
+    extlinux --install /mnt/slot_a/boot/efi/EFI/ZBM 2>/dev/null || extlinux --install /mnt/slot_a/boot/efi 2>/dev/null || true
   fi
-done
+  if command -v syslinux >/dev/null 2>&1; then
+    umount /mnt/slot_a/boot/efi 2>/dev/null || true
+    syslinux --install -d /EFI/ZBM "$PRIMARY_EFI" 2>/dev/null || syslinux --install "$PRIMARY_EFI" 2>/dev/null || true
+    mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi
+  fi
 
-if [ "$THEME_COPIED" = "0" ] || [ ! -s /mnt/slot_a/boot/grub/themes/axonwall/theme.txt ]; then
-  cat << 'THEME_EOF' > /mnt/slot_a/boot/grub/themes/axonwall/theme.txt
+  GPTMBR_BIN=""
+  for mbr_cand in \
+    /usr/lib/SYSLINUX/gptmbr.bin \
+    /usr/lib/syslinux/mbr/gptmbr.bin \
+    /usr/share/syslinux/gptmbr.bin \
+    /mnt/slot_a/usr/lib/SYSLINUX/gptmbr.bin \
+    /mnt/slot_a/usr/lib/syslinux/mbr/gptmbr.bin \
+    /mnt/slot_a/usr/share/syslinux/gptmbr.bin; do
+    if [ -f "$mbr_cand" ]; then
+      GPTMBR_BIN="$mbr_cand"
+      break
+    fi
+  done
+
+  for sys_disk in $SYSTEM_DISKS; do
+    if [ -n "$GPTMBR_BIN" ]; then
+      dd if="$GPTMBR_BIN" of="$sys_disk" bs=440 count=1 conv=notrunc 2>/dev/null || true
+    fi
+    sgdisk --attributes=1:set:2 "$sys_disk" 2>/dev/null || parted -s "$sys_disk" set 1 legacy_boot on 2>/dev/null || true
+  done
+
+  # Clone EFI System Partition to secondary RAID-1 / ZFS mirror disks
+  sync
+  for sys_disk in $SYSTEM_DISKS; do
+    if [ "$sys_disk" != "$PRIMARY_DISK" ]; then
+      SEC_EFI=$(part_dev "$sys_disk" "$EFI_PART_NUM")
+      dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+    fi
+  done
+
+  # Register ZFSBootMenu in UEFI NVRAM if booted in UEFI mode
+  if [ -d /sys/firmware/efi/efivars ] && command -v efibootmgr >/dev/null 2>&1; then
+    for sys_disk in $SYSTEM_DISKS; do
+      efibootmgr -c -d "$sys_disk" -p "$EFI_PART_NUM" -L "Axonwall ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI' 2>/dev/null || true
+    done
+  fi
+
+  # Regenerate target initramfs so OpenZFS, /etc/hostid, and zpool.cache are embedded inside the target OS initramfs
+  for m in dev proc sys run; do
+    mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
+  done
+  if [ "$OS_FAMILY" = "debian" ]; then
+    chroot /mnt/slot_a update-initramfs -u -k all 2>/dev/null || true
+  elif [ "$OS_FAMILY" = "alpine" ] && [ -x /mnt/slot_a/sbin/mkinitfs ]; then
+    if [ -f /mnt/slot_a/etc/mkinitfs/mkinitfs.conf ] && ! grep -q 'zfs' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null; then
+      sed -i 's/features="/features="zfs /' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null || true
+    fi
+    KVER_ALPINE=$(ls /mnt/slot_a/lib/modules 2>/dev/null | head -n1 || true)
+    if [ -n "$KVER_ALPINE" ]; then
+      chroot /mnt/slot_a /sbin/mkinitfs -o "/boot/initramfs-${KERNEL_FLAVOR}" "$KVER_ALPINE" 2>/dev/null || true
+    fi
+  fi
+  for m in run sys proc dev; do
+    umount "/mnt/slot_a/$m" 2>/dev/null || true
+  done
+else
+  emit_phase 6 8 "Installing BIOS & UEFI GRUB2 bootloaders onto system disk(s)..."
+
+  mkdir -p /mnt/slot_a/boot/grub
+  for sys_disk in $SYSTEM_DISKS; do
+    grub-install --target=i386-pc --boot-directory=/mnt/slot_a/boot "$sys_disk" 2>/dev/null || true
+  done
+  grub-install --target=x86_64-efi --efi-directory=/mnt/slot_a/boot/efi --boot-directory=/mnt/slot_a/boot --removable --no-nvram 2>/dev/null || true
+
+  # Copy branded Axonwall splash image, fonts, and theme into installed /boot/grub/
+  mkdir -p /mnt/slot_a/boot/grub/themes/axonwall /mnt/slot_a/etc/axonwall/branding
+
+  SPLASH_IMG="splash.png"
+  if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
+    SPLASH_IMG="splash-vault.png"
+  fi
+
+  for cand in \
+    "/mnt/slot_a/etc/axonwall/branding/${SPLASH_IMG}" \
+    "/mnt/slot_a/usr/share/axonwall/branding/${SPLASH_IMG}" \
+    "/mnt/slot_a/boot/grub/themes/axonwall/${SPLASH_IMG}" \
+    "/etc/axonwall/branding/${SPLASH_IMG}" \
+    "/boot/grub/themes/axonwall/${SPLASH_IMG}" \
+    "/boot/grub/live-theme/${SPLASH_IMG}" \
+    "/mnt/slot_a/etc/axonwall/branding/splash.png" \
+    "/etc/axonwall/branding/splash.png" \
+    "/boot/grub/splash.png" \
+    "/run/live/medium/boot/grub/splash.png"; do
+    if [ -f "$cand" ]; then
+      cp -f "$cand" /mnt/slot_a/boot/grub/themes/axonwall/splash.png 2>/dev/null || true
+      cp -f "$cand" /mnt/slot_a/boot/grub/splash.png 2>/dev/null || true
+      cp -f "$cand" /mnt/slot_a/etc/axonwall/branding/splash.png 2>/dev/null || true
+      break
+    fi
+  done
+
+  THEME_COPIED=0
+  for tcand in \
+    "/mnt/slot_a/boot/grub/themes/axonwall/theme.txt" \
+    "/mnt/slot_a/etc/axonwall/branding/theme.txt" \
+    "/etc/axonwall/branding/theme.txt" \
+    "/boot/grub/themes/axonwall/theme.txt" \
+    "/boot/grub/live-theme/theme.txt"; do
+    if [ -f "$tcand" ]; then
+      cp -f "$tcand" /mnt/slot_a/boot/grub/themes/axonwall/theme.txt 2>/dev/null || true
+      cp -f "$tcand" /mnt/slot_a/etc/axonwall/branding/theme.txt 2>/dev/null || true
+      THEME_COPIED=1
+      break
+    fi
+  done
+
+  if [ "$THEME_COPIED" = "0" ] || [ ! -s /mnt/slot_a/boot/grub/themes/axonwall/theme.txt ]; then
+    cat << 'THEME_EOF' > /mnt/slot_a/boot/grub/themes/axonwall/theme.txt
 desktop-image: "splash.png"
 title-color: "#34d399"
 title-font: "Unifont Regular 16"
@@ -1214,47 +1613,40 @@ terminal-font: "Unifont Regular 16"
 	text = "@TIMEOUT_NOTIFICATION_LONG@"
 }
 THEME_EOF
-  cp -f /mnt/slot_a/boot/grub/themes/axonwall/theme.txt /mnt/slot_a/etc/axonwall/branding/theme.txt 2>/dev/null || true
-fi
-
-for fcand in \
-  /mnt/slot_a/usr/share/grub/unicode.pf2 \
-  /usr/share/grub/unicode.pf2 \
-  /mnt/slot_a/boot/grub/unicode.pf2 \
-  /boot/grub/unicode.pf2 \
-  /run/live/medium/boot/grub/unicode.pf2; do
-  if [ -f "$fcand" ]; then
-    cp -n "$fcand" /mnt/slot_a/boot/grub/unicode.pf2 2>/dev/null || true
-    cp -n "$fcand" /mnt/slot_a/boot/grub/themes/axonwall/unicode.pf2 2>/dev/null || true
-    break
+    cp -f /mnt/slot_a/boot/grub/themes/axonwall/theme.txt /mnt/slot_a/etc/axonwall/branding/theme.txt 2>/dev/null || true
   fi
-done
 
-if [ "$INSTALL_MODE" = "zbm" ]; then
-  mkdir -p /mnt/slot_a/boot/efi/EFI/ZBM
-  if [ -f /mnt/slot_a/usr/lib/zfsbootmenu/vmlinuz.efi ]; then
-    cp -f /mnt/slot_a/usr/lib/zfsbootmenu/vmlinuz.efi /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI 2>/dev/null || true
+  for fcand in \
+    /mnt/slot_a/usr/share/grub/unicode.pf2 \
+    /usr/share/grub/unicode.pf2 \
+    /mnt/slot_a/boot/grub/unicode.pf2 \
+    /boot/grub/unicode.pf2 \
+    /run/live/medium/boot/grub/unicode.pf2; do
+    if [ -f "$fcand" ]; then
+      cp -n "$fcand" /mnt/slot_a/boot/grub/unicode.pf2 2>/dev/null || true
+      cp -n "$fcand" /mnt/slot_a/boot/grub/themes/axonwall/unicode.pf2 2>/dev/null || true
+      break
+    fi
+  done
+
+  # Clone EFI System Partition to secondary RAID-1 disks
+  for sys_disk in $SYSTEM_DISKS; do
+    if [ "$sys_disk" != "$PRIMARY_DISK" ]; then
+      SEC_EFI=$(part_dev "$sys_disk" "$EFI_PART_NUM")
+      dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+    fi
+  done
+
+  grub-editenv /mnt/slot_a/boot/grub/grubenv create 2>/dev/null || true
+  grub-editenv /mnt/slot_a/boot/grub/grubenv set active_slot=A bootcount=0 bootlimit=3 2>/dev/null || true
+
+  if [ "$OS_FAMILY" = "alpine" ]; then
+    EXTRA_KARGS="modules=sd-mod,usb-storage,ext4,xfs,virtio_blk,nvme,raid1,md-mod"
+  else
+    EXTRA_KARGS=""
   fi
-fi
 
-# Clone EFI System Partition to secondary RAID-1 disks
-for sys_disk in $SYSTEM_DISKS; do
-  if [ "$sys_disk" != "$PRIMARY_DISK" ]; then
-    SEC_EFI=$(part_dev "$sys_disk" 2)
-    dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
-  fi
-done
-
-grub-editenv /mnt/slot_a/boot/grub/grubenv create 2>/dev/null || true
-grub-editenv /mnt/slot_a/boot/grub/grubenv set active_slot=A bootcount=0 bootlimit=3 2>/dev/null || true
-
-if [ "$OS_FAMILY" = "alpine" ]; then
-  EXTRA_KARGS="modules=sd-mod,usb-storage,ext4,xfs,virtio_blk,nvme,raid1,md-mod"
-else
-  EXTRA_KARGS=""
-fi
-
-cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
+  cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
 set default=0
 set timeout=3
 
@@ -1364,24 +1756,25 @@ else
 fi
 GRUB_EOF
 
-if [ "${INSTALL_MODE}" = "ab" ] && [ -n "${ROOT_B_DEV:-}" ] && [ -b "$ROOT_B_DEV" ]; then
-  mkdir -p /mnt/slot_b
-  if mount "$ROOT_B_DEV" /mnt/slot_b 2>/dev/null; then
-    mkdir -p /mnt/slot_b/boot
-    cp -a /mnt/slot_a/boot/grub /mnt/slot_b/boot/ 2>/dev/null || true
-    umount /mnt/slot_b 2>/dev/null || true
+  if [ "${INSTALL_MODE}" = "ab" ] && [ -n "${ROOT_B_DEV:-}" ] && [ -b "$ROOT_B_DEV" ]; then
+    mkdir -p /mnt/slot_b
+    if mount "$ROOT_B_DEV" /mnt/slot_b 2>/dev/null; then
+      mkdir -p /mnt/slot_b/boot
+      cp -a /mnt/slot_a/boot/grub /mnt/slot_b/boot/ 2>/dev/null || true
+      umount /mnt/slot_b 2>/dev/null || true
+    fi
   fi
-fi
 
-# On Debian, if update-initramfs is needed for mdadm RAID-1 or LUKS2, refresh initramfs inside chroot
-if [ "$OS_FAMILY" = "debian" ] && { [ "$SYSTEM_RAID_MODE" = "mirror" ] || [ "${LUKS_ENABLED:-0}" = "1" ]; }; then
-  for m in dev proc sys run; do
-    mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
-  done
-  chroot /mnt/slot_a update-initramfs -u -k all 2>/dev/null || true
-  for m in run sys proc dev; do
-    umount "/mnt/slot_a/$m" 2>/dev/null || true
-  done
+  # On Debian, if update-initramfs is needed for mdadm RAID-1 or LUKS2, refresh initramfs inside chroot
+  if [ "$OS_FAMILY" = "debian" ] && { [ "$SYSTEM_RAID_MODE" = "mirror" ] || [ "${LUKS_ENABLED:-0}" = "1" ]; }; then
+    for m in dev proc sys run; do
+      mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
+    done
+    chroot /mnt/slot_a update-initramfs -u -k all 2>/dev/null || true
+    for m in run sys proc dev; do
+      umount "/mnt/slot_a/$m" 2>/dev/null || true
+    done
+  fi
 fi
 
 # ==============================================================================
@@ -1393,7 +1786,9 @@ SYS_ZFS_VDEVS=$(echo "$ZFS_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
 EXTRA_DATA_VDEVS=""
 for xd in $ZFS_EXTRA_DISKS; do
   if [ -b "$xd" ]; then
-    wipefs -a "$xd" 2>/dev/null || true
+    if [ "$INSTALL_MODE" != "zbm" ]; then
+      wipefs -a "$xd" 2>/dev/null || true
+    fi
     EXTRA_DATA_VDEVS="${EXTRA_DATA_VDEVS} ${xd}"
   fi
 done
@@ -1402,7 +1797,9 @@ EXTRA_DATA_VDEVS=$(echo "$EXTRA_DATA_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
 SLOG_VDEVS=""
 for sd in ${ZFS_SLOG_DISKS:-}; do
   if [ -b "$sd" ]; then
-    wipefs -a "$sd" 2>/dev/null || true
+    if [ "$INSTALL_MODE" != "zbm" ]; then
+      wipefs -a "$sd" 2>/dev/null || true
+    fi
     SLOG_VDEVS="${SLOG_VDEVS} ${sd}"
   fi
 done
@@ -1411,7 +1808,9 @@ SLOG_VDEVS=$(echo "$SLOG_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
 L2ARC_VDEVS=""
 for cd in ${ZFS_L2ARC_DISKS:-}; do
   if [ -b "$cd" ]; then
-    wipefs -a "$cd" 2>/dev/null || true
+    if [ "$INSTALL_MODE" != "zbm" ]; then
+      wipefs -a "$cd" 2>/dev/null || true
+    fi
     L2ARC_VDEVS="${L2ARC_VDEVS} ${cd}"
   fi
 done
@@ -1420,7 +1819,9 @@ L2ARC_VDEVS=$(echo "$L2ARC_VDEVS" | tr -s ' ' | sed 's/^ //;s/ $//')
 SPARE_VDEVS=""
 for hd in ${ZFS_SPARE_DISKS:-}; do
   if [ -b "$hd" ]; then
-    wipefs -a "$hd" 2>/dev/null || true
+    if [ "$INSTALL_MODE" != "zbm" ]; then
+      wipefs -a "$hd" 2>/dev/null || true
+    fi
     SPARE_VDEVS="${SPARE_VDEVS} ${hd}"
   fi
 done
@@ -1473,43 +1874,19 @@ resolve_zfs_topology() {
   fi
 }
 
-init_zroot_datasets() {
-  _zroot_topo="${1:-stripe}"
-  _has_separate_tank="${2:-0}"
-  _app_ver="$(head -n1 /mnt/slot_a/etc/axonwall/version 2>/dev/null | tr -d '\r\n ' || true)"
-  [ -z "$_app_ver" ] && _app_ver="0.11.41"
-  _init_be="zroot/ROOT/axonwall-${_app_ver}"
-  zfs create -o canmount=off -o mountpoint=none zroot/ROOT 2>/dev/null || true
-  zfs create -o canmount=noauto -o mountpoint=/ "$_init_be" 2>/dev/null || true
-  if [ "$_has_separate_tank" = "0" ]; then
-    zfs create -o mountpoint=/mnt/tank zroot/tank 2>/dev/null || true
-  fi
-  zpool set "bootfs=${_init_be}" zroot 2>/dev/null || true
-  zfs set "org.axonwall:active_be=${_init_be}" zroot/ROOT 2>/dev/null || true
-  zfs set "org.axonwall:fallback_be=${_init_be}" zroot/ROOT 2>/dev/null || true
-  zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
-  zfs set "org.axonwall:bootlimit=3" zroot/ROOT 2>/dev/null || true
-  zfs set "org.axonwall:topology=${_zroot_topo}" zroot/ROOT 2>/dev/null || true
-  zfs snapshot "${_init_be}@factory-initial" 2>/dev/null || true
-}
-
-if [ "$INSTALL_MODE" = "zbm" ] && [ -n "$EXTRA_DATA_VDEVS" ]; then
-  # Dual-Pool ZBM Architecture: 'zroot' on System Disks + Dedicated 'tank' on Extra Data Disks
-  ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
-  ZROOT_TOPO="stripe"
-  [ "$ZROOT_CNT" -ge 2 ] && ZROOT_TOPO="mirror"
-
-  TANK_CNT=$(echo "$EXTRA_DATA_VDEVS" | wc -w | tr -d ' ')
-  RESOLVED_TOPOLOGY=$(resolve_zfs_topology "${ZFS_RAID_TOPOLOGY:-auto}" "$TANK_CNT")
-
-  JSON_VDEVS=$(to_json_array "$EXTRA_DATA_VDEVS")
+if [ "$INSTALL_MODE" = "zbm" ]; then
   JSON_ZROOT_VDEVS=$(to_json_array "$SYS_ZFS_VDEVS")
   JSON_SLOG=$(to_json_array "$SLOG_VDEVS")
   JSON_L2ARC=$(to_json_array "$L2ARC_VDEVS")
   JSON_SPARE=$(to_json_array "$SPARE_VDEVS")
-
   ZFS_GB=$(( ZFS_MB / 1024 ))
-  cat << ZFS_JSON_EOF > /mnt/data/install-zfs.json
+
+  if [ -n "$EXTRA_DATA_VDEVS" ]; then
+    TANK_CNT=$(echo "$EXTRA_DATA_VDEVS" | wc -w | tr -d ' ')
+    RESOLVED_TOPOLOGY=$(resolve_zfs_topology "${ZFS_RAID_TOPOLOGY:-auto}" "$TANK_CNT")
+    JSON_VDEVS=$(to_json_array "$EXTRA_DATA_VDEVS")
+
+    cat << ZFS_JSON_EOF > /mnt/data/install-zfs.json
 {
   "poolName": "tank",
   "zrootPoolName": "zroot",
@@ -1528,23 +1905,33 @@ if [ "$INSTALL_MODE" = "zbm" ] && [ -n "$EXTRA_DATA_VDEVS" ]; then
 }
 ZFS_JSON_EOF
 
-  if command -v zpool >/dev/null 2>&1; then
-    modprobe zfs 2>/dev/null || true
-    if [ -n "$SYS_ZFS_VDEVS" ]; then
-      echo "[+] Creating OpenZFS System Root Pool 'zroot' (topology=${ZROOT_TOPO}, vdevs=${SYS_ZFS_VDEVS})..."
-      ZROOT_ARGS=""
-      [ "$ZROOT_TOPO" != "stripe" ] && ZROOT_ARGS="$ZROOT_TOPO"
-      # shellcheck disable=SC2086
-      if zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $ZROOT_ARGS $SYS_ZFS_VDEVS 2>/dev/null; then
-        init_zroot_datasets "$ZROOT_TOPO" 1
-      fi
-    fi
     echo "[+] Creating Dedicated OpenZFS Storage Pool 'tank' (topology=${RESOLVED_TOPOLOGY}, vdevs=${EXTRA_DATA_VDEVS}, accel=${ZPOOL_ACCEL_ARGS})..."
     TANK_ARGS=""
     [ "$RESOLVED_TOPOLOGY" != "stripe" ] && TANK_ARGS="$RESOLVED_TOPOLOGY"
     # shellcheck disable=SC2086
-    zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank tank $TANK_ARGS $EXTRA_DATA_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
+    zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank -R /mnt/slot_a tank $TANK_ARGS $EXTRA_DATA_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
+  else
+    zfs create -o mountpoint=/mnt/tank zroot/tank 2>/dev/null || true
+    cat << ZFS_JSON_EOF > /mnt/data/install-zfs.json
+{
+  "poolName": "zroot",
+  "installMode": "${INSTALL_MODE}",
+  "topology": "${ZROOT_TOPO}",
+  "vdevs": [${JSON_ZROOT_VDEVS}],
+  "slogVdevs": [${JSON_SLOG}],
+  "l2arcVdevs": [${JSON_L2ARC}],
+  "spareVdevs": [${JSON_SPARE}],
+  "sizeGb": ${ZFS_GB},
+  "systemRaidMode": "${SYSTEM_RAID_MODE}",
+  "systemRaidDisks": "${SYSTEM_DISKS}",
+  "autoCreatePool": true
+}
+ZFS_JSON_EOF
   fi
+
+  [ -f /etc/zfs/zpool.cache ] && cp -f /etc/zfs/zpool.cache /mnt/slot_a/etc/zfs/zpool.cache 2>/dev/null || true
+  echo "[+] Taking immutable @factory-initial snapshot on ${INIT_BE}..."
+  zfs snapshot "${INIT_BE}@factory-initial" 2>/dev/null || true
 else
   ZFS_VDEVS=$(echo "${SYS_ZFS_VDEVS} ${EXTRA_DATA_VDEVS}" | tr -s ' ' | sed 's/^ //;s/ $//')
   if [ -n "$ZFS_VDEVS" ]; then
@@ -1557,10 +1944,6 @@ else
     JSON_SPARE=$(to_json_array "$SPARE_VDEVS")
 
     TARGET_POOL_NAME="tank"
-    if [ "$INSTALL_MODE" = "zbm" ]; then
-      TARGET_POOL_NAME="zroot"
-    fi
-
     ZFS_GB=$(( ZFS_MB / 1024 ))
     cat << ZFS_JSON_EOF > /mnt/data/install-zfs.json
 {
@@ -1585,15 +1968,8 @@ ZFS_JSON_EOF
       if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
         ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
       fi
-      if [ "$TARGET_POOL_NAME" = "zroot" ]; then
-        # shellcheck disable=SC2086
-        if zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O canmount=off -O mountpoint=none zroot $ZPOOL_ARGS $ZFS_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null; then
-          init_zroot_datasets "$RESOLVED_TOPOLOGY" 0
-        fi
-      else
-        # shellcheck disable=SC2086
-        zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank "${TARGET_POOL_NAME}" $ZPOOL_ARGS $ZFS_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
-      fi
+      # shellcheck disable=SC2086
+      zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O normalization=formD -O mountpoint=/mnt/tank "${TARGET_POOL_NAME}" $ZPOOL_ARGS $ZFS_VDEVS $ZPOOL_ACCEL_ARGS 2>/dev/null || true
     fi
   fi
 fi
@@ -1604,12 +1980,13 @@ fi
 emit_phase 8 8 "Finalizing installation & flushing storage caches..."
 
 cleanup_secrets
+umount /mnt/slot_a/boot/efi 2>/dev/null || true
+umount /mnt/slot_a/var/log 2>/dev/null || true
+umount /mnt/data 2>/dev/null || true
+umount /mnt/slot_a 2>/dev/null || zfs unmount -a 2>/dev/null || true
 if command -v zpool >/dev/null 2>&1; then
   zpool export -a 2>/dev/null || true
 fi
-umount /mnt/slot_a/boot/efi 2>/dev/null || true
-umount /mnt/slot_a 2>/dev/null || true
-umount /mnt/data 2>/dev/null || true
 if [ "${LUKS_ENABLED:-0}" = "1" ] && [ -b /dev/mapper/axon_crypt_data ]; then
   cryptsetup close axon_crypt_data 2>/dev/null || true
 fi
