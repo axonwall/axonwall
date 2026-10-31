@@ -514,14 +514,14 @@ export async function changeAdminPasswordAction(formData: FormData) {
     // Mint a fresh session cookie for the caller with updated epoch and passwordChangeRequired=false
     try {
       const freshSession = { ...session, passwordChangeRequired: false };
-      const freshToken = await createSessionToken(freshSession);
+      stampSessionEpoch(freshSession);
+      const freshToken = await mintSupabaseToken(freshSession, getJwtSecret());
       const cookieStore = await cookies();
-      const hdrs = await headers();
       cookieStore.set(SESSION_COOKIE, freshToken, {
         httpOnly: true,
-        secure: isSecureRequest(hdrs),
+        secure: process.env.NODE_ENV === 'production',
         sameSite: 'lax',
-        maxAge: SESSION_MAX_AGE,
+        maxAge: 8 * 3600,
         path: '/',
       });
     } catch {}
