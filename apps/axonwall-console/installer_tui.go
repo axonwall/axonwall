@@ -330,10 +330,42 @@ func formatDiskRoleBadge(d DiskDevice) string {
 	}
 }
 
+// HardwareEvaluation encapsulates the self-evaluated hardware profile and recommended storage/boot decisions.
+type HardwareEvaluation struct {
+	TotalRAMMB        int
+	FirmwareMode      string
+	HasTPM2           bool
+	DiskCount         int
+	SystemDiskSummary string
+	ZfsPoolSummary    string
+	SlotSizingNote    string
+	EvaluationNotes   []string
+}
+
+func detectTotalRAMMB() int {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 4096
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				if kb, err := strconv.Atoi(fields[1]); err == nil && kb > 0 {
+					return kb / 1024
+				}
+			}
+		}
+	}
+	return 4096
+}
+
 // AutoAssignDiskRoles automatically assigns roles based on disk capacity tiers.
 // For heterogeneous servers (e.g. 2x 32 GB boot disks + 2x 1 TB data disks), the smallest
 // tier (1-2 disks) is assigned as "system" (OS RAID-1 Mirror) and the larger capacity tier
 // is assigned as "zfs-data" (Dedicated OpenZFS storage pool).
+// For homogeneous 2-disk systems, both disks are mirrored as "system".
+// For homogeneous 3+ disk systems, the first 2 disks are mirrored as "system" and remaining disks become "zfs-data".
 func AutoAssignDiskRoles(disks []DiskDevice) []DiskDevice {
 	if len(disks) == 0 {
 		return disks
@@ -385,9 +417,145 @@ func AutoAssignDiskRoles(disks []DiskDevice) []DiskDevice {
 		return out
 	}
 
-	// Homogeneous disks: default first disk (or pair if 2+ identical disks) to system
-	setDiskRole(&out[0], "system")
+	// Homogeneous disks: evaluate optimal redundancy automatically
+	if len(out) == 1 {
+		setDiskRole(&out[0], "system")
+	} else if len(out) == 2 && len(smallIdxs) == 2 {
+		// 2 identical disks -> automatic RAID-1 system mirror
+		setDiskRole(&out[0], "system")
+		setDiskRole(&out[1], "system")
+	} else if len(out) >= 3 && len(smallIdxs) >= 3 {
+		// 3+ identical disks -> mirror first 2 for OS, assign remaining to ZFS Data pool
+		setDiskRole(&out[0], "system")
+		setDiskRole(&out[1], "system")
+		for i := 2; i < len(out); i++ {
+			setDiskRole(&out[i], "zfs-data")
+		}
+	} else {
+		setDiskRole(&out[0], "system")
+	}
 	return out
+}
+
+// EvaluateHardwareProfile inspects candidate disks, RAM, UEFI/BIOS, and TPM 2.0,
+// applies optimal defaults to cfg, and returns a human-readable HardwareEvaluation summary.
+func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDevice, HardwareEvaluation) {
+	evaluatedDisks := AutoAssignDiskRoles(disks)
+	primaryMB := syncDiskRolesAndConfig(evaluatedDisks, cfg)
+
+	ramMB := detectTotalRAMMB()
+	fwMode := "Legacy BIOS"
+	if hasUEFIFirmware() {
+		fwMode = "UEFI"
+	}
+	tpm := hasTPM2Device()
+	cfg.LuksTPM2 = tpm
+
+	// Evaluate optimal SlotMB based on primary system disk capacity
+	if cfg.InstallMode == "zbm" {
+		cfg.SlotMB = 0
+	} else {
+		switch {
+		case primaryMB < 24576: // < 24 GB
+			cfg.SlotMB = 2048
+		case primaryMB < 65536: // 24 - 64 GB
+			cfg.SlotMB = 4096
+		case primaryMB < 204800: // 64 - 200 GB
+			cfg.SlotMB = 8192
+		default: // >= 200 GB
+			cfg.SlotMB = 16384
+		}
+		if cfg.InstallMode == "rolling" && cfg.SlotMB < 8192 {
+			cfg.SlotMB = 8192
+		}
+	}
+
+	// Evaluate ZFS allocation and topology
+	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+		cfg.ZfsAllocMode = "none"
+	} else if cfg.ZfsAllocMode == "" {
+		cfg.ZfsAllocMode = "remainder"
+	}
+
+	vdevCount := len(cfg.ZfsExtraDisks)
+	if vdevCount == 0 {
+		vdevCount = len(cfg.SystemDisks)
+	}
+	resolvedTopo := "stripe"
+	switch {
+	case vdevCount == 2:
+		resolvedTopo = "mirror"
+	case vdevCount >= 3 && vdevCount <= 4:
+		resolvedTopo = "raidz1"
+	case vdevCount >= 5:
+		resolvedTopo = "raidz2"
+	}
+	if cfg.ZfsTopology == "" || cfg.ZfsTopology == "auto" {
+		cfg.ZfsTopology = "auto"
+	}
+
+	sysSummary := "No target disk detected"
+	if len(cfg.SystemDisks) == 1 {
+		sysSummary = fmt.Sprintf("Single Disk (%s — %.1f GB)", cfg.SystemDisks[0], float64(primaryMB)/1024.0)
+	} else if len(cfg.SystemDisks) >= 2 {
+		if cfg.InstallMode == "zbm" {
+			sysSummary = fmt.Sprintf("ZFS Mirror across %d Disks (%s)", len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "))
+		} else {
+			sysSummary = fmt.Sprintf("RAID-1 Mirror across %d Disks (%s)", len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "))
+		}
+	}
+
+	layout := ComputePartitionLayout(primaryMB, *cfg)
+	zfsSummary := "Unified on System Disk"
+	if cfg.InstallMode == "zbm" {
+		if len(cfg.ZfsExtraDisks) > 0 {
+			zfsSummary = fmt.Sprintf("zroot (%s) + Dedicated 'tank' (%s on %s)",
+				strings.ToUpper(resolvedTopo), strings.ToUpper(resolvedTopo), strings.Join(cfg.ZfsExtraDisks, ", "))
+		} else {
+			zfsSummary = fmt.Sprintf("All-in-ZFS 'zroot' Pool (%.1f GB, %s, lz4)",
+				float64(layout.ZfsMB)/1024.0, strings.ToUpper(resolvedTopo))
+		}
+	} else {
+		if len(cfg.ZfsExtraDisks) > 0 {
+			zfsSummary = fmt.Sprintf("Dedicated 'tank' Pool (%s across %s)",
+				strings.ToUpper(resolvedTopo), strings.Join(cfg.ZfsExtraDisks, ", "))
+		} else if layout.ZfsMB > 0 {
+			zfsSummary = fmt.Sprintf("Pool 'tank' on System Disk (%.1f GB, %s)",
+				float64(layout.ZfsMB)/1024.0, strings.ToUpper(resolvedTopo))
+		} else {
+			zfsSummary = "100% OS & Persistent Data (No ZFS partition)"
+		}
+	}
+
+	slotNote := fmt.Sprintf("%d GB per A/B Slot (%s)", cfg.SlotMB/1024, cfg.RootFSType)
+	if cfg.InstallMode == "zbm" {
+		slotNote = "ZFS Boot Environments (Copy-on-Write Snapshots, No GRUB)"
+	} else if cfg.InstallMode == "rolling" {
+		slotNote = fmt.Sprintf("Single Root Partition (%s)", cfg.RootFSType)
+	}
+
+	var notes []string
+	notes = append(notes, fmt.Sprintf("Evaluated %d storage device(s), %d MB RAM, %s firmware", len(evaluatedDisks), ramMB, fwMode))
+	if len(cfg.SystemDisks) >= 2 {
+		notes = append(notes, fmt.Sprintf("Auto-configured %d-disk OS redundancy (%s)", len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, " + ")))
+	}
+	if len(cfg.ZfsExtraDisks) > 0 {
+		notes = append(notes, fmt.Sprintf("Auto-tiered %d dedicated data disk(s) into OpenZFS pool 'tank' (%s)", len(cfg.ZfsExtraDisks), strings.ToUpper(resolvedTopo)))
+	}
+	if tpm {
+		notes = append(notes, "Hardware TPM 2.0 detected (PCR 0+2+7 auto-unlock ready if LUKS2 enabled)")
+	}
+
+	return evaluatedDisks, HardwareEvaluation{
+		TotalRAMMB:        ramMB,
+		FirmwareMode:      fwMode,
+		HasTPM2:           tpm,
+		DiskCount:         len(evaluatedDisks),
+		SystemDiskSummary: sysSummary,
+		ZfsPoolSummary:    zfsSummary,
+		SlotSizingNote:    slotNote,
+		EvaluationNotes:   notes,
+	}
 }
 
 // syncDiskRolesAndConfig synchronizes DiskDevice roles into InstallerConfig disk slices.
@@ -744,7 +912,7 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 		accent = colorBrightCya
 	}
 
-	versionStr := "v0.11.38"
+	versionStr := "v0.11.41"
 	if data, err := os.ReadFile("/etc/axonwall/version"); err == nil {
 		v := strings.TrimSpace(string(data))
 		if v != "" {
@@ -769,29 +937,35 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 	}
 	fmt.Println()
 
-	steps := []string{
-		"1. Edition & Arch",
-		"2. Disk Roles & RAID",
-		"3. Storage & ZFS",
-		"4. Security & Auth",
-		"5. Review & Install",
+	fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+	if step == 0 {
+		fmt.Printf(" %s%s[ ⚡ Express Hardware-Evaluated Setup ]%s  %s(Press [C] for Advanced Customization)%s\n",
+			accent, colorBold, colorReset, colorDim, colorReset)
+	} else {
+		steps := []string{
+			"1. Edition & Arch",
+			"2. Disk Roles & RAID",
+			"3. Storage & ZFS",
+			"4. Security & Auth",
+			"5. Review & Install",
+		}
+		fmt.Print(" ")
+		for i, st := range steps {
+			idx := i + 1
+			if idx == step {
+				fmt.Printf("%s%s[ %s ]%s", accent, colorBold, st, colorReset)
+			} else if idx < step {
+				fmt.Printf("%s✓ %s%s", colorGreen, st, colorReset)
+			} else {
+				fmt.Printf("%s  %s%s", colorDim, st, colorReset)
+			}
+			if i < len(steps)-1 {
+				fmt.Printf(" %s──>%s ", colorDim, colorReset)
+			}
+		}
+		fmt.Println()
 	}
 	fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-	fmt.Print(" ")
-	for i, st := range steps {
-		idx := i + 1
-		if idx == step {
-			fmt.Printf("%s%s[ %s ]%s", accent, colorBold, st, colorReset)
-		} else if idx < step {
-			fmt.Printf("%s✓ %s%s", colorGreen, st, colorReset)
-		} else {
-			fmt.Printf("%s  %s%s", colorDim, st, colorReset)
-		}
-		if i < len(steps)-1 {
-			fmt.Printf(" %s──>%s ", colorDim, colorReset)
-		}
-	}
-	fmt.Println("\n────────────────────────────────────────────────────────────────────────────────")
 }
 
 // RunNextGenInstallerTUI launches the interactive multi-step Axonwall Next-Gen Installer TUI.
@@ -805,20 +979,180 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 	}
 
 	cfg := DefaultInstallerConfig()
-	disks := AutoAssignDiskRoles(DiscoverDisks())
-	syncDiskRolesAndConfig(disks, &cfg)
-	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
-		cfg.ZfsAllocMode = "none"
-	}
+	disks, eval := EvaluateHardwareProfile(DiscoverDisks(), &cfg)
 
-	step := 1
+	step := 0
 	archCursor := 0
 	diskCursor := 0
 	zfsCursor := 0
 	secCursor := 0
 
-	for step >= 1 && step <= 5 {
+	for step >= 0 && step <= 5 {
 		switch step {
+		case 0:
+			renderInstallerBanner(cfg, 0)
+			_, eval = EvaluateHardwareProfile(disks, &cfg)
+			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
+			layout := ComputePartitionLayout(primaryMB, cfg)
+
+			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
+			vaultBadge := colorDim + "( ) Axonwall Vault S3 Storage" + colorReset
+			if cfg.Edition == "vault" {
+				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3 Storage" + colorReset
+			} else {
+				ngfwBadge = colorEmerald + colorBold + "(●) Axonwall NGFW & Router" + colorReset
+			}
+			fmt.Printf(" %s[E] Appliance Edition:%s  %s    %s\n\n", colorBold, colorReset, ngfwBadge, vaultBadge)
+
+			fmt.Printf(" %sSelect Installation Architecture (Hardware-Evaluated):%s\n", colorBold, colorReset)
+			archOptions := []struct {
+				mode  string
+				title string
+				desc  string
+			}{
+				{
+					mode:  "ab",
+					title: "Dual-Root A/B Architecture (Recommended)",
+					desc:  "Unbrickable dual OS slots (Slot A + Slot B) with watchdog rollback & persistent data",
+				},
+				{
+					mode:  "zbm",
+					title: "ZFSBootMenu Root-on-ZFS (All-in-ZFS zroot)",
+					desc:  "Copy-on-write ZFS Boot Environments, atomic snapshots & pure ZFSBootMenu boot",
+				},
+				{
+					mode:  "rolling",
+					title: "Rolling Standard Linux (Single-Root)",
+					desc:  "Single mutable root partition (axon_root) for compact VMs or standard APT workflow",
+				},
+			}
+			for i, opt := range archOptions {
+				selected := cfg.InstallMode == opt.mode
+				cursor := "  "
+				if i == archCursor {
+					cursor = colorEmerald + colorBold + "➜ " + colorReset
+				}
+				radio := "( )"
+				if selected {
+					radio = colorEmerald + colorBold + "(●)" + colorReset
+				}
+				fmt.Printf(" %s%s %s[%d] %s%s\n", cursor, radio, colorBold, i+1, opt.title, colorReset)
+				fmt.Printf("        %s%s%s\n", colorDim, opt.desc, colorReset)
+			}
+
+			pwSummary := colorYellow + "Factory Default (admin / axonwall — prompted on first web login)" + colorReset
+			if cfg.AdminPassword != "" {
+				pwSummary = colorEmerald + colorBold + "Custom Password Set (scrypt)" + colorReset
+			}
+			luksSummary := colorDim + "Disabled (Press [L] to enable LUKS2 AES-XTS-512)" + colorReset
+			if cfg.LuksEnabled {
+				if cfg.LuksTPM2 && eval.HasTPM2 {
+					luksSummary = colorEmerald + colorBold + "Enabled (LUKS2 + Hardware TPM 2.0 Auto-Unlock)" + colorReset
+				} else {
+					luksSummary = colorEmerald + colorBold + "Enabled (LUKS2 Passphrase)" + colorReset
+				}
+			}
+
+			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+			fmt.Printf(" %sHardware Self-Evaluation & Recommended Profile:%s\n", colorBold, colorReset)
+			if len(disks) == 0 {
+				fmt.Printf("   %s[!] No unmounted target storage disks (>= 2 GB) detected. Press [R] to rescan.%s\n", colorRed+colorBold, colorReset)
+			} else {
+				fmt.Printf("   • %-22s : %s%s%s\n", "Target System Disk(s)", colorEmerald+colorBold, eval.SystemDiskSummary, colorReset)
+				fmt.Printf("   • %-22s : %s%s%s\n", "OpenZFS Storage Pool", colorGreen+colorBold, eval.ZfsPoolSummary, colorReset)
+				fmt.Printf("   • %-22s : %s%s%s\n", "Boot & Root Layout", colorCyan+colorBold, eval.SlotSizingNote, colorReset)
+				fmt.Printf("   • %-22s : %s\n", "Data Encryption [L]", luksSummary)
+				fmt.Printf("   • %-22s : %s\n\n", "Admin Password  [P]", pwSummary)
+				fmt.Println(RenderPartitionBar(layout, cfg, 64))
+			}
+
+			var allTargetDisks []string
+			allTargetDisks = append(allTargetDisks, cfg.SystemDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsExtraDisks...)
+			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+			if len(allTargetDisks) > 0 {
+				fmt.Printf(" %sReady to install onto [%s] (existing data on target disk(s) will be erased).%s\n",
+					colorYellow, strings.Join(allTargetDisks, ", "), colorReset)
+			}
+			fmt.Printf(" %sControls:%s %s[Enter / I] Express Install Now%s  [1-3/↑/↓] Arch  [P] Password  [L] LUKS2  [E] Edition  [C] Customize  [Q] Quit\n",
+				colorDim, colorReset, colorEmerald+colorBold, colorReset)
+
+			key := readRawKey()
+			switch key {
+			case "UP":
+				if archCursor > 0 {
+					archCursor--
+					cfg.InstallMode = archOptions[archCursor].mode
+				}
+			case "DOWN":
+				if archCursor < len(archOptions)-1 {
+					archCursor++
+					cfg.InstallMode = archOptions[archCursor].mode
+				}
+			case "1", "2", "3":
+				idx, _ := strconv.Atoi(key)
+				archCursor = idx - 1
+				cfg.InstallMode = archOptions[archCursor].mode
+			case "SPACE":
+				cfg.InstallMode = archOptions[archCursor].mode
+			case "E":
+				if cfg.Edition == "vault" {
+					cfg.Edition = "axonwall"
+					if cfg.Hostname == "" || cfg.Hostname == "axonwall-vault" {
+						cfg.Hostname = "axonwall"
+					}
+				} else {
+					cfg.Edition = "vault"
+					if cfg.Hostname == "" || cfg.Hostname == "axonwall" {
+						cfg.Hostname = "axonwall-vault"
+					}
+				}
+			case "P":
+				pw1, _ := readPassword(reader, "\n Enter new Administrator & Root password (min 8 chars, or empty for default): ")
+				if pw1 == "" {
+					cfg.AdminPassword = ""
+				} else if len(pw1) < 8 {
+					fmt.Printf(" %s[!] Password must be at least 8 characters.%s\n", colorRed, colorReset)
+					time.Sleep(1200 * time.Millisecond)
+				} else {
+					pw2, _ := readPassword(reader, " Confirm new Administrator & Root password: ")
+					if pw1 == pw2 {
+						cfg.AdminPassword = pw1
+					} else {
+						fmt.Printf(" %s[!] Passwords did not match.%s\n", colorRed, colorReset)
+						time.Sleep(1200 * time.Millisecond)
+					}
+				}
+			case "L":
+				cfg.LuksEnabled = !cfg.LuksEnabled
+				if cfg.LuksEnabled && cfg.LuksPassphrase == "" {
+					pw1, _ := readPassword(reader, "\n Enter LUKS2 encryption passphrase: ")
+					if pw1 != "" {
+						pw2, _ := readPassword(reader, " Confirm LUKS2 encryption passphrase: ")
+						if pw1 == pw2 {
+							cfg.LuksPassphrase = pw1
+						} else {
+							fmt.Printf(" %s[!] Passphrases did not match. Disabling LUKS2.%s\n", colorRed, colorReset)
+							cfg.LuksEnabled = false
+							time.Sleep(1200 * time.Millisecond)
+						}
+					} else {
+						cfg.LuksEnabled = false
+					}
+				}
+			case "R":
+				disks, eval = EvaluateHardwareProfile(DiscoverDisks(), &cfg)
+			case "C":
+				step = 1
+			case "I", "ENTER":
+				if len(cfg.SystemDisks) > 0 {
+					executeLiveInstallation(cfg, installerPath, reader)
+					return
+				}
+			case "Q", "ESC":
+				return
+			}
+
 		case 1:
 			renderInstallerBanner(cfg, 1)
 			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
@@ -883,9 +1217,9 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			if cfg.InstallMode == "zbm" {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [B] Express Summary  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
 			} else {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [B] Express  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
 			}
 
 			key := readRawKey()
@@ -945,6 +1279,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 						cfg.DataFSType = "ext4"
 					}
 				}
+			case "B", "BACKSPACE", "LEFT":
+				step = 0
 			case "ENTER", "RIGHT":
 				cfg.InstallMode = archOptions[archCursor].mode
 				if cfg.InstallMode != "ab" && cfg.SlotMB < 8192 {
@@ -1565,8 +1901,10 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 
 	currentPhase := 1
 	totalPhases := len(phases)
-	var logLines []string
+	var milestoneLines []string
+	var allRawLines []string
 	startTime := time.Now()
+	logFilePath := "/var/log/axonwall-install.log"
 
 	drawProgress := func(statusMsg string, finished bool, failed bool) {
 		clearScreen()
@@ -1618,13 +1956,25 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 		}
 
 		fmt.Println("\n────────────────────────────────────────────────────────────────────────────────")
-		fmt.Printf("  %sLive Installer Log:%s\n", colorBold, colorReset)
-		startIdx := 0
-		if len(logLines) > 8 {
-			startIdx = len(logLines) - 8
-		}
-		for _, l := range logLines[startIdx:] {
-			fmt.Printf("   %s%s%s\n", colorDim, l, colorReset)
+		if failed {
+			fmt.Printf("  %sDiagnostic Output (see %s for full details):%s\n", colorRed+colorBold, logFilePath, colorReset)
+			startIdx := 0
+			if len(allRawLines) > 10 {
+				startIdx = len(allRawLines) - 10
+			}
+			for _, l := range allRawLines[startIdx:] {
+				fmt.Printf("   %s%s%s\n", colorRed, l, colorReset)
+			}
+		} else {
+			fmt.Printf("  %sRecent Activity%s %s(verbose command output encapsulated in %s):%s\n",
+				colorBold, colorReset, colorDim, logFilePath, colorReset)
+			startIdx := 0
+			if len(milestoneLines) > 6 {
+				startIdx = len(milestoneLines) - 6
+			}
+			for _, l := range milestoneLines[startIdx:] {
+				fmt.Printf("   %s%s%s\n", colorDim, l, colorReset)
+			}
 		}
 		fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 	}
@@ -1654,6 +2004,7 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 		if line == "" {
 			continue
 		}
+		allRawLines = append(allRawLines, line)
 		if strings.HasPrefix(line, "[PHASE:") {
 			// Format: [PHASE:3/8] Message...
 			closeIdx := strings.Index(line, "]")
@@ -1667,10 +2018,11 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 				}
 				statusMsg = strings.TrimSpace(line[closeIdx+1:])
 			}
-		} else {
-			logLines = append(logLines, line)
+			drawProgress(statusMsg, false, false)
+		} else if strings.HasPrefix(line, "[+]") || strings.HasPrefix(line, "[!]") || strings.HasPrefix(line, "[✓]") {
+			milestoneLines = append(milestoneLines, line)
+			drawProgress(statusMsg, false, false)
 		}
-		drawProgress(statusMsg, false, false)
 	}
 
 	err = cmd.Wait()

@@ -3,6 +3,10 @@ set -e
 
 . /usr/share/debconf/confmodule
 
+INSTALL_LOG="/var/log/axonwall-install.log"
+mkdir -p /var/log
+exec >>"$INSTALL_LOG" 2>&1
+
 echo "================================================================================"
 echo "[Axonwall Installer] Finalizing A/B Dual-Root, System RAID & ZFS Setup..."
 echo "================================================================================"
@@ -952,8 +956,12 @@ CFG_EOF
   in-target update-grub 2>/dev/null || true
 fi
 
-# 10. Clean up sensitive installer state files
+# 10. Clean up sensitive installer state files & persist installation log into target
 cleanup_secrets
 rm -f /var/lib/partman/axonwall-choices /tmp/axonwall-* /target/tmp/axonwall-* /target/run/axonwall-* 2>/dev/null || true
 
 echo "[✓] Axonwall A/B Dual-Root, System RAID & ZFS Setup successfully finished."
+if [ -f "$INSTALL_LOG" ] && [ -d /target/var/log ]; then
+  cp -f "$INSTALL_LOG" /target/var/log/axonwall-install.log 2>/dev/null || true
+  chmod 0600 /target/var/log/axonwall-install.log 2>/dev/null || true
+fi

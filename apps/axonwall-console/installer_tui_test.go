@@ -154,3 +154,37 @@ func TestAutoAssignDiskRolesAndAccelerators(t *testing.T) {
 		t.Errorf("missing ZFS_L2ARC_DISKS in serialized config:\n%s", serialized)
 	}
 }
+
+func TestEvaluateHardwareProfile(t *testing.T) {
+	// 1. Two homogeneous disks -> auto-evaluated RAID-1 / ZFS Mirror across both disks
+	twoDisks := []DiskDevice{
+		{Name: "nvme0n1", Path: "/dev/nvme0n1", SizeMB: 131072, SizeGB: 128.0},
+		{Name: "nvme1n1", Path: "/dev/nvme1n1", SizeMB: 131072, SizeGB: 128.0},
+	}
+	cfg := DefaultInstallerConfig()
+	_, eval := EvaluateHardwareProfile(twoDisks, &cfg)
+	if len(cfg.SystemDisks) != 2 {
+		t.Fatalf("expected 2 homogeneous disks to auto-assign as mirrored system disks, got %v", cfg.SystemDisks)
+	}
+	if !strings.Contains(eval.SystemDiskSummary, "Mirrored") && !strings.Contains(eval.SystemDiskSummary, "RAID-1") {
+		t.Errorf("expected SystemDiskSummary to report mirrored/RAID-1, got %s", eval.SystemDiskSummary)
+	}
+	if cfg.SlotMB != 8192 {
+		t.Errorf("expected 128 GiB disk to auto-evaluate SlotMB=8192, got %d", cfg.SlotMB)
+	}
+
+	// 2. Three homogeneous disks -> first 2 mirrored as system, 3rd as ZFS data
+	threeDisks := []DiskDevice{
+		{Name: "sda", Path: "/dev/sda", SizeMB: 65536, SizeGB: 64.0},
+		{Name: "sdb", Path: "/dev/sdb", SizeMB: 65536, SizeGB: 64.0},
+		{Name: "sdc", Path: "/dev/sdc", SizeMB: 65536, SizeGB: 64.0},
+	}
+	cfg3 := DefaultInstallerConfig()
+	_, eval3 := EvaluateHardwareProfile(threeDisks, &cfg3)
+	if len(cfg3.SystemDisks) != 2 || len(cfg3.ZfsExtraDisks) != 1 {
+		t.Fatalf("expected 2 system disks + 1 zfs-data disk, got sys=%v zfs=%v", cfg3.SystemDisks, cfg3.ZfsExtraDisks)
+	}
+	if eval3.ZfsPoolSummary == "" {
+		t.Errorf("expected non-empty ZfsPoolSummary")
+	}
+}

@@ -308,8 +308,8 @@ if [ "$method" ] && [ -z "$disks" ]; then
 				;;
 		esac
 
-		# Offer A/B System RAID-1 mirror across disks only for non-Express A/B modes when 2+ disks are present
-		if [ "$disk_count" -ge 2 ] && [ "$install_mode" = "ab" ] && [ "$partition_mode" != "auto" ] && [ "$partition_mode" != "manual" ]; then
+		# Offer A/B System RAID-1 mirror across disks only for Guided/Wizard A/B modes when 2+ disks are present
+		if [ "$disk_count" -ge 2 ] && [ "$install_mode" = "ab" ] && { [ "$partition_mode" = "guided" ] || [ "$partition_mode" = "wizard" ]; }; then
 			ask_critical axonwall/system_raid_mode
 			db_get axonwall/system_raid_mode || true
 			case "$RET" in
@@ -339,18 +339,93 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			esac
 		fi
 
-		# If primary disk not yet set (Automated, ZBM, Rolling, Guided, Manual, or Single-Disk Custom), select disk
+		# Hardware Self-Evaluation for Express modes (auto, zbm, rolling)
 		if [ -z "$dev_name" ]; then
-			if [ "$partition_mode" = "auto" ] && [ "$disk_count" -eq 1 ] && [ -n "$first_auto_dev" ] && [ -n "$first_auto_partman_disk" ]; then
+			if [ "$partition_mode" = "auto" ] || [ "$partition_mode" = "zbm" ] || [ "$partition_mode" = "rolling" ]; then
 				disk="$first_auto_partman_disk"
 				dev_name="$first_auto_dev"
+				system_raid_mode="single"
+				system_raid_disks="$dev_name"
+
+				if [ "$disk_count" -ge 2 ]; then
+					# Evaluate candidate disk sizes (in GiB) to detect homogeneous vs heterogeneous storage tiers
+					min_gb=999999
+					max_gb=0
+					all_dev_list=""
+					for d in $(get_auto_disks | cut -f1); do
+						[ -d "$d" ] && [ -f "$d/device" ] || continue
+						d_dev="$(cat "$d/device" 2>/dev/null || true)"
+						if [ -n "$seed_dev" ] && { [ "$d_dev" = "$seed_dev" ] || [ "$d_dev" = "$seed_disk" ]; }; then
+							continue
+						fi
+						[ -n "$d_dev" ] || continue
+						d_base="$(basename "$d_dev")"
+						d_sec="$(cat "/sys/block/${d_base}/size" 2>/dev/null || echo 0)"
+						d_gb=$(( d_sec * 512 / 1024 / 1024 / 1024 ))
+						[ "$d_gb" -le 0 ] && d_gb=32
+						[ "$d_gb" -lt "$min_gb" ] && min_gb="$d_gb"
+						[ "$d_gb" -gt "$max_gb" ] && max_gb="$d_gb"
+						all_dev_list="${all_dev_list:+$all_dev_list }$d_dev"
+					done
+
+					if [ $(( min_gb * 2 )) -lt "$max_gb" ]; then
+						# Heterogeneous tier: smaller disk(s) (<= min_gb * 3 / 2) for OS, larger disk(s) for ZFS tank
+						sys_tier=""
+						sys_cnt=0
+						data_tier=""
+						for d_dev in $all_dev_list; do
+							d_base="$(basename "$d_dev")"
+							d_sec="$(cat "/sys/block/${d_base}/size" 2>/dev/null || echo 0)"
+							d_gb=$(( d_sec * 512 / 1024 / 1024 / 1024 ))
+							[ "$d_gb" -le 0 ] && d_gb=32
+							if [ "$d_gb" -le $(( min_gb * 3 / 2 )) ] && [ "$sys_cnt" -lt 2 ]; then
+								sys_tier="${sys_tier:+$sys_tier }$d_dev"
+								sys_cnt=$(( sys_cnt + 1 ))
+							else
+								data_tier="${data_tier:+$data_tier }$d_dev"
+							fi
+						done
+						primary_dev="$(echo "$sys_tier" | awk '{print $1}')"
+						if [ -n "$primary_dev" ]; then
+							dev_name="$primary_dev"
+							disk="$(dev_to_partman "$primary_dev" 2>/dev/null || echo "$primary_dev")"
+							system_raid_disks="$sys_tier"
+							[ "$sys_cnt" -ge 2 ] && system_raid_mode="mirror"
+							zfs_extra_disks="$data_tier"
+						fi
+					else
+						# Homogeneous disks
+						if [ "$partition_mode" = "zbm" ]; then
+							# ZFSBootMenu: pool all homogeneous disks into zroot (2=mirror, 3+=raidz1)
+							system_raid_disks="$all_dev_list"
+							system_raid_mode="mirror"
+							if [ "$disk_count" -eq 2 ]; then
+								zfs_raid_topology="mirror"
+							else
+								zfs_raid_topology="raidz1"
+							fi
+						elif [ "$disk_count" -eq 2 ]; then
+							system_raid_disks="$all_dev_list"
+							system_raid_mode="mirror"
+							zfs_raid_topology="mirror"
+						else
+							# 3+ homogeneous disks in A/B or Rolling: first 2 mirrored for OS, remaining for ZFS tank
+							d1="$(echo "$all_dev_list" | awk '{print $1}')"
+							d2="$(echo "$all_dev_list" | awk '{print $2}')"
+							system_raid_disks="$d1 $d2"
+							system_raid_mode="mirror"
+							zfs_extra_disks="$(echo "$all_dev_list" | cut -d' ' -f3-)"
+							zfs_raid_topology="auto"
+						fi
+					fi
+				fi
 			else
 				db_fset partman-auto/select_disk seen false 2>/dev/null || true
 				disk=$(select_auto_disk) || exit 99
 				dev_name="$(cat "$disk/device" 2>/dev/null || echo "$disk")"
+				system_raid_mode="single"
+				system_raid_disks="$dev_name"
 			fi
-			system_raid_mode="single"
-			system_raid_disks="$dev_name"
 		fi
 
 		dev_base="$(basename "$dev_name")"
@@ -360,20 +435,22 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			disk_size_gb=32
 		fi
 
+		# Evaluate system RAM to auto-size swap without prompting in Express modes
+		mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 4194304)"
+		mem_gb=$(( mem_kb / 1024 / 1024 ))
+		auto_swap_gb=2
+		if [ "$disk_size_gb" -lt 30 ]; then
+			auto_swap_gb=1
+		elif [ "$mem_gb" -ge 16 ]; then
+			auto_swap_gb=2
+		elif [ "$disk_size_gb" -ge 120 ]; then
+			auto_swap_gb=4
+		fi
+
 		# Handle specific partition modes
 		if [ "$partition_mode" = "zbm" ]; then
-			# Mode: ZFSBootMenu Root-on-ZFS (Boot Environments, Snapshots & Full ZFS RAID)
-			ask_critical axonwall/swap_size
-			db_get axonwall/swap_size || true
-			swap_choice="$RET"
-
-			swap_gb=2
-			case "$swap_choice" in
-				"No swap"*) swap_gb=0 ;;
-				"4 GB"*) swap_gb=4 ;;
-				"8 GB"*) swap_gb=8 ;;
-				*) swap_gb=2 ;;
-			esac
+			# Mode: ZFSBootMenu Root-on-ZFS (Self-Evaluated Express Setup — Zero Extra Prompts)
+			swap_gb="$auto_swap_gb"
 			swap_mb=$(( swap_gb * 1024 ))
 
 			remaining_gb=$(( disk_size_gb - swap_gb - 1 ))
@@ -391,75 +468,21 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			data_gb=0
 			data_mb=0
 		elif [ "$partition_mode" = "rolling" ]; then
-			# Mode: Rolling Standard Linux (Single Root / — No A/B Slots, Full APT Support)
-			ask_critical axonwall/swap_size
-			db_get axonwall/swap_size || true
-			swap_choice="$RET"
-
-			swap_gb=2
-			case "$swap_choice" in
-				"No swap"*) swap_gb=0 ;;
-				"4 GB"*) swap_gb=4 ;;
-				"8 GB"*) swap_gb=8 ;;
-				*) swap_gb=2 ;;
-			esac
+			# Mode: Rolling Standard Linux (Self-Evaluated Express Setup — Zero Extra Prompts)
+			swap_gb="$auto_swap_gb"
 			swap_mb=$(( swap_gb * 1024 ))
 
 			remaining_gb=$(( disk_size_gb - swap_gb - 1 ))
 			[ "$remaining_gb" -lt 8 ] && remaining_gb=8
 
-			ask_critical axonwall/zfs_allocation
-			db_get axonwall/zfs_allocation || true
-			zfs_alloc_choice="$RET"
-
 			zfs_alloc_mode="none"
 			zfs_gb=0
 			root_gb="$remaining_gb"
-
-			case "$zfs_alloc_choice" in
-				"Allocate remaining"*)
-					zfs_alloc_mode="remainder"
-					if [ "$remaining_gb" -ge 48 ]; then
-						root_gb=32
-						zfs_gb=$(( remaining_gb - root_gb ))
-					elif [ "$remaining_gb" -ge 24 ]; then
-						root_gb=16
-						zfs_gb=$(( remaining_gb - root_gb ))
-					else
-						zfs_alloc_mode="none"
-						zfs_gb=0
-					fi
-					;;
-				"Split remaining"*)
-					zfs_alloc_mode="split"
-					root_gb=$(( remaining_gb / 2 ))
-					[ "$root_gb" -lt 8 ] && root_gb=8
-					zfs_gb=$(( remaining_gb - root_gb ))
-					if [ "$zfs_gb" -lt 4 ]; then
-						zfs_gb=0
-						zfs_alloc_mode="none"
-						root_gb="$remaining_gb"
-					fi
-					;;
-				"Custom ZFS"*)
-					zfs_alloc_mode="custom"
-					ask_critical axonwall/custom_zfs_size
-					db_get axonwall/custom_zfs_size || true
-					c_val="$(echo "$RET" | tr -dc '0-9')"
-					if [ -n "$c_val" ] && [ "$c_val" -ge 1 ] && [ "$remaining_gb" -gt $(( c_val + 8 )) ]; then
-						zfs_gb="$c_val"
-						root_gb=$(( remaining_gb - zfs_gb ))
-					else
-						zfs_gb=0
-						zfs_alloc_mode="none"
-					fi
-					;;
-				*)
-					zfs_alloc_mode="none"
-					zfs_gb=0
-					root_gb="$remaining_gb"
-					;;
-			esac
+			if [ -z "$zfs_extra_disks" ] && [ "$remaining_gb" -ge 48 ]; then
+				zfs_alloc_mode="remainder"
+				root_gb=32
+				zfs_gb=$(( remaining_gb - root_gb ))
+			fi
 
 			root_mb=$(( root_gb * 1024 ))
 			data_gb=0
@@ -756,8 +779,8 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			zfs_mb=$(( zfs_gb * 1024 ))
 		fi
 
-		# Offer any remaining secondary disks for the ZFS storage pool in non-Express / non-Manual modes
-		if [ "$partition_mode" != "manual" ] && [ "$partition_mode" != "auto" ]; then
+		# Offer any remaining secondary disks for the ZFS storage pool only in Guided / Wizard modes
+		if [ "$partition_mode" = "guided" ] || [ "$partition_mode" = "wizard" ]; then
 			extra_candidates=""
 			for d in $(get_auto_disks | cut -f1); do
 				[ -d "$d" ] && [ -f "$d/device" ] || continue

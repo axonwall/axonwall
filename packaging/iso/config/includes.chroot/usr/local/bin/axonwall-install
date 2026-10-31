@@ -67,13 +67,33 @@ cleanup_secrets() {
   fi
   rm -f /tmp/axonwall-luks* /mnt/slot_a/tmp/.axonwall_pw_install.tmp /mnt/slot_a/run/axonwall-luks-enroll.key 2>/dev/null || true
 }
-trap cleanup_secrets EXIT INT TERM
+
+on_install_exit() {
+  _rc=$?
+  cleanup_secrets
+  if [ "$_rc" -ne 0 ] && [ -s "${INSTALL_LOG:-/var/log/axonwall-install.log}" ]; then
+    echo "[!] Installation command failed (exit code ${_rc}). Last log lines from ${INSTALL_LOG:-/var/log/axonwall-install.log}:" >&3 2>/dev/null || true
+    tail -n 15 "${INSTALL_LOG:-/var/log/axonwall-install.log}" >&3 2>/dev/null || true
+  fi
+}
+trap on_install_exit EXIT INT TERM
+
+INSTALL_LOG="/var/log/axonwall-install.log"
+mkdir -p /var/log 2>/dev/null || INSTALL_LOG="/tmp/axonwall-install.log"
+: > "$INSTALL_LOG" 2>/dev/null || true
+chmod 0600 "$INSTALL_LOG" 2>/dev/null || true
+exec 3>&1
+
+ui_echo() {
+  printf '%s\n' "$*" >&3
+  printf '%s\n' "$*" >> "$INSTALL_LOG" 2>/dev/null || true
+}
 
 emit_phase() {
   phase_num="$1"
   phase_total="$2"
   phase_msg="$3"
-  echo "[PHASE:${phase_num}/${phase_total}] ${phase_msg}"
+  ui_echo "[PHASE:${phase_num}/${phase_total}] ${phase_msg}"
 }
 
 part_dev() {
@@ -148,6 +168,88 @@ discover_default_disk() {
     return 0
   done
   return 1
+}
+
+# Helper: evaluate all candidate disks and populate SYSTEM_DISKS, ZFS_EXTRA_DISKS, and SLOT_MB automatically
+evaluate_hardware_profile() {
+  _cand_disks=""
+  _min_mb=0
+  for devpath in /sys/block/*; do
+    [ -e "$devpath" ] || continue
+    devname="$(basename "$devpath")"
+    case "$devname" in
+      loop*|ram*|sr*|fd*|dm-*|md*|zd*|zram*) continue ;;
+    esac
+    if [ -f "$devpath/removable" ] && [ "$(cat "$devpath/removable" 2>/dev/null || echo 0)" = "1" ]; then
+      continue
+    fi
+    sectors="$(cat "$devpath/size" 2>/dev/null || echo 0)"
+    if [ "$sectors" -le 4194304 ]; then
+      continue
+    fi
+    if grep -q "^/dev/${devname}" /proc/mounts 2>/dev/null; then
+      continue
+    fi
+    _mb=$(( sectors * 512 / 1024 / 1024 ))
+    _cand_disks="${_cand_disks} /dev/${devname}:${_mb}"
+    if [ "$_min_mb" -eq 0 ] || [ "$_mb" -lt "$_min_mb" ]; then
+      _min_mb="$_mb"
+    fi
+  done
+
+  _small_disks=""
+  _small_cnt=0
+  _large_disks=""
+  _large_cnt=0
+  for item in $_cand_disks; do
+    _d="${item%:*}"
+    _m="${item#*:}"
+    if [ "$_m" -le $(( _min_mb * 125 / 100 )) ]; then
+      _small_disks="${_small_disks} ${_d}"
+      _small_cnt=$(( _small_cnt + 1 ))
+    elif [ "$_m" -ge $(( _min_mb * 150 / 100 )) ]; then
+      _large_disks="${_large_disks} ${_d}"
+      _large_cnt=$(( _large_cnt + 1 ))
+    fi
+  done
+
+  if [ -z "$SYSTEM_DISKS" ]; then
+    if [ "$_small_cnt" -ge 1 ] && [ "$_small_cnt" -le 2 ] && [ "$_large_cnt" -ge 1 ]; then
+      SYSTEM_DISKS="$(echo "$_small_disks" | sed 's/^ *//;s/ *$//')"
+      ZFS_EXTRA_DISKS="$(echo "$_large_disks" | sed 's/^ *//;s/ *$//')"
+    elif [ "$_small_cnt" -eq 2 ] && [ "$_large_cnt" -eq 0 ]; then
+      SYSTEM_DISKS="$(echo "$_small_disks" | sed 's/^ *//;s/ *$//')"
+    elif [ "$_small_cnt" -ge 3 ] && [ "$_large_cnt" -eq 0 ]; then
+      SYSTEM_DISKS="$(echo "$_small_disks" | awk '{print $1 " " $2}')"
+      ZFS_EXTRA_DISKS="$(echo "$_small_disks" | cut -d' ' -f4-)"
+    elif [ -n "$_small_disks" ]; then
+      SYSTEM_DISKS="$(echo "$_small_disks" | awk '{print $1}')"
+    fi
+  fi
+
+  if [ "$INSTALL_MODE" = "zbm" ]; then
+    SLOT_MB=0
+  elif [ "$_min_mb" -gt 0 ]; then
+    if [ "$_min_mb" -lt 24576 ]; then
+      SLOT_MB=2048
+    elif [ "$_min_mb" -lt 65536 ]; then
+      SLOT_MB=4096
+    elif [ "$_min_mb" -lt 204800 ]; then
+      SLOT_MB=8192
+    else
+      SLOT_MB=16384
+    fi
+    if [ "$INSTALL_MODE" = "rolling" ] && [ "$SLOT_MB" -lt 8192 ]; then
+      SLOT_MB=8192
+    fi
+  fi
+
+  if [ -n "$ZFS_EXTRA_DISKS" ] && [ "$INSTALL_MODE" != "zbm" ]; then
+    ZFS_ALLOC_MODE="none"
+  fi
+  if [ -e /dev/tpmrm0 ] || [ -e /dev/tpm0 ]; then
+    LUKS_TPM2=1
+  fi
 }
 
 # Load parameters according to mode
@@ -266,13 +368,16 @@ elif [ "$MODE" = "unattended" ]; then
   fi
 
   if [ -z "$SYSTEM_DISKS" ]; then
+    evaluate_hardware_profile
+  fi
+  if [ -z "$SYSTEM_DISKS" ]; then
     SYSTEM_DISKS="$(discover_default_disk || true)"
   fi
   REBOOT_AFTER_INSTALL=1
 else
   # Interactive Shell Fallback Mode
   echo "================================================================================"
-  echo "  ${EDITION_LABEL} Installer (${OS_FAMILY} — A/B + RAID + OpenZFS + LUKS2)"
+  echo "  ${EDITION_LABEL} Installer (${OS_FAMILY} — Hardware-Evaluated Setup)"
   echo "================================================================================"
   echo ""
   echo "Available block devices:"
@@ -280,29 +385,6 @@ else
   echo ""
 
   SYSTEM_DISKS="$(echo "$CLI_DISKS" | sed 's/^ *//;s/ *$//')"
-  if [ -z "$SYSTEM_DISKS" ]; then
-    printf "Enter system disk(s) to install Axonwall (space-separated for RAID-1 Mirror, e.g. '/dev/vda' or '/dev/nvme0n1 /dev/nvme1n1'): "
-    read -r SYSTEM_DISKS
-  fi
-
-  echo ""
-  echo "Select Appliance Edition:"
-  echo "  [1] Axonwall NGFW & Router Appliance [Default]"
-  echo "  [2] Axonwall Vault Edition (Immutable S3 Object-Lock Backup Appliance)"
-  printf "Choice [1-2] (default 1): "
-  read -r EDITION_CHOICE
-  case "${EDITION_CHOICE:-1}" in
-    2|vault|VAULT)
-      INSTALL_EDITION="vault"
-      EDITION_LABEL="Axonwall Vault Edition"
-      ;;
-    *)
-      INSTALL_EDITION="axonwall"
-      EDITION_LABEL="Axonwall NGFW Appliance"
-      ;;
-  esac
-
-  echo ""
   echo "Select Installation Architecture:"
   echo "  [1] Dual-Root A/B (Unbrickable Dual Slots + Data Partition) [Default]"
   echo "  [2] ZFSBootMenu Root-on-ZFS (Boot Environments, Snapshots & Full ZFS RAID)"
@@ -315,66 +397,100 @@ else
     *) INSTALL_MODE="ab" ;;
   esac
 
-  if [ "$INSTALL_MODE" = "ab" ]; then
-    printf "Select Slot Size for A/B Dual-Root [1=2GB Compact, 2=4GB Standard, 3=8GB Expanded, 4=16GB Enterprise] (default 2): "
-    read -r SLOT_CHOICE
-    case "${SLOT_CHOICE:-2}" in
-      1) SLOT_MB=2048 ;;
-      3) SLOT_MB=8192 ;;
-      4) SLOT_MB=16384 ;;
-      *) SLOT_MB=4096 ;;
-    esac
-  else
-    SLOT_MB=8192
-  fi
+  evaluate_hardware_profile
+  echo ""
+  echo "Hardware Evaluation Summary:"
+  echo "  • System Disk(s)     : ${SYSTEM_DISKS:-<none>}"
+  echo "  • ZFS Data Disk(s)   : ${ZFS_EXTRA_DISKS:-<unified on system disk>}"
+  echo "  • Architecture       : ${INSTALL_MODE} (Slot=${SLOT_MB}MB)"
+  echo ""
+  printf "Press [Enter] to accept recommended layout, or type [c] to customize manually: "
+  read -r SHELL_CUSTOM
 
-  if [ "$INSTALL_MODE" != "zbm" ]; then
+  if [ "$SHELL_CUSTOM" = "c" ] || [ "$SHELL_CUSTOM" = "C" ]; then
+    printf "Enter system disk(s) to install Axonwall [%s]: " "$SYSTEM_DISKS"
+    read -r INPUT_DISKS
+    [ -n "$INPUT_DISKS" ] && SYSTEM_DISKS="$INPUT_DISKS"
+
     echo ""
-    echo "Select ZFS Storage Allocation on System Disk(s):"
-    echo "  [1] Reserve remaining space for ZFS Pool (8GB System Data + Remainder ZFS) [Default]"
-    echo "  [2] Split remaining space 50/50 between System Data and ZFS Pool"
-    echo "  [3] Custom ZFS Partition Size (in GB)"
-    echo "  [4] None on system disk (Use 100% of remaining space for System Data)"
-    printf "Choice [1-4] (default 1): "
-    read -r ZFS_CHOICE
-    case "${ZFS_CHOICE:-1}" in
-      2) ZFS_ALLOC_MODE="split" ;;
-      3)
-        ZFS_ALLOC_MODE="custom"
-        printf "Enter desired ZFS partition size on system disk(s) in GB: "
-        read -r CUSTOM_ZFS_GB
-        CUSTOM_ZFS_GB=$(echo "${CUSTOM_ZFS_GB:-0}" | tr -dc '0-9')
+    echo "Select Appliance Edition:"
+    echo "  [1] Axonwall NGFW & Router Appliance [Default]"
+    echo "  [2] Axonwall Vault Edition (Immutable S3 Object-Lock Backup Appliance)"
+    printf "Choice [1-2] (default 1): "
+    read -r EDITION_CHOICE
+    case "${EDITION_CHOICE:-1}" in
+      2|vault|VAULT)
+        INSTALL_EDITION="vault"
+        EDITION_LABEL="Axonwall Vault Edition"
         ;;
-      4) ZFS_ALLOC_MODE="none" ;;
-      *) ZFS_ALLOC_MODE="remainder" ;;
+      *)
+        INSTALL_EDITION="axonwall"
+        EDITION_LABEL="Axonwall NGFW Appliance"
+        ;;
     esac
-  fi
 
-  echo ""
-  printf "Optional: Enter any dedicated whole disks for ZFS Data Pool 'tank' (space-separated, or Enter for none): "
-  read -r ZFS_EXTRA_DISKS
-  printf "Optional: Enter any dedicated ZFS SLOG (ZIL write log) disks (space-separated, or Enter for none): "
-  read -r ZFS_SLOG_DISKS
-  printf "Optional: Enter any dedicated ZFS L2ARC (read cache) disks (space-separated, or Enter for none): "
-  read -r ZFS_L2ARC_DISKS
-  printf "Optional: Enter any dedicated ZFS Hot Spare disks (space-separated, or Enter for none): "
-  read -r ZFS_SPARE_DISKS
+    if [ "$INSTALL_MODE" = "ab" ]; then
+      printf "Select Slot Size for A/B Dual-Root [1=2GB Compact, 2=4GB Standard, 3=8GB Expanded, 4=16GB Enterprise] (default 2): "
+      read -r SLOT_CHOICE
+      case "${SLOT_CHOICE:-2}" in
+        1) SLOT_MB=2048 ;;
+        3) SLOT_MB=8192 ;;
+        4) SLOT_MB=16384 ;;
+        *) SLOT_MB=4096 ;;
+      esac
+    else
+      SLOT_MB=8192
+    fi
 
-  echo ""
-  printf "Enable LUKS2 disk encryption on persistent data volume (/var/lib/axonwall)? (y/N): "
-  read -r LUKS_ANS
-  if [ "$LUKS_ANS" = "y" ] || [ "$LUKS_ANS" = "Y" ]; then
-    LUKS_ENABLED=1
-    printf "Enter LUKS2 passphrase: "
-    stty -echo 2>/dev/null || true
-    read -r LUKS_PASSPHRASE || LUKS_PASSPHRASE=""
-    stty echo 2>/dev/null || true
+    if [ "$INSTALL_MODE" != "zbm" ]; then
+      echo ""
+      echo "Select ZFS Storage Allocation on System Disk(s):"
+      echo "  [1] Reserve remaining space for ZFS Pool (8GB System Data + Remainder ZFS) [Default]"
+      echo "  [2] Split remaining space 50/50 between System Data and ZFS Pool"
+      echo "  [3] Custom ZFS Partition Size (in GB)"
+      echo "  [4] None on system disk (Use 100% of remaining space for System Data)"
+      printf "Choice [1-4] (default 1): "
+      read -r ZFS_CHOICE
+      case "${ZFS_CHOICE:-1}" in
+        2) ZFS_ALLOC_MODE="split" ;;
+        3)
+          ZFS_ALLOC_MODE="custom"
+          printf "Enter desired ZFS partition size on system disk(s) in GB: "
+          read -r CUSTOM_ZFS_GB
+          CUSTOM_ZFS_GB=$(echo "${CUSTOM_ZFS_GB:-0}" | tr -dc '0-9')
+          ;;
+        4) ZFS_ALLOC_MODE="none" ;;
+        *) ZFS_ALLOC_MODE="remainder" ;;
+      esac
+    fi
+
     echo ""
-    if [ -e /dev/tpmrm0 ] || [ -e /dev/tpm0 ]; then
-      printf "Enroll hardware TPM 2.0 (PCRs 0+2+7) for automatic boot unlock? (Y/n): "
-      read -r TPM_ANS
-      if [ "${TPM_ANS:-Y}" != "n" ] && [ "${TPM_ANS:-Y}" != "N" ]; then
-        LUKS_TPM2=1
+    printf "Optional: Enter any dedicated whole disks for ZFS Data Pool 'tank' [%s]: " "$ZFS_EXTRA_DISKS"
+    read -r INPUT_EXTRA
+    [ -n "$INPUT_EXTRA" ] && ZFS_EXTRA_DISKS="$INPUT_EXTRA"
+    printf "Optional: Enter any dedicated ZFS SLOG (ZIL write log) disks (or Enter for none): "
+    read -r ZFS_SLOG_DISKS
+    printf "Optional: Enter any dedicated ZFS L2ARC (read cache) disks (or Enter for none): "
+    read -r ZFS_L2ARC_DISKS
+    printf "Optional: Enter any dedicated ZFS Hot Spare disks (or Enter for none): "
+    read -r ZFS_SPARE_DISKS
+
+    echo ""
+    printf "Enable LUKS2 disk encryption on persistent data volume (/var/lib/axonwall)? (y/N): "
+    read -r LUKS_ANS
+    if [ "$LUKS_ANS" = "y" ] || [ "$LUKS_ANS" = "Y" ]; then
+      LUKS_ENABLED=1
+      printf "Enter LUKS2 passphrase: "
+      stty -echo 2>/dev/null || true
+      read -r LUKS_PASSPHRASE || LUKS_PASSPHRASE=""
+      stty echo 2>/dev/null || true
+      echo ""
+      if [ -e /dev/tpmrm0 ] || [ -e /dev/tpm0 ]; then
+        printf "Enroll hardware TPM 2.0 (PCRs 0+2+7) for automatic boot unlock? (Y/n): "
+        read -r TPM_ANS
+        if [ "${TPM_ANS:-Y}" != "n" ] && [ "${TPM_ANS:-Y}" != "N" ]; then
+          LUKS_TPM2=1
+        fi
       fi
     fi
   fi
@@ -415,6 +531,10 @@ else
   fi
 fi
 
+# Encapsulate all subsequent low-level command stdout/stderr into $INSTALL_LOG
+# while emit_phase and ui_echo write high-level milestones to fd 3 (the user's screen / TUI).
+exec >>"$INSTALL_LOG" 2>&1
+
 # Validate system disks
 SYSTEM_DISKS=$(echo "$SYSTEM_DISKS" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
 ZFS_EXTRA_DISKS=$(echo "${ZFS_EXTRA_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
@@ -425,7 +545,7 @@ SYS_DISK_COUNT=0
 PRIMARY_DISK=""
 for d in $SYSTEM_DISKS; do
   if [ ! -b "$d" ]; then
-    echo "[!] Error: Block device '$d' does not exist."
+    ui_echo "[!] Error: Block device '$d' does not exist."
     exit 1
   fi
   if [ -z "$PRIMARY_DISK" ]; then
@@ -435,16 +555,16 @@ for d in $SYSTEM_DISKS; do
 done
 
 if [ -z "$PRIMARY_DISK" ]; then
-  echo "[!] Error: No target system disk specified or discovered."
+  ui_echo "[!] Error: No target system disk specified or discovered."
   exit 1
 fi
 
 SYSTEM_RAID_MODE="single"
 if [ "$SYS_DISK_COUNT" -ge 2 ]; then
   SYSTEM_RAID_MODE="mirror"
-  echo "[+] System RAID Mode: RAID-1 Mirror across ${SYS_DISK_COUNT} disks (${SYSTEM_DISKS})"
+  ui_echo "[+] System RAID Mode: RAID-1 Mirror across ${SYS_DISK_COUNT} disks (${SYSTEM_DISKS})"
 else
-  echo "[+] System RAID Mode: Single Disk (${PRIMARY_DISK})"
+  ui_echo "[+] System RAID Mode: Single Disk (${PRIMARY_DISK})"
 fi
 
 # Compute partition geometry in MiB from primary disk size
@@ -569,7 +689,7 @@ for sys_disk in $SYSTEM_DISKS; do
   dd if=/dev/zero of="$sys_disk" bs=1M count=16 conv=notrunc 2>/dev/null || true
 
   if [ "$INSTALL_MODE" = "zbm" ]; then
-    echo "[+] Creating pure ZFSBootMenu GPT partition table on ${sys_disk} (ESP=512MB, LUKS_Data=${DATA_MB}MB, ZFS_zroot=${ZFS_MB}MB)..."
+    ui_echo "[+] Creating pure ZFSBootMenu GPT partition table on ${sys_disk} (ESP=512MB, LUKS_Data=${DATA_MB}MB, ZFS_zroot=${ZFS_MB}MB)..."
     EFI_PART_NUM=1
     parted -s "$sys_disk" \
       mklabel gpt \
@@ -597,7 +717,7 @@ for sys_disk in $SYSTEM_DISKS; do
     ZFS_PART=$(part_dev "$sys_disk" "$ZFS_PART_NUM")
     ZFS_VDEVS="${ZFS_VDEVS} ${ZFS_PART}"
   else
-    echo "[+] Creating GPT partition table on ${sys_disk} (Mode=${INSTALL_MODE}, Slot=${SLOT_MB}MB, Logs=${LOGS_MB}MB, Data=${DATA_MB}MB, ZFS=${ZFS_MB}MB)..."
+    ui_echo "[+] Creating GPT partition table on ${sys_disk} (Mode=${INSTALL_MODE}, Slot=${SLOT_MB}MB, Logs=${LOGS_MB}MB, Data=${DATA_MB}MB, ZFS=${ZFS_MB}MB)..."
     EFI_PART_NUM=2
     parted -s "$sys_disk" \
       mklabel gpt \
@@ -675,7 +795,7 @@ format_esp() {
   elif command -v mkfs.fat >/dev/null 2>&1; then
     mkfs.fat -F 32 -n AXON_EFI "$_esp_dev" >/dev/null 2>&1 || mkfs.fat -F 32 "$_esp_dev"
   else
-    echo "[!] FATAL: Neither mkfs.vfat nor mkfs.fat is available to format EFI System Partition ${_esp_dev}." >&2
+    ui_echo "[!] FATAL: Neither mkfs.vfat nor mkfs.fat is available to format EFI System Partition ${_esp_dev}."
     exit 1
   fi
 }
@@ -715,7 +835,7 @@ fi
 
 if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
   if [ "$INSTALL_MODE" != "zbm" ]; then
-    echo "[+] Assembling mdadm RAID-1 mirrors across ${SYS_DISK_COUNT} system disks..."
+    ui_echo "[+] Assembling mdadm RAID-1 mirrors across ${SYS_DISK_COUNT} system disks..."
     RAID_A_MEMBERS=""
     RAID_B_MEMBERS=""
     RAID_LOGS_MEMBERS=""
@@ -753,7 +873,7 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
       LOGS_DEV="/dev/md3"
     fi
   elif [ -n "$DATA_PART_NUM" ]; then
-    echo "[+] Assembling mdadm RAID-1 mirror for LUKS2 data partition across ${SYS_DISK_COUNT} system disks..."
+    ui_echo "[+] Assembling mdadm RAID-1 mirror for LUKS2 data partition across ${SYS_DISK_COUNT} system disks..."
     RAID_DATA_MEMBERS=""
     for sys_disk in $SYSTEM_DISKS; do
       RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" "$DATA_PART_NUM")"
@@ -773,17 +893,17 @@ if [ "$INSTALL_MODE" = "rolling" ]; then
 fi
 
 if [ "$INSTALL_MODE" != "zbm" ] && [ -n "$ROOT_A_DEV" ]; then
-  echo "[+] Formatting Root (${ROOT_A_DEV} -> ${ROOT_A_LABEL}, ${ROOT_FSTYPE})..."
+  ui_echo "[+] Formatting Root (${ROOT_A_DEV} -> ${ROOT_A_LABEL}, ${ROOT_FSTYPE})..."
   format_fs "$ROOT_A_DEV" "$ROOT_FSTYPE" "$ROOT_A_LABEL"
 fi
 
 if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
-  echo "[+] Formatting Standby Slot B (${ROOT_B_DEV} -> axon_root_b, ${ROOT_FSTYPE})..."
+  ui_echo "[+] Formatting Standby Slot B (${ROOT_B_DEV} -> axon_root_b, ${ROOT_FSTYPE})..."
   format_fs "$ROOT_B_DEV" "$ROOT_FSTYPE" "axon_root_b"
 fi
 
 if [ -n "$LOGS_DEV" ]; then
-  echo "[+] Formatting Dedicated Logs (${LOGS_DEV} -> axon_logs, ${LOGS_FSTYPE})..."
+  ui_echo "[+] Formatting Dedicated Logs (${LOGS_DEV} -> axon_logs, ${LOGS_FSTYPE})..."
   format_fs "$LOGS_DEV" "$LOGS_FSTYPE" "axon_logs"
 fi
 
@@ -791,7 +911,7 @@ TARGET_DATA_MAPPER="$DATA_DEV"
 TEMP_LUKS_KEY=""
 if [ -n "$DATA_DEV" ]; then
   if [ "${LUKS_ENABLED:-0}" = "1" ] && command -v cryptsetup >/dev/null 2>&1; then
-    echo "[+] Initializing LUKS2 AES-XTS-512 encryption on ${DATA_DEV}..."
+    ui_echo "[+] Initializing LUKS2 AES-XTS-512 encryption on ${DATA_DEV}..."
     TEMP_LUKS_KEY="/tmp/axonwall-luks.key"
     rm -f "$TEMP_LUKS_KEY"
     if [ -n "$LUKS_PASSPHRASE" ]; then
@@ -806,7 +926,7 @@ if [ -n "$DATA_DEV" ]; then
     TARGET_DATA_MAPPER="/dev/mapper/axon_crypt_data"
   fi
 
-  echo "[+] Formatting Persistent Data (${TARGET_DATA_MAPPER} -> axon_data, ${DATA_FSTYPE})..."
+  ui_echo "[+] Formatting Persistent Data (${TARGET_DATA_MAPPER} -> axon_data, ${DATA_FSTYPE})..."
   format_fs "$TARGET_DATA_MAPPER" "$DATA_FSTYPE" "axon_data"
 fi
 
@@ -829,7 +949,7 @@ ZROOT_TOPO="stripe"
 
 if [ "$INSTALL_MODE" = "zbm" ]; then
   if ! command -v zpool >/dev/null 2>&1 || ! command -v zfs >/dev/null 2>&1; then
-    echo "[!] FATAL: OpenZFS utilities (zpool/zfs) are not available in this live environment." >&2
+    ui_echo "[!] FATAL: OpenZFS utilities (zpool/zfs) are not available in this live environment."
     exit 1
   fi
   modprobe zfs 2>/dev/null || true
@@ -908,7 +1028,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   fi
 
   mkdir -p /etc/zfs
-  echo "[+] Creating OpenZFS Root Pool 'zroot' (topology=${ZROOT_TOPO}, vdevs=${SYS_ZFS_VDEVS})..."
+  ui_echo "[+] Creating OpenZFS Root Pool 'zroot' (topology=${ZROOT_TOPO}, vdevs=${SYS_ZFS_VDEVS})..."
   # shellcheck disable=SC2086
   zpool create -f \
     -o ashift=12 \
@@ -985,7 +1105,7 @@ if [ -z "$SQUASH_MOUNT" ]; then
 fi
 
 if [ -n "$SQUASH_MOUNT" ]; then
-  echo "[+] Direct-imaging pristine SquashFS image from ${SQUASH_MOUNT}..."
+  ui_echo "[+] Direct-imaging pristine SquashFS image from ${SQUASH_MOUNT}..."
   if command -v rsync >/dev/null 2>&1; then
     rsync -aAX \
       --exclude='/proc/*' \
@@ -1004,7 +1124,7 @@ if [ -n "$SQUASH_MOUNT" ]; then
     umount /mnt/squash_ro 2>/dev/null || true
   fi
 else
-  echo "[+] Copying live root filesystem to Slot A..."
+  ui_echo "[+] Copying live root filesystem to Slot A..."
   for dir in bin etc home lib lib64 opt root sbin usr var; do
     if [ -d "/$dir" ]; then
       cp -a "/$dir" /mnt/slot_a/ 2>/dev/null || true
@@ -1012,7 +1132,7 @@ else
   done
   # On Alpine Live, replace symlinked /lib/modules with real kernel module tree from modloop
   if [ -e /lib/modules ] && { [ -L /mnt/slot_a/lib/modules ] || [ ! -d /mnt/slot_a/lib/modules ]; }; then
-    echo "[+] Installing loadable kernel modules to Slot A..."
+    ui_echo "[+] Installing loadable kernel modules to Slot A..."
     rm -rf /mnt/slot_a/lib/modules
     mkdir -p /mnt/slot_a/lib/modules
     ( cd /lib/modules && tar cf - . ) | ( cd /mnt/slot_a/lib/modules && tar xf - ) || true
@@ -1037,7 +1157,7 @@ echo "${INSTALL_MODE}" > /mnt/slot_a/etc/axonwall/install-mode
 echo "${INSTALL_MODE}" > /mnt/data/install-mode
 
 if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
-  echo "[+] Configuring target as Axonwall Vault Edition (hardened immutable S3 storage appliance)..."
+  ui_echo "[+] Configuring target as Axonwall Vault Edition (hardened immutable S3 storage appliance)..."
   mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/etc/systemd/system/multi-user.target.wants
   touch /mnt/slot_a/etc/axonwall/.vault-edition /mnt/slot_a/etc/axonwall/.vault-firstboot
   rm -f /mnt/slot_a/etc/axonwall/.firstboot
@@ -1093,7 +1213,7 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall
          /mnt/slot_a/etc/systemd/system/suricata.service.d
 
   if [ "$OS_FAMILY" = "debian" ] && [ -x /mnt/slot_a/usr/bin/dpkg ]; then
-    echo "[+] Purging firewall packages from Vault target..."
+    ui_echo "[+] Purging firewall packages from Vault target..."
     chroot /mnt/slot_a /usr/bin/dpkg --purge --force-all \
       suricata kea-dhcp4-server kea-common unbound frr strongswan strongswan-charon strongswan-starter \
       openvpn conntrackd keepalived wireguard-tools samba samba-common-bin nfs-kernel-server open-iscsi \
@@ -1129,18 +1249,18 @@ if [ "${LUKS_ENABLED:-0}" = "1" ] && [ -n "$TEMP_LUKS_KEY" ] && [ -f "$TEMP_LUKS
   DATA_UUID="$(blkid -s UUID -o value "$DATA_DEV" 2>/dev/null || echo "$DATA_DEV")"
   TPM2_SUCCESS=0
   if [ "${LUKS_TPM2:-0}" = "1" ] && command -v systemd-cryptenroll >/dev/null 2>&1; then
-    echo "[+] Enrolling hardware TPM 2.0 (PCRs 0+2+7) token on ${DATA_DEV}..."
+    ui_echo "[+] Enrolling hardware TPM 2.0 (PCRs 0+2+7) token on ${DATA_DEV}..."
     if systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0,2,7 --unlock-key-file="$TEMP_LUKS_KEY" "$DATA_DEV" 2>/dev/null; then
       TPM2_SUCCESS=1
-      echo "[+] Hardware TPM 2.0 enrollment succeeded."
+      ui_echo "[+] Hardware TPM 2.0 enrollment succeeded."
     else
-      echo "[!] Warning: TPM 2.0 enrollment failed; falling back to passphrase unlock at boot."
+      ui_echo "[!] Warning: TPM 2.0 enrollment failed; falling back to passphrase unlock at boot."
     fi
   fi
   if [ "$TPM2_SUCCESS" = "1" ]; then
     echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard,tpm2-device=auto" > /mnt/slot_a/etc/crypttab
   elif [ -z "$LUKS_PASSPHRASE" ]; then
-    echo "[+] Persisting root-only LUKS keyfile (/etc/axonwall/luks-data.key) since no passphrase was specified and TPM 2.0 is unavailable..."
+    ui_echo "[+] Persisting root-only LUKS keyfile (/etc/axonwall/luks-data.key) since no passphrase was specified and TPM 2.0 is unavailable..."
     mkdir -p /mnt/slot_a/etc/axonwall
     ( umask 077 && cp "$TEMP_LUKS_KEY" /mnt/slot_a/etc/axonwall/luks-data.key )
     chown root:root /mnt/slot_a/etc/axonwall/luks-data.key 2>/dev/null || true
@@ -1199,7 +1319,7 @@ fi
 # Seed Cloud-Init configuration into target if present
 for ci_src in /var/lib/partman/cloud-config.yaml /var/lib/cloud/seed/nocloud-net/user-data /etc/axonwall/cloud-config.yaml; do
   if [ -s "$ci_src" ]; then
-    echo "[+] Copying Cloud-Init configuration into installed target..."
+    ui_echo "[+] Copying Cloud-Init configuration into installed target..."
     mkdir -p /mnt/slot_a/var/lib/cloud/seed/nocloud-net /mnt/slot_a/etc/axonwall
     cp "$ci_src" /mnt/slot_a/var/lib/cloud/seed/nocloud-net/user-data
     cp "$ci_src" /mnt/slot_a/etc/axonwall/cloud-config.yaml
@@ -1261,14 +1381,14 @@ if [ -n "$ADMIN_PASSWORD" ]; then
       NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "installed")"
       printf '%s\n' "$NOW_TS" > /mnt/slot_a/etc/axonwall/.password_changed
       printf '%s\n' "$NOW_TS" > /mnt/data/.password_changed
-      echo "[+] Provisioned custom scrypt administrator credentials for '${ADMIN_USER:-admin}'."
+      ui_echo "[+] Provisioned custom scrypt administrator credentials for '${ADMIN_USER:-admin}'."
     else
       rm -f /mnt/slot_a/etc/axonwall/.password_changed /mnt/data/.password_changed
       printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
       chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
       printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
       chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
-      echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first web login)."
+      ui_echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first web login)."
     fi
   fi
 
@@ -1320,7 +1440,7 @@ if [ -f /mnt/slot_a/etc/axonwall/version ]; then
 fi
 
 if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
-  echo "[+] Cloning Slot A into Standby Slot B (${ROOT_B_DEV})..."
+  ui_echo "[+] Cloning Slot A into Standby Slot B (${ROOT_B_DEV})..."
   mount "$ROOT_B_DEV" /mnt/slot_b
   if command -v rsync >/dev/null 2>&1; then
     rsync -aAX --delete \
@@ -1376,7 +1496,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   done
 
   if [ -z "$ZBM_UKI" ]; then
-    echo "[!] FATAL: ZFSBootMenu image (/usr/lib/zfsbootmenu/vmlinuz.efi) not found!" >&2
+    ui_echo "[!] FATAL: ZFSBootMenu image (/usr/lib/zfsbootmenu/vmlinuz.efi) not found!"
     exit 1
   fi
 
@@ -1444,7 +1564,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   # Ensure UKI has .splash embedded and updated cmdline parameters
   THEMED_SUCCESS=0
   if command -v python3 >/dev/null 2>&1 && [ -x /usr/lib/axonwall/theme-zbm-uki.py ] && [ -n "$ZBM_BMP" ]; then
-    echo "[+] Embedding Axonwall splash bitmap and console styling into target UKI..."
+    ui_echo "[+] Embedding Axonwall splash bitmap and console styling into target UKI..."
     if python3 /usr/lib/axonwall/theme-zbm-uki.py "$ZBM_UKI" \
       -o /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI \
       -s "$ZBM_BMP" \
@@ -1990,7 +2110,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
 }
 ZFS_JSON_EOF
 
-    echo "[+] Creating Dedicated OpenZFS Storage Pool 'tank' (topology=${RESOLVED_TOPOLOGY}, vdevs=${EXTRA_DATA_VDEVS}, accel=${ZPOOL_ACCEL_ARGS})..."
+    ui_echo "[+] Creating Dedicated OpenZFS Storage Pool 'tank' (topology=${RESOLVED_TOPOLOGY}, vdevs=${EXTRA_DATA_VDEVS})..."
     TANK_ARGS=""
     [ "$RESOLVED_TOPOLOGY" != "stripe" ] && TANK_ARGS="$RESOLVED_TOPOLOGY"
     # shellcheck disable=SC2086
@@ -2015,7 +2135,7 @@ ZFS_JSON_EOF
   fi
 
   [ -f /etc/zfs/zpool.cache ] && cp -f /etc/zfs/zpool.cache /mnt/slot_a/etc/zfs/zpool.cache 2>/dev/null || true
-  echo "[+] Taking immutable @factory-initial snapshot on ${INIT_BE}..."
+  ui_echo "[+] Taking immutable @factory-initial snapshot on ${INIT_BE}..."
   zfs snapshot "${INIT_BE}@factory-initial" 2>/dev/null || true
 else
   ZFS_VDEVS=$(echo "${SYS_ZFS_VDEVS} ${EXTRA_DATA_VDEVS}" | tr -s ' ' | sed 's/^ //;s/ $//')
@@ -2048,7 +2168,7 @@ ZFS_JSON_EOF
 
     if command -v zpool >/dev/null 2>&1; then
       modprobe zfs 2>/dev/null || true
-      echo "[+] Creating OpenZFS pool '${TARGET_POOL_NAME}' (topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS}, accel=${ZPOOL_ACCEL_ARGS})..."
+      ui_echo "[+] Creating OpenZFS pool '${TARGET_POOL_NAME}' (topology=${RESOLVED_TOPOLOGY}, vdevs=${ZFS_VDEVS})..."
       ZPOOL_ARGS=""
       if [ "$RESOLVED_TOPOLOGY" != "stripe" ]; then
         ZPOOL_ARGS="$RESOLVED_TOPOLOGY"
@@ -2065,6 +2185,10 @@ fi
 emit_phase 8 8 "Finalizing installation & flushing storage caches..."
 
 cleanup_secrets
+if [ -f "$INSTALL_LOG" ] && [ -d /mnt/slot_a/var/log ]; then
+  cp -f "$INSTALL_LOG" /mnt/slot_a/var/log/axonwall-install.log 2>/dev/null || true
+  chmod 0600 /mnt/slot_a/var/log/axonwall-install.log 2>/dev/null || true
+fi
 umount /mnt/slot_a/boot/efi 2>/dev/null || true
 umount /mnt/slot_a/var/log 2>/dev/null || true
 umount /mnt/data 2>/dev/null || true
@@ -2077,13 +2201,14 @@ if [ "${LUKS_ENABLED:-0}" = "1" ] && [ -b /dev/mapper/axon_crypt_data ]; then
 fi
 sync
 
-echo "================================================================================"
-echo "[✓] ${EDITION_LABEL} Installation Complete (${INSTALL_MODE}, ${SYSTEM_RAID_MODE}: ${SYSTEM_DISKS})!"
-echo "    Remove installation media and reboot the appliance."
-echo "================================================================================"
+ui_echo "================================================================================"
+ui_echo "[✓] ${EDITION_LABEL} Installation Complete (${INSTALL_MODE}, ${SYSTEM_RAID_MODE}: ${SYSTEM_DISKS})!"
+ui_echo "    Full installation log saved to /var/log/axonwall-install.log"
+ui_echo "    Remove installation media and reboot the appliance."
+ui_echo "================================================================================"
 
 if [ "${REBOOT_AFTER_INSTALL:-0}" = "1" ]; then
-  echo "[+] Rebooting appliance in 3 seconds..."
+  ui_echo "[+] Rebooting appliance in 3 seconds..."
   sleep 3
   systemctl reboot 2>/dev/null || /sbin/reboot 2>/dev/null || reboot 2>/dev/null || true
 fi
