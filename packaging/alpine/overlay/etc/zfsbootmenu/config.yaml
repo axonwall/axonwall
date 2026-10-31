@@ -1,0 +1,15 @@
+Global:
+  ManageImages: true
+  BootMountPoint: /boot/efi
+  DracutConfDir: /etc/zfsbootmenu/dracut.conf.d
+Components:
+  ImageDir: /boot/efi/EFI/ZBM
+  Versions: 2
+  Enabled: true
+EFI:
+  ImageDir: /boot/efi/EFI/ZBM
+  Versions: 2
+  Enabled: true
+  SplashImage: /etc/zfsbootmenu/splash.bmp
+Kernel:
+  CommandLine: "ro quiet loglevel=3 net.ifnames=0 rd.vconsole.font=ter-132b zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=tty0 console=ttyS0,115200"

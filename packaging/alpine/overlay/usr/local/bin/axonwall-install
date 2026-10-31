@@ -1380,10 +1380,95 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     exit 1
   fi
 
-  mkdir -p /mnt/slot_a/boot/efi/EFI/ZBM /mnt/slot_a/boot/efi/EFI/BOOT
-  cp -f "$ZBM_UKI" /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI
-  cp -f "$ZBM_UKI" /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
-  cp -f "$ZBM_UKI" /mnt/slot_a/boot/efi/EFI/BOOT/BOOTX64.EFI
+  mkdir -p /mnt/slot_a/boot/efi/EFI/ZBM /mnt/slot_a/boot/efi/EFI/BOOT /mnt/slot_a/etc/zfsbootmenu/dracut.conf.d /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d /mnt/slot_a/etc/zfsbootmenu/hooks/setup.d /mnt/slot_a/boot/efi/EFI/ZBM/hooks/early-setup.d /mnt/slot_a/boot/efi/EFI/ZBM/hooks/setup.d
+
+  # Locate and stage Axonwall branded ZFSBootMenu splash bitmap
+  SPLASH_BMP="splash.bmp"
+  if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
+    SPLASH_BMP="splash-vault.bmp"
+  fi
+
+  ZBM_BMP=""
+  for bcand in \
+    "/etc/zfsbootmenu/${SPLASH_BMP}" \
+    "/etc/axonwall/branding/${SPLASH_BMP}" \
+    "/mnt/slot_a/etc/zfsbootmenu/${SPLASH_BMP}" \
+    "/mnt/slot_a/etc/axonwall/branding/${SPLASH_BMP}" \
+    "/etc/zfsbootmenu/splash.bmp" \
+    "/etc/axonwall/branding/splash.bmp"; do
+    if [ -f "$bcand" ]; then
+      ZBM_BMP="$bcand"
+      break
+    fi
+  done
+
+  if [ -n "$ZBM_BMP" ]; then
+    cp -f "$ZBM_BMP" /mnt/slot_a/etc/zfsbootmenu/splash.bmp 2>/dev/null || true
+    cp -f "$ZBM_BMP" /mnt/slot_a/boot/efi/EFI/ZBM/splash.bmp 2>/dev/null || true
+  fi
+
+  # Stage ZBM configuration and dracut theme configs
+  for f_cfg in /etc/zfsbootmenu/config.yaml /mnt/slot_a/etc/zfsbootmenu/config.yaml; do
+    if [ -f "$f_cfg" ]; then
+      cp -f "$f_cfg" /mnt/slot_a/etc/zfsbootmenu/config.yaml
+      break
+    fi
+  done
+
+  for f_col in /etc/zfsbootmenu/dracut.conf.d/colors.conf /mnt/slot_a/etc/zfsbootmenu/dracut.conf.d/colors.conf; do
+    if [ -f "$f_col" ]; then
+      cp -f "$f_col" /mnt/slot_a/etc/zfsbootmenu/dracut.conf.d/colors.conf
+      break
+    fi
+  done
+
+  # Stage Axonwall early theme hook and watchdog hook into both /etc/zfsbootmenu/hooks and /boot/efi/EFI/ZBM/hooks
+  for f_hook in /etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh; do
+    if [ -f "$f_hook" ]; then
+      cp -f "$f_hook" /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh
+      cp -f "$f_hook" /mnt/slot_a/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh
+      chmod +x /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /mnt/slot_a/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh 2>/dev/null || true
+      break
+    fi
+  done
+
+  for f_wd in /etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh /mnt/slot_a/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh; do
+    if [ -f "$f_wd" ]; then
+      cp -f "$f_wd" /mnt/slot_a/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh
+      cp -f "$f_wd" /mnt/slot_a/boot/efi/EFI/ZBM/hooks/setup.d/20-axonwall-watchdog.sh
+      chmod +x /mnt/slot_a/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh /mnt/slot_a/boot/efi/EFI/ZBM/hooks/setup.d/20-axonwall-watchdog.sh 2>/dev/null || true
+      break
+    fi
+  done
+
+  # Ensure UKI has .splash embedded and updated cmdline parameters
+  THEMED_SUCCESS=0
+  if command -v python3 >/dev/null 2>&1 && [ -x /usr/lib/axonwall/theme-zbm-uki.py ] && [ -n "$ZBM_BMP" ]; then
+    echo "[+] Embedding Axonwall splash bitmap and console styling into target UKI..."
+    if python3 /usr/lib/axonwall/theme-zbm-uki.py "$ZBM_UKI" \
+      -o /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI \
+      -s "$ZBM_BMP" \
+      -f "ter-132b" 2>/dev/null; then
+      THEMED_SUCCESS=1
+    fi
+  fi
+
+  if [ "$THEMED_SUCCESS" = "0" ]; then
+    cp -f "$ZBM_UKI" /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI
+  fi
+  cp -f /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
+  cp -f /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI /mnt/slot_a/boot/efi/EFI/BOOT/BOOTX64.EFI
+
+  # Install axonwall-zbm-theme utility onto target system
+  mkdir -p /mnt/slot_a/usr/local/bin /mnt/slot_a/usr/lib/axonwall
+  if [ -f /usr/local/bin/axonwall-zbm-theme ]; then
+    cp -f /usr/local/bin/axonwall-zbm-theme /mnt/slot_a/usr/local/bin/axonwall-zbm-theme
+    chmod +x /mnt/slot_a/usr/local/bin/axonwall-zbm-theme
+  fi
+  if [ -f /usr/lib/axonwall/theme-zbm-uki.py ]; then
+    cp -f /usr/lib/axonwall/theme-zbm-uki.py /mnt/slot_a/usr/lib/axonwall/theme-zbm-uki.py
+    chmod +x /mnt/slot_a/usr/lib/axonwall/theme-zbm-uki.py
+  fi
 
   # Extract .linux (bzImage) and .initrd (cpio.xz) PE sections from ZBM UKI for Legacy BIOS Syslinux boot (zero GRUB)
   extract_pe_sections() {
@@ -1436,12 +1521,12 @@ TIMEOUT 20
 LABEL zbm
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu quiet loglevel=4 console=tty0 console=ttyS0,115200
+  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 rd.vconsole.font=ter-132b zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=tty0 console=ttyS0,115200
 
 LABEL zbm_backup
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu zbm.force_import=1 loglevel=4 console=tty0 console=ttyS0,115200
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 rd.vconsole.font=ter-132b zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=tty0 console=ttyS0,115200
 ZBM_SYSLINUX_EOF
   cp -f /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg /mnt/slot_a/boot/efi/syslinux.cfg 2>/dev/null || true
 

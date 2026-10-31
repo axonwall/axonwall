@@ -274,6 +274,55 @@ def draw_shield_emblem(buf: bytearray, cx: float, cy: float, scale: float, accen
     draw_circle_aa(buf, center[0], center[1], 1.4 * scale, (255, 255, 255))
 
 
+def encode_bmp(buf: bytearray, width: int, height: int) -> bytes:
+    """Encode RGB pixel buffer into standard uncompressed 24-bit Windows BMP.
+
+    Format complies with Microsoft BMP3 standard and UEFI systemd-stub / ZFSBootMenu
+    .splash section requirements (bottom-to-top scanlines, BGR order, 4-byte row padding).
+    """
+    row_stride = ((width * 3 + 3) // 4) * 4
+    padding_len = row_stride - (width * 3)
+    padding = b"\x00" * padding_len
+
+    img_size = row_stride * height
+    file_size = 54 + img_size
+
+    # Bitmap File Header (14 bytes)
+    # bfType (2B='BM'), bfSize (4B), bfReserved1 (2B=0), bfReserved2 (2B=0), bfOffBits (4B=54)
+    file_header = struct.pack("<2sIHHI", b"BM", file_size, 0, 0, 54)
+
+    # DIB Header (BITMAPINFOHEADER, 40 bytes)
+    # biSize (4B=40), biWidth (4B), biHeight (4B), biPlanes (2B=1), biBitCount (2B=24),
+    # biCompression (4B=0 BI_RGB), biSizeImage (4B), biXPelsPerMeter (4B), biYPelsPerMeter (4B),
+    # biClrUsed (4B=0), biClrImportant (4B=0)
+    dib_header = struct.pack(
+        "<IIIHHIIIIII",
+        40,
+        width,
+        height,
+        1,
+        24,
+        0,
+        img_size,
+        2835,  # 72 DPI
+        2835,  # 72 DPI
+        0,
+        0,
+    )
+
+    # Pixel data (bottom-to-top, BGR order)
+    pixel_data = bytearray()
+    for y in range(height - 1, -1, -1):
+        row_start = y * width * 3
+        for x in range(width):
+            px = row_start + x * 3
+            pixel_data.extend((buf[px + 2], buf[px + 1], buf[px]))  # B, G, R
+        if padding_len > 0:
+            pixel_data.extend(padding)
+
+    return file_header + dib_header + bytes(pixel_data)
+
+
 def encode_png(buf: bytearray, width: int, height: int) -> bytes:
     raw_rows = bytearray()
     stride = width * 3
@@ -291,7 +340,7 @@ def encode_png(buf: bytearray, width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", compressed) + chunk(b"IEND", b"")
 
 
-def render_splash(subtitle: str, badge_text: str, primary: tuple[int, int, int], secondary: tuple[int, int, int]) -> bytes:
+def render_splash_buffer(subtitle: str, badge_text: str, primary: tuple[int, int, int], secondary: tuple[int, int, int]) -> bytearray:
     buf = bytearray(WIDTH * HEIGHT * 3)
 
     # 1. Deep cyber-slate vertical + radial gradient background
@@ -395,7 +444,22 @@ def render_splash(subtitle: str, badge_text: str, primary: tuple[int, int, int],
         spacing=1,
     )
 
+    return buf
+
+
+def render_splash_png(subtitle: str, badge_text: str, primary: tuple[int, int, int], secondary: tuple[int, int, int]) -> bytes:
+    buf = render_splash_buffer(subtitle, badge_text, primary, secondary)
     return encode_png(buf, WIDTH, HEIGHT)
+
+
+def render_splash_bmp(subtitle: str, badge_text: str, primary: tuple[int, int, int], secondary: tuple[int, int, int]) -> bytes:
+    buf = render_splash_buffer(subtitle, badge_text, primary, secondary)
+    return encode_bmp(buf, WIDTH, HEIGHT)
+
+
+def render_splash(subtitle: str, badge_text: str, primary: tuple[int, int, int], secondary: tuple[int, int, int]) -> bytes:
+    """Backward compatibility wrapper returning PNG bytes."""
+    return render_splash_png(subtitle, badge_text, primary, secondary)
 
 
 def main() -> int:
@@ -404,28 +468,44 @@ def main() -> int:
         out_dir = sys.argv[1]
     os.makedirs(out_dir, exist_ok=True)
 
-    fw_png = render_splash(
+    # 1. Axonwall Enterprise Firewall (Emerald -> Cyan theme)
+    fw_buf = render_splash_buffer(
         subtitle="ENTERPRISE LINUX NEXT-GENERATION FIREWALL",
         badge_text="NGFW APPLIANCE",
         primary=(52, 211, 153),    # Emerald #34d399
         secondary=(6, 182, 212),   # Cyan #06b6d4
     )
-    fw_path = os.path.join(out_dir, "splash.png")
-    with open(fw_path, "wb") as f:
-        f.write(fw_png)
+    fw_png = encode_png(fw_buf, WIDTH, HEIGHT)
+    fw_bmp = encode_bmp(fw_buf, WIDTH, HEIGHT)
 
-    vault_png = render_splash(
+    fw_png_path = os.path.join(out_dir, "splash.png")
+    fw_bmp_path = os.path.join(out_dir, "splash.bmp")
+    with open(fw_png_path, "wb") as f:
+        f.write(fw_png)
+    with open(fw_bmp_path, "wb") as f:
+        f.write(fw_bmp)
+
+    # 2. Axonwall Vault Storage Edition (Sky Cyan -> Emerald theme)
+    vault_buf = render_splash_buffer(
         subtitle="IMMUTABLE S3 BACKUP & STORAGE VAULT APPLIANCE",
         badge_text="VAULT EDITION",
         primary=(56, 189, 248),    # Sky Cyan #38bdf8
         secondary=(52, 211, 153),  # Emerald #34d399
     )
-    vault_path = os.path.join(out_dir, "splash-vault.png")
-    with open(vault_path, "wb") as f:
-        f.write(vault_png)
+    vault_png = encode_png(vault_buf, WIDTH, HEIGHT)
+    vault_bmp = encode_bmp(vault_buf, WIDTH, HEIGHT)
 
-    print(f"[✓] Generated {fw_path} ({len(fw_png)} bytes)")
-    print(f"[✓] Generated {vault_path} ({len(vault_png)} bytes)")
+    vault_png_path = os.path.join(out_dir, "splash-vault.png")
+    vault_bmp_path = os.path.join(out_dir, "splash-vault.bmp")
+    with open(vault_png_path, "wb") as f:
+        f.write(vault_png)
+    with open(vault_bmp_path, "wb") as f:
+        f.write(vault_bmp)
+
+    print(f"[✓] Generated {fw_png_path} ({len(fw_png)} bytes)")
+    print(f"[✓] Generated {fw_bmp_path} ({len(fw_bmp)} bytes)")
+    print(f"[✓] Generated {vault_png_path} ({len(vault_png)} bytes)")
+    print(f"[✓] Generated {vault_bmp_path} ({len(vault_bmp)} bytes)")
     return 0
 
 

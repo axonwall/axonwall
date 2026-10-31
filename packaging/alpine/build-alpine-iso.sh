@@ -458,21 +458,54 @@ ZBM_VERSION="3.1.0"
 ZBM_KVER="linux6.12"
 ZBM_SHA256="131d55c7b385df8cd319d267b6aa15d97f8c32c94f5149bd906556715fadf4e7"
 ZBM_CACHE="${REPO_ROOT}/packaging/iso/build/cache/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
-mkdir -p "${OVL}/usr/lib/zfsbootmenu" "${OVL}/etc/zfsbootmenu/hooks/setup.d" "${OVL}/etc/zfsbootmenu/dracut.conf.d"
+mkdir -p "${OVL}/usr/lib/zfsbootmenu" "${OVL}/usr/lib/axonwall" "${OVL}/etc/zfsbootmenu/hooks/early-setup.d" "${OVL}/etc/zfsbootmenu/hooks/setup.d" "${OVL}/etc/zfsbootmenu/dracut.conf.d"
+RAW_ZBM="/tmp/zbm-raw-${ZBM_VERSION}.efi"
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" ]]; then
-  echo "${ZBM_SHA256}  ${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" | sha256sum -c -
   cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
 elif [[ -f "${ZBM_CACHE}" ]]; then
   echo "${ZBM_SHA256}  ${ZBM_CACHE}" | sha256sum -c -
-  cp -f "${ZBM_CACHE}" "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
+  cp -f "${ZBM_CACHE}" "$RAW_ZBM"
 else
   echo "[+] Fetching ZFSBootMenu v${ZBM_VERSION} (${ZBM_KVER}) UKI for Alpine overlay..."
-  curl -fsSL -o "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
-  echo "${ZBM_SHA256}  ${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" | sha256sum -c -
+  curl -fsSL -o "$RAW_ZBM" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
+  echo "${ZBM_SHA256}  $RAW_ZBM" | sha256sum -c -
+fi
+
+if [[ ! -f "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" && -f "$RAW_ZBM" ]]; then
+  if command -v python3 &>/dev/null && command -v objcopy &>/dev/null && [[ -f "${REPO_ROOT}/packaging/iso/branding/theme-zbm-uki.py" && -f "${REPO_ROOT}/packaging/iso/branding/splash.bmp" ]]; then
+    echo "[+] Theming ZFSBootMenu UKI for Alpine overlay..."
+    python3 "${REPO_ROOT}/packaging/iso/branding/theme-zbm-uki.py" \
+      "$RAW_ZBM" \
+      -o "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" \
+      -s "${REPO_ROOT}/packaging/iso/branding/splash.bmp" \
+      -f "ter-132b"
+  else
+    cp -f "$RAW_ZBM" "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
+  fi
+  rm -f "$RAW_ZBM"
 fi
 chmod 0644 "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
+
+if [[ -f "${REPO_ROOT}/packaging/iso/branding/theme-zbm-uki.py" ]]; then
+  cp -f "${REPO_ROOT}/packaging/iso/branding/theme-zbm-uki.py" "${OVL}/usr/lib/axonwall/theme-zbm-uki.py"
+  chmod +x "${OVL}/usr/lib/axonwall/theme-zbm-uki.py"
+fi
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-zbm-theme" ]]; then
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-zbm-theme" "${OVL}/usr/local/bin/axonwall-zbm-theme"
+  chmod +x "${OVL}/usr/local/bin/axonwall-zbm-theme"
+fi
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/splash.bmp" ]]; then
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/splash.bmp" "${OVL}/etc/zfsbootmenu/splash.bmp"
+fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/config.yaml" ]]; then
   cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/config.yaml" "${OVL}/etc/zfsbootmenu/config.yaml"
+fi
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/dracut.conf.d/colors.conf" ]]; then
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/dracut.conf.d/colors.conf" "${OVL}/etc/zfsbootmenu/dracut.conf.d/colors.conf"
+fi
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh" ]]; then
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh" "${OVL}/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh"
+  chmod 0755 "${OVL}/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh"
 fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh" ]]; then
   cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh" "${OVL}/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh"

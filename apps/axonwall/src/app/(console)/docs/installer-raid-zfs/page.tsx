@@ -1,6 +1,6 @@
 import React from 'react';
 import Link from 'next/link';
-import { HardDrive, Layers, RefreshCw, CheckCircle2, ShieldAlert, Cpu, Terminal } from 'lucide-react';
+import { HardDrive, Layers, RefreshCw, CheckCircle2, ShieldAlert, Cpu, Terminal, Palette } from 'lucide-react';
 import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
@@ -221,6 +221,56 @@ zroot
 └── data
     └── axonwall                (mountpoint=/var/lib/axonwall, persistent config & logs)`}
         />
+
+        {/* ZFSBootMenu Visual Theming & Styling */}
+        <div className="space-y-4 pt-6 border-t border-slate-800/60">
+          <h3 className="text-xl font-bold text-white flex items-center gap-2">
+            <Palette className="w-5 h-5 text-emerald-400" /> ZFSBootMenu Visual Theming &amp; Console Styling
+          </h3>
+          <p className="text-sm text-slate-300 leading-relaxed">
+            Axonwall provides full visual theming for ZFSBootMenu across the UEFI GOP graphics splash screen, console typography, and terminal color palettes.
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+              <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">1. Boot Splash Screen</span>
+              <p className="text-xs text-slate-400">
+                A 24-bit uncompressed Windows BMP (<code className="text-slate-200">640x480</code>) is embedded directly into the Unified Kernel Image (UKI) <code className="text-slate-200">.splash</code> section via <code className="text-slate-200">systemd-stub</code>, rendering seamlessly before kernel initialization.
+              </p>
+            </div>
+            <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+              <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">2. High-DPI Fonts</span>
+              <p className="text-xs text-slate-400">
+                On 4K and Retina consoles, small text is enlarged using <code className="text-slate-200">rd.vconsole.font=ter-132b</code> (32px bold Terminus) with automatic fallback (<code className="text-slate-200">zbm.autosize=1</code>).
+              </p>
+            </div>
+            <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+              <span className="text-xs font-semibold text-sky-400 uppercase tracking-wider">3. 16-Color ANSI Palettes</span>
+              <p className="text-xs text-slate-400">
+                Early pre-boot hooks (<code className="text-slate-200">15-axonwall-theme.sh</code>) program the hardware console registers to Axonwall Cyber-Slate &amp; Emerald (<code className="text-slate-200">#090e1a / #34d399</code>) or Nord / Dracula.
+              </p>
+            </div>
+          </div>
+
+          <CodeBlock
+            title="Managing ZFSBootMenu Theme with axonwall-zbm-theme"
+            language="bash"
+            code={`# Check current theme, embedded UKI splash section, and active font
+axonwall-zbm-theme status
+
+# Set font for 4K / High-DPI displays (ter-132b, ter-v32b, ter-v28b, ter-v24b, or default)
+sudo axonwall-zbm-theme set-font ter-132b
+
+# Switch 16-color ANSI console palette (axonwall, cyber-cyan, dracula, nord, monokai)
+sudo axonwall-zbm-theme set-palette cyber-cyan
+
+# Install custom splash graphic (automatically converts PNG/JPG to uncompressed BMP)
+sudo axonwall-zbm-theme set-splash /root/custom-brand.png
+
+# Re-embed UKI .splash section and sync hooks with EFI partition
+sudo axonwall-zbm-theme apply`}
+          />
+        </div>
       </section>
     </div>
   );

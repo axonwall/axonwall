@@ -126,11 +126,13 @@ if [[ -d "${SCRIPT_DIR}/config/bootloaders" ]]; then
   cp -r "${SCRIPT_DIR}/config/bootloaders/"* config/bootloaders/
 fi
 SPLASH_SRC="${SCRIPT_DIR}/branding/splash.png"
+SPLASH_BMP="${SCRIPT_DIR}/branding/splash.bmp"
 if [[ "${FLAVOR}" == "vault" && -f "${SCRIPT_DIR}/branding/splash-vault.png" ]]; then
   SPLASH_SRC="${SCRIPT_DIR}/branding/splash-vault.png"
+  SPLASH_BMP="${SCRIPT_DIR}/branding/splash-vault.bmp"
 fi
-if [[ ! -f "${SPLASH_SRC}" ]] && command -v python3 &>/dev/null && [[ -f "${SCRIPT_DIR}/branding/generate-splash.py" ]]; then
-  python3 "${SCRIPT_DIR}/branding/generate-splash.py" || true
+if [[ ( ! -f "${SPLASH_SRC}" || ! -f "${SPLASH_BMP}" ) ]] && command -v python3 &>/dev/null && [[ -f "${SCRIPT_DIR}/branding/generate-splash.py" ]]; then
+  python3 "${SCRIPT_DIR}/branding/generate-splash.py" "${SCRIPT_DIR}/branding" || true
 fi
 if [[ -f "${SPLASH_SRC}" ]]; then
   cp "${SPLASH_SRC}" config/includes.chroot/etc/axonwall/branding/splash.png
@@ -138,6 +140,11 @@ if [[ -f "${SPLASH_SRC}" ]]; then
   cp "${SPLASH_SRC}" config/includes.chroot/boot/grub/splash.png
   cp "${SPLASH_SRC}" config/bootloaders/isolinux/splash.png
   cp "${SPLASH_SRC}" config/bootloaders/grub-pc/live-theme/splash.png
+fi
+if [[ -f "${SPLASH_BMP}" ]]; then
+  mkdir -p config/includes.chroot/etc/axonwall/branding config/includes.chroot/etc/zfsbootmenu
+  cp "${SPLASH_BMP}" config/includes.chroot/etc/axonwall/branding/splash.bmp
+  cp "${SPLASH_BMP}" config/includes.chroot/etc/zfsbootmenu/splash.bmp
 fi
 if [[ -f "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" ]]; then
   cp "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" config/includes.chroot/boot/grub/themes/axonwall/theme.txt
@@ -287,15 +294,31 @@ ZBM_VERSION="3.1.0"
 ZBM_KVER="linux6.12"
 ZBM_SHA256="131d55c7b385df8cd319d267b6aa15d97f8c32c94f5149bd906556715fadf4e7"
 ZBM_CACHE="${WORK_DIR}/cache/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
-mkdir -p "${WORK_DIR}/cache" config/includes.chroot/usr/lib/zfsbootmenu
+mkdir -p "${WORK_DIR}/cache" config/includes.chroot/usr/lib/zfsbootmenu config/includes.chroot/usr/lib/axonwall
 if [[ ! -f config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi ]]; then
   if [[ ! -f "${ZBM_CACHE}" ]]; then
     echo "[+] Fetching ZFSBootMenu v${ZBM_VERSION} (${ZBM_KVER}) UKI..."
     curl -fsSL -o "${ZBM_CACHE}" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
   fi
   echo "${ZBM_SHA256}  ${ZBM_CACHE}" | sha256sum -c -
-  cp -f "${ZBM_CACHE}" config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
+
+  # Theme ZFSBootMenu UKI with Axonwall splash bitmap and high-DPI font parameters
+  if command -v python3 &>/dev/null && command -v objcopy &>/dev/null && [[ -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" && -f "${SPLASH_BMP}" ]]; then
+    echo "[+] Theming ZFSBootMenu UKI (embedding branded .splash section and console font)..."
+    python3 "${SCRIPT_DIR}/branding/theme-zbm-uki.py" \
+      "${ZBM_CACHE}" \
+      -o config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi \
+      -s "${SPLASH_BMP}" \
+      -f "ter-132b"
+  else
+    cp -f "${ZBM_CACHE}" config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
+  fi
   chmod 0644 config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
+fi
+
+if [[ -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" ]]; then
+  cp -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" config/includes.chroot/usr/lib/axonwall/theme-zbm-uki.py
+  chmod +x config/includes.chroot/usr/lib/axonwall/theme-zbm-uki.py
 fi
 
 if [[ "${FLAVOR}" == "axonwall" ]]; then

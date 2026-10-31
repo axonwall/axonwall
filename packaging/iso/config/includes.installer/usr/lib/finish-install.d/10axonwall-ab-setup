@@ -723,21 +723,83 @@ fi
 if [ "$INSTALL_MODE" = "zbm" ]; then
   echo "[+] Configuring ZFSBootMenu v3.1.0 Root-on-ZFS hooks & bootloader (removing GRUB)..."
   rm -rf /target/boot/grub /target/boot/efi/EFI/debian /target/boot/efi/EFI/grub /target/etc/grub.d/40_axonwall_ab 2>/dev/null || true
-  mkdir -p /target/boot/efi/EFI/ZBM /target/boot/efi/EFI/BOOT
+  mkdir -p /target/boot/efi/EFI/ZBM /target/boot/efi/EFI/BOOT /target/etc/zfsbootmenu/dracut.conf.d \
+           /target/etc/zfsbootmenu/hooks/early-setup.d /target/etc/zfsbootmenu/hooks/setup.d \
+           /target/boot/efi/EFI/ZBM/hooks/early-setup.d /target/boot/efi/EFI/ZBM/hooks/setup.d
+
+  # Stage splash bitmap
+  SPLASH_BMP="splash.bmp"
+  if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.vault-edition ]; then
+    SPLASH_BMP="splash-vault.bmp"
+  fi
+  for bcand in \
+    "/etc/zfsbootmenu/${SPLASH_BMP}" \
+    "/etc/axonwall/branding/${SPLASH_BMP}" \
+    "/target/etc/zfsbootmenu/${SPLASH_BMP}" \
+    "/target/etc/axonwall/branding/${SPLASH_BMP}" \
+    "/etc/zfsbootmenu/splash.bmp" \
+    "/etc/axonwall/branding/splash.bmp"; do
+    if [ -f "$bcand" ]; then
+      cp -f "$bcand" /target/etc/zfsbootmenu/splash.bmp 2>/dev/null || true
+      cp -f "$bcand" /target/boot/efi/EFI/ZBM/splash.bmp 2>/dev/null || true
+      break
+    fi
+  done
+
+  # Stage ZBM configuration and dracut theme configs
+  for f_cfg in /etc/zfsbootmenu/config.yaml /target/etc/zfsbootmenu/config.yaml; do
+    if [ -f "$f_cfg" ]; then
+      cp -f "$f_cfg" /target/etc/zfsbootmenu/config.yaml
+      break
+    fi
+  done
+  for f_col in /etc/zfsbootmenu/dracut.conf.d/colors.conf /target/etc/zfsbootmenu/dracut.conf.d/colors.conf; do
+    if [ -f "$f_col" ]; then
+      cp -f "$f_col" /target/etc/zfsbootmenu/dracut.conf.d/colors.conf
+      break
+    fi
+  done
+
+  # Stage theme and watchdog hooks
+  for f_th in /etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /target/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh; do
+    if [ -f "$f_th" ]; then
+      cp -f "$f_th" /target/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh
+      cp -f "$f_th" /target/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh
+      chmod +x /target/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /target/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh 2>/dev/null || true
+      break
+    fi
+  done
+  for f_wd in /etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh /target/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh; do
+    if [ -f "$f_wd" ]; then
+      cp -f "$f_wd" /target/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh
+      cp -f "$f_wd" /target/boot/efi/EFI/ZBM/hooks/setup.d/20-axonwall-watchdog.sh
+      chmod +x /target/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh /target/boot/efi/EFI/ZBM/hooks/setup.d/20-axonwall-watchdog.sh 2>/dev/null || true
+      break
+    fi
+  done
+
+  # Install UKI onto EFI partition (with .splash if python/objcopy available)
   if [ -f /target/usr/lib/zfsbootmenu/vmlinuz.efi ]; then
-    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/ZBM/VMLINUZ.EFI 2>/dev/null || true
-    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI 2>/dev/null || true
-    cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null || true
+    THEMED_DONE=0
+    if command -v python3 >/dev/null 2>&1 && [ -x /usr/lib/axonwall/theme-zbm-uki.py ] && [ -f /target/etc/zfsbootmenu/splash.bmp ]; then
+      if python3 /usr/lib/axonwall/theme-zbm-uki.py /target/usr/lib/zfsbootmenu/vmlinuz.efi \
+        -o /target/boot/efi/EFI/ZBM/VMLINUZ.EFI \
+        -s /target/etc/zfsbootmenu/splash.bmp \
+        -f "ter-132b" 2>/dev/null; then
+        THEMED_DONE=1
+      fi
+    fi
+    if [ "$THEMED_DONE" = "0" ]; then
+      cp -f /target/usr/lib/zfsbootmenu/vmlinuz.efi /target/boot/efi/EFI/ZBM/VMLINUZ.EFI 2>/dev/null || true
+    fi
+    cp -f /target/boot/efi/EFI/ZBM/VMLINUZ.EFI /target/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI 2>/dev/null || true
+    cp -f /target/boot/efi/EFI/ZBM/VMLINUZ.EFI /target/boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null || true
   fi
-  # Install ZBM watchdog hook into /target/etc/zfsbootmenu/hooks/setup.d/
-  mkdir -p /target/etc/zfsbootmenu/hooks/setup.d /target/etc/zfsbootmenu/dracut.conf.d
-  if [ -f /etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh ]; then
-    cp -f /etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh /target/etc/zfsbootmenu/hooks/setup.d/
-    chmod +x /target/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh
-  fi
-  if [ -f /etc/zfsbootmenu/config.yaml ]; then
-    cp -f /etc/zfsbootmenu/config.yaml /target/etc/zfsbootmenu/
-  fi
+
+  # Install CLI tools
+  mkdir -p /target/usr/local/bin /target/usr/lib/axonwall
+  [ -f /usr/local/bin/axonwall-zbm-theme ] && cp -f /usr/local/bin/axonwall-zbm-theme /target/usr/local/bin/ && chmod +x /target/usr/local/bin/axonwall-zbm-theme
+  [ -f /usr/lib/axonwall/theme-zbm-uki.py ] && cp -f /usr/lib/axonwall/theme-zbm-uki.py /target/usr/lib/axonwall/ && chmod +x /target/usr/lib/axonwall/theme-zbm-uki.py
 elif [ "$INSTALL_MODE" = "rolling" ]; then
   echo "[+] Configuring standard Debian GRUB bootloader for Rolling Single-Root mode..."
   mkdir -p /target/boot/grub
