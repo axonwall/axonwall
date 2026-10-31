@@ -696,14 +696,20 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     if (pathname === '/api/v1/fleet/block' && req.method === 'POST') {
       if (!verifyFleetAuth(req, res)) return;
       let body = '';
+      let aborted = false;
       req.on('data', (chunk: any) => {
+        if (aborted) return;
         body += chunk.toString();
         if (body.length > 65536) {
+          aborted = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Payload too large' }));
           req.destroy();
           return;
         }
       });
       req.on('end', () => {
+        if (aborted) return;
         try {
           const payload = JSON.parse(body);
           const rawTarget = typeof payload.target === 'string' ? payload.target.trim() : '';
@@ -724,11 +730,29 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
             }
             target = rawTarget.toLowerCase().replace(/-/g, ':');
           } else {
-            const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}(\/([0-9]|[12][0-9]|3[0-2]))?$/;
-            const ipv6Regex = /^[0-9a-fA-F:]+(\/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$/;
-            if (!ipv4Regex.test(rawTarget) && !ipv6Regex.test(rawTarget)) {
+            const slashParts = rawTarget.split('/');
+            if (slashParts.length > 2) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
               return res.end(JSON.stringify({ error: 'Invalid IP address or CIDR target' }));
+            }
+            const ipPart = slashParts[0] || '';
+            const prefixStr = slashParts[1];
+            const ipFamily = net.isIP(ipPart);
+            if (ipFamily !== 4 && ipFamily !== 6) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'Invalid IP address or CIDR target' }));
+            }
+            if (prefixStr !== undefined) {
+              if (!/^\d{1,3}$/.test(prefixStr)) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'Invalid CIDR prefix length' }));
+              }
+              const prefixNum = Number(prefixStr);
+              const maxPrefix = ipFamily === 4 ? 32 : 128;
+              if (prefixNum < 0 || prefixNum > maxPrefix) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'Invalid CIDR prefix length' }));
+              }
             }
           }
 
@@ -774,14 +798,20 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     if (pathname === '/api/v1/fleet/ha-transition' && req.method === 'POST') {
       if (!verifyFleetAuth(req, res)) return;
       let body = '';
+      let aborted = false;
       req.on('data', (chunk: any) => {
+        if (aborted) return;
         body += chunk.toString();
         if (body.length > 65536) {
+          aborted = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Payload too large' }));
           req.destroy();
           return;
         }
       });
       req.on('end', () => {
+        if (aborted) return;
         try {
           const payload = body ? JSON.parse(body) : {};
           const rawRole = String(payload.role || payload.state || '').toLowerCase();
@@ -824,14 +854,20 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     if (pathname === '/api/v1/fleet/sync' && req.method === 'POST') {
       if (!verifyFleetAuth(req, res)) return;
       let body = '';
+      let aborted = false;
       req.on('data', (chunk: any) => {
+        if (aborted) return;
         body += chunk.toString();
         if (body.length > 524288) {
+          aborted = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Payload too large' }));
           req.destroy();
           return;
         }
       });
       req.on('end', () => {
+        if (aborted) return;
         try {
           let desired: DesiredState | null = null;
           if (body.trim()) {
@@ -923,6 +959,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         let body = '';
         let aborted = false;
         req.on('data', (chunk: any) => {
+          if (aborted) return;
           body += chunk.toString();
           if (body.length > 262144) {
             aborted = true;
@@ -1259,15 +1296,20 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     let tunnelIp = existing?.tunnelIp;
     if (!tunnelIp) {
       const usedIps = new Set(Array.from(activeSatellites.values()).map(s => s.tunnelIp?.split('/')[0]).filter(Boolean));
-      for (let i = 2; i <= 254; i++) {
-        const candidate = `10.99.0.${i}`;
-        if (!usedIps.has(candidate)) {
-          tunnelIp = `${candidate}/24`;
-          break;
+      for (let thirdOctet = 0; thirdOctet <= 255 && !tunnelIp; thirdOctet++) {
+        for (let fourthOctet = thirdOctet === 0 ? 2 : 1; fourthOctet <= 254; fourthOctet++) {
+          const candidate = `10.99.${thirdOctet}.${fourthOctet}`;
+          if (!usedIps.has(candidate)) {
+            tunnelIp = `${candidate}/16`;
+            break;
+          }
         }
       }
       if (!tunnelIp) {
-        tunnelIp = `10.99.0.${ipCounter++ % 250 + 2}/24`;
+        const idx = ipCounter++;
+        const thirdOctet = Math.floor(idx / 250) % 256;
+        const fourthOctet = (idx % 250) + 2;
+        tunnelIp = `10.99.${thirdOctet}.${fourthOctet}/16`;
       }
     }
 

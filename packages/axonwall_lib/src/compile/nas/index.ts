@@ -153,9 +153,9 @@ export function compileNfsExports(nas?: NasConfig): string {
     const rawNets = exp.allowedNetworks && exp.allowedNetworks.length > 0
       ? exp.allowedNetworks
       : ['*'];
-    const nets = rawNets.map(sanitizeIniVal).filter(Boolean);
+    const nets = rawNets.map((n) => sanitizeIniVal(n).replace(/[\s()]/g, '')).filter(Boolean);
     const clientSpecs = nets.map((net) => `${net}(${mode},${syncMode},no_subtree_check,${squash})`).join(' ');
-    lines.push(`${sanitizeIniVal(exp.path)} ${clientSpecs}`);
+    lines.push(`${sanitizeIniVal(exp.path).replace(/[\s()]/g, '')} ${clientSpecs}`);
   }
 
   lines.push('');
@@ -173,6 +173,7 @@ export function compileIscsiConfig(nas?: NasConfig): string {
         allowedInitiators: t.allowedInitiators,
         chapEnabled: Boolean(t.chapUser && t.chapSecret),
         chapUser: t.chapUser || undefined,
+        chapSecret: t.chapSecret || undefined,
         luns: t.luns.map((l) => ({
           lunId: l.lunId,
           zvolDevice: l.zvolPath.startsWith('/dev/') ? l.zvolPath : `/dev/zvol/${l.zvolPath.replace(/^\/+/, '')}`,

@@ -81,11 +81,11 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
       // Existing host: merge ports, OS, scripts, and preserve user tags & comments
       const existing = hostMap.get(key)!;
 
-      // Merge ports
-      const portMap = new Map<number, NmapPort>();
-      for (const p of existing.ports) portMap.set(p.portid, p);
-      for (const p of newHost.ports) portMap.set(p.portid, p); // Overwrite / add updated port
-      const mergedPorts = Array.from(portMap.values()).sort((a, b) => a.portid - b.portid);
+      // Merge ports keyed by portid/protocol
+      const portMap = new Map<string, NmapPort>();
+      for (const p of existing.ports) portMap.set(`${p.portid}/${p.protocol}`, p);
+      for (const p of newHost.ports) portMap.set(`${p.portid}/${p.protocol}`, p); // Overwrite / add updated port
+      const mergedPorts = Array.from(portMap.values()).sort((a, b) => a.portid - b.portid || a.protocol.localeCompare(b.protocol));
 
       // Merge scripts
       const scriptMap = new Map<string, any>();
@@ -144,7 +144,8 @@ export function removeHostFromScan(scan: NmapRun, hostIdOrIp: string): NmapRun {
   const filtered = scan.hosts.filter(
     (h) =>
       h.id.toLowerCase() !== targetId &&
-      (!h.ipv4 || h.ipv4.toLowerCase() !== targetId)
+      (!h.ipv4 || h.ipv4.toLowerCase() !== targetId) &&
+      (!h.ipv6 || h.ipv6.toLowerCase() !== targetId)
   );
 
   return {

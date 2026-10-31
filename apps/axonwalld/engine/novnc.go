@@ -73,7 +73,13 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid Origin header", http.StatusForbidden)
 			return
 		}
-		if r.Host != "" && !strings.EqualFold(u.Host, r.Host) && !strings.EqualFold(u.Hostname(), strings.Split(r.Host, ":")[0]) {
+		reqHostOnly := r.Host
+		if h, _, splitErr := net.SplitHostPort(r.Host); splitErr == nil {
+			reqHostOnly = h
+		} else {
+			reqHostOnly = strings.Trim(r.Host, "[]")
+		}
+		if r.Host != "" && !strings.EqualFold(u.Host, r.Host) && !strings.EqualFold(u.Hostname(), reqHostOnly) {
 			http.Error(w, "Cross-origin WebSocket connection rejected", http.StatusForbidden)
 			return
 		}
@@ -134,6 +140,12 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	errChan := make(chan error, 2)
+	var writeMu sync.Mutex
+	safeWriteFrame := func(payload []byte, opcode byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return writeWSFrame(clientConn, payload, opcode)
+	}
 
 	// Goroutine 1: Backend -> WebSocket Client (pack into binary frames)
 	go func() {
@@ -141,7 +153,7 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for {
 			n, err := backendConn.Read(buf)
 			if n > 0 {
-				if err := writeWSFrame(clientConn, buf[:n], 0x2); err != nil {
+				if err := safeWriteFrame(buf[:n], 0x2); err != nil {
 					errChan <- err
 					return
 				}
@@ -162,12 +174,12 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if opcode == 0x8 { // Close frame
-				_ = writeWSFrame(clientConn, nil, 0x8)
+				_ = safeWriteFrame(nil, 0x8)
 				errChan <- io.EOF
 				return
 			}
 			if opcode == 0x9 { // Ping
-				_ = writeWSFrame(clientConn, payload, 0xA) // Pong
+				_ = safeWriteFrame(payload, 0xA) // Pong
 				continue
 			}
 			if len(payload) > 0 {
@@ -184,31 +196,27 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func writeWSFrame(w io.Writer, payload []byte, opcode byte) error {
 	length := len(payload)
-	header := make([]byte, 10)
-	header[0] = 0x80 | (opcode & 0x0F) // FIN + opcode
+	frame := make([]byte, 10+length)
+	frame[0] = 0x80 | (opcode & 0x0F) // FIN + opcode
 
 	headerLen := 2
 	if length <= 125 {
-		header[1] = byte(length)
+		frame[1] = byte(length)
 	} else if length <= 65535 {
-		header[1] = 126
-		binary.BigEndian.PutUint16(header[2:4], uint16(length))
+		frame[1] = 126
+		binary.BigEndian.PutUint16(frame[2:4], uint16(length))
 		headerLen = 4
 	} else {
-		header[1] = 127
-		binary.BigEndian.PutUint64(header[2:10], uint64(length))
+		frame[1] = 127
+		binary.BigEndian.PutUint64(frame[2:10], uint64(length))
 		headerLen = 10
 	}
 
-	if _, err := w.Write(header[:headerLen]); err != nil {
-		return err
-	}
 	if length > 0 {
-		if _, err := w.Write(payload); err != nil {
-			return err
-		}
+		copy(frame[headerLen:headerLen+length], payload)
 	}
-	return nil
+	_, err := w.Write(frame[:headerLen+length])
+	return err
 }
 
 func readWSFrame(r io.Reader) ([]byte, byte, error) {

@@ -227,6 +227,18 @@ export async function saveVmAction(
   };
 
   const existingIdx = currentVirt.vms.findIndex((v) => v.vmid === vm.vmid);
+  if (existingIdx >= 0 && vm.cloudInit?.password === '********') {
+    const prevPw = currentVirt.vms[existingIdx]?.cloudInit?.password;
+    if (prevPw && prevPw !== '********') {
+      vm = {
+        ...vm,
+        cloudInit: {
+          ...vm.cloudInit,
+          password: prevPw,
+        },
+      };
+    }
+  }
   let updatedVms: VirtualMachine[];
   if (existingIdx >= 0) {
     updatedVms = [...currentVirt.vms];
@@ -266,6 +278,17 @@ export async function saveVmAction(
       cores: vm.cores,
       memoryMb: vm.memoryMb,
       disks: vm.disks,
+      cloudInit: vm.cloudInit
+        ? {
+            user: vm.cloudInit.user,
+            password: vm.cloudInit.password || '',
+            sshKeys: vm.cloudInit.sshAuthorizedKeys || [],
+            ipConfig: vm.cloudInit.ipConfig,
+            gateway: vm.cloudInit.gateway || '',
+            nameservers: vm.cloudInit.nameservers || [],
+            customPayload: vm.cloudInit.customUserData || '',
+          }
+        : null,
     },
   });
 

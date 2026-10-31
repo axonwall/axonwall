@@ -198,9 +198,20 @@ func DiscoverDisks() []DiskDevice {
 
 		mounted := false
 		for _, line := range strings.Split(mountsStr, "\n") {
-			if strings.HasPrefix(line, devPath) {
-				mounted = true
-				break
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				mDev := fields[0]
+				if mDev == devPath {
+					mounted = true
+					break
+				}
+				if strings.HasPrefix(mDev, devPath) {
+					rem := mDev[len(devPath):]
+					if len(rem) > 0 && ((rem[0] >= '0' && rem[0] <= '9') || (rem[0] == 'p' && len(rem) > 1 && rem[1] >= '0' && rem[1] <= '9')) {
+						mounted = true
+						break
+					}
+				}
 			}
 		}
 
@@ -882,7 +893,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "SPACE":
 				cfg.InstallMode = archOptions[archCursor].mode
 			case "S":
-				if cfg.InstallMode != "zbm" {
+				if cfg.InstallMode == "rolling" {
+					if cfg.SlotMB == 8192 {
+						cfg.SlotMB = 16384
+					} else {
+						cfg.SlotMB = 8192
+					}
+				} else if cfg.InstallMode != "zbm" {
 					switch cfg.SlotMB {
 					case 2048:
 						cfg.SlotMB = 4096
@@ -1078,6 +1095,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "R":
 				disks = AutoAssignDiskRoles(DiscoverDisks())
 				diskCursor = 0
+			case "W":
+				cmd := exec.Command("/bin/sh", installerPath, "--wizard")
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				_ = cmd.Run()
+				return
 			case "B", "BACKSPACE", "LEFT":
 				step = 1
 			case "ENTER", "RIGHT":
@@ -1467,13 +1491,27 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 
 // executeLiveInstallation writes the config file, runs axonwall-install, and renders the live progress dashboard.
 func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *bufio.Reader) {
-	cfgPath := "/tmp/axonwall-install.conf"
+	runDir := "/run/axonwall"
+	if err := os.MkdirAll(runDir, 0700); err != nil {
+		runDir = os.TempDir()
+	}
+	tmpFile, err := os.CreateTemp(runDir, "axonwall-install-*.conf")
+	if err != nil {
+		fmt.Printf("\n%s[!] Failed to create installer configuration file: %v%s\n", colorRed, err, colorReset)
+		pause(reader)
+		return
+	}
+	cfgPath := tmpFile.Name()
+	_ = tmpFile.Chmod(0600)
 	content := FormatInstallerConfig(cfg)
-	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
+	if _, err := tmpFile.WriteString(content); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(cfgPath)
 		fmt.Printf("\n%s[!] Failed to write installer configuration: %v%s\n", colorRed, err, colorReset)
 		pause(reader)
 		return
 	}
+	_ = tmpFile.Close()
 	defer func() {
 		_ = os.Remove(cfgPath)
 	}()

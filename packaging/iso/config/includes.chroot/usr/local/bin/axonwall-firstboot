@@ -308,10 +308,11 @@ chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
 chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
 # Initialize persistent directories on /var/lib/axonwall (Headscale, OpenLDAP, HA PKI, shared /home)
-mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /var/cache/axonwall-ui /run/headscale
+mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /var/log/axonwall /var/cache/axonwall-ui /run/headscale
 mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
 mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
-chown root:axonwall-api /var/lib/axonwall 2>/dev/null || true
+chown root:axonwall-api /var/lib/axonwall /var/log/axonwall 2>/dev/null || true
+chmod 1770 /var/log/axonwall 2>/dev/null || true
 chown -R axonwall:axonwall /var/cache/axonwall-ui 2>/dev/null || true
 chmod 0750 /var/cache/axonwall-ui 2>/dev/null || true
 chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true

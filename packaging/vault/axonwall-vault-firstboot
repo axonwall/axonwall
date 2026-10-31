@@ -58,7 +58,8 @@ if [ ! -s "$CERT_DIR/hub.crt" ] || [ ! -s "$CERT_DIR/hub.key" ]; then
         -addext "subjectAltName=${SAN}" \
         || die "certificate generation failed"
 fi
-chown root:axonwall-vault "$CERT_DIR/hub.key" 2>/dev/null || true
+chown root:axonwall-vault "$CONF_DIR" "$CERT_DIR" "$CERT_DIR/hub.key" 2>/dev/null || true
+chmod 0750 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
 chmod 0640 "$CERT_DIR/hub.key"
 chmod 0644 "$CERT_DIR/hub.crt"
 

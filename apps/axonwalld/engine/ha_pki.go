@@ -80,12 +80,28 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 
 	caCertBytes, errCert := os.ReadFile(caCertPath)
 	caKeyBytes, errKey := os.ReadFile(caKeyPath)
-	if errCert == nil && errKey == nil {
-		certBlock, _ := pem.Decode(caCertBytes)
-		keyBlock, _ := pem.Decode(caKeyBytes)
-		if certBlock != nil && keyBlock != nil {
+	if errCert == nil {
+		if certBlock, _ := pem.Decode(caCertBytes); certBlock != nil {
 			caCert, _ = x509.ParseCertificate(certBlock.Bytes)
+		}
+	}
+	if errKey == nil {
+		if keyBlock, _ := pem.Decode(caKeyBytes); keyBlock != nil {
 			caKey, _ = x509.ParseECPrivateKey(keyBlock.Bytes)
+		}
+	}
+
+	// If this node was enrolled via CSR (has ca.crt, node.crt, and node.key, but no ca.key),
+	// preserve the enrolled certificates rather than generating a new Root CA.
+	if caCert != nil && caKey == nil {
+		if nodeBytes, errNode := os.ReadFile(nodeCertPath); errNode == nil {
+			if _, errNodeKey := os.Stat(nodeKeyPath); errNodeKey == nil {
+				if block, _ := pem.Decode(nodeBytes); block != nil {
+					if _, parseErr := x509.ParseCertificate(block.Bytes); parseErr == nil {
+						return nil
+					}
+				}
+			}
 		}
 	}
 
@@ -474,8 +490,10 @@ func ImportHAPKIBundle(bundle HAPKIBundle) error {
 	if err := os.WriteFile(HAPKINodeCertPath, []byte(bundle.NodeCertPEM), 0644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(HAPKINodeKeyPath, []byte(bundle.NodeKeyPEM), 0640); err != nil {
-		return err
+	if strings.TrimSpace(bundle.NodeKeyPEM) != "" {
+		if err := os.WriteFile(HAPKINodeKeyPath, []byte(bundle.NodeKeyPEM), 0640); err != nil {
+			return err
+		}
 	}
 	fixHAPKIPermissions()
 

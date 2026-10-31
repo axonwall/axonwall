@@ -61,14 +61,19 @@ func ValidateRouteSpec(route EdgeRouteSpec) error {
 	if dst == "" {
 		return fmt.Errorf("route destination cannot be empty")
 	}
+	gw := strings.TrimSpace(route.Gateway)
+	gwIP := net.ParseIP(gw)
+	if gw == "" || gwIP == nil {
+		return fmt.Errorf("invalid route gateway IP %q", route.Gateway)
+	}
 	if !strings.EqualFold(dst, "default") {
-		if _, _, err := net.ParseCIDR(dst); err != nil {
+		_, ipNet, err := net.ParseCIDR(dst)
+		if err != nil {
 			return fmt.Errorf("invalid route destination CIDR %q: %w", dst, err)
 		}
-	}
-	gw := strings.TrimSpace(route.Gateway)
-	if gw == "" || net.ParseIP(gw) == nil {
-		return fmt.Errorf("invalid route gateway IP %q", route.Gateway)
+		if (ipNet.IP.To4() != nil) != (gwIP.To4() != nil) {
+			return fmt.Errorf("route address family mismatch between destination %q and gateway %q", dst, gw)
+		}
 	}
 	dev := strings.TrimSpace(route.Device)
 	if dev != "" && (!validRadioRegex.MatchString(dev) || strings.HasPrefix(dev, "-") || strings.Contains(dev, "..")) {
@@ -95,6 +100,19 @@ func (e *EdgeNetworkEngine) SetLinkUp(dev string, up bool) error {
 		return fmt.Errorf("invalid interface name %q", dev)
 	}
 	return setInterfaceFlags(dev, up)
+}
+
+// RemoveAddress deletes an assigned CIDR address from an interface via Netlink RTM_DELADDR.
+func (e *EdgeNetworkEngine) RemoveAddress(dev, cidr string) error {
+	dev = strings.TrimSpace(dev)
+	cidr = strings.TrimSpace(cidr)
+	if dev == "" || !validRadioRegex.MatchString(dev) {
+		return fmt.Errorf("invalid interface name %q", dev)
+	}
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+	}
+	return delInterfaceAddressNetlink(dev, cidr)
 }
 
 // ConfigureInterface applies link state, MTU, CIDR address, and optional default gateway to a network device.
@@ -276,6 +294,43 @@ func addInterfaceAddressNetlink(dev, cidr string) error {
 	binary.NativeEndian.PutUint32(msg[0:4], uint32(len(msg)))
 	binary.NativeEndian.PutUint16(msg[4:6], uint16(syscall.RTM_NEWADDR))
 	binary.NativeEndian.PutUint16(msg[6:8], uint16(syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_REPLACE|syscall.NLM_F_ACK))
+	binary.NativeEndian.PutUint32(msg[8:12], nlSeq.Add(1))
+	binary.NativeEndian.PutUint32(msg[12:16], uint32(os.Getpid()))
+
+	return sendNetlinkRouteMessage(msg)
+}
+
+func delInterfaceAddressNetlink(dev, cidr string) error {
+	iface, err := net.InterfaceByName(dev)
+	if err != nil {
+		return err
+	}
+	ip, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return err
+	}
+	ones, _ := ipNet.Mask.Size()
+
+	family := uint8(syscall.AF_INET)
+	ipBytes := ip.To4()
+	if ipBytes == nil {
+		family = uint8(syscall.AF_INET6)
+		ipBytes = ip.To16()
+	}
+
+	msg := make([]byte, 24)
+	msg[16] = family
+	msg[17] = uint8(ones)
+	msg[18] = 0
+	msg[19] = uint8(syscall.RT_SCOPE_UNIVERSE)
+	binary.NativeEndian.PutUint32(msg[20:24], uint32(iface.Index))
+
+	msg = addRouteAttr(msg, syscall.IFA_LOCAL, ipBytes)
+	msg = addRouteAttr(msg, syscall.IFA_ADDRESS, ipBytes)
+
+	binary.NativeEndian.PutUint32(msg[0:4], uint32(len(msg)))
+	binary.NativeEndian.PutUint16(msg[4:6], uint16(syscall.RTM_DELADDR))
+	binary.NativeEndian.PutUint16(msg[6:8], uint16(syscall.NLM_F_REQUEST|syscall.NLM_F_ACK))
 	binary.NativeEndian.PutUint32(msg[8:12], nlSeq.Add(1))
 	binary.NativeEndian.PutUint32(msg[12:16], uint32(os.Getpid()))
 

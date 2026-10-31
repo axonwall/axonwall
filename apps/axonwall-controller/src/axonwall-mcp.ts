@@ -42,8 +42,35 @@ async function runStdioMcpServer() {
     if (!trimmed) return;
     try {
       const msg = JSON.parse(trimmed) as JsonRpcRequest;
+      const freshAuth = authenticateMcpToken(rawToken, clientIp);
+      if (!freshAuth.authenticated || !freshAuth.key) {
+        recordMcpAuditEntry({
+          keyId: freshAuth.key?.id ?? key.id,
+          keyName: freshAuth.key?.name ?? key.name,
+          agentType: freshAuth.key?.agentType ?? key.agentType,
+          clientIp,
+          toolName: `stdio:${msg.method || 'request'}`,
+          requiredScope: 'mcp:auth',
+          decision: 'denied',
+          denialReason: freshAuth.errorMessage || 'Stdio MCP token re-authentication failed',
+          paramsSummary: { transport: 'stdio', method: msg.method },
+        });
+        if (msg.id !== undefined) {
+          process.stdout.write(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: msg.id ?? null,
+              error: {
+                code: -32001,
+                message: freshAuth.errorMessage || 'Unauthorized or rate-limited MCP session',
+              },
+            }) + '\n'
+          );
+        }
+        return;
+      }
       const resp = await processMcpJsonRpcMessage(msg, {
-        key,
+        key: freshAuth.key,
         clientIp,
       });
       if (resp) {

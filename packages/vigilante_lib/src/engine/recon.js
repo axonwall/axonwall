@@ -361,10 +361,7 @@ export async function runReconScan(target, profileId = 'fast-ports', opts = {}) 
 
   // Also save as formal evidence artifact
   try {
-    await saveEvidenceFile(target, `${scanId}.json`, JSON.stringify(record, null, 2), {
-      source: 'recon',
-      profile: profile.id
-    });
+    await saveEvidenceFile('scans', target, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('RECON', `Could not save evidence file: ${err.message}`);
   }

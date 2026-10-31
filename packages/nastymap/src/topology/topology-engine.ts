@@ -404,6 +404,7 @@ function applyCircularLayout(graph: TopologyGraph, cx: number, cy: number, radiu
 
   const targetNodes = graph.nodes.filter((n) => n.id !== graph.scannerNode.id);
   const count = targetNodes.length;
+  if (count === 0) return;
   const angleStep = (2 * Math.PI) / count;
 
   targetNodes.forEach((node, idx) => {
@@ -422,16 +423,17 @@ function applySubnetGridLayout(graph: TopologyGraph, width: number, height: numb
     subnetMap.get(sub)!.push(node);
   }
 
+  graph.scannerNode.x = width / 2;
+  graph.scannerNode.y = 40;
+
   const subnets = Array.from(subnetMap.keys());
   const numSubnets = subnets.length;
+  if (numSubnets === 0) return;
   const cols = Math.ceil(Math.sqrt(numSubnets));
   const rows = Math.ceil(numSubnets / cols);
 
   const cellWidth = width / cols;
   const cellHeight = height / rows;
-
-  graph.scannerNode.x = width / 2;
-  graph.scannerNode.y = 40;
 
   subnets.forEach((sub, subIdx) => {
     const col = subIdx % cols;
@@ -441,6 +443,7 @@ function applySubnetGridLayout(graph: TopologyGraph, width: number, height: numb
 
     const group = subnetMap.get(sub)!;
     const count = group.length;
+    if (count === 0) return;
     const subRadius = Math.min(cellWidth, cellHeight) * 0.35;
     const angleStep = (2 * Math.PI) / count;
 
@@ -464,6 +467,7 @@ function applyForceLayoutInitialPositions(
 
   const targetNodes = graph.nodes.filter((n) => n.id !== graph.scannerNode.id);
   const count = targetNodes.length;
+  if (count === 0) return;
 
   targetNodes.forEach((node, idx) => {
     const angle = (idx / count) * 2 * Math.PI;

@@ -298,6 +298,25 @@ func ValidateRedirectDestination(dest string) (hostIP string, port int, isV6 boo
 		return "", 0, false, "", fmt.Errorf("empty redirect destination")
 	}
 
+	isProhibitedRedirectIP := func(ip net.IP) bool {
+		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return true
+		}
+		posture := DiscoverProtectedPosture()
+		ipStr := ip.String()
+		for _, selfIP := range posture.ApplianceIPs {
+			if selfIP == ipStr {
+				return true
+			}
+		}
+		for _, gwIP := range posture.GatewayAndHaIPs {
+			if gwIP == ipStr {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Check if host:port
 	if h, pStr, splitErr := net.SplitHostPort(trimmed); splitErr == nil {
 		var p int
@@ -305,7 +324,7 @@ func ValidateRedirectDestination(dest string) (hostIP string, port int, isV6 boo
 			return "", 0, false, "", fmt.Errorf("invalid redirect port '%s'", pStr)
 		}
 		parsedIP := net.ParseIP(h)
-		if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsUnspecified() || parsedIP.IsMulticast() {
+		if isProhibitedRedirectIP(parsedIP) {
 			return "", 0, false, "", fmt.Errorf("invalid or prohibited redirect target IP '%s'", h)
 		}
 		v6 := parsedIP.To4() == nil
@@ -316,7 +335,7 @@ func ValidateRedirectDestination(dest string) (hostIP string, port int, isV6 boo
 	}
 
 	parsedIP := net.ParseIP(trimmed)
-	if parsedIP == nil || parsedIP.IsLoopback() || parsedIP.IsUnspecified() || parsedIP.IsMulticast() {
+	if isProhibitedRedirectIP(parsedIP) {
 		return "", 0, false, "", fmt.Errorf("invalid or prohibited redirect target IP '%s'", trimmed)
 	}
 	v6 := parsedIP.To4() == nil

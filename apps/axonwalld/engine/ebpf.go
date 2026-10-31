@@ -168,7 +168,8 @@ func (m *EBPFManager) monitorFlows() {
 							_ = m.objs.BlocklistMap.Put(key.SrcIp, uint8(1))
 						}
 					}
-				} else if batch != nil {
+				}
+				if batch != nil {
 					err := batch.Append(
 						now,
 						srcIP.String(),

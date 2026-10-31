@@ -70,12 +70,12 @@ echo "[+] Configuring live-build for Debian 13 (Trixie)..."
 lb config \
   --mode debian \
   --distribution trixie \
-  --mirror-bootstrap "http://deb.debian.org/debian/" \
-  --mirror-chroot "http://deb.debian.org/debian/" \
-  --mirror-chroot-security "http://deb.debian.org/debian-security/" \
-  --mirror-binary "http://deb.debian.org/debian/" \
-  --mirror-binary-security "http://deb.debian.org/debian-security/" \
-  --mirror-debian-installer "http://deb.debian.org/debian/" \
+  --mirror-bootstrap "https://deb.debian.org/debian/" \
+  --mirror-chroot "https://deb.debian.org/debian/" \
+  --mirror-chroot-security "https://deb.debian.org/debian-security/" \
+  --mirror-binary "https://deb.debian.org/debian/" \
+  --mirror-binary-security "https://deb.debian.org/debian-security/" \
+  --mirror-debian-installer "https://deb.debian.org/debian/" \
   --keyring-packages debian-archive-keyring \
   --architectures amd64 \
   --linux-flavours amd64 \

@@ -32,6 +32,7 @@ const (
 	dhcpMsgOffer    = 2
 	dhcpMsgRequest  = 3
 	dhcpMsgAck      = 5
+	dhcpMsgNak      = 6
 )
 
 // DHCPv4Lease represents a leased IPv4 configuration obtained from a DHCP server.
@@ -240,16 +241,25 @@ func AcquireDHCPv4Lease(dev string, timeout time.Duration) (DHCPv4Lease, error) 
 	}
 
 	// 4. Wait for DHCPACK
-	for time.Now().Before(deadline) {
+	ackDeadline := time.Now().Add(timeout)
+	for time.Now().Before(ackDeadline) {
 		n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
 		if recvErr != nil {
 			break
 		}
+		if n >= 34 && !bytes.Equal(buf[28:34], iface.HardwareAddr[:6]) {
+			continue
+		}
 		mType, parsed, pErr := ParseDHCPv4Packet(bytes.Clone(buf[:n]), xid)
-		if pErr == nil && mType == dhcpMsgAck {
-			return parsed, nil
+		if pErr == nil {
+			if mType == dhcpMsgAck {
+				return parsed, nil
+			}
+			if mType == dhcpMsgNak {
+				return lease, fmt.Errorf("received DHCPNAK from server on %s", dev)
+			}
 		}
 	}
 
-	return offer, nil
+	return lease, fmt.Errorf("timed out waiting for DHCPACK on %s", dev)
 }

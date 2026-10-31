@@ -633,11 +633,20 @@ export function generateNetworkScenario(options: ScenarioGeneratorOptions = {}):
 } {
   const subnetBase = options.subnet ? options.subnet.split('/')[0].replace(/\.\d+$/, '') : '192.168.1';
   const gatewayIp = options.gatewayIp || `${subnetBase}.1`;
-  const totalCount = options.totalHosts || 22;
+  const totalCount = Math.max(1, Math.min(options.totalHosts || 22, 250));
   const threatCount = Math.min(options.threatCount !== undefined ? options.threatCount : 2, 5);
 
   const usedHostOctets = new Set<number>([1]); // 1 reserved for gateway
   const getUniqueOctet = (): number => {
+    if (usedHostOctets.size >= 253) {
+      for (let i = 2; i <= 254; i++) {
+        if (!usedHostOctets.has(i)) {
+          usedHostOctets.add(i);
+          return i;
+        }
+      }
+      return 254;
+    }
     let octet: number;
     do {
       octet = randomInt(2, 254);

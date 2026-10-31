@@ -511,6 +511,21 @@ export async function changeAdminPasswordAction(formData: FormData) {
     // A password change ends every outstanding session (audit B-09).
     bumpSessionEpoch();
 
+    // Mint a fresh session cookie for the caller with updated epoch and passwordChangeRequired=false
+    try {
+      const freshSession = { ...session, passwordChangeRequired: false };
+      const freshToken = await createSessionToken(freshSession);
+      const cookieStore = await cookies();
+      const hdrs = await headers();
+      cookieStore.set(SESSION_COOKIE, freshToken, {
+        httpOnly: true,
+        secure: isSecureRequest(hdrs),
+        sameSite: 'lax',
+        maxAge: SESSION_MAX_AGE,
+        path: '/',
+      });
+    } catch {}
+
     process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
     return { success: true };
   } catch (err: any) {

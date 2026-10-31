@@ -8,23 +8,28 @@ import type {
 } from '../types/nmap';
 
 function compareHostPorts(portsA: NmapPort[], portsB: NmapPort[]): HostPortDiff[] {
-  const mapA = new Map<number, NmapPort>();
-  const mapB = new Map<number, NmapPort>();
+  const mapA = new Map<string, NmapPort>();
+  const mapB = new Map<string, NmapPort>();
 
-  for (const p of portsA) mapA.set(p.portid, p);
-  for (const p of portsB) mapB.set(p.portid, p);
+  for (const p of portsA) mapA.set(`${p.portid}/${p.protocol}`, p);
+  for (const p of portsB) mapB.set(`${p.portid}/${p.protocol}`, p);
 
-  const allPortIds = Array.from(new Set([...mapA.keys(), ...mapB.keys()])).sort((a, b) => a - b);
+  const allPortKeys = Array.from(new Set([...mapA.keys(), ...mapB.keys()])).sort((a, b) => {
+    const [portA, protoA] = a.split('/');
+    const [portB, protoB] = b.split('/');
+    const diff = Number(portA) - Number(portB);
+    return diff !== 0 ? diff : protoA.localeCompare(protoB);
+  });
   const diffs: HostPortDiff[] = [];
 
-  for (const pid of allPortIds) {
-    const pA = mapA.get(pid);
-    const pB = mapB.get(pid);
+  for (const key of allPortKeys) {
+    const pA = mapA.get(key);
+    const pB = mapB.get(key);
 
     if (!pA && pB) {
       // Port was added in scan B
       diffs.push({
-        portid: pid,
+        portid: pB.portid,
         protocol: pB.protocol,
         changeType: 'added',
         newPort: pB,
@@ -32,7 +37,7 @@ function compareHostPorts(portsA: NmapPort[], portsB: NmapPort[]): HostPortDiff[
     } else if (pA && !pB) {
       // Port was removed in scan B
       diffs.push({
-        portid: pid,
+        portid: pA.portid,
         protocol: pA.protocol,
         changeType: 'removed',
         oldPort: pA,
@@ -45,7 +50,7 @@ function compareHostPorts(portsA: NmapPort[], portsB: NmapPort[]): HostPortDiff[
 
       if (stateChanged || serviceChanged || versionChanged) {
         diffs.push({
-          portid: pid,
+          portid: pB.portid,
           protocol: pB.protocol,
           changeType: 'modified',
           oldPort: pA,
@@ -53,7 +58,7 @@ function compareHostPorts(portsA: NmapPort[], portsB: NmapPort[]): HostPortDiff[
         });
       } else {
         diffs.push({
-          portid: pid,
+          portid: pB.portid,
           protocol: pB.protocol,
           changeType: 'unchanged',
           oldPort: pA,

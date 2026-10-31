@@ -54,7 +54,7 @@ export function HostTable({
 
       return ip.includes(q) || name.includes(q) || os.includes(q) || services.includes(q);
     });
-  }, [scan.hosts, search, statusFilter]);
+  }, [scan.hosts, search, statusFilter, onlyOpenPorts]);
 
   const sortedHosts = useMemo(() => {
     return [...filteredHosts].sort((a, b) => {
@@ -114,7 +114,16 @@ export function HostTable({
       h.latencyMs !== undefined ? h.latencyMs : '',
     ]);
 
-    const csvContent = [headers.join(','), ...rows.map((r) => r.map((cell) => `"${cell}"`).join(','))].join('\n');
+    const escapeCsvCell = (val: unknown): string => {
+      const str = String(val ?? '');
+      const neutralized = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+      return `"${neutralized.replace(/"/g, '""')}"`;
+    };
+
+    const csvContent = [
+      headers.map(escapeCsvCell).join(','),
+      ...rows.map((r) => r.map(escapeCsvCell).join(',')),
+    ].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

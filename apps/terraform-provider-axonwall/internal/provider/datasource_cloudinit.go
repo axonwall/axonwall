@@ -342,13 +342,14 @@ func (d *CloudInitConfigDataSource) Read(ctx context.Context, req datasource.Rea
 		}
 	}
 
+	standbyEnabled := true
+	if !data.StorageStandbyEnabled.IsNull() && !data.StorageStandbyEnabled.IsUnknown() {
+		standbyEnabled = data.StorageStandbyEnabled.ValueBool()
+	}
+
 	partitionsMap := map[string]interface{}{
 		"efi_size_mb": efiSizeMB,
 		"slot_a": map[string]interface{}{
-			"size_gb":    rootSizeGB,
-			"filesystem": rootFstype,
-		},
-		"slot_b": map[string]interface{}{
 			"size_gb":    rootSizeGB,
 			"filesystem": rootFstype,
 		},
@@ -358,6 +359,12 @@ func (d *CloudInitConfigDataSource) Read(ctx context.Context, req datasource.Rea
 		},
 		"data": dataMap,
 		"logs": logsMap,
+	}
+	if standbyEnabled {
+		partitionsMap["slot_b"] = map[string]interface{}{
+			"size_gb":    rootSizeGB,
+			"filesystem": rootFstype,
+		}
 	}
 
 	encryptionMap := map[string]interface{}{

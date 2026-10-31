@@ -156,10 +156,7 @@ export async function runZapScan(targetUrl, profileId = 'spider', opts = {}) {
 
   // Evidence file
   try {
-    await saveEvidenceFile(targetUrl, `${scanId}.json`, JSON.stringify(record, null, 2), {
-      source: 'zap',
-      profile: profile.id
-    });
+    await saveEvidenceFile('scans', targetUrl, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('ZAP', `Could not save evidence file: ${err.message}`);
   }

@@ -75,6 +75,13 @@ san_profile() {
 subj_name() { hostname 2>/dev/null || echo axonwall; }
 
 fix_hub_ownership() {
+    if [ -f /etc/axonwall/.vault-edition ] && getent group axonwall-vault >/dev/null 2>&1; then
+        chown root:axonwall-vault "$KEY" 2>/dev/null || true
+        chown root:root "$CRT" 2>/dev/null || true
+        chmod 0640 "$KEY"
+        chmod 0644 "$CRT"
+        return 0
+    fi
     if getent passwd axonwall-controller >/dev/null 2>&1; then
         chown axonwall-controller:axonwall-controller "$KEY" "$CRT" 2>/dev/null || true
     fi
@@ -183,6 +190,13 @@ issue_selfsigned() {
 }
 
 restart_controller() {
+    if [ -f /etc/axonwall/.vault-edition ]; then
+        if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            systemctl restart seaweedfs.service 2>/dev/null \
+                || echo "note: restart seaweedfs.service manually"
+        fi
+        return 0
+    fi
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
         systemctl restart axonwall-controller 2>/dev/null \
             || echo "note: restart axonwall-controller manually"

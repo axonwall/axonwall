@@ -29,14 +29,21 @@ const EPOCH_PATHS = ['/var/lib/axonwall/session-epoch', '/etc/axonwall/session-e
 const REVOKED_PATHS = ['/var/lib/axonwall/revoked-jtis', '/etc/axonwall/revoked-jtis'];
 const MAX_REVOKED_ENTRIES = 500;
 
+let memoryEpoch = 0;
+const memoryRevokedJtis = new Set<string>();
+
 export function currentSessionEpoch(): number {
+  let maxEpoch = memoryEpoch;
   for (const p of EPOCH_PATHS) {
     try {
       const value = Number(fs.readFileSync(p, 'utf-8').trim());
-      if (Number.isFinite(value) && value > 0) return value;
+      if (Number.isFinite(value) && value > maxEpoch) {
+        maxEpoch = value;
+      }
     } catch {}
   }
-  return 0;
+  memoryEpoch = maxEpoch;
+  return maxEpoch;
 }
 
 /** Stamp a session with the current epoch before it is minted. */
@@ -46,7 +53,9 @@ export function stampSessionEpoch(session: UserSession): void {
 
 /** Invalidate every outstanding session (password change). */
 export function bumpSessionEpoch(): void {
-  const next = String(Date.now());
+  const nextVal = Math.max(Date.now(), currentSessionEpoch() + 1);
+  memoryEpoch = nextVal;
+  const next = String(nextVal);
   for (const p of EPOCH_PATHS) {
     try {
       fs.writeFileSync(p, next, { mode: 0o644 });
@@ -55,22 +64,25 @@ export function bumpSessionEpoch(): void {
 }
 
 function readRevokedJtis(): string[] {
+  const combined = new Set<string>(memoryRevokedJtis);
   for (const p of REVOKED_PATHS) {
     try {
-      return fs
+      const lines = fs
         .readFileSync(p, 'utf-8')
         .split('\n')
         .map((l) => l.trim())
         .filter(Boolean);
+      for (const l of lines) combined.add(l);
     } catch {}
   }
-  return [];
+  return Array.from(combined);
 }
 
 /** Revoke one token by its jti (logout). */
 export function revokeTokenJti(jti: string): void {
   if (!jti) return;
-  const entries = [...readRevokedJtis(), jti].slice(-MAX_REVOKED_ENTRIES);
+  memoryRevokedJtis.add(jti);
+  const entries = readRevokedJtis().slice(-MAX_REVOKED_ENTRIES);
   const content = entries.join('\n') + '\n';
   for (const p of REVOKED_PATHS) {
     try {

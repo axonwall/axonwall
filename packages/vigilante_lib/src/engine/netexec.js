@@ -221,10 +221,7 @@ export async function runNetexecAudit(target, profileId = 'smb-signing', opts = 
 
   // Evidence file
   try {
-    await saveEvidenceFile(target, `${scanId}.json`, JSON.stringify(record, null, 2), {
-      source: 'netexec',
-      profile: profile.id
-    });
+    await saveEvidenceFile('scans', target, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('NETEXEC', `Could not save evidence file: ${err.message}`);
   }

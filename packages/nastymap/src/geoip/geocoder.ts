@@ -18,7 +18,7 @@ interface GeoRecord {
 const KNOWN_GEO_PREFIXES: GeoRecord[] = [
   // Google / US West
   {
-    prefix: '8.8.8',
+    prefix: '8.8.8.',
     city: 'Mountain View',
     region: 'California',
     country: 'United States',
@@ -31,7 +31,7 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
     timezone: 'America/Los_Angeles',
   },
   {
-    prefix: '8.8.4',
+    prefix: '8.8.4.',
     city: 'Mountain View',
     region: 'California',
     country: 'United States',
@@ -71,7 +71,7 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
   },
   // Cloudflare
   {
-    prefix: '1.1.1',
+    prefix: '1.1.1.',
     city: 'Sydney',
     region: 'New South Wales',
     country: 'Australia',
@@ -97,7 +97,7 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
     timezone: 'America/Los_Angeles',
   },
   {
-    prefix: '172.67',
+    prefix: '172.67.',
     city: 'Chicago',
     region: 'Illinois',
     country: 'United States',
@@ -176,6 +176,20 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
     org: 'Microsoft Azure (West Europe)',
     timezone: 'Europe/Amsterdam',
   },
+  // European Providers (Hetzner, OVH) - more specific prefixes before broader ones
+  {
+    prefix: '51.38.',
+    city: 'Roubaix',
+    region: 'Hauts-de-France',
+    country: 'France',
+    countryCode: 'FR',
+    latitude: 50.6927,
+    longitude: 3.1778,
+    isp: 'OVH SAS',
+    asn: 'AS16276',
+    org: 'OVH SAS Gravelines',
+    timezone: 'Europe/Paris',
+  },
   {
     prefix: '51.',
     city: 'London',
@@ -189,9 +203,8 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
     org: 'Azure UK South',
     timezone: 'Europe/London',
   },
-  // European Providers (Hetzner, OVH)
   {
-    prefix: '138.201',
+    prefix: '138.201.',
     city: 'Nuremberg',
     region: 'Bavaria',
     country: 'Germany',
@@ -204,7 +217,7 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
     timezone: 'Europe/Berlin',
   },
   {
-    prefix: '142.44',
+    prefix: '142.44.',
     city: 'Beauharnois',
     region: 'Quebec',
     country: 'Canada',
@@ -215,19 +228,6 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
     asn: 'AS16276',
     org: 'OVH Hosting Inc.',
     timezone: 'America/Toronto',
-  },
-  {
-    prefix: '51.38',
-    city: 'Roubaix',
-    region: 'Hauts-de-France',
-    country: 'France',
-    countryCode: 'FR',
-    latitude: 50.6927,
-    longitude: 3.1778,
-    isp: 'OVH SAS',
-    asn: 'AS16276',
-    org: 'OVH SAS Gravelines',
-    timezone: 'Europe/Paris',
   },
   // Asia Pacific / Tokyo / Singapore
   {
@@ -299,7 +299,7 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
   },
   // Quad9 & OpenDNS
   {
-    prefix: '9.9.9',
+    prefix: '9.9.9.',
     city: 'Zurich',
     region: 'Zurich',
     country: 'Switzerland',
@@ -312,7 +312,7 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
     timezone: 'Europe/Zurich',
   },
   {
-    prefix: '208.67',
+    prefix: '208.67.',
     city: 'San Francisco',
     region: 'California',
     country: 'United States',
@@ -326,7 +326,7 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
   },
   // Scanme.nmap.org
   {
-    prefix: '45.33.32',
+    prefix: '45.33.32.',
     city: 'Fremont',
     region: 'California',
     country: 'United States',

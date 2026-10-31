@@ -193,7 +193,7 @@ fi
 
 chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
 chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
-chmod 0770 /etc/axonwall 2>/dev/null || true
+chmod 1770 /etc/axonwall 2>/dev/null || true
 chmod 0750 /etc/axonwall/certs 2>/dev/null || true
 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
 chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
@@ -202,7 +202,8 @@ mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/etc-axonwall /var/lib/axo
 mkdir -p /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
 mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki /var/lib/openldap/run /run/openldap
 chown -R axonwall:axonwall-api /var/lib/axonwall /run/headscale /run/axonwall 2>/dev/null || true
-chown -R axonwall:axonwall-api /var/log/axonwall 2>/dev/null || true
+chown root:axonwall-api /var/log/axonwall 2>/dev/null || true
+chmod 1770 /var/log/axonwall 2>/dev/null || true
 chmod 0775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home /var/lib/axonwall/ldap 2>/dev/null || true
 chmod 0750 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
@@ -285,7 +286,8 @@ if [ -f /etc/axonwall/controller.env ]; then
   chown root:axonwall-controller /etc/axonwall/controller.env 2>/dev/null || true
   chmod 0640 /etc/axonwall/controller.env 2>/dev/null || true
 fi
-chown -R axonwall:axonwall-api /opt/axonwall 2>/dev/null || true
+chown -R root:root /opt/axonwall 2>/dev/null || true
+chmod -R go-w /opt/axonwall 2>/dev/null || true
 
 # Initialize etckeeper if installed
 if command -v etckeeper >/dev/null 2>&1; then

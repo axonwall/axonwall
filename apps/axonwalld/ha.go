@@ -111,23 +111,31 @@ func (e *HAEngine) handleNotificationConn(conn net.Conn) {
 	// Verify peer credentials: only root (UID 0) is allowed to send transitions
 	if uconn, ok := conn.(*net.UnixConn); ok {
 		raw, err := uconn.SyscallConn()
-		if err == nil {
-			var credErr error
-			_ = raw.Control(func(fd uintptr) {
-				ucred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-				if err != nil {
-					credErr = err
-					return
-				}
-				if ucred.Uid != 0 {
-					credErr = fmt.Errorf("unauthorized caller uid %d, expected 0", ucred.Uid)
-				}
-			})
-			if credErr != nil {
-				slog.Warn("Rejecting HA socket connection from unauthorized peer", "error", credErr)
-				_, _ = conn.Write([]byte("ERR: unauthorized\n"))
+		if err != nil {
+			slog.Warn("Rejecting HA socket connection: failed to access raw conn", "error", err)
+			_, _ = conn.Write([]byte("ERR: unauthorized\n"))
+			return
+		}
+		var credErr error
+		authorized := false
+		if ctrlErr := raw.Control(func(fd uintptr) {
+			ucred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+			if err != nil {
+				credErr = err
 				return
 			}
+			if ucred.Uid != 0 {
+				credErr = fmt.Errorf("unauthorized caller uid %d, expected 0", ucred.Uid)
+				return
+			}
+			authorized = true
+		}); ctrlErr != nil && credErr == nil {
+			credErr = ctrlErr
+		}
+		if credErr != nil || !authorized {
+			slog.Warn("Rejecting HA socket connection from unauthorized peer", "error", credErr)
+			_, _ = conn.Write([]byte("ERR: unauthorized\n"))
+			return
 		}
 	}
 
@@ -233,6 +241,12 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		if strings.ContainsAny(field, "\n\r\"'{};#") {
 			return fmt.Errorf("invalid characters in HA configuration: %q", field)
 		}
+	}
+	if cfg.PeerIp != "" && net.ParseIP(cfg.PeerIp) == nil {
+		return fmt.Errorf("invalid HA peer IP address: %q", cfg.PeerIp)
+	}
+	if cfg.ConntrackSync.PeerAddress != "" && net.ParseIP(cfg.ConntrackSync.PeerAddress) == nil {
+		return fmt.Errorf("invalid conntrack sync peer IP address: %q", cfg.ConntrackSync.PeerAddress)
 	}
 
 	if err := e.generateKeepalived(cfg); err != nil {

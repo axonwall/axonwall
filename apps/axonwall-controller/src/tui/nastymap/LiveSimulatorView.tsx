@@ -67,7 +67,7 @@ export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [], readO
     let resolved = false;
 
     try {
-      const child = spawn('nmap', [...activeProfile.flags, '-oX', '-', activeSubnet.cidr], {
+      const child = spawn('nmap', [...activeProfile.flags, '-oX', '-', '--', activeSubnet.cidr], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -77,6 +77,10 @@ export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [], readO
 
       child.stdout.on('data', (chunk: Buffer) => {
         xmlChunks += chunk.toString('utf-8');
+      });
+
+      child.stderr.on('data', () => {
+        // Drain stderr to prevent buffer backpressure deadlock
       });
 
       child.on('error', () => {

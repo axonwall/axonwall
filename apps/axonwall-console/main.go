@@ -859,12 +859,15 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	extraSections := ""
 	if len(existingYaml) > 0 {
 		str := string(existingYaml)
+		minIdx := -1
 		for _, sec := range []string{"\nvlans:", "\nbridges:", "\nbonds:", "\nlaggs:", "\nvirtualIps:", "\nvrfs:"} {
 			idx := strings.Index(str, sec)
-			if idx != -1 {
-				extraSections = strings.TrimSpace(str[idx+1:])
-				break
+			if idx != -1 && (minIdx == -1 || idx < minIdx) {
+				minIdx = idx
 			}
+		}
+		if minIdx != -1 {
+			extraSections = strings.TrimSpace(str[minIdx+1:])
 		}
 	}
 	if extraSections != "" {

@@ -295,7 +295,7 @@ func (m *NasManager) BootstrapInstallZfsPool() {
 		Autotrim:    true,
 		Compression: "lz4",
 	}
-	if err := ValidateZfsPoolSpec(poolSpec); err != nil {
+	if err := ValidateInstallZfsPoolSpec(poolSpec); err != nil {
 		slog.Warn("Refusing install-time ZFS pool: invalid spec", "error", err)
 		return
 	}

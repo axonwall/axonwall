@@ -137,6 +137,7 @@ export function App({
           host={selectedHost}
           onBack={() => setSelectedHost(null)}
           onUpdateHost={handleUpdateHost}
+          readOnly={readOnly}
         />
       ) : (
         <>

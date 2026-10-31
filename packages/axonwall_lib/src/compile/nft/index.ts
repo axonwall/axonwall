@@ -473,7 +473,7 @@ export function compileNftables(state: DesiredState): CompileResult {
       const elements = alias.entries.join(', ');
       lines.push(`  set ${setName} {`);
       lines.push(`    type ${setType};`);
-      if (alias.type === 'network' || alias.type === 'host' || alias.type === 'port') {
+      if (alias.type === 'network' || alias.type === 'host' || alias.type === 'port' || alias.type === 'urltable') {
         lines.push('    flags interval;');
       }
       lines.push(`    elements = { ${elements} };`);
@@ -1058,8 +1058,12 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
       const rawName = rule.source.slice(1);
       const aliasName = sanitizeIdentifier(rawName);
       const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
-      parts.push(`${isV6 ? 'ip6' : 'ip'} saddr @set_${aliasName}`);
+      if (matchedAlias?.type === 'mac') {
+        parts.push(`ether saddr @set_${aliasName}`);
+      } else {
+        const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
+        parts.push(`${isV6 ? 'ip6' : 'ip'} saddr @set_${aliasName}`);
+      }
     } else if (rule.source.includes(':')) {
       parts.push(`ip6 saddr ${rule.source}`);
     } else {
@@ -1073,8 +1077,12 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
       const rawName = rule.destination.slice(1);
       const aliasName = sanitizeIdentifier(rawName);
       const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
-      parts.push(`${isV6 ? 'ip6' : 'ip'} daddr @set_${aliasName}`);
+      if (matchedAlias?.type === 'mac') {
+        parts.push(`ether daddr @set_${aliasName}`);
+      } else {
+        const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
+        parts.push(`${isV6 ? 'ip6' : 'ip'} daddr @set_${aliasName}`);
+      }
     } else if (rule.destination.includes(':')) {
       parts.push(`ip6 daddr ${rule.destination}`);
     } else {

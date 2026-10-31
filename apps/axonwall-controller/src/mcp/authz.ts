@@ -85,7 +85,7 @@ function saveMcpKeysInternal(keys: McpApiKey[]): void {
   for (const keysPath of Array.from(new Set(targetPaths))) {
     try {
       fs.mkdirSync(path.dirname(keysPath), { recursive: true, mode: 0o775 });
-      const tmpPath = `${keysPath}.tmp.${process.pid}`;
+      const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto.randomUUID()}`;
       fs.writeFileSync(tmpPath, serialized, { mode: 0o660 });
       try {
         fs.chmodSync(tmpPath, 0o660);

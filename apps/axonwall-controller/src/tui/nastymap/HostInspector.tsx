@@ -6,14 +6,17 @@ export interface HostInspectorProps {
   host: NmapHost;
   onBack: () => void;
   onUpdateHost?: (hostId: string, updater: (prev: NmapHost) => NmapHost | Partial<NmapHost>) => void;
+  readOnly?: boolean;
 }
 
-export function HostInspector({ host, onBack, onUpdateHost }: HostInspectorProps) {
+export function HostInspector({ host, onBack, onUpdateHost, readOnly = false }: HostInspectorProps) {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   useInput((input, key) => {
     if (key.escape || key.backspace || input === 'b' || input === 'q') {
       onBack();
+    } else if (readOnly && (input === 'd' || input === 'r' || input === 't')) {
+      setStatusMsg('⚠️ Action blocked: operator is in read-only mode');
     } else if (input === 'd') {
       // Trigger deep re-scan
       setStatusMsg('Running deep scan (nmap -sV -sC -A -p-)...');

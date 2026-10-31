@@ -25,7 +25,8 @@ RestartSec=5s
 ProtectSystem=strict
 ProtectHome=false
 PrivateTmp=true
-ReadWritePaths=/opt/axonwall /var/lib/axonwall /etc/axonwall -/run/headscale -/run/axonwall
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/axonwall /etc/axonwall -/run/headscale -/run/axonwall
 
 [Install]
 WantedBy=multi-user.target

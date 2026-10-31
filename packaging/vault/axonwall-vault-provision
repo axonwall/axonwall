@@ -166,7 +166,8 @@ gen_secret_key() { openssl rand -base64 30 | tr -d '\n'; }
 
 write_config() {
     mkdir -p "$CONF_DIR"
-    chmod 0700 "$CONF_DIR" 2>/dev/null || true
+    chown root:axonwall-vault "$CONF_DIR" 2>/dev/null || true
+    chmod 0750 "$CONF_DIR" 2>/dev/null || true
     if [ ! -f "$ADMIN_ENV" ]; then
         umask 077
         {

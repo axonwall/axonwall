@@ -1042,8 +1042,8 @@ async function cmdCloudInitExport(userArgs: string[]) {
         } else if (/^[a-z_][a-z0-9_-]{0,31}$/.test(dirName)) {
           osUsersMap.set(dirName, {
             name: dirName,
-            gecos: `${dirName} Administrator`,
-            sudo: 'ALL=(ALL) NOPASSWD:ALL',
+            gecos: `${dirName} User`,
+            sudo: dirName === 'admin' ? 'ALL=(ALL) NOPASSWD:ALL' : undefined,
             shell: '/usr/bin/zsh',
             sshAuthorizedKeys: keys,
           });
@@ -1248,9 +1248,10 @@ async function cmdCloudInit(userArgs: string[]) {
           if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(rawAdminUser)) {
             throw new Error(`Invalid administrator username: ${rawAdminUser}`);
           }
+          const cleanAdminPass = finalAdminPass.replace(/[\r\n]/g, '');
           fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
           const adminEnvPath = path.join(ETC_DIR, 'admin.env');
-          const envContent = `LOCAL_ADMIN_USER=${rawAdminUser}\nLOCAL_ADMIN_PASSWORD=${finalAdminPass}\n`;
+          const envContent = `LOCAL_ADMIN_USER=${rawAdminUser}\nLOCAL_ADMIN_PASSWORD=${cleanAdminPass}\n`;
           fs.writeFileSync(adminEnvPath, envContent, { mode: 0o660 });
           try { fs.chmodSync(adminEnvPath, 0o660); } catch {}
 
@@ -1281,11 +1282,13 @@ async function cmdCloudInit(userArgs: string[]) {
       try {
         fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
         const ctrlEnvPath = path.join(ETC_DIR, 'controller.env');
-        const tokenVal =
+        const tokenVal = (
           axon.auth.ztp.enrollment_token && axon.auth.ztp.enrollment_token !== 'CHANGE_ME_ON_DEPLOY'
             ? axon.auth.ztp.enrollment_token
-            : '';
-        const content = `AXONWALL_ZTP_TOKEN=${tokenVal}\nAXONWALL_CONTROLLER_URL=${axon.auth.ztp.controller_url || ''}\n`;
+            : ''
+        ).replace(/[\r\n]/g, '');
+        const cleanControllerUrl = (axon.auth.ztp.controller_url || '').replace(/[\r\n]/g, '');
+        const content = `AXONWALL_ZTP_TOKEN=${tokenVal}\nAXONWALL_CONTROLLER_URL=${cleanControllerUrl}\n`;
         fs.writeFileSync(ctrlEnvPath, content, { mode: 0o640 });
         try { fs.chmodSync(ctrlEnvPath, 0o640); } catch {}
         try {
@@ -1918,19 +1921,63 @@ async function cmdUpdate(args: string[]) {
   }
 }
 
+function persistMcpSettings(enabled: boolean, reason?: string): void {
+  const settingsObj = {
+    enabled,
+    ...(enabled
+      ? {}
+      : {
+          disabledReason: reason || 'Disabled via axonwallctl',
+          disabledAt: new Date().toISOString(),
+          disabledBy: 'axonwallctl',
+        }),
+  };
+  const serialized = JSON.stringify(settingsObj, null, 2);
+  const targets = process.env.AXONWALL_MCP_SETTINGS_PATH
+    ? [process.env.AXONWALL_MCP_SETTINGS_PATH]
+    : Array.from(
+        new Set([
+          resolveMcpSettingsPath(),
+          '/var/lib/axonwall/mcp-settings.json',
+          '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
+          '/etc/axonwall/mcp-settings.json',
+        ])
+      );
+  for (const target of targets) {
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(target, serialized, { mode: 0o660 });
+      try {
+        fs.chmodSync(target, 0o660);
+      } catch {}
+    } catch {}
+  }
+}
+
 async function cmdMcp(args: string[]) {
   const subcmd = (args[0] || 'status').toLowerCase();
   switch (subcmd) {
     case 'status': {
       try {
-        const res = await sendAgentSocketRequest<any>('/v1/mcp/status', 'GET');
+        const localStatus = getMcpServerStatus();
+        let leases: any[] = [];
+        try {
+          const leaseRes = await sendAgentSocketRequest<any>('/v1/mcp/leases', 'GET');
+          if (Array.isArray(leaseRes?.leases)) {
+            leases = leaseRes.leases;
+          }
+        } catch {
+          // Daemon may be offline in standalone mode
+        }
         console.log(`\n${cCyan}${cBold}=== Axonwall MCP Server Status ===${cReset}\n`);
         console.log(
-          `  Master Switch : ${res.masterEnabled ? `${cGreen}ENABLED${cReset}` : `${cRed}DISABLED${cReset}`} ${res.disabledReason ? `(${res.disabledReason})` : ''}`
+          `  Master Switch : ${localStatus.enabled ? `${cGreen}ENABLED${cReset}` : `${cRed}DISABLED${cReset}`} ${localStatus.disabledReason ? `(${localStatus.disabledReason})` : ''}`
         );
-        console.log(`  Active Leases : ${(res.leases || []).length}`);
-        for (const l of res.leases || []) {
-          console.log(`    - [${l.id}] ${l.clientName} (${l.transport}) expires ${l.expiresAt}`);
+        console.log(`  Active Leases : ${leases.length}`);
+        for (const l of leases) {
+          console.log(
+            `    - [${l.id}] ${l.createdByKeyName || l.clientName || l.kind || 'tactical-lease'} (${l.targetSummary || l.transport || 'kernel'}) expires ${l.expiresAt}`
+          );
         }
         console.log('');
       } catch (err: any) {
@@ -1941,26 +1988,30 @@ async function cmdMcp(args: string[]) {
     }
     case 'enable': {
       console.log(`[+] Enabling Axonwall MCP Server...`);
-      const res = await sendAgentSocketRequest<any>('/v1/mcp/toggle', 'POST', { enabled: true });
+      persistMcpSettings(true);
+      const status = getMcpServerStatus();
       console.log(
-        `${cGreen}[✓] MCP Master Switch is now ${res.masterEnabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
+        `${cGreen}[✓] MCP Master Switch is now ${status.enabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
       );
       break;
     }
     case 'disable': {
       console.log(`[+] Disabling Axonwall MCP Server and revoking active leases...`);
-      const res = await sendAgentSocketRequest<any>('/v1/mcp/toggle', 'POST', {
-        enabled: false,
-        reason: 'Disabled via axonwallctl',
-      });
+      persistMcpSettings(false, 'Disabled via axonwallctl');
+      try {
+        await sendAgentSocketRequest<any>('/v1/mcp/flush', 'POST', {});
+      } catch {}
+      const status = getMcpServerStatus();
       console.log(
-        `${cGreen}[✓] MCP Master Switch is now ${res.masterEnabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
+        `${cGreen}[✓] MCP Master Switch is now ${status.enabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
       );
       break;
     }
     case 'flush': {
       console.log(`[+] Flushing all active MCP session leases...`);
-      await sendAgentSocketRequest<any>('/v1/mcp/leases/flush', 'POST', {});
+      try {
+        await sendAgentSocketRequest<any>('/v1/mcp/flush', 'POST', {});
+      } catch {}
       console.log(`${cGreen}[✓] All MCP leases revoked.${cReset}`);
       break;
     }

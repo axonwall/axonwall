@@ -22,9 +22,12 @@ type EdgeHATransitionPayload struct {
 // EdgeHAEngine manages active/standby state, WAN self-fencing, and LAN VIP ownership
 // across both hosted (QEMU VM on Axonwall host) and dedicated (bare-metal SKU) placements.
 type EdgeHAEngine struct {
-	mu        sync.RWMutex
-	placement string
-	role      string
+	mu         sync.RWMutex
+	placement  string
+	role       string
+	lastLanDev string
+	lastVipV4  string
+	lastVipV6  string
 }
 
 func NewEdgeHAEngine(placement, initialRole string) *EdgeHAEngine {
@@ -93,13 +96,21 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 		})
 	}
 
+	h.lastLanDev = lanDev
+	if p.LanVipV4 != "" {
+		h.lastVipV4 = p.LanVipV4
+	}
+	if p.LanVipV6 != "" {
+		h.lastVipV6 = p.LanVipV6
+	}
 	h.role = "active"
 	return nil
 }
 
 // Demote transitions the Edge NGFW into hot-standby mode:
 //  1. Fences the WAN interface first (admin-down so the shared WAN MAC never appears twice on the ISP segment)
-//  2. Marks HA state as "standby"
+//  2. Removes shared LAN VIPs from the LAN interface to prevent ARP/NDP split-brain
+//  3. Marks HA state as "standby"
 func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPayload) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -111,9 +122,30 @@ func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPa
 	if wanDev == "" {
 		wanDev = "eth0"
 	}
+	lanDev := p.LanDevice
+	if lanDev == "" {
+		lanDev = h.lastLanDev
+	}
+	if lanDev == "" {
+		lanDev = "eth1"
+	}
+	vip4 := p.LanVipV4
+	if vip4 == "" {
+		vip4 = h.lastVipV4
+	}
+	vip6 := p.LanVipV6
+	if vip6 == "" {
+		vip6 = h.lastVipV6
+	}
 
-	slog.Info("Demoting Edge NGFW to HOT STANDBY (fencing WAN link)", "placement", h.placement, "wan", wanDev)
+	slog.Info("Demoting Edge NGFW to HOT STANDBY (fencing WAN link & releasing LAN VIPs)", "placement", h.placement, "wan", wanDev, "lan", lanDev)
 	_ = netEngine.SetLinkUp(wanDev, false)
+	if vip4 != "" {
+		_ = netEngine.RemoveAddress(lanDev, vip4)
+	}
+	if vip6 != "" {
+		_ = netEngine.RemoveAddress(lanDev, vip6)
+	}
 	h.role = "standby"
 	return nil
 }

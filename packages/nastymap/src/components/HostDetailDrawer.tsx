@@ -48,15 +48,20 @@ export function HostDetailDrawer({
   customTabs = [],
   renderHostActions,
 }: HostDetailDrawerProps) {
-  if (!node) return null;
-
-  const host = node.hostRef;
+  const host = node?.hostRef;
   const [commentText, setCommentText] = useState(host?.comments || '');
   const [tagInput, setTagInput] = useState('');
   const [tags, setTags] = useState<string[]>(host?.tags || []);
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'warning' | 'error' } | null>(null);
+
+  useEffect(() => {
+    setCommentText(host?.comments || '');
+    setTags(host?.tags || []);
+    setTagInput('');
+    setActiveTab('overview');
+  }, [node?.id, host?.id]);
 
   // Modal Transparency & Positioning Settings
   const [opacity, setOpacity] = useState<number>(() => {
@@ -77,6 +82,8 @@ export function HostDetailDrawer({
     }
     return 'center';
   });
+
+  if (!node) return null;
 
   const handleSetOpacity = (newOpacity: number) => {
     setOpacity(newOpacity);

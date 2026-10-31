@@ -15,7 +15,7 @@ EnvironmentFile=-/etc/axonwall/vault.env
 # Provisioning talks to the S3 endpoint over loopback only, verifying
 # TLS against the endpoint's own certificate.
 Environment=VAULT_S3_ENDPOINT=https://127.0.0.1:8333
-Environment=VAULT_S3_CACERT=/etc/axonwall/certs/hub.crt
+Environment=VAULT_S3_CACERT=/etc/axonwall/certs/ca.crt
 ExecStart=/usr/local/bin/axonwall-vault-provision --ensure
 # The marker gates BOTH firstboot and this service; it is removed only
 # after --ensure has created the bucket and proven the posture live,

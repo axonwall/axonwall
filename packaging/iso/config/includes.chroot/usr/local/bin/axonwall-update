@@ -8,6 +8,7 @@ TARGET_SLOT="B"
 TARGET_VERSION=""
 UPDATE_CHANNEL="stable"
 FORCE_ROLLING=0
+FORCE_ZBM=0
 APT_UPGRADE=0
 
 while [ $# -gt 0 ]; do
@@ -483,7 +484,8 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
         fi
       fi
       rm -rf "${PKG_STAGE}"
-      chown -R axonwall:axonwall-api "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
+      chown -R root:root "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
+      chmod -R go-w "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
     elif [ -d /opt/axonwall ]; then
       mkdir -p "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
       if command -v rsync >/dev/null 2>&1; then
@@ -629,7 +631,8 @@ else
         else
           cp -a "${PKG_STAGE}/opt/axonwall/." /opt/axonwall/ 2>/dev/null || true
         fi
-        chown -R axonwall:axonwall-api /opt/axonwall 2>/dev/null || true
+        chown -R root:root /opt/axonwall 2>/dev/null || true
+        chmod -R go-w /opt/axonwall 2>/dev/null || true
       fi
       if [ -d "${PKG_STAGE}/usr/sbin" ]; then
         for sbin_f in "${PKG_STAGE}/usr/sbin/"*; do

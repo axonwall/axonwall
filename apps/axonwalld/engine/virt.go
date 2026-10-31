@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -188,6 +189,29 @@ func (m *VirtManager) loadPersistedSpecs() {
 	}
 }
 
+func validateSafeQemuArgs(args []string) error {
+	disallowedFlags := map[string]bool{
+		"-gdb": true, "-s": true, "-plugin": true, "-virtfs": true, "-fsdev": true,
+		"-fw_cfg": true, "-D": true, "-pidfile": true, "-loadvm": true, "-incoming": true,
+		"-chroot": true, "-run-with": true, "-semihosting-config": true,
+	}
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if disallowedFlags[trimmed] {
+			return fmt.Errorf("disallowed QEMU flag: %s", trimmed)
+		}
+		for _, part := range strings.Split(trimmed, ",") {
+			if strings.HasPrefix(part, "script=") && part != "script=no" {
+				return fmt.Errorf("disallowed QEMU netdev script parameter: %s", part)
+			}
+			if strings.HasPrefix(part, "downscript=") && part != "downscript=no" {
+				return fmt.Errorf("disallowed QEMU netdev downscript parameter: %s", part)
+			}
+		}
+	}
+	return nil
+}
+
 // RegisterVMSpec stores or updates the compiled specification for a VM and persists to disk.
 func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) {
 	switch spec.Binary {
@@ -196,6 +220,9 @@ func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) {
 	case "qemu-system-aarch64", "/usr/bin/qemu-system-aarch64":
 		spec.Binary = "/usr/bin/qemu-system-aarch64"
 	default:
+		return
+	}
+	if err := validateSafeQemuArgs(spec.Args); err != nil {
 		return
 	}
 	for _, disk := range spec.Disks {
@@ -562,6 +589,9 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			return fmt.Errorf("disallowed QEMU binary: %s", binary)
 		}
 
+		if err := validateSafeQemuArgs(spec.Args); err != nil {
+			return err
+		}
 		qemuArgs := ensureDaemonizeArg(spec.Args)
 		logger("Executing %s with %d arguments...", binary, len(qemuArgs))
 		cmd := exec.Command(binary, qemuArgs...)
@@ -911,8 +941,8 @@ func (m *VirtManager) DownloadISO(rawURL, filename, pool, expectedSha256, user s
 		return "", fmt.Errorf("disallowed loopback ISO download host")
 	}
 	if ip := net.ParseIP(hostOnly); ip != nil {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return "", fmt.Errorf("disallowed loopback or link-local ISO download IP: %s", hostOnly)
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() || ip.IsMulticast() || ip.IsUnspecified() {
+			return "", fmt.Errorf("disallowed loopback, private, or link-local ISO download IP: %s", hostOnly)
 		}
 	}
 
@@ -928,7 +958,48 @@ func (m *VirtManager) DownloadISO(rawURL, filename, pool, expectedSha256, user s
 	upid := m.taskMgr.StartTask("isodownload", safeName, user, func(logger func(format string, args ...any)) error {
 		logger("Downloading ISO from %s to %s...", rawURL, destPath)
 
-		client := &http.Client{Timeout: 30 * time.Minute}
+		dialer := &net.Dialer{Timeout: 15 * time.Second}
+		transport := &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				h, p, splitErr := net.SplitHostPort(addr)
+				if splitErr != nil {
+					return nil, splitErr
+				}
+				ips, lookupErr := net.DefaultResolver.LookupIPAddr(ctx, h)
+				if lookupErr != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("failed to resolve host %s: %v", h, lookupErr)
+				}
+				for _, ipAddr := range ips {
+					ip := ipAddr.IP
+					if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() || ip.IsMulticast() || ip.IsUnspecified() {
+						return nil, fmt.Errorf("disallowed resolved target IP %s for %s", ip.String(), h)
+					}
+				}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), p))
+			},
+		}
+		client := &http.Client{
+			Timeout:   30 * time.Minute,
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 5 {
+					return fmt.Errorf("too many redirects")
+				}
+				if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+					return fmt.Errorf("disallowed redirect scheme: %s", req.URL.Scheme)
+				}
+				rh := req.URL.Hostname()
+				if strings.EqualFold(rh, "localhost") {
+					return fmt.Errorf("disallowed redirect to localhost")
+				}
+				if rip := net.ParseIP(rh); rip != nil {
+					if rip.IsLoopback() || rip.IsLinkLocalUnicast() || rip.IsLinkLocalMulticast() || rip.IsPrivate() || rip.IsMulticast() || rip.IsUnspecified() {
+						return fmt.Errorf("disallowed redirect target IP: %s", rh)
+					}
+				}
+				return nil
+			},
+		}
 		resp, err := client.Get(rawURL)
 		if err != nil {
 			logger("HTTP request error: %v", err)
@@ -941,7 +1012,14 @@ func (m *VirtManager) DownloadISO(rawURL, filename, pool, expectedSha256, user s
 			return fmt.Errorf("http error: %s", resp.Status)
 		}
 
-		outFile, err := os.Create(destPath + ".tmp")
+		tmpPath := destPath + ".tmp"
+		if fi, lerr := os.Lstat(tmpPath); lerr == nil {
+			if (fi.Mode() & os.ModeSymlink) != 0 {
+				return fmt.Errorf("refusing symlink temporary path: %s", tmpPath)
+			}
+			_ = os.Remove(tmpPath)
+		}
+		outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0640)
 		if err != nil {
 			logger("File creation error: %v", err)
 			return err

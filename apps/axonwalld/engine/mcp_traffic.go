@@ -584,14 +584,22 @@ func (m *McpTrafficManager) cleanupKernelArtifactsForLease(l *McpTacticalLease) 
 		if dev != "" {
 			classMinor := strconv.Itoa(l.ClassID)
 			markStr := fmt.Sprintf("0x%x", l.FwMark)
-			_ = exec.Command("tc", "filter", "del", "dev", dev, "parent", "1:", "protocol", "ip", "prio", "10", "handle", markStr, "fw", "flowid", "1:"+classMinor).Run()
+			proto := "ip"
+			if l.IsIPv6 {
+				proto = "ipv6"
+			}
+			_ = exec.Command("tc", "filter", "del", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", markStr, "fw", "flowid", "1:"+classMinor).Run()
 			_ = exec.Command("tc", "qdisc", "del", "dev", dev, "parent", "1:"+classMinor).Run()
 			_ = exec.Command("tc", "class", "del", "dev", dev, "classid", "1:"+classMinor).Run()
 		}
 	} else if l.Kind == "redirect" {
 		if rType, _ := l.Parameters["redirectType"].(string); rType == "policy_route" && l.FwMark > 0 {
 			markHex := fmt.Sprintf("0x%x", l.FwMark)
-			_ = exec.Command("ip", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID)).Run()
+			if l.IsIPv6 {
+				_ = exec.Command("ip", "-6", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID)).Run()
+			} else {
+				_ = exec.Command("ip", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID)).Run()
+			}
 		}
 	}
 }

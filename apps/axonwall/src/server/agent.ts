@@ -926,6 +926,84 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     }
   }
 
+  // Redact canonical DesiredStateSchema top-level secret fields
+  if (redacted.wireguard) {
+    if (redacted.wireguard.privateKey) redacted.wireguard.privateKey = MASK;
+    if (Array.isArray(redacted.wireguard.peers)) {
+      for (const peer of redacted.wireguard.peers) {
+        if (peer?.presharedKey) peer.presharedKey = MASK;
+      }
+    }
+  }
+  if (Array.isArray(redacted.ipsec?.tunnels)) {
+    for (const t of redacted.ipsec.tunnels) {
+      if (t?.presharedKey) t.presharedKey = MASK;
+    }
+  }
+  if (Array.isArray(redacted.openvpn?.servers)) {
+    for (const s of redacted.openvpn.servers) {
+      if (s?.caKey) s.caKey = MASK;
+      if (s?.serverKey) s.serverKey = MASK;
+      if (s?.tlsAuthKey) s.tlsAuthKey = MASK;
+    }
+  }
+  if (redacted.acme) {
+    if (Array.isArray(redacted.acme.accounts)) {
+      for (const a of redacted.acme.accounts) {
+        if (a?.eabHmacKey) a.eabHmacKey = MASK;
+      }
+    }
+    if (Array.isArray(redacted.acme.internalCAs)) {
+      for (const ca of redacted.acme.internalCAs) {
+        if (ca?.privateKeyBase64) ca.privateKeyBase64 = MASK;
+      }
+    }
+  }
+  if (redacted.ha) {
+    if (Array.isArray(redacted.ha.vrrpInstances)) {
+      for (const v of redacted.ha.vrrpInstances) {
+        if (v?.authPassword) v.authPassword = MASK;
+      }
+    }
+    if (redacted.ha.sqliteSync?.litestreamSecretAccessKey) {
+      redacted.ha.sqliteSync.litestreamSecretAccessKey = MASK;
+    }
+  }
+  if (Array.isArray(redacted.frr?.bgp?.neighbors)) {
+    for (const n of redacted.frr.bgp.neighbors) {
+      if (n?.password) n.password = MASK;
+    }
+  }
+  if (redacted.nas) {
+    if (redacted.nas.s3?.secretKey) redacted.nas.s3.secretKey = MASK;
+    if (Array.isArray(redacted.nas.iscsiTargets)) {
+      for (const t of redacted.nas.iscsiTargets) {
+        if (t?.chapSecret) t.chapSecret = MASK;
+      }
+    }
+  }
+  if (redacted.sso?.clientSecret) {
+    redacted.sso.clientSecret = MASK;
+  }
+  if (Array.isArray(redacted.virtualIps)) {
+    for (const vip of redacted.virtualIps) {
+      if (vip?.password) vip.password = MASK;
+    }
+  }
+  if (redacted.radius) {
+    if (redacted.radius.ldapBindPassword) redacted.radius.ldapBindPassword = MASK;
+    if (Array.isArray(redacted.radius.clients)) {
+      for (const c of redacted.radius.clients) {
+        if (c?.secret) c.secret = MASK;
+      }
+    }
+    if (Array.isArray(redacted.radius.users)) {
+      for (const u of redacted.radius.users) {
+        if (u?.password) u.password = MASK;
+      }
+    }
+  }
+
   return redacted as DesiredState;
 }
 
@@ -960,6 +1038,10 @@ export async function saveYamlDomainFile(
 ): Promise<{ success: boolean; message: string; warnings: string[] }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+
+  if (!(AXONWALL_YAML_FILENAMES as readonly string[]).includes(filename)) {
+    throw new Error(`Invalid YAML domain filename: ${filename}`);
+  }
 
   const currentSnapshot = await getYamlConfigFilesSnapshot();
   const updatedFiles: Record<string, string> = {
@@ -2435,6 +2517,7 @@ export async function saveInterfaceAssignment(data: {
   const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
 
   // Delegate persistence, interface bring-up, Kea reload, and nftables commit to root axonwalld daemon
+  let daemonApplied = false;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
     const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
@@ -2480,6 +2563,7 @@ export async function saveInterfaceAssignment(data: {
     });
     if (applyResp?.success) {
       await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
+      daemonApplied = true;
     }
   } catch {}
 
@@ -2494,20 +2578,22 @@ export async function saveInterfaceAssignment(data: {
     );
   } catch {}
 
-  // Sync Kea DHCPv4 config directly if running in standalone/dev mode
-  try {
-    const { files } = compileNftables(normalizedState);
-    const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
-    if (keaFile && fs.existsSync('/etc/kea')) {
-      fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
-      try {
-        execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 });
-      } catch {}
-    }
-  } catch {}
+  // Sync Kea DHCPv4 config directly if running in standalone/dev mode (when axonwalld did not apply)
+  if (!daemonApplied) {
+    try {
+      const { files } = compileNftables(normalizedState);
+      const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
+      if (keaFile && fs.existsSync('/etc/kea')) {
+        fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
+        try {
+          execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 });
+        } catch {}
+      }
+    } catch {}
+  }
 
-  // Apply basic network state if active on a real physical device
-  if (validDev) {
+  // Apply basic network state directly only when axonwalld was not reachable
+  if (!daemonApplied && validDev) {
     if (normalizedEnabled) {
       try {
         execFileSync('ip', ['link', 'set', normalizedDevice, 'up'], { stdio: 'ignore', timeout: 2000 });
@@ -3751,30 +3837,13 @@ export async function executeTerminalCommand(command: string): Promise<TerminalE
     return daemonResp;
   }
 
-  // Fallback execution via Node child_process
-  const start = Date.now();
-  try {
-    const out = execSync(cleanCmd, {
-      encoding: 'utf8',
-      timeout: 10000,
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    return {
-      command: cleanCmd,
-      output: out,
-      exitCode: 0,
-      latencyMs: Date.now() - start,
-      success: true,
-    };
-  } catch (err: any) {
-    return {
-      command: cleanCmd,
-      output: err?.stdout || err?.stderr || err?.message || 'Command execution failed',
-      exitCode: err?.status || 1,
-      latencyMs: Date.now() - start,
-      success: false,
-    };
-  }
+  return {
+    command: cleanCmd,
+    output: 'Terminal execution unavailable: axonwalld agent socket is offline.',
+    exitCode: 1,
+    latencyMs: 0,
+    success: false,
+  };
 }
 
 export interface NasDiskItem {

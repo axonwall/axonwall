@@ -65,7 +65,7 @@ case "$1" in
                 chmod 0660 "$f" 2>/dev/null || true
             fi
         done
-        chown -R axonwall:axonwall /var/log/axonwall
+        chown root:axonwall-api /var/log/axonwall
         chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
         chown axonwall-headscale:axonwall-api /run/headscale
         # Headscale's config can carry the OIDC client secret: group
@@ -79,7 +79,7 @@ case "$1" in
         chown root:root /var/lib/axonwall/home
         chmod 1775 /var/lib/axonwall
         chmod 0755 /var/lib/axonwall/home
-        chmod 0750 /var/log/axonwall
+        chmod 1770 /var/log/axonwall
         chmod 0755 /opt/axonwall
         chmod 770 /var/lib/axonwall/headscale /run/headscale
         chmod 0700 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki

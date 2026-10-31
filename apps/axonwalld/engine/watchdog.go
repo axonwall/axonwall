@@ -1234,8 +1234,11 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 // ApplyFirmwareUpdate executes the privileged firmware updater for a target slot and version,
 // updates bootloader variables, and records the new version on the target slot or Boot Environment.
 func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) (string, error) {
-	isZbm := we.status.InstallMode == "zbm" || detectInstallModeCustom(we.cmdlinePath) == "zbm"
-	isRolling := we.status.InstallMode == "rolling" || detectInstallModeCustom(we.cmdlinePath) == "rolling"
+	we.mu.RLock()
+	currMode := we.status.InstallMode
+	we.mu.RUnlock()
+	isZbm := currMode == "zbm" || detectInstallModeCustom(we.cmdlinePath) == "zbm"
+	isRolling := currMode == "rolling" || detectInstallModeCustom(we.cmdlinePath) == "rolling"
 	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
 	if isRolling {
 		targetSlot = "A"

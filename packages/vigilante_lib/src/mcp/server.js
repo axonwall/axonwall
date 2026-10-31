@@ -3022,7 +3022,9 @@ export function createVigilanteMcpServer() {
     // Tool: verify_evidence_signature
     if (name === 'verify_evidence_signature') {
       const { filePath, signaturePath } = args;
-      const verification = await verifyFileSignature(filePath, signaturePath);
+      const safeFilePath = assertConfinedMcpPath(filePath, 'filePath');
+      const safeSigPath = signaturePath ? assertConfinedMcpPath(signaturePath, 'signaturePath') : undefined;
+      const verification = await verifyFileSignature(safeFilePath, safeSigPath);
 
       return {
         content: [
@@ -3132,7 +3134,8 @@ export function createVigilanteMcpServer() {
     // Tool: list_threat_playbooks
     if (name === 'list_threat_playbooks') {
       const { customDir } = args;
-      const playbooks = await listAvailablePlaybooks({ customDir });
+      const safeCustomDir = customDir ? assertConfinedMcpPath(customDir, 'customDir') : undefined;
+      const playbooks = await listAvailablePlaybooks({ customDir: safeCustomDir });
       return {
         content: [
           {
@@ -3566,7 +3569,8 @@ export function createVigilanteMcpServer() {
         const offset = findDeBruijnOffset(input, needle);
         outputData = { tool: 'offset', patternSnippet: input?.slice(0, 32), needle, offset };
       } else if (tool === 'checksec') {
-        outputData = await checksec(input);
+        const safeInput = assertConfinedMcpPath(input, 'input');
+        outputData = await checksec(safeInput);
       } else if (tool === 'cipher') {
         outputData = { tool: 'cipher', input, candidates: autoIdentifyCipher(input) };
       } else {
@@ -3991,7 +3995,8 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'replay_pcap') {
       const { pcapFilePath, namespace = 'vigilante' } = args;
       if (!pcapFilePath) throw new Error("Argument 'pcapFilePath' is required.");
-      const result = await replayPcap(pcapFilePath, { namespace });
+      const safePcapPath = assertConfinedMcpPath(pcapFilePath, 'pcapFilePath');
+      const result = await replayPcap(safePcapPath, { namespace });
       return {
         content: [
           {
@@ -4006,7 +4011,8 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'ingest_bloodhound_data') {
       const { filePath } = args;
       if (!filePath) throw new Error("Argument 'filePath' is required.");
-      const result = await ingestBloodhoundData(filePath);
+      const safeFilePath = assertConfinedMcpPath(filePath, 'filePath');
+      const result = await ingestBloodhoundData(safeFilePath);
       return {
         content: [
           {
@@ -4112,7 +4118,8 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     // Tool: run_pipeline_audit
     if (name === 'run_pipeline_audit') {
       const { targetPath, failOn = 'HIGH' } = args;
-      const result = await runPipelineAudit(targetPath, { failOn });
+      const safeTargetPath = assertConfinedMcpPath(targetPath, 'targetPath');
+      const result = await runPipelineAudit(safeTargetPath, { failOn });
       const sarif = generateSarifReport(result.findings);
       return {
         content: [
@@ -4222,7 +4229,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     // Tool: transpile_sigma_to_sql
     if (name === 'transpile_sigma_to_sql') {
       const { rule, targetBackend = 'sqlite' } = args;
-      const transpiled = transpileSigmaToSql(rule, targetBackend);
+      const transpiled = transpileSigmaToSql(rule, { backend: targetBackend });
       return {
         content: [{ type: 'text', text: JSON.stringify(transpiled, null, 2) }]
       };
@@ -4230,8 +4237,8 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: run_sigma_threat_hunt
     if (name === 'run_sigma_threat_hunt') {
-      const { rule, targetBackend = 'sqlite' } = args;
-      const hunt = await runSigmaThreatHunt(rule, null, targetBackend);
+      const { rule } = args;
+      const hunt = await runSigmaThreatHunt(rule);
       return {
         content: [{ type: 'text', text: JSON.stringify(hunt, null, 2) }]
       };

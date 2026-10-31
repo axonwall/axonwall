@@ -23,6 +23,7 @@ import (
 var (
 	zfsNameComponentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]*$`)
 	zfsWholeDiskRe     = regexp.MustCompile(`^/dev/(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+)$`)
+	zfsInstallDevRe    = regexp.MustCompile(`^/dev/(sd[a-z]+[0-9]*|vd[a-z]+[0-9]*|nvme[0-9]+n[0-9]+(p[0-9]+)?|mmcblk[0-9]+(p[0-9]+)?|md[0-9]+)$`)
 	zfsByIDRe          = regexp.MustCompile(`^/dev/disk/by-id/[A-Za-z0-9_.\-]+$`)
 )
 
@@ -71,6 +72,33 @@ func validZfsDatasetName(full string) bool {
 
 func validZfsDevice(dev string) bool {
 	return zfsWholeDiskRe.MatchString(dev) || zfsByIDRe.MatchString(dev)
+}
+
+func validInstallZfsDevice(dev string) bool {
+	return zfsInstallDevRe.MatchString(dev) || zfsByIDRe.MatchString(dev)
+}
+
+func ValidateInstallZfsPoolSpec(pool ZfsPoolSpec) error {
+	if !validZfsPoolName(pool.Name) {
+		return fmt.Errorf("invalid pool name %q", pool.Name)
+	}
+	if !zfsTopologies[pool.Topology] {
+		return fmt.Errorf("pool %q: topology %q is not permitted", pool.Name, pool.Topology)
+	}
+	if !zfsCompressions[pool.Compression] {
+		return fmt.Errorf("pool %q: compression %q is not permitted", pool.Name, pool.Compression)
+	}
+	if len(pool.DataDisks) == 0 {
+		return fmt.Errorf("pool %q: at least one data disk is required", pool.Name)
+	}
+	for _, list := range [][]string{pool.DataDisks, pool.LogDisks, pool.CacheDisks, pool.SpareDisks} {
+		for _, d := range list {
+			if !validInstallZfsDevice(d) {
+				return fmt.Errorf("pool %q: disallowed disk path %q", pool.Name, d)
+			}
+		}
+	}
+	return nil
 }
 
 func ValidateZfsPoolSpec(pool ZfsPoolSpec) error {

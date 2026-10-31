@@ -58,7 +58,25 @@ export async function middleware(request: NextRequest) {
       new TextEncoder().encode(secret),
       { algorithms: ['HS256'] }
     );
-    if (payload.pwd_change_required === true) {
+    const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase());
+    if (isMutation) {
+      const origin = request.headers.get('origin');
+      const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+      if (origin && host) {
+        try {
+          const originUrl = new URL(origin);
+          if (originUrl.host.toLowerCase() !== host.toLowerCase()) {
+            return NextResponse.json(
+              { error: 'Forbidden: Cross-origin request rejected.' },
+              { status: 403 }
+            );
+          }
+        } catch {
+          return NextResponse.json({ error: 'Forbidden: Invalid Origin header.' }, { status: 403 });
+        }
+      }
+    }
+    if (payload.pwd_change_required === true && (isMutation || pathname === '/api/auth/gateway')) {
       return NextResponse.json(
         {
           error:

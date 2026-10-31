@@ -261,6 +261,13 @@ if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/de
 
       if [ "$TPM2_SUCCESS" = "1" ]; then
         echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard,tpm2-device=auto" >> /target/etc/crypttab
+      elif [ -z "$LUKS_PASSPHRASE" ]; then
+        echo "[+] Persisting root-only LUKS keyfile (/etc/axonwall/luks-data.key) since no passphrase was specified and TPM 2.0 is unavailable..."
+        mkdir -p /target/etc/axonwall
+        ( umask 077 && cp "$TEMP_KEY" /target/etc/axonwall/luks-data.key )
+        chown 0:0 /target/etc/axonwall/luks-data.key 2>/dev/null || true
+        chmod 0400 /target/etc/axonwall/luks-data.key
+        echo "axon_crypt_data UUID=${DATA_UUID} /etc/axonwall/luks-data.key luks,discard" >> /target/etc/crypttab
       else
         echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard" >> /target/etc/crypttab
       fi
@@ -593,6 +600,15 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && [ -n "$SYSTEM_RAID_DISKS" ]; then
 fi
 
 # 5. Add any extra whole ZFS storage disks selected during install
+if [ "${ZFS_TANK_DISKS:-}" = "auto" ] && [ -z "$ZFS_EXTRA_DISKS" ]; then
+  for cand_d in /dev/sd[a-z] /dev/vd[a-z] /dev/nvme[0-9]n[1-9]; do
+    [ -b "$cand_d" ] || continue
+    [ "$cand_d" = "$TARGET_DISK" ] && continue
+    echo " ${SYSTEM_RAID_DISKS:-} " | grep -q " ${cand_d} " && continue
+    grep -q "^${cand_d}" /proc/mounts 2>/dev/null && continue
+    ZFS_EXTRA_DISKS="${ZFS_EXTRA_DISKS} ${cand_d}"
+  done
+fi
 for extra_d in $ZFS_EXTRA_DISKS; do
   if [ -b "$extra_d" ] && [ "$extra_d" != "$TARGET_DISK" ]; then
     wipefs -a "$extra_d" 2>/dev/null || true

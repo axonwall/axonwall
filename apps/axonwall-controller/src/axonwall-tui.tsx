@@ -21,13 +21,15 @@ import {
   enablePluginWithDependencies,
   disablePluginWithDependents,
 } from '@axonwall/lib';
+import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { App as NastyMapApp } from './tui/nastymap/App.js';
 
 const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
 const VAR_ETC_CONFIG_DIR = '/var/lib/axonwall/etc-axonwall';
 const STATE_JSON_PATH = process.env.AXONWALL_STATE_FILE || '/var/lib/axonwall/state.json';
-const AGENT_API_SOCKET = process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
+const AGENT_API_SOCKET =
+  process.env.AXONWALL_AGENT_API_SOCK || process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
 const AGENT_TOKEN_PATH = process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token';
 
 export type TopTab =
@@ -130,10 +132,21 @@ function callDaemon(endpoint: string, method: 'GET' | 'POST', payload?: unknown)
       return;
     }
     const body = payload ? JSON.stringify(payload) : '';
-    let token = '';
-    try {
-      token = fs.readFileSync(AGENT_TOKEN_PATH, 'utf-8').trim();
-    } catch {}
+    let token = process.env.AXONWALL_AGENT_TOKEN || '';
+    if (!token) {
+      for (const candidate of [
+        AGENT_TOKEN_PATH,
+        '/var/lib/axonwall/etc-axonwall/agent.token',
+        '/run/axonwall/agent.token',
+      ]) {
+        try {
+          if (fs.existsSync(candidate)) {
+            token = fs.readFileSync(candidate, 'utf-8').trim();
+            if (token) break;
+          }
+        } catch {}
+      }
+    }
 
     const req = http.request(
       {
@@ -143,7 +156,7 @@ function callDaemon(endpoint: string, method: 'GET' | 'POST', payload?: unknown)
         headers: {
           'Content-Type': 'application/json',
           ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(token ? { 'X-Axonwall-Agent-Token': token, Authorization: `Bearer ${token}` } : {}),
         },
         timeout: 4000,
       },
@@ -151,6 +164,11 @@ function callDaemon(endpoint: string, method: 'GET' | 'POST', payload?: unknown)
         let data = '';
         res.on('data', (c) => (data += c));
         res.on('end', () => {
+          const status = res.statusCode || 500;
+          if (status < 200 || status >= 300) {
+            resolve(null);
+            return;
+          }
           try {
             resolve(JSON.parse(data));
           } catch {
@@ -255,15 +273,18 @@ export function AxonwallTuiApp({
   const refreshAll = useCallback(async () => {
     const fresh = loadCurrentState();
     setState(fresh);
-    const [st, mcp, plg] = await Promise.all([
+    const localMcp = getMcpServerStatus();
+    const [st, mcpLeases, plg] = await Promise.all([
       callDaemon('/v1/status', 'GET'),
-      callDaemon('/v1/mcp/status', 'GET'),
+      callDaemon('/v1/mcp/leases', 'GET'),
       callDaemon('/v1/system/plugins', 'GET'),
     ]);
     if (st) setDaemonStatus(st);
-    if (mcp && typeof mcp.masterEnabled === 'boolean') {
-      setMcpStatus(mcp);
-    }
+    setMcpStatus({
+      masterEnabled: localMcp.enabled,
+      disabledReason: localMcp.disabledReason,
+      leases: Array.isArray(mcpLeases?.leases) ? mcpLeases.leases : [],
+    });
     if (plg?.plugins && Array.isArray(plg.plugins)) {
       const map: Record<string, any> = {};
       for (const p of plg.plugins) {
@@ -300,15 +321,22 @@ export function AxonwallTuiApp({
     ];
 
     const resp = await callDaemon('/v1/apply', 'POST', {
+      jobId: `tui-${Date.now()}`,
       job_id: `tui-${Date.now()}`,
+      bundleHash,
       bundle_hash: bundleHash,
+      nftablesRuleset: nftScript,
+      nftScript,
       nft_script: nftScript,
       files: allFiles,
+      reloadServices,
       reload_services: reloadServices,
+      commitConfirmTimeoutSec: 120,
+      confirmTimeoutSeconds: 120,
       confirm_timeout_seconds: 120,
     });
 
-    if (resp?.success) {
+    if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
       setStatusMessage('✔ Applied to live daemon! Press [c] within 120s to confirm, or [r] to rollback.');
       await refreshAll();
     } else {
@@ -317,8 +345,8 @@ export function AxonwallTuiApp({
   };
 
   const handleConfirm = async () => {
-    const resp = await callDaemon('/v1/confirm', 'POST');
-    if (resp?.success) {
+    const resp = await callDaemon('/v1/confirm', 'POST', { jobId: 'confirm', job_id: 'confirm' });
+    if (resp && (resp.success || resp.status === 'confirmed')) {
       setStatusMessage('✔ Configuration confirmed and persisted as last-known-good!');
       await refreshAll();
     } else {
@@ -328,7 +356,7 @@ export function AxonwallTuiApp({
 
   const handleRollback = async () => {
     const resp = await callDaemon('/v1/rollback', 'POST', { reason: 'TUI operator rollback' });
-    if (resp?.success) {
+    if (resp && (resp.success || resp.status === 'rolled_back')) {
       setStatusMessage('↺ Rolled back to previous last-known-good configuration!');
       await refreshAll();
     } else {
@@ -788,25 +816,41 @@ export function AxonwallTuiApp({
         const row = serviceRows[cursorIdx % serviceRows.length]!;
         if (row.id === 'mcp') {
           const nextEnabled = !mcpStatus.masterEnabled;
-          callDaemon('/v1/mcp/toggle', 'POST', {
+          const settingsObj = {
             enabled: nextEnabled,
-            reason: nextEnabled ? undefined : 'Disabled via Axonwall TUI',
-          }).then((res) => {
-            if (res && typeof res.masterEnabled === 'boolean') {
-              setMcpStatus(res);
-              setStatusMessage(
-                `Toggled MCP Server Master Switch -> ${res.masterEnabled ? 'ENABLED' : 'DISABLED'}.`
-              );
-            } else {
-              setMcpStatus({
-                masterEnabled: nextEnabled,
-                disabledReason: nextEnabled ? undefined : 'Disabled via Axonwall TUI',
-              });
-              setStatusMessage(
-                `Toggled MCP Server Master Switch -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}.`
-              );
-            }
+            ...(nextEnabled
+              ? {}
+              : {
+                  disabledReason: 'Disabled via Axonwall TUI',
+                  disabledAt: new Date().toISOString(),
+                  disabledBy: 'tui',
+                }),
+          };
+          const serialized = JSON.stringify(settingsObj, null, 2);
+          for (const p of Array.from(
+            new Set([
+              resolveMcpSettingsPath(),
+              '/var/lib/axonwall/mcp-settings.json',
+              '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
+              '/etc/axonwall/mcp-settings.json',
+            ])
+          )) {
+            try {
+              fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+              fs.writeFileSync(p, serialized, { mode: 0o660 });
+            } catch {}
+          }
+          if (!nextEnabled) {
+            callDaemon('/v1/mcp/flush', 'POST', {}).catch(() => {});
+          }
+          setMcpStatus({
+            masterEnabled: nextEnabled,
+            disabledReason: nextEnabled ? undefined : 'Disabled via Axonwall TUI',
+            leases: nextEnabled ? mcpStatus.leases : [],
           });
+          setStatusMessage(
+            `Toggled MCP Server Master Switch -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}.`
+          );
           return;
         }
         const next = structuredClone(state);

@@ -194,7 +194,13 @@ func restoreLkgConfig(bundleDir string) {
 			continue
 		}
 		name := e.Name()
+		if name == "admin.env" || name == "axonwall.env" || name == "agent.token" || name == "controller.env" || name == "mfa.env" || name == "slapd.seed" {
+			continue
+		}
 		srcPath := filepath.Join(lkgConfigDir, name)
+		if fi, lerr := os.Lstat(srcPath); lerr != nil || (fi.Mode()&os.ModeSymlink) != 0 {
+			continue
+		}
 		data, err := os.ReadFile(srcPath)
 		if err != nil || len(data) == 0 {
 			continue
@@ -209,12 +215,17 @@ func restoreLkgConfig(bundleDir string) {
 		for _, dir := range targetDirs {
 			_ = os.MkdirAll(dir, 0775)
 			dst := filepath.Join(dir, name)
+			if fi, lerr := os.Lstat(dst); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+				continue
+			}
 			_ = os.WriteFile(dst, data, mode)
 			ensureSharedConfigPerm(dst, mode)
 		}
 		if name == "state.json" {
-			_ = os.WriteFile("/var/lib/axonwall/state.json", data, 0660)
-			ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+			if fi, lerr := os.Lstat("/var/lib/axonwall/state.json"); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
+				_ = os.WriteFile("/var/lib/axonwall/state.json", data, 0660)
+				ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+			}
 		}
 	}
 }
@@ -338,6 +349,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 		if cleanPath == "/etc/axonwall/admin.env" ||
 			cleanPath == "/etc/axonwall/axonwall.env" ||
+			cleanPath == "/etc/axonwall/agent.token" ||
+			cleanPath == "/etc/axonwall/controller.env" ||
 			cleanPath == "/etc/axonwall/mfa.env" ||
 			cleanPath == "/etc/axonwall/slapd.seed" ||
 			cleanPath == "/etc/axonwall/pki" ||
@@ -1371,11 +1384,18 @@ func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 }
 
 func syncFile(srcPath, dstPath string, perm os.FileMode) {
-	srcInfo, err1 := os.Stat(srcPath)
-	if err1 != nil {
+	base := filepath.Base(srcPath)
+	if base == "admin.env" || base == "axonwall.env" || base == "agent.token" || base == "controller.env" || base == "mfa.env" || base == "slapd.seed" {
 		return
 	}
-	dstInfo, err2 := os.Stat(dstPath)
+	srcInfo, err1 := os.Lstat(srcPath)
+	if err1 != nil || (srcInfo.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
+	dstInfo, err2 := os.Lstat(dstPath)
+	if err2 == nil && (dstInfo.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
 	if err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime()) {
 		if data, err := os.ReadFile(srcPath); err == nil {
 			_ = os.WriteFile(dstPath, data, perm)

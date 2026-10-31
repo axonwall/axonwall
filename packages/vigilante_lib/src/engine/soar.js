@@ -390,6 +390,50 @@ export async function releaseContainment(containmentId) {
     }
   }
 
+  if (record.mcpLeaseId) {
+    const sockPath = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
+    if (fsSync.existsSync(sockPath)) {
+      try {
+        const httpMod = await import('node:http');
+        let agentToken = process.env.AXONWALL_AGENT_TOKEN || '';
+        if (!agentToken) {
+          for (const p of ['/etc/axonwall/agent.token', '/var/lib/axonwall/etc-axonwall/agent.token']) {
+            if (fsSync.existsSync(p)) {
+              agentToken = fsSync.readFileSync(p, 'utf8').trim();
+              if (agentToken) break;
+            }
+          }
+        }
+        const payload = JSON.stringify({ leaseId: record.mcpLeaseId });
+        await new Promise((resolve, reject) => {
+          const req = httpMod.request(
+            {
+              socketPath: sockPath,
+              path: '/v1/mcp/leases/revoke',
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(payload),
+                ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {})
+              },
+              timeout: 5000
+            },
+            (res) => {
+              res.resume();
+              res.on('end', () => resolve({ status: res.statusCode }));
+            }
+          );
+          req.on('error', reject);
+          req.write(payload);
+          req.end();
+        });
+        record.enforcedInKernel = false;
+      } catch (err) {
+        logger.warn('SOAR', `Could not revoke MCP lease ${record.mcpLeaseId} via axonwalld socket: ${err.message}`);
+      }
+    }
+  }
+
   record.status = 'RELEASED';
   record.active = false;
   record.releasedAt = new Date().toISOString();

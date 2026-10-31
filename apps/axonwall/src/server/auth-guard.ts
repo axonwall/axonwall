@@ -17,7 +17,7 @@ export function assertActionPermitted(
   if (!session) {
     throw new Error('Unauthorized');
   }
-  if (session.passwordChangeRequired) {
+  if (session.passwordChangeRequired && requiredRole && requiredRole !== 'readonly') {
     throw new Error('Forbidden: Password change required before performing this action');
   }
   if (requiredRole) {

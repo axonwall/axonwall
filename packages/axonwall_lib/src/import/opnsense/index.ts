@@ -102,7 +102,11 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
       const action = r.type === 'block' ? 'block' : r.type === 'reject' ? 'reject' : 'pass';
       const iface = r.interface || 'any';
       const rawProto = String(r.protocol || 'any').toLowerCase();
-      const proto = rawProto === 'tcp/udp' || rawProto === 'tcp_udp' ? 'tcp_udp' : rawProto;
+      const validProtos = new Set(['any', 'tcp', 'udp', 'tcp_udp', 'icmp', 'ipv6-icmp', 'esp', 'ah', 'gre']);
+      let proto = rawProto === 'tcp/udp' || rawProto === 'tcp_udp' ? 'tcp_udp' : rawProto === 'icmpv6' ? 'ipv6-icmp' : rawProto;
+      if (!validProtos.has(proto)) {
+        proto = 'any';
+      }
       const descr = r.descr ? String(r.descr) : '';
 
       // Parse source

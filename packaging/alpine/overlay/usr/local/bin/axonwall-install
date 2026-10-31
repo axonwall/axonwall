@@ -919,6 +919,13 @@ if [ "${LUKS_ENABLED:-0}" = "1" ] && [ -n "$TEMP_LUKS_KEY" ] && [ -f "$TEMP_LUKS
   fi
   if [ "$TPM2_SUCCESS" = "1" ]; then
     echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard,tpm2-device=auto" > /mnt/slot_a/etc/crypttab
+  elif [ -z "$LUKS_PASSPHRASE" ]; then
+    echo "[+] Persisting root-only LUKS keyfile (/etc/axonwall/luks-data.key) since no passphrase was specified and TPM 2.0 is unavailable..."
+    mkdir -p /mnt/slot_a/etc/axonwall
+    ( umask 077 && cp "$TEMP_LUKS_KEY" /mnt/slot_a/etc/axonwall/luks-data.key )
+    chown root:root /mnt/slot_a/etc/axonwall/luks-data.key 2>/dev/null || true
+    chmod 0400 /mnt/slot_a/etc/axonwall/luks-data.key
+    echo "axon_crypt_data UUID=${DATA_UUID} /etc/axonwall/luks-data.key luks,discard" > /mnt/slot_a/etc/crypttab
   else
     echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard" > /mnt/slot_a/etc/crypttab
   fi

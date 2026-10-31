@@ -258,10 +258,7 @@ export async function runKubeAudit(target = 'cluster', profileId = 'kube-bench',
 
   // Evidence file
   try {
-    await saveEvidenceFile(target, `${scanId}.json`, JSON.stringify(record, null, 2), {
-      source: profile.tool,
-      profile: profile.id
-    });
+    await saveEvidenceFile('scans', target, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('KUBEAUDIT', `Could not save evidence file: ${err.message}`);
   }
