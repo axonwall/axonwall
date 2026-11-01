@@ -878,6 +878,10 @@ func readRawKey() string {
 		return "RIGHT"
 	case s == "\x1b[D" || s == "\x1bOD":
 		return "LEFT"
+	case s == "\x1b[5~":
+		return "PGUP"
+	case s == "\x1b[6~":
+		return "PGDN"
 	case s == "\r" || s == "\n":
 		return "ENTER"
 	case s == " ":
@@ -888,6 +892,383 @@ func readRawKey() string {
 		return "BACKSPACE"
 	default:
 		return strings.ToUpper(strings.TrimSpace(s))
+	}
+}
+
+// suppressConsoleNoise silences kernel printk messages and systemd ShowStatus
+// broadcasts on /dev/console (/dev/tty1) so background service transitions or
+// errors never bleed into the interactive TUI installer screen. All events remain
+// captured in journald and can be inspected via the [V] Logs & Diagnostics screen.
+func suppressConsoleNoise() {
+	_ = os.WriteFile("/proc/sys/kernel/printk", []byte("1\t4\t1\t7\n"), 0644)
+	_ = exec.Command("dmesg", "-n", "1").Run()
+	// SIGRTMIN+21 (signal 55 on Linux x86_64/arm64) instructs PID 1 (systemd)
+	// to disable ShowStatus console output immediately.
+	if os.Geteuid() == 0 {
+		_ = syscall.Kill(1, syscall.Signal(55))
+	}
+}
+
+// countFailedSystemdUnits returns the number of failed systemd units on the system.
+func countFailedSystemdUnits() (int, []string) {
+	out, err := exec.Command("systemctl", "--failed", "--no-legend", "--no-pager", "--plain").Output()
+	if err != nil && len(out) == 0 {
+		return 0, nil
+	}
+	var units []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			units = append(units, fields[0])
+		}
+	}
+	return len(units), units
+}
+
+// collectInstallerLogLines returns lines from /var/log/axonwall-install.log combined with in-memory lines.
+func collectInstallerLogLines(rawLines []string) []string {
+	var lines []string
+	if data, err := os.ReadFile("/var/log/axonwall-install.log"); err == nil && len(data) > 0 {
+		for _, l := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) == 0 && len(rawLines) > 0 {
+		lines = append(lines, rawLines...)
+	}
+	if len(lines) == 0 {
+		lines = []string{
+			"No installation has been executed yet in this session.",
+			" Log path: /var/log/axonwall-install.log",
+			"",
+			" Tip: Switch to Tab [2] to inspect captured background systemd service",
+			"      & kernel warnings/errors, or Tab [3] for Hardware & Storage Probe.",
+		}
+	}
+	return lines
+}
+
+// collectCapturedServiceAndSystemErrors returns failed systemd units and recent journalctl warning/error entries.
+func collectCapturedServiceAndSystemErrors() []string {
+	var lines []string
+	lines = append(lines, "=== Captured Systemd Failed Units (Suppressed from Console TUI) ===")
+	failedCnt, failedUnits := countFailedSystemdUnits()
+	if failedCnt == 0 {
+		lines = append(lines, "  [✓] No failed systemd units detected.")
+	} else {
+		lines = append(lines, fmt.Sprintf("  [!] %d failed unit(s) captured off-screen: %s", failedCnt, strings.Join(failedUnits, ", ")))
+		if out, err := exec.Command("systemctl", "--failed", "--no-pager", "--plain").CombinedOutput(); err == nil && len(out) > 0 {
+			for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+				lines = append(lines, "  "+l)
+			}
+		}
+		for _, u := range failedUnits {
+			lines = append(lines, "")
+			lines = append(lines, fmt.Sprintf("--- Unit Status: %s ---", u))
+			if uOut, err := exec.Command("systemctl", "status", u, "--no-pager", "-n", "12").CombinedOutput(); len(uOut) > 0 || err != nil {
+				for _, l := range strings.Split(strings.TrimRight(string(uOut), "\n"), "\n") {
+					lines = append(lines, "  "+l)
+				}
+			}
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "=== Recent System & Service Warnings / Errors (journalctl -p err..warning) ===")
+	if jOut, err := exec.Command("journalctl", "-p", "err..warning", "-n", "80", "--no-pager", "-o", "short-iso").CombinedOutput(); err == nil && len(jOut) > 0 {
+		for _, l := range strings.Split(strings.TrimRight(string(jOut), "\n"), "\n") {
+			lines = append(lines, "  "+l)
+		}
+	} else if dOut, err := exec.Command("dmesg", "--level=err,warn").CombinedOutput(); err == nil && len(dOut) > 0 {
+		for _, l := range strings.Split(strings.TrimRight(string(dOut), "\n"), "\n") {
+			lines = append(lines, "  "+l)
+		}
+	} else {
+		lines = append(lines, "  (No warning/error journal entries available)")
+	}
+	return lines
+}
+
+// collectHardwareAndStorageProbeLines returns hardware evaluation and block/ZFS/RAID diagnostics.
+func collectHardwareAndStorageProbeLines(cfg InstallerConfig, eval HardwareEvaluation) []string {
+	var lines []string
+	lines = append(lines, "=== Hardware Self-Evaluation & Selected Installer Profile ===")
+	lines = append(lines, fmt.Sprintf("  Appliance Edition : %s (%s)", strings.ToUpper(cfg.Edition), cfg.OSFamily))
+	lines = append(lines, fmt.Sprintf("  Install Mode      : %s", strings.ToUpper(cfg.InstallMode)))
+	lines = append(lines, fmt.Sprintf("  Firmware & RAM    : %s | %d MB RAM | TPM 2.0: %v", eval.FirmwareMode, eval.TotalRAMMB, eval.HasTPM2))
+	lines = append(lines, fmt.Sprintf("  System OS Disks   : %s", eval.SystemDiskSummary))
+	lines = append(lines, fmt.Sprintf("  OpenZFS Pool      : %s", eval.ZfsPoolSummary))
+	lines = append(lines, fmt.Sprintf("  Slot Sizing       : %s", eval.SlotSizingNote))
+	for _, note := range eval.EvaluationNotes {
+		lines = append(lines, "  • "+note)
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "=== Block Storage Devices (lsblk) ===")
+	if out, err := exec.Command("lsblk", "-o", "NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT,MODEL").CombinedOutput(); err == nil && len(out) > 0 {
+		for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			lines = append(lines, "  "+l)
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "=== OpenZFS Pools (zpool status) ===")
+	if out, err := exec.Command("zpool", "status").CombinedOutput(); err == nil && len(out) > 0 {
+		for _, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			lines = append(lines, "  "+l)
+		}
+	} else {
+		lines = append(lines, "  (No active OpenZFS pools imported)")
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "=== Linux Software RAID (mdadm /proc/mdstat) ===")
+	if data, err := os.ReadFile("/proc/mdstat"); err == nil && len(data) > 0 {
+		for _, l := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			lines = append(lines, "  "+l)
+		}
+	} else {
+		lines = append(lines, "  (No active mdadm arrays)")
+	}
+	return lines
+}
+
+// FormatInstallerDiagnosticsBundle builds a comprehensive plain-text diagnostic report for saving/exporting.
+func FormatInstallerDiagnosticsBundle(cfg InstallerConfig, eval HardwareEvaluation, rawLines []string) string {
+	var sb strings.Builder
+	sb.WriteString("================================================================================\n")
+	sb.WriteString(" AXONWALL NEXT-GEN INSTALLER — DIAGNOSTICS & LOG BUNDLE\n")
+	sb.WriteString(fmt.Sprintf(" Generated: %s\n", time.Now().Format(time.RFC3339)))
+	sb.WriteString("================================================================================\n\n")
+
+	sb.WriteString("--- [1] HARDWARE & STORAGE PROBE ---\n")
+	for _, l := range collectHardwareAndStorageProbeLines(cfg, eval) {
+		sb.WriteString(l + "\n")
+	}
+	sb.WriteString("\n--- [2] CAPTURED SERVICE & SYSTEM ERRORS ---\n")
+	for _, l := range collectCapturedServiceAndSystemErrors() {
+		sb.WriteString(l + "\n")
+	}
+	sb.WriteString("\n--- [3] INSTALLER EXECUTION LOG ---\n")
+	for _, l := range collectInstallerLogLines(rawLines) {
+		sb.WriteString(l + "\n")
+	}
+	return sb.String()
+}
+
+// SaveInstallerDiagnosticsBundle writes the diagnostics bundle to the requested path (and standard fallback paths).
+func SaveInstallerDiagnosticsBundle(customPath string, cfg InstallerConfig, eval HardwareEvaluation, rawLines []string) ([]string, error) {
+	bundle := FormatInstallerDiagnosticsBundle(cfg, eval, rawLines)
+	targets := []string{
+		"/var/log/axonwall-installer-diagnostics.log",
+		"/root/axonwall-installer-diagnostics.log",
+	}
+	if st, err := os.Stat("/mnt/slot_a/var/log"); err == nil && st.IsDir() {
+		targets = append(targets, "/mnt/slot_a/var/log/axonwall-installer-diagnostics.log")
+	}
+	customPath = strings.TrimSpace(customPath)
+	if customPath != "" {
+		if st, err := os.Stat(customPath); err == nil && st.IsDir() {
+			customPath = filepath.Join(customPath, "axonwall-installer-diagnostics.log")
+		}
+		already := false
+		for _, t := range targets {
+			if t == customPath {
+				already = true
+				break
+			}
+		}
+		if !already {
+			targets = append([]string{customPath}, targets...)
+		}
+	}
+
+	var saved []string
+	var lastErr error
+	for _, p := range targets {
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := os.WriteFile(p, []byte(bundle), 0600); err != nil {
+			lastErr = err
+			continue
+		}
+		saved = append(saved, p)
+	}
+	if len(saved) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return saved, nil
+}
+
+// runInstallerLogsScreen renders the interactive Logs & Diagnostics TUI screen inside the installer.
+func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLines []string, reader *bufio.Reader) {
+	suppressConsoleNoise()
+	activeTab := 1 // 1=Installer Log, 2=Captured Service & System Errors, 3=Hardware & Storage Probe
+	if len(rawLines) == 0 {
+		if _, err := os.Stat("/var/log/axonwall-install.log"); err != nil {
+			// Default to Captured Service & System Errors if install hasn't run yet and there are failed units
+			if cnt, _ := countFailedSystemdUnits(); cnt > 0 {
+				activeTab = 2
+			}
+		}
+	}
+	scrollOffset := 0
+	statusBanner := ""
+
+	for {
+		clearScreen()
+		accent := colorEmerald
+		if cfg.Edition == "vault" {
+			accent = colorBrightCya
+		}
+		fmt.Printf("%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", accent, colorBold, colorReset)
+		fmt.Printf("%s%s║  📋  AXONWALL INSTALLER — LOGS, CAPTURED ERRORS & DIAGNOSTICS                ║%s\n", accent, colorBold, colorReset)
+		fmt.Printf("%s%s║      Background service & kernel messages are captured here off-screen       ║%s\n", colorCyan, colorBold, colorReset)
+		fmt.Printf("%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n", accent, colorBold, colorReset)
+
+		failedCnt, _ := countFailedSystemdUnits()
+		tab1Label := "[1] Installer Log"
+		tab2Label := fmt.Sprintf("[2] Captured Service & System Errors (%d)", failedCnt)
+		tab3Label := "[3] Hardware & Storage Probe"
+
+		renderTab := func(idx int, label string) string {
+			if activeTab == idx {
+				return accent + colorBold + "● " + label + colorReset
+			}
+			return colorDim + "  " + label + colorReset
+		}
+		fmt.Printf(" %s   %s   %s\n", renderTab(1, tab1Label), renderTab(2, tab2Label), renderTab(3, tab3Label))
+		fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+
+		var lines []string
+		switch activeTab {
+		case 1:
+			lines = collectInstallerLogLines(rawLines)
+		case 2:
+			lines = collectCapturedServiceAndSystemErrors()
+		case 3:
+			lines = collectHardwareAndStorageProbeLines(cfg, eval)
+		}
+
+		pageSize := 13
+		maxScroll := len(lines) - pageSize
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if scrollOffset > maxScroll {
+			scrollOffset = maxScroll
+		}
+		if scrollOffset < 0 {
+			scrollOffset = 0
+		}
+
+		endIdx := scrollOffset + pageSize
+		if endIdx > len(lines) {
+			endIdx = len(lines)
+		}
+
+		for i := scrollOffset; i < endIdx; i++ {
+			line := lines[i]
+			if len(line) > 78 {
+				line = line[:78]
+			}
+			lineColor := ""
+			lower := strings.ToLower(line)
+			switch {
+			case strings.Contains(lower, "failed") || strings.Contains(lower, "[!]") || strings.Contains(lower, "error"):
+				lineColor = colorRed
+			case strings.Contains(lower, "warn"):
+				lineColor = colorYellow
+			case strings.HasPrefix(strings.TrimSpace(line), "===") || strings.HasPrefix(strings.TrimSpace(line), "---"):
+				lineColor = colorCyan + colorBold
+			case strings.Contains(line, "[✓]") || strings.Contains(line, "[+]"):
+				lineColor = colorGreen
+			}
+			if lineColor != "" {
+				fmt.Printf(" %s%s%s\n", lineColor, line, colorReset)
+			} else {
+				fmt.Printf(" %s\n", line)
+			}
+		}
+		for i := endIdx - scrollOffset; i < pageSize; i++ {
+			fmt.Println()
+		}
+
+		fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+		if statusBanner != "" {
+			fmt.Printf(" %s\n", statusBanner)
+		} else {
+			fmt.Printf(" %sShowing lines %d–%d of %d%s  (Console noise suppression: %sACTIVE%s)\n",
+				colorDim, scrollOffset+1, endIdx, len(lines), colorReset, colorEmerald+colorBold, colorReset)
+		}
+		fmt.Printf(" %sControls:%s [1-3] Tab  [↑/↓/PgUp/PgDn] Scroll  %s[S] Save Diagnostics%s  [C] Clear Failed  [B/Esc] Back\n",
+			colorDim, colorReset, colorEmerald+colorBold, colorReset)
+
+		key := readRawKey()
+		statusBanner = ""
+		switch key {
+		case "1":
+			activeTab = 1
+			scrollOffset = 0
+		case "2":
+			activeTab = 2
+			scrollOffset = 0
+		case "3":
+			activeTab = 3
+			scrollOffset = 0
+		case "LEFT":
+			if activeTab > 1 {
+				activeTab--
+				scrollOffset = 0
+			}
+		case "RIGHT":
+			if activeTab < 3 {
+				activeTab++
+				scrollOffset = 0
+			}
+		case "UP":
+			if scrollOffset > 0 {
+				scrollOffset--
+			}
+		case "DOWN":
+			if scrollOffset < maxScroll {
+				scrollOffset++
+			}
+		case "PGUP", "U":
+			scrollOffset -= pageSize
+			if scrollOffset < 0 {
+				scrollOffset = 0
+			}
+		case "PGDN", "D", "SPACE":
+			scrollOffset += pageSize
+			if scrollOffset > maxScroll {
+				scrollOffset = maxScroll
+			}
+		case "S":
+			fmt.Print("\n Save path (Enter for /var/log & /root, or enter custom/USB path): ")
+			customPath, _ := reader.ReadString('\n')
+			savedPaths, err := SaveInstallerDiagnosticsBundle(customPath, cfg, eval, rawLines)
+			if err != nil {
+				statusBanner = fmt.Sprintf("%s[!] Failed to save diagnostics: %v%s", colorRed+colorBold, err, colorReset)
+			} else {
+				statusBanner = fmt.Sprintf("%s[✓] Saved diagnostics to: %s%s", colorEmerald+colorBold, strings.Join(savedPaths, ", "), colorReset)
+			}
+		case "C":
+			_ = exec.Command("systemctl", "reset-failed").Run()
+			suppressConsoleNoise()
+			statusBanner = fmt.Sprintf("%s[✓] Cleared failed systemd unit states and refreshed console suppression.%s", colorEmerald+colorBold, colorReset)
+		case "R":
+			suppressConsoleNoise()
+			statusBanner = fmt.Sprintf("%s[✓] Refreshed logs and console suppression.%s", colorCyan+colorBold, colorReset)
+		case "B", "ESC", "Q", "BACKSPACE":
+			return
+		}
 	}
 }
 
@@ -970,6 +1351,7 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 
 // RunNextGenInstallerTUI launches the interactive multi-step Axonwall Next-Gen Installer TUI.
 func RunNextGenInstallerTUI(reader *bufio.Reader) {
+	suppressConsoleNoise()
 	installerPath := "/usr/local/bin/axonwall-install"
 	if _, err := os.Stat(installerPath); err != nil {
 		clearScreen()
@@ -988,6 +1370,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 	secCursor := 0
 
 	for step >= 0 && step <= 5 {
+		suppressConsoleNoise()
 		switch step {
 		case 0:
 			renderInstallerBanner(cfg, 0)
@@ -1074,8 +1457,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				fmt.Printf(" %sReady to install onto [%s] (existing data on target disk(s) will be erased).%s\n",
 					colorYellow, strings.Join(allTargetDisks, ", "), colorReset)
 			}
-			fmt.Printf(" %sControls:%s %s[Enter / I] Express Install Now%s  [1-3/↑/↓] Arch  [P] Password  [L] LUKS2  [E] Edition  [C] Customize  [Q] Quit\n",
-				colorDim, colorReset, colorEmerald+colorBold, colorReset)
+			fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [E] Ed  [C] Custom  %s[V] Logs%s  [Q] Quit\n",
+				colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 
 			key := readRawKey()
 			switch key {
@@ -1142,11 +1525,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				}
 			case "R":
 				disks, eval = EvaluateHardwareProfile(DiscoverDisks(), &cfg)
+			case "V":
+				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "C":
 				step = 1
 			case "I", "ENTER":
 				if len(cfg.SystemDisks) > 0 {
-					executeLiveInstallation(cfg, installerPath, reader)
+					executeLiveInstallation(cfg, eval, installerPath, reader)
 					return
 				}
 			case "Q", "ESC":
@@ -1217,13 +1602,15 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			if cfg.InstallMode == "zbm" {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [B] Express Summary  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [V] Logs  [B] Express  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
 			} else {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [B] Express  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [V] Logs  [B] Express  [Enter] Next\n", colorDim, colorReset)
 			}
 
 			key := readRawKey()
 			switch key {
+			case "V":
+				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "E":
 				if cfg.Edition == "vault" {
 					cfg.Edition = "axonwall"
@@ -1367,10 +1754,12 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %sRole Keys:%s [Space] Cycle Role  [S] System OS  [D] ZFS Data  [G] ZFS SLOG  [C] ZFS L2ARC  [H] Hot Spare  [U] Unused\n", colorDim, colorReset)
-			fmt.Printf(" %sNavigation:%s [↑/↓] Move  [A] Auto-Tier by Size  [R] Rescan  [B] Back  [Enter] Next\n", colorDim, colorReset)
+			fmt.Printf(" %sNavigation:%s [↑/↓] Move  [A] Auto-Tier by Size  [R] Rescan  [V] Logs & Diagnostics  [B] Back  [Enter] Next\n", colorDim, colorReset)
 
 			key := readRawKey()
 			switch key {
+			case "V":
+				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "UP":
 				if diskCursor > 0 {
 					diskCursor--
@@ -1538,10 +1927,12 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				fmt.Printf(" %s    L2ARC (Read Cache)      :%s %s\n", colorBold, colorReset, l2arcDesc)
 				fmt.Printf(" %s    Hot Spare Devices       :%s %s\n", colorBold, colorReset, spareDesc)
 				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-				fmt.Printf(" %sControls:%s [T] Cycle Topology  [L] Toggle /var/log  [D] Edit Disk Roles (Data/SLOG/L2ARC)  [B] Back  [Enter] Next\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [T] Cycle Topology  [L] Toggle /var/log  [D] Edit Disk Roles  [V] Logs  [B] Back  [Enter] Next\n", colorDim, colorReset)
 
 				key := readRawKey()
 				switch key {
+				case "V":
+					runInstallerLogsScreen(cfg, eval, nil, reader)
 				case "L":
 					cfg.LogsEnabled = !cfg.LogsEnabled
 				case "T":
@@ -1612,10 +2003,12 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				fmt.Printf(" %s    L2ARC (Read Cache)        :%s %s\n", colorBold, colorReset, l2arcDesc)
 				fmt.Printf(" %s    Hot Spare Devices         :%s %s\n", colorBold, colorReset, spareDesc)
 				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-				fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-4] Select  [C] Custom GB  [T] Topology  [L] /var/log  [D] Disk Roles  [B] Back  [Enter] Next\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-4] Select  [C] Custom GB  [T] Topology  [L] /var/log  [V] Logs  [B] Back  [Enter] Next\n", colorDim, colorReset)
 
 				key := readRawKey()
 				switch key {
+				case "V":
+					runInstallerLogsScreen(cfg, eval, nil, reader)
 				case "UP":
 					if zfsCursor > 0 {
 						zfsCursor--
@@ -1699,10 +2092,12 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			}
 
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-4] Toggle/Edit  [B] Back  [Enter] Review & Install\n", colorDim, colorReset)
+			fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-4] Toggle/Edit  [V] Logs & Diagnostics  [B] Back  [Enter] Review & Install\n", colorDim, colorReset)
 
 			key := readRawKey()
 			switch key {
+			case "V":
+				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "UP":
 				if secCursor > 0 {
 					secCursor--
@@ -1824,10 +2219,12 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			fmt.Printf(" %s⚠️  WARNING: ALL EXISTING DATA ON [%s] WILL BE PERMANENTLY ERASED!%s\n",
 				colorRed+colorBold, strings.Join(allTargetDisks, ", "), colorReset)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sControls:%s [I / Enter] Begin Installation Now   [B] Back   [W] Shell Wizard   [Q] Cancel\n", colorDim, colorReset)
+			fmt.Printf(" %sControls:%s [I / Enter] Begin Installation Now   [V] Logs & Diagnostics   [B] Back   [W] Shell Wizard   [Q] Cancel\n", colorDim, colorReset)
 
 			key := readRawKey()
 			switch key {
+			case "V":
+				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "B", "BACKSPACE", "LEFT":
 				step = 4
 			case "W":
@@ -1840,7 +2237,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				pause(reader)
 				return
 			case "I", "ENTER":
-				executeLiveInstallation(cfg, installerPath, reader)
+				executeLiveInstallation(cfg, eval, installerPath, reader)
 				return
 			case "Q", "ESC":
 				return
@@ -1850,7 +2247,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 }
 
 // executeLiveInstallation writes the config file, runs axonwall-install, and renders the live progress dashboard.
-func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *bufio.Reader) {
+func executeLiveInstallation(cfg InstallerConfig, eval HardwareEvaluation, installerPath string, reader *bufio.Reader) {
+	suppressConsoleNoise()
 	runDir := "/run/axonwall"
 	if err := os.MkdirAll(runDir, 0700); err != nil {
 		runDir = os.TempDir()
@@ -2027,24 +2425,43 @@ func executeLiveInstallation(cfg InstallerConfig, installerPath string, reader *
 
 	err = cmd.Wait()
 	if err != nil {
-		drawProgress(fmt.Sprintf("Installation failed: %v", err), true, true)
-		pause(reader)
-		return
+		failureMsg := fmt.Sprintf("Installation failed: %v", err)
+		for {
+			suppressConsoleNoise()
+			drawProgress(failureMsg, true, true)
+			fmt.Printf("\n  Press %s[V]%s to view/save full Logs & Diagnostics, or %s[Enter / Q]%s to return to Console: ",
+				colorCyan+colorBold, colorReset, colorBold, colorReset)
+			key := readRawKey()
+			if key == "V" {
+				runInstallerLogsScreen(cfg, eval, allRawLines, reader)
+				continue
+			}
+			return
+		}
 	}
 
-	drawProgress("Installation completed! Remove installation media and reboot.", true, false)
-	fmt.Printf("\n  %s[✓] Axonwall OS has been installed to %s.%s\n", colorGreen+colorBold, strings.Join(cfg.SystemDisks, ", "), colorReset)
-	fmt.Printf("  Press %s[R]%s to reboot appliance now, or %s[Enter]%s to return to Console: ", colorEmerald+colorBold, colorReset, colorBold, colorReset)
+	for {
+		suppressConsoleNoise()
+		drawProgress("Installation completed! Remove installation media and reboot.", true, false)
+		fmt.Printf("\n  %s[✓] Axonwall OS has been installed to %s.%s\n", colorGreen+colorBold, strings.Join(cfg.SystemDisks, ", "), colorReset)
+		fmt.Printf("  Press %s[R]%s to reboot now, %s[V]%s to view/save Logs & Diagnostics, or %s[Enter]%s for Console: ",
+			colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset, colorBold, colorReset)
 
-	key := readRawKey()
-	if key == "R" {
-		fmt.Println("\n  Rebooting appliance...")
-		_ = exec.Command("systemctl", "reboot").Run()
-		_ = exec.Command("/sbin/reboot").Run()
-		_ = exec.Command("reboot").Run()
-		for {
-			time.Sleep(1 * time.Second)
+		key := readRawKey()
+		if key == "V" {
+			runInstallerLogsScreen(cfg, eval, allRawLines, reader)
+			continue
 		}
+		if key == "R" {
+			fmt.Println("\n  Rebooting appliance...")
+			_ = exec.Command("systemctl", "reboot").Run()
+			_ = exec.Command("/sbin/reboot").Run()
+			_ = exec.Command("reboot").Run()
+			for {
+				time.Sleep(1 * time.Second)
+			}
+		}
+		return
 	}
 }
 

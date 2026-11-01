@@ -188,3 +188,36 @@ func TestEvaluateHardwareProfile(t *testing.T) {
 		t.Errorf("expected non-empty ZfsPoolSummary")
 	}
 }
+
+func TestSaveInstallerDiagnosticsBundle(t *testing.T) {
+	cfg := DefaultInstallerConfig()
+	disks := []DiskDevice{
+		{Name: "nvme0n1", Path: "/dev/nvme0n1", SizeMB: 65536, SizeGB: 64.0},
+	}
+	_, eval := EvaluateHardwareProfile(disks, &cfg)
+	rawLines := []string{
+		"[PHASE:1/8] Partitioning target disk(s)...",
+		"[+] Created GPT partition table on /dev/nvme0n1",
+	}
+
+	tmpDir := t.TempDir()
+	customOut := tmpDir + "/custom-diag.log"
+	savedPaths, err := SaveInstallerDiagnosticsBundle(customOut, cfg, eval, rawLines)
+	if err != nil {
+		t.Fatalf("expected SaveInstallerDiagnosticsBundle to succeed, got err=%v", err)
+	}
+	if len(savedPaths) == 0 {
+		t.Fatalf("expected at least one saved path")
+	}
+
+	bundle := FormatInstallerDiagnosticsBundle(cfg, eval, rawLines)
+	if !strings.Contains(bundle, "AXONWALL NEXT-GEN INSTALLER — DIAGNOSTICS & LOG BUNDLE") {
+		t.Errorf("expected header in diagnostics bundle")
+	}
+	if !strings.Contains(bundle, "CAPTURED SERVICE & SYSTEM ERRORS") {
+		t.Errorf("expected captured service errors section in diagnostics bundle")
+	}
+	if !strings.Contains(bundle, "[PHASE:1/8] Partitioning target disk(s)...") && !strings.Contains(bundle, "INSTALLER EXECUTION LOG") {
+		t.Errorf("expected installer execution log section in diagnostics bundle")
+	}
+}

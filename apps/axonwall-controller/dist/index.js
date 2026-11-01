@@ -38473,6 +38473,7 @@ function compileUnbound(dns, headscale) {
       lines.push("");
       lines.push("# Headscale MagicDNS Forwarding");
       lines.push("server:");
+      lines.push("  do-not-query-localhost: no");
       lines.push(`  local-zone: "${safeMagicDomain}." transparent`);
       lines.push("forward-zone:");
       lines.push(`  name: "${safeMagicDomain}."`);

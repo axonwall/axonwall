@@ -17,6 +17,12 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Silence kernel printk and systemd console status broadcasts during installation
+# so background unit failures or kernel messages never corrupt the installer TUI on /dev/tty1.
+dmesg -n 1 2>/dev/null || true
+printf '1\t4\t1\t7\n' > /proc/sys/kernel/printk 2>/dev/null || true
+kill -55 1 2>/dev/null || true
+
 MODE="interactive"
 CONFIG_FILE=""
 CLI_DISKS=""
@@ -2198,6 +2204,10 @@ cleanup_secrets
 if [ -f "$INSTALL_LOG" ] && [ -d /mnt/slot_a/var/log ]; then
   cp -f "$INSTALL_LOG" /mnt/slot_a/var/log/axonwall-install.log 2>/dev/null || true
   chmod 0600 /mnt/slot_a/var/log/axonwall-install.log 2>/dev/null || true
+fi
+if [ -f /var/log/axonwall-installer-diagnostics.log ] && [ -d /mnt/slot_a/var/log ]; then
+  cp -f /var/log/axonwall-installer-diagnostics.log /mnt/slot_a/var/log/axonwall-installer-diagnostics.log 2>/dev/null || true
+  chmod 0600 /mnt/slot_a/var/log/axonwall-installer-diagnostics.log 2>/dev/null || true
 fi
 umount /mnt/slot_a/boot/efi 2>/dev/null || true
 umount /mnt/slot_a/var/log 2>/dev/null || true

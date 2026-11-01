@@ -12,6 +12,12 @@ fi
 
 echo "[Axonwall Firstboot] Initializing network appliance..."
 
+# Suppress kernel printk and systemd console status broadcasts so background
+# provisioning on Live media or firstboot never corrupts the TUI on /dev/tty1.
+dmesg -n 1 2>/dev/null || true
+printf '1\t4\t1\t7\n' > /proc/sys/kernel/printk 2>/dev/null || true
+kill -55 1 2>/dev/null || true
+
 # 1. Apply kernel performance tuning
 # sysctl --system exits non-zero on unknown keys (e.g. nf_conntrack_* before the
 # module is loaded); under `set -e` that previously aborted the whole script.
@@ -580,6 +586,21 @@ fi
 rm -f "$MARKER"
 
 systemctl daemon-reload
+
+# Ensure DNSSEC root trust anchor exists and is owned by unbound before unbound starts
+if id unbound >/dev/null 2>&1; then
+  mkdir -p /var/lib/unbound /usr/share/dns
+  if [[ ! -s /usr/share/dns/root.key ]]; then
+    printf '. IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D\n. IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16\n' > /usr/share/dns/root.key
+  fi
+  if [[ ! -s /var/lib/unbound/root.key ]]; then
+    cp -f /usr/share/dns/root.key /var/lib/unbound/root.key 2>/dev/null || true
+  fi
+  chown -R unbound:unbound /var/lib/unbound 2>/dev/null || true
+  chmod 0644 /var/lib/unbound/root.key 2>/dev/null || true
+  rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf 2>/dev/null || true
+fi
+
 systemctl enable axonwalld axonwall-controller axonwall-ui headscale ssh chrony sysstat || true
 # Start/restart axonwalld synchronously before axonwallctl apply so the agent socket stays live during apply
 systemctl try-restart axonwalld || true

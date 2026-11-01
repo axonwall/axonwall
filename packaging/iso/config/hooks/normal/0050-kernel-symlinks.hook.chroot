@@ -31,3 +31,13 @@ if [ -n "$LATEST_INITRD" ]; then
   ln -sf "$(basename "$LATEST_INITRD")" /boot/initrd.img
   ln -sf "boot/$(basename "$LATEST_INITRD")" /initrd.img
 fi
+
+echo "[Hook] Ensuring Unbound DNSSEC root trust anchor and disabling unconfigured daemons until axonwall-firstboot..."
+mkdir -p /var/lib/unbound
+if [ -f /usr/share/dns/root.key ] && [ ! -s /var/lib/unbound/root.key ]; then
+  cp -f /usr/share/dns/root.key /var/lib/unbound/root.key
+fi
+chown -R unbound:unbound /var/lib/unbound 2>/dev/null || true
+rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf 2>/dev/null || true
+systemctl disable suricata kea-dhcp4-server unbound unbound-resolvconf frr strongswan strongswan-starter openvpn conntrackd keepalived 2>/dev/null || true
+
