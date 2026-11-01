@@ -63,13 +63,13 @@ export async function executePluginAction(
     '/v1/system/plugins/action',
     'POST',
     { pluginId, action },
-    90000 // Allow up to 90 seconds for apt/apk package manager downloads
+    300000 // Allow up to 5 minutes for apt/apk package manager downloads and configuration hooks
   );
 
   if (!res) {
     return {
       success: false,
-      message: 'Failed to communicate with axonwalld agent daemon.',
+      message: 'Failed to communicate with axonwalld agent daemon or operation timed out.',
     };
   }
 

@@ -62,6 +62,7 @@ type PluginActionResponse struct {
 
 type PluginManager struct {
 	mu           sync.RWMutex
+	actionMu     sync.Mutex
 	baseDataDir  string
 	stateFile    string
 	disabledFile string
@@ -431,6 +432,11 @@ func NewPluginManager(baseDataDir string) *PluginManager {
 		installedMap: make(map[string]string),
 		disabledMap:  make(map[string]bool),
 	}
+	if pm.osFamily == "debian" {
+		// Eliminate tens of thousands of fsync / ZIL commit stalls on ZFS filesystems during dpkg package extraction
+		_ = os.MkdirAll("/etc/dpkg/dpkg.cfg.d", 0755)
+		_ = os.WriteFile("/etc/dpkg/dpkg.cfg.d/force-unsafe-io", []byte("force-unsafe-io\n"), 0644)
+	}
 	pm.loadState()
 	return pm
 }
@@ -584,8 +590,8 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	pm.actionMu.Lock()
+	defer pm.actionMu.Unlock()
 
 	defs := GetExtensionPluginDefinitions()
 	var target *PluginDefinition
@@ -621,7 +627,7 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 			}
 		} else if pluginID == "ntopng" {
 			if _, err := os.Stat("/etc/apt/sources.list.d/ntop.list"); os.IsNotExist(err) {
-				prepCmd := exec.Command("sh", "-c", "apt-get install -y --no-install-recommends gnupg curl && curl -fsSL https://packages.ntop.org/apt/trixie/all/apt-ntop.deb -o /tmp/apt-ntop.deb && dpkg -i /tmp/apt-ntop.deb && apt-get update")
+				prepCmd := exec.Command("sh", "-c", "apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-unsafe-io gnupg curl && curl -fsSL https://packages.ntop.org/apt/trixie/all/apt-ntop.deb -o /tmp/apt-ntop.deb && dpkg --force-unsafe-io -i /tmp/apt-ntop.deb && apt-get update")
 				prepCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 				if out, err := prepCmd.CombinedOutput(); err != nil {
 					log.Printf("[PluginManager] Warning configuring ntopng apt repository: %v (%s)", err, string(out))
@@ -636,7 +642,7 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 			args := append([]string{"add", "--no-cache"}, pkgs...)
 			cmd = exec.Command("apk", args...)
 		} else {
-			args := append([]string{"install", "-y", "--no-install-recommends"}, pkgs...)
+			args := append([]string{"install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io"}, pkgs...)
 			cmd = exec.Command("apt-get", args...)
 			cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 		}
@@ -655,7 +661,9 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	// Post-install configuration hooks
 	if pluginID == "cli-workstation" {
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
+		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)
+		pm.mu.Unlock()
 		if err := pm.provisionWorkstationConfigs(); err != nil {
 			log.Printf("[PluginManager] Warning provisioning workstation configs: %v", err)
 		}
@@ -679,8 +687,10 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	pm.mu.Lock()
 	pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
 	pm.saveState()
+	pm.mu.Unlock()
 
 	// Ensure LDAP integration is provisioned if declared by the plugin
 	go pm.ensurePluginLDAP(pluginID)
@@ -693,8 +703,8 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	pm.actionMu.Lock()
+	defer pm.actionMu.Unlock()
 
 	defs := GetExtensionPluginDefinitions()
 	var target *PluginDefinition
@@ -724,7 +734,7 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 			args := append([]string{"del"}, pkgs...)
 			cmd = exec.Command("apk", args...)
 		} else {
-			args := append([]string{"remove", "-y"}, pkgs...)
+			args := append([]string{"remove", "-y", "-o", "Dpkg::Options::=--force-unsafe-io"}, pkgs...)
 			cmd = exec.Command("apt-get", args...)
 			cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 		}
@@ -742,7 +752,9 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 
 	// Post-removal cleanup hooks
 	if pluginID == "cli-workstation" {
+		pm.mu.Lock()
 		pm.disabledMap[pluginID] = true
+		pm.mu.Unlock()
 		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
 		if pm.osFamily == "alpine" {
@@ -754,8 +766,10 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	pm.mu.Lock()
 	delete(pm.installedMap, pluginID)
 	pm.saveState()
+	pm.mu.Unlock()
 
 	return PluginActionResponse{
 		Success: true,
@@ -765,6 +779,8 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse {
+	pm.actionMu.Lock()
+	defer pm.actionMu.Unlock()
 	if pluginID == "cli-workstation" {
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
 		pm.mu.Lock()

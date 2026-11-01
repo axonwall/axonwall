@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/bits"
 	"net"
 	"os"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -16,17 +19,20 @@ import (
 )
 
 type EBPFManager struct {
-	objs        ebpf.FlowTrackerObjects
-	links       []link.Link
-	ch          driver.Conn
-	stopChan    chan struct{}
-	prevPackets map[ebpf.FlowTrackerFlowKey]uint64
+	objs         ebpf.FlowTrackerObjects
+	links        []link.Link
+	ch           driver.Conn
+	stopChan     chan struct{}
+	prevPackets  map[ebpf.FlowTrackerFlowKey]uint64
+	blockedUntil map[uint32]time.Time
+	blockMu      sync.Mutex
 }
 
 func NewEBPFManager() *EBPFManager {
 	return &EBPFManager{
-		stopChan:    make(chan struct{}),
-		prevPackets: make(map[ebpf.FlowTrackerFlowKey]uint64),
+		stopChan:     make(chan struct{}),
+		prevPackets:  make(map[ebpf.FlowTrackerFlowKey]uint64),
+		blockedUntil: make(map[uint32]time.Time),
 	}
 }
 
@@ -144,6 +150,37 @@ func (m *EBPFManager) monitorFlows() {
 			now := time.Now()
 			count := 0
 
+			// 1. Process cooldown expirations on blocklist
+			if m.objs.BlocklistMap != nil {
+				m.blockMu.Lock()
+				for ipUint, expiry := range m.blockedUntil {
+					if now.After(expiry) {
+						_ = m.objs.BlocklistMap.Delete(ipUint)
+						delete(m.blockedUntil, ipUint)
+						ip := make(net.IP, 4)
+						for i := 0; i < 4; i++ {
+							ip[i] = byte(ipUint >> (i * 8))
+						}
+						log.Printf("DDoS Mitigation: Cooldown expired for IP %s. Removed from XDP blocklist", ip.String())
+					}
+				}
+				m.blockMu.Unlock()
+			}
+
+			ddosEnabled := os.Getenv("AXONWALL_DDOS_MITIGATION_ENABLED") != "false"
+			ddosThreshold := uint64(500000) // 50,000 packets/sec
+			if val := os.Getenv("AXONWALL_DDOS_THRESHOLD_10S"); val != "" {
+				if parsed, err := strconv.ParseUint(val, 10, 64); err == nil && parsed > 0 {
+					ddosThreshold = parsed
+				}
+			}
+			ddosCooldown := 60 * time.Second
+			if val := os.Getenv("AXONWALL_DDOS_COOLDOWN_SECONDS"); val != "" {
+				if sec, err := strconv.Atoi(val); err == nil && sec > 0 {
+					ddosCooldown = time.Duration(sec) * time.Second
+				}
+			}
+
 			for iter.Next(&key, &val) {
 				// Convert uint32 to net.IP
 				srcIP := make(net.IP, 4)
@@ -155,17 +192,30 @@ func (m *EBPFManager) monitorFlows() {
 					dstIP[i] = byte(key.DstIp >> (i * 8))
 				}
 
+				// Network byte order to host byte order:
+				srcPort := bits.ReverseBytes16(key.SrcPort)
+				dstPort := bits.ReverseBytes16(key.DstPort)
+
 				deltaPackets := val.Packets
 				if prev, ok := m.prevPackets[key]; ok && val.Packets >= prev {
 					deltaPackets = val.Packets - prev
 				}
 				m.prevPackets[key] = val.Packets
 
-				if deltaPackets > 10000 {
+				// Filter out response/download traffic:
+				// Never block legitimate response traffic from standard server ports:
+				// 80 (HTTP), 443 (HTTPS), 8080/8443 (Alt-HTTP/S), 53 (DNS), 853 (DoT), 123 (NTP), 22 (SSH)
+				isServerResponsePort := srcPort == 80 || srcPort == 443 || srcPort == 8080 || srcPort == 8443 || srcPort == 53 || srcPort == 853 || srcPort == 123 || srcPort == 22
+				isReturnTraffic := isServerResponsePort || (dstPort >= 1024 && srcPort < 1024)
+
+				if ddosEnabled && !isReturnTraffic && deltaPackets > ddosThreshold {
 					if _, _, _, err := ValidateTargetSafety(srcIP.String(), "", 0, 24, 64); err == nil {
-						log.Printf("DDoS Mitigation: Threshold exceeded (%d packets/10s). Blocking IP %s via XDP", deltaPackets, srcIP.String())
+						log.Printf("DDoS Mitigation: Volumetric threshold exceeded (%d packets/10s on port %d -> %d). Blocking IP %s via XDP for %v cooldown", deltaPackets, srcPort, dstPort, srcIP.String(), ddosCooldown)
 						if m.objs.BlocklistMap != nil {
 							_ = m.objs.BlocklistMap.Put(key.SrcIp, uint8(1))
+							m.blockMu.Lock()
+							m.blockedUntil[key.SrcIp] = now.Add(ddosCooldown)
+							m.blockMu.Unlock()
 						}
 					}
 				}
@@ -218,5 +268,28 @@ func (m *EBPFManager) Stop() {
 	m.objs.Close()
 	if m.ch != nil {
 		_ = m.ch.Close()
+	}
+}
+
+// ClearBlocklist purges all currently active XDP blocks from the eBPF blocklist map.
+func (m *EBPFManager) ClearBlocklist() {
+	m.blockMu.Lock()
+	defer m.blockMu.Unlock()
+	if m.objs.BlocklistMap == nil {
+		return
+	}
+	iter := m.objs.BlocklistMap.Iterate()
+	var ipUint uint32
+	var val uint8
+	var keysToDelete []uint32
+	for iter.Next(&ipUint, &val) {
+		keysToDelete = append(keysToDelete, ipUint)
+	}
+	for _, k := range keysToDelete {
+		_ = m.objs.BlocklistMap.Delete(k)
+	}
+	m.blockedUntil = make(map[uint32]time.Time)
+	if len(keysToDelete) > 0 {
+		log.Printf("DDoS Mitigation: Cleared %d entries from XDP blocklist", len(keysToDelete))
 	}
 }

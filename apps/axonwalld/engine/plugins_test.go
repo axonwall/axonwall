@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPluginManager_ListPlugins(t *testing.T) {
@@ -121,3 +122,33 @@ func TestPluginManager_StatePersistence(t *testing.T) {
 		t.Errorf("failed to reload persisted plugin state")
 	}
 }
+
+func TestPluginManager_NonBlockingListDuringAction(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "axonwall-plugins-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	pm := NewPluginManager(tmpDir)
+
+	// Simulate an in-progress package manager action holding actionMu
+	pm.actionMu.Lock()
+
+	done := make(chan bool, 1)
+	go func() {
+		// ListPlugins should not be blocked by actionMu
+		_ = pm.ListPlugins()
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		// success: ListPlugins returned without deadlock
+	case <-time.After(2 * time.Second):
+		t.Fatalf("ListPlugins was blocked by package action lock!")
+	}
+
+	pm.actionMu.Unlock()
+}
+
