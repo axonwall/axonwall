@@ -7,6 +7,8 @@ INSTALL_LOG="/var/log/axonwall-install.log"
 mkdir -p /var/log
 exec >>"$INSTALL_LOG" 2>&1
 
+swapoff -a 2>/dev/null || true
+
 echo "================================================================================"
 echo "[Axonwall Installer] Finalizing A/B Dual-Root, System RAID & ZFS Setup..."
 echo "================================================================================"
@@ -541,7 +543,6 @@ ZFS_VDEVS=""
 if [ -b "$ZFS_DEV" ]; then
   ZFS_PART_NUM=$(echo "$ZFS_DEV" | grep -oE '[0-9]+$')
   wipefs -a "$ZFS_DEV" 2>/dev/null || true
-  parted -s "$TARGET_DISK" name "$ZFS_PART_NUM" axon_zfs_1 2>/dev/null || true
   sgdisk -c "${ZFS_PART_NUM}:axon_zfs_1" -t "${ZFS_PART_NUM}:bf01" "$TARGET_DISK" 2>/dev/null || true
   ZFS_VDEVS="$ZFS_DEV"
 fi
@@ -595,7 +596,6 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && [ -n "$SYSTEM_RAID_DISKS" ]; then
       SEC_ZFS=$(part_dev "$sec_disk" "$ZFS_PART_NUM")
       if [ -b "$SEC_ZFS" ]; then
         wipefs -a "$SEC_ZFS" 2>/dev/null || true
-        parted -s "$sec_disk" name "$ZFS_PART_NUM" "axon_zfs_${DISK_IDX}" 2>/dev/null || true
         sgdisk -c "${ZFS_PART_NUM}:axon_zfs_${DISK_IDX}" -t "${ZFS_PART_NUM}:bf01" "$sec_disk" 2>/dev/null || true
         ZFS_VDEVS="${ZFS_VDEVS} ${SEC_ZFS}"
       fi

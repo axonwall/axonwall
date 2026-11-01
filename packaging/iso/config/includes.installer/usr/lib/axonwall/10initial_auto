@@ -15,8 +15,45 @@ if [ -z "$(get_auto_disks)" ] || \
 	exit 0
 fi
 
+# Ensure all lingering kernel locks from previous installations or live probes are released
+swapoff -a 2>/dev/null || true
+if command -v mdadm >/dev/null 2>&1; then
+	for md in /dev/md*; do
+		[ -b "$md" ] && mdadm --stop "$md" 2>/dev/null || true
+	done
+fi
+if command -v cryptsetup >/dev/null 2>&1; then
+	cryptsetup close axon_crypt_data 2>/dev/null || true
+fi
+if command -v dmsetup >/dev/null 2>&1; then
+	for dm in $(dmsetup ls --target crypt 2>/dev/null | awk '{print $1}'); do
+		dmsetup remove -f "$dm" 2>/dev/null || true
+	done
+fi
+if command -v zpool >/dev/null 2>&1; then
+	zpool export -a 2>/dev/null || true
+fi
+for mp in /target/boot/efi /target/var/log /target/var/lib/axonwall /target/mnt/* /target; do
+	umount -f "$mp" 2>/dev/null || true
+done
+udevadm settle 2>/dev/null || true
+
 mkdir -p /var/lib/partman
 touch /var/lib/partman/initial_auto
+
+# Preseed debconf to auto-handle partition commit warnings and purge stale metadata
+db_set partman-auto/purge_lvm_from_device true 2>/dev/null || true
+db_fset partman-auto/purge_lvm_from_device seen true 2>/dev/null || true
+db_set partman-lvm/device_remove_lvm true 2>/dev/null || true
+db_fset partman-lvm/device_remove_lvm seen true 2>/dev/null || true
+db_set partman-md/device_remove_md true 2>/dev/null || true
+db_fset partman-md/device_remove_md seen true 2>/dev/null || true
+db_set partman-partitioning/unknown_label true 2>/dev/null || true
+db_fset partman-partitioning/unknown_label seen true 2>/dev/null || true
+db_set partman/exception_handler "Ignore" 2>/dev/null || true
+db_fset partman/exception_handler seen true 2>/dev/null || true
+db_set partman-base/exception_handler "Ignore" 2>/dev/null || true
+db_fset partman-base/exception_handler seen true 2>/dev/null || true
 
 # Load Axonwall debconf templates into live cdebconf daemon (and fallback to debconf-loadtemplate)
 if [ -f /usr/lib/axonwall/axonwall.templates ]; then
@@ -49,6 +86,31 @@ if [ -n "$seed_dev" ]; then
 	seed_disk="$(echo "$seed_dev" | sed -E 's/p?[0-9]+$//')"
 fi
 
+cdrom_dev="$(awk '$2 == "/cdrom" {print $1}' /proc/mounts 2>/dev/null | head -n1 || true)"
+cdrom_disk=""
+if [ -n "$cdrom_dev" ]; then
+	cdrom_disk="$(echo "$cdrom_dev" | sed -E 's/p?[0-9]+$//')"
+fi
+
+is_installer_media() {
+	_chk="$1"
+	[ -z "$_chk" ] && return 0
+	if [ -n "$seed_dev" ] && { [ "$_chk" = "$seed_dev" ] || [ "$_chk" = "$seed_disk" ]; }; then
+		return 0
+	fi
+	if [ -n "$cdrom_dev" ] && { [ "$_chk" = "$cdrom_dev" ] || [ "$_chk" = "$cdrom_disk" ]; }; then
+		return 0
+	fi
+	if grep -qE "^${_chk}(p?[0-9]+)?[[:space:]].*(/cdrom|/run/live|/lib/live|/rofs|iso9660|squashfs)" /proc/mounts 2>/dev/null; then
+		return 0
+	fi
+	_b="$(basename "$_chk")"
+	if [ -f "/sys/block/${_b}/ro" ] && [ "$(cat "/sys/block/${_b}/ro" 2>/dev/null)" = "1" ]; then
+		return 0
+	fi
+	return 1
+}
+
 # See if any autopartition method has been set
 method=""
 if db_get partman-auto/method && [ "$RET" ]; then
@@ -63,7 +125,7 @@ fi
 
 # Axonwall: Prompt user to select target disk(s) and RAID/ZFS topology if not set
 if [ "$method" ] && [ -z "$disks" ]; then
-	# Enumerate all candidate block devices for multi-disk RAID & ZFS selection (excluding Cloud-Init seed media)
+	# Enumerate all candidate block devices for multi-disk RAID & ZFS selection (excluding installer media & Cloud-Init seed)
 	all_devs=""
 	disk_count=0
 	first_auto_partman_disk=""
@@ -71,8 +133,8 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	for d in $(get_auto_disks | cut -f1); do
 		[ -d "$d" ] && [ -f "$d/device" ] || continue
 		d_dev="$(cat "$d/device" 2>/dev/null || true)"
-		if [ -n "$d_dev" ]; then
-			if [ -n "$seed_dev" ] && { [ "$d_dev" = "$seed_dev" ] || [ "$d_dev" = "$seed_disk" ]; }; then
+		if [ -n "$d_dev" ] && [ -b "$d_dev" ]; then
+			if is_installer_media "$d_dev"; then
 				continue
 			fi
 			if [ -z "$first_auto_dev" ]; then
@@ -131,7 +193,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		# Try to parse target disk(s) from cloud-config.yaml or fall back to first detected auto disk
 		c_target_disks="$(grep -A 8 'target_disks:' /var/lib/partman/cloud-config.yaml 2>/dev/null | grep -E '^\s*-\s*/dev/' | tr -d ' -"' || true)"
 		c_target="$(echo "$c_target_disks" | head -n1)"
-		if [ -n "$c_target" ] && [ -b "$c_target" ] && [ "$c_target" != "$seed_dev" ] && [ "$c_target" != "$seed_disk" ]; then
+		if [ -n "$c_target" ] && [ -b "$c_target" ] && ! is_installer_media "$c_target"; then
 			dev_name="$c_target"
 			disk="$(dev_to_partman "$c_target" 2>/dev/null || echo "$c_target")"
 		fi
@@ -141,7 +203,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			if [ -n "$c_target_disks" ]; then
 				valid_raid_disks=""
 				for d_candidate in $c_target_disks; do
-					if [ -b "$d_candidate" ] && [ "$d_candidate" != "$seed_dev" ] && [ "$d_candidate" != "$seed_disk" ]; then
+					if [ -b "$d_candidate" ] && ! is_installer_media "$d_candidate"; then
 						valid_raid_disks="${valid_raid_disks:+$valid_raid_disks }$d_candidate"
 					fi
 				done
@@ -355,10 +417,12 @@ if [ "$method" ] && [ -z "$disks" ]; then
 					for d in $(get_auto_disks | cut -f1); do
 						[ -d "$d" ] && [ -f "$d/device" ] || continue
 						d_dev="$(cat "$d/device" 2>/dev/null || true)"
-						if [ -n "$seed_dev" ] && { [ "$d_dev" = "$seed_dev" ] || [ "$d_dev" = "$seed_disk" ]; }; then
+						if [ -z "$d_dev" ] || [ ! -b "$d_dev" ]; then
 							continue
 						fi
-						[ -n "$d_dev" ] || continue
+						if is_installer_media "$d_dev"; then
+							continue
+						fi
 						d_base="$(basename "$d_dev")"
 						d_sec="$(cat "/sys/block/${d_base}/size" 2>/dev/null || echo 0)"
 						d_gb=$(( d_sec * 512 / 1024 / 1024 / 1024 ))
@@ -785,7 +849,10 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			for d in $(get_auto_disks | cut -f1); do
 				[ -d "$d" ] && [ -f "$d/device" ] || continue
 				d_dev="$(cat "$d/device" 2>/dev/null || true)"
-				if [ -n "$seed_dev" ] && { [ "$d_dev" = "$seed_dev" ] || [ "$d_dev" = "$seed_disk" ]; }; then
+				if [ -z "$d_dev" ] || [ ! -b "$d_dev" ]; then
+					continue
+				fi
+				if is_installer_media "$d_dev"; then
 					continue
 				fi
 				is_sys=0
@@ -1133,9 +1200,23 @@ DATA_BLOCK
 	db_set partman-basicfilesystems/no_mount_point false 2>/dev/null || true
 	db_fset partman-basicfilesystems/no_mount_point seen true 2>/dev/null || true
 
+	# Make sure swap, mdadm, and device-mapper locks on target disks are completely released before autopartition writes
+	swapoff -a 2>/dev/null || true
+	if command -v mdadm >/dev/null 2>&1; then
+		for md in /dev/md*; do
+			[ -b "$md" ] && mdadm --stop "$md" 2>/dev/null || true
+		done
+	fi
+	if command -v cryptsetup >/dev/null 2>&1; then
+		cryptsetup close axon_crypt_data 2>/dev/null || true
+	fi
+	udevadm settle 2>/dev/null || true
+
 	# Perform autopartitioning directly on the primary chosen disk
 	autopartition "$disk"
 	status=$?
+
+	udevadm settle 2>/dev/null || true
 
 	if [ "$partition_mode" = "manual" ]; then
 		# Manual mode: Let operator edit partitions interactively in Debian partman UI

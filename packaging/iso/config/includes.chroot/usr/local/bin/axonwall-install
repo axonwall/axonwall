@@ -661,7 +661,8 @@ END_DATA=$((END_LOGS + DATA_MB))
 # ==============================================================================
 emit_phase 1 8 "Partitioning target disk(s) (${SYSTEM_DISKS})..."
 
-# Stop any pre-existing ZFS pools, mdadm arrays, or crypt mappings from previous runs
+# Stop any pre-existing swap, ZFS pools, mdadm arrays, or crypt mappings from previous runs
+swapoff -a 2>/dev/null || true
 umount /mnt/slot_a/boot/efi /mnt/slot_a/var/log /mnt/slot_a /mnt/slot_b /mnt/data /mnt/logs /mnt/squash_ro 2>/dev/null || true
 if command -v zpool >/dev/null 2>&1; then
   zpool destroy -f zroot 2>/dev/null || zpool export -f zroot 2>/dev/null || true
@@ -1679,7 +1680,7 @@ ZBM_SYSLINUX_EOF
     if [ -n "$GPTMBR_BIN" ]; then
       dd if="$GPTMBR_BIN" of="$sys_disk" bs=440 count=1 conv=notrunc 2>/dev/null || true
     fi
-    sgdisk --attributes=1:set:2 "$sys_disk" 2>/dev/null || parted -s "$sys_disk" set 1 legacy_boot on 2>/dev/null || true
+    sgdisk --attributes=1:set:2 "$sys_disk" 2>/dev/null || true
   done
 
   # Clone EFI System Partition to secondary RAID-1 / ZFS mirror disks
