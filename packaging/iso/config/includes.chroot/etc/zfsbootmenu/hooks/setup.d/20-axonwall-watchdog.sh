@@ -2,12 +2,15 @@
 # ZFSBootMenu v3.1.x Pre-Boot Autonomous Watchdog Hook for Axonwall Root-on-ZFS
 # Located at /etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh
 
-set -e
-
 POOL="zroot"
 PARENT="${POOL}/ROOT"
+GUARD_FILE="${BASE:-/zfsbootmenu}/axonwall_watchdog_done"
 
-# Ensure pool is imported read-write
+[ -e "$GUARD_FILE" ] && exit 0
+mkdir -p "${BASE:-/zfsbootmenu}" 2>/dev/null || true
+: > "$GUARD_FILE" 2>/dev/null || true
+
+# Ensure pool is imported
 if ! zpool list "$POOL" >/dev/null 2>&1; then
   zpool import -N -o readonly=off "$POOL" 2>/dev/null || exit 0
 fi
@@ -26,20 +29,14 @@ BOOTCOUNT=$(echo "$BOOTCOUNT_RAW" | tr -cd '0-9')
 BOOTLIMIT=$(echo "$BOOTLIMIT_RAW" | tr -cd '0-9')
 [ -z "$BOOTLIMIT" ] || [ "$BOOTLIMIT" -le 0 ] && BOOTLIMIT=3
 
-# Current pool bootfs
-CURRENT_BOOTFS="$(zpool get -H -o value bootfs "$POOL" 2>/dev/null || echo "")"
-
-echo "================================================================================"
-echo "[Axonwall ZBM Watchdog] Inspecting Boot Environment health properties..."
-echo "  Pool          : ${POOL}"
-echo "  Current bootfs: ${CURRENT_BOOTFS:-<not set>}"
-echo "  Active BE     : ${ACTIVE_BE:-<none>}"
-echo "  Fallback BE   : ${FALLBACK_BE:-<none>}"
-echo "  Boot Attempts : ${BOOTCOUNT}/${BOOTLIMIT}"
-echo "================================================================================"
-
 # If an upgrade or switch is armed and active_be differs from fallback_be:
 if [ -n "$ACTIVE_BE" ] && [ -n "$FALLBACK_BE" ] && [ "$ACTIVE_BE" != "$FALLBACK_BE" ]; then
+  RO_STATE="$(zpool get -H -o value readonly "$POOL" 2>/dev/null || echo "off")"
+  if [ "$RO_STATE" = "on" ]; then
+    zpool export "$POOL" 2>/dev/null || true
+    zpool import -N -o readonly=off "$POOL" 2>/dev/null || exit 0
+  fi
+
   if [ "$BOOTCOUNT" -ge "$BOOTLIMIT" ]; then
     echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     echo "[!] CRITICAL: Boot attempt threshold (${BOOTCOUNT}/${BOOTLIMIT}) exceeded for target BE:"
@@ -51,11 +48,16 @@ if [ -n "$ACTIVE_BE" ] && [ -n "$FALLBACK_BE" ] && [ "$ACTIVE_BE" != "$FALLBACK_
     zpool set bootfs="${FALLBACK_BE}" "$POOL" 2>/dev/null || true
     zfs set org.axonwall:bootcount=0 "$PARENT" 2>/dev/null || true
     zfs set org.axonwall:active_be="${FALLBACK_BE}" "$PARENT" 2>/dev/null || true
-    sleep 3
+    echo "${FALLBACK_BE}" > "${BASE:-/zfsbootmenu}/bootfs" 2>/dev/null || true
+    sleep 2
   else
     NEW_COUNT=$(( BOOTCOUNT + 1 ))
-    echo "[+] Unverified Boot Environment detected. Incrementing bootcount: ${BOOTCOUNT} -> ${NEW_COUNT} (limit: ${BOOTLIMIT})"
     zfs set org.axonwall:bootcount="${NEW_COUNT}" "$PARENT" 2>/dev/null || true
+  fi
+
+  if [ "$RO_STATE" = "on" ]; then
+    zpool export "$POOL" 2>/dev/null || true
+    zpool import -N -o readonly=on "$POOL" 2>/dev/null || true
   fi
 fi
 

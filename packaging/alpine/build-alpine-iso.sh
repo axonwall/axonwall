@@ -478,7 +478,7 @@ if [[ ! -f "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" && -f "$RAW_ZBM" ]]; then
       "$RAW_ZBM" \
       -o "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi" \
       -s "${REPO_ROOT}/packaging/iso/branding/splash.bmp" \
-      -f "ter-132b"
+      --hooks-dir "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks"
   else
     cp -f "$RAW_ZBM" "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
   fi
@@ -493,6 +493,8 @@ fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-zbm-theme" ]]; then
   cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-zbm-theme" "${OVL}/usr/local/bin/axonwall-zbm-theme"
   chmod +x "${OVL}/usr/local/bin/axonwall-zbm-theme"
+  ln -sf axonwall-zbm-theme "${OVL}/usr/local/bin/generate-zbm"
+  ln -sf axonwall-zbm-theme "${OVL}/usr/local/bin/zbm-kcl"
 fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/splash.bmp" ]]; then
   cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/splash.bmp" "${OVL}/etc/zfsbootmenu/splash.bmp"
@@ -505,7 +507,8 @@ if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/drac
 fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh" ]]; then
   cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh" "${OVL}/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh"
-  chmod 0755 "${OVL}/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh"
+  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh" "${OVL}/etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh"
+  chmod 0755 "${OVL}/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh" "${OVL}/etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh"
 fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh" ]]; then
   cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh" "${OVL}/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh"

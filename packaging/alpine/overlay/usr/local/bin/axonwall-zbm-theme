@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Axonwall ZFSBootMenu Visual Theme & Styling Management Utility
+# Axonwall ZFSBootMenu Visual Theme & Bootloader Management Utility
+# Also serves as `generate-zbm` and `zbm-kcl` when invoked via symlink.
 # ==============================================================================
 set -euo pipefail
 
@@ -14,7 +15,8 @@ COLOR_RED="\033[38;2;244;63;94m"
 ZBM_CONFIG="/etc/zfsbootmenu/config.yaml"
 ZBM_SPLASH="/etc/zfsbootmenu/splash.bmp"
 ZBM_HOOK_DIR="/etc/zfsbootmenu/hooks"
-ZBM_THEME_HOOK="${ZBM_HOOK_DIR}/early-setup.d/15-axonwall-theme.sh"
+ZBM_THEME_HOOK="${ZBM_HOOK_DIR}/early-setup.d/90-axonwall-theme.sh"
+ZBM_THEME_HOOK_LEGACY="${ZBM_HOOK_DIR}/early-setup.d/15-axonwall-theme.sh"
 ESP_MOUNT="/boot/efi"
 ESP_ZBM_DIR="${ESP_MOUNT}/EFI/ZBM"
 ESP_ZBM_HOOKS="${ESP_ZBM_DIR}/hooks"
@@ -22,8 +24,8 @@ ESP_UKI="${ESP_ZBM_DIR}/VMLINUZ.EFI"
 ESP_SYSLINUX="${ESP_ZBM_DIR}/syslinux.cfg"
 
 show_banner() {
-  printf "${COLOR_EMERALD}${COLOR_BOLD}Axonwall ZFSBootMenu Theme Manager${COLOR_RESET}\n"
-  printf "${COLOR_SLATE}Root-on-ZFS Bootloader Visual Styling, Fonts & Palettes${COLOR_RESET}\n\n"
+  printf "${COLOR_EMERALD}${COLOR_BOLD}Axonwall ZFSBootMenu Theme & UKI Manager${COLOR_RESET}\n"
+  printf "${COLOR_SLATE}Root-on-ZFS Bootloader Visual Styling, Fonts, Palettes & UKI Sync${COLOR_RESET}\n\n"
 }
 
 usage() {
@@ -33,15 +35,37 @@ Usage: axonwall-zbm-theme [COMMAND] [OPTIONS]
 
 Commands:
   status                Show current boot splash, console font, and color theme
-  set-font <font>       Set console font (e.g. ter-132b, ter-v32b, ter-v28b, ter-v24b, default)
+  set-font <font>       Set console font (e.g. auto, ter-v32b, ter-v28b, ter-v24b, ter-v20b, ter-v14b)
   set-splash <file>     Install custom boot splash image (.bmp or .png)
   set-palette <scheme>  Switch 16-color ANSI console palette
                         Available: axonwall (default), cyber-cyan, dracula, nord, monokai
-  apply                 Re-theme and sync ZFSBootMenu UKI and EFI hooks
+  apply                 Rebuild & sync ZFSBootMenu UEFI UKI, BIOS Syslinux & mirror ESPs
 
 Options:
   -h, --help            Show this help text
 EOF
+}
+
+sync_secondary_esps() {
+  local primary_dev
+  primary_dev="$(findmnt -n -o SOURCE "$ESP_MOUNT" 2>/dev/null || true)"
+  [ -b "$primary_dev" ] || return 0
+
+  local sec_dev
+  for sec_dev in $(blkid -t LABEL="AXON_EFI" -o device 2>/dev/null || true); do
+    [ -b "$sec_dev" ] || continue
+    [ "$sec_dev" = "$primary_dev" ] && continue
+    local tmp_mnt
+    tmp_mnt="$(mktemp -d /tmp/axon-esp-sync.XXXXXX)"
+    if mount "$sec_dev" "$tmp_mnt" 2>/dev/null; then
+      cp -rf "${ESP_MOUNT}/EFI" "$tmp_mnt/" 2>/dev/null || true
+      [ -f "${ESP_MOUNT}/syslinux.cfg" ] && cp -f "${ESP_MOUNT}/syslinux.cfg" "$tmp_mnt/syslinux.cfg" 2>/dev/null || true
+      sync
+      umount "$tmp_mnt" 2>/dev/null || true
+      printf "[+] Synchronized secondary mirror ESP: %s\n" "$sec_dev"
+    fi
+    rmdir "$tmp_mnt" 2>/dev/null || true
+  done
 }
 
 cmd_status() {
@@ -66,7 +90,7 @@ cmd_status() {
       KCL_STR=$(tr -d '\0' < "$KCL_TMP" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       printf "   Kernel Cmdline: %s\n" "$KCL_STR"
       CUR_FONT=$(echo "$KCL_STR" | grep -o 'rd\.vconsole\.font=[^ ]*' | cut -d= -f2 || true)
-      printf "   Active Font   : ${COLOR_CYAN}%s${COLOR_RESET}\n" "${CUR_FONT:-default (autosize)}"
+      printf "   Active Font   : ${COLOR_CYAN}%s${COLOR_RESET}\n" "${CUR_FONT:-auto (zbm.autosize=1)}"
     fi
     rm -f "$KCL_TMP"
   fi
@@ -76,45 +100,26 @@ cmd_status() {
 cmd_set_font() {
   local font="${1:-}"
   if [ -z "$font" ]; then
-    printf "${COLOR_RED}Error: Font face name required (e.g. ter-132b, ter-v32b, ter-v28b, ter-v24b, default)${COLOR_RESET}\n"
+    printf "${COLOR_RED}Error: Font face name required (e.g. auto, ter-v32b, ter-v28b, ter-v24b, default)${COLOR_RESET}\n"
     exit 1
   fi
 
   show_banner
   printf "[+] Updating target console font to: %s\n" "$font"
 
-  # Update /etc/zfsbootmenu/config.yaml
   if [ -f "$ZBM_CONFIG" ]; then
-    if [ "$font" = "default" ]; then
-      sed -i -E 's/rd\.vconsole\.font=[^ "]+//g' "$ZBM_CONFIG"
+    if [ "$font" = "default" ] || [ "$font" = "auto" ]; then
+      sed -i -E 's/[[:space:]]*rd\.vconsole\.font=[^ "]+//g' "$ZBM_CONFIG"
     else
       if grep -q "rd\.vconsole\.font=" "$ZBM_CONFIG"; then
-        sed -i -E "s/rd\.vconsole\.font=[^ \"']+/rd.vconsole.font=${font}/g" "$ZBM_CONFIG"
+        sed -i -E "s|rd\.vconsole\.font=[^ \"']+|rd.vconsole.font=${font}|g" "$ZBM_CONFIG"
       else
-        sed -i -E "s/(CommandLine:[[:space:]]*\"[^\"]*)/\1 rd.vconsole.font=${font}/" "$ZBM_CONFIG"
+        sed -i -E "s|(zbm\.autosize=1)|\1 rd.vconsole.font=${font}|" "$ZBM_CONFIG"
       fi
     fi
   fi
 
-  # Update syslinux.cfg if present
-  if [ -f "$ESP_SYSLINUX" ]; then
-    if [ "$font" = "default" ]; then
-      sed -i -E 's/rd\.vconsole\.font=[^ "]+//g' "$ESP_SYSLINUX"
-    else
-      if grep -q "rd\.vconsole\.font=" "$ESP_SYSLINUX"; then
-        sed -i -E "s/rd\.vconsole\.font=[^ \"']+/rd.vconsole.font=${font}/g" "$ESP_SYSLINUX"
-      else
-        sed -i -E "s/(APPEND[[:space:]]+[^\r\n]*)/\1 rd.vconsole.font=${font}/" "$ESP_SYSLINUX"
-      fi
-    fi
-  fi
-
-  # Patch UKI directly if present
-  if [ -f "$ESP_UKI" ] && [ -x /usr/lib/axonwall/theme-zbm-uki.py ]; then
-    printf "[+] Re-patching installed UKI with target font...\n"
-    python3 /usr/lib/axonwall/theme-zbm-uki.py "$ESP_UKI" -o "$ESP_UKI" -s "$ZBM_SPLASH" -f "$font"
-  fi
-
+  cmd_apply "$font"
   printf "${COLOR_EMERALD}[✓] Console font updated successfully.${COLOR_RESET}\n"
 }
 
@@ -144,19 +149,12 @@ cmd_set_splash() {
       fi
       ;;
     *)
-      printf "${COLOR_RED}Error: Unsupported image format. Use .bmp or .png${COLOR_RESET}\n"
+      printf "${COLOR_RED}Error: Unsupported image format. Use .bmp or .png${COLOR_RESET}\n" "$src"
       exit 1
       ;;
   esac
 
-  cp -f "$ZBM_SPLASH" "${ESP_ZBM_DIR}/splash.bmp" 2>/dev/null || true
-
-  # Re-embed into UKI if python tool exists
-  if [ -f "$ESP_UKI" ] && [ -x /usr/lib/axonwall/theme-zbm-uki.py ]; then
-    printf "[+] Embedding new splash bitmap into UEFI UKI (.splash section)...\n"
-    python3 /usr/lib/axonwall/theme-zbm-uki.py "$ESP_UKI" -o "$ESP_UKI" -s "$ZBM_SPLASH"
-  fi
-
+  cmd_apply
   printf "${COLOR_EMERALD}[✓] Splash screen updated successfully.${COLOR_RESET}\n"
 }
 
@@ -164,36 +162,27 @@ cmd_set_palette() {
   local scheme="${1:-axonwall}"
   show_banner
 
-  # 16-color ANSI hex sequences: 0=bg, 1=red, 2=green, 3=yellow, 4=blue, 5=magenta, 6=cyan, 7=fg
-  # 8=brblack, 9=brred, A=brgreen, B=bryellow, C=brblue, D=brmagenta, E=brcyan, F=brwhite
   local seq=""
-  local fzf_opts=""
-
   case "$scheme" in
     axonwall|default)
       printf "[+] Applying Axonwall Cyber-Slate & Emerald palette...\n"
       seq="P0090e1a\033]P1f43f5e\033]P210b981\033]P3f59e0b\033]P40284c7\033]P58b5cf6\033]P606b6d4\033]P7cbd5e1\033]P81e293b\033]P9fb7185\033]PA34d399\033]PBfbbf24\033]PC38bdf8\033]PDa78bfa\033]PE22d3ee\033]PFf8fafc"
-      fzf_opts="--color=bg+:#111c2e,bg:#090e1a,spinner:#34d399,hl:#34d399,fg:#cbd5e1,header:#06b6d4,info:#38bdf8,pointer:#34d399,marker:#34d399,fg+:#f8fafc,prompt:#34d399,hl+:#22d3ee,border:#1e3a47"
       ;;
     cyber-cyan)
       printf "[+] Applying Cyber-Cyan palette...\n"
       seq="P003131e\033]P1f43f5e\033]P206b6d4\033]P3f59e0b\033]P40284c7\033]P58b5cf6\033]P638bdf8\033]P7e0f2fe\033]P80f293d\033]P9fb7185\033]PA22d3ee\033]PBfbbf24\033]PC7dd3fc\033]PDa78bfa\033]PEa5f3fc\033]PFf0f9ff"
-      fzf_opts="--color=bg+:#0b263b,bg:#03131e,spinner:#22d3ee,hl:#22d3ee,fg:#e0f2fe,header:#38bdf8,info:#7dd3fc,pointer:#22d3ee,marker:#22d3ee,fg+:#f0f9ff,prompt:#38bdf8,hl+:#a5f3fc,border:#164e63"
       ;;
     nord)
       printf "[+] Applying Nord palette...\n"
       seq="P02e3440\033]P1bf616a\033]P2a3be8c\033]P3ebcb8b\033]P481a1c1\033]P5b48ead\033]P688c0d0\033]P7e5e9f0\033]P84c566a\033]P9d08770\033]PAa3be8c\033]PBebcb8b\033]PC81a1c1\033]PDb48ead\033]PE8fbcbb\033]PFeceff4"
-      fzf_opts="--color=bg+:#3b4252,bg:#2e3440,spinner:#88c0d0,hl:#81a1c1,fg:#e5e9f0,header:#88c0d0,info:#81a1c1,pointer:#88c0d0,marker:#88c0d0,fg+:#eceff4,prompt:#81a1c1,hl+:#8fbcbb,border:#4c566a"
       ;;
     dracula)
       printf "[+] Applying Dracula palette...\n"
       seq="P0282a36\033]P1ff5555\033]P250fa7b\033]P3f1fa8c\033]P4bd93f9\033]P5ff79c6\033]P68be9fd\033]P7f8f8f2\033]P86272a4\033]P9ff6e6e\033]PA69ff94\033]PBffffa5\033]PCd6acff\033]PDff92df\033]PEa4ffff\033]PFffffff"
-      fzf_opts="--color=bg+:#44475a,bg:#282a36,spinner:#50fa7b,hl:#50fa7b,fg:#f8f8f2,header:#bd93f9,info:#ff79c6,pointer:#50fa7b,marker:#50fa7b,fg+:#ffffff,prompt:#8be9fd,hl+:#a4ffff,border:#6272a4"
       ;;
     monokai)
       printf "[+] Applying Monokai palette...\n"
       seq="P0272822\033]P1f92672\033]P2a6e22e\033]P3f4bf75\033]P466d9ef\033]P5ae81ff\033]P6a1efe4\033]P7f8f8f2\033]P875715e\033]P9fd971f\033]PAa6e22e\033]PBe6db74\033]PC66d9ef\033]PDae81ff\033]PEa1efe4\033]PFf9f8f5"
-      fzf_opts="--color=bg+:#3e3d32,bg:#272822,spinner:#a6e22e,hl:#a6e22e,fg:#f8f8f2,header:#66d9ef,info:#fd971f,pointer:#a6e22e,marker:#a6e22e,fg+:#f9f8f5,prompt:#a6e22e,hl+:#a1efe4,border:#75715e"
       ;;
     *)
       printf "${COLOR_RED}Error: Unknown color palette '%s'. Available: axonwall, cyber-cyan, nord, dracula, monokai${COLOR_RESET}\n" "$scheme"
@@ -207,6 +196,10 @@ cmd_set_palette() {
 #!/bin/bash
 # Axonwall ZFSBootMenu Visual Theme Hook (${scheme})
 TERM_DEV="\${control_term:-/dev/tty1}"
+case "\$TERM_DEV" in
+  /dev/tty[0-9]*) ;;
+  *) TERM_DEV="/dev/tty1" ;;
+esac
 [ -c "\$TERM_DEV" ] || TERM_DEV="/dev/tty0"
 
 if [ -c "\$TERM_DEV" ]; then
@@ -214,55 +207,156 @@ if [ -c "\$TERM_DEV" ]; then
   printf '\033[2J\033[H' > "\$TERM_DEV" 2>/dev/null || true
 fi
 
-FZF_AXONWALL_OPTS="${fzf_opts}"
-export FZF_DEFAULT_OPTS="\${FZF_AXONWALL_OPTS}"
+for fzf_cfg in /lib/fzf-defaults.sh /usr/lib/fzf-defaults.sh; do
+  if [ -f "\$fzf_cfg" ] && ! grep -q "AXONWALL_FZF_THEME" "\$fzf_cfg" 2>/dev/null; then
+    cat << 'FZF_EOF' >> "\$fzf_cfg"
 
-if [ -f /etc/zfsbootmenu.conf ] && ! grep -q "FZF_DEFAULT_OPTS" /etc/zfsbootmenu.conf 2>/dev/null; then
-  printf '\nexport FZF_DEFAULT_OPTS="%s"\n' "\${FZF_AXONWALL_OPTS}" >> /etc/zfsbootmenu.conf 2>/dev/null || true
+# AXONWALL_FZF_THEME
+fuzzy_default_options+=(
+  "--color='border:cyan,label:brightcyan,preview-label:brightgreen,current-fg:brightgreen,selected-fg:brightcyan,prompt:brightgreen,pointer:brightgreen,marker:brightgreen,header:cyan,info:brightblue,spinner:brightgreen,hl:brightgreen,hl+:brightcyan'"
+)
+export FZF_DEFAULT_OPTS="\${fuzzy_default_options[*]}"
+FZF_EOF
+  fi
+done
+
+if [ "\${0##*/}" = "15-axonwall-theme.sh" ] && [ -d /libexec/hooks/early-setup.d ] && [ ! -f /libexec/hooks/early-setup.d/90-axonwall-theme.sh ]; then
+  cp -f "\$0" /libexec/hooks/early-setup.d/90-axonwall-theme.sh 2>/dev/null || true
+  chmod +x /libexec/hooks/early-setup.d/90-axonwall-theme.sh 2>/dev/null || true
 fi
 
-if [ -x /usr/bin/setfont ]; then
-  for font in \\
-    /usr/share/zfsbootmenu/fonts/ter-v32b.psf \\
-    /usr/share/zfsbootmenu/fonts/ter-v28b.psf \\
-    /usr/share/zfsbootmenu/fonts/ter-v24b.psf \\
-    /usr/share/kbd/consolefonts/Lat2-Terminus16.psfu.gz; do
-    if [ -f "\$font" ]; then
-      setfont "\$font" >/dev/null 2>&1 && break
-    fi
-  done
-fi
 exit 0
 HOOK_EOF
 
   chmod +x "$ZBM_THEME_HOOK"
-  cp -f "$ZBM_THEME_HOOK" "${ESP_ZBM_HOOKS}/early-setup.d/15-axonwall-theme.sh" 2>/dev/null || true
-  chmod +x "${ESP_ZBM_HOOKS}/early-setup.d/15-axonwall-theme.sh" 2>/dev/null || true
+  cp -f "$ZBM_THEME_HOOK" "$ZBM_THEME_HOOK_LEGACY"
+  chmod +x "$ZBM_THEME_HOOK_LEGACY"
 
-  printf "${COLOR_EMERALD}[✓] Palette '%s' applied to local hooks and EFI partition.${COLOR_RESET}\n" "$scheme"
+  cmd_apply
+  printf "${COLOR_EMERALD}[✓] Palette '%s' applied to UKI, initramfs, and EFI partition.${COLOR_RESET}\n" "$scheme"
 }
 
 cmd_apply() {
+  local font_arg="${1:-auto}"
   show_banner
-  printf "[+] Synchronizing ZFSBootMenu assets and hooks to EFI partition...\n"
+  printf "[+] Synchronizing ZFSBootMenu UKI, initramfs hooks, and Syslinux config...\n"
 
-  mkdir -p "${ESP_ZBM_DIR}" "${ESP_ZBM_HOOKS}/early-setup.d" "${ESP_ZBM_HOOKS}/setup.d"
+  mkdir -p "${ESP_ZBM_DIR}" "${ESP_MOUNT}/EFI/BOOT" "${ESP_ZBM_HOOKS}/early-setup.d" "${ESP_ZBM_HOOKS}/setup.d"
   [ -f "$ZBM_SPLASH" ] && cp -f "$ZBM_SPLASH" "${ESP_ZBM_DIR}/splash.bmp"
-  [ -f "$ZBM_THEME_HOOK" ] && cp -f "$ZBM_THEME_HOOK" "${ESP_ZBM_HOOKS}/early-setup.d/15-axonwall-theme.sh"
+  if [ -f "$ZBM_THEME_HOOK" ]; then
+    cp -f "$ZBM_THEME_HOOK" "${ESP_ZBM_HOOKS}/early-setup.d/90-axonwall-theme.sh"
+    cp -f "$ZBM_THEME_HOOK" "${ESP_ZBM_HOOKS}/early-setup.d/15-axonwall-theme.sh"
+  elif [ -f "$ZBM_THEME_HOOK_LEGACY" ]; then
+    cp -f "$ZBM_THEME_HOOK_LEGACY" "${ESP_ZBM_HOOKS}/early-setup.d/90-axonwall-theme.sh"
+    cp -f "$ZBM_THEME_HOOK_LEGACY" "${ESP_ZBM_HOOKS}/early-setup.d/15-axonwall-theme.sh"
+  fi
   [ -f "${ZBM_HOOK_DIR}/setup.d/20-axonwall-watchdog.sh" ] && cp -f "${ZBM_HOOK_DIR}/setup.d/20-axonwall-watchdog.sh" "${ESP_ZBM_HOOKS}/setup.d/20-axonwall-watchdog.sh"
-
   chmod +x "${ESP_ZBM_HOOKS}"/*/*.sh 2>/dev/null || true
 
-  if command -v generate-zbm >/dev/null 2>&1; then
-    printf "[+] Running generate-zbm to rebuild UKI bundle...\n"
-    generate-zbm
-  elif [ -f "$ESP_UKI" ] && [ -x /usr/lib/axonwall/theme-zbm-uki.py ]; then
-    printf "[+] Re-theming existing UKI using theme-zbm-uki...\n"
-    python3 /usr/lib/axonwall/theme-zbm-uki.py "$ESP_UKI" -o "$ESP_UKI" -s "$ZBM_SPLASH"
+  local src_uki="/usr/lib/zfsbootmenu/vmlinuz.efi"
+  [ -f "$src_uki" ] || src_uki="$ESP_UKI"
+
+  if [ -f "$src_uki" ] && [ -x /usr/lib/axonwall/theme-zbm-uki.py ]; then
+    python3 /usr/lib/axonwall/theme-zbm-uki.py "$src_uki" \
+      -o "$ESP_UKI" \
+      -s "$ZBM_SPLASH" \
+      -f "$font_arg" \
+      --extract-linux "${ESP_ZBM_DIR}/vmlinuz-bootmenu" \
+      --extract-initrd "${ESP_ZBM_DIR}/initramfs-bootmenu.img"
+    cp -f "$ESP_UKI" "${ESP_ZBM_DIR}/VMLINUZ-BACKUP.EFI"
+    cp -f "$ESP_UKI" "${ESP_MOUNT}/EFI/BOOT/BOOTX64.EFI"
   fi
 
-  printf "${COLOR_EMERALD}[✓] All theme assets and hooks synced.${COLOR_RESET}\n"
+  local extra_font=""
+  if [ "$font_arg" != "auto" ] && [ "$font_arg" != "default" ]; then
+    extra_font=" rd.vconsole.font=${font_arg}"
+  fi
+
+  cat << ZBM_SYSLINUX_EOF > "$ESP_SYSLINUX"
+DEFAULT zbm
+PROMPT 0
+TIMEOUT 5
+
+LABEL zbm
+  LINUX /EFI/ZBM/vmlinuz-bootmenu
+  INITRD /EFI/ZBM/initramfs-bootmenu.img
+  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+
+LABEL zbm_backup
+  LINUX /EFI/ZBM/vmlinuz-bootmenu
+  INITRD /EFI/ZBM/initramfs-bootmenu.img
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+ZBM_SYSLINUX_EOF
+  cp -f "$ESP_SYSLINUX" "${ESP_MOUNT}/syslinux.cfg" 2>/dev/null || true
+
+  sync
+  sync_secondary_esps
+
+  printf "${COLOR_EMERALD}[✓] All ZFSBootMenu UKI, BIOS Syslinux, and hook assets synced.${COLOR_RESET}\n"
 }
+
+cmd_zbm_kcl() {
+  local append_args=()
+  local remove_args=()
+  local target_efi="$ESP_UKI"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -a|--append)
+        shift
+        [ $# -gt 0 ] && append_args+=("$1")
+        ;;
+      -r|--remove)
+        shift
+        [ $# -gt 0 ] && remove_args+=("$1")
+        ;;
+      -*)
+        ;;
+      *)
+        target_efi="$1"
+        ;;
+    esac
+    shift || true
+  done
+
+  [ -f "$target_efi" ] || target_efi="$ESP_UKI"
+  local kcl_tmp
+  kcl_tmp=$(mktemp)
+  objcopy --dump-section .cmdline="$kcl_tmp" "$target_efi" 2>/dev/null || true
+  local cur_kcl
+  cur_kcl=$(tr -d '\0' < "$kcl_tmp" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  rm -f "$kcl_tmp"
+
+  if [ ${#append_args[@]} -eq 0 ] && [ ${#remove_args[@]} -eq 0 ]; then
+    echo "$cur_kcl"
+    return 0
+  fi
+
+  local a
+  for a in "${remove_args[@]}"; do
+    local key="${a%%=*}"
+    cur_kcl=$(echo "$cur_kcl" | sed -E "s/(^|[[:space:]])${key}(=[^[:space:]]*)?//g")
+  done
+  for a in "${append_args[@]}"; do
+    cur_kcl="${cur_kcl} ${a}"
+  done
+
+  python3 /usr/lib/axonwall/theme-zbm-uki.py "$target_efi" -o "$target_efi" -s "$ZBM_SPLASH" -c "$cur_kcl"
+  if [ "$target_efi" = "$ESP_UKI" ]; then
+    cp -f "$ESP_UKI" "${ESP_ZBM_DIR}/VMLINUZ-BACKUP.EFI" 2>/dev/null || true
+    cp -f "$ESP_UKI" "${ESP_MOUNT}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
+    sync_secondary_esps
+  fi
+}
+
+INVOKED_AS="$(basename "$0")"
+if [ "$INVOKED_AS" = "generate-zbm" ]; then
+  cmd_apply
+  exit 0
+elif [ "$INVOKED_AS" = "zbm-kcl" ]; then
+  cmd_zbm_kcl "$@"
+  exit 0
+fi
 
 case "${1:-status}" in
   status) cmd_status ;;

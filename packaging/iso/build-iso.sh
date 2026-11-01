@@ -295,26 +295,23 @@ ZBM_KVER="linux6.12"
 ZBM_SHA256="131d55c7b385df8cd319d267b6aa15d97f8c32c94f5149bd906556715fadf4e7"
 ZBM_CACHE="${WORK_DIR}/cache/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
 mkdir -p "${WORK_DIR}/cache" config/includes.chroot/usr/lib/zfsbootmenu config/includes.chroot/usr/lib/axonwall
-if [[ ! -f config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi ]]; then
-  if [[ ! -f "${ZBM_CACHE}" ]]; then
-    echo "[+] Fetching ZFSBootMenu v${ZBM_VERSION} (${ZBM_KVER}) UKI..."
-    curl -fsSL -o "${ZBM_CACHE}" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
-  fi
-  echo "${ZBM_SHA256}  ${ZBM_CACHE}" | sha256sum -c -
-
-  # Theme ZFSBootMenu UKI with Axonwall splash bitmap and high-DPI font parameters
-  if command -v python3 &>/dev/null && command -v objcopy &>/dev/null && [[ -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" && -f "${SPLASH_BMP}" ]]; then
-    echo "[+] Theming ZFSBootMenu UKI (embedding branded .splash section and console font)..."
-    python3 "${SCRIPT_DIR}/branding/theme-zbm-uki.py" \
-      "${ZBM_CACHE}" \
-      -o config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi \
-      -s "${SPLASH_BMP}" \
-      -f "ter-132b"
-  else
-    cp -f "${ZBM_CACHE}" config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
-  fi
-  chmod 0644 config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
+if [[ ! -f "${ZBM_CACHE}" ]]; then
+  echo "[+] Fetching ZFSBootMenu v${ZBM_VERSION} (${ZBM_KVER}) UKI..."
+  curl -fsSL -o "${ZBM_CACHE}" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
 fi
+echo "${ZBM_SHA256}  ${ZBM_CACHE}" | sha256sum -c -
+
+# Theme ZFSBootMenu UKI with Axonwall splash bitmap, embedded initramfs hooks, and console parameters
+if command -v python3 &>/dev/null && command -v objcopy &>/dev/null && [[ -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" && -f "${SPLASH_BMP}" ]]; then
+  echo "[+] Theming ZFSBootMenu UKI (embedding branded .splash section and initramfs hooks)..."
+  python3 "${SCRIPT_DIR}/branding/theme-zbm-uki.py" \
+    "${ZBM_CACHE}" \
+    -o config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi \
+    -s "${SPLASH_BMP}"
+else
+  cp -f "${ZBM_CACHE}" config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
+fi
+chmod 0644 config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi
 
 if [[ -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" ]]; then
   cp -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" config/includes.chroot/usr/lib/axonwall/theme-zbm-uki.py

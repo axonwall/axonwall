@@ -765,11 +765,13 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   done
 
   # Stage theme and watchdog hooks
-  for f_th in /etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /target/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh; do
+  for f_th in /etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh /etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /target/etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh /target/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh; do
     if [ -f "$f_th" ]; then
       cp -f "$f_th" /target/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh
+      cp -f "$f_th" /target/etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh
       cp -f "$f_th" /target/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh
-      chmod +x /target/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /target/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh 2>/dev/null || true
+      cp -f "$f_th" /target/boot/efi/EFI/ZBM/hooks/early-setup.d/90-axonwall-theme.sh
+      chmod +x /target/etc/zfsbootmenu/hooks/early-setup.d/*.sh /target/boot/efi/EFI/ZBM/hooks/early-setup.d/*.sh 2>/dev/null || true
       break
     fi
   done
@@ -782,14 +784,15 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     fi
   done
 
-  # Install UKI onto EFI partition (with .splash if python/objcopy available)
+  # Install UKI onto EFI partition (with .splash, embedded initramfs hooks, and BIOS Syslinux extraction)
   if [ -f /target/usr/lib/zfsbootmenu/vmlinuz.efi ]; then
     THEMED_DONE=0
     if command -v python3 >/dev/null 2>&1 && [ -x /usr/lib/axonwall/theme-zbm-uki.py ] && [ -f /target/etc/zfsbootmenu/splash.bmp ]; then
       if python3 /usr/lib/axonwall/theme-zbm-uki.py /target/usr/lib/zfsbootmenu/vmlinuz.efi \
         -o /target/boot/efi/EFI/ZBM/VMLINUZ.EFI \
         -s /target/etc/zfsbootmenu/splash.bmp \
-        -f "ter-132b" 2>/dev/null; then
+        --extract-linux /target/boot/efi/EFI/ZBM/vmlinuz-bootmenu \
+        --extract-initrd /target/boot/efi/EFI/ZBM/initramfs-bootmenu.img 2>/dev/null; then
         THEMED_DONE=1
       fi
     fi
@@ -798,11 +801,33 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     fi
     cp -f /target/boot/efi/EFI/ZBM/VMLINUZ.EFI /target/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI 2>/dev/null || true
     cp -f /target/boot/efi/EFI/ZBM/VMLINUZ.EFI /target/boot/efi/EFI/BOOT/BOOTX64.EFI 2>/dev/null || true
+
+    cat << 'ZBM_SYSLINUX_EOF' > /target/boot/efi/EFI/ZBM/syslinux.cfg
+DEFAULT zbm
+PROMPT 0
+TIMEOUT 5
+
+LABEL zbm
+  LINUX /EFI/ZBM/vmlinuz-bootmenu
+  INITRD /EFI/ZBM/initramfs-bootmenu.img
+  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+
+LABEL zbm_backup
+  LINUX /EFI/ZBM/vmlinuz-bootmenu
+  INITRD /EFI/ZBM/initramfs-bootmenu.img
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+ZBM_SYSLINUX_EOF
+    cp -f /target/boot/efi/EFI/ZBM/syslinux.cfg /target/boot/efi/syslinux.cfg 2>/dev/null || true
   fi
 
   # Install CLI tools
   mkdir -p /target/usr/local/bin /target/usr/lib/axonwall
-  [ -f /usr/local/bin/axonwall-zbm-theme ] && cp -f /usr/local/bin/axonwall-zbm-theme /target/usr/local/bin/ && chmod +x /target/usr/local/bin/axonwall-zbm-theme
+  if [ -f /usr/local/bin/axonwall-zbm-theme ]; then
+    cp -f /usr/local/bin/axonwall-zbm-theme /target/usr/local/bin/
+    chmod +x /target/usr/local/bin/axonwall-zbm-theme
+    ln -sf axonwall-zbm-theme /target/usr/local/bin/generate-zbm
+    ln -sf axonwall-zbm-theme /target/usr/local/bin/zbm-kcl
+  fi
   [ -f /usr/lib/axonwall/theme-zbm-uki.py ] && cp -f /usr/lib/axonwall/theme-zbm-uki.py /target/usr/lib/axonwall/ && chmod +x /target/usr/lib/axonwall/theme-zbm-uki.py
 elif [ "$INSTALL_MODE" = "rolling" ]; then
   echo "[+] Configuring standard Debian GRUB bootloader for Rolling Single-Root mode..."

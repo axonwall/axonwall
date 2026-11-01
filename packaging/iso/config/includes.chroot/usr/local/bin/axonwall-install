@@ -1544,11 +1544,13 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   done
 
   # Stage Axonwall early theme hook and watchdog hook into both /etc/zfsbootmenu/hooks and /boot/efi/EFI/ZBM/hooks
-  for f_hook in /etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh; do
+  for f_hook in /etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh /etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh; do
     if [ -f "$f_hook" ]; then
       cp -f "$f_hook" /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh
+      cp -f "$f_hook" /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/90-axonwall-theme.sh
       cp -f "$f_hook" /mnt/slot_a/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh
-      chmod +x /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/15-axonwall-theme.sh /mnt/slot_a/boot/efi/EFI/ZBM/hooks/early-setup.d/15-axonwall-theme.sh 2>/dev/null || true
+      cp -f "$f_hook" /mnt/slot_a/boot/efi/EFI/ZBM/hooks/early-setup.d/90-axonwall-theme.sh
+      chmod +x /mnt/slot_a/etc/zfsbootmenu/hooks/early-setup.d/*.sh /mnt/slot_a/boot/efi/EFI/ZBM/hooks/early-setup.d/*.sh 2>/dev/null || true
       break
     fi
   done
@@ -1562,14 +1564,15 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     fi
   done
 
-  # Ensure UKI has .splash embedded and updated cmdline parameters
+  # Ensure UKI has .splash, embedded initramfs hooks, and normalized cmdline parameters
   THEMED_SUCCESS=0
   if command -v python3 >/dev/null 2>&1 && [ -x /usr/lib/axonwall/theme-zbm-uki.py ] && [ -n "$ZBM_BMP" ]; then
     ui_echo "[+] Embedding Axonwall splash bitmap and console styling into target UKI..."
     if python3 /usr/lib/axonwall/theme-zbm-uki.py "$ZBM_UKI" \
       -o /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI \
       -s "$ZBM_BMP" \
-      -f "ter-132b" 2>/dev/null; then
+      --extract-linux /mnt/slot_a/boot/efi/EFI/ZBM/vmlinuz-bootmenu \
+      --extract-initrd /mnt/slot_a/boot/efi/EFI/ZBM/initramfs-bootmenu.img 2>/dev/null; then
       THEMED_SUCCESS=1
     fi
   fi
@@ -1580,25 +1583,28 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   cp -f /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
   cp -f /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI /mnt/slot_a/boot/efi/EFI/BOOT/BOOTX64.EFI
 
-  # Install axonwall-zbm-theme utility onto target system
+  # Install axonwall-zbm-theme, generate-zbm, and zbm-kcl utilities onto target system
   mkdir -p /mnt/slot_a/usr/local/bin /mnt/slot_a/usr/lib/axonwall
   if [ -f /usr/local/bin/axonwall-zbm-theme ]; then
     cp -f /usr/local/bin/axonwall-zbm-theme /mnt/slot_a/usr/local/bin/axonwall-zbm-theme
     chmod +x /mnt/slot_a/usr/local/bin/axonwall-zbm-theme
+    ln -sf axonwall-zbm-theme /mnt/slot_a/usr/local/bin/generate-zbm
+    ln -sf axonwall-zbm-theme /mnt/slot_a/usr/local/bin/zbm-kcl
   fi
   if [ -f /usr/lib/axonwall/theme-zbm-uki.py ]; then
     cp -f /usr/lib/axonwall/theme-zbm-uki.py /mnt/slot_a/usr/lib/axonwall/theme-zbm-uki.py
     chmod +x /mnt/slot_a/usr/lib/axonwall/theme-zbm-uki.py
   fi
 
-  # Extract .linux (bzImage) and .initrd (cpio.xz) PE sections from ZBM UKI for Legacy BIOS Syslinux boot (zero GRUB)
+  # Extract .linux (bzImage) and .initrd (cpio.zst) PE sections if not already extracted by theme-zbm-uki.py
   extract_pe_sections() {
     _efi_file="$1"
     _out_linux="$2"
     _out_initrd="$3"
+    [ -s "$_out_linux" ] && [ -s "$_out_initrd" ] && return 0
     if command -v objcopy >/dev/null 2>&1; then
-      objcopy -O binary --only-section=.linux "$_efi_file" "$_out_linux" 2>/dev/null || true
-      objcopy -O binary --only-section=.initrd "$_efi_file" "$_out_initrd" 2>/dev/null || true
+      objcopy --dump-section .linux="$_out_linux" "$_efi_file" 2>/dev/null || objcopy -O binary --only-section=.linux "$_efi_file" "$_out_linux" 2>/dev/null || true
+      objcopy --dump-section .initrd="$_out_initrd" "$_efi_file" 2>/dev/null || objcopy -O binary --only-section=.initrd "$_efi_file" "$_out_initrd" 2>/dev/null || true
       [ -s "$_out_linux" ] && [ -s "$_out_initrd" ] && return 0
     fi
     if command -v node >/dev/null 2>&1; then
@@ -1615,7 +1621,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
           const vsize = buf.readUInt32LE(off + 8);
           const rawSize = buf.readUInt32LE(off + 16);
           const rawPtr = buf.readUInt32LE(off + 20);
-          const len = (vsize > 0 && vsize < rawSize) ? vsize : rawSize;
+          const len = (vsize > 0 && (vsize <= rawSize || rawSize === 0)) ? vsize : rawSize;
           if (name === ".linux") {
             fs.writeFileSync(process.argv[2], buf.slice(rawPtr, rawPtr + len));
           } else if (name === ".initrd") {
@@ -1630,24 +1636,24 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   }
 
   extract_pe_sections \
-    "$ZBM_UKI" \
+    /mnt/slot_a/boot/efi/EFI/ZBM/VMLINUZ.EFI \
     /mnt/slot_a/boot/efi/EFI/ZBM/vmlinuz-bootmenu \
     /mnt/slot_a/boot/efi/EFI/ZBM/initramfs-bootmenu.img
 
   cat << 'ZBM_SYSLINUX_EOF' > /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg
 DEFAULT zbm
 PROMPT 0
-TIMEOUT 20
+TIMEOUT 5
 
 LABEL zbm
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 rd.vconsole.font=ter-132b zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=tty0 console=ttyS0,115200
+  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
 
 LABEL zbm_backup
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 rd.vconsole.font=ter-132b zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=tty0 console=ttyS0,115200
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
 ZBM_SYSLINUX_EOF
   cp -f /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg /mnt/slot_a/boot/efi/syslinux.cfg 2>/dev/null || true
 
@@ -1656,10 +1662,12 @@ ZBM_SYSLINUX_EOF
   if command -v extlinux >/dev/null 2>&1; then
     extlinux --install /mnt/slot_a/boot/efi/EFI/ZBM 2>/dev/null || extlinux --install /mnt/slot_a/boot/efi 2>/dev/null || true
   fi
+  umount /mnt/slot_a/boot/efi 2>/dev/null || true
   if command -v syslinux >/dev/null 2>&1; then
-    umount /mnt/slot_a/boot/efi 2>/dev/null || true
     syslinux --install -d /EFI/ZBM "$PRIMARY_EFI" 2>/dev/null || syslinux --install "$PRIMARY_EFI" 2>/dev/null || true
-    mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi
+  fi
+  if command -v fsck.vfat >/dev/null 2>&1; then
+    fsck.vfat -a "$PRIMARY_EFI" >/dev/null 2>&1 || true
   fi
 
   GPTMBR_BIN=""
@@ -1680,10 +1688,10 @@ ZBM_SYSLINUX_EOF
     if [ -n "$GPTMBR_BIN" ]; then
       dd if="$GPTMBR_BIN" of="$sys_disk" bs=440 count=1 conv=notrunc 2>/dev/null || true
     fi
-    sgdisk --attributes=1:set:2 "$sys_disk" 2>/dev/null || true
+    sgdisk --attributes=1:set:2 "$sys_disk" >/dev/null 2>&1 || true
   done
 
-  # Clone EFI System Partition to secondary RAID-1 / ZFS mirror disks
+  # Clone unmounted, clean EFI System Partition to secondary RAID-1 / ZFS mirror disks
   sync
   for sys_disk in $SYSTEM_DISKS; do
     if [ "$sys_disk" != "$PRIMARY_DISK" ]; then
@@ -1691,6 +1699,7 @@ ZBM_SYSLINUX_EOF
       dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
     fi
   done
+  mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi 2>/dev/null || true
 
   # Register ZFSBootMenu in UEFI NVRAM if booted in UEFI mode
   if [ -d /sys/firmware/efi/efivars ] && command -v efibootmgr >/dev/null 2>&1; then
