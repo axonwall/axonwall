@@ -951,7 +951,7 @@ General {
             <thead className="bg-slate-900 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
               <tr>
                 <th className="p-3">Protocol / Session Type</th>
-                <th className="p-3">Behavior on Legacy pfSense/OPNsense</th>
+                <th className="p-3">Behavior on Legacy BSD Firewalls</th>
                 <th className="p-3">Behavior on Axonwall HA</th>
               </tr>
             </thead>

@@ -76,6 +76,7 @@ export interface AgentStatus {
 let mockPendingConfirm = false;
 let mockDeadline = 0;
 let mockActiveRuleset = '';
+let lastPendingJobId = '';
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
@@ -1376,8 +1377,10 @@ export async function applyDesiredState(
   ];
 
   // 4. Delegate to root axonwalld daemon if active
+  const jobId = `ui-${Date.now()}`;
+  lastPendingJobId = jobId;
   const daemonResp = await callAgentApi<any>('/v1/apply', 'POST', {
-    job_id: `ui-${Date.now()}`,
+    job_id: jobId,
     bundle_hash: bundleHash,
     nft_script: nftScript,
     files: allFiles,
@@ -1447,7 +1450,20 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
   mockPendingConfirm = false;
   mockDeadline = 0;
 
-  const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
+  // Retrieve any pending job ID from daemon if available
+  let targetJobId = lastPendingJobId || 'confirm';
+  try {
+    const daemonStatus = await callAgentApi<any>('/v1/status');
+    if (daemonStatus?.pending_job_id || daemonStatus?.pendingJobId) {
+      targetJobId = daemonStatus.pending_job_id || daemonStatus.pendingJobId;
+    }
+  } catch {}
+
+  const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', {
+    job_id: targetJobId,
+    jobId: targetJobId,
+  });
+  lastPendingJobId = '';
   if (daemonResp) {
     return {
       success: daemonResp.success,
@@ -3075,6 +3091,49 @@ export interface SystemPartitionsTelemetry {
   bootEnvironments?: ZfsBootEnvironmentTelemetry[];
 }
 
+export async function getSystemInstallMode(): Promise<'ab' | 'rolling' | 'zbm'> {
+  // 1. Direct file inspection (/etc/axonwall/install-mode, /var/lib/axonwall/install-mode)
+  for (const p of ['/etc/axonwall/install-mode', '/var/lib/axonwall/install-mode']) {
+    try {
+      if (fs.existsSync(p)) {
+        const content = fs.readFileSync(p, 'utf8').toLowerCase();
+        if (content.includes('zbm') || content.includes('zfsbootmenu')) {
+          return 'zbm';
+        }
+        if (content.includes('rolling')) {
+          return 'rolling';
+        }
+        if (content.includes('ab')) {
+          return 'ab';
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Kernel cmdline inspection
+  try {
+    if (fs.existsSync('/proc/cmdline')) {
+      const cmdline = fs.readFileSync('/proc/cmdline', 'utf8').toLowerCase();
+      if (cmdline.includes('root=zfs:') || cmdline.includes('zfsbootmenu') || cmdline.includes('spl.spl_hostid')) {
+        return 'zbm';
+      }
+      if (cmdline.includes('axon_rolling') || cmdline.includes('rolling')) {
+        return 'rolling';
+      }
+    }
+  } catch {}
+
+  // 3. Fallback to daemon if available
+  try {
+    const daemonData = await callAgentApi<any>('/v1/system/partitions');
+    if (daemonData?.installMode === 'zbm' || daemonData?.installMode === 'rolling' || daemonData?.installMode === 'ab') {
+      return daemonData.installMode;
+    }
+  } catch {}
+
+  return 'ab';
+}
+
 function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' {
   for (const p of ['/etc/axonwall/install-mode', '/var/lib/axonwall/install-mode']) {
     try {
@@ -3092,6 +3151,14 @@ function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' {
       }
     } catch {}
   }
+  try {
+    if (fs.existsSync('/proc/cmdline')) {
+      const cmdline = fs.readFileSync('/proc/cmdline', 'utf8').toLowerCase();
+      if (cmdline.includes('root=zfs:') || cmdline.includes('zfsbootmenu') || cmdline.includes('spl.spl_hostid')) {
+        return 'zbm';
+      }
+    }
+  } catch {}
   return 'ab';
 }
 

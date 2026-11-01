@@ -23,7 +23,7 @@ export default function ZfsNasStorageDocPage() {
           ZFS NAS Storage Management
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall integrates native OpenZFS on Linux with TrueNAS-parity enterprise file and block storage. Manage physical disks, provision Stripe/Mirror/RAID-Z pools, create datasets with POSIX ACLs, and serve high-speed SMB3, NFSv4, and iSCSI targets.
+          Axonwall integrates native OpenZFS on Linux with enterprise grade NAS file and block storage. Manage physical disks, provision Stripe/Mirror/RAID-Z pools, create datasets with POSIX ACLs, and serve high-speed SMB3, NFSv4, and iSCSI targets.
         </p>
       </div>
 

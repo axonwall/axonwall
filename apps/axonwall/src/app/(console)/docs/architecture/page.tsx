@@ -33,13 +33,13 @@ export default function ArchitectureDocPage() {
           <Cpu className="w-6 h-6 text-emerald-400" /> Linux nftables vs FreeBSD pf
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Traditional open-source firewalls like pfSense® and OPNsense® are constrained by the FreeBSD <code className="text-slate-200">pf</code> packet filter. Under symmetrical 10G/25G/100G loads and high connection churn, BSD <code className="text-slate-200">pf</code> suffers from severe global mutex lock contention.
+          Traditional open-source firewalls are constrained by the legacy FreeBSD <code className="text-slate-200">pf</code> packet filter. Under symmetrical 10G/25G/100G loads and high connection churn, BSD <code className="text-slate-200">pf</code> suffers from severe global mutex lock contention.
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
           <div className="p-5 rounded-xl bg-rose-950/20 border border-rose-500/30 space-y-3">
             <h3 className="font-bold text-rose-300 text-sm flex items-center gap-2">
-              Legacy FreeBSD pf (pfSense / OPNsense)
+              Legacy FreeBSD pf
             </h3>
             <ul className="space-y-2 text-slate-300 list-disc list-inside">
               <li><strong>Single-Threaded State Table:</strong> Multi-core CPUs bottle-neck on global state table insertion locks.</li>

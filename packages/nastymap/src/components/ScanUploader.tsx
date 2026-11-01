@@ -122,7 +122,7 @@ export function ScanUploader({ onScanLoaded, className = '' }: ScanUploaderProps
               Enterprise Multi-Subnet
             </h4>
             <p className="text-xs text-zinc-400 leading-relaxed line-clamp-2">
-              Corporate network with pfSense firewall, Cisco core switch, Windows DC, Linux servers, macOS, and traceroute hops.
+              Corporate network with perimeter firewall, Cisco core switch, Windows DC, Linux servers, macOS, and traceroute hops.
             </p>
           </div>
 

@@ -66,6 +66,6 @@ Recommends:
  xorriso,
  bridge-utils
 Description: Modern Linux Router & Next-Gen Firewall
- Axonwall replaces legacy BSD/PHP firewalls (OPNsense/pfSense) with a
+ Axonwall replaces legacy BSD/PHP firewalls with a
  modern reactive architecture built on Linux nftables, Next.js, Supabase,
  OpenLDAP, and a privileged Go daemon with commit-confirm transaction safety.

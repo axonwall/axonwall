@@ -1,6 +1,6 @@
 /**
  * Axonwall RBAC (Role-Based Access Control)
- * Granular privileges matching and modernizing OPNsense page permissions.
+ * Granular privileges and modern page permissions.
  */
 
 export const PRIVILEGES = [

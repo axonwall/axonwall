@@ -657,7 +657,7 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 			Message: "No pending configuration to confirm (already confirmed or rolled back).",
 		}, nil
 	}
-	if req.JobId != "" && s.pendingJobID != "" && req.JobId != s.pendingJobID {
+	if req.JobId != "" && req.JobId != "confirm" && s.pendingJobID != "" && req.JobId != s.pendingJobID {
 		return &pb.ConfirmResponse{
 			Success: false,
 			Message: fmt.Sprintf("Job ID mismatch for pending confirmation: expected %s, got %s", s.pendingJobID, req.JobId),
@@ -1592,7 +1592,23 @@ func main() {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			agentServer.mu.Lock()
+			currentPendingJobID := agentServer.pendingJobID
+			agentServer.mu.Unlock()
+			statusMap := map[string]interface{}{
+				"node_id":               resp.NodeId,
+				"version":               resp.Version,
+				"uptime_seconds":        resp.UptimeSeconds,
+				"active_bundle_hash":    resp.ActiveBundleHash,
+				"pending_confirm":       resp.PendingConfirm,
+				"pendingConfirm":        resp.PendingConfirm,
+				"confirm_deadline_unix": resp.ConfirmDeadlineUnix,
+				"confirmDeadlineUnix":   resp.ConfirmDeadlineUnix,
+				"pending_job_id":        currentPendingJobID,
+				"pendingJobId":          currentPendingJobID,
+				"interfaces":            resp.Interfaces,
+			}
+			_ = json.NewEncoder(w).Encode(statusMap)
 		})
 		mux.HandleFunc("/v1/apply", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {

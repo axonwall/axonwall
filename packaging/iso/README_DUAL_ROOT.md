@@ -10,7 +10,7 @@ During installation, the installer guides the administrator through target disk 
 ## 2. Why Two Identical System Partitions?
 
 ### The Problem with Single-Partition Firewalls
-In traditional operating systems and firewalls (such as pfSense® or OPNsense®), updates are applied directly to the running root partition (`/`). If a firmware update fails midway, encounters a kernel panic, or breaks network driver compatibility, the appliance is left in an unbootable state ("bricked"), requiring physical serial console or on-site manual recovery.
+In traditional operating systems and firewalls, updates are applied directly to the running root partition (`/`). If a firmware update fails midway, encounters a kernel panic, or breaks network driver compatibility, the appliance is left in an unbootable state ("bricked"), requiring physical serial console or on-site manual recovery.
 
 ### The Axonwall A/B Solution
 Axonwall maintains two identical, independent system partitions:

@@ -50,7 +50,7 @@ _axonwallctl_completion() {
     'services:Kea DHCPv4, Unbound DNS, Captive Portal, HAProxy, and FreeRADIUS'
     'security:Suricata IDS/IPS, CrowdSec, GeoIP, SSO/LDAP, TLS decryption, Zero-Trust, MCP'
     'ha:High Availability VRRP instances, Conntrackd, and pfsync state replication'
-    'storage:TrueNAS-grade OpenZFS pools, datasets, snapshots, SMB, NFSv4, and iSCSI'
+    'storage:enterprise grade NAS OpenZFS pools, datasets, snapshots, SMB, NFSv4, and iSCSI'
     'k3s:Kubernetes (K3s) cluster, Flannel WireGuard mesh, OpenEBS ZFS-LocalPV, workloads'
     'virt:KVM/QEMU virtual machines, LXC containers, VFIO passthrough, VXLAN, backups'
     'vigilante:Vigilante Cyber Defense, SOAR active containment, and autonomous SOC'
@@ -66,7 +66,7 @@ _axonwallctl_completion() {
   )
   plugin_ids=(
     'core-firewall:Axonwall Enterprise NGFW & Router Engine'
-    'core-nas:Axonwall TrueNAS-Grade OpenZFS Storage & Shares'
+    'core-nas:Axonwall Enterprise Grade OpenZFS Storage & Shares'
     'core-k3s:Kubernetes (K3s) & OpenEBS Distributed Storage'
     'core-virt:Axonwall Hypervisor (KVM/QEMU & LXC Containers)'
     'core-vigilante:Vigilante Cyber Defense, SOAR & Autonomous SOC'
@@ -201,7 +201,7 @@ _axonwall_config_completion() {
     'vpn:WireGuard, Rosenpass Post-Quantum & Headscale Mesh'
     'security:Suricata IDS/IPS, CrowdSec & GeoIP Country Blocking'
     'ha:Active/Passive High Availability (VRRP + Conntrackd)'
-    'storage:TrueNAS-Grade OpenZFS Pools, Datasets & SMB/NFS'
+    'storage:Enterprise Grade OpenZFS Pools, Datasets & SMB/NFS'
     'compute:Kubernetes (K3s), KVM/LXC Hypervisor & Vigilante SOC'
   )
   _describe 'Super Configurator domain' domains

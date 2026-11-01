@@ -259,7 +259,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "Hybrid Dual-KEM post-quantum key exchange daemon (Classic McEliece 460896 static authentication + ephemeral ML-KEM-512 forward secrecy) that rotates kernel WireGuard pre-shared keys every 120s with fail-closed boot protection.",
 			Author:           "Rosenpass Project / Axonwall Core",
 			SystemdUnits:     []string{"rosenpass.service"},
-			DebianPackages:   []string{"rosenpass", "wireguard-tools"},
+			DebianPackages:   []string{"wireguard-tools"},
 			AlpinePackages:   []string{"rosenpass", "wireguard-tools"},
 			RequiredBinaries: []string{"rosenpass", "wg"},
 		},
@@ -273,7 +273,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Dependencies:     []string{"core-k3s"},
 			SystemdUnits:     []string{"k3s.service"},
 			Privileges:       []string{"k3s.cluster", "services.vow", "security.certificates", "services.dns"},
-			DebianPackages:   []string{"mkcert", "libnss3-tools", "gettext-base", "git", "curl", "jq"},
+			DebianPackages:   []string{"kubectl", "mkcert", "libnss3-tools", "gettext-base", "git", "curl", "jq"},
 			AlpinePackages:   []string{"mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
 			RequiredBinaries: []string{"kubectl", "git", "envsubst"},
 		},
@@ -439,9 +439,9 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			pkgs = d.AlpinePackages
 		}
 
-		installed := len(missing) == 0
 		installedAt := pm.installedMap[d.ID]
-		bundled := installed && installedAt == ""
+		installed := len(missing) == 0 || installedAt != ""
+		bundled := len(missing) == 0 && installedAt == ""
 
 		enabled := d.DefaultEnabled
 		if pm.disabledMap[d.ID] {
@@ -546,6 +546,28 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	}
 
 	var output strings.Builder
+
+	// Upstream repository preparation hooks for plugins not hosted in base Debian repos
+	if pm.osFamily == "debian" {
+		if pluginID == "tailscale" {
+			if _, err := os.Stat("/etc/apt/sources.list.d/tailscale.list"); os.IsNotExist(err) {
+				prepCmd := exec.Command("sh", "-c", "curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list >/dev/null && apt-get update")
+				prepCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+				if out, err := prepCmd.CombinedOutput(); err != nil {
+					log.Printf("[PluginManager] Warning configuring Tailscale apt repository: %v (%s)", err, string(out))
+				}
+			}
+		} else if pluginID == "ntopng" {
+			if _, err := os.Stat("/etc/apt/sources.list.d/ntop.list"); os.IsNotExist(err) {
+				prepCmd := exec.Command("sh", "-c", "apt-get install -y --no-install-recommends gnupg curl && curl -fsSL https://packages.ntop.org/apt/trixie/all/apt-ntop.deb -o /tmp/apt-ntop.deb && dpkg -i /tmp/apt-ntop.deb && apt-get update")
+				prepCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+				if out, err := prepCmd.CombinedOutput(); err != nil {
+					log.Printf("[PluginManager] Warning configuring ntopng apt repository: %v (%s)", err, string(out))
+				}
+			}
+		}
+	}
+
 	if len(pkgs) > 0 {
 		var cmd *exec.Cmd
 		if pm.osFamily == "alpine" {
@@ -584,6 +606,12 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 	if pluginID == "rosenpass" {
+		if _, err := exec.LookPath("rosenpass"); err != nil {
+			dlCmd := exec.Command("sh", "-c", "curl -fsSL https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar | tar -xf - -C /usr/bin --strip-components=1 && chmod 755 /usr/bin/rosenpass /usr/bin/rp")
+			if out, err := dlCmd.CombinedOutput(); err != nil {
+				log.Printf("[PluginManager] Warning downloading rosenpass release binary: %v (%s)", err, string(out))
+			}
+		}
 		if err := ProvisionRosenpassEnvironment(DefaultRosenpassDir); err != nil {
 			log.Printf("[PluginManager] Warning provisioning Rosenpass PQ keys: %v", err)
 		}
@@ -627,6 +655,7 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	}
 
 	var output strings.Builder
+
 	if len(pkgs) > 0 {
 		var cmd *exec.Cmd
 		if pm.osFamily == "alpine" {

@@ -572,7 +572,7 @@ export const SAMPLE_SCANS = {
   enterprise: {
     id: 'enterprise',
     name: 'Enterprise Multi-Subnet (Traceroute & Mixed OS)',
-    description: 'Corporate network with Cisco routers, pfSense firewall, Windows Domain Controller, Linux servers, macOS, and printers with traceroute hops.',
+    description: 'Corporate network with Cisco routers, perimeter firewall, Windows Domain Controller, Linux servers, macOS, and printers with traceroute hops.',
     xml: ENTERPRISE_NETWORK_XML,
   },
   global: {

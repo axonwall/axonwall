@@ -23,7 +23,7 @@ export default function K3sKubernetesDocPage() {
           Kubernetes (K3s) & OpenEBS Distributed Storage
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall replaces the deprecated Kubernetes stack in TrueNAS with modern, lightweight K3s. Run containerized services directly on your appliance with encrypted WireGuard flannel networking, automated 2-node HA cluster join, and OpenEBS replicated persistent volumes.
+          Axonwall provides modern, lightweight K3s alongside enterprise grade NAS storage. Run containerized services directly on your appliance with encrypted WireGuard flannel networking, automated 2-node HA cluster join, and OpenEBS replicated persistent volumes.
         </p>
       </div>
 

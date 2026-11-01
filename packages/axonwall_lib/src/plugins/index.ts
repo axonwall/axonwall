@@ -31,7 +31,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
   },
   {
     id: 'core-nas',
-    name: 'Axonwall TrueNAS-Grade OpenZFS Storage & Shares',
+    name: 'Axonwall Enterprise Grade OpenZFS Storage & Shares',
     version: '0.3.1',
     category: 'core_role',
     description: 'Full OpenZFS pool/vdev manager (Stripe, Mirror, RAID-Z1/2/3, dRAID), datasets, zvols, automated snapshots, real-time HA ZFS replication, and SMB/NFSv4/iSCSI/S3 sharing.',
@@ -299,7 +299,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     privileges: ['vpn.admin', 'network.interfaces'],
     nftHooks: [{ table: 'inet axonwall', chain: 'input', priority: 0 }],
     packages: {
-      debian: ['rosenpass', 'wireguard-tools'],
+      debian: ['wireguard-tools'],
       alpine: ['rosenpass', 'wireguard-tools'],
     },
     cliBinaries: ['rosenpass', 'wg'],
@@ -327,7 +327,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       icon: 'Layers',
     },
     packages: {
-      debian: ['mkcert', 'libnss3-tools', 'gettext-base', 'git', 'curl', 'jq'],
+      debian: ['kubectl', 'mkcert', 'libnss3-tools', 'gettext-base', 'git', 'curl', 'jq'],
       alpine: ['mkcert', 'nss-tools', 'gettext', 'git', 'curl', 'jq'],
     },
     cliBinaries: ['vow', 'kubectl', 'mkcert'],

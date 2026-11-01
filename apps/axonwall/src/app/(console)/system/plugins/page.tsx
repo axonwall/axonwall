@@ -17,6 +17,9 @@ import {
   RefreshCw,
   Terminal,
   Settings,
+  AlertTriangle,
+  FileText,
+  X,
 } from 'lucide-react';
 import {
   BUILTIN_PLUGINS,
@@ -33,7 +36,8 @@ import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas'
 export default function PluginManagerPage() {
   const [state, setState] = useState<DesiredState | null>(null);
   const [savingRole, setSavingRole] = useState<string | null>(null);
-  const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; text: string; output?: string } | null>(null);
+  const [activeOutputModal, setActiveOutputModal] = useState<{ title: string; output: string } | null>(null);
 
   const [livePlugins, setLivePlugins] = useState<Record<string, ExtensionPluginLiveStatus>>({});
   const [osFamily, setOsFamily] = useState<'alpine' | 'debian'>('debian');
@@ -174,6 +178,10 @@ export default function PluginManagerPage() {
         text: `${id} toggled (${res.message})${autoDisabledNote}`,
       });
     } catch (err: any) {
+      if (err?.message?.includes('Failed to find Server Action')) {
+        window.location.reload();
+        return;
+      }
       setStatusBanner({
         type: 'error',
         text: err?.message || 'Failed to update appliance role',
@@ -192,6 +200,7 @@ export default function PluginManagerPage() {
         setStatusBanner({
           type: 'success',
           text: res.message,
+          output: res.output,
         });
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new Event('axonwall-capabilities-updated'));
@@ -200,10 +209,15 @@ export default function PluginManagerPage() {
         setStatusBanner({
           type: 'error',
           text: res.message || `Action ${action} failed`,
+          output: res.output,
         });
       }
       refreshLivePlugins();
     } catch (err: any) {
+      if (err?.message?.includes('Failed to find Server Action')) {
+        window.location.reload();
+        return;
+      }
       setStatusBanner({
         type: 'error',
         text: err?.message || `Failed to execute ${action} for plugin ${id}`,
@@ -324,6 +338,10 @@ export default function PluginManagerPage() {
         text: `${id} is now ${!isCurrentlyEnabled ? 'enabled' : 'disabled'}${depNotice} (${res.message})`,
       });
     } catch (err: any) {
+      if (err?.message?.includes('Failed to find Server Action')) {
+        window.location.reload();
+        return;
+      }
       setStatusBanner({
         type: 'error',
         text: err?.message || `Failed to toggle plugin ${id}`,
@@ -357,7 +375,7 @@ export default function PluginManagerPage() {
           <div>
             <h1 className="text-2xl font-bold text-white tracking-tight">Appliance Roles & Plugin Store</h1>
             <p className="text-sm text-slate-400">
-              Toggle Core Appliance Roles (Firewall, TrueNAS-grade ZFS NAS, K3s + OpenEBS) or install sandboxed extensions ({osFamily.toUpperCase()} Host).
+              Toggle Core Appliance Roles (Firewall, enterprise grade NAS, K3s + OpenEBS) or install sandboxed extensions ({osFamily.toUpperCase()} Host).
             </p>
           </div>
         </div>
@@ -382,7 +400,22 @@ export default function PluginManagerPage() {
               : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
           }`}
         >
-          <span>{statusBanner.text}</span>
+          <div className="flex items-center gap-3">
+            <span>{statusBanner.text}</span>
+            {statusBanner.output && (
+              <button
+                onClick={() =>
+                  setActiveOutputModal({
+                    title: `Execution Log (${statusBanner.type === 'success' ? 'Success' : 'Error'})`,
+                    output: statusBanner.output || '',
+                  })
+                }
+                className="underline text-[11px] font-mono text-slate-300 hover:text-white"
+              >
+                View Log Output
+              </button>
+            )}
+          </div>
           <button onClick={() => setStatusBanner(null)} className="text-slate-400 hover:text-white">
             ✕
           </button>
@@ -550,6 +583,14 @@ export default function PluginManagerPage() {
                           }`}
                         >
                           {isEnabled ? 'Active' : 'Disabled'}
+                        </span>
+                      )}
+                      {live && live.missingBinaries && live.missingBinaries.length > 0 && (
+                        <span
+                          title={`Missing required binaries: ${live.missingBinaries.join(', ')}`}
+                          className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-amber-500/15 text-amber-300 border-amber-500/30"
+                        >
+                          Missing: {live.missingBinaries.join(', ')}
                         </span>
                       )}
                     </div>
@@ -788,6 +829,80 @@ export default function PluginManagerPage() {
             <div className="pt-3 border-t border-slate-800 flex justify-end">
               <button
                 onClick={() => setSelectedPlugin(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Status Notification Toast */}
+      {statusBanner && (
+        <div
+          className={`fixed bottom-6 right-6 z-40 max-w-md w-full p-4 rounded-xl border shadow-2xl backdrop-blur-md flex flex-col gap-2 transition-all ${
+            statusBanner.type === 'success'
+              ? 'bg-slate-900/95 border-emerald-500/40 text-emerald-300'
+              : 'bg-slate-900/95 border-rose-500/40 text-rose-300'
+          }`}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2 font-semibold text-xs">
+              {statusBanner.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              )}
+              <span>{statusBanner.text}</span>
+            </div>
+            <button
+              onClick={() => setStatusBanner(null)}
+              className="text-slate-400 hover:text-white shrink-0 p-1"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          {statusBanner.output && (
+            <div className="pt-2 border-t border-slate-800 flex justify-end">
+              <button
+                onClick={() =>
+                  setActiveOutputModal({
+                    title: `Execution Log (${statusBanner.type === 'success' ? 'Success' : 'Error'})`,
+                    output: statusBanner.output || '',
+                  })
+                }
+                className="text-[11px] font-mono text-slate-300 hover:text-white flex items-center gap-1.5 underline decoration-slate-600 hover:decoration-white"
+              >
+                <FileText className="w-3 h-3" /> View Execution Log Output
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Execution Output Modal */}
+      {activeOutputModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-emerald-400" />
+                {activeOutputModal.title}
+              </h2>
+              <button
+                onClick={() => setActiveOutputModal(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="bg-black/60 border border-slate-800/80 rounded-xl p-4 text-[11px] font-mono text-slate-300 overflow-x-auto max-h-96 whitespace-pre-wrap leading-relaxed">
+              {activeOutputModal.output}
+            </pre>
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setActiveOutputModal(null)}
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-semibold"
               >
                 Close

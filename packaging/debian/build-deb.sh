@@ -36,7 +36,7 @@ Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd,
 Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
- Axonwall replaces legacy BSD/PHP firewalls (OPNsense/pfSense) with a
+ Axonwall replaces legacy BSD/PHP firewalls with a
  modern reactive architecture built on Linux nftables, Next.js, OpenLDAP,
  and a privileged Go daemon with commit-confirm transaction safety.
 EOF

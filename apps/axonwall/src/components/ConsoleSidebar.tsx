@@ -4,7 +4,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Logo } from './Logo';
-import { getCurrentDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, getSystemInstallMode } from '@/server/agent';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import {
@@ -280,6 +280,7 @@ export function ConsoleSidebar() {
   const [search, setSearch] = useState('');
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [desiredState, setDesiredState] = useState<DesiredState | null>(null);
+  const [installMode, setInstallMode] = useState<'ab' | 'rolling' | 'zbm'>('ab');
   // Defaults mirror CoreCapabilitiesSchema (firewall on, NAS/K3s opt-in)
   // and the pre-fetch state must not advertise menus for roles that are
   // not enabled.
@@ -299,6 +300,11 @@ export function ConsoleSidebar() {
 
   useEffect(() => {
     let mounted = true;
+    getSystemInstallMode()
+      .then((mode) => {
+        if (mounted && mode) setInstallMode(mode);
+      })
+      .catch(() => {});
     const loadCaps = () => {
       getCurrentDesiredState()
         .then((st) => {
@@ -338,17 +344,30 @@ export function ConsoleSidebar() {
     })
       .map((sec) => {
         if (!sec.items) return sec;
-        const filteredItems = sec.items.filter((item) => {
-          if (!item.pluginId) return true;
-          return isPluginEnabled(item.pluginId, desiredState);
-        });
+        const filteredItems = sec.items
+          .filter((item) => {
+            if (!item.pluginId) return true;
+            return isPluginEnabled(item.pluginId, desiredState);
+          })
+          .map((item) => {
+            if (item.href === '/system/updates') {
+              const dynamicName =
+                installMode === 'zbm'
+                  ? 'ZFS Boot Environments'
+                  : installMode === 'rolling'
+                    ? 'Rolling System Updates'
+                    : 'A/B System Updates';
+              return { ...item, name: dynamicName };
+            }
+            return item;
+          });
         return {
           ...sec,
           items: filteredItems,
         };
       })
       .filter((sec) => sec.href || (sec.items && sec.items.length > 0));
-  }, [capabilities, desiredState]);
+  }, [capabilities, desiredState, installMode]);
 
   // Auto-expand the section containing the active pathname
   useEffect(() => {
@@ -426,7 +445,7 @@ export function ConsoleSidebar() {
         </div>
       </div>
 
-      {/* OPNsense-Style Real-time Search Box */}
+      {/* Real-time Menu Search Box */}
       <div className="p-3 border-b border-slate-800/80 shrink-0">
         <div className="relative">
           <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />

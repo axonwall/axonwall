@@ -151,7 +151,11 @@ export default function PowerManagementPage() {
             className="flex items-center gap-2 px-3.5 py-2 text-xs font-medium rounded-lg border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
           >
             <Layers className="w-3.5 h-3.5" />
-            A/B Firmware Updates
+            {telemetry?.installMode === 'zbm'
+              ? 'ZFS Boot Environments'
+              : telemetry?.installMode === 'rolling'
+                ? 'Rolling System Updates'
+                : 'A/B Firmware Updates'}
           </Link>
         </div>
       </div>

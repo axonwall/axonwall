@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Modular Appliance Architecture: Firewall, ZFS NAS & K3s | Axonwall Documentation',
   description:
-    'Comprehensive documentation for Axonwall modular core roles: standalone or converged Next-Gen Firewall, TrueNAS-grade OpenZFS NAS, and lightweight Kubernetes (K3s) with OpenEBS distributed storage.',
+    'Comprehensive documentation for Axonwall modular core roles: standalone or converged Next-Gen Firewall, enterprise grade NAS (OpenZFS), and lightweight Kubernetes (K3s) with OpenEBS distributed storage.',
 };
 
 export default function ModularArchitectureDocPage() {
@@ -20,17 +20,17 @@ export default function ModularArchitectureDocPage() {
           Core Appliance System Architecture
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          Modular Core Roles: Firewall, TrueNAS ZFS & K3s
+          Modular Core Roles: Firewall, enterprise grade NAS & K3s
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall is a hyper-converged, role-modular operating system. Turn the entire firewall off to run as a dedicated, pure enterprise ZFS NAS, run as a dedicated wire-speed Next-Gen Firewall, or operate all three roles—Firewall, ZFS NAS, and Kubernetes (K3s)—simultaneously on high-availability bare-metal clusters.
+          Axonwall is a hyper-converged, role-modular operating system. Turn the entire firewall off to run as a dedicated, pure enterprise grade NAS, run as a dedicated wire-speed Next-Gen Firewall, or operate all three roles—Firewall, ZFS NAS, and Kubernetes (K3s)—simultaneously on high-availability bare-metal clusters.
         </p>
       </div>
 
       {/* Role Comparison Table */}
       <section className="space-y-6">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Layers className="w-6 h-6 text-emerald-400" /> Feature & Architecture Comparison: Axonwall vs. TrueNAS vs. pfSense
+          <Layers className="w-6 h-6 text-emerald-400" /> Feature & Architecture Comparison: Axonwall Converged Appliance
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           Traditional homelab and enterprise infrastructure forced organizations to deploy separate physical appliances or complex nested hypervisors for firewalls, storage, and container runtimes. Axonwall unifies them with native Linux kernel performance, atomic commit-confirm rollback, and zero-drop HA replication.
@@ -42,8 +42,8 @@ export default function ModularArchitectureDocPage() {
               <tr>
                 <th className="p-3">Capability / Subsystem</th>
                 <th className="p-3">Axonwall Converged OS</th>
-                <th className="p-3">TrueNAS SCALE / CORE</th>
-                <th className="p-3">pfSense / OPNsense</th>
+                <th className="p-3">Dedicated Storage Appliances</th>
+                <th className="p-3">Legacy Firewalls</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-slate-300">
@@ -68,13 +68,13 @@ export default function ModularArchitectureDocPage() {
               <tr className="hover:bg-slate-900/30">
                 <td className="p-3 font-semibold text-white">Kubernetes Engine</td>
                 <td className="p-3 text-emerald-400 font-medium">K3s + OpenEBS distributed CSI (ZFS-LocalPV & Mayastor NVMe-oF)</td>
-                <td className="p-3 text-amber-400">Deprecated k3s in SCALE (migrated to standard Docker Engine)</td>
+                <td className="p-3 text-amber-400">Deprecated k3s in legacy storage OS (migrated to standard Docker Engine)</td>
                 <td className="p-3 text-rose-400">None</td>
               </tr>
               <tr className="hover:bg-slate-900/30">
                 <td className="p-3 font-semibold text-white">2-Node True HA</td>
                 <td className="p-3 text-emerald-400 font-medium">Full state sync: VRRP, conntrackd, SQLite DBs, ZFS snapshots & K3s token auto-join</td>
-                <td className="p-3 text-slate-400">TrueNAS Enterprise dual-controller SAS hardware only; no 2-node commodity HA</td>
+                <td className="p-3 text-slate-400">Dual-controller SAS hardware only; no 2-node commodity HA</td>
                 <td className="p-3 text-slate-400">CARP + XMLRPC config sync; no file or container replication</td>
               </tr>
               <tr className="hover:bg-slate-900/30">
@@ -117,7 +117,7 @@ export default function ModularArchitectureDocPage() {
               <span>core-nas</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Provides TrueNAS-equivalent OpenZFS storage management: zpool creation across dedicated NVMe/HDD disks or installer-partitioned slices, dataset quotas, POSIX ACLs, Samba (SMB3) with VSS Shadow Copies, NFSv4 exports, and iSCSI block targets.
+              Provides enterprise grade NAS OpenZFS storage management: zpool creation across dedicated NVMe/HDD disks or installer-partitioned slices, dataset quotas, POSIX ACLs, Samba (SMB3) with VSS Shadow Copies, NFSv4 exports, and iSCSI block targets.
             </p>
             <div className="pt-2 text-[11px] font-mono text-slate-500">
               HA Failover: Backups receive incremental ZFS streams in readonly mode; on Keepalived VRRP transition to MASTER, datasets are promoted read-write and services bind the virtual IP.
@@ -130,7 +130,7 @@ export default function ModularArchitectureDocPage() {
               <span>core-k3s</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Replaces legacy TrueNAS Kubernetes with modern, lightweight K3s. Includes WireGuard flannel overlay mesh, etcd HA consensus, and OpenEBS dynamic storage provisioners.
+              Provides modern, lightweight K3s integrated directly with enterprise grade NAS storage. Includes WireGuard flannel overlay mesh, etcd HA consensus, and OpenEBS dynamic storage provisioners.
             </p>
             <div className="pt-2 text-[11px] font-mono text-slate-500">
               Auto-Join HA: Standby nodes query the primary control plane over mTLS (<code className="text-slate-300">/api/v1/sync/k3s-token</code>), fetch join credentials, and join the cluster automatically without operator intervention.

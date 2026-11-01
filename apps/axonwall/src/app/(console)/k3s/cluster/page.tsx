@@ -88,7 +88,7 @@ export default function K3sClusterPage() {
           <div>
             <h1 className="text-2xl font-bold text-white tracking-tight">Kubernetes (K3s) HA Control Plane</h1>
             <p className="text-sm text-slate-400">
-              Replaces legacy TrueNAS Kubernetes with lightweight K3s, WireGuard flannel mesh, and automatic 2-node HA cluster join.
+              Combines an enterprise grade NAS foundation with lightweight K3s, WireGuard flannel mesh, and automatic 2-node HA cluster join.
             </p>
           </div>
         </div>

@@ -461,7 +461,7 @@ local function build_domain_fields(domain_id)
     add({
       label = "Core OpenZFS NAS",
       vtype = "boolean",
-      desc = "TrueNAS-grade ZFS pool manager, snapshots, SMB/NFS/iSCSI shares.",
+      desc = "enterprise grade NAS ZFS pool manager, snapshots, SMB/NFS/iSCSI shares.",
       get = function() return tostring(Boolean(st.capabilities.nasEnabled)) end,
       set = function(v)
         st.capabilities.nasEnabled = v

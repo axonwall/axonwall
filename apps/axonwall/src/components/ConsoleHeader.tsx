@@ -111,6 +111,10 @@ export function ConsoleHeader({
       setTimeout(() => setFeedback(null), 4000);
       router.refresh();
     } catch (err: any) {
+      if (err?.message?.includes('Failed to find Server Action')) {
+        window.location.reload();
+        return;
+      }
       alert(`Confirm failed: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsOperating(false);
@@ -138,6 +142,10 @@ export function ConsoleHeader({
       setTimeout(() => setFeedback(null), 4000);
       router.refresh();
     } catch (err: any) {
+      if (err?.message?.includes('Failed to find Server Action')) {
+        window.location.reload();
+        return;
+      }
       alert(`Rollback failed: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsOperating(false);
