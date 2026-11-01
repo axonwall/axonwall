@@ -2,16 +2,20 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 // Additional ANSI styling constants for the Next-Gen TUI Installer
@@ -882,6 +886,8 @@ func readRawKey() string {
 		return "PGUP"
 	case s == "\x1b[6~":
 		return "PGDN"
+	case s == "\f":
+		return "REDRAW"
 	case s == "\r" || s == "\n":
 		return "ENTER"
 	case s == " ":
@@ -895,18 +901,200 @@ func readRawKey() string {
 	}
 }
 
-// suppressConsoleNoise silences kernel printk messages and systemd ShowStatus
-// broadcasts on /dev/console (/dev/tty1) so background service transitions or
-// errors never bleed into the interactive TUI installer screen. All events remain
-// captured in journald and can be inspected via the [V] Logs & Diagnostics screen.
+var (
+	consoleCaptureOnce sync.Once
+	consoleMasterPTY   *os.File
+)
+
+// openLinuxPTY allocates a master/slave PTY pair using /dev/ptmx and TIOCGPTN/TIOCSPTLCK ioctls.
+func openLinuxPTY() (*os.File, *os.File, error) {
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	var unlock int32 = 0
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), uintptr(syscall.TIOCSPTLCK), uintptr(unsafe.Pointer(&unlock)))
+	if errno != 0 {
+		_ = master.Close()
+		return nil, nil, errno
+	}
+	var ptyNum uint32
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), uintptr(syscall.TIOCGPTN), uintptr(unsafe.Pointer(&ptyNum)))
+	if errno != 0 {
+		_ = master.Close()
+		return nil, nil, errno
+	}
+	slavePath := fmt.Sprintf("/dev/pts/%d", ptyNum)
+	slave, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		_ = master.Close()
+		return nil, nil, err
+	}
+	return master, slave, nil
+}
+
+// suppressConsoleNoise intercepts all /dev/console writes (including cloud-init,
+// background systemd services, udev, and kernel printk) via the Linux TIOCCONS ioctl
+// onto a hidden capture PTY, and drains every byte into /var/log/axonwall-console-capture.log.
+// This guarantees zero raw garbage output ever bleeds onto /dev/tty1 while the TUI runs.
 func suppressConsoleNoise() {
 	_ = os.WriteFile("/proc/sys/kernel/printk", []byte("1\t4\t1\t7\n"), 0644)
 	_ = exec.Command("dmesg", "-n", "1").Run()
-	// SIGRTMIN+21 (signal 55 on Linux x86_64/arm64) instructs PID 1 (systemd)
-	// to disable ShowStatus console output immediately.
 	if os.Geteuid() == 0 {
+		// SIGRTMIN+21 (signal 55 on Linux x86_64/arm64) instructs PID 1 (systemd)
+		// to disable ShowStatus console output immediately.
 		_ = syscall.Kill(1, syscall.Signal(55))
 	}
+
+	consoleCaptureOnce.Do(func() {
+		if os.Geteuid() != 0 {
+			return
+		}
+		master, slave, err := openLinuxPTY()
+		if err != nil {
+			// Fallback: redirect /dev/console to /dev/tty12 if PTY allocation is unavailable
+			if tty12, tErr := os.OpenFile("/dev/tty12", os.O_RDWR|syscall.O_NOCTTY, 0); tErr == nil {
+				_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, tty12.Fd(), uintptr(syscall.TIOCCONS), 0)
+				_ = tty12.Close()
+			}
+			return
+		}
+		// TIOCCONS redirects all kernel /dev/console and /dev/tty0 output to slave PTY!
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, slave.Fd(), uintptr(syscall.TIOCCONS), 0)
+		_ = slave.Close()
+		if errno != 0 {
+			_ = master.Close()
+			return
+		}
+		consoleMasterPTY = master
+		go func() {
+			_ = os.MkdirAll("/var/log", 0755)
+			logFile, _ := os.OpenFile("/var/log/axonwall-console-capture.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+			defer func() {
+				if logFile != nil {
+					_ = logFile.Close()
+				}
+			}()
+			buf := make([]byte, 4096)
+			for {
+				n, rErr := master.Read(buf)
+				if n > 0 && logFile != nil {
+					_, _ = logFile.Write(buf[:n])
+				}
+				if rErr != nil {
+					return
+				}
+			}
+		}()
+	})
+}
+
+// collectCloudInitAndConsoleCaptureLines returns captured /dev/console output, cloud-init-output.log, and cloud-init.log.
+func collectCloudInitAndConsoleCaptureLines() []string {
+	var lines []string
+	lines = append(lines, "=== Intercepted /dev/console Stream (/var/log/axonwall-console-capture.log) ===")
+	if data, err := os.ReadFile("/var/log/axonwall-console-capture.log"); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		raw := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		if len(raw) > 120 {
+			raw = raw[len(raw)-120:]
+		}
+		for _, l := range raw {
+			lines = append(lines, "  "+strings.TrimRight(l, "\r"))
+		}
+	} else {
+		lines = append(lines, "  (TIOCCONS interceptor active — no stray /dev/console writes captured yet)")
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, "=== Cloud-Init Console & Provisioning Output (/var/log/cloud-init-output.log) ===")
+	if data, err := os.ReadFile("/var/log/cloud-init-output.log"); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		raw := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		if len(raw) > 150 {
+			raw = raw[len(raw)-150:]
+		}
+		for _, l := range raw {
+			lines = append(lines, "  "+strings.TrimRight(l, "\r"))
+		}
+	} else if jOut, err := exec.Command("journalctl", "-u", "cloud-init-local.service", "-u", "cloud-init.service", "-u", "cloud-config.service", "-u", "cloud-final.service", "-n", "100", "--no-pager", "-o", "short-iso").CombinedOutput(); err == nil && len(strings.TrimSpace(string(jOut))) > 0 {
+		for _, l := range strings.Split(strings.TrimRight(string(jOut), "\n"), "\n") {
+			lines = append(lines, "  "+l)
+		}
+	} else {
+		lines = append(lines, "  (No cloud-init output recorded in this session)")
+	}
+
+	if data, err := os.ReadFile("/var/log/cloud-init.log"); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "=== Cloud-Init Detailed Log Tail (/var/log/cloud-init.log) ===")
+		raw := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		if len(raw) > 80 {
+			raw = raw[len(raw)-80:]
+		}
+		for _, l := range raw {
+			lines = append(lines, "  "+strings.TrimRight(l, "\r"))
+		}
+	}
+	return lines
+}
+
+// ShipInstallerDiagnosticsBundle ships the full diagnostics bundle to an HTTP(S) endpoint,
+// syslogserver (UDP/TCP host:port), or SCP target (user@host:/path).
+func ShipInstallerDiagnosticsBundle(endpoint string, cfg InstallerConfig, eval HardwareEvaluation, rawLines []string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", fmt.Errorf("no shipping destination specified")
+	}
+	bundle := FormatInstallerDiagnosticsBundle(cfg, eval, rawLines)
+
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequest("POST", endpoint, bytes.NewBufferString(bundle))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+		req.Header.Set("X-Axonwall-Hostname", cfg.Hostname)
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return "", fmt.Errorf("HTTP %d from %s", resp.StatusCode, endpoint)
+		}
+		return fmt.Sprintf("HTTP POST %s (%d)", endpoint, resp.StatusCode), nil
+	}
+
+	if strings.HasPrefix(endpoint, "syslog://") || strings.HasPrefix(endpoint, "udp://") || strings.HasPrefix(endpoint, "tcp://") {
+		proto := "udp"
+		addr := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(endpoint, "syslog://"), "udp://"), "tcp://")
+		if strings.HasPrefix(endpoint, "tcp://") {
+			proto = "tcp"
+		}
+		if !strings.Contains(addr, ":") {
+			addr += ":514"
+		}
+		cmd := exec.Command("logger", "-n", strings.Split(addr, ":")[0], "-P", strings.Split(addr, ":")[1], "-t", "axonwall-installer")
+		if proto == "tcp" {
+			cmd.Args = append(cmd.Args, "-T")
+		}
+		cmd.Stdin = strings.NewReader(bundle)
+		if err := cmd.Run(); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Syslog %s://%s", proto, addr), nil
+	}
+
+	// Default to SCP if user@host:/path or host:/path format
+	saved, err := SaveInstallerDiagnosticsBundle("", cfg, eval, rawLines)
+	if err != nil || len(saved) == 0 {
+		return "", fmt.Errorf("failed to stage local bundle for SCP: %v", err)
+	}
+	scpCmd := exec.Command("scp", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8", saved[0], endpoint)
+	if out, err := scpCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("scp failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return fmt.Sprintf("SCP %s", endpoint), nil
 }
 
 // countFailedSystemdUnits returns the number of failed systemd units on the system.
@@ -1053,7 +1241,11 @@ func FormatInstallerDiagnosticsBundle(cfg InstallerConfig, eval HardwareEvaluati
 	for _, l := range collectCapturedServiceAndSystemErrors() {
 		sb.WriteString(l + "\n")
 	}
-	sb.WriteString("\n--- [3] INSTALLER EXECUTION LOG ---\n")
+	sb.WriteString("\n--- [3] CLOUD-INIT & INTERCEPTED CONSOLE OUTPUT ---\n")
+	for _, l := range collectCloudInitAndConsoleCaptureLines() {
+		sb.WriteString(l + "\n")
+	}
+	sb.WriteString("\n--- [4] INSTALLER EXECUTION LOG ---\n")
 	for _, l := range collectInstallerLogLines(rawLines) {
 		sb.WriteString(l + "\n")
 	}
@@ -1109,12 +1301,16 @@ func SaveInstallerDiagnosticsBundle(customPath string, cfg InstallerConfig, eval
 // runInstallerLogsScreen renders the interactive Logs & Diagnostics TUI screen inside the installer.
 func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLines []string, reader *bufio.Reader) {
 	suppressConsoleNoise()
-	activeTab := 1 // 1=Installer Log, 2=Captured Service & System Errors, 3=Hardware & Storage Probe
+	activeTab := 1 // 1=Installer Log, 2=Service/System Errors, 3=Cloud-Init & Console Stream, 4=Hardware Probe
 	if len(rawLines) == 0 {
 		if _, err := os.Stat("/var/log/axonwall-install.log"); err != nil {
-			// Default to Captured Service & System Errors if install hasn't run yet and there are failed units
+			// Default to Captured Service & System Errors or Cloud-Init & Console Stream if install hasn't run yet
 			if cnt, _ := countFailedSystemdUnits(); cnt > 0 {
 				activeTab = 2
+			} else if st, err := os.Stat("/var/log/axonwall-console-capture.log"); err == nil && st.Size() > 0 {
+				activeTab = 3
+			} else if st, err := os.Stat("/var/log/cloud-init-output.log"); err == nil && st.Size() > 0 {
+				activeTab = 3
 			}
 		}
 	}
@@ -1128,14 +1324,15 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 			accent = colorBrightCya
 		}
 		fmt.Printf("%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", accent, colorBold, colorReset)
-		fmt.Printf("%s%s║  📋  AXONWALL INSTALLER — LOGS, CAPTURED ERRORS & DIAGNOSTICS                ║%s\n", accent, colorBold, colorReset)
-		fmt.Printf("%s%s║      Background service & kernel messages are captured here off-screen       ║%s\n", colorCyan, colorBold, colorReset)
+		fmt.Printf("%s%s║  📋  AXONWALL INSTALLER — LOGS, CAPTURED CONSOLE & DIAGNOSTICS PANE          ║%s\n", accent, colorBold, colorReset)
+		fmt.Printf("%s%s║      Raw cloud-init, service & kernel output is intercepted & preserved here ║%s\n", colorCyan, colorBold, colorReset)
 		fmt.Printf("%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n", accent, colorBold, colorReset)
 
 		failedCnt, _ := countFailedSystemdUnits()
-		tab1Label := "[1] Installer Log"
-		tab2Label := fmt.Sprintf("[2] Captured Service & System Errors (%d)", failedCnt)
-		tab3Label := "[3] Hardware & Storage Probe"
+		tab1Label := "[1] Install Log"
+		tab2Label := fmt.Sprintf("[2] Service Errors (%d)", failedCnt)
+		tab3Label := "[3] Cloud-Init & Console"
+		tab4Label := "[4] Hardware Probe"
 
 		renderTab := func(idx int, label string) string {
 			if activeTab == idx {
@@ -1143,7 +1340,7 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 			}
 			return colorDim + "  " + label + colorReset
 		}
-		fmt.Printf(" %s   %s   %s\n", renderTab(1, tab1Label), renderTab(2, tab2Label), renderTab(3, tab3Label))
+		fmt.Printf(" %s  %s  %s  %s\n", renderTab(1, tab1Label), renderTab(2, tab2Label), renderTab(3, tab3Label), renderTab(4, tab4Label))
 		fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 
 		var lines []string
@@ -1153,6 +1350,8 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 		case 2:
 			lines = collectCapturedServiceAndSystemErrors()
 		case 3:
+			lines = collectCloudInitAndConsoleCaptureLines()
+		case 4:
 			lines = collectHardwareAndStorageProbeLines(cfg, eval)
 		}
 
@@ -1204,11 +1403,11 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 		if statusBanner != "" {
 			fmt.Printf(" %s\n", statusBanner)
 		} else {
-			fmt.Printf(" %sShowing lines %d–%d of %d%s  (Console noise suppression: %sACTIVE%s)\n",
+			fmt.Printf(" %sLines %d–%d of %d%s  (Console Interceptor: %sTIOCCONS ACTIVE%s)\n",
 				colorDim, scrollOffset+1, endIdx, len(lines), colorReset, colorEmerald+colorBold, colorReset)
 		}
-		fmt.Printf(" %sControls:%s [1-3] Tab  [↑/↓/PgUp/PgDn] Scroll  %s[S] Save Diagnostics%s  [C] Clear Failed  [B/Esc] Back\n",
-			colorDim, colorReset, colorEmerald+colorBold, colorReset)
+		fmt.Printf(" %sControls:%s [1-4] Tab  [↑/↓/PgUp/PgDn] Scroll  %s[S] Save%s  %s[X] Ship Logs%s  [C] Clear  [B/Esc] Back\n",
+			colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 
 		key := readRawKey()
 		statusBanner = ""
@@ -1222,13 +1421,16 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 		case "3":
 			activeTab = 3
 			scrollOffset = 0
+		case "4":
+			activeTab = 4
+			scrollOffset = 0
 		case "LEFT":
 			if activeTab > 1 {
 				activeTab--
 				scrollOffset = 0
 			}
 		case "RIGHT":
-			if activeTab < 3 {
+			if activeTab < 4 {
 				activeTab++
 				scrollOffset = 0
 			}
@@ -1259,13 +1461,22 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 			} else {
 				statusBanner = fmt.Sprintf("%s[✓] Saved diagnostics to: %s%s", colorEmerald+colorBold, strings.Join(savedPaths, ", "), colorReset)
 			}
+		case "X":
+			fmt.Print("\n Ship logs to (https://url, syslog://host:514, or user@host:/path): ")
+			dest, _ := reader.ReadString('\n')
+			shippedTo, err := ShipInstallerDiagnosticsBundle(dest, cfg, eval, rawLines)
+			if err != nil {
+				statusBanner = fmt.Sprintf("%s[!] Log shipping failed: %v%s", colorRed+colorBold, err, colorReset)
+			} else {
+				statusBanner = fmt.Sprintf("%s[✓] Shipped diagnostics bundle via %s%s", colorEmerald+colorBold, shippedTo, colorReset)
+			}
 		case "C":
 			_ = exec.Command("systemctl", "reset-failed").Run()
 			suppressConsoleNoise()
-			statusBanner = fmt.Sprintf("%s[✓] Cleared failed systemd unit states and refreshed console suppression.%s", colorEmerald+colorBold, colorReset)
-		case "R":
+			statusBanner = fmt.Sprintf("%s[✓] Cleared failed systemd unit states and refreshed console capture.%s", colorEmerald+colorBold, colorReset)
+		case "R", "REDRAW":
 			suppressConsoleNoise()
-			statusBanner = fmt.Sprintf("%s[✓] Refreshed logs and console suppression.%s", colorCyan+colorBold, colorReset)
+			statusBanner = fmt.Sprintf("%s[✓] Refreshed logs and console capture.%s", colorCyan+colorBold, colorReset)
 		case "B", "ESC", "Q", "BACKSPACE":
 			return
 		}

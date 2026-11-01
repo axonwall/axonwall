@@ -55,7 +55,7 @@ if [ -d "${BIN_DIR}/live" ]; then
   fi
 fi
 
-COMMON_LIVE_ARGS="boot=live components quiet hostname=${LIVE_HOST} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0"
+COMMON_LIVE_ARGS="boot=live components quiet loglevel=3 systemd.show_status=0 hostname=${LIVE_HOST} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0"
 
 # 1. Install Splash PNG into GRUB and ISOLINUX
 if [ -n "$SPLASH_SRC" ] && [ -f "$SPLASH_SRC" ]; then

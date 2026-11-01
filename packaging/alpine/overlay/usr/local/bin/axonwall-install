@@ -2209,6 +2209,14 @@ if [ -f /var/log/axonwall-installer-diagnostics.log ] && [ -d /mnt/slot_a/var/lo
   cp -f /var/log/axonwall-installer-diagnostics.log /mnt/slot_a/var/log/axonwall-installer-diagnostics.log 2>/dev/null || true
   chmod 0600 /mnt/slot_a/var/log/axonwall-installer-diagnostics.log 2>/dev/null || true
 fi
+if [ -f /var/log/axonwall-console-capture.log ] && [ -d /mnt/slot_a/var/log ]; then
+  cp -f /var/log/axonwall-console-capture.log /mnt/slot_a/var/log/axonwall-console-capture.log 2>/dev/null || true
+  chmod 0600 /mnt/slot_a/var/log/axonwall-console-capture.log 2>/dev/null || true
+fi
+if [ -f /var/log/cloud-init-output.log ] && [ -d /mnt/slot_a/var/log ]; then
+  cp -f /var/log/cloud-init-output.log /mnt/slot_a/var/log/axonwall-live-cloud-init.log 2>/dev/null || true
+  chmod 0600 /mnt/slot_a/var/log/axonwall-live-cloud-init.log 2>/dev/null || true
+fi
 umount /mnt/slot_a/boot/efi 2>/dev/null || true
 umount /mnt/slot_a/var/log 2>/dev/null || true
 umount /mnt/data 2>/dev/null || true

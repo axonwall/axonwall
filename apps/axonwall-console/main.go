@@ -2669,6 +2669,7 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 }
 
 func main() {
+	suppressConsoleNoise()
 	reader := bufio.NewReader(os.Stdin)
 
 	for _, arg := range os.Args[1:] {

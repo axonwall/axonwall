@@ -41,3 +41,17 @@ chown -R unbound:unbound /var/lib/unbound 2>/dev/null || true
 rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf 2>/dev/null || true
 systemctl disable suricata kea-dhcp4-server unbound unbound-resolvconf frr strongswan strongswan-starter openvpn conntrackd keepalived 2>/dev/null || true
 
+echo "[Hook] Silencing cloud-init console output so it never bleeds into the TUI on /dev/tty1..."
+if [ -f /etc/cloud/cloud.cfg.d/05_logging.cfg ]; then
+  sed -i 's/ - \*log_syslog/ # - *log_syslog/' /etc/cloud/cloud.cfg.d/05_logging.cfg 2>/dev/null || true
+fi
+for ci_unit in cloud-init-local.service cloud-init.service cloud-init-network.service cloud-config.service cloud-final.service; do
+  mkdir -p "/etc/systemd/system/${ci_unit}.d"
+  cat > "/etc/systemd/system/${ci_unit}.d/10-axonwall-quiet-console.conf" << 'CI_DROPIN_EOF'
+[Service]
+StandardOutput=journal
+StandardError=journal
+CI_DROPIN_EOF
+done
+
+

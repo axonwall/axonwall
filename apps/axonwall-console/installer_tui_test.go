@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -217,7 +220,35 @@ func TestSaveInstallerDiagnosticsBundle(t *testing.T) {
 	if !strings.Contains(bundle, "CAPTURED SERVICE & SYSTEM ERRORS") {
 		t.Errorf("expected captured service errors section in diagnostics bundle")
 	}
+	if !strings.Contains(bundle, "CLOUD-INIT & INTERCEPTED CONSOLE OUTPUT") {
+		t.Errorf("expected cloud-init & intercepted console output section in diagnostics bundle")
+	}
 	if !strings.Contains(bundle, "[PHASE:1/8] Partitioning target disk(s)...") && !strings.Contains(bundle, "INSTALLER EXECUTION LOG") {
 		t.Errorf("expected installer execution log section in diagnostics bundle")
+	}
+
+	// Verify HTTP log shipping endpoint
+	var receivedBody string
+	var receivedHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		receivedBody = string(b)
+		receivedHost = r.Header.Get("X-Axonwall-Hostname")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	res, err := ShipInstallerDiagnosticsBundle(srv.URL, cfg, eval, rawLines)
+	if err != nil {
+		t.Fatalf("expected ShipInstallerDiagnosticsBundle to succeed via HTTP, got err=%v", err)
+	}
+	if !strings.Contains(res, "HTTP POST") {
+		t.Errorf("expected HTTP POST confirmation, got %s", res)
+	}
+	if receivedHost != cfg.Hostname {
+		t.Errorf("expected X-Axonwall-Hostname=%s, got %s", cfg.Hostname, receivedHost)
+	}
+	if !strings.Contains(receivedBody, "CLOUD-INIT & INTERCEPTED CONSOLE OUTPUT") {
+		t.Errorf("expected shipped payload to include cloud-init & console section")
 	}
 }
