@@ -1127,13 +1127,26 @@ export function synthesizeFluxFromArgo(
   return `${stringifyYaml(gitRepoDoc).trim()}\n---\n${stringifyYaml(kustomizationDoc).trim()}\n`;
 }
 
+function deriveRfc2247BaseDn(domain?: string): string {
+  const cleaned = (domain || 'axonwall.local').trim().replace(/^\.+|\.+$/g, '').toLowerCase();
+  if (!cleaned || cleaned === 'local' || cleaned === 'localhost') {
+    return 'dc=axonwall,dc=local';
+  }
+  const parts = cleaned.split('.').filter(Boolean);
+  if (parts.length === 1) {
+    return `dc=${parts[0]},dc=local`;
+  }
+  return parts.map((p) => `dc=${p}`).join(',');
+}
+
 /**
  * Generates an ArgoCD Application CRD for a VOW catalog app on the Axonwall K3s cluster.
  */
 export function compileVowArgoApplicationYaml(
   app: VowAppDefinition,
   config: VowConfig,
-  override?: VowAppOverride
+  override?: VowAppOverride,
+  baseDn = 'dc=axonwall,dc=local'
 ): string {
   const targetNs = override?.namespace || app.namespace || app.id;
   const storageClass = override?.storageClass || 'axonwall-zfs-local';
@@ -1153,6 +1166,41 @@ export function compileVowArgoApplicationYaml(
     }
   }
 
+  const ldap = config.ldapAuth ?? {
+    enabled: true,
+    autoBindLocalLdap: true,
+    allowLocalBreakGlass: true,
+    autoProvisionPrincipals: true,
+    syncKeycloakUserFederation: true,
+    url: 'ldap://127.0.0.1:389',
+    ownerGroups: ['axonwall-admin'],
+    adminGroups: ['vow-admin'],
+    operatorGroups: ['axonwall-operator', 'vow-operator'],
+    viewerGroups: ['axonwall-readonly', 'vow-readonly'],
+    defaultRole: 'viewer' as const,
+  };
+  const resolvedBaseDn = ldap.baseDn?.trim() || baseDn;
+  const resolvedBindDn = ldap.bindDn?.trim() || `cn=svc-vow,ou=services,${resolvedBaseDn}`;
+
+  const keycloakLdapFederationValues =
+    app.id === 'keycloak' && ldap.enabled && ldap.syncKeycloakUserFederation
+      ? {
+          ldapFederation: {
+            enabled: true,
+            providerId: 'axonwall-openldap',
+            connectionUrl: ldap.url || 'ldap://127.0.0.1:389',
+            baseDn: resolvedBaseDn,
+            bindDn: resolvedBindDn,
+            usersDn: ldap.userSearchBase?.trim() || `ou=users,${resolvedBaseDn}`,
+            groupsDn: ldap.groupSearchBase?.trim() || `ou=groups,${resolvedBaseDn}`,
+            usernameLdapAttribute: 'uid',
+            rdnLdapAttribute: 'uid',
+            uuidLdapAttribute: 'entryUUID',
+            userObjectClasses: 'inetOrgPerson,posixAccount',
+          },
+        }
+      : {};
+
   const valuesObject: Record<string, unknown> = {
     global: {
       domain: config.domain,
@@ -1170,6 +1218,7 @@ export function compileVowArgoApplicationYaml(
           },
         }
       : {}),
+    ...keycloakLdapFederationValues,
     ...customValuesObj,
   };
 
@@ -1281,9 +1330,28 @@ export function compileVowUnboundOverrides(state: DesiredState): string {
 /**
  * Compiles the `.env.enabler` configuration compatible with `/home/djehauti/git/DeployCoop/vigilant-octo-waffle`.
  */
-export function compileVowEnablerEnv(config: VowConfig): string {
+export function compileVowEnablerEnv(config: VowConfig, baseDn = 'dc=axonwall,dc=local'): string {
   const { resolvedApps } = resolveVowAppDependencies(config.enabledApps ?? []);
   const enabledSet = new Set(resolvedApps);
+
+  const ldap = config.ldapAuth ?? {
+    enabled: true,
+    autoBindLocalLdap: true,
+    allowLocalBreakGlass: true,
+    autoProvisionPrincipals: true,
+    syncKeycloakUserFederation: true,
+    url: 'ldap://127.0.0.1:389',
+    ownerGroups: ['axonwall-admin'],
+    adminGroups: ['vow-admin'],
+    operatorGroups: ['axonwall-operator', 'vow-operator'],
+    viewerGroups: ['axonwall-readonly', 'vow-readonly'],
+    defaultRole: 'viewer' as const,
+  };
+  const resolvedBaseDn = ldap.baseDn?.trim() || baseDn;
+  const resolvedBindDn = ldap.bindDn?.trim() || `cn=svc-vow,ou=services,${resolvedBaseDn}`;
+  const resolvedUserBase = ldap.userSearchBase?.trim() || `ou=users,${resolvedBaseDn}`;
+  const resolvedGroupBase = ldap.groupSearchBase?.trim() || `ou=groups,${resolvedBaseDn}`;
+  const authzActive = Boolean(config.authzEnabled || ldap.enabled);
 
   const lines: string[] = [
     '# =============================================================================',
@@ -1292,12 +1360,34 @@ export function compileVowEnablerEnv(config: VowConfig): string {
     '# =============================================================================',
     `CD_RUNNER="${escapeEnvDoubleQuoted(config.cdRunner)}"`,
     `K8S_DISTRO="k3s"`,
+    `THIS_K8S_TYPE="k3s"`,
+    `KUBECONFIG="/etc/rancher/k3s/k3s.yaml"`,
+    `THIS_STORAGECLASS="axonwall-zfs-local"`,
+    `THIS_OPENEBS_NAMESPACE="openebs"`,
+    `THIS_OPENEBS_ENGINE_ZFS="true"`,
     `THIS_DOMAIN_NAME="${escapeEnvDoubleQuoted(config.domain)}"`,
     `THIS_REPO_URL="${escapeEnvDoubleQuoted(config.gitRepoUrl)}"`,
     `THIS_FLUX_BRANCH="${escapeEnvDoubleQuoted(config.gitBranch)}"`,
     `THIS_FLUX_INTERVAL="${escapeEnvDoubleQuoted(config.fluxInterval)}"`,
     `LOCAL_TLS_MKCERT="${config.localTlsMkcert ? 'true' : 'false'}"`,
-    `VOW_AUTHZ_ENABLED="${config.authzEnabled ? 'true' : 'false'}"`,
+    `VOW_AUTHZ="${authzActive ? 'on' : 'off'}"`,
+    `VOW_AUTHZ_ENABLED="${authzActive ? 'true' : 'false'}"`,
+    '',
+    '# Axonwall Local OpenLDAP Integration (cn=svc-vow,ou=services,<baseDN>)',
+    `VOW_LDAP_ENABLED="${ldap.enabled ? 'true' : 'false'}"`,
+    `VOW_LDAP_BINDING_FILE="/etc/axonwall/ldap-plugins/vigilant-octo-waffle.json"`,
+    `VOW_LDAP_URL="${escapeEnvDoubleQuoted(ldap.url || 'ldap://127.0.0.1:389')}"`,
+    `VOW_LDAP_BASE_DN="${escapeEnvDoubleQuoted(resolvedBaseDn)}"`,
+    `VOW_LDAP_BIND_DN="${escapeEnvDoubleQuoted(resolvedBindDn)}"`,
+    `VOW_LDAP_USER_SEARCH_BASE="${escapeEnvDoubleQuoted(resolvedUserBase)}"`,
+    `VOW_LDAP_GROUP_SEARCH_BASE="${escapeEnvDoubleQuoted(resolvedGroupBase)}"`,
+    `VOW_LDAP_OWNER_GROUPS="${escapeEnvDoubleQuoted((ldap.ownerGroups ?? ['axonwall-admin']).join(','))}"`,
+    `VOW_LDAP_ADMIN_GROUPS="${escapeEnvDoubleQuoted((ldap.adminGroups ?? ['vow-admin']).join(','))}"`,
+    `VOW_LDAP_OPERATOR_GROUPS="${escapeEnvDoubleQuoted((ldap.operatorGroups ?? ['axonwall-operator', 'vow-operator']).join(','))}"`,
+    `VOW_LDAP_VIEWER_GROUPS="${escapeEnvDoubleQuoted((ldap.viewerGroups ?? ['axonwall-readonly', 'vow-readonly']).join(','))}"`,
+    `VOW_LDAP_DEFAULT_ROLE="${escapeEnvDoubleQuoted(ldap.defaultRole || 'viewer')}"`,
+    `VOW_LDAP_AUTO_PROVISION="${ldap.autoProvisionPrincipals !== false ? 'true' : 'false'}"`,
+    `VOW_LDAP_ALLOW_BREAK_GLASS="${ldap.allowLocalBreakGlass !== false ? 'true' : 'false'}"`,
     '',
     '# Application Enabler Flags',
   ];
@@ -1314,12 +1404,47 @@ export function compileVowEnablerEnv(config: VowConfig): string {
 /**
  * Compiles the `.vow/authz.yaml` CASL authorization store configuration.
  */
-export function compileVowAuthzYaml(config: VowConfig): string {
+export function compileVowAuthzYaml(config: VowConfig, baseDn = 'dc=axonwall,dc=local'): string {
   const role = config.defaultRole || 'admin';
+  const ldap = config.ldapAuth ?? {
+    enabled: true,
+    autoBindLocalLdap: true,
+    allowLocalBreakGlass: true,
+    autoProvisionPrincipals: true,
+    syncKeycloakUserFederation: true,
+    url: 'ldap://127.0.0.1:389',
+    ownerGroups: ['axonwall-admin'],
+    adminGroups: ['vow-admin'],
+    operatorGroups: ['axonwall-operator', 'vow-operator'],
+    viewerGroups: ['axonwall-readonly', 'vow-readonly'],
+    defaultRole: 'viewer' as const,
+  };
+  const resolvedBaseDn = ldap.baseDn?.trim() || baseDn;
+  const resolvedBindDn = ldap.bindDn?.trim() || `cn=svc-vow,ou=services,${resolvedBaseDn}`;
+
   const doc = {
     version: 1,
-    enabled: config.authzEnabled,
+    enabled: Boolean(config.authzEnabled || ldap.enabled),
     defaultRole: role,
+    ldap: {
+      enabled: ldap.enabled,
+      autoBindLocalLdap: ldap.autoBindLocalLdap,
+      allowLocalBreakGlass: ldap.allowLocalBreakGlass,
+      autoProvisionPrincipals: ldap.autoProvisionPrincipals,
+      bindingFile: '/etc/axonwall/ldap-plugins/vigilant-octo-waffle.json',
+      url: ldap.url || 'ldap://127.0.0.1:389',
+      baseDn: resolvedBaseDn,
+      bindDn: resolvedBindDn,
+      userSearchBase: ldap.userSearchBase?.trim() || `ou=users,${resolvedBaseDn}`,
+      userSearchFilter: '(uid={username})',
+      groupSearchBase: ldap.groupSearchBase?.trim() || `ou=groups,${resolvedBaseDn}`,
+      groupSearchFilter: '(|(&(objectClass=posixGroup)(memberUid={username}))(&(objectClass=groupOfNames)(member={userDn})))',
+      ownerGroups: ldap.ownerGroups ?? ['axonwall-admin'],
+      adminGroups: ldap.adminGroups ?? ['vow-admin'],
+      operatorGroups: ldap.operatorGroups ?? ['axonwall-operator', 'vow-operator'],
+      viewerGroups: ldap.viewerGroups ?? ['axonwall-readonly', 'vow-readonly'],
+      defaultRole: ldap.defaultRole || 'viewer',
+    },
     roles: {
       owner: VOW_ROLE_PERMISSIONS.owner,
       admin: VOW_ROLE_PERMISSIONS.admin,
@@ -1330,9 +1455,12 @@ export function compileVowAuthzYaml(config: VowConfig): string {
     principals: [
       {
         id: 'axonwall-admin',
-        kind: 'user',
+        name: 'Axonwall Appliance Administrator',
+        kind: 'human',
         displayName: 'Axonwall Appliance Administrator',
         role: 'owner',
+        ldapUid: 'admin',
+        ldapGroups: ['axonwall-admin', 'vow-admin'],
         grants: [],
         revocations: [],
       },
@@ -1365,6 +1493,8 @@ export function compileVowBundle(state: DesiredState): CompiledVowBundle {
   const vowRequested = Boolean(
     vowConfig.enabled || state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled)
   );
+  const baseDn =
+    state.identity?.baseDn?.trim() || deriveRfc2247BaseDn(state.system?.domain || 'axonwall.local');
 
   if (!vowRequested) {
     return {
@@ -1411,7 +1541,7 @@ export function compileVowBundle(state: DesiredState): CompiledVowBundle {
     estimatedMemoryMb += app.estimatedMemoryMb;
 
     const override = vowConfig.appOverrides?.find((o) => o.appId === appId);
-    const argoYaml = compileVowArgoApplicationYaml(app, vowConfig, override);
+    const argoYaml = compileVowArgoApplicationYaml(app, vowConfig, override, baseDn);
     argoDocs.push(argoYaml);
 
     const fluxYaml = synthesizeFluxFromArgo(argoYaml, app.id, 'flux-system', {
@@ -1445,7 +1575,7 @@ export function compileVowBundle(state: DesiredState): CompiledVowBundle {
     fluxManifestsYaml,
     combinedK3sManifestsYaml,
     unboundOverrides: compileVowUnboundOverrides(state),
-    enablerEnv: compileVowEnablerEnv(vowConfig),
-    authzYaml: compileVowAuthzYaml(vowConfig),
+    enablerEnv: compileVowEnablerEnv(vowConfig, baseDn),
+    authzYaml: compileVowAuthzYaml(vowConfig, baseDn),
   };
 }

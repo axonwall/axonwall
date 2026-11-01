@@ -13,8 +13,24 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+type VigilanteCompiledBundle struct {
+	K3sDependencyMet bool   `json:"k3sDependencyMet"`
+	NftablesRuleset  string `json:"nftablesRuleset"`
+	UnboundOverrides string `json:"unboundOverrides"`
+	K3sManifests     string `json:"k3sManifests"`
+	ConfigYaml       string `json:"configYaml"`
+	LdapEnv          string `json:"ldapEnv"`
+}
+
+type VigilanteRuntimeBundle struct {
+	Enabled        bool                     `json:"enabled"`
+	K3sEnabled     bool                     `json:"k3sEnabled"`
+	CompiledBundle *VigilanteCompiledBundle `json:"compiledBundle,omitempty"`
+}
 
 var (
 	validPoolDatasetRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$`)
@@ -236,6 +252,51 @@ func (vm *VigilanteManager) CreateIncidentSnapshot(pool, dataset, incidentID str
 
 	log.Printf("[VigilanteManager] Created immutable incident snapshot: %s", fullSpec)
 	return fullSpec, nil
+}
+
+// ApplyConfig reconciles the Vigilante runtime config.yaml, OpenLDAP SSO environment,
+// and in-house K3s manifests (/var/lib/rancher/k3s/server/manifests/axonwall-vigilante.yaml).
+func (vm *VigilanteManager) ApplyConfig(rawJSON []byte) error {
+	var bundle VigilanteRuntimeBundle
+	if err := json.Unmarshal(rawJSON, &bundle); err != nil {
+		return fmt.Errorf("invalid vigilante runtime bundle json: %w", err)
+	}
+
+	manifestPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-vigilante.yaml")
+	if !bundle.Enabled {
+		_ = os.Remove(manifestPath)
+		return nil
+	}
+
+	_ = os.MkdirAll(vm.evidenceRoot, 0750)
+	_ = os.MkdirAll("/etc/axonwall/vigilante", 0750)
+
+	if bundle.CompiledBundle != nil {
+		if bundle.CompiledBundle.ConfigYaml != "" {
+			cfgPath := filepath.Join(vm.evidenceRoot, "config.yaml")
+			if f, err := os.OpenFile(cfgPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
+				_, _ = f.WriteString(bundle.CompiledBundle.ConfigYaml)
+				_ = f.Close()
+			}
+		}
+		if bundle.CompiledBundle.LdapEnv != "" {
+			envPath := "/etc/axonwall/vigilante/ldap.env"
+			if f, err := os.OpenFile(envPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
+				_, _ = f.WriteString(bundle.CompiledBundle.LdapEnv)
+				_ = f.Close()
+			}
+		}
+		if (bundle.K3sEnabled || bundle.CompiledBundle.K3sDependencyMet) && bundle.CompiledBundle.K3sManifests != "" {
+			_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
+			if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
+				_, _ = f.WriteString(bundle.CompiledBundle.K3sManifests)
+				_ = f.Close()
+			}
+		}
+	}
+
+	log.Printf("[VigilanteManager] Reconciled Vigilante runtime configuration and in-house K3s manifests")
+	return nil
 }
 
 // StreamLiveTelemetry handles SSE streaming of live security alerts

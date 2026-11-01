@@ -236,6 +236,56 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	return nil
 }
 
+type VowRuntimeBundle struct {
+	Enabled                  bool   `json:"enabled"`
+	K3sDependencyMet         bool   `json:"k3sDependencyMet"`
+	CombinedK3sManifestsYaml string `json:"combinedK3sManifestsYaml"`
+	EnablerEnv               string `json:"enablerEnv"`
+	AuthzYaml                string `json:"authzYaml"`
+}
+
+// ApplyVowConfig reconciles the Vigilant Octo Waffle (VOW) GitOps & App Platform
+// manifests and environment files onto the in-house K3s cluster.
+func (m *K3sManager) ApplyVowConfig(rawJSON []byte) error {
+	var bundle VowRuntimeBundle
+	if err := json.Unmarshal(rawJSON, &bundle); err != nil {
+		return fmt.Errorf("invalid VOW runtime bundle json: %w", err)
+	}
+
+	manifestPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-vow.yaml")
+	if !bundle.Enabled || !bundle.K3sDependencyMet {
+		_ = os.Remove(manifestPath)
+		return nil
+	}
+
+	_ = os.MkdirAll("/etc/axonwall/vow", 0750)
+	_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
+
+	if bundle.EnablerEnv != "" {
+		envPath := "/etc/axonwall/vow/.env.enabler"
+		if f, err := os.OpenFile(envPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
+			_, _ = f.WriteString(bundle.EnablerEnv)
+			_ = f.Close()
+		}
+	}
+	if bundle.AuthzYaml != "" {
+		authzPath := "/etc/axonwall/vow/authz.yaml"
+		if f, err := os.OpenFile(authzPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
+			_, _ = f.WriteString(bundle.AuthzYaml)
+			_ = f.Close()
+		}
+	}
+	if bundle.CombinedK3sManifestsYaml != "" {
+		if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
+			_, _ = f.WriteString(bundle.CombinedK3sManifestsYaml)
+			_ = f.Close()
+		}
+	}
+
+	slog.Info("Reconciled Vigilant Octo Waffle manifests onto in-house K3s cluster")
+	return nil
+}
+
 func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken string) error {
 	tok, err := FetchPeerClusterToken(peerIp, syncPort, authToken)
 	if err != nil {

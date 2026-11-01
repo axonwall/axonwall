@@ -178,11 +178,42 @@ spec:
     expect(bundle.unboundOverrides).toContain('harbor.vow.axonwall.local. IN A 10.80.0.1');
     expect(bundle.enablerEnv).toContain('export GOHARBOR_ENABLED=true');
     expect(bundle.enablerEnv).toContain('export KUBEGRES_ENABLED=true');
+    expect(bundle.enablerEnv).toContain('VOW_LDAP_ENABLED="true"');
+    expect(bundle.enablerEnv).toContain('VOW_LDAP_BIND_DN="cn=svc-vow,ou=services,dc=axonwall,dc=local"');
     expect(bundle.authzYaml).toContain('axonwall-admin');
+    expect(bundle.authzYaml).toContain('bindingFile: /etc/axonwall/ldap-plugins/vigilant-octo-waffle.json');
+    expect(bundle.authzYaml).toContain('vow-admin');
     expect(VOW_APP_CATALOG.length).toBeGreaterThanOrEqual(35);
     expect(VOW_DEPLOYMENT_PRESETS.length).toBe(6);
     expect(VOW_WAFFLE_BLUEPRINTS.length).toBe(6);
     expect(VOW_PERMISSIONS.length).toBe(34);
     expect(compileVowUnboundOverrides(activeState)).toContain('argocd.vow.axonwall.local. IN A 10.80.0.1');
+  });
+
+  it('declares ldapIntegration on vigilant-octo-waffle and injects Keycloak LDAP federation when enabled', () => {
+    const manifest = findPluginById('vigilant-octo-waffle');
+    expect(manifest?.ldapIntegration).toBeDefined();
+    expect(manifest?.ldapIntegration?.serviceAccountCn).toBe('svc-vow');
+    expect(manifest?.ldapIntegration?.envPrefix).toBe('VOW_LDAP_');
+    expect(manifest?.ldapIntegration?.groups.map((g) => g.cn)).toEqual([
+      'vow-admin',
+      'vow-operator',
+      'vow-readonly',
+    ]);
+
+    const state = DesiredStateSchema.parse({
+      system: { domain: 'edge.corp.io' },
+      capabilities: { k3sEnabled: true },
+      k3s: { enabled: true },
+      vow: {
+        enabled: true,
+        enabledApps: ['argocd', 'keycloak'],
+      },
+    });
+    const bundle = compileVowBundle(state);
+    expect(bundle.enablerEnv).toContain('VOW_LDAP_BASE_DN="dc=edge,dc=corp,dc=io"');
+    expect(bundle.enablerEnv).toContain('VOW_LDAP_BIND_DN="cn=svc-vow,ou=services,dc=edge,dc=corp,dc=io"');
+    expect(bundle.argoManifestsYaml).toContain('providerId: axonwall-openldap');
+    expect(bundle.argoManifestsYaml).toContain('bindDn: cn=svc-vow,ou=services,dc=edge,dc=corp,dc=io');
   });
 });

@@ -130,3 +130,55 @@ func TestHAPKICertGeneration(t *testing.T) {
 		t.Errorf("expected node.crt to exist: %v", err)
 	}
 }
+
+func TestVowPluginLDAPIntegrationSpec(t *testing.T) {
+	plugins := GetExtensionPluginDefinitions()
+	var vowFound bool
+	for _, p := range plugins {
+		if p.ID == "vigilant-octo-waffle" {
+			vowFound = true
+			if p.LdapIntegration == nil {
+				t.Fatalf("expected vigilant-octo-waffle to have LdapIntegration")
+			}
+			if p.LdapIntegration.ServiceAccountCN != "svc-vow" {
+				t.Errorf("expected ServiceAccountCN=svc-vow, got %q", p.LdapIntegration.ServiceAccountCN)
+			}
+			if p.LdapIntegration.EnvPrefix != "VOW_LDAP_" {
+				t.Errorf("expected EnvPrefix=VOW_LDAP_, got %q", p.LdapIntegration.EnvPrefix)
+			}
+			if len(p.LdapIntegration.Groups) != 3 {
+				t.Fatalf("expected 3 LDAP groups on vigilant-octo-waffle, got %d", len(p.LdapIntegration.Groups))
+			}
+		}
+	}
+	if !vowFound {
+		t.Fatalf("vigilant-octo-waffle plugin not found in catalog")
+	}
+}
+
+func TestCoreVigilantePluginLDAPIntegrationSpec(t *testing.T) {
+	spec := GetCoreVigilanteLDAPSpec()
+	if spec.ServiceAccountCN != "svc-vigilante" {
+		t.Errorf("expected ServiceAccountCN=svc-vigilante, got %q", spec.ServiceAccountCN)
+	}
+	if spec.EnvPrefix != "VIGILANTE_LDAP_" {
+		t.Errorf("expected EnvPrefix=VIGILANTE_LDAP_, got %q", spec.EnvPrefix)
+	}
+	if !spec.InheritApplianceRoleGroups {
+		t.Errorf("expected InheritApplianceRoleGroups=true on core-vigilante")
+	}
+	if len(spec.Groups) != 3 {
+		t.Fatalf("expected 3 LDAP groups on core-vigilante, got %d", len(spec.Groups))
+	}
+	wantGroups := map[string]int{
+		"vigilante-admin":    10230,
+		"vigilante-operator": 10231,
+		"vigilante-readonly": 10232,
+	}
+	for _, g := range spec.Groups {
+		if wantGID, ok := wantGroups[g.CN]; !ok || g.GIDNumber != wantGID {
+			t.Errorf("unexpected LDAP group %+v", g)
+		}
+	}
+}
+

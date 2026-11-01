@@ -19,8 +19,8 @@ export function getXdgConfigHome() {
  * @returns {string}
  */
 export function getVigilanteConfigDir() {
-  if (process.env.AXONWALL_VIGILANTE_DIR) {
-    return process.env.AXONWALL_VIGILANTE_DIR;
+  if (process.env.VIGILANTE_CONFIG_DIR) {
+    return process.env.VIGILANTE_CONFIG_DIR;
   }
   const xdg = getXdgConfigHome();
   const dotVigilante = path.join(xdg, '.vigilante');
@@ -43,7 +43,45 @@ export function getVigilanteConfigDir() {
   if (plainExists) {
     return vigilante;
   }
+  // When running on an Axonwall appliance without an explicit XDG override,
+  // use the managed /var/lib/axonwall/vigilante runtime directory if present.
+  if (!process.env.XDG_CONFIG_HOME && fsSync.existsSync('/var/lib/axonwall/vigilante/config.yaml')) {
+    return '/var/lib/axonwall/vigilante';
+  }
   return vigilante;
+}
+
+/**
+ * Detect whether the current host is running Axonwall's in-house K3s cluster.
+ * @returns {boolean}
+ */
+export function isInHouseK3sHost() {
+  if (process.env.VIGILANTE_CLUSTER_PROVIDER) {
+    return process.env.VIGILANTE_CLUSTER_PROVIDER.toLowerCase() === 'k3s';
+  }
+  try {
+    return (
+      fsSync.existsSync('/etc/rancher/k3s/k3s.yaml') ||
+      fsSync.existsSync('/etc/axonwall/managed/k3s_config.json') ||
+      fsSync.existsSync('/var/lib/axonwall/vigilante/config.yaml')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve default cluster target configuration (defaults to Axonwall in-house K3s).
+ */
+export function resolveDefaultClusterSettings() {
+  const provider = (process.env.VIGILANTE_CLUSTER_PROVIDER || 'k3s').toLowerCase();
+  const isK3s = provider === 'k3s' || isInHouseK3sHost();
+  return {
+    clusterProvider: isK3s ? 'k3s' : provider,
+    clusterName: process.env.VIGILANTE_CLUSTER_NAME || (isK3s ? 'axonwall-k3s' : 'vigilante-dev'),
+    kubeconfig: process.env.KUBECONFIG || '/etc/rancher/k3s/k3s.yaml',
+    storageClass: process.env.VIGILANTE_STORAGE_CLASS || 'axonwall-zfs-local',
+  };
 }
 
 /**
@@ -527,7 +565,10 @@ export const DEFAULT_CONFIG = {
   },
   defaults: {
     domain: 'vigilante.local',
-    clusterName: 'vigilante-dev',
+    clusterName: 'axonwall-k3s',
+    clusterProvider: 'k3s',
+    kubeconfig: '/etc/rancher/k3s/k3s.yaml',
+    storageClass: 'axonwall-zfs-local',
     ip: '127.0.0.1',
     httpPort: 80,
     httpsPort: 443,
@@ -646,10 +687,14 @@ theme:
     selectedText: "yellow"
     banner: "magenta"
 
-# Default CLI & Cluster Settings
+# Default CLI & Cluster Settings (Utilizes Axonwall In-House K3s Cluster by Default)
 defaults:
   domain: "vigilante.local"
-  clusterName: "vigilante-dev"
+  clusterName: "axonwall-k3s"
+  # Cluster provider engine: 'k3s' (in-house Axonwall K3s cluster) or 'k3d' (Docker containerized)
+  clusterProvider: "k3s"
+  kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+  storageClass: "axonwall-zfs-local"
   ip: "127.0.0.1"
   # Host ports bound to the cluster ingress (per instance; change these
   # to run multiple instances side by side without port collisions)
@@ -776,34 +821,33 @@ export async function ensureVigilanteConfig() {
   let created = false;
 
   try {
-    await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(valuesDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(nmapsDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(oobscansDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(reconDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(nucleiDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(trivyDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(kubeauditDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(netexecDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(zapDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(pcapDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(dossiersDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(bloodhoundDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(containmentsDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(ctiDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(canaryDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(carveDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(datalakeDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(wasmDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(purpleDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(evidenceDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(playbooksDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(scenariosDir, { recursive: true, mode: 0o700 });
-    await fs.mkdir(instancesDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(valuesDir, { recursive: true });
+    await fs.mkdir(nmapsDir, { recursive: true });
+    await fs.mkdir(oobscansDir, { recursive: true });
+    await fs.mkdir(reconDir, { recursive: true });
+    await fs.mkdir(nucleiDir, { recursive: true });
+    await fs.mkdir(trivyDir, { recursive: true });
+    await fs.mkdir(kubeauditDir, { recursive: true });
+    await fs.mkdir(netexecDir, { recursive: true });
+    await fs.mkdir(zapDir, { recursive: true });
+    await fs.mkdir(pcapDir, { recursive: true });
+    await fs.mkdir(dossiersDir, { recursive: true });
+    await fs.mkdir(bloodhoundDir, { recursive: true });
+    await fs.mkdir(containmentsDir, { recursive: true });
+    await fs.mkdir(ctiDir, { recursive: true });
+    await fs.mkdir(canaryDir, { recursive: true });
+    await fs.mkdir(carveDir, { recursive: true });
+    await fs.mkdir(datalakeDir, { recursive: true });
+    await fs.mkdir(wasmDir, { recursive: true });
+    await fs.mkdir(purpleDir, { recursive: true });
+    await fs.mkdir(evidenceDir, { recursive: true });
+    await fs.mkdir(playbooksDir, { recursive: true });
+    await fs.mkdir(scenariosDir, { recursive: true });
+    await fs.mkdir(instancesDir, { recursive: true });
     try {
       await fs.access(configFile);
     } catch {
-      await fs.writeFile(configFile, DEFAULT_CONFIG_YAML, { encoding: 'utf8', mode: 0o600 });
+      await fs.writeFile(configFile, DEFAULT_CONFIG_YAML, 'utf8');
       created = true;
       logger.info('CONFIG', `Initialized default config.yaml at ${configFile}`);
     }
@@ -872,18 +916,77 @@ export function ensureVigilanteConfigSync() {
   const configFile = getVigilanteConfigFile();
 
   try {
-    for (const d of [
-      configDir, valuesDir, nmapsDir, oobscansDir, reconDir, nucleiDir, trivyDir,
-      kubeauditDir, netexecDir, zapDir, pcapDir, dossiersDir, bloodhoundDir,
-      containmentsDir, ctiDir, canaryDir, carveDir, datalakeDir, wasmDir,
-      purpleDir, evidenceDir, playbooksDir, scenariosDir, instancesDir
-    ]) {
-      if (!fsSync.existsSync(d)) {
-        fsSync.mkdirSync(d, { recursive: true, mode: 0o700 });
-      }
+    if (!fsSync.existsSync(valuesDir)) {
+      fsSync.mkdirSync(valuesDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(nmapsDir)) {
+      fsSync.mkdirSync(nmapsDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(oobscansDir)) {
+      fsSync.mkdirSync(oobscansDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(reconDir)) {
+      fsSync.mkdirSync(reconDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(nucleiDir)) {
+      fsSync.mkdirSync(nucleiDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(trivyDir)) {
+      fsSync.mkdirSync(trivyDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(kubeauditDir)) {
+      fsSync.mkdirSync(kubeauditDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(netexecDir)) {
+      fsSync.mkdirSync(netexecDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(zapDir)) {
+      fsSync.mkdirSync(zapDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(pcapDir)) {
+      fsSync.mkdirSync(pcapDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(dossiersDir)) {
+      fsSync.mkdirSync(dossiersDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(bloodhoundDir)) {
+      fsSync.mkdirSync(bloodhoundDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(containmentsDir)) {
+      fsSync.mkdirSync(containmentsDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(ctiDir)) {
+      fsSync.mkdirSync(ctiDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(canaryDir)) {
+      fsSync.mkdirSync(canaryDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(carveDir)) {
+      fsSync.mkdirSync(carveDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(datalakeDir)) {
+      fsSync.mkdirSync(datalakeDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(wasmDir)) {
+      fsSync.mkdirSync(wasmDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(purpleDir)) {
+      fsSync.mkdirSync(purpleDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(evidenceDir)) {
+      fsSync.mkdirSync(evidenceDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(playbooksDir)) {
+      fsSync.mkdirSync(playbooksDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(scenariosDir)) {
+      fsSync.mkdirSync(scenariosDir, { recursive: true });
+    }
+    if (!fsSync.existsSync(instancesDir)) {
+      fsSync.mkdirSync(instancesDir, { recursive: true });
     }
     if (!fsSync.existsSync(configFile)) {
-      fsSync.writeFileSync(configFile, DEFAULT_CONFIG_YAML, { encoding: 'utf8', mode: 0o600 });
+      fsSync.writeFileSync(configFile, DEFAULT_CONFIG_YAML, 'utf8');
     }
   } catch (err) {
     // Ignore sync fallback error
@@ -971,13 +1074,27 @@ export function loadConfig() {
 export async function saveConfig(config) {
   const configFile = getVigilanteConfigFile();
   const dir = getVigilanteConfigDir();
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.mkdir(dir, { recursive: true });
   const yamlStr = yamlDump(config, { indent: 2 });
-  await fs.writeFile(configFile, yamlStr, { encoding: 'utf8', mode: 0o600 });
-  try {
-    await fs.chmod(configFile, 0o600);
-  } catch {
-    // Ignore on platforms without POSIX chmod
-  }
+  await fs.writeFile(configFile, yamlStr, 'utf8');
   logger.info('CONFIG', `Saved configuration to ${configFile}`);
 }
+
+/**
+ * Get the full path to authz.yaml
+ * Supports VIGILANTE_AUTHZ_FILE env override
+ * @returns {string}
+ */
+export function getVigilanteAuthzFile() {
+  return process.env.VIGILANTE_AUTHZ_FILE || path.join(getVigilanteConfigDir(), 'authz.yaml');
+}
+
+/**
+ * Get the full path to the security audit log
+ * Supports VIGILANTE_AUDIT_LOG env override
+ * @returns {string}
+ */
+export function getVigilanteAuditLogFile() {
+  return process.env.VIGILANTE_AUDIT_LOG || path.join(getVigilanteConfigDir(), 'audit.log');
+}
+

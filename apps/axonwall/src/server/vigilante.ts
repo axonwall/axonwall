@@ -7,6 +7,7 @@ import {
   VigilanteConfigSchema,
   VigilanteModuleConfigSchema,
 } from '@axonwall/lib/schemas';
+import { enablePluginWithDependencies } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from './agent';
 import { callAgentApi } from './agent-client';
 import { getSession } from './auth';
@@ -124,7 +125,7 @@ export async function saveVigilanteConfigAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const state = await getCurrentDesiredState();
+  let state = await getCurrentDesiredState();
   const current = state.vigilante ?? VigilanteConfigSchema.parse({ enabled: true });
 
   const updated: VigilanteConfig = {
@@ -133,16 +134,20 @@ export async function saveVigilanteConfigAction(
   };
 
   state.vigilante = updated;
-  if (!state.capabilities) {
+  if (updated.enabled) {
+    const depRes = enablePluginWithDependencies('core-vigilante', state);
+    state = depRes.state;
+    state.vigilante = updated;
+  } else if (!state.capabilities) {
     state.capabilities = {
       firewallEnabled: true,
       nasEnabled: false,
       k3sEnabled: false,
       virtEnabled: false,
-      vigilanteEnabled: updated.enabled,
+      vigilanteEnabled: false,
     };
   } else {
-    state.capabilities.vigilanteEnabled = updated.enabled;
+    state.capabilities.vigilanteEnabled = false;
   }
 
   const result = await applyDesiredState(state);
@@ -260,16 +265,20 @@ export async function toggleSecurityModuleAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const state = await getCurrentDesiredState();
+  let state = await getCurrentDesiredState();
   if (!state.vigilante) {
     state.vigilante = VigilanteConfigSchema.parse({ enabled: true });
   }
+  if (enabled || state.vigilante.enabled) {
+    const depRes = enablePluginWithDependencies('core-vigilante', state);
+    state = depRes.state;
+  }
 
-  const existingIndex = state.vigilante.modules.findIndex((m) => m.id === moduleId);
+  const existingIndex = state.vigilante!.modules.findIndex((m) => m.id === moduleId);
   if (existingIndex >= 0) {
-    state.vigilante.modules[existingIndex].enabled = enabled;
+    state.vigilante!.modules[existingIndex].enabled = enabled;
   } else {
-    state.vigilante.modules.push(
+    state.vigilante!.modules.push(
       VigilanteModuleConfigSchema.parse({
         id: moduleId as any,
         enabled,

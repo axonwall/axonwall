@@ -81,6 +81,7 @@ export {
   generateMitreMarkdownReport,
   saveMitreReport
 } from './engine/mitre.js';
+export { VulnView } from './ui/VulnView.js';
 export {
   CHALLENGE_CATEGORIES,
   CHALLENGE_TEMPLATES,
@@ -93,6 +94,7 @@ export {
   testChallengeConnection,
   getChallengeLogs
 } from './engine/kctf.js';
+export { KCTFView } from './ui/KCTFView.js';
 export {
   SCAN_PROFILES as OPENVAS_SCAN_PROFILES,
   checkOpenVasStatus,
@@ -103,7 +105,28 @@ export {
 export { ModuleRegistry, globalModuleRegistry } from './modules/registry.js';
 export { checkPrereqs, REQUIRED_TOOLS } from './engine/prereqs.js';
 export { setupCertificates, checkCertificates, applyK8sTlsSecret } from './engine/certs.js';
-export { createK3dCluster, deleteK3dCluster, getClusterInfo } from './engine/cluster.js';
+export {
+  createCluster,
+  deleteCluster,
+  listClusters,
+  createK3dCluster,
+  deleteK3dCluster,
+  listK3dClusters,
+  createK3sCluster,
+  deleteK3sCluster,
+  listK3sClusters,
+  detectK3sAvailability,
+  resolveKubeContext,
+  getClusterContext,
+  getClusterContextArgs,
+  getClusterInfo
+} from './engine/cluster.js';
+export { App } from './ui/App.js';
+export { Header } from './ui/Header.js';
+export { TaskRunner } from './ui/TaskRunner.js';
+export { SelectModules } from './ui/SelectModules.js';
+export { StatusDashboard } from './ui/StatusDashboard.js';
+export { ThreatSimView } from './ui/ThreatSimView.js';
 export {
   BUILTIN_PLAYBOOKS,
   listAvailablePlaybooks,
@@ -135,6 +158,7 @@ export {
   listSavedXmlScans,
   readXmlScan
 } from './engine/nmap-xml.js';
+export { OOBScanView } from './ui/OOBScanView.js';
 export {
   OOB_SCAN_PROFILES,
   checkOobscanInstalled,
@@ -181,6 +205,11 @@ export {
   generateSarifReport,
   runPipelineAudit
 } from './engine/audit.js';
+
+export { BattleStationView } from './ui/BattleStationView.js';
+export { CommandPalette } from './ui/CommandPalette.js';
+export { KspmView } from './ui/KspmView.js';
+export { AuditView } from './ui/AuditView.js';
 
 export {
   generateCanaryServiceAccount,
@@ -297,6 +326,14 @@ export {
   ingestFederatedThreatRecord,
   getVigilanteFederationDir
 } from './engine/federation.js';
+
+export { DeceptionView } from './ui/DeceptionView.js';
+export { PurpleTeamView } from './ui/PurpleTeamView.js';
+export { ForensicsView } from './ui/ForensicsView.js';
+export { LineageView } from './ui/LineageView.js';
+export { CloudSecView } from './ui/CloudSecView.js';
+export { MitreView } from './ui/MitreView.js';
+export { AttackGraphView } from './ui/AttackGraphView.js';
 
 export {
   generateBpfLsmPolicy,
@@ -442,3 +479,61 @@ export {
   exportToPcap,
   generateSyntheticPacketStream
 } from './engine/sniffer.js';
+
+export {
+  getVigilanteAuthzFile,
+  getVigilanteAuditLogFile
+} from './engine/config.js';
+
+export {
+  PERMISSIONS,
+  ROLES,
+  PRINCIPAL_KINDS,
+  ROLE_PERMISSIONS,
+  PERMISSION_SUBJECT,
+  TOKEN_PREFIX,
+  SESSION_TTL_MS,
+  MAX_SESSIONS_PER_PRINCIPAL,
+  MIN_PASSWORD_LENGTH,
+  AuthzInvariantError,
+  generateToken,
+  hashToken,
+  hashPassword,
+  verifyPasswordOrToken,
+  resolvePrincipalByToken,
+  loadAuthzStore,
+  saveAuthzStore,
+  invalidateAuthzCache,
+  assertNotLastOwner,
+  createSession,
+  resolvePrincipalBySession,
+  revokeSession,
+  toPublicPrincipal,
+  findPrincipalByLdapUid,
+  syncLdapPrincipal,
+  initOwner,
+  addPrincipal,
+  updatePrincipal,
+  removePrincipal,
+  rotatePrincipalToken,
+  buildAbilityFor,
+  matchesGrantContext,
+  decide
+} from './engine/authz.js';
+
+export {
+  getOidcConfig,
+  resetOidcCache,
+  verifyOidcToken
+} from './engine/authz-oidc.js';
+
+export {
+  DEFAULT_AXONWALL_PLUGIN_PATHS,
+  DEFAULT_ROLE_MAPPING,
+  escapeLdapFilter,
+  escapeLdapDnValue,
+  resolveVigilanteLdapConfig,
+  mapLdapGroupsToRole,
+  authenticateLdapUser,
+  getVigilanteLdapStatus
+} from './engine/authz-ldap.js';

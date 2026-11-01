@@ -1,4 +1,4 @@
-import { PluginManifestSchema, VowConfigSchema, HostMalwareDefenseConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
+import { PluginManifestSchema, VowConfigSchema, VigilanteConfigSchema, HostMalwareDefenseConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
 export type { PluginManifest };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
@@ -90,8 +90,35 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     category: 'core_role',
     description: 'Autonomous Cyber Defense Operations, real-time SOAR active containment, honeynet deception mesh, embedded security data lake, PCAP forensics, eBPF lineage, and 12 modular security packages.',
     author: 'DeployCoop / Axonwall Core',
+    dependencies: ['core-k3s'],
     systemdUnits: ['axonwall-vigilante.service', 'k3s.service'],
     privileges: ['security.vigilante', 'security.soar', 'security.forensics', 'k3s.cluster', 'firewall.rules'],
+    ldapIntegration: {
+      enabledByDefault: true,
+      serviceAccountCn: 'svc-vigilante',
+      inheritApplianceRoleGroups: true,
+      envPrefix: 'VIGILANTE_LDAP_',
+      groups: [
+        {
+          cn: 'vigilante-admin',
+          gidNumber: 10230,
+          description: 'Vigilante SOC & SOAR Administrators',
+          role: 'admin',
+        },
+        {
+          cn: 'vigilante-operator',
+          gidNumber: 10231,
+          description: 'Vigilante SOC Analysts, Threat Hunters & Incident Responders',
+          role: 'operator',
+        },
+        {
+          cn: 'vigilante-readonly',
+          gidNumber: 10232,
+          description: 'Vigilante SOC Read-Only Auditors & Observers',
+          role: 'readonly',
+        },
+      ],
+    },
     nftHooks: [
       { table: 'inet axonwall', chain: 'input', priority: -10 },
       { table: 'inet axonwall', chain: 'forward', priority: -10 },
@@ -331,6 +358,32 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       alpine: ['mkcert', 'nss-tools', 'gettext', 'git', 'curl', 'jq'],
     },
     cliBinaries: ['vow', 'kubectl', 'mkcert'],
+    ldapIntegration: {
+      enabledByDefault: true,
+      serviceAccountCn: 'svc-vow',
+      inheritApplianceRoleGroups: true,
+      envPrefix: 'VOW_LDAP_',
+      groups: [
+        {
+          cn: 'vow-admin',
+          gidNumber: 10220,
+          description: 'Vigilant Octo Waffle Platform Administrators',
+          role: 'admin',
+        },
+        {
+          cn: 'vow-operator',
+          gidNumber: 10221,
+          description: 'Vigilant Octo Waffle GitOps & Workload Operators',
+          role: 'operator',
+        },
+        {
+          cn: 'vow-readonly',
+          gidNumber: 10222,
+          description: 'Vigilant Octo Waffle Read-Only Viewers',
+          role: 'readonly',
+        },
+      ],
+    },
   },
   {
     id: 'host-malware-rootkit',
@@ -666,6 +719,17 @@ export function enablePluginWithDependencies(
         workloads: [],
       };
       next.k3s.enabled = true;
+    } else if (id === 'core-vigilante') {
+      next.capabilities = {
+        firewallEnabled: next.capabilities?.firewallEnabled !== false,
+        nasEnabled: Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled),
+        k3sEnabled: Boolean(next.capabilities?.k3sEnabled ?? next.k3s?.enabled ?? true),
+        virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
+        vigilanteEnabled: true,
+      };
+      next.vigilante = next.vigilante
+        ? { ...next.vigilante, enabled: true }
+        : VigilanteConfigSchema.parse({ enabled: true });
     } else if (id === 'vigilant-octo-waffle') {
       next.vow = next.vow ? { ...next.vow, enabled: true } : VowConfigSchema.parse({ enabled: true });
     } else if (id === 'host-malware-rootkit') {
@@ -694,7 +758,7 @@ export function enablePluginWithDependencies(
 
 /**
  * Disables a plugin in DesiredState and automatically disables any plugins that depend on it
- * (such as disabling `vigilant-octo-waffle` when `core-k3s` is disabled).
+ * (such as disabling `vigilant-octo-waffle` and `core-vigilante` when `core-k3s` is disabled).
  */
 export function disablePluginWithDependents(
   pluginId: string,
@@ -705,7 +769,11 @@ export function disablePluginWithDependents(
 
   const disableSingle = (id: string, isAutoDependent = false) => {
     for (const depPlugin of getDependentPlugins(id)) {
-      if (isPluginEnabled(depPlugin.id, next) || (depPlugin.id === 'vigilant-octo-waffle' && next.vow?.enabled)) {
+      if (
+        isPluginEnabled(depPlugin.id, next) ||
+        (depPlugin.id === 'vigilant-octo-waffle' && next.vow?.enabled) ||
+        (depPlugin.id === 'core-vigilante' && (next.capabilities?.vigilanteEnabled || next.vigilante?.enabled))
+      ) {
         disableSingle(depPlugin.id, true);
       }
     }
@@ -720,6 +788,13 @@ export function disablePluginWithDependents(
       }
       if (next.k3s) {
         next.k3s.enabled = false;
+      }
+    } else if (id === 'core-vigilante') {
+      if (next.capabilities) {
+        next.capabilities.vigilanteEnabled = false;
+      }
+      if (next.vigilante) {
+        next.vigilante.enabled = false;
       }
     } else if (id === 'vigilant-octo-waffle') {
       if (next.vow) {

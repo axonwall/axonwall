@@ -4,10 +4,20 @@ import {
   compileVigilanteUnboundOverrides,
   compileVigilanteK3sManifests,
   compileVigilanteConfigYaml,
+  compileVigilanteLdapEnv,
   compileVigilanteBundle,
 } from './index.js';
 import { DesiredStateSchema, type DesiredState } from '../../schemas/index.js';
 import { serializeDesiredStateToYamlFiles, parseDesiredStateFromYamlFiles } from '../../yaml/index.js';
+import {
+  BUILTIN_PLUGINS,
+  findPluginById,
+  getPluginDependencies,
+  getDependentPlugins,
+  enablePluginWithDependencies,
+  disablePluginWithDependents,
+  isPluginEnabled,
+} from '../../plugins/index.js';
 
 describe('Vigilante Subsystem Compilers', () => {
   const baseState: DesiredState = DesiredStateSchema.parse({
@@ -115,9 +125,43 @@ describe('Vigilante Subsystem Compilers', () => {
   it('compiles Vigilante runtime config.yaml', () => {
     const yaml = compileVigilanteConfigYaml(baseState);
     expect(yaml).toContain('domain: soc.axonwall.local');
+    expect(yaml).toContain('clusterName: axonwall-k3s');
+    expect(yaml).toContain('clusterProvider: k3s');
+    expect(yaml).toContain('kubeconfig: /etc/rancher/k3s/k3s.yaml');
+    expect(yaml).toContain('storageClass: axonwall-zfs-local');
     expect(yaml).toContain('backend: sqlite');
     expect(yaml).toContain('autoBlockC2Ips: true');
     expect(yaml).toContain('cluster-admin-backup');
+  });
+
+  it('enforces core-k3s dependency for core-vigilante and auto-enables/disables with K3s', () => {
+    const manifest = findPluginById('core-vigilante');
+    expect(manifest?.dependencies).toEqual(['core-k3s']);
+    expect(getPluginDependencies('core-vigilante')).toEqual(['core-k3s']);
+    expect(getDependentPlugins('core-k3s').map((p) => p.id)).toContain('core-vigilante');
+
+    const initial = DesiredStateSchema.parse({});
+    expect(isPluginEnabled('core-k3s', initial)).toBe(false);
+    expect(isPluginEnabled('core-vigilante', initial)).toBe(false);
+
+    const { state: enabledState, autoEnabledDependencies } = enablePluginWithDependencies(
+      'core-vigilante',
+      initial
+    );
+    expect(autoEnabledDependencies).toEqual(['core-k3s']);
+    expect(isPluginEnabled('core-k3s', enabledState)).toBe(true);
+    expect(isPluginEnabled('core-vigilante', enabledState)).toBe(true);
+    expect(enabledState.k3s?.enabled).toBe(true);
+    expect(enabledState.vigilante?.enabled).toBe(true);
+
+    const { state: disabledK3sState, autoDisabledDependents } = disablePluginWithDependents(
+      'core-k3s',
+      enabledState
+    );
+    expect(autoDisabledDependents).toContain('core-vigilante');
+    expect(isPluginEnabled('core-k3s', disabledK3sState)).toBe(false);
+    expect(isPluginEnabled('core-vigilante', disabledK3sState)).toBe(false);
+    expect(disabledK3sState.vigilante?.enabled).toBe(false);
   });
 
   it('compiles full Vigilante bundle', () => {
@@ -137,5 +181,56 @@ describe('Vigilante Subsystem Compilers', () => {
     expect(merged.vigilante?.enabled).toBe(true);
     expect(merged.vigilante?.domain).toBe('soc.axonwall.local');
     expect(merged.vigilante?.modules.length).toBe(2);
+  });
+
+  it('registers core-vigilante plugin LDAP integration metadata', () => {
+    const plugin = BUILTIN_PLUGINS.find((p) => p.id === 'core-vigilante');
+    expect(plugin).toBeDefined();
+    expect(plugin?.ldapIntegration).toBeDefined();
+    expect(plugin?.ldapIntegration?.serviceAccountCn).toBe('svc-vigilante');
+    expect(plugin?.ldapIntegration?.envPrefix).toBe('VIGILANTE_LDAP_');
+    expect(plugin?.ldapIntegration?.inheritApplianceRoleGroups).toBe(true);
+    expect(plugin?.ldapIntegration?.groups).toEqual([
+      {
+        cn: 'vigilante-admin',
+        gidNumber: 10230,
+        description: 'Vigilante SOC & SOAR Administrators',
+        role: 'admin',
+      },
+      {
+        cn: 'vigilante-operator',
+        gidNumber: 10231,
+        description: 'Vigilante SOC Analysts, Threat Hunters & Incident Responders',
+        role: 'operator',
+      },
+      {
+        cn: 'vigilante-readonly',
+        gidNumber: 10232,
+        description: 'Vigilante SOC Read-Only Auditors & Observers',
+        role: 'readonly',
+      },
+    ]);
+  });
+
+  it('compiles K3s vigilante-ldap-sso ConfigMap, config.yaml ldap section, and ldapEnv', () => {
+    const manifests = compileVigilanteK3sManifests(baseState);
+    expect(manifests).toContain('name: vigilante-ldap-sso');
+    expect(manifests).toContain('VIGILANTE_LDAP_URI: ldap://127.0.0.1:389');
+    expect(manifests).toContain('VIGILANTE_LDAP_CONFIG_PATH: /etc/axonwall/vigilante/ldap.json');
+    expect(manifests).toContain('VIGILANTE_LDAP_OPERATOR_GROUPS: axonwall-operator,vigilante-operator');
+
+    const configYaml = compileVigilanteConfigYaml(baseState);
+    expect(configYaml).toContain('ldap:');
+    expect(configYaml).toContain('uri: ldap://127.0.0.1:389');
+    expect(configYaml).toContain('configPath: /etc/axonwall/vigilante/ldap.json');
+    expect(configYaml).toContain('defaultRole: viewer');
+
+    const ldapEnv = compileVigilanteLdapEnv(baseState);
+    expect(ldapEnv).toContain('VIGILANTE_LDAP_ENABLED=true');
+    expect(ldapEnv).toContain('VIGILANTE_LDAP_CONFIG_PATH=/etc/axonwall/vigilante/ldap.json');
+    expect(ldapEnv).toContain('VIGILANTE_LDAP_PLUGIN_CONFIG_PATH=/etc/axonwall/ldap-plugins/vigilante.json');
+
+    const bundle = compileVigilanteBundle(baseState);
+    expect(bundle.ldapEnv).toContain('VIGILANTE_LDAP_ENABLED=true');
   });
 });

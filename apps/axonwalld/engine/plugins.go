@@ -77,11 +77,47 @@ func (pm *PluginManager) SetDirectoryManager(dm *DirectoryManager) {
 	pm.dirMgr = dm
 }
 
+func GetCoreVigilanteLDAPSpec() PluginLDAPSpec {
+	return PluginLDAPSpec{
+		EnabledByDefault:           true,
+		ServiceAccountCN:           "svc-vigilante",
+		InheritApplianceRoleGroups: true,
+		EnvPrefix:                  "VIGILANTE_LDAP_",
+		Groups: []PluginLdapGroupSpec{
+			{
+				CN:          "vigilante-admin",
+				GIDNumber:   10230,
+				Description: "Vigilante SOC & SOAR Administrators",
+				Role:        "admin",
+			},
+			{
+				CN:          "vigilante-operator",
+				GIDNumber:   10231,
+				Description: "Vigilante SOC Analysts, Threat Hunters & Incident Responders",
+				Role:        "operator",
+			},
+			{
+				CN:          "vigilante-readonly",
+				GIDNumber:   10232,
+				Description: "Vigilante SOC Read-Only Auditors & Observers",
+				Role:        "readonly",
+			},
+		},
+	}
+}
+
 func (pm *PluginManager) ensurePluginLDAP(pluginID string) {
 	pm.mu.RLock()
 	dm := pm.dirMgr
 	pm.mu.RUnlock()
 	if dm == nil {
+		return
+	}
+	if pluginID == "core-vigilante" || pluginID == "vigilante" {
+		spec := GetCoreVigilanteLDAPSpec()
+		if _, err := dm.EnsurePluginLDAPIntegration("core-vigilante", spec); err != nil {
+			log.Printf("[Plugins] Warning: failed to ensure LDAP integration for %s: %v", pluginID, err)
+		}
 		return
 	}
 	defs := GetExtensionPluginDefinitions()
@@ -276,6 +312,32 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			DebianPackages:   []string{"kubectl", "mkcert", "libnss3-tools", "gettext-base", "git", "curl", "jq"},
 			AlpinePackages:   []string{"mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
 			RequiredBinaries: []string{"kubectl", "git", "envsubst"},
+			LdapIntegration: &PluginLDAPSpec{
+				EnabledByDefault:           true,
+				ServiceAccountCN:           "svc-vow",
+				InheritApplianceRoleGroups: true,
+				EnvPrefix:                  "VOW_LDAP_",
+				Groups: []PluginLdapGroupSpec{
+					{
+						CN:          "vow-admin",
+						GIDNumber:   10220,
+						Description: "Vigilant Octo Waffle Platform Administrators",
+						Role:        "admin",
+					},
+					{
+						CN:          "vow-operator",
+						GIDNumber:   10221,
+						Description: "Vigilant Octo Waffle GitOps & Workload Operators",
+						Role:        "operator",
+					},
+					{
+						CN:          "vow-readonly",
+						GIDNumber:   10222,
+						Description: "Vigilant Octo Waffle Read-Only Viewers",
+						Role:        "readonly",
+					},
+				},
+			},
 		},
 		{
 			ID:             "host-malware-rootkit",
@@ -733,6 +795,9 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		}
 	}
 	if pluginID == "vigilant-octo-waffle" {
+		_ = os.MkdirAll("/etc/axonwall/vow", 0755)
+		_ = os.MkdirAll("/etc/rancher/k3s", 0755)
+		_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
 		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)
 		if pm.installedMap[pluginID] == "" {
@@ -740,9 +805,21 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		}
 		pm.saveState()
 		pm.mu.Unlock()
+		pm.ensurePluginLDAP(pluginID)
 		return PluginActionResponse{
 			Success: true,
-			Message: "Vigilant Octo Waffle (K8s GitOps & App Platform) enabled and verified (Dependency: core-k3s).",
+			Message: "Vigilant Octo Waffle (K8s GitOps & App Platform) enabled and verified on in-house K3s cluster (Dependency: core-k3s).",
+		}
+	}
+	if pluginID == "core-vigilante" || pluginID == "vigilante" {
+		_ = os.MkdirAll("/etc/axonwall/vigilante", 0755)
+		_ = os.MkdirAll("/var/lib/axonwall/vigilante", 0755)
+		_ = os.MkdirAll("/etc/rancher/k3s", 0755)
+		_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
+		pm.ensurePluginLDAP("core-vigilante")
+		return PluginActionResponse{
+			Success: true,
+			Message: "Vigilante Cyber Defense, SOAR & Autonomous SOC OpenLDAP integration and in-house K3s runtime verified (Dependency: core-k3s).",
 		}
 	}
 	if pluginID == "host-malware-rootkit" {

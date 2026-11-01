@@ -11,6 +11,8 @@ import { compileFrr } from '../frr/index.js';
 import { compileUnbound } from '../unbound/index.js';
 import { compileWireGuard } from '../wireguard/index.js';
 import { compileRosenpass } from '../rosenpass/index.js';
+import { compileVigilanteBundle } from '../vigilante/index.js';
+import { compileVowBundle } from '../vow/index.js';
 
 export interface CompileResult {
   nftScript: string;
@@ -194,13 +196,46 @@ export function compileNftables(state: DesiredState): CompileResult {
     });
   }
 
-  // Emit Vigilante threat defense configuration
-  if (state.vigilante) {
+  // Emit Vigilante threat defense configuration and K3s manifests
+  if (state.vigilante || capabilities.vigilanteEnabled) {
+    const vigilanteCompiled = compileVigilanteBundle(state);
     files.push({
       path: '/etc/axonwall/managed/vigilante_config.json',
-      content: JSON.stringify(state.vigilante, null, 2),
+      content: JSON.stringify(
+        {
+          ...(state.vigilante ?? { enabled: capabilities.vigilanteEnabled }),
+          k3sEnabled: capabilities.k3sEnabled,
+          compiledBundle: vigilanteCompiled,
+        },
+        null,
+        2,
+      ),
       fileMode: 0o600,
     });
+    if (capabilities.firewallEnabled && state.dns?.enabled && state.vigilante?.enabled) {
+      files.push({
+        path: '/etc/unbound/unbound.conf.d/vigilante.conf',
+        content: vigilanteCompiled.unboundOverrides,
+        fileMode: 0o644,
+      });
+    }
+  }
+
+  // Emit Vigilant Octo Waffle (VOW) K3s GitOps & App Platform configuration
+  if (state.vow?.enabled || state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled)) {
+    const vowCompiled = compileVowBundle(state);
+    files.push({
+      path: '/etc/axonwall/managed/vow_config.json',
+      content: JSON.stringify(vowCompiled, null, 2),
+      fileMode: 0o600,
+    });
+    if (capabilities.firewallEnabled && state.dns?.enabled && vowCompiled.enabled && state.vow?.syncUnboundDns !== false) {
+      files.push({
+        path: '/etc/unbound/unbound.conf.d/vow.conf',
+        content: vowCompiled.unboundOverrides,
+        fileMode: 0o644,
+      });
+    }
   }
 
   // Emit Kea DHCPv4 Server configuration only when core-firewall is enabled

@@ -502,7 +502,17 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 
 		if filepath.Base(cleanPath) == "vigilante_config.json" && s.vigilanteManager != nil {
-			log.Printf("[Agent] Applying Vigilante Cyber Defense configuration")
+			log.Printf("[Agent] Applying Vigilante Cyber Defense configuration & K3s manifests")
+			if err := s.vigilanteManager.ApplyConfig([]byte(f.Content)); err != nil {
+				log.Printf("[Agent] Warning: Failed to apply Vigilante config: %v", err)
+			}
+		}
+
+		if filepath.Base(cleanPath) == "vow_config.json" && s.k3sManager != nil {
+			log.Printf("[Agent] Applying Vigilant Octo Waffle (VOW) K3s GitOps configuration")
+			if err := s.k3sManager.ApplyVowConfig([]byte(f.Content)); err != nil {
+				log.Printf("[Agent] Warning: Failed to apply VOW K3s config: %v", err)
+			}
 		}
 	}
 

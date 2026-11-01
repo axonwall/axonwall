@@ -231,6 +231,31 @@ export default function BattleStationPage() {
     }
   };
 
+  const handleLdapAuthChange = async (
+    patch: Partial<NonNullable<VigilanteConfig['ldapAuth']>>
+  ) => {
+    if (!config) return;
+    setStatusBanner(null);
+    const nextLdapAuth = {
+      enabled: config.ldapAuth?.enabled ?? true,
+      autoProvisionPrincipals: config.ldapAuth?.autoProvisionPrincipals ?? true,
+      allowLocalBreakGlass: config.ldapAuth?.allowLocalBreakGlass ?? true,
+      defaultRole: config.ldapAuth?.defaultRole ?? 'viewer',
+      syncModuleSso: config.ldapAuth?.syncModuleSso ?? true,
+      ...patch,
+    };
+    const res = await saveVigilanteConfigAction({ ldapAuth: nextLdapAuth });
+    if (res.success) {
+      setConfig({ ...config, ldapAuth: nextLdapAuth });
+      setStatusBanner({
+        type: 'success',
+        message: 'Updated Vigilante OpenLDAP Directory & SOC RBAC integration settings.',
+      });
+    } else {
+      setStatusBanner({ type: 'error', message: res.message });
+    }
+  };
+
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
       {/* Header */}
@@ -512,6 +537,146 @@ export default function BattleStationPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* Local OpenLDAP Directory & SOC RBAC Integration Card */}
+          <div className="p-6 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-2.5">
+                <Lock className="w-4 h-4 text-cyan-400" />
+                <div>
+                  <div className="text-white font-semibold text-sm">
+                    Local OpenLDAP Directory & SOC RBAC Integration
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    Dedicated service bind (<span className="font-mono text-cyan-300">cn=svc-vigilante,ou=services</span>) and 14-permission CASL role mapping via <span className="font-mono text-slate-300">/etc/axonwall/ldap-plugins/vigilante.json</span>
+                  </div>
+                </div>
+              </div>
+              <span
+                className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                  (config?.ldapAuth?.enabled ?? true)
+                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                }`}
+              >
+                {(config?.ldapAuth?.enabled ?? true) ? 'OpenLDAP Active' : 'OpenLDAP Disabled'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <label className="flex items-center justify-between p-3 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer">
+                <div>
+                  <div className="font-medium text-slate-200">Enable OpenLDAP Authentication</div>
+                  <div className="text-[11px] text-slate-500">Authenticate SOC analysts against local slapd</div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={config?.ldapAuth?.enabled ?? true}
+                  onChange={(e) => handleLdapAuthChange({ enabled: e.target.checked })}
+                  className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-3 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer">
+                <div>
+                  <div className="font-medium text-slate-200">JIT Principal Auto-Provisioning</div>
+                  <div className="text-[11px] text-slate-500">Sync LDAP UID & groups into Vigilante authz.yaml</div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={config?.ldapAuth?.autoProvisionPrincipals ?? true}
+                  onChange={(e) => handleLdapAuthChange({ autoProvisionPrincipals: e.target.checked })}
+                  className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-3 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer">
+                <div>
+                  <div className="font-medium text-slate-200">Allow Break-Glass Local Fallback</div>
+                  <div className="text-[11px] text-slate-500">Permit local token/password if slapd is unreachable</div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={config?.ldapAuth?.allowLocalBreakGlass ?? true}
+                  onChange={(e) => handleLdapAuthChange({ allowLocalBreakGlass: e.target.checked })}
+                  className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-3 bg-slate-950/70 border border-slate-800 rounded-xl cursor-pointer">
+                <div>
+                  <div className="font-medium text-slate-200">Propagate K3s Module SSO</div>
+                  <div className="text-[11px] text-slate-500">Sync vigilante-ldap-sso to Vigil-SOC, OpenSearch & Wazuh</div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={config?.ldapAuth?.syncModuleSso ?? true}
+                  onChange={(e) => handleLdapAuthChange({ syncModuleSso: e.target.checked })}
+                  className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+                />
+              </label>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-slate-950/70 border border-slate-800 rounded-xl text-xs">
+              <div>
+                <div className="font-medium text-slate-200">Default Fallback CASL Role</div>
+                <div className="text-[11px] text-slate-500">Assigned when an authenticated LDAP user matches no explicit SOC group</div>
+              </div>
+              <select
+                value={config?.ldapAuth?.defaultRole ?? 'viewer'}
+                onChange={(e) =>
+                  handleLdapAuthChange({
+                    defaultRole: e.target.value as 'owner' | 'admin' | 'operator' | 'viewer',
+                  })
+                }
+                className="px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white focus:outline-none focus:border-cyan-500"
+              >
+                <option value="viewer">viewer (Read-Only SOC Auditor)</option>
+                <option value="operator">operator (SOC Analyst & Threat Hunter)</option>
+                <option value="admin">admin (SOC Administrator)</option>
+                <option value="owner">owner (Full Platform Owner)</option>
+              </select>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-800 rounded-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-950 text-slate-400 border-b border-slate-800">
+                  <tr>
+                    <th className="py-2 px-3 font-medium">OpenLDAP POSIX Group</th>
+                    <th className="py-2 px-3 font-medium">GID</th>
+                    <th className="py-2 px-3 font-medium">Vigilante CASL Role</th>
+                    <th className="py-2 px-3 font-medium">Granted Capabilities</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70 text-slate-300">
+                  <tr>
+                    <td className="py-2 px-3 font-mono text-cyan-300">axonwall-admin</td>
+                    <td className="py-2 px-3 font-mono text-slate-400">10000</td>
+                    <td className="py-2 px-3 font-semibold text-rose-300">owner</td>
+                    <td className="py-2 px-3 text-slate-400">All 14 SOC permissions + Principal & Owner Management</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2 px-3 font-mono text-cyan-300">vigilante-admin</td>
+                    <td className="py-2 px-3 font-mono text-slate-400">10230</td>
+                    <td className="py-2 px-3 font-semibold text-amber-300">admin</td>
+                    <td className="py-2 px-3 text-slate-400">All 14 SOC permissions (Cluster, Modules, Scans, Forensics, CTF)</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2 px-3 font-mono text-cyan-300">axonwall-operator / vigilante-operator</td>
+                    <td className="py-2 px-3 font-mono text-slate-400">10001 / 10231</td>
+                    <td className="py-2 px-3 font-semibold text-emerald-300">operator</td>
+                    <td className="py-2 px-3 text-slate-400">Deploy Modules, Run Scans/Forensics/Simulations, Manage CTF</td>
+                  </tr>
+                  <tr>
+                    <td className="py-2 px-3 font-mono text-cyan-300">axonwall-readonly / vigilante-readonly</td>
+                    <td className="py-2 px-3 font-mono text-slate-400">10002 / 10232</td>
+                    <td className="py-2 px-3 font-semibold text-slate-300">viewer</td>
+                    <td className="py-2 px-3 text-slate-400">Read-Only Cluster, Modules, Scans, Telemetry, Forensics & CTF</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

@@ -1,11 +1,14 @@
 import { inferInterfaceRole, type DesiredState, type VigilanteConfig } from '../../schemas/index.js';
+import { isPluginEnabled } from '../../plugins/index.js';
 import { stringify as stringifyYaml } from 'yaml';
 
 export interface CompiledVigilanteBundle {
+  k3sDependencyMet: boolean;
   nftablesRuleset: string;
   unboundOverrides: string;
   k3sManifests: string;
   configYaml: string;
+  ldapEnv: string;
 }
 
 /**
@@ -145,6 +148,40 @@ export function compileVigilanteK3sManifests(state: DesiredState): string {
     }
   }
 
+  // 2.5. Local OpenLDAP SSO ConfigMap for K3s SOC Modules (Vigil-SOC, OpenSearch, Wazuh)
+  const ldapEnabled = vigilante.ldapAuth?.enabled ?? true;
+  const syncModuleSso = vigilante.ldapAuth?.syncModuleSso ?? true;
+  if (ldapEnabled && syncModuleSso) {
+    docs.push(
+      stringifyYaml({
+        apiVersion: 'v1',
+        kind: 'ConfigMap',
+        metadata: {
+          name: 'vigilante-ldap-sso',
+          namespace: 'vigilante-soc',
+          labels: {
+            'app.kubernetes.io/name': 'vigilante-ldap-sso',
+            'app.kubernetes.io/part-of': 'vigilante',
+            'app.kubernetes.io/managed-by': 'axonwall',
+          },
+        },
+        data: {
+          VIGILANTE_LDAP_ENABLED: 'true',
+          VIGILANTE_LDAP_URI: 'ldap://127.0.0.1:389',
+          VIGILANTE_LDAP_CONFIG_PATH: '/etc/axonwall/vigilante/ldap.json',
+          VIGILANTE_LDAP_DEFAULT_ROLE: vigilante.ldapAuth?.defaultRole || 'viewer',
+          VIGILANTE_LDAP_OWNER_GROUPS: 'axonwall-admin',
+          VIGILANTE_LDAP_ADMIN_GROUPS: 'vigilante-admin',
+          VIGILANTE_LDAP_OPERATOR_GROUPS: 'axonwall-operator,vigilante-operator',
+          VIGILANTE_LDAP_VIEWER_GROUPS: 'axonwall-readonly,vigilante-readonly',
+          VIGILANTE_CLUSTER_PROVIDER: 'k3s',
+          VIGILANTE_CLUSTER_NAME: 'axonwall-k3s',
+          KUBECONFIG: '/etc/rancher/k3s/k3s.yaml',
+        },
+      }).trim()
+    );
+  }
+
   // 3. Module Storage and HelmChart CRDs (K3s native helm controller)
   for (const mod of vigilante.modules ?? []) {
     if (!mod.enabled) continue;
@@ -201,10 +238,46 @@ export function compileVigilanteK3sManifests(state: DesiredState): string {
 }
 
 /**
+ * Compile Vigilante environment variables for OpenLDAP Directory SSO (/etc/axonwall/vigilante/ldap.env).
+ */
+export function compileVigilanteLdapEnv(state: DesiredState): string {
+  const vigilante = state.vigilante;
+  const ldapAuth = vigilante?.ldapAuth;
+  const enabled = ldapAuth?.enabled ?? true;
+  const autoProvision = ldapAuth?.autoProvisionPrincipals ?? true;
+  const allowBreakGlass = ldapAuth?.allowLocalBreakGlass ?? true;
+  const defaultRole = ldapAuth?.defaultRole || 'viewer';
+  const syncModuleSso = ldapAuth?.syncModuleSso ?? true;
+
+  return [
+    '# Managed by Axonwall Vigilante OpenLDAP Compiler',
+    `VIGILANTE_LDAP_ENABLED=${enabled ? 'true' : 'false'}`,
+    'VIGILANTE_LDAP_CONFIG_PATH=/etc/axonwall/vigilante/ldap.json',
+    'VIGILANTE_LDAP_PLUGIN_CONFIG_PATH=/etc/axonwall/ldap-plugins/vigilante.json',
+    `VIGILANTE_LDAP_AUTO_PROVISION=${autoProvision ? 'true' : 'false'}`,
+    `VIGILANTE_LDAP_ALLOW_BREAK_GLASS=${allowBreakGlass ? 'true' : 'false'}`,
+    `VIGILANTE_LDAP_DEFAULT_ROLE=${defaultRole}`,
+    `VIGILANTE_LDAP_SYNC_MODULE_SSO=${syncModuleSso ? 'true' : 'false'}`,
+    'VIGILANTE_LDAP_OWNER_GROUPS=axonwall-admin',
+    'VIGILANTE_LDAP_ADMIN_GROUPS=vigilante-admin',
+    'VIGILANTE_LDAP_OPERATOR_GROUPS=axonwall-operator,vigilante-operator',
+    'VIGILANTE_LDAP_VIEWER_GROUPS=axonwall-readonly,vigilante-readonly',
+    'KUBECONFIG=/etc/rancher/k3s/k3s.yaml',
+    'VIGILANTE_CLUSTER_PROVIDER=k3s',
+    'VIGILANTE_CLUSTER_NAME=axonwall-k3s',
+    'VIGILANTE_STORAGE_CLASS=axonwall-zfs-local',
+    '',
+  ].join('\n');
+}
+
+/**
  * Compile Vigilante configuration file for the engine runtime (/var/lib/axonwall/vigilante/config.yaml).
  */
 export function compileVigilanteConfigYaml(state: DesiredState): string {
   const vigilante = state.vigilante;
+  const defaultStorageClass = state.k3s?.openEbs?.replicatedStorageEnabled
+    ? 'axonwall-replicated-ha'
+    : 'axonwall-zfs-local';
   const config = {
     theme: {
       name: 'cyberpunk',
@@ -212,6 +285,9 @@ export function compileVigilanteConfigYaml(state: DesiredState): string {
     defaults: {
       domain: vigilante?.domain || 'vigilante.local',
       clusterName: 'axonwall-k3s',
+      clusterProvider: 'k3s',
+      kubeconfig: '/etc/rancher/k3s/k3s.yaml',
+      storageClass: defaultStorageClass,
       ip: '127.0.0.1',
       valuesDir: '/var/lib/axonwall/vigilante/values',
     },
@@ -248,6 +324,22 @@ export function compileVigilanteConfigYaml(state: DesiredState): string {
       peers: [],
       autoIngestPeerBlocks: true,
     },
+    ldap: {
+      enabled: vigilante?.ldapAuth?.enabled ?? true,
+      configPath: '/etc/axonwall/vigilante/ldap.json',
+      pluginConfigPath: '/etc/axonwall/ldap-plugins/vigilante.json',
+      uri: 'ldap://127.0.0.1:389',
+      autoProvisionPrincipals: vigilante?.ldapAuth?.autoProvisionPrincipals ?? true,
+      allowLocalBreakGlass: vigilante?.ldapAuth?.allowLocalBreakGlass ?? true,
+      defaultRole: vigilante?.ldapAuth?.defaultRole || 'viewer',
+      syncModuleSso: vigilante?.ldapAuth?.syncModuleSso ?? true,
+      roleMapping: {
+        ownerGroups: ['axonwall-admin'],
+        adminGroups: ['vigilante-admin'],
+        operatorGroups: ['axonwall-operator', 'vigilante-operator'],
+        viewerGroups: ['axonwall-readonly', 'vigilante-readonly'],
+      },
+    },
   };
 
   return stringifyYaml(config);
@@ -258,9 +350,11 @@ export function compileVigilanteConfigYaml(state: DesiredState): string {
  */
 export function compileVigilanteBundle(state: DesiredState): CompiledVigilanteBundle {
   return {
+    k3sDependencyMet: isPluginEnabled('core-k3s', state),
     nftablesRuleset: compileVigilanteNftables(state),
     unboundOverrides: compileVigilanteUnboundOverrides(state),
     k3sManifests: compileVigilanteK3sManifests(state),
     configYaml: compileVigilanteConfigYaml(state),
+    ldapEnv: compileVigilanteLdapEnv(state),
   };
 }

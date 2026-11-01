@@ -734,68 +734,282 @@ export default function VigilantOctoWafflePage() {
         </div>
       )}
 
-      {/* TAB 4: CASL AUTHORIZATION MATRIX */}
+      {/* TAB 4: CASL AUTHORIZATION MATRIX & LOCAL LDAP */}
       {activeTab === 'authz' && compiledBundle && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-bold text-white">CASL Role-Based Permission Bundles</h3>
+        <div className="space-y-6">
+          {/* Local OpenLDAP Directory & Multi-User RBAC Integration */}
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-5">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-5 h-5 text-emerald-400" />
+                  <h3 className="text-sm font-bold text-white">
+                    Local OpenLDAP Directory & Multi-User RBAC Integration
+                  </h3>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                      (vowConfig.ldapAuth?.enabled ?? true)
+                        ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                        : 'bg-slate-800 border-slate-700 text-slate-400'
+                    }`}
+                  >
+                    {(vowConfig.ldapAuth?.enabled ?? true)
+                      ? 'Auto-Bound: cn=svc-vow,ou=services'
+                      : 'LDAP Disabled'}
+                  </span>
+                </div>
                 <p className="text-xs text-slate-400">
-                  Paperclip-style explainable authorization model backed by <code className="font-mono">.vow/authz.yaml</code>
+                  Automatically binds Vigilant Octo Waffle to Axonwall&apos;s local OpenLDAP (`slapd`) directory via{' '}
+                  <code className="font-mono text-emerald-300">
+                    /etc/axonwall/ldap-plugins/vigilant-octo-waffle.json
+                  </code>{' '}
+                  and maps POSIX groups directly into CASL roles.
                 </p>
               </div>
-              <select
-                value={vowConfig.defaultRole}
-                onChange={(e) =>
-                  saveVowConfig((cfg) => ({ ...cfg, defaultRole: e.target.value as VowRole }))
-                }
-                className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white"
-              >
-                {VOW_ROLES.map((r) => (
-                  <option key={r} value={r}>
-                    Default Role: {r}
-                  </option>
-                ))}
-              </select>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={vowConfig.ldapAuth?.enabled ?? true}
+                    onChange={(e) =>
+                      saveVowConfig((cfg) => ({
+                        ...cfg,
+                        ldapAuth: {
+                          ...(cfg.ldapAuth ?? {
+                            enabled: true,
+                            autoBindLocalLdap: true,
+                            allowLocalBreakGlass: true,
+                            autoProvisionPrincipals: true,
+                            syncKeycloakUserFederation: true,
+                            url: 'ldap://127.0.0.1:389',
+                            ownerGroups: ['axonwall-admin'],
+                            adminGroups: ['vow-admin'],
+                            operatorGroups: ['axonwall-operator', 'vow-operator'],
+                            viewerGroups: ['axonwall-readonly', 'vow-readonly'],
+                            defaultRole: 'viewer',
+                          }),
+                          enabled: e.target.checked,
+                        },
+                      }))
+                    }
+                    className="rounded border-slate-700 bg-slate-900 text-emerald-500"
+                  />
+                  <span>Enable OpenLDAP Auth</span>
+                </label>
+
+                <label className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={vowConfig.ldapAuth?.allowLocalBreakGlass ?? true}
+                    onChange={(e) =>
+                      saveVowConfig((cfg) => ({
+                        ...cfg,
+                        ldapAuth: {
+                          ...cfg.ldapAuth,
+                          allowLocalBreakGlass: e.target.checked,
+                        },
+                      }))
+                    }
+                    className="rounded border-slate-700 bg-slate-900 text-emerald-500"
+                  />
+                  <span>Allow Break-Glass Token</span>
+                </label>
+
+                <label className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={vowConfig.ldapAuth?.autoProvisionPrincipals ?? true}
+                    onChange={(e) =>
+                      saveVowConfig((cfg) => ({
+                        ...cfg,
+                        ldapAuth: {
+                          ...cfg.ldapAuth,
+                          autoProvisionPrincipals: e.target.checked,
+                        },
+                      }))
+                    }
+                    className="rounded border-slate-700 bg-slate-900 text-emerald-500"
+                  />
+                  <span>Auto-Provision Principals</span>
+                </label>
+
+                <label className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={vowConfig.ldapAuth?.syncKeycloakUserFederation ?? true}
+                    onChange={(e) =>
+                      saveVowConfig((cfg) => ({
+                        ...cfg,
+                        ldapAuth: {
+                          ...cfg.ldapAuth,
+                          syncKeycloakUserFederation: e.target.checked,
+                        },
+                      }))
+                    }
+                    className="rounded border-slate-700 bg-slate-900 text-emerald-500"
+                  />
+                  <span>Sync Keycloak Federation</span>
+                </label>
+              </div>
             </div>
 
-            <div className="space-y-3">
-              {VOW_ROLES.map((role) => {
-                const perms = VOW_ROLE_PERMISSIONS[role];
-                return (
-                  <div key={role} className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 font-mono">
-                        {role}
-                      </span>
-                      <span className="text-[11px] font-mono text-slate-400">
-                        {perms.length} permissions
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {perms.map((p) => (
-                        <span
-                          key={p}
-                          className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-300"
-                        >
-                          {p}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                  LDAP Server URL
+                </label>
+                <input
+                  type="text"
+                  value={vowConfig.ldapAuth?.url ?? 'ldap://127.0.0.1:389'}
+                  onChange={(e) =>
+                    saveVowConfig((cfg) => ({
+                      ...cfg,
+                      ldapAuth: { ...cfg.ldapAuth, url: e.target.value },
+                    }))
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                  Base DN Override (blank = system domain)
+                </label>
+                <input
+                  type="text"
+                  placeholder="dc=axonwall,dc=local"
+                  value={vowConfig.ldapAuth?.baseDn ?? ''}
+                  onChange={(e) =>
+                    saveVowConfig((cfg) => ({
+                      ...cfg,
+                      ldapAuth: { ...cfg.ldapAuth, baseDn: e.target.value || undefined },
+                    }))
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                  Unmapped Directory User Fallback Role
+                </label>
+                <select
+                  value={vowConfig.ldapAuth?.defaultRole ?? 'viewer'}
+                  onChange={(e) =>
+                    saveVowConfig((cfg) => ({
+                      ...cfg,
+                      ldapAuth: {
+                        ...cfg.ldapAuth,
+                        defaultRole: e.target.value as 'owner' | 'admin' | 'operator' | 'viewer' | 'none',
+                      },
+                    }))
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white"
+                >
+                  <option value="viewer">viewer (Read-Only)</option>
+                  <option value="operator">operator (GitOps & Deploy)</option>
+                  <option value="admin">admin (Cluster Admin)</option>
+                  <option value="owner">owner (Full Owner)</option>
+                  <option value="none">none (Deny Unmapped Users)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 pt-1">
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+                <div className="text-[10px] font-mono uppercase text-amber-400 font-bold">
+                  CASL Owner Groups
+                </div>
+                <div className="text-xs font-mono text-slate-200">
+                  {(vowConfig.ldapAuth?.ownerGroups ?? ['axonwall-admin']).join(', ')}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+                <div className="text-[10px] font-mono uppercase text-sky-400 font-bold">
+                  CASL Admin Groups
+                </div>
+                <div className="text-xs font-mono text-slate-200">
+                  {(vowConfig.ldapAuth?.adminGroups ?? ['vow-admin']).join(', ')}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+                <div className="text-[10px] font-mono uppercase text-emerald-400 font-bold">
+                  CASL Operator Groups
+                </div>
+                <div className="text-xs font-mono text-slate-200">
+                  {(vowConfig.ldapAuth?.operatorGroups ?? ['axonwall-operator', 'vow-operator']).join(', ')}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+                <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">
+                  CASL Viewer Groups
+                </div>
+                <div className="text-xs font-mono text-slate-200">
+                  {(vowConfig.ldapAuth?.viewerGroups ?? ['axonwall-readonly', 'vow-readonly']).join(', ')}
+                </div>
+              </div>
             </div>
           </div>
 
-          <div className="space-y-2">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5" /> Compiled .vow/authz.yaml Policy Store
-            </h3>
-            <pre className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-[11px] font-mono text-emerald-300 overflow-x-auto max-h-[540px]">
-              {compiledBundle.authzYaml}
-            </pre>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-white">CASL Role-Based Permission Bundles</h3>
+                  <p className="text-xs text-slate-400">
+                    Paperclip-style explainable authorization model backed by <code className="font-mono">.vow/authz.yaml</code>
+                  </p>
+                </div>
+                <select
+                  value={vowConfig.defaultRole}
+                  onChange={(e) =>
+                    saveVowConfig((cfg) => ({ ...cfg, defaultRole: e.target.value as VowRole }))
+                  }
+                  className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white"
+                >
+                  {VOW_ROLES.map((r) => (
+                    <option key={r} value={r}>
+                      Default Role: {r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-3">
+                {VOW_ROLES.map((role) => {
+                  const perms = VOW_ROLE_PERMISSIONS[role];
+                  return (
+                    <div key={role} className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 font-mono">
+                          {role}
+                        </span>
+                        <span className="text-[11px] font-mono text-slate-400">
+                          {perms.length} permissions
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {perms.map((p) => (
+                          <span
+                            key={p}
+                            className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-300"
+                          >
+                            {p}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Compiled .vow/authz.yaml Policy Store
+              </h3>
+              <pre className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-[11px] font-mono text-emerald-300 overflow-x-auto max-h-[540px]">
+                {compiledBundle.authzYaml}
+              </pre>
+            </div>
           </div>
         </div>
       )}

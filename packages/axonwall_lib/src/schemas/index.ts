@@ -1373,6 +1373,25 @@ export const VowAppOverrideSchema = z.object({
 });
 export type VowAppOverride = z.infer<typeof VowAppOverrideSchema>;
 
+export const VowLdapAuthSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoBindLocalLdap: z.boolean().default(true),
+  allowLocalBreakGlass: z.boolean().default(true),
+  autoProvisionPrincipals: z.boolean().default(true),
+  syncKeycloakUserFederation: z.boolean().default(true),
+  url: z.string().default('ldap://127.0.0.1:389'),
+  baseDn: z.string().optional(),
+  bindDn: z.string().optional(),
+  userSearchBase: z.string().optional(),
+  groupSearchBase: z.string().optional(),
+  ownerGroups: z.array(z.string()).default(['axonwall-admin']),
+  adminGroups: z.array(z.string()).default(['vow-admin']),
+  operatorGroups: z.array(z.string()).default(['axonwall-operator', 'vow-operator']),
+  viewerGroups: z.array(z.string()).default(['axonwall-readonly', 'vow-readonly']),
+  defaultRole: z.enum(['owner', 'admin', 'operator', 'viewer', 'none']).default('viewer'),
+});
+export type VowLdapAuth = z.infer<typeof VowLdapAuthSchema>;
+
 export const VowConfigSchema = z.object({
   enabled: z.boolean().default(false),
   cdRunner: VowCdRunnerSchema.default('argocd'),
@@ -1382,8 +1401,21 @@ export const VowConfigSchema = z.object({
   fluxInterval: z.string().default('5m'),
   localTlsMkcert: z.boolean().default(true),
   syncUnboundDns: z.boolean().default(true),
-  authzEnabled: z.boolean().default(false),
+  authzEnabled: z.boolean().default(true),
   defaultRole: z.enum(['owner', 'admin', 'operator', 'viewer', 'webhook']).default('admin'),
+  ldapAuth: VowLdapAuthSchema.default({
+    enabled: true,
+    autoBindLocalLdap: true,
+    allowLocalBreakGlass: true,
+    autoProvisionPrincipals: true,
+    syncKeycloakUserFederation: true,
+    url: 'ldap://127.0.0.1:389',
+    ownerGroups: ['axonwall-admin'],
+    adminGroups: ['vow-admin'],
+    operatorGroups: ['axonwall-operator', 'vow-operator'],
+    viewerGroups: ['axonwall-readonly', 'vow-readonly'],
+    defaultRole: 'viewer',
+  }),
   activePreset: z.enum(['minimal', 'storage', 'observability', 'ai', 'collaboration', 'full', 'custom']).default('minimal'),
   activeBlueprint: z.string().optional(),
   enabledApps: z.array(z.string()).default(['argocd', 'certmanager']),
@@ -1707,6 +1739,15 @@ export const VigilanteFederationConfigSchema = z.object({
 });
 export type VigilanteFederationConfig = z.infer<typeof VigilanteFederationConfigSchema>;
 
+export const VigilanteLdapAuthSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoProvisionPrincipals: z.boolean().default(true),
+  allowLocalBreakGlass: z.boolean().default(true),
+  defaultRole: z.enum(['owner', 'admin', 'operator', 'viewer']).default('viewer'),
+  syncModuleSso: z.boolean().default(true),
+});
+export type VigilanteLdapAuthConfig = z.infer<typeof VigilanteLdapAuthSchema>;
+
 export const VigilanteConfigSchema = z.object({
   enabled: z.boolean().default(false),
   posture: z.enum(['monitoring', 'hybrid', 'enforcing']).default('hybrid'),
@@ -1753,6 +1794,13 @@ export const VigilanteConfigSchema = z.object({
     nodeName: 'axonwall-soc-primary',
     peers: [],
     autoIngestPeerBlocks: true,
+  }),
+  ldapAuth: VigilanteLdapAuthSchema.default({
+    enabled: true,
+    autoProvisionPrincipals: true,
+    allowLocalBreakGlass: true,
+    defaultRole: 'viewer',
+    syncModuleSso: true,
   }),
 });
 export type VigilanteConfig = z.infer<typeof VigilanteConfigSchema>;

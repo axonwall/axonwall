@@ -164,10 +164,16 @@ export default function PluginManagerPage() {
       }
 
       if (id === 'core-vigilante') {
-        next.vigilante = next.vigilante || VigilanteConfigSchema.parse({
-          enabled: nextCaps.vigilanteEnabled,
-        });
-        next.vigilante.enabled = nextCaps.vigilanteEnabled;
+        if (nextCaps.vigilanteEnabled) {
+          const depRes = enablePluginWithDependencies('core-vigilante', next);
+          Object.assign(next, depRes.state);
+          if (depRes.autoEnabledDependencies.length > 0) {
+            autoDisabledNote = ` • Auto-enabled required dependency: ${depRes.autoEnabledDependencies.join(', ')}`;
+          }
+        } else {
+          const depRes = disablePluginWithDependents('core-vigilante', next);
+          Object.assign(next, depRes.state);
+        }
       }
 
       const res = await applyDesiredState(next);
@@ -479,6 +485,22 @@ export default function PluginManagerPage() {
                   <p className="text-xs text-slate-300 leading-relaxed">{plugin.description}</p>
 
                   <div className="flex flex-wrap gap-1.5 pt-1">
+                    {plugin.dependencies && plugin.dependencies.map((depId) => {
+                      const depMet = isPluginEnabled(depId, state);
+                      return (
+                        <span
+                          key={depId}
+                          title={depMet ? `Required dependency ${depId} is active` : `Requires ${depId} (will be auto-enabled when enabling ${plugin.id})`}
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold border flex items-center gap-1 ${
+                            depMet
+                              ? 'bg-sky-500/15 border-sky-500/30 text-sky-300'
+                              : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                          }`}
+                        >
+                          <Cpu className="w-2.5 h-2.5" /> Requires: {depId}
+                        </span>
+                      );
+                    })}
                     {plugin.systemdUnits.map((u) => (
                       <span
                         key={u}

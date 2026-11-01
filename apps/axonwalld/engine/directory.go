@@ -246,6 +246,7 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 
 	d.syncLocalNSSMirrorIfNoSSSD("")
 	_ = d.SyncRootSshPolicy()
+	d.EnsureAllDefaultPluginLDAPIntegrations()
 
 	// On musl/Alpine systems without SSSD, periodically mirror OpenLDAP users/groups (including HA syncrepl changes)
 	if !hasSSSD() {
@@ -1771,8 +1772,37 @@ userPassword: %s
 		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
 		_ = os.WriteFile("/etc/axonwall/eluvix/ldap.json", append(jsonData, '\n'), 0640)
 	}
+	if pluginID == "vigilant-octo-waffle" {
+		_ = os.MkdirAll("/etc/axonwall/vow", 0755)
+		_ = os.WriteFile("/etc/axonwall/vow/ldap.json", append(jsonData, '\n'), 0640)
+	}
+	if pluginID == "core-vigilante" || pluginID == "vigilante" {
+		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "vigilante.json"), append(jsonData, '\n'), 0640)
+		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "vigilante.env"), []byte(envBuf.String()), 0640)
+		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "core-vigilante.json"), append(jsonData, '\n'), 0640)
+		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "core-vigilante.env"), []byte(envBuf.String()), 0640)
+		_ = os.MkdirAll("/etc/axonwall/vigilante", 0755)
+		_ = os.WriteFile("/etc/axonwall/vigilante/ldap.json", append(jsonData, '\n'), 0640)
+		_ = os.MkdirAll("/var/lib/axonwall/vigilante", 0755)
+		_ = os.WriteFile("/var/lib/axonwall/vigilante/ldap.json", append(jsonData, '\n'), 0640)
+	}
 
 	return binding, nil
+}
+
+// EnsureAllDefaultPluginLDAPIntegrations provisions OpenLDAP service accounts, groups,
+// and binding files for core-vigilante and all extension plugins with EnabledByDefault.
+func (d *DirectoryManager) EnsureAllDefaultPluginLDAPIntegrations() {
+	if _, err := d.EnsurePluginLDAPIntegration("core-vigilante", GetCoreVigilanteLDAPSpec()); err != nil {
+		log.Printf("[Directory] Warning provisioning core-vigilante LDAP integration: %v", err)
+	}
+	for _, def := range GetExtensionPluginDefinitions() {
+		if def.LdapIntegration != nil && def.LdapIntegration.EnabledByDefault {
+			if _, err := d.EnsurePluginLDAPIntegration(def.ID, *def.LdapIntegration); err != nil {
+				log.Printf("[Directory] Warning provisioning %s LDAP integration: %v", def.ID, err)
+			}
+		}
+	}
 }
 
 // GetPluginLDAPBinding reads the persisted plugin LDAP binding configuration.
