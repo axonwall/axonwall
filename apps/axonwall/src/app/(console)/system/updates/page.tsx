@@ -75,6 +75,20 @@ export default function SystemUpdatesPage() {
   const [bootEnvironments, setBootEnvironments] = useState<ZfsBootEnvironmentTelemetry[]>([]);
   const [expandedSnapshots, setExpandedSnapshots] = useState<Record<string, boolean>>({});
   const [isZbmActionLoading, setIsZbmActionLoading] = useState(false);
+  const [selectedBeForSnap, setSelectedBeForSnap] = useState<string>('');
+  const [customSnapLabel, setCustomSnapLabel] = useState<string>(() => {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    return `manual-${ts}`;
+  });
+  const [cloneImmediately, setCloneImmediately] = useState<boolean>(false);
+  const [cloneNewBeName, setCloneNewBeName] = useState<string>('');
+  const [armClonedBeNext, setArmClonedBeNext] = useState<boolean>(false);
+  const [cloneModalState, setCloneModalState] = useState<{
+    snapshot: string;
+    newBeName: string;
+    armNext: boolean;
+  } | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [bootCount, setBootCount] = useState(0);
   const [bootLimit, setBootLimit] = useState(3);
   const [healthVerified, setHealthVerified] = useState(true);
@@ -94,6 +108,14 @@ export default function SystemUpdatesPage() {
   const isRollingMode = installMode === 'rolling';
   const isZbmMode = installMode === 'zbm';
 
+  const makeTimestampLabel = (prefix = 'manual') => {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    return `${prefix}-${ts}`;
+  };
+
+  const sanitizeZfsIdentifier = (raw: string) =>
+    raw.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '');
+
   const refreshTelemetryAndRelease = async () => {
     try {
       const resp = await fetch('/api/system/update', { cache: 'no-store' });
@@ -112,6 +134,11 @@ export default function SystemUpdatesPage() {
           }
           if (data.telemetry.bootEnvironments) {
             setBootEnvironments(data.telemetry.bootEnvironments);
+            const activeBe =
+              data.telemetry.bootEnvironments.find((b: ZfsBootEnvironmentTelemetry) => b.activeNow)?.name ||
+              data.telemetry.bootEnvironments[0]?.name ||
+              '';
+            setSelectedBeForSnap((prev) => prev || activeBe);
           }
           setSlots(data.telemetry.slots);
           setBootCount(data.telemetry.bootCount);
@@ -145,6 +172,11 @@ export default function SystemUpdatesPage() {
       }
       if (telemetry.bootEnvironments) {
         setBootEnvironments(telemetry.bootEnvironments);
+        const activeBe =
+          telemetry.bootEnvironments.find((b) => b.activeNow)?.name ||
+          telemetry.bootEnvironments[0]?.name ||
+          '';
+        setSelectedBeForSnap((prev) => prev || activeBe);
       }
       setSlots(telemetry.slots);
       setBootCount(telemetry.bootCount);
@@ -166,57 +198,202 @@ export default function SystemUpdatesPage() {
   const toggleSnapshots = (dataset: string) => {
     setExpandedSnapshots((prev) => ({
       ...prev,
-      [dataset]: !prev[dataset],
+      [dataset]: prev[dataset] === false ? true : false,
     }));
   };
 
-  const handleCreateSnapshot = async (beName: string) => {
-    const defaultLabel = `manual-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
-    const label = prompt(`Enter snapshot label for Boot Environment '${beName}':`, defaultLabel);
-    if (!label) return;
+  const handleSubmitArbitrarySnapshot = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const targetBe =
+      selectedBeForSnap ||
+      bootEnvironments.find((b) => b.activeNow)?.name ||
+      bootEnvironments[0]?.name ||
+      '';
+    const cleanLabel = sanitizeZfsIdentifier(customSnapLabel) || makeTimestampLabel('manual');
+    const cleanNewBe = cloneImmediately ? sanitizeZfsIdentifier(cloneNewBeName) : '';
+
+    if (!targetBe) {
+      setErrorMessage('Please select a target Boot Environment to snapshot.');
+      return;
+    }
+    if (cloneImmediately && !cleanNewBe) {
+      setErrorMessage('Please enter a name for the cloned Boot Environment.');
+      return;
+    }
+
     setIsZbmActionLoading(true);
+    setErrorMessage(null);
     try {
       const resp = await fetch('/api/system/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'zbm-snapshot', beName, label }),
+        body: JSON.stringify({
+          action: 'zbm-snapshot',
+          beName: targetBe,
+          label: cleanLabel,
+          newBeName: cleanNewBe || undefined,
+        }),
       });
       const data = await resp.json();
-      if (!data.success) throw new Error(data.message);
-      setAlertMessage(data.message || `Snapshot ${data.snapshot} created successfully.`);
+      if (!data.success) throw new Error(data.message || 'Snapshot creation failed');
+
+      if (cloneImmediately && cleanNewBe && armClonedBeNext) {
+        await fetch('/api/system/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'zbm-activate', beName: cleanNewBe }),
+        });
+      }
+
+      setAlertMessage(
+        data.message ||
+          `Snapshot zroot/ROOT/${targetBe}@${cleanLabel} created successfully${
+            cleanNewBe ? ` and cloned to ${cleanNewBe}` : ''
+          }.`
+      );
+      setCustomSnapLabel(makeTimestampLabel('manual'));
+      if (cloneImmediately) {
+        setCloneImmediately(false);
+        setCloneNewBeName('');
+      }
       await refreshTelemetryAndRelease();
     } catch (err: any) {
-      alert(`Failed to create snapshot: ${err?.message || String(err)}`);
+      setErrorMessage(`Failed to create snapshot: ${err?.message || String(err)}`);
     } finally {
       setIsZbmActionLoading(false);
     }
   };
 
-  const handleCloneSnapshot = async (snapshot: string) => {
-    const defaultNewName = `axonwall-${new Date().toISOString().slice(0, 10)}-clone`;
-    const newBeName = prompt(`Enter new Boot Environment name for snapshot '${snapshot}':`, defaultNewName);
-    if (!newBeName) return;
+  const handleCreateSnapshot = async (beName: string, presetLabel?: string) => {
+    setSelectedBeForSnap(beName);
+    const labelToUse = sanitizeZfsIdentifier(presetLabel || customSnapLabel) || makeTimestampLabel('manual');
     setIsZbmActionLoading(true);
+    setErrorMessage(null);
     try {
       const resp = await fetch('/api/system/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'zbm-clone', snapshot, newBeName }),
+        body: JSON.stringify({ action: 'zbm-snapshot', beName, label: labelToUse }),
       });
       const data = await resp.json();
       if (!data.success) throw new Error(data.message);
-      setAlertMessage(data.message || `Cloned snapshot to ${data.dataset}.`);
+      setAlertMessage(data.message || `Snapshot ${data.snapshot} created successfully.`);
+      setCustomSnapLabel(makeTimestampLabel('manual'));
       await refreshTelemetryAndRelease();
     } catch (err: any) {
-      alert(`Failed to clone snapshot: ${err?.message || String(err)}`);
+      setErrorMessage(`Failed to create snapshot: ${err?.message || String(err)}`);
+    } finally {
+      setIsZbmActionLoading(false);
+    }
+  };
+
+  const openCloneSnapshotModal = (snapshot: string) => {
+    const snapPart = snapshot.split('@')[1] || 'clone';
+    const cleanSuffix = sanitizeZfsIdentifier(snapPart).slice(0, 24);
+    const defaultNewName = `axonwall-${cleanSuffix || new Date().toISOString().slice(0, 10)}`;
+    setCloneModalState({
+      snapshot,
+      newBeName: defaultNewName,
+      armNext: false,
+    });
+  };
+
+  const handleConfirmCloneModal = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!cloneModalState) return;
+    const cleanNewBe = sanitizeZfsIdentifier(cloneModalState.newBeName);
+    if (!cleanNewBe) {
+      setErrorMessage('Please enter a valid Boot Environment name.');
+      return;
+    }
+    setIsZbmActionLoading(true);
+    setErrorMessage(null);
+    try {
+      const resp = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'zbm-clone',
+          snapshot: cloneModalState.snapshot,
+          newBeName: cleanNewBe,
+        }),
+      });
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message);
+
+      if (cloneModalState.armNext) {
+        await fetch('/api/system/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'zbm-activate', beName: cleanNewBe }),
+        });
+      }
+
+      setAlertMessage(
+        `${data.message || `Cloned snapshot to ${data.dataset}.`}${
+          cloneModalState.armNext ? ` Armed '${cleanNewBe}' for next boot.` : ''
+        }`
+      );
+      setCloneModalState(null);
+      await refreshTelemetryAndRelease();
+    } catch (err: any) {
+      setErrorMessage(`Failed to clone snapshot: ${err?.message || String(err)}`);
+    } finally {
+      setIsZbmActionLoading(false);
+    }
+  };
+
+  const handleDeleteSnapshot = async (snapshot: string) => {
+    if (!confirm(`Delete ZFS snapshot '${snapshot}'? This action cannot be undone.`)) return;
+    setIsZbmActionLoading(true);
+    setErrorMessage(null);
+    try {
+      const resp = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'zbm-delete-snapshot', snapshot }),
+      });
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message);
+      setAlertMessage(data.message || `Deleted snapshot ${snapshot}.`);
+      await refreshTelemetryAndRelease();
+    } catch (err: any) {
+      setErrorMessage(`Failed to delete snapshot: ${err?.message || String(err)}`);
+    } finally {
+      setIsZbmActionLoading(false);
+    }
+  };
+
+  const handleRollbackSnapshot = async (snapshot: string) => {
+    if (
+      !confirm(
+        `Roll back dataset to point-in-time snapshot '${snapshot}'? Any newer changes or intermediate snapshots on that dataset will be reverted.`
+      )
+    ) {
+      return;
+    }
+    setIsZbmActionLoading(true);
+    setErrorMessage(null);
+    try {
+      const resp = await fetch('/api/system/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'zbm-rollback-snapshot', snapshot }),
+      });
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.message);
+      setAlertMessage(data.message || `Rolled back to snapshot ${snapshot}.`);
+      await refreshTelemetryAndRelease();
+    } catch (err: any) {
+      setErrorMessage(`Failed to rollback snapshot: ${err?.message || String(err)}`);
     } finally {
       setIsZbmActionLoading(false);
     }
   };
 
   const handleActivateBootEnvironment = async (beName: string) => {
-    if (!confirm(`Arm Boot Environment '${beName}' as active for the next reboot?`)) return;
     setIsZbmActionLoading(true);
+    setErrorMessage(null);
     try {
       const resp = await fetch('/api/system/update', {
         method: 'POST',
@@ -228,7 +405,7 @@ export default function SystemUpdatesPage() {
       setAlertMessage(data.message || `Boot Environment ${beName} armed for next boot.`);
       await refreshTelemetryAndRelease();
     } catch (err: any) {
-      alert(`Failed to activate Boot Environment: ${err?.message || String(err)}`);
+      setErrorMessage(`Failed to activate Boot Environment: ${err?.message || String(err)}`);
     } finally {
       setIsZbmActionLoading(false);
     }
@@ -239,6 +416,7 @@ export default function SystemUpdatesPage() {
       return;
     }
     setIsZbmActionLoading(true);
+    setErrorMessage(null);
     try {
       const resp = await fetch('/api/system/update', {
         method: 'POST',
@@ -250,7 +428,7 @@ export default function SystemUpdatesPage() {
       setAlertMessage(data.message || `Boot Environment ${beName} deleted.`);
       await refreshTelemetryAndRelease();
     } catch (err: any) {
-      alert(`Failed to delete Boot Environment: ${err?.message || String(err)}`);
+      setErrorMessage(`Failed to delete Boot Environment: ${err?.message || String(err)}`);
     } finally {
       setIsZbmActionLoading(false);
     }
@@ -554,6 +732,18 @@ export default function SystemUpdatesPage() {
         </div>
       )}
 
+      {errorMessage && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+          <button onClick={() => setErrorMessage(null)} className="text-slate-400 hover:text-white text-xs">
+            ✕
+          </button>
+        </div>
+      )}
+
       {alertMessage && (
         <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
@@ -628,13 +818,13 @@ export default function SystemUpdatesPage() {
                 <button
                   onClick={() => {
                     const activeBe = bootEnvironments.find((b) => b.activeNow)?.name || 'axonwall-active';
-                    handleCreateSnapshot(activeBe);
+                    handleCreateSnapshot(activeBe, makeTimestampLabel('quick'));
                   }}
                   disabled={isZbmActionLoading}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer disabled:opacity-50"
                 >
                   <Camera className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Snapshot Active BE</span>
+                  <span>Quick Snapshot Active BE</span>
                 </button>
               </div>
             </div>
@@ -664,6 +854,149 @@ export default function SystemUpdatesPage() {
             </div>
           </div>
 
+          {/* Create Arbitrary ZFS Snapshot & Checkpoint Builder */}
+          <form
+            onSubmit={handleSubmitArbitrarySnapshot}
+            className="p-6 rounded-2xl bg-slate-900 border border-cyan-500/30 shadow-lg space-y-4"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+                  <Camera className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    Create Arbitrary ZFS Snapshot & Boot Checkpoint
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Capture an instant Copy-on-Write point-in-time snapshot of any Boot Environment, and optionally clone it into a standalone bootable environment.
+                  </p>
+                </div>
+              </div>
+              <div className="text-[11px] font-mono text-cyan-300 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800">
+                Target: zroot/ROOT/{selectedBeForSnap || bootEnvironments[0]?.name || 'axonwall'}@
+                {sanitizeZfsIdentifier(customSnapLabel) || 'manual'}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+              <div className="md:col-span-4 space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 block">
+                  Target Boot Environment
+                </label>
+                <select
+                  value={selectedBeForSnap}
+                  onChange={(e) => setSelectedBeForSnap(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+                >
+                  {bootEnvironments.map((be) => (
+                    <option key={be.name} value={be.name}>
+                      {be.name} {be.activeNow ? '(Active Now /)' : be.activeNext ? '(Next Boot)' : '(Standby)'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="md:col-span-5 space-y-1.5">
+                <label className="text-xs font-semibold text-slate-300 block">
+                  Snapshot Label / Tag Name
+                </label>
+                <input
+                  type="text"
+                  value={customSnapLabel}
+                  onChange={(e) => setCustomSnapLabel(e.target.value)}
+                  placeholder="e.g. pre-firewall-migration, gold-baseline, manual-checkpoint"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white font-mono placeholder-slate-600 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div className="md:col-span-3">
+                <button
+                  type="submit"
+                  disabled={isZbmActionLoading}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs transition shadow-lg shadow-cyan-500/20 cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>
+                    {isZbmActionLoading
+                      ? 'Creating...'
+                      : cloneImmediately
+                        ? 'Snapshot & Clone BE'
+                        : 'Create Snapshot'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Preset Label Chips & Optional Clone Toggle */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="text-slate-500 mr-1">Quick Presets:</span>
+                {[
+                  { label: 'Timestamp', val: () => makeTimestampLabel('manual') },
+                  { label: 'pre-upgrade', val: () => `pre-upgrade-${new Date().toISOString().slice(0, 10)}` },
+                  { label: 'before-policy-change', val: () => 'before-policy-change' },
+                  { label: 'gold-baseline', val: () => 'gold-baseline' },
+                  { label: 'rollback-checkpoint', val: () => 'rollback-checkpoint' },
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => setCustomSnapLabel(preset.val())}
+                    className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-mono transition cursor-pointer"
+                  >
+                    @{preset.label}
+                  </button>
+                ))}
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={cloneImmediately}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setCloneImmediately(checked);
+                    if (checked && !cloneNewBeName) {
+                      const cleanSuffix = sanitizeZfsIdentifier(customSnapLabel).slice(0, 20) || 'custom';
+                      setCloneNewBeName(`axonwall-${cleanSuffix}`);
+                    }
+                  }}
+                  className="rounded border-slate-700 bg-slate-950 text-cyan-500 focus:ring-0"
+                />
+                <span>Also clone snapshot into a new Boot Environment</span>
+              </label>
+            </div>
+
+            {cloneImmediately && (
+              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 grid grid-cols-1 sm:grid-cols-12 gap-4 items-center">
+                <div className="sm:col-span-7 space-y-1">
+                  <label className="text-[11px] font-semibold text-cyan-300 block">
+                    New Boot Environment Name (zroot/ROOT/&lt;name&gt;)
+                  </label>
+                  <input
+                    type="text"
+                    value={cloneNewBeName}
+                    onChange={(e) => setCloneNewBeName(e.target.value)}
+                    placeholder="e.g. axonwall-custom-be"
+                    className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+                <div className="sm:col-span-5 pt-3 sm:pt-4">
+                  <label className="flex items-center gap-2 text-xs text-amber-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={armClonedBeNext}
+                      onChange={(e) => setArmClonedBeNext(e.target.checked)}
+                      className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-0"
+                    />
+                    <span>Arm new Boot Environment as Next Boot (bootfs)</span>
+                  </label>
+                </div>
+              </div>
+            )}
+          </form>
+
           {/* Boot Environments Grid */}
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -676,7 +1009,19 @@ export default function SystemUpdatesPage() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {bootEnvironments.map((be) => {
-                const isExpanded = Boolean(expandedSnapshots[be.dataset]);
+                const isExpanded = expandedSnapshots[be.dataset] !== false;
+                const snapDetails =
+                  be.snapshotDetails && be.snapshotDetails.length > 0
+                    ? be.snapshotDetails
+                    : (be.snapshots || []).map((s) => ({
+                        name: s,
+                        fullName: `${be.dataset}@${s}`,
+                        dataset: be.dataset,
+                        beName: be.name,
+                        usedSize: '',
+                        referSize: '',
+                        createdAt: '',
+                      }));
                 return (
                   <div
                     key={be.dataset}
@@ -731,36 +1076,70 @@ export default function SystemUpdatesPage() {
                       </div>
                     </div>
 
-                    {/* Snapshots Toggle */}
+                    {/* Snapshots Drawer */}
                     <div className="py-2.5">
                       <button
+                        type="button"
                         onClick={() => toggleSnapshots(be.dataset)}
-                        className="flex items-center justify-between w-full text-xs text-slate-400 hover:text-white transition cursor-pointer"
+                        className="flex items-center justify-between w-full text-xs text-slate-300 hover:text-white transition cursor-pointer"
                       >
-                        <span className="flex items-center gap-1.5">
+                        <span className="flex items-center gap-1.5 font-medium">
                           <Camera className="w-3.5 h-3.5 text-cyan-400" />
-                          <span>Snapshots ({be.snapshots?.length || 0})</span>
+                          <span>Snapshots ({snapDetails.length})</span>
                         </span>
                         {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                       </button>
 
                       {isExpanded && (
                         <div className="mt-2 space-y-1.5 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
-                          {be.snapshots && be.snapshots.length > 0 ? (
-                            be.snapshots.map((snap) => (
+                          {snapDetails.length > 0 ? (
+                            snapDetails.map((snap) => (
                               <div
-                                key={snap}
-                                className="flex items-center justify-between text-xs py-1 px-1.5 rounded hover:bg-slate-900 transition"
+                                key={snap.fullName}
+                                className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs py-1.5 px-2 rounded-lg hover:bg-slate-900/90 border border-transparent hover:border-slate-800 transition"
                               >
-                                <span className="font-mono text-slate-300 truncate">@{snap}</span>
-                                <button
-                                  onClick={() => handleCloneSnapshot(`${be.dataset}@${snap}`)}
-                                  disabled={isZbmActionLoading}
-                                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-cyan-500 hover:text-slate-950 text-cyan-300 text-[11px] font-medium transition cursor-pointer disabled:opacity-50"
-                                >
-                                  <Copy className="w-3 h-3" />
-                                  <span>Clone BE</span>
-                                </button>
+                                <div className="min-w-0">
+                                  <div className="font-mono text-cyan-300 font-medium truncate">
+                                    @{snap.name}
+                                  </div>
+                                  {(snap.usedSize || snap.createdAt) && (
+                                    <div className="text-[10px] text-slate-500 font-mono">
+                                      {snap.usedSize ? `${snap.usedSize} used` : ''}
+                                      {snap.referSize ? ` (${snap.referSize} refer)` : ''}
+                                      {snap.createdAt ? ` • ${snap.createdAt}` : ''}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => openCloneSnapshotModal(snap.fullName)}
+                                    disabled={isZbmActionLoading}
+                                    className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-cyan-500 hover:text-slate-950 text-cyan-300 text-[11px] font-medium transition cursor-pointer disabled:opacity-50"
+                                    title="Clone this snapshot into a new bootable ZFS Boot Environment"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                    <span>Clone BE</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRollbackSnapshot(snap.fullName)}
+                                    disabled={isZbmActionLoading}
+                                    className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-300 text-[11px] font-medium transition cursor-pointer disabled:opacity-50"
+                                    title="Roll back dataset to this snapshot"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteSnapshot(snap.fullName)}
+                                    disabled={isZbmActionLoading}
+                                    className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-rose-500/20 text-rose-400 text-[11px] font-medium transition cursor-pointer disabled:opacity-50"
+                                    title="Delete snapshot"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
                               </div>
                             ))
                           ) : (
@@ -773,17 +1152,19 @@ export default function SystemUpdatesPage() {
                     {/* Card Actions */}
                     <div className="pt-2 flex items-center justify-between gap-2 border-t border-slate-800">
                       <button
+                        type="button"
                         onClick={() => handleCreateSnapshot(be.name)}
                         disabled={isZbmActionLoading}
                         className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium transition cursor-pointer disabled:opacity-50"
                       >
                         <Camera className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>Snapshot</span>
+                        <span>Snapshot Now (@{sanitizeZfsIdentifier(customSnapLabel) || 'manual'})</span>
                       </button>
 
                       <div className="flex items-center gap-2">
                         {!be.activeNext && (
                           <button
+                            type="button"
                             onClick={() => handleActivateBootEnvironment(be.name)}
                             disabled={isZbmActionLoading}
                             className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-amber-500 hover:text-slate-950 text-amber-300 border border-amber-500/30 text-xs font-medium transition cursor-pointer disabled:opacity-50"
@@ -794,12 +1175,13 @@ export default function SystemUpdatesPage() {
                         )}
                         {!be.activeNow && !be.activeNext && (
                           <button
+                            type="button"
                             onClick={() => handleDeleteBootEnvironment(be.name)}
                             disabled={isZbmActionLoading}
                             className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-red-500/20 text-red-400 border border-red-500/30 text-xs font-medium transition cursor-pointer disabled:opacity-50"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
-                            <span>Delete</span>
+                            <span>Delete BE</span>
                           </button>
                         )}
                       </div>
@@ -809,6 +1191,89 @@ export default function SystemUpdatesPage() {
               })}
             </div>
           </div>
+
+          {/* Clone Snapshot Modal */}
+          {cloneModalState && (
+            <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+              <form
+                onSubmit={handleConfirmCloneModal}
+                className="bg-slate-900 border border-cyan-500/40 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl"
+              >
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-2">
+                    <Copy className="w-5 h-5 text-cyan-400" />
+                    <h3 className="text-base font-bold text-white">
+                      Clone Snapshot to New Boot Environment
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCloneModalState(null)}
+                    className="text-slate-400 hover:text-white text-sm"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <span className="text-slate-400 block mb-1">Source Snapshot:</span>
+                    <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 font-mono text-cyan-300">
+                      {cloneModalState.snapshot}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-slate-300 font-semibold block mb-1">
+                      New Boot Environment Name:
+                    </label>
+                    <input
+                      type="text"
+                      value={cloneModalState.newBeName}
+                      onChange={(e) =>
+                        setCloneModalState({ ...cloneModalState, newBeName: e.target.value })
+                      }
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono focus:outline-none focus:border-cyan-500"
+                      autoFocus
+                    />
+                    <span className="text-[11px] text-slate-500 font-mono mt-1 block">
+                      Target Dataset: zroot/ROOT/{sanitizeZfsIdentifier(cloneModalState.newBeName) || '...'}
+                    </span>
+                  </div>
+
+                  <label className="flex items-center gap-2 pt-1 text-amber-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={cloneModalState.armNext}
+                      onChange={(e) =>
+                        setCloneModalState({ ...cloneModalState, armNext: e.target.checked })
+                      }
+                      className="rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-0"
+                    />
+                    <span>Arm this new Boot Environment for Next Boot immediately</span>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setCloneModalState(null)}
+                    className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isZbmActionLoading}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs transition cursor-pointer disabled:opacity-50"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>{isZbmActionLoading ? 'Cloning...' : 'Create Boot Environment'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
         </div>
       )}
 

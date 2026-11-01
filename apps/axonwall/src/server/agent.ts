@@ -3065,6 +3065,16 @@ export interface HealthCheckItem {
   durationMs: number;
 }
 
+export interface ZfsSnapshotDetailTelemetry {
+  name: string;
+  fullName: string;
+  dataset: string;
+  beName: string;
+  usedSize: string;
+  referSize: string;
+  createdAt: string;
+}
+
 export interface ZfsBootEnvironmentTelemetry {
   name: string;
   dataset: string;
@@ -3074,6 +3084,7 @@ export interface ZfsBootEnvironmentTelemetry {
   usedSize: string;
   createdAt: string;
   snapshots: string[];
+  snapshotDetails?: ZfsSnapshotDetailTelemetry[];
 }
 
 export interface SystemPartitionsTelemetry {
@@ -3627,17 +3638,58 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
 
 export async function createZbmSnapshot(
   beName: string,
-  label: string
-): Promise<{ success: boolean; message: string; snapshot?: string }> {
+  label: string,
+  newBeName?: string
+): Promise<{ success: boolean; message: string; snapshot?: string; dataset?: string }> {
   const session = await getSession();
   if (!isAdminSession(session)) {
     return { success: false, message: 'Unauthorized: Administrator credentials required' };
   }
-  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'snapshot', beName, label });
+  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', {
+    action: 'snapshot',
+    beName,
+    label,
+    newBeName,
+  });
   if (daemonResp && daemonResp.success) {
-    return { success: true, message: daemonResp.message, snapshot: daemonResp.snapshot };
+    return {
+      success: true,
+      message: daemonResp.message,
+      snapshot: daemonResp.snapshot,
+      dataset: daemonResp.dataset,
+    };
   }
   return { success: false, message: daemonResp?.message || 'Failed to create ZBM snapshot' };
+}
+
+export async function deleteZbmSnapshot(snapshot: string): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return { success: false, message: 'Unauthorized: Administrator credentials required' };
+  }
+  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', {
+    action: 'delete-snapshot',
+    snapshot,
+  });
+  if (daemonResp && daemonResp.success) {
+    return { success: true, message: daemonResp.message };
+  }
+  return { success: false, message: daemonResp?.message || 'Failed to delete ZBM snapshot' };
+}
+
+export async function rollbackZbmSnapshot(snapshot: string): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return { success: false, message: 'Unauthorized: Administrator credentials required' };
+  }
+  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', {
+    action: 'rollback-snapshot',
+    snapshot,
+  });
+  if (daemonResp && daemonResp.success) {
+    return { success: true, message: daemonResp.message };
+  }
+  return { success: false, message: daemonResp?.message || 'Failed to rollback ZBM snapshot' };
 }
 
 export async function cloneZbmSnapshot(

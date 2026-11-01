@@ -1763,12 +1763,50 @@ func main() {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
+				var clonedDataset string
+				if strings.TrimSpace(req.NewBeName) != "" {
+					target, cloneErr := watchdog.CloneSnapshotToBootEnvironment(snap, req.NewBeName)
+					if cloneErr != nil {
+						http.Error(w, fmt.Sprintf("Created snapshot %s, but cloning to BE failed: %v", snap, cloneErr), http.StatusBadRequest)
+						return
+					}
+					clonedDataset = target
+				}
+				bes, _ := watchdog.ListBootEnvironments()
+				w.Header().Set("Content-Type", "application/json")
+				msg := fmt.Sprintf("Created snapshot %s", snap)
+				if clonedDataset != "" {
+					msg = fmt.Sprintf("Created snapshot %s and cloned to Boot Environment %s", snap, clonedDataset)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"message":          msg,
+					"snapshot":         snap,
+					"dataset":          clonedDataset,
+					"bootEnvironments": bes,
+				})
+			case "delete-snapshot":
+				if err := watchdog.DeleteBootEnvironmentSnapshot(req.Snapshot); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				bes, _ := watchdog.ListBootEnvironments()
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success":          true,
-					"message":          fmt.Sprintf("Created snapshot %s", snap),
-					"snapshot":         snap,
+					"message":          fmt.Sprintf("Deleted snapshot %s", req.Snapshot),
+					"bootEnvironments": bes,
+				})
+			case "rollback-snapshot":
+				if err := watchdog.RollbackBootEnvironmentSnapshot(req.Snapshot); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				bes, _ := watchdog.ListBootEnvironments()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"message":          fmt.Sprintf("Rolled back to snapshot %s", req.Snapshot),
 					"bootEnvironments": bes,
 				})
 			case "clone":

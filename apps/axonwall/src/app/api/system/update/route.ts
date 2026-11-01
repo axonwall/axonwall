@@ -9,6 +9,8 @@ import {
   cloneZbmSnapshot,
   activateZbmBootEnvironment,
   deleteZbmBootEnvironment,
+  deleteZbmSnapshot,
+  rollbackZbmSnapshot,
 } from '@/server/agent';
 
 export const dynamic = 'force-dynamic';
@@ -71,7 +73,23 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'zbm-snapshot') {
-      const result = await createZbmSnapshot(body?.beName || '', body?.label || '');
+      const result = await createZbmSnapshot(
+        body?.beName || '',
+        body?.label || '',
+        body?.newBeName || undefined
+      );
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'zbm-delete-snapshot') {
+      const result = await deleteZbmSnapshot(body?.snapshot || '');
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'zbm-rollback-snapshot') {
+      const result = await rollbackZbmSnapshot(body?.snapshot || '');
       const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
       return NextResponse.json(result, { status });
     }

@@ -33,16 +33,28 @@ type HealthCheckResult struct {
 	DurationMs int64       `json:"durationMs"`
 }
 
+// ZfsSnapshotDetail provides rich telemetry for an individual OpenZFS snapshot.
+type ZfsSnapshotDetail struct {
+	Name      string `json:"name"`      // e.g. "factory-initial"
+	FullName  string `json:"fullName"`  // e.g. "zroot/ROOT/axonwall-0.11.52@factory-initial"
+	Dataset   string `json:"dataset"`   // e.g. "zroot/ROOT/axonwall-0.11.52"
+	BeName    string `json:"beName"`    // e.g. "axonwall-0.11.52"
+	UsedSize  string `json:"usedSize"`  // e.g. "142M"
+	ReferSize string `json:"referSize"` // e.g. "1.41G"
+	CreatedAt string `json:"createdAt"` // e.g. "Sun Nov  1 16:12 2026"
+}
+
 // ZfsBootEnvironment represents an OpenZFS Boot Environment managed by ZFSBootMenu v3.1.x.
 type ZfsBootEnvironment struct {
-	Name       string   `json:"name"`       // e.g. "axonwall-0.11.30"
-	Dataset    string   `json:"dataset"`    // e.g. "zroot/ROOT/axonwall-0.11.30"
-	ActiveNow  bool     `json:"activeNow"`  // Currently mounted on /
-	ActiveNext bool     `json:"activeNext"` // Staged in zpool bootfs for next reboot
-	Version    string   `json:"version"`
-	UsedSize   string   `json:"usedSize"`
-	CreatedAt  string   `json:"createdAt"`
-	Snapshots  []string `json:"snapshots"`
+	Name            string              `json:"name"`       // e.g. "axonwall-0.11.30"
+	Dataset         string              `json:"dataset"`    // e.g. "zroot/ROOT/axonwall-0.11.30"
+	ActiveNow       bool                `json:"activeNow"`  // Currently mounted on /
+	ActiveNext      bool                `json:"activeNext"` // Staged in zpool bootfs for next reboot
+	Version         string              `json:"version"`
+	UsedSize        string              `json:"usedSize"`
+	CreatedAt       string              `json:"createdAt"`
+	Snapshots       []string            `json:"snapshots"`
+	SnapshotDetails []ZfsSnapshotDetail `json:"snapshotDetails,omitempty"`
 }
 
 // PartitionStatus details the state of the A/B dual-root, Rolling single-root, or ZFSBootMenu system and boot watchdog.
@@ -711,18 +723,36 @@ func (we *WatchdogEngine) listBootEnvironmentsLocked() []ZfsBootEnvironment {
 
 	// 4. Query all snapshots under zroot/ROOT
 	snapMap := make(map[string][]string)
-	if snapOut, snapErr := we.runZfsCmd("list", "-H", "-o", "name", "-t", "snapshot", "-r", "zroot/ROOT"); snapErr == nil {
+	snapDetailMap := make(map[string][]ZfsSnapshotDetail)
+	if snapOut, snapErr := we.runZfsCmd("list", "-H", "-o", "name,used,refer,creation", "-t", "snapshot", "-r", "zroot/ROOT"); snapErr == nil {
 		snapScanner := bufio.NewScanner(bytes.NewReader(snapOut))
 		for snapScanner.Scan() {
 			snapLine := strings.TrimSpace(snapScanner.Text())
 			if snapLine == "" {
 				continue
 			}
-			parts := strings.SplitN(snapLine, "@", 2)
+			fields := strings.Split(snapLine, "\t")
+			fullSnap := strings.TrimSpace(fields[0])
+			var usedSize, referSize, createdAt string
+			if len(fields) >= 4 {
+				usedSize = strings.TrimSpace(fields[1])
+				referSize = strings.TrimSpace(fields[2])
+				createdAt = strings.TrimSpace(strings.Join(fields[3:], " "))
+			}
+			parts := strings.SplitN(fullSnap, "@", 2)
 			if len(parts) == 2 {
 				ds := parts[0]
 				sName := parts[1]
 				snapMap[ds] = append(snapMap[ds], sName)
+				snapDetailMap[ds] = append(snapDetailMap[ds], ZfsSnapshotDetail{
+					Name:      sName,
+					FullName:  fullSnap,
+					Dataset:   ds,
+					BeName:    strings.TrimPrefix(ds, "zroot/ROOT/"),
+					UsedSize:  usedSize,
+					ReferSize: referSize,
+					CreatedAt: createdAt,
+				})
 			}
 		}
 	}
@@ -759,14 +789,15 @@ func (we *WatchdogEngine) listBootEnvironmentsLocked() []ZfsBootEnvironment {
 		ver = strings.TrimPrefix(ver, "v")
 
 		be := ZfsBootEnvironment{
-			Name:       beName,
-			Dataset:    dsName,
-			ActiveNow:  isActiveNow,
-			ActiveNext: isActiveNext,
-			Version:    ver,
-			UsedSize:   usedSize,
-			CreatedAt:  createdAt,
-			Snapshots:  snapMap[dsName],
+			Name:            beName,
+			Dataset:         dsName,
+			ActiveNow:       isActiveNow,
+			ActiveNext:      isActiveNext,
+			Version:         ver,
+			UsedSize:        usedSize,
+			CreatedAt:       createdAt,
+			Snapshots:       snapMap[dsName],
+			SnapshotDetails: snapDetailMap[dsName],
 		}
 		results = append(results, be)
 	}
@@ -789,12 +820,30 @@ func (we *WatchdogEngine) ListBootEnvironments() ([]ZfsBootEnvironment, error) {
 // CreateBootEnvironmentSnapshot creates a point-in-time ZFS snapshot on a Boot Environment dataset.
 func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (string, error) {
 	beName = strings.TrimSpace(beName)
+	beName = strings.TrimPrefix(beName, "zroot/ROOT/")
+	if beName == "" || beName == "axonwall-active" {
+		we.mu.RLock()
+		for _, be := range we.status.BootEnvironments {
+			if be.ActiveNow {
+				beName = be.Name
+				break
+			}
+		}
+		if beName == "" && len(we.status.BootEnvironments) > 0 {
+			beName = we.status.BootEnvironments[0].Name
+		}
+		we.mu.RUnlock()
+	}
 	label = strings.TrimSpace(label)
+	label = strings.ReplaceAll(label, " ", "-")
+	if label == "" {
+		label = fmt.Sprintf("manual-%s", time.Now().UTC().Format("20060102-150405"))
+	}
 	if !zbmIdentifierRegex.MatchString(beName) {
 		return "", fmt.Errorf("invalid boot environment name: %q", beName)
 	}
 	if !zbmIdentifierRegex.MatchString(label) {
-		return "", fmt.Errorf("invalid snapshot label: %q", label)
+		return "", fmt.Errorf("invalid snapshot label: %q (use letters, numbers, hyphens, underscores, or periods)", label)
 	}
 	fullSnap := fmt.Sprintf("zroot/ROOT/%s@%s", beName, label)
 	out, err := we.runZfsCmd("snapshot", fullSnap)
@@ -808,6 +857,64 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 	we.mu.Unlock()
 
 	return fullSnap, nil
+}
+
+// DeleteBootEnvironmentSnapshot destroys an existing ZFS snapshot on a Boot Environment dataset.
+func (we *WatchdogEngine) DeleteBootEnvironmentSnapshot(snapshot string) error {
+	snapshot = strings.TrimSpace(snapshot)
+	if !zbmSnapshotRegex.MatchString(snapshot) {
+		return fmt.Errorf("invalid snapshot name: %q", snapshot)
+	}
+	fullSnap := snapshot
+	if !strings.HasPrefix(fullSnap, "zroot/ROOT/") && !strings.Contains(fullSnap, "/") {
+		fullSnap = "zroot/ROOT/" + fullSnap
+	} else if !strings.HasPrefix(fullSnap, "zroot/") {
+		fullSnap = "zroot/ROOT/" + strings.TrimPrefix(fullSnap, "/")
+	}
+	if !strings.Contains(fullSnap, "@") {
+		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+
+	out, err := we.runZfsCmd("destroy", fullSnap)
+	if err != nil {
+		return fmt.Errorf("zfs destroy snapshot failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[Watchdog/ZBM] Destroyed Boot Environment snapshot: %s", fullSnap)
+
+	we.mu.Lock()
+	we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+	we.mu.Unlock()
+
+	return nil
+}
+
+// RollbackBootEnvironmentSnapshot rolls a Boot Environment dataset back to a point-in-time snapshot.
+func (we *WatchdogEngine) RollbackBootEnvironmentSnapshot(snapshot string) error {
+	snapshot = strings.TrimSpace(snapshot)
+	if !zbmSnapshotRegex.MatchString(snapshot) {
+		return fmt.Errorf("invalid snapshot name: %q", snapshot)
+	}
+	fullSnap := snapshot
+	if !strings.HasPrefix(fullSnap, "zroot/ROOT/") && !strings.Contains(fullSnap, "/") {
+		fullSnap = "zroot/ROOT/" + fullSnap
+	} else if !strings.HasPrefix(fullSnap, "zroot/") {
+		fullSnap = "zroot/ROOT/" + strings.TrimPrefix(fullSnap, "/")
+	}
+	if !strings.Contains(fullSnap, "@") {
+		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+
+	out, err := we.runZfsCmd("rollback", "-r", fullSnap)
+	if err != nil {
+		return fmt.Errorf("zfs rollback failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[Watchdog/ZBM] Rolled back Boot Environment to snapshot: %s", fullSnap)
+
+	we.mu.Lock()
+	we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+	we.mu.Unlock()
+
+	return nil
 }
 
 // CloneSnapshotToBootEnvironment clones an existing snapshot into a new standalone Boot Environment.
