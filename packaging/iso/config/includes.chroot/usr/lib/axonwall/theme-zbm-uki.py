@@ -49,7 +49,7 @@ for fzf_cfg in /lib/fzf-defaults.sh /usr/lib/fzf-defaults.sh; do
 
 # AXONWALL_FZF_THEME
 fuzzy_default_options+=(
-  "--color='border:cyan,label:brightcyan,preview-label:brightgreen,current-fg:brightgreen,selected-fg:brightcyan,prompt:brightgreen,pointer:brightgreen,marker:brightgreen,header:cyan,info:brightblue,spinner:brightgreen,hl:brightgreen,hl+:brightcyan'"
+  "--color=border:cyan,label:bright-cyan,preview-label:bright-green,current-fg:bright-green,selected-fg:bright-cyan,prompt:bright-green,pointer:bright-green,marker:bright-green,header:cyan,info:bright-blue,spinner:bright-green,hl:bright-green,hl+:bright-cyan"
 )
 export FZF_DEFAULT_OPTS="${fuzzy_default_options[*]}"
 FZF_EOF
