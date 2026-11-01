@@ -15,34 +15,28 @@ export function Header({ scan, activeScanLabel }: HeaderProps) {
   );
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginBottom={1}>
-      <Box justifyContent="space-between">
-        <Box gap={1}>
-          <Text bold color="cyan">
-            NASTYMAP CLI
-          </Text>
-          <Text color="gray">|</Text>
-          <Text color="white" bold>
-            {activeScanLabel}
-          </Text>
-        </Box>
-        <Box gap={1}>
-          <Text color="green" bold>
-            ● {upHosts}/{scan.hosts.length} Hosts Online
-          </Text>
-          <Text color="gray">|</Text>
-          <Text color="yellow" bold>
-            {totalOpenPorts} Ports
-          </Text>
-          <Text color="gray">|</Text>
-          <Text color="gray">Nmap v{scan.version}</Text>
-        </Box>
-      </Box>
-      <Box marginTop={0}>
-        <Text color="gray" dimColor>
-          Command: {scan.args} ({scan.startstr})
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginBottom={0}>
+      <Text wrap="truncate-end">
+        <Text bold color="cyan">
+          NASTYMAP CLI
         </Text>
-      </Box>
+        <Text color="gray"> | </Text>
+        <Text color="white" bold>
+          {activeScanLabel}
+        </Text>
+        <Text color="gray"> | </Text>
+        <Text color="green" bold>
+          ● {upHosts}/{scan.hosts.length} Online
+        </Text>
+        <Text color="gray"> | </Text>
+        <Text color="yellow" bold>
+          {totalOpenPorts} Ports
+        </Text>
+        <Text color="gray"> | Nmap v{scan.version}</Text>
+      </Text>
+      <Text color="gray" dimColor wrap="truncate-end">
+        Command: {scan.args} ({scan.startstr})
+      </Text>
     </Box>
   );
 }

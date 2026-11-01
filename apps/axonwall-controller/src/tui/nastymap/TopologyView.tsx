@@ -40,23 +40,21 @@ export function TopologyView({ scan, onSelectHost }: TopologyViewProps) {
   });
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1}>
-      <Box justifyContent="space-between" marginBottom={1}>
-        <Text bold color="cyan">
-          ◈ Network Topology & Traceroute Hierarchy Tree
+    <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+      <Text bold color="cyan" wrap="truncate-end">
+        ◈ Network Topology & Traceroute Hierarchy Tree{' '}
+        <Text color="gray" bold={false} dimColor>
+          — [↑/↓] Navigate · [Enter] Inspect Host
         </Text>
-        <Text color="gray" dimColor>
-          Use ↑/↓ arrow keys to navigate · Press Enter to inspect host
-        </Text>
-      </Box>
+      </Text>
 
       {/* Scanner Root Gateway */}
-      <Box marginBottom={1}>
+      <Text wrap="truncate-end">
         <Text color="magenta" bold>
           [⬡ SCANNER ORIGIN]
         </Text>
         <Text color="gray"> 127.0.0.1 (Local Scanner Host)</Text>
-      </Box>
+      </Text>
 
       {/* Target Nodes Tree */}
       <Box flexDirection="column">
@@ -70,41 +68,22 @@ export function TopologyView({ scan, onSelectHost }: TopologyViewProps) {
               ? `[Ports: ${node.openPorts.slice(0, 5).join(', ')}${node.openPorts.length > 5 ? '...' : ''}]`
               : '[No open ports]';
 
-          const hopStr = node.hopsAway > 0 ? `──(${node.hopsAway} hop${node.hopsAway > 1 ? 's' : ''}${node.latencyMs ? ` ${node.latencyMs}ms` : ''})──>` : '──>';
+          const hopStr = node.hopsAway > 0 ? `─(${node.hopsAway}h${node.latencyMs ? ` ${node.latencyMs}ms` : ''})─>` : '─>';
 
           return (
-            <Box key={node.id} gap={1}>
+            <Text key={node.id} wrap="truncate-end">
               <Text color="cyan">{prefix}</Text>
-              <Text color="gray">{hopStr}</Text>
-
+              <Text color="gray">{hopStr} </Text>
               <Text bold color={node.status === 'up' ? 'green' : 'red'} inverse={isSelected}>
                 {isSelected ? '► ' : ''}{node.ip}
               </Text>
-
-              {node.hostname && (
-                <Text color="white">
-                  ({node.hostname})
-                </Text>
-              )}
-
-              <Text color={osColor as any}>
-                [{node.osFamily}]
-              </Text>
-
-              <Text color="yellow" dimColor>
-                {openPortsStr}
-              </Text>
-
-              <Text color="gray" dimColor>
-                {node.deviceType}
-              </Text>
-
-              {isSelected && (
-                <Text color="cyan" bold>
-                  ◄ [ENTER TO INSPECT]
-                </Text>
-              )}
-            </Box>
+              {node.hostname ? <Text color="white"> ({node.hostname})</Text> : null}
+              <Text color={osColor as any}> [{node.osFamily}]</Text>
+              <Text color="yellow" dimColor> {openPortsStr}</Text>
+              {isSelected ? (
+                <Text color="cyan" bold> ◄ [ENTER]</Text>
+              ) : null}
+            </Text>
           );
         })}
       </Box>

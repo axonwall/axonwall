@@ -405,6 +405,7 @@ def normalize_zbm_cmdline(raw_cmd: str, font: str | None = None) -> str:
     - Avoid forcing invalid rd.vconsole.font=ter-132b by default so 30-console-autosize.sh works
     """
     tokens = [t for t in raw_cmd.split() if not t.startswith("console=")]
+    tokens = ["zbm.timeout=5" if t.startswith("zbm.timeout=") else t for t in tokens]
     if font and font not in ("auto", "default", "ter-132b"):
         tokens = [t for t in tokens if not t.startswith("rd.vconsole.font=")]
         tokens.append(f"rd.vconsole.font={font}")
@@ -412,7 +413,7 @@ def normalize_zbm_cmdline(raw_cmd: str, font: str | None = None) -> str:
         tokens = [t for t in tokens if not t.startswith("rd.vconsole.font=")]
 
     required = [
-        "zbm.timeout=10",
+        "zbm.timeout=5",
         "zbm.autosize=1",
         "zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks",
     ]

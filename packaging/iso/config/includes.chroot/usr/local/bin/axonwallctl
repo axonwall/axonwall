@@ -4,6 +4,15 @@
 # ==============================================================================
 set -eu
 
+if [ "$(id -u)" -ne 0 ] && [ -z "${AXONWALL_NO_SUDO_ELEVATE:-}" ] && [ -d "/etc/axonwall" ]; then
+  if [ ! -r "/etc/axonwall/system.yaml" ] || [ ! -w "/etc/axonwall/system.yaml" ]; then
+    if command -v sudo >/dev/null 2>&1 && (sudo -n true 2>/dev/null || id -Gn 2>/dev/null | grep -qw sudo); then
+      export AXONWALL_NO_SUDO_ELEVATE=1
+      exec sudo -E "$0" "$@"
+    fi
+  fi
+fi
+
 for candidate in \
   "/opt/axonwall/apps/axonwall-controller/dist/axonwallctl.js" \
   "$(dirname "$0")/../../../apps/axonwall-controller/dist/axonwallctl.js" \

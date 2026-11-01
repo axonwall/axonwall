@@ -405,7 +405,7 @@ if [[ "${FLAVOR}" == "axonwall" && -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/ax
   chmod +x config/includes.chroot/usr/sbin/axonwalld
 fi
 
-if [[ ! -f "${SCRIPT_DIR}/../../apps/axonwall-console/bin/axonwall-console" ]] && command -v go &>/dev/null; then
+if command -v go &>/dev/null; then
   echo "[+] Compiling axonwall-console TUI & Next-Gen Installer..."
   (cd "${SCRIPT_DIR}/../../apps/axonwall-console" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/axonwall-console .)
 fi

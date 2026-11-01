@@ -129,7 +129,7 @@ export function App({
       <Header scan={currentScan} activeScanLabel={activeScanLabel} />
 
       {/* Tabs */}
-      <TabBar activeTab={activeTab} />
+      <TabBar activeTab={activeTab} embedded={embedded} />
 
       {/* View Content */}
       {selectedHost ? (
@@ -173,14 +173,11 @@ export function App({
       )}
 
       {/* Bottom Footer Info */}
-      <Box marginTop={1} justifyContent="space-between">
-        <Text color="gray" dimColor>
+      <Box marginTop={0}>
+        <Text color="gray" dimColor wrap="truncate-end">
           {embedded
-            ? 'NastyMap Sub-views: [v] Cycle View · [n] Live Nmap Scanner · [s] Switch Sample · [Enter] Inspect Host'
+            ? 'NastyMap: [v] Cycle View · [n] Live Scanner · [s] Switch Sample · [Enter] Inspect'
             : 'Press [1-6] for tabs · [v] cycle view · [s] switch sample · [q] quit'}
-        </Text>
-        <Text color="cyan" dimColor>
-          NastyMap Engine v1.0.2
         </Text>
       </Box>
     </Box>

@@ -62,16 +62,35 @@ function readLayeredYamlMap(): Record<string, string> {
   for (const filename of AXONWALL_YAML_FILENAMES) {
     const etcPath = path.join(ETC_CONFIG_DIR, filename);
     const varPath = path.join(VAR_ETC_CONFIG_DIR, filename);
-    const etcExists = fs.existsSync(etcPath);
-    const varExists = fs.existsSync(varPath);
-    if (etcExists && varExists) {
-      const etcMtime = fs.statSync(etcPath).mtimeMs;
-      const varMtime = fs.statSync(varPath).mtimeMs;
-      files[filename] = fs.readFileSync(etcMtime >= varMtime ? etcPath : varPath, 'utf-8');
-    } else if (etcExists) {
-      files[filename] = fs.readFileSync(etcPath, 'utf-8');
-    } else if (varExists) {
-      files[filename] = fs.readFileSync(varPath, 'utf-8');
+    let etcMtime = -1;
+    let varMtime = -1;
+    try {
+      if (fs.existsSync(etcPath)) {
+        etcMtime = fs.statSync(etcPath).mtimeMs;
+      }
+    } catch {}
+    try {
+      if (fs.existsSync(varPath)) {
+        varMtime = fs.statSync(varPath).mtimeMs;
+      }
+    } catch {}
+
+    const candidates =
+      etcMtime >= 0 && varMtime >= 0
+        ? etcMtime >= varMtime
+          ? [etcPath, varPath]
+          : [varPath, etcPath]
+        : etcMtime >= 0
+          ? [etcPath]
+          : varMtime >= 0
+            ? [varPath]
+            : [];
+
+    for (const cand of candidates) {
+      try {
+        files[filename] = fs.readFileSync(cand, 'utf-8');
+        break;
+      } catch {}
     }
   }
   return files;
@@ -79,18 +98,23 @@ function readLayeredYamlMap(): Record<string, string> {
 
 function loadCurrentState(): DesiredState {
   const files = readLayeredYamlMap();
+  let base: Partial<DesiredState> | undefined;
+  for (const stPath of [STATE_JSON_PATH, path.join(ETC_CONFIG_DIR, 'state.json')]) {
+    try {
+      if (fs.existsSync(stPath)) {
+        base = JSON.parse(fs.readFileSync(stPath, 'utf-8'));
+        break;
+      }
+    } catch {}
+  }
   if (Object.keys(files).length > 0) {
     try {
-      let base: Partial<DesiredState> | undefined;
-      if (fs.existsSync(STATE_JSON_PATH)) {
-        base = JSON.parse(fs.readFileSync(STATE_JSON_PATH, 'utf-8'));
-      }
       return parseDesiredStateFromYamlFiles(files, base);
     } catch {}
   }
-  if (fs.existsSync(STATE_JSON_PATH)) {
+  if (base) {
     try {
-      return parseDesiredStateFromYamlFiles({}, JSON.parse(fs.readFileSync(STATE_JSON_PATH, 'utf-8')));
+      return parseDesiredStateFromYamlFiles({}, base);
     } catch {}
   }
   return parseDesiredStateFromYamlFiles({});
@@ -105,21 +129,21 @@ function saveStateToDisk(state: DesiredState): Record<string, string> {
   }
   for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
     try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
       for (const [fn, content] of Object.entries(serialized)) {
         const filePath = path.join(dir, fn);
-        fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o600 });
+        fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o660 });
         try {
-          fs.chmodSync(filePath, 0o600);
+          fs.chmodSync(filePath, 0o660);
         } catch {}
       }
     } catch {}
   }
   try {
-    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o775 });
+    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o660 });
     try {
-      fs.chmodSync(STATE_JSON_PATH, 0o600);
+      fs.chmodSync(STATE_JSON_PATH, 0o660);
     } catch {}
   } catch {}
   return daemonFiles;
@@ -315,8 +339,8 @@ export function AxonwallTuiApp({
       ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
         path: filePath,
         content,
-        fileMode: 0o600,
-        file_mode: 0o600,
+        fileMode: 0o660,
+        file_mode: 0o660,
       })),
     ];
 
@@ -633,7 +657,7 @@ export function AxonwallTuiApp({
   };
 
   useInput((input, key) => {
-    if (input === 'q') {
+    if (input === 'q' || input === 'Q') {
       exit();
       return;
     }
@@ -647,58 +671,74 @@ export function AxonwallTuiApp({
     if (input === '1') {
       setActiveTab('dashboard');
       setCursorIdx(0);
+      return;
     } else if (input === '2') {
       setActiveTab('interfaces');
       setCursorIdx(0);
+      return;
     } else if (input === '3') {
       setActiveTab('firewall');
       setCursorIdx(0);
+      return;
     } else if (input === '4') {
       setActiveTab('routing');
       setCursorIdx(0);
+      return;
     } else if (input === '5') {
       setActiveTab('services');
       setCursorIdx(0);
+      return;
     } else if (input === '6') {
       setActiveTab('storage');
       setCursorIdx(0);
+      return;
     } else if (input === '7') {
       setActiveTab('compute');
       setCursorIdx(0);
+      return;
     } else if (input === '8') {
       setActiveTab('plugins');
       setCursorIdx(0);
+      return;
     } else if (input === '9') {
       setActiveTab('nastymap');
       setCursorIdx(0);
+      return;
     } else if (input === '0') {
       setActiveTab('cli_ops');
       setCursorIdx(0);
       if (!cliOutput) runCliToolInline(0);
-    } else if (input === 'c') {
+      return;
+    }
+
+    if (activeTab === 'nastymap') return;
+
+    if (input === 'c') {
       if (readOnly) {
         setStatusMessage('Read-only operator session: confirming commit is disabled.');
         return;
       }
       handleConfirm();
+      return;
     } else if (input === 'r') {
       if (readOnly) {
         setStatusMessage('Read-only operator session: configuration rollback is disabled.');
         return;
       }
       handleRollback();
+      return;
     } else if (input === 'a') {
       if (readOnly) {
         setStatusMessage('Read-only operator session: applying configuration changes is disabled.');
         return;
       }
       handleApplyConfig();
+      return;
     } else if (input === 'd') {
       refreshAll();
       setStatusMessage('Reloaded configuration from /etc/axonwall/*.yaml.');
+      return;
     }
-
-    if (activeTab === 'nastymap') return;
 
     if (activeTab === 'firewall' && input === 'n') {
       const order: Array<'rules' | 'nat' | 'aliases'> = ['rules', 'nat', 'aliases'];
@@ -939,35 +979,24 @@ export function AxonwallTuiApp({
         paddingX={1}
         justifyContent="space-between"
       >
-        <Box gap={2}>
-          <Text bold color="green">
-            🛡️ AXONWALL SSH/CONSOLE TUI
-          </Text>
-          <Text color="white">
-            Host: <Text bold color="cyan">{state.system?.hostname || os.hostname()}</Text>
-          </Text>
-          <Text color="gray">|</Text>
-          <Text color="white">
-            Load: <Text color="yellow">{loadStr}</Text>
-          </Text>
-          <Text color="gray">|</Text>
-          <Text color="white">
-            RAM: <Text color="cyan">{usedMemGb}/{totalMemGb} GB ({memPct}%)</Text>
-          </Text>
-        </Box>
-        <Box gap={2}>
-          {readOnly && (
-            <Text bold color="yellow">
-              [READ-ONLY OPERATOR MODE]
-            </Text>
-          )}
+        <Text wrap="truncate-end">
+          <Text bold color="green">AXONWALL TUI</Text>
+          <Text color="gray"> · </Text>
+          <Text color="white">Host: <Text bold color="cyan">{state.system?.hostname || os.hostname()}</Text></Text>
+          <Text color="gray"> · </Text>
+          <Text color="white">Load: <Text color="yellow">{loadStr}</Text></Text>
+          <Text color="gray"> · </Text>
+          <Text color="white">RAM: <Text color="cyan">{usedMemGb}/{totalMemGb}G ({memPct}%)</Text></Text>
+          <Text color="gray"> · </Text>
           <Text color={mcpStatus.masterEnabled ? 'yellow' : 'gray'}>
-            MCP: {mcpStatus.masterEnabled ? 'ON' : 'OFF'}
+            MCP:{mcpStatus.masterEnabled ? 'ON' : 'OFF'}
           </Text>
+          <Text color="gray"> · </Text>
           <Text color={daemonStatus ? 'green' : 'yellow'}>
-            ● {daemonStatus ? 'axonwalld Connected' : 'YAML Direct Mode'}
+            ● {daemonStatus ? 'axonwalld' : 'YAML Direct'}
           </Text>
-        </Box>
+          {readOnly ? <Text bold color="yellow"> [READ-ONLY]</Text> : null}
+        </Text>
       </Box>
 
       {/* Commit-Confirm Safety Banner if Active */}
@@ -988,93 +1017,87 @@ export function AxonwallTuiApp({
       )}
 
       {/* Global Navigation Tab Bar */}
-      <Box marginY={1} gap={1} flexWrap="wrap">
+      <Box marginY={0} gap={1} flexWrap="wrap" paddingX={1}>
         {TOP_TABS.map((t) => {
           const isAct = activeTab === t.id;
           return (
-            <Box
+            <Text
               key={t.id}
-              borderStyle="single"
-              borderColor={isAct ? 'green' : 'gray'}
-              paddingX={1}
+              bold={isAct}
+              color={isAct ? 'black' : 'white'}
+              backgroundColor={isAct ? 'green' : undefined}
             >
-              <Text bold={isAct} color={isAct ? 'green' : 'white'}>
-                [{t.key}] {t.label}
-              </Text>
-            </Box>
+              {isAct ? ` ▸ [${t.key}] ${t.label} ` : `[${t.key}] ${t.label}`}
+            </Text>
           );
         })}
       </Box>
 
       {/* Main Content Area */}
       {activeTab === 'dashboard' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1} gap={1}>
-          <Text bold color="cyan" underline>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} gap={0}>
+          <Text bold color="cyan" underline wrap="truncate-end">
             Appliance Overview & Active Stack (/etc/axonwall/*.yaml)
           </Text>
-          <Box gap={4}>
+          <Box gap={2}>
             <Box flexDirection="column" width="50%">
               <Text bold color="white">Configured Network Interfaces ({state.interfaces.length}):</Text>
               {state.interfaces.map((iface) => (
-                <Box key={iface.name} gap={2} paddingLeft={1}>
+                <Text key={iface.name} wrap="truncate-end">
+                  {' '}
                   <Text color={iface.enabled ? 'green' : 'red'} bold>
                     {iface.enabled ? '● UP  ' : '○ DOWN'}
-                  </Text>
+                  </Text>{' '}
                   <Text bold color="white">
-                    {iface.name.toUpperCase().padEnd(6, ' ')}
-                  </Text>
-                  <Text color="cyan">{iface.device.padEnd(8, ' ')}</Text>
-                  <Text color="yellow">{(iface.ipv4Address || iface.type).padEnd(18, ' ')}</Text>
-                  <Text color="gray">{iface.description || ''}</Text>
-                </Box>
+                    {iface.name.toUpperCase().padEnd(5, ' ')}
+                  </Text>{' '}
+                  <Text color="cyan">{iface.device.padEnd(7, ' ')}</Text>{' '}
+                  <Text color="yellow">{iface.ipv4Address || iface.type}</Text>
+                </Text>
               ))}
               <Box marginTop={1} flexDirection="column">
                 <Text bold color="white">Active Appliance Core Roles:</Text>
-                <Text>
-                  {'  '}• Firewall & Gateway : <Text color={caps.firewallEnabled ? 'green' : 'gray'} bold>{caps.firewallEnabled ? 'ENABLED' : 'DISABLED'}</Text>
-                  {'  '}• ZFS NAS : <Text color={caps.nasEnabled ? 'green' : 'gray'} bold>{caps.nasEnabled ? 'ENABLED' : 'DISABLED'}</Text>
+                <Text wrap="truncate-end">
+                  {'  '}• Firewall : <Text color={caps.firewallEnabled ? 'green' : 'gray'} bold>{caps.firewallEnabled ? 'ON ' : 'OFF'}</Text>
+                  {'  '}• ZFS NAS : <Text color={caps.nasEnabled ? 'green' : 'gray'} bold>{caps.nasEnabled ? 'ON' : 'OFF'}</Text>
                 </Text>
-                <Text>
-                  {'  '}• K3s + OpenEBS      : <Text color={caps.k3sEnabled ? 'green' : 'gray'} bold>{caps.k3sEnabled ? 'ENABLED' : 'DISABLED'}</Text>
-                  {'  '}• KVM/LXC : <Text color={caps.virtEnabled ? 'green' : 'gray'} bold>{caps.virtEnabled ? 'ENABLED' : 'DISABLED'}</Text>
+                <Text wrap="truncate-end">
+                  {'  '}• K3s/EBS  : <Text color={caps.k3sEnabled ? 'green' : 'gray'} bold>{caps.k3sEnabled ? 'ON ' : 'OFF'}</Text>
+                  {'  '}• KVM/LXC : <Text color={caps.virtEnabled ? 'green' : 'gray'} bold>{caps.virtEnabled ? 'ON' : 'OFF'}</Text>
                 </Text>
-                <Text>
-                  {'  '}• Vigilante SOC      : <Text color={caps.vigilanteEnabled ? 'green' : 'gray'} bold>{caps.vigilanteEnabled ? 'ENABLED' : 'DISABLED'}</Text>
+                <Text wrap="truncate-end">
+                  {'  '}• Vigilante: <Text color={caps.vigilanteEnabled ? 'green' : 'gray'} bold>{caps.vigilanteEnabled ? 'ON ' : 'OFF'}</Text>
                 </Text>
               </Box>
             </Box>
             <Box flexDirection="column" width="50%">
               <Text bold color="white">Control Plane & Security Summary:</Text>
-              <Text>  • Firewall & NAT   : <Text color="green" bold>{state.rules.length}</Text> rules, <Text color="cyan" bold>{state.nat?.length || 0}</Text> NAT rules</Text>
-              <Text>  • Static Routes    : <Text color="cyan" bold>{state.routes?.length || 0}</Text> routes ({(state.routes || []).map((r) => r.network).join(', ') || 'none'})</Text>
-              <Text>  • Gateways         : <Text color="yellow" bold>{state.gateways?.length || 0}</Text> upstream gateways</Text>
-              <Text>  • DHCPv4 Subnets   : <Text color="green" bold>{state.dhcp?.subnets?.length || 0}</Text> configured</Text>
-              <Text>  • MCP Server       : <Text color={mcpStatus.masterEnabled ? 'yellow' : 'green'} bold>{mcpStatus.masterEnabled ? 'ENABLED' : 'DISABLED (Default Safe)'}</Text></Text>
-              <Text>  • Shell Experience : <Text color={workstationEnabled ? 'cyan' : 'gray'} bold>{workstationEnabled ? 'ENABLED (ZSH + Oh My Zsh + kubectl + Starship + VIM)' : 'MINIMAL (Disabled)'}</Text></Text>
+              <Text wrap="truncate-end">  • Firewall & NAT : <Text color="green" bold>{state.rules.length}</Text> rules, <Text color="cyan" bold>{state.nat?.length || 0}</Text> NAT</Text>
+              <Text wrap="truncate-end">  • Static Routes  : <Text color="cyan" bold>{state.routes?.length || 0}</Text> ({(state.routes || []).map((r) => r.network).join(', ') || 'none'})</Text>
+              <Text wrap="truncate-end">  • Gateways       : <Text color="yellow" bold>{state.gateways?.length || 0}</Text> upstream</Text>
+              <Text wrap="truncate-end">  • DHCPv4 Subnets : <Text color="green" bold>{state.dhcp?.subnets?.length || 0}</Text> configured</Text>
+              <Text wrap="truncate-end">  • MCP Server     : <Text color={mcpStatus.masterEnabled ? 'yellow' : 'green'} bold>{mcpStatus.masterEnabled ? 'ENABLED' : 'DISABLED (Safe)'}</Text></Text>
+              <Text wrap="truncate-end">  • Shell Profile  : <Text color={workstationEnabled ? 'cyan' : 'gray'} bold>{workstationEnabled ? 'ENABLED (ZSH+Starship)' : 'MINIMAL'}</Text></Text>
             </Box>
           </Box>
         </Box>
       )}
 
       {activeTab === 'interfaces' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1}>
-          <Box justifyContent="space-between" marginBottom={1}>
-            <Text bold color="cyan">
-              Network Interfaces, VLANs ({state.vlans?.length || 0}), Bonds ({state.bonds?.length || 0}) & Bridges ({state.bridges?.length || 0})
-            </Text>
-            <Text color="gray">
-              [↑/↓] Select · [Space] Toggle Enable · [a] Apply Changes
-            </Text>
-          </Box>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            Interfaces, VLANs ({state.vlans?.length || 0}), Bonds ({state.bonds?.length || 0}) & Bridges ({state.bridges?.length || 0}){' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+          </Text>
           {state.interfaces.map((iface, idx) => {
             const sel = idx === cursorIdx % Math.max(1, state.interfaces.length);
             return (
-              <Box key={iface.name} gap={2} paddingLeft={1}>
+              <Text key={iface.name} wrap="truncate-end">
                 <Text color={sel ? 'cyan' : 'gray'} bold>
-                  {sel ? '▶' : ' '}
+                  {sel ? '▶ ' : '  '}
                 </Text>
                 <Text color={iface.enabled ? 'green' : 'red'} bold>
-                  {iface.enabled ? '[ENABLED] ' : '[DISABLED]'}
+                  {iface.enabled ? '[ENABLED]  ' : '[DISABLED] '}
                 </Text>
                 <Text bold color={sel ? 'white' : 'gray'}>
                   {iface.name.toUpperCase().padEnd(8, ' ')}
@@ -1082,14 +1105,14 @@ export function AxonwallTuiApp({
                 <Text color="cyan">{iface.device.padEnd(10, ' ')}</Text>
                 <Text color="yellow">{(iface.ipv4Address || iface.type).padEnd(20, ' ')}</Text>
                 <Text color="white">{iface.description || ''}</Text>
-              </Box>
+              </Text>
             );
           })}
           {(state.vlans?.length || 0) > 0 && (
             <Box marginTop={1} flexDirection="column">
               <Text bold color="white">Configured 802.1Q VLANs:</Text>
               {(state.vlans || []).map((v) => (
-                <Text key={v.id || v.vlanInterface} color="gray">
+                <Text key={v.id || v.vlanInterface} color="gray" wrap="truncate-end">
                   {'  '}• VLAN {v.tag} on {v.parentInterface} ({v.vlanInterface}) — {v.description || 'tagged'}
                 </Text>
               ))}
@@ -1099,27 +1122,23 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'firewall' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1}>
-          <Box justifyContent="space-between" marginBottom={1}>
-            <Text bold color="cyan">
-              Firewall & NAT (/etc/axonwall/firewall.yaml) — View: [{fwSubView.toUpperCase()}]
-            </Text>
-            <Text color="gray">
-              [n] Switch View (Rules/NAT/Aliases) · [↑/↓] Select · [Space] Toggle · [a] Apply
-            </Text>
-          </Box>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            Firewall & NAT [{fwSubView.toUpperCase()}]{' '}
+            <Text color="gray" bold={false}>— [n] View · [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+          </Text>
           {fwSubView === 'rules' &&
-            state.rules.slice(0, 16).map((rule, idx) => {
+            state.rules.slice(0, 14).map((rule, idx) => {
               const sel = idx === cursorIdx % Math.max(1, state.rules.length);
               const actionColor =
                 rule.action === 'pass' ? 'green' : rule.action === 'block' ? 'red' : 'yellow';
               return (
-                <Box key={rule.id || idx} gap={2} paddingLeft={1}>
+                <Text key={rule.id || idx} wrap="truncate-end">
                   <Text color={sel ? 'cyan' : 'gray'} bold>
-                    {sel ? '▶' : ' '}
+                    {sel ? '▶ ' : '  '}
                   </Text>
                   <Text color={rule.enabled ? 'green' : 'gray'}>
-                    {rule.enabled ? '[ON] ' : '[OFF]'}
+                    {rule.enabled ? '[ON]  ' : '[OFF] '}
                   </Text>
                   <Text bold color={actionColor}>
                     {rule.action.toUpperCase().padEnd(7, ' ')}
@@ -1127,10 +1146,10 @@ export function AxonwallTuiApp({
                   <Text color="cyan">{rule.interface.padEnd(6, ' ')}</Text>
                   <Text color="yellow">{rule.protocol.toUpperCase().padEnd(6, ' ')}</Text>
                   <Text color="white">
-                    {`${rule.source || 'any'} -> ${rule.destination || 'any'}${rule.destinationPort ? ':' + rule.destinationPort : ''}`.padEnd(28, ' ')}
+                    {`${rule.source || 'any'} -> ${rule.destination || 'any'}${rule.destinationPort ? ':' + rule.destinationPort : ''}`.padEnd(26, ' ')}
                   </Text>
                   <Text color="gray">{rule.description || ''}</Text>
-                </Box>
+                </Text>
               );
             })}
           {fwSubView === 'nat' &&
@@ -1140,14 +1159,14 @@ export function AxonwallTuiApp({
               (state.nat || []).map((nr, idx) => {
                 const sel = idx === cursorIdx % Math.max(1, (state.nat || []).length);
                 return (
-                  <Box key={nr.id || idx} gap={2} paddingLeft={1}>
-                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶' : ' '}</Text>
-                    <Text color={nr.enabled ? 'green' : 'gray'}>{nr.enabled ? '[ON] ' : '[OFF]'}</Text>
+                  <Text key={nr.id || idx} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                    <Text color={nr.enabled ? 'green' : 'gray'}>{nr.enabled ? '[ON]  ' : '[OFF] '}</Text>
                     <Text bold color="yellow">{nr.type.toUpperCase().padEnd(11, ' ')}</Text>
                     <Text color="cyan">{nr.interface.padEnd(6, ' ')}</Text>
-                    <Text color="white">{`${nr.protocol.toUpperCase()} :${nr.destinationPort || '*'} -> ${nr.targetIp || 'masquerade'}${nr.targetPort ? ':' + nr.targetPort : ''}`.padEnd(34, ' ')}</Text>
+                    <Text color="white">{`${nr.protocol.toUpperCase()} :${nr.destinationPort || '*'} -> ${nr.targetIp || 'masquerade'}${nr.targetPort ? ':' + nr.targetPort : ''}`.padEnd(32, ' ')}</Text>
                     <Text color="gray">{nr.description || ''}</Text>
-                  </Box>
+                  </Text>
                 );
               })
             ))}
@@ -1158,14 +1177,14 @@ export function AxonwallTuiApp({
               (state.aliases || []).map((al, idx) => {
                 const sel = idx === cursorIdx % Math.max(1, (state.aliases || []).length);
                 return (
-                  <Box key={al.id || idx} gap={2} paddingLeft={1}>
-                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶' : ' '}</Text>
-                    <Text color={al.enabled ? 'green' : 'gray'}>{al.enabled ? '[ON] ' : '[OFF]'}</Text>
-                    <Text bold color="cyan">{al.name.padEnd(20, ' ')}</Text>
+                  <Text key={al.id || idx} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                    <Text color={al.enabled ? 'green' : 'gray'}>{al.enabled ? '[ON]  ' : '[OFF] '}</Text>
+                    <Text bold color="cyan">{al.name.padEnd(18, ' ')}</Text>
                     <Text color="yellow">{al.type.toUpperCase().padEnd(10, ' ')}</Text>
-                    <Text color="white">{(al.entries || []).join(', ')}</Text>
+                    <Text color="white">{(al.entries || []).join(', ')} </Text>
                     <Text color="gray">{al.description || ''}</Text>
-                  </Box>
+                  </Text>
                 );
               })
             ))}
@@ -1173,24 +1192,21 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'routing' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1}>
-          <Box justifyContent="space-between" marginBottom={1}>
-            <Text bold color="cyan">
-              Gateways, Static Routes & FRR BGP/OSPF (/etc/axonwall/routing.yaml)
-            </Text>
-            <Text color="gray">
-              [↑/↓] Select Route · [Space] Toggle Route · [d] Reload Disk · [a] Apply Routes
-            </Text>
-          </Box>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            Gateways, Static Routes & FRR BGP/OSPF{' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+          </Text>
           <Text bold color="white">Upstream Gateways ({state.gateways?.length || 0}):</Text>
           {(state.gateways || []).map((gw) => (
-            <Box key={gw.name} gap={2} paddingLeft={2}>
-              <Text color={gw.enabled ? 'green' : 'red'}>●</Text>
+            <Text key={gw.name} wrap="truncate-end">
+              {'  '}
+              <Text color={gw.enabled ? 'green' : 'red'}>● </Text>
               <Text bold color="white">{gw.name.padEnd(14, ' ')}</Text>
               <Text color="cyan">{gw.interface.padEnd(8, ' ')}</Text>
               <Text color="yellow">{gw.gatewayIp.padEnd(16, ' ')}</Text>
               <Text color="gray">Monitor: {gw.monitorIp || 'none'} {gw.isDefault ? '(Default)' : ''}</Text>
-            </Box>
+            </Text>
           ))}
           <Box marginTop={1} flexDirection="column">
             <Text bold color="white">Static Routes ({state.routes?.length || 0}):</Text>
@@ -1200,24 +1216,24 @@ export function AxonwallTuiApp({
               (state.routes || []).map((rt, idx) => {
                 const sel = idx === cursorIdx % Math.max(1, (state.routes || []).length);
                 return (
-                  <Box key={`${rt.network}-${rt.gateway}-${idx}`} gap={2} paddingLeft={1}>
+                  <Text key={`${rt.network}-${rt.gateway}-${idx}`} wrap="truncate-end">
                     <Text color={sel ? 'cyan' : 'gray'} bold>
-                      {sel ? '▶' : ' '}
+                      {sel ? '▶ ' : '  '}
                     </Text>
                     <Text color={rt.enabled !== false ? 'green' : 'red'} bold>
-                      {rt.enabled !== false ? '[ACTIVE]  ' : '[DISABLED]'}
+                      {rt.enabled !== false ? '[ACTIVE]   ' : '[DISABLED] '}
                     </Text>
                     <Text bold color="white">{rt.network.padEnd(18, ' ')}</Text>
-                    <Text color="yellow">{`via ${rt.gateway}`.padEnd(20, ' ')}</Text>
-                    <Text color="cyan">{`dev ${rt.interface || 'auto'}`.padEnd(12, ' ')}</Text>
+                    <Text color="yellow">{`via ${rt.gateway}`.padEnd(19, ' ')}</Text>
+                    <Text color="cyan">{`dev ${rt.interface || 'auto'}`.padEnd(11, ' ')}</Text>
                     <Text color="gray">{rt.description ? `# ${rt.description}` : ''}</Text>
-                  </Box>
+                  </Text>
                 );
               })
             )}
           </Box>
           <Box marginTop={1}>
-            <Text color="gray">
+            <Text color="gray" wrap="truncate-end">
               FRRouting Dynamic Routing: BGP {state.frr?.bgp?.enabled ? `ENABLED (ASN ${state.frr.bgp.asNumber}, ${state.frr.bgp.neighbors?.length || 0} peers)` : 'DISABLED'} · OSPF {state.frr?.ospf?.enabled ? `ENABLED (${state.frr.ospf.areas?.length || 0} areas)` : 'DISABLED'}
             </Text>
           </Box>
@@ -1225,46 +1241,38 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'services' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1}>
-          <Box justifyContent="space-between" marginBottom={1}>
-            <Text bold color="cyan">
-              Network Services, Post-Quantum VPN, HA & MCP Control Plane
-            </Text>
-            <Text color="gray">
-              [↑/↓] Select Service · [Space] Toggle Enable/Disable · [a] Compile & Apply
-            </Text>
-          </Box>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            Network Services, Post-Quantum VPN, HA & MCP{' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+          </Text>
           {serviceRows.map((row, idx) => {
             const sel = idx === cursorIdx % serviceRows.length;
             return (
-              <Box key={row.id} gap={2} paddingLeft={1}>
+              <Text key={row.id} wrap="truncate-end">
                 <Text color={sel ? 'cyan' : 'gray'} bold>
-                  {sel ? '▶' : ' '}
+                  {sel ? '▶ ' : '  '}
                 </Text>
                 <Text color={row.enabled ? 'green' : 'gray'} bold>
-                  {row.enabled ? '[ENABLED] ' : '[DISABLED]'}
+                  {row.enabled ? '[ENABLED]  ' : '[DISABLED] '}
                 </Text>
                 <Text bold={sel} color={sel ? 'white' : 'cyan'}>
-                  {row.name.padEnd(44, ' ')}
+                  {row.name.padEnd(40, ' ')}
                 </Text>
                 <Text color="gray">{row.detail}</Text>
-              </Box>
+              </Text>
             );
           })}
         </Box>
       )}
 
       {activeTab === 'storage' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1} gap={1}>
-          <Box justifyContent="space-between">
-            <Text bold color="cyan">
-              OpenZFS Storage Pools, Datasets & NAS Shares (/etc/axonwall/storage.yaml)
-            </Text>
-            <Text color="gray">
-              [Space] Toggle NAS Role · [s] Live zpool status · [a] Apply
-            </Text>
-          </Box>
-          <Text>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} gap={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            OpenZFS Storage Pools & NAS Shares{' '}
+            <Text color="gray" bold={false}>— [Space] Toggle NAS · [s] zpool status · [a] Apply</Text>
+          </Text>
+          <Text wrap="truncate-end">
             ZFS NAS Core Role :{' '}
             <Text bold color={caps.nasEnabled ? 'green' : 'gray'}>
               {caps.nasEnabled ? '[ENABLED]' : '[DISABLED]'}
@@ -1274,7 +1282,7 @@ export function AxonwallTuiApp({
             <Text bold color="cyan">{(state.nas?.smbShares?.length || 0) + (state.nas?.nfsExports?.length || 0)}</Text>
           </Text>
           {(state.nas?.pools || []).map((p: any) => (
-            <Text key={p.name} color="white">
+            <Text key={p.name} color="white" wrap="truncate-end">
               {'  '}• Pool <Text bold color="cyan">{p.name}</Text> ({p.topology || 'mirror'}) — Compression: {p.compression || 'lz4'}, Auto-Scrub: {p.autoScrub ? 'ON' : 'OFF'}
             </Text>
           ))}
@@ -1287,21 +1295,17 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'compute' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1} gap={1}>
-          <Box justifyContent="space-between">
-            <Text bold color="cyan">
-              K3s Kubernetes + OpenEBS, KVM/LXC Virtualization & Vigilante SOC
-            </Text>
-            <Text color="gray">
-              [↑/↓] Select Role · [Space] Toggle Role · [k] Live kubectl · [v] Live virsh · [a] Apply
-            </Text>
-          </Box>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} gap={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            K3s + OpenEBS, KVM/LXC & Vigilante SOC{' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [k] kubectl · [v] virsh</Text>
+          </Text>
           {[
             {
               id: 'core-k3s',
               name: 'K3s Kubernetes Cluster + OpenEBS LocalPV',
               enabled: caps.k3sEnabled,
-              detail: `CIDR: ${state.k3s?.clusterCidr || '10.42.0.0/16'}, Service CIDR: ${state.k3s?.serviceCidr || '10.43.0.0/16'}, OpenEBS ZFS LocalPV`,
+              detail: `CIDR: ${state.k3s?.clusterCidr || '10.42.0.0/16'}, OpenEBS ZFS`,
             },
             {
               id: 'core-virt',
@@ -1313,17 +1317,17 @@ export function AxonwallTuiApp({
               id: 'core-vigilante',
               name: 'Vigilante Autonomous SOC & Threat Hunting',
               enabled: caps.vigilanteEnabled,
-              detail: `Automated IOC enrichment, telemetry correlation & active response`,
+              detail: `Automated IOC enrichment & active response`,
             },
           ].map((r, idx) => {
             const sel = idx === cursorIdx % 3;
             return (
-              <Box key={r.id} gap={2} paddingLeft={1}>
-                <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶' : ' '}</Text>
-                <Text color={r.enabled ? 'green' : 'gray'} bold>{r.enabled ? '[ENABLED] ' : '[DISABLED]'}</Text>
-                <Text bold={sel} color="white">{r.name.padEnd(44, ' ')}</Text>
+              <Text key={r.id} wrap="truncate-end">
+                <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                <Text color={r.enabled ? 'green' : 'gray'} bold>{r.enabled ? '[ENABLED]  ' : '[DISABLED] '}</Text>
+                <Text bold={sel} color="white">{r.name.padEnd(42, ' ')}</Text>
                 <Text color="gray">{r.detail}</Text>
-              </Box>
+              </Text>
             );
           })}
           {computeOutput && (
@@ -1335,21 +1339,15 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'plugins' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1}>
-          <Box justifyContent="space-between" marginBottom={1}>
-            <Text bold color="cyan">
-              Appliance Roles, Extension Plugins & First-Class Shell Experience
-            </Text>
-            <Text color="gray">
-              [↑/↓] Select · [Space] Enable/Disable · [i] Install · [u] Remove · [s] Re-Sync · [a] Apply
-            </Text>
-          </Box>
-          <Box marginBottom={1} paddingX={1}>
-            <Text color="green">
-              ★ Oh My Zsh (/usr/share/oh-my-zsh) + Starship + VIM + Tmux is ENABLED BY DEFAULT. Active ZSH plugins: git, kubectl, helm, systemd, sudo, tmux, extract, colored-man-pages, docker, axonwall.
-            </Text>
-          </Box>
-          {BUILTIN_PLUGINS.map((p, idx) => {
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            Appliance Roles, Extension Plugins & Shell{' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [i] Install · [a] Apply</Text>
+          </Text>
+          <Text color="green" wrap="truncate-end">
+            ★ Oh My Zsh + Starship + VIM + Tmux ENABLED BY DEFAULT (git, kubectl, helm, systemd, sudo, tmux, axonwall).
+          </Text>
+          {BUILTIN_PLUGINS.slice(0, 14).map((p, idx) => {
             const sel = idx === cursorIdx % BUILTIN_PLUGINS.length;
             const isCore = CORE_ROLE_PLUGIN_IDS.has(p.id);
             const enabled = isCore
@@ -1374,22 +1372,22 @@ export function AxonwallTuiApp({
                     ? 'Default ON'
                     : 'Extension';
             return (
-              <Box key={p.id} gap={2} paddingLeft={1}>
+              <Text key={p.id} wrap="truncate-end">
                 <Text color={sel ? 'cyan' : 'gray'} bold>
-                  {sel ? '▶' : ' '}
+                  {sel ? '▶ ' : '  '}
                 </Text>
                 <Text color={enabled ? 'green' : 'gray'} bold>
-                  {enabled ? '[ENABLED] ' : '[DISABLED]'}
+                  {enabled ? '[ENABLED]  ' : '[DISABLED] '}
                 </Text>
                 <Text color="yellow">{`[${pkgStatus}]`.padEnd(13, ' ')}</Text>
                 <Text bold={sel} color={sel ? 'white' : 'cyan'}>
-                  {p.id.padEnd(26, ' ')}
+                  {p.id.padEnd(24, ' ')}
                 </Text>
                 <Text color="white">
                   {p.name}
-                  {p.dependencies && p.dependencies.length > 0 ? ` [requires: ${p.dependencies.join(', ')}]` : ''}
+                  {p.dependencies && p.dependencies.length > 0 ? ` [req: ${p.dependencies.join(', ')}]` : ''}
                 </Text>
-              </Box>
+              </Text>
             );
           })}
         </Box>
@@ -1400,27 +1398,23 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'cli_ops' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" padding={1}>
-          <Box justifyContent="space-between" marginBottom={1}>
-            <Text bold color="cyan">
-              Modern CLI Ops & Telemetry Toolkit (Auto-Default NIC: {detectedSubnets[0]?.device || 'eth0'})
-            </Text>
-            <Text color="gray">
-              [↑/↓] Select Tool · [Enter/Space] Execute with Auto-Defaults
-            </Text>
-          </Box>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          <Text bold color="cyan" wrap="truncate-end">
+            CLI Ops & Telemetry Toolkit (NIC: {detectedSubnets[0]?.device || 'eth0'}){' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Enter/Space] Execute</Text>
+          </Text>
           {cliTools.map((t, idx) => {
             const sel = idx === cursorIdx % cliTools.length;
             return (
-              <Box key={t.id} gap={2} paddingLeft={1}>
+              <Text key={t.id} wrap="truncate-end">
                 <Text color={sel ? 'cyan' : 'gray'} bold>
-                  {sel ? '▶' : ' '}
+                  {sel ? '▶ ' : '  '}
                 </Text>
                 <Text bold={sel} color={sel ? 'green' : 'white'}>
-                  {t.name.padEnd(44, ' ')}
+                  {t.name.padEnd(38, ' ')}
                 </Text>
                 <Text color="gray">{t.desc}</Text>
-              </Box>
+              </Text>
             );
           })}
           {cliOutput && (
@@ -1438,12 +1432,12 @@ export function AxonwallTuiApp({
       )}
 
       {/* Status Bar & Hotkey Legend */}
-      <Box marginTop={1} justifyContent="space-between">
-        <Text color={readOnly ? 'yellow' : 'green'}>{statusMessage}</Text>
-        <Text color="gray">
+      <Box marginTop={0} flexDirection="column" paddingX={1}>
+        <Text color={readOnly ? 'yellow' : 'green'} wrap="truncate-end">{statusMessage}</Text>
+        <Text color="gray" wrap="truncate-end">
           {readOnly
-            ? '[1-9,0/Tab] Tabs · [d] Reload · [q] Quit [READ-ONLY]'
-            : '[1-9,0/Tab] Tabs · [a] Apply · [c] Confirm · [r] Rollback · [d] Reload · [q] Quit'}
+            ? '[1-9,0/Tab] Switch Tabs · [d] Reload · [q] Quit [READ-ONLY]'
+            : '[1-9,0/Tab] Switch Tabs · [a] Apply · [c] Confirm · [r] Rollback · [d] Reload · [q] Quit'}
         </Text>
       </Box>
     </Box>

@@ -280,12 +280,12 @@ TIMEOUT 5
 LABEL zbm
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
 
 LABEL zbm_backup
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=10 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
 ZBM_SYSLINUX_EOF
   cp -f "$ESP_SYSLINUX" "${ESP_MOUNT}/syslinux.cfg" 2>/dev/null || true
 
