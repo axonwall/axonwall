@@ -32,7 +32,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, nmap
+Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, nmap, kubectl
 Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
@@ -122,6 +122,19 @@ if [[ ! -f "${WORK_DIR}/usr/sbin/litestream" ]]; then
   tar -xzf "${LITE_TAR}" -C "${WORK_DIR}/usr/sbin/" litestream
   chmod 755 "${WORK_DIR}/usr/sbin/litestream"
   rm -f "${LITE_TAR}"
+fi
+
+# Fetch Helm v3 binary if absent
+HELM_VERSION="3.17.4"
+HELM_SHA256="c91e3d7293849eff3b4dc4ea7994c338bcc92f914864d38b5789bab18a1d775d"
+if [[ ! -f "${WORK_DIR}/usr/local/bin/helm" ]]; then
+  echo "[+] Downloading Helm v${HELM_VERSION} binary..."
+  HELM_TAR="$(mktemp -t helm-XXXXXX.tar.gz)"
+  curl -fsSL -o "${HELM_TAR}" "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+  echo "${HELM_SHA256}  ${HELM_TAR}" | sha256sum -c -
+  tar -xzf "${HELM_TAR}" -C "${WORK_DIR}/usr/local/bin/" --strip-components=1 linux-amd64/helm
+  chmod 755 "${WORK_DIR}/usr/local/bin/helm"
+  rm -f "${HELM_TAR}"
 fi
 
 # 5. Copy System Scripts & Terminal Configs

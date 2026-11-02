@@ -294,7 +294,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'kubectl',
       ],
     },
-    cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl'],
+    cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl', 'helm'],
   },
   {
     id: 'cli-diagnostics-nastymap',
@@ -359,7 +359,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       debian: ['kubectl', 'mkcert', 'libnss3-tools', 'gettext-base', 'git', 'curl', 'jq'],
       alpine: ['mkcert', 'nss-tools', 'gettext', 'git', 'curl', 'jq'],
     },
-    cliBinaries: ['vow', 'kubectl', 'mkcert'],
+    cliBinaries: ['vow', 'kubectl', 'helm', 'mkcert'],
     ldapIntegration: {
       enabledByDefault: true,
       serviceAccountCn: 'svc-vow',

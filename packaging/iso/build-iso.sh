@@ -349,6 +349,20 @@ if [[ ! -f config/includes.chroot/usr/sbin/litestream ]]; then
   rm -f "${LITE_TAR}"
 fi
 
+# Fetch Helm v3 binary for Kubernetes & Cloud-Native package management
+HELM_VERSION="3.17.4"
+HELM_SHA256="c91e3d7293849eff3b4dc4ea7994c338bcc92f914864d38b5789bab18a1d775d"
+mkdir -p config/includes.chroot/usr/local/bin
+if [[ ! -f config/includes.chroot/usr/local/bin/helm ]]; then
+  echo "[+] Fetching Helm v${HELM_VERSION}..."
+  HELM_TAR="$(mktemp -t helm-XXXXXX.tar.gz)"
+  curl -fsSL -o "${HELM_TAR}" "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+  echo "${HELM_SHA256}  ${HELM_TAR}" | sha256sum -c -
+  tar -xzf "${HELM_TAR}" -C config/includes.chroot/usr/local/bin/ --strip-components=1 linux-amd64/helm
+  chmod 0755 config/includes.chroot/usr/local/bin/helm
+  rm -f "${HELM_TAR}"
+fi
+
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
 # main ISO can install EITHER Axonwall NGFW OR Axonwall Vault Edition.
 mkdir -p config/includes.chroot/usr/share/axonwall/vault
