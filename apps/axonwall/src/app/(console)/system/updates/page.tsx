@@ -116,9 +116,10 @@ export default function SystemUpdatesPage() {
   const sanitizeZfsIdentifier = (raw: string) =>
     raw.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '');
 
-  const refreshTelemetryAndRelease = async () => {
+  const refreshTelemetryAndRelease = async (forceRefresh = false) => {
     try {
-      const resp = await fetch('/api/system/update', { cache: 'no-store' });
+      const url = forceRefresh ? '/api/system/update?refresh=1' : '/api/system/update';
+      const resp = await fetch(url, { cache: 'no-store' });
       if (resp.ok) {
         const data = await resp.json();
         if (data.telemetry) {
@@ -157,7 +158,7 @@ export default function SystemUpdatesPage() {
 
     const [telemetry, info] = await Promise.all([
       getSystemPartitionsTelemetry().catch(() => null),
-      getReleaseInfo().catch(() => null),
+      getReleaseInfo(forceRefresh).catch(() => null),
     ]);
     if (telemetry) {
       if (telemetry.installMode) {
@@ -510,8 +511,8 @@ export default function SystemUpdatesPage() {
   const handleCheckCloud = async () => {
     setIsCheckingCloud(true);
     try {
-      const data = await refreshTelemetryAndRelease();
-      const info: ReleaseInfo | null = data?.releaseInfo || (await getReleaseInfo());
+      const data = await refreshTelemetryAndRelease(true);
+      const info: ReleaseInfo | null = data?.releaseInfo || (await getReleaseInfo(true));
       if (info) {
         setReleaseInfo(info);
         if (info.isUpToDate) {
@@ -523,7 +524,9 @@ export default function SystemUpdatesPage() {
         }
       }
     } catch {
-      alert('Axonwall Release Channel Check: Up to date! Currently running latest release v0.11.55.');
+      alert(
+        `Axonwall Release Channel Check: Unable to reach GitHub release channel. Currently running v${releaseInfo?.currentVersion || activeSlot.version}.`
+      );
     } finally {
       setIsCheckingCloud(false);
     }

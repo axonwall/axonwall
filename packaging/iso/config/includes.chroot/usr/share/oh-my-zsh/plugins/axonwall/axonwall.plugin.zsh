@@ -14,7 +14,7 @@
 # 1. axonwallctl & ctl completion
 # ------------------------------------------------------------------------------
 _axonwallctl_completion() {
-  local -a subcmds sections plugin_cmds plugin_ids mcp_cmds shells slots
+  local -a subcmds sections plugin_cmds plugin_ids mcp_cmds zbm_cmds shells slots
   subcmds=(
     'status:Show live appliance health, YAML validation state, and daemon connectivity'
     'validate:Validate syntax and Zod schema of /etc/axonwall/*.yaml'
@@ -24,7 +24,9 @@ _axonwallctl_completion() {
     'reload:Alias for apply — reload all services and Web GUI state'
     'confirm:Confirm active candidate configuration before rollback timer expires'
     'rollback:Immediately revert to Last-Known-Good (LKG) configuration'
-    'update:Update Axonwall packages in-place (Rolling) or flash standby slot (A/B)'
+    'zbm:Manage ZFSBootMenu Boot Environments & arbitrary ZFS root snapshots'
+    'be:Alias for zbm — manage ZFS Boot Environments'
+    'update:Update Axonwall packages in-place (ZBM / Rolling) or flash standby slot (A/B)'
     'upgrade:Alias for update'
     'plugin:Manage core appliance roles & extension plugins'
     'plugins:Alias for plugin'
@@ -90,6 +92,14 @@ _axonwallctl_completion() {
     'disable:Disable the MCP server and flush active AI tactical leases'
     'flush:Emergency panic flush of all active MCP tactical leases'
   )
+  zbm_cmds=(
+    'list:List ZFS Boot Environments and ZFS root snapshots'
+    'snapshot:Create an arbitrary ZFS Boot Environment snapshot (and optional clone)'
+    'clone:Clone a ZFS root snapshot into a new Boot Environment'
+    'activate:Activate a ZFS Boot Environment for next boot'
+    'delete:Destroy an inactive ZFS Boot Environment'
+    'delete-snapshot:Destroy a ZFS Boot Environment snapshot'
+  )
   shells=('zsh' 'bash' 'fish')
   slots=('A' 'B')
 
@@ -101,6 +111,11 @@ _axonwallctl_completion() {
   case "${words[2]}" in
     edit|config|nvim|super)
       _describe 'YAML configuration section' sections
+      ;;
+    zbm|be|bootenv)
+      if (( CURRENT == 3 )); then
+        _describe 'zbm subcommand' zbm_cmds
+      fi
       ;;
     plugin|plugins)
       if (( CURRENT == 3 )); then
@@ -173,6 +188,11 @@ _axonwall_tui_completion() {
     'nastymap:NastyMap Interactive Nmap Scanner, Topology & Host Inventory'
     'cli_ops:CLI Ops Toolkit (btop, slurm, iftop, iotop, sysstat, dig, nft, zpool, kubectl)'
     'cli-tools:Alias for cli_ops'
+    'users:OpenLDAP Directory & Local OS Users'
+    'gitops:Etckeeper /etc Git Revision History'
+    'updates:ZFSBootMenu Boot Environments, Snapshots & System Updates'
+    'zbm:Alias for updates — ZFS Boot Environments & Snapshots'
+    'be:Alias for updates — ZFS Boot Environments & Snapshots'
     'logs:Live System & Daemon Journal Logs'
   )
   _arguments \

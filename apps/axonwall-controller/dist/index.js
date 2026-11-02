@@ -39007,6 +39007,7 @@ function compileUnbound(dns, headscale) {
   lines.push("  hide-version: yes");
   lines.push("  harden-glue: yes");
   lines.push("  harden-dnssec-stripped: yes");
+  lines.push('  tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"');
   if (dns.dnssec) {
     lines.push('  auto-trust-anchor-file: "/var/lib/unbound/root.key"');
   }
@@ -39078,7 +39079,7 @@ function compileUnbound(dns, headscale) {
     }
   }
   return {
-    unboundConfig: lines.join("\n")
+    unboundConfig: lines.join("\n") + "\n"
   };
 }
 

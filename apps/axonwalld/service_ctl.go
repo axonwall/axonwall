@@ -118,9 +118,13 @@ func dhcpClientRunning(dev string) bool {
 	return false
 }
 
-func triggerDhcpClient(dev string) {
+func triggerDhcpClient(dev string, roles ...string) {
 	if dev == "" {
 		return
+	}
+	role := "wan"
+	if len(roles) > 0 && roles[0] != "" {
+		role = strings.ToLower(strings.TrimSpace(roles[0]))
 	}
 	if dhcpClientRunning(dev) {
 		log.Printf("[Agent] DHCP client already running on %s; not starting another", dev)
@@ -128,7 +132,11 @@ func triggerDhcpClient(dev string) {
 	}
 	go func() {
 		if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
-			_ = exec.Command(dhcpcdPath, "-4", dev).Run()
+			if role != "wan" {
+				_ = exec.Command(dhcpcdPath, "-4", "-G", "-C", "resolv.conf", dev).Run()
+			} else {
+				_ = exec.Command(dhcpcdPath, "-4", dev).Run()
+			}
 		} else if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
 			_ = exec.Command(dhclientPath, "-1", "-v", dev).Run()
 		}

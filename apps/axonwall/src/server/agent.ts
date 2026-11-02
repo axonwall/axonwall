@@ -2966,14 +2966,19 @@ function compareSemver(v1: string, v2: string): number {
   return 0;
 }
 
-export async function getReleaseInfo(): Promise<ReleaseInfo> {
+export async function getReleaseInfo(forceRefresh = false): Promise<ReleaseInfo> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
   if (session.passwordChangeRequired) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const now = Date.now();
 
-  if (cachedReleaseInfo && now - cachedReleaseInfo.timestamp < 60000) {
+  if (
+    !forceRefresh &&
+    cachedReleaseInfo &&
+    now - cachedReleaseInfo.timestamp < 60000 &&
+    cachedReleaseInfo.data.currentVersion === currentVersion
+  ) {
     return cachedReleaseInfo.data;
   }
 
@@ -2981,52 +2986,91 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
   let releaseNotes = 'You are running the latest stable release of Axonwall.';
   let publishedAt = new Date().toISOString();
   let downloadUrl = 'https://github.com/axonwall/axonwall/releases';
+  let remoteResolved = false;
+
+  const applyReleasePayload = (data: any): boolean => {
+    if (data && typeof data.tag_name === 'string' && data.tag_name.trim()) {
+      latestVersion = data.tag_name.trim().replace(/^v/, '');
+      releaseNotes = data.body || 'No release notes provided.';
+      publishedAt = data.published_at || publishedAt;
+      downloadUrl = data.html_url || downloadUrl;
+      return true;
+    }
+    return false;
+  };
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     const res = await fetch('https://api.github.com/repos/axonwall/axonwall/releases/latest', {
       headers: {
-        'User-Agent': 'Axonwall-Appliance-Updater/0.11.55',
+        'User-Agent': `Axonwall-Appliance-Updater/${currentVersion}`,
         Accept: 'application/vnd.github.v3+json',
       },
+      cache: 'no-store',
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
 
     if (res.ok) {
       const data = await res.json();
-      if (data && data.tag_name) {
-        latestVersion = data.tag_name.replace(/^v/, '');
-        releaseNotes = data.body || 'No release notes provided.';
-        publishedAt = data.published_at || publishedAt;
-        downloadUrl = data.html_url || downloadUrl;
+      if (applyReleasePayload(data)) {
+        remoteResolved = true;
       }
     } else {
       // Fallback: Check tags
-      const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall/tags?per_page=5', {
+      const tagController = new AbortController();
+      const tagTimeoutId = setTimeout(() => tagController.abort(), 12000);
+      const tagRes = await fetch('https://api.github.com/repos/axonwall/axonwall/tags?per_page=10', {
         headers: {
-          'User-Agent': 'Axonwall-Appliance-Updater/0.11.55',
+          'User-Agent': `Axonwall-Appliance-Updater/${currentVersion}`,
           Accept: 'application/vnd.github.v3+json',
         },
+        cache: 'no-store',
+        signal: tagController.signal,
       });
+      clearTimeout(tagTimeoutId);
       if (tagRes.ok) {
         const tags = await tagRes.json();
         if (Array.isArray(tags) && tags.length > 0) {
           const semverTags = tags
-            .map((t: any) => t.name.replace(/^v/, ''))
+            .map((t: any) => String(t?.name || '').replace(/^v/, ''))
             .filter((t: string) => /^\d+\.\d+\.\d+/.test(t))
             .sort((a: string, b: string) => compareSemver(b, a));
           if (semverTags.length > 0) {
             latestVersion = semverTags[0];
+            remoteResolved = true;
           }
         }
       }
     }
   } catch {
-    // In airgapped or offline VM environments, default to current installed version
-    latestVersion = currentVersion;
+    // Fallback to curl in case Node fetch timed out on primary DNS resolver failover
+    try {
+      const raw = execFileSync(
+        'curl',
+        [
+          '-fsSL',
+          '--connect-timeout',
+          '6',
+          '--max-time',
+          '12',
+          '-H',
+          `User-Agent: Axonwall-Appliance-Updater/${currentVersion}`,
+          '-H',
+          'Accept: application/vnd.github.v3+json',
+          'https://api.github.com/repos/axonwall/axonwall/releases/latest',
+        ],
+        { encoding: 'utf8', timeout: 14000, stdio: ['ignore', 'pipe', 'ignore'] }
+      );
+      if (raw && applyReleasePayload(JSON.parse(raw))) {
+        remoteResolved = true;
+      }
+    } catch {
+      // In airgapped or offline VM environments, default to current installed version
+      latestVersion = currentVersion;
+    }
   }
 
   const isUpToDate = compareSemver(currentVersion, latestVersion) >= 0;
@@ -3041,7 +3085,9 @@ export async function getReleaseInfo(): Promise<ReleaseInfo> {
     downloadUrl,
   };
 
-  cachedReleaseInfo = { data: result, timestamp: now };
+  if (remoteResolved) {
+    cachedReleaseInfo = { data: result, timestamp: now };
+  }
   return result;
 }
 
@@ -3502,7 +3548,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
     }
 
     const currentVersion = getCurrentInstalledVersion();
-    const release = await getReleaseInfo();
+    const release = await getReleaseInfo(true);
     const targetVersion = (release.latestVersion || '0.11.55').replace(/[^0-9a-zA-Z._-]/g, '');
 
     // 1. Delegate privileged firmware update to root daemon (axonwalld) first
@@ -3510,7 +3556,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       '/v1/system/update',
       'POST',
       { slot: cleanSlot, version: targetVersion },
-      45000
+      300000
     );
     if (daemonResp) {
       if (daemonResp.success) {
@@ -3549,7 +3595,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
                 : ['--slot', cleanSlot, '--version', targetVersion];
           execFileSync(up, cliArgs, {
             stdio: 'pipe',
-            timeout: 45000,
+            timeout: 300000,
           });
         } catch (execErr: any) {
           const stderr = execErr?.stderr ? String(execErr.stderr).trim() : '';

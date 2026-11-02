@@ -34,7 +34,7 @@ fi
 
 echo "[Hook] Ensuring Unbound DNSSEC root trust anchor and disabling unconfigured daemons until axonwall-firstboot..."
 mkdir -p /var/lib/unbound
-if [ -f /usr/share/dns/root.key ] && [ ! -s /var/lib/unbound/root.key ]; then
+if [ -f /usr/share/dns/root.key ] && { [ ! -s /var/lib/unbound/root.key ] || ! grep -q "AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449" /var/lib/unbound/root.key 2>/dev/null; }; then
   cp -f /usr/share/dns/root.key /var/lib/unbound/root.key
 fi
 chown -R unbound:unbound /var/lib/unbound 2>/dev/null || true

@@ -42,20 +42,79 @@ export type TopTab =
   | 'compute'
   | 'plugins'
   | 'nastymap'
+  | 'updates'
   | 'cli_ops';
 
-const TOP_TABS: Array<{ id: TopTab; key: string; label: string }> = [
-  { id: 'dashboard', key: '1', label: 'Dashboard' },
-  { id: 'interfaces', key: '2', label: 'Interfaces' },
-  { id: 'firewall', key: '3', label: 'Firewall & NAT' },
-  { id: 'routing', key: '4', label: 'Routing & FRR' },
-  { id: 'services', key: '5', label: 'Services & MCP' },
-  { id: 'storage', key: '6', label: 'ZFS Storage' },
-  { id: 'compute', key: '7', label: 'K3s, Virt & SOC' },
-  { id: 'plugins', key: '8', label: 'Plugins & Shell' },
-  { id: 'nastymap', key: '9', label: 'NastyMap' },
-  { id: 'cli_ops', key: '0', label: 'CLI Ops & Logs' },
-];
+function detectLocalInstallMode(): 'zbm' | 'rolling' | 'ab' {
+  for (const p of [path.join(ETC_CONFIG_DIR, 'install-mode'), '/var/lib/axonwall/install-mode']) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = fs.readFileSync(p, 'utf-8').trim().toLowerCase();
+        if (raw.includes('zbm') || raw.includes('zfs')) return 'zbm';
+        if (raw.includes('rolling')) return 'rolling';
+        if (raw.includes('ab')) return 'ab';
+      }
+    } catch {}
+  }
+  try {
+    if (fs.existsSync('/proc/mounts')) {
+      const mounts = fs.readFileSync('/proc/mounts', 'utf-8');
+      for (const line of mounts.split('\n')) {
+        const parts = line.split(' ');
+        if (parts[1] === '/' && parts[2] === 'zfs') {
+          return 'zbm';
+        }
+      }
+    }
+  } catch {}
+  return 'ab';
+}
+
+function getTopTabs(installMode: string): Array<{ id: TopTab; key: string; label: string }> {
+  const updatesLabel =
+    installMode === 'zbm'
+      ? 'ZFS Boot Env'
+      : installMode === 'rolling'
+        ? 'Rolling Updates'
+        : 'A/B Updates';
+  return [
+    { id: 'dashboard', key: '1', label: 'Dashboard' },
+    { id: 'interfaces', key: '2', label: 'Interfaces' },
+    { id: 'firewall', key: '3', label: 'Firewall & NAT' },
+    { id: 'routing', key: '4', label: 'Routing & FRR' },
+    { id: 'services', key: '5', label: 'Services & VPN' },
+    { id: 'storage', key: '6', label: 'ZFS Storage' },
+    { id: 'compute', key: '7', label: 'K3s, Virt & SOC' },
+    { id: 'plugins', key: '8', label: 'Plugins & Shell' },
+    { id: 'nastymap', key: '9', label: 'NastyMap' },
+    { id: 'updates', key: 'u', label: updatesLabel },
+    { id: 'cli_ops', key: '0', label: 'System & Ops' },
+  ];
+}
+
+export function getViewportSlice<T>(
+  items: T[],
+  cursorIdx: number,
+  maxRows = 13
+): { slice: T[]; startIndex: number; activeIndex: number } {
+  if (items.length === 0) {
+    return { slice: [], startIndex: 0, activeIndex: 0 };
+  }
+  const activeIndex = ((cursorIdx % items.length) + items.length) % items.length;
+  if (items.length <= maxRows) {
+    return { slice: items, startIndex: 0, activeIndex };
+  }
+  const half = Math.floor(maxRows / 2);
+  let startIndex = Math.max(0, activeIndex - half);
+  if (startIndex + maxRows > items.length) {
+    startIndex = Math.max(0, items.length - maxRows);
+  }
+  return {
+    slice: items.slice(startIndex, startIndex + maxRows),
+    startIndex,
+    activeIndex,
+  };
+}
 
 function readLayeredYamlMap(): Record<string, string> {
   const files: Record<string, string> = {};
@@ -149,7 +208,12 @@ function saveStateToDisk(state: DesiredState): Record<string, string> {
   return daemonFiles;
 }
 
-function callDaemon(endpoint: string, method: 'GET' | 'POST', payload?: unknown): Promise<any> {
+function callDaemon(
+  endpoint: string,
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  payload?: unknown,
+  timeoutMs = 8000
+): Promise<any> {
   return new Promise((resolve) => {
     if (!fs.existsSync(AGENT_API_SOCKET)) {
       resolve(null);
@@ -182,7 +246,7 @@ function callDaemon(endpoint: string, method: 'GET' | 'POST', payload?: unknown)
           ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
           ...(token ? { 'X-Axonwall-Agent-Token': token, Authorization: `Bearer ${token}` } : {}),
         },
-        timeout: 4000,
+        timeout: timeoutMs,
       },
       (res) => {
         let data = '';
@@ -190,7 +254,20 @@ function callDaemon(endpoint: string, method: 'GET' | 'POST', payload?: unknown)
         res.on('end', () => {
           const status = res.statusCode || 500;
           if (status < 200 || status >= 300) {
-            resolve(null);
+            try {
+              const parsed = JSON.parse(data);
+              resolve({
+                success: false,
+                error: parsed.error || parsed.message || `HTTP ${status}`,
+                message: parsed.message || parsed.error || `HTTP ${status}`,
+              });
+            } catch {
+              resolve({
+                success: false,
+                error: data.trim() || `HTTP ${status}`,
+                message: data.trim() || `HTTP ${status}`,
+              });
+            }
             return;
           }
           try {
@@ -267,6 +344,13 @@ function execSafe(bin: string, args: string[]): string {
   }
 }
 
+interface InlinePrompt {
+  title: string;
+  placeholder: string;
+  value: string;
+  onSubmit: (val: string) => void;
+}
+
 export function AxonwallTuiApp({
   initialTab = 'dashboard',
   readOnly = false,
@@ -276,18 +360,45 @@ export function AxonwallTuiApp({
 }) {
   const { exit } = useApp();
   const [activeTab, setActiveTab] = useState<TopTab>(initialTab);
-  const [fwSubView, setFwSubView] = useState<'rules' | 'nat' | 'aliases'>('rules');
+  const [ifSubView, setIfSubView] = useState<'interfaces' | 'vlans' | 'bonds' | 'bridges'>('interfaces');
+  const [fwSubView, setFwSubView] = useState<'rules' | 'nat' | 'aliases' | 'shaper' | 'security'>('rules');
+  const [rtSubView, setRtSubView] = useState<'routes' | 'gateways' | 'frr'>('routes');
+  const [stSubView, setStSubView] = useState<'pools' | 'datasets' | 'snapshots' | 'shares'>('pools');
+  const [cmpSubView, setCmpSubView] = useState<'roles' | 'vms' | 'containers' | 'soc'>('roles');
+  const [updSubView, setUpdSubView] = useState<'be' | 'snapshots' | 'checks'>('be');
+  const [opsSubView, setOpsSubView] = useState<'toolkit' | 'users' | 'gitops' | 'power'>('toolkit');
+
   const [state, setState] = useState<DesiredState>(() => loadCurrentState());
   const [daemonStatus, setDaemonStatus] = useState<any>(null);
+  const [partitionStatus, setPartitionStatus] = useState<any>(() => ({
+    installMode: detectLocalInstallMode(),
+    bootEnvironments: [],
+    checks: [],
+  }));
   const [mcpStatus, setMcpStatus] = useState<{ masterEnabled: boolean; leases?: any[]; disabledReason?: string }>({
     masterEnabled: false,
     disabledReason: 'Disabled by default',
   });
   const [hostPlugins, setHostPlugins] = useState<Record<string, any>>({});
+  const [liveNasPools, setLiveNasPools] = useState<any[]>([]);
+  const [liveNasSnapshots, setLiveNasSnapshots] = useState<any[]>([]);
+  const [liveNasDisks, setLiveNasDisks] = useState<any[]>([]);
+  const [liveVms, setLiveVms] = useState<any[]>([]);
+  const [liveContainers, setLiveContainers] = useState<any[]>([]);
+  const [soarBlockedIps, setSoarBlockedIps] = useState<any[]>([]);
+  const [rootkitStatus, setRootkitStatus] = useState<any>(null);
+  const [directoryUsers, setDirectoryUsers] = useState<any[]>([]);
+  const [directoryStatus, setDirectoryStatus] = useState<any>(null);
+  const [etckeeperHistory, setEtckeeperHistory] = useState<any[]>([]);
+  const [hwTelemetry, setHwTelemetry] = useState<any>(null);
+  const [haTrustStatus, setHaTrustStatus] = useState<any>(null);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [promptState, setPromptState] = useState<InlinePrompt | null>(null);
+
   const [statusMessage, setStatusMessage] = useState<string>(
     readOnly
-      ? 'Ready [READ-ONLY OPERATOR MODE] — Use [1-9,0] or [Tab] to inspect tabs, [↑/↓] to scroll, [q] to exit.'
-      : 'Ready — Use [1-9,0] or [Tab] to switch tabs, [↑/↓] to select, [Space] to toggle, [a] to apply, [q] to exit.'
+      ? 'Ready [READ-ONLY OPERATOR MODE] — Use [1-9,u,0] or [Tab] to inspect tabs, [↑/↓] to scroll, [q] to exit.'
+      : 'Ready — Use [1-9,u,0] or [Tab] to switch tabs, [n] Subview, [↑/↓] Select, [Space] Toggle, [a] Apply, [q] Quit.'
   );
   const [cursorIdx, setCursorIdx] = useState<number>(0);
   const [cliOutput, setCliOutput] = useState<string>('');
@@ -298,12 +409,16 @@ export function AxonwallTuiApp({
     const fresh = loadCurrentState();
     setState(fresh);
     const localMcp = getMcpServerStatus();
-    const [st, mcpLeases, plg] = await Promise.all([
+    const [st, mcpLeases, plg, parts] = await Promise.all([
       callDaemon('/v1/status', 'GET'),
       callDaemon('/v1/mcp/leases', 'GET'),
       callDaemon('/v1/system/plugins', 'GET'),
+      callDaemon('/v1/system/partitions', 'GET'),
     ]);
-    if (st) setDaemonStatus(st);
+    if (st && !st.error) setDaemonStatus(st);
+    if (parts && !parts.error) {
+      setPartitionStatus(parts);
+    }
     setMcpStatus({
       masterEnabled: localMcp.enabled,
       disabledReason: localMcp.disabledReason,
@@ -316,7 +431,48 @@ export function AxonwallTuiApp({
       }
       setHostPlugins(map);
     }
-  }, []);
+
+    // Fetch tab-specific live telemetry in background
+    if (activeTab === 'storage') {
+      const [poolsRes, snapsRes, disksRes] = await Promise.all([
+        callDaemon('/v1/nas/pools', 'GET'),
+        callDaemon('/v1/nas/snapshots', 'GET'),
+        callDaemon('/v1/nas/disks', 'GET'),
+      ]);
+      if (Array.isArray(poolsRes?.pools)) setLiveNasPools(poolsRes.pools);
+      if (Array.isArray(snapsRes?.snapshots)) setLiveNasSnapshots(snapsRes.snapshots);
+      if (Array.isArray(disksRes?.disks)) setLiveNasDisks(disksRes.disks);
+    } else if (activeTab === 'compute') {
+      const [vmsRes, ctsRes, soarRes, rkRes] = await Promise.all([
+        callDaemon('/v1/virt/vms', 'GET'),
+        callDaemon('/v1/virt/containers', 'GET'),
+        callDaemon('/v1/vigilante/soar/blocked-ips', 'GET'),
+        callDaemon('/v1/security/rootkit/status', 'GET'),
+      ]);
+      if (Array.isArray(vmsRes?.vms)) setLiveVms(vmsRes.vms);
+      if (Array.isArray(ctsRes?.containers)) setLiveContainers(ctsRes.containers);
+      if (Array.isArray(soarRes?.blockedIPs)) setSoarBlockedIps(soarRes.blockedIPs);
+      if (rkRes && !rkRes.error) setRootkitStatus(rkRes);
+    } else if (activeTab === 'cli_ops') {
+      const [usrRes, dirRes, etcRes, hwRes] = await Promise.all([
+        callDaemon('/v1/system/users', 'GET'),
+        callDaemon('/v1/system/directory/status', 'GET'),
+        callDaemon('/v1/system/etckeeper/history', 'GET'),
+        callDaemon('/v1/system/telemetry/hardware', 'GET'),
+      ]);
+      if (Array.isArray(usrRes?.users)) setDirectoryUsers(usrRes.users);
+      if (dirRes && !dirRes.error) setDirectoryStatus(dirRes);
+      if (Array.isArray(etcRes?.history)) setEtckeeperHistory(etcRes.history);
+      if (hwRes && !hwRes.error) setHwTelemetry(hwRes);
+    } else if (activeTab === 'dashboard' || activeTab === 'services') {
+      const [hwRes, haRes] = await Promise.all([
+        callDaemon('/v1/system/telemetry/hardware', 'GET'),
+        callDaemon('/v1/ha/sync-trust', 'GET'),
+      ]);
+      if (hwRes && !hwRes.error) setHwTelemetry(hwRes);
+      if (haRes && !haRes.error) setHaTrustStatus(haRes);
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     refreshAll();
@@ -344,37 +500,46 @@ export function AxonwallTuiApp({
       })),
     ];
 
-    const resp = await callDaemon('/v1/apply', 'POST', {
-      jobId: `tui-${Date.now()}`,
-      job_id: `tui-${Date.now()}`,
-      bundleHash,
-      bundle_hash: bundleHash,
-      nftablesRuleset: nftScript,
-      nftScript,
-      nft_script: nftScript,
-      files: allFiles,
-      reloadServices,
-      reload_services: reloadServices,
-      commitConfirmTimeoutSec: 120,
-      confirmTimeoutSeconds: 120,
-      confirm_timeout_seconds: 120,
-    });
+    const jobId = `tui-${Date.now()}`;
+    const resp = await callDaemon(
+      '/v1/apply',
+      'POST',
+      {
+        jobId,
+        job_id: jobId,
+        bundleHash,
+        bundle_hash: bundleHash,
+        nftablesRuleset: nftScript,
+        nftScript,
+        nft_script: nftScript,
+        files: allFiles,
+        reloadServices,
+        reload_services: reloadServices,
+        commitConfirmTimeoutSec: 120,
+        confirmTimeoutSeconds: 120,
+        confirm_timeout_seconds: 120,
+      },
+      20000
+    );
 
     if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
       setStatusMessage('✔ Applied to live daemon! Press [c] within 120s to confirm, or [r] to rollback.');
       await refreshAll();
+    } else if (resp?.error) {
+      setStatusMessage(`✖ Apply rejected by daemon: ${resp.message || resp.error}`);
     } else {
-      setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or mock mode).');
+      setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     }
   };
 
   const handleConfirm = async () => {
-    const resp = await callDaemon('/v1/confirm', 'POST', { jobId: 'confirm', job_id: 'confirm' });
+    const activeJobId = daemonStatus?.pending_job_id || daemonStatus?.pendingJobId || 'confirm';
+    const resp = await callDaemon('/v1/confirm', 'POST', { jobId: activeJobId, job_id: activeJobId });
     if (resp && (resp.success || resp.status === 'confirmed')) {
       setStatusMessage('✔ Configuration confirmed and persisted as last-known-good!');
       await refreshAll();
     } else {
-      setStatusMessage('No pending commit-confirm timer active.');
+      setStatusMessage(resp?.message || 'No pending commit-confirm timer active.');
     }
   };
 
@@ -384,7 +549,7 @@ export function AxonwallTuiApp({
       setStatusMessage('↺ Rolled back to previous last-known-good configuration!');
       await refreshAll();
     } else {
-      setStatusMessage('Rollback requested.');
+      setStatusMessage(resp?.message || 'Rollback requested.');
     }
   };
 
@@ -484,6 +649,12 @@ export function AxonwallTuiApp({
       detail: `Upstreams: ${(state.dns?.dotUpstreams || state.system?.dnsServers || []).join(', ') || 'Root Hints'}`,
     },
     {
+      id: 'dnsBlocklist',
+      name: 'DNS Blocklist & Sinkhole (RPZ)',
+      enabled: Boolean(state.dns?.blocklist?.enabled ?? (state as any).dnsBlocklist?.enabled),
+      detail: `${state.dns?.blocklist?.feeds?.length || 0} threat feeds, ${(state.dns?.blocklist as any)?.customBlockedDomains?.length || 0} custom domains`,
+    },
+    {
       id: 'wireguard',
       name: 'WireGuard Kernel VPN',
       enabled: Boolean(state.wireguard?.enabled),
@@ -493,13 +664,25 @@ export function AxonwallTuiApp({
       id: 'rosenpass',
       name: 'Rosenpass Post-Quantum WireGuard PSK',
       enabled: Boolean(state.rosenpass?.enabled),
-      detail: `Classic McEliece + Kyber PSK rotation on UDP ${state.rosenpass?.listenPort || 9999}`,
+      detail: `Classic McEliece + Kyber PSK rotation on UDP ${state.rosenpass?.listenPort || 9999} ([g] Keygen)`,
     },
     {
       id: 'headscale',
       name: 'Headscale Mesh Coordination Server',
       enabled: Boolean(state.headscale?.enabled),
       detail: `MagicDNS: ${state.headscale?.magicDnsDomain || 'mesh.axonwall.local'}`,
+    },
+    {
+      id: 'openvpn',
+      name: 'OpenVPN Server / Site-to-Site',
+      enabled: Boolean((state as any).openvpn?.enabled),
+      detail: `Instances: ${(state as any).openvpn?.instances?.length || 0}`,
+    },
+    {
+      id: 'ipsec',
+      name: 'IPsec / StrongSwan IKEv2 VPN',
+      enabled: Boolean((state as any).ipsec?.enabled),
+      detail: `Tunnels: ${(state as any).ipsec?.tunnels?.length || 0}`,
     },
     {
       id: 'suricata',
@@ -514,6 +697,12 @@ export function AxonwallTuiApp({
       detail: `nftables set @${state.crowdsec?.remediationSetName || 'crowdsec_blackhole'} (${state.crowdsec?.action || 'drop'})`,
     },
     {
+      id: 'geoip',
+      name: 'GeoIP Country Filtering',
+      enabled: Boolean(state.geoip?.enabled),
+      detail: `Mode: ${state.geoip?.mode || 'block'} (${state.geoip?.countries?.join(', ') || 'none'})`,
+    },
+    {
       id: 'haproxy',
       name: 'HAProxy L4/L7 Reverse Proxy',
       enabled: Boolean(state.haproxy?.enabled),
@@ -524,6 +713,36 @@ export function AxonwallTuiApp({
       name: 'FreeRADIUS 802.1X Authentication',
       enabled: Boolean(state.freeradius?.enabled),
       detail: `UDP ${state.freeradius?.authPort || 1812}/${state.freeradius?.acctPort || 1813} (${state.freeradius?.clients?.length || 0} NAS clients)`,
+    },
+    {
+      id: 'captivePortal',
+      name: 'Captive Portal & Voucher Gateway',
+      enabled: Boolean(state.captivePortal?.enabled),
+      detail: `Zones: ${(state.captivePortal?.zones || []).map((z) => z.interface).join(', ') || 'none'}`,
+    },
+    {
+      id: 'iap',
+      name: 'Identity-Aware Zero-Trust Proxy (IAP)',
+      enabled: Boolean(state.zeroTrust?.enabled ?? (state as any).iap?.enabled),
+      detail: `${state.zeroTrust?.apps?.length || 0} protected applications`,
+    },
+    {
+      id: 'acme',
+      name: 'ACME / Let’s Encrypt Automated TLS',
+      enabled: Boolean(state.acme?.enabled),
+      detail: `Certs: ${state.acme?.certificates?.length || 0} (${state.acme?.accounts?.[0]?.email || 'no account'})`,
+    },
+    {
+      id: 'ddns',
+      name: 'Dynamic DNS (DDNS) Client',
+      enabled: Boolean((state as any).ddns?.enabled),
+      detail: `Provider: ${(state as any).ddns?.provider || 'cloudflare'} (${(state as any).ddns?.hostname || 'unconfigured'})`,
+    },
+    {
+      id: 'mdns',
+      name: 'mDNS / Avahi Multicast Reflector',
+      enabled: Boolean((state as any).mdns?.enabled),
+      detail: `Reflect across: ${(state as any).mdns?.interfaces?.join(', ') || 'LAN/VLANs'}`,
     },
     {
       id: 'snmp',
@@ -539,18 +758,18 @@ export function AxonwallTuiApp({
     },
     {
       id: 'ha',
-      name: 'High Availability (Keepalived VRRP + Conntrackd)',
+      name: 'High Availability (Keepalived VRRP + mTLS)',
       enabled: Boolean(state.ha?.enabled),
       detail: state.ha?.enabled
-        ? `${(state.ha?.nodeRole || 'MASTER').toUpperCase()} (${state.ha?.vrrpInstances?.length || 0} VRRP VIPs)`
+        ? `${(state.ha?.nodeRole || 'MASTER').toUpperCase()} (${state.ha?.vrrpInstances?.length || 0} VIPs, PKI: ${haTrustStatus?.pkiEnrolled ? 'ENROLLED' : 'PENDING'})`
         : 'Standalone Node',
     },
     {
       id: 'mcp',
-      name: 'Axonwall MCP Server (AI Agent Control Plane)',
+      name: 'Axonwall MCP Server (AI Control Plane)',
       enabled: Boolean(mcpStatus.masterEnabled),
       detail: mcpStatus.masterEnabled
-        ? `ACTIVE (${mcpStatus.leases?.length || 0} active leases)`
+        ? `ACTIVE (${mcpStatus.leases?.length || 0} active leases — [f] Emergency Flush)`
         : `DISABLED BY DEFAULT (${mcpStatus.disabledReason || 'Explicit opt-in required'})`,
     },
   ];
@@ -656,14 +875,63 @@ export function AxonwallTuiApp({
     setStatusMessage(`Executed ${item.name} (NIC: ${defaultIf}, DNS: ${defaultDns}).`);
   };
 
+  const installMode = partitionStatus?.installMode || detectLocalInstallMode();
+  const topTabs = getTopTabs(installMode);
+
+  // Flatten all ZBM snapshots across Boot Environments
+  const allZbmSnapshots: any[] = [];
+  for (const be of partitionStatus?.bootEnvironments || []) {
+    if (Array.isArray(be.snapshotDetails) && be.snapshotDetails.length > 0) {
+      for (const sd of be.snapshotDetails) {
+        allZbmSnapshots.push(sd);
+      }
+    } else if (Array.isArray(be.snapshots)) {
+      for (const sName of be.snapshots) {
+        allZbmSnapshots.push({
+          name: sName.includes('@') ? sName.split('@')[1] : sName,
+          fullName: sName.includes('@') ? sName : `${be.dataset}@${sName}`,
+          dataset: be.dataset,
+          beName: be.name,
+          usedSize: '-',
+          referSize: be.usedSize || '-',
+          createdAt: be.createdAt || '-',
+        });
+      }
+    }
+  }
+
   useInput((input, key) => {
+    // Handle inline text prompt mode first
+    if (promptState) {
+      if (key.escape) {
+        setPromptState(null);
+        setStatusMessage('Cancelled input prompt.');
+        return;
+      }
+      if (key.return) {
+        const finalVal = (promptState.value.trim() || promptState.placeholder).trim();
+        const cb = promptState.onSubmit;
+        setPromptState(null);
+        cb(finalVal);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setPromptState((prev) => (prev ? { ...prev, value: prev.value.slice(0, -1) } : null));
+        return;
+      }
+      if (input && !key.ctrl && !key.meta && input.length === 1) {
+        setPromptState((prev) => (prev ? { ...prev, value: prev.value + input } : null));
+      }
+      return;
+    }
+
     if (input === 'q' || input === 'Q') {
       exit();
       return;
     }
     if (key.tab) {
-      const idx = TOP_TABS.findIndex((t) => t.id === activeTab);
-      const nextTab = TOP_TABS[(idx + 1) % TOP_TABS.length]!;
+      const idx = topTabs.findIndex((t) => t.id === activeTab);
+      const nextTab = topTabs[(idx + 1) % topTabs.length]!;
       setActiveTab(nextTab.id);
       setCursorIdx(0);
       return;
@@ -704,6 +972,10 @@ export function AxonwallTuiApp({
       setActiveTab('nastymap');
       setCursorIdx(0);
       return;
+    } else if (input === 'u' && activeTab !== 'plugins' && activeTab !== 'compute') {
+      setActiveTab('updates');
+      setCursorIdx(0);
+      return;
     } else if (input === '0') {
       setActiveTab('cli_ops');
       setCursorIdx(0);
@@ -713,7 +985,7 @@ export function AxonwallTuiApp({
 
     if (activeTab === 'nastymap') return;
 
-    if (input === 'c') {
+    if (input === 'c' && activeTab !== 'updates') {
       if (readOnly) {
         setStatusMessage('Read-only operator session: confirming commit is disabled.');
         return;
@@ -734,47 +1006,433 @@ export function AxonwallTuiApp({
       }
       handleApplyConfig();
       return;
-    } else if (input === 'd') {
+    } else if (input === 'd' && activeTab !== 'interfaces') {
       refreshAll();
-      setStatusMessage('Reloaded configuration from /etc/axonwall/*.yaml.');
+      setStatusMessage('Reloaded live state & telemetry from /etc/axonwall/*.yaml and axonwalld.');
       return;
     }
 
-    if (activeTab === 'firewall' && input === 'n') {
-      const order: Array<'rules' | 'nat' | 'aliases'> = ['rules', 'nat', 'aliases'];
-      const nextSub = order[(order.indexOf(fwSubView) + 1) % order.length]!;
-      setFwSubView(nextSub);
-      setCursorIdx(0);
-      setStatusMessage(`Switched Firewall view to ${nextSub.toUpperCase()}.`);
-      return;
+    // Subview cycling with [n] across all multi-view tabs
+    if (input === 'n') {
+      if (activeTab === 'interfaces') {
+        const order: Array<'interfaces' | 'vlans' | 'bonds' | 'bridges'> = ['interfaces', 'vlans', 'bonds', 'bridges'];
+        const nextSub = order[(order.indexOf(ifSubView) + 1) % order.length]!;
+        setIfSubView(nextSub);
+        setCursorIdx(0);
+        setStatusMessage(`Switched Interfaces view to ${nextSub.toUpperCase()}.`);
+        return;
+      }
+      if (activeTab === 'firewall') {
+        const order: Array<'rules' | 'nat' | 'aliases' | 'shaper' | 'security'> = [
+          'rules',
+          'nat',
+          'aliases',
+          'shaper',
+          'security',
+        ];
+        const nextSub = order[(order.indexOf(fwSubView) + 1) % order.length]!;
+        setFwSubView(nextSub);
+        setCursorIdx(0);
+        setStatusMessage(`Switched Firewall view to ${nextSub.toUpperCase()}.`);
+        return;
+      }
+      if (activeTab === 'routing') {
+        const order: Array<'routes' | 'gateways' | 'frr'> = ['routes', 'gateways', 'frr'];
+        const nextSub = order[(order.indexOf(rtSubView) + 1) % order.length]!;
+        setRtSubView(nextSub);
+        setCursorIdx(0);
+        setStatusMessage(`Switched Routing view to ${nextSub.toUpperCase()}.`);
+        return;
+      }
+      if (activeTab === 'storage') {
+        const order: Array<'pools' | 'datasets' | 'snapshots' | 'shares'> = ['pools', 'datasets', 'snapshots', 'shares'];
+        const nextSub = order[(order.indexOf(stSubView) + 1) % order.length]!;
+        setStSubView(nextSub);
+        setCursorIdx(0);
+        setStatusMessage(`Switched Storage view to ${nextSub.toUpperCase()}.`);
+        return;
+      }
+      if (activeTab === 'compute') {
+        const order: Array<'roles' | 'vms' | 'containers' | 'soc'> = ['roles', 'vms', 'containers', 'soc'];
+        const nextSub = order[(order.indexOf(cmpSubView) + 1) % order.length]!;
+        setCmpSubView(nextSub);
+        setCursorIdx(0);
+        setStatusMessage(`Switched Compute view to ${nextSub.toUpperCase()}.`);
+        return;
+      }
+      if (activeTab === 'updates') {
+        const order: Array<'be' | 'snapshots' | 'checks'> = ['be', 'snapshots', 'checks'];
+        const nextSub = order[(order.indexOf(updSubView) + 1) % order.length]!;
+        setUpdSubView(nextSub);
+        setCursorIdx(0);
+        setStatusMessage(`Switched Updates / ZBM view to ${nextSub.toUpperCase()}.`);
+        return;
+      }
+      if (activeTab === 'cli_ops') {
+        const order: Array<'toolkit' | 'users' | 'gitops' | 'power'> = ['toolkit', 'users', 'gitops', 'power'];
+        const nextSub = order[(order.indexOf(opsSubView) + 1) % order.length]!;
+        setOpsSubView(nextSub);
+        setCursorIdx(0);
+        setStatusMessage(`Switched System & Ops view to ${nextSub.toUpperCase()}.`);
+        return;
+      }
     }
 
-    if (activeTab === 'storage' && input === 's') {
-      const zp = execSafe('zpool', ['status']) || 'No live ZFS pools imported in kernel.';
-      const zl = execSafe('zfs', ['list']) || '';
-      setStorageOutput(`${zp}\n${zl}`.trim());
-      setStatusMessage('Queried live ZFS pool & dataset telemetry.');
-      return;
+    // Tab-specific hotkeys
+    if (activeTab === 'interfaces' && !readOnly && ifSubView === 'interfaces' && state.interfaces.length > 0) {
+      const idx = cursorIdx % state.interfaces.length;
+      if (input === 'm') {
+        const next = structuredClone(state);
+        const target = next.interfaces[idx]!;
+        target.type = target.type === 'dhcp' ? 'static' : 'dhcp';
+        if (target.type === 'static' && !target.ipv4Address) {
+          target.ipv4Address = '192.168.10.1/24';
+        }
+        setState(next);
+        saveStateToDisk(next);
+        setStatusMessage(`Switched ${target.name} (${target.device}) mode to ${target.type.toUpperCase()}. Press [a] to apply.`);
+        return;
+      }
+      if (input === 'd') {
+        const next = structuredClone(state);
+        const target = next.interfaces[idx]!;
+        target.dhcpServer = !target.dhcpServer;
+        setState(next);
+        saveStateToDisk(next);
+        setStatusMessage(
+          `Toggled DHCPv4 Server on ${target.name} -> ${target.dhcpServer ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+        );
+        return;
+      }
     }
 
-    if (activeTab === 'compute' && input === 'k') {
-      const ko =
-        execSafe('kubectl', ['get', 'nodes,pods', '-A', '-o', 'wide']) ||
-        execSafe('k3s', ['kubectl', 'get', 'nodes,pods', '-A']) ||
-        'k3s server not currently running.';
-      setComputeOutput(ko);
-      setStatusMessage('Queried live Kubernetes (k3s) cluster status.');
-      return;
+    if (activeTab === 'firewall' && !readOnly && fwSubView === 'rules' && state.rules.length > 0) {
+      const idx = cursorIdx % state.rules.length;
+      if (input === 'p') {
+        const next = structuredClone(state);
+        const rule = next.rules[idx]!;
+        const order: Array<'pass' | 'block' | 'reject'> = ['pass', 'block', 'reject'];
+        rule.action = order[(order.indexOf(rule.action as any) + 1) % order.length]!;
+        setState(next);
+        saveStateToDisk(next);
+        setStatusMessage(`Rule '${rule.description || rule.id}' action -> ${rule.action.toUpperCase()}. Press [a] to apply.`);
+        return;
+      }
+      if (input === 'l') {
+        const next = structuredClone(state);
+        const rule = next.rules[idx]!;
+        rule.log = !rule.log;
+        setState(next);
+        saveStateToDisk(next);
+        setStatusMessage(`Rule '${rule.description || rule.id}' logging -> ${rule.log ? 'ON' : 'OFF'}. Press [a] to apply.`);
+        return;
+      }
+      if ((input === '+' || input === 'K') && idx > 0) {
+        const next = structuredClone(state);
+        const tmp = next.rules[idx - 1]!;
+        next.rules[idx - 1] = next.rules[idx]!;
+        next.rules[idx] = tmp;
+        setState(next);
+        saveStateToDisk(next);
+        setCursorIdx(idx - 1);
+        setStatusMessage(`Moved firewall rule up to priority #${idx}. Press [a] to apply.`);
+        return;
+      }
+      if ((input === '-' || input === 'J') && idx < state.rules.length - 1) {
+        const next = structuredClone(state);
+        const tmp = next.rules[idx + 1]!;
+        next.rules[idx + 1] = next.rules[idx]!;
+        next.rules[idx] = tmp;
+        setState(next);
+        saveStateToDisk(next);
+        setCursorIdx(idx + 1);
+        setStatusMessage(`Moved firewall rule down to priority #${idx + 2}. Press [a] to apply.`);
+        return;
+      }
     }
 
-    if (activeTab === 'compute' && input === 'v') {
-      const vo =
-        execSafe('virsh', ['list', '--all']) ||
-        execSafe('lxc-ls', ['--fancy']) ||
-        'libvirtd / LXC not currently running.';
-      setComputeOutput(vo);
-      setStatusMessage('Queried live KVM/LXC hypervisor domains.');
-      return;
+    if (activeTab === 'services' && !readOnly) {
+      if (input === 'g') {
+        setStatusMessage('Generating / rotating Rosenpass Post-Quantum McEliece 460896 keypair...');
+        callDaemon('/v1/vpn/rosenpass/keygen', 'POST', { force: true }, 20000).then((res) => {
+          setStatusMessage(res?.success ? '✔ Rosenpass Post-Quantum keypair rotated!' : `Rosenpass keygen: ${res?.message || 'done'}`);
+          refreshAll();
+        });
+        return;
+      }
+      if (input === 'f') {
+        setStatusMessage('Flushing all active MCP tactical leases...');
+        callDaemon('/v1/mcp/flush', 'POST', { reason: 'TUI operator flush' }).then(() => {
+          setStatusMessage('✔ All active MCP leases flushed and revoked.');
+          refreshAll();
+        });
+        return;
+      }
+    }
+
+    if (activeTab === 'storage') {
+      if (input === 's' && !readOnly) {
+        const datasets = state.nas?.datasets || [];
+        const dsName =
+          stSubView === 'datasets' && datasets[cursorIdx % Math.max(1, datasets.length)]
+            ? `${datasets[cursorIdx % datasets.length]!.pool || 'tank'}/${datasets[cursorIdx % datasets.length]!.name}`
+            : liveNasPools[0]?.name || state.nas?.pools?.[0]?.name || 'tank';
+        const defaultLabel = `manual-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
+        setPromptState({
+          title: `Create ZFS Snapshot on '${dsName}' (Enter label)`,
+          placeholder: defaultLabel,
+          value: '',
+          onSubmit: (label) => {
+            setStatusMessage(`Creating ZFS snapshot ${dsName}@${label}...`);
+            callDaemon('/v1/nas/snapshots', 'POST', { dataset: dsName, label }).then((res) => {
+              if (res?.success) {
+                setStatusMessage(`✔ Created ZFS snapshot: ${res.snapshot || `${dsName}@${label}`}`);
+              } else {
+                setStatusMessage(`✖ Snapshot failed: ${res?.message || 'ZFS pool not imported'}`);
+              }
+              refreshAll();
+            });
+          },
+        });
+        return;
+      }
+      if (input === 'w' && !readOnly) {
+        const poolName = liveNasPools[cursorIdx % Math.max(1, liveNasPools.length)]?.name || state.nas?.pools?.[0]?.name || 'tank';
+        setStatusMessage(`Starting ZFS scrub on pool '${poolName}'...`);
+        callDaemon('/v1/nas/scrub', 'POST', { pool: poolName }).then((res) => {
+          setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Scrub failed: ${res?.message || 'pool unavailable'}`);
+          refreshAll();
+        });
+        return;
+      }
+      if (input === 'z') {
+        const zp = execSafe('zpool', ['status']) || 'No live ZFS pools imported in kernel.';
+        const zl = execSafe('zfs', ['list']) || '';
+        setStorageOutput(`${zp}\n${zl}`.trim());
+        setStatusMessage('Queried live ZFS pool & dataset telemetry.');
+        return;
+      }
+    }
+
+    if (activeTab === 'compute') {
+      if (input === 'k') {
+        const ko =
+          execSafe('kubectl', ['get', 'nodes,pods', '-A', '-o', 'wide']) ||
+          execSafe('k3s', ['kubectl', 'get', 'nodes,pods', '-A']) ||
+          'k3s server not currently running.';
+        setComputeOutput(ko);
+        setStatusMessage('Queried live Kubernetes (k3s) cluster status.');
+        return;
+      }
+      if (input === 'v') {
+        const vo =
+          execSafe('virsh', ['list', '--all']) ||
+          execSafe('lxc-ls', ['--fancy']) ||
+          'libvirtd / LXC not currently running.';
+        setComputeOutput(vo);
+        setStatusMessage('Queried live KVM/LXC hypervisor domains.');
+        return;
+      }
+      if (!readOnly && cmpSubView === 'vms' && liveVms.length > 0) {
+        const vm = liveVms[cursorIdx % liveVms.length]!;
+        if (input === 's' || input === 'x' || input === 'b') {
+          const action = input === 's' ? 'start' : input === 'x' ? 'stop' : 'reset';
+          setStatusMessage(`Executing '${action}' on KVM VM #${vm.vmid} (${vm.name})...`);
+          callDaemon('/v1/virt/vms', 'POST', { action, vmid: vm.vmid }).then((res) => {
+            setStatusMessage(res?.success ? `✔ VM #${vm.vmid} ${action} initiated.` : `✖ VM ${action} failed: ${res?.message}`);
+            refreshAll();
+          });
+          return;
+        }
+      }
+      if (!readOnly && cmpSubView === 'containers' && liveContainers.length > 0) {
+        const ct = liveContainers[cursorIdx % liveContainers.length]!;
+        if (input === 's' || input === 'x') {
+          const action = input === 's' ? 'start' : 'stop';
+          setStatusMessage(`Executing '${action}' on LXC Container #${ct.ctid} (${ct.name})...`);
+          callDaemon('/v1/virt/containers', 'POST', { action, ctid: ct.ctid }).then((res) => {
+            setStatusMessage(res?.success ? `✔ CT #${ct.ctid} ${action} initiated.` : `✖ CT ${action} failed: ${res?.message}`);
+            refreshAll();
+          });
+          return;
+        }
+      }
+      if (cmpSubView === 'soc') {
+        if (input === 'h') {
+          setStatusMessage('Running Host Malware, Rootkit & Ghost-in-the-Ring Kernel Audit...');
+          callDaemon('/v1/security/rootkit/scan', 'POST', {}, 30000).then((res) => {
+            if (res && !res.error) setRootkitStatus(res);
+            setStatusMessage('✔ Rootkit & Kernel Integrity Audit complete.');
+            refreshAll();
+          });
+          return;
+        }
+        if (!readOnly && input === 'b') {
+          setPromptState({
+            title: 'Quarantine & Block IP via Vigilante SOAR (Enter IPv4/IPv6)',
+            placeholder: '198.51.100.42',
+            value: '',
+            onSubmit: (ip) => {
+              callDaemon('/v1/vigilante/soar/block-ip', 'POST', { ip, timeoutSec: 3600 }).then((res) => {
+                setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Block failed: ${res?.message}`);
+                refreshAll();
+              });
+            },
+          });
+          return;
+        }
+        if (!readOnly && input === 'u' && soarBlockedIps.length > 0) {
+          const targetIp = soarBlockedIps[cursorIdx % soarBlockedIps.length]?.ip;
+          if (targetIp) {
+            callDaemon('/v1/vigilante/soar/unblock-ip', 'POST', { ip: targetIp }).then((res) => {
+              setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Unblock failed: ${res?.message}`);
+              refreshAll();
+            });
+          }
+          return;
+        }
+      }
+    }
+
+    // ZFSBootMenu (ZBM) & A/B Updates Tab Actions
+    if (activeTab === 'updates' && !readOnly) {
+      const bes = partitionStatus?.bootEnvironments || [];
+      if (input === 'h') {
+        setStatusMessage('Running partition & ZBM boot health verification...');
+        callDaemon('/v1/system/health/verify', 'POST', {}, 15000).then((res) => {
+          setStatusMessage(res?.success !== false ? '✔ System boot health verified and bootcount cleared!' : `✖ Health check: ${res?.message}`);
+          refreshAll();
+        });
+        return;
+      }
+      if (installMode === 'zbm') {
+        if (input === 's') {
+          const selectedBe =
+            updSubView === 'be' && bes[cursorIdx % Math.max(1, bes.length)]
+              ? bes[cursorIdx % bes.length]!.name
+              : bes.find((b: any) => b.activeNow)?.name || bes[0]?.name || '';
+          const defaultLabel = `snap-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
+          setPromptState({
+            title: `Create Arbitrary ZFS Snapshot on Boot Environment '${selectedBe || 'active'}' (Enter label)`,
+            placeholder: defaultLabel,
+            value: '',
+            onSubmit: (label) => {
+              setBusyAction(`Creating snapshot @${label}...`);
+              setStatusMessage(`Creating ZFS Boot Environment snapshot ${selectedBe}@${label}...`);
+              callDaemon('/v1/system/zbm', 'POST', { action: 'snapshot', beName: selectedBe, label }, 30000).then(
+                (res) => {
+                  setBusyAction(null);
+                  if (res?.success) {
+                    setStatusMessage(`✔ ${res.message || `Created snapshot ${res.snapshot}`}`);
+                  } else {
+                    setStatusMessage(`✖ Snapshot failed: ${res?.message || 'ZBM error'}`);
+                  }
+                  refreshAll();
+                }
+              );
+            },
+          });
+          return;
+        }
+        if (input === 'c') {
+          const snapObj =
+            updSubView === 'snapshots' && allZbmSnapshots[cursorIdx % Math.max(1, allZbmSnapshots.length)]
+              ? allZbmSnapshots[cursorIdx % allZbmSnapshots.length]
+              : allZbmSnapshots[0];
+          if (!snapObj) {
+            setStatusMessage('No ZFS snapshot available to clone. Press [s] to create a snapshot first.');
+            return;
+          }
+          const defaultNewBe = `axonwall-clone-${new Date().toISOString().slice(0, 10)}`;
+          setPromptState({
+            title: `Clone '${snapObj.fullName}' into new Boot Environment (Enter new BE name)`,
+            placeholder: defaultNewBe,
+            value: '',
+            onSubmit: (newBeName) => {
+              setBusyAction(`Cloning to ${newBeName}...`);
+              callDaemon(
+                '/v1/system/zbm',
+                'POST',
+                { action: 'clone', snapshot: snapObj.fullName, newBeName },
+                30000
+              ).then((res) => {
+                setBusyAction(null);
+                setStatusMessage(
+                  res?.success ? `✔ ${res.message}` : `✖ Clone failed: ${res?.message || 'ZBM error'}`
+                );
+                refreshAll();
+              });
+            },
+          });
+          return;
+        }
+        if (input === 'b' && updSubView === 'be' && bes.length > 0) {
+          const targetBe = bes[cursorIdx % bes.length]!;
+          setStatusMessage(`Activating Boot Environment '${targetBe.name}' for next reboot...`);
+          callDaemon('/v1/system/zbm', 'POST', { action: 'activate', beName: targetBe.name }, 15000).then((res) => {
+            setStatusMessage(
+              res?.success ? `✔ ${res.message}` : `✖ Activate failed: ${res?.message || 'ZBM error'}`
+            );
+            refreshAll();
+          });
+          return;
+        }
+        if (input === 'x') {
+          if (updSubView === 'be' && bes.length > 0) {
+            const targetBe = bes[cursorIdx % bes.length]!;
+            if (targetBe.activeNow) {
+              setStatusMessage(`✖ Cannot delete currently mounted Boot Environment '${targetBe.name}'.`);
+              return;
+            }
+            setStatusMessage(`Deleting Boot Environment '${targetBe.name}'...`);
+            callDaemon('/v1/system/zbm', 'POST', { action: 'delete', beName: targetBe.name }, 20000).then((res) => {
+              setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Delete failed: ${res?.message}`);
+              refreshAll();
+            });
+          } else if (updSubView === 'snapshots' && allZbmSnapshots.length > 0) {
+            const targetSnap = allZbmSnapshots[cursorIdx % allZbmSnapshots.length]!;
+            setStatusMessage(`Deleting ZFS snapshot '${targetSnap.fullName}'...`);
+            callDaemon(
+              '/v1/system/zbm',
+              'POST',
+              { action: 'delete-snapshot', snapshot: targetSnap.fullName },
+              20000
+            ).then((res) => {
+              setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Delete snapshot failed: ${res?.message}`);
+              refreshAll();
+            });
+          }
+          return;
+        }
+      } else {
+        // A/B or Rolling mode
+        if (input === 'b') {
+          const standby = partitionStatus?.inactiveSlot || (partitionStatus?.activeSlot === 'A' ? 'B' : 'A');
+          setStatusMessage(`Activating standby partition Slot ${standby} for next boot...`);
+          callDaemon('/v1/system/slot/activate', 'POST', { slot: standby }, 15000).then((res) => {
+            setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Slot activation failed: ${res?.message}`);
+            refreshAll();
+          });
+          return;
+        }
+      }
+    }
+
+    if (activeTab === 'cli_ops' && !readOnly && opsSubView === 'gitops') {
+      if (input === 's') {
+        setPromptState({
+          title: 'Commit /etc changes to Etckeeper GitOps (Enter commit message)',
+          placeholder: 'Manual operator snapshot via Axonwall TUI',
+          value: '',
+          onSubmit: (msg) => {
+            callDaemon('/v1/system/etckeeper/commit', 'POST', { message: msg, author: 'tui-operator' }).then((res) => {
+              setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Etckeeper commit failed: ${res?.message}`);
+              refreshAll();
+            });
+          },
+        });
+        return;
+      }
     }
 
     if (activeTab === 'plugins' && !readOnly && (input === 'i' || input === 'u' || input === 's')) {
@@ -784,12 +1442,16 @@ export function AxonwallTuiApp({
         return;
       }
       const action = input === 'i' ? 'install' : input === 'u' ? 'uninstall' : 'reconfigure';
-      setStatusMessage(`Executing '${action}' for plugin '${plg.id}'...`);
-      callDaemon('/v1/system/plugins/action', 'POST', { pluginId: plg.id, action }).then((res) => {
+      setBusyAction(`${action.toUpperCase()} ${plg.id}...`);
+      setStatusMessage(
+        `⏳ Executing '${action}' for plugin '${plg.id}' (downloading & configuring packages, up to 5m)...`
+      );
+      callDaemon('/v1/system/plugins/action', 'POST', { pluginId: plg.id, action }, 300000).then((res) => {
+        setBusyAction(null);
         if (res?.success) {
           setStatusMessage(`✔ ${res.message}`);
         } else {
-          setStatusMessage(`Plugin ${action} finished (${res?.message || 'daemon offline'}).`);
+          setStatusMessage(`✖ Plugin ${action} failed: ${res?.message || 'daemon communication timeout'}`);
         }
         refreshAll();
       });
@@ -805,53 +1467,87 @@ export function AxonwallTuiApp({
         setStatusMessage('Read-only operator session: configuration modifications are disabled.');
         return;
       }
-      if (activeTab === 'interfaces' && state.interfaces[cursorIdx]) {
-        const next = structuredClone(state);
-        const target = next.interfaces[cursorIdx]!;
-        target.enabled = !target.enabled;
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(
-          `Toggled interface '${target.name}' (${target.device}) -> ${target.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
-        );
-      } else if (activeTab === 'firewall') {
-        if (fwSubView === 'rules' && state.rules[cursorIdx]) {
+      if (activeTab === 'interfaces') {
+        if (ifSubView === 'interfaces' && state.interfaces.length > 0) {
           const next = structuredClone(state);
-          const rule = next.rules[cursorIdx]!;
+          const target = next.interfaces[cursorIdx % next.interfaces.length]!;
+          target.enabled = !target.enabled;
+          setState(next);
+          saveStateToDisk(next);
+          setStatusMessage(
+            `Toggled interface '${target.name}' (${target.device}) -> ${target.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+          );
+        }
+      } else if (activeTab === 'firewall') {
+        if (fwSubView === 'rules' && state.rules.length > 0) {
+          const next = structuredClone(state);
+          const rule = next.rules[cursorIdx % next.rules.length]!;
           rule.enabled = !rule.enabled;
           setState(next);
           saveStateToDisk(next);
           setStatusMessage(
             `Toggled firewall rule '${rule.description || rule.id}' -> ${rule.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
-        } else if (fwSubView === 'nat' && state.nat?.[cursorIdx]) {
+        } else if (fwSubView === 'nat' && (state.nat?.length || 0) > 0) {
           const next = structuredClone(state);
-          const nr = next.nat[cursorIdx]!;
+          const nr = next.nat![cursorIdx % next.nat!.length]!;
           nr.enabled = !nr.enabled;
           setState(next);
           saveStateToDisk(next);
           setStatusMessage(
             `Toggled NAT rule '${nr.description || nr.id}' -> ${nr.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
-        } else if (fwSubView === 'aliases' && state.aliases?.[cursorIdx]) {
+        } else if (fwSubView === 'aliases' && (state.aliases?.length || 0) > 0) {
           const next = structuredClone(state);
-          const al = next.aliases[cursorIdx]!;
+          const al = next.aliases![cursorIdx % next.aliases!.length]!;
           al.enabled = !al.enabled;
           setState(next);
           saveStateToDisk(next);
           setStatusMessage(
             `Toggled alias '${al.name}' -> ${al.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
+        } else if (fwSubView === 'shaper') {
+          const next = structuredClone(state) as any;
+          next.shaper = { ...(next.shaper || { queues: [], rules: [] }), enabled: !next.shaper?.enabled };
+          setState(next);
+          saveStateToDisk(next);
+          setStatusMessage(
+            `Toggled QoS Traffic Shaper -> ${next.shaper.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+          );
         }
-      } else if (activeTab === 'routing' && state.routes?.[cursorIdx]) {
-        const next = structuredClone(state);
-        const rt = next.routes![cursorIdx]!;
-        rt.enabled = rt.enabled === false ? true : false;
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(
-          `Toggled static route '${rt.network} via ${rt.gateway}' -> ${rt.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
-        );
+      } else if (activeTab === 'routing') {
+        if (rtSubView === 'routes' && (state.routes?.length || 0) > 0) {
+          const next = structuredClone(state);
+          const rt = next.routes![cursorIdx % next.routes!.length]!;
+          rt.enabled = rt.enabled === false ? true : false;
+          setState(next);
+          saveStateToDisk(next);
+          setStatusMessage(
+            `Toggled static route '${rt.network} via ${rt.gateway}' -> ${rt.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+          );
+        } else if (rtSubView === 'gateways' && (state.gateways?.length || 0) > 0) {
+          const next = structuredClone(state);
+          const gw = next.gateways![cursorIdx % next.gateways!.length]!;
+          gw.enabled = !gw.enabled;
+          setState(next);
+          saveStateToDisk(next);
+          setStatusMessage(
+            `Toggled upstream gateway '${gw.name}' (${gw.gatewayIp}) -> ${gw.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+          );
+        } else if (rtSubView === 'frr') {
+          const next = structuredClone(state);
+          const frrObj = (next.frr || { bgp: { enabled: false, asNumber: 65001, neighbors: [] }, ospf: { enabled: false, areas: [] } }) as any;
+          if (cursorIdx % 2 === 0) {
+            frrObj.bgp = { ...(frrObj.bgp || { asNumber: 65001, neighbors: [] }), enabled: !frrObj.bgp?.enabled };
+            setStatusMessage(`Toggled FRR BGP -> ${frrObj.bgp.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`);
+          } else {
+            frrObj.ospf = { ...(frrObj.ospf || { areas: [] }), enabled: !frrObj.ospf?.enabled };
+            setStatusMessage(`Toggled FRR OSPF -> ${frrObj.ospf.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`);
+          }
+          next.frr = frrObj;
+          setState(next);
+          saveStateToDisk(next);
+        }
       } else if (activeTab === 'services') {
         const row = serviceRows[cursorIdx % serviceRows.length]!;
         if (row.id === 'mcp') {
@@ -888,35 +1584,52 @@ export function AxonwallTuiApp({
             disabledReason: nextEnabled ? undefined : 'Disabled via Axonwall TUI',
             leases: nextEnabled ? mcpStatus.leases : [],
           });
-          setStatusMessage(
-            `Toggled MCP Server Master Switch -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}.`
-          );
+          setStatusMessage(`Toggled MCP Server Master Switch -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}.`);
           return;
         }
         const next = structuredClone(state);
         if (row.id === 'dhcp') next.dhcp = { ...(next.dhcp || { subnets: [] }), enabled: !next.dhcp?.enabled };
         else if (row.id === 'dns') next.dns = { ...(next.dns || ({} as any)), enabled: !next.dns?.enabled };
-        else if (row.id === 'wireguard') {
-          next.wireguard = { ...(next.wireguard || ({} as any)), enabled: !next.wireguard?.enabled };
-        } else if (row.id === 'rosenpass') {
-          next.rosenpass = { ...(next.rosenpass || ({} as any)), enabled: !next.rosenpass?.enabled };
-        } else if (row.id === 'headscale') {
-          next.headscale = { ...(next.headscale || ({} as any)), enabled: !next.headscale?.enabled };
-        } else if (row.id === 'suricata') {
-          next.suricata = { ...(next.suricata || ({} as any)), enabled: !next.suricata?.enabled };
-        } else if (row.id === 'crowdsec') {
-          next.crowdsec = { ...(next.crowdsec || ({} as any)), enabled: !next.crowdsec?.enabled };
-        } else if (row.id === 'haproxy') {
-          next.haproxy = { ...(next.haproxy || ({} as any)), enabled: !next.haproxy?.enabled };
-        } else if (row.id === 'freeradius') {
-          next.freeradius = { ...(next.freeradius || ({} as any)), enabled: !next.freeradius?.enabled };
-        } else if (row.id === 'snmp') {
-          next.snmp = { ...(next.snmp || ({} as any)), enabled: !next.snmp?.enabled };
-        } else if (row.id === 'ups') {
-          next.ups = { ...(next.ups || ({} as any)), enabled: !next.ups?.enabled };
-        } else if (row.id === 'ha') {
-          next.ha = { ...(next.ha || ({} as any)), enabled: !next.ha?.enabled };
+        else if (row.id === 'dnsBlocklist') {
+          next.dns = next.dns || ({ enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] } as any);
+          (next.dns as any).blocklist = { ...((next.dns as any).blocklist || { feeds: [] }), enabled: !next.dns?.blocklist?.enabled };
         }
+        else if (row.id === 'wireguard')
+          next.wireguard = { ...(next.wireguard || ({} as any)), enabled: !next.wireguard?.enabled };
+        else if (row.id === 'rosenpass')
+          next.rosenpass = { ...(next.rosenpass || ({} as any)), enabled: !next.rosenpass?.enabled };
+        else if (row.id === 'headscale')
+          next.headscale = { ...(next.headscale || ({} as any)), enabled: !next.headscale?.enabled };
+        else if (row.id === 'openvpn')
+          (next as any).openvpn = { ...((next as any).openvpn || {}), enabled: !(next as any).openvpn?.enabled };
+        else if (row.id === 'ipsec')
+          (next as any).ipsec = { ...((next as any).ipsec || {}), enabled: !(next as any).ipsec?.enabled };
+        else if (row.id === 'suricata')
+          next.suricata = { ...(next.suricata || ({} as any)), enabled: !next.suricata?.enabled };
+        else if (row.id === 'crowdsec')
+          next.crowdsec = { ...(next.crowdsec || ({} as any)), enabled: !next.crowdsec?.enabled };
+        else if (row.id === 'geoip')
+          next.geoip = { ...(next.geoip || ({} as any)), enabled: !next.geoip?.enabled };
+        else if (row.id === 'haproxy')
+          next.haproxy = { ...(next.haproxy || ({} as any)), enabled: !next.haproxy?.enabled };
+        else if (row.id === 'freeradius')
+          next.freeradius = { ...(next.freeradius || ({} as any)), enabled: !next.freeradius?.enabled };
+        else if (row.id === 'captivePortal')
+          next.captivePortal = { ...(next.captivePortal || ({} as any)), enabled: !next.captivePortal?.enabled };
+        else if (row.id === 'iap')
+          next.zeroTrust = { ...(next.zeroTrust || ({ apps: [] } as any)), enabled: !next.zeroTrust?.enabled };
+        else if (row.id === 'acme')
+          next.acme = { ...(next.acme || ({} as any)), enabled: !next.acme?.enabled };
+        else if (row.id === 'ddns')
+          (next as any).ddns = { ...((next as any).ddns || {}), enabled: !(next as any).ddns?.enabled };
+        else if (row.id === 'mdns')
+          (next as any).mdns = { ...((next as any).mdns || {}), enabled: !(next as any).mdns?.enabled };
+        else if (row.id === 'snmp')
+          next.snmp = { ...(next.snmp || ({} as any)), enabled: !next.snmp?.enabled };
+        else if (row.id === 'ups')
+          next.ups = { ...(next.ups || ({} as any)), enabled: !next.ups?.enabled };
+        else if (row.id === 'ha')
+          next.ha = { ...(next.ha || ({} as any)), enabled: !next.ha?.enabled };
         setState(next);
         saveStateToDisk(next);
         setStatusMessage(`Toggled ${row.name}. Press [a] to compile & apply.`);
@@ -926,18 +1639,22 @@ export function AxonwallTuiApp({
         setState(next);
         saveStateToDisk(next);
         setStatusMessage(
-          `Toggled ZFS NAS & Storage Manager (core-nas) -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+          `Toggled Enterprise Grade ZFS NAS (core-nas) -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
         );
       } else if (activeTab === 'compute') {
-        const roles = ['core-k3s', 'core-virt', 'core-vigilante'];
-        const roleId = roles[cursorIdx % roles.length]!;
-        const next = structuredClone(state);
-        const nowEnabled = toggleCoreRoleInState(next, roleId);
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(
-          `Toggled ${roleId} -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
-        );
+        if (cmpSubView === 'roles') {
+          const roles = ['core-k3s', 'core-virt', 'core-vigilante', 'vigilant-octo-waffle', 'eluvix', 'host-malware-rootkit'];
+          const roleId = roles[cursorIdx % roles.length]!;
+          if (CORE_ROLE_PLUGIN_IDS.has(roleId)) {
+            const next = structuredClone(state);
+            const nowEnabled = toggleCoreRoleInState(next, roleId);
+            setState(next);
+            saveStateToDisk(next);
+            setStatusMessage(`Toggled ${roleId} -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`);
+          } else {
+            toggleExtensionPluginInState(roleId);
+          }
+        }
       } else if (activeTab === 'plugins') {
         const plg = BUILTIN_PLUGINS[cursorIdx % BUILTIN_PLUGINS.length]!;
         if (CORE_ROLE_PLUGIN_IDS.has(plg.id)) {
@@ -952,7 +1669,9 @@ export function AxonwallTuiApp({
           toggleExtensionPluginInState(plg.id);
         }
       } else if (activeTab === 'cli_ops') {
-        runCliToolInline(cursorIdx);
+        if (opsSubView === 'toolkit') {
+          runCliToolInline(cursorIdx);
+        }
       }
     }
   });
@@ -970,6 +1689,12 @@ export function AxonwallTuiApp({
   const caps = resolveCapabilities(state);
   const workstationEnabled = isPluginEnabled('cli-workstation', state);
 
+  const fwRulesViewport = getViewportSlice(state.rules || [], cursorIdx, 13);
+  const servicesViewport = getViewportSlice(serviceRows, cursorIdx, 13);
+  const pluginsViewport = getViewportSlice(BUILTIN_PLUGINS, cursorIdx, 13);
+  const zbmBeViewport = getViewportSlice(partitionStatus?.bootEnvironments || [], cursorIdx, 11);
+  const zbmSnapViewport = getViewportSlice(allZbmSnapshots, cursorIdx, 11);
+
   return (
     <Box flexDirection="column" paddingX={1}>
       {/* Top Appliance Header */}
@@ -984,6 +1709,8 @@ export function AxonwallTuiApp({
           <Text color="gray"> · </Text>
           <Text color="white">Host: <Text bold color="cyan">{state.system?.hostname || os.hostname()}</Text></Text>
           <Text color="gray"> · </Text>
+          <Text color="white">Mode: <Text bold color="magenta">{installMode.toUpperCase()}</Text></Text>
+          <Text color="gray"> · </Text>
           <Text color="white">Load: <Text color="yellow">{loadStr}</Text></Text>
           <Text color="gray"> · </Text>
           <Text color="white">RAM: <Text color="cyan">{usedMemGb}/{totalMemGb}G ({memPct}%)</Text></Text>
@@ -995,9 +1722,24 @@ export function AxonwallTuiApp({
           <Text color={daemonStatus ? 'green' : 'yellow'}>
             ● {daemonStatus ? 'axonwalld' : 'YAML Direct'}
           </Text>
+          {busyAction ? <Text bold color="yellow"> ⏳ [{busyAction}]</Text> : null}
           {readOnly ? <Text bold color="yellow"> [READ-ONLY]</Text> : null}
         </Text>
       </Box>
+
+      {/* Inline Interactive Input Prompt Bar */}
+      {promptState && (
+        <Box borderStyle="double" borderColor="cyan" paddingX={1} flexDirection="column">
+          <Text bold color="cyan">
+            ✎ {promptState.title}:
+          </Text>
+          <Text>
+            <Text color="green" bold>{'> '}</Text>
+            <Text color="white" bold>{promptState.value}</Text>
+            <Text color="gray">{promptState.value ? '█' : `${promptState.placeholder} (Press Enter for default, Esc to cancel)`}</Text>
+          </Text>
+        </Box>
+      )}
 
       {/* Commit-Confirm Safety Banner if Active */}
       {pendingConfirm && (
@@ -1018,7 +1760,7 @@ export function AxonwallTuiApp({
 
       {/* Global Navigation Tab Bar */}
       <Box marginY={0} gap={1} flexWrap="wrap" paddingX={1}>
-        {TOP_TABS.map((t) => {
+        {topTabs.map((t) => {
           const isAct = activeTab === t.id;
           return (
             <Text
@@ -1071,13 +1813,23 @@ export function AxonwallTuiApp({
               </Box>
             </Box>
             <Box flexDirection="column" width="50%">
-              <Text bold color="white">Control Plane & Security Summary:</Text>
-              <Text wrap="truncate-end">  • Firewall & NAT : <Text color="green" bold>{state.rules.length}</Text> rules, <Text color="cyan" bold>{state.nat?.length || 0}</Text> NAT</Text>
-              <Text wrap="truncate-end">  • Static Routes  : <Text color="cyan" bold>{state.routes?.length || 0}</Text> ({(state.routes || []).map((r) => r.network).join(', ') || 'none'})</Text>
-              <Text wrap="truncate-end">  • Gateways       : <Text color="yellow" bold>{state.gateways?.length || 0}</Text> upstream</Text>
-              <Text wrap="truncate-end">  • DHCPv4 Subnets : <Text color="green" bold>{state.dhcp?.subnets?.length || 0}</Text> configured</Text>
-              <Text wrap="truncate-end">  • MCP Server     : <Text color={mcpStatus.masterEnabled ? 'yellow' : 'green'} bold>{mcpStatus.masterEnabled ? 'ENABLED' : 'DISABLED (Safe)'}</Text></Text>
-              <Text wrap="truncate-end">  • Shell Profile  : <Text color={workstationEnabled ? 'cyan' : 'gray'} bold>{workstationEnabled ? 'ENABLED (ZSH+Starship)' : 'MINIMAL'}</Text></Text>
+              <Text bold color="white">Control Plane, Boot & Security Summary:</Text>
+              <Text wrap="truncate-end">
+                {'  '}• Boot Architecture :{' '}
+                <Text color="magenta" bold>
+                  {installMode === 'zbm'
+                    ? `ZFSBootMenu (${partitionStatus?.bootEnvironments?.length || 1} BEs, ${allZbmSnapshots.length} snaps)`
+                    : installMode === 'rolling'
+                      ? 'Rolling Standard Linux'
+                      : `A/B Dual-Root (Slot ${partitionStatus?.activeSlot || 'A'})`}
+                </Text>
+              </Text>
+              <Text wrap="truncate-end">  • Firewall & NAT    : <Text color="green" bold>{state.rules.length}</Text> rules, <Text color="cyan" bold>{state.nat?.length || 0}</Text> NAT, <Text color="yellow" bold>{state.aliases?.length || 0}</Text> aliases</Text>
+              <Text wrap="truncate-end">  • Routing & FRR     : <Text color="cyan" bold>{state.routes?.length || 0}</Text> static, <Text color="yellow" bold>{state.gateways?.length || 0}</Text> gateways, BGP:{state.frr?.bgp?.enabled ? 'ON' : 'OFF'}</Text>
+              <Text wrap="truncate-end">  • DHCPv4 / Unbound  : <Text color="green" bold>{state.dhcp?.subnets?.length || 0}</Text> subnets, DNS:{state.dns?.enabled !== false ? 'ON' : 'OFF'}</Text>
+              <Text wrap="truncate-end">  • Post-Quantum VPN  : WG:{state.wireguard?.enabled ? 'ON' : 'OFF'} · Rosenpass PQ:{state.rosenpass?.enabled ? 'ON' : 'OFF'}</Text>
+              <Text wrap="truncate-end">  • MCP Control Plane : <Text color={mcpStatus.masterEnabled ? 'yellow' : 'green'} bold>{mcpStatus.masterEnabled ? `ENABLED (${mcpStatus.leases?.length || 0} leases)` : 'DISABLED (Safe)'}</Text></Text>
+              <Text wrap="truncate-end">  • Shell Workstation : <Text color={workstationEnabled ? 'cyan' : 'gray'} bold>{workstationEnabled ? 'ENABLED (ZSH+Starship+Nvim)' : 'MINIMAL'}</Text></Text>
             </Box>
           </Box>
         </Box>
@@ -1086,38 +1838,83 @@ export function AxonwallTuiApp({
       {activeTab === 'interfaces' && (
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="cyan" wrap="truncate-end">
-            Interfaces, VLANs ({state.vlans?.length || 0}), Bonds ({state.bonds?.length || 0}) & Bridges ({state.bridges?.length || 0}){' '}
-            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+            Network Interfaces [{ifSubView.toUpperCase()}]{' '}
+            <Text color="gray" bold={false}>
+              — [n] View ({state.interfaces.length} NICs, {state.vlans?.length || 0} VLANs, {state.bonds?.length || 0} Bonds, {state.bridges?.length || 0} Bridges) · [Space] Toggle · [m] Mode · [d] DHCP · [a] Apply
+            </Text>
           </Text>
-          {state.interfaces.map((iface, idx) => {
-            const sel = idx === cursorIdx % Math.max(1, state.interfaces.length);
-            return (
-              <Text key={iface.name} wrap="truncate-end">
-                <Text color={sel ? 'cyan' : 'gray'} bold>
-                  {sel ? '▶ ' : '  '}
+          {ifSubView === 'interfaces' &&
+            state.interfaces.map((iface, idx) => {
+              const sel = idx === cursorIdx % Math.max(1, state.interfaces.length);
+              return (
+                <Text key={iface.name} wrap="truncate-end">
+                  <Text color={sel ? 'cyan' : 'gray'} bold>
+                    {sel ? '▶ ' : '  '}
+                  </Text>
+                  <Text color={iface.enabled ? 'green' : 'red'} bold>
+                    {iface.enabled ? '[ENABLED]  ' : '[DISABLED] '}
+                  </Text>
+                  <Text bold color={sel ? 'white' : 'gray'}>
+                    {iface.name.toUpperCase().padEnd(8, ' ')}
+                  </Text>
+                  <Text color="cyan">{iface.device.padEnd(10, ' ')}</Text>
+                  <Text color="yellow">{(iface.ipv4Address || iface.type).padEnd(19, ' ')}</Text>
+                  <Text color={iface.dhcpServer ? 'green' : 'gray'}>
+                    {iface.dhcpServer ? '[DHCP:ON]  ' : '[DHCP:OFF] '}
+                  </Text>
+                  <Text color="white">{iface.description || ''}</Text>
                 </Text>
-                <Text color={iface.enabled ? 'green' : 'red'} bold>
-                  {iface.enabled ? '[ENABLED]  ' : '[DISABLED] '}
-                </Text>
-                <Text bold color={sel ? 'white' : 'gray'}>
-                  {iface.name.toUpperCase().padEnd(8, ' ')}
-                </Text>
-                <Text color="cyan">{iface.device.padEnd(10, ' ')}</Text>
-                <Text color="yellow">{(iface.ipv4Address || iface.type).padEnd(20, ' ')}</Text>
-                <Text color="white">{iface.description || ''}</Text>
-              </Text>
-            );
-          })}
-          {(state.vlans?.length || 0) > 0 && (
-            <Box marginTop={1} flexDirection="column">
-              <Text bold color="white">Configured 802.1Q VLANs:</Text>
-              {(state.vlans || []).map((v) => (
-                <Text key={v.id || v.vlanInterface} color="gray" wrap="truncate-end">
-                  {'  '}• VLAN {v.tag} on {v.parentInterface} ({v.vlanInterface}) — {v.description || 'tagged'}
-                </Text>
-              ))}
-            </Box>
-          )}
+              );
+            })}
+          {ifSubView === 'vlans' &&
+            ((state.vlans || []).length === 0 ? (
+              <Text color="gray">  No 802.1Q VLANs configured in /etc/axonwall/interfaces.yaml.</Text>
+            ) : (
+              (state.vlans || []).map((v, idx) => {
+                const sel = idx === cursorIdx % Math.max(1, (state.vlans || []).length);
+                return (
+                  <Text key={v.id || v.vlanInterface || idx} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                    <Text bold color="cyan">{`VLAN ${v.tag}`.padEnd(10, ' ')}</Text>
+                    <Text color="yellow">{(v.vlanInterface || `${v.parentInterface}.${v.tag}`).padEnd(14, ' ')}</Text>
+                    <Text color="white">{`Parent: ${v.parentInterface}`.padEnd(16, ' ')}</Text>
+                    <Text color="gray">{v.description || ''}</Text>
+                  </Text>
+                );
+              })
+            ))}
+          {ifSubView === 'bonds' &&
+            ((state.bonds || []).length === 0 ? (
+              <Text color="gray">  No LACP / LAGG link aggregation bonds configured.</Text>
+            ) : (
+              (state.bonds || []).map((b: any, idx: number) => {
+                const sel = idx === cursorIdx % Math.max(1, (state.bonds || []).length);
+                return (
+                  <Text key={b.name || idx} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                    <Text bold color="cyan">{(b.name || 'bond0').padEnd(12, ' ')}</Text>
+                    <Text color="yellow">{(b.mode || '802.3ad').padEnd(14, ' ')}</Text>
+                    <Text color="white">Members: {(b.interfaces || b.members || []).join(', ')}</Text>
+                  </Text>
+                );
+              })
+            ))}
+          {ifSubView === 'bridges' &&
+            ((state.bridges || []).length === 0 ? (
+              <Text color="gray">  No Layer-2 bridges configured.</Text>
+            ) : (
+              (state.bridges || []).map((br: any, idx: number) => {
+                const sel = idx === cursorIdx % Math.max(1, (state.bridges || []).length);
+                return (
+                  <Text key={br.name || idx} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                    <Text bold color="cyan">{(br.name || 'br0').padEnd(12, ' ')}</Text>
+                    <Text color="yellow">{`STP: ${br.stp ? 'ON' : 'OFF'}`.padEnd(12, ' ')}</Text>
+                    <Text color="white">Ports: {(br.interfaces || br.ports || []).join(', ')}</Text>
+                  </Text>
+                );
+              })
+            ))}
         </Box>
       )}
 
@@ -1125,15 +1922,18 @@ export function AxonwallTuiApp({
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="cyan" wrap="truncate-end">
             Firewall & NAT [{fwSubView.toUpperCase()}]{' '}
-            <Text color="gray" bold={false}>— [n] View · [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+            <Text color="gray" bold={false}>
+              — [n] View · [↑/↓] Select · [Space] Toggle · [p] Action · [l] Log · [+/-] Reorder · [a] Apply
+            </Text>
           </Text>
           {fwSubView === 'rules' &&
-            state.rules.slice(0, 14).map((rule, idx) => {
-              const sel = idx === cursorIdx % Math.max(1, state.rules.length);
+            fwRulesViewport.slice.map((rule, i) => {
+              const absIdx = fwRulesViewport.startIndex + i;
+              const sel = absIdx === fwRulesViewport.activeIndex;
               const actionColor =
                 rule.action === 'pass' ? 'green' : rule.action === 'block' ? 'red' : 'yellow';
               return (
-                <Text key={rule.id || idx} wrap="truncate-end">
+                <Text key={rule.id || absIdx} wrap="truncate-end">
                   <Text color={sel ? 'cyan' : 'gray'} bold>
                     {sel ? '▶ ' : '  '}
                   </Text>
@@ -1148,6 +1948,7 @@ export function AxonwallTuiApp({
                   <Text color="white">
                     {`${rule.source || 'any'} -> ${rule.destination || 'any'}${rule.destinationPort ? ':' + rule.destinationPort : ''}`.padEnd(26, ' ')}
                   </Text>
+                  {rule.log ? <Text color="magenta">[LOG] </Text> : null}
                   <Text color="gray">{rule.description || ''}</Text>
                 </Text>
               );
@@ -1188,66 +1989,113 @@ export function AxonwallTuiApp({
                 );
               })
             ))}
+          {fwSubView === 'shaper' && (
+            <Box flexDirection="column">
+              <Text wrap="truncate-end">
+                QoS Traffic Shaper / SQM Cake :{' '}
+                <Text bold color={(state as any).shaper?.enabled ? 'green' : 'gray'}>
+                  {(state as any).shaper?.enabled ? '[ENABLED]' : '[DISABLED]'}
+                </Text>{' '}
+                — Queues: {(state as any).shaper?.queues?.length || 0} · Rules: {(state as any).shaper?.rules?.length || 0}
+              </Text>
+              {((state as any).shaper?.queues || []).map((q: any, idx: number) => (
+                <Text key={q.id || idx} color="white" wrap="truncate-end">
+                  {'  '}• Queue <Text bold color="cyan">{q.name}</Text> on {q.interface} — Bandwidth: {q.bandwidth} ({q.scheduler || 'cake'})
+                </Text>
+              ))}
+            </Box>
+          )}
+          {fwSubView === 'security' && (
+            <Box flexDirection="column">
+              <Text wrap="truncate-end">  • Suricata IDS/IPS   : <Text bold color={state.suricata?.enabled ? 'green' : 'gray'}>{state.suricata?.enabled ? `ENABLED (${state.suricata.mode.toUpperCase()})` : 'DISABLED'}</Text></Text>
+              <Text wrap="truncate-end">  • CrowdSec IPS       : <Text bold color={state.crowdsec?.enabled ? 'green' : 'gray'}>{state.crowdsec?.enabled ? `ENABLED (${state.crowdsec.action})` : 'DISABLED'}</Text></Text>
+              <Text wrap="truncate-end">  • GeoIP Filtering    : <Text bold color={state.geoip?.enabled ? 'green' : 'gray'}>{state.geoip?.enabled ? `ENABLED (${state.geoip.countries?.join(', ')})` : 'DISABLED'}</Text></Text>
+              <Text wrap="truncate-end">  • DNS Blocklist RPZ  : <Text bold color={state.dns?.blocklist?.enabled ? 'green' : 'gray'}>{state.dns?.blocklist?.enabled ? `ENABLED (${state.dns.blocklist.feeds?.length || 0} feeds)` : 'DISABLED'}</Text></Text>
+              <Text wrap="truncate-end">  • Captive Portal     : <Text bold color={state.captivePortal?.enabled ? 'green' : 'gray'}>{state.captivePortal?.enabled ? 'ENABLED' : 'DISABLED'}</Text></Text>
+              <Text wrap="truncate-end">  • Zero-Trust IAP     : <Text bold color={state.zeroTrust?.enabled ? 'green' : 'gray'}>{state.zeroTrust?.enabled ? `ENABLED (${state.zeroTrust.apps?.length || 0} apps)` : 'DISABLED'}</Text></Text>
+            </Box>
+          )}
         </Box>
       )}
 
       {activeTab === 'routing' && (
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="cyan" wrap="truncate-end">
-            Gateways, Static Routes & FRR BGP/OSPF{' '}
-            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+            Gateways, Static Routes & FRR BGP/OSPF [{rtSubView.toUpperCase()}]{' '}
+            <Text color="gray" bold={false}>— [n] View · [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
           </Text>
-          <Text bold color="white">Upstream Gateways ({state.gateways?.length || 0}):</Text>
-          {(state.gateways || []).map((gw) => (
-            <Text key={gw.name} wrap="truncate-end">
-              {'  '}
-              <Text color={gw.enabled ? 'green' : 'red'}>● </Text>
-              <Text bold color="white">{gw.name.padEnd(14, ' ')}</Text>
-              <Text color="cyan">{gw.interface.padEnd(8, ' ')}</Text>
-              <Text color="yellow">{gw.gatewayIp.padEnd(16, ' ')}</Text>
-              <Text color="gray">Monitor: {gw.monitorIp || 'none'} {gw.isDefault ? '(Default)' : ''}</Text>
-            </Text>
-          ))}
-          <Box marginTop={1} flexDirection="column">
-            <Text bold color="white">Static Routes ({state.routes?.length || 0}):</Text>
-            {(state.routes || []).length === 0 ? (
-              <Text color="gray">  No static routes configured in /etc/axonwall/routing.yaml.</Text>
-            ) : (
-              (state.routes || []).map((rt, idx) => {
-                const sel = idx === cursorIdx % Math.max(1, (state.routes || []).length);
+          {rtSubView === 'gateways' && (
+            <Box flexDirection="column">
+              <Text bold color="white">Upstream Gateways ({state.gateways?.length || 0}):</Text>
+              {(state.gateways || []).map((gw, idx) => {
+                const sel = idx === cursorIdx % Math.max(1, (state.gateways || []).length);
                 return (
-                  <Text key={`${rt.network}-${rt.gateway}-${idx}`} wrap="truncate-end">
-                    <Text color={sel ? 'cyan' : 'gray'} bold>
-                      {sel ? '▶ ' : '  '}
-                    </Text>
-                    <Text color={rt.enabled !== false ? 'green' : 'red'} bold>
-                      {rt.enabled !== false ? '[ACTIVE]   ' : '[DISABLED] '}
-                    </Text>
-                    <Text bold color="white">{rt.network.padEnd(18, ' ')}</Text>
-                    <Text color="yellow">{`via ${rt.gateway}`.padEnd(19, ' ')}</Text>
-                    <Text color="cyan">{`dev ${rt.interface || 'auto'}`.padEnd(11, ' ')}</Text>
-                    <Text color="gray">{rt.description ? `# ${rt.description}` : ''}</Text>
+                  <Text key={gw.name} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                    <Text color={gw.enabled ? 'green' : 'red'} bold>{gw.enabled ? '[ENABLED]  ' : '[DISABLED] '}</Text>
+                    <Text bold color="white">{gw.name.padEnd(14, ' ')}</Text>
+                    <Text color="cyan">{gw.interface.padEnd(8, ' ')}</Text>
+                    <Text color="yellow">{gw.gatewayIp.padEnd(16, ' ')}</Text>
+                    <Text color="gray">Monitor: {gw.monitorIp || 'none'} {gw.isDefault ? '(Default)' : ''}</Text>
                   </Text>
                 );
-              })
-            )}
-          </Box>
-          <Box marginTop={1}>
-            <Text color="gray" wrap="truncate-end">
-              FRRouting Dynamic Routing: BGP {state.frr?.bgp?.enabled ? `ENABLED (ASN ${state.frr.bgp.asNumber}, ${state.frr.bgp.neighbors?.length || 0} peers)` : 'DISABLED'} · OSPF {state.frr?.ospf?.enabled ? `ENABLED (${state.frr.ospf.areas?.length || 0} areas)` : 'DISABLED'}
-            </Text>
-          </Box>
+              })}
+            </Box>
+          )}
+          {rtSubView === 'routes' && (
+            <Box flexDirection="column">
+              <Text bold color="white">Static Routes ({state.routes?.length || 0}):</Text>
+              {(state.routes || []).length === 0 ? (
+                <Text color="gray">  No static routes configured in /etc/axonwall/routing.yaml.</Text>
+              ) : (
+                (state.routes || []).map((rt, idx) => {
+                  const sel = idx === cursorIdx % Math.max(1, (state.routes || []).length);
+                  return (
+                    <Text key={`${rt.network}-${rt.gateway}-${idx}`} wrap="truncate-end">
+                      <Text color={sel ? 'cyan' : 'gray'} bold>
+                        {sel ? '▶ ' : '  '}
+                      </Text>
+                      <Text color={rt.enabled !== false ? 'green' : 'red'} bold>
+                        {rt.enabled !== false ? '[ACTIVE]   ' : '[DISABLED] '}
+                      </Text>
+                      <Text bold color="white">{rt.network.padEnd(18, ' ')}</Text>
+                      <Text color="yellow">{`via ${rt.gateway}`.padEnd(19, ' ')}</Text>
+                      <Text color="cyan">{`dev ${rt.interface || 'auto'}`.padEnd(11, ' ')}</Text>
+                      <Text color="gray">{rt.description ? `# ${rt.description}` : ''}</Text>
+                    </Text>
+                  );
+                })
+              )}
+            </Box>
+          )}
+          {rtSubView === 'frr' && (
+            <Box flexDirection="column">
+              <Text wrap="truncate-end">
+                <Text color={cursorIdx % 2 === 0 ? 'cyan' : 'gray'} bold>{cursorIdx % 2 === 0 ? '▶ ' : '  '}</Text>
+                <Text color={state.frr?.bgp?.enabled ? 'green' : 'gray'} bold>{state.frr?.bgp?.enabled ? '[ENABLED]  ' : '[DISABLED] '}</Text>
+                <Text bold color="white">FRRouting BGPv4 Daemon </Text>
+                <Text color="yellow">ASN: {state.frr?.bgp?.asNumber || 65001} · Router ID: {state.frr?.bgp?.routerId || 'auto'} · Neighbors: {state.frr?.bgp?.neighbors?.length || 0}</Text>
+              </Text>
+              <Text wrap="truncate-end">
+                <Text color={cursorIdx % 2 === 1 ? 'cyan' : 'gray'} bold>{cursorIdx % 2 === 1 ? '▶ ' : '  '}</Text>
+                <Text color={state.frr?.ospf?.enabled ? 'green' : 'gray'} bold>{state.frr?.ospf?.enabled ? '[ENABLED]  ' : '[DISABLED] '}</Text>
+                <Text bold color="white">FRRouting OSPFv2/v3    </Text>
+                <Text color="yellow">Router ID: {state.frr?.ospf?.routerId || 'auto'} · Areas: {state.frr?.ospf?.areas?.length || 0}</Text>
+              </Text>
+            </Box>
+          )}
         </Box>
       )}
 
       {activeTab === 'services' && (
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="cyan" wrap="truncate-end">
-            Network Services, Post-Quantum VPN, HA & MCP{' '}
-            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [a] Apply</Text>
+            Network Services, Post-Quantum VPN, HA & MCP ({servicesViewport.activeIndex + 1}/{serviceRows.length}){' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [g] PQ Keygen · [f] MCP Flush · [a] Apply</Text>
           </Text>
-          {serviceRows.map((row, idx) => {
-            const sel = idx === cursorIdx % serviceRows.length;
+          {servicesViewport.slice.map((row, i) => {
+            const absIdx = servicesViewport.startIndex + i;
+            const sel = absIdx === servicesViewport.activeIndex;
             return (
               <Text key={row.id} wrap="truncate-end">
                 <Text color={sel ? 'cyan' : 'gray'} bold>
@@ -1267,27 +2115,90 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'storage' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} gap={1}>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} gap={0}>
           <Text bold color="cyan" wrap="truncate-end">
-            OpenZFS Storage Pools & NAS Shares{' '}
-            <Text color="gray" bold={false}>— [Space] Toggle NAS · [s] zpool status · [a] Apply</Text>
+            Enterprise Grade OpenZFS Storage & Shares [{stSubView.toUpperCase()}]{' '}
+            <Text color="gray" bold={false}>— [n] View · [Space] Toggle NAS · [s] Create Snapshot · [w] Scrub · [z] zpool status</Text>
           </Text>
           <Text wrap="truncate-end">
-            ZFS NAS Core Role :{' '}
+            Enterprise Grade ZFS NAS Role :{' '}
             <Text bold color={caps.nasEnabled ? 'green' : 'gray'}>
               {caps.nasEnabled ? '[ENABLED]' : '[DISABLED]'}
             </Text>{' '}
-            — Pools: <Text bold color="cyan">{state.nas?.pools?.length || 0}</Text> · Datasets:{' '}
-            <Text bold color="cyan">{state.nas?.datasets?.length || 0}</Text> · SMB/NFS Shares:{' '}
+            — Live Pools: <Text bold color="cyan">{liveNasPools.length || state.nas?.pools?.length || 0}</Text> · Datasets:{' '}
+            <Text bold color="cyan">{state.nas?.datasets?.length || 0}</Text> · Snapshots:{' '}
+            <Text bold color="cyan">{liveNasSnapshots.length}</Text> · Shares:{' '}
             <Text bold color="cyan">{(state.nas?.smbShares?.length || 0) + (state.nas?.nfsExports?.length || 0)}</Text>
           </Text>
-          {(state.nas?.pools || []).map((p: any) => (
-            <Text key={p.name} color="white" wrap="truncate-end">
-              {'  '}• Pool <Text bold color="cyan">{p.name}</Text> ({p.topology || 'mirror'}) — Compression: {p.compression || 'lz4'}, Auto-Scrub: {p.autoScrub ? 'ON' : 'OFF'}
-            </Text>
-          ))}
+          {stSubView === 'pools' && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white">ZFS Storage Pools & Physical Disks ({liveNasDisks.length} disks):</Text>
+              {(liveNasPools.length > 0 ? liveNasPools : state.nas?.pools || []).map((p: any, idx: number) => {
+                const sel = idx === cursorIdx % Math.max(1, liveNasPools.length || state.nas?.pools?.length || 1);
+                return (
+                  <Text key={p.name || idx} color="white" wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                    Pool <Text bold color="cyan">{(p.name || 'tank').padEnd(12, ' ')}</Text>{' '}
+                    <Text color={p.health === 'ONLINE' ? 'green' : 'yellow'}>[{p.health || p.topology || 'ONLINE'}]</Text>{' '}
+                    Size: {p.size || '-'} · Used: {p.alloc || '-'} · Free: {p.free || '-'}
+                  </Text>
+                );
+              })}
+            </Box>
+          )}
+          {stSubView === 'datasets' && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white">Configured ZFS Datasets (Press [s] to snapshot selected dataset):</Text>
+              {(state.nas?.datasets || []).length === 0 ? (
+                <Text color="gray">  No datasets configured in /etc/axonwall/storage.yaml.</Text>
+              ) : (
+                (state.nas?.datasets || []).map((ds: any, idx: number) => {
+                  const sel = idx === cursorIdx % Math.max(1, (state.nas?.datasets || []).length);
+                  return (
+                    <Text key={`${ds.pool}/${ds.name}`} wrap="truncate-end">
+                      <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                      <Text bold color="cyan">{`${ds.pool || 'tank'}/${ds.name}`.padEnd(26, ' ')}</Text>
+                      <Text color="yellow">{`Comp: ${ds.compression || 'lz4'}`.padEnd(14, ' ')}</Text>
+                      <Text color="white">Quota: {ds.quota || 'none'} · Mount: {ds.mountpoint || 'auto'}</Text>
+                    </Text>
+                  );
+                })
+              )}
+            </Box>
+          )}
+          {stSubView === 'snapshots' && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white">Live ZFS Snapshots ({liveNasSnapshots.length}) — Press [s] to create snapshot:</Text>
+              {liveNasSnapshots.length === 0 ? (
+                <Text color="gray">  No live NAS snapshots found. Press [s] to create a snapshot.</Text>
+              ) : (
+                liveNasSnapshots.slice(0, 11).map((sn: any, idx: number) => (
+                  <Text key={sn.name || idx} wrap="truncate-end">
+                    {'  '}• <Text bold color="cyan">{(sn.name || sn).toString().padEnd(36, ' ')}</Text>{' '}
+                    <Text color="yellow">Used: {sn.used || '-'}</Text>{' '}
+                    <Text color="gray">{sn.creation || ''}</Text>
+                  </Text>
+                ))
+              )}
+            </Box>
+          )}
+          {stSubView === 'shares' && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color="white">SMB Shares ({state.nas?.smbShares?.length || 0}) & NFSv4 Exports ({state.nas?.nfsExports?.length || 0}):</Text>
+              {(state.nas?.smbShares || []).map((sh: any, idx: number) => (
+                <Text key={sh.name || idx} wrap="truncate-end">
+                  {'  '}• <Text color="green">[SMB]</Text> <Text bold color="white">{sh.name.padEnd(16, ' ')}</Text> Path: <Text color="cyan">{sh.path}</Text>
+                </Text>
+              ))}
+              {(state.nas?.nfsExports || []).map((nf: any, idx: number) => (
+                <Text key={nf.path || idx} wrap="truncate-end">
+                  {'  '}• <Text color="yellow">[NFS]</Text> <Text bold color="cyan">{nf.path.padEnd(24, ' ')}</Text> Network: <Text color="white">{nf.network || '*'}</Text>
+                </Text>
+              ))}
+            </Box>
+          )}
           {storageOutput && (
-            <Box borderStyle="single" borderColor="green" paddingX={1} flexDirection="column">
+            <Box borderStyle="single" borderColor="green" paddingX={1} flexDirection="column" marginTop={1}>
               <Text color="green">{storageOutput}</Text>
             </Box>
           )}
@@ -1295,43 +2206,135 @@ export function AxonwallTuiApp({
       )}
 
       {activeTab === 'compute' && (
-        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} gap={1}>
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1} gap={0}>
           <Text bold color="cyan" wrap="truncate-end">
-            K3s + OpenEBS, KVM/LXC & Vigilante SOC{' '}
-            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [k] kubectl · [v] virsh</Text>
+            K3s + OpenEBS, KVM/LXC Hypervisor & Vigilante SOC [{cmpSubView.toUpperCase()}]{' '}
+            <Text color="gray" bold={false}>— [n] View · [↑/↓] Select · [Space] Toggle · [k] kubectl · [v] virsh</Text>
           </Text>
-          {[
-            {
-              id: 'core-k3s',
-              name: 'K3s Kubernetes Cluster + OpenEBS LocalPV',
-              enabled: caps.k3sEnabled,
-              detail: `CIDR: ${state.k3s?.clusterCidr || '10.42.0.0/16'}, OpenEBS ZFS`,
-            },
-            {
-              id: 'core-virt',
-              name: 'KVM/QEMU & LXC Virtualization Hypervisor',
-              enabled: caps.virtEnabled,
-              detail: `${state.virt?.vms?.length || 0} KVM VMs, ${state.virt?.containers?.length || 0} LXC containers`,
-            },
-            {
-              id: 'core-vigilante',
-              name: 'Vigilante Autonomous SOC & Threat Hunting',
-              enabled: caps.vigilanteEnabled,
-              detail: `Automated IOC enrichment & active response`,
-            },
-          ].map((r, idx) => {
-            const sel = idx === cursorIdx % 3;
-            return (
-              <Text key={r.id} wrap="truncate-end">
-                <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
-                <Text color={r.enabled ? 'green' : 'gray'} bold>{r.enabled ? '[ENABLED]  ' : '[DISABLED] '}</Text>
-                <Text bold={sel} color="white">{r.name.padEnd(42, ' ')}</Text>
-                <Text color="gray">{r.detail}</Text>
+          {cmpSubView === 'roles' &&
+            [
+              {
+                id: 'core-k3s',
+                name: 'K3s Kubernetes Cluster + OpenEBS LocalPV',
+                enabled: caps.k3sEnabled,
+                detail: `CIDR: ${state.k3s?.clusterCidr || '10.42.0.0/16'}, OpenEBS ZFS`,
+              },
+              {
+                id: 'core-virt',
+                name: 'KVM/QEMU & LXC Virtualization Hypervisor',
+                enabled: caps.virtEnabled,
+                detail: `${liveVms.length || state.virt?.vms?.length || 0} KVM VMs, ${liveContainers.length || state.virt?.containers?.length || 0} LXC containers`,
+              },
+              {
+                id: 'core-vigilante',
+                name: 'Vigilante Autonomous SOC & Threat Hunting',
+                enabled: caps.vigilanteEnabled,
+                detail: `${soarBlockedIps.length} SOAR blocked IPs, automated IOC containment`,
+              },
+              {
+                id: 'vigilant-octo-waffle',
+                name: 'Vigilant Octo Waffle (K8s GitOps Platform)',
+                enabled: isPluginEnabled('vigilant-octo-waffle', state),
+                detail: 'In-house K3s GitOps & App Platform (requires core-k3s)',
+              },
+              {
+                id: 'eluvix',
+                name: 'Eluvix Sovereign AI Router & Prompt Guard',
+                enabled: isPluginEnabled('eluvix', state),
+                detail: 'Enterprise Tokenomics & PII Guard (:3588)',
+              },
+              {
+                id: 'host-malware-rootkit',
+                name: 'Host Malware, Rootkit & Kernel Hunter',
+                enabled: isPluginEnabled('host-malware-rootkit', state),
+                detail: 'rkhunter, AIDE, YARA, io_uring & eBPF ring audit',
+              },
+            ].map((r, idx) => {
+              const sel = idx === cursorIdx % 6;
+              return (
+                <Text key={r.id} wrap="truncate-end">
+                  <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                  <Text color={r.enabled ? 'green' : 'gray'} bold>{r.enabled ? '[ENABLED]  ' : '[DISABLED] '}</Text>
+                  <Text bold={sel} color="white">{r.name.padEnd(42, ' ')}</Text>
+                  <Text color="gray">{r.detail}</Text>
+                </Text>
+              );
+            })}
+          {cmpSubView === 'vms' && (
+            <Box flexDirection="column">
+              <Text bold color="white">KVM Virtual Machines ({liveVms.length}) — [s] Start · [x] Stop · [b] Reset:</Text>
+              {liveVms.length === 0 ? (
+                <Text color="gray">  No KVM virtual machines registered.</Text>
+              ) : (
+                liveVms.map((vm: any, idx: number) => {
+                  const sel = idx === cursorIdx % liveVms.length;
+                  return (
+                    <Text key={vm.vmid || idx} wrap="truncate-end">
+                      <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                      <Text color={vm.status === 'running' ? 'green' : 'gray'} bold>
+                        {`[${(vm.status || 'stopped').toUpperCase()}]`.padEnd(11, ' ')}
+                      </Text>
+                      <Text bold color="cyan">{`VM #${vm.vmid}`.padEnd(9, ' ')}</Text>
+                      <Text bold color="white">{(vm.name || 'vm').padEnd(20, ' ')}</Text>
+                      <Text color="yellow">{`${vm.cpus || 2} vCPU / ${vm.memoryMb || 2048} MB`}</Text>
+                    </Text>
+                  );
+                })
+              )}
+            </Box>
+          )}
+          {cmpSubView === 'containers' && (
+            <Box flexDirection="column">
+              <Text bold color="white">LXC System Containers ({liveContainers.length}) — [s] Start · [x] Stop:</Text>
+              {liveContainers.length === 0 ? (
+                <Text color="gray">  No LXC containers registered.</Text>
+              ) : (
+                liveContainers.map((ct: any, idx: number) => {
+                  const sel = idx === cursorIdx % liveContainers.length;
+                  return (
+                    <Text key={ct.ctid || idx} wrap="truncate-end">
+                      <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                      <Text color={ct.status === 'running' ? 'green' : 'gray'} bold>
+                        {`[${(ct.status || 'stopped').toUpperCase()}]`.padEnd(11, ' ')}
+                      </Text>
+                      <Text bold color="cyan">{`CT #${ct.ctid}`.padEnd(9, ' ')}</Text>
+                      <Text bold color="white">{(ct.name || 'ct').padEnd(20, ' ')}</Text>
+                      <Text color="yellow">{`${ct.cpus || 1} vCPU / ${ct.memoryMb || 512} MB`}</Text>
+                    </Text>
+                  );
+                })
+              )}
+            </Box>
+          )}
+          {cmpSubView === 'soc' && (
+            <Box flexDirection="column">
+              <Text bold color="white">
+                Vigilante SOAR Blocked IPs ({soarBlockedIps.length}) — [b] Block IP · [u] Unblock Selected · [h] Rootkit Audit:
               </Text>
-            );
-          })}
+              {soarBlockedIps.length === 0 ? (
+                <Text color="gray">  No IPs currently quarantined in SOAR blocklist.</Text>
+              ) : (
+                soarBlockedIps.slice(0, 8).map((item: any, idx: number) => {
+                  const sel = idx === cursorIdx % soarBlockedIps.length;
+                  return (
+                    <Text key={item.ip || idx} wrap="truncate-end">
+                      <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                      <Text color="red" bold>[BLOCKED] </Text>
+                      <Text bold color="white">{(item.ip || '').padEnd(20, ' ')}</Text>
+                      <Text color="gray">Expires: {item.expiresAt || 'permanent'}</Text>
+                    </Text>
+                  );
+                })
+              )}
+              {rootkitStatus && (
+                <Text color="cyan" wrap="truncate-end">
+                  Rootkit & Kernel Hunter: {rootkitStatus.summary || `Scanners ready (${(rootkitStatus.scanners || []).length})`}
+                </Text>
+              )}
+            </Box>
+          )}
           {computeOutput && (
-            <Box borderStyle="single" borderColor="green" paddingX={1} flexDirection="column">
+            <Box borderStyle="single" borderColor="green" paddingX={1} flexDirection="column" marginTop={1}>
               <Text color="green">{computeOutput}</Text>
             </Box>
           )}
@@ -1341,14 +2344,15 @@ export function AxonwallTuiApp({
       {activeTab === 'plugins' && (
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="cyan" wrap="truncate-end">
-            Appliance Roles, Extension Plugins & Shell{' '}
-            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [i] Install · [a] Apply</Text>
+            Appliance Roles, Extension Plugins & Shell ({pluginsViewport.activeIndex + 1}/{BUILTIN_PLUGINS.length}){' '}
+            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [i] Install · [u] Uninstall · [s] Re-sync · [a] Apply</Text>
           </Text>
           <Text color="green" wrap="truncate-end">
-            ★ Oh My Zsh + Starship + VIM + Tmux ENABLED BY DEFAULT (git, kubectl, helm, systemd, sudo, tmux, axonwall).
+            ★ Oh My Zsh + Starship + Neovim Super Configurator ENABLED BY DEFAULT (git, kubectl, helm, systemd, sudo, tmux, axonwall).
           </Text>
-          {BUILTIN_PLUGINS.slice(0, 14).map((p, idx) => {
-            const sel = idx === cursorIdx % BUILTIN_PLUGINS.length;
+          {pluginsViewport.slice.map((p, i) => {
+            const absIdx = pluginsViewport.startIndex + i;
+            const sel = absIdx === pluginsViewport.activeIndex;
             const isCore = CORE_ROLE_PLUGIN_IDS.has(p.id);
             const enabled = isCore
               ? p.id === 'core-firewall'
@@ -1379,7 +2383,9 @@ export function AxonwallTuiApp({
                 <Text color={enabled ? 'green' : 'gray'} bold>
                   {enabled ? '[ENABLED]  ' : '[DISABLED] '}
                 </Text>
-                <Text color="yellow">{`[${pkgStatus}]`.padEnd(13, ' ')}</Text>
+                <Text color={hostInfo?.installed || hostInfo?.bundled || isCore ? 'green' : 'yellow'}>
+                  {`[${pkgStatus}]`.padEnd(13, ' ')}
+                </Text>
                 <Text bold={sel} color={sel ? 'white' : 'cyan'}>
                   {p.id.padEnd(24, ' ')}
                 </Text>
@@ -1397,35 +2403,200 @@ export function AxonwallTuiApp({
         <NastyMapApp embedded={true} detectedSubnets={detectedSubnets} readOnly={readOnly} />
       )}
 
+      {activeTab === 'updates' && (
+        <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
+          {installMode === 'zbm' ? (
+            <>
+              <Text bold color="cyan" wrap="truncate-end">
+                ZFSBootMenu Root-on-ZFS System Updates & Boot Environments [{updSubView.toUpperCase()}]{' '}
+                <Text color="gray" bold={false}>
+                  — [n] View (BEs / Snapshots / Health) · [s] Create Snapshot · [c] Clone · [b] Activate BE · [x] Delete · [h] Verify
+                </Text>
+              </Text>
+              <Text wrap="truncate-end">
+                Pool: <Text bold color="cyan">{partitionStatus?.zbmPoolName || 'zroot'}</Text>{' '}
+                (<Text color="green">{partitionStatus?.zbmPoolHealth || 'ONLINE'}</Text>) · Active Root:{' '}
+                <Text bold color="yellow">{partitionStatus?.activeRootDevice || 'zroot/ROOT/default'}</Text> · Watchdog:{' '}
+                <Text bold color={partitionStatus?.healthVerified ? 'green' : 'yellow'}>
+                  {partitionStatus?.healthVerified ? 'VERIFIED (bootcount=0)' : `PENDING (${partitionStatus?.bootCount || 0}/${partitionStatus?.bootLimit || 3})`}
+                </Text>
+              </Text>
+              {updSubView === 'be' && (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text bold color="white">
+                    ZFS Boot Environments ({(partitionStatus?.bootEnvironments || []).length}) — [s] Snapshot Selected BE · [b] Activate for Next Boot · [x] Delete:
+                  </Text>
+                  {zbmBeViewport.slice.length === 0 ? (
+                    <Text color="gray">  No ZFS Boot Environments discovered.</Text>
+                  ) : (
+                    zbmBeViewport.slice.map((be: any, i: number) => {
+                      const absIdx = zbmBeViewport.startIndex + i;
+                      const sel = absIdx === zbmBeViewport.activeIndex;
+                      return (
+                        <Text key={be.dataset || be.name || absIdx} wrap="truncate-end">
+                          <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                          <Text color={be.activeNow ? 'green' : 'gray'} bold>
+                            {be.activeNow ? '[ACTIVE NOW] ' : '             '}
+                          </Text>
+                          <Text color={be.activeNext ? 'magenta' : 'gray'} bold>
+                            {be.activeNext ? '[NEXT BOOT] ' : '            '}
+                          </Text>
+                          <Text bold color="white">{(be.name || '').padEnd(22, ' ')}</Text>
+                          <Text color="cyan">{(be.dataset || '').padEnd(30, ' ')}</Text>
+                          <Text color="yellow">{`Used: ${(be.usedSize || '-').padEnd(8, ' ')}`}</Text>
+                          <Text color="gray">Snaps: {be.snapshots?.length || 0} · {be.createdAt || ''}</Text>
+                        </Text>
+                      );
+                    })
+                  )}
+                </Box>
+              )}
+              {updSubView === 'snapshots' && (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text bold color="white">
+                    ZFS Boot Environment Snapshots ({allZbmSnapshots.length}) — [s] New Snapshot · [c] Clone to Boot Env · [x] Destroy Snapshot:
+                  </Text>
+                  {zbmSnapViewport.slice.length === 0 ? (
+                    <Text color="gray">  No ZFS Boot Environment snapshots yet. Press [s] to create an arbitrary snapshot!</Text>
+                  ) : (
+                    zbmSnapViewport.slice.map((sn: any, i: number) => {
+                      const absIdx = zbmSnapViewport.startIndex + i;
+                      const sel = absIdx === zbmSnapViewport.activeIndex;
+                      return (
+                        <Text key={sn.fullName || absIdx} wrap="truncate-end">
+                          <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                          <Text bold color="cyan">{(sn.name || '').padEnd(24, ' ')}</Text>
+                          <Text color="white">{(sn.fullName || '').padEnd(42, ' ')}</Text>
+                          <Text color="yellow">{`Used: ${(sn.usedSize || '-').padEnd(7, ' ')} Refer: ${(sn.referSize || '-').padEnd(7, ' ')}`}</Text>
+                          <Text color="gray">{sn.createdAt || ''}</Text>
+                        </Text>
+                      );
+                    })
+                  )}
+                </Box>
+              )}
+              {updSubView === 'checks' && (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text bold color="white">Boot Watchdog Health Quorum Checks ({(partitionStatus?.checks || []).length}):</Text>
+                  {(partitionStatus?.checks || []).map((chk: any, idx: number) => (
+                    <Text key={chk.name || idx} wrap="truncate-end">
+                      {'  '}
+                      <Text color={chk.status === 'PASS' ? 'green' : chk.status === 'WARN' ? 'yellow' : 'red'} bold>
+                        [{chk.status}]
+                      </Text>{' '}
+                      <Text bold color="white">{(chk.name || '').padEnd(28, ' ')}</Text>{' '}
+                      <Text color="gray">{chk.detail} ({chk.durationMs || 0}ms)</Text>
+                    </Text>
+                  ))}
+                </Box>
+              )}
+            </>
+          ) : (
+            <>
+              <Text bold color="cyan" wrap="truncate-end">
+                {installMode === 'rolling' ? 'Rolling Standard Linux System Updates' : 'Dual-Root A/B Partition System Updates'}{' '}
+                <Text color="gray" bold={false}>— [b] Activate Standby Slot · [h] Verify Health</Text>
+              </Text>
+              <Text wrap="truncate-end">
+                Active Slot: <Text bold color="green">Slot {partitionStatus?.activeSlot || 'A'}</Text> ({partitionStatus?.slotAVersion || 'current'}) · Standby Slot:{' '}
+                <Text bold color="yellow">Slot {partitionStatus?.inactiveSlot || 'B'}</Text> ({partitionStatus?.slotBVersion || 'standby'}) · Health:{' '}
+                <Text bold color={partitionStatus?.healthVerified ? 'green' : 'yellow'}>
+                  {partitionStatus?.healthVerified ? 'VERIFIED' : 'PENDING'}
+                </Text>
+              </Text>
+              <Box flexDirection="column" marginTop={1}>
+                <Text bold color="white">Boot Watchdog Health Checks:</Text>
+                {(partitionStatus?.checks || []).map((chk: any, idx: number) => (
+                  <Text key={chk.name || idx} wrap="truncate-end">
+                    {'  '}
+                    <Text color={chk.status === 'PASS' ? 'green' : 'red'} bold>[{chk.status}]</Text>{' '}
+                    <Text color="white">{chk.name}: </Text>
+                    <Text color="gray">{chk.detail}</Text>
+                  </Text>
+                ))}
+              </Box>
+            </>
+          )}
+        </Box>
+      )}
+
       {activeTab === 'cli_ops' && (
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
           <Text bold color="cyan" wrap="truncate-end">
-            CLI Ops & Telemetry Toolkit (NIC: {detectedSubnets[0]?.device || 'eth0'}){' '}
-            <Text color="gray" bold={false}>— [↑/↓] Select · [Enter/Space] Execute</Text>
+            System Administration, Directory, GitOps & CLI Ops [{opsSubView.toUpperCase()}]{' '}
+            <Text color="gray" bold={false}>— [n] View (Toolkit / Users / GitOps / Power) · [↑/↓] Select · [Enter/Space] Execute</Text>
           </Text>
-          {cliTools.map((t, idx) => {
-            const sel = idx === cursorIdx % cliTools.length;
-            return (
-              <Text key={t.id} wrap="truncate-end">
-                <Text color={sel ? 'cyan' : 'gray'} bold>
-                  {sel ? '▶ ' : '  '}
-                </Text>
-                <Text bold={sel} color={sel ? 'green' : 'white'}>
-                  {t.name.padEnd(38, ' ')}
-                </Text>
-                <Text color="gray">{t.desc}</Text>
+          {opsSubView === 'toolkit' && (
+            <>
+              {cliTools.map((t, idx) => {
+                const sel = idx === cursorIdx % cliTools.length;
+                return (
+                  <Text key={t.id} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>
+                      {sel ? '▶ ' : '  '}
+                    </Text>
+                    <Text bold={sel} color={sel ? 'green' : 'white'}>
+                      {t.name.padEnd(38, ' ')}
+                    </Text>
+                    <Text color="gray">{t.desc}</Text>
+                  </Text>
+                );
+              })}
+              {cliOutput && (
+                <Box
+                  marginTop={1}
+                  borderStyle="single"
+                  borderColor="green"
+                  paddingX={1}
+                  flexDirection="column"
+                >
+                  <Text color="green">{cliOutput}</Text>
+                </Box>
+              )}
+            </>
+          )}
+          {opsSubView === 'users' && (
+            <Box flexDirection="column">
+              <Text wrap="truncate-end">
+                OpenLDAP Directory:{' '}
+                <Text bold color={directoryStatus?.slapdRunning ? 'green' : 'yellow'}>
+                  {directoryStatus?.slapdRunning ? 'ONLINE' : 'LOCAL PAM'}
+                </Text>{' '}
+                · Base DN: <Text color="cyan">{directoryStatus?.baseDn || 'dc=axonwall,dc=local'}</Text> · Users: <Text bold color="white">{directoryUsers.length}</Text>
               </Text>
-            );
-          })}
-          {cliOutput && (
-            <Box
-              marginTop={1}
-              borderStyle="single"
-              borderColor="green"
-              paddingX={1}
-              flexDirection="column"
-            >
-              <Text color="green">{cliOutput}</Text>
+              {directoryUsers.slice(0, 12).map((u: any, idx: number) => (
+                <Text key={u.username || idx} wrap="truncate-end">
+                  {'  '}• <Text bold color="cyan">{(u.username || '').padEnd(16, ' ')}</Text>{' '}
+                  <Text color="yellow">{`[${(u.applianceRole || 'operator').toUpperCase()}]`.padEnd(12, ' ')}</Text>{' '}
+                  <Text color="white">UID: {String(u.uid || '-').padEnd(7, ' ')} Shell: {(u.shell || '/bin/zsh').padEnd(15, ' ')}</Text>{' '}
+                  <Text color="gray">SSH Keys: {u.sshKeys?.length || 0}</Text>
+                </Text>
+              ))}
+            </Box>
+          )}
+          {opsSubView === 'gitops' && (
+            <Box flexDirection="column">
+              <Text bold color="white">Etckeeper /etc Git Commit History ({etckeeperHistory.length}) — Press [s] to commit snapshot:</Text>
+              {etckeeperHistory.length === 0 ? (
+                <Text color="gray">  No etckeeper commits recorded yet. Press [s] to create an /etc git commit.</Text>
+              ) : (
+                etckeeperHistory.slice(0, 11).map((h: any, idx: number) => (
+                  <Text key={h.commit || h.hash || idx} wrap="truncate-end">
+                    {'  '}• <Text bold color="yellow">{(h.commit || h.hash || '').slice(0, 8)}</Text>{' '}
+                    <Text color="cyan">{(h.date || h.timestamp || '').slice(0, 19).padEnd(20, ' ')}</Text>{' '}
+                    <Text color="white">{h.message || h.subject || ''}</Text>
+                  </Text>
+                ))
+              )}
+            </Box>
+          )}
+          {opsSubView === 'power' && (
+            <Box flexDirection="column">
+              <Text bold color="white">Hardware Telemetry & System Environment:</Text>
+              <Text wrap="truncate-end">  • CPU Model    : <Text color="cyan">{hwTelemetry?.cpuModel || os.cpus()[0]?.model || 'x86_64'}</Text> ({os.cpus().length} logical cores)</Text>
+              <Text wrap="truncate-end">  • Kernel / OS  : <Text color="yellow">{os.type()} {os.release()} ({os.arch()})</Text></Text>
+              <Text wrap="truncate-end">  • System Uptime: <Text color="green">{Math.floor(os.uptime() / 3600)}h {Math.floor((os.uptime() % 3600) / 60)}m</Text></Text>
+              <Text wrap="truncate-end">  • Thermal Zones: <Text color="cyan">{(hwTelemetry?.temperatures || []).map((t: any) => `${t.label}: ${t.celsius}°C`).join(', ') || 'Nominal'}</Text></Text>
             </Box>
           )}
         </Box>
@@ -1436,15 +2607,15 @@ export function AxonwallTuiApp({
         <Text color={readOnly ? 'yellow' : 'green'} wrap="truncate-end">{statusMessage}</Text>
         <Text color="gray" wrap="truncate-end">
           {readOnly
-            ? '[1-9,0/Tab] Switch Tabs · [d] Reload · [q] Quit [READ-ONLY]'
-            : '[1-9,0/Tab] Switch Tabs · [a] Apply · [c] Confirm · [r] Rollback · [d] Reload · [q] Quit'}
+            ? '[1-9,u,0/Tab] Switch Tabs · [n] Subview · [d] Reload · [q] Quit [READ-ONLY]'
+            : '[1-9,u,0/Tab] Switch Tabs · [n] Subview · [a] Apply · [c] Confirm · [r] Rollback · [d] Reload · [q] Quit'}
         </Text>
       </Box>
     </Box>
   );
 }
 
-function resolveTabFromArg(val: string): TopTab {
+export function resolveTabFromArg(val: string): TopTab {
   const v = val.toLowerCase();
   if (v === 'nastymap' || v === 'nmap') return 'nastymap';
   if (v === 'routing' || v === 'routes' || v === 'frr') return 'routing';
@@ -1454,26 +2625,56 @@ function resolveTabFromArg(val: string): TopTab {
   if (v === 'storage' || v === 'zfs' || v === 'nas') return 'storage';
   if (v === 'compute' || v === 'k3s' || v === 'virt' || v === 'vigilante') return 'compute';
   if (v === 'plugins' || v === 'shell') return 'plugins';
-  if (v === 'cli' || v === 'ops' || v === 'cli_ops' || v === 'cli-tools' || v === 'logs') return 'cli_ops';
+  if (v === 'updates' || v === 'update' || v === 'zbm' || v === 'be' || v === 'bootenv') return 'updates';
+  if (
+    v === 'cli' ||
+    v === 'ops' ||
+    v === 'cli_ops' ||
+    v === 'cli-tools' ||
+    v === 'logs' ||
+    v === 'users' ||
+    v === 'gitops' ||
+    v === 'system'
+  )
+    return 'cli_ops';
   return 'dashboard';
 }
 
 // Parse CLI arguments (--tab nastymap, --readonly, etc.)
-const args = process.argv.slice(2);
-let startTab: TopTab = 'dashboard';
-let readOnlyMode = process.env.AXONWALL_TUI_READONLY === '1';
+const isDirectExecution =
+  process.argv[1] &&
+  (process.argv[1].endsWith('axonwall-tui.js') ||
+    process.argv[1].endsWith('axonwall-tui.tsx') ||
+    process.argv[1].endsWith('axonwall-tui'));
 
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-  if (arg === '--readonly' || arg === '-r') {
-    readOnlyMode = true;
-  } else if ((arg === '--tab' || arg === '-t' || arg === '--view') && args[i + 1]) {
-    startTab = resolveTabFromArg(args[++i]!);
-  } else if (arg?.startsWith('--view=')) {
-    startTab = resolveTabFromArg(arg.slice(7));
-  } else if (arg?.startsWith('--tab=')) {
-    startTab = resolveTabFromArg(arg.slice(6));
+if (isDirectExecution) {
+  const args = process.argv.slice(2);
+  let startTab: TopTab = 'dashboard';
+  let readOnlyMode = process.env.AXONWALL_TUI_READONLY === '1';
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--help' || arg === '-h' || arg === 'help') {
+      console.log(`axonwall-tui — Unified Axonwall Appliance Ink TUI
+
+Usage:
+  axonwall-tui [--tab <tab>] [--readonly]
+
+Tabs:
+  dashboard, interfaces, firewall (nat), routing, services (vpn, mcp),
+  storage (zfs), compute (k3s, virt, vigilante), plugins (shell),
+  nastymap, cli_ops (users, gitops, logs), updates (zbm, be)`);
+      process.exit(0);
+    } else if (arg === '--readonly' || arg === '-r') {
+      readOnlyMode = true;
+    } else if ((arg === '--tab' || arg === '-t' || arg === '--view') && args[i + 1]) {
+      startTab = resolveTabFromArg(args[++i]!);
+    } else if (arg?.startsWith('--view=')) {
+      startTab = resolveTabFromArg(arg.slice(7));
+    } else if (arg?.startsWith('--tab=')) {
+      startTab = resolveTabFromArg(arg.slice(6));
+    }
   }
-}
 
-render(<AxonwallTuiApp initialTab={startTab} readOnly={readOnlyMode} />);
+  render(<AxonwallTuiApp initialTab={startTab} readOnly={readOnlyMode} />);
+}

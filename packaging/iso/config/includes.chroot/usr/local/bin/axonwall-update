@@ -241,12 +241,12 @@ if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
   RELEASE_PUBKEY="/etc/axonwall/release-signing.pub"
   CANDIDATE_DEB="/tmp/axonwall_${CLEAN_VER}_amd64.deb"
   echo "[+] Checking release artifact: ${DEB_URL}"
-  if curl -fsSL --connect-timeout 4 --max-time 25 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
+  if curl -fsSL --connect-timeout 10 --max-time 180 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
     # Fail closed: the .deb is only ever used after verification. A
     # checksum that cannot be fetched discards the download -- a
     # missing checksum must never mean "unverified is fine" for code
     # that will run as root.
-    if ! curl -fsSL --connect-timeout 4 --max-time 10 -o "${CANDIDATE_DEB}.sha256" "${SHA_URL}" 2>/dev/null; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256" "${SHA_URL}" 2>/dev/null; then
       echo "[-] ERROR: could not fetch SHA-256 checksum for ${DEB_URL}; discarding unverified download."
       rm -f "${CANDIDATE_DEB}"
     else
@@ -259,7 +259,7 @@ if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
         # A release signing key is provisioned: the checksum itself
         # must carry a valid detached signature (${SHA_URL}.sig, made
         # by the release workflow) before the package is accepted.
-        if curl -fsSL --connect-timeout 4 --max-time 10 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null \
+        if curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null \
           && openssl dgst -sha256 -verify "$RELEASE_PUBKEY" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
           echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
           DEB_TMP="${CANDIDATE_DEB}"

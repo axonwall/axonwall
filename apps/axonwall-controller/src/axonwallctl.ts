@@ -314,7 +314,7 @@ function getAgentToken(): string | undefined {
   }
 }
 
-function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body?: unknown): Promise<T> {
+function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body?: unknown, timeoutMs = 15000): Promise<T> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(AGENT_API_SOCK)) {
       reject(new Error(`Socket not found at ${AGENT_API_SOCK}`));
@@ -326,6 +326,7 @@ function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body
         socketPath: AGENT_API_SOCK,
         path: reqPath,
         method,
+        timeout: timeoutMs,
         headers: {
           ...(payload
             ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
@@ -344,12 +345,23 @@ function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body
               reject(err);
             }
           } else {
-            reject(new Error(data || `HTTP ${res.statusCode}`));
+            let errMsg = data || `HTTP ${res.statusCode}`;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed?.error || parsed?.message) {
+                errMsg = String(parsed.error || parsed.message);
+              }
+            } catch {}
+            reject(new Error(errMsg));
           }
         });
       }
     );
     req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Daemon socket request timed out after ${Math.round(timeoutMs / 1000)}s`));
+    });
     if (payload) req.write(payload);
     req.end();
   });
@@ -828,7 +840,17 @@ function cmdExport() {
 async function cmdConfirm() {
   console.log(`${cCyan}Confirming pending ruleset and configuration commit...${cReset}`);
   try {
-    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/confirm', 'POST', {});
+    let pendingJobId = 'confirm';
+    try {
+      const status = await sendAgentSocketRequest<any>('/v1/status', 'GET');
+      if (status?.pending_job_id || status?.pendingJobId) {
+        pendingJobId = String(status.pending_job_id || status.pendingJobId);
+      }
+    } catch {}
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/confirm', 'POST', {
+      jobId: pendingJobId,
+      job_id: pendingJobId,
+    });
     if (resp.success) {
       console.log(`${cGreen}${cBold}[✓] Active ruleset and configuration successfully confirmed. Auto-rollback disarmed.${cReset}`);
     } else {
@@ -1751,7 +1773,8 @@ async function cmdPlugin(args: string[]) {
         const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
           '/v1/system/plugins/action',
           'POST',
-          { pluginId, action: 'install' }
+          { pluginId, action: 'install' },
+          300000
         );
         if (res.success) {
           console.log(`${cGreen}[✓] ${res.message}${cReset}`);
@@ -1782,7 +1805,8 @@ async function cmdPlugin(args: string[]) {
         const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
           '/v1/system/plugins/action',
           'POST',
-          { pluginId, action: 'uninstall' }
+          { pluginId, action: 'uninstall' },
+          300000
         );
         if (res.success) {
           console.log(`${cGreen}[✓] ${res.message}${cReset}`);
@@ -1809,7 +1833,8 @@ async function cmdPlugin(args: string[]) {
         const res = await sendAgentSocketRequest<{ success: boolean; message: string }>(
           '/v1/system/plugins/action',
           'POST',
-          { pluginId, action: 'reconfigure' }
+          { pluginId, action: 'reconfigure' },
+          300000
         );
         if (res.success) {
           console.log(`${cGreen}[✓] ${res.message}${cReset}`);
@@ -1826,6 +1851,239 @@ async function cmdPlugin(args: string[]) {
     default:
       console.error(`${cRed}Unknown plugin subcommand: ${subcmd}${cReset}`);
       console.log(`Usage: axonwallctl plugin <list|enable|disable|install|remove|re-sync> [plugin-id]`);
+      process.exit(1);
+  }
+}
+
+async function cmdZbm(args: string[]) {
+  const subcmd = (args[0] || 'list').toLowerCase();
+
+  switch (subcmd) {
+    case 'list':
+    case 'ls':
+    case 'status': {
+      try {
+        const res = await sendAgentSocketRequest<any>('/v1/system/partitions', 'GET');
+        const mode = res?.installMode || 'zbm';
+        const modeLabel =
+          mode === 'zbm'
+            ? 'ZFSBootMenu Root-on-ZFS'
+            : mode === 'rolling'
+              ? 'Rolling Standard Linux'
+              : 'Dual-Root A/B Partition';
+        console.log(`\n${cCyan}${cBold}=== Axonwall Boot Environment & Partition Status (${modeLabel}) ===${cReset}\n`);
+        console.log(
+          `  ${cBold}Install Mode:${cReset}   ${mode.toUpperCase()}   ${cBold}Active Root:${cReset} ${res?.activeRootDevice || res?.activeDataset || res?.activeSlot || 'root'}`
+        );
+        if (res?.zbmPoolName || res?.zbmPool) {
+          console.log(
+            `  ${cBold}ZFS Root Pool:${cReset}  ${res.zbmPoolName || res.zbmPool} (${res?.zbmPoolHealth || 'ONLINE'})`
+          );
+        }
+        const bes: any[] = Array.isArray(res?.bootEnvironments) ? res.bootEnvironments : [];
+        const snaps: any[] = Array.isArray(res?.zbmSnapshots)
+          ? res.zbmSnapshots
+          : bes.flatMap((be) =>
+              Array.isArray(be.snapshotDetails)
+                ? be.snapshotDetails
+                : Array.isArray(be.snapshots)
+                  ? be.snapshots.map((s: string) => ({
+                      fullName: `${be.dataset}@${s}`,
+                      name: s,
+                      beName: be.name,
+                    }))
+                  : []
+            );
+
+        if (bes.length > 0) {
+          console.log(`\n${cCyan}${cBold}  ZFS Boot Environments (${bes.length}):${cReset}`);
+          console.log(
+            `  ${cBold}${'NAME'.padEnd(28)} ${'DATASET'.padEnd(36)} ${'ACTIVE'.padEnd(10)} ${'NEXT BOOT'.padEnd(12)} ${'USED'.padEnd(10)} CREATED${cReset}`
+          );
+          console.log(`  ${'-'.repeat(112)}`);
+          for (const be of bes) {
+            const isNow = Boolean(be.activeNow ?? be.active);
+            const isNext = Boolean(be.activeNext ?? be.bootfs);
+            const activeStr = isNow ? `${cGreen}ACTIVE${cReset}` : `${cDim}STANDBY${cReset}`;
+            const bootStr = isNext ? `${cCyan}NEXT-BOOT${cReset}` : `${cDim}-${cReset}`;
+            console.log(
+              `  ${String(be.name || '').padEnd(28)} ${String(be.dataset || '').padEnd(36)} ${activeStr.padEnd(19)} ${bootStr.padEnd(21)} ${String(be.usedSize || be.used || '-').padEnd(10)} ${cDim}${be.createdAt || be.creation || '-'}${cReset}`
+            );
+          }
+        }
+
+        if (snaps.length > 0) {
+          console.log(`\n${cCyan}${cBold}  ZFS Root Snapshots (${snaps.length}):${cReset}`);
+          console.log(
+            `  ${cBold}${'SNAPSHOT'.padEnd(54)} ${'BOOT ENV'.padEnd(22)} ${'USED'.padEnd(10)} CREATED${cReset}`
+          );
+          console.log(`  ${'-'.repeat(104)}`);
+          for (const snap of snaps) {
+            console.log(
+              `  ${String(snap.fullName || snap.name || '').padEnd(54)} ${String(snap.beName || '-').padEnd(22)} ${String(snap.usedSize || snap.used || '-').padEnd(10)} ${cDim}${snap.createdAt || snap.creation || '-'}${cReset}`
+            );
+          }
+        }
+        console.log('');
+      } catch (err: any) {
+        console.error(`${cRed}[✗] Failed to query ZFS Boot Environments: ${err?.message || err}${cReset}`);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'snapshot':
+    case 'snap':
+    case 'create-snapshot': {
+      let label = '';
+      let beName: string | undefined;
+      let newBeName: string | undefined;
+      for (let i = 1; i < args.length; i++) {
+        const a = args[i]!;
+        if ((a === '--be' || a === '-b') && args[i + 1]) {
+          beName = args[++i];
+        } else if ((a === '--clone' || a === '-c') && args[i + 1]) {
+          newBeName = args[++i];
+        } else if ((a === '--label' || a === '-l') && args[i + 1]) {
+          label = args[++i]!;
+        } else if (!a.startsWith('-') && !label) {
+          label = a;
+        }
+      }
+      console.log(
+        `[+] Creating ZFS Boot Environment snapshot${label ? ` (${label})` : ''}${newBeName ? ` + cloning '${newBeName}'` : ''}...`
+      );
+      try {
+        const res = await sendAgentSocketRequest<{
+          success: boolean;
+          message: string;
+          snapshot?: string;
+          clonedBe?: string;
+        }>('/v1/system/zbm', 'POST', {
+          action: 'snapshot',
+          beName,
+          label: label || undefined,
+          newBeName,
+        });
+        if (res.success) {
+          console.log(`${cGreen}${cBold}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[✗] ${res.message}${cReset}`);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}[✗] Snapshot creation failed: ${err?.message || err}${cReset}`);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'clone': {
+      const snapshot = args[1];
+      const newBeName = args[2];
+      if (!snapshot || !newBeName) {
+        console.error(`${cRed}Usage: axonwallctl zbm clone <snapshot> <new-be-name>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Cloning snapshot '${snapshot}' into new Boot Environment '${newBeName}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/system/zbm', 'POST', {
+          action: 'clone',
+          snapshot,
+          newBeName,
+        });
+        if (res.success) {
+          console.log(`${cGreen}${cBold}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[✗] ${res.message}${cReset}`);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}[✗] Clone failed: ${err?.message || err}${cReset}`);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'activate':
+    case 'boot': {
+      const beName = args[1];
+      if (!beName) {
+        console.error(`${cRed}Usage: axonwallctl zbm activate <be-name>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Activating Boot Environment '${beName}' for next boot...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/system/zbm', 'POST', {
+          action: 'activate',
+          beName,
+        });
+        if (res.success) {
+          console.log(`${cGreen}${cBold}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[✗] ${res.message}${cReset}`);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}[✗] Failed to activate Boot Environment: ${err?.message || err}${cReset}`);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'delete':
+    case 'destroy':
+    case 'rm': {
+      const beName = args[1];
+      if (!beName) {
+        console.error(`${cRed}Usage: axonwallctl zbm delete <be-name>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Deleting Boot Environment '${beName}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/system/zbm', 'POST', {
+          action: 'delete',
+          beName,
+        });
+        if (res.success) {
+          console.log(`${cGreen}${cBold}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[✗] ${res.message}${cReset}`);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}[✗] Failed to delete Boot Environment: ${err?.message || err}${cReset}`);
+        process.exit(1);
+      }
+      break;
+    }
+    case 'delete-snapshot':
+    case 'destroy-snapshot':
+    case 'rm-snap': {
+      const snapshot = args[1];
+      if (!snapshot) {
+        console.error(`${cRed}Usage: axonwallctl zbm delete-snapshot <snapshot>${cReset}`);
+        process.exit(1);
+      }
+      console.log(`[+] Deleting ZFS snapshot '${snapshot}'...`);
+      try {
+        const res = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/system/zbm', 'POST', {
+          action: 'delete-snapshot',
+          snapshot,
+        });
+        if (res.success) {
+          console.log(`${cGreen}${cBold}[✓] ${res.message}${cReset}`);
+        } else {
+          console.error(`${cRed}[✗] ${res.message}${cReset}`);
+          process.exit(1);
+        }
+      } catch (err: any) {
+        console.error(`${cRed}[✗] Failed to delete snapshot: ${err?.message || err}${cReset}`);
+        process.exit(1);
+      }
+      break;
+    }
+    default:
+      console.error(`${cRed}Unknown zbm subcommand: ${subcmd}${cReset}`);
+      console.log(
+        `Usage: axonwallctl zbm <list|snapshot [label] [--be <be>] [--clone <newBe>]|clone <snap> <newBe>|activate <be>|delete <be>|delete-snapshot <snap>>`
+      );
       process.exit(1);
   }
 }
@@ -1849,17 +2107,33 @@ async function cmdUpdate(args: string[]) {
     }
   }
 
-  let installMode: 'ab' | 'rolling' = 'ab';
+  let installMode: 'zbm' | 'ab' | 'rolling' = 'ab';
   for (const modePath of [path.join(ETC_DIR, 'install-mode'), '/var/lib/axonwall/install-mode']) {
     try {
-      if (fs.existsSync(modePath) && fs.readFileSync(modePath, 'utf8').toLowerCase().includes('rolling')) {
-        installMode = 'rolling';
-        break;
+      if (fs.existsSync(modePath)) {
+        const raw = fs.readFileSync(modePath, 'utf8').toLowerCase();
+        if (raw.includes('zbm') || raw.includes('zfs')) {
+          installMode = 'zbm';
+          break;
+        }
+        if (raw.includes('rolling')) {
+          installMode = 'rolling';
+          break;
+        }
+      }
+    } catch {}
+  }
+  if (installMode === 'ab') {
+    try {
+      if (fs.existsSync('/proc/mounts') && fs.readFileSync('/proc/mounts', 'utf8').includes(' / zfs ')) {
+        installMode = 'zbm';
       }
     } catch {}
   }
 
-  if (installMode === 'rolling') {
+  if (installMode === 'zbm') {
+    console.log(`${cCyan}${cBold}=== Axonwall ZFSBootMenu Root-on-ZFS System Updater ===${cReset}`);
+  } else if (installMode === 'rolling') {
     console.log(`${cCyan}${cBold}=== Axonwall Rolling Standard Linux Updater ===${cReset}`);
   } else {
     console.log(`${cCyan}${cBold}=== Axonwall Dual-Root A/B Firmware Updater ===${cReset}`);
@@ -1887,7 +2161,7 @@ async function cmdUpdate(args: string[]) {
   for (const up of updaterPaths) {
     if (fs.existsSync(up)) {
       const cliArgs: string[] = [];
-      if (installMode === 'rolling') {
+      if (installMode === 'rolling' || installMode === 'zbm') {
         cliArgs.push('--rolling');
       } else if (targetSlot) {
         cliArgs.push('--slot', targetSlot);
@@ -1905,10 +2179,15 @@ async function cmdUpdate(args: string[]) {
 
   // Fallback to daemon API
   try {
-    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/system/update', 'POST', {
-      slot: targetSlot || 'B',
-      version: targetVersion || undefined,
-    });
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>(
+      '/v1/system/update',
+      'POST',
+      {
+        slot: targetSlot || 'B',
+        version: targetVersion || undefined,
+      },
+      300000
+    );
     if (resp.success) {
       console.log(`${cGreen}[✓] ${resp.message}${cReset}`);
     } else {
@@ -2044,6 +2323,8 @@ _axonwallctl() {
     'confirm:Confirm pending configuration commit and disarm auto-rollback'
     'rollback:Abort pending commit and revert to last-known-good configuration'
     'reload:Reload all services and Web GUI state from /etc/axonwall/*.yaml'
+    'zbm:Manage ZFSBootMenu Boot Environments and arbitrary ZFS root snapshots'
+    'be:Alias for zbm — manage ZFS Boot Environments'
     'update:Update Axonwall packages in-place or flash standby A/B slot'
     'plugin:Manage core appliance roles and extension plugins'
     'mcp:Manage Axonwall MCP server master switch and leases'
@@ -2064,11 +2345,15 @@ _axonwallctl_completions() {
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
   case "\${prev}" in
     axonwallctl|ctl)
-      COMPREPLY=( $(compgen -W "status validate diff apply confirm rollback reload update plugin mcp cloudinit edit export completion help" -- "\${cur}") )
+      COMPREPLY=( $(compgen -W "status validate diff apply confirm rollback reload zbm be update plugin mcp cloudinit edit export completion help" -- "\${cur}") )
       return 0
       ;;
     edit)
       COMPREPLY=( $(compgen -W "${sections}" -- "\${cur}") )
+      return 0
+      ;;
+    zbm|be|bootenv)
+      COMPREPLY=( $(compgen -W "list snapshot clone activate delete delete-snapshot" -- "\${cur}") )
       return 0
       ;;
     plugin|plugins)
@@ -2106,7 +2391,8 @@ ${cBold}COMMANDS:${cReset}
   confirm             Confirm the currently pending configuration commit and disarm auto-rollback
   rollback            Immediately abort pending commit and revert to last-known-good configuration
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
-  update [options]    Update Axonwall packages in-place (Rolling mode) or flash standby slot (A/B mode)
+  zbm <cmd> [args]    Manage ZFSBootMenu Boot Environments & Snapshots (list, snapshot, clone, activate, delete, delete-snapshot)
+  update [options]    Update Axonwall packages in-place (ZBM / Rolling) or flash standby slot (A/B mode)
                       Options: [--apt] [--version <ver>] [--slot <A|B>]
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
   mcp <cmd>           Manage MCP server (status, enable, disable, flush) — disabled by default
@@ -2149,6 +2435,11 @@ async function main() {
       break;
     case 'rollback':
       await cmdRollback();
+      break;
+    case 'zbm':
+    case 'be':
+    case 'bootenv':
+      await cmdZbm(args.slice(1));
       break;
     case 'update':
     case 'upgrade':

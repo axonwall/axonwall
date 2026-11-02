@@ -202,6 +202,7 @@ rm -f /etc/network/interfaces.d/axonwall 2>/dev/null || true
 
 start_dhcp_if_missing() {
   local _if="$1"
+  local _role="${2:-wan}"
   [[ -z "$_if" ]] && return 0
   ip link show "$_if" &>/dev/null || return 0
   ip link set up dev "$_if" 2>/dev/null || true
@@ -209,19 +210,27 @@ start_dhcp_if_missing() {
     return 0
   fi
   if command -v dhcpcd &>/dev/null; then
-    dhcpcd -4 "$_if" &>/dev/null || true
+    if [[ "$_role" != "wan" ]]; then
+      dhcpcd -4 -G -C resolv.conf "$_if" &>/dev/null || true
+    else
+      dhcpcd -4 "$_if" &>/dev/null || true
+    fi
   elif command -v dhclient &>/dev/null; then
     dhclient -1 -v "$_if" &>/dev/null || true
   fi
 }
 
+# Ensure fast DNS resolver failover and fallback nameservers in /etc/resolv.conf.{head,tail}
+printf 'options timeout:1 attempts:2\n' > /etc/resolv.conf.head 2>/dev/null || true
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf.tail 2>/dev/null || true
+
 # Bring up WAN interface and acquire DHCP lease if not already configured
-start_dhcp_if_missing "$WAN_IF"
+start_dhcp_if_missing "$WAN_IF" "wan"
 
 # 3. Configure default LAN IP on a real second NIC (static 192.168.1.1/24 in NGFW mode, DHCP in Host Mode)
 if [[ -n "$LAN_IF" ]] && ip link show "$LAN_IF" &>/dev/null; then
   if [[ "$HOST_MODE" == "1" ]]; then
-    start_dhcp_if_missing "$LAN_IF"
+    start_dhcp_if_missing "$LAN_IF" "lan"
   else
     ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
     ip link set up dev "$LAN_IF" || true
@@ -233,7 +242,10 @@ for (( idx=2; idx<${#INTERFACES[@]}; idx++ )); do
   _opt_num=$(( idx - 1 ))
   _opt_dev="${INTERFACES[$idx]}"
   if [[ -n "$_opt_dev" ]] && ip link show "$_opt_dev" &>/dev/null; then
-    start_dhcp_if_missing "$_opt_dev"
+    if [[ -f /etc/dhcpcd.conf ]] && ! grep -q "^interface ${_opt_dev}\$" /etc/dhcpcd.conf 2>/dev/null; then
+      printf '\ninterface %s\n  nogateway\n  nohook resolv.conf\n' "$_opt_dev" >> /etc/dhcpcd.conf 2>/dev/null || true
+    fi
+    start_dhcp_if_missing "$_opt_dev" "lan"
     echo "[Axonwall Firstboot] OPT${_opt_num} interface ($_opt_dev) brought UP (Non-authoritative / attached network)"
   fi
 done
@@ -590,10 +602,13 @@ systemctl daemon-reload
 # Ensure DNSSEC root trust anchor exists and is owned by unbound before unbound starts
 if id unbound >/dev/null 2>&1; then
   mkdir -p /var/lib/unbound /usr/share/dns
-  if [[ ! -s /usr/share/dns/root.key ]]; then
-    printf '. IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D\n. IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16\n' > /usr/share/dns/root.key
+  if [[ ! -s /usr/share/dns/root.key ]] || ! grep -q "AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449" /usr/share/dns/root.key 2>/dev/null; then
+    cat << 'ROOTKEY_EOF' > /usr/share/dns/root.key
+.	172800	IN	DNSKEY	257 3 8 AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU= ;{id = 20326 (ksk), size = 2048b} ;;state=2 [  VALID  ]
+.	172800	IN	DNSKEY	257 3 8 AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449/cidltpkyGwCJNnOAlFNKF2jBosZBU5eeHspaQWOmOElZsjICMQMC3aeHbGiShvZsx4wMYSjH8e7Vrhbu6irwCzVBApESjbUdpWWmEnhathWu1jo+siFUiRAAxm9qyJNg/wOZqqzL/dL/q8PkcRU5oUKEpUge71M3ej2/7CPqpdVwuMoTvoB+ZOT4YeGyxMvHmbrxlFzGOHOijtzN+u1TQNatX2XBuzZNQ1K+s2CXkPIZo7s6JgZyvaBevYtxPvYLw4z9mR7K2vaF18UYH9Z9GNUUeayffKC73PYc= ;{id = 38696 (ksk), size = 2048b} ;;state=2 [  VALID  ]
+ROOTKEY_EOF
   fi
-  if [[ ! -s /var/lib/unbound/root.key ]]; then
+  if [[ ! -s /var/lib/unbound/root.key ]] || ! grep -q "AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC6rXTsDc449" /var/lib/unbound/root.key 2>/dev/null; then
     cp -f /usr/share/dns/root.key /var/lib/unbound/root.key 2>/dev/null || true
   fi
   chown -R unbound:unbound /var/lib/unbound 2>/dev/null || true

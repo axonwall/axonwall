@@ -120,12 +120,45 @@ test('axonwallctl completion outputs zsh and bash completion scripts', () => {
 
   const zshOut = execFileSync('node', [ctlBin, 'completion', 'zsh'], { encoding: 'utf-8' });
   assert.ok(zshOut.includes('_axonwallctl'), 'zsh completion output must include _axonwallctl');
+  assert.ok(zshOut.includes('zbm:'), 'zsh completion output must include zbm subcommand');
 
   const bashOut = execFileSync('node', [ctlBin, 'completion', 'bash'], { encoding: 'utf-8' });
   assert.ok(
     bashOut.includes('complete -F _axonwallctl_completions axonwallctl ctl'),
     'bash completion output must register complete -F _axonwallctl_completions'
   );
+  assert.ok(
+    bashOut.includes('zbm|be|bootenv'),
+    'bash completion output must include zbm/be/bootenv completions'
+  );
+
+  const helpOut = execFileSync('node', [ctlBin, '--help'], { encoding: 'utf-8' });
+  assert.ok(helpOut.includes('zbm <cmd> [args]'), 'axonwallctl --help must document zbm subcommand');
+});
+
+test('Ink TUI (axonwall-tui) supports ZBM/Updates tab resolution and sliding viewport pagination across all 18+ plugins', async () => {
+  const tuiBin = path.join(repoRoot, 'apps/axonwall-controller/dist/axonwall-tui.js');
+  assert.ok(fs.existsSync(tuiBin), 'Compiled axonwall-tui.js must exist');
+
+  const tuiHelp = execFileSync('node', [tuiBin, '--help'], { encoding: 'utf-8' });
+  assert.ok(tuiHelp.includes('updates'), 'axonwall-tui --help must list updates tab');
+  assert.ok(tuiHelp.includes('zbm'), 'axonwall-tui --help must list zbm tab alias');
+
+  const { getViewportSlice, resolveTabFromArg } = await import(tuiBin);
+  assert.equal(resolveTabFromArg('zbm'), 'updates');
+  assert.equal(resolveTabFromArg('be'), 'updates');
+  assert.equal(resolveTabFromArg('updates'), 'updates');
+  assert.equal(resolveTabFromArg('users'), 'cli_ops');
+  assert.equal(resolveTabFromArg('gitops'), 'cli_ops');
+  assert.equal(resolveTabFromArg('vigilante'), 'compute');
+
+  // Verify sliding viewport pagination reaches every plugin in BUILTIN_PLUGINS (including index 17 'eluvix')
+  assert.ok(BUILTIN_PLUGINS.length >= 18, `Expected at least 18 BUILTIN_PLUGINS, got ${BUILTIN_PLUGINS.length}`);
+  const lastIdx = BUILTIN_PLUGINS.length - 1;
+  const vp = getViewportSlice(BUILTIN_PLUGINS, lastIdx, 12);
+  assert.equal(vp.activeIndex, lastIdx);
+  assert.equal(vp.slice[vp.slice.length - 1].id, BUILTIN_PLUGINS[lastIdx].id);
+  assert.ok(vp.startIndex > 0, 'Viewport startIndex must scroll past 0 when cursor is at the end of 18+ items');
 });
 
 test('Neovim Super Configurator (axonwall-config / init.lua) provides zero-chrome UI with native Vim motions and saves to /etc/axonwall/*.yaml', (t) => {

@@ -15,10 +15,11 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    const forceRefresh = req.nextUrl.searchParams.get('refresh') === '1';
     const [releaseInfo, telemetry] = await Promise.all([
-      getReleaseInfo(),
+      getReleaseInfo(forceRefresh),
       getSystemPartitionsTelemetry(),
     ]);
     return NextResponse.json({
