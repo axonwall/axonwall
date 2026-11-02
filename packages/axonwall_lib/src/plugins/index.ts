@@ -276,6 +276,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'ripgrep',
         'fd-find',
         'git',
+        'kubectl',
       ],
       alpine: [
         'zsh',
@@ -290,9 +291,10 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'ripgrep',
         'fd',
         'git',
+        'kubectl',
       ],
     },
-    cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux'],
+    cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl'],
   },
   {
     id: 'cli-diagnostics-nastymap',

@@ -162,6 +162,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"ripgrep",
 				"fd-find",
 				"git",
+				"kubectl",
 			},
 			AlpinePackages: []string{
 				"zsh",
@@ -176,6 +177,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"ripgrep",
 				"fd",
 				"git",
+				"kubectl",
 			},
 			RequiredBinaries: []string{"zsh", "vim", "starship", "tmux"},
 		},

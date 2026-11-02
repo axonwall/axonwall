@@ -560,6 +560,7 @@ ca-certificates
 net-tools
 dnsutils
 nmap
+kubectl
 zsh
 vim
 neovim
@@ -671,6 +672,7 @@ nodejs
 net-tools
 dnsutils
 nmap
+kubectl
 zsh
 vim
 neovim

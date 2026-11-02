@@ -204,6 +204,7 @@ if [[ "$MINIMAL" -eq 0 ]]; then
     vim
     neovim
     zsh
+    kubectl
     starship
     tmux
   )

@@ -48,7 +48,8 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
  slurm,
  net-tools,
  dnsutils,
- nmap
+ nmap,
+ kubectl
 Recommends:
  starship,
  zoxide,

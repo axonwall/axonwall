@@ -37664,7 +37664,8 @@ var BUILTIN_PLUGINS = [
         "bat",
         "ripgrep",
         "fd-find",
-        "git"
+        "git",
+        "kubectl"
       ],
       alpine: [
         "zsh",
@@ -37678,10 +37679,11 @@ var BUILTIN_PLUGINS = [
         "bat",
         "ripgrep",
         "fd",
-        "git"
+        "git",
+        "kubectl"
       ]
     },
-    cliBinaries: ["zsh", "vim", "nvim", "starship", "tmux"]
+    cliBinaries: ["zsh", "vim", "nvim", "starship", "tmux", "kubectl"]
   },
   {
     id: "cli-diagnostics-nastymap",
