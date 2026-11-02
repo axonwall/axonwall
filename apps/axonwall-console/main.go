@@ -2,13 +2,18 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1462,6 +1467,34 @@ func verifyPassword(inputPass, expectedPassOrHash string) bool {
 	return subtle.ConstantTimeCompare([]byte(inputPass), []byte(expectedPassOrHash)) == 1
 }
 
+func hashSSHA(password string) (string, error) {
+	salt := make([]byte, 8)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("failed to generate salt: %w", err)
+	}
+	h := sha1.New()
+	h.Write([]byte(password))
+	h.Write(salt)
+	digest := append(h.Sum(nil), salt...)
+	return "{SSHA}" + base64.StdEncoding.EncodeToString(digest), nil
+}
+
+func verifySSHA(password, sshaHash string) bool {
+	if !strings.HasPrefix(sshaHash, "{SSHA}") {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(sshaHash, "{SSHA}"))
+	if err != nil || len(raw) <= sha1.Size {
+		return false
+	}
+	digest := raw[:sha1.Size]
+	salt := raw[sha1.Size:]
+	h := sha1.New()
+	h.Write([]byte(password))
+	h.Write(salt)
+	return subtle.ConstantTimeCompare(h.Sum(nil), digest) == 1
+}
+
 func readPassword(reader *bufio.Reader, prompt string) (string, error) {
 	fmt.Print(prompt)
 	cmd := exec.Command("stty", "-echo")
@@ -1684,7 +1717,7 @@ func printHeader() {
 	fmt.Println("  1) Interfaces Overview & Physical Link Status")
 	fmt.Println("  2) Assign Network Interfaces (WAN, LAN, OPT1, OPT2)")
 	fmt.Println("  3) Configure Interface IP & DHCP (WAN, LAN, OPT1, OPT2)")
-	fmt.Println("  4) Reset Web Admin Password")
+	fmt.Println("  4) Reset the Admin Password")
 	fmt.Println("  5) Break-Glass Disable / Reset TOTP MFA")
 	fmt.Println("  6) Network Diagnostics (Ping, DNS Lookup)")
 	fmt.Println("  7) Display Web Console Scannable QR Code")
@@ -2201,11 +2234,261 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	pause(reader)
 }
 
+func userExistsInPasswd(username string) bool {
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return false
+	}
+	prefix := username + ":"
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func updateLinuxUserPassword(username, password string) error {
+	if strings.ContainsAny(username, ":\n\r\x00") || strings.ContainsAny(password, "\n\r\x00") {
+		return fmt.Errorf("invalid characters in username or password")
+	}
+	chpasswdBin := "chpasswd"
+	for _, p := range []string{"/usr/sbin/chpasswd", "/sbin/chpasswd", "/usr/bin/chpasswd"} {
+		if _, err := os.Stat(p); err == nil {
+			chpasswdBin = p
+			break
+		}
+	}
+	cmd := exec.Command(chpasswdBin)
+	cmd.Stdin = strings.NewReader(fmt.Sprintf("%s:%s\n", username, password))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("chpasswd failed for %s: %s (%w)", username, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func updateAdminEnvPassword(path, adminUser, hashedPass string) {
+	_ = os.MkdirAll(filepath.Dir(path), 0775)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		envContent := fmt.Sprintf("LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n", adminUser, hashedPass)
+		writeSharedConfigFile(path, []byte(envContent), 0660)
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	foundUser := false
+	foundPass := false
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "LOCAL_ADMIN_PASSWORD=") {
+			lines[i] = "LOCAL_ADMIN_PASSWORD=" + hashedPass
+			foundPass = true
+		} else if strings.HasPrefix(trimmed, "LOCAL_ADMIN_USER=") {
+			lines[i] = "LOCAL_ADMIN_USER=" + adminUser
+			foundUser = true
+		}
+	}
+	if !foundUser {
+		lines = append([]string{"LOCAL_ADMIN_USER=" + adminUser}, lines...)
+	}
+	if !foundPass {
+		lines = append(lines, "LOCAL_ADMIN_PASSWORD="+hashedPass)
+	}
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	writeSharedConfigFile(path, []byte(out), 0660)
+}
+
+func updateAxonwallEnvPassword(path, hashedPass string) {
+	fi, err := os.Lstat(path)
+	if err != nil || (fi.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "LOCAL_ADMIN_PASSWORD=") {
+			lines[i] = "LOCAL_ADMIN_PASSWORD=" + hashedPass
+			found = true
+		}
+	}
+	if !found {
+		lines = append(lines, "LOCAL_ADMIN_PASSWORD="+hashedPass)
+	}
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	writeSharedConfigFile(path, []byte(out), fi.Mode().Perm())
+}
+
+func updateOpenLDAPAdminPassword(newPass string) (bool, error) {
+	sshaHash, err := hashSSHA(newPass)
+	if err != nil {
+		return false, fmt.Errorf("failed to generate SSHA hash: %w", err)
+	}
+
+	ldapmodifyBin := "ldapmodify"
+	for _, p := range []string{"/usr/bin/ldapmodify", "/bin/ldapmodify"} {
+		if _, err := os.Stat(p); err == nil {
+			ldapmodifyBin = p
+			break
+		}
+	}
+
+	// 1. Update olcRootPW in olcDatabase={1}mdb,cn=config
+	ldifRoot := fmt.Sprintf("dn: olcDatabase={1}mdb,cn=config\nchangetype: modify\nreplace: olcRootPW\nolcRootPW: %s\n", sshaHash)
+	cmdRoot := exec.Command(ldapmodifyBin, "-Y", "EXTERNAL", "-H", "ldapi:///")
+	cmdRoot.Stdin = strings.NewReader(ldifRoot)
+	outRoot, errRoot := cmdRoot.CombinedOutput()
+	rootSuccess := (errRoot == nil)
+
+	// 2. Discover baseDN from namingContexts
+	baseDN := "dc=axonwall,dc=local"
+	ldapsearchBin := "ldapsearch"
+	for _, p := range []string{"/usr/bin/ldapsearch", "/bin/ldapsearch"} {
+		if _, err := os.Stat(p); err == nil {
+			ldapsearchBin = p
+			break
+		}
+	}
+	cmdSearch := exec.Command(ldapsearchBin, "-Y", "EXTERNAL", "-H", "ldapi:///", "-s", "base", "-b", "", "(objectClass=*)", "namingContexts")
+	if outSearch, errSearch := cmdSearch.CombinedOutput(); errSearch == nil {
+		for _, line := range strings.Split(string(outSearch), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "namingContexts:") {
+				ctx := strings.TrimSpace(strings.TrimPrefix(line, "namingContexts:"))
+				if ctx != "" {
+					baseDN = ctx
+					break
+				}
+			}
+		}
+	}
+
+	// 3. Update uid=admin in LDAP if it exists
+	ldifUser := fmt.Sprintf("dn: uid=admin,ou=users,%s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n", baseDN, sshaHash)
+	cmdUser := exec.Command(ldapmodifyBin, "-Y", "EXTERNAL", "-H", "ldapi:///")
+	cmdUser.Stdin = strings.NewReader(ldifUser)
+	outUser, errUser := cmdUser.CombinedOutput()
+	userSuccess := (errUser == nil)
+
+	// 4. Notify axonwalld via agent-api.sock if running
+	updateDaemonAdminUser(newPass)
+
+	if !rootSuccess && !userSuccess {
+		if errRoot != nil {
+			return false, fmt.Errorf("%s (%w)", strings.TrimSpace(string(outRoot)), errRoot)
+		}
+		return false, fmt.Errorf("%s (%w)", strings.TrimSpace(string(outUser)), errUser)
+	}
+	return true, nil
+}
+
+func updateDaemonAdminUser(newPass string) {
+	sockPath := "/run/axonwall/agent-api.sock"
+	if _, err := os.Stat(sockPath); err != nil {
+		return
+	}
+
+	token := ""
+	if data, err := os.ReadFile("/etc/axonwall/agent.token"); err == nil {
+		token = strings.TrimSpace(string(data))
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sockPath)
+			},
+		},
+		Timeout: 4 * time.Second,
+	}
+
+	payload := map[string]string{"password": newPass}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "http://unix/v1/system/users/admin", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("X-Axonwall-Agent-Token", token)
+	}
+
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+}
+
+func flushSSSDCache() {
+	sssCacheBin := "sss_cache"
+	for _, p := range []string{"/usr/sbin/sss_cache", "/sbin/sss_cache", "/usr/bin/sss_cache"} {
+		if _, err := os.Stat(p); err == nil {
+			sssCacheBin = p
+			break
+		}
+	}
+	_ = exec.Command(sssCacheBin, "-u", "admin").Run()
+	_ = exec.Command(sssCacheBin, "-E").Run()
+	_ = exec.Command("systemctl", "try-restart", "sssd").Run()
+}
+
+func updateSambaUser(username, password string) bool {
+	smbpasswdBin := ""
+	for _, p := range []string{"/usr/bin/smbpasswd", "/bin/smbpasswd", "/usr/sbin/smbpasswd"} {
+		if _, err := os.Stat(p); err == nil {
+			smbpasswdBin = p
+			break
+		}
+	}
+	if smbpasswdBin == "" {
+		if p, err := exec.LookPath("smbpasswd"); err == nil {
+			smbpasswdBin = p
+		}
+	}
+	if smbpasswdBin == "" {
+		return false
+	}
+	if _, err := os.Stat("/etc/samba/smb.conf"); err != nil {
+		return false
+	}
+
+	cmd := exec.Command(smbpasswdBin, "-s", username)
+	cmd.Stdin = strings.NewReader(fmt.Sprintf("%s\n%s\n", password, password))
+	if err := cmd.Run(); err == nil {
+		return true
+	}
+	if userExistsInPasswd(username) {
+		cmdAdd := exec.Command(smbpasswdBin, "-s", "-a", username)
+		cmdAdd.Stdin = strings.NewReader(fmt.Sprintf("%s\n%s\n", password, password))
+		if err := cmdAdd.Run(); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func actionResetAdminPassword(reader *bufio.Reader) {
 	clearScreen()
-	fmt.Println("=== Reset Web Admin Password ===")
-	fmt.Println("This resets the break-glass local administrator credentials.")
-	newPass, err := readPassword(reader, "\nEnter new password for admin: ")
+	fmt.Println("=== Reset the Admin Password ===")
+	fmt.Println("This resets the administrator password across the appliance")
+	fmt.Println("(Web UI, Linux OS accounts, and Directory).")
+
+	newPass, err := readPassword(reader, "\nEnter new admin password: ")
 	if err != nil {
 		fmt.Printf("%s[!] Error reading password: %v%s\n", colorRed, err, colorReset)
 		pause(reader)
@@ -2218,6 +2501,21 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 		return
 	}
 
+	confirmPass, err := readPassword(reader, "Confirm new admin password: ")
+	if err != nil {
+		fmt.Printf("%s[!] Error reading confirmation password: %v%s\n", colorRed, err, colorReset)
+		pause(reader)
+		return
+	}
+
+	if newPass != confirmPass {
+		fmt.Printf("%s[!] Error: Passwords do not match.%s\n", colorRed, colorReset)
+		pause(reader)
+		return
+	}
+
+	fmt.Println("\nUpdating administrator credentials...")
+
 	hashed, err := hashPassword(newPass)
 	if err != nil {
 		fmt.Printf("%s[!] Error generating password hash: %v%s\n", colorRed, err, colorReset)
@@ -2225,27 +2523,83 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 		return
 	}
 
-	// Update local credential environment override in /etc/axonwall/admin.env and /var/lib/axonwall/etc-axonwall/admin.env
-	_ = os.MkdirAll("/etc/axonwall", 0775)
-	_ = os.MkdirAll("/var/lib/axonwall/etc-axonwall", 0775)
-	envContent := fmt.Sprintf("LOCAL_ADMIN_USER=admin\nLOCAL_ADMIN_PASSWORD=%s\n", hashed)
-	writeSharedConfigFile("/etc/axonwall/admin.env", []byte(envContent), 0660)
-	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/admin.env", []byte(envContent), 0660)
-	if _, errEtc := os.Stat("/etc/axonwall/admin.env"); errEtc == nil {
-		_ = os.Remove("/etc/axonwall/initial-admin-password")
-		timestamp := []byte(time.Now().UTC().Format(time.RFC3339))
-		writeSharedConfigFile("/etc/axonwall/.password_changed", timestamp, 0664)
-		writeSharedConfigFile("/var/lib/axonwall/.password_changed", timestamp, 0664)
-		epoch := []byte(strconv.FormatInt(time.Now().UnixMilli(), 10))
-		writeSharedConfigFile("/var/lib/axonwall/session-epoch", epoch, 0660)
-
-		fmt.Printf("\n%s[✓] Admin password updated successfully (hashed with scrypt).%s\n", colorGreen, colorReset)
-		fmt.Println("Restarting Web UI to apply new credentials...")
-		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
-		fmt.Printf("%s[✓] Web UI reloaded.%s\n", colorGreen, colorReset)
-	} else {
-		fmt.Printf("%s[!] Failed to save credentials: %v%s\n", colorRed, errEtc, colorReset)
+	adminUser, _ := getAdminCredentials()
+	if adminUser == "" {
+		adminUser = "admin"
 	}
+
+	// 1. Update Web UI & Local Break-Glass credentials
+	updateAdminEnvPassword("/etc/axonwall/admin.env", adminUser, hashed)
+	updateAdminEnvPassword("/var/lib/axonwall/etc-axonwall/admin.env", adminUser, hashed)
+	updateAxonwallEnvPassword("/etc/axonwall/axonwall.env", hashed)
+	updateAxonwallEnvPassword("/var/lib/axonwall/etc-axonwall/axonwall.env", hashed)
+
+	_ = os.Remove("/etc/axonwall/initial-admin-password")
+	_ = os.Remove("/var/lib/axonwall/etc-axonwall/initial-admin-password")
+
+	nowTimestamp := []byte(time.Now().UTC().Format(time.RFC3339))
+	writeSharedConfigFile("/etc/axonwall/.password_changed", nowTimestamp, 0664)
+	writeSharedConfigFile("/var/lib/axonwall/.password_changed", nowTimestamp, 0664)
+
+	epoch := []byte(strconv.FormatInt(time.Now().UnixMilli(), 10))
+	writeSharedConfigFile("/var/lib/axonwall/session-epoch", epoch, 0660)
+	writeSharedConfigFile("/etc/axonwall/session-epoch", epoch, 0660)
+
+	fmt.Printf("%s[✓] Web UI & break-glass credentials updated (scrypt).%s\n", colorGreen, colorReset)
+
+	// 2. Update Linux OS system accounts
+	updatedOS := false
+	if userExistsInPasswd("root") {
+		if err := updateLinuxUserPassword("root", newPass); err == nil {
+			fmt.Printf("%s[✓] Linux system password updated for root.%s\n", colorGreen, colorReset)
+			updatedOS = true
+		} else {
+			fmt.Printf("%s[!] Warning: Failed to update root password: %v%s\n", colorYellow, err, colorReset)
+		}
+	}
+	if userExistsInPasswd("admin") {
+		if err := updateLinuxUserPassword("admin", newPass); err == nil {
+			fmt.Printf("%s[✓] Linux system password updated for admin.%s\n", colorGreen, colorReset)
+			updatedOS = true
+		} else {
+			fmt.Printf("%s[!] Warning: Failed to update admin password: %v%s\n", colorYellow, err, colorReset)
+		}
+	}
+	if adminUser != "root" && adminUser != "admin" && userExistsInPasswd(adminUser) {
+		if err := updateLinuxUserPassword(adminUser, newPass); err == nil {
+			fmt.Printf("%s[✓] Linux system password updated for %s.%s\n", colorGreen, adminUser, colorReset)
+			updatedOS = true
+		}
+	}
+	if !updatedOS {
+		_ = updateLinuxUserPassword("root", newPass)
+	}
+
+	// 3. Update OpenLDAP directory administrator & root passwords
+	ldapUpdated, ldapErr := updateOpenLDAPAdminPassword(newPass)
+	if ldapUpdated {
+		fmt.Printf("%s[✓] OpenLDAP directory administrator password updated (SSHA).%s\n", colorGreen, colorReset)
+	} else if ldapErr != nil {
+		if _, err := exec.LookPath("ldapmodify"); err == nil {
+			fmt.Printf("%s[!] Warning: OpenLDAP password update encountered: %v%s\n", colorYellow, ldapErr, colorReset)
+		}
+	}
+
+	// 4. Invalidate SSSD cache
+	flushSSSDCache()
+	fmt.Printf("%s[✓] SSSD credentials cache invalidated.%s\n", colorGreen, colorReset)
+
+	// 5. Update Samba if configured
+	smbRoot := updateSambaUser("root", newPass)
+	smbAdmin := updateSambaUser("admin", newPass)
+	if smbRoot || smbAdmin {
+		fmt.Printf("%s[✓] Samba user password updated.%s\n", colorGreen, colorReset)
+	}
+
+	// 6. Restart Web UI to apply new credentials
+	fmt.Println("Restarting Web UI to apply new credentials...")
+	_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
+	fmt.Printf("%s[✓] Web UI reloaded.%s\n", colorGreen, colorReset)
 
 	pause(reader)
 }
