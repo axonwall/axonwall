@@ -149,10 +149,12 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:    "Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, Neovim Super Configurator (axonwall-config / nui — zero-chrome Lua form TUI with full Vim motions), VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui, axonwall-config). Can be disabled to minimize attack surface.",
 			Author:         "Axonwall Core",
 			DefaultEnabled: true,
+			Privileges:     []string{"system.users", "system.hardware"},
 			DebianPackages: []string{
 				"zsh",
 				"vim",
 				"neovim",
+				"starship",
 				"tmux",
 				"zsh-autosuggestions",
 				"zsh-syntax-highlighting",
@@ -179,7 +181,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"git",
 				"kubectl",
 			},
-			RequiredBinaries: []string{"zsh", "vim", "starship", "tmux"},
+			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux", "kubectl", "helm"},
 		},
 		{
 			ID:               "cli-diagnostics-nastymap",
@@ -188,9 +190,10 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Category:         "extension",
 			Description:      "Autonomous host discovery and vulnerability auditing with NastyMap & Nmap, plus real-time system/network monitors (btop, htop, iftop, iotop, slurm, sysstat, dnsutils).",
 			Author:           "Axonwall Core / NastyMap",
+			Privileges:       []string{"system.monitoring", "network.interfaces"},
 			DebianPackages:   []string{"nmap", "dnsutils", "net-tools", "btop", "htop", "iftop", "iotop", "slurm", "sysstat"},
-			AlpinePackages:   []string{"nmap", "bind-tools", "net-tools", "btop", "htop", "iftop", "sysstat"},
-			RequiredBinaries: []string{"nmap", "btop", "htop", "iftop"},
+			AlpinePackages:   []string{"nmap", "bind-tools", "net-tools", "btop", "htop", "iftop", "iotop", "slurm", "sysstat"},
+			RequiredBinaries: []string{"nmap", "dig", "netstat", "btop", "htop", "iftop", "iostat", "mpstat"},
 		},
 		{
 			ID:               "haproxy",
@@ -200,6 +203,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "High performance TCP/HTTP load balancer, reverse proxy, and SSL/TLS termination with ACME integration.",
 			Author:           "HAProxy Technologies / Axonwall Core",
 			SystemdUnits:     []string{"haproxy.service"},
+			Privileges:       []string{"services.haproxy", "system.certificates"},
 			DebianPackages:   []string{"haproxy"},
 			AlpinePackages:   []string{"haproxy"},
 			RequiredBinaries: []string{"haproxy"},
@@ -212,6 +216,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "High-performance RADIUS authentication and accounting server integrated with internal OpenLDAP.",
 			Author:           "Network RADIUS / Axonwall Core",
 			SystemdUnits:     []string{"freeradius.service"},
+			Privileges:       []string{"services.freeradius", "system.users"},
 			DebianPackages:   []string{"freeradius", "freeradius-ldap"},
 			AlpinePackages:   []string{"freeradius"},
 			RequiredBinaries: []string{"freeradius"},
@@ -238,6 +243,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "SNMPv2c and SNMPv3 monitoring agent with standard MIBs for network management systems.",
 			Author:           "Net-SNMP Team / Axonwall Core",
 			SystemdUnits:     []string{"snmpd.service"},
+			Privileges:       []string{"system.monitoring"},
 			DebianPackages:   []string{"snmpd", "snmp"},
 			AlpinePackages:   []string{"net-snmp"},
 			RequiredBinaries: []string{"snmpd"},
@@ -250,6 +256,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "Reliable UPS monitoring and automated graceful shutdown for battery backups over USB and serial.",
 			Author:           "NUT Project / Axonwall Core",
 			SystemdUnits:     []string{"nut-server.service", "nut-client.service"},
+			Privileges:       []string{"system.hardware", "system.power"},
 			DebianPackages:   []string{"nut-server", "nut-client"},
 			AlpinePackages:   []string{"nut"},
 			RequiredBinaries: []string{"upsd"},
@@ -262,6 +269,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "Self-hosted, open source WireGuard mesh coordination server with MagicDNS, multi-tenant namespaces, and route distribution.",
 			Author:           "Juan Font / Axonwall Core",
 			SystemdUnits:     []string{"headscale.service"},
+			Privileges:       []string{"vpn.admin", "network.interfaces"},
 			DebianPackages:   []string{},
 			AlpinePackages:   []string{},
 			RequiredBinaries: []string{"headscale"},
@@ -274,6 +282,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "Zero-config WireGuard mesh VPN for secure fleet connectivity and subnet routing.",
 			Author:           "Tailscale Inc. / Axonwall Community",
 			SystemdUnits:     []string{"tailscaled.service"},
+			Privileges:       []string{"vpn.tailscale", "network.interfaces"},
 			DebianPackages:   []string{"tailscale"},
 			AlpinePackages:   []string{"tailscale"},
 			RequiredBinaries: []string{"tailscaled", "tailscale"},
@@ -286,6 +295,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "Next-generation web-based traffic analysis and flow visibility.",
 			Author:           "ntop / Axonwall Community",
 			SystemdUnits:     []string{"ntopng.service"},
+			Privileges:       []string{"reporting.flows", "system.monitoring"},
 			DebianPackages:   []string{"ntopng"},
 			AlpinePackages:   []string{"ntopng"},
 			RequiredBinaries: []string{"ntopng"},
@@ -298,6 +308,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Description:      "Hybrid Dual-KEM post-quantum key exchange daemon (Classic McEliece 460896 static authentication + ephemeral ML-KEM-512 forward secrecy) that rotates kernel WireGuard pre-shared keys every 120s with fail-closed boot protection.",
 			Author:           "Rosenpass Project / Axonwall Core",
 			SystemdUnits:     []string{"rosenpass.service"},
+			Privileges:       []string{"vpn.admin", "network.interfaces"},
 			DebianPackages:   []string{"wireguard-tools"},
 			AlpinePackages:   []string{"rosenpass", "wireguard-tools"},
 			RequiredBinaries: []string{"rosenpass", "wg"},
@@ -313,8 +324,8 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			SystemdUnits:     []string{"k3s.service"},
 			Privileges:       []string{"k3s.cluster", "services.vow", "security.certificates", "services.dns"},
 			DebianPackages:   []string{"kubectl", "mkcert", "libnss3-tools", "gettext-base", "git", "curl", "jq"},
-			AlpinePackages:   []string{"mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
-			RequiredBinaries: []string{"kubectl", "git", "envsubst"},
+			AlpinePackages:   []string{"kubectl", "mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
+			RequiredBinaries: []string{"kubectl", "helm", "mkcert", "git", "envsubst"},
 			LdapIntegration: &PluginLDAPSpec{
 				EnabledByDefault:           true,
 				ServiceAccountCN:           "svc-vow",
@@ -378,7 +389,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"bpftrace",
 				"perf",
 			},
-			RequiredBinaries: []string{"rkhunter", "chkrootkit", "yara"},
+			RequiredBinaries: []string{"rkhunter", "chkrootkit", "yara", "unhide", "debsums"},
 		},
 		{
 			ID:               "eluvix",
@@ -510,7 +521,10 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 		}
 
 		installedAt := pm.installedMap[d.ID]
-		installed := len(missing) == 0 || installedAt != ""
+		installed := len(missing) == 0
+		if len(d.RequiredBinaries) == 0 && installedAt != "" {
+			installed = true
+		}
 		bundled := len(missing) == 0 && installedAt == ""
 
 		enabled := d.DefaultEnabled
@@ -550,6 +564,9 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 	pm.mu.Lock()
 	delete(pm.disabledMap, pluginID)
+	if pm.installedMap[pluginID] == "" {
+		pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+	}
 	pm.saveState()
 	pm.mu.Unlock()
 
@@ -564,6 +581,17 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 		return PluginActionResponse{
 			Success: true,
 			Message: "Enabled Modern Operator Shell & Editor (ZSH + Oh My Zsh + Starship + VIM + Full Stack Completions).",
+		}
+	}
+
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		for _, d := range GetExtensionPluginDefinitions() {
+			if d.ID == pluginID {
+				for _, unit := range d.SystemdUnits {
+					_ = exec.Command("systemctl", "enable", "--now", unit).Run()
+				}
+				break
+			}
 		}
 	}
 
@@ -585,6 +613,17 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		for _, d := range GetExtensionPluginDefinitions() {
+			if d.ID == pluginID {
+				for _, unit := range d.SystemdUnits {
+					_ = exec.Command("systemctl", "disable", "--now", unit).Run()
+				}
+				break
+			}
+		}
+	}
+
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Disabled plugin %s.", pluginID),
@@ -592,6 +631,17 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
+	if strings.HasPrefix(pluginID, "core-") {
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return pm.ReconfigurePlugin(pluginID)
+	}
+
 	pm.actionMu.Lock()
 	defer pm.actionMu.Unlock()
 
@@ -621,7 +671,7 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	if pm.osFamily == "debian" {
 		if pluginID == "tailscale" {
 			if _, err := os.Stat("/etc/apt/sources.list.d/tailscale.list"); os.IsNotExist(err) {
-				prepCmd := exec.Command("sh", "-c", "curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list >/dev/null && apt-get update")
+				prepCmd := exec.Command("sh", "-c", "codename=$(. /etc/os-release 2>/dev/null && echo \"${VERSION_CODENAME:-trixie}\" || echo trixie); curl -fsSL \"https://pkgs.tailscale.com/stable/debian/${codename}.noarmor.gpg\" | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null && curl -fsSL \"https://pkgs.tailscale.com/stable/debian/${codename}.tailscale-keyring.list\" | tee /etc/apt/sources.list.d/tailscale.list >/dev/null && apt-get update")
 				prepCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 				if out, err := prepCmd.CombinedOutput(); err != nil {
 					log.Printf("[PluginManager] Warning configuring Tailscale apt repository: %v (%s)", err, string(out))
@@ -629,7 +679,7 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 			}
 		} else if pluginID == "ntopng" {
 			if _, err := os.Stat("/etc/apt/sources.list.d/ntop.list"); os.IsNotExist(err) {
-				prepCmd := exec.Command("sh", "-c", "apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-unsafe-io gnupg curl && curl -fsSL https://packages.ntop.org/apt/trixie/all/apt-ntop.deb -o /tmp/apt-ntop.deb && dpkg --force-unsafe-io -i /tmp/apt-ntop.deb && apt-get update")
+				prepCmd := exec.Command("sh", "-c", "apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-unsafe-io gnupg curl ca-certificates lsb-release wget && curl -fsSL https://packages.ntop.org/apt/trixie/all/apt-ntop.deb -o /tmp/apt-ntop.deb && (dpkg --force-unsafe-io -i /tmp/apt-ntop.deb || apt-get install -f -y) && apt-get update")
 				prepCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 				if out, err := prepCmd.CombinedOutput(); err != nil {
 					log.Printf("[PluginManager] Warning configuring ntopng apt repository: %v (%s)", err, string(out))
@@ -639,28 +689,71 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	}
 
 	if len(pkgs) > 0 {
-		var cmd *exec.Cmd
-		if pm.osFamily == "alpine" {
-			args := append([]string{"add", "--no-cache"}, pkgs...)
-			cmd = exec.Command("apk", args...)
-		} else {
-			args := append([]string{"install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io"}, pkgs...)
-			cmd = exec.Command("apt-get", args...)
-			cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+		var corePkgs, optionalPkgs []string
+		optionalSet := map[string]bool{
+			"python3-drgn": true,
+			"bpftrace":     true,
+			"linux-perf":   true,
+			"bpftool":      true,
+			"perf":         true,
+			"kubectl":      true,
+			"starship":     true,
+		}
+		for _, p := range pkgs {
+			if optionalSet[p] {
+				optionalPkgs = append(optionalPkgs, p)
+			} else {
+				corePkgs = append(corePkgs, p)
+			}
 		}
 
-		out, err := cmd.CombinedOutput()
-		output.WriteString(string(out))
-		if err != nil {
-			return PluginActionResponse{
-				Success: false,
-				Message: fmt.Sprintf("Package installation failed: %v", err),
-				Output:  output.String(),
+		if len(corePkgs) > 0 {
+			var cmd *exec.Cmd
+			if pm.osFamily == "alpine" {
+				args := append([]string{"add", "--no-cache"}, corePkgs...)
+				cmd = exec.Command("apk", args...)
+			} else {
+				args := append([]string{"install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io"}, corePkgs...)
+				cmd = exec.Command("apt-get", args...)
+				cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+			}
+
+			out, err := cmd.CombinedOutput()
+			output.WriteString(string(out))
+			if err != nil {
+				return PluginActionResponse{
+					Success: false,
+					Message: fmt.Sprintf("Package installation failed: %v", err),
+					Output:  output.String(),
+				}
+			}
+		}
+
+		for _, optPkg := range optionalPkgs {
+			var optCmd *exec.Cmd
+			if pm.osFamily == "alpine" {
+				optCmd = exec.Command("apk", "add", "--no-cache", optPkg)
+			} else {
+				optCmd = exec.Command("apt-get", "install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io", optPkg)
+				optCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+			}
+			if out, err := optCmd.CombinedOutput(); err != nil {
+				log.Printf("[PluginManager] Note: optional package %s not installed via repo: %v (%s)", optPkg, err, string(out))
+			} else {
+				output.WriteString(string(out))
 			}
 		}
 	}
 
 	// Post-install configuration hooks
+	if pluginID == "cli-workstation" || pluginID == "vigilant-octo-waffle" {
+		if _, err := exec.LookPath("kubectl"); err != nil {
+			if k3sPath, kerr := exec.LookPath("k3s"); kerr == nil && k3sPath != "" {
+				_ = os.MkdirAll("/usr/local/bin", 0755)
+				_ = os.Symlink(k3sPath, "/usr/local/bin/kubectl")
+			}
+		}
+	}
 	if pluginID == "cli-workstation" {
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
 		pm.mu.Lock()
@@ -679,7 +772,7 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	}
 	if pluginID == "rosenpass" {
 		if _, err := exec.LookPath("rosenpass"); err != nil {
-			dlCmd := exec.Command("sh", "-c", "curl -fsSL https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar | tar -xf - -C /usr/bin --strip-components=1 && chmod 755 /usr/bin/rosenpass /usr/bin/rp")
+			dlCmd := exec.Command("sh", "-c", "tmpd=$(mktemp -d) && curl -fsSL https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar | tar -xf - -C \"$tmpd\" && find \"$tmpd\" -type f \\( -name rosenpass -o -name rp \\) -exec cp -f {} /usr/local/bin/ \\; && chmod 755 /usr/local/bin/rosenpass /usr/local/bin/rp 2>/dev/null; rm -rf \"$tmpd\"")
 			if out, err := dlCmd.CombinedOutput(); err != nil {
 				log.Printf("[PluginManager] Warning downloading rosenpass release binary: %v (%s)", err, string(out))
 			}
@@ -688,8 +781,17 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 			log.Printf("[PluginManager] Warning provisioning Rosenpass PQ keys: %v", err)
 		}
 	}
+	if pluginID == "vigilant-octo-waffle" {
+		_ = os.MkdirAll("/etc/axonwall/vow", 0755)
+		_ = os.MkdirAll("/etc/rancher/k3s", 0755)
+		_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
+	}
+	if pluginID == "eluvix" {
+		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
+	}
 
 	pm.mu.Lock()
+	delete(pm.disabledMap, pluginID)
 	pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
 	pm.saveState()
 	pm.mu.Unlock()
@@ -705,6 +807,18 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
+	if strings.HasPrefix(pluginID, "core-") {
+		pm.mu.Lock()
+		pm.disabledMap[pluginID] = true
+		delete(pm.installedMap, pluginID)
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: fmt.Sprintf("Disabled core role plugin %s.", pluginID),
+		}
+	}
+
 	pm.actionMu.Lock()
 	defer pm.actionMu.Unlock()
 
@@ -720,6 +834,12 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		return PluginActionResponse{
 			Success: false,
 			Message: fmt.Sprintf("Unknown plugin ID '%s'", pluginID),
+		}
+	}
+
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		for _, unit := range target.SystemdUnits {
+			_ = exec.Command("systemctl", "disable", "--now", unit).Run()
 		}
 	}
 
@@ -770,6 +890,9 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 
 	pm.mu.Lock()
 	delete(pm.installedMap, pluginID)
+	if target.DefaultEnabled {
+		pm.disabledMap[pluginID] = true
+	}
 	pm.saveState()
 	pm.mu.Unlock()
 
@@ -1045,6 +1168,42 @@ alias kroll='kubectl rollout restart deployment'
 		_ = os.WriteFile(kubectlPluginPath, []byte(kubectlPlug), 0644)
 	}
 
+	// Ensure helm Oh My Zsh plugin exists
+	helmPluginPath := "/usr/share/oh-my-zsh/plugins/helm/helm.plugin.zsh"
+	if _, err := os.Stat(helmPluginPath); os.IsNotExist(err) {
+		helmPlug := `# Oh My Zsh — helm plugin
+if (( $+commands[helm] )); then
+  if [[ ! -f "${ZSH_CACHE_DIR}/completions/_helm" ]]; then
+    helm completion zsh 2>/dev/null >| "${ZSH_CACHE_DIR}/completions/_helm" &|
+  fi
+  [[ -s "${ZSH_CACHE_DIR}/completions/_helm" ]] && source "${ZSH_CACHE_DIR}/completions/_helm" 2>/dev/null
+  alias h='helm'
+  alias hl='helm list'
+  alias hla='helm list --all-namespaces'
+  alias hi='helm install'
+  alias hu='helm upgrade --install'
+  alias hd='helm uninstall'
+  alias hs='helm status'
+  alias hrepo='helm repo'
+  alias hse='helm search'
+fi
+`
+		_ = os.WriteFile(helmPluginPath, []byte(helmPlug), 0644)
+	}
+
+	// Ensure bat -> batcat and fd -> fdfind symlinks exist on Debian
+	_ = os.MkdirAll("/usr/local/bin", 0755)
+	if _, err := os.Stat("/usr/bin/batcat"); err == nil {
+		if _, err := os.Lstat("/usr/local/bin/bat"); os.IsNotExist(err) {
+			_ = os.Symlink("/usr/bin/batcat", "/usr/local/bin/bat")
+		}
+	}
+	if _, err := os.Stat("/usr/bin/fdfind"); err == nil {
+		if _, err := os.Lstat("/usr/local/bin/fd"); os.IsNotExist(err) {
+			_ = os.Symlink("/usr/bin/fdfind", "/usr/local/bin/fd")
+		}
+	}
+
 	// 3. /etc/zsh/axonwall.zsh (preserve packaged rich version if already present and non-empty, otherwise write full config)
 	zshConf := `# ==============================================================================
 # Axonwall Appliance Modern ZSH Configuration (/etc/zsh/axonwall.zsh)
@@ -1124,10 +1283,20 @@ fi
 alias tui='axonwall-tui'
 alias webtui='axonwall-tui'
 alias nastymap='axonwall-tui --tab nastymap'
+alias nui='axonwall-config'
+alias cfg='axonwall-config'
+alias superedit='axonwall-config'
+alias console='/usr/sbin/axonwall-console'
 alias ctl='axonwallctl'
 alias confirm='axonwallctl confirm'
 alias rollback='axonwallctl rollback'
 alias vi='vim'
+if command -v batcat >/dev/null 2>&1 && ! command -v bat >/dev/null 2>&1; then
+  alias bat='batcat'
+fi
+if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+  alias fd='fdfind'
+fi
 alias ll='ls -lah --color=auto'
 alias la='ls -A --color=auto'
 alias l='ls -CF --color=auto'

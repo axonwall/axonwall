@@ -3002,17 +3002,23 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 	idx, err := strconv.Atoi(choice)
 	if err == nil && idx >= 1 && idx <= len(domains) {
 		dom := domains[idx-1]
-		cmd := exec.Command("axonwallctl", "edit", dom)
+		ctlBin := "/usr/local/bin/axonwallctl"
+		if _, statErr := os.Stat(ctlBin); statErr != nil {
+			ctlBin = "axonwallctl"
+		}
+		cmd := exec.Command(ctlBin, "edit", dom)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			// Fallback to direct editor if axonwallctl is not in PATH
-			editor := os.Getenv("EDITOR")
+			editor := strings.TrimSpace(os.Getenv("EDITOR"))
 			if editor == "" {
 				editor = "vi"
 			}
-			edCmd := exec.Command(editor, fmt.Sprintf("/etc/axonwall/%s.yaml", dom))
+			edParts := strings.Fields(editor)
+			edArgs := append(edParts[1:], fmt.Sprintf("/etc/axonwall/%s.yaml", dom))
+			edCmd := exec.Command(edParts[0], edArgs...)
 			edCmd.Stdin = os.Stdin
 			edCmd.Stdout = os.Stdout
 			edCmd.Stderr = os.Stderr
@@ -3022,7 +3028,26 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 	}
 }
 
+func ensureStandardPath() {
+	required := []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+	cur := os.Getenv("PATH")
+	parts := strings.Split(cur, ":")
+	present := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			present[p] = true
+		}
+	}
+	for _, req := range required {
+		if !present[req] {
+			parts = append(parts, req)
+		}
+	}
+	_ = os.Setenv("PATH", strings.Join(parts, ":"))
+}
+
 func main() {
+	ensureStandardPath()
 	suppressConsoleNoise()
 	reader := bufio.NewReader(os.Stdin)
 

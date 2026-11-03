@@ -567,10 +567,20 @@ export function AxonwallTuiApp({
       next.nas = { ...(next.nas || ({} as any)), enabled: nextCaps.nasEnabled };
     } else if (roleId === 'core-k3s') {
       next.k3s = { ...(next.k3s || ({} as any)), enabled: nextCaps.k3sEnabled };
+      if (!nextCaps.k3sEnabled) {
+        const depRes = disablePluginWithDependents('core-k3s', next);
+        Object.assign(next, depRes.state);
+      }
     } else if (roleId === 'core-virt') {
       next.virt = { ...(next.virt || ({} as any)), enabled: nextCaps.virtEnabled };
     } else if (roleId === 'core-vigilante') {
-      next.vigilante = { ...(next.vigilante || ({} as any)), enabled: nextCaps.vigilanteEnabled };
+      if (nextCaps.vigilanteEnabled) {
+        const depRes = enablePluginWithDependencies('core-vigilante', next);
+        Object.assign(next, depRes.state);
+      } else {
+        const depRes = disablePluginWithDependents('core-vigilante', next);
+        Object.assign(next, depRes.state);
+      }
     }
     return roleId === 'core-firewall'
       ? nextCaps.firewallEnabled
@@ -1507,12 +1517,16 @@ export function AxonwallTuiApp({
             `Toggled alias '${al.name}' -> ${al.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         } else if (fwSubView === 'shaper') {
-          const next = structuredClone(state) as any;
-          next.shaper = { ...(next.shaper || { queues: [], rules: [] }), enabled: !next.shaper?.enabled };
+          const next = structuredClone(state);
+          const nextEnabled = !next.trafficShaper?.enabled;
+          next.trafficShaper = {
+            interfaces: next.trafficShaper?.interfaces || [],
+            enabled: nextEnabled,
+          };
           setState(next);
           saveStateToDisk(next);
           setStatusMessage(
-            `Toggled QoS Traffic Shaper -> ${next.shaper.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
+            `Toggled QoS Traffic Shaper -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         }
       } else if (activeTab === 'routing') {
@@ -1993,14 +2007,14 @@ export function AxonwallTuiApp({
             <Box flexDirection="column">
               <Text wrap="truncate-end">
                 QoS Traffic Shaper / SQM Cake :{' '}
-                <Text bold color={(state as any).shaper?.enabled ? 'green' : 'gray'}>
-                  {(state as any).shaper?.enabled ? '[ENABLED]' : '[DISABLED]'}
+                <Text bold color={state.trafficShaper?.enabled ? 'green' : 'gray'}>
+                  {state.trafficShaper?.enabled ? '[ENABLED]' : '[DISABLED]'}
                 </Text>{' '}
-                — Queues: {(state as any).shaper?.queues?.length || 0} · Rules: {(state as any).shaper?.rules?.length || 0}
+                — Interfaces: {state.trafficShaper?.interfaces?.length || 0}
               </Text>
-              {((state as any).shaper?.queues || []).map((q: any, idx: number) => (
+              {(state.trafficShaper?.interfaces || []).map((q, idx: number) => (
                 <Text key={q.id || idx} color="white" wrap="truncate-end">
-                  {'  '}• Queue <Text bold color="cyan">{q.name}</Text> on {q.interface} — Bandwidth: {q.bandwidth} ({q.scheduler || 'cake'})
+                  {'  '}• Shaper on <Text bold color="cyan">{q.interface}</Text> — Down: {q.downloadBandwidthMbps} Mbps / Up: {q.uploadBandwidthMbps} Mbps ({q.scheduler || 'cake'})
                 </Text>
               ))}
             </Box>

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -615,7 +616,7 @@ func ComputePartitionLayout(diskMB int, cfg InstallerConfig) PartitionLayout {
 		if cfg.LogsEnabled && cfg.LogsGB >= 1 {
 			logsMB = cfg.LogsGB * 1024
 		}
-		remMB := diskMB - efiMB - 16
+		remMB := diskMB - efiMB - logsMB - 16
 		if remMB < 1024 {
 			remMB = 1024
 		}
@@ -769,16 +770,30 @@ func RenderPartitionBar(layout PartitionLayout, cfg InstallerConfig, width int) 
 		counts[i] = c
 		usedCells += c
 	}
-	// Adjust largest segment so total width matches exactly
-	maxIdx := 0
-	for i := range segments {
-		if counts[i] > counts[maxIdx] {
-			maxIdx = i
-		}
-	}
+	// Adjust segments so total width matches exactly while keeping each segment >= 2
 	diff := width - usedCells
-	if counts[maxIdx]+diff >= 2 {
+	if diff > 0 {
+		maxIdx := 0
+		for i := range segments {
+			if counts[i] > counts[maxIdx] {
+				maxIdx = i
+			}
+		}
 		counts[maxIdx] += diff
+	} else {
+		for diff < 0 {
+			maxIdx := -1
+			for i := range segments {
+				if counts[i] > 2 && (maxIdx == -1 || counts[i] > counts[maxIdx]) {
+					maxIdx = i
+				}
+			}
+			if maxIdx == -1 {
+				break
+			}
+			counts[maxIdx]--
+			diff++
+		}
 	}
 
 	var sb strings.Builder
@@ -1071,10 +1086,12 @@ func ShipInstallerDiagnosticsBundle(endpoint string, cfg InstallerConfig, eval H
 		if strings.HasPrefix(endpoint, "tcp://") {
 			proto = "tcp"
 		}
-		if !strings.Contains(addr, ":") {
-			addr += ":514"
+		host, port, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			host = strings.Trim(addr, "[]")
+			port = "514"
 		}
-		cmd := exec.Command("logger", "-n", strings.Split(addr, ":")[0], "-P", strings.Split(addr, ":")[1], "-t", "axonwall-installer")
+		cmd := exec.Command("logger", "-n", host, "-P", port, "-t", "axonwall-installer")
 		if proto == "tcp" {
 			cmd.Args = append(cmd.Args, "-T")
 		}
@@ -1082,7 +1099,7 @@ func ShipInstallerDiagnosticsBundle(endpoint string, cfg InstallerConfig, eval H
 		if err := cmd.Run(); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Syslog %s://%s", proto, addr), nil
+		return fmt.Sprintf("Syslog %s://%s", proto, net.JoinHostPort(host, port)), nil
 	}
 
 	// Default to SCP if user@host:/path or host:/path format

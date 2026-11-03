@@ -37528,6 +37528,11 @@ var BUILTIN_PLUGINS = [
     author: "HAProxy Technologies / Axonwall Core",
     systemdUnits: ["haproxy.service"],
     privileges: ["services.haproxy", "system.certificates"],
+    packages: {
+      debian: ["haproxy"],
+      alpine: ["haproxy"]
+    },
+    cliBinaries: ["haproxy"],
     nftHooks: [
       { table: "inet axonwall", chain: "input", priority: 0 }
     ],
@@ -37546,6 +37551,11 @@ var BUILTIN_PLUGINS = [
     author: "Network RADIUS / Axonwall Core",
     systemdUnits: ["freeradius.service"],
     privileges: ["services.freeradius", "system.users"],
+    packages: {
+      debian: ["freeradius", "freeradius-ldap", "freeradius-utils"],
+      alpine: ["freeradius", "freeradius-ldap"]
+    },
+    cliBinaries: ["freeradius", "radtest"],
     ldapIntegration: {
       enabledByDefault: true,
       serviceAccountCn: "svc-freeradius",
@@ -37575,6 +37585,11 @@ var BUILTIN_PLUGINS = [
     author: "Net-SNMP Team / Axonwall Core",
     systemdUnits: ["snmpd.service"],
     privileges: ["system.monitoring"],
+    packages: {
+      debian: ["snmpd", "snmp"],
+      alpine: ["net-snmp", "net-snmp-tools"]
+    },
+    cliBinaries: ["snmpd", "snmpwalk"],
     menuEntry: {
       title: "SNMP Monitoring",
       path: "/services/snmp",
@@ -37590,6 +37605,11 @@ var BUILTIN_PLUGINS = [
     author: "NUT Project / Axonwall Core",
     systemdUnits: ["nut-server.service", "nut-client.service"],
     privileges: ["system.hardware", "system.power"],
+    packages: {
+      debian: ["nut", "nut-server", "nut-client"],
+      alpine: ["nut"]
+    },
+    cliBinaries: ["upsc", "upsd", "upsmon"],
     menuEntry: {
       title: "UPS Battery (NUT)",
       path: "/system/ups",
@@ -37605,6 +37625,11 @@ var BUILTIN_PLUGINS = [
     author: "Juan Font / Axonwall Core",
     systemdUnits: ["headscale.service"],
     privileges: ["vpn.admin", "network.interfaces"],
+    packages: {
+      debian: ["wireguard-tools", "sqlite3"],
+      alpine: ["wireguard-tools", "sqlite"]
+    },
+    cliBinaries: ["headscale", "wg"],
     menuEntry: {
       title: "Mesh VPN (Headscale)",
       path: "/vpn/mesh",
@@ -37620,6 +37645,11 @@ var BUILTIN_PLUGINS = [
     author: "Tailscale Inc. / Axonwall Community",
     systemdUnits: ["tailscaled.service"],
     privileges: ["vpn.tailscale", "network.interfaces"],
+    packages: {
+      debian: ["wireguard-tools", "ca-certificates", "curl"],
+      alpine: ["tailscale", "wireguard-tools"]
+    },
+    cliBinaries: ["tailscale", "tailscaled"],
     menuEntry: {
       title: "Tailscale Mesh",
       path: "/vpn/tailscale",
@@ -37635,6 +37665,11 @@ var BUILTIN_PLUGINS = [
     author: "ntop / Axonwall Community",
     systemdUnits: ["ntopng.service"],
     privileges: ["reporting.flows", "system.monitoring"],
+    packages: {
+      debian: ["tcpdump", "ethtool"],
+      alpine: ["tcpdump", "ethtool"]
+    },
+    cliBinaries: ["ntopng", "tcpdump"],
     menuEntry: {
       title: "ntopng Flow Analyzer",
       path: "/reporting/ntopng",
@@ -40734,6 +40769,168 @@ ${fluxManifestsYaml}`;
   };
 }
 
+// ../../packages/axonwall_lib/dist/compile/haproxy/index.js
+function safeIdentifier(str) {
+  return str.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+function compileHaProxy(config2) {
+  const lines = [];
+  const safeConfigMode = safeIdentifier(config2.mode);
+  lines.push("# /etc/haproxy/haproxy.cfg - Managed by Axonwall HAProxy Plugin");
+  lines.push("");
+  lines.push("global");
+  lines.push("    log /dev/log local0");
+  lines.push("    log /dev/log local1 notice");
+  lines.push("    chroot /var/lib/haproxy");
+  lines.push("    user haproxy");
+  lines.push("    group haproxy");
+  lines.push("    daemon");
+  lines.push("    stats socket /run/haproxy/admin.sock mode 660 level admin");
+  lines.push("    stats timeout 30s");
+  lines.push("    maxconn 4096");
+  lines.push("    ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384");
+  lines.push("    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets");
+  lines.push("");
+  lines.push("defaults");
+  lines.push("    log global");
+  lines.push(`    mode ${safeConfigMode}`);
+  lines.push("    option httplog");
+  lines.push("    option dontlognull");
+  lines.push("    timeout connect 5000ms");
+  lines.push("    timeout client  50000ms");
+  lines.push("    timeout server  50000ms");
+  lines.push("");
+  for (const fe of config2.frontends) {
+    const safeFeName = safeIdentifier(fe.name);
+    lines.push(`frontend ${safeFeName}`);
+    let bindLine = `    bind *:${fe.bindPort}`;
+    if (fe.ssl && fe.certName) {
+      const safeCert = safeIdentifier(fe.certName);
+      bindLine += ` ssl crt /etc/axonwall/certs/${safeCert}.pem`;
+    }
+    lines.push(bindLine);
+    lines.push(`    mode ${safeConfigMode}`);
+    if (safeConfigMode === "http") {
+      lines.push("    option forwardfor");
+      lines.push("    http-request set-header X-Forwarded-Proto https if { ssl_fc }");
+    }
+    lines.push(`    default_backend ${safeIdentifier(fe.defaultBackend)}`);
+    lines.push("");
+  }
+  for (const be of config2.backends) {
+    const safeBeName = safeIdentifier(be.name);
+    lines.push(`backend ${safeBeName}`);
+    lines.push(`    mode ${safeIdentifier(be.mode)}`);
+    lines.push(`    balance ${safeIdentifier(be.balance)}`);
+    if (be.mode === "http") {
+      lines.push("    option httpchk GET /");
+    }
+    for (const srv of be.servers) {
+      const safeSrvName = safeIdentifier(srv.name);
+      const safeAddr = srv.address.replace(/[\r\n\s]+/g, "");
+      let srvLine = `    server ${safeSrvName} ${safeAddr}:${srv.port}`;
+      if (srv.check) {
+        srvLine += " check";
+      }
+      lines.push(srvLine);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+// ../../packages/axonwall_lib/dist/compile/freeradius/index.js
+function compileFreeRadiusClients(config2) {
+  const lines = [];
+  lines.push("# clients.conf - FreeRADIUS client configuration (Axonwall Managed)");
+  lines.push("");
+  lines.push("client localhost {");
+  lines.push("    ipaddr = 127.0.0.1");
+  lines.push("    proto = *");
+  lines.push("    secret = testing123");
+  lines.push("    require_message_authenticator = no");
+  lines.push("    nas_type = other");
+  lines.push("    limit {");
+  lines.push("        max_connections = 16");
+  lines.push("        lifetime = 0");
+  lines.push("        idle_timeout = 30");
+  lines.push("    }");
+  lines.push("}");
+  lines.push("");
+  for (const client of config2.clients) {
+    const safeName = client.name.split(/[\r\n\}]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, "");
+    const safeIp = client.ipAddress.split(/[\r\n\}]/)[0].trim().replace(/[^a-fA-F0-9:./]/g, "");
+    const rawSecret = client.secret.split(/[\r\n]/)[0];
+    const safeSecret = rawSecret.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    if (!safeName || !safeIp)
+      continue;
+    lines.push(`client ${safeName} {`);
+    lines.push(`    ipaddr = ${safeIp}`);
+    lines.push(`    secret = "${safeSecret}"`);
+    lines.push("    require_message_authenticator = auto");
+    lines.push("    nas_type = other");
+    lines.push("    limit {");
+    lines.push("        max_connections = 64");
+    lines.push("        lifetime = 3600");
+    lines.push("        idle_timeout = 60");
+    lines.push("    }");
+    lines.push("}");
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+// ../../packages/axonwall_lib/dist/compile/snmp/index.js
+function compileSnmpd(config2) {
+  const lines = [];
+  const safeCommunity = config2.community.split(/[\r\n]/)[0].trim().replace(/[\r\n\s]+/g, "");
+  const safeLocation = config2.sysLocation.split(/[\r\n]/)[0].trim();
+  const safeContact = config2.sysContact.split(/[\r\n]/)[0].trim();
+  const port = Math.max(1, Math.min(65535, Number(config2.listenPort) || 161));
+  lines.push("# /etc/snmp/snmpd.conf - Managed by Axonwall SNMP Plugin");
+  lines.push(`agentAddress udp:${port},udp6:[::1]:${port}`);
+  lines.push("");
+  lines.push(`rocommunity ${safeCommunity} default`);
+  lines.push(`sysLocation ${safeLocation}`);
+  lines.push(`sysContact ${safeContact}`);
+  lines.push("");
+  lines.push("# Include network interface stats and host resources");
+  lines.push("view   systemonly  included   .1.3.6.1.2.1.1");
+  lines.push("view   systemonly  included   .1.3.6.1.2.1.25.1");
+  lines.push("view   all         included   .1");
+  lines.push(`rocommunity ${safeCommunity} default -V all`);
+  lines.push("");
+  return lines.join("\n");
+}
+
+// ../../packages/axonwall_lib/dist/compile/nut/index.js
+function compileNutUps(config2) {
+  const safeName = config2.name.split(/[\r\n\]]/)[0].trim().replace(/[^a-zA-Z0-9_-]/g, "") || "ups";
+  const safeDriver = config2.driver.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, "") || "usbhid-ups";
+  const safePort = config2.port.split(/[\r\n]/)[0].trim().replace(/[\r\n\s]+/g, "") || "auto";
+  const safeShutdownBatteryPct = Math.max(1, Math.min(100, Number(config2.shutdownBatteryPct) || 20));
+  const safeLowBatteryRuntimeSec = Math.max(0, Math.min(86400, Number(config2.lowBatteryRuntimeSec) || 300));
+  const upsLines = [];
+  upsLines.push("# /etc/nut/ups.conf - Managed by Axonwall UPS");
+  upsLines.push("maxretry = 3");
+  upsLines.push("");
+  upsLines.push(`[${safeName}]`);
+  upsLines.push(`    driver = ${safeDriver}`);
+  upsLines.push(`    port = ${safePort}`);
+  upsLines.push('    desc = "Axonwall Protected Battery Backup"');
+  upsLines.push(`    override.battery.charge.low = ${safeShutdownBatteryPct}`);
+  upsLines.push(`    override.battery.runtime.low = ${safeLowBatteryRuntimeSec}`);
+  upsLines.push("");
+  const nutLines = [];
+  nutLines.push("# /etc/nut/nut.conf - Managed by Axonwall UPS");
+  nutLines.push("MODE=standalone");
+  nutLines.push("");
+  return {
+    upsConf: upsLines.join("\n"),
+    nutConf: nutLines.join("\n")
+  };
+}
+
 // ../../packages/axonwall_lib/dist/compile/nft/index.js
 function buildNasAndK3sInputRules(state, ifDeviceMap, nasEnabled, k3sEnabled, firewallEnabled = true) {
   const hostRules = [];
@@ -40808,14 +41005,19 @@ function compileNftables(state) {
     const k3sCompiled = compileK3s(state);
     const effectiveRole = state.ha?.role || state.ha?.nodeRole || "master";
     const effectivePeer = state.ha?.peerIp || state.ha?.peerAddress || "";
+    const effectiveSecret = state.ha?.sqliteSync?.authToken || state.ha?.vrrpInstances?.[0]?.authPassword || "";
     files.push({
       path: "/etc/axonwall/managed/k3s_config.json",
       content: JSON.stringify({
         enabled: capabilities.k3sEnabled,
         haEnabled: Boolean(state.ha?.enabled),
+        role: effectiveRole,
         haRole: effectiveRole,
+        peerIp: effectivePeer,
         haPeerAddress: effectivePeer,
-        haSharedSecret: state.ha?.sqliteSync?.authToken || state.ha?.vrrpInstances?.[0]?.authPassword || "",
+        syncPort: 8443,
+        authToken: effectiveSecret,
+        haSharedSecret: effectiveSecret,
         autoJoinHaPeer: state.k3s?.autoJoinHaPeer !== false,
         zfsLocalPvPool: state.k3s?.openEbs?.zfsLocalPvPool || "tank",
         replicatedPool: state.k3s?.openEbs?.replicatedBackingPool || "tank/openebs-replicated",
@@ -40934,6 +41136,45 @@ function compileNftables(state) {
       fileMode: 384
     });
     reloadServices.push("rosenpass");
+  }
+  if (state.haproxy?.enabled) {
+    files.push({
+      path: "/etc/haproxy/haproxy.cfg",
+      content: compileHaProxy(state.haproxy),
+      fileMode: 420
+    });
+    reloadServices.push("haproxy");
+  }
+  if (state.freeradius?.enabled) {
+    files.push({
+      path: "/etc/freeradius/3.0/clients.conf",
+      content: compileFreeRadiusClients(state.freeradius),
+      fileMode: 416
+    });
+    reloadServices.push("freeradius");
+  }
+  if (state.snmp?.enabled) {
+    files.push({
+      path: "/etc/snmp/snmpd.conf",
+      content: compileSnmpd(state.snmp),
+      fileMode: 416
+    });
+    reloadServices.push("snmpd");
+  }
+  if (state.ups?.enabled) {
+    const nutCompiled = compileNutUps(state.ups);
+    files.push({
+      path: "/etc/nut/ups.conf",
+      content: nutCompiled.upsConf,
+      fileMode: 416
+    });
+    files.push({
+      path: "/etc/nut/nut.conf",
+      content: nutCompiled.nutConf,
+      fileMode: 416
+    });
+    reloadServices.push("nut-server");
+    reloadServices.push("nut-client");
   }
   const ifDeviceMap = /* @__PURE__ */ new Map();
   const ifRoleMap = /* @__PURE__ */ new Map();
@@ -41966,6 +42207,46 @@ var AXONWALL_YAML_DOMAINS = [
   }
 ];
 var AXONWALL_YAML_FILENAMES = AXONWALL_YAML_DOMAINS.map((d) => d.filename);
+function buildHeaderComment(domain2) {
+  return [
+    `# =============================================================================`,
+    `# ${domain2.title}`,
+    `# File: /etc/axonwall/${domain2.filename}`,
+    `# =============================================================================`,
+    `# ${domain2.description}`,
+    `#`,
+    `# CLI Workflow:`,
+    `#   1. Edit this file by hand (e.g., vim /etc/axonwall/${domain2.filename})`,
+    `#   2. Validate syntax & schema:  axonwallctl validate`,
+    `#   3. View pending changes:      axonwallctl diff`,
+    `#   4. Apply to live system:      axonwallctl apply`,
+    `#`,
+    `# Bidirectional Sync: Any edits saved here automatically appear in the Web GUI,`,
+    `# and any changes saved in the Web GUI are written back to /etc/axonwall/*.yaml.`,
+    `# =============================================================================`,
+    ``
+  ].join("\n");
+}
+function serializeDesiredStateToYamlFiles(inputState) {
+  const state = DesiredStateSchema.parse(inputState);
+  const result = {};
+  for (const domain2 of AXONWALL_YAML_DOMAINS) {
+    const partialObj = {};
+    for (const key of domain2.keys) {
+      const value = state[key];
+      if (value !== void 0) {
+        partialObj[key] = value;
+      }
+    }
+    const yamlBody = (0, import_yaml3.stringify)(partialObj, {
+      indent: 2,
+      lineWidth: 120,
+      nullStr: "~"
+    });
+    result[domain2.filename] = `${buildHeaderComment(domain2)}${yamlBody}`;
+  }
+  return result;
+}
 
 // ../../packages/axonwall_lib/dist/cloudinit/index.js
 var import_yaml4 = __toESM(require_dist(), 1);
@@ -44508,6 +44789,21 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       state.rules.push(req.rule);
       try {
         fs5.writeFileSync("/etc/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
+      } catch {
+      }
+      try {
+        fs5.writeFileSync("/var/lib/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
+      } catch {
+      }
+      try {
+        const yamlFiles = serializeDesiredStateToYamlFiles(state);
+        for (const dir of ["/etc/axonwall", "/var/lib/axonwall/etc-axonwall"]) {
+          if (fs5.existsSync(dir)) {
+            for (const [fn, content] of Object.entries(yamlFiles)) {
+              fs5.writeFileSync(`${dir}/${fn}`, content, { mode: 432 });
+            }
+          }
+        }
       } catch {
       }
       let applyStatus = "staged_only";

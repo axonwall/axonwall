@@ -2,12 +2,16 @@ package engine
 
 import (
 	"bufio"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/bits"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -295,9 +299,196 @@ func (d *DirectoryManager) readInitialAdminPasswordWithState() (string, bool) {
 	return fmt.Sprintf("axonwall-%d", time.Now().UnixNano()), sawScrypt
 }
 
+func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
+	prf := hmac.New(sha256.New, password)
+	hashLen := prf.Size()
+	numBlocks := (keyLen + hashLen - 1) / hashLen
+	var buf [4]byte
+	dk := make([]byte, 0, numBlocks*hashLen)
+	u := make([]byte, hashLen)
+	for block := 1; block <= numBlocks; block++ {
+		prf.Reset()
+		prf.Write(salt)
+		binary.BigEndian.PutUint32(buf[:], uint32(block))
+		prf.Write(buf[:])
+		dk = prf.Sum(dk)
+		t := dk[len(dk)-hashLen:]
+		copy(u, t)
+		for n := 2; n <= iter; n++ {
+			prf.Reset()
+			prf.Write(u)
+			u = prf.Sum(u[:0])
+			for x := range u {
+				t[x] ^= u[x]
+			}
+		}
+	}
+	return dk[:keyLen]
+}
+
+func salsaXOR(tmp *[16]uint32, in, out []uint32) {
+	w0 := tmp[0] ^ in[0]
+	w1 := tmp[1] ^ in[1]
+	w2 := tmp[2] ^ in[2]
+	w3 := tmp[3] ^ in[3]
+	w4 := tmp[4] ^ in[4]
+	w5 := tmp[5] ^ in[5]
+	w6 := tmp[6] ^ in[6]
+	w7 := tmp[7] ^ in[7]
+	w8 := tmp[8] ^ in[8]
+	w9 := tmp[9] ^ in[9]
+	w10 := tmp[10] ^ in[10]
+	w11 := tmp[11] ^ in[11]
+	w12 := tmp[12] ^ in[12]
+	w13 := tmp[13] ^ in[13]
+	w14 := tmp[14] ^ in[14]
+	w15 := tmp[15] ^ in[15]
+
+	x0, x1, x2, x3, x4, x5, x6, x7 := w0, w1, w2, w3, w4, w5, w6, w7
+	x8, x9, x10, x11, x12, x13, x14, x15 := w8, w9, w10, w11, w12, w13, w14, w15
+
+	for i := 0; i < 8; i += 2 {
+		x4 ^= bits.RotateLeft32(x0+x12, 7)
+		x8 ^= bits.RotateLeft32(x4+x0, 9)
+		x12 ^= bits.RotateLeft32(x8+x4, 13)
+		x0 ^= bits.RotateLeft32(x12+x8, 18)
+
+		x9 ^= bits.RotateLeft32(x5+x1, 7)
+		x13 ^= bits.RotateLeft32(x9+x5, 9)
+		x1 ^= bits.RotateLeft32(x13+x9, 13)
+		x5 ^= bits.RotateLeft32(x1+x13, 18)
+
+		x14 ^= bits.RotateLeft32(x10+x6, 7)
+		x2 ^= bits.RotateLeft32(x14+x10, 9)
+		x6 ^= bits.RotateLeft32(x2+x14, 13)
+		x10 ^= bits.RotateLeft32(x6+x2, 18)
+
+		x3 ^= bits.RotateLeft32(x15+x11, 7)
+		x7 ^= bits.RotateLeft32(x3+x15, 9)
+		x11 ^= bits.RotateLeft32(x7+x3, 13)
+		x15 ^= bits.RotateLeft32(x11+x7, 18)
+
+		x1 ^= bits.RotateLeft32(x0+x3, 7)
+		x2 ^= bits.RotateLeft32(x1+x0, 9)
+		x3 ^= bits.RotateLeft32(x2+x1, 13)
+		x0 ^= bits.RotateLeft32(x3+x2, 18)
+
+		x6 ^= bits.RotateLeft32(x5+x4, 7)
+		x7 ^= bits.RotateLeft32(x6+x5, 9)
+		x4 ^= bits.RotateLeft32(x7+x6, 13)
+		x5 ^= bits.RotateLeft32(x4+x7, 18)
+
+		x11 ^= bits.RotateLeft32(x10+x9, 7)
+		x8 ^= bits.RotateLeft32(x11+x10, 9)
+		x9 ^= bits.RotateLeft32(x8+x11, 13)
+		x10 ^= bits.RotateLeft32(x9+x8, 18)
+
+		x12 ^= bits.RotateLeft32(x15+x14, 7)
+		x13 ^= bits.RotateLeft32(x12+x15, 9)
+		x14 ^= bits.RotateLeft32(x13+x12, 13)
+		x15 ^= bits.RotateLeft32(x14+x13, 18)
+	}
+	x0 += w0
+	x1 += w1
+	x2 += w2
+	x3 += w3
+	x4 += w4
+	x5 += w5
+	x6 += w6
+	x7 += w7
+	x8 += w8
+	x9 += w9
+	x10 += w10
+	x11 += w11
+	x12 += w12
+	x13 += w13
+	x14 += w14
+	x15 += w15
+
+	out[0], tmp[0] = x0, x0
+	out[1], tmp[1] = x1, x1
+	out[2], tmp[2] = x2, x2
+	out[3], tmp[3] = x3, x3
+	out[4], tmp[4] = x4, x4
+	out[5], tmp[5] = x5, x5
+	out[6], tmp[6] = x6, x6
+	out[7], tmp[7] = x7, x7
+	out[8], tmp[8] = x8, x8
+	out[9], tmp[9] = x9, x9
+	out[10], tmp[10] = x10, x10
+	out[11], tmp[11] = x11, x11
+	out[12], tmp[12] = x12, x12
+	out[13], tmp[13] = x13, x13
+	out[14], tmp[14] = x14, x14
+	out[15], tmp[15] = x15, x15
+}
+
+func scryptBlockMix(tmp *[16]uint32, in, out []uint32, r int) {
+	copy(tmp[:], in[(2*r-1)*16:2*r*16])
+	for i := 0; i < 2*r; i += 2 {
+		salsaXOR(tmp, in[i*16:], out[i*8:])
+		salsaXOR(tmp, in[i*16+16:], out[i*8+r*16:])
+	}
+}
+
+func hashBreakGlassScrypt(pass string) (string, error) {
+	if strings.HasPrefix(pass, "scrypt$") {
+		return pass, nil
+	}
+	saltBytes := make([]byte, 16)
+	if _, err := rand.Read(saltBytes); err != nil {
+		return "", err
+	}
+	saltHex := hex.EncodeToString(saltBytes)
+	const (
+		N      = 16384
+		r      = 8
+		p      = 1
+		keyLen = 64
+	)
+	b := pbkdf2SHA256([]byte(pass), []byte(saltHex), 1, p*128*r)
+	xy := make([]uint32, 64*r)
+	v := make([]uint32, 32*N*r)
+	var tmp [16]uint32
+	x := xy[:32*r]
+	y := xy[32*r:]
+	for i := 0; i < 32*r; i++ {
+		x[i] = binary.LittleEndian.Uint32(b[4*i:])
+	}
+	for i := 0; i < N; i += 2 {
+		copy(v[i*(32*r):], x)
+		scryptBlockMix(&tmp, x, y, r)
+		copy(v[(i+1)*(32*r):], y)
+		scryptBlockMix(&tmp, y, x, r)
+	}
+	for i := 0; i < N; i += 2 {
+		j := int(x[(2*r-1)*16] & uint32(N-1))
+		for k := range x {
+			x[k] ^= v[j*(32*r)+k]
+		}
+		scryptBlockMix(&tmp, x, y, r)
+		j = int(y[(2*r-1)*16] & uint32(N-1))
+		for k := range y {
+			y[k] ^= v[j*(32*r)+k]
+		}
+		scryptBlockMix(&tmp, y, x, r)
+	}
+	for i, v32 := range x {
+		binary.LittleEndian.PutUint32(b[4*i:], v32)
+	}
+	dk := pbkdf2SHA256([]byte(pass), b, 1, keyLen)
+	return fmt.Sprintf("scrypt$%s$%s", saltHex, hex.EncodeToString(dk)), nil
+}
+
 func (d *DirectoryManager) syncBreakGlassPasswordFile(password string) {
-	if strings.ContainsAny(password, "\n\r\x00") {
+	if strings.ContainsAny(password, "\n\r\x00") || password == "" {
 		return
+	}
+	storedValue := password
+	if !strings.HasPrefix(password, "scrypt$") {
+		if hashed, err := hashBreakGlassScrypt(password); err == nil {
+			storedValue = hashed
+		}
 	}
 	for _, path := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
 		info, lerr := os.Lstat(path)
@@ -312,7 +503,7 @@ func (d *DirectoryManager) syncBreakGlassPasswordFile(password string) {
 		updated := false
 		for i, line := range lines {
 			if strings.HasPrefix(strings.TrimSpace(line), "LOCAL_ADMIN_PASSWORD=") {
-				lines[i] = "LOCAL_ADMIN_PASSWORD=" + password
+				lines[i] = "LOCAL_ADMIN_PASSWORD=" + storedValue
 				updated = true
 			}
 		}
@@ -1431,7 +1622,11 @@ MaxAuthTries 3
 	if string(existing) != sshdConf {
 		_ = os.MkdirAll(filepath.Dir(confPath), 0755)
 		if err := os.WriteFile(confPath, []byte(sshdConf), 0644); err == nil {
-			_ = exec.Command("systemctl", "reload", "ssh").Run()
+			if exec.Command("systemctl", "reload", "ssh").Run() != nil {
+				if exec.Command("systemctl", "reload", "sshd").Run() != nil {
+					_ = exec.Command("rc-service", "sshd", "reload").Run()
+				}
+			}
 		}
 	}
 	return nil

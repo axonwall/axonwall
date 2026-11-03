@@ -271,6 +271,16 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-install ]]; then
   chmod +x config/includes.chroot/usr/local/bin/axonwall-install
 fi
 
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-cloud-init ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-cloud-init
+fi
+
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-zbm-theme ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-zbm-theme
+  ln -sf axonwall-zbm-theme config/includes.chroot/usr/local/bin/generate-zbm
+  ln -sf axonwall-zbm-theme config/includes.chroot/usr/local/bin/zbm-kcl
+fi
+
 for rk_script in axonwall-hunt-rootkits hunt-io-uring-implants.sh hunt-ebpf-rootkits.sh audit_hidden_bpf_prog_idr.py; do
   if [[ -f "config/includes.chroot/usr/local/bin/${rk_script}" ]]; then
     chmod +x "config/includes.chroot/usr/local/bin/${rk_script}"
@@ -361,6 +371,16 @@ if [[ ! -f config/includes.chroot/usr/local/bin/helm ]]; then
   tar -xzf "${HELM_TAR}" -C config/includes.chroot/usr/local/bin/ --strip-components=1 linux-amd64/helm
   chmod 0755 config/includes.chroot/usr/local/bin/helm
   rm -f "${HELM_TAR}"
+fi
+
+# Fetch kubectl binary for Kubernetes cluster administration
+KUBECTL_VERSION="1.32.3"
+KUBECTL_SHA256="ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f"
+if [[ ! -f config/includes.chroot/usr/local/bin/kubectl ]]; then
+  echo "[+] Fetching kubectl v${KUBECTL_VERSION}..."
+  curl -fsSL -o config/includes.chroot/usr/local/bin/kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+  echo "${KUBECTL_SHA256}  config/includes.chroot/usr/local/bin/kubectl" | sha256sum -c -
+  chmod 0755 config/includes.chroot/usr/local/bin/kubectl
 fi
 
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
@@ -573,11 +593,19 @@ jq
 ca-certificates
 net-tools
 dnsutils
+bind9-host
 nmap
 kubectl
+mkcert
 zsh
 vim
 neovim
+less
+binutils
+zstd
+xz-utils
+bzip2
+unzip
 btop
 htop
 sysstat
@@ -627,6 +655,8 @@ unhide
 lynis
 debsums
 bpftool
+python3-drgn
+linux-perf
 EOF
 else
 cat << 'EOF' > config/package-lists/axonwall.list.chroot
@@ -685,11 +715,19 @@ ca-certificates
 nodejs
 net-tools
 dnsutils
+bind9-host
 nmap
 kubectl
+mkcert
 zsh
 vim
 neovim
+less
+binutils
+zstd
+xz-utils
+bzip2
+unzip
 btop
 htop
 sysstat
@@ -729,6 +767,8 @@ qemu-utils
 ovmf
 xorriso
 bridge-utils
+libvirt-clients
+lxc
 cryptsetup
 systemd-cryptsetup
 tpm2-tools
@@ -736,6 +776,7 @@ xfsprogs
 samba
 nfs-kernel-server
 open-iscsi
+tgt
 etckeeper
 git
 openssh-server
@@ -755,6 +796,8 @@ unhide
 lynis
 debsums
 bpftool
+python3-drgn
+linux-perf
 EOF
 fi
 

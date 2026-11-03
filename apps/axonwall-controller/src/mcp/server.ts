@@ -17,6 +17,7 @@ import {
 } from '@axonwall/lib/mcp';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { compileNftables } from '@axonwall/lib/compile/nft';
+import { serializeDesiredStateToYamlFiles } from '@axonwall/lib/yaml';
 import { hasMcpScope } from './authz.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 
@@ -1425,6 +1426,19 @@ export async function handleMcpCallTool(
       } catch {
         // Fallback if /etc/axonwall not writable in dev
       }
+      try {
+        fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
+      } catch {}
+      try {
+        const yamlFiles = serializeDesiredStateToYamlFiles(state);
+        for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+          if (fs.existsSync(dir)) {
+            for (const [fn, content] of Object.entries(yamlFiles)) {
+              fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
+            }
+          }
+        }
+      } catch {}
 
       let applyStatus = 'staged_only';
       if (req.applyImmediately) {

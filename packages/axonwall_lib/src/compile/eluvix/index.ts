@@ -547,7 +547,7 @@ export function compileEluvixBundle(state: Partial<DesiredState>): CompiledEluvi
     harnessMesh: {
       ...config.harnessMesh,
       axonwallMcpEndpoint: config.harnessMesh.injectAxonwallMcp
-        ? 'unix:///var/run/axonwalld.sock'
+        ? 'unix:///run/axonwall/agent-api.sock'
         : null,
     },
   };

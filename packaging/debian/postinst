@@ -220,6 +220,18 @@ ENV_EOF
         fi
 
         # 5b. Configure VIM as standard editor & vi via update-alternatives, and ZSH as default interactive shell
+        mkdir -p /usr/local/bin 2>/dev/null || true
+        if [ -x /usr/bin/batcat ] && [ ! -e /usr/local/bin/bat ] && [ ! -e /usr/bin/bat ]; then
+            ln -sf /usr/bin/batcat /usr/local/bin/bat 2>/dev/null || true
+        fi
+        if [ -x /usr/bin/fdfind ] && [ ! -e /usr/local/bin/fd ] && [ ! -e /usr/bin/fd ]; then
+            ln -sf /usr/bin/fdfind /usr/local/bin/fd 2>/dev/null || true
+        fi
+        if [ -x /usr/local/bin/axonwall-zbm-theme ]; then
+            [ -e /usr/local/bin/generate-zbm ] || ln -sf /usr/local/bin/axonwall-zbm-theme /usr/local/bin/generate-zbm 2>/dev/null || true
+            [ -e /usr/local/bin/zbm-kcl ] || ln -sf /usr/local/bin/axonwall-zbm-theme /usr/local/bin/zbm-kcl 2>/dev/null || true
+        fi
+
         for vim_bin in /usr/bin/vim.basic /usr/bin/vim.nox /usr/bin/vim.tiny /usr/bin/vim; do
             if [ -x "$vim_bin" ] && command -v update-alternatives >/dev/null 2>&1; then
                 update-alternatives --set editor "$vim_bin" >/dev/null 2>&1 || true

@@ -126,9 +126,21 @@ export async function checkTool(tool) {
 
 /**
  * Check all prerequisites
+ * @param {Object} [options]
+ * @param {string} [options.clusterProvider] - 'k3s' (in-house K3s appliance) or 'k3d' (standalone Docker)
  */
-export async function checkPrereqs() {
-  const results = await Promise.all(REQUIRED_TOOLS.map(tool => checkTool(tool)));
+export async function checkPrereqs(options = {}) {
+  const isInHouseK3s =
+    options.clusterProvider === 'k3s' ||
+    options.clusterProvider === 'in-house' ||
+    process.env.VIGILANTE_CLUSTER_PROVIDER === 'k3s' ||
+    (await commandExists('k3s'));
+
+  const toolsToCheck = isInHouseK3s
+    ? REQUIRED_TOOLS.filter(t => t.id !== 'docker' && t.id !== 'k3d')
+    : REQUIRED_TOOLS;
+
+  const results = await Promise.all(toolsToCheck.map(tool => checkTool(tool)));
   const allReady = results.every(r => r.ready);
   const missing = results.filter(r => !r.ready);
 

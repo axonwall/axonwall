@@ -39,7 +39,20 @@ if [ -f /usr/share/dns/root.key ] && { [ ! -s /var/lib/unbound/root.key ] || ! g
 fi
 chown -R unbound:unbound /var/lib/unbound 2>/dev/null || true
 rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf 2>/dev/null || true
-systemctl disable suricata kea-dhcp4-server unbound unbound-resolvconf frr strongswan strongswan-starter openvpn conntrackd keepalived 2>/dev/null || true
+systemctl disable suricata kea-dhcp4-server unbound unbound-resolvconf frr strongswan strongswan-starter openvpn conntrackd keepalived tgt lxc lxc-net 2>/dev/null || true
+
+echo "[Hook] Creating /usr/local/bin symlinks for Debian-renamed CLI tools (bat -> batcat, fd -> fdfind)..."
+mkdir -p /usr/local/bin
+if [ -x /usr/bin/batcat ] && [ ! -e /usr/local/bin/bat ] && [ ! -e /usr/bin/bat ]; then
+  ln -sf /usr/bin/batcat /usr/local/bin/bat
+fi
+if [ -x /usr/bin/fdfind ] && [ ! -e /usr/local/bin/fd ] && [ ! -e /usr/bin/fd ]; then
+  ln -sf /usr/bin/fdfind /usr/local/bin/fd
+fi
+if [ -x /usr/local/bin/axonwall-zbm-theme ]; then
+  ln -sf /usr/local/bin/axonwall-zbm-theme /usr/local/bin/generate-zbm
+  ln -sf /usr/local/bin/axonwall-zbm-theme /usr/local/bin/zbm-kcl
+fi
 
 echo "[Hook] Silencing cloud-init console output so it never bleeds into the TUI on /dev/tty1..."
 if [ -f /etc/cloud/cloud.cfg.d/05_logging.cfg ]; then

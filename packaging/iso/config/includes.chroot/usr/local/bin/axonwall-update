@@ -150,6 +150,112 @@ extract_deb() {
   return 1
 }
 
+# Sync static non-secret /etc/axonwall assets into both target root and persistent bind-mount
+sync_static_etc_axonwall() {
+  src_etc="$1"
+  dst_etc="$2"
+  [ -d "$src_etc" ] || return 0
+  mkdir -p "$dst_etc" 2>/dev/null || true
+  for item in nvim yara branding starship.toml release-signing.pub; do
+    if [ -e "${src_etc}/${item}" ]; then
+      cp -af "${src_etc}/${item}" "${dst_etc}/" 2>/dev/null || true
+    fi
+  done
+}
+
+# Ensure Debian batcat/fdfind and ZBM symlinks exist in target /usr/local/bin
+ensure_cli_symlinks() {
+  target_root="${1:-/}"
+  target_root="${target_root%/}"
+  mkdir -p "${target_root}/usr/local/bin" 2>/dev/null || true
+  if [ -x "${target_root}/usr/bin/batcat" ] && [ ! -e "${target_root}/usr/local/bin/bat" ] && [ ! -e "${target_root}/usr/bin/bat" ]; then
+    ln -sf /usr/bin/batcat "${target_root}/usr/local/bin/bat" 2>/dev/null || true
+  fi
+  if [ -x "${target_root}/usr/bin/fdfind" ] && [ ! -e "${target_root}/usr/local/bin/fd" ] && [ ! -e "${target_root}/usr/bin/fd" ]; then
+    ln -sf /usr/bin/fdfind "${target_root}/usr/local/bin/fd" 2>/dev/null || true
+  fi
+  if [ -x "${target_root}/usr/local/bin/axonwall-zbm-theme" ]; then
+    [ -e "${target_root}/usr/local/bin/generate-zbm" ] || ln -sf /usr/local/bin/axonwall-zbm-theme "${target_root}/usr/local/bin/generate-zbm" 2>/dev/null || true
+    [ -e "${target_root}/usr/local/bin/zbm-kcl" ] || ln -sf /usr/local/bin/axonwall-zbm-theme "${target_root}/usr/local/bin/zbm-kcl" 2>/dev/null || true
+  fi
+}
+
+# Apply extracted .deb staging tree onto a destination root (standby slot or live root)
+apply_staged_tree() {
+  pkg_stage="$1"
+  dest_root="${2:-/}"
+  dest_root="${dest_root%/}"
+
+  if [ -d "${pkg_stage}/opt/axonwall" ]; then
+    mkdir -p "${dest_root}/opt/axonwall"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --delete "${pkg_stage}/opt/axonwall/" "${dest_root}/opt/axonwall/" 2>/dev/null || true
+    else
+      rm -rf "${dest_root}/opt/axonwall"
+      cp -a "${pkg_stage}/opt/axonwall" "${dest_root}/opt/axonwall" 2>/dev/null || true
+    fi
+    chown -R root:root "${dest_root}/opt/axonwall" 2>/dev/null || true
+    chmod -R go-w "${dest_root}/opt/axonwall" 2>/dev/null || true
+  fi
+
+  if [ -d "${pkg_stage}/usr/sbin" ]; then
+    mkdir -p "${dest_root}/usr/sbin" 2>/dev/null || true
+    for sbin_f in "${pkg_stage}/usr/sbin/"*; do
+      if [ -e "$sbin_f" ] || [ -L "$sbin_f" ]; then
+        bname="$(basename "$sbin_f")"
+        rm -f "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
+        cp -af "$sbin_f" "${dest_root}/usr/sbin/" 2>/dev/null || true
+        if [ -f "${dest_root}/usr/sbin/${bname}" ] && [ ! -L "${dest_root}/usr/sbin/${bname}" ]; then
+          chmod 755 "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
+        fi
+      fi
+    done
+  fi
+
+  if [ -d "${pkg_stage}/usr/local/bin" ]; then
+    mkdir -p "${dest_root}/usr/local/bin" 2>/dev/null || true
+    for bin_f in "${pkg_stage}/usr/local/bin/"*; do
+      if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
+        bname="$(basename "$bin_f")"
+        rm -f "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
+        cp -af "$bin_f" "${dest_root}/usr/local/bin/" 2>/dev/null || true
+        if [ -f "${dest_root}/usr/local/bin/${bname}" ] && [ ! -L "${dest_root}/usr/local/bin/${bname}" ]; then
+          chmod 755 "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
+        fi
+      fi
+    done
+  fi
+
+  for sub in usr/lib/axonwall usr/lib/sysusers.d usr/lib/tmpfiles.d usr/share/oh-my-zsh usr/share/axonwall etc/zsh etc/zfsbootmenu etc/modprobe.d etc/sysctl.d etc/vim; do
+    if [ -d "${pkg_stage}/${sub}" ]; then
+      mkdir -p "${dest_root}/${sub}" 2>/dev/null || true
+      cp -af "${pkg_stage}/${sub}/." "${dest_root}/${sub}/" 2>/dev/null || true
+    fi
+  done
+
+  for cfg_f in etc/tmux.conf etc/rkhunter.conf.local; do
+    if [ -f "${pkg_stage}/${cfg_f}" ]; then
+      mkdir -p "$(dirname "${dest_root}/${cfg_f}")" 2>/dev/null || true
+      cp -af "${pkg_stage}/${cfg_f}" "${dest_root}/${cfg_f}" 2>/dev/null || true
+    fi
+  done
+
+  if [ -d "${pkg_stage}/lib/systemd/system" ]; then
+    mkdir -p "${dest_root}/lib/systemd/system" 2>/dev/null || true
+    cp -af "${pkg_stage}/lib/systemd/system/"*.service "${dest_root}/lib/systemd/system/" 2>/dev/null || true
+    cp -af "${pkg_stage}/lib/systemd/system/"*.timer "${dest_root}/lib/systemd/system/" 2>/dev/null || true
+  fi
+
+  if [ -d "${pkg_stage}/etc/axonwall" ]; then
+    sync_static_etc_axonwall "${pkg_stage}/etc/axonwall" "${dest_root}/etc/axonwall"
+    if [ -d /var/lib/axonwall/etc-axonwall ]; then
+      sync_static_etc_axonwall "${pkg_stage}/etc/axonwall" /var/lib/axonwall/etc-axonwall
+    fi
+  fi
+
+  ensure_cli_symlinks "${dest_root}"
+}
+
 # Helper: Resolve partition block device by label
 resolve_label_dev() {
   label="$1"
@@ -338,6 +444,24 @@ if [ "$ZBM_MODE" = "1" ]; then
     if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
       echo "[+] Extracting firmware payload into ${TARGET_BE_DS}..."
       extract_deb "${DEB_TMP}" "${ZBM_STAGE_MNT}"
+      if [ -d "${ZBM_STAGE_MNT}/etc/axonwall" ] && [ -d /var/lib/axonwall/etc-axonwall ]; then
+        sync_static_etc_axonwall "${ZBM_STAGE_MNT}/etc/axonwall" /var/lib/axonwall/etc-axonwall
+      fi
+      ensure_cli_symlinks "${ZBM_STAGE_MNT}"
+      if [ -d "${ZBM_STAGE_MNT}/usr/local/bin" ]; then
+        for bin_f in "${ZBM_STAGE_MNT}/usr/local/bin/"*; do
+          if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
+            bname="$(basename "$bin_f")"
+            if [ ! -e "/usr/local/bin/${bname}" ] || [ "$bname" = "axonwall-update" ]; then
+              cp -af "$bin_f" /usr/local/bin/ 2>/dev/null || true
+              if [ -f "/usr/local/bin/${bname}" ] && [ ! -L "/usr/local/bin/${bname}" ]; then
+                chmod 755 "/usr/local/bin/${bname}" 2>/dev/null || true
+              fi
+            fi
+          fi
+        done
+      fi
+      ensure_cli_symlinks "/"
     fi
 
     mkdir -p "${ZBM_STAGE_MNT}/etc/axonwall" "${ZBM_STAGE_MNT}/var/lib/axonwall"
@@ -445,47 +569,31 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       rm -rf "${PKG_STAGE}"
       mkdir -p "${PKG_STAGE}"
       if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
-        if [ -d "${PKG_STAGE}/opt/axonwall" ]; then
-          mkdir -p "${STAGE_DIR}/opt/axonwall"
-          if command -v rsync >/dev/null 2>&1; then
-            rsync -a --delete "${PKG_STAGE}/opt/axonwall/" "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+        apply_staged_tree "${PKG_STAGE}" "${STAGE_DIR}"
+        if [ -f "${STAGE_DIR}/usr/local/bin/axonwall-update" ]; then
+          if sh -n "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null; then
+            cp -f "${STAGE_DIR}/usr/local/bin/axonwall-update" /usr/local/bin/axonwall-update 2>/dev/null || true
+            chmod 755 /usr/local/bin/axonwall-update 2>/dev/null || true
           else
-            rm -rf "${STAGE_DIR}/opt/axonwall"
-            cp -a "${PKG_STAGE}/opt/axonwall" "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
+            cp -f /usr/local/bin/axonwall-update "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null || true
           fi
-        fi
-        if [ -d "${PKG_STAGE}/usr/sbin" ]; then
-          mkdir -p "${STAGE_DIR}/usr/sbin" 2>/dev/null || true
-          for sbin_f in "${PKG_STAGE}/usr/sbin/"*; do
-            if [ -e "$sbin_f" ]; then
-              rm -f "${STAGE_DIR}/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
-              cp -f "$sbin_f" "${STAGE_DIR}/usr/sbin/" 2>/dev/null || true
-              chmod 755 "${STAGE_DIR}/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
-            fi
-          done
         fi
         if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
-          mkdir -p "${STAGE_DIR}/usr/local/bin" 2>/dev/null || true
-          for bin_f in "${PKG_STAGE}/usr/local/bin/axonwall"*; do
-            if [ -e "$bin_f" ]; then
-              rm -f "${STAGE_DIR}/usr/local/bin/$(basename "$bin_f")" 2>/dev/null || true
-              cp -f "$bin_f" "${STAGE_DIR}/usr/local/bin/" 2>/dev/null || true
-              chmod 755 "${STAGE_DIR}/usr/local/bin/$(basename "$bin_f")" 2>/dev/null || true
+          for bin_f in "${PKG_STAGE}/usr/local/bin/"*; do
+            if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
+              bname="$(basename "$bin_f")"
+              if [ ! -e "/usr/local/bin/${bname}" ]; then
+                cp -af "$bin_f" /usr/local/bin/ 2>/dev/null || true
+                if [ -f "/usr/local/bin/${bname}" ] && [ ! -L "/usr/local/bin/${bname}" ]; then
+                  chmod 755 "/usr/local/bin/${bname}" 2>/dev/null || true
+                fi
+              fi
             fi
           done
-          if [ -f "${STAGE_DIR}/usr/local/bin/axonwall-update" ]; then
-            if sh -n "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null; then
-              cp -f "${STAGE_DIR}/usr/local/bin/axonwall-update" /usr/local/bin/axonwall-update 2>/dev/null || true
-              chmod 755 /usr/local/bin/axonwall-update 2>/dev/null || true
-            else
-              cp -f /usr/local/bin/axonwall-update "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null || true
-            fi
-          fi
         fi
+        ensure_cli_symlinks "/"
       fi
       rm -rf "${PKG_STAGE}"
-      chown -R root:root "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
-      chmod -R go-w "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
     elif [ -d /opt/axonwall ]; then
       mkdir -p "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
       if command -v rsync >/dev/null 2>&1; then
@@ -624,37 +732,7 @@ else
     rm -rf "${PKG_STAGE}"
     mkdir -p "${PKG_STAGE}"
     if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
-      if [ -d "${PKG_STAGE}/opt/axonwall" ]; then
-        mkdir -p /opt/axonwall
-        if command -v rsync >/dev/null 2>&1; then
-          rsync -a --delete "${PKG_STAGE}/opt/axonwall/" /opt/axonwall/ 2>/dev/null || true
-        else
-          cp -a "${PKG_STAGE}/opt/axonwall/." /opt/axonwall/ 2>/dev/null || true
-        fi
-        chown -R root:root /opt/axonwall 2>/dev/null || true
-        chmod -R go-w /opt/axonwall 2>/dev/null || true
-      fi
-      if [ -d "${PKG_STAGE}/usr/sbin" ]; then
-        for sbin_f in "${PKG_STAGE}/usr/sbin/"*; do
-          if [ -e "$sbin_f" ]; then
-            rm -f "/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
-            cp -f "$sbin_f" /usr/sbin/ 2>/dev/null || true
-            chmod 755 "/usr/sbin/$(basename "$sbin_f")" 2>/dev/null || true
-          fi
-        done
-      fi
-      if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
-        for bin_f in "${PKG_STAGE}/usr/local/bin/axonwall"*; do
-          if [ -e "$bin_f" ]; then
-            cp -f "$bin_f" /usr/local/bin/ 2>/dev/null || true
-            chmod 755 "/usr/local/bin/$(basename "$bin_f")" 2>/dev/null || true
-          fi
-        done
-      fi
-      if [ -d "${PKG_STAGE}/lib/systemd/system" ]; then
-        cp -f "${PKG_STAGE}/lib/systemd/system/"*.service /lib/systemd/system/ 2>/dev/null || true
-        cp -f "${PKG_STAGE}/lib/systemd/system/"*.timer /lib/systemd/system/ 2>/dev/null || true
-      fi
+      apply_staged_tree "${PKG_STAGE}" "/"
     fi
     rm -rf "${PKG_STAGE}"
 

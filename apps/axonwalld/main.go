@@ -333,6 +333,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		"/etc/swanctl/",
 		"/etc/haproxy/",
 		"/etc/freeradius/",
+		"/etc/snmp/",
+		"/etc/nut/",
 	}
 	for _, f := range req.Files {
 		// Enforce safety: paths must reside within allowed system config locations or /tmp/
@@ -1487,7 +1489,25 @@ func syncPersistentYamlConfigs() {
 	normalizeConfigTreePermissions()
 }
 
+func ensureStandardPath() {
+	required := []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+	current := filepath.SplitList(os.Getenv("PATH"))
+	seen := make(map[string]bool, len(current))
+	for _, p := range current {
+		if p != "" {
+			seen[p] = true
+		}
+	}
+	for _, req := range required {
+		if !seen[req] {
+			current = append(current, req)
+		}
+	}
+	_ = os.Setenv("PATH", strings.Join(current, string(os.PathListSeparator)))
+}
+
 func main() {
+	ensureStandardPath()
 	notifyState := flag.String("notify", "", "Send state change notification to running axonwalld HA engine (MASTER/BACKUP/FAULT)")
 	socketPath := flag.String("socket", "/run/axonwall/agent.sock", "Path to agent Unix socket")
 	bundleDir := flag.String("bundle-dir", "/var/lib/axonwall/bundles", "Directory for storing last-known-good bundles")

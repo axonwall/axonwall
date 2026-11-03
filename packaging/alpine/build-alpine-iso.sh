@@ -205,8 +205,15 @@ if [[ "$MINIMAL" -eq 0 ]]; then
     neovim
     zsh
     kubectl
+    helm
     starship
     tmux
+    less
+    binutils
+    zstd
+    bzip2
+    xz
+    unzip
   )
 fi
 

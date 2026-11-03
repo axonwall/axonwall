@@ -138,6 +138,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'HAProxy Technologies / Axonwall Core',
     systemdUnits: ['haproxy.service'],
     privileges: ['services.haproxy', 'system.certificates'],
+    packages: {
+      debian: ['haproxy'],
+      alpine: ['haproxy'],
+    },
+    cliBinaries: ['haproxy'],
     nftHooks: [
       { table: 'inet axonwall', chain: 'input', priority: 0 },
     ],
@@ -156,6 +161,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Network RADIUS / Axonwall Core',
     systemdUnits: ['freeradius.service'],
     privileges: ['services.freeradius', 'system.users'],
+    packages: {
+      debian: ['freeradius', 'freeradius-ldap', 'freeradius-utils'],
+      alpine: ['freeradius', 'freeradius-ldap'],
+    },
+    cliBinaries: ['freeradius', 'radtest'],
     ldapIntegration: {
       enabledByDefault: true,
       serviceAccountCn: 'svc-freeradius',
@@ -185,6 +195,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Net-SNMP Team / Axonwall Core',
     systemdUnits: ['snmpd.service'],
     privileges: ['system.monitoring'],
+    packages: {
+      debian: ['snmpd', 'snmp'],
+      alpine: ['net-snmp', 'net-snmp-tools'],
+    },
+    cliBinaries: ['snmpd', 'snmpwalk'],
     menuEntry: {
       title: 'SNMP Monitoring',
       path: '/services/snmp',
@@ -200,6 +215,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'NUT Project / Axonwall Core',
     systemdUnits: ['nut-server.service', 'nut-client.service'],
     privileges: ['system.hardware', 'system.power'],
+    packages: {
+      debian: ['nut', 'nut-server', 'nut-client'],
+      alpine: ['nut'],
+    },
+    cliBinaries: ['upsc', 'upsd', 'upsmon'],
     menuEntry: {
       title: 'UPS Battery (NUT)',
       path: '/system/ups',
@@ -215,6 +235,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Juan Font / Axonwall Core',
     systemdUnits: ['headscale.service'],
     privileges: ['vpn.admin', 'network.interfaces'],
+    packages: {
+      debian: ['wireguard-tools', 'sqlite3'],
+      alpine: ['wireguard-tools', 'sqlite'],
+    },
+    cliBinaries: ['headscale', 'wg'],
     menuEntry: {
       title: 'Mesh VPN (Headscale)',
       path: '/vpn/mesh',
@@ -230,6 +255,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Tailscale Inc. / Axonwall Community',
     systemdUnits: ['tailscaled.service'],
     privileges: ['vpn.tailscale', 'network.interfaces'],
+    packages: {
+      debian: ['wireguard-tools', 'ca-certificates', 'curl'],
+      alpine: ['tailscale', 'wireguard-tools'],
+    },
+    cliBinaries: ['tailscale', 'tailscaled'],
     menuEntry: {
       title: 'Tailscale Mesh',
       path: '/vpn/tailscale',
@@ -245,6 +275,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'ntop / Axonwall Community',
     systemdUnits: ['ntopng.service'],
     privileges: ['reporting.flows', 'system.monitoring'],
+    packages: {
+      debian: ['tcpdump', 'ethtool'],
+      alpine: ['tcpdump', 'ethtool'],
+    },
+    cliBinaries: ['ntopng', 'tcpdump'],
     menuEntry: {
       title: 'ntopng Flow Analyzer',
       path: '/reporting/ntopng',

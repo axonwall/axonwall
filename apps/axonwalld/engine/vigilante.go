@@ -240,11 +240,15 @@ func (vm *VigilanteManager) CreateIncidentSnapshot(pool, dataset, incidentID str
 	if dataset == "" {
 		dataset = "vigilante-evidence"
 	}
+	targetDataset := fmt.Sprintf("%s/%s", pool, dataset)
+	if !validPoolDatasetRegex.MatchString(targetDataset) {
+		return "", fmt.Errorf("invalid pool or dataset name: %q", targetDataset)
+	}
 	if !validIncidentIDRegex.MatchString(incidentID) {
 		return "", fmt.Errorf("invalid incident id: %q", incidentID)
 	}
 
-	fullSpec := fmt.Sprintf("%s/%s@incident-%s", pool, dataset, incidentID)
+	fullSpec := fmt.Sprintf("%s@incident-%s", targetDataset, incidentID)
 	cmd := exec.Command("zfs", "snapshot", fullSpec)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("zfs snapshot failed: %s (%w)", string(out), err)

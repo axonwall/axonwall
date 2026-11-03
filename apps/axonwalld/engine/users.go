@@ -831,10 +831,30 @@ func (m *UserManager) Authenticate(req AuthUserRequest) AuthUserResponse {
 		}
 	}
 
-	// Strategy B: python3 crypt reading password from stdin and hash from AXONWALL_SHADOW_HASH
+	// Strategy B: python3 crypt / ctypes libcrypt reading password from stdin and hash from AXONWALL_SHADOW_HASH
 	if !verified {
 		if pyPath, err := exec.LookPath("python3"); err == nil {
-			script := `import crypt, os, sys; pw = sys.stdin.buffer.read().decode('utf-8'); h = os.environ.get('AXONWALL_SHADOW_HASH', ''); sys.exit(0 if h and crypt.crypt(pw, h) == h else 1)`
+			script := `import os, sys
+pw = sys.stdin.buffer.read()
+h = os.environ.get('AXONWALL_SHADOW_HASH', '').encode('utf-8')
+if not h: sys.exit(1)
+try:
+    import crypt
+    res = (crypt.crypt(pw.decode('utf-8'), h.decode('utf-8')) or '').encode('utf-8')
+except ImportError:
+    import ctypes
+    lib = None
+    for soname in ('libcrypt.so.1', 'libcrypt.so.2', 'libc.so.6', 'libc.musl-x86_64.so.1'):
+        try:
+            lib = ctypes.CDLL(soname)
+            break
+        except OSError:
+            continue
+    if lib is None: sys.exit(1)
+    lib.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    lib.crypt.restype = ctypes.c_char_p
+    res = lib.crypt(pw, h) or b''
+sys.exit(0 if res == h else 1)`
 			cmd := exec.Command(pyPath, "-c", script)
 			cmd.Env = append(os.Environ(), "AXONWALL_SHADOW_HASH="+hash)
 			cmd.Stdin = strings.NewReader(password)
@@ -846,7 +866,7 @@ func (m *UserManager) Authenticate(req AuthUserRequest) AuthUserResponse {
 
 	// Strategy C: unix_chkpwd
 	if !verified {
-		for _, path := range []string{"/usr/bin/unix_chkpwd", "/sbin/unix_chkpwd"} {
+		for _, path := range []string{"/usr/sbin/unix_chkpwd", "/usr/bin/unix_chkpwd", "/sbin/unix_chkpwd"} {
 			if _, err := os.Stat(path); err == nil {
 				cmd := exec.Command(path, username, "nullok")
 				cmd.Stdin = bytes.NewReader([]byte(password + "\x00"))

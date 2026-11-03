@@ -32,8 +32,8 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, ca-certificates, rsync, python3, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, nmap, kubectl
-Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils
+Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert
+Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
  Axonwall replaces legacy BSD/PHP firewalls with a
@@ -137,39 +137,81 @@ if [[ ! -f "${WORK_DIR}/usr/local/bin/helm" ]]; then
   rm -f "${HELM_TAR}"
 fi
 
+# Fetch kubectl binary if absent (ensures .deb updates via axonwall-update include kubectl)
+KUBECTL_VERSION="1.32.3"
+KUBECTL_SHA256="ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f"
+if [[ ! -f "${WORK_DIR}/usr/local/bin/kubectl" ]]; then
+  echo "[+] Downloading kubectl v${KUBECTL_VERSION} binary..."
+  curl -fsSL -o "${WORK_DIR}/usr/local/bin/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+  echo "${KUBECTL_SHA256}  ${WORK_DIR}/usr/local/bin/kubectl" | sha256sum -c -
+  chmod 755 "${WORK_DIR}/usr/local/bin/kubectl"
+fi
+
 # 5. Copy System Scripts & Terminal Configs
 CHROOT_SRC="${ROOT_DIR}/packaging/iso/config/includes.chroot"
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-firstboot" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwall-firstboot" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-firstboot"
+for bin_script in \
+  axonwall-firstboot \
+  axonwall-import \
+  axonwall-ha-notify \
+  axonwall-update \
+  axonwall-opshell \
+  axonwallctl \
+  axonwall-tui \
+  axonwall-config \
+  axonwall-install \
+  axonwall-cloud-init \
+  axonwall-zbm-theme \
+  axonwall-hunt-rootkits \
+  hunt-io-uring-implants.sh \
+  hunt-ebpf-rootkits.sh \
+  audit_hidden_bpf_prog_idr.py
+do
+  if [[ -f "${CHROOT_SRC}/usr/local/bin/${bin_script}" ]]; then
+    cp "${CHROOT_SRC}/usr/local/bin/${bin_script}" "${WORK_DIR}/usr/local/bin/"
+    chmod 755 "${WORK_DIR}/usr/local/bin/${bin_script}"
+  fi
+done
+ln -sf axonwall-zbm-theme "${WORK_DIR}/usr/local/bin/generate-zbm"
+ln -sf axonwall-zbm-theme "${WORK_DIR}/usr/local/bin/zbm-kcl"
+
+if [[ -f "${ROOT_DIR}/packaging/iso/branding/theme-zbm-uki.py" ]]; then
+  mkdir -p "${WORK_DIR}/usr/lib/axonwall"
+  cp "${ROOT_DIR}/packaging/iso/branding/theme-zbm-uki.py" "${WORK_DIR}/usr/lib/axonwall/theme-zbm-uki.py"
+  chmod 755 "${WORK_DIR}/usr/lib/axonwall/theme-zbm-uki.py"
+elif [[ -f "${CHROOT_SRC}/usr/lib/axonwall/theme-zbm-uki.py" ]]; then
+  mkdir -p "${WORK_DIR}/usr/lib/axonwall"
+  cp "${CHROOT_SRC}/usr/lib/axonwall/theme-zbm-uki.py" "${WORK_DIR}/usr/lib/axonwall/theme-zbm-uki.py"
+  chmod 755 "${WORK_DIR}/usr/lib/axonwall/theme-zbm-uki.py"
 fi
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-import" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwall-import" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-import"
+
+if [[ -d "${CHROOT_SRC}/etc/axonwall/yara" ]]; then
+  mkdir -p "${WORK_DIR}/etc/axonwall/yara"
+  cp -a "${CHROOT_SRC}/etc/axonwall/yara/." "${WORK_DIR}/etc/axonwall/yara/"
+  chmod -R a+rX "${WORK_DIR}/etc/axonwall/yara"
 fi
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-ha-notify" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwall-ha-notify" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-ha-notify"
+if [[ -d "${CHROOT_SRC}/etc/axonwall/branding" ]]; then
+  mkdir -p "${WORK_DIR}/etc/axonwall/branding"
+  cp -a "${CHROOT_SRC}/etc/axonwall/branding/." "${WORK_DIR}/etc/axonwall/branding/"
+  chmod -R a+rX "${WORK_DIR}/etc/axonwall/branding"
 fi
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-update" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwall-update" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-update"
+if [[ -d "${CHROOT_SRC}/etc/zfsbootmenu" ]]; then
+  mkdir -p "${WORK_DIR}/etc/zfsbootmenu"
+  cp -a "${CHROOT_SRC}/etc/zfsbootmenu/." "${WORK_DIR}/etc/zfsbootmenu/"
+  chmod -R a+rX "${WORK_DIR}/etc/zfsbootmenu"
 fi
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-opshell" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwall-opshell" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-opshell"
+if [[ -f "${CHROOT_SRC}/etc/rkhunter.conf.local" ]]; then
+  cp "${CHROOT_SRC}/etc/rkhunter.conf.local" "${WORK_DIR}/etc/rkhunter.conf.local"
+  chmod 0644 "${WORK_DIR}/etc/rkhunter.conf.local"
 fi
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwallctl" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwallctl" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwallctl"
+if [[ -f "${CHROOT_SRC}/etc/modprobe.d/axonwall-blacklist.conf" ]]; then
+  mkdir -p "${WORK_DIR}/etc/modprobe.d"
+  cp "${CHROOT_SRC}/etc/modprobe.d/axonwall-blacklist.conf" "${WORK_DIR}/etc/modprobe.d/axonwall-blacklist.conf"
+  chmod 0644 "${WORK_DIR}/etc/modprobe.d/axonwall-blacklist.conf"
 fi
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-tui" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwall-tui" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-tui"
-fi
-if [[ -f "${CHROOT_SRC}/usr/local/bin/axonwall-config" ]]; then
-  cp "${CHROOT_SRC}/usr/local/bin/axonwall-config" "${WORK_DIR}/usr/local/bin/"
-  chmod 755 "${WORK_DIR}/usr/local/bin/axonwall-config"
+if [[ -f "${CHROOT_SRC}/etc/sysctl.d/99-axonwall.conf" ]]; then
+  mkdir -p "${WORK_DIR}/etc/sysctl.d"
+  cp "${CHROOT_SRC}/etc/sysctl.d/99-axonwall.conf" "${WORK_DIR}/etc/sysctl.d/99-axonwall.conf"
+  chmod 0644 "${WORK_DIR}/etc/sysctl.d/99-axonwall.conf"
 fi
 if [[ -d "${CHROOT_SRC}/etc/axonwall/nvim" ]]; then
   mkdir -p "${WORK_DIR}/etc/axonwall/nvim"

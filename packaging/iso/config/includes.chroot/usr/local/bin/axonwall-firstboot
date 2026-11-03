@@ -19,6 +19,17 @@ printf '1\t4\t1\t7\n' > /proc/sys/kernel/printk 2>/dev/null || true
 kill -55 1 2>/dev/null || true
 
 # 1. Apply kernel performance tuning
+mkdir -p /usr/local/bin 2>/dev/null || true
+if [[ -x /usr/bin/batcat && ! -e /usr/local/bin/bat && ! -e /usr/bin/bat ]]; then
+  ln -sf /usr/bin/batcat /usr/local/bin/bat 2>/dev/null || true
+fi
+if [[ -x /usr/bin/fdfind && ! -e /usr/local/bin/fd && ! -e /usr/bin/fd ]]; then
+  ln -sf /usr/bin/fdfind /usr/local/bin/fd 2>/dev/null || true
+fi
+if [[ -x /usr/local/bin/axonwall-zbm-theme ]]; then
+  [[ -e /usr/local/bin/generate-zbm ]] || ln -sf /usr/local/bin/axonwall-zbm-theme /usr/local/bin/generate-zbm 2>/dev/null || true
+  [[ -e /usr/local/bin/zbm-kcl ]] || ln -sf /usr/local/bin/axonwall-zbm-theme /usr/local/bin/zbm-kcl 2>/dev/null || true
+fi
 # sysctl --system exits non-zero on unknown keys (e.g. nf_conntrack_* before the
 # module is loaded); under `set -e` that previously aborted the whole script.
 modprobe nf_conntrack 2>/dev/null || true

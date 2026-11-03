@@ -13,6 +13,10 @@ import { compileWireGuard } from '../wireguard/index.js';
 import { compileRosenpass } from '../rosenpass/index.js';
 import { compileVigilanteBundle } from '../vigilante/index.js';
 import { compileVowBundle } from '../vow/index.js';
+import { compileHaProxy } from '../haproxy/index.js';
+import { compileFreeRadiusClients } from '../freeradius/index.js';
+import { compileSnmpd } from '../snmp/index.js';
+import { compileNutUps } from '../nut/index.js';
 
 export interface CompileResult {
   nftScript: string;
@@ -132,18 +136,23 @@ export function compileNftables(state: DesiredState): CompileResult {
     const k3sCompiled = compileK3s(state);
     const effectiveRole = state.ha?.role || state.ha?.nodeRole || 'master';
     const effectivePeer = state.ha?.peerIp || state.ha?.peerAddress || '';
+    const effectiveSecret =
+      state.ha?.sqliteSync?.authToken ||
+      state.ha?.vrrpInstances?.[0]?.authPassword ||
+      '';
     files.push({
       path: '/etc/axonwall/managed/k3s_config.json',
       content: JSON.stringify(
         {
           enabled: capabilities.k3sEnabled,
           haEnabled: Boolean(state.ha?.enabled),
+          role: effectiveRole,
           haRole: effectiveRole,
+          peerIp: effectivePeer,
           haPeerAddress: effectivePeer,
-          haSharedSecret:
-            state.ha?.sqliteSync?.authToken ||
-            state.ha?.vrrpInstances?.[0]?.authPassword ||
-            '',
+          syncPort: 8443,
+          authToken: effectiveSecret,
+          haSharedSecret: effectiveSecret,
           autoJoinHaPeer: state.k3s?.autoJoinHaPeer !== false,
           zfsLocalPvPool: state.k3s?.openEbs?.zfsLocalPvPool || 'tank',
           replicatedPool: state.k3s?.openEbs?.replicatedBackingPool || 'tank/openebs-replicated',
@@ -297,6 +306,53 @@ export function compileNftables(state: DesiredState): CompileResult {
       fileMode: 0o600,
     });
     reloadServices.push('rosenpass');
+  }
+
+  // Emit HAProxy configuration when enabled
+  if (state.haproxy?.enabled) {
+    files.push({
+      path: '/etc/haproxy/haproxy.cfg',
+      content: compileHaProxy(state.haproxy),
+      fileMode: 0o644,
+    });
+    reloadServices.push('haproxy');
+  }
+
+  // Emit FreeRADIUS clients configuration when enabled
+  if (state.freeradius?.enabled) {
+    files.push({
+      path: '/etc/freeradius/3.0/clients.conf',
+      content: compileFreeRadiusClients(state.freeradius),
+      fileMode: 0o640,
+    });
+    reloadServices.push('freeradius');
+  }
+
+  // Emit Net-SNMP snmpd configuration when enabled
+  if (state.snmp?.enabled) {
+    files.push({
+      path: '/etc/snmp/snmpd.conf',
+      content: compileSnmpd(state.snmp),
+      fileMode: 0o640,
+    });
+    reloadServices.push('snmpd');
+  }
+
+  // Emit Network UPS Tools (NUT) configuration when enabled
+  if (state.ups?.enabled) {
+    const nutCompiled = compileNutUps(state.ups);
+    files.push({
+      path: '/etc/nut/ups.conf',
+      content: nutCompiled.upsConf,
+      fileMode: 0o640,
+    });
+    files.push({
+      path: '/etc/nut/nut.conf',
+      content: nutCompiled.nutConf,
+      fileMode: 0o640,
+    });
+    reloadServices.push('nut-server');
+    reloadServices.push('nut-client');
   }
 
   // Helper to map interfaces to system devices and roles

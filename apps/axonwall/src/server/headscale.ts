@@ -126,6 +126,18 @@ export async function createPreAuthKey(user: string | number, reusable: boolean,
   };
 }
 
+function normalizeHeadscaleTimestamp(val: any): string | undefined {
+  if (!val) return undefined;
+  if (typeof val === 'string') {
+    const d = new Date(val);
+    return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+  }
+  if (typeof val === 'object' && typeof val.seconds === 'number') {
+    return new Date(val.seconds * 1000).toISOString();
+  }
+  return undefined;
+}
+
 export async function listPreAuthKeys(user?: string) {
   const data = await runHeadscale(['preauthkeys', 'list', '-o', 'json']);
   if (!Array.isArray(data)) return [];
@@ -135,8 +147,8 @@ export async function listPreAuthKeys(user?: string) {
     reusable: k.reusable,
     ephemeral: k.ephemeral,
     used: k.used,
-    expiration: k.expiration ? new Date((k.expiration.seconds || 0) * 1000).toISOString() : undefined,
-    createdAt: k.created_at ? new Date((k.created_at.seconds || 0) * 1000).toISOString() : undefined,
+    expiration: normalizeHeadscaleTimestamp(k.expiration),
+    createdAt: normalizeHeadscaleTimestamp(k.created_at),
     user: k.user,
   }));
   if (user) {
@@ -163,7 +175,7 @@ export async function listMachines(user?: string) {
     name: n.given_name || n.name,
     ipAddresses: n.ip_addresses || [],
     user: n.user,
-    lastSeen: n.last_seen ? new Date(n.last_seen).toISOString() : null,
+    lastSeen: normalizeHeadscaleTimestamp(n.last_seen) || null,
     online: n.online ?? false,
     routes: n.approved_routes || [],
   }));

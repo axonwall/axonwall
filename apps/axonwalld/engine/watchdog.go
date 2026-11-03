@@ -275,9 +275,15 @@ func readVersionFromDirectory(dir string) string {
 		if data, err := os.ReadFile(fpath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
 			if strings.HasPrefix(trimmed, "{") {
+				var pkg struct {
+					Version string `json:"version"`
+				}
+				if err := json.Unmarshal(data, &pkg); err == nil && strings.TrimSpace(pkg.Version) != "" {
+					return strings.TrimSpace(pkg.Version)
+				}
 				if idx := strings.Index(trimmed, `"version":`); idx != -1 {
 					s := trimmed[idx+10:]
-					s = strings.Trim(strings.Split(s, ",")[0], ` "`)
+					s = strings.TrimSpace(strings.Trim(strings.Split(s, ",")[0], ` "`+"\n\r\t}"))
 					if s != "" {
 						return s
 					}
@@ -558,9 +564,16 @@ func readInstalledVersion() string {
 		if data, err := os.ReadFile(vpath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
 			if strings.HasPrefix(trimmed, "{") {
+				var pkg struct {
+					Version string `json:"version"`
+				}
+				if err := json.Unmarshal(data, &pkg); err == nil && strings.TrimSpace(pkg.Version) != "" {
+					appVer = strings.TrimSpace(pkg.Version)
+					break
+				}
 				if idx := strings.Index(trimmed, `"version":`); idx != -1 {
 					sub := trimmed[idx+10:]
-					sub = strings.Trim(strings.Split(sub, ",")[0], ` "`)
+					sub = strings.TrimSpace(strings.Trim(strings.Split(sub, ",")[0], ` "`+"\n\r\t}"))
 					if sub != "" {
 						appVer = sub
 						break
@@ -592,7 +605,14 @@ func (we *WatchdogEngine) RunVerification() PartitionStatus {
 
 // Stop shuts down background watchdog routines.
 func (we *WatchdogEngine) Stop() {
-	close(we.stopChan)
+	we.mu.Lock()
+	defer we.mu.Unlock()
+	select {
+	case <-we.stopChan:
+		// Already closed
+	default:
+		close(we.stopChan)
+	}
 }
 
 // GetStatus returns a snapshot of partition health and GRUB variables.

@@ -768,14 +768,17 @@ function cmdSaveJson(fileArg?: string) {
   if (parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)) {
     const objectKeys = [
       'capabilities',
-      'plugins',
       'system',
+      'trafficShaper',
       'frr',
       'dhcp',
       'dns',
       'wireguard',
       'rosenpass',
+      'ipsec',
+      'openvpn',
       'headscale',
+      'captivePortal',
       'suricata',
       'crowdsec',
       'geoip',
@@ -784,10 +787,19 @@ function cmdSaveJson(fileArg?: string) {
       'k3s',
       'virt',
       'vigilante',
+      'vow',
+      'hostedEdge',
+      'hostDefense',
+      'eluvix',
+      'sso',
+      'fleet',
+      'zeroTrust',
       'aiCopilot',
       'observability',
+      'haproxy',
+      'freeradius',
       'snmp',
-      'nut',
+      'ups',
       'acme',
     ];
     for (const k of objectKeys) {
@@ -1529,12 +1541,18 @@ async function setCoreRolePlugin(pluginId: string, enable: boolean) {
     };
     state.virt.enabled = enable;
   } else if (pluginId === 'core-vigilante') {
-    state.vigilante =
-      state.vigilante ||
-      VigilanteConfigSchema.parse({
-        enabled: enable,
-      });
-    state.vigilante.enabled = enable;
+    if (enable) {
+      const depRes = enablePluginWithDependencies('core-vigilante', state);
+      Object.assign(state, depRes.state);
+      if (depRes.autoEnabledDependencies.length > 0) {
+        console.log(
+          `${cCyan}[+] Auto-enabled required dependency plugins for core-vigilante: ${depRes.autoEnabledDependencies.join(', ')}${cReset}`
+        );
+      }
+    } else {
+      const depRes = disablePluginWithDependents('core-vigilante', state);
+      Object.assign(state, depRes.state);
+    }
   }
 
   const yamlFiles = serializeDesiredStateToYamlFiles(state);
@@ -2161,7 +2179,9 @@ async function cmdUpdate(args: string[]) {
   for (const up of updaterPaths) {
     if (fs.existsSync(up)) {
       const cliArgs: string[] = [];
-      if (installMode === 'rolling' || installMode === 'zbm') {
+      if (installMode === 'zbm') {
+        cliArgs.push('--zbm');
+      } else if (installMode === 'rolling') {
         cliArgs.push('--rolling');
       } else if (targetSlot) {
         cliArgs.push('--slot', targetSlot);

@@ -1004,6 +1004,35 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
       }
     }
   }
+  if (redacted.freeradius && Array.isArray(redacted.freeradius.clients)) {
+    for (const c of redacted.freeradius.clients) {
+      if (c?.secret) c.secret = MASK;
+    }
+  }
+  if (redacted.vow) {
+    if (redacted.vow.gitCredentials?.token) redacted.vow.gitCredentials.token = MASK;
+    if (redacted.vow.gitCredentials?.sshPrivateKey) redacted.vow.gitCredentials.sshPrivateKey = MASK;
+    if (redacted.vow.webhookSecret) redacted.vow.webhookSecret = MASK;
+    if (redacted.vow.adminPassword) redacted.vow.adminPassword = MASK;
+  }
+  if (redacted.eluvix) {
+    if (Array.isArray(redacted.eluvix.providers)) {
+      for (const p of redacted.eluvix.providers) {
+        if (p?.apiKey) p.apiKey = MASK;
+      }
+    }
+    if (redacted.eluvix.semanticCache?.redisPassword) {
+      redacted.eluvix.semanticCache.redisPassword = MASK;
+    }
+  }
+  if (redacted.zeroTrust) {
+    if (redacted.zeroTrust.sharedSecret) redacted.zeroTrust.sharedSecret = MASK;
+    if (Array.isArray(redacted.zeroTrust.apps)) {
+      for (const app of redacted.zeroTrust.apps) {
+        if (app?.oidcClientSecret) app.oidcClientSecret = MASK;
+      }
+    }
+  }
 
   return redacted as DesiredState;
 }

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -305,6 +306,17 @@ func ensureDaemonizeArg(args []string) []string {
 	return append(out, "-daemonize")
 }
 
+func ensurePidFileArg(args []string, pidFile string) []string {
+	for _, a := range args {
+		if a == "-pidfile" {
+			return args
+		}
+	}
+	out := make([]string, len(args), len(args)+2)
+	copy(out, args)
+	return append(out, "-pidfile", pidFile)
+}
+
 func ensureOvmfNvram(vmid int, args []string) {
 	needsNvram := false
 	nvramPath := fmt.Sprintf("/var/lib/axonwall/nvram/vm-%d.fd", vmid)
@@ -388,18 +400,30 @@ func SendQMPCommand(socketPath string, command string, args map[string]any) (map
 	defer conn.Close()
 
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
+	reader := bufio.NewReader(conn)
 
-	buf := make([]byte, 4096)
-	// Read initial QMP greeting banner
-	_, _ = conn.Read(buf)
+	// Read initial QMP greeting banner line
+	_, _ = reader.ReadString('\n')
 
 	// Send qmp_capabilities handshake
 	handshake := []byte(`{"execute":"qmp_capabilities"}` + "\n")
 	if _, err := conn.Write(handshake); err != nil {
 		return nil, fmt.Errorf("qmp handshake write failed: %v", err)
 	}
-	// Read handshake response
-	_, _ = conn.Read(buf)
+	// Read handshake response, skipping any asynchronous QMP event lines
+	for i := 0; i < 8; i++ {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+		var msg map[string]any
+		if json.Unmarshal([]byte(line), &msg) == nil {
+			if _, isEvent := msg["event"]; isEvent {
+				continue
+			}
+		}
+		break
+	}
 
 	reqObj := map[string]any{
 		"execute": command,
@@ -414,16 +438,21 @@ func SendQMPCommand(socketPath string, command string, args map[string]any) (map
 		return nil, fmt.Errorf("qmp command write failed: %v", err)
 	}
 
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, fmt.Errorf("qmp command read failed: %v", err)
+	for i := 0; i < 16; i++ {
+		line, err := reader.ReadString('\n')
+		if err != nil && len(line) == 0 {
+			return nil, fmt.Errorf("qmp command read failed: %v", err)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			return map[string]any{"raw": strings.TrimSpace(line)}, nil
+		}
+		if _, isEvent := resp["event"]; isEvent {
+			continue
+		}
+		return resp, nil
 	}
-
-	var resp map[string]any
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		return map[string]any{"raw": string(buf[:n])}, nil
-	}
-	return resp, nil
+	return nil, fmt.Errorf("qmp command read exceeded event limit")
 }
 
 // StartVM provisions required ZVOLs, Cloud-Init ISO, and launches QEMU process
@@ -447,7 +476,6 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 				"-cpu", "host",
 				"-smp", "2",
 				"-m", "2048",
-				"-pidfile", fmt.Sprintf("/run/axonwall/pids/vm-%d.pid", vmid),
 				"-chardev", fmt.Sprintf("socket,id=qmp,path=/run/axonwall/qmp/vm-%d.sock,server=on,wait=off", vmid),
 				"-mon", "chardev=qmp,mode=control",
 				"-chardev", fmt.Sprintf("socket,id=serial0,path=/run/axonwall/serial/vm-%d.sock,server=on,wait=off", vmid),
@@ -592,7 +620,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 		if err := validateSafeQemuArgs(spec.Args); err != nil {
 			return err
 		}
-		qemuArgs := ensureDaemonizeArg(spec.Args)
+		qemuArgs := ensurePidFileArg(ensureDaemonizeArg(spec.Args), pidFile)
 		logger("Executing %s with %d arguments...", binary, len(qemuArgs))
 		cmd := exec.Command(binary, qemuArgs...)
 		if out, err := cmd.CombinedOutput(); err != nil {

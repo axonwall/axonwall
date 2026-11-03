@@ -61,7 +61,7 @@ export async function runBenchmark(host, {
   requests = 50,
   concurrency = 5
 } = {}) {
-  const target = (host || '127.0.0.1').trim();
+  const target = assertCliTarget((host || '127.0.0.1').trim(), 'benchmark target');
   const protocol = isHttps || port === 443 ? 'https' : 'http';
   const targetPort = port ? `:${port}` : (isHttps ? ':443' : ':80');
   const targetUrl = `${protocol}://${target}${targetPort}/`;
@@ -200,7 +200,7 @@ export async function runMtr(host) {
  * @returns {Promise<{ success: boolean, output: string }>}
  */
 export async function runCurlHeaders(host, { port = null, isHttps = false } = {}) {
-  const target = (host || '127.0.0.1').trim();
+  const target = assertCliTarget((host || '127.0.0.1').trim(), 'curl target');
   const protocol = isHttps || port === 443 ? 'https' : 'http';
   const targetPort = port ? `:${port}` : (isHttps ? ':443' : ':80');
   const targetUrl = `${protocol}://${target}${targetPort}/`;
@@ -277,7 +277,7 @@ export async function runDnsLookup(host) {
  * @returns {Promise<{ success: boolean, output: string, command: string }>}
  */
 export async function runTlsCertDump(host, port = 443) {
-  const target = (host || '127.0.0.1').trim();
+  const target = assertCliTarget((host || '127.0.0.1').trim(), 'tls target');
   const targetPort = String(port || 443);
   logger.info('DIAG:TLS_CERTS', `Executing openssl s_client -showcerts -connect ${target}:${targetPort}`);
 

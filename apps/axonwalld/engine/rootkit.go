@@ -110,6 +110,16 @@ func ParseProcFdInfoIoUring(pid int, comm, exe string, fd int, fdInfoText string
 		"postgres":        true,
 		"qemu-system-x86": true,
 		"axonwalld":       true,
+		"node":            true,
+		"k3s":             true,
+		"k3s-server":      true,
+		"containerd":      true,
+		"suricata":        true,
+		"unbound":         true,
+		"caddy":           true,
+		"vector":          true,
+		"weed":            true,
+		"mariadbd":        true,
 	}
 
 	severity := "INFO"

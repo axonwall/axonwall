@@ -11,13 +11,18 @@ export interface ExtensionPluginLiveStatus {
   category: string;
   description: string;
   author: string;
+  enabled: boolean;
+  defaultEnabled?: boolean;
+  coreRole?: boolean;
   installed: boolean;
   bundled: boolean;
+  dependencies?: string[];
   requiredBinaries: string[];
   missingBinaries: string[];
   packages: string[];
   installedAt?: string;
   systemdUnits?: string[];
+  systemdServices?: { unit: string; active: boolean; state: string }[];
 }
 
 export interface PluginsApiResponse {

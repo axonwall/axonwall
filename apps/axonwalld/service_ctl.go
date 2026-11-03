@@ -28,11 +28,35 @@ var managedServices = map[string]bool{
 	"openvpn": true, "openvpn@server": true,
 	"strongswan": true, "strongswan-starter": true,
 	"smbd": true, "nmbd": true, "nfs-server": true, "nfs-kernel-server": true, "tgt": true,
-	"k3s": true, "libvirtd": true, "nut-server": true, "nut-monitor": true, "snmpd": true,
+	"k3s": true, "libvirtd": true, "nut-server": true, "nut-monitor": true, "nut-client": true, "snmpd": true,
+	"tailscaled": true, "ntopng": true, "eluvix": true,
+	"clamav-freshclam": true, "clamav-daemon": true, "vector": true,
+}
+
+func isSafeInstanceToken(tok string) bool {
+	if tok == "" || len(tok) > 32 {
+		return false
+	}
+	for _, r := range tok {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func validServiceName(svc string) bool {
-	return managedServices[strings.TrimSuffix(svc, ".service")]
+	unit := strings.TrimSuffix(svc, ".service")
+	if managedServices[unit] {
+		return true
+	}
+	if strings.HasPrefix(unit, "wg-quick@") && isSafeInstanceToken(strings.TrimPrefix(unit, "wg-quick@")) {
+		return true
+	}
+	if strings.HasPrefix(unit, "openvpn@") && isSafeInstanceToken(strings.TrimPrefix(unit, "openvpn@")) {
+		return true
+	}
+	return false
 }
 
 func keaHasActiveInterfaces() bool {

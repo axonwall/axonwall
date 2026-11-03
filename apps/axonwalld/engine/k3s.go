@@ -19,10 +19,13 @@ import (
 
 type K3sRuntimeBundle struct {
 	Enabled               bool   `json:"enabled"`
-	Role                  string `json:"role"` // "master" or "backup"
+	Role                  string `json:"role"`   // "master" or "backup"
+	HaRole                string `json:"haRole"` // alias emitted by compiler
 	PeerIp                string `json:"peerIp"`
+	HaPeerAddress         string `json:"haPeerAddress"` // alias emitted by compiler
 	SyncPort              int    `json:"syncPort"`
 	AuthToken             string `json:"authToken"`
+	HaSharedSecret        string `json:"haSharedSecret"` // alias emitted by compiler
 	AutoJoinHaPeer        bool   `json:"autoJoinHaPeer"`
 	K3sConfigYaml         string `json:"k3sConfigYaml"`
 	OpenEbsManifestYaml   string `json:"openEbsManifestYaml"`
@@ -158,6 +161,18 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	if err := json.Unmarshal(rawJSON, &bundle); err != nil {
 		return fmt.Errorf("invalid K3s runtime bundle json: %w", err)
 	}
+	if bundle.Role == "" && bundle.HaRole != "" {
+		bundle.Role = bundle.HaRole
+	}
+	if bundle.PeerIp == "" && bundle.HaPeerAddress != "" {
+		bundle.PeerIp = bundle.HaPeerAddress
+	}
+	if bundle.AuthToken == "" && bundle.HaSharedSecret != "" {
+		bundle.AuthToken = bundle.HaSharedSecret
+	}
+	if bundle.SyncPort <= 0 {
+		bundle.SyncPort = 8443
+	}
 
 	// Validate free-text config before it can reach privileged paths
 	// (audit D-05): an invalid bundle changes nothing on disk.
@@ -276,6 +291,9 @@ func (m *K3sManager) ApplyVowConfig(rawJSON []byte) error {
 		}
 	}
 	if bundle.CombinedK3sManifestsYaml != "" {
+		if err := validateK3sManifest(bundle.CombinedK3sManifestsYaml); err != nil {
+			return fmt.Errorf("vow bundle rejected: %w", err)
+		}
 		if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
 			_, _ = f.WriteString(bundle.CombinedK3sManifestsYaml)
 			_ = f.Close()
