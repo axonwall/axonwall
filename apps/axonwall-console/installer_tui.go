@@ -69,6 +69,7 @@ type InstallerConfig struct {
 	Hostname       string   // appliance hostname
 	AdminUser      string   // default "admin"
 	AdminPassword  string   // plaintext or scrypt hash for installed appliance
+	KeepPartitions bool     // preserve pre-partitioned disk layout created in root shell
 }
 
 // PartitionLayout represents the computed MiB sizes for visual preview and execution.
@@ -101,24 +102,85 @@ func DefaultInstallerConfig() InstallerConfig {
 		osFamily = "alpine"
 	}
 	tpmPresent := hasTPM2Device()
-	return InstallerConfig{
-		Edition:      edition,
-		OSFamily:     osFamily,
-		InstallMode:  "ab",
-		SlotMB:       4096,
-		RootFSType:   "ext4",
-		DataFSType:   "ext4",
-		ZfsAllocMode: "remainder",
-		CustomZfsGB:  16,
-		ZfsTopology:  "auto",
-		LogsEnabled:  false,
-		LogsGB:       8,
-		LogsFSType:   "xfs",
-		LuksEnabled:  false,
-		LuksTPM2:     tpmPresent,
-		Hostname:     hostname,
-		AdminUser:    "admin",
+	adminPass := ""
+	if _, err := os.Stat("/etc/axonwall/.password_changed"); err == nil {
+		if u, p := getAdminCredentials(); strings.HasPrefix(p, "scrypt$") {
+			_ = u
+			adminPass = p
+		}
 	}
+	return InstallerConfig{
+		Edition:       edition,
+		OSFamily:      osFamily,
+		InstallMode:   "ab",
+		SlotMB:        4096,
+		RootFSType:    "ext4",
+		DataFSType:    "ext4",
+		ZfsAllocMode:  "remainder",
+		CustomZfsGB:   16,
+		ZfsTopology:   "auto",
+		LogsEnabled:   false,
+		LogsGB:        8,
+		LogsFSType:    "xfs",
+		LuksEnabled:   false,
+		LuksTPM2:      tpmPresent,
+		Hostname:      hostname,
+		AdminUser:     "admin",
+		AdminPassword: adminPass,
+	}
+}
+
+func diskHasPrecreatedAxonwallPartitions(diskPath string) bool {
+	if diskPath == "" {
+		return false
+	}
+	for _, dir := range []string{"/dev/disk/by-label", "/dev/disk/by-partlabel"} {
+		for _, lbl := range []string{"axon_root_a", "axon_root"} {
+			if target, err := filepath.EvalSymlinks(filepath.Join(dir, lbl)); err == nil {
+				if strings.HasPrefix(target, diskPath) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func formatPreInstallNetworkSummary() string {
+	cfg := readCurrentNetworkConfig()
+	var parts []string
+	if cfg.WanDevice != "" {
+		wanDesc := cfg.WanMode
+		if cfg.WanMode == "static" && cfg.WanIP != "" {
+			wanDesc = cfg.WanIP
+		}
+		parts = append(parts, fmt.Sprintf("WAN=%s (%s)", cfg.WanDevice, wanDesc))
+	}
+	if cfg.LanDevice != "" {
+		lanDesc := cfg.LanMode
+		if cfg.LanMode == "static" && cfg.LanIP != "" {
+			lanDesc = cfg.LanIP
+		}
+		parts = append(parts, fmt.Sprintf("LAN=%s (%s)", cfg.LanDevice, lanDesc))
+	}
+	if cfg.Opt1Device != "" {
+		opt1Desc := cfg.Opt1Mode
+		if cfg.Opt1Mode == "static" && cfg.Opt1IP != "" {
+			opt1Desc = cfg.Opt1IP
+		}
+		parts = append(parts, fmt.Sprintf("OPT1=%s (%s)", cfg.Opt1Device, opt1Desc))
+	}
+	if cfg.Opt2Device != "" {
+		opt2Desc := cfg.Opt2Mode
+		if cfg.Opt2Mode == "static" && cfg.Opt2IP != "" {
+			opt2Desc = cfg.Opt2IP
+		}
+		parts = append(parts, fmt.Sprintf("OPT2=%s (%s)", cfg.Opt2Device, opt2Desc))
+	}
+	if len(parts) == 0 {
+		return "Auto-Detect on Firstboot (Use CLI [2]/[3] to customize)"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func hasTPM2Device() bool {
@@ -550,6 +612,9 @@ func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDe
 	if tpm {
 		notes = append(notes, "Hardware TPM 2.0 detected (PCR 0+2+7 auto-unlock ready if LUKS2 enabled)")
 	}
+	if len(cfg.SystemDisks) > 0 && diskHasPrecreatedAxonwallPartitions(cfg.SystemDisks[0]) {
+		notes = append(notes, fmt.Sprintf("Pre-partitioned Axonwall layout detected on %s (press [X] to preserve existing partitions)", cfg.SystemDisks[0]))
+	}
 
 	return evaluatedDisks, HardwareEvaluation{
 		TotalRAMMB:        ramMB,
@@ -837,6 +902,10 @@ func FormatInstallerConfig(cfg InstallerConfig) string {
 	if cfg.LuksTPM2 {
 		luksTPM2 = 1
 	}
+	keepParts := 0
+	if cfg.KeepPartitions {
+		keepParts = 1
+	}
 
 	edition := cfg.Edition
 	if edition == "" {
@@ -848,6 +917,7 @@ func FormatInstallerConfig(cfg InstallerConfig) string {
 		fmt.Sprintf("INSTALL_EDITION=%s", shellQuote(edition)),
 		fmt.Sprintf("SYSTEM_DISKS=%s", shellQuote(strings.Join(cfg.SystemDisks, " "))),
 		fmt.Sprintf("INSTALL_MODE=%s", shellQuote(cfg.InstallMode)),
+		fmt.Sprintf("KEEP_PARTITIONS=%d", keepParts),
 		fmt.Sprintf("SLOT_MB=%d", cfg.SlotMB),
 		fmt.Sprintf("ROOT_FSTYPE=%s", shellQuote(cfg.RootFSType)),
 		fmt.Sprintf("DATA_FSTYPE=%s", shellQuote(cfg.DataFSType)),
@@ -1671,7 +1741,12 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			} else {
 				fmt.Printf("   • %-22s : %s%s%s\n", "Target System Disk(s)", colorEmerald+colorBold, eval.SystemDiskSummary, colorReset)
 				fmt.Printf("   • %-22s : %s%s%s\n", "OpenZFS Storage Pool", colorGreen+colorBold, eval.ZfsPoolSummary, colorReset)
-				fmt.Printf("   • %-22s : %s%s%s\n", "Boot & Root Layout", colorCyan+colorBold, eval.SlotSizingNote, colorReset)
+				if cfg.KeepPartitions {
+					fmt.Printf("   • %-22s : %sKeep Existing Pre-Partitioned Disk Layout [X]%s\n", "Partition Table [X]", colorYellow+colorBold, colorReset)
+				} else {
+					fmt.Printf("   • %-22s : %s%s%s\n", "Boot & Root Layout", colorCyan+colorBold, eval.SlotSizingNote, colorReset)
+				}
+				fmt.Printf("   • %-22s : %s%s%s\n", "Network Setup [Q->2/3]", colorCyan, formatPreInstallNetworkSummary(), colorReset)
 				fmt.Printf("   • %-22s : %s\n", "Data Encryption [L]", luksSummary)
 				fmt.Printf("   • %-22s : %s\n\n", "Admin Password  [P]", pwSummary)
 				fmt.Println(RenderPartitionBar(layout, cfg, 64))
@@ -1682,10 +1757,15 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			allTargetDisks = append(allTargetDisks, cfg.ZfsExtraDisks...)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			if len(allTargetDisks) > 0 {
-				fmt.Printf(" %sReady to install onto [%s] (existing data on target disk(s) will be erased).%s\n",
-					colorYellow, strings.Join(allTargetDisks, ", "), colorReset)
+				if cfg.KeepPartitions {
+					fmt.Printf(" %sReady to install onto pre-partitioned [%s] (preserving existing partition table).%s\n",
+						colorYellow, strings.Join(allTargetDisks, ", "), colorReset)
+				} else {
+					fmt.Printf(" %sReady to install onto [%s] (existing data on target disk(s) will be erased).%s\n",
+						colorYellow, strings.Join(allTargetDisks, ", "), colorReset)
+				}
 			}
-			fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [E] Ed  [C] Custom  %s[V] Logs%s  [Q] Quit\n",
+			fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI Menu\n",
 				colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 
 			key := readRawKey()
@@ -1718,6 +1798,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 						cfg.Hostname = "axonwall-vault"
 					}
 				}
+			case "X":
+				cfg.KeepPartitions = !cfg.KeepPartitions
 			case "P":
 				pw1, _ := readPassword(reader, "\n Enter new Administrator & Root password (min 8 chars, or empty for default): ")
 				if pw1 == "" {
@@ -1982,12 +2064,14 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %sRole Keys:%s [Space] Cycle Role  [S] System OS  [D] ZFS Data  [G] ZFS SLOG  [C] ZFS L2ARC  [H] Hot Spare  [U] Unused\n", colorDim, colorReset)
-			fmt.Printf(" %sNavigation:%s [↑/↓] Move  [A] Auto-Tier by Size  [R] Rescan  [V] Logs & Diagnostics  [B] Back  [Enter] Next\n", colorDim, colorReset)
+			fmt.Printf(" %sNavigation:%s [↑/↓] Move  [A] Auto-Tier  [X] Keep Existing Partitions (%v)  [R] Rescan  [V] Logs  [B] Back  [Enter] Next\n", colorDim, colorReset, cfg.KeepPartitions)
 
 			key := readRawKey()
 			switch key {
 			case "V":
 				runInstallerLogsScreen(cfg, eval, nil, reader)
+			case "X":
+				cfg.KeepPartitions = !cfg.KeepPartitions
 			case "UP":
 				if diskCursor > 0 {
 					diskCursor--
@@ -2073,11 +2157,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				disks = AutoAssignDiskRoles(DiscoverDisks())
 				diskCursor = 0
 			case "W":
-				cmd := exec.Command("/bin/sh", installerPath, "--wizard")
+				clearScreen()
+				cmd := exec.Command("/bin/sh", installerPath, "--shell-wizard")
 				cmd.Stdin = os.Stdin
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
 				_ = cmd.Run()
+				pause(reader)
 				return
 			case "B", "BACKSPACE", "LEFT":
 				step = 1
@@ -2433,6 +2519,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				fmt.Printf("   • %-24s : %sSLOG=%v  L2ARC=%v  Spare=%v%s\n", "OpenZFS Accelerators", colorYellow+colorBold, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks, colorReset)
 			}
 			fmt.Printf("   • %-24s : %s%s%s\n", "Data Volume Encryption", colorMagenta+colorBold, luksSummary, colorReset)
+			fmt.Printf("   • %-24s : %s%s%s\n", "Network Interfaces", colorCyan+colorBold, formatPreInstallNetworkSummary(), colorReset)
+			if cfg.KeepPartitions {
+				fmt.Printf("   • %-24s : %sKeep Existing Pre-Partitioned Disk Layout%s\n", "Partition Table Mode", colorYellow+colorBold, colorReset)
+			}
 			fmt.Printf("   • %-24s : %s%s%s\n\n", "Appliance Hostname", colorBold, cfg.Hostname, colorReset)
 
 			fmt.Println(RenderPartitionBar(layout, cfg, 64))

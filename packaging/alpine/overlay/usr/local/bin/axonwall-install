@@ -131,6 +131,7 @@ fi
 # Default installation parameters
 SYSTEM_DISKS=""
 INSTALL_MODE="ab"
+KEEP_PARTITIONS=0
 SLOT_MB=4096
 ROOT_FSTYPE="ext4"
 DATA_FSTYPE="ext4"
@@ -690,6 +691,78 @@ LOGS_PART_NUM=""
 DATA_PART_NUM=""
 ZFS_PART_NUM=""
 
+find_part_num_on_disk() {
+  _f_disk="$1"
+  shift
+  for _lbl in "$@"; do
+    for _dir in /dev/disk/by-label /dev/disk/by-partlabel; do
+      if [ -e "${_dir}/${_lbl}" ]; then
+        _resolved="$(readlink -f "${_dir}/${_lbl}" 2>/dev/null || true)"
+        case "$_resolved" in
+          "${_f_disk}p"*)
+            echo "${_resolved#"${_f_disk}p"}"
+            return 0
+            ;;
+          "${_f_disk}"*)
+            echo "${_resolved#"${_f_disk}"}"
+            return 0
+            ;;
+        esac
+      fi
+    done
+  done
+  return 1
+}
+
+if [ "${KEEP_PARTITIONS:-0}" = "1" ]; then
+  ui_echo "[+] Preserving pre-partitioned disk layout on ${SYSTEM_DISKS} (KEEP_PARTITIONS=1)..."
+  EFI_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" AXON_EFI ESP EFI efi || true)"
+  if [ -z "$EFI_PART_NUM" ]; then
+    if [ "$INSTALL_MODE" = "zbm" ]; then
+      EFI_PART_NUM=1
+    elif [ -b "$(part_dev "$PRIMARY_DISK" 2)" ]; then
+      EFI_PART_NUM=2
+    else
+      EFI_PART_NUM=1
+    fi
+  fi
+  if [ "$INSTALL_MODE" != "zbm" ]; then
+    ROOT_A_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" axon_root_a axon_root || true)"
+    [ -z "$ROOT_A_PART_NUM" ] && ROOT_A_PART_NUM=3
+    if [ "$INSTALL_MODE" = "ab" ]; then
+      ROOT_B_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" axon_root_b || true)"
+      if [ -z "$ROOT_B_PART_NUM" ] && [ -b "$(part_dev "$PRIMARY_DISK" 4)" ]; then
+        ROOT_B_PART_NUM=4
+      fi
+    fi
+    LOGS_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" axon_logs || true)"
+  fi
+  DATA_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" axon_data || true)"
+  if [ -z "$DATA_PART_NUM" ] && [ "$INSTALL_MODE" != "zbm" ]; then
+    for _cand_p in 6 5 4; do
+      if [ "$_cand_p" != "${ROOT_A_PART_NUM:-}" ] && [ "$_cand_p" != "${ROOT_B_PART_NUM:-}" ] && [ "$_cand_p" != "${LOGS_PART_NUM:-}" ] && [ -b "$(part_dev "$PRIMARY_DISK" "$_cand_p")" ]; then
+        DATA_PART_NUM="$_cand_p"
+        break
+      fi
+    done
+  fi
+  for sys_disk in $SYSTEM_DISKS; do
+    DISK_IDX=$(( DISK_IDX + 1 ))
+    _zp="$(find_part_num_on_disk "$sys_disk" "axon_zfs_${DISK_IDX}" axon_zfs_1 axon_zfs zroot tank || true)"
+    if [ -z "$_zp" ] && [ "$INSTALL_MODE" = "zbm" ]; then
+      if [ -n "$DATA_PART_NUM" ] && [ -b "$(part_dev "$sys_disk" 3)" ]; then
+        _zp=3
+      elif [ -b "$(part_dev "$sys_disk" 2)" ]; then
+        _zp=2
+      fi
+    fi
+    if [ -n "$_zp" ] && [ -b "$(part_dev "$sys_disk" "$_zp")" ]; then
+      ZFS_PART_NUM="$_zp"
+      ZFS_VDEVS="${ZFS_VDEVS} $(part_dev "$sys_disk" "$_zp")"
+    fi
+    partprobe "$sys_disk" 2>/dev/null || true
+  done
+else
 for sys_disk in $SYSTEM_DISKS; do
   DISK_IDX=$(( DISK_IDX + 1 ))
   wipefs -a "$sys_disk" 2>/dev/null || true
@@ -777,6 +850,7 @@ for sys_disk in $SYSTEM_DISKS; do
 
   partprobe "$sys_disk" 2>/dev/null || true
 done
+fi
 
 udevadm settle 2>/dev/null || mdev -s 2>/dev/null || true
 sleep 1
@@ -1239,9 +1313,44 @@ else
 fi
 rm -rf /mnt/slot_a/usr/share/axonwall/vault
 
-# Preserve any live-configured network interfaces if modified during Live session
+# Preserve any live-configured network interfaces, state.json, and YAML configs modified during Live session
 if [ -s /etc/axonwall/interfaces.conf ]; then
   cp -a /etc/axonwall/interfaces.conf /mnt/slot_a/etc/axonwall/interfaces.conf 2>/dev/null || true
+  cp -a /etc/axonwall/interfaces.conf /mnt/data/etc-axonwall/interfaces.conf 2>/dev/null || true
+fi
+if [ -f /etc/axonwall/.interfaces_configured ]; then
+  cp -a /etc/axonwall/.interfaces_configured /mnt/slot_a/etc/axonwall/.interfaces_configured 2>/dev/null || true
+  cp -a /etc/axonwall/.interfaces_configured /mnt/data/etc-axonwall/.interfaces_configured 2>/dev/null || true
+fi
+if [ -s /etc/network/interfaces ]; then
+  mkdir -p /mnt/slot_a/etc/network
+  cp -a /etc/network/interfaces /mnt/slot_a/etc/network/interfaces 2>/dev/null || true
+fi
+if [ -s /etc/resolv.conf ]; then
+  rm -f /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
+  cp -L /etc/resolv.conf /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
+fi
+for _yfile in /etc/axonwall/*.yaml; do
+  if [ -s "$_yfile" ]; then
+    cp -a "$_yfile" "/mnt/slot_a/etc/axonwall/$(basename "$_yfile")" 2>/dev/null || true
+    cp -a "$_yfile" "/mnt/data/etc-axonwall/$(basename "$_yfile")" 2>/dev/null || true
+  fi
+done
+if [ -d /etc/axonwall/conf.d ]; then
+  mkdir -p /mnt/slot_a/etc/axonwall/conf.d /mnt/data/etc-axonwall/conf.d
+  cp -a /etc/axonwall/conf.d/. /mnt/slot_a/etc/axonwall/conf.d/ 2>/dev/null || true
+  cp -a /etc/axonwall/conf.d/. /mnt/data/etc-axonwall/conf.d/ 2>/dev/null || true
+fi
+for _sfile in /var/lib/axonwall/state.json /etc/axonwall/state.json; do
+  if [ -s "$_sfile" ]; then
+    cp -a "$_sfile" /mnt/slot_a/etc/axonwall/state.json 2>/dev/null || true
+    cp -a "$_sfile" /mnt/data/state.json 2>/dev/null || true
+    cp -a "$_sfile" /mnt/data/etc-axonwall/state.json 2>/dev/null || true
+    break
+  fi
+done
+if [ -s /usr/share/axonwall/lockdown.nft ] && [ -d /mnt/slot_a/usr/share/axonwall ]; then
+  cp -a /usr/share/axonwall/lockdown.nft /mnt/slot_a/usr/share/axonwall/lockdown.nft 2>/dev/null || true
 fi
 
 if [ -n "${HOSTNAME_OVERRIDE:-}" ]; then

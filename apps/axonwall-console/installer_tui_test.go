@@ -90,6 +90,15 @@ func TestRenderPartitionBarAndFormatConfig(t *testing.T) {
 	if !strings.Contains(serialized, "LUKS_PASSPHRASE='s3cr3t'\"'\"'pass'") {
 		t.Errorf("expected properly shell-escaped single quote in LUKS_PASSPHRASE:\n%s", serialized)
 	}
+	if !strings.Contains(serialized, "KEEP_PARTITIONS=0") {
+		t.Errorf("expected KEEP_PARTITIONS=0 by default in serialized config:\n%s", serialized)
+	}
+
+	cfg.KeepPartitions = true
+	serializedKeep := FormatInstallerConfig(cfg)
+	if !strings.Contains(serializedKeep, "KEEP_PARTITIONS=1") {
+		t.Errorf("expected KEEP_PARTITIONS=1 when KeepPartitions=true:\n%s", serializedKeep)
+	}
 }
 
 func TestAutoAssignDiskRolesAndAccelerators(t *testing.T) {

@@ -1007,6 +1007,8 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 
 	writeSharedConfigFile("/etc/axonwall/interfaces.conf", []byte(conf.String()), 0664)
 	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/interfaces.conf", []byte(conf.String()), 0664)
+	writeSharedConfigFile("/etc/axonwall/.interfaces_configured", []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0664)
+	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/.interfaces_configured", []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0664)
 
 	// 3. Write /etc/network/interfaces
 	var ifaces strings.Builder
@@ -1669,8 +1671,9 @@ func printHeader() {
 		colorCyan+colorBold, currentSessionUser, colorReset)
 	fmt.Println("--------------------------------------------------------------------------------")
 	if isLiveMode() {
-		fmt.Printf(" %s⚡ LIVE INSTALLATION MEDIA DETECTED%s\n", colorYellow+colorBold, colorReset)
-		fmt.Printf(" %sTo install Axonwall to permanent disk storage, select Option [12] or [I]%s\n", colorCyan+colorBold, colorReset)
+		fmt.Printf(" %s⚡ LIVE INSTALLATION MEDIA — PRE-INSTALL PREPARATION & CLI CHOOSER%s\n", colorYellow+colorBold, colorReset)
+		fmt.Printf(" %s• Use [2] Assign Interfaces, [3] Configure IP/DHCP, or [9] Root Shell (Partition Disks)%s\n", colorDim, colorReset)
+		fmt.Printf(" %s• When ready to install Axonwall OS to permanent storage, select [12] or press [I]%s\n", colorCyan+colorBold, colorReset)
 		fmt.Println("--------------------------------------------------------------------------------")
 	}
 
@@ -1722,7 +1725,11 @@ func printHeader() {
 	fmt.Println("  6) Network Diagnostics (Ping, DNS Lookup)")
 	fmt.Println("  7) Display Web Console Scannable QR Code")
 	fmt.Println("  8) Restart Axonwall Core Services")
-	fmt.Println("  9) Drop to Root Shell")
+	if isLiveMode() {
+		fmt.Println("  9) Drop to Root Shell (Partition Disks & Preparatory Tasks)")
+	} else {
+		fmt.Println("  9) Drop to Root Shell")
+	}
 	fmt.Println(" 10) Reboot Appliance")
 	fmt.Println(" 11) Power Off System")
 	if isLiveMode() {
@@ -3046,6 +3053,26 @@ func ensureStandardPath() {
 	_ = os.Setenv("PATH", strings.Join(parts, ":"))
 }
 
+func launchRootShell() {
+	clearScreen()
+	fmt.Printf("%sDropping to root shell (ZSH/Bash). Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
+	shellPath := "/usr/bin/zsh"
+	if _, err := os.Stat(shellPath); err != nil {
+		shellPath = "/bin/zsh"
+		if _, err := os.Stat(shellPath); err != nil {
+			shellPath = "/bin/bash"
+			if _, err := os.Stat(shellPath); err != nil {
+				shellPath = "/bin/sh"
+			}
+		}
+	}
+	shell := exec.Command(shellPath)
+	shell.Stdin = os.Stdin
+	shell.Stdout = os.Stdout
+	shell.Stderr = os.Stderr
+	_ = shell.Run()
+}
+
 func main() {
 	ensureStandardPath()
 	suppressConsoleNoise()
@@ -3068,23 +3095,34 @@ func main() {
 	autoInstallHandled := false
 
 	for {
-		// Check for auto-install or unattended kernel boot flags on Live media before requiring console authentication
+		var (
+			user string
+			ok   bool
+		)
+		// On Live / Installer media, check for unattended Cloud-Init boot first;
+		// otherwise present the Axonwall CLI chooser directly before installation so
+		// the operator can assign interfaces (2), configure IPs/DHCP (3), or drop to a
+		// root shell to partition disks and run preparatory tasks (9) before pressing
+		// 12 / I to launch the installer.
 		if !autoInstallHandled && isLiveMode() {
 			autoInstallHandled = true
 			if data, err := os.ReadFile("/proc/cmdline"); err == nil {
 				cmd := string(data)
 				if strings.Contains(cmd, "axonwall.unattended=1") {
 					_ = RunUnattendedInstall()
-				} else if strings.Contains(cmd, "axonwall_install=1") || strings.Contains(cmd, "axonwall.install=1") {
-					RunNextGenInstallerTUI(reader)
 				}
 			}
-		}
-
-		// Require authentication before entering console menu
-		user, ok := authenticateConsole(reader)
-		if !ok {
-			continue
+			expectedUser, _ := getAdminCredentials()
+			if expectedUser == "" {
+				expectedUser = "admin"
+			}
+			user, ok = expectedUser, true
+		} else {
+			// Require authentication before entering console menu
+			user, ok = authenticateConsole(reader)
+			if !ok {
+				continue
+			}
 		}
 		currentSessionUser = user
 
@@ -3120,23 +3158,7 @@ func main() {
 			case "8":
 				actionRestartServices(reader)
 			case "9":
-				clearScreen()
-				fmt.Printf("%sDropping to root shell (ZSH/Bash). Type 'exit' to return to Axonwall Console.%s\n\n", colorYellow, colorReset)
-				shellPath := "/usr/bin/zsh"
-				if _, err := os.Stat(shellPath); err != nil {
-					shellPath = "/bin/zsh"
-					if _, err := os.Stat(shellPath); err != nil {
-						shellPath = "/bin/bash"
-						if _, err := os.Stat(shellPath); err != nil {
-							shellPath = "/bin/sh"
-						}
-					}
-				}
-				shell := exec.Command(shellPath)
-				shell.Stdin = os.Stdin
-				shell.Stdout = os.Stdout
-				shell.Stderr = os.Stderr
-				_ = shell.Run()
+				launchRootShell()
 			case "10":
 				fmt.Print("\nAre you sure you want to reboot the appliance? (y/N): ")
 				ans, _ := reader.ReadString('\n')
