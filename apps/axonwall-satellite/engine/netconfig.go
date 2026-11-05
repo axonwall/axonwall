@@ -159,9 +159,14 @@ func (e *EdgeNetworkEngine) ConfigureInterface(spec EdgeInterfaceSpec) error {
 
 	if addr != "" {
 		if err := addInterfaceAddressNetlink(dev, addr); err != nil {
-			// Fallback to /sbin/ip if available
+			// Fallback to /sbin/ip if available. A-L2: if the
+			// fallback fails too, that is an error — the old code
+			// discarded the fallback's result, so an interface on
+			// a nonexistent device was reported as configured.
 			if ipBin, lookErr := exec.LookPath("ip"); lookErr == nil {
-				_ = exec.Command(ipBin, "addr", "replace", addr, "dev", dev).Run()
+				if fbErr := exec.Command(ipBin, "addr", "replace", addr, "dev", dev).Run(); fbErr != nil {
+					return fmt.Errorf("address assignment failed on %s (%s): netlink: %v; ip fallback: %w", dev, addr, err, fbErr)
+				}
 			} else {
 				return fmt.Errorf("netlink address assignment failed on %s (%s): %w", dev, addr, err)
 			}
@@ -194,6 +199,18 @@ func (e *EdgeNetworkEngine) ConfigureInterface(spec EdgeInterfaceSpec) error {
 func (e *EdgeNetworkEngine) AddRoute(route EdgeRouteSpec) error {
 	if err := ValidateRouteSpec(route); err != nil {
 		return err
+	}
+
+	// A-L3: a non-empty route device that does not resolve used to
+	// be silently dropped by addRouteNetlink, installing the route
+	// with no device binding (so the kernel routed via an unintended
+	// interface) while the caller reported the route installed as
+	// specified. Fail here instead, matching ConfigureInterface's
+	// existence check.
+	if dev := strings.TrimSpace(route.Device); dev != "" {
+		if _, err := net.InterfaceByName(dev); err != nil {
+			return fmt.Errorf("route device %q does not exist: %w", route.Device, err)
+		}
 	}
 
 	if err := addRouteNetlink(route); err != nil {
@@ -338,9 +355,22 @@ func delInterfaceAddressNetlink(dev, cidr string) error {
 }
 
 func addRouteNetlink(route EdgeRouteSpec) error {
+	msg, err := buildRouteNetlinkMessage(route)
+	if err != nil {
+		return err
+	}
+	return sendNetlinkRouteMessage(msg)
+}
+
+// buildRouteNetlinkMessage serializes an RTM_NEWROUTE request for
+// the given route. It is split out of addRouteNetlink so the
+// A-L3 device-binding behaviour is testable without a kernel
+// round-trip (the sandbox lacks CAP_NET_ADMIN, so a real route add
+// fails with EPERM before the binding question is ever reached).
+func buildRouteNetlinkMessage(route EdgeRouteSpec) ([]byte, error) {
 	gwIP := net.ParseIP(strings.TrimSpace(route.Gateway))
 	if gwIP == nil {
-		return fmt.Errorf("invalid gateway IP: %s", route.Gateway)
+		return nil, fmt.Errorf("invalid gateway IP: %s", route.Gateway)
 	}
 
 	family := uint8(syscall.AF_INET)
@@ -356,7 +386,7 @@ func addRouteNetlink(route EdgeRouteSpec) error {
 	if !strings.EqualFold(dst, "default") {
 		_, ipNet, err := net.ParseCIDR(dst)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ones, _ := ipNet.Mask.Size()
 		dstPrefixLen = uint8(ones)
@@ -384,11 +414,17 @@ func addRouteNetlink(route EdgeRouteSpec) error {
 	msg = addRouteAttr(msg, syscall.RTA_GATEWAY, gwBytes)
 
 	if route.Device != "" {
-		if iface, err := net.InterfaceByName(strings.TrimSpace(route.Device)); err == nil {
-			oif := make([]byte, 4)
-			binary.NativeEndian.PutUint32(oif, uint32(iface.Index))
-			msg = addRouteAttr(msg, syscall.RTA_OIF, oif)
+		// A-L3: do not silently install a device-bound route with
+		// no device binding when the device does not resolve.
+		// (AddRoute checks this first; this keeps the helper
+		// fail-closed for any future caller too.)
+		iface, err := net.InterfaceByName(strings.TrimSpace(route.Device))
+		if err != nil {
+			return nil, fmt.Errorf("route device %q does not exist: %w", route.Device, err)
 		}
+		oif := make([]byte, 4)
+		binary.NativeEndian.PutUint32(oif, uint32(iface.Index))
+		msg = addRouteAttr(msg, syscall.RTA_OIF, oif)
 	}
 
 	binary.NativeEndian.PutUint32(msg[0:4], uint32(len(msg)))
@@ -397,7 +433,7 @@ func addRouteNetlink(route EdgeRouteSpec) error {
 	binary.NativeEndian.PutUint32(msg[8:12], nlSeq.Add(1))
 	binary.NativeEndian.PutUint32(msg[12:16], uint32(os.Getpid()))
 
-	return sendNetlinkRouteMessage(msg)
+	return msg, nil
 }
 
 func sendNetlinkRouteMessage(msg []byte) error {

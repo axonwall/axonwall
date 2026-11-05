@@ -41,8 +41,39 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const action = body?.action || 'update';
-    const slot: 'A' | 'B' = body?.slot === 'A' ? 'A' : 'B';
+    // C14: a bare POST used to default to a firmware update of slot B
+    // (`body?.action || 'update'`, any slot other than exactly 'A'
+    // coerced to 'B'). Destructive defaults must fail closed: the
+    // action is required and must be known, and update/activate
+    // require an explicit slot of exactly 'A' or 'B'. The other
+    // actions (verify, zbm-*) take no slot.
+    const action = body?.action;
+    const knownActions = [
+      'update',
+      'activate',
+      'verify',
+      'zbm-snapshot',
+      'zbm-delete-snapshot',
+      'zbm-rollback-snapshot',
+      'zbm-clone',
+      'zbm-activate',
+      'zbm-delete',
+    ];
+    if (typeof action !== 'string' || !knownActions.includes(action)) {
+      return NextResponse.json(
+        { success: false, message: `Missing or unknown action: ${typeof action === 'string' ? action : 'none'}. An explicit action is required.` },
+        { status: 400 }
+      );
+    }
+    if (action === 'update' || action === 'activate') {
+      if (body?.slot !== 'A' && body?.slot !== 'B') {
+        return NextResponse.json(
+          { success: false, message: `Invalid slot: ${JSON.stringify(body?.slot ?? null)}. An explicit slot of 'A' or 'B' is required for action '${action}'.` },
+          { status: 400 }
+        );
+      }
+    }
+    const slot: 'A' | 'B' = body?.slot;
 
     if (action === 'update') {
       const result = await applySystemFirmwareUpdate(slot);
@@ -113,12 +144,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(result, { status });
     }
 
-    return NextResponse.json(
-      { success: false, message: `Unknown action: ${action}` },
-      { status: 400 }
-    );
+    // Unreachable: `action` was validated against knownActions above,
+    // so every known action has returned by here.
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    // C14: an unparseable (including empty) body is a client error,
+    // not a 500 — a bare POST must fail closed with a 400.
+    if (err instanceof SyntaxError || message.toLowerCase().includes('json')) {
+      return NextResponse.json({ success: false, message: 'Invalid JSON body' }, { status: 400 });
+    }
     const status = message.includes('Unauthorized')
       ? 401
       : message.includes('Forbidden') || message.toLowerCase().includes('admin')

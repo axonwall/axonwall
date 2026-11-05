@@ -1093,6 +1093,30 @@ func (we *WatchdogEngine) DeleteBootEnvironment(beName string) error {
 	}
 	targetDataset := "zroot/ROOT/" + beName
 
+	// E4: refuse to delete the fallback Boot Environment. The
+	// org.axonwall:fallback_be property is the rollback pointer the
+	// ZBM watchdog hook follows on a failed boot; destroying the BE
+	// it names would leave it pointing at a destroyed dataset and
+	// consume the one autonomous fallback. The property is read live
+	// from ZFS here, not from cached status, so a fallback armed
+	// since the last status refresh is still protected. An unreadable
+	// property (unset, or a non-ZBM box) means "no fallback set" and
+	// does not block the delete; the destroy itself still fails if
+	// the dataset does not exist. This guard deliberately does not
+	// depend on what ZFSBootMenu does with a missing bootfs target
+	// (inferred, not observed on hardware): it only prevents the
+	// pointer from being poisoned in the first place.
+	if we.runZfsCmd != nil {
+		if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:fallback_be", "zroot/ROOT"); err == nil {
+			fallback := strings.TrimSpace(string(out))
+			if fallback != "" && fallback != "-" && (fallback == targetDataset || fallback == beName) {
+				return fmt.Errorf("cannot delete Boot Environment %s: it is the fallback Boot Environment (org.axonwall:fallback_be=%s); activate another BE as fallback first", beName, fallback)
+			}
+		} else {
+			log.Printf("[Watchdog/ZBM] Warning: could not read org.axonwall:fallback_be before deleting %s: %v", beName, err)
+		}
+	}
+
 	we.mu.RLock()
 	for _, be := range we.status.BootEnvironments {
 		if be.Dataset == targetDataset {
