@@ -36,7 +36,112 @@ modprobe nf_conntrack 2>/dev/null || true
 modprobe tcp_bbr 2>/dev/null || true
 sysctl --system || true
 
-# 1.1 Process Cloud-Init configuration (#cloud-config) if present
+# 1.1 Populate the standby root slot (cloud images ship slot B empty).
+# The qcow2 image cannot carry a pre-populated slot B: storing the rootfs
+# twice doubled the image to 2.34 GB, past the GitHub 2 GiB release asset
+# limit. The image builder therefore leaves B as an empty formatted
+# filesystem and writes /etc/axonwall/.ab-clone-pending; this step clones
+# the booted slot to the standby slot once, then consumes the marker.
+# Installer (d-i) images replicate A to B at install time and carry no
+# marker, so they skip this step entirely. The clone runs before any
+# provisioning below mutates the rootfs, so the standby copy is the
+# pristine image state and provisions itself on its first boot, exactly
+# like the d-i replica. It is best-effort by design: a failure is logged
+# loudly but NEVER aborts firstboot (a later update populates B), and the
+# pending marker is left in place so the next firstboot run retries.
+# Guards, in order: the marker must exist; the booted slot must be A
+# (refuse to clone B onto itself, and refuse when the booted slot cannot
+# be determined); the standby slot must be empty (never clobber a slot
+# that already holds an OS); rsync must be present.
+if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
+  (
+    set +e
+    echo "[Axonwall Firstboot] Standby slot population pending -- cloning booted slot to standby..."
+    _ab_ok=0
+    _ab_root_dev=""
+    if command -v findmnt >/dev/null 2>&1; then
+      _ab_root_dev="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    fi
+    _ab_boot_label=""
+    if [[ -n "$_ab_root_dev" && -b "$_ab_root_dev" ]] && command -v blkid >/dev/null 2>&1; then
+      _ab_boot_label="$(blkid -s LABEL -o value "$_ab_root_dev" 2>/dev/null || true)"
+    fi
+    if [[ -z "$_ab_boot_label" ]]; then
+      # Fallback: the watchdog uses the same kernel-command-line markers.
+      if grep -qE '(^|[[:space:]])root=[^[:space:]]*axon_root_b|(^|[[:space:]])rootfsB=1|(^|[[:space:]])slot=B' /proc/cmdline 2>/dev/null; then
+        _ab_boot_label="axon_root_b"
+      elif grep -qE '(^|[[:space:]])root=[^[:space:]]*axon_root_a|(^|[[:space:]])rootfsB=0|(^|[[:space:]])slot=A' /proc/cmdline 2>/dev/null; then
+        _ab_boot_label="axon_root_a"
+      fi
+    fi
+    if [[ "$_ab_boot_label" == "axon_root_b" ]]; then
+      echo "[Axonwall Firstboot] WARNING: booted from standby slot B; refusing to clone B onto itself. Standby slot A will be populated by the next update." >&2
+    elif [[ "$_ab_boot_label" != "axon_root_a" ]]; then
+      echo "[Axonwall Firstboot] WARNING: could not determine the booted root slot (label='${_ab_boot_label:-<none>}'); skipping standby population rather than risk cloning the wrong direction." >&2
+    else
+      _ab_dev="$(blkid -L axon_root_b 2>/dev/null || true)"
+      if [[ -z "$_ab_dev" || ! -b "$_ab_dev" ]]; then
+        echo "[Axonwall Firstboot] WARNING: standby slot (label axon_root_b) not found; skipping standby population." >&2
+      elif ! command -v rsync >/dev/null 2>&1; then
+        echo "[Axonwall Firstboot] WARNING: rsync not found; cannot populate standby slot." >&2
+      else
+        _ab_mnt="/run/axonwall-ab-clone"
+        mkdir -p "$_ab_mnt"
+        if mount "$_ab_dev" "$_ab_mnt" 2>/dev/null; then
+          # Safety: never clobber a standby slot that already holds an OS.
+          if [[ -e "$_ab_mnt/bin/bash" || -e "$_ab_mnt/usr/bin/bash" ]]; then
+            echo "[Axonwall Firstboot] Standby slot already populated; skipping clone and consuming the pending marker."
+            _ab_ok=1
+          elif rsync -aHAX --delete \
+              --exclude='/boot/efi/*' \
+              --exclude='/var/lib/axonwall/*' \
+              --exclude='/var/lib/cloud/*' \
+              --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
+              --exclude='/run/*' --exclude='/tmp/*' \
+              --exclude='/mnt/*' --exclude='/media/*' \
+              --exclude='/etc/axonwall/.ab-clone-pending' \
+              / "$_ab_mnt/"; then
+            # Slot B must mount itself as root: point its / entry at its
+            # own label (as d-i does), or systemd would remount slot A
+            # over the booted slot B.
+            if [[ -f "$_ab_mnt/etc/fstab" ]]; then
+              sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root_b\1|' "$_ab_mnt/etc/fstab" 2>/dev/null || true
+            fi
+            # Sanitize identity on the standby copy so it generates its
+            # own machine-id, SSH host keys and cloud-init state on its
+            # first boot (the builder sanitizes the same way before any
+            # clone, and the booted slot may already have generated
+            # these by the time firstboot runs).
+            : > "$_ab_mnt/etc/machine-id" 2>/dev/null || true
+            rm -f "$_ab_mnt/var/lib/dbus/machine-id" "$_ab_mnt/etc/ssh/ssh_host_"* 2>/dev/null || true
+            rm -rf "$_ab_mnt/var/lib/cloud/data" "$_ab_mnt/var/lib/cloud/instance" "$_ab_mnt/var/lib/cloud/instances" 2>/dev/null || true
+            rm -rf "$_ab_mnt/tmp/"* "$_ab_mnt/var/tmp/"* 2>/dev/null || true
+            # Record the standby population the way d-i does, so the slot
+            # display stays consistent when B is booted.
+            _ab_ver="$(head -n1 /etc/axonwall/version 2>/dev/null | tr -d '\r\n ' || echo "")"
+            [[ -z "$_ab_ver" ]] && _ab_ver="0.0.0"
+            _ab_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+            mkdir -p "$_ab_mnt/etc/axonwall" 2>/dev/null || true
+            printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$_ab_ver" "$_ab_ver" "$_ab_ts" > "$_ab_mnt/etc/axonwall/slot_versions.json" 2>/dev/null || true
+            echo "[Axonwall Firstboot] Standby slot B populated from booted slot A."
+            _ab_ok=1
+          else
+            echo "[Axonwall Firstboot] WARNING: standby slot clone (rsync) failed; slot B stays empty until the next update populates it." >&2
+          fi
+          umount "$_ab_mnt" 2>/dev/null || umount -l "$_ab_mnt" 2>/dev/null || true
+        else
+          echo "[Axonwall Firstboot] WARNING: could not mount standby slot ${_ab_dev}; skipping standby population." >&2
+        fi
+        rmdir "$_ab_mnt" 2>/dev/null || true
+      fi
+    fi
+    if [[ "$_ab_ok" == "1" ]]; then
+      rm -f /etc/axonwall/.ab-clone-pending
+    fi
+  ) || echo "[Axonwall Firstboot] WARNING: standby slot population step failed unexpectedly; slot B stays empty until the next update populates it." >&2
+fi
+
+# 1.2 Process Cloud-Init configuration (#cloud-config) if present
 mkdir -p /etc/axonwall
 if [[ ! -s /var/lib/cloud/seed/nocloud-net/user-data && ! -s /var/lib/cloud/instance/user-data.txt && ! -s /etc/axonwall/cloud-config.yaml ]]; then
   modprobe isofs vfat sr_mod sd_mod virtio_blk virtio_scsi 2>/dev/null || true
