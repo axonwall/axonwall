@@ -82,7 +82,11 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 	}
 
 	safeIface := strings.ReplaceAll(iface, ".", "_")
-	captureID := fmt.Sprintf("pcap-%d-%s", time.Now().Unix(), safeIface)
+	// A-M15: the ID must be unique per capture, not per second. Two
+	// captures on one interface within the same second previously
+	// shared a filename, so the second tcpdump truncated the file
+	// while the first caller was still parsing it.
+	captureID := fmt.Sprintf("pcap-%d-%d-%s", os.Getpid(), time.Now().UnixNano(), safeIface)
 	pcapFile := filepath.Join(m.captureDir, fmt.Sprintf("%s.pcap", captureID))
 	startedAt := time.Now().UTC().Format(time.RFC3339)
 
@@ -103,7 +107,10 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, tcpdumpPath, args...)
-	_ = cmd.Run() // tcpdump exits when count packets captured or timeout occurs
+	// Capture stderr so a failed run can be reported, not swallowed.
+	var tcpdumpStderr strings.Builder
+	cmd.Stderr = &tcpdumpStderr
+	runErr := cmd.Run() // tcpdump exits when count packets captured or timeout occurs
 	_ = os.Chmod(pcapFile, 0664)
 
 	completedAt := time.Now().UTC().Format(time.RFC3339)
@@ -111,6 +118,14 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 	// Parse captured packets from the pcap file using tcpdump -nn -tt -r
 	packets, _ := m.parsePcap(pcapFile)
 	if len(packets) == 0 {
+		// A-M15: a failed tcpdump run (down/nonexistent interface,
+		// permission, bad filter) used to return "success, 0
+		// packets". Return tcpdump's error instead. A run that was
+		// cut short by the 30s cap but still captured packets keeps
+		// returning those packets below.
+		if runErr != nil {
+			return nil, fmt.Errorf("tcpdump failed on interface %s: %w (stderr: %s)", iface, runErr, strings.TrimSpace(tcpdumpStderr.String()))
+		}
 		// If 0 packets captured on live interface, provide clean result
 		packets = []CapturedPacket{}
 	}
