@@ -37,7 +37,18 @@ export async function POST(req: Request) {
       await expirePreAuthKey(user, key);
       return NextResponse.json({ status: 'ok' });
     }
-    
+
+    // C21: only an explicit 'create' mints a key. The old fall-through
+    // created a 30-day pre-auth key for any unrecognised action, so a
+    // typo like 'expir' silently minted a credential instead of
+    // expiring one.
+    if (action !== 'create') {
+      return NextResponse.json(
+        { error: `Invalid action '${action}': expected 'create' or 'expire'` },
+        { status: 400 }
+      );
+    }
+
     // Create new key
     if (!user) return NextResponse.json({ error: 'user is required' }, { status: 400 });
     const newKey = await createPreAuthKey(

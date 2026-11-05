@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { importFirewallConfig, detectFirewallType, type FirewallVendor } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { applyDesiredState } from '../../../../server/agent';
+import { parseConfirmTimeoutSeconds } from '../../../../server/confirm-timeout';
 import { getSession } from '../../../../server/auth';
 
 export async function POST(req: Request) {
@@ -48,7 +49,9 @@ export async function POST(req: Request) {
       shouldApply = formData.get('apply') === 'true' || formData.get('apply') === '1';
       const timeoutParam = formData.get('confirmTimeoutSeconds') as string | null;
       if (timeoutParam) {
-        confirmTimeoutSeconds = Number.parseInt(timeoutParam, 10) || 120;
+        // C26: same validation as the apply route; invalid values are
+        // a 400 via the catch below, not a coerced window.
+        confirmTimeoutSeconds = parseConfirmTimeoutSeconds(timeoutParam);
       }
     } else {
       const body = await req.json();
@@ -57,8 +60,8 @@ export async function POST(req: Request) {
         vendor = body.vendor;
       }
       shouldApply = Boolean(body.apply);
-      if (body.confirmTimeoutSeconds) {
-        confirmTimeoutSeconds = Number(body.confirmTimeoutSeconds) || 120;
+      if (body.confirmTimeoutSeconds !== undefined && body.confirmTimeoutSeconds !== null) {
+        confirmTimeoutSeconds = parseConfirmTimeoutSeconds(body.confirmTimeoutSeconds);
       }
     }
 

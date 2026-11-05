@@ -1779,33 +1779,54 @@ export async function getSystemHealthTelemetry(): Promise<SystemHealthMetrics> {
   };
 }
 
-export interface HubCertStatus {
-  expiresAt: string;
-  daysRemaining: number;
-  subject: string;
-}
+// C12: hub-cert status is a discriminated union, not nullable. "No cert
+// on this box", "cert unreadable/unparseable", and "cert OK" used to
+// collapse to the same null, so the expiry card silently vanished in
+// exactly the case it exists to warn about.
+export type HubCertStatus =
+  | { state: 'ok'; expiresAt: string; daysRemaining: number; subject: string }
+  | { state: 'missing' }
+  | { state: 'error'; message: string };
 
 // Hub TLS certificate expiry (audit B-14). The packaged hub certificate
 // is a 10-year self-signed cert with no renewal machinery; surface its
 // expiry so it never arrives as a surprise outage. The cert is public
 // material (mode 0644) and this runs server-side, so reading it directly
-// is safe. Returns null when no packaged cert exists (dev machines).
-export async function getHubCertStatus(): Promise<HubCertStatus | null> {
+// is safe. Returns 'missing' when no packaged cert exists (dev machines)
+// and 'error' when the cert exists but cannot be read or parsed, so the
+// page can alert instead of rendering nothing.
+export async function getHubCertStatus(): Promise<HubCertStatus> {
   const session = await getSession();
   assertActionPermitted(session);
 
+  let pem: string;
   try {
-    const pem = fs.readFileSync('/etc/axonwall/certs/hub.crt', 'utf8');
+    pem = fs.readFileSync('/etc/axonwall/certs/hub.crt', 'utf8');
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return { state: 'missing' };
+    return {
+      state: 'error',
+      message: `Hub certificate unreadable: ${err?.message || 'read failed'}`,
+    };
+  }
+
+  try {
     const cert = new crypto.X509Certificate(pem);
     const expires = new Date(cert.validTo);
-    if (Number.isNaN(expires.getTime())) return null;
+    if (Number.isNaN(expires.getTime())) {
+      return { state: 'error', message: 'Hub certificate has no parseable expiry date.' };
+    }
     return {
+      state: 'ok',
       expiresAt: expires.toISOString(),
       daysRemaining: Math.floor((expires.getTime() - Date.now()) / 86_400_000),
       subject: cert.subject.replace(/\n/g, ', '),
     };
-  } catch {
-    return null;
+  } catch (err: any) {
+    return {
+      state: 'error',
+      message: `Hub certificate unparseable: ${err?.message || 'parse failed'}`,
+    };
   }
 }
 
@@ -2045,6 +2066,123 @@ export async function getServiceJournalLogs(unit: string): Promise<string> {
   }
 
   return `-- No service logs found for ${safeUnit} --`;
+}
+
+// C3: real service control for the Service Supervisor page. The buttons
+// used to be a setTimeout that reported success without executing
+// anything. This runs the actual systemctl action against an allowlist
+// of the units the page lists — never an arbitrary unit name — and
+// reports the real outcome, so a failed restart is a visible failure,
+// not a success banner. There is no daemon service-control RPC; the UI
+// server already runs privileged systemctl/journalctl reads, so the
+// control action lives here beside them. The console's own unit is
+// excluded by the page: restarting it from this page would kill the
+// request itself.
+const CONTROLLABLE_SERVICE_UNITS = [
+  'axonwalld.service',
+  'axonwall-ui.service',
+  'axonwall-controller.service',
+  'keepalived.service',
+  'conntrackd.service',
+  'suricata.service',
+  'unbound.service',
+  'kea-dhcp4-server.service',
+  'frr.service',
+  'crowdsec.service',
+  'headscale.service',
+  'nut-server.service',
+];
+
+export async function controlSystemService(
+  unit: string,
+  action: 'start' | 'stop' | 'restart'
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const cleanUnit = (unit || '').trim();
+  if (!CONTROLLABLE_SERVICE_UNITS.includes(cleanUnit)) {
+    return { success: false, message: `Service control is not available for '${unit}'.` };
+  }
+  if (action !== 'start' && action !== 'stop' && action !== 'restart') {
+    return { success: false, message: `Invalid service action '${action}'.` };
+  }
+
+  try {
+    execFileSync('systemctl', [action, cleanUnit], {
+      encoding: 'utf8',
+      timeout: 30000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { success: true, message: `systemctl ${action} ${cleanUnit} completed.` };
+  } catch (err: any) {
+    const detail = (err?.stderr || err?.stdout || err?.message || 'command failed').toString().trim();
+    return {
+      success: false,
+      message: `systemctl ${action} ${cleanUnit} failed: ${detail.slice(0, 300)}`,
+    };
+  }
+}
+
+// C4 (SSO): a real, live OIDC discovery check for the SSO page's
+// "Test IdP Discovery" button, which used to be a timer that always
+// reported success. This deliberately does NOT reuse the login flow's
+// cached discovery helper: a test button must reflect the IdP's live
+// state, not a 10-minute-old cached document, so it fetches with its
+// own short timeout and validates all three endpoints.
+export async function testOidcDiscoveryAction(
+  issuerUrl: string
+): Promise<{ ok: boolean; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const issuer = (issuerUrl || '').trim().replace(/\/+$/, '');
+  if (!issuer) {
+    return { ok: false, message: 'Enter an OIDC issuer URL first.' };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(issuer);
+  } catch {
+    return { ok: false, message: `Issuer URL '${issuerUrl}' is not a valid URL.` };
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return { ok: false, message: 'Issuer URL must use http(s).' };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    let res: Response;
+    try {
+      res = await fetch(`${issuer}/.well-known/openid-configuration`, {
+        headers: { accept: 'application/json' },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!res.ok) {
+      return { ok: false, message: `OIDC discovery failed: ${issuer} returned HTTP ${res.status}.` };
+    }
+    const doc: any = await res.json();
+    const missing = ['authorization_endpoint', 'token_endpoint', 'jwks_uri'].filter(
+      (k) => typeof doc?.[k] !== 'string' || !doc[k]
+    );
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        message: `OIDC discovery document from ${issuer} is incomplete (missing ${missing.join(', ')}).`,
+      };
+    }
+    return {
+      ok: true,
+      message: `OIDC discovery verified at ${issuer}: authorization, token, and JWKS endpoints all present.`,
+    };
+  } catch (err: any) {
+    const reason = err?.name === 'AbortError' ? 'timed out after 10s' : err?.message || 'fetch failed';
+    return { ok: false, message: `OIDC discovery failed for ${issuer}: ${reason}.` };
+  }
 }
 
 export interface LiveInterfaceInfo {
@@ -2554,6 +2692,18 @@ export async function saveInterfaceAssignment(data: {
 
   const state = await getCurrentDesiredState();
   const lookupName = (data.originalName || cleanName).trim().toLowerCase();
+  // C18: a create (no originalName) must not silently overwrite an
+  // existing interface. The Interfaces page sends no originalName for
+  // "Add", so a stale or failed load that emptied its list used to
+  // turn an add into an overwrite of the live LAN assignment. Renames
+  // (originalName present) keep the replace path.
+  if (!data.originalName?.trim()) {
+    if (state.interfaces.some((i) => i.name === cleanName)) {
+      throw new Error(
+        `Interface '${cleanName}' already exists. Edit the existing interface instead of creating a duplicate.`
+      );
+    }
+  }
   const idx = state.interfaces.findIndex((i) => i.name === lookupName);
 
   const defaultDesc =
@@ -3250,9 +3400,14 @@ export async function getReleaseInfo(forceRefresh = false): Promise<ReleaseInfo>
       if (tagRes.ok) {
         const tags = await tagRes.json();
         if (Array.isArray(tags) && tags.length > 0) {
+          // E12: exact-match only. The old prefix match admitted
+          // prerelease tags (1.2.4-rc1) and compareSemver scores them
+          // equal to their release, so a prerelease could be offered as
+          // the latest *stable* update. Prerelease-suffixed tags are
+          // excluded; if none remain, no stable tag is claimed.
           const semverTags = tags
             .map((t: any) => String(t?.name || '').replace(/^v/, ''))
-            .filter((t: string) => /^\d+\.\d+\.\d+/.test(t))
+            .filter((t: string) => /^\d+\.\d+\.\d+$/.test(t))
             .sort((a: string, b: string) => compareSemver(b, a));
           if (semverTags.length > 0) {
             latestVersion = semverTags[0];
@@ -3312,6 +3467,12 @@ export interface PartitionSlotInfo {
   name: string;
   isActive: boolean;
   isHealthy: boolean;
+  // E8: false when no verification of this slot's health has ever run.
+  // The daemon's healthVerified flag describes the running system only,
+  // so standby health is unknown — never healthy by inheritance. The
+  // page renders healthKnown === false as "Unverified", and must check
+  // it before trusting isHealthy.
+  healthKnown?: boolean;
   version: string;
   kernel: string;
   device: string;
@@ -3358,6 +3519,10 @@ export interface SystemPartitionsTelemetry {
   kernelVersion: string;
   osVersion: string;
   checks: HealthCheckItem[];
+  // E8: true when the daemon could not be reached and this telemetry
+  // was assembled from local files only. Slot health is unverified in
+  // that case; the page must show an unavailable banner, not PASS.
+  daemonUnreachable?: boolean;
   zbmPoolName?: string;
   zbmPoolTopology?: string;
   zbmPoolHealth?: string;
@@ -3456,6 +3621,12 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
     const defaultInactive = 'Standby';
     const slotAVer = daemonData.slotAVersion || (activeSlot === 'A' ? currentVersion : defaultInactive);
     const slotBVer = daemonData.slotBVersion || (activeSlot === 'B' ? currentVersion : defaultInactive);
+    // E8: healthVerified describes the running system only. The running
+    // slot's health is known only when the daemon actually sent the flag;
+    // the standby slot's health is never known from this flag.
+    const runningHealthKnown =
+      daemonData.healthVerified !== undefined && daemonData.healthVerified !== null;
+    const runningHealthy = Boolean(daemonData.healthVerified);
     return {
       installMode,
       zbmPoolName: daemonData.zbmPoolName || 'zroot',
@@ -3480,7 +3651,8 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                 slot: 'A',
                 name: 'Rolling Root Filesystem (/)',
                 isActive: true,
-                isHealthy: true,
+                isHealthy: runningHealthy,
+                healthKnown: runningHealthKnown,
                 version: slotAVer,
                 kernel: daemonData.kernelVersion || kernel,
                 device: daemonData.activeRootDevice || '/dev/disk/by-label/axon_root',
@@ -3495,7 +3667,8 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                   slot: 'A',
                   name: `Boot Environment (${slotAVer})`,
                   isActive: true,
-                  isHealthy: daemonData.healthVerified ?? true,
+                  isHealthy: runningHealthy,
+                  healthKnown: runningHealthKnown,
                   version: slotAVer,
                   kernel: daemonData.kernelVersion || kernel,
                   device: daemonData.activeRootDevice || `zroot/ROOT/axonwall-${slotAVer}`,
@@ -3507,7 +3680,9 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                   slot: 'B',
                   name: `Standby BE (${slotBVer})`,
                   isActive: false,
-                  isHealthy: true,
+                  // E8: the standby BE was never checked; unknown, not healthy.
+                  isHealthy: false,
+                  healthKnown: false,
                   version: slotBVer,
                   kernel: daemonData.kernelVersion || kernel,
                   device: `zroot/ROOT/axonwall-${slotBVer}`,
@@ -3521,7 +3696,10 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                 slot: 'A',
                 name: 'Slot A (Primary Rootfs)',
                 isActive: activeSlot === 'A',
-                isHealthy: daemonData.healthVerified || activeSlot === 'A',
+                // E8: only the running slot inherits healthVerified; the
+                // standby slot's health is unknown, not healthy.
+                isHealthy: activeSlot === 'A' ? runningHealthy : false,
+                healthKnown: activeSlot === 'A' ? runningHealthKnown : false,
                 version: slotAVer,
                 kernel: daemonData.kernelVersion || kernel,
                 device: activeSlot === 'A' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_a',
@@ -3533,7 +3711,8 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                 slot: 'B',
                 name: 'Slot B (Alternate Standby)',
                 isActive: activeSlot === 'B',
-                isHealthy: daemonData.healthVerified || activeSlot === 'B',
+                isHealthy: activeSlot === 'B' ? runningHealthy : false,
+                healthKnown: activeSlot === 'B' ? runningHealthKnown : false,
                 version: slotBVer,
                 kernel: daemonData.kernelVersion || kernel,
                 device: activeSlot === 'B' && daemonData.activeRootDevice ? daemonData.activeRootDevice : '/dev/disk/by-label/axon_root_b',
@@ -3607,8 +3786,12 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   if (activeSlot === 'A') slotAVersion = currentVersion;
   if (activeSlot === 'B') slotBVersion = currentVersion;
 
+  // E8: the daemon is unreachable, so this telemetry comes from local
+  // files only. Nothing was verified: slot health is unknown and the
+  // checks list must not claim PASS results that never ran.
   return {
     installMode: localInstallMode,
+    daemonUnreachable: true,
     slots:
       localInstallMode === 'rolling'
         ? [
@@ -3616,7 +3799,8 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
               slot: 'A',
               name: 'Rolling Root Filesystem (/)',
               isActive: true,
-              isHealthy: true,
+              isHealthy: false,
+              healthKnown: false,
               version: slotAVersion,
               kernel,
               device: rootDevice,
@@ -3630,7 +3814,8 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
               slot: 'A',
               name: 'Slot A (Primary Rootfs)',
               isActive: activeSlot === 'A',
-              isHealthy: true,
+              isHealthy: false,
+              healthKnown: false,
               version: slotAVersion,
               kernel,
               device: activeSlot === 'A' ? rootDevice : '/dev/disk/by-label/axon_root_a',
@@ -3642,7 +3827,8 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
               slot: 'B',
               name: 'Slot B (Alternate Standby)',
               isActive: activeSlot === 'B',
-              isHealthy: true,
+              isHealthy: false,
+              healthKnown: false,
               version: slotBVersion,
               kernel,
               device: activeSlot === 'B' ? rootDevice : '/dev/disk/by-label/axon_root_b',
@@ -3653,27 +3839,15 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
           ],
     bootCount,
     bootLimit: 3,
-    healthVerified: true,
+    healthVerified: false,
     kernelVersion: kernel,
     osVersion: `Axonwall OS v${currentVersion}`,
     checks: [
       {
-        name: 'Network Interface Initialization',
-        status: 'PASS',
-        detail: 'Active loopback (lo) detected',
-        durationMs: 12,
-      },
-      {
-        name: 'Kernel nftables Netfilter Baseline',
-        status: 'PASS',
-        detail: 'nftables subsystem verified',
-        durationMs: 25,
-      },
-      {
-        name: 'Control Plane & Management Quorum',
-        status: 'PASS',
-        detail: 'Agent socket and control plane active',
-        durationMs: 6,
+        name: 'Daemon telemetry unavailable',
+        status: 'WARN',
+        detail: 'axonwalld unreachable — health checks were not run and slot health is unverified',
+        durationMs: 0,
       },
     ],
   };
