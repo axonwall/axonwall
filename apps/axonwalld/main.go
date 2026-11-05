@@ -519,7 +519,17 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	}
 
 	// Reconcile physical/logical interfaces and static routes whenever a bundle is applied
-	applyBootInterfaces()
+	// A-M16: a failed static address assignment fails the apply (with
+	// rollback, like the nft failure below) instead of being logged
+	// while the WAN is left address-less.
+	if err := applyBootInterfaces(); err != nil {
+		log.Printf("[Agent] Failed to apply boot interfaces: %v; rolling back", err)
+		_ = s.executeRollback("interface apply failed")
+		return &pb.ApplyBundleResponse{
+			Success: false,
+			Message: fmt.Sprintf("failed to apply interfaces: %v", err),
+		}, nil
+	}
 	if err := ReconcileStaticRoutes(); err != nil {
 		log.Printf("[Agent] Warning: Static routes reconciliation: %v", err)
 	}
@@ -630,7 +640,11 @@ func (s *AgentServer) executeRollback(reason string) error {
 	restoreLkgConfig(s.bundleDir)
 
 	// Re-apply restored physical/logical interfaces and reconcile static routes
-	applyBootInterfaces()
+	// A-M16: a rollback must not itself fail because one interface
+	// re-apply failed; log and continue restoring the rest.
+	if err := applyBootInterfaces(); err != nil {
+		log.Printf("[Agent] Rollback: boot interfaces re-apply failed: %v", err)
+	}
 	if err := ReconcileStaticRoutes(); err != nil {
 		log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
 	}
@@ -1198,7 +1212,44 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 	return specs
 }
 
-func applyBootInterfaces() {
+// staleStaticAddrs parses `ip -4 addr show dev <device>` output and
+// returns the global (non-secondary, non-link-local) addresses that are
+// not the target address. A-M16: the old code ran `ip addr flush` on
+// every WAN bundle apply, deleting keepalived VRRP VIPs (which live on
+// the device as secondary addresses) along with the stale static
+// address it meant to remove. Secondary addresses are therefore never
+// returned here, so a VIP survives an unrelated bundle apply.
+func staleStaticAddrs(addrShowOut string, targetCIDR string) []string {
+	targetIP := strings.Split(targetCIDR, "/")[0]
+	var stale []string
+	for _, line := range strings.Split(addrShowOut, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "inet ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		addr := fields[1]
+		ip := strings.Split(addr, "/")[0]
+		if addr == targetCIDR || ip == targetIP {
+			continue
+		}
+		// Keepalived VIPs are secondary addresses; link-local
+		// addresses are not stale statics either.
+		if strings.Contains(line, " secondary") || strings.Contains(line, " scope link") {
+			continue
+		}
+		if net.ParseIP(ip) == nil {
+			continue
+		}
+		stale = append(stale, addr)
+	}
+	return stale
+}
+
+func applyBootInterfaces() error {
 	sanitizeEtcNetworkInterfaces()
 
 	config := make(map[string]string)
@@ -1215,7 +1266,7 @@ func applyBootInterfaces() {
 
 	specs := loadAllBootInterfaces(config)
 	if len(specs) == 0 {
-		return
+		return nil
 	}
 
 	validIP := func(ip string) string {
@@ -1249,6 +1300,10 @@ func applyBootInterfaces() {
 
 	var dhcpSpecs []bootIfaceSpec
 	defaultRouteSet := false
+	// A-M16: the first static-WAN address failure is returned to the
+	// caller (ApplyBundle fails the apply) instead of being logged
+	// while the WAN is left address-less after a flush.
+	var firstIfaceErr error
 
 	for _, spec := range specs {
 		if spec.Role == "wan-delegated" {
@@ -1274,10 +1329,22 @@ func applyBootInterfaces() {
 			if !strings.Contains(string(out), "inet "+spec.IPv4) && !strings.Contains(string(out), "inet "+ipOnly+"/") {
 				log.Printf("[Agent] Boot-apply: configuring static IP %s on %s (%s, role=%s)", spec.IPv4, spec.Name, spec.Device, spec.Role)
 				if spec.Role == "wan" {
-					_ = exec.Command("ip", "addr", "flush", "dev", spec.Device).Run()
+					// A-M16: never flush the device — that deletes
+					// HA VIPs and secondary addresses. Delete only
+					// the specific stale global addresses, then use
+					// `ip addr replace` (add-or-replace just this
+					// address) for the target.
+					for _, stale := range staleStaticAddrs(string(out), spec.IPv4) {
+						if delOut, err := exec.Command("ip", "addr", "del", stale, "dev", spec.Device).CombinedOutput(); err != nil {
+							log.Printf("[Agent] Boot-apply: warning: failed to remove stale address %s on %s: %s", stale, spec.Device, string(delOut))
+						}
+					}
 				}
-				if addOut, err := exec.Command("ip", "addr", "add", spec.IPv4, "dev", spec.Device).CombinedOutput(); err != nil {
+				if addOut, err := exec.Command("ip", "addr", "replace", spec.IPv4, "dev", spec.Device).CombinedOutput(); err != nil {
 					log.Printf("[Agent] Boot-apply: failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
+					if firstIfaceErr == nil {
+						firstIfaceErr = fmt.Errorf("failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
+					}
 				}
 			}
 			if spec.Gateway != "" && spec.Role == "wan" && !defaultRouteSet {
@@ -1328,6 +1395,8 @@ func applyBootInterfaces() {
 			}
 		}(dhcpSpecs)
 	}
+
+	return firstIfaceErr
 }
 
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
@@ -1527,7 +1596,12 @@ func main() {
 
 	// If boot-apply is requested, load last-known-good configuration and ensure network interfaces are configured
 	if *bootApply {
-		applyBootInterfaces()
+		// A-M16: log a failed interface apply at boot; boot itself
+		// must not abort on one interface (the post-boot checks and
+		// later bundle applies still run).
+		if err := applyBootInterfaces(); err != nil {
+			log.Printf("[Agent] Boot-apply: boot interfaces failed: %v", err)
+		}
 
 		lkgPath := filepath.Join(*bundleDir, "last-known-good.nft")
 		hasLkg := false
