@@ -404,6 +404,16 @@ fi
 
 # 3. Check if running in ZFSBootMenu, Dual-Root, or Rolling Single-Disk mode
 if [ "$ZBM_MODE" = "1" ]; then
+  # E10: the ZBM path used to run with an empty --version, minting a
+  # version-less Boot Environment (axonwall-), writing an empty
+  # version file into the staged BE, and recording a BE dataset name
+  # in a version field. The daemon always passes a version (it
+  # defaults an empty one to the installed version before invoking
+  # this script), so refusing here only blocks direct CLI misuse.
+  if [ -z "$CLEAN_VER" ]; then
+    echo "[-] ERROR: --version is required for ZBM updates; refusing to create a version-less Boot Environment." >&2
+    exit 1
+  fi
   echo "[+] Running in ZFSBootMenu Root-on-ZFS mode. Performing atomic snapshot & clone Boot Environment update..."
   POOL_NAME="zroot"
   PARENT_DS="${POOL_NAME}/ROOT"
@@ -475,7 +485,15 @@ if [ "$ZBM_MODE" = "1" ]; then
     echo "zbm" > "${ZBM_STAGE_MNT}/var/lib/axonwall/install-mode"
 
     SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
-    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$CURRENT_BE" "$SV_TIMESTAMP")"
+    # E10: slotB is a version field, never a BE dataset name. Derive
+    # the running BE's version from its name (axonwall-<version>);
+    # fall back to the running version when the name carries no
+    # usable version (e.g. the "current" fallback above).
+    CURRENT_BE_VER="${CURRENT_BE#axonwall-}"
+    if [ "$CURRENT_BE_VER" = "$CURRENT_BE" ] || [ -z "$CURRENT_BE_VER" ] || [ "$CURRENT_BE_VER" = "current" ]; then
+      CURRENT_BE_VER="$RUNNING_VER"
+    fi
+    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$CURRENT_BE_VER" "$SV_TIMESTAMP")"
     printf '%s' "$SV_JSON" > "${ZBM_STAGE_MNT}/etc/axonwall/slot_versions.json" 2>/dev/null || true
     printf '%s' "$SV_JSON" > "${ZBM_STAGE_MNT}/var/lib/axonwall/slot_versions.json" 2>/dev/null || true
 
