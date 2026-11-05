@@ -359,7 +359,14 @@ func TestWatchdogZbmDetectionAndOperations(t *testing.T) {
 			return []byte("zroot/ROOT/axonwall-0.11.29@pre-upgrade\n"), nil
 		}
 		if strings.HasPrefix(cmdStr, "get") && strings.Contains(cmdStr, "org.axonwall:fallback_be") {
-			return []byte("zroot/ROOT/axonwall-0.11.29\n"), nil
+			// E4: the fallback is the last verified active BE
+			// (runVerificationSequence sets it to the active root
+			// device), not the standby BE step 6 deletes — a
+			// standby BE that is the fallback can no longer be
+			// deleted, so the fixture must not name it here. The
+			// refusal itself is covered by
+			// TestBatch7DeleteFallbackBootEnvironmentRefused.
+			return []byte("zroot/ROOT/axonwall-0.11.30\n"), nil
 		}
 		return []byte("ok"), nil
 	}
