@@ -45249,6 +45249,24 @@ function isValidCidr(value) {
   const prefix = Number(parts[1]);
   return prefix >= 0 && prefix <= (family === 4 ? 32 : 128);
 }
+function parseFleetSyncBody(body) {
+  if (!body.trim()) {
+    return { ok: true, desired: void 0 };
+  }
+  let raw;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return { ok: false, status: 400, error: "Invalid JSON" };
+  }
+  const parsed = DesiredStateSchema.safeParse(raw);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    const detail = first ? ` (${first.path.join(".") || "body"}: ${first.message})` : "";
+    return { ok: false, status: 400, error: `Invalid DesiredState body${detail}` };
+  }
+  return { ok: true, desired: parsed.data };
+}
 function validateHaTransition(payload, fleetLanVip) {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? "").toLowerCase();
   if (!rawRole) {
@@ -45926,25 +45944,22 @@ async function main() {
       });
       req.on("end", () => {
         if (aborted2) return;
-        try {
-          let desired = null;
-          if (body.trim()) {
-            const parsed = DesiredStateSchema.safeParse(JSON.parse(body));
-            if (parsed.success) desired = parsed.data;
-          }
-          let synced = 0;
-          for (const sat of activeSatellites.values()) {
-            if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-              syncSatelliteDesiredState(sat, desired);
-              synced++;
-            }
-          }
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ success: true, syncedSatellites: synced }));
-        } catch {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Invalid JSON" }));
+        const validation = parseFleetSyncBody(body);
+        if (!validation.ok) {
+          res.writeHead(validation.status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: validation.error }));
+          return;
         }
+        const desired = validation.desired;
+        let synced = 0;
+        for (const sat of activeSatellites.values()) {
+          if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
+            syncSatelliteDesiredState(sat, desired);
+            synced++;
+          }
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, syncedSatellites: synced }));
       });
       return;
     }
@@ -46524,6 +46539,7 @@ export {
   isValidMacAddress,
   listMcpApiKeys,
   normalizeMacAddress,
+  parseFleetSyncBody,
   processMcpJsonRpcMessage,
   provisionHeadscaleWithRetry,
   queryMcpAuditEntries,
