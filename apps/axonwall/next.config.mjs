@@ -1,3 +1,8 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const cspHeader = `
   default-src 'self';
   script-src 'self' 'unsafe-eval' 'unsafe-inline';
@@ -20,7 +25,14 @@ const nextConfig = {
       bodySizeLimit: '2mb',
     },
   },
+
   webpack: (config) => {
+    // Resolve the `@/` tsconfig alias explicitly. Next's tsconfig-paths
+    // handling fails to resolve `@/server/*` for the first pages that
+    // import each server-action module (Module not found, while later
+    // importers of the same module resolve fine); a plain webpack alias
+    // makes resolution deterministic for every importer.
+    config.resolve.alias = { ...config.resolve.alias, '@': path.join(__dirname, 'src') };
     config.resolve.extensionAlias = {
       '.js': ['.ts', '.tsx', '.js'],
     };
