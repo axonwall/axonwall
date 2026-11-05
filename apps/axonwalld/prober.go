@@ -85,9 +85,22 @@ func (p *SDWanProber) ReloadConfig(path string) error {
 		return err
 	}
 
+	// A-M4: seed the active map from the previous config instead of
+	// resetting it to empty. A gateway that was up before the reload
+	// and is down on the first post-reload probe must produce a
+	// true→false transition so triggerFailover runs; with a reset map
+	// it produced false→false and the dead gateway kept the default
+	// route. Entries for gateways no longer configured are dropped.
 	p.mu.Lock()
+	prevActive := p.active
 	p.config = &config
-	p.active = make(map[string]bool)
+	kept := make(map[string]bool)
+	for _, gw := range config.Gateways {
+		if was, ok := prevActive[gw.Name]; ok {
+			kept[gw.Name] = was
+		}
+	}
+	p.active = kept
 	p.mu.Unlock()
 
 	if !config.isEnabled() {
@@ -126,6 +139,14 @@ func (p *SDWanProber) run(ctx context.Context) {
 	// Initial probe
 	p.probeAll(ctx)
 
+	// A-M4: evaluate failover unconditionally after the first
+	// post-reload probe cycle, even if no gateway changed state in
+	// that cycle. triggerFailover is a no-op when no gateway is
+	// active, so this cannot move the route to a dead gateway; it
+	// only guarantees the route reflects the fresh probe results
+	// rather than the pre-reload winner.
+	p.evaluateFailover()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -133,6 +154,35 @@ func (p *SDWanProber) run(ctx context.Context) {
 		case <-ticker.C:
 			p.probeAll(ctx)
 		}
+	}
+}
+
+// evaluateFailover re-calculates the default route from the current
+// active map and config snapshot, regardless of whether the last
+// probe cycle observed a transition.
+func (p *SDWanProber) evaluateFailover() {
+	p.mu.Lock()
+	if !p.config.isEnabled() {
+		p.mu.Unlock()
+		return
+	}
+	gateways := p.config.Gateways
+	groups := p.config.GatewayGroups
+	p.mu.Unlock()
+
+	p.triggerFailover(gateways, groups)
+}
+
+// markGatewayOffline records a gateway that could not be probed at
+// all as offline (A-M5). It is called from every skip branch of
+// probeAll, including a disabled gateway: a gateway that cannot be
+// probed must not remain a failover target.
+func (p *SDWanProber) markGatewayOffline(name string, stateChanged *bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.active[name] {
+		p.active[name] = false
+		*stateChanged = true
 	}
 }
 
@@ -151,6 +201,9 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 
 	for _, gw := range gateways {
 		if !gw.Enabled {
+			// A-M5: a disabled gateway stops being a failover
+			// target instead of lingering as active=true.
+			p.markGatewayOffline(gw.Name, &stateChanged)
 			continue
 		}
 
@@ -159,10 +212,17 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 			targetIP = gw.GatewayIP
 		}
 		if targetIP == "" || net.ParseIP(targetIP) == nil {
+			// A-M5: "cannot probe" is offline, not "still up".
+			// Without this, a gateway whose interface was renamed
+			// or removed stayed active=true forever and the
+			// default route kept pointing at a dead device.
+			p.markGatewayOffline(gw.Name, &stateChanged)
 			continue
 		}
 		resolvedDev := resolveInterfaceDevice(gw.Interface, devMap)
 		if resolvedDev == "" || !validGwIfaceRegex.MatchString(resolvedDev) {
+			// A-M5: same treatment for an unresolvable device.
+			p.markGatewayOffline(gw.Name, &stateChanged)
 			continue
 		}
 

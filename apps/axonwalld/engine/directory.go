@@ -529,8 +529,19 @@ func (d *DirectoryManager) SetHAState(enabled bool, role string, serverID int, p
 func (d *DirectoryManager) checkWritePermitted() error {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if d.haEnabled && d.haRole == "BACKUP" {
-		return fmt.Errorf("appliance is currently in HA BACKUP state; identity directory mutations must be performed on the active MASTER node")
+	// A-M18: allowlist, not denylist. The old guard blocked only
+	// BACKUP, so a node in FAULT — VRRP failed, NAS and SQLite
+	// already demoted to backup behaviour — still accepted identity
+	// writes while the real master also accepted them, producing
+	// divergent directory state for syncrepl to reconcile. When HA
+	// is enabled, only MASTER may write.
+	// ASSUMPTION (flagged for product confirmation per the hunt
+	// report): FAULT must not write. If FAULT nodes are ever meant
+	// to accept writes (e.g. during a transitional window), this
+	// allowlist is the place to carve out that exception — but the
+	// default must stay fail-closed.
+	if d.haEnabled && d.haRole != "MASTER" {
+		return fmt.Errorf("appliance is currently in HA %s state; identity directory mutations must be performed on the active MASTER node", d.haRole)
 	}
 	return nil
 }

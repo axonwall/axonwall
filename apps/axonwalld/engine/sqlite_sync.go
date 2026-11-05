@@ -61,10 +61,15 @@ type SyncStatusResponse struct {
 	SignsPayloads bool `json:"signsPayloads"`
 }
 
+// masterServerRetryDelay is the pause between bind retries of the HA
+// sync master server (A-M7). Package variable so tests can shorten it.
+var masterServerRetryDelay = 5 * time.Second
+
 type SqliteSyncManager struct {
 	mu                 sync.Mutex
 	cfg                SqliteSyncConfig
 	server             *http.Server
+	serverGen          uint64 // generation of the running master server; stop/replace bumps it so a stale retry loop retires (A-M7)
 	stopPoller         chan struct{}
 	pollerRunning      bool
 	pollerDone         chan struct{} // closed by the poller goroutine on exit; waited on by ApplyConfig/OnStateChange/Stop
@@ -169,6 +174,24 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 		for _, db := range databases {
 			if _, err := os.Stat(db); err == nil {
 				_ = exec.Command("sqlite3", db, "PRAGMA wal_checkpoint(TRUNCATE);").Run()
+			}
+		}
+
+		// A-M8: promote the verified peer state replica to the live
+		// path now that the databases are checkpointed, before the
+		// master server starts serving. The old code downloaded,
+		// checksummed, and signature-verified peer state.json on
+		// every poll and then never read it back, so a failover
+		// served the new master's own stale state instead of the
+		// peer's latest. A promotion failure is logged, not fatal:
+		// refusing takeover entirely would leave no master at all,
+		// which is worse than serving the local state.
+		for _, livePath := range []string{"/etc/axonwall/state.json", "/var/lib/axonwall/state.json"} {
+			promoted, err := promoteStateReplicaFile(livePath, livePath+".ha-replica")
+			if err != nil {
+				slog.Warn("HA sync: failed to promote verified peer state replica", "live", livePath, "error", err)
+			} else if promoted {
+				slog.Info("HA sync: promoted verified peer state replica to live state", "live", livePath)
 			}
 		}
 
@@ -413,11 +436,29 @@ func (m *SqliteSyncManager) startMasterServer() error {
 	}
 
 	slog.Info("Starting Unified HA Sync Master Server (SQLite + State + ZFS + K3s + Identity PKI)", "addr", listenAddr, "transport", m.effectiveTransport)
+	// A-M7: this server object belongs to exactly one generation.
+	// stopInternal bumps serverGen, so a retry loop whose server was
+	// stopped (node demoted to BACKUP, HA disabled, config replaced)
+	// can never bind later and serve the sync database from a node
+	// that is no longer master. The old code only exited on
+	// ErrServerClosed, and Close on a never-listening server was a
+	// no-op, so the loop resurrected the stopped server on retry.
+	// Callers hold m.mu here (ApplyConfig, OnStateChange), so the
+	// bump is safe.
+	m.serverGen++
+	gen := m.serverGen
 	srv := m.server
 	go func() {
 		// The HA sync interface address may not be assigned yet at boot;
 		// keep retrying the bind instead of giving up on the first error.
 		for {
+			m.mu.Lock()
+			retired := gen != m.serverGen
+			m.mu.Unlock()
+			if retired {
+				slog.Info("SQLite Sync master server retry loop retiring: server was stopped or replaced", "addr", listenAddr)
+				return
+			}
 			var err error
 			if serveTLS {
 				err = srv.ListenAndServeTLS("", "")
@@ -427,8 +468,8 @@ func (m *SqliteSyncManager) startMasterServer() error {
 			if err == nil || err == http.ErrServerClosed {
 				return
 			}
-			slog.Error("SQLite Sync server error; retrying in 5s", "addr", listenAddr, "error", err)
-			time.Sleep(5 * time.Second)
+			slog.Error("SQLite Sync server error; retrying", "addr", listenAddr, "error", err, "retryDelay", masterServerRetryDelay)
+			time.Sleep(masterServerRetryDelay)
 		}
 	}()
 
@@ -885,6 +926,53 @@ func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// promoteStateReplicaFile atomically replaces the live appliance state
+// file with the verified peer replica written by the backup poller
+// (A-M8). The replica was checksum- and signature-verified when it
+// was downloaded, but it is re-checked here for non-empty valid JSON
+// so a torn local file can never become the live state. The swap is
+// a rename within the live file's directory, so readers never observe
+// a half-written state.json; the live file's mode and ownership are
+// preserved. A missing replica is not an error — it only means the
+// poller never fetched peer state — and the replica file itself is
+// kept as the backup copy.
+func promoteStateReplicaFile(livePath, replicaPath string) (bool, error) {
+	data, err := os.ReadFile(replicaPath)
+	if err != nil {
+		return false, nil
+	}
+	if len(data) == 0 || !json.Valid(data) {
+		return false, fmt.Errorf("peer state replica %s is empty or not valid JSON; refusing to promote", replicaPath)
+	}
+	dir := filepath.Dir(livePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(dir, ".state-promote-*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if fi, err := os.Stat(livePath); err == nil {
+		_ = tmp.Chmod(fi.Mode().Perm())
+	} else {
+		_ = tmp.Chmod(0600)
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	preserveFileOwnership(tmpName, livePath)
+	if err := os.Rename(tmpName, livePath); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *http.Client, scheme string, stopCh <-chan struct{}, pollerCtx context.Context) {
 	m.mu.Lock()
 	peerAddr := m.cfg.PeerAddress
@@ -1117,6 +1205,11 @@ func (m *SqliteSyncManager) startLitestream() error {
 // Stop) capture m.pollerDone, release m.mu, and wait on it — the join
 // that A-H3 requires, placed where it cannot deadlock.
 func (m *SqliteSyncManager) stopInternal() {
+	// A-M7: retire the master server object. Bumping the generation
+	// makes the old retry loop exit after its sleep instead of
+	// binding on a later retry; Close alone cannot do that, because
+	// Close on a server that never started listening is a no-op.
+	m.serverGen++
 	if m.server != nil {
 		_ = m.server.Close()
 		m.server = nil
