@@ -11,6 +11,11 @@ ConditionKernelCommandLine=!axonwall.unattended=1
 Type=oneshot
 ExecStart=/usr/local/bin/axonwall-firstboot
 RemainAfterExit=yes
+# Firstboot now clones the booted root slot to the standby slot on cloud
+# images (step 1.1 in axonwall-firstboot), an rsync of ~1 GB that alone
+# can exceed systemd's 90 s default start timeout on slow disks; 15 min
+# bounds the whole run while leaving room for that copy.
+TimeoutStartSec=15min
 
 [Install]
 WantedBy=multi-user.target

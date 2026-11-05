@@ -4,7 +4,8 @@
 # ==============================================================================
 # Builds an optimized, compressed QCOW2 virtual appliance image with:
 # - GPT hybrid BIOS & UEFI boot support (SeaBIOS + OVMF)
-# - Dual-Root A/B unbrickable upgrade layout (Slot A active, Slot B standby)
+# - Dual-Root A/B unbrickable upgrade layout (Slot A active, Slot B standby;
+#   B ships empty and is populated by firstboot -- see the note below)
 # - Dynamic auto-expansion of data partition via cloud-guest-utils (growpart)
 # - Native cloud-init integration (#cloud-config)
 # ==============================================================================
@@ -92,7 +93,6 @@ cleanup() {
   set +e
   echo "[*] Cleaning up mounts and loop devices..."
   umount -R "${WORK_DIR}/mnt" 2>/dev/null || true
-  umount "${WORK_DIR}/mnt-b" 2>/dev/null || true
   if [[ -n "${LOOP_DEV:-}" && -b "${LOOP_DEV}" ]]; then
     losetup -d "${LOOP_DEV}" 2>/dev/null || true
   fi
@@ -164,6 +164,13 @@ mkdir -p "${TARGET}/var/lib/axonwall/home"
 # Set firstboot marker
 touch "${TARGET}/etc/axonwall/.firstboot"
 
+# Slot B ships as an empty formatted filesystem (see the note below the
+# sanitize step): storing the rootfs twice pushed the image past GitHub's
+# 2 GiB release asset limit. Firstboot populates B from the booted slot
+# once, then consumes this marker; installer (d-i) images populate B at
+# install time and never carry it.
+touch "${TARGET}/etc/axonwall/.ab-clone-pending"
+
 # Configure cloud-init datasource
 cat << 'CFG_EOF' > "${TARGET}/etc/cloud/cloud.cfg.d/90_axonwall.cfg"
 # Axonwall Appliance Cloud-Init Datasource Configuration
@@ -224,31 +231,18 @@ rm -rf "${TARGET}/tmp/"* "${TARGET}/var/tmp/"*
 # Unmount target mounts
 umount "${TARGET}/sys" "${TARGET}/proc" "${TARGET}/dev/pts" "${TARGET}/dev"
 
-# Clone Slot A to Slot B: the image advertises a dual-root A/B layout,
-# but slot B previously shipped as an empty formatted filesystem, so any
-# watchdog fallback to B booted an empty root. Mirror the d-i path
-# (10axonwall-ab-setup), which replicates A to B at install time. This
-# runs after sanitizing so slot B inherits the sanitized state
-# (cleared machine-id/host keys/cloud state), and before the data and
-# EFI partitions are unmounted so they can be excluded from the copy.
-echo "[+] Cloning Slot A rootfs to Slot B standby..."
-SLOT_B_MNT="${WORK_DIR}/mnt-b"
-mkdir -p "${SLOT_B_MNT}"
-mount "${PART_ROOT_B}" "${SLOT_B_MNT}"
-rsync -aHAX --delete \
-  --exclude='/boot/efi/*' \
-  --exclude='/var/lib/axonwall/*' \
-  --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
-  --exclude='/run/*' --exclude='/tmp/*' \
-  "${TARGET}/" "${SLOT_B_MNT}/"
-# Slot B must mount itself as root: point its / entry at its own label
-# (as d-i does), or systemd would remount slot A over the booted slot B.
-if [[ -f "${SLOT_B_MNT}/etc/fstab" ]]; then
-  sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root_b\1|' "${SLOT_B_MNT}/etc/fstab"
-fi
-umount "${SLOT_B_MNT}"
-rmdir "${SLOT_B_MNT}" 2>/dev/null || true
-
+# Slot B ships EMPTY: it is formatted above (mkfs.ext4, label axon_root_b)
+# and left unpopulated. The batch-3 fix cloned Slot A to Slot B here so a
+# watchdog fallback would find a bootable standby, but that doubled the
+# image (1.17 GB -> 2.34 GB) and pushed it past GitHub's 2 GiB release
+# asset limit. The clone now happens on the appliance itself: firstboot
+# (axonwall-firstboot, step 1.1) replicates the booted slot to the
+# standby slot once, gated by the .ab-clone-pending marker written above,
+# mirroring the d-i path (10axonwall-ab-setup) which replicates A to B at
+# install time. Until that first-boot clone completes, a watchdog fallback
+# to B finds an empty root -- the same window the d-i path already accepts
+# between install and first boot, and far narrower than shipping B empty
+# with no clone at all.
 umount "${TARGET}/boot/efi" "${TARGET}/var/lib/axonwall" "${TARGET}"
 losetup -d "${LOOP_DEV}"
 LOOP_DEV=""
