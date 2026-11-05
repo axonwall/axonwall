@@ -320,6 +320,37 @@ export interface HaTransitionValidation {
 // registry. `fleetLanVip` is the LAN VIP from fleet config (hosted edge
 // LAN address); it is the only permitted non-explicit VIP source —
 // there is no hardcoded default. Role precedence is role > state > type.
+export type FleetSyncBodyValidation =
+  | { ok: true; desired: DesiredState | undefined }
+  | { ok: false; status: 400; error: string };
+
+// B-H1: parse the POST /api/v1/fleet/sync body. An empty body means
+// "re-sync from the on-disk state" (desired === undefined, so
+// syncSatelliteDesiredState loads /etc/axonwall/state.json). A
+// non-empty body must be valid JSON matching DesiredStateSchema;
+// anything else is a 400. The previous handler silently ignored a
+// schema failure and synced `null`, which syncSatelliteDesiredState
+// treats as a value (not "load from disk"), so edge satellites were
+// pushed hardcoded default interface config.
+export function parseFleetSyncBody(body: string): FleetSyncBodyValidation {
+  if (!body.trim()) {
+    return { ok: true, desired: undefined };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return { ok: false, status: 400, error: 'Invalid JSON' };
+  }
+  const parsed = DesiredStateSchema.safeParse(raw);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    const detail = first ? ` (${first.path.join('.') || 'body'}: ${first.message})` : '';
+    return { ok: false, status: 400, error: `Invalid DesiredState body${detail}` };
+  }
+  return { ok: true, desired: parsed.data };
+}
+
 export function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?: string): HaTransitionValidation {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? '').toLowerCase();
   if (!rawRole) {
@@ -735,6 +766,14 @@ async function main() {
     return null;
   }
 
+  // B-H1: the fleet-sync body is validated by parseFleetSyncBody
+  // (exported above, beside validateHaTransition) before any
+  // means "re-sync from the on-disk state" (desired === undefined,
+  // so syncSatelliteDesiredState loads /etc/axonwall/state.json); a
+  // non-empty body that fails validation is a 400, never a silent
+  // sync of default/empty state. Passing null here used to mean
+  // "sync with empty state", which pushed hardcoded default edge
+  // config (WAN DHCP, LAN 10.0.0.1/24) to every connected edge.
   function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null) {
     if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return;
 
@@ -1222,25 +1261,24 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       });
       req.on('end', () => {
         if (aborted) return;
-        try {
-          let desired: DesiredState | null = null;
-          if (body.trim()) {
-            const parsed = DesiredStateSchema.safeParse(JSON.parse(body));
-            if (parsed.success) desired = parsed.data;
-          }
-          let synced = 0;
-          for (const sat of activeSatellites.values()) {
-            if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
-              syncSatelliteDesiredState(sat, desired);
-              synced++;
-            }
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, syncedSatellites: synced }));
-        } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        // B-H1: validate the body before syncing anything. A 400 here
+        // means no satellite was synced.
+        const validation = parseFleetSyncBody(body);
+        if (!validation.ok) {
+          res.writeHead(validation.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: validation.error }));
+          return;
         }
+        const desired = validation.desired;
+        let synced = 0;
+        for (const sat of activeSatellites.values()) {
+          if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
+            syncSatelliteDesiredState(sat, desired);
+            synced++;
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, syncedSatellites: synced }));
       });
       return;
     }
