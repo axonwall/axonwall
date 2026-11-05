@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/url"
@@ -33,8 +34,26 @@ var (
 )
 
 type EnvelopeMessage struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+	CommandID string          `json:"commandId,omitempty"`
+}
+
+// CommandAckPayload is the per-command acknowledgement the satellite
+// sends back over the same socket (A-M9). The hub previously could
+// not distinguish "applied" from "failed to apply": every handler
+// failure was only logged locally. The hub's message handler ignores
+// unknown envelope types, so COMMAND_ACK is backward compatible with
+// a hub that does not consume it yet. CommandID is echoed when the
+// hub supplies one; hub commands today carry no id, so the ack is
+// correlated by command type until the hub starts sending ids.
+type CommandAckPayload struct {
+	Command     string `json:"command"`
+	CommandID   string `json:"commandId,omitempty"`
+	SatelliteID string `json:"satelliteId"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+	Timestamp   int64  `json:"timestamp"`
 }
 
 type NftablesSyncPayload struct {
@@ -66,6 +85,10 @@ type BlockTargetPayload struct {
 type TelemetryReportPayload struct {
 	SatelliteID string                  `json:"satelliteId"`
 	Metrics     engine.SatelliteMetrics `json:"metrics"`
+	// LastApplyError carries the most recent hub-command failure for
+	// hubs that do not consume COMMAND_ACK yet (A-M9 fallback). It is
+	// empty when the last command succeeded.
+	LastApplyError string `json:"lastApplyError,omitempty"`
 }
 
 // exitOrHalt exits normally, except as PID 1 where exiting would panic the kernel.
@@ -278,6 +301,14 @@ func main() {
 	headers["X-Axonwall-Satellite-ID"] = []string{*satID}
 	headers["X-Axonwall-ZTP-Token"] = []string{*token}
 
+	// A-M10: install the fail-closed emergency lockdown as the
+	// rollback target when no baseline or confirmed ruleset exists
+	// yet. In PID 1 mode the initial ruleset was already applied and
+	// confirmed above, so this is a no-op there; in hub-managed mode
+	// it guarantees a watchdog rollback escapes a bad first ruleset
+	// instead of restoring it.
+	nftEngine.SetEmergencyFallback(engine.BuildEmergencyLockdownNft(*coreURL))
+
 	backoff := 2 * time.Second
 	const maxBackoff = 60 * time.Second
 
@@ -317,13 +348,59 @@ func main() {
 		writeWS := func(messageType int, data []byte) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
+			// A-H4: a write deadline so a send into a dead socket
+			// fails instead of blocking the telemetry loop forever.
+			_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			return c.WriteMessage(messageType, data)
 		}
 
+		// A-H4: read deadlines are what turn a TCP blackhole (hub
+		// crash, NAT state loss, no FIN/RST) into a read error so
+		// the outer reconnect loop runs. The deadline is armed here
+		// for the no-pong-at-all case and re-armed on every pong and
+		// on every received message below.
+		readDeadline := time.Duration(2*(*watchdogTimeout)) * time.Second
+		_ = c.SetReadDeadline(time.Now().Add(readDeadline))
+
 		c.SetPongHandler(func(appData string) error {
 			lastHeardUnix.Store(time.Now().Unix())
+			_ = c.SetReadDeadline(time.Now().Add(readDeadline))
 			return nil
 		})
+
+		// Last hub-command failure, for the COMMAND_ACK envelope and
+		// the telemetry fallback (A-M9).
+		var lastApplyErrMu sync.Mutex
+		var lastApplyError string
+		sendAck := func(command, commandID string, err error) {
+			lastApplyErrMu.Lock()
+			if err != nil {
+				lastApplyError = err.Error()
+			} else {
+				lastApplyError = ""
+			}
+			lastApplyErrMu.Unlock()
+			ack := CommandAckPayload{
+				Command:     command,
+				CommandID:   commandID,
+				SatelliteID: *satID,
+				Success:     err == nil,
+				Timestamp:   time.Now().Unix(),
+			}
+			if err != nil {
+				ack.Error = err.Error()
+			}
+			payloadBytes, mErr := json.Marshal(ack)
+			if mErr != nil {
+				return
+			}
+			msg := EnvelopeMessage{Type: "COMMAND_ACK", Payload: payloadBytes}
+			if msgBytes, mErr := json.Marshal(msg); mErr == nil {
+				if wErr := writeWS(websocket.TextMessage, msgBytes); wErr != nil {
+					slog.Warn("Failed to send command ack", "command", command, "error", wErr)
+				}
+			}
+		}
 
 		// Watchdog routine: triggers rollback if connectivity to Core is lost
 		go func() {
@@ -341,7 +418,16 @@ func main() {
 						if err := nftEngine.Rollback(); err != nil {
 							slog.Error("Watchdog rollback error", "error", err)
 						}
-						// Reset lastHeard to prevent continuous rollbacks
+						// A-H4: closing the connection is what ends
+						// the session. The old code only rolled back
+						// and reset lastHeard, so on a half-open
+						// connection the read loop never errored, the
+						// reconnect loop never ran, and the satellite
+						// rolled back forever while staying
+						// "connected". Reset lastHeard as well so a
+						// tick that races the close cannot roll back
+						// a second time.
+						_ = c.Close()
 						lastHeardUnix.Store(time.Now().Unix())
 					}
 				}
@@ -359,6 +445,9 @@ func main() {
 				}
 
 				lastHeardUnix.Store(time.Now().Unix())
+				// A-H4: a data message proves liveness as surely as a
+				// pong does, so it re-arms the read deadline too.
+				_ = c.SetReadDeadline(time.Now().Add(readDeadline))
 
 				var env EnvelopeMessage
 				if err := json.Unmarshal(rawMsg, &env); err != nil {
@@ -366,70 +455,110 @@ func main() {
 					continue
 				}
 
+				// A-M9: every acted-on command gets a COMMAND_ACK
+				// (success or failure) so the hub stops showing
+				// failed applies as pushed/synced.
 				switch env.Type {
 				case "SYNC_NFTABLES":
 					var p NftablesSyncPayload
-					if err := json.Unmarshal(env.Payload, &p); err == nil && p.Script != "" {
+					if err := json.Unmarshal(env.Payload, &p); err != nil {
+						slog.Error("Malformed nftables sync payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else if p.Script == "" {
+						sendAck(env.Type, env.CommandID, errors.New("empty nftables script"))
+					} else {
 						slog.Info("Applying updated nftables ruleset from Core Hub...")
 						if err := nftEngine.Apply(p.Script); err != nil {
 							slog.Error("Failed to apply nftables script", "error", err)
+							sendAck(env.Type, env.CommandID, err)
 						} else {
 							_ = engine.SetForwarding("", true)
 							slog.Info("nftables ruleset applied successfully")
+							sendAck(env.Type, env.CommandID, nil)
 						}
 					}
 
 				case "SYNC_WIREGUARD":
 					var wgCfg engine.WireGuardConfig
-					if err := json.Unmarshal(env.Payload, &wgCfg); err == nil {
+					if err := json.Unmarshal(env.Payload, &wgCfg); err != nil {
+						slog.Error("Malformed WireGuard sync payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else {
 						slog.Info("Applying WireGuard mesh tunnel configuration...")
 						if err := wgEngine.ConfigureMesh(wgCfg); err != nil {
 							slog.Error("Failed to configure WireGuard mesh", "error", err)
+							sendAck(env.Type, env.CommandID, err)
+						} else {
+							sendAck(env.Type, env.CommandID, nil)
 						}
 					}
 
 				case "SYNC_WIFI":
 					var wfCfg SyncWiFiPayload
-					if err := json.Unmarshal(env.Payload, &wfCfg); err == nil {
+					if err := json.Unmarshal(env.Payload, &wfCfg); err != nil {
+						slog.Error("Malformed Wi-Fi sync payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else {
 						slog.Info("Applying Wi-Fi radio configurations...")
+						var errs []error
 						for _, c := range wfCfg.Configs {
 							if err := wifiEngine.Configure(c); err != nil {
 								slog.Error("Failed to configure Wi-Fi radio", "radio", c.Radio, "error", err)
+								errs = append(errs, err)
 							} else {
 								slog.Info("Wi-Fi configured successfully", "radio", c.Radio, "ssid", c.SSID)
 							}
 						}
+						sendAck(env.Type, env.CommandID, errors.Join(errs...))
 					}
 
 				case "SYNC_INTERFACES":
 					var ifPayload SyncInterfacesPayload
-					if err := json.Unmarshal(env.Payload, &ifPayload); err == nil {
+					if err := json.Unmarshal(env.Payload, &ifPayload); err != nil {
+						slog.Error("Malformed interfaces sync payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else {
 						slog.Info("Applying edge network interface configurations...", "count", len(ifPayload.Interfaces))
+						var errs []error
 						for _, iface := range ifPayload.Interfaces {
 							if err := netEngine.ConfigureInterface(iface); err != nil {
 								slog.Error("Failed to configure edge interface", "device", iface.Device, "error", err)
+								errs = append(errs, err)
 							}
 						}
+						sendAck(env.Type, env.CommandID, errors.Join(errs...))
 					}
 
 				case "SYNC_ROUTES":
 					var rtPayload SyncRoutesPayload
-					if err := json.Unmarshal(env.Payload, &rtPayload); err == nil {
+					if err := json.Unmarshal(env.Payload, &rtPayload); err != nil {
+						slog.Error("Malformed routes sync payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else {
 						slog.Info("Applying edge kernel routes...", "count", len(rtPayload.Routes))
+						var errs []error
 						for _, rt := range rtPayload.Routes {
 							if err := netEngine.AddRoute(rt); err != nil {
 								slog.Error("Failed to add edge route", "destination", rt.Destination, "error", err)
+								errs = append(errs, err)
 							}
 						}
+						sendAck(env.Type, env.CommandID, errors.Join(errs...))
 					}
 
 				case "CONFIRM_CONFIG", "CONFIRM_NFTABLES":
 					nftEngine.Confirm()
 					slog.Info("Confirmed active nftables ruleset as last-known-good")
+					sendAck(env.Type, env.CommandID, nil)
 
 				case "SYNC_HEADSCALE":
 					var hsCfg HeadscaleSyncPayload
-					if err := json.Unmarshal(env.Payload, &hsCfg); err == nil && hsCfg.AuthKey != "" {
+					if err := json.Unmarshal(env.Payload, &hsCfg); err != nil {
+						slog.Error("Malformed Headscale sync payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else if hsCfg.AuthKey == "" {
+						sendAck(env.Type, env.CommandID, errors.New("missing Headscale authKey"))
+					} else {
 						hsURL := strings.TrimSpace(hsCfg.ServerURL)
 						hsKey := strings.TrimSpace(hsCfg.AuthKey)
 						parsedHS, urlErr := url.Parse(hsURL)
@@ -437,6 +566,7 @@ func main() {
 							strings.HasPrefix(hsURL, "-") || strings.ContainsAny(hsURL, " \t\r\n") ||
 							strings.HasPrefix(hsKey, "-") || strings.ContainsAny(hsKey, " \t\r\n") {
 							slog.Error("Rejected invalid Headscale serverUrl or authKey")
+							sendAck(env.Type, env.CommandID, errors.New("invalid Headscale serverUrl or authKey"))
 							continue
 						}
 						slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsURL)
@@ -444,32 +574,52 @@ func main() {
 						out, err := cmd.CombinedOutput()
 						if err != nil {
 							slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
+							sendAck(env.Type, env.CommandID, err)
 						} else {
 							slog.Info("Successfully joined Headscale mesh!")
+							sendAck(env.Type, env.CommandID, nil)
 						}
 					}
 
 				case "BLOCK_TARGET":
 					var bp BlockTargetPayload
-					if err := json.Unmarshal(env.Payload, &bp); err == nil && bp.Target != "" {
+					if err := json.Unmarshal(env.Payload, &bp); err != nil {
+						slog.Error("Malformed block target payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else if bp.Target == "" {
+						sendAck(env.Type, env.CommandID, errors.New("empty block target"))
+					} else {
 						slog.Info("Received AI Copilot block request...", "target", bp.Target)
 						if err := nftEngine.BlockTarget(bp.Target, bp.IsMac); err != nil {
 							slog.Error("Failed to apply micro-segmentation block", "error", err)
+							sendAck(env.Type, env.CommandID, err)
+						} else {
+							sendAck(env.Type, env.CommandID, nil)
 						}
 					}
 
 				case "PROMOTE":
 					var hp engine.EdgeHATransitionPayload
-					_ = json.Unmarshal(env.Payload, &hp)
-					if err := haEngine.Promote(netEngine, hp); err != nil {
+					if err := json.Unmarshal(env.Payload, &hp); err != nil {
+						slog.Error("Malformed promote payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else if err := haEngine.Promote(netEngine, hp); err != nil {
 						slog.Error("Failed to promote Edge NGFW to active", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else {
+						sendAck(env.Type, env.CommandID, nil)
 					}
 
 				case "DEMOTE":
 					var hp engine.EdgeHATransitionPayload
-					_ = json.Unmarshal(env.Payload, &hp)
-					if err := haEngine.Demote(netEngine, hp); err != nil {
+					if err := json.Unmarshal(env.Payload, &hp); err != nil {
+						slog.Error("Malformed demote payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else if err := haEngine.Demote(netEngine, hp); err != nil {
 						slog.Error("Failed to demote Edge NGFW to standby", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else {
+						sendAck(env.Type, env.CommandID, nil)
 					}
 
 				case "PING":
@@ -498,9 +648,13 @@ func main() {
 
 				// 2. Gather kernel telemetry and push to Core
 				metrics := engine.CollectMetrics()
+				lastApplyErrMu.Lock()
+				lastErr := lastApplyError
+				lastApplyErrMu.Unlock()
 				report := TelemetryReportPayload{
-					SatelliteID: *satID,
-					Metrics:     metrics,
+					SatelliteID:    *satID,
+					Metrics:        metrics,
+					LastApplyError: lastErr,
 				}
 
 				payloadBytes, err := json.Marshal(report)

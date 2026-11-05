@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -47,12 +48,24 @@ type InterfacesConfigYaml struct {
 
 // LoadRoutingConfigFromBytes parses static route definitions from raw YAML or JSON bytes.
 func LoadRoutingConfigFromBytes(data []byte) (*RoutingDomainConfig, error) {
-	var cfg RoutingDomainConfig
-	if err := yaml.Unmarshal(data, &cfg); err == nil && cfg.Routes != nil {
-		return &cfg, nil
+	var yamlCfg RoutingDomainConfig
+	yamlErr := yaml.Unmarshal(data, &yamlCfg)
+	if yamlErr == nil && yamlCfg.Routes != nil {
+		return &yamlCfg, nil
 	}
-	if err := json.Unmarshal(data, &cfg); err == nil && cfg.Routes != nil {
-		return &cfg, nil
+	var jsonCfg RoutingDomainConfig
+	jsonErr := json.Unmarshal(data, &jsonCfg)
+	if jsonErr == nil && jsonCfg.Routes != nil {
+		return &jsonCfg, nil
+	}
+	// A-H1: a file that parses under neither encoding is corrupt, not
+	// "zero routes". The old code returned an empty config with a nil
+	// error here, so ReconcileStaticRoutes pruned every kernel static
+	// route after a typo or a truncated bundle write. A file that
+	// parses cleanly but simply defines no routes still yields the
+	// empty config below, unchanged.
+	if yamlErr != nil && jsonErr != nil {
+		return nil, fmt.Errorf("routing config is neither valid YAML nor valid JSON (yaml: %v; json: %v)", yamlErr, jsonErr)
 	}
 	return &RoutingDomainConfig{Routes: []StaticRouteConfig{}}, nil
 }
@@ -72,7 +85,16 @@ func LoadRoutingConfig() (*RoutingDomainConfig, error) {
 			continue
 		}
 
-		if cfg, err := LoadRoutingConfigFromBytes(data); err == nil && cfg.Routes != nil {
+		// A-H1: fail closed on a corrupt candidate instead of falling
+		// through to a stale mirror and eventually an empty desired
+		// set that would prune every static route. A bundle write
+		// mirrors /etc/axonwall/*.yaml to /var/lib, so the mirror
+		// carries the same corruption and is no safety net here.
+		cfg, err := LoadRoutingConfigFromBytes(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", path, err)
+		}
+		if cfg.Routes != nil {
 			return cfg, nil
 		}
 	}
@@ -304,15 +326,97 @@ func ReconcileStaticRoutes() error {
 		}
 	}
 
-	// Prune obsolete routes marked with proto static that are no longer in desiredRoutes
-	prunedCount := pruneObsoleteRoutes("-4", desiredRoutes)
-	prunedCount += pruneObsoleteRoutes("-6", desiredRoutes)
+	// A-H1: prune only routes this reconciler owns (destinations it
+	// installed on an earlier run). A foreign proto-static route — one
+	// added by DHCP, keepalived, or an operator's `ip route` — is
+	// never this reconciler's to delete, and a config that failed to
+	// load never reaches this point (LoadRoutingConfig errors above).
+	ownedRoutes := loadOwnedStaticRoutes()
+	prunedCount := pruneObsoleteRoutes("-4", desiredRoutes, ownedRoutes)
+	prunedCount += pruneObsoleteRoutes("-6", desiredRoutes, ownedRoutes)
+	// Record this run's installed destinations as the owned set for
+	// the next reconcile. On the first run after this change the set
+	// is empty, so pre-existing stale routes linger rather than being
+	// deleted — the fail-closed direction — and converge from then on.
+	saveOwnedStaticRoutes(desiredRoutes)
 
 	log.Printf("[Agent] Static routes reconciliation complete: %d active, %d pruned", appliedCount, prunedCount)
 	return nil
 }
 
-func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig) int {
+// staticRoutesOwnedPath records the destinations the reconciler last
+// installed, so pruning only ever removes routes it owns (A-H1). The
+// path is a variable so tests can redirect it.
+var staticRoutesOwnedPath = "/var/lib/axonwall/applied-static-routes.json"
+
+func loadOwnedStaticRoutes() map[string]bool {
+	owned := make(map[string]bool)
+	data, err := os.ReadFile(staticRoutesOwnedPath)
+	if err != nil || len(data) == 0 {
+		return owned
+	}
+	var dests []string
+	if err := json.Unmarshal(data, &dests); err != nil {
+		return owned
+	}
+	for _, d := range dests {
+		if d != "" {
+			owned[d] = true
+		}
+	}
+	return owned
+}
+
+func saveOwnedStaticRoutes(desired map[string]StaticRouteConfig) {
+	dests := make([]string, 0, len(desired))
+	for d := range desired {
+		dests = append(dests, d)
+	}
+	data, err := json.Marshal(dests)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(staticRoutesOwnedPath), 0755)
+	_ = os.WriteFile(staticRoutesOwnedPath, data, 0600)
+}
+
+// shouldPruneStaticRoute reports whether a kernel proto-static route
+// may be deleted: it must be absent from the desired set (including
+// the host-suffix forms the reconciler records) and present in the
+// owned set from a previous reconcile. The default route is never
+// pruned here; it is managed separately.
+func shouldPruneStaticRoute(dest string, desired map[string]StaticRouteConfig, owned map[string]bool) bool {
+	if dest == "default" {
+		return false
+	}
+	if _, ok := desired[dest]; ok {
+		return false
+	}
+	if !strings.Contains(dest, "/") {
+		if strings.Contains(dest, ":") {
+			if _, ok := desired[dest+"/128"]; ok {
+				return false
+			}
+		} else {
+			if _, ok := desired[dest+"/32"]; ok {
+				return false
+			}
+		}
+	}
+	// Owned check mirrors the desired check, including host-suffix forms.
+	if owned[dest] {
+		return true
+	}
+	if !strings.Contains(dest, "/") {
+		if strings.Contains(dest, ":") {
+			return owned[dest+"/128"]
+		}
+		return owned[dest+"/32"]
+	}
+	return false
+}
+
+func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig, owned map[string]bool) int {
 	out, err := exec.Command("ip", family, "route", "show", "proto", "static").CombinedOutput()
 	if err != nil {
 		return 0
@@ -331,26 +435,14 @@ func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig) in
 		}
 
 		dest := fields[0]
-		// Skip default route if managed separately
-		if dest == "default" {
+		if !shouldPruneStaticRoute(dest, desired, owned) {
 			continue
 		}
 
-		_, exists := desired[dest]
-		if !exists && !strings.Contains(dest, "/") {
-			if strings.Contains(dest, ":") {
-				_, exists = desired[dest+"/128"]
-			} else {
-				_, exists = desired[dest+"/32"]
-			}
-		}
-
-		if !exists {
-			log.Printf("[Agent] Pruning obsolete static route: %s (%s)", dest, family)
-			delCmd := exec.Command("ip", family, "route", "del", dest, "proto", "static")
-			if err := delCmd.Run(); err == nil {
-				pruned++
-			}
+		log.Printf("[Agent] Pruning obsolete static route: %s (%s)", dest, family)
+		delCmd := exec.Command("ip", family, "route", "del", dest, "proto", "static")
+		if err := delCmd.Run(); err == nil {
+			pruned++
 		}
 	}
 	return pruned

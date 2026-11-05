@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -259,13 +260,21 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 
 	e.config = cfg
 
+	// A-M3: HA component failures are returned, not merely logged.
+	// ApplyBundle fails the bundle on this error instead of entering
+	// pending-confirm and promoting a configuration whose VRRP,
+	// syncrepl, or sync daemon never actually applied.
+	var applyErrs []error
+
 	slog.Info("Restarting HA services (Keepalived & Conntrackd)")
 	if out, err := reloadOrRestartService("keepalived"); err != nil {
 		slog.Warn("Failed to reload keepalived", "error", err, "output", string(out))
+		applyErrs = append(applyErrs, fmt.Errorf("keepalived reload: %w (output: %s)", err, strings.TrimSpace(string(out))))
 	}
 
 	if out, err := reloadOrRestartService("conntrackd"); err != nil {
 		slog.Warn("Failed to reload conntrackd", "error", err, "output", string(out))
+		applyErrs = append(applyErrs, fmt.Errorf("conntrackd reload: %w (output: %s)", err, strings.TrimSpace(string(out))))
 	}
 
 	// Configure Chrony NTP peering with HA peer to keep CSN clocks strictly synchronized
@@ -294,6 +303,7 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		baseDN, _, _ := engine.ResolveOrCreateBaseDN("axonwall.local")
 		if err := engine.ConfigureMultiProviderSyncrepl(serverID, cfg.PeerIp, baseDN); err != nil {
 			slog.Warn("Failed to configure OpenLDAP multi-provider syncrepl", "error", err)
+			applyErrs = append(applyErrs, fmt.Errorf("syncrepl: %w", err))
 		}
 	}
 
@@ -308,11 +318,17 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		}
 		if err := e.sqliteSync.ApplyConfig(cfg.SqliteSync); err != nil {
 			slog.Error("Failed to apply SQLite sync config", "error", err)
+			applyErrs = append(applyErrs, fmt.Errorf("sqlite sync: %w", err))
 		}
 	} else {
 		e.sqliteSync.Stop()
 	}
 
+	// The chrony NTP peering reload above stays best-effort: a stale
+	// NTP peer does not invalidate the HA configuration itself.
+	if len(applyErrs) > 0 {
+		return errors.Join(applyErrs...)
+	}
 	return nil
 }
 

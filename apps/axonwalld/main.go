@@ -281,44 +281,31 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 	}
 }
 
-func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Timeouts bounding the slow external commands ApplyBundle runs (A-M2).
+// A hung nftables load or service reload must delay an apply, never
+// wedge the agent API forever. Package variables so tests can shorten
+// them; production values are deliberately generous because nft -f on
+// a large ruleset and a slow unit reload are legitimate slow paths.
+var nftValidateTimeout = 60 * time.Second
+var nftApplyTimeout = 120 * time.Second
 
-	log.Printf("[Agent] Received ApplyBundle request (hash: %s, timeout: %ds)", req.BundleHash, req.ConfirmTimeoutSeconds)
+// validatedBundleFile is one bundle file after all path, symlink, and
+// mode checks have passed, before anything is written (A-H2).
+type validatedBundleFile struct {
+	file                *pb.BundleFile
+	cleanPath           string
+	mode                os.FileMode
+	isSharedAxonwallCfg bool
+}
 
-	if req.NftScript == "" {
-		return nil, status.Error(codes.InvalidArgument, "nft_script cannot be empty")
-	}
-
-	// 1. Dry run syntax check using `nft -c -f`
-	tmpFile, err := os.CreateTemp("", "axonwall-candidate-*.nft")
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create temp candidate file: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.WriteString(req.NftScript); err != nil {
-		_ = tmpFile.Close()
-		return nil, status.Errorf(codes.Internal, "failed to write candidate script: %v", err)
-	}
-	_ = tmpFile.Close()
-
-	validateCmd := exec.Command("nft", "-c", "-f", tmpFile.Name())
-	if out, err := validateCmd.CombinedOutput(); err != nil {
-		log.Printf("[Agent] nft validation error: %s", string(out))
-		return &pb.ApplyBundleResponse{
-			Success: false,
-			Message: fmt.Sprintf("nftables syntax validation failed: %s", string(out)),
-		}, nil
-	}
-
-	// Snapshot verified configuration before writing candidate changes
-	if !s.pendingConfirm {
-		snapshotLkgConfig(s.bundleDir)
-	}
-
-	// 2. Write optional bundle configuration files (e.g. kea, unbound, suricata, crowdsec)
+// validateBundleFiles checks every file in a bundle — allowed prefix,
+// protected credential/PKI paths, leaf and intermediate symlinks, and
+// the sanitized mode — without writing anything. ApplyBundle runs
+// this before the write loop so a bundle that fails validation leaves
+// no half-written files behind (A-H2: the old loop validated and
+// wrote file by file, so a disallowed later file left earlier files
+// and their subsystem side effects live).
+func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) {
 	allowedPrefixes := []string{
 		"/etc/axonwall/",
 		"/tmp/",
@@ -336,8 +323,8 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		"/etc/snmp/",
 		"/etc/nut/",
 	}
-	for _, f := range req.Files {
-		// Enforce safety: paths must reside within allowed system config locations or /tmp/
+	out := make([]validatedBundleFile, 0, len(files))
+	for _, f := range files {
 		cleanPath := filepath.Clean(f.Path)
 		allowed := false
 		for _, prefix := range allowedPrefixes {
@@ -385,9 +372,6 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 				}
 			}
 		}
-		if err := os.MkdirAll(filepath.Dir(cleanPath), 0755); err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to create directories for %s: %v", cleanPath, err)
-		}
 		// Sanitize the caller-chosen mode (audit D-S02): plain permission
 		// bits only (drops setuid/setgid/sticky), and never world-writable.
 		// Shared config files under /etc/axonwall (*.yaml, *.yml, state.json, interfaces.conf)
@@ -413,14 +397,106 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			}
 			mode &^= 0o022
 		}
+		out = append(out, validatedBundleFile{file: f, cleanPath: cleanPath, mode: mode, isSharedAxonwallCfg: isSharedAxonwallCfg})
+	}
+	return out, nil
+}
+
+// reloadBundleServices reloads the requested units. It touches no
+// AgentServer state, so ApplyBundle calls it without holding s.mu
+// (A-M2): a hung unit reload must not wedge GetStatus, Confirm, or
+// the auto-rollback timer behind the agent lock. A Confirm arriving
+// in this window is premature — ApplyBundle has not returned success
+// yet — and the commit-confirm timer is not armed until after the
+// reloads, so releasing the lock here changes no committed state.
+func reloadBundleServices(services []string) {
+	for _, svc := range services {
+		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
+		if strings.Contains(svc, "/") || strings.Contains(svc, "\\") || strings.HasPrefix(svc, ".") {
+			log.Printf("[Agent] Rejected malformed/malicious service reload request: %s", svc)
+			continue
+		}
+		log.Printf("[Agent] Reloading system service: %s", svc)
+		_, _ = reloadOrRestartService(svc)
+	}
+}
+
+func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	log.Printf("[Agent] Received ApplyBundle request (hash: %s, timeout: %ds)", req.BundleHash, req.ConfirmTimeoutSeconds)
+
+	if req.NftScript == "" {
+		return nil, status.Error(codes.InvalidArgument, "nft_script cannot be empty")
+	}
+
+	// 1. Dry run syntax check using `nft -c -f`
+	tmpFile, err := os.CreateTemp("", "axonwall-candidate-*.nft")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to create temp candidate file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(req.NftScript); err != nil {
+		_ = tmpFile.Close()
+		return nil, status.Errorf(codes.Internal, "failed to write candidate script: %v", err)
+	}
+	_ = tmpFile.Close()
+
+	// A-M2: bound the validation exec; an nft binary that hangs must
+	// not wedge the agent API behind s.mu forever.
+	validateCtx, validateCancel := context.WithTimeout(context.Background(), nftValidateTimeout)
+	defer validateCancel()
+	validateCmd := exec.CommandContext(validateCtx, "nft", "-c", "-f", tmpFile.Name())
+	if out, err := validateCmd.CombinedOutput(); err != nil {
+		log.Printf("[Agent] nft validation error: %s", string(out))
+		return &pb.ApplyBundleResponse{
+			Success: false,
+			Message: fmt.Sprintf("nftables syntax validation failed: %s", string(out)),
+		}, nil
+	}
+
+	// A-H2: validate every file before writing any of them.
+	validatedFiles, err := validateBundleFiles(req.Files)
+	if err != nil {
+		return nil, err
+	}
+
+	// Snapshot verified configuration before writing candidate changes
+	if !s.pendingConfirm {
+		snapshotLkgConfig(s.bundleDir)
+	}
+
+	// 2. Write the already-validated bundle configuration files (e.g.
+	// kea, unbound, suricata, crowdsec). Paths, symlinks, and modes
+	// were checked for every file up front by validateBundleFiles, so
+	// a failure here can only come from the writes themselves — and
+	// any such failure rolls back instead of leaving a half-applied
+	// bundle behind (A-H2).
+	var subsystemErr error
+	for _, vf := range validatedFiles {
+		f := vf.file
+		cleanPath := vf.cleanPath
+		mode := vf.mode
+		isSharedAxonwallCfg := vf.isSharedAxonwallCfg
+		if err := os.MkdirAll(filepath.Dir(cleanPath), 0755); err != nil {
+			log.Printf("[Agent] Failed to create directories for %s: %v; rolling back", cleanPath, err)
+			_ = s.executeRollback("bundle file write failed")
+			return nil, status.Errorf(codes.Internal, "failed to create directories for %s: %v", cleanPath, err)
+		}
 
 		// Use syscall.O_NOFOLLOW to prevent symlink TOCTOU attacks
 		file, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
 		if err != nil {
+			log.Printf("[Agent] Failed to open file %s: %v; rolling back", cleanPath, err)
+			_ = s.executeRollback("bundle file write failed")
 			return nil, status.Errorf(codes.Internal, "failed to open file %s: %v", cleanPath, err)
 		}
 		if _, err := file.Write([]byte(f.Content)); err != nil {
 			file.Close()
+			log.Printf("[Agent] Failed to write file %s: %v; rolling back", cleanPath, err)
+			_ = s.executeRollback("bundle file write failed")
 			return nil, status.Errorf(codes.Internal, "failed to write file %s: %v", cleanPath, err)
 		}
 		_ = file.Chmod(mode)
@@ -464,62 +540,98 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			}
 			if err := json.Unmarshal([]byte(f.Content), &fwCfg); err == nil && !fwCfg.Enabled {
 				log.Printf("[Agent] Core-Firewall plugin is disabled (Host Mode); stopping NGFW-only daemons")
-				_ = exec.Command("systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+				_ = exec.CommandContext(stopCtx, "systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
+				stopCancel()
 			}
 		}
 
+		// A-M3: a subsystem apply failure fails the bundle instead of
+		// being logged and then confirmed into last-known-good. The
+		// first failure stops the loop (fewer half-applied side
+		// effects) and the bundle is rolled back below.
 		if filepath.Base(cleanPath) == "zero_trust_apps.json" {
 			log.Printf("[Agent] Applying Zero Trust IAP configuration")
 			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {
-				log.Printf("[Agent] Warning: Failed to apply IAP config: %v", err)
+				subsystemErr = fmt.Errorf("IAP config: %w", err)
+				break
 			}
 		}
 
 		if filepath.Base(cleanPath) == "sdwan_config.json" {
 			log.Printf("[Agent] Applying SD-WAN Gateway routing configuration")
 			if err := s.sdwanProber.ReloadConfig(cleanPath); err != nil {
-				log.Printf("[Agent] Warning: Failed to apply SD-WAN config: %v", err)
+				subsystemErr = fmt.Errorf("SD-WAN config: %w", err)
+				break
 			}
 		}
 
 		if filepath.Base(cleanPath) == "ha_config.json" {
 			log.Printf("[Agent] Applying High Availability & SQLite Sync configuration")
 			if err := s.haEngine.ApplyFromJSON([]byte(f.Content)); err != nil {
-				log.Printf("[Agent] Warning: Failed to apply HA config: %v", err)
+				subsystemErr = fmt.Errorf("HA config: %w", err)
+				break
 			}
 		}
 
 		if filepath.Base(cleanPath) == "nas_config.json" && s.nasManager != nil {
 			log.Printf("[Agent] Applying OpenZFS Storage & NAS Share configuration")
 			if err := s.nasManager.ApplyConfig([]byte(f.Content)); err != nil {
-				log.Printf("[Agent] Warning: Failed to apply NAS config: %v", err)
+				subsystemErr = fmt.Errorf("NAS config: %w", err)
+				break
 			}
 		}
 
 		if filepath.Base(cleanPath) == "k3s_config.json" && s.k3sManager != nil {
 			log.Printf("[Agent] Applying K3s & OpenEBS cluster configuration")
 			if err := s.k3sManager.ApplyConfig([]byte(f.Content)); err != nil {
-				log.Printf("[Agent] Warning: Failed to apply K3s config: %v", err)
+				subsystemErr = fmt.Errorf("K3s config: %w", err)
+				break
 			}
 		}
 
 		if filepath.Base(cleanPath) == "vigilante_config.json" && s.vigilanteManager != nil {
 			log.Printf("[Agent] Applying Vigilante Cyber Defense configuration & K3s manifests")
 			if err := s.vigilanteManager.ApplyConfig([]byte(f.Content)); err != nil {
-				log.Printf("[Agent] Warning: Failed to apply Vigilante config: %v", err)
+				subsystemErr = fmt.Errorf("Vigilante config: %w", err)
+				break
 			}
 		}
 
 		if filepath.Base(cleanPath) == "vow_config.json" && s.k3sManager != nil {
 			log.Printf("[Agent] Applying Vigilant Octo Waffle (VOW) K3s GitOps configuration")
 			if err := s.k3sManager.ApplyVowConfig([]byte(f.Content)); err != nil {
-				log.Printf("[Agent] Warning: Failed to apply VOW K3s config: %v", err)
+				subsystemErr = fmt.Errorf("VOW config: %w", err)
+				break
 			}
 		}
 	}
 
+	// A-M3: report the subsystem failure and roll back instead of
+	// entering pending-confirm with a half-applied bundle.
+	if subsystemErr != nil {
+		log.Printf("[Agent] Subsystem apply failed (%v); rolling back", subsystemErr)
+		if rbErr := s.executeRollback("subsystem apply failed"); rbErr != nil {
+			log.Printf("[Agent] Rollback after subsystem failure also failed: %v", rbErr)
+		}
+		return &pb.ApplyBundleResponse{
+			Success: false,
+			Message: fmt.Sprintf("subsystem apply failed: %v", subsystemErr),
+		}, nil
+	}
+
 	// Reconcile physical/logical interfaces and static routes whenever a bundle is applied
-	applyBootInterfaces()
+	// A-M16: a failed static address assignment fails the apply (with
+	// rollback, like the nft failure below) instead of being logged
+	// while the WAN is left address-less.
+	if err := applyBootInterfaces(); err != nil {
+		log.Printf("[Agent] Failed to apply boot interfaces: %v; rolling back", err)
+		_ = s.executeRollback("interface apply failed")
+		return &pb.ApplyBundleResponse{
+			Success: false,
+			Message: fmt.Sprintf("failed to apply interfaces: %v", err),
+		}, nil
+	}
 	if err := ReconcileStaticRoutes(); err != nil {
 		log.Printf("[Agent] Warning: Static routes reconciliation: %v", err)
 	}
@@ -532,11 +644,15 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// 3. Backup current script for rollback
 	s.candidateScript = req.NftScript
 
-	// 4. Apply ruleset atomically
-	applyCmd := exec.Command("nft", "-f", tmpFile.Name())
+	// 4. Apply ruleset atomically (bounded by A-M2's timeout).
+	applyCtx, applyCancel := context.WithTimeout(context.Background(), nftApplyTimeout)
+	defer applyCancel()
+	applyCmd := exec.CommandContext(applyCtx, "nft", "-f", tmpFile.Name())
 	if out, err := applyCmd.CombinedOutput(); err != nil {
 		log.Printf("[Agent] Failed to apply nftables ruleset: %s; rolling back config files and services", string(out))
-		_ = s.executeRollback("nftables apply failed")
+		if rbErr := s.executeRollback("nftables apply failed"); rbErr != nil {
+			log.Printf("[Agent] Rollback after nftables apply failure also failed: %v", rbErr)
+		}
 		return &pb.ApplyBundleResponse{
 			Success: false,
 			Message: fmt.Sprintf("failed to execute atomic nft application: %s", string(out)),
@@ -550,16 +666,12 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		s.activeHash = hex.EncodeToString(h[:])
 	}
 
-	// 5. Reload any changed systemd units requested
-	for _, svc := range req.ReloadServices {
-		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
-		if strings.Contains(svc, "/") || strings.Contains(svc, "\\") || strings.HasPrefix(svc, ".") {
-			log.Printf("[Agent] Rejected malformed/malicious service reload request: %s", svc)
-			continue
-		}
-		log.Printf("[Agent] Reloading system service: %s", svc)
-		_, _ = reloadOrRestartService(svc)
-	}
+	// 5. Reload any changed systemd units requested. A-M2: this runs
+	// without holding s.mu (see reloadBundleServices); the deferred
+	// unlock at the top of ApplyBundle releases the re-acquired lock.
+	s.mu.Unlock()
+	reloadBundleServices(req.ReloadServices)
+	s.mu.Lock()
 
 	// 6. Setup Commit-Confirm deadline
 	timeoutSec := req.ConfirmTimeoutSeconds
@@ -590,12 +702,32 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	}, nil
 }
 
+// clearPendingLocked drops the pending-confirm state. Callers hold
+// s.mu. It is used on every rollback path, success or failure: a
+// failed rollback must never leave a failed candidate confirmable
+// (A-M1 — the old code returned before clearing on rollback failure,
+// so a later Confirm for the previous job's ID promoted the failed
+// candidate script to last-known-good).
+func (s *AgentServer) clearPendingLocked() {
+	if s.rollbackTimer != nil {
+		s.rollbackTimer.Stop()
+		s.rollbackTimer = nil
+	}
+	s.pendingConfirm = false
+	s.pendingJobID = ""
+	s.candidateScript = ""
+	_ = os.Remove("/run/axonwall/commit-confirm.pending")
+}
+
 func (s *AgentServer) executeRollback(reason string) error {
 	if s.lastGoodScript == "" {
 		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
 		if data, err := os.ReadFile(lkgPath); err == nil && len(data) > 0 {
 			s.lastGoodScript = string(data)
 		} else {
+			// A-M1: no rollback target means the pending candidate
+			// must die here, not linger for a later Confirm.
+			s.clearPendingLocked()
 			return fmt.Errorf("no previous last-known-good configuration available for rollback")
 		}
 	}
@@ -603,18 +735,24 @@ func (s *AgentServer) executeRollback(reason string) error {
 	if s.lastGoodScript != "" {
 		tmpFile, err := os.CreateTemp("", "axonwall-rollback-*.nft")
 		if err != nil {
+			s.clearPendingLocked()
 			return fmt.Errorf("failed to create rollback temp file: %w", err)
 		}
 		_ = tmpFile.Close()
 		defer os.Remove(tmpFile.Name())
 
 		if err := os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644); err != nil {
+			s.clearPendingLocked()
 			return fmt.Errorf("failed to write rollback script: %w", err)
 		}
 
-		cmd := exec.Command("nft", "-f", tmpFile.Name())
+		// A-M2: bound the rollback exec like the apply exec.
+		rbCtx, rbCancel := context.WithTimeout(context.Background(), nftApplyTimeout)
+		defer rbCancel()
+		cmd := exec.CommandContext(rbCtx, "nft", "-f", tmpFile.Name())
 		if out, err := cmd.CombinedOutput(); err != nil {
 			log.Printf("[Agent] ERROR applying rollback ruleset: %s", string(out))
+			s.clearPendingLocked()
 			return fmt.Errorf("failed to execute rollback nftables application: %s", string(out))
 		}
 
@@ -630,15 +768,16 @@ func (s *AgentServer) executeRollback(reason string) error {
 	restoreLkgConfig(s.bundleDir)
 
 	// Re-apply restored physical/logical interfaces and reconcile static routes
-	applyBootInterfaces()
+	// A-M16: a rollback must not itself fail because one interface
+	// re-apply failed; log and continue restoring the rest.
+	if err := applyBootInterfaces(); err != nil {
+		log.Printf("[Agent] Rollback: boot interfaces re-apply failed: %v", err)
+	}
 	if err := ReconcileStaticRoutes(); err != nil {
 		log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
 	}
 
-	s.pendingConfirm = false
-	s.pendingJobID = ""
-	s.candidateScript = ""
-	_ = os.Remove("/run/axonwall/commit-confirm.pending")
+	s.clearPendingLocked()
 	log.Printf("[Agent] Successfully rolled back to last known good configuration (reason: %s).", reason)
 	return nil
 }
@@ -1198,7 +1337,44 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 	return specs
 }
 
-func applyBootInterfaces() {
+// staleStaticAddrs parses `ip -4 addr show dev <device>` output and
+// returns the global (non-secondary, non-link-local) addresses that are
+// not the target address. A-M16: the old code ran `ip addr flush` on
+// every WAN bundle apply, deleting keepalived VRRP VIPs (which live on
+// the device as secondary addresses) along with the stale static
+// address it meant to remove. Secondary addresses are therefore never
+// returned here, so a VIP survives an unrelated bundle apply.
+func staleStaticAddrs(addrShowOut string, targetCIDR string) []string {
+	targetIP := strings.Split(targetCIDR, "/")[0]
+	var stale []string
+	for _, line := range strings.Split(addrShowOut, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "inet ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		addr := fields[1]
+		ip := strings.Split(addr, "/")[0]
+		if addr == targetCIDR || ip == targetIP {
+			continue
+		}
+		// Keepalived VIPs are secondary addresses; link-local
+		// addresses are not stale statics either.
+		if strings.Contains(line, " secondary") || strings.Contains(line, " scope link") {
+			continue
+		}
+		if net.ParseIP(ip) == nil {
+			continue
+		}
+		stale = append(stale, addr)
+	}
+	return stale
+}
+
+func applyBootInterfaces() error {
 	sanitizeEtcNetworkInterfaces()
 
 	config := make(map[string]string)
@@ -1215,7 +1391,7 @@ func applyBootInterfaces() {
 
 	specs := loadAllBootInterfaces(config)
 	if len(specs) == 0 {
-		return
+		return nil
 	}
 
 	validIP := func(ip string) string {
@@ -1249,6 +1425,10 @@ func applyBootInterfaces() {
 
 	var dhcpSpecs []bootIfaceSpec
 	defaultRouteSet := false
+	// A-M16: the first static-WAN address failure is returned to the
+	// caller (ApplyBundle fails the apply) instead of being logged
+	// while the WAN is left address-less after a flush.
+	var firstIfaceErr error
 
 	for _, spec := range specs {
 		if spec.Role == "wan-delegated" {
@@ -1274,10 +1454,22 @@ func applyBootInterfaces() {
 			if !strings.Contains(string(out), "inet "+spec.IPv4) && !strings.Contains(string(out), "inet "+ipOnly+"/") {
 				log.Printf("[Agent] Boot-apply: configuring static IP %s on %s (%s, role=%s)", spec.IPv4, spec.Name, spec.Device, spec.Role)
 				if spec.Role == "wan" {
-					_ = exec.Command("ip", "addr", "flush", "dev", spec.Device).Run()
+					// A-M16: never flush the device — that deletes
+					// HA VIPs and secondary addresses. Delete only
+					// the specific stale global addresses, then use
+					// `ip addr replace` (add-or-replace just this
+					// address) for the target.
+					for _, stale := range staleStaticAddrs(string(out), spec.IPv4) {
+						if delOut, err := exec.Command("ip", "addr", "del", stale, "dev", spec.Device).CombinedOutput(); err != nil {
+							log.Printf("[Agent] Boot-apply: warning: failed to remove stale address %s on %s: %s", stale, spec.Device, string(delOut))
+						}
+					}
 				}
-				if addOut, err := exec.Command("ip", "addr", "add", spec.IPv4, "dev", spec.Device).CombinedOutput(); err != nil {
+				if addOut, err := exec.Command("ip", "addr", "replace", spec.IPv4, "dev", spec.Device).CombinedOutput(); err != nil {
 					log.Printf("[Agent] Boot-apply: failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
+					if firstIfaceErr == nil {
+						firstIfaceErr = fmt.Errorf("failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
+					}
 				}
 			}
 			if spec.Gateway != "" && spec.Role == "wan" && !defaultRouteSet {
@@ -1328,6 +1520,8 @@ func applyBootInterfaces() {
 			}
 		}(dhcpSpecs)
 	}
+
+	return firstIfaceErr
 }
 
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
@@ -1527,7 +1721,12 @@ func main() {
 
 	// If boot-apply is requested, load last-known-good configuration and ensure network interfaces are configured
 	if *bootApply {
-		applyBootInterfaces()
+		// A-M16: log a failed interface apply at boot; boot itself
+		// must not abort on one interface (the post-boot checks and
+		// later bundle applies still run).
+		if err := applyBootInterfaces(); err != nil {
+			log.Printf("[Agent] Boot-apply: boot interfaces failed: %v", err)
+		}
 
 		lkgPath := filepath.Join(*bundleDir, "last-known-good.nft")
 		hasLkg := false

@@ -150,6 +150,11 @@ func (m *TaskManager) StartTask(taskType, targetId, user string, fn func(log fun
 	return upid
 }
 
+// A-M14: GetTask/ListTasks return copies, never the live record. The
+// task goroutine mutates Status/EndTime under m.mu while API readers
+// previously received the same pointer and read it without any lock,
+// which `go test -race` flags and which can surface torn snapshots
+// (status observed as finished while EndTime is not yet final).
 func (m *TaskManager) GetTask(upid string) (*TaskRecord, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -158,7 +163,8 @@ func (m *TaskManager) GetTask(upid string) (*TaskRecord, error) {
 	if !exists {
 		return nil, fmt.Errorf("task not found: %s", upid)
 	}
-	return task, nil
+	cp := *task
+	return &cp, nil
 }
 
 func (m *TaskManager) ListTasks(limit int) []*TaskRecord {
@@ -167,7 +173,8 @@ func (m *TaskManager) ListTasks(limit int) []*TaskRecord {
 
 	result := make([]*TaskRecord, 0, len(m.tasks))
 	for _, t := range m.tasks {
-		result = append(result, t)
+		cp := *t
+		result = append(result, &cp)
 	}
 
 	// Sort descending by StartTime
@@ -186,6 +193,9 @@ func (m *TaskManager) ListTasks(limit int) []*TaskRecord {
 }
 
 func (m *TaskManager) GetTaskLog(upid string, startLine int) ([]string, bool, error) {
+	// A-M14: GetTask returns a snapshot taken under RLock, so the
+	// Status/LogFile reads below observe a consistent copy even
+	// while the task goroutine mutates the live record.
 	task, err := m.GetTask(upid)
 	if err != nil {
 		return nil, false, err
