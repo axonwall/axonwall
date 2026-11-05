@@ -41,11 +41,12 @@ export async function getExtensionPlugins(): Promise<PluginsApiResponse> {
   assertActionPermitted(session);
 
   const res = await callAgentApi<PluginsApiResponse>('/v1/system/plugins', 'GET', undefined, 5000);
+  // C25: a daemon outage used to collapse to "no extensions" plus a
+  // possibly wrong default OS family. Throw a distinct
+  // daemon-unavailable error so the page shows an unknown state and
+  // keeps its previous list instead of an empty one.
   if (!res || !res.plugins) {
-    return {
-      plugins: [],
-      osFamily: 'debian',
-    };
+    throw new Error('Daemon unavailable: could not load extension plugins from axonwalld');
   }
   return res;
 }

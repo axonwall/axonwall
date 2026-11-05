@@ -166,32 +166,86 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Goroutine 2: WebSocket Client -> Backend (decode WS frames, write to unix socket)
-	go func() {
-		for {
-			payload, opcode, err := readWSFrame(clientBuf)
-			if err != nil {
-				errChan <- err
+	go forwardClientFrames(clientBuf, backendConn, safeWriteFrame, errChan)
+
+	<-errChan
+}
+
+// forwardClientFrames decodes client WebSocket frames and writes the
+// resulting RFB bytes to the backend. It owns the client -> backend
+// direction of the proxy loop (A-L6): fragmented binary messages are
+// reassembled (continuation frames buffered until FIN) and delivered
+// as one write, text frames are rejected instead of being forwarded
+// as if they were RFB bytes, and pong frames are ignored instead of
+// being forwarded to the backend. Pre-fix, every non-control frame —
+// fragment, text, or pong — was written to the backend raw, which
+// corrupts the RFB stream for the session.
+func forwardClientFrames(clientBuf io.Reader, backendConn net.Conn, safeWriteFrame func([]byte, byte) error, errChan chan<- error) {
+	const maxReassembledMessage = 10 * 1024 * 1024
+	var fragBuf []byte
+	inFragment := false
+	for {
+		payload, opcode, fin, err := readWSFrame(clientBuf)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		switch opcode {
+		case 0x8: // Close frame
+			_ = safeWriteFrame(nil, 0x8)
+			errChan <- io.EOF
+			return
+		case 0x9: // Ping
+			_ = safeWriteFrame(payload, 0xA) // Pong
+			continue
+		case 0xA: // Pong: ignore, never forward to the backend.
+			continue
+		case 0x1: // Text frame: RFB is binary; forwarding UTF-8
+			// text as RFB bytes would corrupt the session.
+			errChan <- fmt.Errorf("websocket text frame rejected: console transport is binary-only")
+			return
+		case 0x2: // Binary frame: start of a (possibly fragmented) message.
+			if inFragment {
+				errChan <- fmt.Errorf("websocket protocol violation: new binary frame while a fragmented message is incomplete")
 				return
 			}
-			if opcode == 0x8 { // Close frame
-				_ = safeWriteFrame(nil, 0x8)
-				errChan <- io.EOF
-				return
-			}
-			if opcode == 0x9 { // Ping
-				_ = safeWriteFrame(payload, 0xA) // Pong
+			if fin {
+				if len(payload) > 0 {
+					if _, err := backendConn.Write(payload); err != nil {
+						errChan <- err
+						return
+					}
+				}
 				continue
 			}
-			if len(payload) > 0 {
-				if _, err := backendConn.Write(payload); err != nil {
+			fragBuf = append(fragBuf[:0], payload...)
+			inFragment = true
+		case 0x0: // Continuation frame.
+			if !inFragment {
+				errChan <- fmt.Errorf("websocket protocol violation: continuation frame with no fragmented message in progress")
+				return
+			}
+			if len(fragBuf)+len(payload) > maxReassembledMessage {
+				errChan <- fmt.Errorf("websocket reassembled message exceeds 10MB limit")
+				return
+			}
+			fragBuf = append(fragBuf, payload...)
+			if !fin {
+				continue
+			}
+			if len(fragBuf) > 0 {
+				if _, err := backendConn.Write(fragBuf); err != nil {
 					errChan <- err
 					return
 				}
 			}
+			fragBuf = fragBuf[:0]
+			inFragment = false
+		default:
+			errChan <- fmt.Errorf("websocket protocol violation: unsupported opcode 0x%x", opcode)
+			return
 		}
-	}()
-
-	<-errChan
+	}
 }
 
 func writeWSFrame(w io.Writer, payload []byte, opcode byte) error {
@@ -219,10 +273,10 @@ func writeWSFrame(w io.Writer, payload []byte, opcode byte) error {
 	return err
 }
 
-func readWSFrame(r io.Reader) ([]byte, byte, error) {
+func readWSFrame(r io.Reader) ([]byte, byte, bool, error) {
 	head := make([]byte, 2)
 	if _, err := io.ReadFull(r, head); err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
 	opcode := head[0] & 0x0F
@@ -232,16 +286,16 @@ func readWSFrame(r io.Reader) ([]byte, byte, error) {
 	if payloadLen == 126 {
 		var extLen uint16
 		if err := binary.Read(r, binary.BigEndian, &extLen); err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 		payloadLen = int64(extLen)
 	} else if payloadLen == 127 {
 		var extLen uint64
 		if err := binary.Read(r, binary.BigEndian, &extLen); err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 		if extLen > 10*1024*1024 {
-			return nil, 0, fmt.Errorf("websocket frame payload exceeds 10MB limit")
+			return nil, 0, false, fmt.Errorf("websocket frame payload exceeds 10MB limit")
 		}
 		payloadLen = int64(extLen)
 	}
@@ -249,17 +303,17 @@ func readWSFrame(r io.Reader) ([]byte, byte, error) {
 	var maskKey [4]byte
 	if masked {
 		if _, err := io.ReadFull(r, maskKey[:]); err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 	}
 
 	if payloadLen > 10*1024*1024 {
-		return nil, 0, fmt.Errorf("websocket frame payload exceeds 10MB limit")
+		return nil, 0, false, fmt.Errorf("websocket frame payload exceeds 10MB limit")
 	}
 
 	data := make([]byte, payloadLen)
 	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
 	if masked {
@@ -268,5 +322,5 @@ func readWSFrame(r io.Reader) ([]byte, byte, error) {
 		}
 	}
 
-	return data, opcode, nil
+	return data, opcode, (head[0] & 0x80) != 0, nil
 }

@@ -200,11 +200,14 @@ export async function runLivePacketCapture({
   try {
     // Attempt live execution using tcpdump
     packets = await executeTcpdump(cleanIface, filterTokens, boundedCount, pcapFilePath);
-  } catch {
-    // Return empty list if tcpdump fails or interface is uncapturable
-    packets = [];
-    const binary = buildPcapBinary([]);
-    fs.writeFileSync(pcapFilePath, binary);
+  } catch (err: any) {
+    // C20: a failed capture backend must not masquerade as a
+    // zero-traffic capture. Throw, so the caller shows an error that
+    // distinguishes "ran, saw nothing" (packetCount 0, no throw) from
+    // "could not capture". No empty pcap is written or registered.
+    throw new Error(
+      `Packet capture failed on interface ${cleanIface}: ${err?.message || 'tcpdump failed'} — no packets were captured.`
+    );
   }
 
   const completedAt = new Date().toISOString();

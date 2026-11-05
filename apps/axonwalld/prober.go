@@ -62,6 +62,12 @@ type SDWanProber struct {
 	mu     sync.Mutex
 	active map[string]bool
 	cancel context.CancelFunc
+	// wg tracks the run goroutine so restart waits for the old loop to
+	// exit before starting a new one (A-M6). Without the join, the old
+	// loop could still be inside triggerFailover (an unbounded `ip route`
+	// exec with no context) while the new loop probes and fails over
+	// from its own snapshot, and last-writer-wins on the default route.
+	wg sync.WaitGroup
 }
 
 func NewSDWanProber() *SDWanProber {
@@ -75,6 +81,9 @@ func (p *SDWanProber) ReloadConfig(path string) error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			p.stop()
+			// A-M6, same join as restart: a disabled prober must not
+			// leave a stale loop that can still move the default route.
+			p.wg.Wait()
 			return nil
 		}
 		return err
@@ -105,6 +114,7 @@ func (p *SDWanProber) ReloadConfig(path string) error {
 
 	if !config.isEnabled() {
 		p.stop()
+		p.wg.Wait()
 		return nil
 	}
 
@@ -123,16 +133,25 @@ func (p *SDWanProber) stop() {
 
 func (p *SDWanProber) restart() {
 	p.stop()
+	// A-M6: wait for the old run goroutine to exit before starting a
+	// new one. The wait is deliberately outside p.mu: the old loop's
+	// exit path takes no lock, and probeAll's post-cancel path returns
+	// before re-acquiring it, so this cannot deadlock with a probe
+	// that is mid-flight. A hung `ip route` exec in the old loop's
+	// triggerFailover delays the new loop rather than racing it.
+	p.wg.Wait()
 
 	p.mu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.mu.Unlock()
 
+	p.wg.Add(1)
 	go p.run(ctx)
 }
 
 func (p *SDWanProber) run(ctx context.Context) {
+	defer p.wg.Done()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 

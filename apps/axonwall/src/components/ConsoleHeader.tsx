@@ -32,11 +32,16 @@ export function ConsoleHeader({
   });
   const [isOperating, setIsOperating] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  // C23: once the deadline passes, the expiry re-check fires once and
+  // the 1s loop stops; this flag renders the expired-pending state
+  // until the next poll cycle (3s when pending) refreshes the status.
+  const [expiryChecked, setExpiryChecked] = useState<boolean>(false);
 
   // Sync with prop updates from Server Component
   useEffect(() => {
     setIsPending(initialPending);
     setDeadline(initialDeadline);
+    setExpiryChecked(false);
     if (initialDeadline) {
       setTimeLeft(Math.max(0, initialDeadline - Math.floor(Date.now() / 1000)));
     }
@@ -60,13 +65,20 @@ export function ConsoleHeader({
   // Countdown timer
   useEffect(() => {
     if (!isPending || !deadline) return;
+    setExpiryChecked(false);
 
     const interval = setInterval(() => {
       const remaining = Math.max(0, deadline - Math.floor(Date.now() / 1000));
       setTimeLeft(remaining);
 
-      // If timer hits zero, verify status with daemon/server
+      // If timer hits zero, verify status with daemon/server exactly
+      // once, then stop this interval: if the daemon keeps reporting
+      // pendingConfirm with a past deadline, the old loop fired a
+      // server action + full router refresh every second forever.
+      // The 3s poll cycle below is what refreshes the status next.
       if (remaining === 0) {
+        setExpiryChecked(true);
+        clearInterval(interval);
         checkStatus().then(() => router.refresh());
       }
     }, 1000);
@@ -175,7 +187,15 @@ export function ConsoleHeader({
             <div className="flex items-center gap-3 bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 rounded-lg text-xs text-amber-300 animate-pulse">
               <Clock className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
-                <strong>Commit-Confirm Active:</strong> Auto-rollback in {timeLeft}s unless confirmed!
+                {expiryChecked && timeLeft === 0 ? (
+                  <>
+                    <strong>Commit-Confirm Active:</strong> Deadline passed — status pending re-check.
+                  </>
+                ) : (
+                  <>
+                    <strong>Commit-Confirm Active:</strong> Auto-rollback in {timeLeft}s unless confirmed!
+                  </>
+                )}
               </span>
               <button
                 type="button"

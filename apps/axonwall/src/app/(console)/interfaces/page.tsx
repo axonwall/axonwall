@@ -87,6 +87,10 @@ export default function InterfacesPage() {
   const [isCreatingNew, setIsCreatingNew] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  // C18: a failed load used to wipe the list, so "Add" suggested the
+  // already-used name/device and saving overwrote the live assignment.
+  // The previous list is now kept and the failure is bannered.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Edit / Create form state
   const [editForm, setEditForm] = useState({
@@ -111,10 +115,13 @@ export default function InterfacesPage() {
       .then(([ifaceData, devData]) => {
         setInterfaces(ifaceData);
         setPhysicalDevs(devData);
+        setLoadError(null);
       })
-      .catch(() => {
-        setInterfaces([]);
-        setPhysicalDevs([]);
+      .catch((err: any) => {
+        // Keep the previous list: an empty table is indistinguishable
+        // from "no interfaces configured", and Add would reuse a live
+        // name/device. The server also rejects creates that collide.
+        setLoadError(err?.message || 'Failed to load interfaces. The list below may be stale.');
       })
       .finally(() => setLoading(false));
   };
@@ -365,6 +372,25 @@ export default function InterfacesPage() {
           })}
         </div>
       </div>
+
+      {loadError && (
+        <div className="p-4 rounded-xl border flex items-center justify-between bg-amber-500/10 border-amber-500/30 text-amber-300">
+          <div className="flex items-center gap-2 text-sm">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>
+              {loadError} Adding an interface now may reuse a name or device that already exists —
+              the server rejects creates that collide with a live interface.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={loadData}
+            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium shrink-0 ml-4 cursor-pointer"
+          >
+            Retry load
+          </button>
+        </div>
+      )}
 
       {feedback && (
         <div

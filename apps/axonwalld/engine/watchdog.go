@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -353,6 +354,28 @@ var (
 	zbmSnapshotRegex   = regexp.MustCompile(`^([a-zA-Z0-9._/-]+@)?[a-zA-Z0-9._-]+$`)
 )
 
+// detectRunningSlotFromCmdline reports which slot the running kernel
+// actually booted from, based only on the kernel cmdline. The second
+// return is false when the cmdline is unreadable or carries no slot
+// marker, so callers can fall back to in-memory state instead of
+// trusting detectActiveSlotFromSystem's default-A. (E9: the in-memory
+// ActiveSlot is updated by ActivateSlot BEFORE any reboot, so after
+// arming it names the staged slot, not the running one.)
+func detectRunningSlotFromCmdline(cmdlinePath string) (string, bool) {
+	cmdlineBytes, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		return "", false
+	}
+	cmdline := string(cmdlineBytes)
+	if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
+		return "B", true
+	}
+	if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
+		return "A", true
+	}
+	return "", false
+}
+
 func detectInstallModeCustom(cmdlinePath string) string {
 	for _, p := range []string{"/etc/axonwall/install-mode", "/var/lib/axonwall/install-mode"} {
 		if data, err := os.ReadFile(p); err == nil {
@@ -670,7 +693,17 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 		readDisk = we.readSlotVersionFromDiskReal
 	}
 
-	if we.status.ActiveSlot == "A" {
+	// E9: the running slot is derived from the kernel cmdline, not
+	// from in-memory ActiveSlot (which ActivateSlot already moved to
+	// the staged slot before any reboot). Using ActiveSlot here used
+	// to overwrite the staged slot's version with the running version,
+	// so after arming both slots reported the running version.
+	runningSlot := we.status.ActiveSlot
+	if slot, ok := detectRunningSlotFromCmdline(we.cmdlinePath); ok {
+		runningSlot = slot
+	}
+
+	if runningSlot == "A" {
 		we.status.SlotAVersion = appVer
 		if we.status.SlotBVersion == "" || we.status.SlotBVersion == "Standby" || we.status.SlotBVersion == "Unknown" || we.status.SlotBVersion == we.status.SlotAVersion {
 			readDisk := we.readSlotDiskVersion
@@ -682,7 +715,7 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 				we.saveSlotVersionsLocked()
 			}
 		}
-	} else if we.status.ActiveSlot == "B" {
+	} else if runningSlot == "B" {
 		we.status.SlotBVersion = appVer
 		if we.status.SlotAVersion == "" || we.status.SlotAVersion == "Standby" || we.status.SlotAVersion == "Unknown" || we.status.SlotAVersion == we.status.SlotBVersion {
 			readDisk := we.readSlotDiskVersion
@@ -697,7 +730,7 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 	}
 
 	activeVer := we.status.SlotAVersion
-	if we.status.ActiveSlot == "B" {
+	if runningSlot == "B" {
 		activeVer = we.status.SlotBVersion
 	}
 	if activeVer != "" {
@@ -1635,10 +1668,28 @@ func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, va
 	}
 	env[key] = value
 
+	// A-L4: the block is fixed at 1024 bytes, and the old code sliced
+	// the serialised content to 1024, silently dropping keys in Go
+	// map iteration order — the just-set key itself could be the one
+	// truncated, while the caller was told the write succeeded.
+	// Serialise in sorted key order (deterministic) and fail closed
+	// instead of persisting a partial block: a caller that cannot set
+	// active_slot/bootcount must report failure, not boot with a
+	// grubenv that silently lost the key it just set.
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	var buf bytes.Buffer
 	buf.WriteString("# GRUB Environment Block\n")
-	for k, v := range env {
-		buf.WriteString(fmt.Sprintf("%s=%s\n", k, v))
+	for _, k := range keys {
+		buf.WriteString(fmt.Sprintf("%s=%s\n", k, env[k]))
+	}
+
+	if buf.Len() > 1024 {
+		return fmt.Errorf("grubenv content (%d bytes) exceeds the 1024-byte GRUB environment block; refusing to truncate keys (set %q, %d keys total)", buf.Len(), key, len(keys))
 	}
 
 	// Pad with '#' up to 1024 bytes
@@ -1648,5 +1699,5 @@ func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, va
 
 	// Ensure parent dir exists
 	_ = os.MkdirAll(filepath.Dir(envPath), 0755)
-	return os.WriteFile(envPath, buf.Bytes()[:1024], 0644)
+	return os.WriteFile(envPath, buf.Bytes(), 0644)
 }

@@ -3794,7 +3794,7 @@ var require_osMemoryHeapLinux = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/osMemoryHeapLinux.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs7 = __require("fs");
+    var fs8 = __require("fs");
     var values = ["VmSize", "VmRSS", "VmData"];
     var PROCESS_RESIDENT_MEMORY = "process_resident_memory_bytes";
     var PROCESS_VIRTUAL_MEMORY = "process_virtual_memory_bytes";
@@ -3825,7 +3825,7 @@ var require_osMemoryHeapLinux = __commonJS({
         // Use this one metric's `collect` to set all metrics' values.
         collect() {
           try {
-            const stat = fs7.readFileSync("/proc/self/status", "utf8");
+            const stat = fs8.readFileSync("/proc/self/status", "utf8");
             const structuredOutput = structureOutput(stat);
             residentMemGauge.set(labels, structuredOutput.VmRSS);
             virtualMemGauge.set(labels, structuredOutput.VmSize);
@@ -3905,7 +3905,7 @@ var require_processOpenFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processOpenFileDescriptors.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs7 = __require("fs");
+    var fs8 = __require("fs");
     var process2 = __require("process");
     var PROCESS_OPEN_FDS = "process_open_fds";
     module.exports = (registry2, config2 = {}) => {
@@ -3922,7 +3922,7 @@ var require_processOpenFileDescriptors = __commonJS({
         labelNames,
         collect() {
           try {
-            const fds = fs7.readdirSync("/proc/self/fd");
+            const fds = fs8.readdirSync("/proc/self/fd");
             this.set(labels, fds.length - 1);
           } catch {
           }
@@ -3938,13 +3938,13 @@ var require_processMaxFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processMaxFileDescriptors.js"(exports, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs7 = __require("fs");
+    var fs8 = __require("fs");
     var PROCESS_MAX_FDS = "process_max_fds";
     var maxFds;
     module.exports = (registry2, config2 = {}) => {
       if (maxFds === void 0) {
         try {
-          const limits = fs7.readFileSync("/proc/self/limits", "utf8");
+          const limits = fs8.readFileSync("/proc/self/limits", "utf8");
           const lines = limits.split("\n");
           for (const line of lines) {
             if (line.startsWith("Max open files")) {
@@ -11669,14 +11669,14 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs7 = this.flowScalar(this.type);
+              const fs8 = this.flowScalar(this.type);
               if (atNextItem || it.value) {
-                map2.items.push({ start, key: fs7, sep: [] });
+                map2.items.push({ start, key: fs8, sep: [] });
                 this.onKeyLine = true;
               } else if (it.sep) {
-                this.stack.push(fs7);
+                this.stack.push(fs8);
               } else {
-                Object.assign(it, { key: fs7, sep: [] });
+                Object.assign(it, { key: fs8, sep: [] });
                 this.onKeyLine = true;
               }
               return;
@@ -11804,13 +11804,13 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs7 = this.flowScalar(this.type);
+              const fs8 = this.flowScalar(this.type);
               if (!it || it.value)
-                fc.items.push({ start: [], key: fs7, sep: [] });
+                fc.items.push({ start: [], key: fs8, sep: [] });
               else if (it.sep)
-                this.stack.push(fs7);
+                this.stack.push(fs8);
               else
-                Object.assign(it, { key: fs7, sep: [] });
+                Object.assign(it, { key: fs8, sep: [] });
               return;
             }
             case "flow-map-end":
@@ -42054,7 +42054,7 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 // src/index.ts
 import * as http2 from "node:http";
 import * as https from "node:https";
-import * as fs6 from "node:fs";
+import * as fs7 from "node:fs";
 import * as net from "node:net";
 import * as path4 from "node:path";
 import * as os from "node:os";
@@ -43041,6 +43041,35 @@ function assertSafeIdentifier(val, paramName) {
 var HEADSCALE_SOCKET_PATH = process.env.HEADSCALE_SOCKET_PATH || "/run/headscale/headscale.sock";
 var HEADSCALE_CONFIG_PATH = process.env.HEADSCALE_CONFIG_PATH || "/etc/headscale/config.yaml";
 var HEADSCALE_BIN = process.env.HEADSCALE_BIN || "/usr/sbin/headscale";
+function parseHeadscaleTimestamp(value) {
+  if (value === null || value === void 0) return void 0;
+  if (typeof value === "string") {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? void 0 : new Date(ms).toISOString();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const ms = value > 1e12 ? value : value * 1e3;
+    return new Date(ms).toISOString();
+  }
+  if (typeof value === "object") {
+    const obj = value;
+    if (typeof obj.seconds === "number") {
+      return new Date(obj.seconds * 1e3).toISOString();
+    }
+    if (typeof obj.seconds === "string" && obj.seconds !== "") {
+      const s = Number(obj.seconds);
+      if (Number.isFinite(s)) return new Date(s * 1e3).toISOString();
+    }
+  }
+  return void 0;
+}
+function headscaleTimestamp(record2, ...keys) {
+  for (const key of keys) {
+    const parsed = parseHeadscaleTimestamp(record2?.[key]);
+    if (parsed !== void 0) return parsed;
+  }
+  return void 0;
+}
 function getHeadscaleBin() {
   if (fs2.existsSync(HEADSCALE_BIN)) return HEADSCALE_BIN;
   if (fs2.existsSync("/usr/local/bin/headscale")) return "/usr/local/bin/headscale";
@@ -43077,7 +43106,7 @@ async function listUsers() {
   return data.map((u) => ({
     id: u.id,
     name: u.name,
-    createdAt: u.created_at ? new Date((u.created_at.seconds || 0) * 1e3).toISOString() : (/* @__PURE__ */ new Date()).toISOString()
+    createdAt: headscaleTimestamp(u, "createdAt", "created_at") ?? (/* @__PURE__ */ new Date()).toISOString()
   }));
 }
 async function createUser(name) {
@@ -43086,7 +43115,7 @@ async function createUser(name) {
   return {
     id: data?.id,
     name: data?.name || safeName,
-    createdAt: data?.created_at ? new Date((data.created_at.seconds || 0) * 1e3).toISOString() : (/* @__PURE__ */ new Date()).toISOString()
+    createdAt: headscaleTimestamp(data, "createdAt", "created_at") ?? (/* @__PURE__ */ new Date()).toISOString()
   };
 }
 async function createPreAuthKey(user, reusable, ephemeral, expiration) {
@@ -43119,15 +43148,65 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
     key: data?.key,
     reusable: data?.reusable,
     ephemeral: data?.ephemeral,
-    expiration: data?.expiration ? new Date((data.expiration.seconds || 0) * 1e3).toISOString() : void 0,
+    expiration: headscaleTimestamp(data, "expiration"),
     user: data?.user || { id: safeUserId, name: String(user) }
   };
 }
 
 // src/mcp/authz.ts
 import * as crypto2 from "node:crypto";
-import * as fs3 from "node:fs";
+import * as fs4 from "node:fs";
 import * as path2 from "node:path";
+
+// src/mcp/lockfile.ts
+import * as fs3 from "node:fs";
+function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
+  const deadline = Date.now() + timeoutMs;
+  const waiter = new Int32Array(new SharedArrayBuffer(4));
+  for (; ; ) {
+    try {
+      const fd = fs3.openSync(lockPath, "wx", 432);
+      try {
+        fs3.writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: (/* @__PURE__ */ new Date()).toISOString() }));
+      } catch {
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try {
+          fs3.closeSync(fd);
+        } catch {
+        }
+        try {
+          fs3.unlinkSync(lockPath);
+        } catch {
+        }
+      };
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+      let stale = false;
+      try {
+        const stat = fs3.statSync(lockPath);
+        stale = Date.now() - stat.mtimeMs > 3e4;
+      } catch {
+      }
+      if (stale) {
+        try {
+          fs3.unlinkSync(lockPath);
+        } catch {
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for lock ${lockPath} after ${timeoutMs}ms`);
+      }
+      Atomics.wait(waiter, 0, 0, 5);
+    }
+  }
+}
+
+// src/mcp/authz.ts
 var rateLimitBuckets = /* @__PURE__ */ new Map();
 function resolveMcpKeysPath() {
   if (process.env.AXONWALL_MCP_KEYS_PATH) {
@@ -43136,16 +43215,16 @@ function resolveMcpKeysPath() {
   const primaryDir = "/var/lib/axonwall";
   const primaryFile = path2.join(primaryDir, "mcp-keys.json");
   try {
-    if (fs3.existsSync(primaryFile)) {
-      fs3.accessSync(primaryFile, fs3.constants.R_OK);
+    if (fs4.existsSync(primaryFile)) {
+      fs4.accessSync(primaryFile, fs4.constants.R_OK);
       return primaryFile;
     }
-    fs3.mkdirSync(primaryDir, { recursive: true, mode: 509 });
-    fs3.accessSync(primaryDir, fs3.constants.W_OK);
+    fs4.mkdirSync(primaryDir, { recursive: true, mode: 509 });
+    fs4.accessSync(primaryDir, fs4.constants.W_OK);
     return primaryFile;
   } catch {
     for (const candidate of ["/var/lib/axonwall/etc-axonwall/mcp-keys.json", "/etc/axonwall/mcp-keys.json"]) {
-      if (fs3.existsSync(candidate)) {
+      if (fs4.existsSync(candidate)) {
         return candidate;
       }
     }
@@ -43162,9 +43241,9 @@ function loadMcpKeysInternal() {
     ])
   );
   for (const keysPath of candidatePaths) {
-    if (!fs3.existsSync(keysPath)) continue;
+    if (!fs4.existsSync(keysPath)) continue;
     try {
-      const raw = fs3.readFileSync(keysPath, "utf8");
+      const raw = fs4.readFileSync(keysPath, "utf8");
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) continue;
       const valid = [];
@@ -43189,18 +43268,18 @@ function saveMcpKeysInternal(keys) {
   ];
   for (const keysPath of Array.from(new Set(targetPaths))) {
     try {
-      fs3.mkdirSync(path2.dirname(keysPath), { recursive: true, mode: 509 });
+      fs4.mkdirSync(path2.dirname(keysPath), { recursive: true, mode: 509 });
       const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
-      fs3.writeFileSync(tmpPath, serialized, { mode: 432 });
+      fs4.writeFileSync(tmpPath, serialized, { mode: 432 });
       try {
-        fs3.chmodSync(tmpPath, 432);
+        fs4.chmodSync(tmpPath, 432);
       } catch {
       }
-      fs3.renameSync(tmpPath, keysPath);
+      fs4.renameSync(tmpPath, keysPath);
     } catch {
       try {
-        fs3.writeFileSync(keysPath, serialized, { mode: 432 });
-        fs3.chmodSync(keysPath, 432);
+        fs4.writeFileSync(keysPath, serialized, { mode: 432 });
+        fs4.chmodSync(keysPath, 432);
       } catch {
       }
     }
@@ -43208,6 +43287,37 @@ function saveMcpKeysInternal(keys) {
 }
 function hashMcpToken(rawToken) {
   return crypto2.createHash("sha256").update(rawToken.trim()).digest("hex");
+}
+function readLastUsedSidecar(keysPath) {
+  try {
+    const raw = fs4.readFileSync(`${keysPath}.lastused.json`, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+  }
+  return {};
+}
+function writeLastUsedSidecar(keysPath, keyId, entry) {
+  try {
+    const sidecarPath = `${keysPath}.lastused.json`;
+    const all = readLastUsedSidecar(keysPath);
+    all[keyId] = entry;
+    fs4.mkdirSync(path2.dirname(sidecarPath), { recursive: true, mode: 509 });
+    const tmpPath = `${sidecarPath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
+    fs4.writeFileSync(tmpPath, JSON.stringify(all, null, 2), { mode: 432 });
+    fs4.renameSync(tmpPath, sidecarPath);
+  } catch {
+  }
+}
+function withMcpKeysLock(fn) {
+  const release = acquireMcpLockFile(`${resolveMcpKeysPath()}.lock`);
+  try {
+    return fn();
+  } finally {
+    release();
+  }
 }
 function createMcpApiKeyRecord(input2) {
   const shortId = crypto2.randomBytes(4).toString("hex");
@@ -43236,9 +43346,11 @@ function createMcpApiKeyRecord(input2) {
     expiresAt,
     createdBy: input2.createdBy ?? "admin"
   });
-  const existing = loadMcpKeysInternal();
-  existing.unshift(record2);
-  saveMcpKeysInternal(existing);
+  withMcpKeysLock(() => {
+    const existing = loadMcpKeysInternal();
+    existing.unshift(record2);
+    saveMcpKeysInternal(existing);
+  });
   const { secretHashSha256: _omitted, ...publicRecord } = record2;
   return {
     rawToken,
@@ -43246,16 +43358,26 @@ function createMcpApiKeyRecord(input2) {
   };
 }
 function listMcpApiKeys() {
-  return loadMcpKeysInternal().map(({ secretHashSha256: _omitted, ...pub }) => pub);
+  const sidecar = readLastUsedSidecar(resolveMcpKeysPath());
+  return loadMcpKeysInternal().map(({ secretHashSha256: _omitted, ...pub }) => {
+    const entry = sidecar[pub.id];
+    if (entry) {
+      return { ...pub, lastUsedAt: entry.lastUsedAt, lastUsedIp: entry.lastUsedIp };
+    }
+    return pub;
+  });
 }
 function revokeMcpApiKeyRecord(keyId) {
-  const keys = loadMcpKeysInternal();
-  const idx = keys.findIndex((k) => k.id === keyId);
-  if (idx === -1) return false;
-  keys.splice(idx, 1);
-  saveMcpKeysInternal(keys);
-  rateLimitBuckets.delete(keyId);
-  return true;
+  const revoked = withMcpKeysLock(() => {
+    const keys = loadMcpKeysInternal();
+    const idx = keys.findIndex((k) => k.id === keyId);
+    if (idx === -1) return false;
+    keys.splice(idx, 1);
+    saveMcpKeysInternal(keys);
+    return true;
+  });
+  if (revoked) rateLimitBuckets.delete(keyId);
+  return revoked;
 }
 function extractClientCertificateFingerprint(req) {
   if (!req) return null;
@@ -43378,9 +43500,10 @@ function authenticateMcpToken(rawToken, clientIp, req) {
     };
   }
   try {
-    matchedKey.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    matchedKey.lastUsedAt = now;
     matchedKey.lastUsedIp = cleanIp;
-    saveMcpKeysInternal(keys);
+    writeLastUsedSidecar(resolveMcpKeysPath(), matchedKey.id, { lastUsedAt: now, lastUsedIp: cleanIp });
   } catch {
   }
   return {
@@ -43394,13 +43517,13 @@ function hasMcpScope(key, requiredScope) {
 }
 
 // src/mcp/server.ts
-import * as fs5 from "node:fs";
+import * as fs6 from "node:fs";
 import * as http from "node:http";
 import * as crypto4 from "node:crypto";
 
 // src/mcp/audit.ts
 import * as crypto3 from "node:crypto";
-import * as fs4 from "node:fs";
+import * as fs5 from "node:fs";
 import * as path3 from "node:path";
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 function resolveMcpAuditPath() {
@@ -43410,18 +43533,18 @@ function resolveMcpAuditPath() {
   for (const dir of ["/var/lib/axonwall", "/var/log/axonwall"]) {
     const file2 = path3.join(dir, "mcp-audit.jsonl");
     try {
-      if (fs4.existsSync(file2)) {
-        fs4.accessSync(file2, fs4.constants.W_OK);
+      if (fs5.existsSync(file2)) {
+        fs5.accessSync(file2, fs5.constants.W_OK);
         return file2;
       }
-      fs4.mkdirSync(dir, { recursive: true, mode: 509 });
-      fs4.accessSync(dir, fs4.constants.W_OK);
+      fs5.mkdirSync(dir, { recursive: true, mode: 509 });
+      fs5.accessSync(dir, fs5.constants.W_OK);
       return file2;
     } catch {
     }
   }
   const fallbackDir = "/tmp/axonwall";
-  fs4.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
+  fs5.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
   return path3.join(fallbackDir, "mcp-audit.jsonl");
 }
 function computeEntryHash(entryWithoutHash) {
@@ -43445,8 +43568,8 @@ function computeEntryHash(entryWithoutHash) {
 }
 function getLastHash(auditPath) {
   try {
-    if (!fs4.existsSync(auditPath)) return GENESIS_HASH;
-    const content = fs4.readFileSync(auditPath, "utf8").trim();
+    if (!fs5.existsSync(auditPath)) return GENESIS_HASH;
+    const content = fs5.readFileSync(auditPath, "utf8").trim();
     if (!content) return GENESIS_HASH;
     const lines = content.split("\n");
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -43459,9 +43582,7 @@ function getLastHash(auditPath) {
   }
   return GENESIS_HASH;
 }
-function recordMcpAuditEntry(input2) {
-  const auditPath = resolveMcpAuditPath();
-  const prevHash = getLastHash(auditPath);
+function buildAuditEntry(input2, prevHash) {
   const partial2 = {
     id: `mcp_aud_${crypto3.randomBytes(6).toString("hex")}`,
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
@@ -43479,28 +43600,43 @@ function recordMcpAuditEntry(input2) {
     prevHash
   };
   const entryHash = computeEntryHash(partial2);
-  const fullEntry = {
+  return {
     ...partial2,
     entryHash
   };
+}
+function recordMcpAuditEntry(input2) {
+  const auditPath = resolveMcpAuditPath();
+  let release = null;
   try {
-    fs4.mkdirSync(path3.dirname(auditPath), { recursive: true, mode: 509 });
-    fs4.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 432 });
-    try {
-      fs4.chmodSync(auditPath, 432);
-    } catch {
-    }
+    release = acquireMcpLockFile(`${auditPath}.lock`);
   } catch (err) {
-    console.error("[MCP Audit] Failed to append audit entry:", err);
+    console.error("[MCP Audit] Failed to acquire audit lock; entry not recorded:", err);
+    return buildAuditEntry(input2, getLastHash(auditPath));
   }
-  return fullEntry;
+  try {
+    const fullEntry = buildAuditEntry(input2, getLastHash(auditPath));
+    try {
+      fs5.mkdirSync(path3.dirname(auditPath), { recursive: true, mode: 509 });
+      fs5.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 432 });
+      try {
+        fs5.chmodSync(auditPath, 432);
+      } catch {
+      }
+    } catch (err) {
+      console.error("[MCP Audit] Failed to append audit entry:", err);
+    }
+    return fullEntry;
+  } finally {
+    release();
+  }
 }
 function verifyMcpAuditChain() {
   const auditPath = resolveMcpAuditPath();
-  if (!fs4.existsSync(auditPath)) {
+  if (!fs5.existsSync(auditPath)) {
     return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
   }
-  const raw = fs4.readFileSync(auditPath, "utf8").trim();
+  const raw = fs5.readFileSync(auditPath, "utf8").trim();
   if (!raw) {
     return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
   }
@@ -43547,10 +43683,10 @@ function verifyMcpAuditChain() {
 function queryMcpAuditEntries(limit = 100) {
   const auditPath = resolveMcpAuditPath();
   const integrity = verifyMcpAuditChain();
-  if (!fs4.existsSync(auditPath)) {
+  if (!fs5.existsSync(auditPath)) {
     return { entries: [], integrity };
   }
-  const raw = fs4.readFileSync(auditPath, "utf8").trim();
+  const raw = fs5.readFileSync(auditPath, "utf8").trim();
   if (!raw) {
     return { entries: [], integrity };
   }
@@ -43579,8 +43715,8 @@ function readAgentToken() {
   }
   for (const p of AGENT_TOKEN_PATHS) {
     try {
-      if (fs5.existsSync(p)) {
-        const tok = fs5.readFileSync(p, "utf8").trim();
+      if (fs6.existsSync(p)) {
+        const tok = fs6.readFileSync(p, "utf8").trim();
         if (tok) return tok;
       }
     } catch {
@@ -43589,7 +43725,7 @@ function readAgentToken() {
   return "";
 }
 async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
-  if (!fs5.existsSync(AGENT_SOCKET_PATH)) {
+  if (!fs6.existsSync(AGENT_SOCKET_PATH)) {
     return {
       ok: false,
       status: 503,
@@ -43656,8 +43792,8 @@ function loadLocalDesiredState() {
   const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
   for (const p of candidates) {
     try {
-      if (fs5.existsSync(p)) {
-        const raw = JSON.parse(fs5.readFileSync(p, "utf8"));
+      if (fs6.existsSync(p)) {
+        const raw = JSON.parse(fs6.readFileSync(p, "utf8"));
         const parsed = DesiredStateSchema.safeParse(raw);
         if (parsed.success) return parsed.data;
         return null;
@@ -44036,8 +44172,8 @@ async function handleMcpReadResource(uri, env) {
     case "axonwall://telemetry/alerts/suricata": {
       const alerts = [];
       try {
-        if (fs5.existsSync("/var/log/suricata/eve.json")) {
-          const lines = fs5.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+        if (fs6.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs6.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
           for (const line of lines.slice(-50).reverse()) {
             try {
               alerts.push(JSON.parse(line));
@@ -44183,8 +44319,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       const sigFilter = typeof args.signatureContains === "string" ? args.signatureContains.toLowerCase() : "";
       const matchingAlerts = [];
       try {
-        if (fs5.existsSync("/var/log/suricata/eve.json")) {
-          const lines = fs5.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+        if (fs6.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs6.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
           for (let i = lines.length - 1; i >= 0 && matchingAlerts.length < limit; i--) {
             const line = lines[i];
             if (!line) continue;
@@ -44750,19 +44886,19 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       }
       state.rules.push(req.rule);
       try {
-        fs5.writeFileSync("/etc/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
+        fs6.writeFileSync("/etc/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
       } catch {
       }
       try {
-        fs5.writeFileSync("/var/lib/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
+        fs6.writeFileSync("/var/lib/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
       } catch {
       }
       try {
         const yamlFiles = serializeDesiredStateToYamlFiles(state);
         for (const dir of ["/etc/axonwall", "/var/lib/axonwall/etc-axonwall"]) {
-          if (fs5.existsSync(dir)) {
+          if (fs6.existsSync(dir)) {
             for (const [fn, content] of Object.entries(yamlFiles)) {
-              fs5.writeFileSync(`${dir}/${fn}`, content, { mode: 432 });
+              fs6.writeFileSync(`${dir}/${fn}`, content, { mode: 432 });
             }
           }
         }
@@ -44952,7 +45088,7 @@ function leafChainsToCa(certPath, caPath) {
   }
 }
 function assertNotOperatorCaWithoutKey(caPath, caKeyPath) {
-  if (fs6.existsSync(caPath) && !fs6.existsSync(caKeyPath)) {
+  if (fs7.existsSync(caPath) && !fs7.existsSync(caKeyPath)) {
     throw new Error(
       "[Axonwall Controller] Refusing to mint a self-signed hub certificate: ca.crt exists but no matching on-box CA key was found (operator-CA mode). Install an operator-issued hub.crt/hub.key pair that chains to ca.crt, or remove ca.crt to use appliance-CA provisioning."
     );
@@ -44963,14 +45099,14 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
     console.warn("[Axonwall Controller] AXONWALL_INSECURE_HTTP=1 is set: running in plaintext mode (DEV/TEST ONLY)");
     return null;
   }
-  if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
+  if (fs7.existsSync(certPath) && fs7.existsSync(keyPath)) {
     try {
-      const certStat = fs6.statSync(certPath);
-      const keyStat = fs6.statSync(keyPath);
+      const certStat = fs7.statSync(certPath);
+      const keyStat = fs7.statSync(keyPath);
       if (certStat.size > 0 && keyStat.size > 0) {
-        const cert = fs6.readFileSync(certPath);
-        const key = fs6.readFileSync(keyPath);
-        const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+        const cert = fs7.readFileSync(certPath);
+        const key = fs7.readFileSync(keyPath);
+        const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
         if (ca && leafChainsToCa(certPath, caPath) === false) {
           console.warn("[Axonwall Controller] Existing hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
         } else {
@@ -44982,16 +45118,16 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
     }
   }
   const rotateCandidates = ["/usr/local/bin/axonwall-rotate-hub-cert", "/usr/bin/axonwall-rotate-hub-cert"];
-  const rotateBin = rotateCandidates.find((p) => fs6.existsSync(p));
+  const rotateBin = rotateCandidates.find((p) => fs7.existsSync(p));
   if (rotateBin) {
     try {
       console.log(`[Axonwall Controller] Running ${rotateBin} --ensure to provision hub TLS certificate...`);
       child_process.execFileSync(rotateBin, ["--ensure"], { timeout: 15e3, stdio: "ignore" });
-      if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
-        const cert = fs6.readFileSync(certPath);
-        const key = fs6.readFileSync(keyPath);
+      if (fs7.existsSync(certPath) && fs7.existsSync(keyPath)) {
+        const cert = fs7.readFileSync(certPath);
+        const key = fs7.readFileSync(keyPath);
         if (cert.length > 0 && key.length > 0) {
-          const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+          const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
           if (ca && leafChainsToCa(certPath, caPath) === false) {
             console.warn("[Axonwall Controller] Rotated hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
           } else {
@@ -45006,8 +45142,8 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
   try {
     const certDir = path4.dirname(certPath);
-    if (!fs6.existsSync(certDir)) {
-      fs6.mkdirSync(certDir, { recursive: true, mode: 488 });
+    if (!fs7.existsSync(certDir)) {
+      fs7.mkdirSync(certDir, { recursive: true, mode: 488 });
     }
     const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
     child_process.execFileSync(
@@ -45031,17 +45167,17 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
       ],
       { timeout: 15e3, stdio: "ignore" }
     );
-    if (fs6.existsSync(certPath) && fs6.existsSync(keyPath)) {
-      const cert = fs6.readFileSync(certPath);
-      const key = fs6.readFileSync(keyPath);
+    if (fs7.existsSync(certPath) && fs7.existsSync(keyPath)) {
+      const cert = fs7.readFileSync(certPath);
+      const key = fs7.readFileSync(keyPath);
       try {
-        fs6.chmodSync(keyPath, 384);
-        fs6.chmodSync(certPath, 420);
+        fs7.chmodSync(keyPath, 384);
+        fs7.chmodSync(certPath, 420);
       } catch {
       }
       if (cert.length > 0 && key.length > 0) {
         console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
-        const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+        const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
         return { cert, key, ca };
       }
     }
@@ -45050,7 +45186,7 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
   }
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
   try {
-    const tmpDir = fs6.mkdtempSync(path4.join(os.tmpdir(), "axonwall-tls-"));
+    const tmpDir = fs7.mkdtempSync(path4.join(os.tmpdir(), "axonwall-tls-"));
     const tmpKey = path4.join(tmpDir, "hub.key");
     const tmpCert = path4.join(tmpDir, "hub.crt");
     const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
@@ -45075,19 +45211,19 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
       ],
       { timeout: 15e3, stdio: "ignore" }
     );
-    const cert = fs6.readFileSync(tmpCert);
-    const key = fs6.readFileSync(tmpKey);
+    const cert = fs7.readFileSync(tmpCert);
+    const key = fs7.readFileSync(tmpKey);
     try {
-      fs6.unlinkSync(tmpKey);
-      fs6.unlinkSync(tmpCert);
-      fs6.rmdirSync(tmpDir);
+      fs7.unlinkSync(tmpKey);
+      fs7.unlinkSync(tmpCert);
+      fs7.rmdirSync(tmpDir);
     } catch {
     }
     if (cert.length > 0 && key.length > 0) {
       console.warn(
         "[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted"
       );
-      const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+      const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
       return { cert, key, ca, isFallback: true };
     }
   } catch (err) {
@@ -45215,6 +45351,24 @@ function getSafeRedirectUrl(req, targetPort) {
   const scriptSafeUrl = JSON.stringify(targetUrl).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
   return { targetUrl, escapedUrl, scriptSafeUrl };
 }
+function deriveSatelliteRole(input2) {
+  if (input2.configuredRole) {
+    return input2.configuredRole;
+  }
+  if (input2.pid1ModeReported === true) {
+    return "edge-ngfw";
+  }
+  if (input2.pid1ModeReported === false) {
+    if (input2.currentRole === "edge-ngfw" && !input2.satelliteId.startsWith("edge-") && input2.satelliteId !== "edge") {
+      return "satellite";
+    }
+    return input2.currentRole || "satellite";
+  }
+  if (input2.currentRole === "edge-ngfw" || input2.satelliteId.startsWith("edge-") || input2.satelliteId === "edge") {
+    return "edge-ngfw";
+  }
+  return input2.currentRole || "satellite";
+}
 function createHttpRedirectServer(targetPort) {
   const redirectServer = http2.createServer((req, res) => {
     const { targetUrl, escapedUrl, scriptSafeUrl } = getSafeRedirectUrl(req, targetPort);
@@ -45259,7 +45413,31 @@ Redirecting to HTTPS\r
   });
   return redirectServer;
 }
-function createPortMultiplexer(httpsServer, redirectServer) {
+function createPortMultiplexer(httpsServer, redirectServer, opts) {
+  const handshakeTimeoutMs = opts?.handshakeTimeoutMs ?? 1e4;
+  const pendingTls = /* @__PURE__ */ new Map();
+  const pendingRedirect = /* @__PURE__ */ new Map();
+  const tlsKey = (socket) => `${socket.remoteAddress}:${socket.remotePort}`;
+  const clearTlsDeadline = (socket) => {
+    const timer = pendingTls.get(tlsKey(socket));
+    if (timer) {
+      clearTimeout(timer);
+      pendingTls.delete(tlsKey(socket));
+    }
+  };
+  const clearRedirectDeadline = (socket) => {
+    const timer = pendingRedirect.get(socket);
+    if (timer) {
+      clearTimeout(timer);
+      pendingRedirect.delete(socket);
+    }
+  };
+  httpsServer.on("secureConnection", (tlsSocket) => {
+    clearTlsDeadline(tlsSocket);
+  });
+  redirectServer.on("request", (req) => {
+    if (req.socket) clearRedirectDeadline(req.socket);
+  });
   const tcpMultiplexer = net.createServer((socket) => {
     let handled = false;
     socket.setTimeout(5e3, () => {
@@ -45278,8 +45456,22 @@ function createPortMultiplexer(httpsServer, redirectServer) {
       socket.removeListener("close", onClose);
       socket.unshift(buf);
       if (buf[0] === 22) {
+        const timer = setTimeout(() => {
+          pendingTls.delete(tlsKey(socket));
+          socket.destroy();
+        }, handshakeTimeoutMs);
+        pendingTls.set(tlsKey(socket), timer);
+        socket.once("close", () => clearTlsDeadline(socket));
+        socket.once("error", () => clearTlsDeadline(socket));
         httpsServer.emit("connection", socket);
       } else {
+        const timer = setTimeout(() => {
+          pendingRedirect.delete(socket);
+          socket.destroy();
+        }, handshakeTimeoutMs);
+        pendingRedirect.set(socket, timer);
+        socket.once("close", () => clearRedirectDeadline(socket));
+        socket.once("error", () => clearRedirectDeadline(socket));
         redirectServer.emit("connection", socket);
       }
     };
@@ -45320,8 +45512,8 @@ async function main() {
     const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
     for (const p of candidates) {
       try {
-        if (fs6.existsSync(p)) {
-          const raw = JSON.parse(fs6.readFileSync(p, "utf8"));
+        if (fs7.existsSync(p)) {
+          const raw = JSON.parse(fs7.readFileSync(p, "utf8"));
           const parsed = DesiredStateSchema.safeParse(raw);
           if (parsed.success) return parsed.data;
         }
@@ -45335,14 +45527,12 @@ async function main() {
     const localState = desiredState !== void 0 ? desiredState : loadLocalDesiredState2();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
-    const isEdge = sat.role === "edge-ngfw" || fleetNode?.role === "edge-ngfw" || sat.id.startsWith("edge-") || sat.id === "edge";
-    if (isEdge) {
-      sat.role = "edge-ngfw";
-    }
+    sat.role = deriveSatelliteRole({ configuredRole: fleetNode?.role, currentRole: sat.role, satelliteId: sat.id });
+    const isEdge = sat.role === "edge-ngfw";
     const mergedNode = {
       ...fleetNode,
       ...sat,
-      role: isEdge ? "edge-ngfw" : fleetNode?.role || sat.role || "satellite",
+      role: sat.role,
       skuProfile: fleetNode?.skuProfile || sat.skuProfile || hostedEdge?.skuProfile || "sku-vm-virtio",
       wanInterface: fleetNode?.wanInterface || sat.wanInterface || "eth0",
       lanInterface: fleetNode?.lanInterface || sat.lanInterface || "eth1",
@@ -45489,7 +45679,7 @@ async function main() {
       return;
     }
     const verifyFleetAuth = (req2, res2) => {
-      if (fs6.existsSync(caPath)) {
+      if (fs7.existsSync(caPath)) {
         const tlsSocket = req2.socket;
         let peerCert = null;
         try {
@@ -45874,6 +46064,18 @@ data: /api/v1/mcp
       return;
     }
     const forwardedHost = req.headers.host || req.headers["x-forwarded-host"] || "localhost";
+    let upstreamRes = null;
+    let proxyTimedOut = false;
+    const destroyUpstream = () => {
+      try {
+        uiReq.destroy();
+      } catch {
+      }
+      try {
+        upstreamRes?.destroy();
+      } catch {
+      }
+    };
     const uiReq = http2.request({
       hostname: "127.0.0.1",
       port: uiPort,
@@ -45886,11 +46088,28 @@ data: /api/v1/mcp
         "x-forwarded-for": req.socket?.remoteAddress || "127.0.0.1"
       }
     }, (uiRes) => {
+      upstreamRes = uiRes;
       res.writeHead(uiRes.statusCode || 200, uiRes.headers);
       uiRes.pipe(res);
     });
-    req.on("aborted", () => uiReq.destroy());
+    uiReq.setTimeout(3e4, () => {
+      proxyTimedOut = true;
+      destroyUpstream();
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      try {
+        res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Bad Gateway: web console upstream timed out");
+      } catch {
+        res.destroy();
+      }
+    });
+    req.on("aborted", destroyUpstream);
+    res.on("close", destroyUpstream);
     uiReq.on("error", () => {
+      if (proxyTimedOut) return;
       if (res.headersSent) {
         res.destroy();
         return;
@@ -45984,7 +46203,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         socket.destroy();
         return;
       }
-      if (fs6.existsSync(caPath)) {
+      if (fs7.existsSync(caPath)) {
         const tlsSocket = socket;
         if (!tlsSocket.authorized) {
           console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
@@ -46011,6 +46230,9 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             satCpuGauge.remove({ satellite_id: oldestDisconnectedId });
             satMemGauge.remove({ satellite_id: oldestDisconnectedId });
             satConnsGauge.remove({ satellite_id: oldestDisconnectedId });
+            satRxBytesGauge.remove({ satellite_id: oldestDisconnectedId });
+            satTxBytesGauge.remove({ satellite_id: oldestDisconnectedId });
+            satFlowsCounter.remove({ satellite_id: oldestDisconnectedId });
           } catch {
           }
           lastRxTxBytes.delete(oldestDisconnectedId);
@@ -46173,24 +46395,32 @@ ${headerLines.join("\r\n")}\r
           } else {
             report = parsed.payload;
           }
-          state.metrics = report.metrics;
-          if (report.metrics?.pid1Mode) {
-            state.role = "edge-ngfw";
+          if (report.metrics) {
+            state.metrics = report.metrics;
+            const fleetNode = loadLocalDesiredState2()?.fleet?.nodes?.find((n) => n.id === satId);
+            state.role = deriveSatelliteRole({
+              configuredRole: fleetNode?.role,
+              currentRole: state.role,
+              satelliteId: satId,
+              pid1ModeReported: Boolean(report.metrics.pid1Mode)
+            });
+            if (report.metrics?.skuProfile) {
+              state.skuProfile = report.metrics.skuProfile;
+            }
+            console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics?.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics?.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`);
+            satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
+            satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
+            satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
+            satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
+            const currentRx = report.metrics.rxBytesTotal || 0;
+            const currentTx = report.metrics.txBytesTotal || 0;
+            const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
+            if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
+            if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
+            lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
+          } else {
+            console.log(`[Fleet Manager] Telemetry from ${satId} without metrics; keeping last-known metrics.`);
           }
-          if (report.metrics?.skuProfile) {
-            state.skuProfile = report.metrics.skuProfile;
-          }
-          console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics.activeConns}`);
-          satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
-          satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
-          satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
-          satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
-          const currentRx = report.metrics.rxBytesTotal || 0;
-          const currentTx = report.metrics.txBytesTotal || 0;
-          const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
-          if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
-          if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
-          lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
           if (ws.readyState === import_websocket.default.OPEN) {
             ws.send(JSON.stringify({ type: "PING", payload: {} }));
           }
@@ -46217,6 +46447,9 @@ ${headerLines.join("\r\n")}\r
         satCpuGauge.remove({ satellite_id: satId });
         satMemGauge.remove({ satellite_id: satId });
         satConnsGauge.remove({ satellite_id: satId });
+        satRxBytesGauge.remove({ satellite_id: satId });
+        satTxBytesGauge.remove({ satellite_id: satId });
+        satFlowsCounter.remove({ satellite_id: satId });
         lastRxTxBytes.delete(satId);
         current.ws = void 0;
         current.disconnectedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -46282,6 +46515,7 @@ export {
   createHttpRedirectServer,
   createMcpApiKeyRecord,
   createPortMultiplexer,
+  deriveSatelliteRole,
   ensureControllerTls,
   getMcpServerStatus,
   headscaleRetryDelaysMs,

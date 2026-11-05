@@ -674,9 +674,21 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	s.mu.Lock()
 
 	// 6. Setup Commit-Confirm deadline
+	// C26 (daemon side): the UI now validates/clamps this value, but
+	// the daemon must not trust it. Out-of-range values previously
+	// passed through verbatim: a negative timeout armed a deadline
+	// in the past (immediate auto-rollback racing the confirm), and
+	// a huge timeout left a ruleset effectively unconfirmed forever.
+	// Clamp to 10-3600s, defaulting an absent value to 120s.
 	timeoutSec := req.ConfirmTimeoutSeconds
 	if timeoutSec == 0 {
 		timeoutSec = 120
+	}
+	if timeoutSec < 10 {
+		timeoutSec = 10
+	}
+	if timeoutSec > 3600 {
+		timeoutSec = 3600
 	}
 
 	if s.rollbackTimer != nil {
@@ -808,7 +820,16 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 			Message: "No pending configuration to confirm (already confirmed or rolled back).",
 		}, nil
 	}
-	if req.JobId != "" && req.JobId != "confirm" && s.pendingJobID != "" && req.JobId != s.pendingJobID {
+	// C10/C11 (daemon side): the literal job id "confirm" used to be
+	// exempt from the mismatch check, so a stale confirm — sent for
+	// a job that is no longer pending, or with no job known at all —
+	// confirmed whatever bundle happened to be pending, promoting a
+	// ruleset the operator never reviewed. The UI now sends real job
+	// ids, and axonwallctl resolves the pending id before confirming,
+	// so the daemon requires an exact match: the confirm must name
+	// the pending job (including both sides being empty for applies
+	// submitted without a job id). Anything else is a mismatch.
+	if req.JobId != s.pendingJobID {
 		return &pb.ConfirmResponse{
 			Success: false,
 			Message: fmt.Sprintf("Job ID mismatch for pending confirmation: expected %s, got %s", s.pendingJobID, req.JobId),
@@ -1506,22 +1527,67 @@ func applyBootInterfaces() error {
 
 	// Post-boot DHCP & static route verification once networking.service settles
 	if len(dhcpSpecs) > 0 {
-		go func(ifSpecs []bootIfaceSpec) {
-			for _, delay := range []time.Duration{8 * time.Second, 20 * time.Second} {
-				time.Sleep(delay)
-				for _, sp := range ifSpecs {
-					out, _ := exec.Command("ip", "-4", "addr", "show", "dev", sp.Device).CombinedOutput()
-					if !dhcpClientRunning(sp.Device) || !strings.Contains(string(out), "inet ") {
-						log.Printf("[Agent] Post-boot check: ensuring DHCP client is active on %s", sp.Device)
-						triggerDhcpClient(sp.Device, sp.Role)
-					}
-				}
-				_ = ReconcileStaticRoutes()
-			}
-		}(dhcpSpecs)
+		schedulePostBootVerification(dhcpSpecs)
 	}
 
 	return firstIfaceErr
+}
+
+// postBootVerificationDelays are the waits before each post-boot DHCP /
+// static-route verification round. A variable (not constants) so tests
+// can shrink them; production values are unchanged (8s, 20s).
+var postBootVerificationDelays = []time.Duration{8 * time.Second, 20 * time.Second}
+
+// postBootReconcileStaticRoutes is the reconcile step run by the
+// post-boot verifier. A variable so tests can observe invocations
+// without touching kernel routes; production always calls
+// ReconcileStaticRoutes.
+var postBootReconcileStaticRoutes = ReconcileStaticRoutes
+
+var postBootVerificationMu sync.Mutex
+var postBootVerificationCancel context.CancelFunc
+
+// schedulePostBootVerification starts the post-boot DHCP/static-route
+// verification goroutine, cancelling any previous one (A-M12). Every
+// bundle apply that touches a DHCP interface used to spawn another
+// goroutine, so an earlier goroutine's prune phase could delete a
+// route the newer config just installed; now at most one verifier
+// runs, and it is cancelled by the next apply.
+func schedulePostBootVerification(ifSpecs []bootIfaceSpec) {
+	postBootVerificationMu.Lock()
+	if postBootVerificationCancel != nil {
+		postBootVerificationCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	postBootVerificationCancel = cancel
+	postBootVerificationMu.Unlock()
+	go runPostBootVerification(ctx, ifSpecs)
+}
+
+func runPostBootVerification(ctx context.Context, ifSpecs []bootIfaceSpec) {
+	for _, delay := range postBootVerificationDelays {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		for _, sp := range ifSpecs {
+			if ctx.Err() != nil {
+				return
+			}
+			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", sp.Device).CombinedOutput()
+			if !dhcpClientRunning(sp.Device) || !strings.Contains(string(out), "inet ") {
+				log.Printf("[Agent] Post-boot check: ensuring DHCP client is active on %s", sp.Device)
+				triggerDhcpClient(sp.Device, sp.Role)
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		_ = postBootReconcileStaticRoutes()
+	}
 }
 
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {

@@ -43,7 +43,6 @@ export default function RootkitHunterPage() {
   );
   const [simulateAttack, setSimulateAttack] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
-  const [scanning, setScanning] = useState<boolean>(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
   useEffect(() => {
@@ -138,16 +137,17 @@ export default function RootkitHunterPage() {
     }
   };
 
+  // C4: this button used to be a 600 ms timer that reported either a
+  // canned "0 anomalies" pass or a canned critical alert — neither from
+  // any scan. No host-audit backend (rkhunter/chkrootkit/ClamAV/AIDE)
+  // is wired to this page, so it is now an explicit not-implemented
+  // notice that cannot report a pass. The simulation toggle above is
+  // a separate, labelled simulation of the Ghost-in-the-Ring analysis
+  // views, not an audit result.
   const handleRunFullAudit = () => {
-    setScanning(true);
-    setTimeout(() => {
-      setScanning(false);
-      setStatusBanner(
-        simulateAttack
-          ? 'CRITICAL ALERT: Out-of-band /proc/kcore prog_idr & io_uring SQPOLL scan detected 2 hidden eBPF programs (IDs 84, 85) and 1 rogue IORING_SETUP_SQPOLL implant (PID 4192)!'
-          : 'Audit Complete: All 12 host malware, rootkit, io_uring fdinfo, /proc/kcore prog_idr, and Silicon PMU LBR checks passed with 0 anomalies.'
-      );
-    }, 600);
+    setStatusBanner(
+      'Not implemented: no host audit backend is wired to this button — no scan was run and no result is claimed. Policy saving above is unaffected.'
+    );
   };
 
   return (
@@ -203,11 +203,10 @@ export default function RootkitHunterPage() {
           <button
             type="button"
             onClick={handleRunFullAudit}
-            disabled={scanning}
             className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 transition"
           >
             <Play className="w-4 h-4" />
-            {scanning ? 'Scanning Ring-0 & Host...' : 'Run Full 12-Layer Audit'}
+            Run Full 12-Layer Audit (not implemented)
           </button>
           <button
             type="button"
@@ -224,12 +223,14 @@ export default function RootkitHunterPage() {
       {statusBanner && (
         <div
           className={`p-4 rounded-xl border text-xs font-mono flex items-center gap-3 ${
-            statusBanner.startsWith('CRITICAL') || statusBanner.startsWith('Error')
+            statusBanner.startsWith('CRITICAL') ||
+            statusBanner.startsWith('Error') ||
+            statusBanner.startsWith('Not implemented')
               ? 'bg-red-950/60 border-red-500/50 text-red-200'
               : 'bg-emerald-950/50 border-emerald-500/40 text-emerald-200'
           }`}
         >
-          {statusBanner.startsWith('CRITICAL') ? (
+          {statusBanner.startsWith('CRITICAL') || statusBanner.startsWith('Not implemented') ? (
             <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
           ) : (
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />

@@ -101,56 +101,41 @@ export async function GET(req: NextRequest) {
               } catch {}
             });
           } else {
-            startFallbackStream(controller);
+            // C5: daemon answered with an error — do NOT fabricate
+            // traffic. Close the stream with an error event so the
+            // flows page shows "live feed unavailable" instead of
+            // invented hosts the operator could filter and export.
+            sendDaemonError(controller);
           }
         }
       );
 
       unixReq.on('error', () => {
-        // Fallback simulated stream when daemon is not listening on socket
+        // Daemon socket unreachable: same fail-closed error event,
+        // never a simulated stream.
         if (!cleanedUp) {
-          startFallbackStream(controller);
+          sendDaemonError(controller);
         }
       });
 
       unixReq.end();
 
-      function startFallbackStream(ctrl: ReadableStreamDefaultController) {
+      function sendDaemonError(ctrl: ReadableStreamDefaultController) {
         if (cleanedUp) return;
-        let index = 1;
-        const mockFlows = [
-          { proto: 'TLS', src: '192.168.1.105', sp: '58492', dst: '142.250.190.46', dp: '443', info: 'Application Data [TLS 1.3], len=482' },
-          { proto: 'DNS', src: '192.168.1.105', sp: '61023', dst: '192.168.1.1', dp: '53', info: 'Standard query 0x4f12 A security.axonwall.net' },
-          { proto: 'DNS', src: '192.168.1.1', sp: '53', dst: '192.168.1.105', dp: '61023', info: 'Standard query response 0x4f12 A 198.51.100.8' },
-          { proto: 'TCP', src: '192.168.1.50', sp: '22', dst: '192.168.1.10', dp: '51240', info: 'Flags [P.], seq 104:248, ack 12, win 502' },
-          { proto: 'WireGuard', src: '192.168.1.1', sp: '51820', dst: '198.51.100.25', dp: '51820', info: 'Transport Data, Counter 4920, len=128' },
-          { proto: 'ICMP', src: '192.168.1.105', sp: '-', dst: '8.8.8.8', dp: '-', info: 'echo request, id 0x8201, seq 4' },
-          { proto: 'ICMP', src: '8.8.8.8', sp: '-', dst: '192.168.1.105', dp: '-', info: 'echo reply, id 0x8201, seq 4' },
-        ];
-
-        interval = setInterval(() => {
-          if (cleanedUp) return;
-          try {
-            const flow = mockFlows[index % mockFlows.length];
-            const now = new Date().toTimeString().split(' ')[0] + '.' + String(Date.now() % 1000).padStart(3, '0');
-            const payload = JSON.stringify({
-              index,
-              timestamp: now,
-              srcIp: flow.src,
-              srcPort: flow.sp,
-              dstIp: flow.dst,
-              dstPort: flow.dp,
-              protocol: flow.proto,
-              length: 64 + (index % 8) * 128,
-              info: flow.info,
-            });
-
-            ctrl.enqueue(encoder.encode(`event: packet\ndata: ${payload}\n\n`));
-            index++;
-          } catch {
-            cleanup();
-          }
-        }, 300);
+        try {
+          ctrl.enqueue(
+            encoder.encode(
+              `event: error\ndata: ${JSON.stringify({
+                error:
+                  'Live packet feed unavailable: the axonwalld daemon is unreachable or returned an error. No traffic is shown.',
+              })}\n\n`
+            )
+          );
+        } catch {}
+        cleanup();
+        try {
+          ctrl.close();
+        } catch {}
       }
     },
     cancel() {

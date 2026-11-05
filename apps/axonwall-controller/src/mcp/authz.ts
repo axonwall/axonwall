@@ -13,6 +13,7 @@ import {
   type McpPolicyLimits,
   type McpScope,
 } from '@axonwall/lib/mcp';
+import { acquireMcpLockFile } from './lockfile.js';
 
 const rateLimitBuckets = new Map<string, number[]>();
 
@@ -104,6 +105,59 @@ export function hashMcpToken(rawToken: string): string {
   return crypto.createHash('sha256').update(rawToken.trim()).digest('hex');
 }
 
+// B-S1: last-used metadata lives in a sidecar file next to the keys
+// file (<keys>.lastused.json), keyed by key id. Authentication used
+// to rewrite the whole mcp-keys.json on every request to record
+// lastUsedAt; a request that loaded the list before a revocation
+// and saved after it resurrected the revoked key (and could drop a
+// concurrently created key). Authentication now only reads the keys
+// file and writes this sidecar, so it can never resurrect a key.
+// The sidecar is anchored to the resolved primary keys path.
+interface LastUsedEntry {
+  lastUsedAt: string;
+  lastUsedIp: string;
+}
+
+function readLastUsedSidecar(keysPath: string): Record<string, LastUsedEntry> {
+  try {
+    const raw = fs.readFileSync(`${keysPath}.lastused.json`, 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, LastUsedEntry>;
+    }
+  } catch {
+    // Missing or corrupt sidecar: metadata is best-effort.
+  }
+  return {};
+}
+
+function writeLastUsedSidecar(keysPath: string, keyId: string, entry: LastUsedEntry): void {
+  try {
+    const sidecarPath = `${keysPath}.lastused.json`;
+    const all = readLastUsedSidecar(keysPath);
+    all[keyId] = entry;
+    fs.mkdirSync(path.dirname(sidecarPath), { recursive: true, mode: 0o775 });
+    const tmpPath = `${sidecarPath}.tmp.${process.pid}.${crypto.randomUUID()}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(all, null, 2), { mode: 0o660 });
+    fs.renameSync(tmpPath, sidecarPath);
+  } catch {
+    // Non-fatal metadata update.
+  }
+}
+
+// Serialise a key-file mutation (create/revoke/toggle) against other
+// processes holding the same keys file. The lock guards the primary
+// keys path; saveMcpKeysInternal fans the result out to the mirror
+// paths afterwards, as before.
+function withMcpKeysLock<T>(fn: () => T): T {
+  const release = acquireMcpLockFile(`${resolveMcpKeysPath()}.lock`);
+  try {
+    return fn();
+  } finally {
+    release();
+  }
+}
+
 export interface CreateMcpApiKeyInput {
   name: string;
   agentType?: 'vigilsoc' | 'soar' | 'custom-ai' | 'readonly-analyst';
@@ -152,9 +206,11 @@ export function createMcpApiKeyRecord(input: CreateMcpApiKeyInput): CreatedMcpAp
     createdBy: input.createdBy ?? 'admin',
   });
 
-  const existing = loadMcpKeysInternal();
-  existing.unshift(record);
-  saveMcpKeysInternal(existing);
+  withMcpKeysLock(() => {
+    const existing = loadMcpKeysInternal();
+    existing.unshift(record);
+    saveMcpKeysInternal(existing);
+  });
 
   const { secretHashSha256: _omitted, ...publicRecord } = record;
   return {
@@ -164,27 +220,39 @@ export function createMcpApiKeyRecord(input: CreateMcpApiKeyInput): CreatedMcpAp
 }
 
 export function listMcpApiKeys(): McpApiKeyPublic[] {
-  return loadMcpKeysInternal().map(({ secretHashSha256: _omitted, ...pub }) => pub);
+  const sidecar = readLastUsedSidecar(resolveMcpKeysPath());
+  return loadMcpKeysInternal().map(({ secretHashSha256: _omitted, ...pub }) => {
+    const entry = sidecar[pub.id];
+    if (entry) {
+      return { ...pub, lastUsedAt: entry.lastUsedAt, lastUsedIp: entry.lastUsedIp };
+    }
+    return pub;
+  });
 }
 
 export function revokeMcpApiKeyRecord(keyId: string): boolean {
-  const keys = loadMcpKeysInternal();
-  const idx = keys.findIndex((k) => k.id === keyId);
-  if (idx === -1) return false;
-  keys.splice(idx, 1);
-  saveMcpKeysInternal(keys);
-  rateLimitBuckets.delete(keyId);
-  return true;
+  const revoked = withMcpKeysLock(() => {
+    const keys = loadMcpKeysInternal();
+    const idx = keys.findIndex((k) => k.id === keyId);
+    if (idx === -1) return false;
+    keys.splice(idx, 1);
+    saveMcpKeysInternal(keys);
+    return true;
+  });
+  if (revoked) rateLimitBuckets.delete(keyId);
+  return revoked;
 }
 
 export function toggleMcpApiKeyRecord(keyId: string, enabled: boolean): McpApiKeyPublic | null {
-  const keys = loadMcpKeysInternal();
-  const target = keys.find((k) => k.id === keyId);
-  if (!target) return null;
-  target.enabled = enabled;
-  saveMcpKeysInternal(keys);
-  const { secretHashSha256: _omitted, ...pub } = target;
-  return pub;
+  return withMcpKeysLock(() => {
+    const keys = loadMcpKeysInternal();
+    const target = keys.find((k) => k.id === keyId);
+    if (!target) return null;
+    target.enabled = enabled;
+    saveMcpKeysInternal(keys);
+    const { secretHashSha256: _omitted, ...pub } = target;
+    return pub;
+  });
 }
 
 export interface McpAuthResult {
@@ -339,11 +407,15 @@ export function authenticateMcpToken(
     };
   }
 
-  // Update lastUsedAt / lastUsedIp metadata
+  // Update lastUsedAt / lastUsedIp metadata in the sidecar only.
+  // B-S1: never rewrite the keys file here — a full rewrite on
+  // every authentication is the lost-update race that could
+  // resurrect a revoked key.
   try {
-    matchedKey.lastUsedAt = new Date().toISOString();
+    const now = new Date().toISOString();
+    matchedKey.lastUsedAt = now;
     matchedKey.lastUsedIp = cleanIp;
-    saveMcpKeysInternal(keys);
+    writeLastUsedSidecar(resolveMcpKeysPath(), matchedKey.id, { lastUsedAt: now, lastUsedIp: cleanIp });
   } catch {
     // Non-fatal metadata update
   }

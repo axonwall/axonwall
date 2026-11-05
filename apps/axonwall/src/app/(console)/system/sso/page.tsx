@@ -17,7 +17,7 @@ import {
   Save,
 } from 'lucide-react';
 import type { SsoConfig, SsoRoleMapping } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, applyDesiredState, testOidcDiscoveryAction } from '@/server/agent';
 
 const PRESET_PROVIDERS = [
   {
@@ -47,24 +47,26 @@ const PRESET_PROVIDERS = [
 ];
 
 export default function SsoSettingsPage() {
+  // C16: an appliance with no SSO configured used to display a fully
+  // populated, enabled Entra config belonging to nobody's tenant — and
+  // Save applied it, enabling SSO against a wrong issuer. The form now
+  // starts empty and disabled; only a saved config replaces it.
   const [config, setConfig] = useState<SsoConfig>({
-    enabled: true,
+    enabled: false,
     provider: 'entra',
-    displayName: 'Corporate Single Sign-On',
-    issuerUrl: 'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0',
-    clientId: 'axonwall-firewall-console-app-id',
-    clientSecret: '••••••••••••••••••••••••••••',
-    redirectUri: 'https://firewall.corp.local:2966/api/auth/callback/oidc',
-    scopes: ['openid', 'profile', 'email', 'groups'],
+    displayName: '',
+    issuerUrl: '',
+    clientId: '',
+    clientSecret: '',
+    redirectUri: '',
+    scopes: ['openid', 'profile', 'email'],
     groupClaim: 'groups',
-    roleMappings: [
-      { idpGroup: 'Entra-FirewallAdmins', role: 'admin' },
-      { idpGroup: 'Entra-SecurityOperations', role: 'operator' },
-      { idpGroup: 'Entra-ComplianceAuditors', role: 'readonly' },
-    ],
+    roleMappings: [],
   });
 
-  const [testResult, setTestResult] = useState<string | null>(null);
+  // null = load not finished yet; false = no saved SSO config exists.
+  const [hasSavedConfig, setHasSavedConfig] = useState<boolean | null>(null);
+  const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [newGroup, setNewGroup] = useState('');
@@ -73,19 +75,36 @@ export default function SsoSettingsPage() {
   useEffect(() => {
     getCurrentDesiredState()
       .then((state) => {
-        if (state.sso) setConfig(state.sso);
+        if (state.sso) {
+          setConfig(state.sso);
+          setHasSavedConfig(true);
+        } else {
+          setHasSavedConfig(false);
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        setHasSavedConfig(false);
+      });
   }, []);
 
   async function handleSaveConfig() {
     setIsSaving(true);
+    setTestResult(null);
     try {
       const state = await getCurrentDesiredState();
       await applyDesiredState({ ...state, sso: config });
-      setTestResult('Saved SSO configuration to /etc/axonwall/security.yaml');
-    } catch {}
-    setIsSaving(false);
+      setHasSavedConfig(true);
+      setTestResult({ type: 'success', text: 'Saved SSO configuration to /etc/axonwall/security.yaml' });
+    } catch (err: any) {
+      // C16: a failed save used to be swallowed silently, so the
+      // operator could not tell whether the config landed.
+      setTestResult({
+        type: 'error',
+        text: `Failed to save SSO configuration: ${err?.message || 'unknown error'}. The previous configuration is unchanged.`,
+      });
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function handleAddMapping() {
@@ -104,13 +123,24 @@ export default function SsoSettingsPage() {
     }));
   }
 
-  function handleTestIdP() {
+  // C4: the test used to be a 1200 ms timer that always reported a
+  // verified discovery document. It now performs a real live fetch of
+  // the entered issuer's .well-known/openid-configuration and reports
+  // the actual outcome, including failures.
+  async function handleTestIdP() {
     setIsTesting(true);
     setTestResult(null);
-    setTimeout(() => {
+    try {
+      const res = await testOidcDiscoveryAction(config.issuerUrl);
+      setTestResult({ type: res.ok ? 'success' : 'error', text: res.message });
+    } catch (err: any) {
+      setTestResult({
+        type: 'error',
+        text: `OIDC discovery test failed: ${err?.message || 'unknown error'}`,
+      });
+    } finally {
       setIsTesting(false);
-      setTestResult('Successfully validated OIDC discovery endpoint (.well-known/openid-configuration). Token endpoint and jwks_uri verified.');
-    }, 1200);
+    }
   }
 
   return (
@@ -167,9 +197,29 @@ export default function SsoSettingsPage() {
       </div>
 
       {testResult && (
-        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 flex items-center gap-3 text-emerald-300 text-sm">
-          <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-400" />
-          <span>{testResult}</span>
+        <div
+          className={`rounded-xl p-4 flex items-center gap-3 text-sm ${
+            testResult.type === 'error'
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {testResult.type === 'error' ? (
+            <AlertCircle className="w-5 h-5 shrink-0 text-red-400" />
+          ) : (
+            <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-400" />
+          )}
+          <span>{testResult.text}</span>
+        </div>
+      )}
+
+      {hasSavedConfig === false && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-center gap-3 text-amber-200 text-sm">
+          <AlertCircle className="w-5 h-5 shrink-0 text-amber-400" />
+          <span>
+            SSO is not configured on this appliance. The form starts empty and disabled — enter
+            your own IdP details before saving.
+          </span>
         </div>
       )}
 
