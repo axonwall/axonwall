@@ -969,24 +969,74 @@ func (we *WatchdogEngine) CloneSnapshotToBootEnvironment(snapshot, newBeName str
 }
 
 // ActivateBootEnvironment sets the targeted Boot Environment as the active bootfs for next reboot.
+// E3: the watchdog property sets are part of the arming, not best-effort
+// decoration. If any of them fails, the previous bootfs is restored and an
+// error is returned, so activation is atomic or reported failed — never a
+// success with bootfs and the watchdog's view of active/fallback disagreeing.
 func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	beName = strings.TrimSpace(beName)
 	if !zbmIdentifierRegex.MatchString(beName) {
 		return fmt.Errorf("invalid boot environment name: %q", beName)
 	}
 	targetDataset := "zroot/ROOT/" + beName
+	prevBootfs := ""
+	if out, err := we.runZpoolCmd("get", "-H", "-o", "value", "bootfs", "zroot"); err == nil {
+		prevBootfs = strings.TrimSpace(string(out))
+	}
+	prevActiveBe := ""
+	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:active_be", "zroot/ROOT"); err == nil {
+		prevActiveBe = strings.TrimSpace(string(out))
+	}
+	prevBootcount := ""
+	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:bootcount", "zroot/ROOT"); err == nil {
+		prevBootcount = strings.TrimSpace(string(out))
+	}
+	prevBootlimit := ""
+	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:bootlimit", "zroot/ROOT"); err == nil {
+		prevBootlimit = strings.TrimSpace(string(out))
+	}
 	out, err := we.runZpoolCmd("set", "bootfs="+targetDataset, "zroot")
 	if err != nil {
 		return fmt.Errorf("zpool set bootfs failed: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
+	armErr := ""
 	if out, err := we.runZfsCmd("set", "org.axonwall:active_be="+targetDataset, "zroot/ROOT"); err != nil {
-		log.Printf("[Watchdog/ZBM] Warning: Failed to set org.axonwall:active_be: %v (%s)", err, strings.TrimSpace(string(out)))
+		armErr = fmt.Sprintf("failed to set org.axonwall:active_be: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
-	if out, err := we.runZfsCmd("set", "org.axonwall:bootcount=0", "zroot/ROOT"); err != nil {
-		log.Printf("[Watchdog/ZBM] Warning: Failed to reset org.axonwall:bootcount: %v (%s)", err, strings.TrimSpace(string(out)))
+	if armErr == "" {
+		if out, err := we.runZfsCmd("set", "org.axonwall:bootcount=0", "zroot/ROOT"); err != nil {
+			armErr = fmt.Sprintf("failed to reset org.axonwall:bootcount: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
 	}
-	if out, err := we.runZfsCmd("set", "org.axonwall:bootlimit=3", "zroot/ROOT"); err != nil {
-		log.Printf("[Watchdog/ZBM] Warning: Failed to set org.axonwall:bootlimit: %v (%s)", err, strings.TrimSpace(string(out)))
+	if armErr == "" {
+		if out, err := we.runZfsCmd("set", "org.axonwall:bootlimit=3", "zroot/ROOT"); err != nil {
+			armErr = fmt.Sprintf("failed to set org.axonwall:bootlimit: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+	if armErr != "" {
+		// Roll the arming back to the previously read values so a failed
+		// activation leaves bootfs and the watchdog properties consistent.
+		if prevBootfs != "" && prevBootfs != targetDataset {
+			if _, rerr := we.runZpoolCmd("set", "bootfs="+prevBootfs, "zroot"); rerr != nil {
+				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back bootfs to %s after arming failure: %v", prevBootfs, rerr)
+			}
+		}
+		if prevActiveBe != "" {
+			if _, rerr := we.runZfsCmd("set", "org.axonwall:active_be="+prevActiveBe, "zroot/ROOT"); rerr != nil {
+				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back org.axonwall:active_be to %s after arming failure: %v", prevActiveBe, rerr)
+			}
+		}
+		if prevBootcount != "" {
+			if _, rerr := we.runZfsCmd("set", "org.axonwall:bootcount="+prevBootcount, "zroot/ROOT"); rerr != nil {
+				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back org.axonwall:bootcount to %s after arming failure: %v", prevBootcount, rerr)
+			}
+		}
+		if prevBootlimit != "" {
+			if _, rerr := we.runZfsCmd("set", "org.axonwall:bootlimit="+prevBootlimit, "zroot/ROOT"); rerr != nil {
+				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back org.axonwall:bootlimit to %s after arming failure: %v", prevBootlimit, rerr)
+			}
+		}
+		return fmt.Errorf("boot environment arming failed (%s); arming rolled back to its previous values", armErr)
 	}
 
 	we.mu.Lock()

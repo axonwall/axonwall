@@ -59,12 +59,15 @@ export default function RoutingPage() {
   }, [loadRoutingData]);
 
   const persistRouting = async (nextGateways: Gateway[], nextRoutes: StaticRoute[]) => {
+    const prevFullState = fullState;
+    const prevGateways = gateways;
+    const prevRoutes = routes;
     setGateways(nextGateways);
     setRoutes(nextRoutes);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         gateways: nextGateways,
@@ -74,6 +77,9 @@ export default function RoutingPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved routing configuration to /etc/axonwall/routing.yaml');
     } catch (err: any) {
+      setGateways(prevGateways);
+      setRoutes(prevRoutes);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save routing state'}`);
     } finally {
       setSaving(false);

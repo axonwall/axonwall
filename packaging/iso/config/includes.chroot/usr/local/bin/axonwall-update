@@ -281,16 +281,21 @@ resolve_label_dev() {
 }
 
 # Helper: Update GRUB environment file with active_slot and reset bootcount
+# Returns non-zero when the write did not happen, so arming callers (E1)
+# can fail closed instead of claiming an armed slot. Best-effort callers
+# inside staging keep ignoring the result.
 update_grubenv_file() {
   env_path="$1"
   slot="$2"
-  mkdir -p "$(dirname "$env_path")" 2>/dev/null || true
-  if command -v grub-editenv >/dev/null 2>&1; then
-    if [ ! -f "$env_path" ]; then
-      grub-editenv "$env_path" create 2>/dev/null || true
-    fi
-    grub-editenv "$env_path" set "active_slot=${slot}" bootcount=0 bootlimit=3 2>/dev/null || true
+  mkdir -p "$(dirname "$env_path")" 2>/dev/null || return 1
+  if ! command -v grub-editenv >/dev/null 2>&1; then
+    return 1
   fi
+  if [ ! -f "$env_path" ]; then
+    grub-editenv "$env_path" create 2>/dev/null || return 1
+  fi
+  grub-editenv "$env_path" set "active_slot=${slot}" bootcount=0 bootlimit=3 2>/dev/null || return 1
+  return 0
 }
 
 # 1. Detect target block device (skip when in Rolling Single-Root mode)
@@ -491,22 +496,43 @@ if [ "$ZBM_MODE" = "1" ]; then
     rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
 
     echo "[+] Arming ZFSBootMenu bootfs and autonomous watchdog..."
-    zpool set bootfs="${TARGET_BE_DS}" "${POOL_NAME}" 2>/dev/null || true
-    zfs set org.axonwall:fallback_be="${CURRENT_BE_DS}" "${PARENT_DS}" 2>/dev/null || true
-    zfs set org.axonwall:active_be="${TARGET_BE_DS}" "${PARENT_DS}" 2>/dev/null || true
-    zfs set org.axonwall:bootcount=0 "${PARENT_DS}" 2>/dev/null || true
-    zfs set org.axonwall:bootlimit=3 "${PARENT_DS}" 2>/dev/null || true
+    # E2: every arming step is checked. On any failure, restore the
+    # previous bootfs, print an error, and exit non-zero — never claim
+    # the Boot Environment is armed.
+    PREV_BOOTFS="$(zpool get -H -o value bootfs "${POOL_NAME}" 2>/dev/null || true)"
+    ZBM_ARM_OK=1
+    zpool set bootfs="${TARGET_BE_DS}" "${POOL_NAME}" 2>/dev/null || ZBM_ARM_OK=0
+    zfs set org.axonwall:fallback_be="${CURRENT_BE_DS}" "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
+    zfs set org.axonwall:active_be="${TARGET_BE_DS}" "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
+    zfs set org.axonwall:bootcount=0 "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
+    zfs set org.axonwall:bootlimit=3 "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
+    if [ "$ZBM_ARM_OK" != "1" ]; then
+      echo "[-] ERROR: Failed to arm Boot Environment ${TARGET_BE} (one or more zpool/zfs arming steps failed); the Boot Environment is NOT armed." >&2
+      if [ -n "$PREV_BOOTFS" ]; then
+        zpool set bootfs="${PREV_BOOTFS}" "${POOL_NAME}" 2>/dev/null || true
+      fi
+      exit 1
+    fi
 
     printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
     printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
 
     echo "[✓] Boot Environment ${TARGET_BE} successfully staged and armed. Reboot to activate."
+  else
+    # E2 family: ZBM mode with no zfs tools stages nothing; failing closed
+    # here keeps the script from printing success at the end for no work.
+    echo "[-] ERROR: ZFSBootMenu mode requested but the zfs tools are not available; no Boot Environment was staged or armed." >&2
+    exit 1
   fi
 elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
   echo "[+] Detected Dual-Root target partition: ${TARGET_DEV} (${TARGET_LABEL})"
   echo "[+] Mounting standby partition to staging directory..."
   STAGE_DIR="/tmp/axonwall-update-slot-${TARGET_SLOT}"
   mkdir -p "${STAGE_DIR}"
+  # E1: staging-success flag. Only the mount-ok block below may set it;
+  # the grubenv arming after that block is gated on it.
+  STAGING_OK=0
+  STAGING_RSYNCS_FAILED=0
   mount "${TARGET_DEV}" "${STAGE_DIR}" 2>/dev/null || true
 
   # If mounting succeeds, synchronize root filesystem or extract downloaded release package
@@ -527,7 +553,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           --exclude=/var/lib/axonwall/* \
           --exclude=/home/* \
           --exclude=/boot/efi/* \
-          / "${STAGE_DIR}/" 2>/dev/null || true
+          / "${STAGE_DIR}/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       else
         for sys_dir in bin etc home lib lib64 opt root sbin usr var; do
           if [ -d "/${sys_dir}" ]; then
@@ -597,7 +623,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     elif [ -d /opt/axonwall ]; then
       mkdir -p "${STAGE_DIR}/opt/axonwall" 2>/dev/null || true
       if command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+        rsync -a --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       else
         cp -a /opt/axonwall/. "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
       fi
@@ -662,8 +688,27 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       update_grubenv_file "${STAGE_DIR}/boot/grub/grubenv" "${TARGET_SLOT}"
     fi
 
+    # E1 staging-success gate: only a staged slot with a real rootfs
+    # (etc + init), a kernel, and no failed staging rsync may ever be
+    # armed. A stale or partial tree fails here, not at next boot.
+    if [ "$STAGING_RSYNCS_FAILED" != "1" ] && [ -d "${STAGE_DIR}/etc" ] && [ -e "${STAGE_DIR}/sbin/init" ] && ls "${STAGE_DIR}/boot"/vmlinuz-* >/dev/null 2>&1; then
+      STAGING_OK=1
+    else
+      echo "[-] ERROR: Staged Slot ${TARGET_SLOT} is not a complete bootable rootfs (missing etc, sbin/init, or kernel, or a staging copy failed); refusing to arm it." >&2
+    fi
+
     umount "${STAGE_DIR}" 2>/dev/null || true
     rmdir "${STAGE_DIR}" 2>/dev/null || true
+  fi
+
+  # E1: never arm a slot whose staging did not complete. The mount-ok
+  # block above is the only place staging happens; anything else means
+  # the standby slot was never updated.
+  if [ "$STAGING_OK" != "1" ]; then
+    echo "[-] ERROR: Standby Slot ${TARGET_SLOT} staging did not complete (mount failure or incomplete staged tree); refusing to arm it. The previous boot target is unchanged." >&2
+    umount "${STAGE_DIR}" 2>/dev/null || true
+    rmdir "${STAGE_DIR}" 2>/dev/null || true
+    exit 1
   fi
 
   # Also ensure running rootfs has valid /boot/vmlinuz and /boot/initrd.img symlinks
@@ -689,7 +734,12 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
 
   # Arm GRUB boot watchdog for next boot on current /boot/grub/grubenv (and Slot A's grubenv if running on Slot B)
   echo "[+] Arming GRUB boot watchdog on /boot/grub/grubenv..."
-  update_grubenv_file "/boot/grub/grubenv" "${TARGET_SLOT}"
+  # E1: check the arming call's result — a failed grubenv write must fail
+  # the update, not print success for an unarmed slot.
+  if ! update_grubenv_file "/boot/grub/grubenv" "${TARGET_SLOT}"; then
+    echo "[-] ERROR: Failed to arm GRUB boot watchdog for Slot ${TARGET_SLOT} (grubenv write failed); the previous boot target is unchanged." >&2
+    exit 1
+  fi
   if [ "$ACTIVE_SLOT" = "B" ]; then
     SLOT_A_DEV="$(resolve_label_dev "axon_root_a")"
     if [ -n "$SLOT_A_DEV" ] && [ -b "$SLOT_A_DEV" ]; then
@@ -697,7 +747,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       mkdir -p "$SLOT_A_MNT" 2>/dev/null || true
       if mount "$SLOT_A_DEV" "$SLOT_A_MNT" 2>/dev/null; then
         if [ -d "$SLOT_A_MNT/boot/grub" ]; then
-          update_grubenv_file "$SLOT_A_MNT/boot/grub/grubenv" "${TARGET_SLOT}"
+          update_grubenv_file "$SLOT_A_MNT/boot/grub/grubenv" "${TARGET_SLOT}" || echo "[!] WARNING: Failed to update the Slot A grubenv copy; the primary grubenv was armed." >&2
         fi
         umount "$SLOT_A_MNT" 2>/dev/null || true
       fi

@@ -50,12 +50,15 @@ export default function IdsIpsPage() {
   }, []);
 
   const handleSaveSuricata = async (nextEnabled = suricataEnabled, nextMode = suricataMode) => {
+    const prevFullState = fullState;
+    const prevSuricataEnabled = suricataEnabled;
+    const prevSuricataMode = suricataMode;
     setSuricataEnabled(nextEnabled);
     setSuricataMode(nextMode);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         suricata: {
@@ -78,6 +81,9 @@ export default function IdsIpsPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved Suricata configuration to /etc/axonwall/security.yaml');
     } catch (err: any) {
+      setSuricataEnabled(prevSuricataEnabled);
+      setSuricataMode(prevSuricataMode);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save Suricata settings'}`);
     } finally {
       setSaving(false);

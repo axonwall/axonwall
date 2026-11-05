@@ -25,10 +25,12 @@ export default function AcmeCertificatesPage() {
   }, []);
 
   const persistCerts = async (nextCerts: AcmeCertificate[]) => {
+    const prevFullState = fullState;
+    const prevCertificates = certificates;
     setCertificates(nextCerts);
     setRenewing(true);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         acme: {
@@ -42,7 +44,10 @@ export default function AcmeCertificatesPage() {
       await applyDesiredState(nextState);
       setRenewDone(true);
       setTimeout(() => setRenewDone(false), 3000);
-    } catch {}
+    } catch {
+      setCertificates(prevCertificates);
+      setFullState(prevFullState);
+    }
     setRenewing(false);
   };
 

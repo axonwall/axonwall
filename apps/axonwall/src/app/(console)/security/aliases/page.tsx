@@ -63,10 +63,12 @@ export default function DynamicAliasesPage() {
   }, []);
 
   const persistAliases = async (nextAliases: Alias[]) => {
+    const prevFullState = fullState;
+    const prevAliases = aliases;
     setAliases(nextAliases);
     setRefreshing(true);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         aliases: nextAliases,
@@ -75,7 +77,10 @@ export default function DynamicAliasesPage() {
       await applyDesiredState(nextState);
       setRefreshSuccess(true);
       setTimeout(() => setRefreshSuccess(false), 3000);
-    } catch {}
+    } catch {
+      setAliases(prevAliases);
+      setFullState(prevFullState);
+    }
     setRefreshing(false);
   };
 

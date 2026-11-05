@@ -17,104 +17,6 @@ import {
 import { getCurrentDesiredState, applyDesiredState } from '../../../server/agent';
 import { inferInterfaceRole, type DesiredState, type FirewallRule } from '@axonwall/lib/schemas';
 
-const INITIAL_STATE: DesiredState = {
-  version: 1,
-  system: {
-    hostname: 'axonwall',
-    domain: 'axonwall.local',
-    dnsServers: ['1.1.1.1'],
-    timezone: 'UTC',
-    flowtableOffload: true,
-    antiLockout: {
-      enabled: true,
-      interface: 'lan',
-      ports: [22, 80, 443, 2966, 3000],
-    },
-  },
-  interfaces: [
-    { name: 'wan', role: 'wan', device: 'eth0', type: 'dhcp', enabled: true, description: 'WAN', mtu: 1500 },
-    { name: 'lan', role: 'lan', device: 'eth1', type: 'static', enabled: true, dhcpServer: true, description: 'LAN', ipv4Address: '192.168.1.1/24', mtu: 1500 },
-  ],
-  aliases: [
-    { name: 'web_servers', type: 'host', entries: ['192.168.1.10', '192.168.1.20'], description: 'Internal Web Servers', enabled: true },
-  ],
-  rules: [
-    {
-      id: '00000000-0000-4000-8000-000000000001',
-      action: 'pass',
-      direction: 'in',
-      interface: 'lan',
-      quick: true,
-      protocol: 'tcp',
-      source: 'any',
-      sourcePort: '',
-      destination: 'any',
-      destinationPort: '22, 80, 443, 2966, 3000',
-      log: false,
-      enabled: true,
-      description: 'Anti-Lockout Rule: Web GUI & SSH',
-      sortOrder: 10,
-    },
-    {
-      id: '00000000-0000-4000-8000-000000000002',
-      action: 'pass',
-      direction: 'in',
-      interface: 'lan',
-      quick: true,
-      protocol: 'tcp',
-      source: 'any',
-      sourcePort: '',
-      destination: '$web_servers',
-      destinationPort: '80, 443',
-      log: true,
-      enabled: true,
-      description: 'Allow LAN to Internal Web Servers',
-      sortOrder: 20,
-    },
-    {
-      id: '00000000-0000-4000-8000-000000000003',
-      action: 'pass',
-      direction: 'in',
-      interface: 'lan',
-      quick: true,
-      protocol: 'any',
-      source: 'any',
-      sourcePort: '',
-      destination: 'any',
-      destinationPort: '',
-      log: false,
-      enabled: true,
-      description: 'Default Allow LAN to Internet',
-      sortOrder: 100,
-    },
-  ],
-  nat: [
-    {
-      type: 'masquerade',
-      interface: 'wan',
-      protocol: 'any',
-      source: 'any',
-      sourcePort: '',
-      destination: 'any',
-      destinationPort: '',
-      enabled: true,
-      description: 'Default Outbound NAT',
-      sortOrder: 100,
-      log: false,
-    },
-  ],
-  gateways: [],
-  gatewayGroups: [],
-  vlans: [],
-  bridges: [],
-  bonds: [],
-  virtualIps: [],
-  vrfs: [],
-  dhcp: { enabled: true, subnets: [] },
-  dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
-  routes: [],
-};
-
 const DEFAULT_RULE: FirewallRule = {
   action: 'pass',
   direction: 'in',
@@ -132,7 +34,12 @@ const DEFAULT_RULE: FirewallRule = {
 };
 
 export default function FirewallPage() {
-  const [state, setState] = useState<DesiredState>(INITIAL_STATE);
+  // C1: never render a placeholder ruleset. State starts null and the page
+  // shows a loading/error screen until the real config loads, so Apply can
+  // never persist demo rules over the live configuration.
+  const [state, setState] = useState<DesiredState | null>(null);
+  const [isLoadingState, setIsLoadingState] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedInterface, setSelectedInterface] = useState<string>('lan');
   const [compiledScript, setCompiledScript] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<{ message: string; warnings: string[] } | null>(null);
@@ -144,24 +51,40 @@ export default function FirewallPage() {
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [ruleForm, setRuleForm] = useState<FirewallRule>(DEFAULT_RULE);
 
-  useEffect(() => {
+  const loadState = () => {
+    setIsLoadingState(true);
+    setLoadError(null);
     getCurrentDesiredState()
       .then((s) => {
-        if (s) setState(s);
+        if (s) {
+          setState(s);
+        } else {
+          setLoadError('No firewall configuration was returned by the server.');
+        }
       })
-      .catch(() => {});
+      .catch((err: any) => {
+        setLoadError(err?.message || 'Failed to load the current firewall configuration.');
+      })
+      .finally(() => {
+        setIsLoadingState(false);
+      });
+  };
+
+  useEffect(() => {
+    loadState();
   }, []);
 
   const availableInterfaces = [
-    ...state.interfaces.map((i) => i.name),
+    ...(state?.interfaces ?? []).map((i) => i.name),
     'any',
   ];
 
-  const filteredRules = state.rules.filter(
+  const filteredRules = (state?.rules ?? []).filter(
     (r) => selectedInterface === 'all' || r.interface === selectedInterface
   );
 
   const handleOpenAddModal = () => {
+    if (!state) return;
     setEditingRuleId(null);
     setRuleForm({
       ...DEFAULT_RULE,
@@ -181,20 +104,21 @@ export default function FirewallPage() {
     e.preventDefault();
     if (editingRuleId) {
       // Edit existing rule
-      setState((prev) => ({
-        ...prev,
-        rules: prev.rules.map((r) => (r.id === editingRuleId ? { ...ruleForm, id: editingRuleId } : r)),
-      }));
+      setState((prev) =>
+        prev
+          ? {
+              ...prev,
+              rules: prev.rules.map((r) => (r.id === editingRuleId ? { ...ruleForm, id: editingRuleId } : r)),
+            }
+          : prev
+      );
     } else {
       // Create new rule
       const newRule: FirewallRule = {
         ...ruleForm,
         id: crypto.randomUUID(),
       };
-      setState((prev) => ({
-        ...prev,
-        rules: [...prev.rules, newRule],
-      }));
+      setState((prev) => (prev ? { ...prev, rules: [...prev.rules, newRule] } : prev));
     }
     setHasUnappliedChanges(true);
     setIsModalOpen(false);
@@ -203,24 +127,26 @@ export default function FirewallPage() {
   const handleDeleteRule = (id?: string) => {
     if (!id) return;
     if (confirm('Are you sure you want to delete this firewall rule?')) {
-      setState((prev) => ({
-        ...prev,
-        rules: prev.rules.filter((r) => r.id !== id),
-      }));
+      setState((prev) => (prev ? { ...prev, rules: prev.rules.filter((r) => r.id !== id) } : prev));
       setHasUnappliedChanges(true);
     }
   };
 
   const handleToggleRule = (id?: string) => {
     if (!id) return;
-    setState((prev) => ({
-      ...prev,
-      rules: prev.rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)),
-    }));
+    setState((prev) =>
+      prev
+        ? {
+            ...prev,
+            rules: prev.rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)),
+          }
+        : prev
+    );
     setHasUnappliedChanges(true);
   };
 
   async function handleApply() {
+    if (!state) return;
     setIsApplying(true);
     try {
       const res = await applyDesiredState(state, 120);
@@ -238,6 +164,41 @@ export default function FirewallPage() {
     } finally {
       setIsApplying(false);
     }
+  }
+
+  // C1: nothing editable renders until the real configuration has loaded.
+  // A load failure shows an error (never the demo ruleset) with a retry.
+  if (isLoadingState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading firewall configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !state) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'Firewall configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current ruleset is unknown, so editing and applying are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (

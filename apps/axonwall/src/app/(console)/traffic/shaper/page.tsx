@@ -56,10 +56,11 @@ export default function TrafficShaperPage() {
   const compiled = compileTrafficShaper(currentConfig);
 
   const handleApply = async () => {
+    const prevFullState = fullState;
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         trafficShaper: currentConfig,
@@ -70,6 +71,7 @@ export default function TrafficShaperPage() {
       setApplied(true);
       setTimeout(() => setApplied(false), 3000);
     } catch (err: any) {
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save Traffic Shaper settings'}`);
     } finally {
       setSaving(false);

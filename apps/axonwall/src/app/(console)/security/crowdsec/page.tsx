@@ -44,11 +44,13 @@ export default function CrowdSecPage() {
   };
 
   const handleSaveCrowdSec = async (nextEnabled = enabled) => {
+    const prevFullState = fullState;
+    const prevEnabled = enabled;
     setEnabled(nextEnabled);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         crowdsec: {
@@ -60,6 +62,8 @@ export default function CrowdSecPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved CrowdSec configuration to /etc/axonwall/security.yaml');
     } catch (err: any) {
+      setEnabled(prevEnabled);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save CrowdSec settings'}`);
     } finally {
       setSaving(false);

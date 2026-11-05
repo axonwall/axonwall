@@ -85,10 +85,11 @@ export default function DynamicRoutingPage() {
   const compiled = compileFrr(frrConfig);
 
   const handleApply = async () => {
+    const prevFullState = fullState;
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         frr: frrConfig,
@@ -99,6 +100,7 @@ export default function DynamicRoutingPage() {
       setApplied(true);
       setTimeout(() => setApplied(false), 3000);
     } catch (err: any) {
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save FRR settings'}`);
     } finally {
       setSaving(false);

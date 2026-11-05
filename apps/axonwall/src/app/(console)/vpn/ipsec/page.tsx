@@ -29,11 +29,13 @@ export default function IpsecPage() {
   }, []);
 
   const persistTunnels = async (nextTunnels: IpsecTunnel[]) => {
+    const prevFullState = fullState;
+    const prevTunnels = tunnels;
     setTunnels(nextTunnels);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         ipsec: {
@@ -45,6 +47,8 @@ export default function IpsecPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved IPsec configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
+      setTunnels(prevTunnels);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save IPsec tunnels'}`);
     } finally {
       setSaving(false);

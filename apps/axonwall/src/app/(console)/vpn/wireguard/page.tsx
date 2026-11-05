@@ -57,11 +57,13 @@ export default function WireGuardPage() {
   }, []);
 
   const persistWireGuard = async (nextWg: typeof serverConfig) => {
+    const prevFullState = fullState;
+    const prevServerConfig = serverConfig;
     setServerConfig(nextWg);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         wireguard: {
@@ -84,6 +86,8 @@ export default function WireGuardPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved WireGuard configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
+      setServerConfig(prevServerConfig);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save WireGuard settings'}`);
     } finally {
       setSaving(false);
