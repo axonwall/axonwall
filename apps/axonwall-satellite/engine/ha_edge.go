@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -75,25 +77,42 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 	}
 
 	slog.Info("Promoting Edge NGFW to ACTIVE master", "placement", h.placement, "wan", wanDev, "lan", lanDev)
-	_ = netEngine.SetLinkUp(wanDev, true)
+	// A-M11: every kernel operation is checked, and the recorded
+	// role changes only after all of them succeed. The old code
+	// discarded every error and recorded "active" unconditionally,
+	// so the hub believed a node held the gateway VIP when the VIP
+	// assignment had silently failed.
+	if err := netEngine.SetLinkUp(wanDev, true); err != nil {
+		return fmt.Errorf("promote: failed to unfence WAN %s: %w", wanDev, err)
+	}
 
+	var errs []error
 	if p.LanVipV4 != "" {
-		_ = netEngine.ConfigureInterface(EdgeInterfaceSpec{
+		if err := netEngine.ConfigureInterface(EdgeInterfaceSpec{
 			Name:    "lan-vip4",
 			Device:  lanDev,
 			Address: p.LanVipV4,
 			MTU:     1500,
 			Enabled: true,
-		})
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("promote: failed to assign LAN VIP %s on %s: %w", p.LanVipV4, lanDev, err))
+		}
 	}
 	if p.LanVipV6 != "" {
-		_ = netEngine.ConfigureInterface(EdgeInterfaceSpec{
+		if err := netEngine.ConfigureInterface(EdgeInterfaceSpec{
 			Name:    "lan-vip6",
 			Device:  lanDev,
 			Address: p.LanVipV6,
 			MTU:     1500,
 			Enabled: true,
-		})
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("promote: failed to assign LAN VIP %s on %s: %w", p.LanVipV6, lanDev, err))
+		}
+	}
+	if len(errs) > 0 {
+		// Role and remembered VIPs stay as they were: the node is
+		// not active if its VIPs are not actually assigned.
+		return errors.Join(errs...)
 	}
 
 	h.lastLanDev = lanDev
@@ -139,12 +158,27 @@ func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPa
 	}
 
 	slog.Info("Demoting Edge NGFW to HOT STANDBY (fencing WAN link & releasing LAN VIPs)", "placement", h.placement, "wan", wanDev, "lan", lanDev)
-	_ = netEngine.SetLinkUp(wanDev, false)
+	// A-M11: same fail-closed shape as Promote. If the WAN fence
+	// fails, the node is not standby; if a VIP removal fails, the
+	// VIP is still live on this node and the role must not claim
+	// otherwise — a "standby" node still holding the VIP alongside
+	// the new active node is exactly the split-brain this guards.
+	if err := netEngine.SetLinkUp(wanDev, false); err != nil {
+		return fmt.Errorf("demote: failed to fence WAN %s: %w", wanDev, err)
+	}
+	var errs []error
 	if vip4 != "" {
-		_ = netEngine.RemoveAddress(lanDev, vip4)
+		if err := netEngine.RemoveAddress(lanDev, vip4); err != nil {
+			errs = append(errs, fmt.Errorf("demote: failed to remove LAN VIP %s from %s: %w", vip4, lanDev, err))
+		}
 	}
 	if vip6 != "" {
-		_ = netEngine.RemoveAddress(lanDev, vip6)
+		if err := netEngine.RemoveAddress(lanDev, vip6); err != nil {
+			errs = append(errs, fmt.Errorf("demote: failed to remove LAN VIP %s from %s: %w", vip6, lanDev, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	h.role = "standby"
 	return nil
