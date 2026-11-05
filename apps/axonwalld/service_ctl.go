@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,7 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// serviceCommandTimeout bounds every systemctl/service invocation made
+// on behalf of bundle/API callers (A-M2). A hung unit must delay one
+// operation, never wedge the agent API forever. Package variable so
+// tests can shorten it.
+var serviceCommandTimeout = 90 * time.Second
 
 // managedServices is the allowlist of units the daemon may reload,
 // restart, or stop on behalf of bundle/API callers (audit D-S03). Before
@@ -85,20 +93,24 @@ func reloadOrRestartService(svc string) ([]byte, error) {
 	if unit == "kea-dhcp4-server" && !keaHasActiveInterfaces() {
 		return stopSystemService(svc)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+	defer cancel()
 	if _, err := exec.LookPath("systemctl"); err == nil {
-		return exec.Command("systemctl", "reload-or-restart", svc).CombinedOutput()
+		return exec.CommandContext(ctx, "systemctl", "reload-or-restart", svc).CombinedOutput()
 	}
-	return exec.Command("service", unit, "restart").CombinedOutput()
+	return exec.CommandContext(ctx, "service", unit, "restart").CombinedOutput()
 }
 
 func stopSystemService(svc string) ([]byte, error) {
 	if !validServiceName(svc) {
 		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+	defer cancel()
 	if _, err := exec.LookPath("systemctl"); err == nil {
-		return exec.Command("systemctl", "stop", svc).CombinedOutput()
+		return exec.CommandContext(ctx, "systemctl", "stop", svc).CombinedOutput()
 	}
-	return exec.Command("service", strings.TrimSuffix(svc, ".service"), "stop").CombinedOutput()
+	return exec.CommandContext(ctx, "service", strings.TrimSuffix(svc, ".service"), "stop").CombinedOutput()
 }
 
 // dhcpClientRunning reports whether a DHCP client started by the system

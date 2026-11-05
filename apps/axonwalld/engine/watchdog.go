@@ -1187,7 +1187,9 @@ func (we *WatchdogEngine) verifyInterfaces() HealthCheckResult {
 	hasLoopback := false
 	upCount := 0
 	for _, iface := range ifaces {
-		if (iface.Flags & net.FlagLoopback) != 0 {
+		// A-M17 (slice E note): loopback must exist AND be up; the
+		// old check counted a merely-present loopback as healthy.
+		if (iface.Flags&net.FlagLoopback) != 0 && (iface.Flags&net.FlagUp) != 0 {
 			hasLoopback = true
 		}
 		if (iface.Flags & net.FlagUp) != 0 {
@@ -1215,11 +1217,16 @@ func (we *WatchdogEngine) verifyNftables() HealthCheckResult {
 	cmd := exec.Command("nft", "--version")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Mock fallback if running in dev environment without nftables
+		// A-M17: a missing nft binary is a FAIL, not a pass. The old
+		// code scored it as a simulated pass, so
+		// runVerificationSequence committed bootcount=0 and marked
+		// the slot permanently healthy on an image whose firewall
+		// tooling was absent — disarming exactly the A/B fallback
+		// that exists to catch a broken firewall image.
 		return HealthCheckResult{
 			Name:   "Kernel nftables Atomic Baseline",
-			Status: CheckStatusPass,
-			Detail: "Simulated nftables kernel verification (development mode)",
+			Status: CheckStatusFail,
+			Detail: fmt.Sprintf("nft binary is missing or not executable: %v", err),
 		}
 	}
 
@@ -1271,7 +1278,16 @@ func (we *WatchdogEngine) verifyNftables() HealthCheckResult {
 }
 
 func (we *WatchdogEngine) verifyControlPlane() HealthCheckResult {
-	// Verify directory presence and control plane accessibility
+	// A-M17: the old check only created /run/axonwall and then
+	// claimed "daemon sockets responsive" without touching any
+	// socket or service. Probe something real instead: a connect to
+	// any of the daemon's own Unix sockets proves a listener is
+	// behind it (connecting to a bound Unix listener succeeds even
+	// before the server's accept loop starts, so this is safe to run
+	// during early-boot verification), and a systemctl is-active
+	// check covers a daemon whose sockets are not yet bound.
+	// Nothing responsive means FAIL — the slot must not be marked
+	// healthy on an unverified control plane.
 	runDir := "/run/axonwall"
 	if os.Geteuid() != 0 {
 		runDir = filepath.Join(os.TempDir(), "axonwall-run")
@@ -1284,10 +1300,36 @@ func (we *WatchdogEngine) verifyControlPlane() HealthCheckResult {
 		}
 	}
 
+	for _, sockPath := range []string{
+		"/run/axonwall/agent-api.sock",
+		"/run/axonwall/agent.sock",
+		"/run/axonwall/ha.sock",
+	} {
+		conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
+			return HealthCheckResult{
+				Name:   "Control Plane Quorum",
+				Status: CheckStatusPass,
+				Detail: fmt.Sprintf("Control plane socket responsive: %s", sockPath),
+			}
+		}
+	}
+
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		if out, err := exec.Command("systemctl", "is-active", "axonwalld").CombinedOutput(); err == nil && strings.TrimSpace(string(out)) == "active" {
+			return HealthCheckResult{
+				Name:   "Control Plane Quorum",
+				Status: CheckStatusPass,
+				Detail: "Control plane service axonwalld is active.",
+			}
+		}
+	}
+
 	return HealthCheckResult{
 		Name:   "Control Plane Quorum",
-		Status: CheckStatusPass,
-		Detail: "Runtime control plane storage and daemon sockets responsive.",
+		Status: CheckStatusFail,
+		Detail: "No control plane socket responded (agent-api.sock, agent.sock, ha.sock) and axonwalld is not active",
 	}
 }
 

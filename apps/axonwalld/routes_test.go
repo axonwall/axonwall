@@ -72,6 +72,78 @@ routes:
 	_ = origDir
 }
 
+// A-H1 regression: a routing file that parses under neither YAML nor
+// JSON is corrupt, not "zero routes". Pre-fix this returned a nil
+// error with an empty route list, and ReconcileStaticRoutes then
+// pruned every kernel static route.
+func TestLoadRoutingConfigFromBytesCorruptReturnsError(t *testing.T) {
+	corrupt := "routes: [unclosed\n\tbad: : : {\n"
+	if _, err := LoadRoutingConfigFromBytes([]byte(corrupt)); err == nil {
+		t.Fatalf("expected an error for corrupt routing config, got nil")
+	}
+}
+
+// A-H1 guard against overcorrection: a file that parses cleanly but
+// simply defines no routes is still "zero routes", not an error.
+func TestLoadRoutingConfigFromBytesValidNoRoutes(t *testing.T) {
+	gatewaysOnly := "gateways:\n  - name: WAN_GW\n    interface: wan\n    gatewayIp: 192.168.1.1\n"
+	cfg, err := LoadRoutingConfigFromBytes([]byte(gatewaysOnly))
+	if err != nil {
+		t.Fatalf("expected no error for a parseable file without routes, got: %v", err)
+	}
+	if len(cfg.Routes) != 0 {
+		t.Fatalf("expected 0 routes, got %d", len(cfg.Routes))
+	}
+}
+
+// A-H1 regression: pruning is limited to routes this reconciler owns.
+// A foreign proto-static route (not in the desired set and never
+// installed by a previous reconcile) must survive, while an owned
+// route that left the desired set is pruned.
+func TestShouldPruneStaticRoute(t *testing.T) {
+	desired := map[string]StaticRouteConfig{
+		"10.0.0.0/24": {Network: "10.0.0.0/24", Gateway: "10.0.0.1"},
+		"10.3.0.5/32": {Network: "10.3.0.5/32", Gateway: "10.0.0.1"},
+	}
+	owned := map[string]bool{
+		"10.1.0.0/24": true,
+		"10.4.0.5/32": true,
+	}
+	cases := []struct {
+		dest string
+		want bool
+	}{
+		{"10.0.0.0/24", false}, // still desired
+		{"10.3.0.5", false},    // desired via its /32 form
+		{"10.1.0.0/24", true},  // owned, no longer desired
+		{"10.4.0.5", true},     // owned via its /32 form, no longer desired
+		{"10.9.0.0/24", false}, // foreign: never owned, must survive
+		{"default", false},     // managed separately, never pruned here
+	}
+	for _, tc := range cases {
+		if got := shouldPruneStaticRoute(tc.dest, desired, owned); got != tc.want {
+			t.Errorf("shouldPruneStaticRoute(%q) = %v, want %v", tc.dest, got, tc.want)
+		}
+	}
+}
+
+// A-H1: the owned-set round-trips through its backing file.
+func TestOwnedStaticRoutesRoundTrip(t *testing.T) {
+	orig := staticRoutesOwnedPath
+	staticRoutesOwnedPath = filepath.Join(t.TempDir(), "owned.json")
+	defer func() { staticRoutesOwnedPath = orig }()
+
+	desired := map[string]StaticRouteConfig{
+		"10.0.0.0/24": {Network: "10.0.0.0/24", Gateway: "10.0.0.1"},
+		"10.2.0.0/24": {Network: "10.2.0.0/24", Gateway: "10.0.0.1"},
+	}
+	saveOwnedStaticRoutes(desired)
+	owned := loadOwnedStaticRoutes()
+	if !owned["10.0.0.0/24"] || !owned["10.2.0.0/24"] || len(owned) != 2 {
+		t.Fatalf("owned set round-trip failed, got %v", owned)
+	}
+}
+
 func TestResolveInterfaceDevice(t *testing.T) {
 	devMap := map[string]string{
 		"wan":  "ens19",
