@@ -641,6 +641,16 @@ async function cmdApply(autoConfirm = true) {
     { path: '/etc/axonwall/state.json', content: serializedJson, fileMode: 0o660, file_mode: 0o660 },
   ];
 
+  // B-M4: apply and confirm used to share one try/catch whose handler
+  // printed "daemon socket offline" for ANY error — including a confirm
+  // failure after a successful apply, when the daemon was online and
+  // the bundle was sitting in its 120s commit-confirm window — and
+  // execution then fell through to a GitOps commit recording the
+  // revision as applied while the daemon was about to roll it back.
+  // The phases are now separated: GitOps is committed only after a
+  // confirmed apply, and a confirm failure is a pending-rollback
+  // warning that exits non-zero, never an "offline" message.
+  let confirmed = false;
   try {
     const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/apply', 'POST', {
       jobId,
@@ -655,22 +665,35 @@ async function cmdApply(autoConfirm = true) {
       console.error(`${cRed}[✗] Daemon rejected bundle: ${resp.message}${cReset}`);
       process.exit(1);
     }
-
-    if (autoConfirm) {
-      await sendAgentSocketRequest('/v1/confirm', 'POST', { jobId });
-      console.log(`${cGreen}${cBold}[✓] Applied /etc/axonwall/*.yaml to kernel nftables and system daemons (hash: ${bundleHash.slice(0, 12)}).${cReset}`);
-    } else {
-      console.log(`${cYellow}${cBold}[!] Applied with Commit-Confirm (120s timeout). Run 'axonwallctl confirm' to confirm or 'axonwallctl rollback' to revert.${cReset}`);
-    }
   } catch (err: any) {
+    // Apply itself never reached the daemon: disk-only sync, and the
+    // revision is deliberately NOT recorded in GitOps as applied.
     console.log(
-      `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk (daemon socket offline: ${err?.message || 'standalone'}).${cReset}`
+      `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk only (daemon socket offline: ${err?.message || 'standalone'}). Not recorded in GitOps: nothing was applied.${cReset}`
     );
+    return;
   }
 
-  const commitHash = commitToGitOps(state, `CLI apply via axonwallctl (${bundleHash.slice(0, 8)})`);
-  if (commitHash) {
-    console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+  if (autoConfirm) {
+    try {
+      await sendAgentSocketRequest('/v1/confirm', 'POST', { jobId });
+      confirmed = true;
+    } catch (err: any) {
+      console.error(
+        `${cRed}[!] Confirm failed (${err?.message || 'confirm request failed'}) after a successful apply: the bundle is pending auto-rollback on the daemon. NOT recorded in GitOps. Re-apply or confirm before the window expires; do not treat this as a daemon-offline disk sync.${cReset}`
+      );
+      process.exit(1);
+    }
+    console.log(`${cGreen}${cBold}[✓] Applied /etc/axonwall/*.yaml to kernel nftables and system daemons (hash: ${bundleHash.slice(0, 12)}).${cReset}`);
+  } else {
+    console.log(`${cYellow}${cBold}[!] Applied with Commit-Confirm (120s timeout). Run 'axonwallctl confirm' to confirm or 'axonwallctl rollback' to revert. Not recorded in GitOps until confirmed.${cReset}`);
+  }
+
+  if (confirmed) {
+    const commitHash = commitToGitOps(state, `CLI apply via axonwallctl (${bundleHash.slice(0, 8)})`);
+    if (commitHash) {
+      console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+    }
   }
 }
 

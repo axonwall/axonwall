@@ -467,6 +467,46 @@ function getSafeRedirectUrl(
   return { targetUrl, escapedUrl, scriptSafeUrl };
 }
 
+// B-M5: derive a satellite's effective role. The fleet node's
+// configured role always wins. For unconfigured nodes, telemetry
+// (pid1Mode) and the id prefix are fallbacks only: a telemetry report
+// with pid1Mode latches 'edge-ngfw', a later report without it clears
+// a telemetry-latched edge role (but never an id-prefix edge role),
+// and the sync path (pid1ModeReported undefined) keeps a latched edge
+// role or the id-prefix fallback. Used by both the telemetry handler
+// and syncSatelliteDesiredState so the two paths cannot drift apart.
+export function deriveSatelliteRole(input: {
+  configuredRole?: 'satellite' | 'edge-ngfw' | null;
+  currentRole?: 'satellite' | 'edge-ngfw' | null;
+  satelliteId: string;
+  pid1ModeReported?: boolean;
+}): 'satellite' | 'edge-ngfw' {
+  if (input.configuredRole) {
+    return input.configuredRole;
+  }
+  if (input.pid1ModeReported === true) {
+    return 'edge-ngfw';
+  }
+  if (input.pid1ModeReported === false) {
+    if (
+      input.currentRole === 'edge-ngfw' &&
+      !input.satelliteId.startsWith('edge-') &&
+      input.satelliteId !== 'edge'
+    ) {
+      return 'satellite';
+    }
+    return input.currentRole || 'satellite';
+  }
+  if (
+    input.currentRole === 'edge-ngfw' ||
+    input.satelliteId.startsWith('edge-') ||
+    input.satelliteId === 'edge'
+  ) {
+    return 'edge-ngfw';
+  }
+  return input.currentRole || 'satellite';
+}
+
 export function createHttpRedirectServer(targetPort: number): http.Server {
   const redirectServer = http.createServer((req, res) => {
     const { targetUrl, escapedUrl, scriptSafeUrl } = getSafeRedirectUrl(req, targetPort);
@@ -645,20 +685,17 @@ async function main() {
     const localState = desiredState !== undefined ? desiredState : loadLocalDesiredState();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
-    const isEdge =
-      sat.role === 'edge-ngfw' ||
-      fleetNode?.role === 'edge-ngfw' ||
-      sat.id.startsWith('edge-') ||
-      sat.id === 'edge';
-
-    if (isEdge) {
-      sat.role = 'edge-ngfw';
-    }
+    // B-M5: role is derived from the fleet node's configured role on
+    // every sync (see deriveSatelliteRole). Telemetry and the id
+    // prefix are only fallbacks for unconfigured nodes, and a
+    // configured 'satellite' role clears a latched 'edge-ngfw'.
+    sat.role = deriveSatelliteRole({ configuredRole: fleetNode?.role, currentRole: sat.role, satelliteId: sat.id });
+    const isEdge = sat.role === 'edge-ngfw';
 
     const mergedNode = {
       ...fleetNode,
       ...sat,
-      role: isEdge ? ('edge-ngfw' as const) : (fleetNode?.role || sat.role || 'satellite'),
+      role: sat.role,
       skuProfile: fleetNode?.skuProfile || sat.skuProfile || hostedEdge?.skuProfile || 'sku-vm-virtio',
       wanInterface: fleetNode?.wanInterface || sat.wanInterface || 'eth0',
       lanInterface: fleetNode?.lanInterface || sat.lanInterface || 'eth1',
@@ -1277,6 +1314,15 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     // Reverse proxy all other HTTP traffic to the Axonwall Web Console on port 3000
     // Use the actual Host requested on this reverse proxy; never overwrite with client-supplied Origin
     const forwardedHost = req.headers.host || (req.headers['x-forwarded-host'] as string) || 'localhost';
+    // B-L3: the proxied request used to have no timeout and only
+    // propagated mid-request aborts, so a wedged UI accumulated
+    // sockets forever and responses kept generating for dead clients.
+    let upstreamRes: http.IncomingMessage | null = null;
+    let proxyTimedOut = false;
+    const destroyUpstream = () => {
+      try { uiReq.destroy(); } catch {}
+      try { upstreamRes?.destroy(); } catch {}
+    };
     const uiReq = http.request({
       hostname: '127.0.0.1',
       port: uiPort,
@@ -1289,13 +1335,36 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         'x-forwarded-for': req.socket?.remoteAddress || '127.0.0.1',
       },
     }, (uiRes) => {
+      upstreamRes = uiRes;
       res.writeHead(uiRes.statusCode || 200, uiRes.headers);
       uiRes.pipe(res);
     });
 
-    req.on('aborted', () => uiReq.destroy());
+    // 30s upstream timeout: destroy the upstream request and answer
+    // 502 (or destroy the client response if headers already went).
+    uiReq.setTimeout(30000, () => {
+      proxyTimedOut = true;
+      destroyUpstream();
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      try {
+        res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Bad Gateway: web console upstream timed out');
+      } catch {
+        res.destroy();
+      }
+    });
+
+    req.on('aborted', destroyUpstream);
+    // A client disconnect after the response started must also kill
+    // the upstream request/response, not just a mid-request abort.
+    res.on('close', destroyUpstream);
 
     uiReq.on('error', () => {
+      // The timeout path above already answered; do not double-send.
+      if (proxyTimedOut) return;
       // If the upstream died mid-response, headers are already sent: writeHead would throw
       // and crash the whole controller (and every satellite connection with it).
       if (res.headersSent) {
@@ -1445,6 +1514,13 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             satCpuGauge.remove({ satellite_id: oldestDisconnectedId });
             satMemGauge.remove({ satellite_id: oldestDisconnectedId });
             satConnsGauge.remove({ satellite_id: oldestDisconnectedId });
+            // B-M3: the rx/tx/flows counters were never removed here
+            // (or on close), so evicted series leaked forever and a
+            // reconnect restarted the delta from zero, double-counting
+            // the satellite's lifetime bytes.
+            satRxBytesGauge.remove({ satellite_id: oldestDisconnectedId });
+            satTxBytesGauge.remove({ satellite_id: oldestDisconnectedId });
+            satFlowsCounter.remove({ satellite_id: oldestDisconnectedId });
           } catch {
             // Metrics might already have been removed
           }
@@ -1634,30 +1710,49 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           } else {
               report = parsed.payload;
           }
-          state.metrics = report.metrics;
-          if (report.metrics?.pid1Mode) {
-            state.role = 'edge-ngfw';
+          // B-L1: a report without metrics used to throw on the log
+          // line below (unguarded report.metrics access), which the
+          // outer catch swallowed — dropping the whole report, wiping
+          // the last-known metrics, and suppressing the PING reply.
+          // Skip the metrics block with a warning instead, and always
+          // send PING for a well-formed report.
+          if (report.metrics) {
+            state.metrics = report.metrics;
+            // B-M5: telemetry is only a fallback signal for nodes with
+            // no configured fleet role (see deriveSatelliteRole). A
+            // configured role wins over telemetry, and when pid1Mode
+            // stops being reported the latched edge role is cleared
+            // instead of sticking forever.
+            const fleetNode = loadLocalDesiredState()?.fleet?.nodes?.find((n) => n.id === satId);
+            state.role = deriveSatelliteRole({
+              configuredRole: fleetNode?.role,
+              currentRole: state.role,
+              satelliteId: satId,
+              pid1ModeReported: Boolean(report.metrics.pid1Mode),
+            });
+            if (report.metrics?.skuProfile) {
+              state.skuProfile = report.metrics.skuProfile;
+            }
+            console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics?.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics?.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`);
+
+            // Update Prometheus metrics
+            satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
+            satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
+            satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
+            satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
+
+            // Handle counter increments safely
+            const currentRx = report.metrics.rxBytesTotal || 0;
+            const currentTx = report.metrics.txBytesTotal || 0;
+            const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
+
+            if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
+            if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
+
+            lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
+          } else {
+            console.log(`[Fleet Manager] Telemetry from ${satId} without metrics; keeping last-known metrics.`);
           }
-          if (report.metrics?.skuProfile) {
-            state.skuProfile = report.metrics.skuProfile;
-          }
-          console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics.activeConns}`);
-          
-          // Update Prometheus metrics
-          satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
-          satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
-          satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
-          satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
-          
-          // Handle counter increments safely
-          const currentRx = report.metrics.rxBytesTotal || 0;
-          const currentTx = report.metrics.txBytesTotal || 0;
-          const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
-          
-          if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
-          if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
-          
-          lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
 
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'PING', payload: {} }));
@@ -1687,6 +1782,13 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         satCpuGauge.remove({ satellite_id: satId });
         satMemGauge.remove({ satellite_id: satId });
         satConnsGauge.remove({ satellite_id: satId });
+        // B-M3: remove the counters like the gauges. Otherwise the
+        // next telemetry report after a reconnect increments the
+        // persistent counter by the satellite's entire lifetime total
+        // again, because lastRxTxBytes restarts at zero.
+        satRxBytesGauge.remove({ satellite_id: satId });
+        satTxBytesGauge.remove({ satellite_id: satId });
+        satFlowsCounter.remove({ satellite_id: satId });
         lastRxTxBytes.delete(satId);
         current.ws = undefined;
         // B-M2: timestamp the disconnect for grace-period pruning.
