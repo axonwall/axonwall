@@ -555,6 +555,16 @@ func readCurrentNetworkConfig() NetworkConfig {
 	return cfg
 }
 
+// resolveIfaceMtu implements the C27 rule for updateStateJSON's
+// setIface closure: an existing entry keeps its MTU (whatever JSON
+// decoded it as), and only a brand-new entry defaults to 1500.
+func resolveIfaceMtu(entry map[string]interface{}) interface{} {
+	if mtu, ok := entry["mtu"]; ok {
+		return mtu
+	}
+	return 1500
+}
+
 func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	cfg.WanDevice = normalizeAssignedDevice(cfg.WanDevice)
 	cfg.LanDevice = normalizeAssignedDevice(cfg.LanDevice)
@@ -607,7 +617,12 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 		entry["enabled"] = enabled
 		entry["dhcpServer"] = dhcpSrv
 		entry["description"] = desc
-		entry["mtu"] = 1500
+		// C27: any console interface action that rewrote state.json
+		// used to reset every interface MTU to 1500, silently
+		// discarding a custom MTU (e.g. 9000 jumbo frames) set from
+		// the web UI. Preserve the existing entry's MTU when present;
+		// only default to 1500 for brand-new entries.
+		entry["mtu"] = resolveIfaceMtu(entry)
 		if ifType == "static" && ipAddr != "" {
 			entry["ipv4Address"] = ipAddr
 		} else {
