@@ -44942,7 +44942,23 @@ function buildArtifactBundle(jobId, state) {
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
-function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath = "/etc/axonwall/certs/hub.key", caPath = "/etc/axonwall/certs/ca.crt") {
+function leafChainsToCa(certPath, caPath) {
+  try {
+    child_process.execFileSync("openssl", ["verify", "-CAfile", caPath, certPath], { timeout: 15e3, stdio: "ignore" });
+    return true;
+  } catch (err) {
+    if (err && typeof err.status === "number") return false;
+    return null;
+  }
+}
+function assertNotOperatorCaWithoutKey(caPath, caKeyPath) {
+  if (fs6.existsSync(caPath) && !fs6.existsSync(caKeyPath)) {
+    throw new Error(
+      "[Axonwall Controller] Refusing to mint a self-signed hub certificate: ca.crt exists but no matching on-box CA key was found (operator-CA mode). Install an operator-issued hub.crt/hub.key pair that chains to ca.crt, or remove ca.crt to use appliance-CA provisioning."
+    );
+  }
+}
+function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath = "/etc/axonwall/certs/hub.key", caPath = "/etc/axonwall/certs/ca.crt", caKeyPath = path4.join(path4.dirname(caPath), "ca.key")) {
   if (process.env.AXONWALL_INSECURE_HTTP === "1") {
     console.warn("[Axonwall Controller] AXONWALL_INSECURE_HTTP=1 is set: running in plaintext mode (DEV/TEST ONLY)");
     return null;
@@ -44955,7 +44971,11 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
         const cert = fs6.readFileSync(certPath);
         const key = fs6.readFileSync(keyPath);
         const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
-        return { cert, key, ca };
+        if (ca && leafChainsToCa(certPath, caPath) === false) {
+          console.warn("[Axonwall Controller] Existing hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
+        } else {
+          return { cert, key, ca };
+        }
       }
     } catch (err) {
       console.warn("[Axonwall Controller] Existing cert files could not be read:", err);
@@ -44972,13 +44992,18 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
         const key = fs6.readFileSync(keyPath);
         if (cert.length > 0 && key.length > 0) {
           const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
-          return { cert, key, ca };
+          if (ca && leafChainsToCa(certPath, caPath) === false) {
+            console.warn("[Axonwall Controller] Rotated hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
+          } else {
+            return { cert, key, ca };
+          }
         }
       }
     } catch (err) {
       console.warn("[Axonwall Controller] axonwall-rotate-hub-cert execution failed:", err);
     }
   }
+  assertNotOperatorCaWithoutKey(caPath, caKeyPath);
   try {
     const certDir = path4.dirname(certPath);
     if (!fs6.existsSync(certDir)) {
@@ -45016,12 +45041,14 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
       }
       if (cert.length > 0 && key.length > 0) {
         console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
-        return { cert, key };
+        const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+        return { cert, key, ca };
       }
     }
   } catch (err) {
     console.warn("[Axonwall Controller] Generating certificate in target directory failed:", err);
   }
+  assertNotOperatorCaWithoutKey(caPath, caKeyPath);
   try {
     const tmpDir = fs6.mkdtempSync(path4.join(os.tmpdir(), "axonwall-tls-"));
     const tmpKey = path4.join(tmpDir, "hub.key");
@@ -45060,12 +45087,109 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
       console.warn(
         "[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted"
       );
-      return { cert, key, isFallback: true };
+      const ca = fs6.existsSync(caPath) ? fs6.readFileSync(caPath) : void 0;
+      return { cert, key, ca, isFallback: true };
     }
   } catch (err) {
     console.error("[Axonwall Controller] Critical error generating emergency TLS certificate:", err);
   }
   return null;
+}
+var HA_PROMOTE_ROLES = /* @__PURE__ */ new Set(["master", "active", "promote"]);
+var HA_DEMOTE_ROLES = /* @__PURE__ */ new Set(["standby", "demote", "backup"]);
+function isValidMacAddress(value) {
+  return typeof value === "string" && /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/.test(value.trim());
+}
+function normalizeMacAddress(value) {
+  return value.trim().toLowerCase().replace(/-/g, ":");
+}
+function isValidCidr(value) {
+  if (typeof value !== "string") return false;
+  const parts = value.trim().split("/");
+  if (parts.length !== 2) return false;
+  const family = net.isIP(parts[0]);
+  if (family !== 4 && family !== 6) return false;
+  if (!/^\d{1,3}$/.test(parts[1])) return false;
+  const prefix = Number(parts[1]);
+  return prefix >= 0 && prefix <= (family === 4 ? 32 : 128);
+}
+function validateHaTransition(payload, fleetLanVip) {
+  const rawRole = String(payload.role ?? payload.state ?? payload.type ?? "").toLowerCase();
+  if (!rawRole) {
+    return { ok: false, status: 400, error: "Missing HA role: expected one of master/active/promote (PROMOTE) or standby/demote/backup (DEMOTE)" };
+  }
+  let transition;
+  if (HA_PROMOTE_ROLES.has(rawRole)) transition = "PROMOTE";
+  else if (HA_DEMOTE_ROLES.has(rawRole)) transition = "DEMOTE";
+  else {
+    return { ok: false, status: 400, error: `Unknown HA role "${rawRole}": expected one of master/active/promote (PROMOTE) or standby/demote/backup (DEMOTE)` };
+  }
+  const satelliteId = typeof payload.satelliteId === "string" ? payload.satelliteId.trim() : "";
+  if (transition === "PROMOTE" && !satelliteId) {
+    return { ok: false, status: 400, error: "satelliteId is required for PROMOTE: promoting without an explicit target would activate every edge at once" };
+  }
+  let sharedWanMac;
+  if (payload.sharedWanMac !== void 0) {
+    if (!isValidMacAddress(payload.sharedWanMac)) {
+      return { ok: false, status: 400, error: "Invalid sharedWanMac: expected a MAC address (e.g. 02:00:00:00:00:01)" };
+    }
+    sharedWanMac = normalizeMacAddress(payload.sharedWanMac);
+  }
+  let lanVip;
+  if (typeof payload.lanVip === "string" && payload.lanVip.trim() !== "") {
+    if (!isValidCidr(payload.lanVip)) {
+      return { ok: false, status: 400, error: "Invalid lanVip: expected an IP/CIDR (e.g. 10.0.0.1/24)" };
+    }
+    lanVip = payload.lanVip.trim();
+  } else if (transition === "PROMOTE") {
+    if (fleetLanVip && isValidCidr(fleetLanVip)) lanVip = fleetLanVip.trim();
+    else {
+      return { ok: false, status: 400, error: "lanVip is required for PROMOTE: supply it explicitly or configure the fleet LAN address; no default VIP is assumed" };
+    }
+  }
+  return {
+    ok: true,
+    transition,
+    role: transition === "PROMOTE" ? "active" : "standby",
+    satelliteId: satelliteId || void 0,
+    sharedWanMac,
+    lanVip
+  };
+}
+var MESH_DISCONNECTED_GRACE_MS = 24 * 60 * 60 * 1e3;
+function shouldPruneDisconnectedSatellite(disconnectedAt, nowMs, graceMs = MESH_DISCONNECTED_GRACE_MS) {
+  if (!disconnectedAt) return false;
+  const t = Date.parse(disconnectedAt);
+  if (Number.isNaN(t)) return false;
+  return nowMs - t >= graceMs;
+}
+function headscaleRetryDelaysMs() {
+  return [0, 5e3, 15e3, 3e4, 6e4];
+}
+async function provisionHeadscaleWithRetry(deps) {
+  const sleep = deps.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+  const delays = deps.delaysMs ?? headscaleRetryDelaysMs();
+  for (const delay of delays) {
+    if (delay > 0) await sleep(delay);
+    if (!deps.isOpen()) return false;
+    try {
+      const users = await deps.listUsers();
+      let satelliteUser = users.find((u) => u.name === "satellites");
+      if (!satelliteUser) satelliteUser = await deps.createUser("satellites");
+      void satelliteUser;
+      const expiration = new Date(Date.now() + 60 * 60 * 1e3).toISOString();
+      const preAuthKey = await deps.createPreAuthKey("satellites", false, true, expiration);
+      if (!deps.isOpen()) return false;
+      deps.send({
+        type: "SYNC_HEADSCALE",
+        payload: { serverUrl: deps.serverUrl, authKey: preAuthKey.key }
+      });
+      return true;
+    } catch (err) {
+      console.error(`[Fleet Manager] Headscale provisioning attempt failed: ${err?.message || err}`);
+    }
+  }
+  return false;
 }
 function getSafeRedirectUrl(req, targetPort) {
   const rawHostHeader = (req.headers.host || "").trim();
@@ -45191,6 +45315,7 @@ async function main() {
   console.log("[Axonwall Controller] Starting Axonwall Control Plane Worker...");
   console.log("[Axonwall Controller] Monitoring config changes and apply pipeline.");
   const activeSatellites = /* @__PURE__ */ new Map();
+  let activeHaEdgeId = null;
   function loadLocalDesiredState2() {
     const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
     for (const p of candidates) {
@@ -45533,29 +45658,58 @@ async function main() {
         if (aborted2) return;
         try {
           const payload = body ? JSON.parse(body) : {};
-          const rawRole = String(payload.role || payload.state || "").toLowerCase();
-          const msgType = rawRole === "master" || rawRole === "active" || payload.type === "PROMOTE" ? "PROMOTE" : "DEMOTE";
-          const normalizedRole = msgType === "PROMOTE" ? "active" : "standby";
-          const sharedWanMac = typeof payload.sharedWanMac === "string" ? payload.sharedWanMac : void 0;
-          const lanVip = typeof payload.lanVip === "string" ? payload.lanVip : "10.0.0.1/24";
-          const targetId = typeof payload.satelliteId === "string" ? payload.satelliteId.trim() : "";
+          const fleetLanVip = loadLocalDesiredState2()?.hostedEdge?.lan?.edgeAddress;
+          const validation = validateHaTransition(payload, fleetLanVip);
+          if (!validation.ok) {
+            res.writeHead(validation.status || 400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ success: false, error: validation.error }));
+            return;
+          }
+          const msgType = validation.transition;
+          const normalizedRole = validation.role;
+          const sharedWanMac = validation.sharedWanMac;
+          const lanVip = validation.lanVip;
+          const targetId = validation.satelliteId || "";
+          const sendTransition = (sat, type, role) => {
+            if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return false;
+            sat.ws.send(
+              JSON.stringify({
+                type,
+                payload: {
+                  role,
+                  sharedWanMac,
+                  lanVip,
+                  lanVipV4: lanVip
+                }
+              })
+            );
+            return true;
+          };
+          if (targetId) {
+            const target = activeSatellites.get(targetId);
+            if (!target || !target.ws || target.ws.readyState !== import_websocket.default.OPEN) {
+              res.writeHead(404, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ success: false, error: `No connected satellite matches satelliteId "${targetId}"`, notifiedEdges: 0 }));
+              return;
+            }
+            let demoted = 0;
+            if (msgType === "PROMOTE" && activeHaEdgeId && activeHaEdgeId !== targetId) {
+              const previous = activeSatellites.get(activeHaEdgeId);
+              if (previous && sendTransition(previous, "DEMOTE", "standby")) demoted++;
+            }
+            const notified2 = sendTransition(target, msgType, normalizedRole) ? 1 : 0;
+            if (msgType === "PROMOTE" && notified2 === 1) activeHaEdgeId = targetId;
+            if (msgType === "DEMOTE" && activeHaEdgeId === targetId) activeHaEdgeId = null;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified2, demotedEdges: demoted }));
+            return;
+          }
           let notified = 0;
           for (const sat of activeSatellites.values()) {
-            const isTarget = targetId ? sat.id === targetId : sat.role === "edge-ngfw" || sat.id.startsWith("edge-") || sat.id === "edge";
-            if (isTarget && sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-              sat.ws.send(
-                JSON.stringify({
-                  type: msgType,
-                  payload: {
-                    role: normalizedRole,
-                    sharedWanMac,
-                    lanVip
-                  }
-                })
-              );
-              notified++;
-            }
+            const isTarget = sat.role === "edge-ngfw" || sat.id.startsWith("edge-") || sat.id === "edge";
+            if (isTarget && sendTransition(sat, msgType, normalizedRole)) notified++;
           }
+          if (msgType === "DEMOTE") activeHaEdgeId = null;
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified }));
         } catch {
@@ -45816,6 +45970,29 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         socket.destroy();
         return;
       }
+      const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
+      if (!expectedToken) {
+        console.log(`[Fleet Manager] Rejected connection: AXONWALL_ZTP_TOKEN not configured`);
+        socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      const isTokenValid = token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      if (!isTokenValid) {
+        console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      if (fs6.existsSync(caPath)) {
+        const tlsSocket = socket;
+        if (!tlsSocket.authorized) {
+          console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
+          socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+      }
       if (!activeSatellites.has(satId) && activeSatellites.size >= 500) {
         let oldestDisconnectedId = null;
         let oldestTime = Infinity;
@@ -45842,29 +46019,6 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         } else {
           console.log(`[Fleet Manager] Rejected connection: fleet size limit reached (500 active satellites)`);
           socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-          socket.destroy();
-          return;
-        }
-      }
-      const expectedToken = process.env.AXONWALL_ZTP_TOKEN;
-      if (!expectedToken) {
-        console.log(`[Fleet Manager] Rejected connection: AXONWALL_ZTP_TOKEN not configured`);
-        socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-      const isTokenValid = token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
-      if (!isTokenValid) {
-        console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
-        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-      if (fs6.existsSync(caPath)) {
-        const tlsSocket = socket;
-        if (!tlsSocket.authorized) {
-          console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
-          socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
           socket.destroy();
           return;
         }
@@ -45915,7 +46069,7 @@ ${headerLines.join("\r\n")}\r
     const allSats = Array.from(activeSatellites.values());
     for (const sat of allSats) {
       if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) continue;
-      const peers = allSats.filter((p) => p.id !== sat.id).map((p) => {
+      const peers = allSats.filter((p) => p.id !== sat.id && p.ws && p.ws.readyState === import_websocket.default.OPEN).map((p) => {
         const formattedIp = p.ip && p.ip.includes(":") && !p.ip.startsWith("[") ? `[${p.ip}]` : p.ip;
         return {
           publicKey: p.wgPublicKey,
@@ -45938,6 +46092,16 @@ ${headerLines.join("\r\n")}\r
       }));
     }
   }
+  const meshPruneTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [id, sat] of activeSatellites.entries()) {
+      if (!sat.ws && shouldPruneDisconnectedSatellite(sat.disconnectedAt, now)) {
+        activeSatellites.delete(id);
+        console.log(`[Fleet Manager] Pruned disconnected satellite ${id} after the mesh grace period`);
+      }
+    }
+  }, 60 * 1e3);
+  meshPruneTimer.unref?.();
   wss.on("connection", async (ws, request3, satId) => {
     const remoteIp = request3.socket.remoteAddress || "127.0.0.1";
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
@@ -46000,7 +46164,9 @@ ${headerLines.join("\r\n")}\r
       try {
         const text = message.toString();
         const parsed = JSON.parse(text);
-        if (parsed.type === "TELEMETRY_REPORT") {
+        if (parsed.type === "REQUEST_HEADSCALE") {
+          void requestHeadscaleProvision();
+        } else if (parsed.type === "TELEMETRY_REPORT") {
           let report;
           if (typeof parsed.payload === "string") {
             report = JSON.parse(parsed.payload);
@@ -46053,33 +46219,36 @@ ${headerLines.join("\r\n")}\r
         satConnsGauge.remove({ satellite_id: satId });
         lastRxTxBytes.delete(satId);
         current.ws = void 0;
+        current.disconnectedAt = (/* @__PURE__ */ new Date()).toISOString();
+        if (activeHaEdgeId === satId) activeHaEdgeId = null;
         broadcastMeshTopology();
       }
     });
+    const provisionHeadscale = () => provisionHeadscaleWithRetry({
+      listUsers,
+      createUser,
+      createPreAuthKey,
+      serverUrl: process.env.HEADSCALE_EXTERNAL_URL || "https://hub.axonwall.local",
+      send: (msg) => {
+        if (ws.readyState !== import_websocket.default.OPEN) throw new Error("satellite socket closed before SYNC_HEADSCALE could be sent");
+        ws.send(JSON.stringify(msg));
+      },
+      isOpen: () => ws.readyState === import_websocket.default.OPEN
+    });
+    let headscaleProvisioning = null;
+    const requestHeadscaleProvision = () => {
+      if (headscaleProvisioning) return headscaleProvisioning;
+      headscaleProvisioning = provisionHeadscale().then((ok) => {
+        state.headscaleEnrolled = ok;
+        headscaleProvisioning = null;
+        if (ok) console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
+        else console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect or on a REQUEST_HEADSCALE message`);
+        return ok;
+      });
+      return headscaleProvisioning;
+    };
     if (!state.headscaleEnrolled) {
-      try {
-        console.log(`[Fleet Manager] Provisioning Headscale PreAuthKey for ${satId}...`);
-        let users = await listUsers();
-        let satelliteUser = users.find((u) => u.name === "satellites");
-        if (!satelliteUser) {
-          satelliteUser = await createUser("satellites");
-        }
-        const expiration = new Date(Date.now() + 60 * 60 * 1e3).toISOString();
-        const preAuthKey = await createPreAuthKey("satellites", false, true, expiration);
-        if (ws.readyState === import_websocket.default.OPEN) {
-          ws.send(JSON.stringify({
-            type: "SYNC_HEADSCALE",
-            payload: {
-              serverUrl: process.env.HEADSCALE_EXTERNAL_URL || "https://hub.axonwall.local",
-              authKey: preAuthKey.key
-            }
-          }));
-          state.headscaleEnrolled = true;
-          console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
-        }
-      } catch (err) {
-        console.error(`[Fleet Manager] Failed to provision Headscale key for ${satId}: ${err.message}`);
-      }
+      void requestHeadscaleProvision();
     }
     if (ws.readyState === import_websocket.default.OPEN) {
       syncSatelliteDesiredState(state);
@@ -46107,6 +46276,7 @@ if (isDirectExecution()) {
 export {
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
+  MESH_DISCONNECTED_GRACE_MS,
   authenticateMcpToken,
   buildArtifactBundle,
   createHttpRedirectServer,
@@ -46114,11 +46284,18 @@ export {
   createPortMultiplexer,
   ensureControllerTls,
   getMcpServerStatus,
+  headscaleRetryDelaysMs,
   isMcpServerEnabled,
+  isValidCidr,
+  isValidMacAddress,
   listMcpApiKeys,
+  normalizeMacAddress,
   processMcpJsonRpcMessage,
+  provisionHeadscaleWithRetry,
   queryMcpAuditEntries,
   recordMcpAuditEntry,
   revokeMcpApiKeyRecord,
+  shouldPruneDisconnectedSatellite,
+  validateHaTransition,
   verifyMcpAuditChain
 };
