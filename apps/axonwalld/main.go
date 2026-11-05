@@ -2952,7 +2952,11 @@ func main() {
 			if !checkMcpEnabled(w) {
 				return
 			}
-			cleared := mcpTrafficManager.FlushAllLeases()
+			cleared, flushErr := mcpTrafficManager.FlushAllLeases()
+			if flushErr != nil {
+				writeMcpJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": flushErr.Error(), "clearedCount": cleared})
+				return
+			}
 			writeMcpJSON(w, http.StatusOK, map[string]any{"success": true, "clearedCount": cleared})
 		})
 

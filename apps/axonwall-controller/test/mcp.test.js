@@ -83,8 +83,9 @@ test('MCP AuthZ, Blast-Radius Guardrails & Hash-Chained Audit Verification', asy
   );
   assert.equal(deniedSelf?.result?.isError, true);
 
-  // 6. Allow valid tactical blackhole of external C2 IP
-  const allowedBlackhole = await processMcpJsonRpcMessage(
+  // 6. B-H5: with axonwalld unreachable, a tactical blackhole must DENY —
+  // the pre-fix code fabricated a success + mcp_lease_ id here.
+  const deniedBlackhole = await processMcpJsonRpcMessage(
     {
       jsonrpc: '2.0',
       id: 3,
@@ -105,10 +106,10 @@ test('MCP AuthZ, Blast-Radius Guardrails & Hash-Chained Audit Verification', asy
     },
     env
   );
-  assert.ok(!allowedBlackhole?.result?.isError);
-  const blackholePayload = JSON.parse(allowedBlackhole.result.content[0].text);
-  assert.equal(blackholePayload.success, true);
-  assert.ok(blackholePayload.lease.id.startsWith('mcp_lease_'));
+  assert.equal(deniedBlackhole?.result?.isError, true);
+  const blackholePayload = JSON.parse(deniedBlackhole.result.content[0].text);
+  assert.equal(blackholePayload.success, false);
+  assert.ok(!deniedBlackhole.result.content[0].text.includes('mcp_lease_'));
 
   // 7. Verify SHA-256 hash-chained audit log integrity
   const chainStatus = verifyMcpAuditChain();

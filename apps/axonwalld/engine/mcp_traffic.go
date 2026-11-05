@@ -21,9 +21,12 @@ import (
 )
 
 const (
-	mcpStateFilePath       = "/var/lib/axonwall/mcp-tactical-state.json"
 	unboundMcpSinkholePath = "/etc/unbound/unbound.conf.d/mcp-sinkhole.conf"
 )
+
+// mcpStateFilePath is a var (not a const) so tests can redirect persisted
+// lease state into a temp dir; the production value is unchanged.
+var mcpStateFilePath = "/var/lib/axonwall/mcp-tactical-state.json"
 
 var safeIfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
 
@@ -242,7 +245,11 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 		log.Printf("[MCP Janitor] Expiring tactical lease %s (%s: %s)", l.ID, l.Kind, l.TargetSummary)
 		m.cleanupKernelArtifactsForLease(l)
 	}
-	_ = m.ReconcileKernelState()
+	// A-M13: a failed rebuild must not pass silently — the expired leases
+	// are gone from the records, but the kernel table may still enforce them.
+	if err := m.ReconcileKernelState(); err != nil {
+		log.Printf("[MCP Traffic] Janitor kernel reconciliation failed (kernel table may still enforce expired leases): %v", err)
+	}
 }
 
 // ListLeases returns all currently active tactical leases with updated remaining TTL seconds.
@@ -519,11 +526,19 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 	nft.WriteString("  }\n")
 	nft.WriteString("}\n")
 
-	// Apply nftables script atomically via stdin
+	// Apply nftables script atomically via stdin.
+	// A-M13: validate the complete replacement script before touching the
+	// live table, then apply it. Either failure is returned to the caller
+	// instead of being logged away while the lease is reported as active.
+	checkCmd := exec.Command("nft", "-c", "-f", "-")
+	checkCmd.Stdin = strings.NewReader(nft.String())
+	if out, err := checkCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nftables validation failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
 	cmd := exec.Command("nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(nft.String())
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[MCP Traffic] Warning: nftables apply returned error: %v (%s)", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("nftables apply failed: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	// Reconcile Unbound DNS sinkhole configuration
@@ -716,7 +731,21 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 	m.saveStateLocked()
 	m.mu.Unlock()
 
-	_ = m.ReconcileKernelState()
+	// A-M13: a lease whose kernel rules failed to land must not be stored,
+	// persisted, or returned as active. Remove it, clean up any artifacts
+	// applied before the reconcile, and fail the creation; a best-effort
+	// healing reconcile rebuilds the table for the remaining leases.
+	if err := m.ReconcileKernelState(); err != nil {
+		m.mu.Lock()
+		delete(m.leases, lease.ID)
+		m.saveStateLocked()
+		m.mu.Unlock()
+		m.cleanupKernelArtifactsForLease(lease)
+		if herr := m.ReconcileKernelState(); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
+		}
+		return nil, fmt.Errorf("kernel reconcile failed for lease %s: %w", lease.ID, err)
+	}
 	return lease, nil
 }
 
@@ -827,7 +856,21 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	m.saveStateLocked()
 	m.mu.Unlock()
 
-	_ = m.ReconcileKernelState()
+	// A-M13: a lease whose kernel rules failed to land must not be stored,
+	// persisted, or returned as active. Remove it, clean up any artifacts
+	// applied before the reconcile, and fail the creation; a best-effort
+	// healing reconcile rebuilds the table for the remaining leases.
+	if err := m.ReconcileKernelState(); err != nil {
+		m.mu.Lock()
+		delete(m.leases, lease.ID)
+		m.saveStateLocked()
+		m.mu.Unlock()
+		m.cleanupKernelArtifactsForLease(lease)
+		if herr := m.ReconcileKernelState(); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
+		}
+		return nil, fmt.Errorf("kernel reconcile failed for lease %s: %w", lease.ID, err)
+	}
 	return lease, nil
 }
 
@@ -911,7 +954,21 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 	m.saveStateLocked()
 	m.mu.Unlock()
 
-	_ = m.ReconcileKernelState()
+	// A-M13: a lease whose kernel rules failed to land must not be stored,
+	// persisted, or returned as active. Remove it, clean up any artifacts
+	// applied before the reconcile, and fail the creation; a best-effort
+	// healing reconcile rebuilds the table for the remaining leases.
+	if err := m.ReconcileKernelState(); err != nil {
+		m.mu.Lock()
+		delete(m.leases, lease.ID)
+		m.saveStateLocked()
+		m.mu.Unlock()
+		m.cleanupKernelArtifactsForLease(lease)
+		if herr := m.ReconcileKernelState(); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
+		}
+		return nil, fmt.Errorf("kernel reconcile failed for lease %s: %w", lease.ID, err)
+	}
 	return lease, nil
 }
 
@@ -963,7 +1020,21 @@ func (m *McpTrafficManager) SinkholeDNS(req McpDnsSinkholeReq) (*McpTacticalLeas
 	m.saveStateLocked()
 	m.mu.Unlock()
 
-	_ = m.ReconcileKernelState()
+	// A-M13: a lease whose kernel rules failed to land must not be stored,
+	// persisted, or returned as active. Remove it, clean up any artifacts
+	// applied before the reconcile, and fail the creation; a best-effort
+	// healing reconcile rebuilds the table for the remaining leases.
+	if err := m.ReconcileKernelState(); err != nil {
+		m.mu.Lock()
+		delete(m.leases, lease.ID)
+		m.saveStateLocked()
+		m.mu.Unlock()
+		m.cleanupKernelArtifactsForLease(lease)
+		if herr := m.ReconcileKernelState(); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
+		}
+		return nil, fmt.Errorf("kernel reconcile failed for lease %s: %w", lease.ID, err)
+	}
 	return lease, nil
 }
 
@@ -980,12 +1051,23 @@ func (m *McpTrafficManager) RevertLease(leaseID string) (*McpTacticalLease, erro
 	m.mu.Unlock()
 
 	m.cleanupKernelArtifactsForLease(lease)
-	_ = m.ReconcileKernelState()
+	// A-M13: a failed rebuild means the kernel table may still enforce the
+	// lease (or may be partial). Report the failure so the caller does not
+	// record the revert as complete; a healing rebuild is attempted for
+	// the remaining leases.
+	if err := m.ReconcileKernelState(); err != nil {
+		if herr := m.ReconcileKernelState(); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after revert of lease %s: %v", lease.ID, herr)
+		}
+		return nil, fmt.Errorf("kernel reconcile failed while reverting lease %s: %w", lease.ID, err)
+	}
 	return lease, nil
 }
 
 // FlushAllLeases is the emergency panic switch: clears all MCP tactical leases and flushes kernel artifacts.
-func (m *McpTrafficManager) FlushAllLeases() int {
+// It returns the number of leases cleared and, on a failed kernel rebuild, an error: the records are
+// cleared but the kernel table may still enforce some leases, which must not be reported as flushed.
+func (m *McpTrafficManager) FlushAllLeases() (int, error) {
 	m.mu.Lock()
 	all := make([]*McpTacticalLease, 0, len(m.leases))
 	for _, l := range m.leases {
@@ -998,8 +1080,13 @@ func (m *McpTrafficManager) FlushAllLeases() int {
 	for _, l := range all {
 		m.cleanupKernelArtifactsForLease(l)
 	}
-	_ = m.ReconcileKernelState()
-	return len(all)
+	if err := m.ReconcileKernelState(); err != nil {
+		if herr := m.ReconcileKernelState(); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after flush: %v", herr)
+		}
+		return len(all), fmt.Errorf("kernel reconcile failed while flushing %d leases: %w", len(all), err)
+	}
+	return len(all), nil
 }
 
 // QueryActiveFlows parses `/proc/net/nf_conntrack` (or `conntrack -L`) to return live connection flows.

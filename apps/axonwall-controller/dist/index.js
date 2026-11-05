@@ -14357,7 +14357,7 @@ var require_websocket = __commonJS({
     var http3 = __require("http");
     var net2 = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes4, createHash: createHash5 } = __require("crypto");
+    var { randomBytes: randomBytes3, createHash: createHash5 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -14908,7 +14908,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes4(16).toString("base64");
+      const key = randomBytes3(16).toString("base64");
       const request3 = isSecure ? https2.request : http3.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -44311,21 +44311,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok && daemonRes.status !== 503) {
+      if (!daemonRes.ok) {
         return deny("mcp:traffic:blackhole", daemonRes.data?.error || "Daemon rejected blackhole request", req.audit);
       }
-      const lease = daemonRes.ok ? daemonRes.data.lease : {
-        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
-        kind: "blackhole",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
-        ttlSeconds: boundedTtl,
-        createdByKeyId: env.key.id,
-        createdByKeyName: env.key.name,
-        targetSummary: `Blackhole ${targetCheck.normalizedTarget} (${req.mode}, ${req.direction})`,
-        parameters: { ...req, target: targetCheck.normalizedTarget, ttlSeconds: boundedTtl },
-        audit: req.audit
-      };
+      const lease = daemonRes.data.lease;
       let fleetPropagatedCount = 0;
       if (req.propagateToFleet && env.onFleetBroadcastBlock && targetCheck.normalizedTarget) {
         fleetPropagatedCount = env.onFleetBroadcastBlock(
@@ -44402,21 +44391,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok && daemonRes.status !== 503) {
+      if (!daemonRes.ok) {
         return deny("mcp:traffic:shape", daemonRes.data?.error || "Daemon rejected traffic shaping request", req.audit);
       }
-      const lease = daemonRes.ok ? daemonRes.data.lease : {
-        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
-        kind: "shape",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
-        ttlSeconds: boundedTtl,
-        createdByKeyId: env.key.id,
-        createdByKeyName: env.key.name,
-        targetSummary: `Throttle ${targetCheck.normalizedTarget} to ${req.rateKbps} kbps`,
-        parameters: { ...req, target: targetCheck.normalizedTarget, ttlSeconds: boundedTtl },
-        audit: req.audit
-      };
+      const lease = daemonRes.data.lease;
       const auditEntry = recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -44483,21 +44461,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok && daemonRes.status !== 503) {
+      if (!daemonRes.ok) {
         return deny("mcp:traffic:redirect", daemonRes.data?.error || "Daemon rejected redirect request", req.audit);
       }
-      const lease = daemonRes.ok ? daemonRes.data.lease : {
-        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
-        kind: "redirect",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
-        ttlSeconds: boundedTtl,
-        createdByKeyId: env.key.id,
-        createdByKeyName: env.key.name,
-        targetSummary: `Redirect ${sourceCheck.normalizedTarget} -> ${destCheck.normalizedTarget} (${req.redirectType})`,
-        parameters: { ...req, source: sourceCheck.normalizedTarget, ttlSeconds: boundedTtl },
-        audit: req.audit
-      };
+      const lease = daemonRes.data.lease;
       const auditEntry = recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -44574,21 +44541,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok && daemonRes.status !== 503) {
+      if (!daemonRes.ok) {
         return deny("mcp:traffic:redirect", daemonRes.data?.error || "Daemon rejected DNS sinkhole request", req.audit);
       }
-      const lease = daemonRes.ok ? daemonRes.data.lease : {
-        id: `mcp_lease_${crypto4.randomBytes(6).toString("hex")}`,
-        kind: "dns_sinkhole",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        expiresAt: new Date(Date.now() + boundedTtl * 1e3).toISOString(),
-        ttlSeconds: boundedTtl,
-        createdByKeyId: env.key.id,
-        createdByKeyName: env.key.name,
-        targetSummary: `DNS Sinkhole ${normDomain} -> ${cleanSinkholeIp}`,
-        parameters: { ...req, domain: normDomain, sinkholeIp: cleanSinkholeIp, ttlSeconds: boundedTtl },
-        audit: req.audit
-      };
+      const lease = daemonRes.data.lease;
       const auditEntry = recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -44625,7 +44581,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         return deny("mcp:traffic:*", "leaseId is required");
       }
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/revert", { leaseId });
-      if (!daemonRes.ok && daemonRes.status !== 503) {
+      if (!daemonRes.ok) {
         return deny("mcp:traffic:*", daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
       }
       recordMcpAuditEntry({
@@ -44644,7 +44600,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           {
             type: "text",
             text: JSON.stringify(
-              daemonRes.ok ? daemonRes.data : { success: true, leaseId, note: daemonRes.data?.error },
+              daemonRes.data,
               null,
               2
             )
@@ -44658,6 +44614,12 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       }
       const reason = typeof args.reason === "string" ? args.reason.trim() : "Emergency flush via MCP";
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/flush", {});
+      if (!daemonRes.ok) {
+        return deny(
+          "mcp:firewall:apply",
+          daemonRes.data?.error || "Daemon unavailable: emergency clear-all was not applied; tactical leases are still active"
+        );
+      }
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -44675,7 +44637,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
             text: JSON.stringify(
               {
                 success: true,
-                clearedCount: daemonRes.ok ? daemonRes.data?.clearedCount ?? 0 : 0,
+                clearedCount: daemonRes.data?.clearedCount ?? 0,
                 reason
               },
               null,
