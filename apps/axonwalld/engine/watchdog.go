@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -1667,10 +1668,28 @@ func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, va
 	}
 	env[key] = value
 
+	// A-L4: the block is fixed at 1024 bytes, and the old code sliced
+	// the serialised content to 1024, silently dropping keys in Go
+	// map iteration order — the just-set key itself could be the one
+	// truncated, while the caller was told the write succeeded.
+	// Serialise in sorted key order (deterministic) and fail closed
+	// instead of persisting a partial block: a caller that cannot set
+	// active_slot/bootcount must report failure, not boot with a
+	// grubenv that silently lost the key it just set.
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	var buf bytes.Buffer
 	buf.WriteString("# GRUB Environment Block\n")
-	for k, v := range env {
-		buf.WriteString(fmt.Sprintf("%s=%s\n", k, v))
+	for _, k := range keys {
+		buf.WriteString(fmt.Sprintf("%s=%s\n", k, env[k]))
+	}
+
+	if buf.Len() > 1024 {
+		return fmt.Errorf("grubenv content (%d bytes) exceeds the 1024-byte GRUB environment block; refusing to truncate keys (set %q, %d keys total)", buf.Len(), key, len(keys))
 	}
 
 	// Pad with '#' up to 1024 bytes
@@ -1680,5 +1699,5 @@ func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, va
 
 	// Ensure parent dir exists
 	_ = os.MkdirAll(filepath.Dir(envPath), 0755)
-	return os.WriteFile(envPath, buf.Bytes()[:1024], 0644)
+	return os.WriteFile(envPath, buf.Bytes(), 0644)
 }
