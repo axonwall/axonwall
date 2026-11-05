@@ -85,13 +85,28 @@ func (e *NftablesEngine) Apply(scriptContent string) error {
 
 	slog.Info("Successfully applied nftables ruleset.")
 
-	// Keep lastKnownGood untouched until Confirm() is called (unless no baseline existed at all)
-	if e.lastKnownGood == "" {
-		e.lastKnownGood = scriptContent
-	}
+	// A-M10: lastKnownGood changes ONLY on Confirm (or an explicit
+	// emergency fallback installed by main). The old code promoted
+	// the first hub-pushed script to lastKnownGood when no baseline
+	// existed, so a watchdog rollback restored the very script it
+	// was meant to escape — on a fresh edge box with no baseline,
+	// a bad first ruleset that dropped the hub connection could
+	// never be escaped.
 	e.currentScript = scriptContent
 
 	return nil
+}
+
+// SetEmergencyFallback installs a fail-closed fallback ruleset as the
+// rollback target, but only when no baseline or confirmed ruleset
+// exists yet. It never overwrites a real baseline or a confirmed
+// ruleset, and it never promotes an unconfirmed hub-pushed script.
+func (e *NftablesEngine) SetEmergencyFallback(script string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.lastKnownGood == "" && script != "" {
+		e.lastKnownGood = script
+	}
 }
 
 // Confirm promotes the currently applied ruleset to lastKnownGood.
@@ -109,8 +124,11 @@ func (e *NftablesEngine) Rollback() error {
 	defer e.mu.Unlock()
 
 	if e.lastKnownGood == "" {
-		slog.Warn("No previous known good configuration to rollback to.")
-		return nil
+		// A-M10: a rollback with nothing to roll back to is an
+		// error, not a success. The old code logged a warning and
+		// returned nil, so the watchdog logged no error while the
+		// box stayed on the bad ruleset.
+		return fmt.Errorf("no last-known-good configuration available for rollback")
 	}
 
 	slog.Info("Initiating nftables rollback...")
