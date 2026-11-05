@@ -434,9 +434,14 @@ if [[ ! -f config/includes.chroot/usr/sbin/weed ]]; then
 fi
 fi
 
-if [[ "${FLAVOR}" == "axonwall" && -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then
-  cp "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" config/includes.chroot/usr/sbin/
-  chmod +x config/includes.chroot/usr/sbin/axonwalld
+if [[ "${FLAVOR}" == "axonwall" ]]; then
+  if [[ -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then
+    cp "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" config/includes.chroot/usr/sbin/
+    chmod +x config/includes.chroot/usr/sbin/axonwalld
+  else
+    echo "[!] ERROR: apps/axonwalld/bin/axonwalld is missing; cannot build ISO without the daemon." >&2
+    exit 1
+  fi
 fi
 
 if command -v go &>/dev/null; then
@@ -451,9 +456,14 @@ else
   exit 1
 fi
 
-if [[ "${FLAVOR}" == "axonwall" && -f "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
-  cp "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" config/includes.chroot/usr/sbin/axonwall-satellite
-  chmod +x config/includes.chroot/usr/sbin/axonwall-satellite
+if [[ "${FLAVOR}" == "axonwall" ]]; then
+  if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
+    cp "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" config/includes.chroot/usr/sbin/axonwall-satellite
+    chmod +x config/includes.chroot/usr/sbin/axonwall-satellite
+  else
+    echo "[!] ERROR: apps/axonwall-satellite/bin/axonwall-satellite-amd64 is missing; cannot build ISO without the satellite binary." >&2
+    exit 1
+  fi
 fi
 
 if [[ "${FLAVOR}" == "axonwall" ]]; then
@@ -486,11 +496,17 @@ if [[ -d "${SCRIPT_DIR}/../../apps/axonwall/.next/standalone" ]]; then
     cp -r "${SCRIPT_DIR}/../../apps/axonwall/public" config/includes.chroot/opt/axonwall/apps/axonwall/
     cp -r "${SCRIPT_DIR}/../../apps/axonwall/public" config/includes.chroot/opt/axonwall/
   fi
+else
+  echo "[!] ERROR: apps/axonwall/.next/standalone is missing (run the Next.js production build first); cannot build ISO without the web console." >&2
+  exit 1
 fi
 
 if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/index.js" ]]; then
   cp "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/index.js" config/includes.chroot/opt/axonwall/apps/axonwall-controller/dist/
   cp "${SCRIPT_DIR}/../../apps/axonwall-controller/package.json" config/includes.chroot/opt/axonwall/apps/axonwall-controller/
+else
+  echo "[!] ERROR: apps/axonwall-controller/dist/index.js is missing (run the controller build first); cannot build ISO without the controller." >&2
+  exit 1
 fi
 if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwallctl.js" ]]; then
   cp "${SCRIPT_DIR}/../../apps/axonwall-controller/dist/axonwallctl.js" config/includes.chroot/opt/axonwall/apps/axonwall-controller/dist/

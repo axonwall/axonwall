@@ -94,6 +94,16 @@ ALPINE_FLAVOR="${PROFILE}"
 if [[ "$PROFILE" == "lts" || "$PROFILE" == "standard" ]]; then
   ALPINE_FLAVOR="standard"
 fi
+# ISO flavor name != kernel flavor name: the standard ISO ships the lts
+# kernel (vmlinuz-lts / initramfs-lts); only virt matches its kernel
+# name. Bootloader entries must use the kernel flavor, or BIOS boot
+# fails to find its kernel (the stock efi.img config is untouched, so
+# UEFI boot masked this). Verified against the real 3.21.9 standard
+# ISO, whose /boot holds vmlinuz-lts, not vmlinuz-standard.
+ALPINE_KERNEL_FLAVOR="${ALPINE_FLAVOR}"
+if [[ "$ALPINE_FLAVOR" == "standard" ]]; then
+  ALPINE_KERNEL_FLAVOR="lts"
+fi
 RELEASE_YAML="$(curl -fsSL "${ALPINE_MIRROR}/releases/x86_64/latest-releases.yaml")"
 ISO_FILE="$(echo "$RELEASE_YAML" | awk -v flv="alpine-${ALPINE_FLAVOR}-" '$1 == "file:" && $2 ~ flv && $2 ~ "-x86_64.iso" {print $2; exit}')"
 if [[ -z "$ISO_FILE" ]]; then
@@ -424,16 +434,25 @@ VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0
 echo "${VERSION}" > "${OVL}/etc/axonwall/version"
 
 # Copy compiled Go daemons (axonwalld, axonwall-console, axonwall-satellite)
+# Core payloads are fail-closed, mirroring the console-binary guard in
+# build-iso.sh: an image built without its daemon, UI, or controller
+# boots "successfully" and is only discovered broken at service start.
 if [[ -f "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" ]]; then
   cp "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" "${OVL}/usr/sbin/axonwalld"
   strip "${OVL}/usr/sbin/axonwalld" 2>/dev/null || true
   chmod +x "${OVL}/usr/sbin/axonwalld"
+else
+  echo "[!] ERROR: apps/axonwalld/bin/axonwalld is missing; cannot build Alpine ISO without the daemon." >&2
+  exit 1
 fi
 
 if [[ -f "${REPO_ROOT}/apps/axonwall-console/bin/axonwall-console" ]]; then
   cp "${REPO_ROOT}/apps/axonwall-console/bin/axonwall-console" "${OVL}/usr/sbin/axonwall-console"
   strip "${OVL}/usr/sbin/axonwall-console" 2>/dev/null || true
   chmod +x "${OVL}/usr/sbin/axonwall-console"
+else
+  echo "[!] ERROR: apps/axonwall-console/bin/axonwall-console is missing; cannot build Alpine ISO without the console TUI." >&2
+  exit 1
 fi
 
 if [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
@@ -441,6 +460,9 @@ if [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]];
   strip "${OVL}/usr/sbin/axonwall-satellite" 2>/dev/null || true
   chmod +x "${OVL}/usr/sbin/axonwall-satellite"
   ln -sf /usr/sbin/axonwall-satellite "${OVL}/usr/share/axonwall/satellites/axonwall-satellite-amd64"
+else
+  echo "[!] ERROR: apps/axonwall-satellite/bin/axonwall-satellite-amd64 is missing; cannot build Alpine ISO without the satellite binary." >&2
+  exit 1
 fi
 
 HEADSCALE_VERSION="0.29.4"
@@ -560,11 +582,17 @@ if [[ -d "${REPO_ROOT}/apps/axonwall/.next/standalone" ]]; then
   if [[ -d "${REPO_ROOT}/apps/axonwall/public" ]]; then
     cp -a "${REPO_ROOT}/apps/axonwall/public" "${OVL}/opt/axonwall/apps/axonwall/"
   fi
+else
+  echo "[!] ERROR: apps/axonwall/.next/standalone is missing (run the Next.js production build first); cannot build Alpine ISO without the web console." >&2
+  exit 1
 fi
 
 if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" ]]; then
   cp "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
   cp "${REPO_ROOT}/apps/axonwall-controller/package.json" "${OVL}/opt/axonwall/apps/axonwall-controller/"
+else
+  echo "[!] ERROR: apps/axonwall-controller/dist/index.js is missing (run the controller build first); cannot build Alpine ISO without the controller." >&2
+  exit 1
 fi
 if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
   cp "${REPO_ROOT}/apps/axonwall-controller/dist/axonwallctl.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
@@ -633,6 +661,16 @@ if [[ -f "${REPO_ROOT}/packaging/iso/config/bootloaders/grub-pc/live-theme/theme
   cp "${REPO_ROOT}/packaging/iso/config/bootloaders/grub-pc/live-theme/theme.txt" "${WORK_DIR}/iso/boot/grub/themes/axonwall/theme.txt"
 fi
 
+# Fail closed if the mapped kernel/initramfs are not in the extracted
+# base ISO (e.g. Alpine renames a kernel flavor): a bootloader entry
+# pointing at a missing file is a BIOS-boot brick, not a warning.
+for _boot_file in "vmlinuz-${ALPINE_KERNEL_FLAVOR}" "initramfs-${ALPINE_KERNEL_FLAVOR}"; do
+  if [[ ! -f "${WORK_DIR}/iso/boot/${_boot_file}" ]]; then
+    echo "[!] ERROR: base ISO '${ISO_FILE}' has no /boot/${_boot_file}; refusing to write bootloader entries that point at a missing kernel." >&2
+    exit 1
+  fi
+done
+
 cat << SYSLINUX_EOF > "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 UI vesamenu.c32
 TIMEOUT 50
@@ -650,20 +688,20 @@ MENU COLOR unsel        37;44      #ffe2e8f0 #00000000 std
 LABEL install
   MENU LABEL ^Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)
   MENU DEFAULT
-  KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
-  INITRD /boot/initramfs-${ALPINE_FLAVOR}
+  KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
+  INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
   APPEND modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
 
 LABEL live
   MENU LABEL ^Live Appliance Mode (Evaluate & Web UI on 192.168.1.1:2966)
-  KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
-  INITRD /boot/initramfs-${ALPINE_FLAVOR}
+  KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
+  INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
   APPEND modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
 
 LABEL unattended
   MENU LABEL ^Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)
-  KERNEL /boot/vmlinuz-${ALPINE_FLAVOR}
-  INITRD /boot/initramfs-${ALPINE_FLAVOR}
+  KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
+  INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
   APPEND modules=${STORAGE_MODULES} axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
 SYSLINUX_EOF
 
@@ -689,18 +727,18 @@ set color_highlight=light-green/dark-gray
 terminal_output gfxterm
 
 menuentry "Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)" {
-  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
-  initrd /boot/initramfs-${ALPINE_FLAVOR}
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 
 menuentry "Axonwall Live Appliance Mode (Evaluate & Web UI)" {
-  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
-  initrd /boot/initramfs-${ALPINE_FLAVOR}
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 
 menuentry "Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)" {
-  linux /boot/vmlinuz-${ALPINE_FLAVOR} modules=${STORAGE_MODULES} axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
-  initrd /boot/initramfs-${ALPINE_FLAVOR}
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 GRUB_EOF
 
