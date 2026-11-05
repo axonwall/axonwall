@@ -46,6 +46,8 @@ export default function PluginManagerPage() {
   const [selectedPlugin, setSelectedPlugin] = useState<PluginManifest | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
+  const [livePluginsError, setLivePluginsError] = useState<string | null>(null);
+
   const refreshLivePlugins = () => {
     getExtensionPlugins()
       .then((res) => {
@@ -56,9 +58,15 @@ export default function PluginManagerPage() {
           }
           setLivePlugins(map);
           setOsFamily(res.osFamily);
+          setLivePluginsError(null);
         }
       })
-      .catch(() => {});
+      .catch((err: any) => {
+        // C25: the server now throws a distinct daemon-unavailable
+        // error instead of returning an empty list. Keep the previous
+        // live list and banner the unknown state.
+        setLivePluginsError(err?.message || 'Live plugin status unavailable.');
+      });
   };
 
   useEffect(() => {
@@ -331,7 +339,19 @@ export default function PluginManagerPage() {
       }
 
       if (id === 'cli-workstation' || id === 'vigilant-octo-waffle') {
-        await executePluginAction(id, !isCurrentlyEnabled ? 'enable' : 'disable').catch(() => {});
+        // C22: the plugin action's failure used to be swallowed, then
+        // the state apply ran and the banner claimed the toggle was
+        // done while the plugin service never started/stopped. Await
+        // and check it; on failure, abort the state apply and the
+        // success banner entirely.
+        const actionRes = await executePluginAction(id, !isCurrentlyEnabled ? 'enable' : 'disable');
+        if (!actionRes.success) {
+          setStatusBanner({
+            type: 'error',
+            text: `Plugin action failed for ${id}: ${actionRes.message}. The toggle was not applied.`,
+          });
+          return;
+        }
       }
 
       const res = await applyDesiredState(next);
@@ -397,6 +417,18 @@ export default function PluginManagerPage() {
           />
         </div>
       </div>
+
+      {livePluginsError && (
+        <div className="p-4 rounded-xl border text-xs font-medium flex items-center justify-between bg-amber-500/10 border-amber-500/30 text-amber-300">
+          <span>
+            {livePluginsError} Live plugin status is unknown; the list below shows the last known
+            state, if any.
+          </span>
+          <button onClick={refreshLivePlugins} className="text-slate-300 hover:text-white shrink-0 ml-4 cursor-pointer">
+            Retry
+          </button>
+        </div>
+      )}
 
       {statusBanner && (
         <div

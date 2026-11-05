@@ -21,7 +21,6 @@ export default function PurpleTeamPage() {
   const [coveragePercent, setCoveragePercent] = useState(0);
   const [totalSims, setTotalSims] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [runningSim, setRunningSim] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   const loadData = async () => {
@@ -42,21 +41,16 @@ export default function PurpleTeamPage() {
     loadData();
   }, []);
 
+  // C4: this button used to be a 1500 ms timer that marked the
+  // technique "blocked" and reported a successful detection — without
+  // running any emulation. No adversary-emulation backend is wired to
+  // this page, so it is now an explicit not-implemented error that
+  // leaves the technique status untouched.
   const handleRunEmulation = async (techId: string) => {
-    setRunningSim(techId);
-    setStatusBanner(null);
-
-    // Simulate emulation run
-    setTimeout(() => {
-      setRunningSim(null);
-      setTechniques((prev) =>
-        prev.map((t) => (t.id === techId ? { ...t, status: 'blocked', testedAt: new Date().toISOString() } : t))
-      );
-      setStatusBanner({
-        type: 'success',
-        message: `Simulation ${techId} completed. Threat was detected and blocked by autonomous defense rules.`,
-      });
-    }, 1500);
+    setStatusBanner({
+      type: 'error',
+      message: `Simulation ${techId} is not implemented: no adversary emulation was run and the technique status was not changed.`,
+    });
   };
 
   return (
@@ -162,12 +156,11 @@ export default function PurpleTeamPage() {
                 </span>
 
                 <button
-                  disabled={runningSim === tech.id}
                   onClick={() => handleRunEmulation(tech.id)}
                   className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-lg text-xs transition-colors flex items-center gap-1.5 shadow-lg shadow-indigo-900/30"
                 >
                   <Play className="w-3.5 h-3.5" />
-                  {runningSim === tech.id ? 'Running...' : 'Emulate'}
+                  Emulate (not implemented)
                 </button>
               </div>
             </div>

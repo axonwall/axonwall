@@ -24,17 +24,23 @@ export default function HighAvailabilityPage() {
   const [enabled, setEnabled] = useState(false);
   const [role, setRole] = useState<'primary' | 'secondary'>('primary');
   const [vrid, setVrid] = useState(51);
-  const [syncInterface, setSyncInterface] = useState('eth3');
-  const [peerIp, setPeerIp] = useState('10.0.99.2');
-  const [syncPassword, setSyncPassword] = useState('axonwall-ha-secret');
-  const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(true);
+  // C17: an HA-unconfigured box used to display concrete peer/VRRP
+  // values — including a baked-in default sync password and a VIP that
+  // could collide with the real LAN gateway — and saving persisted
+  // them as real config. Fields start empty; nothing is persisted
+  // until the operator enters it explicitly (see handleSaveHa).
+  const [syncInterface, setSyncInterface] = useState('');
+  const [peerIp, setPeerIp] = useState('');
+  const [syncPassword, setSyncPassword] = useState('');
+  const [virtualIp, setVirtualIp] = useState('');
+  const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(false);
   const [sqliteSyncMode, setSqliteSyncMode] = useState<'direct_stream' | 'litestream'>('direct_stream');
   const [syncInterval, setSyncInterval] = useState(5);
   const [syncTransport, setSyncTransport] = useState<'token-http' | 'mtls'>('mtls');
   const [requireSigned, setRequireSigned] = useState(false);
   const [trustStatus, setTrustStatus] = useState<HASyncTrustStatus | null>(null);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -48,6 +54,7 @@ export default function HighAvailabilityPage() {
           if (firstVrrp) {
             setVrid(firstVrrp.vrid);
             if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
+            if (firstVrrp.virtualIps?.[0]) setVirtualIp(firstVrrp.virtualIps[0]);
           }
           if (state.ha.syncInterface) setSyncInterface(state.ha.syncInterface);
           if (state.ha.peerIp || state.ha.peerAddress) {
@@ -71,12 +78,60 @@ export default function HighAvailabilityPage() {
       .catch(() => {});
   }, []);
 
+  const isValidCidr = (value: string): boolean => {
+    const m = value.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+    if (!m) return false;
+    const octets = m.slice(1, 5).map(Number);
+    const prefix = Number(m[5]);
+    return octets.every((o) => o >= 0 && o <= 255) && prefix >= 8 && prefix <= 32;
+  };
+
   const handleSaveHa = async () => {
     setIsSaving(true);
+    setSyncErrorMsg(null);
     try {
       const state = await getCurrentDesiredState();
       const mappedRole: 'master' | 'backup' = role === 'primary' ? 'master' : 'backup';
       const existingVrrp = state.ha?.vrrpInstances || [];
+      // C17: never persist a baked-in default. When HA is enabled, the
+      // peer, sync interface, sync password, and (for a first VRRP
+      // instance) the VIP must all be entered explicitly; otherwise
+      // the save is refused and nothing is written.
+      if (enabled) {
+        if (!syncInterface.trim()) {
+          setSyncErrorMsg('Enter a sync interface before saving HA configuration.');
+          return;
+        }
+        if (!peerIp.trim()) {
+          setSyncErrorMsg('Enter a peer sync IP address before saving HA configuration.');
+          return;
+        }
+        if (!syncPassword.trim()) {
+          setSyncErrorMsg('Enter a sync password before saving HA configuration. No default password is used.');
+          return;
+        }
+        if (existingVrrp.length === 0 && !isValidCidr(virtualIp)) {
+          setSyncErrorMsg('Enter a virtual IP in CIDR form (e.g. 192.168.1.254/24) for the first VRRP instance.');
+          return;
+        }
+      }
+      const vrrpInstances =
+        existingVrrp.length > 0
+          ? existingVrrp.map((v, idx) =>
+              idx === 0 ? { ...v, vrid, authPassword: syncPassword } : v
+            )
+          : enabled
+            ? [
+                {
+                  name: 'VI_WAN',
+                  vrid,
+                  interface: syncInterface,
+                  priority: mappedRole === 'master' ? 150 : 100,
+                  virtualIps: [virtualIp.trim()],
+                  authPassword: syncPassword,
+                },
+              ]
+            : [];
       await applyDesiredState({
         ...state,
         ha: {
@@ -88,21 +143,7 @@ export default function HighAvailabilityPage() {
           peerAddress: peerIp,
           peerIp,
           peerPort: state.ha?.peerPort ?? 2966,
-          vrrpInstances:
-            existingVrrp.length > 0
-              ? existingVrrp.map((v, idx) =>
-                  idx === 0 ? { ...v, vrid, authPassword: syncPassword } : v
-                )
-              : [
-                  {
-                    name: 'VI_WAN',
-                    vrid,
-                    interface: syncInterface || 'eth0',
-                    priority: mappedRole === 'master' ? 150 : 100,
-                    virtualIps: ['192.168.1.254/24'],
-                    authPassword: syncPassword,
-                  },
-                ],
+          vrrpInstances,
           conntrackSync: state.ha?.conntrackSync ?? {
             enabled,
             interface: syncInterface || 'eth0',
@@ -135,17 +176,20 @@ export default function HighAvailabilityPage() {
     } catch {
       setSyncStatusMsg('Error saving High Availability configuration');
       setTimeout(() => setSyncStatusMsg(null), 4000);
+    } finally {
+      setIsSaving(false);
     }
-    setIsSaving(false);
   };
 
+  // C4: this button used to be a 1200 ms timer that reported a verified
+  // SQLite snapshot SHA that was never computed. No replica-verify or
+  // instant-sync backend exists, so it is now an explicit
+  // not-implemented notice that cannot report a pass. The live Sync
+  // Trust card above still shows the daemon's real trust state.
   const handleTriggerSync = () => {
-    setIsSyncing(true);
-    setTimeout(() => {
-      setIsSyncing(false);
-      setSyncStatusMsg('SQLite snapshot verified: /var/lib/axonwall/headscale/db.sqlite (SHA256: d8f3a9e1...)');
-      setTimeout(() => setSyncStatusMsg(null), 5000);
-    }, 1200);
+    setSyncErrorMsg(
+      'Replica verification is not implemented: no snapshot was verified and no sync was triggered. See Sync Trust above for the live daemon-reported state.'
+    );
   };
 
   return (
@@ -210,6 +254,21 @@ export default function HighAvailabilityPage() {
           </div>
           <button
             onClick={() => setSyncStatusMsg(null)}
+            className="text-slate-400 hover:text-white text-xs cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {syncErrorMsg && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm flex items-center justify-between shadow-lg">
+          <div className="flex items-center gap-2.5">
+            <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+            <span>{syncErrorMsg}</span>
+          </div>
+          <button
+            onClick={() => setSyncErrorMsg(null)}
             className="text-slate-400 hover:text-white text-xs cursor-pointer"
           >
             ✕
@@ -286,6 +345,7 @@ export default function HighAvailabilityPage() {
                     onChange={(e) => setSyncInterface(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition cursor-pointer font-mono"
                   >
+                    <option value="">Select sync interface…</option>
                     <option value="eth3">eth3 (Dedicated Point-to-Point Sync Link)</option>
                     <option value="eth2">eth2 (OPT1 Dedicated Interconnect)</option>
                     <option value="eth1">eth1 (LAN Shared Interconnect)</option>
@@ -322,6 +382,23 @@ export default function HighAvailabilityPage() {
                       className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition font-mono"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                    Virtual IP (first VRRP instance, CIDR)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="192.168.1.254/24"
+                    value={virtualIp}
+                    onChange={(e) => setVirtualIp(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition font-mono"
+                  />
+                  <p className="text-xs text-slate-500 mt-1.5">
+                    Required when no VRRP instance exists yet. No default VIP is used — an invented
+                    VIP could collide with the real LAN gateway.
+                  </p>
                 </div>
               </div>
             )}
@@ -506,11 +583,10 @@ export default function HighAvailabilityPage() {
                     <button
                       type="button"
                       onClick={handleTriggerSync}
-                      disabled={isSyncing}
-                      className="w-full sm:w-auto px-3.5 py-2 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
+                      className="w-full sm:w-auto px-3.5 py-2 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center justify-center gap-2 transition cursor-pointer"
                     >
-                      <ArrowRightLeft className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                      <span>{isSyncing ? 'Verifying Snapshot...' : 'Verify Replica & Trigger Instant Sync'}</span>
+                      <ArrowRightLeft className="w-3.5 h-3.5" />
+                      <span>Verify Replica & Trigger Instant Sync (not implemented)</span>
                     </button>
 
                     <button

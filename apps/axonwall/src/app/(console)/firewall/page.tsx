@@ -50,6 +50,10 @@ export default function FirewallPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [ruleForm, setRuleForm] = useState<FirewallRule>(DEFAULT_RULE);
+  // C19: toggle/delete/edit of an id-less rule used to silently no-op
+  // (and edit-then-save duplicated the rule). Such rules now surface
+  // an error instead of pretending to work.
+  const [ruleActionError, setRuleActionError] = useState<string | null>(null);
 
   const loadState = () => {
     setIsLoadingState(true);
@@ -95,7 +99,17 @@ export default function FirewallPage() {
   };
 
   const handleOpenEditModal = (rule: FirewallRule) => {
-    setEditingRuleId(rule.id || null);
+    // C19: editing an id-less rule used to fall into the create branch
+    // on save, appending a duplicate while the original remained.
+    // Refuse with an error instead of opening a modal that duplicates.
+    if (!rule.id) {
+      setRuleActionError(
+        'This rule has no id (it was staged before ids were assigned at staging) and cannot be edited from here. Delete is also unavailable for id-less rules; remove it by editing the stored ruleset directly.'
+      );
+      return;
+    }
+    setRuleActionError(null);
+    setEditingRuleId(rule.id);
     setRuleForm({ ...rule });
     setIsModalOpen(true);
   };
@@ -103,7 +117,13 @@ export default function FirewallPage() {
   const handleSaveRule = (e: React.FormEvent) => {
     e.preventDefault();
     if (editingRuleId) {
-      // Edit existing rule
+      // Edit existing rule; if the id matches nothing (stale edit),
+      // say so instead of silently closing the modal as if saved.
+      if (!state?.rules.some((r) => r.id === editingRuleId)) {
+        setRuleActionError(`No rule with id ${editingRuleId} exists anymore; nothing was saved.`);
+        setIsModalOpen(false);
+        return;
+      }
       setState((prev) =>
         prev
           ? {
@@ -125,7 +145,11 @@ export default function FirewallPage() {
   };
 
   const handleDeleteRule = (id?: string) => {
-    if (!id) return;
+    // C19: was a silent no-op for id-less rules.
+    if (!id) {
+      setRuleActionError('This rule has no id and cannot be deleted from here. Rules staged before ids were assigned at staging must be removed by editing the stored ruleset directly.');
+      return;
+    }
     if (confirm('Are you sure you want to delete this firewall rule?')) {
       setState((prev) => (prev ? { ...prev, rules: prev.rules.filter((r) => r.id !== id) } : prev));
       setHasUnappliedChanges(true);
@@ -133,7 +157,11 @@ export default function FirewallPage() {
   };
 
   const handleToggleRule = (id?: string) => {
-    if (!id) return;
+    // C19: was a silent no-op for id-less rules.
+    if (!id) {
+      setRuleActionError('This rule has no id and cannot be toggled from here.');
+      return;
+    }
     setState((prev) =>
       prev
         ? {
@@ -246,6 +274,22 @@ export default function FirewallPage() {
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
             <span>You have unapplied rule changes pending. Click <strong>Apply Changes</strong> to compile and commit to kernel nftables.</span>
           </div>
+        </div>
+      )}
+
+      {ruleActionError && (
+        <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl flex items-center justify-between text-sm text-red-300">
+          <div className="flex items-center gap-2">
+            <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>{ruleActionError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRuleActionError(null)}
+            className="text-slate-400 hover:text-white text-xs cursor-pointer shrink-0 ml-4"
+          >
+            ✕
+          </button>
         </div>
       )}
 

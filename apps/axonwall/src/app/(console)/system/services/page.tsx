@@ -17,6 +17,7 @@ import {
 import {
   getSystemServicesStatus,
   getServiceJournalLogs,
+  controlSystemService,
   type SystemServiceInfo,
 } from '@/server/agent';
 
@@ -26,6 +27,8 @@ export default function ServicesSupervisorPage() {
   const [selectedLogs, setSelectedLogs] = useState<string | null>(null);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actingUnit, setActingUnit] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
   const loadServices = async () => {
@@ -44,13 +47,28 @@ export default function ServicesSupervisorPage() {
     loadServices();
   }, []);
 
-  const handleAction = (unit: string, action: 'restart' | 'stop' | 'start') => {
-    setActionNotice(`Executing systemctl ${action} ${unit}...`);
-    setTimeout(() => {
-      setActionNotice(`Requested ${action} for ${unit}.`);
-      loadServices();
-      setTimeout(() => setActionNotice(null), 3000);
-    }, 800);
+  // C3: the buttons used to be a setTimeout that reported success
+  // without executing anything. They now run the real server action
+  // and report its actual outcome; a failure is a red error banner,
+  // never a success notice.
+  const handleAction = async (unit: string, action: 'restart' | 'stop' | 'start') => {
+    setActionNotice(null);
+    setActionError(null);
+    setActingUnit(unit);
+    try {
+      const res = await controlSystemService(unit, action);
+      if (res.success) {
+        setActionNotice(res.message);
+        await loadServices();
+        setTimeout(() => setActionNotice(null), 4000);
+      } else {
+        setActionError(res.message);
+      }
+    } catch (err: any) {
+      setActionError(err?.message || `Failed to ${action} ${unit}.`);
+    } finally {
+      setActingUnit(null);
+    }
   };
 
   const handleViewLogs = async (unit: string) => {
@@ -118,6 +136,13 @@ export default function ServicesSupervisorPage() {
         </div>
       )}
 
+      {actionError && (
+        <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/30 flex items-center gap-3 text-sm text-red-300">
+          <AlertCircle className="w-5 h-5 shrink-0 text-red-400" />
+          <span>{actionError}</span>
+        </div>
+      )}
+
       {/* Services Table */}
       <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
         <div className="overflow-x-auto">
@@ -181,17 +206,33 @@ export default function ServicesSupervisorPage() {
                     <td className="py-4 text-slate-400">{svc.uptime || '-'}</td>
                     <td className="py-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
+                        {/* C3: the console cannot restart/stop itself from
+                            this page — the request would die with the
+                            service — so its control buttons are an
+                            explicit unavailable state, not a fake action. */}
                         <button
-                          title="Restart"
+                          title={
+                            svc.unit === 'axonwall-ui.service'
+                              ? 'Service control is unavailable for the console service itself from this page'
+                              : 'Restart'
+                          }
+                          disabled={svc.unit === 'axonwall-ui.service' || actingUnit === svc.unit}
                           onClick={() => handleAction(svc.unit, 'restart')}
-                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer"
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer disabled:opacity-40"
                         >
                           <RotateCw className="w-3.5 h-3.5" />
                         </button>
                         <button
-                          title={svc.status === 'active' ? 'Stop' : 'Start'}
+                          title={
+                            svc.unit === 'axonwall-ui.service'
+                              ? 'Service control is unavailable for the console service itself from this page'
+                              : svc.status === 'active'
+                                ? 'Stop'
+                                : 'Start'
+                          }
+                          disabled={svc.unit === 'axonwall-ui.service' || actingUnit === svc.unit}
                           onClick={() => handleAction(svc.unit, svc.status === 'active' ? 'stop' : 'start')}
-                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-400 transition cursor-pointer"
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-400 transition cursor-pointer disabled:opacity-40"
                         >
                           {svc.status === 'active' ? <Square className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
                         </button>

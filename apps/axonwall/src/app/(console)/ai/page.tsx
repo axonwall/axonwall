@@ -46,7 +46,7 @@ export default function AiCopilotPage() {
   const [inputPrompt, setInputPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
-  const [stagedNotification, setStagedNotification] = useState<string | null>(null);
+  const [stagedNotification, setStagedNotification] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Provider Settings
   const [config, setConfig] = useState<AiConfig>({
@@ -136,7 +136,7 @@ export default function AiCopilotPage() {
         ...state,
         ai: { ...config, activeProvider },
       });
-      setStagedNotification('Saved AI Provider configuration to /etc/axonwall/system.yaml');
+      setStagedNotification({ type: 'success', text: 'Saved AI Provider configuration to /etc/axonwall/system.yaml' });
       setTimeout(() => setStagedNotification(null), 4000);
     } catch {}
     setIsSavingConfig(false);
@@ -231,13 +231,27 @@ export default function AiCopilotPage() {
   const handleStageRule = async (rule: FirewallRule) => {
     try {
       const state = await getCurrentDesiredState();
+      // C19: AI-staged rules typically arrive without an id, and the
+      // Firewall page's toggle/delete/edit silently no-op (or, for
+      // edit, duplicate) id-less rules. Assign an id at staging so the
+      // rule is manageable from the moment it exists.
+      const stagedRule: FirewallRule = {
+        ...rule,
+        id: rule.id || crypto.randomUUID(),
+      };
       await applyDesiredState({
         ...state,
-        rules: [...(state.rules || []), rule],
+        rules: [...(state.rules || []), stagedRule],
       });
-      setStagedNotification(`Rule "${rule.description || rule.action}" added to /etc/axonwall/firewall.yaml and applied.`);
-    } catch {
-      setStagedNotification(`Rule "${rule.description || rule.action}" added to draft changeset. Ready for atomic commit-confirm.`);
+      setStagedNotification({ type: 'success', text: `Rule "${stagedRule.description || stagedRule.action}" added to /etc/axonwall/firewall.yaml and applied.` });
+    } catch (err: any) {
+      // C24: the old message claimed a draft changeset existed when
+      // nothing was staged. Report the actual error and the actual
+      // disposition: not applied.
+      setStagedNotification({
+        type: 'error',
+        text: `Failed to stage rule "${rule.description || rule.action}": ${err?.message || 'unknown error'}. The rule was not applied.`,
+      });
     }
     setTimeout(() => setStagedNotification(null), 4000);
   };
@@ -321,10 +335,20 @@ export default function AiCopilotPage() {
       </div>
 
       {stagedNotification && (
-        <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-500/30 flex items-center justify-between text-sm text-emerald-300">
+        <div
+          className={`p-4 rounded-xl border flex items-center justify-between text-sm ${
+            stagedNotification.type === 'error'
+              ? 'bg-red-950/40 border-red-500/30 text-red-300'
+              : 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
           <div className="flex items-center gap-3">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-            <span>{stagedNotification}</span>
+            <CheckCircle2
+              className={`w-5 h-5 shrink-0 ${
+                stagedNotification.type === 'error' ? 'text-red-400' : 'text-emerald-400'
+              }`}
+            />
+            <span>{stagedNotification.text}</span>
           </div>
           <button onClick={() => setStagedNotification(null)} className="text-slate-400 hover:text-white">✕</button>
         </div>

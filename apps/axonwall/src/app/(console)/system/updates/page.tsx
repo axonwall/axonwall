@@ -43,32 +43,14 @@ import {
 } from 'lucide-react';
 
 export default function SystemUpdatesPage() {
-  const [slots, setSlots] = useState<PartitionSlotInfo[]>([
-    {
-      slot: 'A',
-      name: 'Slot A (Primary Rootfs)',
-      isActive: true,
-      isHealthy: true,
-      version: '0.11.58',
-      kernel: 'Linux 6.12.111+deb13-amd64',
-      device: '/dev/sda2',
-      label: 'axon_root_a',
-      size: '16.0 GB (ext4)',
-      lastUpdated: 'Current System',
-    },
-    {
-      slot: 'B',
-      name: 'Slot B (Alternate Standby)',
-      isActive: false,
-      isHealthy: true,
-      version: '0.11.58 (Standby)',
-      kernel: 'Linux 6.12.111+deb13-amd64',
-      device: '/dev/sda3',
-      label: 'axon_root_b',
-      size: '16.0 GB (ext4)',
-      lastUpdated: 'Standby Slot',
-    },
-  ]);
+  // C15: no demo slots. Until real telemetry loads, the slot section
+  // below shows a loading/error state and every slot action is
+  // disabled — demo identities must never be rebooted, flashed, or
+  // rolled back.
+  const [slots, setSlots] = useState<PartitionSlotInfo[]>([]);
+  const [telemetryLoading, setTelemetryLoading] = useState(true);
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
+  const [telemetryDaemonUnreachable, setTelemetryDaemonUnreachable] = useState(false);
 
   const [installMode, setInstallMode] = useState<'ab' | 'rolling' | 'zbm'>('ab');
   const [zbmPool, setZbmPool] = useState<{ name: string; topology: string; health: string } | null>(null);
@@ -103,8 +85,8 @@ export default function SystemUpdatesPage() {
   const [isRebooting, setIsRebooting] = useState(false);
   const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null);
 
-  const activeSlot = slots.find((s) => s.isActive) || slots[0];
-  const standbySlot = slots.find((s) => !s.isActive) || slots[1] || slots[0];
+  const activeSlot = slots.find((s) => s.isActive) || slots[0] || null;
+  const standbySlot = slots.find((s) => !s.isActive) || slots[1] || slots[0] || null;
   const isRollingMode = installMode === 'rolling';
   const isZbmMode = installMode === 'zbm';
 
@@ -117,12 +99,14 @@ export default function SystemUpdatesPage() {
     raw.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '');
 
   const refreshTelemetryAndRelease = async (forceRefresh = false) => {
+    setTelemetryError(null);
     try {
       const url = forceRefresh ? '/api/system/update?refresh=1' : '/api/system/update';
       const resp = await fetch(url, { cache: 'no-store' });
       if (resp.ok) {
         const data = await resp.json();
         if (data.telemetry) {
+          setTelemetryDaemonUnreachable(Boolean(data.telemetry.daemonUnreachable));
           if (data.telemetry.installMode) {
             setInstallMode(data.telemetry.installMode);
           }
@@ -146,10 +130,13 @@ export default function SystemUpdatesPage() {
           setBootLimit(data.telemetry.bootLimit);
           setHealthVerified(data.telemetry.healthVerified);
           setHealthChecks(data.telemetry.checks);
+        } else {
+          setTelemetryError('Slot telemetry unavailable — the update service did not return slot data.');
         }
         if (data.releaseInfo) {
           setReleaseInfo(data.releaseInfo);
         }
+        setTelemetryLoading(false);
         return data;
       }
     } catch {
@@ -184,16 +171,23 @@ export default function SystemUpdatesPage() {
       setBootLimit(telemetry.bootLimit);
       setHealthVerified(telemetry.healthVerified);
       setHealthChecks(telemetry.checks);
+      setTelemetryDaemonUnreachable(Boolean(telemetry.daemonUnreachable));
+    } else {
+      setTelemetryError('Slot telemetry unavailable — could not load slot data from the update service.');
     }
     if (info) {
       setReleaseInfo(info);
     }
+    setTelemetryLoading(false);
     return { telemetry, releaseInfo: info };
   };
 
   // Load real telemetry on initial mount
   useEffect(() => {
-    refreshTelemetryAndRelease().catch(() => {});
+    refreshTelemetryAndRelease().catch(() => {
+      setTelemetryLoading(false);
+      setTelemetryError('Slot telemetry unavailable — could not load slot data from the update service.');
+    });
   }, []);
 
   const toggleSnapshots = (dataset: string) => {
@@ -469,6 +463,12 @@ export default function SystemUpdatesPage() {
   };
 
   const handleManualRollback = async () => {
+    // C15: no telemetry, no rollback target — demo slots used to make
+    // this button actionable before any real slot ever loaded.
+    if (!standbySlot) {
+      alert('Rollback unavailable: slot telemetry has not loaded.');
+      return;
+    }
     if (
       !confirm(
         `Are you sure you want to trigger a safe rollback to Slot ${standbySlot.slot}? The system will configure GRUB active_slot=${standbySlot.slot}, reset bootcount=0, and arm the alternate rootfs for next boot.`
@@ -496,12 +496,11 @@ export default function SystemUpdatesPage() {
       }
 
       setPendingRebootSlot(standbySlot.slot);
-      setAlertMessage(res.message);
-      setSlots(
-        slots.map((s) => ({
-          ...s,
-          isActive: !s.isActive,
-        }))
+      // C15: staging a rollback only arms the next-boot GRUB target.
+      // The slot is NOT active until a post-reboot refresh confirms
+      // it, so isActive is left untouched and the message says staged.
+      setAlertMessage(
+        `Rollback staged: Slot ${standbySlot.slot} will boot next. The current slot remains active until reboot.`
       );
     } catch (err: any) {
       alert(`Rollback staging failed: ${err?.message || String(err)}`);
@@ -525,7 +524,7 @@ export default function SystemUpdatesPage() {
       }
     } catch {
       alert(
-        `Axonwall Release Channel Check: Unable to reach GitHub release channel. Currently running v${releaseInfo?.currentVersion || activeSlot.version}.`
+        `Axonwall Release Channel Check: Unable to reach GitHub release channel. Currently running v${releaseInfo?.currentVersion || activeSlot?.version || 'unknown'}.`
       );
     } finally {
       setIsCheckingCloud(false);
@@ -533,7 +532,14 @@ export default function SystemUpdatesPage() {
   };
 
   const handleFlashUpgrade = async () => {
-    const targetSlot = isRollingMode ? 'A' : standbySlot.slot;
+    // C15: without loaded telemetry there is no standby slot to flash.
+    const targetSlot: 'A' | 'B' | undefined = isRollingMode ? 'A' : standbySlot?.slot;
+    if (!targetSlot) {
+      setErrorMessage('Firmware update unavailable: slot telemetry has not loaded.');
+      return;
+    }
+    const targetLabel =
+      slots.find((s) => s.slot === targetSlot)?.label || `Slot ${targetSlot}`;
     setIsUpgrading(true);
     setUpgradeProgress(15);
     setUpgradePhase(
@@ -552,7 +558,7 @@ export default function SystemUpdatesPage() {
       setUpgradePhase(
         isRollingMode
           ? 'Applying in-place package update to / and reloading systemd units...'
-          : `Writing firmware payload to ${standbySlot.label} and updating bootloader...`
+          : `Writing firmware payload to ${targetLabel} and updating bootloader...`
       );
     }, 1500);
 
@@ -638,6 +644,8 @@ export default function SystemUpdatesPage() {
       setBootLimit(telemetry.bootLimit);
       setHealthVerified(telemetry.healthVerified);
       setHealthChecks(telemetry.checks);
+      setTelemetryError(null);
+      setTelemetryDaemonUnreachable(Boolean(telemetry.daemonUnreachable));
       alert('Watchdog Health Quorum: All verification tests PASSED. Partition marked permanently healthy (bootcount=0).');
     } catch (err: any) {
       alert(`Health verification check failed: ${err?.message || String(err)}`);
@@ -1280,8 +1288,42 @@ export default function SystemUpdatesPage() {
         </div>
       )}
 
+      {/* E8: when the daemon is unreachable, slot health is unverified
+          and the numbers below come from local files only. */}
+      {telemetryDaemonUnreachable && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm flex items-center gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+          <span>
+            Telemetry unavailable — the daemon is unreachable, so slot health is unverified and
+            shown from local files only. Do not trust a standby slot&apos;s health from this page.
+          </span>
+        </div>
+      )}
+
+      {/* C15: with no loaded slots, show a loading/error state instead
+          of demo slots — the actions below must never run on fake
+          slot identities. */}
+      {!isZbmMode && slots.length === 0 && (
+        <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+          <p className="text-sm text-slate-300">
+            {telemetryLoading
+              ? 'Loading slot telemetry…'
+              : telemetryError || 'Slot telemetry unavailable.'}
+          </p>
+          {!telemetryLoading && (
+            <button
+              type="button"
+              onClick={() => refreshTelemetryAndRelease(true)}
+              className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer"
+            >
+              Retry loading telemetry
+            </button>
+          )}
+        </div>
+      )}
+
       {/* A/B Dual-Root Partition Slots or Single-Root Rolling Card (Hidden in ZBM mode) */}
-      {!isZbmMode && (
+      {!isZbmMode && slots.length > 0 && (
         <div className={`grid grid-cols-1 ${slots.length > 1 ? 'md:grid-cols-2' : ''} gap-6`}>
           {slots.map((slot) => {
             return (
@@ -1349,13 +1391,19 @@ export default function SystemUpdatesPage() {
 
                 <div className="pt-4 flex items-center justify-between">
                   <div className="flex items-center gap-2 text-xs">
-                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    {!isRollingMode && slot.healthKnown === false ? (
+                      <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    ) : (
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    )}
                     <span className="text-slate-300">
                       {isRollingMode
                         ? 'Standard Debian Root — apt update && apt upgrade supported'
-                        : slot.isActive
-                        ? 'Healthy & Committed'
-                        : 'Flash Target Ready'}
+                        : slot.healthKnown === false
+                          ? 'Health unverified — this slot was not checked'
+                          : slot.isActive
+                            ? 'Healthy & Committed'
+                            : 'Flash Target Ready'}
                     </span>
                   </div>
 
