@@ -674,9 +674,21 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	s.mu.Lock()
 
 	// 6. Setup Commit-Confirm deadline
+	// C26 (daemon side): the UI now validates/clamps this value, but
+	// the daemon must not trust it. Out-of-range values previously
+	// passed through verbatim: a negative timeout armed a deadline
+	// in the past (immediate auto-rollback racing the confirm), and
+	// a huge timeout left a ruleset effectively unconfirmed forever.
+	// Clamp to 10-3600s, defaulting an absent value to 120s.
 	timeoutSec := req.ConfirmTimeoutSeconds
 	if timeoutSec == 0 {
 		timeoutSec = 120
+	}
+	if timeoutSec < 10 {
+		timeoutSec = 10
+	}
+	if timeoutSec > 3600 {
+		timeoutSec = 3600
 	}
 
 	if s.rollbackTimer != nil {
@@ -808,7 +820,16 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 			Message: "No pending configuration to confirm (already confirmed or rolled back).",
 		}, nil
 	}
-	if req.JobId != "" && req.JobId != "confirm" && s.pendingJobID != "" && req.JobId != s.pendingJobID {
+	// C10/C11 (daemon side): the literal job id "confirm" used to be
+	// exempt from the mismatch check, so a stale confirm — sent for
+	// a job that is no longer pending, or with no job known at all —
+	// confirmed whatever bundle happened to be pending, promoting a
+	// ruleset the operator never reviewed. The UI now sends real job
+	// ids, and axonwallctl resolves the pending id before confirming,
+	// so the daemon requires an exact match: the confirm must name
+	// the pending job (including both sides being empty for applies
+	// submitted without a job id). Anything else is a mismatch.
+	if req.JobId != s.pendingJobID {
 		return &pb.ConfirmResponse{
 			Success: false,
 			Message: fmt.Sprintf("Job ID mismatch for pending confirmation: expected %s, got %s", s.pendingJobID, req.JobId),
