@@ -554,7 +554,49 @@ export function createHttpRedirectServer(targetPort: number): http.Server {
   return redirectServer;
 }
 
-export function createPortMultiplexer(httpsServer: https.Server, redirectServer: http.Server): net.Server {
+export function createPortMultiplexer(
+  httpsServer: https.Server,
+  redirectServer: http.Server,
+  opts?: { handshakeTimeoutMs?: number },
+): net.Server {
+  // B-L2: the pre-handshake timeout used to be cleared on the first
+  // byte, so a client that sent one byte and stalled held a socket
+  // forever before the TLS handshake. Keep a handshake deadline
+  // after the first byte instead: it is cleared when the TLS
+  // handshake completes (TLS branch) or the first HTTP request
+  // arrives (redirect branch), and on socket close/error. A plain
+  // JS timer is used rather than socket.setTimeout because the
+  // socket timeout is unreliable once the TLS wrapper owns the
+  // handle. The deadline is keyed by remote address+port for TLS
+  // (the TLSSocket is a different object from the raw socket) and
+  // by socket object for the redirect branch (req.socket is the
+  // raw socket); both are unique among open connections on this
+  // listener.
+  const handshakeTimeoutMs = opts?.handshakeTimeoutMs ?? 10000;
+  const pendingTls = new Map<string, NodeJS.Timeout>();
+  const pendingRedirect = new Map<net.Socket, NodeJS.Timeout>();
+  const tlsKey = (socket: net.Socket) => `${socket.remoteAddress}:${socket.remotePort}`;
+  const clearTlsDeadline = (socket: net.Socket) => {
+    const timer = pendingTls.get(tlsKey(socket));
+    if (timer) {
+      clearTimeout(timer);
+      pendingTls.delete(tlsKey(socket));
+    }
+  };
+  const clearRedirectDeadline = (socket: net.Socket) => {
+    const timer = pendingRedirect.get(socket);
+    if (timer) {
+      clearTimeout(timer);
+      pendingRedirect.delete(socket);
+    }
+  };
+  httpsServer.on('secureConnection', (tlsSocket: net.Socket) => {
+    clearTlsDeadline(tlsSocket);
+  });
+  redirectServer.on('request', (req: http.IncomingMessage) => {
+    if (req.socket) clearRedirectDeadline(req.socket as net.Socket);
+  });
+
   const tcpMultiplexer = net.createServer((socket) => {
     let handled = false;
 
@@ -577,8 +619,22 @@ export function createPortMultiplexer(httpsServer: https.Server, redirectServer:
       socket.removeListener('close', onClose);
       socket.unshift(buf);
       if (buf[0] === 0x16) {
+        const timer = setTimeout(() => {
+          pendingTls.delete(tlsKey(socket));
+          socket.destroy();
+        }, handshakeTimeoutMs);
+        pendingTls.set(tlsKey(socket), timer);
+        socket.once('close', () => clearTlsDeadline(socket));
+        socket.once('error', () => clearTlsDeadline(socket));
         httpsServer.emit('connection', socket);
       } else {
+        const timer = setTimeout(() => {
+          pendingRedirect.delete(socket);
+          socket.destroy();
+        }, handshakeTimeoutMs);
+        pendingRedirect.set(socket, timer);
+        socket.once('close', () => clearRedirectDeadline(socket));
+        socket.once('error', () => clearRedirectDeadline(socket));
         redirectServer.emit('connection', socket);
       }
     };
