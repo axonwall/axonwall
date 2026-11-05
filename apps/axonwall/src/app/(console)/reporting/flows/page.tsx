@@ -35,6 +35,7 @@ export default function FlowsDashboardPage() {
   const [packets, setPackets] = useState<StreamPacket[]>([]);
   const [selectedPacket, setSelectedPacket] = useState<StreamPacket | null>(null);
   const [packetsPerSec, setPacketsPerSec] = useState(0);
+  const [feedError, setFeedError] = useState<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const ppsCounterRef = useRef(0);
@@ -60,6 +61,7 @@ export default function FlowsDashboardPage() {
     if (selectedIface !== 'any') query.set('interface', selectedIface);
     if (selectedProto !== 'any') query.set('protocol', selectedProto);
 
+    setFeedError(null);
     const sse = new EventSource(`/api/v1/events/packets?${query.toString()}`);
     eventSourceRef.current = sse;
 
@@ -71,8 +73,27 @@ export default function FlowsDashboardPage() {
       } catch {}
     });
 
+    // C5: the route closes the stream with an error event when the
+    // daemon is unreachable, instead of streaming fabricated traffic.
+    // Surface that as a "live feed unavailable" banner and stop
+    // streaming rather than letting EventSource retry forever.
+    sse.addEventListener('error', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data || '{}');
+        setFeedError(data.error || 'Live packet feed unavailable.');
+      } catch {
+        setFeedError('Live packet feed unavailable.');
+      }
+      // Close synchronously so EventSource cannot schedule a reconnect
+      // before the state update re-runs the effect cleanup.
+      sse.close();
+      setIsStreaming(false);
+    });
+
     sse.onerror = () => {
-      // EventSource automatically retries
+      // Transport-level errors (not the route's error event) still
+      // retry via EventSource; the error event above stops the loop
+      // when the daemon itself is the problem.
     };
 
     return () => {
@@ -116,6 +137,21 @@ export default function FlowsDashboardPage() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
+      {feedError && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-sm flex items-center justify-between">
+          <span>{feedError} No traffic is shown while the feed is unavailable.</span>
+          <button
+            type="button"
+            onClick={() => {
+              setFeedError(null);
+              setIsStreaming(true);
+            }}
+            className="text-slate-300 hover:text-white text-xs font-semibold cursor-pointer shrink-0 ml-4"
+          >
+            Retry feed
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
