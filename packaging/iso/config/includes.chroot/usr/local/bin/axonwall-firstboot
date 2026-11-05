@@ -660,11 +660,12 @@ if [[ -f /etc/default/sysstat ]]; then
   sed -i 's/^ENABLED="false"/ENABLED="true"/' /etc/default/sysstat 2>/dev/null || true
 fi
 
-# 6. Remove marker and trigger services
-# Marker is removed first so ConditionPathExists doesn't loop or block
-rm -f "$MARKER"
-
-systemctl daemon-reload
+# 6. Trigger services (the marker is removed last, at the end of the
+# script, so a failure or power cut anywhere in the tail steps leaves
+# it in place and firstboot retries on the next boot; the service is
+# already oneshot/RemainAfterExit with ConditionPathExists, so early
+# removal bought no loop protection)
+systemctl daemon-reload || true
 
 # Ensure DNSSEC root trust anchor exists and is owned by unbound before unbound starts
 if id unbound >/dev/null 2>&1; then
@@ -723,3 +724,9 @@ echo "  WAN Inbound Access          : BLOCKED by default"
 echo "  Default Administrator       : admin"
 echo "  Appliance Console           : Login authentication enabled"
 echo "================================================================================"
+
+# Marker removed only now, after every tail step (daemon-reload, service
+# enabling, daemon restart, axonwallctl apply) has run: removing it
+# earlier meant a failure or power cut in that window left a
+# half-provisioned box that never retried.
+rm -f "$MARKER"

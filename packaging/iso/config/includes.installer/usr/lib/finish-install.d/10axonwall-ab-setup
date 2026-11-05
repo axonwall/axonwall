@@ -279,8 +279,20 @@ if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/de
       fi
     fi
   else
-    echo "[-] Error: cryptsetup luksFormat failed on ${DATA_DEV}"
+    echo "[-] ERROR: cryptsetup luksFormat failed on ${DATA_DEV}; the requested LUKS encryption is NOT in place."
+    echo "[-] ERROR: aborting the install rather than silently continuing without encryption and with data unmounted."
+    # Best effort: restore the plain mount and the staged files, so no
+    # later step writes into slot A's root directory over the data
+    # mountpoint (a partially formatted device simply will not mount,
+    # in which case this no-ops and the abort below still holds).
+    mkdir -p /target/var/lib/axonwall
+    if mount "$DATA_DEV" /target/var/lib/axonwall 2>/dev/null; then
+      if [ -d "$STAGE_DATA" ] && [ -n "$(ls -A "$STAGE_DATA" 2>/dev/null || true)" ]; then
+        cp -a "$STAGE_DATA/." /target/var/lib/axonwall/ 2>/dev/null || true
+      fi
+    fi
     rm -rf "$STAGE_DATA"
+    exit 1
   fi
 
   shred -u "$TEMP_KEY" 2>/dev/null || rm -f "$TEMP_KEY"
@@ -489,11 +501,30 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
     else
       e2label "$ROOT_B_DEV" axon_root_b 2>/dev/null || tune2fs -L axon_root_b "$ROOT_B_DEV" 2>/dev/null || true
     fi
+  else
+    # Slot B exists but could not be mounted: the old code silently
+    # skipped the sync AND wrote no slot_versions at all, leaving an
+    # empty formatted standby nobody knew about. Warn loudly and record
+    # the honest state, so the watchdog/UI never believe B is usable.
+    echo "[-] WARNING: A/B install: slot B (${ROOT_B_DEV}) could not be mounted; NO standby system was synced."
+    echo "[-] WARNING: this install has no working fallback slot until a successful update populates slot B."
+    INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "Missing (standby sync failed: slot B unmountable)" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
+    mkdir -p /target/etc/axonwall /target/var/lib/axonwall 2>/dev/null || true
+    printf '%s' "$INIT_SLOT_JSON" > /target/etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$INIT_SLOT_JSON" > /target/var/lib/axonwall/slot_versions.json 2>/dev/null || true
   fi
 else
   SLOT_B_DESC="Rolling (Single-Root)"
   if [ "$INSTALL_MODE" = "zbm" ]; then
     SLOT_B_DESC="axonwall-${INSTALL_VER}@factory-initial"
+  elif [ "$INSTALL_MODE" = "ab" ]; then
+    # A/B mode with no slot-B block device (e.g. manual partitioning
+    # without the axon_root_b label): never claim "Rolling" for an A/B
+    # install -- install-mode still says ab, and the watchdog/UI would
+    # disagree about the layout. Warn loudly and record the honest state.
+    echo "[-] WARNING: A/B install: no slot B device found; NO standby system was synced."
+    echo "[-] WARNING: this install has no working fallback slot until a successful update populates slot B."
+    SLOT_B_DESC="Missing (no standby slot)"
   fi
   INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$SLOT_B_DESC" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
   mkdir -p /target/etc/axonwall /target/var/lib/axonwall 2>/dev/null || true
@@ -648,7 +679,20 @@ if [ -n "$ZFS_VDEVS" ]; then
   elif [ "$RESOLVED_TOPOLOGY" = "raidz2" ] && [ "$VDEV_COUNT" -lt 4 ]; then
     RESOLVED_TOPOLOGY=$( [ "$VDEV_COUNT" -ge 3 ] && echo "raidz1" || echo "stripe" )
   elif [ "$RESOLVED_TOPOLOGY" = "raidz3" ] && [ "$VDEV_COUNT" -lt 5 ]; then
-    RESOLVED_TOPOLOGY="raidz2"
+    # Cascade through the same count checks the other fallbacks use,
+    # instead of blindly emitting raidz2: raidz2 needs >= 4 disks,
+    # raidz1 >= 3, mirror 2, else stripe. (The old code emitted raidz2
+    # for a 2-disk raidz3, which zpool cannot create, so the pool
+    # silently never existed.)
+    if [ "$VDEV_COUNT" -ge 4 ]; then
+      RESOLVED_TOPOLOGY="raidz2"
+    elif [ "$VDEV_COUNT" -eq 3 ]; then
+      RESOLVED_TOPOLOGY="raidz1"
+    elif [ "$VDEV_COUNT" -eq 2 ]; then
+      RESOLVED_TOPOLOGY="mirror"
+    else
+      RESOLVED_TOPOLOGY="stripe"
+    fi
   fi
 
   # Construct JSON array of VDEV paths for axonwalld & axonwall-firstboot bootstrap
