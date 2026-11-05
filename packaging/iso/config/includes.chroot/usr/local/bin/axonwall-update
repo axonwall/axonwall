@@ -311,6 +311,34 @@ update_grubenv_file() {
   return 0
 }
 
+# E5 (suspect variant): the adjacent-partition fallback used to
+# relabel any block device on `[ -b ]` alone -- including the ext4
+# data partition, which the staging step would then rsync-clone
+# over. Only relabel a candidate that is an ext4 filesystem whose
+# contents already look like a standby rootfs (the same markers the
+# staging step uses to decide a rootfs is present: /sbin/init, /etc,
+# /lib/modules). The check mounts the candidate read-only on a
+# throwaway directory and unmounts it again; anything else is left
+# untouched and TARGET_DEV stays empty, so the update aborts
+# instead of guessing.
+candidate_is_standby_rootfs() {
+  _cand="$1"
+  _fstype="$(blkid -o value -s TYPE "$_cand" 2>/dev/null || true)"
+  [ "$_fstype" = "ext4" ] || return 1
+  _probe="$(mktemp -d /tmp/axonwall-update-probe.XXXXXX 2>/dev/null || true)"
+  [ -n "$_probe" ] && [ -d "$_probe" ] || return 1
+  if mount -o ro "$_cand" "$_probe" 2>/dev/null; then
+    if [ -e "${_probe}/sbin/init" ] && [ -d "${_probe}/etc" ] && [ -d "${_probe}/lib/modules" ]; then
+      umount "$_probe" 2>/dev/null || true
+      rmdir "$_probe" 2>/dev/null || true
+      return 0
+    fi
+    umount "$_probe" 2>/dev/null || true
+  fi
+  rmdir "$_probe" 2>/dev/null || true
+  return 1
+}
+
 # 1. Detect target block device (skip when in Rolling Single-Root mode)
 TARGET_LABEL="axon_root_b"
 if [ "$TARGET_SLOT" = "A" ]; then
@@ -335,9 +363,13 @@ if [ -z "$TARGET_DEV" ] && [ "$ROLLING_MODE" != "1" ]; then
         SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM + 1 ))"
       fi
       if [ -b "$SIBLING_DEV" ]; then
-        echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
-        e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
-        TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+        if candidate_is_standby_rootfs "$SIBLING_DEV"; then
+          echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
+          e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
+          TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+        else
+          echo "[-] ERROR: adjacent partition ${SIBLING_DEV} does not look like a standby rootfs (not ext4, or missing /sbin/init, /etc, /lib/modules); refusing to relabel it as ${TARGET_LABEL}." >&2
+        fi
       fi
     elif [ "$TARGET_SLOT" = "A" ] && [ -n "$ROOT_PART_NUM" ] && [ "$ROOT_PART_NUM" -gt 1 ]; then
       SIBLING_DEV=""
@@ -347,9 +379,13 @@ if [ -z "$TARGET_DEV" ] && [ "$ROLLING_MODE" != "1" ]; then
         SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM - 1 ))"
       fi
       if [ -b "$SIBLING_DEV" ]; then
-        echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
-        e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
-        TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+        if candidate_is_standby_rootfs "$SIBLING_DEV"; then
+          echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
+          e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
+          TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+        else
+          echo "[-] ERROR: adjacent partition ${SIBLING_DEV} does not look like a standby rootfs (not ext4, or missing /sbin/init, /etc, /lib/modules); refusing to relabel it as ${TARGET_LABEL}." >&2
+        fi
       fi
     fi
   fi
@@ -571,6 +607,24 @@ if [ "$ZBM_MODE" = "1" ]; then
     exit 1
   fi
 elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
+  # E5 (confirmed): refuse to stage onto the running root. Running
+  # on slot B and updating --slot B used to mount the live root a
+  # second time and rsync --delete onto the live system. Compare
+  # canonical device paths, since the target resolves through
+  # /dev/disk/by-label/* while findmnt reports the plain node.
+  # (The UI always passes the standby slot, so this trigger is
+  # CLI-only; the guard still applies to every caller.) This check
+  # sits here, at the only place TARGET_DEV is mounted, so the ZBM
+  # path -- which never mounts TARGET_DEV -- is unaffected.
+  _running_root="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+  if [ -n "$_running_root" ] && [ -b "$_running_root" ]; then
+    _target_canon="$(readlink -f "$TARGET_DEV" 2>/dev/null || echo "$TARGET_DEV")"
+    _running_canon="$(readlink -f "$_running_root" 2>/dev/null || echo "$_running_root")"
+    if [ "$_target_canon" = "$_running_canon" ]; then
+      echo "[-] ERROR: target device ${TARGET_DEV} is the running root device (${_running_root}); refusing to update the live system in place. Pass the standby slot." >&2
+      exit 1
+    fi
+  fi
   echo "[+] Detected Dual-Root target partition: ${TARGET_DEV} (${TARGET_LABEL})"
   echo "[+] Mounting standby partition to staging directory..."
   STAGE_DIR="/tmp/axonwall-update-slot-${TARGET_SLOT}"
