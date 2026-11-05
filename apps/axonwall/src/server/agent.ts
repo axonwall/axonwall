@@ -3875,13 +3875,17 @@ function isAdminSession(session: Awaited<ReturnType<typeof getSession>>): boolea
 }
 
 export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success: boolean; message: string }> {
+  // C14: never coerce an invalid slot to 'B'. The type says 'A' |
+  // 'B', but a runtime caller can still pass anything; fail closed.
+  if (slot !== 'A' && slot !== 'B') {
+    return { success: false, message: `Invalid slot: ${JSON.stringify(slot)}. Expected 'A' or 'B'; refusing to arm a slot that was not explicitly requested.` };
+  }
+  const cleanSlot: 'A' | 'B' = slot;
   try {
     const session = await getSession();
     if (!isAdminSession(session)) {
       return { success: false, message: 'Unauthorized: Admin credentials required to activate partition slot' };
     }
-
-    const cleanSlot: 'A' | 'B' = slot === 'A' ? 'A' : 'B';
 
     // 1. Try daemon endpoint
     const daemonResp = await callAgentApi<any>('/v1/system/slot/activate', 'POST', { slot: cleanSlot });
@@ -3939,7 +3943,20 @@ export interface FirmwareUpgradeResult {
 }
 
 export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<FirmwareUpgradeResult> {
-  const cleanSlot: 'A' | 'B' = targetSlot === 'A' ? 'A' : 'B';
+  // C14: never coerce an invalid slot to 'B'. The type says 'A' |
+  // 'B', but a runtime caller can still pass anything; fail closed
+  // before any session or daemon work. The echoed targetSlot carries
+  // the rejected value verbatim (cast only to satisfy the type) so
+  // the failure never masquerades as a flash of the other slot.
+  if (targetSlot !== 'A' && targetSlot !== 'B') {
+    return {
+      success: false,
+      message: `Invalid target slot: ${JSON.stringify(targetSlot)}. Expected 'A' or 'B'; refusing to flash a slot that was not explicitly requested.`,
+      targetSlot: targetSlot as 'A' | 'B',
+      newVersion: getCurrentInstalledVersion(),
+    };
+  }
+  const cleanSlot: 'A' | 'B' = targetSlot;
   try {
     const session = await getSession();
     if (!isAdminSession(session)) {
