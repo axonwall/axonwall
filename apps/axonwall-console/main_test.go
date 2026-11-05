@@ -220,3 +220,40 @@ func TestActionResetAdminPasswordShort(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader(input))
 	actionResetAdminPassword(reader)
 }
+
+func batch5MtuAsFloat(t *testing.T, v interface{}) float64 {
+	t.Helper()
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	default:
+		t.Fatalf("unexpected MTU type %T (%v)", v, v)
+		return 0
+	}
+}
+
+func TestBatch5ResolveIfaceMtuPreservesExisting(t *testing.T) {
+	// C27 regression: a stored jumbo MTU (9000, as JSON-decoded
+	// float64) must survive a console interface rewrite; the old code
+	// unconditionally wrote 1500.
+	entry := map[string]interface{}{"name": "lan", "mtu": float64(9000)}
+	if got := batch5MtuAsFloat(t, resolveIfaceMtu(entry)); got != 9000 {
+		t.Errorf("expected existing MTU 9000 to be preserved, got %v", got)
+	}
+	// A stored MTU of 1500 stays 1500 (no spurious change).
+	entry1500 := map[string]interface{}{"name": "wan", "mtu": float64(1500)}
+	if got := batch5MtuAsFloat(t, resolveIfaceMtu(entry1500)); got != 1500 {
+		t.Errorf("expected existing MTU 1500 to be preserved, got %v", got)
+	}
+}
+
+func TestBatch5ResolveIfaceMtuDefaultsForNewEntries(t *testing.T) {
+	// Brand-new entries (no mtu key at all) still default to 1500.
+	if got := batch5MtuAsFloat(t, resolveIfaceMtu(map[string]interface{}{"name": "opt1"})); got != 1500 {
+		t.Errorf("expected new-entry MTU default 1500, got %v", got)
+	}
+}
