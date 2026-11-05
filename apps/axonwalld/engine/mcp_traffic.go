@@ -125,17 +125,17 @@ type McpDnsSinkholeReq struct {
 
 // ConntrackFlow represents an active tracked connection in the Linux kernel.
 type ConntrackFlow struct {
-	Protocol  string `json:"protocol"`
-	State     string `json:"state,omitempty"`
-	SrcIP     string `json:"srcIp"`
-	DstIP     string `json:"dstIp"`
-	SrcPort   int    `json:"srcPort,omitempty"`
-	DstPort   int    `json:"dstPort,omitempty"`
-	Packets   uint64 `json:"packets"`
-	Bytes     uint64 `json:"bytes"`
-	Assured   bool   `json:"assured"`
-	Mark      string `json:"mark,omitempty"`
-	ReplyDst  string `json:"replyDst,omitempty"`
+	Protocol string `json:"protocol"`
+	State    string `json:"state,omitempty"`
+	SrcIP    string `json:"srcIp"`
+	DstIP    string `json:"dstIp"`
+	SrcPort  int    `json:"srcPort,omitempty"`
+	DstPort  int    `json:"dstPort,omitempty"`
+	Packets  uint64 `json:"packets"`
+	Bytes    uint64 `json:"bytes"`
+	Assured  bool   `json:"assured"`
+	Mark     string `json:"mark,omitempty"`
+	ReplyDst string `json:"replyDst,omitempty"`
 }
 
 // McpTrafficManager manages the isolated `table inet axonwall_mcp` ruleset, tactical `tc` classes,
@@ -143,15 +143,78 @@ type ConntrackFlow struct {
 type McpTrafficManager struct {
 	mu         sync.Mutex
 	leases     map[string]*McpTacticalLease
-	nextClass  int
 	stopTicker chan struct{}
+	// reservedClassIDs holds tc class / policy-routing table IDs that
+	// are allocated but not yet covered by a lease in m.leases: either
+	// allocated and still in kernel setup, or freed by a delete whose
+	// kernel cleanup has not finished yet. See allocClassIDLocked.
+	reservedClassIDs map[int]struct{}
+}
+
+// mcpClassIDRange is the shared pool for tc classes (shape) and
+// policy-routing tables (redirect). Both namespaces draw from it so
+// one allocator covers every kernel artifact keyed by ClassID.
+const (
+	mcpClassIDMin = 500
+	mcpClassIDMax = 9000
+)
+
+// allocClassIDLocked returns the lowest ID in the pool that is neither
+// held by a live lease nor reserved, and reserves it. Callers hold
+// m.mu. The reservation is what makes scan-based allocation safe
+// across the alloc-then-unlock-then-insert shape of Shape/Redirect:
+// without it, two concurrent creations could both scan the same free
+// ID before either inserted its lease. The reservation is released
+// when the lease is inserted (the leases map then covers the ID), or
+// after kernel cleanup when a lease is deleted, so a freed ID is
+// never recycled underneath a cleanup that deletes artifacts by ID.
+// A-L5: the old counter wrapped 9000 -> 500 without any in-use check,
+// so a new lease could reuse a live lease's ID and reverting either
+// one then deleted both leases' enforcement.
+func (m *McpTrafficManager) allocClassIDLocked() (int, error) {
+	used := make(map[int]struct{}, len(m.leases)+len(m.reservedClassIDs))
+	for _, l := range m.leases {
+		if l.ClassID != 0 {
+			used[l.ClassID] = struct{}{}
+		}
+	}
+	for id := range m.reservedClassIDs {
+		used[id] = struct{}{}
+	}
+	for id := mcpClassIDMin; id <= mcpClassIDMax; id++ {
+		if _, ok := used[id]; !ok {
+			if m.reservedClassIDs == nil {
+				m.reservedClassIDs = make(map[int]struct{})
+			}
+			m.reservedClassIDs[id] = struct{}{}
+			return id, nil
+		}
+	}
+	return 0, fmt.Errorf("no free MCP class/table ID in range %d-%d", mcpClassIDMin, mcpClassIDMax)
+}
+
+// reserveClassIDLocked marks id as reserved (no-op for 0, which means
+// "no kernel artifact"). Callers hold m.mu.
+func (m *McpTrafficManager) reserveClassIDLocked(id int) {
+	if id == 0 {
+		return
+	}
+	if m.reservedClassIDs == nil {
+		m.reservedClassIDs = make(map[int]struct{})
+	}
+	m.reservedClassIDs[id] = struct{}{}
+}
+
+// releaseClassIDLocked frees a reservation. Callers hold m.mu.
+func (m *McpTrafficManager) releaseClassIDLocked(id int) {
+	delete(m.reservedClassIDs, id)
 }
 
 func NewMcpTrafficManager() *McpTrafficManager {
 	mgr := &McpTrafficManager{
-		leases:     make(map[string]*McpTacticalLease),
-		nextClass:  500,
-		stopTicker: make(chan struct{}),
+		leases:           make(map[string]*McpTacticalLease),
+		reservedClassIDs: make(map[int]struct{}),
+		stopTicker:       make(chan struct{}),
 	}
 	mgr.loadState()
 	if err := mgr.ReconcileKernelState(); err != nil {
@@ -187,9 +250,9 @@ func (m *McpTrafficManager) loadState() {
 		exp, err := time.Parse(time.RFC3339, l.ExpiresAt)
 		if err == nil && exp.After(now) {
 			m.leases[l.ID] = l
-			if l.ClassID >= m.nextClass {
-				m.nextClass = l.ClassID + 1
-			}
+			// A-L5: no counter to restore — allocation scans the
+			// live leases, so a restart can never reissue an ID
+			// that a reloaded lease still holds.
 		}
 	}
 }
@@ -232,6 +295,9 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 		if err != nil || !exp.After(now) {
 			expired = append(expired, l)
 			delete(m.leases, l.ID)
+			// A-L5: hold each ID reserved until its kernel cleanup
+			// finishes (see allocClassIDLocked).
+			m.reserveClassIDLocked(l.ClassID)
 		}
 	}
 	if len(expired) == 0 {
@@ -245,6 +311,11 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 		log.Printf("[MCP Janitor] Expiring tactical lease %s (%s: %s)", l.ID, l.Kind, l.TargetSummary)
 		m.cleanupKernelArtifactsForLease(l)
 	}
+	m.mu.Lock()
+	for _, l := range expired {
+		m.releaseClassIDLocked(l.ClassID)
+	}
+	m.mu.Unlock()
 	// A-M13: a failed rebuild must not pass silently — the expired leases
 	// are gone from the records, but the kernel table may still enforce them.
 	if err := m.ReconcileKernelState(); err != nil {
@@ -728,6 +799,9 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 
 	m.mu.Lock()
 	m.leases[lease.ID] = lease
+	// A-L5: the leases map now covers this ID, so the allocation
+	// reservation is released (no-op when ClassID is 0).
+	m.releaseClassIDLocked(lease.ClassID)
 	m.saveStateLocked()
 	m.mu.Unlock()
 
@@ -738,9 +812,16 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 	if err := m.ReconcileKernelState(); err != nil {
 		m.mu.Lock()
 		delete(m.leases, lease.ID)
+		// A-L5: hold the ID reserved until kernel cleanup finishes,
+		// so a concurrent creation cannot recycle it underneath
+		// cleanupKernelArtifactsForLease (which deletes by ID).
+		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
 		m.cleanupKernelArtifactsForLease(lease)
+		m.mu.Lock()
+		m.releaseClassIDLocked(lease.ClassID)
+		m.mu.Unlock()
 		if herr := m.ReconcileKernelState(); herr != nil {
 			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
 		}
@@ -776,10 +857,10 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	}
 
 	m.mu.Lock()
-	classID := m.nextClass
-	m.nextClass++
-	if m.nextClass > 9000 {
-		m.nextClass = 500
+	classID, allocErr := m.allocClassIDLocked()
+	if allocErr != nil {
+		m.mu.Unlock()
+		return nil, allocErr
 	}
 	fwMark := 0x2000 + classID
 	m.mu.Unlock()
@@ -853,6 +934,9 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 
 	m.mu.Lock()
 	m.leases[lease.ID] = lease
+	// A-L5: the leases map now covers this ID, so the allocation
+	// reservation is released (no-op when ClassID is 0).
+	m.releaseClassIDLocked(lease.ClassID)
 	m.saveStateLocked()
 	m.mu.Unlock()
 
@@ -863,9 +947,16 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	if err := m.ReconcileKernelState(); err != nil {
 		m.mu.Lock()
 		delete(m.leases, lease.ID)
+		// A-L5: hold the ID reserved until kernel cleanup finishes,
+		// so a concurrent creation cannot recycle it underneath
+		// cleanupKernelArtifactsForLease (which deletes by ID).
+		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
 		m.cleanupKernelArtifactsForLease(lease)
+		m.mu.Lock()
+		m.releaseClassIDLocked(lease.ClassID)
+		m.mu.Unlock()
 		if herr := m.ReconcileKernelState(); herr != nil {
 			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
 		}
@@ -906,8 +997,11 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 	}
 
 	m.mu.Lock()
-	tableID := m.nextClass
-	m.nextClass++
+	tableID, allocErr := m.allocClassIDLocked()
+	if allocErr != nil {
+		m.mu.Unlock()
+		return nil, allocErr
+	}
 	fwMark := 0x4000 + tableID
 	m.mu.Unlock()
 
@@ -951,6 +1045,9 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 
 	m.mu.Lock()
 	m.leases[lease.ID] = lease
+	// A-L5: the leases map now covers this ID, so the allocation
+	// reservation is released (no-op when ClassID is 0).
+	m.releaseClassIDLocked(lease.ClassID)
 	m.saveStateLocked()
 	m.mu.Unlock()
 
@@ -961,9 +1058,16 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 	if err := m.ReconcileKernelState(); err != nil {
 		m.mu.Lock()
 		delete(m.leases, lease.ID)
+		// A-L5: hold the ID reserved until kernel cleanup finishes,
+		// so a concurrent creation cannot recycle it underneath
+		// cleanupKernelArtifactsForLease (which deletes by ID).
+		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
 		m.cleanupKernelArtifactsForLease(lease)
+		m.mu.Lock()
+		m.releaseClassIDLocked(lease.ClassID)
+		m.mu.Unlock()
 		if herr := m.ReconcileKernelState(); herr != nil {
 			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
 		}
@@ -1017,6 +1121,9 @@ func (m *McpTrafficManager) SinkholeDNS(req McpDnsSinkholeReq) (*McpTacticalLeas
 
 	m.mu.Lock()
 	m.leases[lease.ID] = lease
+	// A-L5: the leases map now covers this ID, so the allocation
+	// reservation is released (no-op when ClassID is 0).
+	m.releaseClassIDLocked(lease.ClassID)
 	m.saveStateLocked()
 	m.mu.Unlock()
 
@@ -1027,9 +1134,16 @@ func (m *McpTrafficManager) SinkholeDNS(req McpDnsSinkholeReq) (*McpTacticalLeas
 	if err := m.ReconcileKernelState(); err != nil {
 		m.mu.Lock()
 		delete(m.leases, lease.ID)
+		// A-L5: hold the ID reserved until kernel cleanup finishes,
+		// so a concurrent creation cannot recycle it underneath
+		// cleanupKernelArtifactsForLease (which deletes by ID).
+		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
 		m.cleanupKernelArtifactsForLease(lease)
+		m.mu.Lock()
+		m.releaseClassIDLocked(lease.ClassID)
+		m.mu.Unlock()
 		if herr := m.ReconcileKernelState(); herr != nil {
 			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after lease %s creation failure: %v", lease.ID, herr)
 		}
@@ -1047,10 +1161,16 @@ func (m *McpTrafficManager) RevertLease(leaseID string) (*McpTacticalLease, erro
 		return nil, fmt.Errorf("tactical lease '%s' not found or already expired", leaseID)
 	}
 	delete(m.leases, leaseID)
+	// A-L5: hold the ID reserved until kernel cleanup finishes (see
+	// allocClassIDLocked).
+	m.reserveClassIDLocked(lease.ClassID)
 	m.saveStateLocked()
 	m.mu.Unlock()
 
 	m.cleanupKernelArtifactsForLease(lease)
+	m.mu.Lock()
+	m.releaseClassIDLocked(lease.ClassID)
+	m.mu.Unlock()
 	// A-M13: a failed rebuild means the kernel table may still enforce the
 	// lease (or may be partial). Report the failure so the caller does not
 	// record the revert as complete; a healing rebuild is attempted for
@@ -1074,12 +1194,22 @@ func (m *McpTrafficManager) FlushAllLeases() (int, error) {
 		all = append(all, l)
 	}
 	m.leases = make(map[string]*McpTacticalLease)
+	// A-L5: hold every cleared ID reserved until its kernel cleanup
+	// finishes (see allocClassIDLocked).
+	for _, l := range all {
+		m.reserveClassIDLocked(l.ClassID)
+	}
 	m.saveStateLocked()
 	m.mu.Unlock()
 
 	for _, l := range all {
 		m.cleanupKernelArtifactsForLease(l)
 	}
+	m.mu.Lock()
+	for _, l := range all {
+		m.releaseClassIDLocked(l.ClassID)
+	}
+	m.mu.Unlock()
 	if err := m.ReconcileKernelState(); err != nil {
 		if herr := m.ReconcileKernelState(); herr != nil {
 			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after flush: %v", herr)
