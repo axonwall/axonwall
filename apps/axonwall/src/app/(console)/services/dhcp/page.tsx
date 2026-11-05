@@ -58,11 +58,13 @@ export default function DhcpPage() {
   }, []);
 
   const persistDhcp = async (updatedDhcp: DhcpConfig) => {
+    const prevFullState = fullState;
+    const prevDhcp = dhcp;
     setDhcp(updatedDhcp);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         dhcp: updatedDhcp,
@@ -71,6 +73,8 @@ export default function DhcpPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved to /etc/axonwall/services.yaml');
     } catch (err: any) {
+      setDhcp(prevDhcp);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save DHCP configuration'}`);
     } finally {
       setSaving(false);

@@ -38,11 +38,13 @@ export default function CaptivePortalPage() {
   }, []);
 
   const persistZones = async (nextZones: CaptivePortalZone[]) => {
+    const prevFullState = fullState;
+    const prevZones = zones;
     setZones(nextZones);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         captivePortal: {
@@ -54,6 +56,8 @@ export default function CaptivePortalPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved Captive Portal zones to /etc/axonwall/services.yaml');
     } catch (err: any) {
+      setZones(prevZones);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save Captive Portal zones'}`);
     } finally {
       setSaving(false);

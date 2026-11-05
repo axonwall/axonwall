@@ -101,6 +101,12 @@ export default function AdvancedInterfacesPage() {
     nextVips = vips,
     nextVrfs = vrfs
   ) => {
+    const prevFullState = fullState;
+    const prevVlans = vlans;
+    const prevBridges = bridges;
+    const prevBonds = bonds;
+    const prevVips = vips;
+    const prevVrfs = vrfs;
     setVlans(nextVlans);
     setBridges(nextBridges);
     setBonds(nextBonds);
@@ -109,7 +115,7 @@ export default function AdvancedInterfacesPage() {
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         vlans: nextVlans,
@@ -122,6 +128,12 @@ export default function AdvancedInterfacesPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved topology to /etc/axonwall/interfaces.yaml');
     } catch (err: any) {
+      setVlans(prevVlans);
+      setBridges(prevBridges);
+      setBonds(prevBonds);
+      setVips(prevVips);
+      setVrfs(prevVrfs);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save interfaces.yaml'}`);
     } finally {
       setSaving(false);

@@ -38,11 +38,13 @@ export default function IAPDashboardPage() {
   }, []);
 
   const persistApps = async (nextApps: ZeroTrustApp[]) => {
+    const prevFullState = fullState;
+    const prevApps = apps;
     setApps(nextApps);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         zeroTrust: {
@@ -54,6 +56,8 @@ export default function IAPDashboardPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved Zero-Trust IAP applications to /etc/axonwall/security.yaml');
     } catch (err: any) {
+      setApps(prevApps);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save IAP apps'}`);
     } finally {
       setSaving(false);

@@ -42,10 +42,11 @@ export default function MeshVpnPage() {
   }, []);
 
   const handleSaveHeadscaleConfig = async () => {
+    const prevFullState = fullState;
     setSavingConfig(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         headscale: {
@@ -60,6 +61,7 @@ export default function MeshVpnPage() {
       }
       setStatusMsg(res.message || 'Saved Headscale configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save Headscale settings'}`);
     } finally {
       setSavingConfig(false);

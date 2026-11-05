@@ -1044,6 +1044,16 @@ export async function getCurrentDesiredState(): Promise<DesiredState> {
   return redactDesiredStateForSession(state, session);
 }
 
+// State-version token for the slice-edit pages (C2): the SHA-256 of the
+// on-disk YAML config files. A page can pass the fingerprint it loaded with
+// as applyDesiredState's expectedFingerprint; the apply is then refused
+// instead of silently overwriting newer on-disk state.
+export async function getDesiredStateFingerprint(): Promise<{ fingerprint: string }> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  return { fingerprint: readAllYamlConfigFiles().fingerprint };
+}
+
 export async function getYamlConfigFilesSnapshot(): Promise<{
   directory: string;
   files: Record<string, string>;
@@ -1351,15 +1361,97 @@ export async function exportCloudInitConfigAction(
   };
 }
 
+type OnDiskConfigSnapshotEntry = {
+  path: string;
+  existed: boolean;
+  content: string | null;
+};
+
+// Snapshot every file persistDesiredStateToDisk / syncNetworkInterfacesFiles
+// can write, so a daemon rejection (C9) or a rejected interface change (C10)
+// can roll the on-disk config back to its pre-apply contents instead of
+// leaving disk ahead of the live daemon ruleset.
+function snapshotDesiredStateOnDisk(): OnDiskConfigSnapshotEntry[] {
+  const paths = new Set<string>();
+  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR, '/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+    for (const filename of AXONWALL_YAML_FILENAMES) {
+      paths.add(path.join(dir, filename));
+    }
+    paths.add(path.join(dir, 'interfaces.conf'));
+  }
+  for (const jsonPath of [
+    '/var/lib/axonwall/state.json',
+    '/var/lib/axonwall/etc-axonwall/state.json',
+    '/etc/axonwall/state.json',
+    '/etc/network/interfaces',
+  ]) {
+    paths.add(jsonPath);
+  }
+  const snapshot: OnDiskConfigSnapshotEntry[] = [];
+  for (const filePath of paths) {
+    try {
+      if (fs.existsSync(filePath)) {
+        snapshot.push({ path: filePath, existed: true, content: fs.readFileSync(filePath, 'utf8') });
+      } else {
+        snapshot.push({ path: filePath, existed: false, content: null });
+      }
+    } catch {
+      snapshot.push({ path: filePath, existed: false, content: null });
+    }
+  }
+  return snapshot;
+}
+
+// Best-effort restore of a snapshot from snapshotDesiredStateOnDisk.
+// Returns false if any file could not be restored, so the caller can report
+// the disk/daemon divergence instead of silently claiming success.
+function restoreDesiredStateSnapshot(snapshot: OnDiskConfigSnapshotEntry[]): boolean {
+  let ok = true;
+  for (const entry of snapshot) {
+    try {
+      if (entry.existed && entry.content !== null) {
+        fs.writeFileSync(entry.path, entry.content, 'utf8');
+      } else if (fs.existsSync(entry.path)) {
+        fs.unlinkSync(entry.path);
+      }
+    } catch {
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+function invalidateDesiredStateCache(): void {
+  cachedDesiredState = null;
+  lastLoadedFingerprint = '';
+}
+
 export async function applyDesiredState(
   state: DesiredState,
-  confirmTimeoutSeconds = 120
+  confirmTimeoutSeconds = 120,
+  options?: { expectedFingerprint?: string }
 ): Promise<{ success: boolean; message: string; nftScript: string; warnings: string[] }> {
   const session = await getSession();
   await enforceRateLimit(10, 60000); // Max 10 applies per minute per IP
   assertActionPermitted(session, 'admin');
 
   const normalizedState = DesiredStateSchema.parse(state);
+
+  // C2: state-version precondition. When the caller passes the fingerprint
+  // the page loaded with, refuse to apply over newer on-disk state instead
+  // of silently reverting another operator's (or tab's) change.
+  if (options?.expectedFingerprint) {
+    const { fingerprint: currentFingerprint } = readAllYamlConfigFiles();
+    if (currentFingerprint !== options.expectedFingerprint) {
+      throw new Error(
+        'Configuration changed since it was loaded; reload the latest configuration and retry instead of overwriting it.'
+      );
+    }
+  }
+
+  // C9: snapshot on-disk config before persisting, so a daemon rejection
+  // below can roll it back rather than leaving disk ahead of the daemon.
+  const diskSnapshot = snapshotDesiredStateOnDisk();
 
   // 1. Run linter
   const lintIssues = lintRuleset(normalizedState);
@@ -1417,6 +1509,40 @@ export async function applyDesiredState(
     confirm_timeout_seconds: confirmTimeoutSeconds,
   });
 
+  if (daemonResp) {
+    if (!daemonResp.success) {
+      // C9: the daemon rejected the bundle. Roll the on-disk config back
+      // to its pre-apply contents so disk, daemon, and UI agree again, and
+      // report the divergence if the rollback itself could not complete.
+      // The rejected bundle never entered pending-confirm, so drop its job id.
+      const restored = restoreDesiredStateSnapshot(diskSnapshot);
+      invalidateDesiredStateCache();
+      lastPendingJobId = '';
+      throw new Error(
+        (daemonResp.message || 'Ruleset validation failed on daemon') +
+          (restored
+            ? ''
+            : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
+      );
+    }
+    // Automatically record state changeset (including modular YAML files) in GitOps audit repository.
+    // Recorded only once the daemon has accepted the bundle, never on rejection.
+    try {
+      const { recordGitOpsChange } = await import('./gitops');
+      await recordGitOpsChange(
+        normalizedState,
+        session?.username || 'admin',
+        `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
+      );
+    } catch {}
+    return {
+      success: true,
+      message: daemonResp.message,
+      nftScript,
+      warnings,
+    };
+  }
+
   // Automatically record state changeset (including modular YAML files) in GitOps audit repository
   try {
     const { recordGitOpsChange } = await import('./gitops');
@@ -1426,18 +1552,6 @@ export async function applyDesiredState(
       `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
     );
   } catch {}
-
-  if (daemonResp) {
-    if (!daemonResp.success) {
-      throw new Error(daemonResp.message || 'Ruleset validation failed on daemon');
-    }
-    return {
-      success: true,
-      message: daemonResp.message,
-      nftScript,
-      warnings,
-    };
-  }
 
   // Fallback for dev mode / local execution
   try {
@@ -1476,9 +1590,6 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  mockPendingConfirm = false;
-  mockDeadline = 0;
-
   // Retrieve any pending job ID from daemon if available
   let targetJobId = lastPendingJobId || 'confirm';
   try {
@@ -1492,14 +1603,25 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
     job_id: targetJobId,
     jobId: targetJobId,
   });
-  lastPendingJobId = '';
   if (daemonResp) {
+    // C11: clear pending state only once the daemon has acknowledged the
+    // confirm. On failure the job id and banner survive, so the operator
+    // can retry the confirm before the daemon auto-rolls back.
+    if (daemonResp.success) {
+      mockPendingConfirm = false;
+      mockDeadline = 0;
+      lastPendingJobId = '';
+    }
     return {
       success: daemonResp.success,
       message: daemonResp.message,
     };
   }
 
+  // Daemon unreachable: dev-mode fallback — confirm the local mock pending state.
+  mockPendingConfirm = false;
+  mockDeadline = 0;
+  lastPendingJobId = '';
   return {
     success: true,
     message: 'Configuration confirmed. Promoted to last-known-good.',
@@ -1510,19 +1632,28 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  mockPendingConfirm = false;
-  mockDeadline = 0;
-  cachedDesiredState = null;
-  lastLoadedFingerprint = '';
-
   const daemonResp = await callAgentApi<any>('/v1/rollback', 'POST', { reason: 'operator rollback' });
   if (daemonResp) {
+    // C11: clear local pending/cache state only once the daemon has
+    // acknowledged the rollback. On failure the cache still describes the
+    // ruleset the daemon is actually running.
+    if (daemonResp.success) {
+      mockPendingConfirm = false;
+      mockDeadline = 0;
+      cachedDesiredState = null;
+      lastLoadedFingerprint = '';
+    }
     return {
       success: daemonResp.success,
       message: daemonResp.message,
     };
   }
 
+  // Daemon unreachable: dev-mode fallback.
+  mockPendingConfirm = false;
+  mockDeadline = 0;
+  cachedDesiredState = null;
+  lastLoadedFingerprint = '';
   return {
     success: true,
     message: 'Successfully rolled back to previous last-known-good configuration.',
@@ -2556,6 +2687,10 @@ export async function saveInterfaceAssignment(data: {
   }
 
   const normalizedState = DesiredStateSchema.parse(state);
+  // C10: snapshot on-disk config before persisting, so an explicit daemon
+  // rejection below can roll it back instead of presenting a disk-only
+  // change as applied.
+  const diskSnapshot = snapshotDesiredStateOnDisk();
   const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
 
   // Persist device mappings and interface configuration into /etc/axonwall/interfaces.conf and /etc/network/interfaces
@@ -2563,6 +2698,7 @@ export async function saveInterfaceAssignment(data: {
 
   // Delegate persistence, interface bring-up, Kea reload, and nftables commit to root axonwalld daemon
   let daemonApplied = false;
+  let daemonError: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
     const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
@@ -2598,8 +2734,11 @@ export async function saveInterfaceAssignment(data: {
       },
     ];
 
+    // C10: confirm with the job id that was actually submitted, not a
+    // literal — the daemon checks confirm job ids against the pending job.
+    const ifaceJobId = `iface-${Date.now()}`;
     const applyResp = await callAgentApi<any>('/v1/apply', 'POST', {
-      job_id: `iface-${Date.now()}`,
+      job_id: ifaceJobId,
       bundle_hash: bundleHash,
       nft_script: nftScript,
       files: allFiles,
@@ -2607,10 +2746,31 @@ export async function saveInterfaceAssignment(data: {
       confirm_timeout_seconds: 120,
     });
     if (applyResp?.success) {
-      await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
-      daemonApplied = true;
+      const confirmResp = await callAgentApi<any>('/v1/confirm', 'POST', {
+        job_id: ifaceJobId,
+      });
+      if (confirmResp && !confirmResp.success) {
+        daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface change';
+      } else {
+        daemonApplied = true;
+      }
+    } else if (applyResp) {
+      // C10: the daemon answered and rejected the change. Do not fall
+      // through to a success return; the caller handles the rollback below.
+      daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface change';
     }
   } catch {}
+
+  // C10: on an explicit daemon rejection, roll the disk write back and
+  // report failure — never present the disk-only change as applied.
+  if (daemonError) {
+    restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCache();
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was not applied: ${daemonError}`,
+    };
+  }
 
   try {
     const { recordGitOpsChange } = await import('./gitops');
@@ -2710,9 +2870,14 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
   }
 
   const normalizedState = DesiredStateSchema.parse(state);
+  // C10: snapshot on-disk config before persisting, so an explicit daemon
+  // rejection below can roll it back instead of presenting a disk-only
+  // removal as applied.
+  const diskSnapshot = snapshotDesiredStateOnDisk();
   const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
   const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
 
+  let daemonError: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
     const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
@@ -2748,8 +2913,11 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
       },
     ];
 
+    // C10: confirm with the job id that was actually submitted, not a
+    // literal — the daemon checks confirm job ids against the pending job.
+    const ifaceDelJobId = `iface-del-${Date.now()}`;
     const applyResp = await callAgentApi<any>('/v1/apply', 'POST', {
-      job_id: `iface-del-${Date.now()}`,
+      job_id: ifaceDelJobId,
       bundle_hash: bundleHash,
       nft_script: nftScript,
       files: allFiles,
@@ -2757,9 +2925,28 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
       confirm_timeout_seconds: 120,
     });
     if (applyResp?.success) {
-      await callAgentApi<any>('/v1/confirm', 'POST', { job_id: 'confirm' });
+      const confirmResp = await callAgentApi<any>('/v1/confirm', 'POST', {
+        job_id: ifaceDelJobId,
+      });
+      if (confirmResp && !confirmResp.success) {
+        daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface removal';
+      }
+    } else if (applyResp) {
+      // C10: the daemon answered and rejected the removal.
+      daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface removal';
     }
   } catch {}
+
+  // C10: on an explicit daemon rejection, roll the disk write back and
+  // report failure — never present the disk-only removal as applied.
+  if (daemonError) {
+    restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCache();
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was not removed: ${daemonError}`,
+    };
+  }
 
   try {
     const { files } = compileNftables(normalizedState);
@@ -3532,10 +3719,12 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
         success: true,
         message: `Partition Slot ${cleanSlot} armed in GRUB environment. System will boot into Slot ${cleanSlot} on next reboot.`,
       };
-    } catch {
+    } catch (err: any) {
+      // C7: a failed privileged grub-editenv write is a failure, not an
+      // "emulated environment" success. The active slot was not changed.
       return {
-        success: true,
-        message: `Slot ${cleanSlot} staged for next boot cycle (emulated environment).`,
+        success: false,
+        message: `Failed to arm Slot ${cleanSlot}: ${err?.message || 'grub-editenv write failed'}. The active slot was not changed; do not reboot on the basis of this result.`,
       };
     }
   } catch (err: any) {
@@ -3613,8 +3802,13 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
     // 2. Fallback: Check if system has axonwall-update utility
     const localInstallMode = detectLocalInstallMode();
     const updaterPaths = ['/usr/local/bin/axonwall-update', '/usr/sbin/axonwall-update'];
+    // C6: track whether any flasher actually ran. If neither the daemon
+    // nor a local updater exists, the function must report failure — never
+    // fall through to GRUB/version writes and an unconditional success.
+    let flasherRan = false;
     for (const up of updaterPaths) {
       if (fs.existsSync(up)) {
+        flasherRan = true;
         try {
           const cliArgs =
             localInstallMode === 'zbm'
@@ -3638,6 +3832,17 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
         }
         break;
       }
+    }
+
+    // C6: no update backend ran at all — report failure before any GRUB
+    // or version-metadata write can make the lie persistent.
+    if (!flasherRan) {
+      return {
+        success: false,
+        message: `No firmware update backend available: axonwalld did not answer and no local axonwall-update binary was found; Slot ${cleanSlot} was not flashed.`,
+        targetSlot: cleanSlot,
+        newVersion: currentVersion,
+      };
     }
 
     // Update GRUB environment for standby slot (skip on Rolling Single-Root systems)
@@ -3839,11 +4044,41 @@ export async function rebootSystemAction(slot?: 'A' | 'B'): Promise<PowerActionR
     };
   }
 
-  // 2. Direct fallback
+  // C8: the daemon answered and refused (success: false) — propagate the
+  // refusal. Only a null response (daemon unreachable) may fall through
+  // to the local fallback below; never reboot around an explicit refusal.
+  if (daemonResp) {
+    return {
+      success: false,
+      message:
+        daemonResp.message ||
+        daemonResp.error ||
+        `Daemon refused reboot${cleanSlot ? ` into Slot ${cleanSlot}` : ''}.`,
+      action: 'reboot',
+      slot: cleanSlot,
+    };
+  }
+
+  // 2. Direct fallback (daemon unreachable only)
   if (cleanSlot) {
     try {
-      await activatePartitionSlot(cleanSlot);
-    } catch {}
+      const activation = await activatePartitionSlot(cleanSlot);
+      if (!activation.success) {
+        return {
+          success: false,
+          message: `Reboot aborted: ${activation.message}`,
+          action: 'reboot',
+          slot: cleanSlot,
+        };
+      }
+    } catch (err: any) {
+      return {
+        success: false,
+        message: `Reboot aborted: slot activation failed: ${err?.message || 'unknown error'}`,
+        action: 'reboot',
+        slot: cleanSlot,
+      };
+    }
   }
 
   try {

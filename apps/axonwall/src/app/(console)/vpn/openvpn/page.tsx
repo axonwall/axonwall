@@ -31,11 +31,13 @@ export default function OpenVpnPage() {
   }, []);
 
   const persistServers = async (nextServers: OpenVpnServer[]) => {
+    const prevFullState = fullState;
+    const prevServers = servers;
     setServers(nextServers);
     setSaving(true);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         openvpn: {
@@ -47,6 +49,8 @@ export default function OpenVpnPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved OpenVPN configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
+      setServers(prevServers);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save OpenVPN servers'}`);
     } finally {
       setSaving(false);

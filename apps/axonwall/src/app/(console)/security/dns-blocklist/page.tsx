@@ -109,10 +109,11 @@ export default function DnsBlocklistPage() {
     feeds.reduce((acc, f) => (f.enabled ? acc + f.entriesCount : acc), 0) + blacklist.length;
 
   const handleSave = async () => {
+    const prevFullState = fullState;
     setIsSaving(true);
     setSaveSuccess(false);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         dns: {
@@ -135,6 +136,8 @@ export default function DnsBlocklistPage() {
       await applyDesiredState(nextState);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
+    } catch {
+      setFullState(prevFullState);
     } finally {
       setIsSaving(false);
     }

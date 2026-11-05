@@ -104,11 +104,13 @@ export default function RosenpassPage() {
   }, []);
 
   const persistConfig = async (nextCfg: RosenpassConfig) => {
+    const prevFullState = fullState;
+    const prevConfig = config;
     setConfig(nextCfg);
     setSaving(true);
     setStatusBanner(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const plugins = [...(current.plugins || [])];
       const idx = plugins.findIndex((p) => p.id === 'rosenpass');
       if (idx >= 0) {
@@ -132,6 +134,8 @@ export default function RosenpassPage() {
         text: res.message || 'Saved Post-Quantum Rosenpass configuration to /etc/axonwall/vpn.yaml',
       });
     } catch (err: any) {
+      setConfig(prevConfig);
+      setFullState(prevFullState);
       setStatusBanner({
         type: 'error',
         text: err?.message || 'Failed to save Rosenpass configuration',

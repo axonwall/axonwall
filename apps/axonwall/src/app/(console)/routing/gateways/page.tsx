@@ -60,10 +60,12 @@ export default function GatewaysPage() {
   };
 
   const handleAddGateway = async (e: React.FormEvent) => {
+    const prevFullState = fullState;
+    const prevConfiguredGateways = configuredGateways;
     e.preventDefault();
     if (!newName.trim() || !newIp.trim()) return;
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextGws: Gateway[] = [
         ...(current.gateways || []),
         {
@@ -86,13 +88,17 @@ export default function GatewaysPage() {
       setNewIp('');
       setShowAddForm(false);
     } catch (err: any) {
+      setConfiguredGateways(prevConfiguredGateways);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save gateway'}`);
     }
   };
 
   const handleDeleteConfiguredGateway = async (name: string) => {
+    const prevFullState = fullState;
+    const prevConfiguredGateways = configuredGateways;
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextGws = (current.gateways || []).filter((g) => g.name !== name);
       const nextState: DesiredState = { ...current, gateways: nextGws };
       setFullState(nextState);
@@ -100,6 +106,8 @@ export default function GatewaysPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Removed gateway from /etc/axonwall/routing.yaml');
     } catch (err: any) {
+      setConfiguredGateways(prevConfiguredGateways);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to delete gateway'}`);
     }
   };

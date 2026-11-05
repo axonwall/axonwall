@@ -32,11 +32,14 @@ export default function TlsDecryptionPage() {
   }, []);
 
   const persistTls = async (nextEnabled: boolean, nextBypass: string[]) => {
+    const prevFullState = fullState;
+    const prevEnabled = enabled;
+    const prevBypassedDomains = bypassedDomains;
     setEnabled(nextEnabled);
     setBypassedDomains(nextBypass);
     setStatusMsg(null);
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const tlsObj = {
         enabled: nextEnabled,
         transparentProxyPort: 3129,
@@ -50,6 +53,9 @@ export default function TlsDecryptionPage() {
       const res = await applyDesiredState(nextState);
       setStatusMsg(res.message || 'Saved TLS Decryption policy to /etc/axonwall/security.yaml');
     } catch (err: any) {
+      setEnabled(prevEnabled);
+      setBypassedDomains(prevBypassedDomains);
+      setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save TLS Decryption settings'}`);
     }
   };

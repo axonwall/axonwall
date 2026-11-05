@@ -107,8 +107,9 @@ export default function GeoIpPage() {
   }
 
   async function handleSave() {
+    const prevFullState = fullState;
     try {
-      const current = fullState || (await getCurrentDesiredState());
+      const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
         geoip: config,
@@ -117,6 +118,7 @@ export default function GeoIpPage() {
       const res = await applyDesiredState(nextState);
       setSavedMessage(res.message || 'GeoIP configuration saved to /etc/axonwall/security.yaml.');
     } catch (err: any) {
+      setFullState(prevFullState);
       setSavedMessage(`Error: ${err?.message || 'Failed to save GeoIP policy'}`);
     }
     setTimeout(() => setSavedMessage(null), 4000);
