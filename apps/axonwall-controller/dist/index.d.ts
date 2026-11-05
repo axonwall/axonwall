@@ -26,8 +26,63 @@ export interface ControllerTlsConfig {
     ca?: Buffer | string;
     isFallback?: boolean;
 }
-export declare function ensureControllerTls(certPath?: string, keyPath?: string, caPath?: string): ControllerTlsConfig | null;
+export declare function ensureControllerTls(certPath?: string, keyPath?: string, caPath?: string, caKeyPath?: string): ControllerTlsConfig | null;
 export { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord, processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries, isMcpServerEnabled, getMcpServerStatus, };
+export declare function isValidMacAddress(value: unknown): boolean;
+export declare function normalizeMacAddress(value: string): string;
+export declare function isValidCidr(value: unknown): boolean;
+export interface HaTransitionRequest {
+    role?: unknown;
+    state?: unknown;
+    type?: unknown;
+    satelliteId?: unknown;
+    sharedWanMac?: unknown;
+    lanVip?: unknown;
+}
+export interface HaTransitionValidation {
+    ok: boolean;
+    error?: string;
+    status?: number;
+    transition?: 'PROMOTE' | 'DEMOTE';
+    role?: 'active' | 'standby';
+    satelliteId?: string;
+    sharedWanMac?: string;
+    lanVip?: string;
+}
+export type FleetSyncBodyValidation = {
+    ok: true;
+    desired: DesiredState | undefined;
+} | {
+    ok: false;
+    status: 400;
+    error: string;
+};
+export declare function parseFleetSyncBody(body: string): FleetSyncBodyValidation;
+export declare function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?: string): HaTransitionValidation;
+export declare const MESH_DISCONNECTED_GRACE_MS: number;
+export declare function shouldPruneDisconnectedSatellite(disconnectedAt: string | undefined, nowMs: number, graceMs?: number): boolean;
+export declare function headscaleRetryDelaysMs(): number[];
+export interface HeadscaleProvisionDeps {
+    listUsers: () => Promise<any[]>;
+    createUser: (name: string) => Promise<any>;
+    createPreAuthKey: (user: string, reusable: boolean, ephemeral: boolean, expiration: string) => Promise<{
+        key: string;
+    }>;
+    serverUrl: string;
+    send: (msg: unknown) => void;
+    isOpen: () => boolean;
+    sleep?: (ms: number) => Promise<void>;
+    delaysMs?: number[];
+}
+export declare function provisionHeadscaleWithRetry(deps: HeadscaleProvisionDeps): Promise<boolean>;
+export declare function deriveSatelliteRole(input: {
+    configuredRole?: 'satellite' | 'edge-ngfw' | null;
+    currentRole?: 'satellite' | 'edge-ngfw' | null;
+    satelliteId: string;
+    pid1ModeReported?: boolean;
+}): 'satellite' | 'edge-ngfw';
 export declare function createHttpRedirectServer(targetPort: number): http.Server;
-export declare function createPortMultiplexer(httpsServer: https.Server, redirectServer: http.Server): net.Server;
+export declare function createPortMultiplexer(httpsServer: https.Server, redirectServer: http.Server, opts?: {
+    handshakeTimeoutMs?: number;
+}): net.Server;
 //# sourceMappingURL=index.d.ts.map

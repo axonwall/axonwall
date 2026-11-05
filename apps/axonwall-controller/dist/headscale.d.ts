@@ -1,3 +1,4 @@
+export declare function parseHeadscaleTimestamp(value: unknown): string | undefined;
 export declare function listUsers(): Promise<{
     id: any;
     name: any;
