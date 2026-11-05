@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -241,7 +242,20 @@ func resolveInterfaceDevice(ifaceName string, devMap map[string]string) string {
 
 // ReconcileStaticRoutes synchronizes the Linux kernel routing table with static routes
 // defined in /etc/axonwall/routing.yaml or state.json.
+// reconcileStaticRoutesMu serialises all static-route reconciliations
+// (A-M12). Reconcile reads config, applies routes, then prunes against
+// shared kernel state; two concurrent runs with different config
+// snapshots could interleave apply/prune so the older run's prune
+// deletes a route the newer config just installed.
+var reconcileStaticRoutesMu sync.Mutex
+
 func ReconcileStaticRoutes() error {
+	reconcileStaticRoutesMu.Lock()
+	defer reconcileStaticRoutesMu.Unlock()
+	return reconcileStaticRoutesLocked()
+}
+
+func reconcileStaticRoutesLocked() error {
 	cfg, err := LoadRoutingConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load static routes: %w", err)
