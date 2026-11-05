@@ -32,7 +32,22 @@ type TaskManager struct {
 	node    string
 	logDir  string
 	counter uint64
+	// A-L7: cap on retained tasks (see DefaultMaxRetainedTasks).
+	// Zero means "use the default"; tests may set a smaller cap.
+	maxRetained int
 }
+
+// DefaultMaxRetainedTasks bounds how many task records (and their log
+// files) a long-lived daemon keeps. Task records and
+// /var/log/axonwall/tasks log files used to grow without bound —
+// months of routine VM/backup operations accumulated forever. The
+// cap is applied on insert: the oldest *finished* tasks are evicted
+// first (running tasks are never evicted, so a live task's record
+// and log file cannot disappear under its goroutine). 200 retains
+// 4x the 50 tasks the API list endpoint serves (main.go) while
+// bounding memory and disk; raise it only with a matching retention
+// story for the log directory.
+const DefaultMaxRetainedTasks = 200
 
 func NewTaskManager() *TaskManager {
 	nodeName, err := os.Hostname()
@@ -46,9 +61,63 @@ func NewTaskManager() *TaskManager {
 	}
 
 	return &TaskManager{
-		tasks:  make(map[string]*TaskRecord),
-		node:   nodeName,
-		logDir: logDir,
+		tasks:       make(map[string]*TaskRecord),
+		node:        nodeName,
+		logDir:      logDir,
+		maxRetained: DefaultMaxRetainedTasks,
+	}
+}
+
+// retentionCap returns the configured cap, defaulting when unset
+// (e.g. a TaskManager built literally in a test).
+func (m *TaskManager) retentionCap() int {
+	if m.maxRetained > 0 {
+		return m.maxRetained
+	}
+	return DefaultMaxRetainedTasks
+}
+
+// taskLogOwned reports whether path is a log file this manager may
+// delete: inside its logDir, or inside the temp fallback dir
+// StartTask uses when the primary log file cannot be opened.
+func (m *TaskManager) taskLogOwned(path string) bool {
+	for _, dir := range []string{m.logDir, filepath.Join(os.TempDir(), "axonwall", "tasks")} {
+		if dir == "" {
+			continue
+		}
+		if rel, err := filepath.Rel(dir, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneRetainedTasksLocked evicts the oldest finished tasks while
+// the retained count exceeds the cap, deleting their log files.
+// Caller must hold m.mu (write). Running tasks are never evicted:
+// their goroutine still writes to the record and its log file.
+func (m *TaskManager) pruneRetainedTasksLocked() {
+	cap := m.retentionCap()
+	for len(m.tasks) > cap {
+		var oldest *TaskRecord
+		for _, t := range m.tasks {
+			if t.Status == "running" {
+				continue
+			}
+			if oldest == nil || t.StartTime < oldest.StartTime ||
+				(t.StartTime == oldest.StartTime && t.UPID < oldest.UPID) {
+				oldest = t
+			}
+		}
+		if oldest == nil {
+			// Every retained task is still running; nothing safe
+			// to evict. The next insert re-checks after some finish.
+			return
+		}
+		delete(m.tasks, oldest.UPID)
+		if oldest.LogFile != "" && m.taskLogOwned(oldest.LogFile) {
+			_ = os.Remove(oldest.LogFile)
+		}
 	}
 }
 
@@ -107,6 +176,8 @@ func (m *TaskManager) StartTask(taskType, targetId, user string, fn func(log fun
 
 	m.mu.Lock()
 	m.tasks[upid] = task
+	// A-L7: cap retained tasks (and their log files) on insert.
+	m.pruneRetainedTasksLocked()
 	m.mu.Unlock()
 
 	if logFile != nil {
