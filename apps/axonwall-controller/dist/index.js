@@ -45215,6 +45215,24 @@ function getSafeRedirectUrl(req, targetPort) {
   const scriptSafeUrl = JSON.stringify(targetUrl).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
   return { targetUrl, escapedUrl, scriptSafeUrl };
 }
+function deriveSatelliteRole(input2) {
+  if (input2.configuredRole) {
+    return input2.configuredRole;
+  }
+  if (input2.pid1ModeReported === true) {
+    return "edge-ngfw";
+  }
+  if (input2.pid1ModeReported === false) {
+    if (input2.currentRole === "edge-ngfw" && !input2.satelliteId.startsWith("edge-") && input2.satelliteId !== "edge") {
+      return "satellite";
+    }
+    return input2.currentRole || "satellite";
+  }
+  if (input2.currentRole === "edge-ngfw" || input2.satelliteId.startsWith("edge-") || input2.satelliteId === "edge") {
+    return "edge-ngfw";
+  }
+  return input2.currentRole || "satellite";
+}
 function createHttpRedirectServer(targetPort) {
   const redirectServer = http2.createServer((req, res) => {
     const { targetUrl, escapedUrl, scriptSafeUrl } = getSafeRedirectUrl(req, targetPort);
@@ -45335,14 +45353,12 @@ async function main() {
     const localState = desiredState !== void 0 ? desiredState : loadLocalDesiredState2();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
-    const isEdge = sat.role === "edge-ngfw" || fleetNode?.role === "edge-ngfw" || sat.id.startsWith("edge-") || sat.id === "edge";
-    if (isEdge) {
-      sat.role = "edge-ngfw";
-    }
+    sat.role = deriveSatelliteRole({ configuredRole: fleetNode?.role, currentRole: sat.role, satelliteId: sat.id });
+    const isEdge = sat.role === "edge-ngfw";
     const mergedNode = {
       ...fleetNode,
       ...sat,
-      role: isEdge ? "edge-ngfw" : fleetNode?.role || sat.role || "satellite",
+      role: sat.role,
       skuProfile: fleetNode?.skuProfile || sat.skuProfile || hostedEdge?.skuProfile || "sku-vm-virtio",
       wanInterface: fleetNode?.wanInterface || sat.wanInterface || "eth0",
       lanInterface: fleetNode?.lanInterface || sat.lanInterface || "eth1",
@@ -45874,6 +45890,18 @@ data: /api/v1/mcp
       return;
     }
     const forwardedHost = req.headers.host || req.headers["x-forwarded-host"] || "localhost";
+    let upstreamRes = null;
+    let proxyTimedOut = false;
+    const destroyUpstream = () => {
+      try {
+        uiReq.destroy();
+      } catch {
+      }
+      try {
+        upstreamRes?.destroy();
+      } catch {
+      }
+    };
     const uiReq = http2.request({
       hostname: "127.0.0.1",
       port: uiPort,
@@ -45886,11 +45914,28 @@ data: /api/v1/mcp
         "x-forwarded-for": req.socket?.remoteAddress || "127.0.0.1"
       }
     }, (uiRes) => {
+      upstreamRes = uiRes;
       res.writeHead(uiRes.statusCode || 200, uiRes.headers);
       uiRes.pipe(res);
     });
-    req.on("aborted", () => uiReq.destroy());
+    uiReq.setTimeout(3e4, () => {
+      proxyTimedOut = true;
+      destroyUpstream();
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      try {
+        res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Bad Gateway: web console upstream timed out");
+      } catch {
+        res.destroy();
+      }
+    });
+    req.on("aborted", destroyUpstream);
+    res.on("close", destroyUpstream);
     uiReq.on("error", () => {
+      if (proxyTimedOut) return;
       if (res.headersSent) {
         res.destroy();
         return;
@@ -46011,6 +46056,9 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             satCpuGauge.remove({ satellite_id: oldestDisconnectedId });
             satMemGauge.remove({ satellite_id: oldestDisconnectedId });
             satConnsGauge.remove({ satellite_id: oldestDisconnectedId });
+            satRxBytesGauge.remove({ satellite_id: oldestDisconnectedId });
+            satTxBytesGauge.remove({ satellite_id: oldestDisconnectedId });
+            satFlowsCounter.remove({ satellite_id: oldestDisconnectedId });
           } catch {
           }
           lastRxTxBytes.delete(oldestDisconnectedId);
@@ -46173,24 +46221,32 @@ ${headerLines.join("\r\n")}\r
           } else {
             report = parsed.payload;
           }
-          state.metrics = report.metrics;
-          if (report.metrics?.pid1Mode) {
-            state.role = "edge-ngfw";
+          if (report.metrics) {
+            state.metrics = report.metrics;
+            const fleetNode = loadLocalDesiredState2()?.fleet?.nodes?.find((n) => n.id === satId);
+            state.role = deriveSatelliteRole({
+              configuredRole: fleetNode?.role,
+              currentRole: state.role,
+              satelliteId: satId,
+              pid1ModeReported: Boolean(report.metrics.pid1Mode)
+            });
+            if (report.metrics?.skuProfile) {
+              state.skuProfile = report.metrics.skuProfile;
+            }
+            console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics?.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics?.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`);
+            satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
+            satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
+            satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
+            satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
+            const currentRx = report.metrics.rxBytesTotal || 0;
+            const currentTx = report.metrics.txBytesTotal || 0;
+            const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
+            if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
+            if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
+            lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
+          } else {
+            console.log(`[Fleet Manager] Telemetry from ${satId} without metrics; keeping last-known metrics.`);
           }
-          if (report.metrics?.skuProfile) {
-            state.skuProfile = report.metrics.skuProfile;
-          }
-          console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics.activeConns}`);
-          satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
-          satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
-          satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
-          satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
-          const currentRx = report.metrics.rxBytesTotal || 0;
-          const currentTx = report.metrics.txBytesTotal || 0;
-          const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
-          if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
-          if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
-          lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
           if (ws.readyState === import_websocket.default.OPEN) {
             ws.send(JSON.stringify({ type: "PING", payload: {} }));
           }
@@ -46217,6 +46273,9 @@ ${headerLines.join("\r\n")}\r
         satCpuGauge.remove({ satellite_id: satId });
         satMemGauge.remove({ satellite_id: satId });
         satConnsGauge.remove({ satellite_id: satId });
+        satRxBytesGauge.remove({ satellite_id: satId });
+        satTxBytesGauge.remove({ satellite_id: satId });
+        satFlowsCounter.remove({ satellite_id: satId });
         lastRxTxBytes.delete(satId);
         current.ws = void 0;
         current.disconnectedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -46282,6 +46341,7 @@ export {
   createHttpRedirectServer,
   createMcpApiKeyRecord,
   createPortMultiplexer,
+  deriveSatelliteRole,
   ensureControllerTls,
   getMcpServerStatus,
   headscaleRetryDelaysMs,
