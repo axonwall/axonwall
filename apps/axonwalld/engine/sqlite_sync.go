@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
@@ -66,6 +67,8 @@ type SqliteSyncManager struct {
 	server             *http.Server
 	stopPoller         chan struct{}
 	pollerRunning      bool
+	pollerDone         chan struct{} // closed by the poller goroutine on exit; waited on by ApplyConfig/OnStateChange/Stop
+	pollerCancel       context.CancelFunc
 	litestreamCmd      *exec.Cmd
 	k3sManager         *K3sManager
 	effectiveTransport string // transport the master server is actually serving ("token-http" or "mtls")
@@ -85,9 +88,6 @@ func (m *SqliteSyncManager) SetK3sManager(km *K3sManager) {
 }
 
 func (m *SqliteSyncManager) ApplyConfig(cfg SqliteSyncConfig) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	slog.Info("Applying SQLite Sync Configuration",
 		"enabled", cfg.Enabled,
 		"role", cfg.NodeRole,
@@ -95,10 +95,21 @@ func (m *SqliteSyncManager) ApplyConfig(cfg SqliteSyncConfig) error {
 		"databases", cfg.Databases,
 	)
 
-	// Stop existing services
+	// Stop existing services, then JOIN the old poller before starting
+	// anything new. The wait runs without
+	// holding m.mu: the winding-down poller still needs m.mu for its
+	// snapshots, so waiting under the lock would deadlock.
+	m.mu.Lock()
 	m.stopInternal()
-
+	done := m.pollerDone
 	m.cfg = cfg
+	m.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !cfg.Enabled {
 		slog.Info("SQLite Sync is disabled.")
 		return nil
@@ -119,34 +130,58 @@ func (m *SqliteSyncManager) ApplyConfig(cfg SqliteSyncConfig) error {
 }
 
 func (m *SqliteSyncManager) OnStateChange(state string) {
+	// A-H3: stop the backup poller and JOIN it before starting the
+	// master server. Previously stopInternal only closed the stop
+	// channel, so a pollAndSync already in flight (status check, DB
+	// download up to 60s) ran to completion and could rename a peer
+	// database over the live one — and drop its WAL — after this node
+	// had already started serving as master. The join waits without
+	// holding m.mu (the poller needs m.mu while winding down), and
+	// pollAndSync itself is stop/context-aware so the join cannot wait
+	// out a hung download: cancelling the poller context aborts the
+	// in-flight HTTP requests. The invariant this buys: every poller
+	// database apply happens-before the master server starts, so no
+	// apply can land after MASTER takeover.
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	enabled := m.cfg.Enabled
+	m.stopInternal()
+	done := m.pollerDone
+	databases := append([]string(nil), m.cfg.Databases...)
+	mode := m.cfg.Mode
+	autoPromote := m.cfg.AutoPromoteHeadscale
+	m.mu.Unlock()
+	if done != nil {
+		<-done
+	}
 
-	if !m.cfg.Enabled {
+	if !enabled {
 		return
 	}
 
 	slog.Info("HA State transition notification received in SqliteSyncManager", "state", state)
 
 	if state == "MASTER" {
+		m.mu.Lock()
 		m.cfg.NodeRole = "master"
-		m.stopInternal()
+		m.mu.Unlock()
 
 		// Run SQLite checkpoint before taking over
-		for _, db := range m.cfg.Databases {
+		for _, db := range databases {
 			if _, err := os.Stat(db); err == nil {
 				_ = exec.Command("sqlite3", db, "PRAGMA wal_checkpoint(TRUNCATE);").Run()
 			}
 		}
 
-		if m.cfg.AutoPromoteHeadscale {
+		if autoPromote {
 			slog.Info("Promoting local Headscale service to Active Master...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
 				_ = exec.Command("systemctl", "try-reload-or-restart", "headscale").Run()
 			}
 		}
 
-		if m.cfg.Mode == "litestream" {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if mode == "litestream" {
 			if err := m.startLitestream(); err != nil {
 				slog.Error("Failed to start litestream on transition to MASTER", "error", err)
 			}
@@ -156,17 +191,20 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 			}
 		}
 	} else if state == "BACKUP" || state == "FAULT" {
+		m.mu.Lock()
 		m.cfg.NodeRole = "backup"
-		m.stopInternal()
+		m.mu.Unlock()
 
-		if m.cfg.AutoPromoteHeadscale {
+		if autoPromote {
 			slog.Info("Demoting local node to Standby: stopping Headscale to prevent split-brain writes...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
 				_ = exec.Command("systemctl", "stop", "headscale").Run()
 			}
 		}
 
-		if m.cfg.Mode != "litestream" {
+		if mode != "litestream" {
+			m.mu.Lock()
+			defer m.mu.Unlock()
 			if err := m.startBackupPoller(); err != nil {
 				slog.Error("Failed to start backup poller on transition to BACKUP", "error", err)
 			}
@@ -584,8 +622,22 @@ func (m *SqliteSyncManager) handleDownloadDb(w http.ResponseWriter, r *http.Requ
 	_, _ = io.Copy(w, f)
 }
 
+// pollerStopped reports whether the poller generation that owns stopCh
+// has been stopped. Every apply step in pollAndSync checks it first.
+func pollerStopped(stopCh <-chan struct{}) bool {
+	select {
+	case <-stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *SqliteSyncManager) startBackupPoller() error {
 	m.stopPoller = make(chan struct{})
+	pollerCtx, cancel := context.WithCancel(context.Background())
+	m.pollerCancel = cancel
+	m.pollerDone = make(chan struct{})
 	m.pollerRunning = true
 
 	interval := m.cfg.SyncIntervalSeconds
@@ -596,19 +648,21 @@ func (m *SqliteSyncManager) startBackupPoller() error {
 	slog.Info("Starting SQLite Sync Backup Poller", "intervalSeconds", interval, "peer", m.cfg.PeerAddress)
 
 	stopCh := m.stopPoller
+	done := m.pollerDone
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(time.Duration(interval) * time.Second)
 		defer ticker.Stop()
 
 		// Run an immediate sync on startup
-		m.pollAndSync()
+		m.pollAndSync(stopCh, pollerCtx)
 
 		for {
 			select {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				m.pollAndSync()
+				m.pollAndSync(stopCh, pollerCtx)
 			}
 		}
 	}()
@@ -616,7 +670,7 @@ func (m *SqliteSyncManager) startBackupPoller() error {
 	return nil
 }
 
-func (m *SqliteSyncManager) pollAndSync() {
+func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx context.Context) {
 	m.mu.Lock()
 	cfg := m.cfg
 	m.mu.Unlock()
@@ -632,7 +686,7 @@ func (m *SqliteSyncManager) pollAndSync() {
 
 	client, scheme := m.peerClient(10 * time.Second)
 	statusUrl := fmt.Sprintf("%s://%s/api/v1/sync/status", scheme, net.JoinHostPort(cfg.PeerAddress, strconv.Itoa(peerPort)))
-	req, err := http.NewRequest("GET", statusUrl, nil)
+	req, err := http.NewRequestWithContext(pollerCtx, "GET", statusUrl, nil)
 	if err != nil {
 		return
 	}
@@ -665,8 +719,13 @@ func (m *SqliteSyncManager) pollAndSync() {
 	m.peerSignsPayloads = statusResp.SignsPayloads
 	m.mu.Unlock()
 
-	// Compare peer databases against local copies
+	// Compare peer databases against local copies. Each apply step is
+	// gated on the poller still being current: once this node stops
+	// being a backup, no step below may write anything.
 	for _, peerDb := range statusResp.Databases {
+		if pollerStopped(stopCh) {
+			return
+		}
 		localSha := computeFileSha256(peerDb.Path)
 		if localSha != peerDb.Sha256 {
 			slog.Info("Database update detected on peer. Synchronizing...",
@@ -676,7 +735,7 @@ func (m *SqliteSyncManager) pollAndSync() {
 			)
 
 			dbClient, _ := m.peerClient(60 * time.Second)
-			if err := m.fetchAndApplyDb(peerDb.Path, peerPort, dbClient, scheme); err != nil {
+			if err := m.fetchAndApplyDb(peerDb.Path, peerPort, dbClient, scheme, stopCh, pollerCtx); err != nil {
 				slog.Error("Failed to synchronize database from peer", "path", peerDb.Path, "error", err)
 			} else {
 				slog.Info("Successfully synchronized database from peer", "path", peerDb.Path)
@@ -684,8 +743,16 @@ func (m *SqliteSyncManager) pollAndSync() {
 		}
 	}
 
+	if pollerStopped(stopCh) {
+		return
+	}
+
 	// Synchronize non-K3s appliance state (/var/lib/axonwall/state.json & Samba passdb.tdb)
-	m.syncApplianceStateFromPeer(peerPort, client, scheme)
+	m.syncApplianceStateFromPeer(peerPort, client, scheme, stopCh, pollerCtx)
+
+	if pollerStopped(stopCh) {
+		return
+	}
 
 	// Automatically enroll HA PKI + OpenLDAP multi-provider syncrepl secret if not yet enrolled.
 	// Enrollment is the PKI bootstrap and ALWAYS uses plain HTTP + the
@@ -697,6 +764,10 @@ func (m *SqliteSyncManager) pollAndSync() {
 			_, _ = EnsureOpenLDAPBootstrapped(csrResp.LDAPBaseDN, 2, DefaultPasswordPolicyConfig())
 			_ = ConfigureMultiProviderSyncrepl(2, cfg.PeerAddress, csrResp.LDAPBaseDN)
 		}
+	}
+
+	if pollerStopped(stopCh) {
+		return
 	}
 
 	// Automatically fetch K3s cluster join token if not yet present on backup node
@@ -814,7 +885,7 @@ func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *http.Client, scheme string) {
+func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *http.Client, scheme string, stopCh <-chan struct{}, pollerCtx context.Context) {
 	m.mu.Lock()
 	peerAddr := m.cfg.PeerAddress
 	authToken := m.cfg.AuthToken
@@ -825,7 +896,7 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *htt
 	}
 
 	stateUrl := fmt.Sprintf("%s://%s/api/v1/sync/state", scheme, net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)))
-	req, err := http.NewRequest(http.MethodGet, stateUrl, nil)
+	req, err := http.NewRequestWithContext(pollerCtx, http.MethodGet, stateUrl, nil)
 	if err != nil {
 		return
 	}
@@ -873,6 +944,9 @@ func (m *SqliteSyncManager) syncApplianceStateFromPeer(peerPort int, client *htt
 		slog.Warn("Peer state signature check failed, skipping sync", "error", err)
 		return
 	}
+	if pollerStopped(stopCh) {
+		return
+	}
 	_ = os.MkdirAll(filepath.Dir(localPath), 0755)
 	_ = os.WriteFile(replicaPath, body, 0600)
 }
@@ -904,7 +978,7 @@ func preserveFileOwnership(newPath, targetPath string) {
 	}
 }
 
-func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client *http.Client, scheme string) error {
+func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client *http.Client, scheme string, stopCh <-chan struct{}, pollerCtx context.Context) error {
 	m.mu.Lock()
 	peerAddr := m.cfg.PeerAddress
 	authToken := m.cfg.AuthToken
@@ -929,7 +1003,7 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 	}
 
 	downloadUrl := fmt.Sprintf("%s://%s/api/v1/sync/db?path=%s", scheme, net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)), url.QueryEscape(dbPath))
-	req, err := http.NewRequest("GET", downloadUrl, nil)
+	req, err := http.NewRequestWithContext(pollerCtx, "GET", downloadUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -987,6 +1061,17 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 		return err
 	}
 
+	// A-H3: final stop gate before the destructive step. The caller
+	// (OnStateChange/ApplyConfig) joins the poller before starting the
+	// master server, so any rename that happens here still
+	// happens-before MASTER takeover; this gate additionally aborts
+	// promptly instead of renaming a database this node no longer
+	// wants as a backup.
+	if pollerStopped(stopCh) {
+		os.Remove(tmpFile)
+		return fmt.Errorf("sync stopped before applying database %s", dbPath)
+	}
+
 	// Keep the replaced database's ownership on the downloaded copy
 	// (see preserveFileOwnership) before it becomes the live file.
 	preserveFileOwnership(tmpFile, dbPath)
@@ -1024,6 +1109,13 @@ func (m *SqliteSyncManager) startLitestream() error {
 	return nil
 }
 
+// stopInternal initiates shutdown of the master server, the backup
+// poller and litestream. Callers hold m.mu. It deliberately does NOT
+// wait for the poller goroutine: the goroutine needs m.mu while it
+// winds down, so joining here would deadlock. Callers that must not
+// proceed until the poller has exited (ApplyConfig, OnStateChange,
+// Stop) capture m.pollerDone, release m.mu, and wait on it — the join
+// that A-H3 requires, placed where it cannot deadlock.
 func (m *SqliteSyncManager) stopInternal() {
 	if m.server != nil {
 		_ = m.server.Close()
@@ -1032,6 +1124,12 @@ func (m *SqliteSyncManager) stopInternal() {
 
 	if m.pollerRunning {
 		close(m.stopPoller)
+		if m.pollerCancel != nil {
+			// Aborts in-flight poller HTTP requests (status check,
+			// DB download) so the join below is prompt, not 60s.
+			m.pollerCancel()
+			m.pollerCancel = nil
+		}
 		m.pollerRunning = false
 	}
 
@@ -1044,8 +1142,12 @@ func (m *SqliteSyncManager) stopInternal() {
 
 func (m *SqliteSyncManager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.stopInternal()
+	done := m.pollerDone
+	m.mu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 func computeFileSha256(path string) string {
