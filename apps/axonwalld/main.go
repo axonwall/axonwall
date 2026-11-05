@@ -1506,22 +1506,67 @@ func applyBootInterfaces() error {
 
 	// Post-boot DHCP & static route verification once networking.service settles
 	if len(dhcpSpecs) > 0 {
-		go func(ifSpecs []bootIfaceSpec) {
-			for _, delay := range []time.Duration{8 * time.Second, 20 * time.Second} {
-				time.Sleep(delay)
-				for _, sp := range ifSpecs {
-					out, _ := exec.Command("ip", "-4", "addr", "show", "dev", sp.Device).CombinedOutput()
-					if !dhcpClientRunning(sp.Device) || !strings.Contains(string(out), "inet ") {
-						log.Printf("[Agent] Post-boot check: ensuring DHCP client is active on %s", sp.Device)
-						triggerDhcpClient(sp.Device, sp.Role)
-					}
-				}
-				_ = ReconcileStaticRoutes()
-			}
-		}(dhcpSpecs)
+		schedulePostBootVerification(dhcpSpecs)
 	}
 
 	return firstIfaceErr
+}
+
+// postBootVerificationDelays are the waits before each post-boot DHCP /
+// static-route verification round. A variable (not constants) so tests
+// can shrink them; production values are unchanged (8s, 20s).
+var postBootVerificationDelays = []time.Duration{8 * time.Second, 20 * time.Second}
+
+// postBootReconcileStaticRoutes is the reconcile step run by the
+// post-boot verifier. A variable so tests can observe invocations
+// without touching kernel routes; production always calls
+// ReconcileStaticRoutes.
+var postBootReconcileStaticRoutes = ReconcileStaticRoutes
+
+var postBootVerificationMu sync.Mutex
+var postBootVerificationCancel context.CancelFunc
+
+// schedulePostBootVerification starts the post-boot DHCP/static-route
+// verification goroutine, cancelling any previous one (A-M12). Every
+// bundle apply that touches a DHCP interface used to spawn another
+// goroutine, so an earlier goroutine's prune phase could delete a
+// route the newer config just installed; now at most one verifier
+// runs, and it is cancelled by the next apply.
+func schedulePostBootVerification(ifSpecs []bootIfaceSpec) {
+	postBootVerificationMu.Lock()
+	if postBootVerificationCancel != nil {
+		postBootVerificationCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	postBootVerificationCancel = cancel
+	postBootVerificationMu.Unlock()
+	go runPostBootVerification(ctx, ifSpecs)
+}
+
+func runPostBootVerification(ctx context.Context, ifSpecs []bootIfaceSpec) {
+	for _, delay := range postBootVerificationDelays {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		for _, sp := range ifSpecs {
+			if ctx.Err() != nil {
+				return
+			}
+			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", sp.Device).CombinedOutput()
+			if !dhcpClientRunning(sp.Device) || !strings.Contains(string(out), "inet ") {
+				log.Printf("[Agent] Post-boot check: ensuring DHCP client is active on %s", sp.Device)
+				triggerDhcpClient(sp.Device, sp.Role)
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		_ = postBootReconcileStaticRoutes()
+	}
 }
 
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
