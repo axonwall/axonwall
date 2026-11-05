@@ -90,11 +90,15 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 	pcapFile := filepath.Join(m.captureDir, fmt.Sprintf("%s.pcap", captureID))
 	startedAt := time.Now().UTC().Format(time.RFC3339)
 
-	// Verify if tcpdump exists on the system
+	// Verify if tcpdump exists on the system. There is deliberately
+	// no mock fallback here: serving fabricated flows in the shape
+	// of a live capture (the old generateMockCapture) presented
+	// invented traffic as observed traffic — the same defect class
+	// as the UI-side C5 fix. A box without tcpdump gets an error,
+	// not a plausible-looking lie.
 	tcpdumpPath, err := exec.LookPath("tcpdump")
 	if err != nil {
-		// Mock capture fallback for development mode when tcpdump is not installed
-		return m.generateMockCapture(captureID, iface, filter, count, startedAt, pcapFile), nil
+		return nil, fmt.Errorf("packet capture unavailable: tcpdump is not installed on this system")
 	}
 
 	args := []string{"-i", iface, "-c", strconv.Itoa(count), "-nn", "-s", "0", "-w", pcapFile}
@@ -214,56 +218,4 @@ func (m *PacketCaptureManager) parsePcap(pcapFile string) ([]CapturedPacket, err
 	_ = cmd.Wait()
 
 	return packets, nil
-}
-
-func (m *PacketCaptureManager) generateMockCapture(id, iface, filter string, count int, startedAt, pcapFile string) *CaptureResult {
-	// Create an empty dummy file for pcap download
-	_ = os.WriteFile(pcapFile, []byte("MOCK_PCAP_FILE_HEADER"), 0644)
-
-	var packets []CapturedPacket
-	mockFlows := []struct {
-		proto   string
-		srcIP   string
-		srcPort string
-		dstIP   string
-		dstPort string
-		info    string
-	}{
-		{"DNS", "192.168.1.105", "54321", "192.168.1.1", "53", "Standard query 0x1a2b A deb.debian.org"},
-		{"DNS", "192.168.1.1", "53", "192.168.1.105", "54321", "Standard query response 0x1a2b A 151.101.130.132"},
-		{"TLS/HTTPS", "192.168.1.105", "51234", "151.101.130.132", "443", "Client Hello, Version: TLS 1.3 (SNI: deb.debian.org)"},
-		{"TLS/HTTPS", "151.101.130.132", "443", "192.168.1.105", "51234", "Server Hello, Change Cipher Spec, Encrypted Handshake Message"},
-		{"TCP", "192.168.1.105", "51234", "151.101.130.132", "443", "Flags [P.], seq 1:512, ack 1, win 502, length 511"},
-		{"ICMP", "192.168.1.50", "-", "8.8.8.8", "-", "echo request, id 0x1234, seq 1, length 64"},
-		{"ICMP", "8.8.8.8", "-", "192.168.1.50", "-", "echo reply, id 0x1234, seq 1, length 64"},
-		{"WireGuard", "192.168.1.1", "51820", "198.51.100.25", "51820", "Transport Data, Receiver index 0x98f2, Counter 1024, length 128"},
-	}
-
-	now := time.Now()
-	for i := 0; i < count && i < len(mockFlows); i++ {
-		flow := mockFlows[i%len(mockFlows)]
-		t := now.Add(time.Duration(i*80) * time.Millisecond)
-		packets = append(packets, CapturedPacket{
-			Index:     i + 1,
-			Timestamp: t.Format("15:04:05.000000"),
-			SrcIP:     flow.srcIP,
-			SrcPort:   flow.srcPort,
-			DstIP:     flow.dstIP,
-			DstPort:   flow.dstPort,
-			Protocol:  flow.proto,
-			Length:    64 + (i * 128),
-			Info:      flow.info,
-		})
-	}
-
-	return &CaptureResult{
-		ID:          id,
-		Interface:   iface,
-		Filter:      filter,
-		PacketCount: len(packets),
-		Packets:     packets,
-		PcapPath:    pcapFile,
-		StartedAt:   startedAt,
-		CompletedAt: time.Now().UTC().Format(time.RFC3339),
-	}
 }
