@@ -74,6 +74,60 @@ san_profile() {
 
 subj_name() { hostname 2>/dev/null || echo axonwall; }
 
+# Normalise one SAN entry per line: "IP Address:" -> "IP:", and
+# IPv6 addresses expanded to 8 upper-case zero-padded groups, so the
+# compressed form from `hostname -I` (fd8b:...::2) compares equal to
+# the expanded form openssl writes into the certificate
+# (FD8B:...:0000:0002). DNS names pass through unchanged; IPv4
+# addresses contain no colon and are unaffected.
+normalize_san_list() {
+    awk '
+    function pad4(g) { while (length(g) < 4) g = "0" g; return toupper(g); }
+    function norm_ip(ip,    n, a, lg, rg, l, r, i, miss, out) {
+        if (ip !~ /:/) return ip;
+        n = split(ip, a, "::");
+        if (n == 1) {
+            split(ip, g, ":");
+            out = "";
+            for (i = 1; i <= 8; i++) out = out (i > 1 ? ":" : "") pad4(g[i]);
+            return out;
+        }
+        lg = (a[1] == "" ? 0 : split(a[1], l, ":"));
+        rg = (a[2] == "" ? 0 : split(a[2], r, ":"));
+        miss = 8 - lg - rg;
+        out = "";
+        for (i = 1; i <= lg; i++) out = out pad4(l[i]) ":";
+        for (i = 1; i <= miss; i++) out = out "0000:";
+        for (i = 1; i <= rg; i++) out = out pad4(r[i]) (i < rg ? ":" : "");
+        sub(/:$/, "", out);
+        return out;
+    }
+    /^IP:/ { print "IP:" norm_ip(substr($0, 4)); next; }
+    { print; }
+    '
+}
+
+leaf_covers_san() {
+    # D-M10: true when the installed leaf's SAN covers every name/IP
+    # in the current san_profile (hostname + current IPs). Without
+    # this, a leaf frozen at firstboot keeps serving after a
+    # hostname/IP change, and neither --ensure (pair exists, exit 0)
+    # nor --if-needed (expiry-only check) ever re-issued it.
+    # openssl prints SAN entries as "DNS:name, IP Address:a.b.c.d";
+    # san_profile prints "DNS:name,IP:a.b.c.d" -- both are normalised
+    # to one "DNS:name" / "IP:a.b.c.d" entry per line before the
+    # comparison. A missing/unreadable SAN fails closed (reissue).
+    [ -s "$CRT" ] || return 1
+    _have="$(openssl x509 -in "$CRT" -noout -ext subjectAltName 2>/dev/null \
+        | tail -n +2 | tr ',' '\n' | sed 's/^ *//; s/IP Address:/IP:/' | normalize_san_list | sort -u)"
+    [ -n "$_have" ] || return 1
+    _want="$(san_profile | tr ',' '\n' | normalize_san_list)"
+    for _entry in $_want; do
+        printf '%s\n' "$_have" | grep -Fxq "$_entry" || return 1
+    done
+    return 0
+}
+
 fix_hub_ownership() {
     if [ -f /etc/axonwall/.vault-edition ] && getent group axonwall-vault >/dev/null 2>&1; then
         chown root:axonwall-vault "$KEY" 2>/dev/null || true
@@ -223,14 +277,17 @@ ensure)
     if [ -s "$CA_CRT" ]; then
         # A CA is already established (appliance or operator): never
         # regenerate it. Only fill in a missing hub leaf, and only when
-        # the CA key is on-box to issue from.
-        if [ -s "$CRT" ] && [ -s "$KEY" ]; then
+        # the CA key is on-box to issue from. D-M10: a present pair
+        # is not enough -- re-issue when its SAN no longer covers the
+        # current hostname/IPs (operator-CA installs still never
+        # re-issue: the CA_KEY branch below is skipped for them).
+        if [ -s "$CRT" ] && [ -s "$KEY" ] && leaf_covers_san; then
             exit 0
         fi
         if [ -s "$CA_KEY" ]; then
             issue_leaf "${DAYS:-825}" || exit 2
         else
-            echo "note: $CA_CRT present without its key (operator CA) and no hub certificate installed; install the operator-issued hub.crt/hub.key into $CERT_DIR" >&2
+            echo "note: $CA_CRT present without its key (operator CA); the hub certificate must come from that operator CA -- install the operator-issued hub.crt/hub.key into $CERT_DIR" >&2
         fi
         exit 0
     fi
@@ -250,10 +307,12 @@ ifneeded)
     # --check remains the alerting path for those.
     [ -s "$CA_CRT" ] && [ -s "$CA_KEY" ] && [ -s "$CRT" ] || exit 0
     openssl verify -CAfile "$CA_CRT" "$CRT" >/dev/null 2>&1 || exit 0
-    if openssl x509 -in "$CRT" -noout -checkend 7776000 >/dev/null 2>&1; then
+    # D-M10: expiry is not the only reissue trigger -- a leaf whose
+    # SAN no longer covers the current hostname/IPs is renewed too.
+    if openssl x509 -in "$CRT" -noout -checkend 7776000 >/dev/null 2>&1 && leaf_covers_san; then
         exit 0
     fi
-    echo "hub certificate expires within 90 days; renewing from the appliance CA"
+    echo "hub certificate expires within 90 days or no longer covers the current hostname/IPs; renewing from the appliance CA"
     issue_leaf "${DAYS:-825}" || exit 2
     restart_controller
     exit 0
