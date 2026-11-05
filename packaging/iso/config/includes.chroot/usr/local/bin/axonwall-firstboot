@@ -370,13 +370,26 @@ fi
 
 # Provision the hub TLS PKI (audit B-14): an on-box appliance CA plus a
 # CA-issued hub leaf, via the shared provisioning tool. --ensure is
-# idempotent and never disturbs an operator CA. The inline fallback is
-# the previous self-signed generation, used only if the tool is missing.
+# idempotent and never disturbs an operator CA.
 mkdir -p /etc/axonwall/certs
 if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
   echo "[Axonwall Firstboot] Provisioning appliance TLS PKI (CA + hub leaf)..."
   axonwall-rotate-hub-cert --ensure || true
-elif [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; then
+fi
+# D-M4: the old elif fallback only ran when the tool was missing, so
+# a rotate failure left the box with no hub pair at all. Generate
+# the fallback whenever the pair is missing, regardless of why
+# rotate produced nothing -- EXCEPT when an appliance CA exists:
+# then the pair's absence means an operator-CA install (or a broken
+# one), and minting a non-chaining self-signed cert would defeat
+# the operator-CA refusal (the D-H3/B-H3 pattern). Fail loudly
+# instead; the marker is removed at the end of this script (Batch 3
+# D-M3), so the next boot retries rather than silently degrading.
+if [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; then
+  if [[ -s /etc/axonwall/certs/ca.crt ]]; then
+    echo "[Axonwall Firstboot] ERROR: hub certificate pair missing but an appliance CA exists; refusing to mint a non-chaining certificate. Fix the PKI and re-run firstboot." >&2
+    exit 1
+  fi
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
   for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
