@@ -1,11 +1,14 @@
 import { NextResponse } from 'next/server';
 import { applyDesiredState } from '../../../../server/agent';
+import { parseConfirmTimeoutSeconds } from '../../../../server/confirm-timeout';
 import { DesiredStateSchema } from '@axonwall/lib/schemas';
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const timeout = body.confirmTimeoutSeconds || 120;
+    // C26: validate the confirm window (integer 10–3600, default 120);
+    // invalid values are a 400, not a silently coerced window.
+    const timeout = parseConfirmTimeoutSeconds(body.confirmTimeoutSeconds);
     const parsedState = DesiredStateSchema.parse(body.state);
 
     const result = await applyDesiredState(parsedState, timeout);

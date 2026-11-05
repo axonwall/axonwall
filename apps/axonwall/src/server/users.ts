@@ -17,8 +17,11 @@ export async function getLocalUsers(): Promise<LocalUser[]> {
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<{ users: LocalUser[] }>('/v1/system/users', 'GET');
+  // C25: a daemon outage used to collapse to an empty user list, which
+  // the page rendered as "no users". Throw a distinct daemon-unavailable
+  // error so callers show an unknown/unavailable state instead.
   if (!res || !res.users) {
-    return [];
+    throw new Error('Daemon unavailable: could not load local users from axonwalld');
   }
   return res.users;
 }
@@ -28,8 +31,9 @@ export async function getLocalGroups(): Promise<LocalGroup[]> {
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<{ groups: LocalGroup[] }>('/v1/system/groups', 'GET');
+  // C25: see getLocalUsers — daemon-down must not render as "no groups".
   if (!res || !res.groups) {
-    return [];
+    throw new Error('Daemon unavailable: could not load local groups from axonwalld');
   }
   return res.groups;
 }
