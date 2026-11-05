@@ -66,19 +66,33 @@ mkdir -p "${WORK_DIR}/opt/axonwall/apps/axonwall"
 mkdir -p "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist"
 
 # 4. Copy Binaries
+# Core payloads are fail-closed, mirroring the console-binary guard in
+# build-iso.sh: a package built without its daemon, UI, or controller
+# installs "successfully" and is only discovered broken at service
+# start on the target. Optional payloads (satellite bin dir, edge EFI)
+# stay conditional below.
 if [[ -f "${ROOT_DIR}/apps/axonwalld/bin/axonwalld" ]]; then
   cp "${ROOT_DIR}/apps/axonwalld/bin/axonwalld" "${WORK_DIR}/usr/sbin/axonwalld"
   chmod 755 "${WORK_DIR}/usr/sbin/axonwalld"
+else
+  echo "[!] ERROR: apps/axonwalld/bin/axonwalld is missing; cannot build deb without the daemon." >&2
+  exit 1
 fi
 
 if [[ -f "${ROOT_DIR}/apps/axonwall-console/bin/axonwall-console" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-console/bin/axonwall-console" "${WORK_DIR}/usr/sbin/axonwall-console"
   chmod 755 "${WORK_DIR}/usr/sbin/axonwall-console"
+else
+  echo "[!] ERROR: apps/axonwall-console/bin/axonwall-console is missing; cannot build deb without the console TUI." >&2
+  exit 1
 fi
 
 if [[ -f "${ROOT_DIR}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" "${WORK_DIR}/usr/sbin/axonwall-satellite"
   chmod 755 "${WORK_DIR}/usr/sbin/axonwall-satellite"
+else
+  echo "[!] ERROR: apps/axonwall-satellite/bin/axonwall-satellite-amd64 is missing; cannot build deb without the satellite binary." >&2
+  exit 1
 fi
 
 # Hub TLS certificate rotation tool (audit B-14)
@@ -303,11 +317,17 @@ if [[ -d "${ROOT_DIR}/apps/axonwall/.next/standalone" ]]; then
     cp -r "${ROOT_DIR}/apps/axonwall/public" "${WORK_DIR}/opt/axonwall/apps/axonwall/"
     cp -r "${ROOT_DIR}/apps/axonwall/public" "${WORK_DIR}/opt/axonwall/"
   fi
+else
+  echo "[!] ERROR: apps/axonwall/.next/standalone is missing (run the Next.js production build first); cannot build deb without the web console." >&2
+  exit 1
 fi
 
 if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/index.js" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-controller/dist/index.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
   cp "${ROOT_DIR}/apps/axonwall-controller/package.json" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/"
+else
+  echo "[!] ERROR: apps/axonwall-controller/dist/index.js is missing (run the controller build first); cannot build deb without the controller." >&2
+  exit 1
 fi
 if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-controller/dist/axonwallctl.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"

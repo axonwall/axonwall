@@ -9,8 +9,10 @@
 #   1. TLS: provision the hub TLS PKI via axonwall-rotate-hub-cert
 #      --ensure (B-14: on-box appliance CA + CA-issued 825-day hub
 #      leaf; idempotent, never disturbs an operator CA). The inline
-#      self-signed generation remains as the fallback if the tool is
-#      missing or fails, exactly as in the firewall firstboot.
+#      self-signed generation remains as the fallback ONLY when no CA
+#      exists at all: minting a self-signed leaf while ca.crt exists
+#      would not chain to the CA and breaks S3 provisioning forever,
+#      so that case fails loudly instead (D-H3).
 #      Backup clients should pin /etc/axonwall/certs/ca.crt (stable
 #      across leaf renewals), not the leaf.
 #   2. Credentials + S3 identity config via axonwall-vault-provision
@@ -49,6 +51,15 @@ if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
     axonwall-rotate-hub-cert --ensure || true
 fi
 if [ ! -s "$CERT_DIR/hub.crt" ] || [ ! -s "$CERT_DIR/hub.key" ]; then
+    # Never mint a self-signed leaf when a CA exists: it would not chain
+    # to the operator/appliance CA, and the provision service verifies
+    # the S3 endpoint against ca.crt, so the non-chaining leaf breaks
+    # provisioning forever (the exact outcome the rotate tool's
+    # operator-CA refusal exists to prevent). Only fall back when no
+    # CA exists at all; otherwise fail loudly for operator repair.
+    if [ -s "$CERT_DIR/ca.crt" ]; then
+        die "hub leaf missing/unusable but $CERT_DIR/ca.crt exists; refusing to mint a non-chaining self-signed leaf (re-run axonwall-rotate-hub-cert --ensure once the CA/leaf issue is fixed)"
+    fi
     SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
     for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
     log "generating S3 endpoint certificate (SAN: $SAN)"
@@ -74,6 +85,14 @@ chmod 0640 "$CONF_DIR/seaweedfs-s3.json"
 
 # --- 3. Data device ----------------------------------------------------------
 if [ -n "${VAULT_DATA_DEVICE:-}" ] && [ -b "$VAULT_DATA_DEVICE" ]; then
+    # Import BEFORE the signature check: zpool list only sees imported
+    # pools, so checking list first and importing only in the
+    # already-imported branch could never import an unimported pool
+    # (the old else-branch import was dead code). The device-scoped
+    # attempt runs first; the plain name import covers a pool whose
+    # device path moved since creation.
+    zpool import -d "$VAULT_DATA_DEVICE" vaultdata >/dev/null 2>&1 \
+        || zpool import vaultdata >/dev/null 2>&1 || true
     if ! zpool list vaultdata >/dev/null 2>&1; then
         _sig="$(blkid -p -o value -s TYPE "$VAULT_DATA_DEVICE" 2>/dev/null || true)"
         if [ -n "$_sig" ] && [ "${VAULT_DATA_DEVICE_FORCE:-0}" != "1" ]; then
@@ -85,8 +104,6 @@ if [ -n "${VAULT_DATA_DEVICE:-}" ] && [ -b "$VAULT_DATA_DEVICE" ]; then
             zpool create -m "$DATA_DIR" vaultdata "$VAULT_DATA_DEVICE" \
                 || die "zpool create failed"
         fi
-    else
-        zpool import vaultdata >/dev/null 2>&1 || true
     fi
 elif [ -n "${VAULT_DATA_DEVICE:-}" ]; then
     log "WARNING: VAULT_DATA_DEVICE=$VAULT_DATA_DEVICE is not a block device; using root filesystem"

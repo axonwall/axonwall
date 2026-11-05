@@ -92,6 +92,7 @@ cleanup() {
   set +e
   echo "[*] Cleaning up mounts and loop devices..."
   umount -R "${WORK_DIR}/mnt" 2>/dev/null || true
+  umount "${WORK_DIR}/mnt-b" 2>/dev/null || true
   if [[ -n "${LOOP_DEV:-}" && -b "${LOOP_DEV}" ]]; then
     losetup -d "${LOOP_DEV}" 2>/dev/null || true
   fi
@@ -152,6 +153,13 @@ LABEL=axon_data        /var/lib/axonwall   ext4     defaults,noatime            
 LABEL=axon_swap        none                swap     sw                               0       0
 /var/lib/axonwall/home /home               none     bind                             0       0
 FSTAB_EOF
+
+# The fstab bind-mounts /var/lib/axonwall/home onto /home, so the source
+# must already exist inside the data partition at first boot: a failed
+# fstab mount (no nofail) fails local-fs.target and drops the box to
+# emergency mode before Debian firstboot (which creates the directory
+# far too late) ever runs.
+mkdir -p "${TARGET}/var/lib/axonwall/home"
 
 # Set firstboot marker
 touch "${TARGET}/etc/axonwall/.firstboot"
@@ -215,6 +223,32 @@ rm -rf "${TARGET}/tmp/"* "${TARGET}/var/tmp/"*
 
 # Unmount target mounts
 umount "${TARGET}/sys" "${TARGET}/proc" "${TARGET}/dev/pts" "${TARGET}/dev"
+
+# Clone Slot A to Slot B: the image advertises a dual-root A/B layout,
+# but slot B previously shipped as an empty formatted filesystem, so any
+# watchdog fallback to B booted an empty root. Mirror the d-i path
+# (10axonwall-ab-setup), which replicates A to B at install time. This
+# runs after sanitizing so slot B inherits the sanitized state
+# (cleared machine-id/host keys/cloud state), and before the data and
+# EFI partitions are unmounted so they can be excluded from the copy.
+echo "[+] Cloning Slot A rootfs to Slot B standby..."
+SLOT_B_MNT="${WORK_DIR}/mnt-b"
+mkdir -p "${SLOT_B_MNT}"
+mount "${PART_ROOT_B}" "${SLOT_B_MNT}"
+rsync -aHAX --delete \
+  --exclude='/boot/efi/*' \
+  --exclude='/var/lib/axonwall/*' \
+  --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
+  --exclude='/run/*' --exclude='/tmp/*' \
+  "${TARGET}/" "${SLOT_B_MNT}/"
+# Slot B must mount itself as root: point its / entry at its own label
+# (as d-i does), or systemd would remount slot A over the booted slot B.
+if [[ -f "${SLOT_B_MNT}/etc/fstab" ]]; then
+  sed -i -E 's|^[^#[:space:]]+([[:space:]]+/[[:space:]]+)|LABEL=axon_root_b\1|' "${SLOT_B_MNT}/etc/fstab"
+fi
+umount "${SLOT_B_MNT}"
+rmdir "${SLOT_B_MNT}" 2>/dev/null || true
+
 umount "${TARGET}/boot/efi" "${TARGET}/var/lib/axonwall" "${TARGET}"
 losetup -d "${LOOP_DEV}"
 LOOP_DEV=""
