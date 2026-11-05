@@ -212,6 +212,35 @@ jobs:
             packaging/debian/output/*.deb.sha256.sig
           retention-days: 7
 
+      - name: Check vault preseeds agree (D-M8)
+        run: |
+          # The d-i installer preseed (preseed-vault.cfg, used for
+          # config/includes.installer/preseed.cfg) and the live-image
+          # preseed (preseed-vault-binary.cfg, used for
+          # config/includes.binary/preseed.cfg) drifted apart before:
+          # the binary image lost the disk-tooling packages and the
+          # cloud-init services. Compare the package lists and the
+          # enabled-service lists, not whole files -- the files
+          # differ legitimately elsewhere.
+          extract_pkgs() {
+            awk '/d-i pkgsel\/include string/{flag=1; next} flag{print; if ($0 !~ /\\$/) exit}' "$1" \
+              | sed 's/\\$//; s/^[[:space:]]*//; s/[[:space:]]*$//' | sort
+          }
+          extract_services() {
+            grep 'systemctl enable' "$1" | sed 's/.*systemctl enable//; s/;.*//' \
+              | tr ' ' '\n' | grep -v '^$' | sort
+          }
+          fail=0
+          if ! diff -u <(extract_pkgs packaging/vault/preseed-vault.cfg) <(extract_pkgs packaging/vault/preseed-vault-binary.cfg); then
+            echo "::error::vault preseed package lists differ"
+            fail=1
+          fi
+          if ! diff -u <(extract_services packaging/vault/preseed-vault.cfg) <(extract_services packaging/vault/preseed-vault-binary.cfg); then
+            echo "::error::vault preseed enabled-service lists differ"
+            fail=1
+          fi
+          exit $fail
+
       - name: Build Hybrid Appliance ISO (Unified NGFW + Vault Edition)
         run: |
           sudo ./packaging/iso/build-iso.sh
