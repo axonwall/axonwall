@@ -1590,14 +1590,26 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  // Retrieve any pending job ID from daemon if available
-  let targetJobId = lastPendingJobId || 'confirm';
+  // Retrieve any pending job ID from daemon if available. C10/C11-
+  // downstream: never send the literal 'confirm' as a job id — the
+  // daemon now requires an exact match, and before that fix the
+  // literal wildcard-confirmed whatever bundle happened to be
+  // pending. If no job id is known, fail without calling the daemon.
+  // (The dev-mode mock path is unaffected: every apply, daemon or
+  // mock, sets lastPendingJobId first.)
+  let targetJobId: string | null = lastPendingJobId || null;
   try {
     const daemonStatus = await callAgentApi<any>('/v1/status');
     if (daemonStatus?.pending_job_id || daemonStatus?.pendingJobId) {
       targetJobId = daemonStatus.pending_job_id || daemonStatus.pendingJobId;
     }
   } catch {}
+  if (!targetJobId) {
+    return {
+      success: false,
+      message: 'No pending ruleset to confirm: no pending job id is known.',
+    };
+  }
 
   const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', {
     job_id: targetJobId,

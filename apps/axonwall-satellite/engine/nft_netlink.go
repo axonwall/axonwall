@@ -12,12 +12,12 @@ import (
 
 // Netfilter Netlink & nf_tables kernel ABI constants (from <linux/netfilter/nfnetlink.h> and <linux/netfilter/nf_tables.h>)
 const (
-	nfnetlinkV0          = 0
-	nfnlSubsysNftables   = 10
-	nfnlMsgBatchBegin    = 0x10 // NLMSG_MIN_TYPE
-	nfnlMsgBatchEnd      = 0x11 // NLMSG_MIN_TYPE + 1
-	nlaFNested           = 0x8000
-	nlaFNetByteorder     = 0x4000
+	nfnetlinkV0        = 0
+	nfnlSubsysNftables = 10
+	nfnlMsgBatchBegin  = 0x10 // NLMSG_MIN_TYPE
+	nfnlMsgBatchEnd    = 0x11 // NLMSG_MIN_TYPE + 1
+	nlaFNested         = 0x8000
+	nlaFNetByteorder   = 0x4000
 
 	nfprotoUnspec = 0
 	nfprotoInet   = 1
@@ -129,10 +129,10 @@ const (
 	nftMetaL4Proto = 17
 
 	// nft_payload_attributes & bases
-	nftaPayloadDreg   = 1
-	nftaPayloadBase   = 2
-	nftaPayloadOffset = 3
-	nftaPayloadLen    = 4
+	nftaPayloadDreg           = 1
+	nftaPayloadBase           = 2
+	nftaPayloadOffset         = 3
+	nftaPayloadLen            = 4
 	nftPayloadLLHeader        = 0
 	nftPayloadNetworkHeader   = 1
 	nftPayloadTransportHeader = 2
@@ -897,9 +897,9 @@ func buildExprImmediateData(dreg uint32, val []byte) []byte {
 
 func buildExprDnatIPv4(addrReg, protoReg uint32, hasPort bool) []byte {
 	attrs := [][]byte{
-		nlAttrU32BE(1, 1),            // NFTA_NAT_TYPE = NFT_NAT_DNAT (1)
-		nlAttrU32BE(2, nfprotoIPv4),  // NFTA_NAT_FAMILY = NFPROTO_IPV4 (2)
-		nlAttrU32BE(3, addrReg),      // NFTA_NAT_REG_ADDR_MIN
+		nlAttrU32BE(1, 1),           // NFTA_NAT_TYPE = NFT_NAT_DNAT (1)
+		nlAttrU32BE(2, nfprotoIPv4), // NFTA_NAT_FAMILY = NFPROTO_IPV4 (2)
+		nlAttrU32BE(3, addrReg),     // NFTA_NAT_REG_ADDR_MIN
 	}
 	if hasPort {
 		attrs = append(attrs, nlAttrU32BE(5, protoReg)) // NFTA_NAT_REG_PROTO_MIN
@@ -1065,8 +1065,12 @@ func serializeNftBatch(b *NftCompiledBatch) [][]byte {
 		seq++
 	}
 
-	// 6. NFNL_MSG_BATCH_END
-	msgs = append(msgs, buildNfgenMsg(nfnlMsgBatchEnd, syscall.NLM_F_REQUEST, seq, nfprotoUnspec, nfnlSubsysNftables))
+	// 6. NFNL_MSG_BATCH_END. A-L1: request an ack on the batch end so
+	// the kernel positively confirms the whole transaction. None of
+	// the messages above requests one, so without this the sender
+	// could never tell an accepted batch from one the kernel had not
+	// finished (or had rejected) yet.
+	msgs = append(msgs, buildNfgenMsg(nfnlMsgBatchEnd, syscall.NLM_F_REQUEST|syscall.NLM_F_ACK, seq, nfprotoUnspec, nfnlSubsysNftables))
 	return msgs
 }
 
@@ -1150,21 +1154,36 @@ func sendNetfilterNetlinkBatch(payload []byte) error {
 		return fmt.Errorf("NETLINK_NETFILTER sendto failed: %w", err)
 	}
 
-	// Read kernel ACK / error response if any message requested NLM_F_ACK or triggered an error
+	// A-L1: wait for the kernel's verdict with a blocking read instead
+	// of a single non-blocking recv racing kernel processing. The old
+	// code returned success whenever the error had not landed yet, so
+	// a rejected batch (bad rule, missing set/table) was recorded as
+	// applied and could later be confirmed into last-known-good. The
+	// socket's 2s SO_RCVTIMEO bounds this read: a kernel that never
+	// answers is a failure, not a success. The kernel sends exactly
+	// one NLMSG_ERROR verdict per batch — errno 0 for an acked batch,
+	// negative errno for a rejected one.
 	buf := make([]byte, 8192)
-	n, _, recvErr := syscall.Recvfrom(fd, buf, syscall.MSG_DONTWAIT)
-	if recvErr == nil && n >= syscall.NLMSG_HDRLEN {
+	for {
+		n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
+		if recvErr != nil {
+			return fmt.Errorf("timed out waiting for kernel acknowledgement of nftables batch: %w", recvErr)
+		}
+		if n < syscall.NLMSG_HDRLEN {
+			continue
+		}
 		msgs, parseErr := syscall.ParseNetlinkMessage(buf[:n])
-		if parseErr == nil {
-			for _, m := range msgs {
-				if m.Header.Type == syscall.NLMSG_ERROR && len(m.Data) >= 4 {
-					errno := int32(binary.NativeEndian.Uint32(m.Data[0:4]))
-					if errno < 0 {
-						return syscall.Errno(-errno)
-					}
+		if parseErr != nil {
+			continue
+		}
+		for _, m := range msgs {
+			if m.Header.Type == syscall.NLMSG_ERROR && len(m.Data) >= 4 {
+				errno := int32(binary.NativeEndian.Uint32(m.Data[0:4]))
+				if errno < 0 {
+					return syscall.Errno(-errno)
 				}
+				return nil
 			}
 		}
 	}
-	return nil
 }

@@ -875,13 +875,23 @@ function cmdExport() {
 async function cmdConfirm() {
   console.log(`${cCyan}Confirming pending ruleset and configuration commit...${cReset}`);
   try {
-    let pendingJobId = 'confirm';
+    // C10/C11-downstream: never send the literal 'confirm' as a job
+    // id. The daemon now requires an exact job-id match, so a
+    // placeholder would be rejected — and before that fix it
+    // wildcard-confirmed whatever bundle happened to be pending.
+    // If no pending job id can be determined, fail here instead of
+    // calling the daemon with a guess.
+    let pendingJobId: string | null = null;
     try {
       const status = await sendAgentSocketRequest<any>('/v1/status', 'GET');
       if (status?.pending_job_id || status?.pendingJobId) {
         pendingJobId = String(status.pending_job_id || status.pendingJobId);
       }
     } catch {}
+    if (!pendingJobId) {
+      console.error(`${cRed}[✗] No pending ruleset job id could be determined; refusing to confirm without one.${cReset}`);
+      process.exit(1);
+    }
     const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/confirm', 'POST', {
       jobId: pendingJobId,
       job_id: pendingJobId,

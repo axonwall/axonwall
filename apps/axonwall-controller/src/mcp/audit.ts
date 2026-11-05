@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { McpAuditLogEntry, McpAuditMetadata } from '@axonwall/lib/mcp';
+import { acquireMcpLockFile } from './lockfile.js';
 
 const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 
@@ -80,10 +81,7 @@ export interface RecordAuditInput {
   leaseId?: string;
 }
 
-export function recordMcpAuditEntry(input: RecordAuditInput): McpAuditLogEntry {
-  const auditPath = resolveMcpAuditPath();
-  const prevHash = getLastHash(auditPath);
-
+function buildAuditEntry(input: RecordAuditInput, prevHash: string): McpAuditLogEntry {
   const partial: Omit<McpAuditLogEntry, 'entryHash'> = {
     id: `mcp_aud_${crypto.randomBytes(6).toString('hex')}`,
     timestamp: new Date().toISOString(),
@@ -102,22 +100,47 @@ export function recordMcpAuditEntry(input: RecordAuditInput): McpAuditLogEntry {
   };
 
   const entryHash = computeEntryHash(partial);
-  const fullEntry: McpAuditLogEntry = {
+  return {
     ...partial,
     entryHash,
   };
+}
 
+export function recordMcpAuditEntry(input: RecordAuditInput): McpAuditLogEntry {
+  const auditPath = resolveMcpAuditPath();
+
+  // B-S2: appending is read-last-hash + append, and at least two
+  // processes write this log (HTTP controller and stdio MCP server).
+  // Without serialisation, two writers that read the same tail hash
+  // both append entries chaining to it, forking the chain and
+  // failing every later verification. Hold an exclusive lockfile
+  // across the read-tail + append so the chain stays linear.
+  let release: (() => void) | null = null;
   try {
-    fs.mkdirSync(path.dirname(auditPath), { recursive: true, mode: 0o775 });
-    fs.appendFileSync(auditPath, JSON.stringify(fullEntry) + '\n', { mode: 0o660 });
-    try {
-      fs.chmodSync(auditPath, 0o660);
-    } catch {}
+    release = acquireMcpLockFile(`${auditPath}.lock`);
   } catch (err) {
-    console.error('[MCP Audit] Failed to append audit entry:', err);
+    // A lock that cannot be acquired must not fork the chain: skip
+    // the append (the entry is returned unrecorded) rather than
+    // writing an entry chained to a stale tail hash.
+    console.error('[MCP Audit] Failed to acquire audit lock; entry not recorded:', err);
+    return buildAuditEntry(input, getLastHash(auditPath));
   }
 
-  return fullEntry;
+  try {
+    const fullEntry = buildAuditEntry(input, getLastHash(auditPath));
+    try {
+      fs.mkdirSync(path.dirname(auditPath), { recursive: true, mode: 0o775 });
+      fs.appendFileSync(auditPath, JSON.stringify(fullEntry) + '\n', { mode: 0o660 });
+      try {
+        fs.chmodSync(auditPath, 0o660);
+      } catch {}
+    } catch (err) {
+      console.error('[MCP Audit] Failed to append audit entry:', err);
+    }
+    return fullEntry;
+  } finally {
+    release();
+  }
 }
 
 export interface AuditChainVerification {

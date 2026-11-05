@@ -129,15 +129,27 @@ case "$1" in
         # 3. Provision the hub TLS PKI if needed (audit B-14): an on-box
         # appliance CA plus a CA-issued hub leaf, via the shared tool.
         # --ensure is idempotent, migrates legacy self-signed installs to
-        # the CA model, and leaves operator-CA installs untouched. The
-        # inline fallback (the previous self-signed generation) covers
-        # the tool being unavailable.
+        # the CA model, and leaves operator-CA installs untouched.
         mkdir -p /etc/axonwall/certs
         if [ -x /usr/local/bin/axonwall-rotate-hub-cert ]; then
             /usr/local/bin/axonwall-rotate-hub-cert --ensure || true
         elif command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
             axonwall-rotate-hub-cert --ensure || true
-        elif [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
+        fi
+        # D-M4: the old elif fallback only ran when the tool was
+        # missing, so a rotate failure left the box with no hub pair
+        # at all. Generate the fallback whenever the pair is missing,
+        # regardless of why rotate produced nothing -- EXCEPT when an
+        # appliance CA exists, where minting a non-chaining
+        # self-signed cert would defeat the operator-CA refusal (the
+        # D-H3/B-H3 pattern). Fail the configure step loudly there
+        # so the operator fixes the PKI and re-runs dpkg --configure
+        # instead of silently degrading.
+        if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
+            if [ -s /etc/axonwall/certs/ca.crt ]; then
+                echo "Error: hub certificate pair missing but an appliance CA exists; refusing to mint a non-chaining certificate. Fix the PKI and re-run dpkg --configure." >&2
+                exit 1
+            fi
             if command -v openssl >/dev/null 2>&1; then
                 SAN="DNS:$(hostname 2>/dev/null || echo axonwall),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
                 openssl req -x509 -newkey rsa:2048 -nodes \

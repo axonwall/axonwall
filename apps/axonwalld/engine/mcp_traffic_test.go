@@ -34,9 +34,9 @@ func newTestTrafficManager(t *testing.T) *McpTrafficManager {
 	mcpStateFilePath = filepath.Join(t.TempDir(), "mcp-tactical-state.json")
 	t.Cleanup(func() { mcpStateFilePath = orig })
 	return &McpTrafficManager{
-		leases:     make(map[string]*McpTacticalLease),
-		nextClass:  500,
-		stopTicker: make(chan struct{}),
+		leases:           make(map[string]*McpTacticalLease),
+		reservedClassIDs: make(map[int]struct{}),
+		stopTicker:       make(chan struct{}),
 	}
 }
 

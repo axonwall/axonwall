@@ -138,7 +138,20 @@ extract_deb() {
         rm -f "$data_tar"
         return 1
       fi
-      tar -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
+      # R2: tar -xf honors symlink/hardlink members, so a crafted
+      # data.tar could plant links pointing outside the staging
+      # tree, which later rsync/cp steps would follow. Reject link
+      # members before extraction. This fallback runs only when
+      # dpkg-deb is absent, and a malicious .deb must first pass
+      # the signature check, so a proportionate pre-extraction
+      # rejection (rather than a post-extraction audit) suffices.
+      # --no-same-owner is defense in depth for the same reason.
+      if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^[lh]'; then
+        echo "[!] Update package contains link members; refusing to extract." >&2
+        rm -f "$data_tar"
+        return 1
+      fi
+      tar --no-same-owner -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
         rm -f "$data_tar"
         return 1
       }
@@ -434,6 +447,21 @@ if [ "$ZBM_MODE" = "1" ]; then
 
   echo "[+] Active Boot Environment : ${CURRENT_BE_DS} (${CURRENT_BE})"
   echo "[+] Target Boot Environment : ${TARGET_BE_DS} (${TARGET_BE})"
+
+  # E11: refuse a same-version re-update. Without this, a re-run for
+  # the running version reaches the recreate path below, which runs
+  # `zfs destroy -r` on the target BE -- and when the target IS the
+  # running BE, that destroys the live root (the destroy failure is
+  # swallowed with `|| true`, so the script would carry on). Whether
+  # ZFS refuses destroying a mounted BE is unproven on a live ZBM
+  # box; this guard is safe regardless of that answer, so fail
+  # closed here. Both the name and the full dataset path are
+  # compared: the name catches the normal case, the path catches a
+  # renamed or relocated running BE.
+  if [ "$TARGET_BE" = "$CURRENT_BE" ] || [ "$TARGET_BE_DS" = "$CURRENT_BE_DS" ]; then
+    echo "[-] ERROR: target Boot Environment ${TARGET_BE_DS} is the running Boot Environment (same version ${CLEAN_VER}); refusing same-version re-update." >&2
+    exit 1
+  fi
 
   if command -v zfs >/dev/null 2>&1; then
     if zfs list -H -o name -t snapshot "$PRE_SNAP" >/dev/null 2>&1; then
