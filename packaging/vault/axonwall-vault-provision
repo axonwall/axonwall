@@ -164,37 +164,79 @@ load_creds() {
 gen_access_key() { printf 'AXVW%s' "$(openssl rand -hex 8 | tr 'a-f' 'A-F')"; }
 gen_secret_key() { openssl rand -base64 30 | tr -d '\n'; }
 
+# atomic_write DEST: write stdin to DEST via a temp file in the same
+# directory + rename, so a crash/power cut mid-write never leaves a torn
+# DEST behind (mktemp already creates the temp file 0600; the rename
+# keeps credentials and identity config at 0600 throughout).
+atomic_write() {
+    _dest="$1"
+    _tmp="$(mktemp "$_dest.tmp.XXXXXX")" || return 1
+    if ! cat > "$_tmp"; then rm -f "$_tmp"; return 1; fi
+    chmod 0600 "$_tmp"
+    mv -f "$_tmp" "$_dest"
+}
+
+# env_defines FILE VAR1 VAR2: 0 if FILE, when sourced, defines both vars
+# non-empty. A torn credential write (empty file, truncated line,
+# unbalanced quote) fails this, so write_config can treat it as absent
+# and regenerate instead of bricking provisioning forever.
+env_defines() {
+    ( set +u; . "$1" 2>/dev/null; eval "test -n \"\${$2:-}\" -a -n \"\${$3:-}\"" )
+}
+
 write_config() {
     mkdir -p "$CONF_DIR"
     chown root:axonwall-vault "$CONF_DIR" 2>/dev/null || true
     chmod 0750 "$CONF_DIR" 2>/dev/null || true
+    # A torn write leaves a file that merely exists; the old code skipped
+    # regeneration for any existing file, so one crash bricked every
+    # later boot. Discard empty/incomplete credential files and let the
+    # generation below recreate them.
+    if [ -f "$ADMIN_ENV" ] && ! env_defines "$ADMIN_ENV" VAULT_ADMIN_ACCESS_KEY VAULT_ADMIN_SECRET_KEY; then
+        echo "discarding incomplete credential file (torn write?): $ADMIN_ENV"
+        rm -f "$ADMIN_ENV"
+    fi
+    if [ -f "$WRITER_ENV" ] && ! env_defines "$WRITER_ENV" VAULT_WRITER_ACCESS_KEY VAULT_WRITER_SECRET_KEY; then
+        echo "discarding incomplete credential file (torn write?): $WRITER_ENV"
+        rm -f "$WRITER_ENV"
+    fi
     if [ ! -f "$ADMIN_ENV" ]; then
-        umask 077
         {
             echo "VAULT_ADMIN_ACCESS_KEY=$(gen_access_key)"
             echo "VAULT_ADMIN_SECRET_KEY=$(gen_secret_key)"
-        } > "$ADMIN_ENV"
+        } | atomic_write "$ADMIN_ENV" || return 1
         echo "generated vault admin credentials: $ADMIN_ENV"
     fi
     if [ ! -f "$WRITER_ENV" ]; then
-        umask 077
         {
             echo "VAULT_WRITER_ACCESS_KEY=$(gen_access_key)"
             echo "VAULT_WRITER_SECRET_KEY=$(gen_secret_key)"
-        } > "$WRITER_ENV"
+        } | atomic_write "$WRITER_ENV" || return 1
         echo "generated vault writer credentials: $WRITER_ENV"
     fi
     chmod 0600 "$ADMIN_ENV" "$WRITER_ENV"
     load_creds
-    if [ -f "$S3_CONFIG" ]; then
+    # An empty identity config is a torn write, not a config: treat it
+    # as absent and regenerate (same rule as empty credential files).
+    if [ -s "$S3_CONFIG" ]; then
         if grep -q "\"$VAULT_WRITER_ACCESS_KEY\"" "$S3_CONFIG" \
            && grep -q "\"$VAULT_ADMIN_ACCESS_KEY\"" "$S3_CONFIG" \
            && grep -q "\"name\": \"$POLICY_NAME\"" "$S3_CONFIG"; then
-            echo "S3 identity config already matches credentials: $S3_CONFIG"
-            return 0
+            # The policy's Resource ARNs embed the bucket from write
+            # time, so the bucket is part of the match: a rename in
+            # vault.env must regenerate the policy, or the writer PUT
+            # probe fails 403 against the stale grant on every boot.
+            # (-F with the trailing slash makes the match exact:
+            # "backups" must not match "backups2" and vice versa.)
+            if grep -Fq "arn:aws:s3:::$BUCKET/*" "$S3_CONFIG"; then
+                echo "S3 identity config already matches credentials: $S3_CONFIG"
+                return 0
+            fi
+            echo "bucket changed; regenerating S3 identity config for bucket $BUCKET"
+        else
+            echo "existing $S3_CONFIG does not match the stored credentials; refusing to overwrite (delete $S3_CONFIG to regenerate it)" >&2
+            return 1
         fi
-        echo "existing $S3_CONFIG does not match the stored credentials; refusing to overwrite" >&2
-        return 1
     fi
     _policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject","s3:GetObject","s3:GetObjectVersion","s3:ListBucket","s3:ListBucketVersions","s3:PutObjectRetention","s3:GetObjectRetention","s3:PutObjectLegalHold","s3:GetObjectLegalHold","s3:CreateMultipartUpload","s3:UploadPart","s3:CompleteMultipartUpload","s3:AbortMultipartUpload","s3:ListMultipartUploads","s3:ListBucketMultipartUploads","s3:DeleteObject"],"Resource":["arn:aws:s3:::'"$BUCKET"'","arn:aws:s3:::'"$BUCKET"'/*"]}]}'
     _policy_esc="$(printf '%s' "$_policy" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
@@ -217,7 +259,7 @@ write_config() {
         echo "    {\"name\": \"$POLICY_NAME\", \"content\": \"$_policy_esc\"}"
         echo '  ]'
         echo '}'
-    } > "$S3_CONFIG"
+    } | atomic_write "$S3_CONFIG" || return 1
     chmod 0600 "$S3_CONFIG"
     echo "wrote S3 identity config: $S3_CONFIG (bucket: $BUCKET)"
 }
