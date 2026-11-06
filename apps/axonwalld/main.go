@@ -35,7 +35,23 @@ import (
 
 type AgentServer struct {
 	pb.UnimplementedAgentServiceServer
-	mu               sync.Mutex
+	mu sync.Mutex
+	// applyMu serialises whole ApplyBundle calls (M1). The A-M2 fix
+	// releases s.mu around service reloads so a hung reload cannot
+	// wedge the API — but nothing serialised two applies across that
+	// window, so a second apply could arm its own timer and pending
+	// state while the first was still reloading, disarming the first
+	// bundle's auto-rollback and leaving it unconfirmable. A second
+	// ApplyBundle now waits on applyMu; GetStatus/Confirm/Rollback
+	// only take s.mu, so they stay live during an apply (Confirm and
+	// Rollback fail fast while one is in progress — see
+	// applyInProgress — instead of acting on state mid-apply).
+	applyMu sync.Mutex
+	// applyInProgress is set under s.mu for the whole of ApplyBundle
+	// (including the windows where s.mu itself is released) so
+	// Confirm, Rollback, and the auto-rollback timer can tell an
+	// apply is running without taking applyMu.
+	applyInProgress  bool
 	bundleDir        string
 	activeHash       string
 	lastGoodHash     string
@@ -45,6 +61,13 @@ type AgentServer struct {
 	pendingJobID     string
 	confirmDeadline  time.Time
 	rollbackTimer    *time.Timer
+	// rollbackGen counts every arming of the auto-rollback timer (M2).
+	// The timer callback captures the generation it was armed with
+	// and refuses to roll back unless it still matches: Timer.Stop
+	// cannot stop a callback that already started, so without this a
+	// stale callback could fire into a newer bundle's apply window
+	// and roll back the wrong bundle.
+	rollbackGen      uint64
 	nodeId           string
 	startTime        time.Time
 	iapManager       *engine.IAPManager
@@ -65,6 +88,13 @@ func isSnapshotEligibleName(name string) bool {
 	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".json") || name == "interfaces.conf"
 }
 
+// lkgConfigSrcDirs and lkgConfigDstDirs are the config trees the
+// last-known-good snapshot is copied from / restored to. Package
+// variables (not constants) so tests can redirect them into temp
+// dirs; the production values are unchanged.
+var lkgConfigSrcDirs = []string{"/var/lib/axonwall/etc-axonwall", "/etc/axonwall"}
+var lkgConfigDstDirs = []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+
 func snapshotLkgConfig(bundleDir string) {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
 	if err := os.MkdirAll(lkgConfigDir, 0700); err != nil {
@@ -72,7 +102,7 @@ func snapshotLkgConfig(bundleDir string) {
 	}
 
 	// Read fallback dir first so live /etc/axonwall files take precedence
-	srcDirs := []string{"/var/lib/axonwall/etc-axonwall", "/etc/axonwall"}
+	srcDirs := lkgConfigSrcDirs
 	for _, srcDir := range srcDirs {
 		entries, err := os.ReadDir(srcDir)
 		if err != nil {
@@ -188,13 +218,18 @@ func normalizeConfigTreePermissions() {
 	}
 }
 
-func restoreLkgConfig(bundleDir string) {
+// restoreLkgConfig restores the last-known-good config snapshot over
+// the live config trees. It reports whether it restored at least one
+// file, so callers can tell "nothing to restore" apart from a
+// successful restore (M3).
+func restoreLkgConfig(bundleDir string) bool {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
 	entries, err := os.ReadDir(lkgConfigDir)
 	if err != nil {
-		return
+		return false
 	}
 
+	restored := false
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -217,20 +252,24 @@ func restoreLkgConfig(bundleDir string) {
 			mode = 0664
 		}
 
-		targetDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+		targetDirs := lkgConfigDstDirs
 		for _, dir := range targetDirs {
 			_ = os.MkdirAll(dir, 0775)
 			dst := filepath.Join(dir, name)
 			if fi, lerr := os.Lstat(dst); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
 				continue
 			}
-			_ = os.WriteFile(dst, data, mode)
-			ensureSharedConfigPerm(dst, mode)
+			if err := os.WriteFile(dst, data, mode); err == nil {
+				ensureSharedConfigPerm(dst, mode)
+				restored = true
+			}
 		}
 		if name == "state.json" {
 			if fi, lerr := os.Lstat("/var/lib/axonwall/state.json"); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
-				_ = os.WriteFile("/var/lib/axonwall/state.json", data, 0660)
-				ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+				if err := os.WriteFile("/var/lib/axonwall/state.json", data, 0660); err == nil {
+					ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+					restored = true
+				}
 			}
 		}
 	}
@@ -247,8 +286,7 @@ func restoreLkgConfig(bundleDir string) {
 	for _, e := range entries {
 		snapshotNames[e.Name()] = true
 	}
-	targetDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
-	for _, dir := range targetDirs {
+	for _, dir := range lkgConfigDstDirs {
 		live, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -270,10 +308,20 @@ func restoreLkgConfig(bundleDir string) {
 			}
 		}
 	}
+	return restored
 }
 
 func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager, etckeeperManager *engine.EtckeeperManager, directoryManager *engine.DirectoryManager) *AgentServer {
 	hostname, _ := os.Hostname()
+
+	// M3: a pending-confirm record from a previous run means the live
+	// config/ruleset is an UNCONFIRMED bundle. It must never be
+	// adopted as last-known-good below, and the startup LKG snapshot
+	// must not copy it over the confirmed snapshot.
+	pendingExists := false
+	if _, err := os.Stat(pendingConfirmStatePath(bundleDir)); err == nil {
+		pendingExists = true
+	}
 
 	initHash := ""
 	lastGoodScript := ""
@@ -285,7 +333,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 			break
 		}
 	}
-	if lastGoodScript == "" {
+	if lastGoodScript == "" && !pendingExists {
 		if out, err := exec.Command("nft", "list", "ruleset").CombinedOutput(); err == nil && len(out) > 0 {
 			scriptStr := string(out)
 			if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
@@ -301,9 +349,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		}
 	}
 
-	snapshotLkgConfig(bundleDir)
-
-	return &AgentServer{
+	s := &AgentServer{
 		bundleDir:        bundleDir,
 		activeHash:       initHash,
 		lastGoodHash:     initHash,
@@ -321,6 +367,88 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		etckeeperManager: etckeeperManager,
 		directoryManager: directoryManager,
 	}
+
+	if pendingExists {
+		s.handlePendingConfirmAtStartup(bundleDir)
+	} else {
+		snapshotLkgConfig(bundleDir)
+	}
+
+	return s
+}
+
+// handlePendingConfirmAtStartup reconciles a pending-confirm record
+// left by a previous run (M3). If the deadline is still in the
+// future, the pending state is restored (with the timer re-armed from
+// the remaining time) so the operator can still confirm it; the
+// startup LKG snapshot is skipped so the unconfirmed bundle is not
+// promoted. If the deadline already passed (or the record is
+// corrupt), the daemon rolls back to last-known-good before doing
+// anything else.
+func (s *AgentServer) handlePendingConfirmAtStartup(bundleDir string) {
+	state, candidate, ok := loadPendingConfirmState(bundleDir)
+	if !ok {
+		log.Printf("[Agent] WARNING: pending-confirm record in %s is corrupt or incomplete; rolling back to last-known-good", bundleDir)
+		s.rollbackPendingAtStartup(bundleDir)
+		return
+	}
+	remaining := time.Until(time.Unix(state.DeadlineUnix, 0))
+	if remaining <= 0 {
+		log.Printf("[Agent] WARNING: previous run exited with unconfirmed bundle (job %s, deadline %s); rolling back to last-known-good", state.JobID, time.Unix(state.DeadlineUnix, 0).Format(time.RFC3339))
+		s.rollbackPendingAtStartup(bundleDir)
+		return
+	}
+
+	// Deadline still in the future: restore the pending state.
+	s.pendingConfirm = true
+	s.pendingJobID = state.JobID
+	s.confirmDeadline = time.Unix(state.DeadlineUnix, 0)
+	s.candidateScript = candidate
+	if state.ActiveHash != "" {
+		s.activeHash = state.ActiveHash
+	}
+	s.rollbackGen++
+	gen := s.rollbackGen
+	s.rollbackTimer = time.AfterFunc(remaining, func() {
+		s.triggerAutoRollback(state.JobID, gen)
+	})
+	_ = os.MkdirAll("/run/axonwall", 0755)
+	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (restored, %ds remaining)", int(remaining.Seconds()))), 0644)
+	log.Printf("[Agent] WARNING: restored pending confirmation for job %s from previous run (deadline %s, %ds remaining); confirm it or it will roll back automatically", state.JobID, s.confirmDeadline.Format(time.RFC3339), int(remaining.Seconds()))
+	// NOTE: no snapshotLkgConfig here — the live files are the
+	// unconfirmed bundle's; snapshotting them would promote it.
+}
+
+// rollbackPendingAtStartup restores the last-known-good config files
+// and ruleset after a previous run exited with an unconfirmed bundle
+// (M3). When no confirmed LKG exists at all there is nothing to roll
+// back to: the unconfirmed bundle stays live, but it is NOT adopted
+// as LKG and the live files are NOT snapshotted as LKG.
+func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
+	restored := restoreLkgConfig(bundleDir)
+	if s.lastGoodScript != "" {
+		if err := applyNftScriptString(s.lastGoodScript); err != nil {
+			log.Printf("[Agent] WARNING: startup rollback could not apply last-known-good ruleset: %v", err)
+		} else {
+			log.Printf("[Agent] Startup rollback applied last-known-good ruleset")
+			if s.lastGoodHash != "" {
+				s.activeHash = s.lastGoodHash
+			}
+		}
+	}
+	if restored {
+		// The restored files are the confirmed LKG config; snapshot
+		// them so the lkg-config dir matches what is live now.
+		snapshotLkgConfig(bundleDir)
+	} else {
+		if s.lastGoodScript == "" {
+			log.Printf("[Agent] WARNING: no last-known-good configuration exists to roll back to; the unconfirmed bundle from the previous run stays live but is NOT promoted to last-known-good")
+		} else {
+			log.Printf("[Agent] WARNING: no last-known-good config snapshot exists to restore; config files left as-is while the ruleset was rolled back")
+		}
+	}
+	clearPendingConfirmFiles(bundleDir)
+	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 }
 
 // Timeouts bounding the slow external commands ApplyBundle runs (A-M2).
@@ -330,6 +458,23 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 // a large ruleset and a slow unit reload are legitimate slow paths.
 var nftValidateTimeout = 60 * time.Second
 var nftApplyTimeout = 120 * time.Second
+
+// subsystemApplyTimeout bounds each subsystem apply inside ApplyBundle
+// (A-M14). The applies shell out to ZFS/kubectl-class tooling and to
+// LDAP/SQLite setup, none of which carries its own timeout; without a
+// bound here a hung subsystem wedged the agent API and the
+// auto-rollback timer behind s.mu. A variable so tests can shrink it.
+// On timeout the bundle fails and rolls back; the timed-out apply
+// keeps running in the background and its late result is logged and
+// discarded — it can no longer wedge the API, but it may still land
+// its own side effects after the rollback, which only restores the
+// nft script and the LKG config files.
+var subsystemApplyTimeout = 120 * time.Second
+
+// autoRollbackDeferDelay is how long a commit-confirm timer callback
+// waits before retrying when it fires while an apply is in progress
+// (M2). A variable so tests can shrink it.
+var autoRollbackDeferDelay = 10 * time.Second
 
 // validatedBundleFile is one bundle file after all path, symlink, and
 // mode checks have passed, before anything is written (A-H2).
@@ -451,6 +596,9 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 // in this window is premature — ApplyBundle has not returned success
 // yet — and the commit-confirm timer is not armed until after the
 // reloads, so releasing the lock here changes no committed state.
+// (M1: Confirm now fails fast while an apply is in progress, and a
+// second ApplyBundle waits on applyMu, so nothing can act on the
+// half-applied state from this window.)
 func reloadBundleServices(services []string) {
 	for _, svc := range services {
 		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
@@ -463,8 +611,73 @@ func reloadBundleServices(services []string) {
 	}
 }
 
+// pendingSubsystemApply is one subsystem apply queued while the
+// bundle files are written (A-M14). The applies run after the write
+// loop, without holding s.mu, so a hung subsystem no longer wedges
+// GetStatus, Confirm, Rollback, or the auto-rollback timer behind the
+// agent lock. The manager pointers and file contents are captured
+// while s.mu is held, so the applies themselves touch no AgentServer
+// state.
+type pendingSubsystemApply struct {
+	name  string
+	apply func() error
+}
+
+// runSubsystemApplies runs each queued subsystem apply in file order,
+// stopping at the first failure, with each apply bounded by
+// subsystemApplyTimeout (A-M14).
+func runSubsystemApplies(applies []pendingSubsystemApply) error {
+	for _, a := range applies {
+		log.Printf("[Agent] Applying %s", a.name)
+		if err := runWithTimeout(a.apply, subsystemApplyTimeout); err != nil {
+			return fmt.Errorf("%s: %w", a.name, err)
+		}
+	}
+	return nil
+}
+
+// runWithTimeout runs fn and returns its error, or a timeout error if
+// fn does not return within timeout. Go has no way to cancel an
+// arbitrary function, so a timed-out call keeps running in the
+// background: its late result is only logged, never applied to the
+// already-failed bundle.
+func runWithTimeout(fn func() error, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- fn()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		go func() {
+			if err := <-done; err != nil {
+				log.Printf("[Agent] WARNING: timed-out subsystem apply finished late with error: %v", err)
+			} else {
+				log.Printf("[Agent] WARNING: timed-out subsystem apply finished late (success) after the bundle already failed and rolled back; its side effects stand")
+			}
+		}()
+		return fmt.Errorf("timed out after %s", timeout)
+	}
+}
+
 func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
+	// M1: serialise whole applies. A second ApplyBundle waits here
+	// instead of interleaving with the first across the lock-release
+	// windows below and corrupting its pending-confirm state.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+
 	s.mu.Lock()
+	s.applyInProgress = true
+	// Registered before the deferred s.mu.Unlock below, so it runs
+	// after the lock is released at return: clear the flag under the
+	// lock, then let the deferred applyMu unlock run.
+	defer func() {
+		s.mu.Lock()
+		s.applyInProgress = false
+		s.mu.Unlock()
+	}()
 	defer s.mu.Unlock()
 
 	log.Printf("[Agent] Received ApplyBundle request (hash: %s, timeout: %ds)", req.BundleHash, req.ConfirmTimeoutSeconds)
@@ -516,7 +729,17 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// a failure here can only come from the writes themselves — and
 	// any such failure rolls back instead of leaving a half-applied
 	// bundle behind (A-H2).
+	//
+	// A-M14: the subsystem applies for each config file are only
+	// QUEUED here; they run after the write loop, without holding
+	// s.mu (see runSubsystemApplies). Running them inline used to
+	// hold the agent lock across unbounded subsystem work — HA
+	// Apply runs keepalived/conntrackd reloads plus LDAP syncrepl
+	// setup, NAS/K3s/Vigilante applies shell out to ZFS/kubectl-class
+	// tooling — so a hung subsystem wedged GetStatus, Confirm,
+	// Rollback, and the auto-rollback timer behind s.mu.
 	var subsystemErr error
+	var pendingApplies []pendingSubsystemApply
 	for _, vf := range validatedFiles {
 		f := vf.file
 		cleanPath := vf.cleanPath
@@ -590,63 +813,77 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 
 		// A-M3: a subsystem apply failure fails the bundle instead of
 		// being logged and then confirmed into last-known-good. The
-		// first failure stops the loop (fewer half-applied side
-		// effects) and the bundle is rolled back below.
+		// applies are queued in file order and run after the write
+		// loop (A-M14); the first failure stops the run and the
+		// bundle is rolled back below.
 		if filepath.Base(cleanPath) == "zero_trust_apps.json" {
-			log.Printf("[Agent] Applying Zero Trust IAP configuration")
-			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("IAP config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "IAP config",
+				apply: func() error { return s.iapManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "sdwan_config.json" {
-			log.Printf("[Agent] Applying SD-WAN Gateway routing configuration")
-			if err := s.sdwanProber.ReloadConfig(cleanPath); err != nil {
-				subsystemErr = fmt.Errorf("SD-WAN config: %w", err)
-				break
-			}
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "SD-WAN config",
+				apply: func() error { return s.sdwanProber.ReloadConfig(cleanPath) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "ha_config.json" {
-			log.Printf("[Agent] Applying High Availability & SQLite Sync configuration")
-			if err := s.haEngine.ApplyFromJSON([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("HA config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "HA config",
+				apply: func() error { return s.haEngine.ApplyFromJSON(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "nas_config.json" && s.nasManager != nil {
-			log.Printf("[Agent] Applying OpenZFS Storage & NAS Share configuration")
-			if err := s.nasManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("NAS config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "NAS config",
+				apply: func() error { return s.nasManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "k3s_config.json" && s.k3sManager != nil {
-			log.Printf("[Agent] Applying K3s & OpenEBS cluster configuration")
-			if err := s.k3sManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("K3s config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "K3s config",
+				apply: func() error { return s.k3sManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "vigilante_config.json" && s.vigilanteManager != nil {
-			log.Printf("[Agent] Applying Vigilante Cyber Defense configuration & K3s manifests")
-			if err := s.vigilanteManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("Vigilante config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Vigilante config",
+				apply: func() error { return s.vigilanteManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "vow_config.json" && s.k3sManager != nil {
-			log.Printf("[Agent] Applying Vigilant Octo Waffle (VOW) K3s GitOps configuration")
-			if err := s.k3sManager.ApplyVowConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("VOW config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "VOW config",
+				apply: func() error { return s.k3sManager.ApplyVowConfig(content) },
+			})
 		}
+	}
+
+	// A-M14: run the queued subsystem applies without holding s.mu —
+	// the same pattern as reloadBundleServices below. The applyMu
+	// serialisation and the applyInProgress flag still protect
+	// Confirm/Rollback (they fail fast while an apply is in flight,
+	// M1), and the auto-rollback timer defers while an apply is in
+	// progress (M2) instead of rolling back underneath it. The
+	// deferred s.mu.Unlock at the top of ApplyBundle releases the
+	// lock re-acquired here.
+	if len(pendingApplies) > 0 {
+		s.mu.Unlock()
+		subsystemErr = runSubsystemApplies(pendingApplies)
+		s.mu.Lock()
 	}
 
 	// A-M3: report the subsystem failure and roll back instead of
@@ -743,9 +980,27 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	_ = os.MkdirAll("/run/axonwall", 0755)
 	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (%ds)", timeoutSec)), 0644)
 
+	// M2: the callback captures the generation it was armed with.
+	// A stale callback (already running when a newer bundle armed
+	// its own timer) must not roll back the newer bundle.
+	s.rollbackGen++
+	rollbackGen := s.rollbackGen
 	s.rollbackTimer = time.AfterFunc(time.Duration(timeoutSec)*time.Second, func() {
-		s.triggerAutoRollback(req.JobId)
+		s.triggerAutoRollback(req.JobId, rollbackGen)
 	})
+
+	// M3: persist the pending-confirm state (job, deadline, candidate
+	// script) so a daemon restart neither promotes the unconfirmed
+	// bundle to last-known-good nor loses the chance to confirm or
+	// roll it back. A persist failure is loud but does not fail the
+	// apply: the in-memory state is still correct for this run.
+	if err := writePendingConfirmState(s.bundleDir, pendingConfirmState{
+		JobID:        req.JobId,
+		DeadlineUnix: s.confirmDeadline.Unix(),
+		ActiveHash:   s.activeHash,
+	}, s.candidateScript); err != nil {
+		log.Printf("[Agent] WARNING: failed to persist pending-confirm state: %v (a restart will roll back to last-known-good)", err)
+	}
 
 	log.Printf("[Agent] Configuration applied successfully. Pending confirmation for job %s (deadline: %v)", req.JobId, s.confirmDeadline)
 
@@ -771,6 +1026,115 @@ func (s *AgentServer) clearPendingLocked() {
 	s.pendingJobID = ""
 	s.candidateScript = ""
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
+	// M3: drop the persisted pending-confirm record too, so a later
+	// restart does not try to confirm or roll back a bundle that
+	// already finished.
+	clearPendingConfirmFiles(s.bundleDir)
+}
+
+// pendingConfirmState is the on-disk record of an unconfirmed bundle
+// (M3). Pending-confirm state used to live only in memory plus the
+// /run marker file, which nothing read at startup — so a daemon
+// restart silently promoted an unconfirmed bundle to last-known-good
+// (NewAgentServer snapshotted the live files as LKG, and adopted the
+// live ruleset as the LKG script when no LKG file existed yet). The
+// record lives in the bundle dir (persistent, unlike /run) next to
+// last-known-good.nft; the candidate script is stored alongside it
+// so a restarted daemon can still confirm or roll back the pending
+// bundle.
+type pendingConfirmState struct {
+	JobID        string `json:"jobId"`
+	DeadlineUnix int64  `json:"deadlineUnix"`
+	ActiveHash   string `json:"activeHash"`
+}
+
+func pendingConfirmStatePath(bundleDir string) string {
+	return filepath.Join(bundleDir, "pending-confirm.json")
+}
+
+func pendingCandidatePath(bundleDir string) string {
+	return filepath.Join(bundleDir, "candidate.nft")
+}
+
+// writePendingConfirmState persists a pending-confirm record and its
+// candidate script. A failure to persist is reported but must not
+// fail the apply itself: the in-memory state is still correct for
+// this run, and the startup path treats a missing record as "roll
+// back to last-known-good".
+func writePendingConfirmState(bundleDir string, state pendingConfirmState, candidateScript string) error {
+	if err := os.MkdirAll(bundleDir, 0700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(pendingConfirmStatePath(bundleDir), data, 0600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(pendingCandidatePath(bundleDir), []byte(candidateScript), 0600); err != nil {
+		_ = os.Remove(pendingConfirmStatePath(bundleDir))
+		return err
+	}
+	return nil
+}
+
+// loadPendingConfirmState reads a persisted pending-confirm record.
+// It reports ok=false when no confirm was pending or the record is
+// unusable (missing/corrupt state or candidate); callers treat that
+// as "no live pending bundle" and roll back if a record exists.
+func loadPendingConfirmState(bundleDir string) (pendingConfirmState, string, bool) {
+	var state pendingConfirmState
+	data, err := os.ReadFile(pendingConfirmStatePath(bundleDir))
+	if err != nil || len(data) == 0 {
+		return state, "", false
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return state, "", false
+	}
+	candidate, err := os.ReadFile(pendingCandidatePath(bundleDir))
+	if err != nil || len(candidate) == 0 {
+		return state, "", false
+	}
+	return state, string(candidate), true
+}
+
+// pendingConfirmIsLive reports whether a previous run left a pending
+// confirm whose deadline is still in the future.
+func pendingConfirmIsLive(bundleDir string) bool {
+	state, _, ok := loadPendingConfirmState(bundleDir)
+	if !ok {
+		return false
+	}
+	return time.Now().Unix() < state.DeadlineUnix
+}
+
+func clearPendingConfirmFiles(bundleDir string) {
+	_ = os.Remove(pendingConfirmStatePath(bundleDir))
+	_ = os.Remove(pendingCandidatePath(bundleDir))
+}
+
+// applyNftScriptString applies an nftables script via a temp file,
+// bounded by nftApplyTimeout like the apply/rollback execs (A-M2).
+func applyNftScriptString(script string) error {
+	tmpFile, err := os.CreateTemp("", "axonwall-script-*.nft")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	_ = tmpFile.Close()
+	defer os.Remove(tmpFile.Name())
+
+	if err := os.WriteFile(tmpFile.Name(), []byte(script), 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nftApplyTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nft", "-f", tmpFile.Name())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nft -f failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (s *AgentServer) executeRollback(reason string) error {
@@ -787,27 +1151,10 @@ func (s *AgentServer) executeRollback(reason string) error {
 	}
 
 	if s.lastGoodScript != "" {
-		tmpFile, err := os.CreateTemp("", "axonwall-rollback-*.nft")
-		if err != nil {
+		if err := applyNftScriptString(s.lastGoodScript); err != nil {
+			log.Printf("[Agent] ERROR applying rollback ruleset: %v", err)
 			s.clearPendingLocked()
-			return fmt.Errorf("failed to create rollback temp file: %w", err)
-		}
-		_ = tmpFile.Close()
-		defer os.Remove(tmpFile.Name())
-
-		if err := os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644); err != nil {
-			s.clearPendingLocked()
-			return fmt.Errorf("failed to write rollback script: %w", err)
-		}
-
-		// A-M2: bound the rollback exec like the apply exec.
-		rbCtx, rbCancel := context.WithTimeout(context.Background(), nftApplyTimeout)
-		defer rbCancel()
-		cmd := exec.CommandContext(rbCtx, "nft", "-f", tmpFile.Name())
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[Agent] ERROR applying rollback ruleset: %s", string(out))
-			s.clearPendingLocked()
-			return fmt.Errorf("failed to execute rollback nftables application: %s", string(out))
+			return fmt.Errorf("failed to execute rollback nftables application: %w", err)
 		}
 
 		if s.lastGoodHash != "" {
@@ -936,11 +1283,34 @@ func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
 	return nil
 }
 
-func (s *AgentServer) triggerAutoRollback(jobId string) {
+func (s *AgentServer) triggerAutoRollback(jobId string, gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if !s.pendingConfirm {
+		return
+	}
+
+	// M2: the callback only rolls back the bundle it was armed for.
+	// Timer.Stop cannot stop a callback that already started, so a
+	// stale callback can acquire the lock after a newer bundle went
+	// pending; without the job-id and generation checks it would
+	// roll back the newer bundle.
+	if jobId != s.pendingJobID || gen != s.rollbackGen {
+		return
+	}
+
+	// M2/M1: an apply in progress owns the config files and the
+	// kernel state right now; rolling back underneath it would
+	// restore LKG files under the new bundle's writes. Defer the
+	// rollback instead of dropping it: the re-armed callback
+	// re-checks the job id and generation, so it becomes a no-op
+	// if the apply armed a newer pending bundle in the meantime.
+	if s.applyInProgress {
+		log.Printf("[Agent] WARNING: Commit-confirm deadline expired for job %s, but a configuration apply is in progress; deferring automatic rollback.", jobId)
+		s.rollbackTimer = time.AfterFunc(autoRollbackDeferDelay, func() {
+			s.triggerAutoRollback(jobId, gen)
+		})
 		return
 	}
 
@@ -955,6 +1325,18 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	defer s.mu.Unlock()
 
 	log.Printf("[Agent] Received Confirm request for job %s", req.JobId)
+
+	// M1: a confirm arriving while an apply is in progress is
+	// premature — the pending state it would act on belongs to the
+	// previous bundle, while the new bundle's files are already on
+	// disk. Fail fast instead of confirming (and snapshotting) a
+	// half-applied state; the caller retries after the apply returns.
+	if s.applyInProgress {
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: "Configuration apply in progress; retry the confirm after it completes.",
+		}, nil
+	}
 
 	if !s.pendingConfirm {
 		return &pb.ConfirmResponse{
@@ -986,6 +1368,8 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	s.pendingConfirm = false
 	s.pendingJobID = ""
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
+	// M3: drop the persisted pending-confirm record too.
+	clearPendingConfirmFiles(s.bundleDir)
 	if s.candidateScript != "" {
 		s.lastGoodScript = s.candidateScript
 		if s.activeHash == "" {
@@ -1016,6 +1400,17 @@ func (s *AgentServer) Rollback(ctx context.Context, req *pb.RollbackRequest) (*p
 	defer s.mu.Unlock()
 
 	log.Printf("[Agent] Manual Rollback requested: %s", req.Reason)
+
+	// M1: same premature-action guard as Confirm — rolling back
+	// while an apply is mid-flight would restore LKG files under
+	// the new bundle's writes. Fail fast; the caller retries after
+	// the apply returns.
+	if s.applyInProgress {
+		return &pb.RollbackResponse{
+			Success: false,
+			Message: "Configuration apply in progress; retry the rollback after it completes.",
+		}, nil
+	}
 
 	if s.rollbackTimer != nil {
 		s.rollbackTimer.Stop()
@@ -1537,6 +1932,40 @@ func staleStaticAddrs(addrShowOut string, targetCIDR string) []string {
 	return stale
 }
 
+// staticWanGateway is one static WAN's default-route candidate.
+type staticWanGateway struct {
+	gateway string
+	device  string
+}
+
+// ipRouteReplaceDefault installs the default route via one gateway.
+// A variable so tests can simulate failing/succeeding gateways
+// without touching kernel routes.
+var ipRouteReplaceDefault = func(gateway, dev string) error {
+	return exec.Command("ip", "route", "replace", "default", "via", gateway, "dev", dev).Run()
+}
+
+// installStaticDefaultRoute tries each static WAN gateway in order
+// until one installs (M6). Pre-fix, the first attempt's error was
+// discarded and the route was marked set regardless, so a second
+// configured WAN gateway was never tried and the box could end up
+// with no default route while a reachable gateway was configured.
+func installStaticDefaultRoute(gateways []staticWanGateway) error {
+	var lastErr error
+	for _, gw := range gateways {
+		if err := ipRouteReplaceDefault(gw.gateway, gw.device); err != nil {
+			lastErr = err
+			log.Printf("[Agent] Boot-apply: failed to install default route via %s on %s: %v", gw.gateway, gw.device, err)
+			continue
+		}
+		return nil
+	}
+	if lastErr == nil {
+		return nil
+	}
+	return fmt.Errorf("no static WAN gateway yielded a default route (last error: %w)", lastErr)
+}
+
 func applyBootInterfaces() error {
 	sanitizeEtcNetworkInterfaces()
 
@@ -1587,7 +2016,10 @@ func applyBootInterfaces() error {
 	}
 
 	var dhcpSpecs []bootIfaceSpec
-	defaultRouteSet := false
+	// M6: static WAN gateways are collected during the loop and the
+	// default route is installed afterwards by
+	// installStaticDefaultRoute, which tries each in turn.
+	var staticGateways []staticWanGateway
 	// A-M16: the first static-WAN address failure is returned to the
 	// caller (ApplyBundle fails the apply) instead of being logged
 	// while the WAN is left address-less after a flush.
@@ -1635,9 +2067,8 @@ func applyBootInterfaces() error {
 					}
 				}
 			}
-			if spec.Gateway != "" && spec.Role == "wan" && !defaultRouteSet {
-				_ = exec.Command("ip", "route", "replace", "default", "via", spec.Gateway, "dev", spec.Device).Run()
-				defaultRouteSet = true
+			if spec.Gateway != "" && spec.Role == "wan" {
+				staticGateways = append(staticGateways, staticWanGateway{gateway: spec.Gateway, device: spec.Device})
 			}
 			if spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
 				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr != nil || len(strings.TrimSpace(string(rData))) == 0 {
@@ -1658,6 +2089,18 @@ func applyBootInterfaces() error {
 			if !strings.Contains(string(out), "inet ") {
 				log.Printf("[Agent] Boot-apply: starting DHCP client on %s (%s, role=%s)", spec.Name, spec.Device, spec.Role)
 				triggerDhcpClient(spec.Device, spec.Role)
+			}
+		}
+	}
+
+	// M6: install the default route from the first static WAN gateway
+	// that accepts it. If no WAN yields one, the apply fails loudly
+	// instead of reporting success with no default route.
+	if len(staticGateways) > 0 {
+		if err := installStaticDefaultRoute(staticGateways); err != nil {
+			log.Printf("[Agent] Boot-apply: %v", err)
+			if firstIfaceErr == nil {
+				firstIfaceErr = err
 			}
 		}
 	}
@@ -1938,7 +2381,14 @@ func main() {
 
 		lkgPath := filepath.Join(*bundleDir, "last-known-good.nft")
 		hasLkg := false
-		if _, err := os.Stat(lkgPath); err == nil {
+		if pendingConfirmIsLive(*bundleDir) {
+			// M3: a confirm is still pending from the previous run
+			// with time left on its deadline. The live ruleset is
+			// that unconfirmed bundle; applying LKG here would roll
+			// it back underneath the restored pending state (see
+			// NewAgentServer), so leave the kernel alone.
+			log.Printf("[Agent] Early-boot: a configuration confirm is still pending from the previous run; skipping last-known-good apply so the pending bundle stays live until its deadline")
+		} else if _, err := os.Stat(lkgPath); err == nil {
 			log.Printf("[Agent] Early-boot: applying last-known-good bundle from %s", lkgPath)
 			cmd := exec.Command("nft", "-f", lkgPath)
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -3232,6 +3682,10 @@ func main() {
 				"success": true,
 				"posture": engine.DiscoverProtectedPosture(),
 				"leases":  mcpTrafficManager.ListLeases(),
+				// M9: a failed kernel rebuild leaves enforcement
+				// stale; say so instead of listing leases as if
+				// they were enforced.
+				"reconcileDirty": mcpTrafficManager.ReconcileDirty(),
 			})
 		})
 
@@ -3246,6 +3700,8 @@ func main() {
 			writeMcpJSON(w, http.StatusOK, map[string]any{
 				"success": true,
 				"leases":  mcpTrafficManager.ListLeases(),
+				// M9: see the posture endpoint above.
+				"reconcileDirty": mcpTrafficManager.ReconcileDirty(),
 			})
 		})
 

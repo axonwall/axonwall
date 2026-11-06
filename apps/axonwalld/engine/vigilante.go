@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -36,6 +35,101 @@ var (
 	validPoolDatasetRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$`)
 	validIncidentIDRegex  = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 )
+
+// vigilanteEtcDir is a var (not a literal) so tests can redirect the
+// ldap.env write; the production value is unchanged.
+var vigilanteEtcDir = "/etc/axonwall/vigilante"
+
+// removeFileIfExists removes path, tolerating an already-absent file.
+// Any other failure is returned: a stale manifest that could not be
+// removed must not be silently left live (A-M12, A-M15).
+func removeFileIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// atomicFileWrite is one file in an all-or-nothing multi-file write
+// (A-M12, A-M15).
+type atomicFileWrite struct {
+	path    string
+	content string
+	perm    os.FileMode
+}
+
+// writeFileAtomic writes a single file via temp+rename.
+func writeFileAtomic(w atomicFileWrite) error {
+	return writeFilesAtomic([]atomicFileWrite{w})
+}
+
+// writeFilesAtomic writes every file via a temp file in its own
+// directory followed by a rename, so a failed write never leaves a
+// truncated file behind — and if a later file fails, the ones already
+// renamed are rolled back to their previous content (or removed, if
+// they did not exist before), so a failed apply leaves the previous
+// on-disk state instead of a mix of new and old files (A-M12). A
+// pre-existing symlink at a destination is refused instead of
+// replaced, preserving the O_NOFOLLOW intent of the old direct
+// opens. All temp files are staged before any rename happens, so a
+// failure while staging changes nothing on disk.
+func writeFilesAtomic(writes []atomicFileWrite) error {
+	type staged struct {
+		write   atomicFileWrite
+		tmpPath string
+		existed bool
+		prior   []byte
+	}
+	var stagedList []staged
+	cleanup := func() {
+		for _, s := range stagedList {
+			_ = os.Remove(s.tmpPath)
+		}
+	}
+	for _, w := range writes {
+		if fi, err := os.Lstat(w.path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			cleanup()
+			return fmt.Errorf("refusing to write %q: destination is a symlink", w.path)
+		}
+		prior, err := os.ReadFile(w.path)
+		existed := err == nil
+		tmp, err := os.CreateTemp(filepath.Dir(w.path), ".axonwall-tmp-*")
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("failed to create temp file for %q: %w", w.path, err)
+		}
+		if _, err := tmp.WriteString(w.content); err != nil {
+			_ = tmp.Close()
+			cleanup()
+			return fmt.Errorf("failed to write %q: %w", w.path, err)
+		}
+		if err := tmp.Close(); err != nil {
+			cleanup()
+			return fmt.Errorf("failed to close %q: %w", w.path, err)
+		}
+		if err := os.Chmod(tmp.Name(), w.perm); err != nil {
+			cleanup()
+			return fmt.Errorf("failed to set permissions on %q: %w", w.path, err)
+		}
+		stagedList = append(stagedList, staged{write: w, tmpPath: tmp.Name(), existed: existed, prior: prior})
+	}
+	var renamed []staged
+	for _, s := range stagedList {
+		if err := os.Rename(s.tmpPath, s.write.path); err != nil {
+			for _, r := range renamed {
+				if r.existed {
+					_ = os.WriteFile(r.write.path, r.prior, r.write.perm)
+				} else {
+					_ = os.Remove(r.write.path)
+				}
+			}
+			cleanup()
+			return fmt.Errorf("failed to install %q: %w", s.write.path, err)
+		}
+		renamed = append(renamed, s)
+	}
+	return nil
+}
 
 type BlockedIPRecord struct {
 	IP        string    `json:"ip"`
@@ -156,6 +250,14 @@ func (vm *VigilanteManager) UnblockIP(rawIP string) error {
 	cmd := exec.Command("nft", "delete", "element", "inet", "axonwall", setName, elementSpec)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("[VigilanteManager] nft delete element warning: %v, out: %s", err, string(out))
+		// A-M11: mirror BlockIP — as root a failed kernel delete
+		// is an error and the map entry stays, so ListBlockedIPs
+		// never reports an IP unblocked while the kernel may still
+		// drop its traffic. As non-root the nft call is
+		// best-effort (the sandbox/CI case), as in BlockIP.
+		if os.Geteuid() == 0 {
+			return fmt.Errorf("failed to remove IP %s from nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
+		}
 	}
 
 	vm.mu.Lock()
@@ -266,44 +368,78 @@ func (vm *VigilanteManager) ApplyConfig(rawJSON []byte) error {
 		return fmt.Errorf("invalid vigilante runtime bundle json: %w", err)
 	}
 
-	manifestPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-vigilante.yaml")
+	manifestPath := filepath.Join(k3sServerManifestDir, "axonwall-vigilante.yaml")
 	if !bundle.Enabled {
-		_ = os.Remove(manifestPath)
+		if err := removeFileIfExists(manifestPath); err != nil {
+			return fmt.Errorf("failed to remove stale vigilante manifest %q: %w", manifestPath, err)
+		}
 		return nil
 	}
 
-	_ = os.MkdirAll(vm.evidenceRoot, 0750)
-	_ = os.MkdirAll("/etc/axonwall/vigilante", 0750)
+	// A-M12: validate the K3s manifest BEFORE writing anything. The
+	// old code wrote config.yaml and ldap.env first and only then
+	// validated, so a validation failure left new config on disk
+	// paired with the stale manifest — and executeRollback restores
+	// only the nft script, so the mixed state persisted until the
+	// next successful bundle apply.
+	if bundle.CompiledBundle != nil && (bundle.K3sEnabled || bundle.CompiledBundle.K3sDependencyMet) && bundle.CompiledBundle.K3sManifests != "" {
+		if err := validateK3sManifest(bundle.CompiledBundle.K3sManifests); err != nil {
+			return fmt.Errorf("vigilante K3s manifest failed security validation: %w", err)
+		}
+	}
+
+	if err := os.MkdirAll(vm.evidenceRoot, 0750); err != nil {
+		return fmt.Errorf("failed to create evidence root %q: %w", vm.evidenceRoot, err)
+	}
+	if err := os.MkdirAll(vigilanteEtcDir, 0750); err != nil {
+		return fmt.Errorf("failed to create vigilante config dir %q: %w", vigilanteEtcDir, err)
+	}
 
 	if bundle.CompiledBundle != nil {
-		if bundle.CompiledBundle.ConfigYaml != "" {
-			cfgPath := filepath.Join(vm.evidenceRoot, "config.yaml")
-			if f, err := os.OpenFile(cfgPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
-				_, _ = f.WriteString(bundle.CompiledBundle.ConfigYaml)
-				_ = f.Close()
+		// An empty manifests field withdraws the deployment: remove
+		// the stale manifest BEFORE writing the new config files, so
+		// a later write failure cannot leave new config paired with
+		// a manifest the bundle meant to withdraw.
+		if (bundle.K3sEnabled || bundle.CompiledBundle.K3sDependencyMet) && bundle.CompiledBundle.K3sManifests == "" {
+			if err := removeFileIfExists(manifestPath); err != nil {
+				return fmt.Errorf("failed to remove stale vigilante manifest %q: %w", manifestPath, err)
 			}
+		}
+		var writes []atomicFileWrite
+		if bundle.CompiledBundle.ConfigYaml != "" {
+			writes = append(writes, atomicFileWrite{
+				path:    filepath.Join(vm.evidenceRoot, "config.yaml"),
+				content: bundle.CompiledBundle.ConfigYaml,
+				perm:    0640,
+			})
 		}
 		if bundle.CompiledBundle.LdapEnv != "" {
-			envPath := "/etc/axonwall/vigilante/ldap.env"
-			if f, err := os.OpenFile(envPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
-				_, _ = f.WriteString(bundle.CompiledBundle.LdapEnv)
-				_ = f.Close()
-			}
+			writes = append(writes, atomicFileWrite{
+				path:    filepath.Join(vigilanteEtcDir, "ldap.env"),
+				content: bundle.CompiledBundle.LdapEnv,
+				perm:    0640,
+			})
 		}
 		if (bundle.K3sEnabled || bundle.CompiledBundle.K3sDependencyMet) && bundle.CompiledBundle.K3sManifests != "" {
-			if err := validateK3sManifest(bundle.CompiledBundle.K3sManifests); err != nil {
-				return fmt.Errorf("vigilante K3s manifest failed security validation: %w", err)
+			if err := os.MkdirAll(k3sServerManifestDir, 0755); err != nil {
+				return fmt.Errorf("failed to create k3s manifest dir %q: %w", k3sServerManifestDir, err)
 			}
-			_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
-			if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-				_, _ = f.WriteString(bundle.CompiledBundle.K3sManifests)
-				_ = f.Close()
-			}
-		} else {
-			_ = os.Remove(manifestPath)
+			writes = append(writes, atomicFileWrite{
+				path:    manifestPath,
+				content: bundle.CompiledBundle.K3sManifests,
+				perm:    0644,
+			})
+		}
+		// A-M12: every write failure is returned (the old code
+		// swallowed open failures and reported "Reconciled"), and
+		// the writes land all-or-nothing via temp+rename.
+		if err := writeFilesAtomic(writes); err != nil {
+			return err
 		}
 	} else {
-		_ = os.Remove(manifestPath)
+		if err := removeFileIfExists(manifestPath); err != nil {
+			return fmt.Errorf("failed to remove stale vigilante manifest %q: %w", manifestPath, err)
+		}
 	}
 
 	log.Printf("[VigilanteManager] Reconciled Vigilante runtime configuration and in-house K3s manifests")

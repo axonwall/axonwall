@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -47,8 +49,43 @@ type InterfacesConfigYaml struct {
 	} `yaml:"interfaces" json:"interfaces"`
 }
 
+// errNoRoutesKey marks a routing document that parses but carries no
+// usable `routes` key (A-M13). LoadRoutingConfig treats it as fatal
+// for routing.yaml candidates and as "try the next candidate" for
+// state.json, which is a grab-bag document that legitimately may not
+// carry routes.
+var errNoRoutesKey = errors.New("routing document has no \"routes\" key")
+
 // LoadRoutingConfigFromBytes parses static route definitions from raw YAML or JSON bytes.
 func LoadRoutingConfigFromBytes(data []byte) (*RoutingDomainConfig, error) {
+	// An empty (or whitespace/comment-only) document is the
+	// explicitly-empty config, not a wrong-schema document.
+	if len(bytes.TrimSpace(data)) == 0 {
+		return &RoutingDomainConfig{Routes: []StaticRouteConfig{}}, nil
+	}
+	// A-M13 (A-H1 residual): the round-1 fix errored only when the
+	// file parsed under NEITHER YAML nor JSON. A file that parses
+	// cleanly but carries no `routes:` key — a typo'd top-level key
+	// (`route:` instead of `routes:`), a `gateways:`-only document,
+	// an interfaces.yaml accidentally written to routing.yaml, or
+	// `routes: null` — used to be accepted as "zero routes", so the
+	// reconciler pruned every owned route. Require the document to
+	// contain a `routes` key holding a list; an explicitly empty list
+	// (`routes: []`) is still the legitimate empty config.
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err == nil {
+		if doc == nil {
+			// A null/comment-only document defines nothing.
+			return &RoutingDomainConfig{Routes: []StaticRouteConfig{}}, nil
+		}
+		routes, ok := doc["routes"]
+		if !ok || routes == nil {
+			return nil, errNoRoutesKey
+		}
+		if _, isList := routes.([]any); !isList {
+			return nil, fmt.Errorf("%w: \"routes\" must be a list", errNoRoutesKey)
+		}
+	}
 	var yamlCfg RoutingDomainConfig
 	yamlErr := yaml.Unmarshal(data, &yamlCfg)
 	if yamlErr == nil && yamlCfg.Routes != nil {
@@ -62,9 +99,7 @@ func LoadRoutingConfigFromBytes(data []byte) (*RoutingDomainConfig, error) {
 	// A-H1: a file that parses under neither encoding is corrupt, not
 	// "zero routes". The old code returned an empty config with a nil
 	// error here, so ReconcileStaticRoutes pruned every kernel static
-	// route after a typo or a truncated bundle write. A file that
-	// parses cleanly but simply defines no routes still yields the
-	// empty config below, unchanged.
+	// route after a typo or a truncated bundle write.
 	if yamlErr != nil && jsonErr != nil {
 		return nil, fmt.Errorf("routing config is neither valid YAML nor valid JSON (yaml: %v; json: %v)", yamlErr, jsonErr)
 	}
@@ -91,8 +126,17 @@ func LoadRoutingConfig() (*RoutingDomainConfig, error) {
 		// set that would prune every static route. A bundle write
 		// mirrors /etc/axonwall/*.yaml to /var/lib, so the mirror
 		// carries the same corruption and is no safety net here.
+		// A-M13: a state.json candidate with no `routes` key is not
+		// a routing document at all — fall through to the next
+		// candidate instead of failing closed or returning an empty
+		// desired set. A routing.yaml candidate with no `routes`
+		// key is a wrong-schema document and fails closed: it
+		// shadows any good state.json.
 		cfg, err := LoadRoutingConfigFromBytes(data)
 		if err != nil {
+			if errors.Is(err, errNoRoutesKey) && strings.HasSuffix(path, "state.json") {
+				continue
+			}
 			return nil, fmt.Errorf("failed to parse %s: %w", path, err)
 		}
 		if cfg.Routes != nil {

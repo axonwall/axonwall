@@ -18,6 +18,12 @@ import (
 	"github.com/axonwall/axonwall/apps/axonwalld/engine"
 )
 
+// keepalivedConfPath and conntrackdConfPath are the generated daemon
+// configs. Package variables (not constants) so tests can redirect
+// them into temp dirs; the production values are unchanged.
+var keepalivedConfPath = "/etc/keepalived/keepalived.conf"
+var conntrackdConfPath = "/etc/conntrackd/conntrackd.conf"
+
 type VRRPInstanceConfig struct {
 	Name         string   `json:"name"`
 	Vrid         int      `json:"vrid"`
@@ -239,15 +245,34 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 	}
 
 	devMap := loadInterfaceDeviceMap()
+	// M4: a configured interface that resolves to nothing (a
+	// placeholder name like "auto", or a logical name whose mapping
+	// was deleted/disabled) used to be stored back as "" and then
+	// silently replaced by "eth0" in the generators — VRRP and
+	// conntrackd bound to the wrong interface while Apply returned
+	// nil. Only an UNSET interface may fall back to eth0; a
+	// set-but-unresolvable one fails the apply instead.
 	if cfg.SyncInterface != "" {
-		cfg.SyncInterface = resolveInterfaceDevice(cfg.SyncInterface, devMap)
+		if resolved := resolveInterfaceDevice(cfg.SyncInterface, devMap); resolved == "" {
+			return fmt.Errorf("HA sync interface %q does not resolve to a network device", cfg.SyncInterface)
+		} else {
+			cfg.SyncInterface = resolved
+		}
 	}
 	if cfg.ConntrackSync.Interface != "" {
-		cfg.ConntrackSync.Interface = resolveInterfaceDevice(cfg.ConntrackSync.Interface, devMap)
+		if resolved := resolveInterfaceDevice(cfg.ConntrackSync.Interface, devMap); resolved == "" {
+			return fmt.Errorf("HA conntrack sync interface %q does not resolve to a network device", cfg.ConntrackSync.Interface)
+		} else {
+			cfg.ConntrackSync.Interface = resolved
+		}
 	}
 	for i := range cfg.VRRPInstances {
 		if cfg.VRRPInstances[i].Interface != "" {
-			cfg.VRRPInstances[i].Interface = resolveInterfaceDevice(cfg.VRRPInstances[i].Interface, devMap)
+			if resolved := resolveInterfaceDevice(cfg.VRRPInstances[i].Interface, devMap); resolved == "" {
+				return fmt.Errorf("HA VRRP instance %d interface %q does not resolve to a network device", i, cfg.VRRPInstances[i].Interface)
+			} else {
+				cfg.VRRPInstances[i].Interface = resolved
+			}
 		}
 	}
 
@@ -493,11 +518,11 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 `))
 	}
 
-	if err := os.MkdirAll("/etc/keepalived", 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(keepalivedConfPath), 0755); err != nil {
 		return err
 	}
 
-	f, err := os.OpenFile("/etc/keepalived/keepalived.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	f, err := os.OpenFile(keepalivedConfPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open keepalived.conf safely: %w", err)
 	}
@@ -596,11 +621,11 @@ General {
 }
 `, ipv4IfaceLine, syncIface)
 
-	if err := os.MkdirAll("/etc/conntrackd", 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(conntrackdConfPath), 0755); err != nil {
 		return err
 	}
 
-	f, err := os.OpenFile("/etc/conntrackd/conntrackd.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	f, err := os.OpenFile(conntrackdConfPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open conntrackd.conf safely: %w", err)
 	}

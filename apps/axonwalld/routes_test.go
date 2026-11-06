@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -83,16 +84,17 @@ func TestLoadRoutingConfigFromBytesCorruptReturnsError(t *testing.T) {
 	}
 }
 
-// A-H1 guard against overcorrection: a file that parses cleanly but
-// simply defines no routes is still "zero routes", not an error.
+// A-M13 (A-H1 residual): a file that parses cleanly but carries no
+// `routes` key is a wrong-schema document, not "zero routes" —
+// accepting it used to let the reconciler prune every owned route
+// (a typo'd top-level key, a `gateways:`-only document, an
+// interfaces.yaml written to routing.yaml). The round-1 A-H1 guard
+// below blessed this case; round-2 M13 overturns it. Only an
+// explicitly empty document (or `routes: []`) is "zero routes".
 func TestLoadRoutingConfigFromBytesValidNoRoutes(t *testing.T) {
 	gatewaysOnly := "gateways:\n  - name: WAN_GW\n    interface: wan\n    gatewayIp: 192.168.1.1\n"
-	cfg, err := LoadRoutingConfigFromBytes([]byte(gatewaysOnly))
-	if err != nil {
-		t.Fatalf("expected no error for a parseable file without routes, got: %v", err)
-	}
-	if len(cfg.Routes) != 0 {
-		t.Fatalf("expected 0 routes, got %d", len(cfg.Routes))
+	if _, err := LoadRoutingConfigFromBytes([]byte(gatewaysOnly)); !errors.Is(err, errNoRoutesKey) {
+		t.Fatalf("expected errNoRoutesKey for a gateways-only routing document, got: %v", err)
 	}
 }
 

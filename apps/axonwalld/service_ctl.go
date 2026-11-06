@@ -113,11 +113,13 @@ func stopSystemService(svc string) ([]byte, error) {
 	return exec.CommandContext(ctx, "service", strings.TrimSuffix(svc, ".service"), "stop").CombinedOutput()
 }
 
-// dhcpClientRunning reports whether a DHCP client started by the system
-// networking path (ifup/dhcpcd, dhclient, udhcpc, or an earlier boot-apply) is
-// already alive for dev, based on the clients' pidfiles.
-func dhcpClientRunning(dev string) bool {
-	pidFiles := []string{
+// dhcpPidFilesForDev lists the pidfiles a DHCP client for one device
+// writes. The daemon-global dhcpcd pidfiles are deliberately NOT in
+// this list (M5): a dhcpcd daemon managing any interface at all used
+// to make every later DHCP WAN look "already running", so the second
+// WAN never got a client.
+func dhcpPidFilesForDev(dev string) []string {
+	return []string{
 		"/var/run/dhclient." + dev + ".pid",
 		"/var/run/dhcpcd/" + dev + ".pid",
 		"/var/run/dhcpcd/" + dev + "-4.pid",
@@ -127,13 +129,36 @@ func dhcpClientRunning(dev string) bool {
 		"/run/dhcpcd/" + dev + "-4.pid",
 		"/run/dhcpcd-" + dev + ".pid",
 		"/run/dhcpcd-" + dev + "-4.pid",
-		"/var/run/dhcpcd/pid",
-		"/run/dhcpcd/pid",
-		"/var/run/dhcpcd.pid",
-		"/run/dhcpcd.pid",
 		"/var/run/udhcpc." + dev + ".pid",
 		"/run/udhcpc." + dev + ".pid",
 	}
+}
+
+// pidBelongsToDhcpClient reports whether pid is a live process whose
+// command line names a DHCP client. A pidfile whose pid was recycled
+// by an unrelated process must not count as a running client (M5).
+// When the command line cannot be read, liveness (signal 0) alone is
+// the verdict, matching the old behaviour.
+func pidBelongsToDhcpClient(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return true
+	}
+	return strings.Contains(strings.ToLower(string(cmdline)), "dhcp")
+}
+
+// dhcpClientRunningForDev reports whether a DHCP client started by
+// the system is already alive for dev, based on the clients'
+// per-device pidfiles. It is split out from dhcpClientRunning so
+// tests can point it at temp pidfiles.
+func dhcpClientRunningForDev(dev string, pidFiles []string) bool {
 	for _, pidFile := range pidFiles {
 		data, err := os.ReadFile(pidFile)
 		if err != nil {
@@ -143,15 +168,21 @@ func dhcpClientRunning(dev string) bool {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			continue
-		}
-		if err := proc.Signal(syscall.Signal(0)); err == nil {
+		if pidBelongsToDhcpClient(pid) {
 			return true
 		}
 	}
 	return false
+}
+
+// dhcpClientRunning reports whether a DHCP client started by the system
+// networking path (ifup/dhcpcd, dhclient, udhcpc, or an earlier boot-apply) is
+// already alive for dev, based on the clients' per-device pidfiles.
+// A running dhcpcd daemon for ANOTHER device does not count: dhcpcd
+// is asked to manage a new device with `dhcpcd -4 <dev>` even when
+// the daemon already exists (M5).
+func dhcpClientRunning(dev string) bool {
+	return dhcpClientRunningForDev(dev, dhcpPidFilesForDev(dev))
 }
 
 func triggerDhcpClient(dev string, roles ...string) {

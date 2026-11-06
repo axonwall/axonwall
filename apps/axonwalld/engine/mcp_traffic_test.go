@@ -286,10 +286,18 @@ func TestMcpRevertFailsWhenNftApplyFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected RevertLease to fail when nft fails; got nil (pre-fix success lie)")
 	}
+	// M8: the record must survive a failed rebuild — the lease stays
+	// listed and revertable instead of vanishing while the kernel may
+	// still enforce it.
+	if got := len(mgr.ListLeases()); got != 1 {
+		t.Errorf("Expected the lease to still be listed after a failed revert, got %d listed", got)
+	}
 }
 
-// A-M13: flush must report failure (with the cleared count) when the
-// kernel rebuild fails, not success with a cleared count.
+// A-M13: flush must report failure when the kernel rebuild fails.
+// M8: on failure nothing is cleared — the records are kept so the
+// leases stay listed and revertable instead of vanishing while the
+// kernel may still enforce them.
 func TestMcpFlushFailsWhenNftApplyFails(t *testing.T) {
 	installFakeNft(t, 1)
 	mgr := newTestTrafficManager(t)
@@ -309,7 +317,10 @@ func TestMcpFlushFailsWhenNftApplyFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected FlushAllLeases to fail when nft fails; got nil (pre-fix success lie)")
 	}
-	if cleared != 2 {
-		t.Errorf("Expected cleared count 2 alongside the error, got %d", cleared)
+	if cleared != 0 {
+		t.Errorf("Expected cleared count 0 alongside the error (nothing was cleared), got %d", cleared)
+	}
+	if got := len(mgr.ListLeases()); got != 2 {
+		t.Errorf("Expected both leases to still be listed after a failed flush, got %d", got)
 	}
 }
