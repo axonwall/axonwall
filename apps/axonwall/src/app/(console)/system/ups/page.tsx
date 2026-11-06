@@ -11,6 +11,8 @@ import {
   Settings,
   HelpCircle,
   Save,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { compileNutUps } from '@axonwall/lib/compile/nut';
 import type { NutUpsConfig } from '@axonwall/lib/schemas';
@@ -20,6 +22,10 @@ export default function UpsMonitoringPage() {
   const [upsStatus, setUpsStatus] = useState<UpsStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  // C-B14: the save handler used to swallow both success and failure
+  // in an empty catch, so a failed apply was indistinguishable from a
+  // saved one. The result is now surfaced in a typed banner.
+  const [saveMsg, setSaveMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [upsConfig, setUpsConfig] = useState<NutUpsConfig>({
     enabled: false,
     name: 'axonups',
@@ -62,13 +68,20 @@ export default function UpsMonitoringPage() {
 
   const handleSaveUps = async () => {
     setIsSaving(true);
+    setSaveMsg(null);
     try {
       const state = await getCurrentDesiredState();
       await applyDesiredState({ ...state, ups: upsConfig });
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       }
-    } catch {}
+      setSaveMsg({ type: 'success', text: 'Saved UPS configuration to /etc/axonwall/system.yaml' });
+    } catch (err: any) {
+      setSaveMsg({
+        type: 'error',
+        text: `Failed to save UPS configuration: ${err?.message || 'unknown error'}. The previous shutdown thresholds are still in effect.`,
+      });
+    }
     setIsSaving(false);
   };
 
@@ -121,6 +134,23 @@ export default function UpsMonitoringPage() {
           )}
         </div>
       </div>
+
+      {saveMsg && (
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            saveMsg.type === 'error'
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {saveMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{saveMsg.text}</span>
+        </div>
+      )}
 
       {/* Disconnected / Virtual Machine Info Callout */}
       {!upsStatus?.connected && (
