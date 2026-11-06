@@ -80,12 +80,17 @@ export default function DynamicAliasesPage() {
     const existing = aliases.find((a) => a.url === feed.url);
     if (existing) return;
 
+    // C-A3: subscribe with NO entries. The old TEST-NET placeholders
+    // (198.51.100.0/24, 203.0.113.0/24) were compiled into the nftables
+    // sets as the feed's real content, and nothing ever replaces them —
+    // there is no urltable fetch anywhere in the repo. An empty entry
+    // list renders as "Not fetched yet" until a real fetcher exists.
     const newAlias: Alias = {
       name: feed.name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 31),
       type: 'urltable',
       url: feed.url,
       refreshIntervalHours: 24,
-      entries: ['198.51.100.0/24', '203.0.113.0/24'],
+      entries: [],
       description: feed.description,
       enabled: true,
     };
@@ -168,10 +173,11 @@ export default function DynamicAliasesPage() {
             type="button"
             onClick={handleRefreshAll}
             disabled={refreshing}
+            title="Re-applies the current alias list. No feed is fetched — no feed fetcher exists yet."
             className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs text-white transition flex items-center gap-1.5 shadow font-medium cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-            <span>{refreshing ? 'Updating Feeds...' : 'Refresh All Feeds'}</span>
+            <span>{refreshing ? 'Re-applying...' : 'Re-apply Aliases'}</span>
           </button>
         </div>
       </div>
@@ -271,7 +277,8 @@ export default function DynamicAliasesPage() {
         {refreshSuccess && (
           <div className="px-4 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20 text-xs text-emerald-400 flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
-            Feeds successfully fetched and synchronized into nftables named sets.
+            Alias configuration re-applied. Note: no feed was fetched — no feed fetcher exists yet, so entries are
+            unchanged.
           </div>
         )}
 
@@ -282,7 +289,7 @@ export default function DynamicAliasesPage() {
               <th className="px-4 py-3">Type</th>
               <th className="px-4 py-3">Source / Feeds</th>
               <th className="px-4 py-3">Elements</th>
-              <th className="px-4 py-3">Refresh Cycle</th>
+              <th className="px-4 py-3">Refresh Interval (Configured)</th>
               <th className="px-4 py-3">Description</th>
               <th className="px-4 py-3 text-right">Actions</th>
             </tr>
@@ -314,10 +321,15 @@ export default function DynamicAliasesPage() {
                   )}
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-emerald-400 font-semibold">
-                  {a.entries.length} Prefixes
+                  {/* C-A3: an empty urltable alias was never fetched — say
+                      so instead of "0 Prefixes", which reads as a
+                      fetched-but-empty feed. */}
+                  {a.entries.length === 0 && a.type === 'urltable'
+                    ? 'Not fetched yet'
+                    : `${a.entries.length} Prefixes`}
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-slate-400">
-                  Every {a.refreshIntervalHours}h
+                  Every {a.refreshIntervalHours}h (configured — no fetcher runs it yet)
                 </td>
                 <td className="px-4 py-3 text-slate-400 text-xs">{a.description}</td>
                 <td className="px-4 py-3 text-right">
