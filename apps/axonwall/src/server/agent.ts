@@ -3667,19 +3667,11 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
       installMode,
       zbmPoolName: daemonData.zbmPoolName || 'zroot',
       zbmPoolTopology: daemonData.zbmPoolTopology || 'mirror',
-      zbmPoolHealth: daemonData.zbmPoolHealth || 'ONLINE',
-      bootEnvironments: daemonData.bootEnvironments || [
-        {
-          name: `axonwall-${currentVersion}`,
-          dataset: `zroot/ROOT/axonwall-${currentVersion}`,
-          activeNow: true,
-          activeNext: true,
-          version: currentVersion,
-          usedSize: '6.4G',
-          createdAt: new Date().toISOString(),
-          snapshots: [],
-        },
-      ],
+      zbmPoolHealth: daemonData.zbmPoolHealth || undefined,
+      // B22: when the daemon omits bootEnvironments, do not fabricate
+      // one with an invented size/creation time — an empty list is
+      // honest (the updates page disables BE actions while it is empty).
+      bootEnvironments: daemonData.bootEnvironments ?? [],
       slots:
         installMode === 'rolling'
           ? [
@@ -3762,26 +3754,10 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
       healthVerified: Boolean(daemonData.healthVerified),
       kernelVersion: daemonData.kernelVersion || kernel,
       osVersion: daemonData.osVersion || `Axonwall OS v${currentVersion}`,
-      checks: daemonData.checks || [
-        {
-          name: 'Network Interface Initialization',
-          status: 'PASS',
-          detail: 'Loopback and network carrier operational',
-          durationMs: 14,
-        },
-        {
-          name: 'Kernel nftables Netfilter Baseline',
-          status: 'PASS',
-          detail: 'Atomic ruleset compiler validation verified',
-          durationMs: 28,
-        },
-        {
-          name: 'Control Plane & Management Quorum',
-          status: 'PASS',
-          detail: 'Privileged IPC socket active and responding',
-          durationMs: 8,
-        },
-      ],
+      // B22: when the daemon omits checks, do not substitute three
+      // hardcoded PASS checks that never ran — an empty list means
+      // "checks unavailable" and the page renders it as such.
+      checks: daemonData.checks ?? [],
     };
   }
 

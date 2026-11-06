@@ -114,7 +114,7 @@ export default function SystemUpdatesPage() {
             setZbmPool({
               name: data.telemetry.zbmPoolName,
               topology: data.telemetry.zbmPoolTopology || 'mirror',
-              health: data.telemetry.zbmPoolHealth || 'ONLINE',
+              health: data.telemetry.zbmPoolHealth || 'Unknown',
             });
           }
           if (data.telemetry.bootEnvironments) {
@@ -155,7 +155,7 @@ export default function SystemUpdatesPage() {
         setZbmPool({
           name: telemetry.zbmPoolName,
           topology: telemetry.zbmPoolTopology || 'mirror',
-          health: telemetry.zbmPoolHealth || 'ONLINE',
+          health: telemetry.zbmPoolHealth || 'Unknown',
         });
       }
       if (telemetry.bootEnvironments) {
@@ -814,7 +814,7 @@ export default function SystemUpdatesPage() {
                       Root Pool: {zbmPool?.name || 'zroot'}
                     </h2>
                     <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      {zbmPool?.health || 'ONLINE'}
+                      {zbmPool?.health || 'Unknown'}
                     </span>
                     <span className="px-2 py-0.5 rounded-full text-xs font-mono font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 uppercase">
                       {zbmPool?.topology || 'Mirror'}
@@ -1494,26 +1494,8 @@ export default function SystemUpdatesPage() {
           </h3>
 
           <div className="space-y-2">
-            {(healthChecks.length > 0 ? healthChecks : [
-              {
-                name: 'Network Interface Initialization',
-                status: 'PASS' as const,
-                detail: 'Loopback (lo) operational and link carrier detected across all active NICs',
-                durationMs: 14,
-              },
-              {
-                name: 'Kernel nftables Netfilter Baseline',
-                status: 'PASS' as const,
-                detail: 'Atomic ruleset syntax validation and kernel table hooks applied cleanly',
-                durationMs: 28,
-              },
-              {
-                name: 'Control Plane & Management Quorum',
-                status: 'PASS' as const,
-                detail: 'Privileged IPC socket /run/axonwall/agent.sock is active and responding',
-                durationMs: 8,
-              },
-            ]).map((check) => (
+            {healthChecks.length > 0 ? (
+              healthChecks.map((check) => (
               <div key={check.name} className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <CheckCircle2
@@ -1542,7 +1524,14 @@ export default function SystemUpdatesPage() {
                   {check.status} ({check.durationMs}ms)
                 </span>
               </div>
-            ))}
+              ))
+            ) : (
+              // B22: no checks were reported — say so instead of
+              // rendering three hardcoded PASS checks that never ran.
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-400">
+                Health checks unavailable — the daemon did not report any checks.
+              </div>
+            )}
           </div>
         </div>
       </div>
