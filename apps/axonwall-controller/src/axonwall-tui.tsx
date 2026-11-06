@@ -179,6 +179,47 @@ function loadCurrentState(): DesiredState {
   return parseDesiredStateFromYamlFiles({});
 }
 
+// B2-M5: snapshot/restore for the on-disk config
+// handleApplyConfig overwrites (see the CLI twin in
+// axonwallctl.ts). The snapshot maps every path saveStateToDisk
+// writes to its previous contents, or null when the path did not
+// exist, so a daemon rejection can put disk back exactly as it was.
+type TuiConfigSnapshot = Map<string, Buffer | null>;
+
+function snapshotTuiConfigFiles(state: DesiredState): TuiConfigSnapshot {
+  const snap: TuiConfigSnapshot = new Map();
+  const paths: string[] = [];
+  const serialized = serializeDesiredStateToYamlFiles(state);
+  for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
+    for (const fn of Object.keys(serialized)) paths.push(path.join(dir, fn));
+    paths.push(path.join(dir, 'conf.d', '99-cloudinit.yaml'));
+  }
+  for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
+    paths.push(jsonTarget);
+  }
+  for (const p of paths) {
+    try {
+      snap.set(p, fs.existsSync(p) ? fs.readFileSync(p) : null);
+    } catch {
+      snap.set(p, null);
+    }
+  }
+  return snap;
+}
+
+function restoreTuiConfigSnapshot(snap: TuiConfigSnapshot): void {
+  for (const [p, content] of snap.entries()) {
+    try {
+      if (content === null) {
+        fs.rmSync(p, { force: true });
+      } else {
+        fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(p, content, { encoding: 'utf-8', mode: 0o660 });
+      }
+    } catch {}
+  }
+}
+
 function saveStateToDisk(state: DesiredState): Record<string, string> {
   const serialized = serializeDesiredStateToYamlFiles(state);
   const daemonFiles: Record<string, string> = {};
@@ -490,6 +531,13 @@ export function AxonwallTuiApp({
 
   const handleApplyConfig = async () => {
     setStatusMessage('Compiling nftables & subsystem configurations and applying with 120s commit-confirm...');
+    // B2-M5: snapshot the on-disk config before overwriting it,
+    // so a daemon rejection can restore the previous version
+    // instead of leaving the rejected config on disk as if it
+    // were current. A daemon outage is different: the disk-only
+    // save below deliberately keeps the new files, and only an
+    // explicit rejection restores.
+    const diskSnapshot = snapshotTuiConfigFiles(state);
     const yamlDaemonFiles = saveStateToDisk(state);
     const { nftScript, files, reloadServices } = compileNftables(state);
     const hashInput = JSON.stringify({
@@ -542,7 +590,8 @@ export function AxonwallTuiApp({
       setStatusMessage('✔ Applied to live daemon! Press [c] within 120s to confirm, or [r] to rollback.');
       await refreshAll();
     } else if (resp?.error) {
-      setStatusMessage(`✖ Apply rejected by daemon: ${resp.message || resp.error}`);
+      restoreTuiConfigSnapshot(diskSnapshot);
+      setStatusMessage(`✖ Apply rejected by daemon: ${resp.message || resp.error} (previous on-disk configuration restored)`);
     } else {
       setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     }

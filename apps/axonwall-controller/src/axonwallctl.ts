@@ -599,11 +599,60 @@ function cmdDiff() {
   console.log(nftScript.split('\n').slice(0, 35).join('\n'));
 }
 
+// B2-M5: snapshot/restore for the on-disk config cmdApply
+// overwrites. The snapshot maps every path cmdApply writes (YAML
+// files and state.json in both dirs, plus the cloud-init override
+// it deletes) to its previous contents, or null when the path did
+// not exist, so a daemon rejection can put disk back exactly as it
+// was.
+type CliConfigSnapshot = Map<string, Buffer | null>;
+
+function snapshotCliConfigFiles(yamlFiles: Record<string, string>): CliConfigSnapshot {
+  const snap: CliConfigSnapshot = new Map();
+  const paths: string[] = [];
+  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+    for (const filename of Object.keys(yamlFiles)) paths.push(path.join(dir, filename));
+    paths.push(path.join(dir, 'conf.d', '99-cloudinit.yaml'));
+  }
+  for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
+    paths.push(jsonTarget);
+  }
+  for (const p of paths) {
+    try {
+      snap.set(p, fs.existsSync(p) ? fs.readFileSync(p) : null);
+    } catch {
+      snap.set(p, null);
+    }
+  }
+  return snap;
+}
+
+function restoreCliConfigSnapshot(snap: CliConfigSnapshot): void {
+  for (const [p, content] of snap.entries()) {
+    try {
+      if (content === null) {
+        fs.rmSync(p, { force: true });
+      } else {
+        fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(p, content, { mode: 0o660 });
+      }
+    } catch {}
+  }
+}
+
 async function cmdApply(autoConfirm = true) {
   const state = cmdValidate();
 
-  // Persist normalized YAML files + state.json
+  // B2-M5: snapshot the on-disk config before overwriting it, so a
+  // daemon rejection can restore the previous version instead of
+  // leaving the rejected config on disk as if it were current
+  // (disk, GitOps, and kernel would then disagree). A daemon
+  // outage is different: the disk-only sync below deliberately
+  // keeps the new files, and only an explicit rejection restores.
   const yamlFiles = serializeDesiredStateToYamlFiles(state);
+  const diskSnapshot = snapshotCliConfigFiles(yamlFiles);
+
+  // Persist normalized YAML files + state.json
   const serializedJson = JSON.stringify(state, null, 2);
 
   for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
@@ -674,7 +723,9 @@ async function cmdApply(autoConfirm = true) {
     });
 
     if (!resp.success) {
+      restoreCliConfigSnapshot(diskSnapshot);
       console.error(`${cRed}[✗] Daemon rejected bundle: ${resp.message}${cReset}`);
+      console.error(`${cYellow}[!] Restored the previous on-disk configuration; the rejected bundle was not kept.${cReset}`);
       process.exit(1);
     }
   } catch (err: any) {
