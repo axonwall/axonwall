@@ -4095,7 +4095,20 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
           ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
           { stdio: 'ignore', timeout: 1500 }
         );
-      } catch {}
+      } catch (err: any) {
+        // C-B11: a failed grubenv write used to be swallowed while the
+        // success message below claimed "Watchdog bootcount armed
+        // (bootlimit=3)". Like activatePartitionSlot (C7), a failed
+        // privileged write is a failure: the firmware WAS flashed, but
+        // the watchdog was NOT armed, so a bad boot will not count
+        // toward the rollback limit. Say so loudly instead.
+        return {
+          success: false,
+          message: `Firmware v${targetVersion} was flashed to Slot ${cleanSlot}, but the watchdog bootcount could NOT be armed: ${err?.message || 'grub-editenv write failed'}. A failed boot will not count toward the rollback limit; fix /boot/grub/grubenv and re-arm before relying on watchdog rollback.`,
+          targetSlot: cleanSlot,
+          newVersion: targetVersion,
+        };
+      }
     }
 
     // Persist per-slot version metadata
