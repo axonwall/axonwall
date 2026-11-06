@@ -158,9 +158,23 @@ export async function vmPowerAction(
   if (action === 'start') {
     const state = await getCurrentDesiredState();
     const vm = state.virt?.vms?.find((v) => v.vmid === vmid);
-    if (vm) {
-      const compiled = compileVmProcess(vm);
-      await callAgentApi('/v1/virt/vms', 'POST', {
+    // D1: never start a VM with no configured spec — the daemon would boot
+    // a generic diskless VM (2 vCPU / 2048 MB, no disks, no NICs) that is
+    // invisible in the VMs table.
+    if (!vm) {
+      return {
+        success: false,
+        message: `VM ${vmid} is not configured — refusing to start. Starting without a registered spec would boot a generic diskless VM.`,
+      };
+    }
+    const compiled = compileVmProcess(vm);
+    // D1: the register result used to be discarded, so a failed register
+    // was invisible and the power POST booted the daemon's fallback spec.
+    // Abort the start when registration fails or the daemon is unreachable.
+    const registerResp = await callAgentApi<{ success: boolean; message?: string }>(
+      '/v1/virt/vms',
+      'POST',
+      {
         action: 'register',
         vmid: vm.vmid,
         spec: {
@@ -183,7 +197,15 @@ export async function vmPowerAction(
               }
             : null,
         },
-      });
+      }
+    );
+    if (!registerResp || registerResp.success === false) {
+      return {
+        success: false,
+        message:
+          registerResp?.message ||
+          `VM ${vmid} spec registration failed${registerResp ? '' : ' (daemon unreachable)'} — start aborted so no generic fallback VM boots.`,
+      };
     }
   }
 
@@ -267,7 +289,10 @@ export async function saveVmAction(
 
   // Register with daemon engine
   const compiled = compileVmProcess(vm);
-  await callAgentApi('/v1/virt/vms', 'POST', {
+  // D1: the register result used to be discarded. The config is saved, so
+  // the save still succeeds — but a failed registration must be visible,
+  // or the next start silently boots the daemon's generic fallback spec.
+  const registerResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/vms', 'POST', {
     action: 'register',
     vmid: vm.vmid,
     spec: {
@@ -294,7 +319,11 @@ export async function saveVmAction(
 
   return {
     success: true,
-    message: `VM ${vm.vmid} (${vm.name}) saved to /etc/axonwall/virt.yaml.`,
+    message:
+      `VM ${vm.vmid} (${vm.name}) saved to /etc/axonwall/virt.yaml.` +
+      (!registerResp || registerResp.success === false
+        ? ' Warning: daemon spec registration failed (daemon unreachable or refused) — re-save once the daemon is back, or the next start may boot a generic fallback VM.'
+        : ''),
   };
 }
 
@@ -306,7 +335,28 @@ export async function deleteVmAction(
 
   const state = await getCurrentDesiredState();
   if (!state.virt?.vms) {
-    return { success: true, message: 'No VMs configured.' };
+    return { success: false, message: 'No VMs configured — nothing deleted.' };
+  }
+  if (!state.virt.vms.some((v) => v.vmid === vmid)) {
+    return { success: false, message: `VM ${vmid} is not configured — nothing deleted.` };
+  }
+
+  // D2: deregister with the daemon BEFORE removing the config, and refuse
+  // to pretend the delete happened when the daemon cannot be reached —
+  // otherwise the registration (and disk) survive and re-creating the ID
+  // resurrects the old VM. Best-effort stop first so a running VM is not
+  // left orphaned after its spec is gone.
+  await callAgentApi('/v1/virt/vms', 'POST', { action: 'stop', vmid, force: true });
+  const unregisterResp = await callAgentApi<{ success: boolean; message?: string }>(
+    '/v1/virt/vms',
+    'POST',
+    { action: 'unregister', vmid }
+  );
+  if (!unregisterResp || unregisterResp.success === false) {
+    return {
+      success: false,
+      message: `Daemon unavailable or unregister refused — VM ${vmid} was NOT deleted; configuration and daemon registration preserved. Retry once axonwalld is reachable.`,
+    };
   }
 
   const updatedState = {
@@ -320,7 +370,7 @@ export async function deleteVmAction(
   await applyDesiredState(updatedState);
   return {
     success: true,
-    message: `VM ${vmid} removed from configuration.`,
+    message: `VM ${vmid} removed from configuration and unregistered from the daemon. NOTE: the ZVOL disk was NOT deleted and storage was not freed — re-creating VM ${vmid} will reuse the old disk.`,
   };
 }
 
@@ -375,9 +425,19 @@ export async function containerPowerAction(
   if (action === 'start' || action === 'reboot' || action === 'reset') {
     const state = await getCurrentDesiredState();
     const ct = state.virt?.containers?.find((c) => c.ctid === ctid);
-    if (ct) {
-      const compiled = compileLxcContainer(ct);
-      await callAgentApi('/v1/virt/containers', 'POST', {
+    // D1 (container shape): same discarded-register hole as VMs — a failed
+    // register must abort before any stop/start, never silently proceed.
+    if (!ct) {
+      return {
+        success: false,
+        message: `Container ${ctid} is not configured — refusing to ${action}.`,
+      };
+    }
+    const compiled = compileLxcContainer(ct);
+    const registerResp = await callAgentApi<{ success: boolean; message?: string }>(
+      '/v1/virt/containers',
+      'POST',
+      {
         action: 'register',
         ctid: ct.ctid,
         spec: {
@@ -389,7 +449,15 @@ export async function containerPowerAction(
           rootfsPath: compiled.rootfsPath,
           features: ct.features,
         },
-      });
+      }
+    );
+    if (!registerResp || registerResp.success === false) {
+      return {
+        success: false,
+        message:
+          registerResp?.message ||
+          `Container ${ctid} spec registration failed${registerResp ? '' : ' (daemon unreachable)'} — ${action} aborted.`,
+      };
     }
   }
 
@@ -481,7 +549,9 @@ export async function saveContainerAction(
 
   // Register with daemon engine
   const compiled = compileLxcContainer(container);
-  await callAgentApi('/v1/virt/containers', 'POST', {
+  // D1 (container shape): surface a failed registration instead of
+  // discarding it — the config is saved, but the daemon may not know it.
+  const registerResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/containers', 'POST', {
     action: 'register',
     ctid: container.ctid,
     spec: {
@@ -497,7 +567,11 @@ export async function saveContainerAction(
 
   return {
     success: true,
-    message: `LXC Container ${container.ctid} (${container.hostname}) saved to /etc/axonwall/virt.yaml.`,
+    message:
+      `LXC Container ${container.ctid} (${container.hostname}) saved to /etc/axonwall/virt.yaml.` +
+      (!registerResp || registerResp.success === false
+        ? ' Warning: daemon spec registration failed (daemon unreachable or refused) — re-save once the daemon is back.'
+        : ''),
   };
 }
 
@@ -509,8 +583,18 @@ export async function deleteContainerAction(
 
   const state = await getCurrentDesiredState();
   if (!state.virt?.containers) {
-    return { success: true, message: 'No containers configured.' };
+    return { success: false, message: 'No containers configured — nothing deleted.' };
   }
+  if (!state.virt.containers.some((c) => c.ctid === ctid)) {
+    return { success: false, message: `Container ${ctid} is not configured — nothing deleted.` };
+  }
+
+  // D2: best-effort stop so a running container is not left orphaned.
+  // There is no daemon container-unregister action (the daemon handler only
+  // knows register/start/stop), so the registration and rootfs CANNOT be
+  // removed from here — say so explicitly instead of implying a clean
+  // delete. Re-creating this CTID will reuse the old rootfs.
+  await callAgentApi('/v1/virt/containers', 'POST', { action: 'stop', ctid, force: true });
 
   const updatedState = {
     ...state,
@@ -523,7 +607,7 @@ export async function deleteContainerAction(
   await applyDesiredState(updatedState);
   return {
     success: true,
-    message: `Container ${ctid} removed from configuration.`,
+    message: `Container ${ctid} removed from configuration. NOTE: the daemon registration and rootfs were NOT removed (no container unregister action exists) and storage was not freed — re-creating CTID ${ctid} will reuse the old rootfs.`,
   };
 }
 
