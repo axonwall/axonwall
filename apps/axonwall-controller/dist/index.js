@@ -43871,6 +43871,22 @@ function readAgentToken() {
 function newMcpApplyJobId() {
   return `mcp_apply_${Date.now()}_${crypto4.randomBytes(4).toString("hex")}`;
 }
+function desiredStateLockPath() {
+  return fs6.existsSync("/etc/axonwall") ? "/etc/axonwall/state.json.lock" : "/var/lib/axonwall/state.json.lock";
+}
+function insertMcpRuleIntoState(targetState, rule) {
+  const isBlockOrReject = rule.action === "block" || rule.action === "reject";
+  if (isBlockOrReject) {
+    const firstPassIdx = targetState.rules.findIndex((r) => r.action === "pass");
+    if (firstPassIdx !== -1) {
+      targetState.rules.splice(firstPassIdx, 0, rule);
+    } else {
+      targetState.rules.push(rule);
+    }
+  } else {
+    targetState.rules.push(rule);
+  }
+}
 async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
   if (!fs6.existsSync(AGENT_SOCKET_PATH)) {
     return {
@@ -45122,17 +45138,6 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           }
         }
       }
-      const previousRules = [...state.rules];
-      if (isBlockOrReject) {
-        const firstPassIdx = state.rules.findIndex((r) => r.action === "pass");
-        if (firstPassIdx !== -1) {
-          state.rules.splice(firstPassIdx, 0, req.rule);
-        } else {
-          state.rules.push(req.rule);
-        }
-      } else {
-        state.rules.push(req.rule);
-      }
       const persistDesiredState = (targetState) => {
         try {
           fs6.writeFileSync("/etc/axonwall/state.json", JSON.stringify(targetState, null, 2), { mode: 384 });
@@ -45154,11 +45159,28 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         } catch {
         }
       };
-      persistDesiredState(state);
+      let liveState = state;
+      let releaseStateLock = null;
+      try {
+        try {
+          releaseStateLock = acquireMcpLockFile(desiredStateLockPath());
+        } catch (err) {
+          return deny("mcp:firewall:write", `Could not lock DesiredState for the rule update (${err?.message || err}); retry the propose`, req.audit);
+        }
+        const fresh = loadLocalDesiredState();
+        if (!fresh) {
+          return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
+        }
+        insertMcpRuleIntoState(fresh, req.rule);
+        persistDesiredState(fresh);
+        liveState = fresh;
+      } finally {
+        releaseStateLock?.();
+      }
       let applyStatus = "staged_only";
       let applyJobId;
       if (req.applyImmediately) {
-        const compiled = compileNftables(state);
+        const compiled = compileNftables(liveState);
         const hashInput = JSON.stringify({
           nftScript: compiled.nftScript,
           files: [...compiled.files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
@@ -45176,8 +45198,28 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds
         });
         if (!applyRes.ok) {
-          state.rules = previousRules;
-          persistDesiredState(state);
+          const stagedRuleJson = JSON.stringify(req.rule);
+          let releaseRollbackLock = null;
+          try {
+            try {
+              releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+            } catch {
+              console.error("[MCP] Could not lock DesiredState to roll back a rejected staged rule; the staged rule remains on disk");
+              releaseRollbackLock = null;
+            }
+            if (releaseRollbackLock) {
+              const fresh = loadLocalDesiredState();
+              if (fresh) {
+                const idx = fresh.rules.findIndex((r) => JSON.stringify(r) === stagedRuleJson);
+                if (idx !== -1) {
+                  fresh.rules.splice(idx, 1);
+                  persistDesiredState(fresh);
+                }
+              }
+            }
+          } finally {
+            releaseRollbackLock?.();
+          }
           return deny(
             "mcp:firewall:apply",
             applyRes.data?.error || "Daemon rejected ruleset apply; rolled back staged rule",
@@ -47072,6 +47114,7 @@ export {
   PENDING_COMMAND_STALE_MS,
   SATELLITE_HEARTBEAT_MS,
   SATELLITE_LAST_SEEN_GRACE_MS,
+  acquireMcpLockFile,
   authenticateMcpToken,
   buildArtifactBundle,
   buildSatelliteCommandEnvelope,
@@ -47079,9 +47122,11 @@ export {
   createMcpApiKeyRecord,
   createPortMultiplexer,
   deriveSatelliteRole,
+  desiredStateLockPath,
   ensureControllerTls,
   getMcpServerStatus,
   headscaleRetryDelaysMs,
+  insertMcpRuleIntoState,
   isMcpServerEnabled,
   isPendingCommandStale,
   isValidCidr,

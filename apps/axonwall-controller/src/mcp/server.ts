@@ -19,6 +19,7 @@ import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { serializeDesiredStateToYamlFiles } from '@axonwall/lib/yaml';
 import { hasMcpScope } from './authz.js';
+import { acquireMcpLockFile } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 
 const AGENT_SOCKET_PATH = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
@@ -55,6 +56,35 @@ function readAgentToken(): string {
 // random suffix.
 export function newMcpApplyJobId(): string {
   return `mcp_apply_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+}
+
+// B2-M4: the lockfile path for DesiredState mutation. The lock
+// must be one path for every process sharing the state files (the
+// HTTP controller and the stdio MCP server). Prefer the primary
+// state dir when it exists; the lock helper creates the lock dir
+// itself, so only the choice needs to be deterministic across
+// processes.
+export function desiredStateLockPath(): string {
+  return fs.existsSync('/etc/axonwall') ? '/etc/axonwall/state.json.lock' : '/var/lib/axonwall/state.json.lock';
+}
+
+// B2-M4: insert a proposed rule into a DesiredState, preserving
+// the established ordering (block/reject rules go before the
+// first pass rule, everything else appends). Split out so the
+// locked reload-mutate-persist section in propose_firewall_rule
+// and its rollback path apply exactly the same mutation.
+export function insertMcpRuleIntoState(targetState: DesiredState, rule: DesiredState['rules'][number]): void {
+  const isBlockOrReject = rule.action === 'block' || rule.action === 'reject';
+  if (isBlockOrReject) {
+    const firstPassIdx = targetState.rules.findIndex((r) => r.action === 'pass');
+    if (firstPassIdx !== -1) {
+      targetState.rules.splice(firstPassIdx, 0, rule);
+    } else {
+      targetState.rules.push(rule);
+    }
+  } else {
+    targetState.rules.push(rule);
+  }
 }
 
 export async function callAxonwalldApi<T = any>(
@@ -1513,18 +1543,6 @@ export async function handleMcpCallTool(
         }
       }
 
-      const previousRules = [...state.rules];
-      if (isBlockOrReject) {
-        const firstPassIdx = state.rules.findIndex((r) => r.action === 'pass');
-        if (firstPassIdx !== -1) {
-          state.rules.splice(firstPassIdx, 0, req.rule);
-        } else {
-          state.rules.push(req.rule);
-        }
-      } else {
-        state.rules.push(req.rule);
-      }
-
       const persistDesiredState = (targetState: DesiredState) => {
         try {
           fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
@@ -1546,12 +1564,43 @@ export async function handleMcpCallTool(
         } catch {}
       };
 
-      persistDesiredState(state);
+      // B2-M4: serialize the load -> mutate -> persist window with
+      // the MCP lockfile. Two concurrent proposes (or a propose
+      // racing a console/TUI save) used to load the same state,
+      // mutate their own stale copies, and persist last-writer-wins
+      // — the loser's rule vanished from disk AND from the kernel
+      // (the second apply pushed the loser's rule-less state),
+      // while both calls reported success. The lock is held only
+      // around the synchronous reload/mutate/persist, never across
+      // the awaits (guard build above, daemon apply below), and the
+      // mutation is re-applied to a freshly reloaded state inside
+      // the lock so a concurrent writer's rule cannot be clobbered.
+      // `state` stays the guard-phase snapshot (const, so the guard
+      // closures keep their non-null narrowing); `liveState` is the
+      // freshly reloaded state the apply below compiles.
+      let liveState = state;
+      let releaseStateLock: (() => void) | null = null;
+      try {
+        try {
+          releaseStateLock = acquireMcpLockFile(desiredStateLockPath());
+        } catch (err: any) {
+          return deny('mcp:firewall:write', `Could not lock DesiredState for the rule update (${err?.message || err}); retry the propose`, req.audit);
+        }
+        const fresh = loadLocalDesiredState();
+        if (!fresh) {
+          return deny('mcp:firewall:write', 'DesiredState file (/etc/axonwall/state.json) not found on appliance', req.audit);
+        }
+        insertMcpRuleIntoState(fresh, req.rule);
+        persistDesiredState(fresh);
+        liveState = fresh;
+      } finally {
+        releaseStateLock?.();
+      }
 
       let applyStatus = 'staged_only';
       let applyJobId: string | undefined;
       if (req.applyImmediately) {
-        const compiled = compileNftables(state);
+        const compiled = compileNftables(liveState);
         const hashInput = JSON.stringify({
           nftScript: compiled.nftScript,
           files: [...compiled.files]
@@ -1574,8 +1623,37 @@ export async function handleMcpCallTool(
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds,
         });
         if (!applyRes.ok) {
-          state.rules = previousRules;
-          persistDesiredState(state);
+          // B2-M4: roll the staged rule back out under the same
+          // lock, reloaded fresh — restoring a stale snapshot here
+          // would clobber a concurrent writer's rule exactly like
+          // the bug above. The rule is removed by deep equality
+          // (rule.id is optional), so a pre-existing identical
+          // rule survives as one copy.
+          const stagedRuleJson = JSON.stringify(req.rule);
+          let releaseRollbackLock: (() => void) | null = null;
+          try {
+            try {
+              releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+            } catch {
+              // Best effort: the daemon rejected the apply, so the
+              // staged rule is inert in the kernel; a locked
+              // rollback that cannot run is logged, not fatal.
+              console.error('[MCP] Could not lock DesiredState to roll back a rejected staged rule; the staged rule remains on disk');
+              releaseRollbackLock = null;
+            }
+            if (releaseRollbackLock) {
+              const fresh = loadLocalDesiredState();
+              if (fresh) {
+                const idx = fresh.rules.findIndex((r) => JSON.stringify(r) === stagedRuleJson);
+                if (idx !== -1) {
+                  fresh.rules.splice(idx, 1);
+                  persistDesiredState(fresh);
+                }
+              }
+            }
+          } finally {
+            releaseRollbackLock?.();
+          }
           return deny(
             'mcp:firewall:apply',
             applyRes.data?.error || 'Daemon rejected ruleset apply; rolled back staged rule',

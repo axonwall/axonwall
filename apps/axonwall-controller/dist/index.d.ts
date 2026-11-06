@@ -17,7 +17,8 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
 import { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord } from './mcp/authz.js';
-import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId } from './mcp/server.js';
+import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath } from './mcp/server.js';
+import { acquireMcpLockFile } from './mcp/lockfile.js';
 import { recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries } from './mcp/audit.js';
 import { isMcpServerEnabled, getMcpServerStatus } from '@axonwall/lib/mcp';
 export interface ControllerTlsConfig {
@@ -27,7 +28,7 @@ export interface ControllerTlsConfig {
     isFallback?: boolean;
 }
 export declare function ensureControllerTls(certPath?: string, keyPath?: string, caPath?: string, caKeyPath?: string): ControllerTlsConfig | null;
-export { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord, processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries, isMcpServerEnabled, getMcpServerStatus, };
+export { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord, processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, acquireMcpLockFile, recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries, isMcpServerEnabled, getMcpServerStatus, };
 export declare function isValidMacAddress(value: unknown): boolean;
 export declare function normalizeMacAddress(value: string): string;
 export declare function isValidCidr(value: unknown): boolean;

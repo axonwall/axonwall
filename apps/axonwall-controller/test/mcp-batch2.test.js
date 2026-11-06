@@ -31,6 +31,9 @@ const {
   authenticateMcpToken,
   processMcpJsonRpcMessage,
   newMcpApplyJobId,
+  insertMcpRuleIntoState,
+  desiredStateLockPath,
+  acquireMcpLockFile,
 } = await import('../dist/index.js');
 
 // Fake daemon state, controlled per test.
@@ -189,6 +192,81 @@ test('B2-M3: read paths return data without a daemonDown flag when the daemon is
   const ifaces = await readResource('axonwall://telemetry/interfaces', 13);
   assert.equal(ifaces.interfaces.length, 1);
   assert.equal(ifaces.daemonDown, undefined);
+});
+
+// B2-M4: concurrent MCP propose_firewall_rule calls lost rules —
+// each call loaded state.json, mutated its own stale copy, and
+// persisted last-writer-wins, while both reported success. The
+// load -> mutate -> persist window is now serialized with the MCP
+// lockfile and the mutation is re-applied to a freshly reloaded
+// state inside the lock. The full propose path cannot run in this
+// sandbox (it needs a real /etc/axonwall/state.json, which is
+// shared with the sibling batch worktrees), so these pin the two
+// pieces the fix depends on: the insertion ordering and the lock
+// itself.
+
+function testRule(overrides) {
+  return {
+    action: 'pass',
+    direction: 'in',
+    interface: 'lan',
+    quick: true,
+    protocol: 'any',
+    source: 'any',
+    sourcePort: '',
+    destination: 'any',
+    destinationPort: '',
+    log: false,
+    enabled: true,
+    description: '',
+    sortOrder: 100,
+    ...overrides,
+  };
+}
+
+test('B2-M4: block rules insert before the first pass rule, other rules append', () => {
+  const state = {
+    rules: [testRule({ action: 'pass', description: 'first-pass' }), testRule({ action: 'pass', description: 'second-pass' })],
+  };
+  insertMcpRuleIntoState(state, testRule({ action: 'block', description: 'new-block' }));
+  assert.deepEqual(
+    state.rules.map((r) => r.description),
+    ['new-block', 'first-pass', 'second-pass'],
+    'a block rule must go before the first pass rule',
+  );
+
+  insertMcpRuleIntoState(state, testRule({ action: 'pass', description: 'new-pass' }));
+  assert.equal(state.rules.at(-1).description, 'new-pass', 'a pass rule appends');
+
+  const noPass = { rules: [testRule({ action: 'block', description: 'only-block' })] };
+  insertMcpRuleIntoState(noPass, testRule({ action: 'reject', description: 'new-reject' }));
+  assert.deepEqual(
+    noPass.rules.map((r) => r.description),
+    ['only-block', 'new-reject'],
+    'a block rule appends when there is no pass rule',
+  );
+});
+
+test('B2-M4: the DesiredState lock path is deterministic across calls', () => {
+  assert.equal(desiredStateLockPath(), desiredStateLockPath());
+  assert.ok(desiredStateLockPath().endsWith('state.json.lock'));
+});
+
+test('B2-M4: the lockfile serializes holders and frees on release', (t) => {
+  const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-mcp-lock-'));
+  t.after(() => fs.rmSync(lockDir, { recursive: true, force: true }));
+  const lockPath = path.join(lockDir, 'state.json.lock');
+
+  const release = acquireMcpLockFile(lockPath, 1000);
+  assert.throws(
+    () => acquireMcpLockFile(lockPath, 200),
+    /timed out waiting for lock/,
+    'a second holder must block until the timeout instead of taking the lock',
+  );
+  release();
+  // After release the lock is immediately acquirable again.
+  const release2 = acquireMcpLockFile(lockPath, 1000);
+  release2();
 });
 
 test('B2-M2: confirm denies when the daemon is down', async () => {

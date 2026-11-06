@@ -54,7 +54,8 @@ import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { listUsers, createUser, createPreAuthKey } from './headscale.js';
 import { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord } from './mcp/authz.js';
-import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, type JsonRpcRequest } from './mcp/server.js';
+import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, type JsonRpcRequest } from './mcp/server.js';
+import { acquireMcpLockFile } from './mcp/lockfile.js';
 import { recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries } from './mcp/audit.js';
 import { isMcpServerEnabled, getMcpServerStatus } from '@axonwall/lib/mcp';
 
@@ -303,6 +304,9 @@ export {
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
   newMcpApplyJobId,
+  insertMcpRuleIntoState,
+  desiredStateLockPath,
+  acquireMcpLockFile,
   recordMcpAuditEntry,
   verifyMcpAuditChain,
   queryMcpAuditEntries,
