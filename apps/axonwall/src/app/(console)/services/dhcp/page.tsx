@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Server, Plus, Trash2, CheckCircle2, FileCode, ShieldCheck, Save } from 'lucide-react';
+import { Server, Plus, Trash2, CheckCircle2, AlertTriangle, FileCode, ShieldCheck, Save } from 'lucide-react';
 import { compileKeaDhcp4 } from '@axonwall/lib/compile/kea';
 import { inferInterfaceRole, isInterfaceAuthoritativeDhcp, type DesiredState, type DhcpConfig, type Interface } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
@@ -29,6 +29,9 @@ export default function DhcpPage() {
   const [showKeaConfig, setShowKeaConfig] = useState(false);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // B19: the banner used to be always emerald, so a failed save looked
+  // like a confirmed one. Type it so errors render red.
+  const [statusKind, setStatusKind] = useState<'success' | 'error'>('success');
 
   // Per-subnet new static mapping form drafts
   const [drafts, setDrafts] = useState<Record<number, ReservationDraft>>({});
@@ -71,10 +74,19 @@ export default function DhcpPage() {
       };
       setFullState(nextState);
       const res = await applyDesiredState(nextState);
-      setStatusMsg(res.message || 'Saved to /etc/axonwall/services.yaml');
+      // B19: check res.success — a daemon success:false message must
+      // not render in the green success banner.
+      if (res.success) {
+        setStatusKind('success');
+        setStatusMsg(res.message || 'Saved to /etc/axonwall/services.yaml');
+      } else {
+        setStatusKind('error');
+        setStatusMsg(res.message || 'Failed to save DHCP configuration');
+      }
     } catch (err: any) {
       setDhcp(prevDhcp);
       setFullState(prevFullState);
+      setStatusKind('error');
       setStatusMsg(`Error: ${err?.message || 'Failed to save DHCP configuration'}`);
     } finally {
       setSaving(false);
@@ -159,8 +171,18 @@ export default function DhcpPage() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div
+          className={
+            statusKind === 'error'
+              ? 'p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-300 flex items-center gap-2'
+              : 'p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2'
+          }
+        >
+          {statusKind === 'error' ? (
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
           <span>{statusMsg}</span>
         </div>
       )}
