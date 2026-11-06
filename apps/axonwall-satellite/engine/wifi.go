@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
+	"time"
 )
 
 var validRadioRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
@@ -162,7 +163,17 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		slog.Warn("Failed to restart hostapd via systemd, trying direct execution", "error", err, "output", string(out))
 		// Fallback for non-systemd environments (like OpenWrt)
-		exec.Command("pkill", "-f", fmt.Sprintf("hostapd %s", confPath)).Run()
+		// A-M39 (round 2): the old pattern "hostapd <confPath>"
+		// could never match the daemon this code itself starts
+		// ("hostapd -B <confPath>"), so the stale hostapd survived
+		// every re-configure. Match the real argv, with the path
+		// regex-quoted, and wait for the old daemon to die before
+		// starting the new one (otherwise the new hostapd fails to
+		// bind the radio while the old config stays live).
+		_ = exec.Command("pkill", "-f", hostapdPattern(confPath)).Run()
+		if !waitHostapdGone(confPath, 5*time.Second) {
+			return fmt.Errorf("previous hostapd for radio %s is still running; refusing to start a second instance", cfg.Radio)
+		}
 
 		startCmd := exec.Command("hostapd", "-B", confPath)
 		if startOut, startErr := startCmd.CombinedOutput(); startErr != nil {
@@ -171,6 +182,28 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 	}
 
 	return nil
+}
+
+// hostapdPattern matches the exact argv this code starts hostapd with
+// ("hostapd -B <confPath>") for pkill/pgrep -f.
+func hostapdPattern(confPath string) string {
+	return fmt.Sprintf("hostapd -B %s", regexp.QuoteMeta(confPath))
+}
+
+// waitHostapdGone polls until no hostapd with this config is running, or
+// the deadline passes. Teardown must not report success while the AP
+// keeps broadcasting (A-M39).
+func waitHostapdGone(confPath string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if exec.Command("pgrep", "-f", hostapdPattern(confPath)).Run() != nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // Teardown stops hostapd for the radio
@@ -182,7 +215,14 @@ func (e *WiFiEngine) Teardown(radio string) error {
 
 	cmd := exec.Command("systemctl", "stop", fmt.Sprintf("hostapd@%s", radio))
 	if err := cmd.Run(); err != nil {
-		exec.Command("pkill", "-f", fmt.Sprintf("hostapd %s", confPath)).Run()
+		_ = exec.Command("pkill", "-f", hostapdPattern(confPath)).Run()
+	}
+
+	// A-M39 (round 2): Teardown used to remove the config and return
+	// nil while the AP kept broadcasting. Verify the process is
+	// actually gone before reporting success.
+	if !waitHostapdGone(confPath, 5*time.Second) {
+		return fmt.Errorf("hostapd for radio %s is still running after stop; AP may still be broadcasting", radio)
 	}
 
 	_ = os.Remove(confPath)

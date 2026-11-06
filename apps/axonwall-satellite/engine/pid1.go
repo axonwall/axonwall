@@ -118,8 +118,8 @@ func ParseKernelCmdline(cmdline string) EdgeBootConfig {
 			} else {
 				// A-M35 (round 2): a rejected interface spec used to
 				// vanish silently, so the interface simply never
-				// existed. Log it loudly instead.
-				slog.Warn("Ignoring unparseable interface boot argument", "role", role, "value", val)
+				// existed. Log it so a bad boot arg is diagnosable.
+				slog.Warn("Ignoring unparseable interface boot arg", "key", key, "value", val)
 			}
 		}
 	}
@@ -138,12 +138,15 @@ func parseInterfaceBootArg(role, arg string) (EdgeInterfaceSpec, bool) {
 	addr := rest
 	gw := ""
 
-	// A-M35 (round 2): `dhcp` with an explicit gateway (`eth0:dhcp:10.0.0.1`)
-	// must split before the CIDR branch below — the old code only
-	// recognised a bare `dhcp` and rejected the gateway form outright.
-	if len(rest) > 5 && strings.EqualFold(rest[:5], "dhcp:") {
+	// A-M35 (round 2): the dhcp-with-gateway form ("dhcp:<gateway>")
+	// must be split before the CIDR branch. The old code only entered
+	// the gateway branch when rest was exactly "dhcp", in which case
+	// there was no colon to split on — dead code — so
+	// "eth0:dhcp:10.0.0.1" fell through to ParseCIDR and the whole
+	// interface spec was dropped.
+	if strings.HasPrefix(strings.ToLower(rest), "dhcp:") {
 		addr = "dhcp"
-		gw = strings.TrimSpace(rest[5:])
+		gw = strings.TrimSpace(rest[len("dhcp:"):])
 	} else if !strings.EqualFold(rest, "dhcp") {
 		if slashIdx := strings.IndexByte(rest, '/'); slashIdx > 0 {
 			afterSlash := rest[slashIdx+1:]
@@ -152,13 +155,15 @@ func parseInterfaceBootArg(role, arg string) (EdgeInterfaceSpec, bool) {
 				gw = strings.TrimSpace(afterSlash[gwColon+1:])
 			}
 		} else if colonIdx := strings.LastIndexByte(rest, ':'); colonIdx > 0 {
-			// Bare IP with a gateway (`eth0:10.0.0.1:10.0.0.254`, no
-			// prefix). Only split when both sides parse as IPs, so a
-			// bare IPv6 address (colons, no prefix) is never split.
-			left, right := rest[:colonIdx], rest[colonIdx+1:]
-			if net.ParseIP(left) != nil && net.ParseIP(right) != nil {
-				addr = left
-				gw = right
+			// Bare IP with gateway, e.g. "10.0.0.1:10.0.0.254" (no
+			// prefix). Only split when both sides parse as IPs so
+			// bare IPv6 literals are never mangled here, and only
+			// for IPv4: the bare address takes the /24 the v1
+			// cloud-init path in this package also defaults to.
+			candAddr, candGw := strings.TrimSpace(rest[:colonIdx]), strings.TrimSpace(rest[colonIdx+1:])
+			if ip := net.ParseIP(candAddr); ip != nil && ip.To4() != nil && net.ParseIP(candGw) != nil {
+				addr = candAddr + "/24"
+				gw = candGw
 			}
 		}
 	}

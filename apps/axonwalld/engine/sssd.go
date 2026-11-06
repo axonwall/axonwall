@@ -21,12 +21,20 @@ func BuildSSSDConfig(baseDN string, peerLDAPURI string) string {
 	var tlsBlock string
 	if peerLDAPURI != "" {
 		ldapURI = fmt.Sprintf("ldap://127.0.0.1:389, %s", peerLDAPURI)
-		if caCertPath == "" {
-			caCertPath = HAPKICACertPath
-		}
-		tlsBlock = fmt.Sprintf(`ldap_id_use_start_tls = False
+		// A-M31 (round 2): the old code forced a tls_cacert path
+		// that does not exist yet when a peer was configured
+		// before HA PKI material existed; with
+		// ldap_tls_reqcert=demand sssd then failed to start. Only
+		// emit a CA path that actually exists; without one, do
+		// not demand a cert we cannot verify against.
+		if caCertPath != "" {
+			tlsBlock = fmt.Sprintf(`ldap_id_use_start_tls = False
 ldap_tls_reqcert = demand
 ldap_tls_cacert = %s`, caCertPath)
+		} else {
+			tlsBlock = `ldap_id_use_start_tls = False
+ldap_tls_reqcert = never`
+		}
 	} else if caCertPath != "" {
 		tlsBlock = fmt.Sprintf(`ldap_id_use_start_tls = False
 ldap_tls_reqcert = demand
@@ -211,20 +219,48 @@ Cmnd_Alias AXONWALL_OP_CMDS = /usr/local/bin/axonwall-tui --readonly, /usr/local
 			return err
 		}
 		_ = os.Chown("/etc/sssd/sssd.conf", 0, 0)
-		_ = exec.Command("systemctl", "enable", "sssd").Run()
-		if err := exec.Command("systemctl", "restart", "sssd").Run(); err != nil {
-			_ = exec.Command("pkill", "-x", "sssd").Run()
-			_ = exec.Command("/usr/sbin/sssd", "-D").Run()
+		if err := restartSSSD(); err != nil {
+			return err
 		}
-	} else if exec.Command("systemctl", "is-active", "--quiet", "sssd").Run() != nil {
-		_ = exec.Command("systemctl", "enable", "sssd").Run()
-		if err := exec.Command("systemctl", "restart", "sssd").Run(); err != nil {
-			if exec.Command("pgrep", "-x", "sssd").Run() != nil {
-				_ = exec.Command("/usr/sbin/sssd", "-D").Run()
-			}
+	} else if !sssdRunning() {
+		if err := restartSSSD(); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// sssdRunning reports whether the SSSD daemon is currently running: via
+// systemctl on systemd hosts, falling back to pgrep (a directly-started
+// sssd has no unit for is-active to see).
+func sssdRunning() bool {
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		if exec.Command("systemctl", "is-active", "--quiet", "sssd").Run() == nil {
+			return true
+		}
+	}
+	return exec.Command("pgrep", "-x", "sssd").Run() == nil
+}
+
+// restartSSSD restarts SSSD (systemctl, falling back to pkill + a direct
+// start on non-systemd hosts) and verifies the daemon is actually
+// running afterwards.
+//
+// A-M31 (round 2): the old code discarded the fallback's error and
+// returned nil, so a dead sssd was invisible to Bootstrap (which only
+// warns on a returned error) while LDAP logins via SSSD failed.
+func restartSSSD() error {
+	_ = exec.Command("systemctl", "enable", "sssd").Run()
+	if err := exec.Command("systemctl", "restart", "sssd").Run(); err != nil {
+		_ = exec.Command("pkill", "-x", "sssd").Run()
+		if err := exec.Command("/usr/sbin/sssd", "-D").Run(); err != nil {
+			return fmt.Errorf("failed to start sssd: %w", err)
+		}
+	}
+	if !sssdRunning() {
+		return fmt.Errorf("sssd is not running after restart")
+	}
 	return nil
 }
 

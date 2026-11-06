@@ -87,6 +87,7 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 	}
 
 	var errs []error
+	var assigned []string
 	if p.LanVipV4 != "" {
 		if err := netEngine.ConfigureInterface(EdgeInterfaceSpec{
 			Name:    "lan-vip4",
@@ -96,6 +97,8 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 			Enabled: true,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("promote: failed to assign LAN VIP %s on %s: %w", p.LanVipV4, lanDev, err))
+		} else {
+			assigned = append(assigned, p.LanVipV4)
 		}
 	}
 	if p.LanVipV6 != "" {
@@ -107,9 +110,25 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 			Enabled: true,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("promote: failed to assign LAN VIP %s on %s: %w", p.LanVipV6, lanDev, err))
+		} else {
+			assigned = append(assigned, p.LanVipV6)
 		}
 	}
 	if len(errs) > 0 {
+		// A-M41 (round 2): roll back the half-applied kernel state.
+		// Without this, a v4-OK/v6-failed Promote returned an error
+		// with the role unchanged ("standby") while the v4 VIP was
+		// live on the interface and the WAN was unfenced. Remove
+		// any VIP that was assigned and re-fence the WAN so the
+		// recorded role matches the kernel state.
+		for _, vip := range assigned {
+			if rerr := netEngine.RemoveAddress(lanDev, vip); rerr != nil {
+				errs = append(errs, fmt.Errorf("promote: rollback failed to remove LAN VIP %s from %s: %w", vip, lanDev, rerr))
+			}
+		}
+		if rerr := netEngine.SetLinkUp(wanDev, false); rerr != nil {
+			errs = append(errs, fmt.Errorf("promote: rollback failed to re-fence WAN %s: %w", wanDev, rerr))
+		}
 		// Role and remembered VIPs stay as they were: the node is
 		// not active if its VIPs are not actually assigned.
 		return errors.Join(errs...)
@@ -178,6 +197,16 @@ func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPa
 		}
 	}
 	if len(errs) > 0 {
+		// A-M41 (round 2): the WAN is already fenced while the
+		// role still says "active" — a node that claims active but
+		// cannot forward. Roll the fence back (bring the WAN back
+		// up) so the recorded role matches the kernel state and a
+		// retry starts from a consistent state. (With idempotent
+		// RemoveAddress above, the routine "VIP already absent"
+		// case no longer reaches this path at all.)
+		if rerr := netEngine.SetLinkUp(wanDev, true); rerr != nil {
+			errs = append(errs, fmt.Errorf("demote: rollback failed to restore WAN %s: %w", wanDev, rerr))
+		}
 		return errors.Join(errs...)
 	}
 	h.role = "standby"

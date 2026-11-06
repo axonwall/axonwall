@@ -582,8 +582,19 @@ func main() {
 							continue
 						}
 						slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsURL)
-						cmd := exec.Command("tailscale", "up", "--login-server="+hsURL, "--authkey="+hsKey, "--reset")
+						// A-M42 (round 2): this exec used to run
+						// unbounded inline in the websocket read
+						// loop — the only goroutine that reads hub
+						// messages or processes pongs — so a hung
+						// tailscale invocation wedged all command
+						// processing and the reconnect loop. Bound
+						// it to 30s; on timeout the command is
+						// killed and the failure is acked to the hub
+						// instead of stalling the session.
+						hsCtx, hsCancel := context.WithTimeout(context.Background(), 30*time.Second)
+						cmd := exec.CommandContext(hsCtx, "tailscale", "up", "--login-server="+hsURL, "--authkey="+hsKey, "--reset")
 						out, err := cmd.CombinedOutput()
+						hsCancel()
 						if err != nil {
 							slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
 							sendAck(env.Type, env.CommandID, err)

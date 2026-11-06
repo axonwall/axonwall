@@ -286,7 +286,11 @@ func (vm *VigilanteManager) ListBlockedIPs() []BlockedIPRecord {
 	return res
 }
 
-// ProvisionEvidenceVault initializes an encrypted/compressed ZFS dataset and folder hierarchy
+// ProvisionEvidenceVault initializes a compressed ZFS dataset and folder hierarchy.
+// (The old docstring promised an *encrypted* dataset, but the create
+// command never set any encryption property — there is no ZFS encryption
+// key infrastructure in this codebase — so the claim is dropped rather
+// than left as a lie. See A-M44.)
 func (vm *VigilanteManager) ProvisionEvidenceVault(pool, dataset string) error {
 	if pool == "" {
 		pool = "tank"
@@ -303,13 +307,29 @@ func (vm *VigilanteManager) ProvisionEvidenceVault(pool, dataset string) error {
 	// Create ZFS dataset with zstd compression if zfs is available
 	cmd := exec.Command("zfs", "create", "-p", "-o", "compression=zstd", fullSpec)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[VigilanteManager] zfs create info (may already exist): %v, out: %s", err, string(out))
+		log.Printf("[VigilanteManager] zfs create failed for %s (may already exist): %v, out: %s", fullSpec, err, string(out))
 	}
 
-	// Mountpoint lookup or fallback
-	mountDir := fmt.Sprintf("/mnt/%s", fullSpec)
-	if _, err := os.Stat(mountDir); os.IsNotExist(err) {
-		mountDir = filepath.Join(vm.evidenceRoot, dataset)
+	// A-M44 (round 2): the old code only logged a zfs create failure,
+	// then fell back to the evidence root on / when the mountpoint did
+	// not exist — so on a box without zfs (or with a failed create)
+	// the caller reported "provisioned successfully" while no dataset
+	// existed and evidence landed unencrypted on the root filesystem.
+	// The dataset must be confirmed to exist, and the mountpoint must
+	// actually be the dataset's mount — never a fallback onto /.
+	if !zfsDatasetExists(fullSpec) {
+		return fmt.Errorf("evidence vault dataset %s does not exist (zfs create failed)", fullSpec)
+	}
+	mountDir, err := zfsDatasetMountpoint(fullSpec)
+	if err != nil {
+		return fmt.Errorf("evidence vault dataset %s has no usable mountpoint: %w", fullSpec, err)
+	}
+	if !isMountpoint(mountDir) {
+		// The dataset exists but is not mounted; try to mount it once.
+		_ = exec.Command("zfs", "mount", fullSpec).Run()
+		if !isMountpoint(mountDir) {
+			return fmt.Errorf("evidence vault dataset %s is not mounted at %s", fullSpec, mountDir)
+		}
 	}
 
 	subdirs := []string{
@@ -335,6 +355,54 @@ func (vm *VigilanteManager) ProvisionEvidenceVault(pool, dataset string) error {
 
 	log.Printf("[VigilanteManager] Evidence vault provisioned at %s", mountDir)
 	return nil
+}
+
+// zfsDatasetExists reports whether a ZFS dataset exists (via "zfs list").
+// When the zfs binary is absent the command fails, so a box without zfs
+// correctly reports no dataset (A-M44).
+func zfsDatasetExists(spec string) bool {
+	return exec.Command("zfs", "list", "-H", "-o", "name", spec).Run() == nil
+}
+
+// zfsDatasetMountpoint returns the configured mountpoint of a ZFS
+// dataset. "none" and "legacy" are not usable mountpoints.
+func zfsDatasetMountpoint(spec string) (string, error) {
+	out, err := exec.Command("zfs", "get", "-H", "-o", "value", "mountpoint", spec).Output()
+	if err != nil {
+		return "", err
+	}
+	mp := strings.TrimSpace(string(out))
+	if mp == "" || mp == "none" || mp == "legacy" {
+		return "", fmt.Errorf("dataset mountpoint is %q", mp)
+	}
+	return mp, nil
+}
+
+// isMountpoint reports whether dir is an active mount point, by scanning
+// /proc/mounts. A directory that merely exists (e.g. a stale empty dir
+// where a dataset should be mounted) is not a mountpoint.
+func isMountpoint(dir string) bool {
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && unescapeMountField(fields[1]) == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// unescapeMountField reverses the octal escaping /proc/mounts applies to
+// mount paths (space -> \040, tab -> \011, newline -> \012, backslash ->
+// \134).
+func unescapeMountField(s string) string {
+	replacer := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	return replacer.Replace(s)
 }
 
 // CreateIncidentSnapshot creates an immutable ZFS snapshot of the evidence vault for legal chain-of-custody

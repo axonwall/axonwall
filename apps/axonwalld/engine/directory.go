@@ -42,22 +42,25 @@ func DefaultPasswordPolicyConfig() PasswordPolicyConfig {
 }
 
 type DirectoryStatus struct {
-	SlapdRunning         bool                 `json:"slapdRunning"`
-	SssdRunning          bool                 `json:"sssdRunning"`
-	BaseDN               string               `json:"baseDn"`
-	ServerID             int                  `json:"serverId"`
-	HaSyncEnabled        bool                 `json:"haSyncEnabled"`
-	HaRole               string               `json:"haRole"`
-	PeerURI              string               `json:"peerUri,omitempty"`
-	ContextCSN           string               `json:"contextCsn,omitempty"`
-	PeerContextCSN       string               `json:"peerContextCsn,omitempty"`
-	InSync               bool                 `json:"inSync"`
-	ClockSkewMs          float64              `json:"clockSkewMs"`
-	RootSshDisabled      bool                 `json:"rootSshDisabled"`
-	TotalDirectoryUsers  int                  `json:"totalDirectoryUsers"`
-	AdminUsersCount      int                  `json:"adminUsersCount"`
-	UnmigratedLocalCount int                  `json:"unmigratedLocalCount"`
-	PasswordPolicy       PasswordPolicyConfig `json:"passwordPolicy"`
+	SlapdRunning        bool                 `json:"slapdRunning"`
+	SssdRunning         bool                 `json:"sssdRunning"`
+	BaseDN              string               `json:"baseDn"`
+	ServerID            int                  `json:"serverId"`
+	HaSyncEnabled       bool                 `json:"haSyncEnabled"`
+	HaRole              string               `json:"haRole"`
+	PeerURI             string               `json:"peerUri,omitempty"`
+	ContextCSN          string               `json:"contextCsn,omitempty"`
+	PeerContextCSN      string               `json:"peerContextCsn,omitempty"`
+	InSync              bool                 `json:"inSync"`
+	ClockSkewMs         float64              `json:"clockSkewMs"`
+	RootSshDisabled     bool                 `json:"rootSshDisabled"`
+	TotalDirectoryUsers int                  `json:"totalDirectoryUsers"`
+	AdminUsersCount     int                  `json:"adminUsersCount"`
+	UnmigratedLocalCount int                 `json:"unmigratedLocalCount"`
+	// AdminSeedError records a break-glass admin seeding failure (A-M32):
+	// when set, the box may have no admin account.
+	AdminSeedError      string               `json:"adminSeedError,omitempty"`
+	PasswordPolicy      PasswordPolicyConfig `json:"passwordPolicy"`
 }
 
 type PluginLdapGroupSpec struct {
@@ -91,16 +94,19 @@ type PluginLDAPBinding struct {
 }
 
 type DirectoryManager struct {
-	mu         sync.RWMutex
-	baseDN     string
-	serverID   int
-	haRole     string
-	haEnabled  bool
-	peerURI    string
-	policy     PasswordPolicyConfig
-	localUsers *UserManager
-	etckeeper  *EtckeeperManager
-	policyFile string
+	mu          sync.RWMutex
+	baseDN      string
+	serverID    int
+	haRole      string
+	haEnabled   bool
+	peerURI     string
+	policy      PasswordPolicyConfig
+	localUsers  *UserManager
+	etckeeper   *EtckeeperManager
+	policyFile  string
+	// adminSeedError records the last break-glass admin seeding failure
+	// (A-M32); surfaced in GetStatus so a box with no admin is visible.
+	adminSeedError string
 }
 
 func NewDirectoryManager(localUsers *UserManager, etckeeper *EtckeeperManager) *DirectoryManager {
@@ -207,46 +213,7 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 	}
 
 	// Ensure at least one admin user exists in LDAP; if not, seed initial break-glass 'admin'
-	users, err := d.listLDAPUsersInternal()
-	if err == nil {
-		hasAdmin := false
-		for _, u := range users {
-			if u.ApplianceRole == "admin" && !u.PasswordLocked {
-				hasAdmin = true
-			}
-			// Upgrade existing shell users (admin / os_only) from legacy /bin/bash to /usr/bin/zsh
-			if (u.ApplianceRole == "admin" || u.ApplianceRole == "os_only") && (u.Shell == "/bin/bash" || u.Shell == "") {
-				zshShell := "/usr/bin/zsh"
-				_ = d.UpdateUser(u.Username, UpdateUserRequest{Shell: &zshShell})
-			}
-			if u.HomeDir != "" && u.UID >= 1000 {
-				seedUserZshrc(u.HomeDir, u.UID, u.GID)
-			}
-		}
-		if !hasAdmin {
-			adminPass, hasExistingScrypt := d.readInitialAdminPasswordWithState()
-			log.Printf("[Directory] No active admin user found in LDAP; seeding default 'admin' account...")
-			var savedEnv map[string][]byte
-			if hasExistingScrypt {
-				savedEnv = make(map[string][]byte)
-				for _, p := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
-					if b, err := os.ReadFile(p); err == nil {
-						savedEnv[p] = b
-					}
-				}
-			}
-			_ = d.CreateUser(CreateUserRequest{
-				Username:      "admin",
-				Comment:       "Axonwall Break-Glass Administrator",
-				Password:      adminPass,
-				ApplianceRole: "admin",
-				Shell:         "/usr/bin/zsh",
-			})
-			for p, b := range savedEnv {
-				_ = os.WriteFile(p, b, 0600)
-			}
-		}
-	}
+	seedErr := d.ensureBreakGlassAdmin()
 
 	d.syncLocalNSSMirrorIfNoSSSD("")
 	_ = d.SyncRootSshPolicy()
@@ -262,6 +229,113 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 			}
 		}()
 	}
+	// A-M32: a failed admin seeding used to be swallowed entirely.
+	// Return it so the startup goroutine logs it (and GetStatus
+	// already carries it via AdminSeedError).
+	if seedErr != nil {
+		return seedErr
+	}
+	return nil
+}
+
+// setAdminSeedError records a break-glass admin seeding failure for
+// GetStatus; clearAdminSeedError clears it after a successful seed.
+func (d *DirectoryManager) setAdminSeedError(msg string) {
+	d.mu.Lock()
+	d.adminSeedError = msg
+	d.mu.Unlock()
+}
+
+func (d *DirectoryManager) clearAdminSeedError() {
+	d.mu.Lock()
+	d.adminSeedError = ""
+	d.mu.Unlock()
+}
+
+// ensureBreakGlassAdmin verifies at least one unlocked admin exists in
+// LDAP and seeds the break-glass "admin" account when none does.
+//
+// A-M32 (round 2): the old code skipped this whole block silently when
+// the user list failed, and discarded the CreateUser error, so a box
+// could boot with no admin account and nothing in the log said so.
+// Listing and seeding are now retried, failures are logged loudly,
+// recorded for GetStatus, and returned.
+func (d *DirectoryManager) ensureBreakGlassAdmin() error {
+	var users []LocalUser
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		users, err = d.listLDAPUsersInternal()
+		if err == nil {
+			break
+		}
+		log.Printf("[Directory] ERROR: cannot list LDAP users to check for an admin account (attempt %d/4): %v", attempt+1, err)
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+		}
+	}
+	if err != nil {
+		msg := fmt.Sprintf("break-glass admin seeding skipped: cannot list LDAP users: %v", err)
+		log.Printf("[Directory] ERROR: %s — the box may have no admin account", msg)
+		d.setAdminSeedError(msg)
+		return fmt.Errorf("%s", msg)
+	}
+
+	hasAdmin := false
+	for _, u := range users {
+		if u.ApplianceRole == "admin" && !u.PasswordLocked {
+			hasAdmin = true
+		}
+		// Upgrade existing shell users (admin / os_only) from legacy /bin/bash to /usr/bin/zsh
+		if (u.ApplianceRole == "admin" || u.ApplianceRole == "os_only") && (u.Shell == "/bin/bash" || u.Shell == "") {
+			zshShell := "/usr/bin/zsh"
+			_ = d.UpdateUser(u.Username, UpdateUserRequest{Shell: &zshShell})
+		}
+		if u.HomeDir != "" && u.UID >= 1000 {
+			seedUserZshrc(u.HomeDir, u.UID, u.GID)
+		}
+	}
+	if hasAdmin {
+		d.clearAdminSeedError()
+		return nil
+	}
+
+	adminPass, hasExistingScrypt := d.readInitialAdminPasswordWithState()
+	log.Printf("[Directory] No active admin user found in LDAP; seeding default 'admin' account...")
+	var savedEnv map[string][]byte
+	if hasExistingScrypt {
+		savedEnv = make(map[string][]byte)
+		for _, p := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
+			if b, err := os.ReadFile(p); err == nil {
+				savedEnv[p] = b
+			}
+		}
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		err = d.CreateUser(CreateUserRequest{
+			Username:      "admin",
+			Comment:       "Axonwall Break-Glass Administrator",
+			Password:      adminPass,
+			ApplianceRole: "admin",
+			Shell:         "/usr/bin/zsh",
+		})
+		if err == nil {
+			break
+		}
+		log.Printf("[Directory] ERROR: failed to seed break-glass 'admin' account (attempt %d/3): %v", attempt+1, err)
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+		}
+	}
+	if err != nil {
+		msg := fmt.Sprintf("break-glass admin seeding failed: %v", err)
+		log.Printf("[Directory] ERROR: %s — the box may have no admin account", msg)
+		d.setAdminSeedError(msg)
+		return fmt.Errorf("%s", msg)
+	}
+	for p, b := range savedEnv {
+		_ = os.WriteFile(p, b, 0600)
+	}
+	d.clearAdminSeedError()
 	return nil
 }
 
@@ -1917,6 +1991,7 @@ func (d *DirectoryManager) GetStatus() DirectoryStatus {
 		HaSyncEnabled:  d.haEnabled,
 		HaRole:         d.haRole,
 		PeerURI:        d.peerURI,
+		AdminSeedError: d.adminSeedError,
 		PasswordPolicy: d.policy,
 	}
 	d.mu.RUnlock()

@@ -437,14 +437,33 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 			devIndent     int
 			curSpec       *EdgeInterfaceSpec
 			inAddresses   bool
+			inRoutes      bool
+			curRoute      *EdgeRouteSpec
 			FirstStaticIP string
 		)
+		// A-M40 (round 2): "routes:" lists under ethernets were
+		// silently dropped. A pending route is flushed into the
+		// routes slice (with the current device attached) when the
+		// list ends, and only complete routes (destination +
+		// parseable gateway) are kept.
+		flushRoute := func() {
+			if curRoute != nil && curRoute.Destination != "" && net.ParseIP(curRoute.Gateway) != nil {
+				routes = append(routes, *curRoute)
+			}
+			curRoute = nil
+			inRoutes = false
+		}
 		flushDev := func() {
+			flushRoute()
 			if curSpec != nil && curSpec.Device != "" {
 				if curSpec.Address == "" && FirstStaticIP != "" {
 					curSpec.Address = FirstStaticIP
 				}
-				if curSpec.Address != "" {
+				// A-M40 side note: a device with only "dhcp6:
+				// true" used to be dropped entirely. Keep it
+				// when it carries IPv6 configuration (mode or
+				// address) so the link still comes up.
+				if curSpec.Address != "" || curSpec.IPv6Mode != "" || curSpec.IPv6Address != "" {
 					if curSpec.Name == "" {
 						curSpec.Name = inferInterfaceRole(len(ifaces), curSpec.Gateway != "")
 					}
@@ -513,6 +532,40 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 				inAddresses = false
 			}
 
+			// A-M40: "routes:" lists under ethernets. A "- to:"
+			// item starts a route; deeper "to:"/"via:" lines fill
+			// it. Any other device-level key ends the list.
+			if tl == "routes:" {
+				flushRoute()
+				inRoutes = true
+				inAddresses = false
+				continue
+			}
+			if inRoutes {
+				if strings.HasPrefix(tl, "-") {
+					flushRoute()
+					curRoute = &EdgeRouteSpec{Device: curDev}
+					inRoutes = true
+					if rest := strings.TrimSpace(strings.TrimPrefix(tl, "-")); rest != "" {
+						applyRouteKV(curRoute, rest)
+					}
+					continue
+				}
+				if strings.Contains(tl, ":") {
+					k := strings.ToLower(strings.TrimSpace(strings.SplitN(tl, ":", 2)[0]))
+					// Route keys keep the list open (applyRouteKV
+					// records to/via and ignores the rest); any
+					// other device-level key ends it.
+					if k == "to" || k == "via" || k == "destination" || k == "gateway" || k == "from" || k == "metric" || k == "table" || k == "on-link" {
+						if curRoute != nil {
+							applyRouteKV(curRoute, tl)
+						}
+						continue
+					}
+				}
+				flushRoute()
+			}
+
 			if strings.Contains(tl, ":") {
 				parts := strings.SplitN(tl, ":", 2)
 				k := strings.ToLower(strings.TrimSpace(parts[0]))
@@ -521,6 +574,21 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 				case "dhcp4":
 					if v == "true" || v == "yes" || v == "1" {
 						curSpec.Address = "dhcp"
+					}
+				case "dhcp6":
+					// A-M40 side note: a dhcp6-only device was
+					// dropped entirely; record the mode so the
+					// device survives flushDev.
+					if (v == "true" || v == "yes" || v == "1") && curSpec.IPv6Mode == "" {
+						curSpec.IPv6Mode = "auto"
+					}
+				case "gateway6":
+					// A-M40 side note: no IPv6 gateway field
+					// exists on the spec, so carry it as a
+					// default route (the route layer handles
+					// IPv6 gateways).
+					if ip := net.ParseIP(v); ip != nil && ip.To4() == nil {
+						routes = append(routes, EdgeRouteSpec{Destination: "default", Gateway: v, Device: curDev})
 					}
 				case "addresses":
 					// Inline array e.g. addresses: [10.0.0.1/24]
@@ -554,7 +622,19 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 		curMask   string
 		curGW     string
 		curType   string
+		inRoute   bool
+		curRoute  *EdgeRouteSpec
 	)
+	// A-M40 (round 2): "- type: route" entries were discarded
+	// (flushV1Spec ran and curSpec was set to nil without recording
+	// anything). Capture them as EdgeRouteSpecs.
+	flushRouteV1 := func() {
+		if curRoute != nil && curRoute.Destination != "" && net.ParseIP(curRoute.Gateway) != nil {
+			routes = append(routes, *curRoute)
+		}
+		curRoute = nil
+		inRoute = false
+	}
 	flushSubnet := func() {
 		if curSpec == nil {
 			return
@@ -578,6 +658,7 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 		curAddr, curMask, curGW, curType = "", "", "", ""
 	}
 	flushV1Spec := func() {
+		flushRouteV1()
 		flushSubnet()
 		if curSpec != nil && curSpec.Device != "" && curSpec.Address != "" {
 			if curSpec.Name == "" {
@@ -608,6 +689,20 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 			flushV1Spec()
 			if typeVal == "physical" {
 				curSpec = &EdgeInterfaceSpec{MTU: 1500, Enabled: true}
+			}
+			// A-M40: "- type: route" entries carry destination /
+			// gateway keys on the following lines.
+			if typeVal == "route" {
+				inRoute = true
+				curRoute = &EdgeRouteSpec{}
+			}
+			continue
+		}
+		// A-M40: route-entry keys (destination/gateway) are parsed
+		// even though no physical spec is active.
+		if inRoute {
+			if strings.Contains(tl, ":") {
+				applyRouteKV(curRoute, strings.TrimSpace(strings.TrimPrefix(tl, "-")))
 			}
 			continue
 		}
