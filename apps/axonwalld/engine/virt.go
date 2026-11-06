@@ -77,6 +77,15 @@ type VirtManager struct {
 	ctSpecs      map[int]CompiledCtSpec
 	vmStartTimes map[int]int64
 	defaultPool  string
+	// startMu guards startingVMs: the set of VMIDs whose StartVM
+	// task is still running. The already-running pid check in
+	// StartVM races a concurrent start (both pass before either
+	// QEMU writes its pidfile), so two concurrent starts could
+	// launch two QEMU processes for the same VM (round-2 A-L22).
+	// The flag is held from the pid check until the start task
+	// finishes, covering provisioning, socket cleanup, and launch.
+	startMu     sync.Mutex
+	startingVMs map[int]bool
 }
 
 type CompiledVmSpec struct {
@@ -146,6 +155,7 @@ func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
 		ctSpecs:      make(map[int]CompiledCtSpec),
 		vmStartTimes: make(map[int]int64),
 		defaultPool:  "tank",
+		startingVMs:  make(map[int]bool),
 	}
 	m.loadPersistedSpecs()
 	return m
@@ -493,11 +503,36 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 	}
 
 	pidFile := fmt.Sprintf("/run/axonwall/pids/vm-%d.pid", vmid)
+
+	// A-L22: claim the start before the pid check. The task below
+	// runs asynchronously, so without this flag a second concurrent
+	// StartVM would pass the pid check (no pidfile yet) and launch
+	// a second QEMU for the same VM.
+	m.startMu.Lock()
+	if m.startingVMs == nil {
+		m.startingVMs = make(map[int]bool)
+	}
+	if m.startingVMs[vmid] {
+		m.startMu.Unlock()
+		return "", fmt.Errorf("VM %d start already in progress", vmid)
+	}
+	m.startingVMs[vmid] = true
+	m.startMu.Unlock()
+	clearStarting := func() {
+		m.startMu.Lock()
+		delete(m.startingVMs, vmid)
+		m.startMu.Unlock()
+	}
+
 	if pid := readPidFile(pidFile); pid > 0 && isPidRunning(pid) {
+		clearStarting()
 		return "", fmt.Errorf("VM %d is already running (PID %d)", vmid, pid)
 	}
 
 	upid := m.taskMgr.StartTask("qmstart", strconv.Itoa(vmid), user, func(logger func(format string, args ...any)) error {
+		// Release the claim when the start task finishes (success
+		// or failure) so a later retry is not blocked forever.
+		defer clearStarting()
 		logger("Starting VM %d (%s)...", vmid, spec.Name)
 
 		// 1. Ensure ZVOL disks exist
