@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { KeyRound, Plus, Trash2, Copy, Check, FileText, Save, CheckCircle2, ShieldCheck } from 'lucide-react';
+import { KeyRound, Plus, Trash2, Copy, Check, FileText, Save, CheckCircle2, ShieldCheck, AlertCircle } from 'lucide-react';
 import { compileWireGuard } from '@axonwall/lib/compile/wireguard';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
@@ -97,10 +97,22 @@ export default function WireGuardPage() {
   const handleAddPeer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!peerName.trim() || !peerPubKey.trim()) return;
-    const paddedKey =
-      peerPubKey.trim().length >= 32
-        ? peerPubKey.trim()
-        : `${peerPubKey.trim()}${'A'.repeat(32 - peerPubKey.trim().length)}=`;
+    // A WireGuard public key is 32 raw bytes = 44 base64 chars. Never pad or
+    // otherwise mutate pasted key material: a short key is a typo, and the
+    // padded key would belong to nobody.
+    const key = peerPubKey.trim();
+    let keyBytes: Buffer | null = null;
+    try {
+      keyBytes = Buffer.from(key, 'base64');
+    } catch {
+      keyBytes = null;
+    }
+    if (key.length !== 44 || !keyBytes || keyBytes.length !== 32 || keyBytes.toString('base64') !== key) {
+      setStatusMsg(
+        'Error: Invalid WireGuard public key — expected a 44-character base64 key (32 bytes). Peer not added.'
+      );
+      return;
+    }
     const nextWg = {
       ...serverConfig,
       enabled: true,
@@ -108,7 +120,7 @@ export default function WireGuardPage() {
         ...serverConfig.peers,
         {
           name: peerName.trim(),
-          publicKey: paddedKey,
+          publicKey: key,
           allowedIps: peerAllowedIps
             .split(',')
             .map((s) => s.trim())
@@ -179,8 +191,18 @@ PersistentKeepalive = 25
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            statusMsg.startsWith('Error:')
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.startsWith('Error:') ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
           <span>{statusMsg}</span>
         </div>
       )}
@@ -340,7 +362,7 @@ PersistentKeepalive = 25
             type="text"
             value={peerPubKey}
             onChange={(e) => setPeerPubKey(e.target.value)}
-            placeholder="Base64 Public Key (min 32 chars)"
+            placeholder="Base64 Public Key (44 chars)"
             className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
             required
           />
