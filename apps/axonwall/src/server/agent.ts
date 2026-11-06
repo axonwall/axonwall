@@ -1637,13 +1637,12 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
     };
   }
 
-  // Daemon unreachable: dev-mode fallback — confirm the local mock pending state.
-  mockPendingConfirm = false;
-  mockDeadline = 0;
-  lastPendingJobId = '';
+  // C11: daemon unreachable — do NOT clear the local pending state or
+  // claim success. The daemon may still auto-roll back at its deadline,
+  // so the job id and banner survive for a retry once it is back.
   return {
-    success: true,
-    message: 'Configuration confirmed. Promoted to last-known-good.',
+    success: false,
+    message: 'Daemon unavailable — confirm not acknowledged; pending state preserved. Retry once axonwalld is reachable.',
   };
 }
 
@@ -1668,14 +1667,12 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
     };
   }
 
-  // Daemon unreachable: dev-mode fallback.
-  mockPendingConfirm = false;
-  mockDeadline = 0;
-  cachedDesiredState = null;
-  lastLoadedFingerprint = '';
+  // C11: daemon unreachable — do NOT clear the local pending/cache state
+  // or claim success. The daemon still holds the unconfirmed ruleset, so
+  // the cached state keeps describing what it is actually running.
   return {
-    success: true,
-    message: 'Successfully rolled back to previous last-known-good configuration.',
+    success: false,
+    message: 'Daemon unavailable — rollback not acknowledged; pending state preserved. Retry once axonwalld is reachable.',
   };
 }
 
@@ -1742,10 +1739,11 @@ export async function runDiagnostic(
     }
   } catch {}
 
-  // Ping fallback
+  // N1: the daemon did not answer (or returned no output). Never fabricate
+  // a perfect ping result — report the probe as not run.
   return {
-    success: true,
-    output: `PING ${cleanTarget} - 3 packets transmitted, 3 received, 0% packet loss, avg 1.2ms`,
+    success: false,
+    output: `Ping unavailable: axonwalld unreachable — no ping of ${cleanTarget} was run.`,
   };
 }
 

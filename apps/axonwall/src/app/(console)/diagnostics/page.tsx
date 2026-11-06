@@ -90,6 +90,7 @@ export default function DiagnosticsPage() {
   const [probeTarget, setProbeTarget] = useState('1.1.1.1');
   const [probePort, setProbePort] = useState(443);
   const [probeOutput, setProbeOutput] = useState<string | null>(null);
+  const [probeFailed, setProbeFailed] = useState(false);
   const [isProbing, setIsProbing] = useState(false);
 
   useEffect(() => {
@@ -239,8 +240,12 @@ export default function DiagnosticsPage() {
   async function handleRunProbe() {
     setIsProbing(true);
     setProbeOutput('Executing diagnostic probe...');
+    setProbeFailed(false);
     try {
       const res = await runDiagnostic(probeTool, probeTarget, probePort);
+      // N1: surface the verdict, not just the text — a failed probe used
+      // to render as green console output indistinguishable from success.
+      setProbeFailed(!res.success);
       setProbeOutput(res.output);
     } finally {
       setIsProbing(false);
@@ -832,12 +837,12 @@ export default function DiagnosticsPage() {
           </div>
 
           {probeOutput && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-2">
+            <div className={`bg-slate-900 border rounded-xl p-5 space-y-2 ${probeFailed ? 'border-red-500/40' : 'border-slate-800'}`}>
               <div className="flex items-center gap-2 text-sm font-semibold text-white">
-                <Terminal className="w-4 h-4 text-emerald-400" />
-                <span>Console Output</span>
+                <Terminal className={`w-4 h-4 ${probeFailed ? 'text-red-400' : 'text-emerald-400'}`} />
+                <span>Console Output{probeFailed ? ' — Probe Failed' : ''}</span>
               </div>
-              <pre className="bg-slate-950 border border-slate-800/80 rounded-lg p-4 font-mono text-xs text-emerald-400 whitespace-pre-wrap">
+              <pre className={`bg-slate-950 border border-slate-800/80 rounded-lg p-4 font-mono text-xs whitespace-pre-wrap ${probeFailed ? 'text-red-400' : 'text-emerald-400'}`}>
                 {probeOutput}
               </pre>
             </div>
