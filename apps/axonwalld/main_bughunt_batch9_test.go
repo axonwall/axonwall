@@ -90,3 +90,32 @@ func TestBatch9MirrorBundleFile(t *testing.T) {
 		t.Fatalf("symlinked mirror entry was followed; target = %q", string(data))
 	}
 }
+
+// L6: a bundle naming a service that cannot be reloaded must say so
+// in its response. Pre-fix, reloadBundleServices discarded every
+// result, so a typo'd or non-allowlisted unit reported full bundle
+// success while the service kept running its old config.
+func TestBatch9ApplyBundleWarnsOnFailedServiceReload(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+	s := batch4TestServer(t)
+	batch4StopTimer(t, s)
+
+	resp, err := s.ApplyBundle(context.Background(), &pb.ApplyBundleRequest{
+		JobId:                 "batch9-l6",
+		NftScript:             batch4NftScript,
+		ConfirmTimeoutSeconds: 60,
+		ReloadServices:        []string{"not-a-managed-service", "/tmp/evil.service"},
+	})
+	if err != nil {
+		t.Fatalf("ApplyBundle failed: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("ApplyBundle reported failure: %s", resp.Message)
+	}
+	if !strings.Contains(resp.Message, "not-a-managed-service") {
+		t.Fatalf("expected the response to name the unloadable service, got: %s", resp.Message)
+	}
+	if !strings.Contains(resp.Message, "evil.service") {
+		t.Fatalf("expected the response to name the rejected service, got: %s", resp.Message)
+	}
+}

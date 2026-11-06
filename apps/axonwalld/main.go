@@ -402,23 +402,32 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 	return out, nil
 }
 
-// reloadBundleServices reloads the requested units. It touches no
-// AgentServer state, so ApplyBundle calls it without holding s.mu
-// (A-M2): a hung unit reload must not wedge GetStatus, Confirm, or
-// the auto-rollback timer behind the agent lock. A Confirm arriving
-// in this window is premature — ApplyBundle has not returned success
-// yet — and the commit-confirm timer is not armed until after the
-// reloads, so releasing the lock here changes no committed state.
-func reloadBundleServices(services []string) {
+// reloadBundleServices reloads the requested units and returns every
+// failure. It touches no AgentServer state, so ApplyBundle calls it
+// without holding s.mu (A-M2): a hung unit reload must not wedge
+// GetStatus, Confirm, or the auto-rollback timer behind the agent
+// lock. A Confirm arriving in this window is premature — ApplyBundle
+// has not returned success yet — and the commit-confirm timer is not
+// armed until after the reloads, so releasing the lock here changes
+// no committed state. L6: the results used to be discarded, so a
+// bundle naming a typo'd, renamed, or non-allowlisted unit reported
+// full success while the service kept running its old config.
+func reloadBundleServices(services []string) []error {
+	var errs []error
 	for _, svc := range services {
 		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
 		if strings.Contains(svc, "/") || strings.Contains(svc, "\\") || strings.HasPrefix(svc, ".") {
 			log.Printf("[Agent] Rejected malformed/malicious service reload request: %s", svc)
+			errs = append(errs, fmt.Errorf("rejected malformed service reload request: %s", svc))
 			continue
 		}
 		log.Printf("[Agent] Reloading system service: %s", svc)
-		_, _ = reloadOrRestartService(svc)
+		if _, err := reloadOrRestartService(svc); err != nil {
+			log.Printf("[Agent] ERROR: Failed to reload system service %s: %v", svc, err)
+			errs = append(errs, fmt.Errorf("failed to reload service %s: %w", svc, err))
+		}
 	}
+	return errs
 }
 
 // mirrorBundleFile writes one bundle file into the A/B persistence
@@ -702,7 +711,9 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// without holding s.mu (see reloadBundleServices); the deferred
 	// unlock at the top of ApplyBundle releases the re-acquired lock.
 	s.mu.Unlock()
-	reloadBundleServices(req.ReloadServices)
+	for _, err := range reloadBundleServices(req.ReloadServices) {
+		applyWarnings = append(applyWarnings, err.Error())
+	}
 	s.mu.Lock()
 
 	// 6. Setup Commit-Confirm deadline
