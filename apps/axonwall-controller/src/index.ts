@@ -642,13 +642,82 @@ export interface SyncedRoute {
 }
 
 // B2-M7: routes that were pushed on an earlier sync but are no
-// longer in the enabled set. A first sync (no previous record)
-// has no deletions — the controller cannot know about kernel
+// longer in the enabled set. A first sync with no previous record
+// (no prior push, or a record that predates the persisted file
+// below) has no deletions — the controller cannot know about kernel
 // routes that predate its own pushes.
 export function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRoute[]): SyncedRoute[] {
   const routeKey = (r: SyncedRoute): string => `${r.destination}|${r.gateway}|${r.device ?? ''}`;
   const currentKeys = new Set(current.map(routeKey));
   return previous.filter((r) => !currentKeys.has(routeKey(r)));
+}
+
+// B2-M7 follow-up: the synced-routes record, persisted. The record
+// used to live only in controller RAM, so after a controller
+// restart the first sync had no deletions and any route removed
+// from DesiredState while the controller was down (or pushed before
+// this code deployed) lingered in every edge kernel forever. The
+// record is now written to disk on every successful sync and
+// reloaded at startup, following the same pattern as the B-H2b
+// persisted HA state (AXONWALL_SYNCED_ROUTES_PATH overrides the
+// path for tests). Routes pushed before this code deployed are
+// still unknown — only routes the controller itself pushed after
+// this landed are recorded. Full replace semantics were NOT chosen
+// instead: the satellite has no ownership marker distinguishing
+// Axonwall-pushed kernel routes from operator-added ones, so a
+// reconcile-against-desired-set would delete hand-added routes;
+// the explicit delete list only ever deletes routes the controller
+// itself pushed. Records are retained after a satellite is pruned
+// (disconnect grace), so a later reconnect still gets its
+// deletions; the file is bounded by fleet size in practice.
+export type PersistedSyncedRoutes = Record<string, SyncedRoute[]>;
+
+const SYNCED_ROUTES_STATE_PATHS = ['/var/lib/axonwall/synced-routes.json', '/etc/axonwall/synced-routes.json'];
+
+export function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          const out: PersistedSyncedRoutes = {};
+          for (const [satId, routes] of Object.entries(raw)) {
+            if (!Array.isArray(routes)) continue;
+            out[satId] = (routes as unknown[])
+              .filter(
+                (r): r is SyncedRoute =>
+                  !!r &&
+                  typeof r === 'object' &&
+                  typeof (r as SyncedRoute).destination === 'string' &&
+                  typeof (r as SyncedRoute).gateway === 'string' &&
+                  ((r as SyncedRoute).device === undefined || typeof (r as SyncedRoute).device === 'string'),
+              )
+              .map((r) => ({ destination: r.destination, gateway: r.gateway, ...(r.device ? { device: r.device } : {}) }));
+          }
+          return out;
+        }
+      }
+    } catch {
+      // Ignore unreadable/corrupt state; the controller proceeds
+      // with no recorded routes (a first sync then has no deletions).
+    }
+  }
+  return null;
+}
+
+export function persistSyncedRoutes(routes: PersistedSyncedRoutes): void {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  const payload = JSON.stringify(routes, null, 2);
+  for (const p of paths) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(p, payload, { mode: 0o600 });
+    } catch {
+      // Best effort: the in-memory record is still authoritative
+      // for this process lifetime.
+    }
+  }
 }
 
 // B2-M1: satellite command acknowledgements. The satellite acks
@@ -1024,7 +1093,8 @@ async function main() {
     // removed from DesiredState can be deleted from the kernel
     // instead of lingering forever (SYNC_ROUTES used to send only
     // additions). Carried over from the previous entry on
-    // reconnect, like headscaleEnrolled.
+    // reconnect, like headscaleEnrolled, and seeded from the
+    // persisted synced-routes file after a controller restart.
     lastSyncedRoutes?: SyncedRoute[];
     metrics?: {
       uptimeSeconds: number;
@@ -1071,6 +1141,15 @@ async function main() {
     activeHaLanVip = lanVip;
     persistHaState({ activeHaEdgeId: id, sharedWanMac, lanVip });
   };
+
+  // B2-M7 follow-up: routes last pushed per satellite, reloaded
+  // from disk (see loadPersistedSyncedRoutes). The record survives
+  // a controller restart, so the first sync after a restart still
+  // deletes routes removed from DesiredState while the controller
+  // was down. Updated (and re-persisted) on every successful
+  // SYNC_ROUTES send below; the in-memory map is authoritative
+  // for this process lifetime.
+  const persistedSyncedRoutes: PersistedSyncedRoutes = loadPersistedSyncedRoutes() ?? {};
 
   // B-H2b residual: one send path for HA transitions, shared by
   // the /fleet/ha-transition endpoint and the reconnect re-assert
@@ -1242,6 +1321,12 @@ async function main() {
       const routesToDelete = computeRoutesToDelete(sat.lastSyncedRoutes ?? [], enabledRoutes);
       if (sendToSatellite(sat, 'SYNC_ROUTES', { routes: enabledRoutes, routesToDelete }) !== null) {
         sat.lastSyncedRoutes = enabledRoutes;
+        // B2-M7 follow-up: persist the record so a controller
+        // restart still knows what was pushed and can delete routes
+        // removed while it was down. Best-effort disk write; the
+        // in-memory record is authoritative for this lifetime.
+        persistedSyncedRoutes[sat.id] = enabledRoutes;
+        persistSyncedRoutes(persistedSyncedRoutes);
       }
     }
   }
@@ -2179,7 +2264,11 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       wireguard: { tunnelIp },
       ws: ws,
       headscaleEnrolled: existing?.headscaleEnrolled || false,
-      lastSyncedRoutes: existing?.lastSyncedRoutes,
+      // B2-M7 follow-up: seed from the persisted synced-routes
+      // file when there is no live previous entry — i.e. after a
+      // controller restart — so the first sync still deletes routes
+      // removed while the controller was down.
+      lastSyncedRoutes: existing?.lastSyncedRoutes ?? (persistedSyncedRoutes[satId] ? [...persistedSyncedRoutes[satId]] : undefined),
     };
     activeSatellites.set(satId, state);
 

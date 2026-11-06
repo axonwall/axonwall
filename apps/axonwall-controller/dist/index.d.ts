@@ -80,6 +80,9 @@ export interface SyncedRoute {
     device?: string;
 }
 export declare function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRoute[]): SyncedRoute[];
+export type PersistedSyncedRoutes = Record<string, SyncedRoute[]>;
+export declare function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null;
+export declare function persistSyncedRoutes(routes: PersistedSyncedRoutes): void;
 export declare const PENDING_COMMAND_STALE_MS: number;
 export interface SatelliteCommandAck {
     command: string;

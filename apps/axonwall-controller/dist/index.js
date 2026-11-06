@@ -45812,6 +45812,40 @@ function computeRoutesToDelete(previous, current) {
   const currentKeys = new Set(current.map(routeKey));
   return previous.filter((r) => !currentKeys.has(routeKey(r)));
 }
+var SYNCED_ROUTES_STATE_PATHS = ["/var/lib/axonwall/synced-routes.json", "/etc/axonwall/synced-routes.json"];
+function loadPersistedSyncedRoutes() {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs7.existsSync(p)) {
+        const raw = JSON.parse(fs7.readFileSync(p, "utf8"));
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          const out = {};
+          for (const [satId, routes] of Object.entries(raw)) {
+            if (!Array.isArray(routes)) continue;
+            out[satId] = routes.filter(
+              (r) => !!r && typeof r === "object" && typeof r.destination === "string" && typeof r.gateway === "string" && (r.device === void 0 || typeof r.device === "string")
+            ).map((r) => ({ destination: r.destination, gateway: r.gateway, ...r.device ? { device: r.device } : {} }));
+          }
+          return out;
+        }
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function persistSyncedRoutes(routes) {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  const payload = JSON.stringify(routes, null, 2);
+  for (const p of paths) {
+    try {
+      fs7.mkdirSync(path5.dirname(p), { recursive: true, mode: 509 });
+      fs7.writeFileSync(p, payload, { mode: 384 });
+    } catch {
+    }
+  }
+}
 var PENDING_COMMAND_STALE_MS = 5 * 60 * 1e3;
 function buildSatelliteCommandEnvelope(type, payload, commandId) {
   return JSON.stringify({ type, commandId, payload });
@@ -46057,6 +46091,7 @@ async function main() {
     activeHaLanVip = lanVip;
     persistHaState({ activeHaEdgeId: id, sharedWanMac, lanVip });
   };
+  const persistedSyncedRoutes = loadPersistedSyncedRoutes() ?? {};
   const sendHaTransition = (sat, type, role, sharedWanMac, lanVip) => {
     return sendToSatellite(sat, type, {
       role,
@@ -46159,6 +46194,8 @@ async function main() {
       const routesToDelete = computeRoutesToDelete(sat.lastSyncedRoutes ?? [], enabledRoutes);
       if (sendToSatellite(sat, "SYNC_ROUTES", { routes: enabledRoutes, routesToDelete }) !== null) {
         sat.lastSyncedRoutes = enabledRoutes;
+        persistedSyncedRoutes[sat.id] = enabledRoutes;
+        persistSyncedRoutes(persistedSyncedRoutes);
       }
     }
   }
@@ -46962,7 +46999,11 @@ ${headerLines.join("\r\n")}\r
       wireguard: { tunnelIp },
       ws,
       headscaleEnrolled: existing?.headscaleEnrolled || false,
-      lastSyncedRoutes: existing?.lastSyncedRoutes
+      // B2-M7 follow-up: seed from the persisted synced-routes
+      // file when there is no live previous entry — i.e. after a
+      // controller restart — so the first sync still deletes routes
+      // removed while the controller was down.
+      lastSyncedRoutes: existing?.lastSyncedRoutes ?? (persistedSyncedRoutes[satId] ? [...persistedSyncedRoutes[satId]] : void 0)
     };
     activeSatellites.set(satId, state);
     let headscaleRecheckTimer = null;
@@ -47198,10 +47239,12 @@ export {
   isValidMacAddress,
   listMcpApiKeys,
   loadPersistedHaState,
+  loadPersistedSyncedRoutes,
   newMcpApplyJobId,
   normalizeMacAddress,
   parseFleetSyncBody,
   persistHaState,
+  persistSyncedRoutes,
   processMcpJsonRpcMessage,
   provisionHeadscaleWithRetry,
   queryMcpAuditEntries,
