@@ -267,3 +267,78 @@ func TestBatch8WifiTeardownNoDaemon(t *testing.T) {
 		t.Fatalf("Teardown with no hostapd running failed: %v", err)
 	}
 }
+
+// A-M40: v2 netplan "routes:" lists under ethernets must be parsed into
+// EdgeRouteSpecs instead of being silently dropped.
+func TestBatch8CloudInitV2Routes(t *testing.T) {
+	v2 := `version: 2
+ethernets:
+  eth0:
+    addresses: [10.0.0.2/24]
+    gateway4: 10.0.0.1
+    routes:
+      - to: 10.20.0.0/16
+        via: 10.0.0.254
+      - to: default
+        via: 10.0.0.1
+  eth1:
+    dhcp6: true
+    gateway6: fd00::ffff
+`
+	ifaces, routes := ParseCloudInitNetworkConfig(v2)
+	if len(ifaces) != 2 {
+		t.Fatalf("expected 2 interfaces, got %+v", ifaces)
+	}
+	if ifaces[0].Address != "10.0.0.2/24" || ifaces[0].Gateway != "10.0.0.1" {
+		t.Fatalf("unexpected eth0 spec: %+v", ifaces[0])
+	}
+	// dhcp6-only device must survive instead of being dropped.
+	if ifaces[1].Device != "eth1" || ifaces[1].IPv6Mode != "auto" {
+		t.Fatalf("dhcp6-only eth1 must be kept with IPv6Mode=auto, got %+v", ifaces[1])
+	}
+	if len(routes) != 3 {
+		t.Fatalf("expected 3 routes (2 static + gateway6 default), got %+v", routes)
+	}
+	if routes[0].Destination != "10.20.0.0/16" || routes[0].Gateway != "10.0.0.254" || routes[0].Device != "eth0" {
+		t.Fatalf("unexpected route 0: %+v", routes[0])
+	}
+	if routes[1].Destination != "default" || routes[1].Gateway != "10.0.0.1" || routes[1].Device != "eth0" {
+		t.Fatalf("unexpected route 1: %+v", routes[1])
+	}
+	if routes[2].Destination != "default" || routes[2].Gateway != "fd00::ffff" || routes[2].Device != "eth1" {
+		t.Fatalf("unexpected gateway6 route: %+v", routes[2])
+	}
+}
+
+// A-M40: v1 "- type: route" entries must be parsed instead of discarded.
+func TestBatch8CloudInitV1Routes(t *testing.T) {
+	v1 := `version: 1
+config:
+  - type: physical
+    name: eth0
+    subnets:
+      - type: static
+        address: 203.0.113.5
+        netmask: 255.255.255.0
+        gateway: 203.0.113.1
+  - type: route
+    destination: 10.20.0.0/16
+    gateway: 203.0.113.254
+  - type: route
+    destination: 0.0.0.0/0
+    gateway: 203.0.113.1
+`
+	ifaces, routes := ParseCloudInitNetworkConfig(v1)
+	if len(ifaces) != 1 || ifaces[0].Address != "203.0.113.5/24" {
+		t.Fatalf("unexpected v1 interfaces: %+v", ifaces)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 v1 routes, got %+v", routes)
+	}
+	if routes[0].Destination != "10.20.0.0/16" || routes[0].Gateway != "203.0.113.254" {
+		t.Fatalf("unexpected v1 route 0: %+v", routes[0])
+	}
+	if routes[1].Destination != "0.0.0.0/0" || routes[1].Gateway != "203.0.113.1" {
+		t.Fatalf("unexpected v1 route 1: %+v", routes[1])
+	}
+}
