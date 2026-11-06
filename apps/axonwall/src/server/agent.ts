@@ -4727,11 +4727,13 @@ export async function createNasSnapshotAction(
     };
   }
 
-  const snapName = `${dataset}@${label || `manual-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}`}`;
+  // C-B1: the daemon is unreachable, so no snapshot was taken anywhere.
+  // Never invent a snapshot name and report success — an operator about
+  // to upgrade on the strength of that banner would have no safety net.
   return {
-    success: true,
-    snapshot: snapName,
-    message: `Snapshot ${snapName} created.`,
+    success: false,
+    snapshot: '',
+    message: 'Snapshot not created: axonwalld is unreachable. No snapshot exists for this dataset.',
   };
 }
 

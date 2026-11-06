@@ -19,6 +19,7 @@ export default function ZfsSnapshotsPage() {
   const [interval, setIntervalVal] = useState<'hourly' | 'daily' | 'weekly'>('hourly');
   const [keepCount, setKeepCount] = useState(24);
   const [msg, setMsg] = useState<string | null>(null);
+  const [msgIsError, setMsgIsError] = useState(false);
 
   const load = async () => {
     try {
@@ -36,9 +37,13 @@ export default function ZfsSnapshotsPage() {
     try {
       const res = await createNasSnapshotAction(dataset, label || undefined);
       setMsg(res.message);
+      // C-B1: a failed snapshot must not render in the green success
+      // banner — the operator may be about to upgrade on its strength.
+      setMsgIsError(!res.success);
       await load();
     } catch (err: any) {
       setMsg(`Error: ${err?.message || 'Failed to create snapshot'}`);
+      setMsgIsError(true);
     }
   };
 
@@ -90,7 +95,13 @@ export default function ZfsSnapshotsPage() {
       </div>
 
       {msg && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+        <div
+          className={`p-4 rounded-xl text-xs ${
+            msgIsError
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
           {msg}
         </div>
       )}
