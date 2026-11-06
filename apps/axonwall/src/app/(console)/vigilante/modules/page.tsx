@@ -51,8 +51,10 @@ export default function SecurityModulesPage() {
 
     if (res.success) {
       setStatusBanner({ type: 'success', message: `${id} ${!currentEnabled ? 'enabled' : 'disabled'}` });
+      // D15: enabling a module does not prove it healthy — nothing probes
+      // it — so the optimistic state is "unknown", never "healthy".
       setModules((prev) =>
-        prev.map((m) => (m.id === id ? { ...m, enabled: !currentEnabled, health: !currentEnabled ? 'healthy' : 'offline' } : m))
+        prev.map((m) => (m.id === id ? { ...m, enabled: !currentEnabled, health: !currentEnabled ? 'unknown' : 'offline' } : m))
       );
     } else {
       setStatusBanner({ type: 'error', message: res.message });
@@ -163,10 +165,13 @@ export default function SecurityModulesPage() {
                   <div className="text-[11px] text-cyan-400 font-mono mt-0.5">{mod.subdomain}.axonwall.internal</div>
                 </div>
                 <div
+                  title={mod.health === 'unknown' ? 'Enabled, but health has never been probed — no live check runs for this module.' : undefined}
                   className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                    mod.enabled
+                    mod.health === 'healthy'
                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                      : 'bg-slate-800 text-slate-400 border border-slate-700'
+                      : mod.health === 'unknown'
+                        ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
                   }`}
                 >
                   {mod.health}
@@ -183,7 +188,9 @@ export default function SecurityModulesPage() {
                 <div>
                   <span className="text-[10px] text-slate-500 uppercase block">Throughput</span>
                   <span className="font-mono text-emerald-400 font-medium">
-                    {mod.telemetryEps > 0 ? `${mod.telemetryEps} EPS` : 'Idle'}
+                    {/* D15: throughput is unmeasured — never a random EPS, and
+                        "Idle" would imply a measured zero. */}
+                    {mod.health === 'unknown' ? 'Unknown' : mod.telemetryEps > 0 ? `${mod.telemetryEps} EPS` : 'Idle'}
                   </span>
                 </div>
               </div>

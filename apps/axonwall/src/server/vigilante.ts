@@ -54,7 +54,7 @@ export interface SecurityModuleStatus {
   category: 'threat_detection' | 'deception' | 'ad_identity' | 'vulnerability' | 'siem_edr' | 'purple_team';
   description: string;
   enabled: boolean;
-  health: 'healthy' | 'warning' | 'offline' | 'unconfigured';
+  health: 'healthy' | 'warning' | 'offline' | 'unconfigured' | 'unknown';
   port: number;
   subdomain: string;
   telemetryEps: number;
@@ -257,15 +257,20 @@ export async function listSecurityModulesAction(): Promise<SecurityModuleStatus[
   return DEFAULT_MODULE_SPECS.map((spec) => {
     const configured = configuredModules.find((m) => m.id === spec.id);
     const enabled = configured ? configured.enabled : (state.vigilante?.enabled ?? false);
-    const health = enabled ? 'healthy' : 'offline';
-    const eps = enabled ? Math.floor(Math.random() * 45) + 5 : 0;
+    // D15: no module is ever probed (no port check, process check, or
+    // daemon query), so an enabled module's health is unknown — never
+    // "healthy" just because it is enabled — and its throughput is
+    // unmeasured (0 EPS, no last-event time). A disabled module is
+    // genuinely offline. Do not invent a random 5–49 EPS.
+    const health = enabled ? 'unknown' : 'offline';
+    const eps = 0;
 
     return {
       ...spec,
       enabled,
       health,
       telemetryEps: eps,
-      lastEventAt: enabled ? new Date().toISOString() : undefined,
+      lastEventAt: undefined,
     };
   });
 }
