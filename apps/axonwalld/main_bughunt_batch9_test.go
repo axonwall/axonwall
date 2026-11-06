@@ -135,3 +135,27 @@ func TestBatch9StopNgfwDaemonsReportsFailure(t *testing.T) {
 		t.Fatalf("stopNgfwDaemons must succeed when systemctl exits 0, got: %v", err)
 	}
 }
+
+// L10: a changed static-IP prefix must not be silently accepted.
+// Pre-fix, the check matched any prefix length for the same IP, so
+// 192.168.1.1/25 satisfied a configured 192.168.1.1/24 and the
+// kernel kept the old prefix.
+func TestBatch9BootAddrMatchesExactPrefix(t *testing.T) {
+	out := "2: eth0: <BROADCAST,MULTICAST,UP> mtu 1500\n    inet 192.168.1.1/25 brd 192.168.1.127 scope global eth0\n"
+	if bootAddrMatches(out, "192.168.1.1/24") {
+		t.Fatal("192.168.1.1/25 must not satisfy a configured 192.168.1.1/24")
+	}
+	if !bootAddrMatches(out, "192.168.1.1/25") {
+		t.Fatal("192.168.1.1/25 must satisfy a configured 192.168.1.1/25")
+	}
+	// A bare IP (no prefix) still matches any prefix for that IP.
+	if !bootAddrMatches(out, "192.168.1.1") {
+		t.Fatal("a bare 192.168.1.1 must match an installed 192.168.1.1/25")
+	}
+	// A different host address must not match by substring: .1 must
+	// not match an installed .10.
+	out10 := "    inet 192.168.1.10/24 brd 192.168.1.255 scope global eth0\n"
+	if bootAddrMatches(out10, "192.168.1.1/24") {
+		t.Fatal("192.168.1.10/24 must not satisfy a configured 192.168.1.1/24")
+	}
+}

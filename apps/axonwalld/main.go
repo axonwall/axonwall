@@ -1445,6 +1445,28 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 // the device as secondary addresses) along with the stale static
 // address it meant to remove. Secondary addresses are therefore never
 // returned here, so a VIP survives an unrelated bundle apply.
+// bootAddrMatches reports whether `ip addr show` output already
+// contains the exact CIDR in wantCIDR. L10: the old check also
+// matched any prefix length for the same IP ("inet 192.168.1.1/"),
+// so a prefix change (/24 -> /25) was silently accepted and the
+// kernel kept the old prefix while the config said the new one. A
+// bare IP without a prefix still matches any prefix for that IP.
+func bootAddrMatches(addrShowOut, wantCIDR string) bool {
+	for _, line := range strings.Split(addrShowOut, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "inet" {
+			continue
+		}
+		if fields[1] == wantCIDR {
+			return true
+		}
+		if !strings.Contains(wantCIDR, "/") && strings.Split(fields[1], "/")[0] == wantCIDR {
+			return true
+		}
+	}
+	return false
+}
+
 func staleStaticAddrs(addrShowOut string, targetCIDR string) []string {
 	targetIP := strings.Split(targetCIDR, "/")[0]
 	var stale []string
@@ -1551,8 +1573,7 @@ func applyBootInterfaces() error {
 		_ = exec.Command("ip", "link", "set", spec.Device, "up").Run()
 		if spec.Mode == "static" && spec.IPv4 != "" {
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
-			ipOnly := strings.Split(spec.IPv4, "/")[0]
-			if !strings.Contains(string(out), "inet "+spec.IPv4) && !strings.Contains(string(out), "inet "+ipOnly+"/") {
+			if !bootAddrMatches(string(out), spec.IPv4) {
 				log.Printf("[Agent] Boot-apply: configuring static IP %s on %s (%s, role=%s)", spec.IPv4, spec.Name, spec.Device, spec.Role)
 				if spec.Role == "wan" {
 					// A-M16: never flush the device — that deletes
