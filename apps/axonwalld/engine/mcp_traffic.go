@@ -441,6 +441,18 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 				verdict = "counter reject"
 			}
 
+			// M7 (defence in depth): a lease with an unrecognised
+			// direction must fail the reconcile instead of silently
+			// emitting no rule. Creation now rejects these, so this
+			// can only fire for a lease persisted before the fix —
+			// and a revert of that lease reconciles the set without
+			// it, so it stays removable.
+			switch dir {
+			case "", "both", "inbound", "outbound":
+			default:
+				return fmt.Errorf("lease %s has unrecognised blackhole direction %q", l.ID, dir)
+			}
+
 			protoMatch := ""
 			if proto == "tcp" || proto == "udp" {
 				if port > 0 {
@@ -471,6 +483,12 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 			shapeDir, _ := l.Parameters["direction"].(string)
 			if shapeDir == "" {
 				shapeDir = "both"
+			}
+			// M7 (defence in depth): see the blackhole case above.
+			switch shapeDir {
+			case "both", "ingress", "inbound", "egress", "outbound":
+			default:
+				return fmt.Errorf("lease %s has unrecognised shape direction %q", l.ID, shapeDir)
 			}
 			if l.FwMark > 0 {
 				if shapeDir == "both" || shapeDir == "ingress" || shapeDir == "inbound" {
@@ -756,6 +774,15 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 	if req.Direction == "" {
 		req.Direction = "both"
 	}
+	// M7: an unrecognised direction used to be accepted and then
+	// match no rule branch in ReconcileKernelState, so the lease was
+	// stored and reported as active while the kernel enforced
+	// nothing for it.
+	switch req.Direction {
+	case "both", "inbound", "outbound":
+	default:
+		return nil, fmt.Errorf("invalid blackhole direction %q: must be both, inbound, or outbound", req.Direction)
+	}
 	if req.Protocol == "" {
 		req.Protocol = "any"
 	}
@@ -859,6 +886,15 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	}
 	if req.LatencyMs < 0 || req.LatencyMs > 5000 {
 		return nil, fmt.Errorf("latencyMs must be between 0 and 5000 ms")
+	}
+	// M7: same direction validation as BlackholeTraffic (see there).
+	if req.Direction == "" {
+		req.Direction = "both"
+	}
+	switch req.Direction {
+	case "both", "ingress", "inbound", "egress", "outbound":
+	default:
+		return nil, fmt.Errorf("invalid shape direction %q: must be both, ingress, inbound, egress, or outbound", req.Direction)
 	}
 	if req.TTLSeconds < 10 {
 		req.TTLSeconds = 3600

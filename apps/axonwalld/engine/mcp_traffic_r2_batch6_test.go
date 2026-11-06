@@ -1,0 +1,115 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// installFakeTc prepends a directory containing a fake `tc`
+// executable to PATH so shape-lease tests never touch the sandbox's
+// real qdiscs. The fake drains its arguments and exits 0.
+func installFakeTc(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"" + filepath.Join(dir, "tc-args.log") + "\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "tc"), []byte(script), 0755); err != nil {
+		t.Fatalf("Failed to write fake tc: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+}
+
+func shapeReq() McpShapeReq {
+	return McpShapeReq{
+		Target:           "198.51.100.20",
+		Interface:        "eth0",
+		Direction:        "both",
+		RateKbps:         1000,
+		CeilKbps:         2000,
+		TTLSeconds:       3600,
+		CallerIP:         "10.42.1.25",
+		MaxIPv4PrefixLen: 24,
+		MaxIPv6PrefixLen: 64,
+		KeyID:            "test-key",
+		KeyName:          "test-agent",
+	}
+}
+
+// M7: creation must reject an unrecognised direction instead of
+// storing a lease the kernel enforces nothing for.
+func TestR2Batch6LeaseCreationRejectsBadDirection(t *testing.T) {
+	installFakeNft(t, 0)
+	installFakeTc(t)
+	mgr := newTestTrafficManager(t)
+
+	bad := blackholeReq()
+	bad.Direction = "in"
+	if _, err := mgr.BlackholeTraffic(bad); err == nil {
+		t.Fatal("BlackholeTraffic accepted direction \"in\"; expected a validation error")
+	}
+	if got := len(mgr.leases); got != 0 {
+		t.Fatalf("rejected blackhole was stored anyway (%d leases)", got)
+	}
+
+	badShape := shapeReq()
+	badShape.Direction = "sideways"
+	if _, err := mgr.ShapeTraffic(badShape); err == nil {
+		t.Fatal("ShapeTraffic accepted direction \"sideways\"; expected a validation error")
+	}
+	if got := len(mgr.leases); got != 0 {
+		t.Fatalf("rejected shape lease was stored anyway (%d leases)", got)
+	}
+
+	// Every recognised direction still creates a lease.
+	for _, dir := range []string{"both", "inbound", "outbound"} {
+		req := blackholeReq()
+		req.Direction = dir
+		if _, err := mgr.BlackholeTraffic(req); err != nil {
+			t.Fatalf("BlackholeTraffic rejected valid direction %q: %v", dir, err)
+		}
+	}
+	for _, dir := range []string{"both", "ingress", "inbound", "egress", "outbound"} {
+		req := shapeReq()
+		req.Direction = dir
+		if _, err := mgr.ShapeTraffic(req); err != nil {
+			t.Fatalf("ShapeTraffic rejected valid direction %q: %v", dir, err)
+		}
+	}
+}
+
+// M7 (defence in depth): a lease persisted before the fix with an
+// unrecognised direction must fail the reconcile instead of silently
+// emitting no rule — and the nft apply must not run for it.
+func TestR2Batch6ReconcileRejectsBadDirection(t *testing.T) {
+	logPath := installFakeNft(t, 0)
+	mgr := newTestTrafficManager(t)
+	now := time.Now().UTC()
+	mgr.leases["mcp_lease_bad"] = &McpTacticalLease{
+		ID:               "mcp_lease_bad",
+		Kind:             "blackhole",
+		CreatedAt:        now.Format(time.RFC3339),
+		ExpiresAt:        now.Add(time.Hour).Format(time.RFC3339),
+		NormalizedTarget: "198.51.100.20",
+		Parameters:       map[string]interface{}{"mode": "nft_drop", "direction": "in"},
+	}
+
+	if err := mgr.ReconcileKernelState(); err == nil {
+		t.Fatal("ReconcileKernelState succeeded with a bad-direction lease; expected an error instead of an empty rule set")
+	}
+	if argsLog, err := os.ReadFile(logPath); err == nil && strings.TrimSpace(string(argsLog)) != "" {
+		t.Fatalf("reconcile ran nft for a bad-direction lease: %q", string(argsLog))
+	}
+
+	// The bad lease stays removable: reverting it reconciles the set
+	// without it, so the revert must succeed.
+	if _, err := mgr.RevertLease("mcp_lease_bad"); err != nil {
+		t.Fatalf("RevertLease of a bad-direction lease failed: %v", err)
+	}
+	if got := len(mgr.leases); got != 0 {
+		t.Fatalf("bad-direction lease was not removed by the revert (%d leases)", got)
+	}
+}
