@@ -455,6 +455,61 @@ export function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?:
   };
 }
 
+// B-H2b residual: the last-promoted HA edge, persisted. The id
+// used to live only in controller RAM, and the close handler
+// cleared it whenever the active edge disconnected, so after a
+// controller restart or an active-edge flap the controller had
+// forgotten who was active while the old edge still held the LAN
+// VIP and shared WAN MAC in its kernel — and the next promote
+// demoted nobody. The record (edge id plus the VIP/MAC that
+// promotion used, so a reconnect can re-assert the same promotion)
+// is written to disk on every change and reloaded at startup.
+// Only an explicit DEMOTE clears it; a disconnect deliberately
+// does not, because the edge keeps its kernel HA state across a
+// flap. AXONWALL_HA_STATE_PATH overrides the path (tests).
+export interface PersistedHaState {
+  activeHaEdgeId: string | null;
+  sharedWanMac?: string;
+  lanVip?: string;
+}
+
+const HA_STATE_PATHS = ['/var/lib/axonwall/active-ha-edge.json', '/etc/axonwall/active-ha-edge.json'];
+
+export function loadPersistedHaState(): PersistedHaState | null {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (raw && typeof raw === 'object' && (typeof raw.activeHaEdgeId === 'string' || raw.activeHaEdgeId === null)) {
+          const out: PersistedHaState = { activeHaEdgeId: raw.activeHaEdgeId ?? null };
+          if (typeof raw.sharedWanMac === 'string') out.sharedWanMac = raw.sharedWanMac;
+          if (typeof raw.lanVip === 'string') out.lanVip = raw.lanVip;
+          return out;
+        }
+      }
+    } catch {
+      // Ignore unreadable/corrupt state; the controller proceeds
+      // with no recorded active edge.
+    }
+  }
+  return null;
+}
+
+export function persistHaState(state: PersistedHaState): void {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  const payload = JSON.stringify(state, null, 2);
+  for (const p of paths) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(p, payload, { mode: 0o600 });
+    } catch {
+      // Best effort: the in-memory record is still authoritative
+      // for this process lifetime.
+    }
+  }
+}
+
 // B-M2: disconnected satellites are retained (for reconnect identity)
 // only for a grace period, then pruned. The mesh peer filter itself is
 // stricter: only OPEN sockets are ever broadcast as live peers.
@@ -819,9 +874,46 @@ async function main() {
 
   const activeSatellites = new Map<string, SatelliteState>();
 
-  // B-H2b: the edge last promoted to active via /fleet/ha-transition.
-  // The controller demotes this edge before promoting a different one.
-  let activeHaEdgeId: string | null = null;
+  // B-H2b residual: the edge last promoted to active via
+  // /fleet/ha-transition, reloaded from disk (see
+  // loadPersistedHaState). The record survives a controller
+  // restart and an active-edge flap, so demote-before-promote keeps
+  // working across both; only an explicit DEMOTE clears it.
+  const persistedHa = loadPersistedHaState();
+  let activeHaEdgeId: string | null = persistedHa?.activeHaEdgeId ?? null;
+  let activeHaSharedWanMac: string | undefined = persistedHa?.sharedWanMac;
+  let activeHaLanVip: string | undefined = persistedHa?.lanVip;
+  const setActiveHaEdge = (id: string | null, sharedWanMac?: string, lanVip?: string): void => {
+    activeHaEdgeId = id;
+    activeHaSharedWanMac = sharedWanMac;
+    activeHaLanVip = lanVip;
+    persistHaState({ activeHaEdgeId: id, sharedWanMac, lanVip });
+  };
+
+  // B-H2b residual: one send path for HA transitions, shared by
+  // the /fleet/ha-transition endpoint and the reconnect re-assert
+  // below so the two cannot drift apart. Returns false when the
+  // socket is not OPEN (a half-open socket's readyState stays OPEN
+  // only until the B2-H2 heartbeat terminates it, so a buffered
+  // send into a dead socket no longer counts as notified).
+  const sendHaTransition = (sat: SatelliteState, type: 'PROMOTE' | 'DEMOTE', role: 'active' | 'standby', sharedWanMac?: string, lanVip?: string): boolean => {
+    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return false;
+    // The satellite's EdgeHATransitionPayload reads lanVipV4
+    // (lanVip is kept for backward compatibility with any
+    // consumer that still reads the old field name).
+    sat.ws.send(
+      JSON.stringify({
+        type,
+        payload: {
+          role,
+          sharedWanMac,
+          lanVip,
+          lanVipV4: lanVip,
+        },
+      }),
+    );
+    return true;
+  };
 
   function loadLocalDesiredState(): DesiredState | null {
     const candidates = ['/etc/axonwall/state.json', '/var/lib/axonwall/state.json'];
@@ -1255,25 +1347,6 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           const lanVip = validation.lanVip;
           const targetId = validation.satelliteId || '';
 
-          const sendTransition = (sat: SatelliteState, type: 'PROMOTE' | 'DEMOTE', role: 'active' | 'standby'): boolean => {
-            if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return false;
-            // The satellite's EdgeHATransitionPayload reads lanVipV4
-            // (lanVip is kept for backward compatibility with any
-            // consumer that still reads the old field name).
-            sat.ws.send(
-              JSON.stringify({
-                type,
-                payload: {
-                  role,
-                  sharedWanMac,
-                  lanVip,
-                  lanVipV4: lanVip,
-                },
-              }),
-            );
-            return true;
-          };
-
           // B-M6: a named target that matches no connected satellite
           // must not report success with zero notified.
           if (targetId) {
@@ -1286,14 +1359,16 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
             let demoted = 0;
             // B-H2b: demote the previously active edge before
             // promoting the new one, so two edges never hold the
-            // same VIP / shared WAN MAC at once.
+            // same VIP / shared WAN MAC at once. The previous edge
+            // is the persisted record, so this works across a
+            // controller restart and an active-edge flap.
             if (msgType === 'PROMOTE' && activeHaEdgeId && activeHaEdgeId !== targetId) {
               const previous = activeSatellites.get(activeHaEdgeId);
-              if (previous && sendTransition(previous, 'DEMOTE', 'standby')) demoted++;
+              if (previous && sendHaTransition(previous, 'DEMOTE', 'standby', sharedWanMac, lanVip)) demoted++;
             }
-            const notified = sendTransition(target, msgType, normalizedRole) ? 1 : 0;
-            if (msgType === 'PROMOTE' && notified === 1) activeHaEdgeId = targetId;
-            if (msgType === 'DEMOTE' && activeHaEdgeId === targetId) activeHaEdgeId = null;
+            const notified = sendHaTransition(target, msgType, normalizedRole, sharedWanMac, lanVip) ? 1 : 0;
+            if (msgType === 'PROMOTE' && notified === 1) setActiveHaEdge(targetId, sharedWanMac, lanVip);
+            if (msgType === 'DEMOTE' && activeHaEdgeId === targetId) setActiveHaEdge(null);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified, demotedEdges: demoted }));
             return;
@@ -1305,9 +1380,9 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           let notified = 0;
           for (const sat of activeSatellites.values()) {
             const isTarget = sat.role === 'edge-ngfw' || sat.id.startsWith('edge-') || sat.id === 'edge';
-            if (isTarget && sendTransition(sat, msgType, normalizedRole)) notified++;
+            if (isTarget && sendHaTransition(sat, msgType, normalizedRole, sharedWanMac, lanVip)) notified++;
           }
-          if (msgType === 'DEMOTE') activeHaEdgeId = null;
+          if (msgType === 'DEMOTE') setActiveHaEdge(null);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified }));
         } catch {
@@ -2033,7 +2108,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         current.ws = undefined;
         // B-M2: timestamp the disconnect for grace-period pruning.
         current.disconnectedAt = new Date().toISOString();
-        if (activeHaEdgeId === satId) activeHaEdgeId = null;
+        // B-H2b residual: a disconnect deliberately does NOT clear
+        // the recorded active edge. The edge keeps its kernel HA
+        // state (LAN VIP, shared WAN MAC) across a network flap, so
+        // forgetting it here is what let the next promote skip the
+        // demote and create a dual-active split-brain. Only an
+        // explicit DEMOTE clears the record.
         broadcastMeshTopology();
       }
     });
@@ -2077,6 +2157,25 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     // 2. Push initial compiled nftables ruleset (and SYNC_INTERFACES / SYNC_ROUTES for edge-ngfw)
     if (ws.readyState === WebSocket.OPEN) {
       syncSatelliteDesiredState(state);
+    }
+
+    // 2b. B-H2b residual: re-assert HA state on (re)connect. The
+    // recorded active edge keeps its kernel VIP/MAC across a flap
+    // and the controller may have restarted since it was promoted,
+    // so re-send the recorded promotion to it; demote any other
+    // edge that reconnects while a different edge is recorded
+    // active, since it may still hold a stale VIP from being
+    // superseded while it was disconnected. A DEMOTE to an edge
+    // that was never promoted is a harmless standby no-op.
+    if (activeHaEdgeId === satId) {
+      const vip = activeHaLanVip || loadLocalDesiredState()?.hostedEdge?.lan?.edgeAddress;
+      if (vip) {
+        sendHaTransition(state, 'PROMOTE', 'active', activeHaSharedWanMac, vip);
+      } else {
+        console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
+      }
+    } else if (activeHaEdgeId && (state.role === 'edge-ngfw' || satId.startsWith('edge-') || satId === 'edge')) {
+      sendHaTransition(state, 'DEMOTE', 'standby');
     }
 
     // 3. Broadcast mesh update to all satellites (including the new one)

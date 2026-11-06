@@ -45608,6 +45608,36 @@ function validateHaTransition(payload, fleetLanVip) {
     lanVip
   };
 }
+var HA_STATE_PATHS = ["/var/lib/axonwall/active-ha-edge.json", "/etc/axonwall/active-ha-edge.json"];
+function loadPersistedHaState() {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs7.existsSync(p)) {
+        const raw = JSON.parse(fs7.readFileSync(p, "utf8"));
+        if (raw && typeof raw === "object" && (typeof raw.activeHaEdgeId === "string" || raw.activeHaEdgeId === null)) {
+          const out = { activeHaEdgeId: raw.activeHaEdgeId ?? null };
+          if (typeof raw.sharedWanMac === "string") out.sharedWanMac = raw.sharedWanMac;
+          if (typeof raw.lanVip === "string") out.lanVip = raw.lanVip;
+          return out;
+        }
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function persistHaState(state) {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  const payload = JSON.stringify(state, null, 2);
+  for (const p of paths) {
+    try {
+      fs7.mkdirSync(path5.dirname(p), { recursive: true, mode: 509 });
+      fs7.writeFileSync(p, payload, { mode: 384 });
+    } catch {
+    }
+  }
+}
 var MESH_DISCONNECTED_GRACE_MS = 24 * 60 * 60 * 1e3;
 var SATELLITE_HEARTBEAT_MS = 30 * 1e3;
 var SATELLITE_LAST_SEEN_GRACE_MS = 150 * 1e3;
@@ -45829,7 +45859,31 @@ async function main() {
   console.log("[Axonwall Controller] Starting Axonwall Control Plane Worker...");
   console.log("[Axonwall Controller] Monitoring config changes and apply pipeline.");
   const activeSatellites = /* @__PURE__ */ new Map();
-  let activeHaEdgeId = null;
+  const persistedHa = loadPersistedHaState();
+  let activeHaEdgeId = persistedHa?.activeHaEdgeId ?? null;
+  let activeHaSharedWanMac = persistedHa?.sharedWanMac;
+  let activeHaLanVip = persistedHa?.lanVip;
+  const setActiveHaEdge = (id, sharedWanMac, lanVip) => {
+    activeHaEdgeId = id;
+    activeHaSharedWanMac = sharedWanMac;
+    activeHaLanVip = lanVip;
+    persistHaState({ activeHaEdgeId: id, sharedWanMac, lanVip });
+  };
+  const sendHaTransition = (sat, type, role, sharedWanMac, lanVip) => {
+    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return false;
+    sat.ws.send(
+      JSON.stringify({
+        type,
+        payload: {
+          role,
+          sharedWanMac,
+          lanVip,
+          lanVipV4: lanVip
+        }
+      })
+    );
+    return true;
+  };
   function loadLocalDesiredState2() {
     const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
     for (const p of candidates) {
@@ -46180,21 +46234,6 @@ async function main() {
           const sharedWanMac = validation.sharedWanMac;
           const lanVip = validation.lanVip;
           const targetId = validation.satelliteId || "";
-          const sendTransition = (sat, type, role) => {
-            if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return false;
-            sat.ws.send(
-              JSON.stringify({
-                type,
-                payload: {
-                  role,
-                  sharedWanMac,
-                  lanVip,
-                  lanVipV4: lanVip
-                }
-              })
-            );
-            return true;
-          };
           if (targetId) {
             const target = activeSatellites.get(targetId);
             if (!target || !target.ws || target.ws.readyState !== import_websocket.default.OPEN) {
@@ -46205,11 +46244,11 @@ async function main() {
             let demoted = 0;
             if (msgType === "PROMOTE" && activeHaEdgeId && activeHaEdgeId !== targetId) {
               const previous = activeSatellites.get(activeHaEdgeId);
-              if (previous && sendTransition(previous, "DEMOTE", "standby")) demoted++;
+              if (previous && sendHaTransition(previous, "DEMOTE", "standby", sharedWanMac, lanVip)) demoted++;
             }
-            const notified2 = sendTransition(target, msgType, normalizedRole) ? 1 : 0;
-            if (msgType === "PROMOTE" && notified2 === 1) activeHaEdgeId = targetId;
-            if (msgType === "DEMOTE" && activeHaEdgeId === targetId) activeHaEdgeId = null;
+            const notified2 = sendHaTransition(target, msgType, normalizedRole, sharedWanMac, lanVip) ? 1 : 0;
+            if (msgType === "PROMOTE" && notified2 === 1) setActiveHaEdge(targetId, sharedWanMac, lanVip);
+            if (msgType === "DEMOTE" && activeHaEdgeId === targetId) setActiveHaEdge(null);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified2, demotedEdges: demoted }));
             return;
@@ -46217,9 +46256,9 @@ async function main() {
           let notified = 0;
           for (const sat of activeSatellites.values()) {
             const isTarget = sat.role === "edge-ngfw" || sat.id.startsWith("edge-") || sat.id === "edge";
-            if (isTarget && sendTransition(sat, msgType, normalizedRole)) notified++;
+            if (isTarget && sendHaTransition(sat, msgType, normalizedRole, sharedWanMac, lanVip)) notified++;
           }
-          if (msgType === "DEMOTE") activeHaEdgeId = null;
+          if (msgType === "DEMOTE") setActiveHaEdge(null);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified }));
         } catch {
@@ -46837,7 +46876,6 @@ ${headerLines.join("\r\n")}\r
         lastRxTxBytes.delete(satId);
         current.ws = void 0;
         current.disconnectedAt = (/* @__PURE__ */ new Date()).toISOString();
-        if (activeHaEdgeId === satId) activeHaEdgeId = null;
         broadcastMeshTopology();
       }
     });
@@ -46869,6 +46907,16 @@ ${headerLines.join("\r\n")}\r
     }
     if (ws.readyState === import_websocket.default.OPEN) {
       syncSatelliteDesiredState(state);
+    }
+    if (activeHaEdgeId === satId) {
+      const vip = activeHaLanVip || loadLocalDesiredState2()?.hostedEdge?.lan?.edgeAddress;
+      if (vip) {
+        sendHaTransition(state, "PROMOTE", "active", activeHaSharedWanMac, vip);
+      } else {
+        console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
+      }
+    } else if (activeHaEdgeId && (state.role === "edge-ngfw" || satId.startsWith("edge-") || satId === "edge")) {
+      sendHaTransition(state, "DEMOTE", "standby");
     }
     broadcastMeshTopology();
   });
@@ -46909,8 +46957,10 @@ export {
   isValidCidr,
   isValidMacAddress,
   listMcpApiKeys,
+  loadPersistedHaState,
   normalizeMacAddress,
   parseFleetSyncBody,
+  persistHaState,
   processMcpJsonRpcMessage,
   provisionHeadscaleWithRetry,
   queryMcpAuditEntries,
