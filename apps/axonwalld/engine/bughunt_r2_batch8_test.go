@@ -1,9 +1,16 @@
 package engine
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Round-2 batch 8 (daemon-med-3) regression tests.
@@ -92,5 +99,82 @@ func TestBatch8VerifyRosenpassUnitMissing(t *testing.T) {
 	}
 	if err := verifyRosenpassUnit(); err == nil {
 		t.Fatalf("verifyRosenpassUnit should fail with no unit file present")
+	}
+}
+// A-M34: HA PKI imports must reject empty/unparseable PEM and
+// mismatched keys instead of writing them to disk and reporting success.
+// These tests assert rejection only: validation runs before any write,
+// so they have no filesystem side effects on this shared box.
+func batch8TestSelfSignedCert(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating test key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "batch8-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		IsCA:         true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("creating test certificate: %v", err)
+	}
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyDER := x509.MarshalPKCS1PrivateKey(priv)
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyDER}))
+	return certPEM, keyPEM
+}
+
+func TestBatch8HAPKIBundleValidation(t *testing.T) {
+	caCert, caKey := batch8TestSelfSignedCert(t)
+	nodeCert, _ := batch8TestSelfSignedCert(t)
+	_, otherKey := batch8TestSelfSignedCert(t)
+
+	// The pure validators accept good material and a matching pair.
+	if _, err := parsePEMCertificate("CA certificate", caCert); err != nil {
+		t.Fatalf("parsePEMCertificate(valid cert) failed: %v", err)
+	}
+	if err := validatePEMCertKeyPair("CA certificate", caCert, "CA key", caKey); err != nil {
+		t.Fatalf("validatePEMCertKeyPair(matching pair) failed: %v", err)
+	}
+	if err := validatePEMCertKeyPair("node certificate", nodeCert, "node key", otherKey); err == nil {
+		t.Fatalf("validatePEMCertKeyPair must reject a key that does not match the cert")
+	}
+
+	// ImportHAPKIBundle must reject empty / garbage / mismatched input.
+	for _, tc := range []struct {
+		name   string
+		bundle HAPKIBundle
+	}{
+		{"empty bundle", HAPKIBundle{}},
+		{"empty CA", HAPKIBundle{CACertPEM: "", NodeCertPEM: nodeCert}},
+		{"garbage CA", HAPKIBundle{CACertPEM: "not pem at all", NodeCertPEM: nodeCert}},
+		{"garbage node cert", HAPKIBundle{CACertPEM: caCert, NodeCertPEM: "-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----"}},
+		{"mismatched node key", HAPKIBundle{CACertPEM: caCert, NodeCertPEM: nodeCert, NodeKeyPEM: otherKey}},
+		{"mismatched CA key", HAPKIBundle{CACertPEM: caCert, CAKeyPEM: otherKey, NodeCertPEM: nodeCert}},
+	} {
+		if err := ImportHAPKIBundle(tc.bundle); err == nil {
+			t.Fatalf("ImportHAPKIBundle(%s) should fail", tc.name)
+		}
+	}
+
+	// InstallHAPKICSRResponse must reject garbage the same way (the
+	// old code only checked non-emptiness and wrote it to disk).
+	for _, tc := range []struct {
+		name string
+		resp *HAPKICSRResponse
+	}{
+		{"garbage CA", &HAPKICSRResponse{CACertPEM: "not pem", SignedCertPEM: nodeCert}},
+		{"garbage signed cert", &HAPKICSRResponse{CACertPEM: caCert, SignedCertPEM: "not pem"}},
+		{"garbage peer cert", &HAPKICSRResponse{CACertPEM: caCert, SignedCertPEM: nodeCert, PeerSignerCertPEM: "not pem"}},
+	} {
+		if err := InstallHAPKICSRResponse(tc.resp); err == nil {
+			t.Fatalf("InstallHAPKICSRResponse(%s) should fail", tc.name)
+		}
 	}
 }
