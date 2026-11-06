@@ -4478,52 +4478,13 @@ export async function getHardwareTelemetry(): Promise<HardwareTelemetry> {
     return daemonTelem;
   }
 
-  // Fallback telemetry
-  return {
-    hostname: os.hostname(),
-    cpuTempC: 42.0,
-    temperatures: [
-      { name: 'cpu_core0', label: 'CPU Core 0', value: 41.5, unit: '°C', warning: 85, critical: 100 },
-      { name: 'cpu_core1', label: 'CPU Core 1', value: 42.5, unit: '°C', warning: 85, critical: 100 },
-      { name: 'pch_temp', label: 'Platform Controller Hub (PCH)', value: 46.2, unit: '°C', warning: 90, critical: 105 },
-      { name: 'ambient_zone', label: 'Chassis Intake Ambient', value: 24.8, unit: '°C', warning: 45, critical: 60 },
-    ],
-    fans: [
-      { name: 'fan_chassis1', label: 'Chassis Exhaust Fan 1', rpm: 2450 },
-      { name: 'fan_chassis2', label: 'Chassis Exhaust Fan 2', rpm: 2380 },
-      { name: 'fan_cpu', label: 'CPU PWM Cooler', rpm: 1820 },
-    ],
-    voltages: [
-      { name: 'vcore', label: 'CPU Vcore', value: 1.15, unit: 'V' },
-      { name: '12v', label: '+12V Rail', value: 12.08, unit: 'V' },
-      { name: '5v', label: '+5V Rail', value: 5.02, unit: 'V' },
-      { name: '3v3', label: '+3.3V Rail', value: 3.31, unit: 'V' },
-    ],
-    transceivers: [
-      {
-        interface: 'eth1 (WAN SFP+)',
-        vendor: 'CISCO-FINISAR',
-        partNumber: 'FTLX8571D3BCL',
-        temperature: 38.4,
-        voltage: 3.29,
-        txPowerDbm: -2.1,
-        rxPowerDbm: -3.4,
-        biasCurrentMa: 6.8,
-        status: 'Optimal Link (10G-SR)',
-      },
-      {
-        interface: 'eth2 (LAN SFP+)',
-        vendor: 'FS.COM',
-        partNumber: 'SFP-10GSR-85',
-        temperature: 36.1,
-        voltage: 3.31,
-        txPowerDbm: -1.8,
-        rxPowerDbm: -2.2,
-        biasCurrentMa: 7.1,
-        status: 'Optimal Link (10G-SR)',
-      },
-    ],
-  };
+  // C-B5: the daemon did not answer, so no sensor was ever read. Never
+  // return invented healthy-looking readings — an operator checking a
+  // thermal/fan/optic incident would be told everything is normal.
+  // Callers render an "unavailable" state instead (see terminal page).
+  throw new Error(
+    'Hardware telemetry unavailable: axonwalld is unreachable — no sensor readings were taken.'
+  );
 }
 
 export async function executeTerminalCommand(command: string): Promise<TerminalExecResponse> {

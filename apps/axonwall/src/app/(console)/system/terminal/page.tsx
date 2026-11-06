@@ -63,6 +63,9 @@ export default function TerminalPage() {
 
   const [telemetry, setTelemetry] = useState<HardwareTelemetry | null>(null);
   const [isLoadingTelem, setIsLoadingTelem] = useState(false);
+  // C-B5: a failed load must surface as "unavailable", never as empty
+  // grids the operator could read as "no sensors / all normal".
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
 
@@ -78,10 +81,14 @@ export default function TerminalPage() {
 
   const loadTelemetry = async () => {
     setIsLoadingTelem(true);
+    setTelemetryError(null);
     try {
       const data = await getHardwareTelemetry();
       setTelemetry(data);
-    } catch {}
+    } catch (err: any) {
+      setTelemetry(null);
+      setTelemetryError(err?.message || 'Failed to load hardware telemetry.');
+    }
     setIsLoadingTelem(false);
   };
 
@@ -272,6 +279,11 @@ export default function TerminalPage() {
           </div>
 
           {/* Temperature Grid */}
+          {telemetryError && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300">
+              Hardware readings unavailable: {telemetryError} No sensor, fan, voltage, or optic values shown below were measured.
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {telemetry?.temperatures.map((temp) => (
               <div
