@@ -286,9 +286,11 @@ table inet axonwall {
 	if len(b2.Chains) != 4 {
 		t.Fatalf("expected 4 chains (input, forward, output, postrouting), got %d", len(b2.Chains))
 	}
-	if len(b2.Rules) != 25 {
-		t.Fatalf("expected 25 compiled rules, got %d", len(b2.Rules))
+	if len(b2.Rules) != 26 {
+		t.Fatalf("expected 26 compiled rules, got %d", len(b2.Rules))
 	}
+	// 26, not 25: the `meta l4proto { tcp, udp } ... flow add @fastpath`
+	// rule expands to one rule per protocol (A-M36, round 2).
 }
 
 // decodeCtStateMask extracts the bitmask from the nft bitwise expression of
@@ -400,6 +402,52 @@ func TestCompileNftSetInitialElements(t *testing.T) {
 		if _, err := CompileNftScriptToNetlinkBatch(bad); err == nil {
 			t.Errorf("expected compile error for script %q, got nil", bad)
 		}
+	}
+}
+
+func TestCompileNftCommonTokens(t *testing.T) {
+	// A-M36 (round 2, regression in 29c6eda): one unsupported token used
+	// to fail the ENTIRE ruleset on a binary-less box. Each of these
+	// single rules failed the whole batch before the fix.
+	script := "table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    ip saddr 10.0.0.1 log drop\n    ip saddr 10.0.0.0/24 drop\n    tcp dport { 80, 443 } accept\n    meta l4proto { tcp, udp } accept\n    ip saddr 10.0.0.2 reject\n    ip saddr 10.0.0.3 reject with tcp reset\n    ip saddr 10.0.0.4 log level info drop\n    ct state new return\n  }\n  chain helper {\n    ip saddr 10.0.0.5 accept\n  }\n  chain input2 {\n    type filter hook input priority filter; policy drop;\n    ip saddr 10.0.0.6 jump helper\n  }\n}\n"
+	batch, err := CompileNftScriptToNetlinkBatch(script)
+	if err != nil {
+		t.Fatalf("CompileNftScriptToNetlinkBatch failed: %v", err)
+	}
+	// 10 rules in input (port set and proto set each expand to 2), 1 in
+	// helper, 1 in input2.
+	if len(batch.Rules) != 12 {
+		t.Fatalf("expected 12 compiled rules, got %d", len(batch.Rules))
+	}
+	// The port-set rule expanded to one rule per port, in order.
+	if batch.Rules[2].RawLine != "tcp dport 80 accept" || batch.Rules[3].RawLine != "tcp dport 443 accept" {
+		t.Errorf("port-set expansion wrong: %q / %q", batch.Rules[2].RawLine, batch.Rules[3].RawLine)
+	}
+	// The proto-set rule expanded to one rule per protocol, in order.
+	if batch.Rules[4].RawLine != "meta l4proto tcp accept" || batch.Rules[5].RawLine != "meta l4proto udp accept" {
+		t.Errorf("proto-set expansion wrong: %q / %q", batch.Rules[4].RawLine, batch.Rules[5].RawLine)
+	}
+	// Both reject forms compiled to a reject expression.
+	for _, idx := range []int{6, 7} {
+		found := false
+		for _, expr := range batch.Rules[idx].Expressions {
+			if bytes.Contains(expr, []byte("reject")) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("rule %d (%q): no reject expression in compiled output", idx, batch.Rules[idx].RawLine)
+		}
+	}
+	// The CIDR rule compiled to a masked compare (bitwise + cmp), not an error.
+	foundBitwise := false
+	for _, expr := range batch.Rules[1].Expressions {
+		if bytes.Contains(expr, []byte("bitwise")) {
+			foundBitwise = true
+		}
+	}
+	if !foundBitwise {
+		t.Errorf("CIDR rule %q: no bitwise expression in compiled output", batch.Rules[1].RawLine)
 	}
 }
 
