@@ -12,6 +12,17 @@ import {
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function ZfsSnapshotsPage() {
+  // C-B13: the runtime snapshot list was fetched into `snapshots` and
+  // then never rendered, so a snapshot created by "Create Snapshot
+  // Now" could only be trusted from the banner text. The list is now
+  // shown below (name/dataset/created/size). No delete/rollback server
+  // action exists yet, so this section is read-only.
+  const formatBytes = (bytes: number): string => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  };
   const [state, setState] = useState<DesiredState | null>(null);
   const [snapshots, setSnapshots] = useState<NasSnapshotItem[]>([]);
   const [dataset, setDataset] = useState('tank/shares/general');
@@ -208,6 +219,31 @@ export default function ZfsSnapshotsPage() {
                 <span className="font-mono text-white">{p.dataset}</span>
                 <span className="text-slate-400 font-mono">Every {p.interval} • Keep {p.keepCount} snapshots</span>
                 <span className="text-amber-400 font-semibold">Recorded only — not scheduled, HA replication not implemented</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-3">
+        <h3 className="text-sm font-bold text-white">Runtime Snapshots (live from the daemon)</h3>
+        {snapshots.length === 0 ? (
+          <p className="text-xs text-slate-500">
+            No snapshots reported by the daemon. If you just created one and it is not listed here,
+            the creation may not have landed — check the message above.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {snapshots.map((s) => (
+              <div
+                key={`${s.dataset}@${s.name}`}
+                className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-3 text-xs"
+              >
+                <span className="font-mono text-white">{s.dataset}@{s.name}</span>
+                <span className="text-slate-400 font-mono">
+                  {s.createdAt ? new Date(s.createdAt).toLocaleString() : 'unknown date'}
+                </span>
+                <span className="text-slate-400 font-mono">{formatBytes(s.usedBytes)}</span>
               </div>
             ))}
           </div>

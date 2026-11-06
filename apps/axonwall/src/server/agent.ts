@@ -1999,13 +1999,38 @@ export interface SystemServiceInfo {
   name: string;
   unit: string;
   description: string;
-  status: 'active' | 'inactive' | 'failed' | 'not-installed';
+  // C-B15: 'unknown' means the state could not be read (systemctl
+  // failed); it is distinct from 'not-installed' (no unit file) and
+  // from 'inactive' (installed but stopped).
+  status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown';
   pid: number | null;
   memory: string | null;
   uptime: string | null;
 }
 
 export type LiveServiceInfo = SystemServiceInfo;
+
+// C-B15: file-based unit existence check, used when `systemctl show`
+// fails and the state is otherwise unreadable. `list-unit-files`
+// reads unit files from disk (no manager connection), so it still
+// answers during a dbus outage. Returns true when the unit file
+// exists, false when it is provably absent (exit 1, no output), and
+// null when the probe itself is inconclusive (binary missing,
+// timeout, unexpected exit) — inconclusive must never be reported
+// as "not installed".
+function isSystemdUnitFilePresent(unit: string): boolean | null {
+  try {
+    const out = execFileSync('systemctl', ['list-unit-files', unit, '--no-legend', '--no-pager'], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.split('\n').some((line) => line.trim().startsWith(unit));
+  } catch (err: any) {
+    if (err?.status === 1) return false;
+    return null;
+  }
+}
 
 export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   const session = await getSession();
@@ -2029,7 +2054,7 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   const results: SystemServiceInfo[] = [];
 
   for (const u of units) {
-    let status: 'active' | 'inactive' | 'failed' | 'not-installed' = 'inactive';
+    let status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown' = 'inactive';
     let pid: number | null = null;
     let memory: string | null = null;
     let uptime: string | null = null;
@@ -2047,7 +2072,11 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
       }
 
       const activeState = props['ActiveState'];
-      if (activeState === 'active') status = 'active';
+      // C-B15: `systemctl show` exits 0 for a unit with no unit file
+      // (LoadState=not-found, ActiveState=inactive) — without this
+      // check a missing unit rendered as "Inactive (stopped)".
+      if (props['LoadState'] === 'not-found') status = 'not-installed';
+      else if (activeState === 'active') status = 'active';
       else if (activeState === 'failed') status = 'failed';
       else status = 'inactive';
 
@@ -2063,7 +2092,11 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
         uptime = 'Active';
       }
     } catch {
-      status = 'not-installed';
+      // C-B15: any `systemctl show` failure used to mark the unit "Not
+      // Installed" — so a systemd/dbus outage rendered all 12 services
+      // as not installed. A failed probe means the state is unknown;
+      // only a unit file provably absent is not-installed.
+      status = isSystemdUnitFilePresent(u.unit) === false ? 'not-installed' : 'unknown';
     }
 
     results.push({
@@ -2101,7 +2134,17 @@ export async function getServiceJournalLogs(unit: string): Promise<string> {
     try {
       if (fs.existsSync(logPath)) {
         const raw = execFileSync('tail', ['-n', '50', logPath], { encoding: 'utf8', timeout: 1000 });
-        if (raw.trim()) return raw.trim();
+        if (raw.trim()) {
+          // C-B15: fallback log sources used to be returned bare, so
+          // the last 50 lines of the global /var/log/messages were
+          // presented as the unit's own "Journal Logs". Every fallback
+          // is now labelled with its source; the global log is
+          // explicitly flagged as NOT this unit's logs.
+          if (logPath === '/var/log/messages') {
+            return `-- Source: /var/log/messages (system-wide log — no logs found for ${safeUnit}; entries below are NOT this unit's logs) --\n${raw.trim()}`;
+          }
+          return `-- Source: ${logPath} (service log file, not the journal) --\n${raw.trim()}`;
+        }
       }
     } catch {}
   }
@@ -2756,6 +2799,21 @@ export async function saveInterfaceAssignment(data: {
     if (state.interfaces.some((i) => i.name === cleanName)) {
       throw new Error(
         `Interface '${cleanName}' already exists. Edit the existing interface instead of creating a duplicate.`
+      );
+    }
+  }
+  // C-A10: mirror the name-collision check for devices. The UI used to
+  // both suggest and permit a device already bound to another logical
+  // interface (including a disabled one), and the server accepted it,
+  // so two logical interfaces could share one NIC. Renames
+  // (originalName present) may keep their own device.
+  if (normalizedDevice !== 'none') {
+    const holder = state.interfaces.find(
+      (i) => i.device === normalizedDevice && i.name.toLowerCase() !== lookupName
+    );
+    if (holder) {
+      throw new Error(
+        `Device '${normalizedDevice}' is already assigned to interface '${holder.name}'. Remove or reassign that interface first.`
       );
     }
   }
@@ -4200,7 +4258,20 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
           ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
           { stdio: 'ignore', timeout: 1500 }
         );
-      } catch {}
+      } catch (err: any) {
+        // C-B11: a failed grubenv write used to be swallowed while the
+        // success message below claimed "Watchdog bootcount armed
+        // (bootlimit=3)". Like activatePartitionSlot (C7), a failed
+        // privileged write is a failure: the firmware WAS flashed, but
+        // the watchdog was NOT armed, so a bad boot will not count
+        // toward the rollback limit. Say so loudly instead.
+        return {
+          success: false,
+          message: `Firmware v${targetVersion} was flashed to Slot ${cleanSlot}, but the watchdog bootcount could NOT be armed: ${err?.message || 'grub-editenv write failed'}. A failed boot will not count toward the rollback limit; fix /boot/grub/grubenv and re-arm before relying on watchdog rollback.`,
+          targetSlot: cleanSlot,
+          newVersion: targetVersion,
+        };
+      }
     }
 
     // Persist per-slot version metadata

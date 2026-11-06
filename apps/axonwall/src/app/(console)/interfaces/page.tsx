@@ -163,8 +163,12 @@ export default function InterfacesPage() {
   };
 
   const getFirstUnassignedDevice = (): string => {
+    // C-A10: every bound device is excluded, not just enabled ones —
+    // a disabled interface still owns its NIC, and suggesting it for
+    // a new interface used to let two logical interfaces share one
+    // physical device.
     const usedDevs = new Set(
-      interfaces.filter((i) => i.enabled && i.device && i.device !== 'none').map((i) => i.device)
+      interfaces.filter((i) => i.device && i.device !== 'none').map((i) => i.device)
     );
     return physicalDevs.find((d) => !usedDevs.has(d)) || '';
   };
@@ -815,7 +819,10 @@ export default function InterfacesPage() {
                     const bound = assignedByDev.get(dev);
                     const isBoundElsewhere = bound && bound.name !== editForm.originalName;
                     return (
-                      <option key={dev} value={dev}>
+                      // C-A10: a device bound to another interface is
+                      // disabled, not just labelled — the label alone
+                      // did not stop the selection.
+                      <option key={dev} value={dev} disabled={Boolean(isBoundElsewhere)}>
                         {dev}
                         {isBoundElsewhere ? ` (currently ${bound.name.toUpperCase()})` : ''}
                       </option>

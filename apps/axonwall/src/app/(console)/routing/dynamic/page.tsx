@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Route, Terminal, Shield, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import { compileFrr } from '@axonwall/lib/compile/frr';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, applyDesiredState, getSystemServicesStatus } from '@/server/agent';
 import type { DesiredState, FrrConfig } from '@axonwall/lib/schemas';
 
 export default function DynamicRoutingPage() {
@@ -54,6 +54,18 @@ export default function DynamicRoutingPage() {
       setIsLoading(false);
     }
   };
+  // C-A8: every neighbour used to render a green "ESTABLISHED" badge
+  // from the configured list alone — no BGP session state was ever
+  // read, and no BGP status query exists. Until one does, the badge
+  // is honest: "Down" only when FRR itself is not running, otherwise
+  // "Unknown". null = service status not loaded yet.
+  const [frrStatus, setFrrStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    getSystemServicesStatus()
+      .then((list) => setFrrStatus(list.find((s) => s.unit === 'frr.service')?.status ?? 'unknown'))
+      .catch(() => setFrrStatus('unknown'));
+  }, []);
 
   useEffect(() => {
     loadState();
@@ -223,7 +235,13 @@ export default function DynamicRoutingPage() {
                         BFD Fast Failover
                       </span>
                     )}
-                    <span className="text-emerald-400 font-bold">ESTABLISHED</span>
+                    {frrStatus === 'inactive' || frrStatus === 'failed' || frrStatus === 'not-installed' ? (
+                      <span className="text-red-400 font-bold">DOWN (FRR {frrStatus})</span>
+                    ) : (
+                      <span className="text-amber-400 font-bold" title="BGP session state is not checked on this page">
+                        UNKNOWN
+                      </span>
+                    )}
                   </div>
                 </div>
               ))}

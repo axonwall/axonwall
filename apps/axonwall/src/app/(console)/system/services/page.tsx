@@ -194,6 +194,14 @@ export default function ServicesSupervisorPage() {
                         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-slate-800/60 text-slate-500 border border-slate-700/50">
                           Not Installed
                         </span>
+                      ) : svc.status === 'unknown' ? (
+                        <span
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                          title="systemctl could not read this unit's state — it may be running, stopped, or absent"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                          Unknown
+                        </span>
                       ) : (
                         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">
                           <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />

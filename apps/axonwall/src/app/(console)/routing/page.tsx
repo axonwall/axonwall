@@ -2,7 +2,7 @@
 
 import { Route, CheckCircle2, Plus, Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, applyDesiredState, getGatewaysTelemetry, type LiveGatewayInfo } from '@/server/agent';
 import type { DesiredState, Gateway, StaticRoute } from '@axonwall/lib/schemas';
 
 export default function RoutingPage() {
@@ -13,6 +13,12 @@ export default function RoutingPage() {
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // C-A7: the gateway table used to hardcode "Online" for every row.
+  // Telemetry comes from the kernel routing table via
+  // getGatewaysTelemetry; a gateway with no telemetry entry is
+  // "Unknown", not online — the check only covers the active default
+  // route, so a non-default gateway cannot be claimed either way.
+  const [liveGateways, setLiveGateways] = useState<LiveGatewayInfo[]>([]);
 
   // Static route form
   const [newNetwork, setNewNetwork] = useState('');
@@ -25,10 +31,14 @@ export default function RoutingPage() {
     setErrorMsg(null);
     if (isManual) setStatusMsg(null);
     try {
-      const state = await getCurrentDesiredState();
+      const [state, live] = await Promise.all([
+        getCurrentDesiredState(),
+        getGatewaysTelemetry().catch(() => [] as LiveGatewayInfo[]),
+      ]);
       setFullState(state);
       setGateways(state.gateways || []);
       setRoutes(state.routes || []);
+      setLiveGateways(live);
       if (isManual) {
         setStatusMsg(`Successfully loaded ${state.routes?.length || 0} static route(s) from /etc/axonwall/routing.yaml`);
       }
@@ -164,10 +174,24 @@ export default function RoutingPage() {
                 <td className="px-4 py-3 text-slate-300">{gw.gatewayIp}</td>
                 <td className="px-4 py-3 text-cyan-400">{gw.monitorIp || 'Auto'}</td>
                 <td className="px-4 py-3">
-                  <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Online
-                  </span>
+                  {(() => {
+                    const live = liveGateways.find((g) => g.ip === gw.gatewayIp);
+                    if (!live) {
+                      return <span className="inline-flex items-center gap-1 text-amber-400 font-medium">Unknown</span>;
+                    }
+                    if (live.status === 'online') {
+                      return (
+                        <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Online
+                        </span>
+                      );
+                    }
+                    if (live.status === 'standby') {
+                      return <span className="inline-flex items-center gap-1 text-amber-400 font-medium">Standby</span>;
+                    }
+                    return <span className="inline-flex items-center gap-1 text-red-400 font-medium">Offline</span>;
+                  })()}
                 </td>
               </tr>
             ))}

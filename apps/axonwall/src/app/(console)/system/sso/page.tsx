@@ -68,12 +68,21 @@ export default function SsoSettingsPage() {
 
   // null = load not finished yet; false = no saved SSO config exists.
   const [hasSavedConfig, setHasSavedConfig] = useState<boolean | null>(null);
+  // C-B17: a load failure used to set hasSavedConfig=false — the same
+  // value as "no config exists" — leaving the empty form on screen,
+  // and saving then clobbered the real config with near-empty values.
+  // Load failure is now tracked separately; saving is refused until
+  // a load has succeeded.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadOk, setLoadOk] = useState(false);
   const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
 
   useEffect(() => {
     getCurrentDesiredState()
       .then((state) => {
+        setLoadOk(true);
+        setLoadError(null);
         if (state.sso) {
           setConfig(state.sso);
           setHasSavedConfig(true);
@@ -81,8 +90,13 @@ export default function SsoSettingsPage() {
           setHasSavedConfig(false);
         }
       })
-      .catch(() => {
-        setHasSavedConfig(false);
+      .catch((err: any) => {
+        // C-B17: do NOT set hasSavedConfig=false here — that is the
+        // "no config exists" state. A failed load leaves it null and
+        // records the error, so the page cannot present an empty form
+        // as "not configured".
+        setLoadOk(false);
+        setLoadError(err?.message || 'Failed to load SSO configuration');
       });
   }, []);
 
@@ -201,7 +215,19 @@ export default function SsoSettingsPage() {
         </div>
       )}
 
+      {loadError && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3 text-red-300 text-sm">
+          <AlertCircle className="w-5 h-5 shrink-0 text-red-400" />
+          <span>
+            Failed to load the saved SSO configuration: {loadError}. The form may not reflect the
+            real configuration, so editing and saving are disabled until it loads — saving an
+            empty form here would overwrite the real IdP settings.
+          </span>
+        </div>
+      )}
+
       {/* Main Settings Grid */}
+      <fieldset disabled={loadError !== null} className="border-0 p-0 m-0 min-w-0">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Identity Provider Parameters */}
         <div className="lg:col-span-2 space-y-6">
@@ -362,6 +388,7 @@ export default function SsoSettingsPage() {
           </div>
         </div>
       </div>
+      </fieldset>
     </div>
   );
 }
