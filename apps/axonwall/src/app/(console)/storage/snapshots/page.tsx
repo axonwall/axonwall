@@ -74,9 +74,16 @@ export default function ZfsSnapshotsPage() {
       ];
       await applyDesiredState(next);
       setState(next);
-      setMsg(`Automated ${interval} snapshot & HA replication policy saved for ${dataset}.`);
+      // C-B7: no scheduler or `zfs send` loop consumes snapshotPolicies
+      // anywhere — the policy is only recorded. Say so, instead of
+      // promising automated snapshots and HA replication that never run.
+      setMsg(
+        `Snapshot policy recorded for ${dataset} (${interval}, keep ${keepCount}). Note: no automatic scheduler exists yet — snapshots are manual only and nothing is replicated to the HA peer.`
+      );
+      setMsgIsError(false);
     } catch (err: any) {
       setMsg(`Error: ${err?.message || 'Failed to save snapshot policy'}`);
+      setMsgIsError(true);
     }
   };
 
@@ -89,7 +96,8 @@ export default function ZfsSnapshotsPage() {
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">ZFS Snapshots & 2-Node HA Replication</h1>
           <p className="text-sm text-slate-400">
-            Take instant Copy-on-Write ZFS snapshots and stream incremental <code className="text-emerald-400">zfs send -I</code> deltas to your HA Backup node.
+            Take instant Copy-on-Write ZFS snapshots. Automated schedules and streaming incremental{' '}
+            <code className="text-emerald-400">zfs send -I</code> deltas to an HA Backup node are not implemented yet.
           </p>
         </div>
       </div>
@@ -142,8 +150,12 @@ export default function ZfsSnapshotsPage() {
 
         <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
           <h2 className="text-base font-bold text-white flex items-center gap-2">
-            <ArrowRightLeft className="w-4 h-4 text-emerald-400" /> Automated Snapshot & HA Sync Policy
+            <ArrowRightLeft className="w-4 h-4 text-emerald-400" /> Snapshot & HA Sync Policy (recorded only — not executed)
           </h2>
+          <p className="text-xs text-slate-400">
+            Policies are stored for later use. No scheduler runs them and no replication stream exists yet — take snapshots
+            manually with “Create Snapshot Now” above.
+          </p>
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-xs text-slate-400 mb-1">Dataset</label>
@@ -186,16 +198,16 @@ export default function ZfsSnapshotsPage() {
       </div>
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-3">
-        <h3 className="text-sm font-bold text-white">Active Snapshot & HA Replication Policies</h3>
+        <h3 className="text-sm font-bold text-white">Recorded Snapshot & HA Replication Policies</h3>
         {(state?.nas?.snapshotPolicies ?? []).length === 0 ? (
-          <p className="text-xs text-slate-500">No automated policies configured yet.</p>
+          <p className="text-xs text-slate-500">No snapshot policies recorded yet.</p>
         ) : (
           <div className="space-y-2">
             {(state?.nas?.snapshotPolicies ?? []).map((p, idx) => (
               <div key={idx} className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs">
                 <span className="font-mono text-white">{p.dataset}</span>
                 <span className="text-slate-400 font-mono">Every {p.interval} • Keep {p.keepCount} snapshots</span>
-                <span className="text-emerald-400 font-semibold">HA ZFS Stream Enabled</span>
+                <span className="text-amber-400 font-semibold">Recorded only — not scheduled, HA replication not implemented</span>
               </div>
             ))}
           </div>
