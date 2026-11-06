@@ -20,19 +20,19 @@ import (
 )
 
 type EBPFManager struct {
-	objs         ebpf.FlowTrackerObjects
-	links        []link.Link
-	ch           driver.Conn
-	stopChan     chan struct{}
-	doneChan     chan struct{}
+	objs     ebpf.FlowTrackerObjects
+	links    []link.Link
+	ch       driver.Conn
+	stopChan chan struct{}
+	doneChan chan struct{}
 	// monitorStarted records whether monitorFlows() was actually launched.
 	// Start() returns early on object-load failure before `go
 	// m.monitorFlows()`, so doneChan is never closed; Stop() must not
 	// wait on it in that case (A-M23).
 	monitorStarted atomic.Bool
-	prevPackets  map[ebpf.FlowTrackerFlowKey]uint64
-	blockedUntil map[uint32]time.Time
-	blockMu      sync.Mutex
+	prevPackets    map[ebpf.FlowTrackerFlowKey]uint64
+	blockedUntil   map[uint32]time.Time
+	blockMu        sync.Mutex
 }
 
 func NewEBPFManager() *EBPFManager {
