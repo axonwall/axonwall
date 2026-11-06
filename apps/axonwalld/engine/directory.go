@@ -1091,12 +1091,8 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 	}
 
 	for _, mod := range mods {
-		ldif := fmt.Sprintf("dn: uid=%s,ou=users,%s\nchangetype: modify\n%s\n", username, baseDN, mod)
-		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
-		cmd.Stdin = strings.NewReader(ldif)
-		out, err := cmd.CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "No such attribute") {
-			return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, string(out), err)
+		if err := d.runLDAPModify(username, baseDN, mod); err != nil {
+			return err
 		}
 	}
 
@@ -1147,6 +1143,87 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 	InvalidateSSSDCache(username)
 	_ = d.SyncRootSshPolicy()
 	return nil
+}
+
+// runLDAPModify applies one LDIF modify block for a user.
+//
+// A "No such attribute" failure is only benign for delete: operations
+// (removing an attribute that was never set, e.g. unlocking a user that
+// was never locked). For replace: it means the attribute does not exist
+// — which is expected for pwdAccountLockedTime and sshPublicKey, two
+// attributes CreateUser never sets — so those retry once as add:.
+// Anything else is a real error (A-H6, round 2: the old code swallowed
+// "No such attribute" for every modify, silently dropping a first-time
+// account lock and a first SSH key).
+func (d *DirectoryManager) runLDAPModify(username, baseDN, mod string) error {
+	run := func(ldifMod string) (string, error) {
+		ldif := fmt.Sprintf("dn: uid=%s,ou=users,%s\nchangetype: modify\n%s\n", username, baseDN, ldifMod)
+		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+		cmd.Stdin = strings.NewReader(ldif)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	out, err := run(mod)
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(out, "No such attribute") {
+		return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, out, err)
+	}
+	if strings.HasPrefix(mod, "delete:") {
+		return nil
+	}
+	// replace: on an attribute that does not exist yet — retry as add:
+	// when the block targets an add-if-absent attribute and carries
+	// values; a bare replace of an absent attribute ("", true) is
+	// already in the desired state.
+	addMod, ok := replaceToAddForAbsentAttrs(mod)
+	if !ok {
+		return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, out, err)
+	}
+	if addMod == "" {
+		return nil
+	}
+	if out2, err2 := run(addMod); err2 != nil {
+		return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, out2, err2)
+	}
+	return nil
+}
+
+// replaceToAddForAbsentAttrs converts a replace: block into an add:
+// block when it targets only attributes that may legitimately be absent
+// (pwdAccountLockedTime, sshPublicKey — CreateUser never sets them) and
+// carries values to add. It reports ok=false when the block targets
+// other attributes (a missing attribute there is a real inconsistency,
+// not a first-time set) or mixes in other operations. It returns
+// ("", true) for a bare replace with no values: deleting an attribute
+// that is already absent is the desired end state.
+func replaceToAddForAbsentAttrs(mod string) (string, bool) {
+	hasAbsentAttr := false
+	hasValue := false
+	var lines []string
+	for _, ln := range strings.Split(mod, "\n") {
+		if strings.HasPrefix(ln, "replace: ") {
+			attr := strings.TrimSpace(strings.TrimPrefix(ln, "replace: "))
+			if attr == "pwdAccountLockedTime" || attr == "sshPublicKey" {
+				hasAbsentAttr = true
+				lines = append(lines, "add: "+attr)
+				continue
+			}
+			return "", false
+		}
+		if strings.HasPrefix(ln, "sshPublicKey: ") || strings.HasPrefix(ln, "pwdAccountLockedTime: ") {
+			hasValue = true
+		}
+		lines = append(lines, ln)
+	}
+	if !hasAbsentAttr {
+		return "", false
+	}
+	if !hasValue {
+		return "", true
+	}
+	return strings.Join(lines, "\n"), true
 }
 
 // DeleteUser removes a human user from the OpenLDAP directory (after verifying at least one unlocked admin remains).
