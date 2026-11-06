@@ -103,6 +103,20 @@ export default function BattleStationPage() {
     }
   };
 
+  const handleContainIP = async (ip: string) => {
+    if (!ip.trim()) return;
+    setStatusBanner(null);
+
+    const res = await soarBlockIPAction(ip.trim(), blockTimeout);
+    if (res.success) {
+      setStatusBanner({ type: 'success', message: res.message });
+      const blocked = await getSoarBlockedIPsAction();
+      setBlockedIPs(blocked);
+    } else {
+      setStatusBanner({ type: 'error', message: res.message });
+    }
+  };
+
   const handleUnblockIP = async (ip: string) => {
     setStatusBanner(null);
     const res = await soarUnblockIPAction(ip);
@@ -467,7 +481,7 @@ export default function BattleStationPage() {
                     <span className="text-[10px] text-slate-500 font-mono">{evt.time}</span>
                     {evt.srcIp && (
                       <button
-                        onClick={() => soarBlockIPAction(evt.srcIp!)}
+                        onClick={() => handleContainIP(evt.srcIp!)}
                         className="px-2 py-1 bg-rose-950/60 border border-rose-800/60 hover:bg-rose-900/80 text-rose-300 text-[10px] font-semibold rounded transition-colors"
                       >
                         Contain IP
