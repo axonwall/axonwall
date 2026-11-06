@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -62,6 +63,15 @@ type SDWanProber struct {
 	mu     sync.Mutex
 	active map[string]bool
 	cancel context.CancelFunc
+	// generation is bumped by ReloadConfig every time the config
+	// changes. triggerFailover snapshots it with the active map and
+	// re-checks it just before the `ip route` exec: a reload that
+	// lands mid-failover must abort the stale exec instead of
+	// installing a default route via a gateway the new config
+	// removed (L3). The restart() join waits for the old loop to
+	// exit — i.e. for the stale exec to LAND first — so the check
+	// before the exec is the only place the race can be caught.
+	generation uint64
 	// wg tracks the run goroutine so restart waits for the old loop to
 	// exit before starting a new one (A-M6). Without the join, the old
 	// loop could still be inside triggerFailover (an unbounded `ip route`
@@ -80,6 +90,12 @@ func (p *SDWanProber) ReloadConfig(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// The config is gone: any in-flight failover
+			// computed from it is stale, so bump the
+			// generation before stopping the loop.
+			p.mu.Lock()
+			p.generation++
+			p.mu.Unlock()
 			p.stop()
 			// A-M6, same join as restart: a disabled prober must not
 			// leave a stale loop that can still move the default route.
@@ -103,6 +119,7 @@ func (p *SDWanProber) ReloadConfig(path string) error {
 	p.mu.Lock()
 	prevActive := p.active
 	p.config = &config
+	p.generation++
 	kept := make(map[string]bool)
 	for _, gw := range config.Gateways {
 		if was, ok := prevActive[gw.Name]; ok {
@@ -282,6 +299,7 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 	for k, v := range p.active {
 		activeSnapshot[k] = v
 	}
+	gen := p.generation
 	p.mu.Unlock()
 
 	devMap := loadInterfaceDeviceMap()
@@ -306,6 +324,7 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 
 		if bestTier == 999 {
 			slog.Error("SD-WAN Prober: ALL GATEWAYS IN GROUP OFFLINE. No internet connectivity.")
+			p.withdrawStaleDefaultRoute()
 			return
 		}
 
@@ -334,6 +353,7 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 
 	if len(activeTargets) == 0 {
 		slog.Error("SD-WAN Prober: No active default gateways available.")
+		p.withdrawStaleDefaultRoute()
 		return
 	}
 
@@ -355,6 +375,21 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 
 	if len(args) == 3 {
 		slog.Error("SD-WAN Prober: No valid IP/interface targets for default route")
+		p.withdrawStaleDefaultRoute()
+		return
+	}
+
+	// L3: re-validate the snapshot before the exec. A ReloadConfig
+	// that landed after the snapshot (and before this point) makes
+	// this failover stale; installing it would put a default route
+	// via a gateway the new config removed, and the new loop's
+	// unconditional evaluateFailover cannot repair that when the
+	// new config has no active gateway at all.
+	p.mu.Lock()
+	stale := p.generation != gen
+	p.mu.Unlock()
+	if stale {
+		slog.Warn("SD-WAN Prober: Config reloaded mid-failover; aborting stale default-route update")
 		return
 	}
 
@@ -365,5 +400,52 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 		slog.Error("SD-WAN Prober: Failed to update default route", "error", err, "output", string(out))
 	} else {
 		slog.Info("SD-WAN Prober: Default route updated successfully", "active_links", len(activeTargets))
+	}
+}
+
+// withdrawStaleDefaultRoute deletes the kernel default route when it
+// points at a gateway the CURRENT config no longer contains (L3).
+// It runs on the all-offline paths, where triggerFailover otherwise
+// returns without touching the route: a stale default via a removed
+// gateway would persist indefinitely while the prober reports
+// everything down. When every configured gateway is merely down,
+// the route is left alone — its gateway is still configured, so it
+// recovers with the gateway. A multipath default is left alone too:
+// with several nexthops there is no single stale gateway to blame.
+func (p *SDWanProber) withdrawStaleDefaultRoute() {
+	p.mu.Lock()
+	configured := make(map[string]bool)
+	if p.config != nil {
+		for _, gw := range p.config.Gateways {
+			if gw.GatewayIP != "" {
+				configured[gw.GatewayIP] = true
+			}
+		}
+	}
+	p.mu.Unlock()
+
+	out, err := exec.Command("ip", "route", "show", "default").CombinedOutput()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var vias []string
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "via" && i+1 < len(fields) {
+				vias = append(vias, fields[i+1])
+			}
+		}
+		if len(vias) == 1 && !configured[vias[0]] {
+			slog.Warn("SD-WAN Prober: Withdrawing stale default route via unconfigured gateway", "gateway", vias[0])
+			if delOut, err := exec.Command("ip", "route", "del", "default").CombinedOutput(); err != nil {
+				slog.Error("SD-WAN Prober: Failed to withdraw stale default route", "error", err, "output", string(delOut))
+			}
+		}
+		return
 	}
 }
