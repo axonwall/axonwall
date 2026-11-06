@@ -421,6 +421,41 @@ func reloadBundleServices(services []string) {
 	}
 }
 
+// mirrorBundleFile writes one bundle file into the A/B persistence
+// mirror. L5: every step of the mirror write used to discard its
+// error (open, write, chmod, close), so a bundle could be live in
+// /etc and reported successful while its mirror was stale or missing
+// — and the boot-time sync could not heal a file that never reached
+// the mirror. All failures are returned now; a symlinked mirror
+// entry is left alone, never followed.
+func mirrorBundleFile(mirrorPath string, mode os.FileMode, content []byte, isSharedAxonwallCfg bool) error {
+	if fi, lerr := os.Lstat(mirrorPath); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(mirrorPath), 0775); err != nil {
+		return fmt.Errorf("create mirror directory: %w", err)
+	}
+	pf, err := os.OpenFile(mirrorPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+	if err != nil {
+		return fmt.Errorf("open mirror file: %w", err)
+	}
+	if _, err := pf.Write(content); err != nil {
+		_ = pf.Close()
+		return fmt.Errorf("write mirror file: %w", err)
+	}
+	if err := pf.Chmod(mode); err != nil {
+		_ = pf.Close()
+		return fmt.Errorf("chmod mirror file: %w", err)
+	}
+	if err := pf.Close(); err != nil {
+		return fmt.Errorf("close mirror file: %w", err)
+	}
+	if isSharedAxonwallCfg {
+		ensureSharedConfigPerm(mirrorPath, mode)
+	}
+	return nil
+}
+
 func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -475,6 +510,10 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// any such failure rolls back instead of leaving a half-applied
 	// bundle behind (A-H2).
 	var subsystemErr error
+	// applyWarnings collects non-fatal apply problems (L5 mirror
+	// failures, L6 service-reload failures) to surface in the
+	// ApplyBundle response instead of silently discarding them.
+	var applyWarnings []string
 	for _, vf := range validatedFiles {
 		f := vf.file
 		cleanPath := vf.cleanPath
@@ -505,31 +544,24 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			ensureSharedConfigPerm(cleanPath, mode)
 		}
 
-		// Mirror /etc/axonwall/*.yaml, *.json, and interfaces.conf to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence
+		// Mirror /etc/axonwall/*.yaml, *.json, and interfaces.conf to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence.
+		// L5: the mirror write used to discard every error, so a
+		// bundle could be live in /etc and reported successful
+		// while its mirror was stale or missing. Failures are
+		// logged loudly and carried into the ApplyBundle response
+		// as warnings instead.
 		if strings.HasPrefix(cleanPath, "/etc/axonwall/") &&
 			(strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml") || strings.HasSuffix(cleanPath, ".json") || filepath.Base(cleanPath) == "interfaces.conf") {
 			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
 			persistPath := filepath.Join("/var/lib/axonwall/etc-axonwall", relPath)
-			_ = os.MkdirAll(filepath.Dir(persistPath), 0775)
-			if fi, lerr := os.Lstat(persistPath); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
-				if pf, perr := os.OpenFile(persistPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode); perr == nil {
-					_, _ = pf.Write([]byte(f.Content))
-					_ = pf.Chmod(mode)
-					_ = pf.Close()
-				}
-				if isSharedAxonwallCfg {
-					ensureSharedConfigPerm(persistPath, mode)
-				}
+			if err := mirrorBundleFile(persistPath, mode, []byte(f.Content), isSharedAxonwallCfg); err != nil {
+				log.Printf("[Agent] ERROR: Failed to mirror bundle file %s to %s: %v; the live config is applied but will not survive an A/B slot switch", cleanPath, persistPath, err)
+				applyWarnings = append(applyWarnings, fmt.Sprintf("mirror write failed for %s: %v", relPath, err))
 			}
 			if filepath.Base(cleanPath) == "state.json" {
-				varStatePath := "/var/lib/axonwall/state.json"
-				if fi, lerr := os.Lstat(varStatePath); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
-					if sf, serr := os.OpenFile(varStatePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0660); serr == nil {
-						_, _ = sf.Write([]byte(f.Content))
-						_ = sf.Chmod(0660)
-						_ = sf.Close()
-					}
-					ensureSharedConfigPerm(varStatePath, 0660)
+				if err := mirrorBundleFile("/var/lib/axonwall/state.json", 0660, []byte(f.Content), true); err != nil {
+					log.Printf("[Agent] ERROR: Failed to mirror state.json to /var/lib/axonwall/state.json: %v", err)
+					applyWarnings = append(applyWarnings, fmt.Sprintf("mirror write failed for state.json: %v", err))
 				}
 			}
 		}
@@ -707,9 +739,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 
 	log.Printf("[Agent] Configuration applied successfully. Pending confirmation for job %s (deadline: %v)", req.JobId, s.confirmDeadline)
 
+	applyMsg := "Configuration applied. Pending confirmation before timeout."
+	if len(applyWarnings) > 0 {
+		applyMsg += " Warnings: " + strings.Join(applyWarnings, "; ")
+	}
 	return &pb.ApplyBundleResponse{
 		Success:             true,
-		Message:             "Configuration applied. Pending confirmation before timeout.",
+		Message:             applyMsg,
 		ConfirmDeadlineUnix: s.confirmDeadline.Unix(),
 	}, nil
 }
@@ -1763,6 +1799,45 @@ func syncPersistentYamlConfigs() {
 	syncFile(filepath.Join(srcDir, "mcp-settings.json"), filepath.Join(dstDir, "mcp-settings.json"), 0660)
 	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0640)
 	syncFile(filepath.Join(srcDir, "interfaces.conf"), filepath.Join(dstDir, "interfaces.conf"), 0664)
+
+	// L5: mirror /etc-only files into the mirror as well. The loop
+	// above only iterates mirror entries, so a config file that never
+	// reached the mirror (a failed mirror write during a bundle
+	// apply) was never healed: after an A/B slot switch the box
+	// booted with the pre-bundle config and no record of why.
+	// syncFile copies a missing destination from the source, so
+	// syncing each /etc-only mirrorable file heals exactly that case.
+	mirrorable := func(name string) bool {
+		return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") ||
+			strings.HasSuffix(name, ".json") || name == "interfaces.conf"
+	}
+	if etcEntries, err := os.ReadDir(dstDir); err == nil {
+		for _, entry := range etcEntries {
+			if entry.IsDir() {
+				if entry.Name() != "conf.d" {
+					continue
+				}
+				_ = os.MkdirAll(filepath.Join(srcDir, "conf.d"), 0775)
+				if confEntries, err := os.ReadDir(filepath.Join(dstDir, "conf.d")); err == nil {
+					for _, ce := range confEntries {
+						if ce.IsDir() || !mirrorable(ce.Name()) {
+							continue
+						}
+						if _, err := os.Lstat(filepath.Join(srcDir, "conf.d", ce.Name())); os.IsNotExist(err) {
+							syncFile(filepath.Join(dstDir, "conf.d", ce.Name()), filepath.Join(srcDir, "conf.d", ce.Name()), 0660)
+						}
+					}
+				}
+				continue
+			}
+			if !mirrorable(entry.Name()) {
+				continue
+			}
+			if _, err := os.Lstat(filepath.Join(srcDir, entry.Name())); os.IsNotExist(err) {
+				syncFile(filepath.Join(dstDir, entry.Name()), filepath.Join(srcDir, entry.Name()), 0660)
+			}
+		}
+	}
 	normalizeConfigTreePermissions()
 }
 

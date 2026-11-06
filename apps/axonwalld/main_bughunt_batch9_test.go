@@ -16,8 +16,7 @@ import (
 // persist fails. Pre-fix, the WriteFile error was discarded and the
 // "Persisted last-known-good" log line was emitted regardless, so a
 // restart silently loaded the previous LKG as the rollback target.
-func TestBatch9ConfirmFailsWhenLkgPersistFails(t *testing.T) {
-	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+func TestBatch9ConfirmFailsWhenLkgPersistFails(t *testing.T) {	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
 	s := batch4TestServer(t)
 	batch4StopTimer(t, s)
 
@@ -47,5 +46,47 @@ func TestBatch9ConfirmFailsWhenLkgPersistFails(t *testing.T) {
 	}
 	if !strings.Contains(resp.Message, "last-known-good") {
 		t.Fatalf("expected the failure to name last-known-good, got: %s", resp.Message)
+	}
+}
+
+// L5: mirrorBundleFile must write the mirror copy and must report
+// failures instead of discarding them. Pre-fix, the mirror write
+// ignored open/write/chmod/close errors, so a bundle could be live
+// in /etc while its A/B mirror was stale or missing.
+func TestBatch9MirrorBundleFile(t *testing.T) {
+	dir := t.TempDir()
+	mirrorPath := filepath.Join(dir, "etc-axonwall", "routing.yaml")
+	if err := mirrorBundleFile(mirrorPath, 0660, []byte("routes: []\n"), false); err != nil {
+		t.Fatalf("mirrorBundleFile failed: %v", err)
+	}
+	data, err := os.ReadFile(mirrorPath)
+	if err != nil || string(data) != "routes: []\n" {
+		t.Fatalf("mirror content = %q, err = %v", string(data), err)
+	}
+
+	// A mirror write under a regular file must fail loudly, not
+	// silently pretend the mirror is up to date.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	if err := mirrorBundleFile(filepath.Join(blocker, "x.yaml"), 0660, []byte("x"), false); err == nil {
+		t.Fatal("mirrorBundleFile under a non-directory must fail")
+	}
+
+	// A symlinked mirror entry is left alone, never followed.
+	target := filepath.Join(dir, "target.yaml")
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(dir, "link.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := mirrorBundleFile(link, 0660, []byte("evil"), false); err != nil {
+		t.Fatalf("mirrorBundleFile on a symlink must skip quietly, got: %v", err)
+	}
+	if data, _ := os.ReadFile(target); string(data) != "original" {
+		t.Fatalf("symlinked mirror entry was followed; target = %q", string(data))
 	}
 }
