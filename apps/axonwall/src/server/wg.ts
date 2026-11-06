@@ -4,7 +4,27 @@ import { execFileSync } from 'node:child_process';
 import QRCode from 'qrcode';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { getCurrentDesiredState } from './agent';
+
+// PKCS#8 DER prefix for a raw 32-byte X25519 private key.
+const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex');
+
+/**
+ * Derive the X25519 public key for a base64-encoded WireGuard private key
+ * using Node crypto, without the `wg` CLI. Throws when the private key is
+ * not a valid 32-byte base64 key.
+ */
+function deriveX25519PublicKey(privateKeyBase64: string): string {
+  const rawPriv = Buffer.from(privateKeyBase64.trim(), 'base64');
+  if (rawPriv.length !== 32) {
+    throw new Error('WireGuard private key is not a 32-byte base64 key');
+  }
+  const der = Buffer.concat([X25519_PKCS8_PREFIX, rawPriv]);
+  const priv = createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+  const pub = createPublicKey(priv);
+  return pub.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
+}
 
 export async function generateWireGuardProfile() {
   const session = await getSession();
@@ -40,6 +60,23 @@ export async function generateWireGuardProfile() {
     const rawPub = pubKeyObj.export({ type: 'spki', format: 'der' }).subarray(-32);
     privateKey = rawPriv.toString('base64');
     publicKey = rawPub.toString('base64');
+    // The server public key is derivable from the configured server private
+    // key without the `wg` CLI — never emit the placeholder key.
+    if (wgCfg?.privateKey) {
+      try {
+        serverPubKey = deriveX25519PublicKey(wgCfg.privateKey);
+      } catch {
+        throw new Error('Configured WireGuard server private key is invalid: cannot derive its public key');
+      }
+    }
+  }
+
+  // Fail closed when the server key is genuinely unknown instead of handing
+  // out a profile whose [Peer] PublicKey can never handshake.
+  if (serverPubKey === 'SERVER_PUBLIC_KEY_NOT_CONFIGURED') {
+    throw new Error(
+      'WireGuard server public key is not configured: no server private key is set, so no usable client profile can be generated'
+    );
   }
 
   // 2. Derive assigned IP and DNS from configured WireGuard interface address
