@@ -113,3 +113,69 @@ func TestR2Batch6ReconcileRejectsBadDirection(t *testing.T) {
 		t.Fatalf("bad-direction lease was not removed by the revert (%d leases)", got)
 	}
 }
+
+// M8: a failed rebuild must keep the record — the lease stays listed
+// and revertable instead of vanishing while the kernel may still
+// enforce it.
+func TestR2Batch6RevertKeepsLeaseWhenRebuildFails(t *testing.T) {
+	installFakeNft(t, 1)
+	mgr := newTestTrafficManager(t)
+	now := time.Now().UTC()
+	mgr.leases["mcp_lease_test"] = &McpTacticalLease{
+		ID:               "mcp_lease_test",
+		Kind:             "blackhole",
+		CreatedAt:        now.Format(time.RFC3339),
+		ExpiresAt:        now.Add(time.Hour).Format(time.RFC3339),
+		NormalizedTarget: "198.51.100.20",
+		Parameters:       map[string]interface{}{"mode": "nft_drop", "direction": "both"},
+	}
+
+	if _, err := mgr.RevertLease("mcp_lease_test"); err == nil {
+		t.Fatal("RevertLease succeeded when the kernel rebuild failed")
+	}
+	if got := len(mgr.ListLeases()); got != 1 {
+		t.Fatalf("failed revert removed the lease from the listing (%d listed, want 1)", got)
+	}
+	if _, ok := mgr.leases["mcp_lease_test"]; !ok {
+		t.Fatal("failed revert deleted the lease record")
+	}
+}
+
+// M8: the happy paths still remove the record once the rebuild lands.
+func TestR2Batch6RevertAndFlushRemoveLeasesOnSuccess(t *testing.T) {
+	installFakeNft(t, 0)
+	mgr := newTestTrafficManager(t)
+	now := time.Now().UTC()
+	for _, id := range []string{"mcp_lease_a", "mcp_lease_b"} {
+		mgr.leases[id] = &McpTacticalLease{
+			ID:               id,
+			Kind:             "blackhole",
+			CreatedAt:        now.Format(time.RFC3339),
+			ExpiresAt:        now.Add(time.Hour).Format(time.RFC3339),
+			NormalizedTarget: "198.51.100.20",
+			Parameters:       map[string]interface{}{"mode": "nft_drop", "direction": "both"},
+		}
+	}
+
+	lease, err := mgr.RevertLease("mcp_lease_a")
+	if err != nil {
+		t.Fatalf("RevertLease failed with working nft: %v", err)
+	}
+	if lease == nil || lease.ID != "mcp_lease_a" {
+		t.Fatalf("RevertLease returned wrong lease: %+v", lease)
+	}
+	if got := len(mgr.ListLeases()); got != 1 {
+		t.Fatalf("expected 1 lease after revert, got %d", got)
+	}
+
+	cleared, err := mgr.FlushAllLeases()
+	if err != nil {
+		t.Fatalf("FlushAllLeases failed with working nft: %v", err)
+	}
+	if cleared != 1 {
+		t.Fatalf("FlushAllLeases cleared %d, want 1", cleared)
+	}
+	if got := len(mgr.ListLeases()); got != 0 {
+		t.Fatalf("expected 0 leases after flush, got %d", got)
+	}
+}

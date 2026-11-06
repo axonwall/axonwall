@@ -349,6 +349,14 @@ func (m *McpTrafficManager) ListLeases() []*McpTacticalLease {
 // and Unbound DNS sinkhole configs from the active lease map.
 func (m *McpTrafficManager) ReconcileKernelState() error {
 	m.mu.Lock()
+	leases := m.activeLeasesLocked()
+	m.mu.Unlock()
+	return m.reconcileKernelStateWith(leases)
+}
+
+// activeLeasesLocked returns the currently unexpired leases. Callers
+// hold m.mu.
+func (m *McpTrafficManager) activeLeasesLocked() []*McpTacticalLease {
 	leases := make([]*McpTacticalLease, 0, len(m.leases))
 	now := time.Now().UTC()
 	for _, l := range m.leases {
@@ -356,7 +364,13 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 			leases = append(leases, l)
 		}
 	}
-	m.mu.Unlock()
+	return leases
+}
+
+// reconcileKernelStateWith rebuilds the kernel table from an explicit
+// lease set instead of the live map, so RevertLease/FlushAllLeases
+// can rebuild the post-delete table BEFORE deleting any record (M8).
+func (m *McpTrafficManager) reconcileKernelStateWith(leases []*McpTacticalLease) error {
 
 	posture := DiscoverProtectedPosture()
 	protectedV4 := []string{"127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4"}
@@ -1204,6 +1218,32 @@ func (m *McpTrafficManager) RevertLease(leaseID string) (*McpTacticalLease, erro
 		m.mu.Unlock()
 		return nil, fmt.Errorf("tactical lease '%s' not found or already expired", leaseID)
 	}
+	// M8: rebuild the kernel table WITHOUT the lease first, and only
+	// delete the record once the rebuild lands. The old code deleted
+	// the record (and saved state) before the rebuild, so a failed
+	// rebuild left the lease enforced in the kernel with no record
+	// and no way to address it except a daemon restart.
+	remaining := make([]*McpTacticalLease, 0, len(m.leases))
+	for _, l := range m.activeLeasesLocked() {
+		if l.ID != leaseID {
+			remaining = append(remaining, l)
+		}
+	}
+	m.mu.Unlock()
+
+	if err := m.reconcileKernelStateWith(remaining); err != nil {
+		// A-M13: a failed rebuild means the kernel table may still
+		// enforce the lease. A healing rebuild is attempted for the
+		// remaining leases; if it also fails, the record is kept so
+		// the lease stays listed and revertable.
+		if herr := m.reconcileKernelStateWith(remaining); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed while reverting lease %s: %v", lease.ID, herr)
+			return nil, fmt.Errorf("kernel reconcile failed while reverting lease %s: %w", lease.ID, err)
+		}
+		log.Printf("[MCP Traffic] Healing kernel reconciliation succeeded while reverting lease %s after an initial failure", lease.ID)
+	}
+
+	m.mu.Lock()
 	delete(m.leases, leaseID)
 	// A-L5: hold the ID reserved until kernel cleanup finishes (see
 	// allocClassIDLocked).
@@ -1215,28 +1255,33 @@ func (m *McpTrafficManager) RevertLease(leaseID string) (*McpTacticalLease, erro
 	m.mu.Lock()
 	m.releaseClassIDLocked(lease.ClassID)
 	m.mu.Unlock()
-	// A-M13: a failed rebuild means the kernel table may still enforce the
-	// lease (or may be partial). Report the failure so the caller does not
-	// record the revert as complete; a healing rebuild is attempted for
-	// the remaining leases.
-	if err := m.ReconcileKernelState(); err != nil {
-		if herr := m.ReconcileKernelState(); herr != nil {
-			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after revert of lease %s: %v", lease.ID, herr)
-		}
-		return nil, fmt.Errorf("kernel reconcile failed while reverting lease %s: %w", lease.ID, err)
-	}
 	return lease, nil
 }
 
 // FlushAllLeases is the emergency panic switch: clears all MCP tactical leases and flushes kernel artifacts.
-// It returns the number of leases cleared and, on a failed kernel rebuild, an error: the records are
-// cleared but the kernel table may still enforce some leases, which must not be reported as flushed.
+// It returns the number of leases cleared. On a failed kernel rebuild
+// it returns 0 and an error: no record is cleared, so the leases stay
+// listed and revertable instead of vanishing while the kernel may
+// still enforce them (M8).
 func (m *McpTrafficManager) FlushAllLeases() (int, error) {
 	m.mu.Lock()
 	all := make([]*McpTacticalLease, 0, len(m.leases))
 	for _, l := range m.leases {
 		all = append(all, l)
 	}
+	m.mu.Unlock()
+
+	// M8: rebuild the kernel table empty FIRST; only when it lands
+	// are the records cleared (same reasoning as RevertLease).
+	if err := m.reconcileKernelStateWith(nil); err != nil {
+		if herr := m.reconcileKernelStateWith(nil); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after flush: %v", herr)
+			return 0, fmt.Errorf("kernel reconcile failed while flushing %d leases: %w", len(all), err)
+		}
+		log.Printf("[MCP Traffic] Healing kernel reconciliation succeeded while flushing after an initial failure")
+	}
+
+	m.mu.Lock()
 	m.leases = make(map[string]*McpTacticalLease)
 	// A-L5: hold every cleared ID reserved until its kernel cleanup
 	// finishes (see allocClassIDLocked).
@@ -1254,12 +1299,6 @@ func (m *McpTrafficManager) FlushAllLeases() (int, error) {
 		m.releaseClassIDLocked(l.ClassID)
 	}
 	m.mu.Unlock()
-	if err := m.ReconcileKernelState(); err != nil {
-		if herr := m.ReconcileKernelState(); herr != nil {
-			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after flush: %v", herr)
-		}
-		return len(all), fmt.Errorf("kernel reconcile failed while flushing %d leases: %w", len(all), err)
-	}
 	return len(all), nil
 }
 
