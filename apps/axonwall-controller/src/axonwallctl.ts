@@ -957,7 +957,11 @@ async function cmdRollback() {
     if (resp.success) {
       console.log(`${cGreen}${cBold}[✓] Rolled back to last-known-good ruleset and restored /etc/axonwall/*.yaml.${cReset}`);
     } else {
+      // B2-L4: a refused rollback used to fall through to exit 0, so
+      // a scripted caller believed the rollback had happened.
+      // Match cmdConfirm: fail loudly.
       console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+      process.exit(1);
     }
   } catch (err: any) {
     console.error(`${cRed}[✗] Failed to trigger rollback: ${err?.message || err}${cReset}`);
