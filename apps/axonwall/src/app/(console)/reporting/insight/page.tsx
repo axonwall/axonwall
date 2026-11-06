@@ -91,8 +91,11 @@ export default function ReportingInsightPage() {
             <ShieldAlert className="h-4 w-4 text-red-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold font-mono">0 pkts</div>
-            <p className="text-xs text-muted-foreground mt-1">nftables drop counters</p>
+            {/* G7: this used to render a hardcoded "0 pkts" as if it were
+                a measured nftables drop counter. No counter is ever read,
+                so report it as unmeasured instead of inventing a zero. */}
+            <div className="text-2xl font-bold font-mono">—</div>
+            <p className="text-xs text-muted-foreground mt-1">nftables drop counter not collected</p>
           </CardContent>
         </Card>
       </div>
