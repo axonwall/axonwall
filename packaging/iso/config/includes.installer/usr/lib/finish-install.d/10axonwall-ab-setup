@@ -894,6 +894,23 @@ elif [ "$INSTALL_MODE" = "rolling" ]; then
   rm -f /target/etc/grub.d/40_axonwall_ab 2>/dev/null || true
 else
   mkdir -p /target/boot/grub
+  # D2-H1: install the A/B GRUB script into the target before
+  # update-grub runs (section 10). Without it update-grub generates
+  # a stock grub.cfg — no load_env, no bootcount handling, no slot
+  # entries — and the grubenv values above are never read by GRUB,
+  # leaving the watchdog fallback and slot arming dead on d-i
+  # installs. The script ships in the installer payload at
+  # /usr/lib/axonwall/40_axonwall_ab (a copy of the live-image
+  # /etc/grub.d/40_axonwall_ab); keep the two in sync.
+  mkdir -p /target/etc/grub.d
+  if [ -f /usr/lib/axonwall/40_axonwall_ab ]; then
+    cp -f /usr/lib/axonwall/40_axonwall_ab /target/etc/grub.d/40_axonwall_ab
+    chmod +x /target/etc/grub.d/40_axonwall_ab
+  else
+    echo "[-] ERROR: A/B GRUB script /usr/lib/axonwall/40_axonwall_ab is missing from the installer environment; update-grub would generate a stock grub.cfg with no slot logic."
+    echo "[-] ERROR: aborting the install rather than shipping a target whose GRUB cannot switch slots."
+    exit 1
+  fi
   in-target grub-editenv /boot/grub/grubenv create 2>/dev/null || true
   in-target grub-editenv /boot/grub/grubenv set active_slot=A 2>/dev/null || true
   in-target grub-editenv /boot/grub/grubenv set bootcount=0 2>/dev/null || true
