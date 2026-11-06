@@ -149,6 +149,11 @@ type McpTrafficManager struct {
 	// allocated and still in kernel setup, or freed by a delete whose
 	// kernel cleanup has not finished yet. See allocClassIDLocked.
 	reservedClassIDs map[int]struct{}
+	// reconcileDirty is set when a kernel rebuild fails (M9): the
+	// lease records changed but the kernel table may not match them.
+	// The janitor retries the rebuild on every tick until it lands
+	// instead of forgetting the failure. Guarded by mu.
+	reconcileDirty bool
 }
 
 // mcpClassIDRange is the shared pool for tc classes (shape) and
@@ -219,9 +224,23 @@ func NewMcpTrafficManager() *McpTrafficManager {
 	mgr.loadState()
 	if err := mgr.ReconcileKernelState(); err != nil {
 		log.Printf("[MCP Traffic] Initial kernel reconciliation warning: %v", err)
+		// M9: the startup rebuild failed, so the leases reloaded from
+		// disk are listed as active with a stale (or empty) kernel
+		// table. Mark it dirty so the janitor retries the rebuild
+		// until it lands instead of waiting for a lease event.
+		mgr.reconcileDirty = true
 	}
 	go mgr.janitorLoop()
 	return mgr
+}
+
+// ReconcileDirty reports whether a kernel rebuild failed and has not
+// yet been retried to success (M9). The stale-enforcement state is
+// surfaced to the API alongside the lease list.
+func (m *McpTrafficManager) ReconcileDirty() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reconcileDirty
 }
 
 func generateLeaseID() string {
@@ -302,6 +321,9 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 	}
 	if len(expired) == 0 {
 		m.mu.Unlock()
+		// M9: even a tick with nothing to expire retries a
+		// previously failed rebuild (see retryDirtyReconcile).
+		m.retryDirtyReconcile()
 		return
 	}
 	m.saveStateLocked()
@@ -320,7 +342,39 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 	// are gone from the records, but the kernel table may still enforce them.
 	if err := m.ReconcileKernelState(); err != nil {
 		log.Printf("[MCP Traffic] Janitor kernel reconciliation failed (kernel table may still enforce expired leases): %v", err)
+		// M9: keep the failure sticky. The next tick finds no
+		// expired leases left, so without a dirty flag nothing
+		// would ever retry the rebuild and the expired leases
+		// could stay enforced indefinitely.
+		m.mu.Lock()
+		m.reconcileDirty = true
+		m.mu.Unlock()
+		return
 	}
+	m.mu.Lock()
+	m.reconcileDirty = false
+	m.mu.Unlock()
+}
+
+// retryDirtyReconcile retries a previously failed kernel rebuild
+// (M9). It runs at the end of every janitor tick, including ticks
+// with nothing to expire, so a failed rebuild is retried until it
+// lands instead of being forgotten after one log line.
+func (m *McpTrafficManager) retryDirtyReconcile() {
+	m.mu.Lock()
+	dirty := m.reconcileDirty
+	m.mu.Unlock()
+	if !dirty {
+		return
+	}
+	if err := m.ReconcileKernelState(); err != nil {
+		log.Printf("[MCP Traffic] Retrying failed kernel reconciliation (kernel table may still be stale): %v", err)
+		return
+	}
+	m.mu.Lock()
+	m.reconcileDirty = false
+	m.mu.Unlock()
+	log.Printf("[MCP Traffic] Previously failed kernel reconciliation succeeded on retry")
 }
 
 // ListLeases returns all currently active tactical leases with updated remaining TTL seconds.

@@ -3450,6 +3450,10 @@ func main() {
 				"success": true,
 				"posture": engine.DiscoverProtectedPosture(),
 				"leases":  mcpTrafficManager.ListLeases(),
+				// M9: a failed kernel rebuild leaves enforcement
+				// stale; say so instead of listing leases as if
+				// they were enforced.
+				"reconcileDirty": mcpTrafficManager.ReconcileDirty(),
 			})
 		})
 
@@ -3464,6 +3468,8 @@ func main() {
 			writeMcpJSON(w, http.StatusOK, map[string]any{
 				"success": true,
 				"leases":  mcpTrafficManager.ListLeases(),
+				// M9: see the posture endpoint above.
+				"reconcileDirty": mcpTrafficManager.ReconcileDirty(),
 			})
 		})
 

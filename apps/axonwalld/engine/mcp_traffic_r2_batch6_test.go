@@ -179,3 +179,53 @@ func TestR2Batch6RevertAndFlushRemoveLeasesOnSuccess(t *testing.T) {
 		t.Fatalf("expected 0 leases after flush, got %d", got)
 	}
 }
+
+// M9: a janitor reconcile failure must stay sticky (dirty) and be
+// retried on the next tick — the next tick finds no expired leases
+// left, so without a retry the expired leases could stay enforced
+// indefinitely.
+func TestR2Batch6JanitorRetriesFailedReconcile(t *testing.T) {
+	installFakeNft(t, 1)
+	mgr := newTestTrafficManager(t)
+	now := time.Now().UTC()
+	mgr.leases["mcp_lease_expired"] = &McpTacticalLease{
+		ID:               "mcp_lease_expired",
+		Kind:             "blackhole",
+		CreatedAt:        now.Add(-2 * time.Hour).Format(time.RFC3339),
+		ExpiresAt:        now.Add(-time.Hour).Format(time.RFC3339),
+		NormalizedTarget: "198.51.100.20",
+		Parameters:       map[string]interface{}{"mode": "nft_drop", "direction": "both"},
+	}
+
+	mgr.purgeExpiredLeases()
+	if got := len(mgr.ListLeases()); got != 0 {
+		t.Fatalf("expired lease was not purged (%d listed)", got)
+	}
+	if !mgr.ReconcileDirty() {
+		t.Fatal("failed janitor rebuild did not mark the manager dirty; the failure would never be retried")
+	}
+
+	// The nft binary recovers; the next tick — with nothing left to
+	// expire — must retry the rebuild and clear the dirty flag.
+	installFakeNft(t, 0)
+	mgr.purgeExpiredLeases()
+	if mgr.ReconcileDirty() {
+		t.Fatal("dirty flag was not cleared after the retry rebuild succeeded")
+	}
+}
+
+// M9: a failed startup reconcile marks the manager dirty so the
+// janitor retries it, instead of listing reloaded leases as active
+// with a stale kernel table.
+func TestR2Batch6StartupReconcileFailureMarksDirty(t *testing.T) {
+	installFakeNft(t, 1)
+	orig := mcpStateFilePath
+	mcpStateFilePath = filepath.Join(t.TempDir(), "mcp-tactical-state.json")
+	t.Cleanup(func() { mcpStateFilePath = orig })
+
+	mgr := NewMcpTrafficManager()
+	defer close(mgr.stopTicker)
+	if !mgr.ReconcileDirty() {
+		t.Fatal("failed startup rebuild did not mark the manager dirty")
+	}
+}
