@@ -2737,6 +2737,21 @@ export async function saveInterfaceAssignment(data: {
       );
     }
   }
+  // C-A10: mirror the name-collision check for devices. The UI used to
+  // both suggest and permit a device already bound to another logical
+  // interface (including a disabled one), and the server accepted it,
+  // so two logical interfaces could share one NIC. Renames
+  // (originalName present) may keep their own device.
+  if (normalizedDevice !== 'none') {
+    const holder = state.interfaces.find(
+      (i) => i.device === normalizedDevice && i.name.toLowerCase() !== lookupName
+    );
+    if (holder) {
+      throw new Error(
+        `Device '${normalizedDevice}' is already assigned to interface '${holder.name}'. Remove or reassign that interface first.`
+      );
+    }
+  }
   const idx = state.interfaces.findIndex((i) => i.name === lookupName);
 
   const defaultDesc =
