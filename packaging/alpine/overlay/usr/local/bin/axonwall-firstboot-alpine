@@ -239,7 +239,19 @@ if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
   echo "[Axonwall Firstboot] Provisioning appliance TLS PKI (CA + hub leaf)..."
   axonwall-rotate-hub-cert --ensure || true
 fi
-if { [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; } && [ ! -s /var/lib/axonwall/tls/ca.crt ]; then
+# D2-M4: the old guard tested /var/lib/axonwall/tls/ca.crt, a path
+# nothing ever writes, so it always passed and firstboot minted a
+# non-chaining self-signed leaf even when an operator CA was
+# installed. Test the real CA path (the rotate tool's CERT_DIR,
+# /etc/axonwall/certs/ca.crt) and fail loudly when a CA exists but
+# the pair is missing, exactly like the Debian firstboot. The marker
+# is removed only at the end of this script, so the exit below keeps
+# it and the next boot retries instead of silently degrading.
+if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
+  if [ -s /etc/axonwall/certs/ca.crt ]; then
+    echo "[Axonwall Firstboot] ERROR: hub certificate pair missing but an appliance CA exists; refusing to mint a non-chaining certificate. Fix the PKI and re-run firstboot." >&2
+    exit 1
+  fi
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   HN="$(hostname 2>/dev/null || echo axonwall)"
   SAN="DNS:${HN},DNS:axonwall.local,DNS:localhost,IP:127.0.0.1,IP:192.168.1.1"
