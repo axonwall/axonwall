@@ -16,7 +16,8 @@ import (
 // persist fails. Pre-fix, the WriteFile error was discarded and the
 // "Persisted last-known-good" log line was emitted regardless, so a
 // restart silently loaded the previous LKG as the rollback target.
-func TestBatch9ConfirmFailsWhenLkgPersistFails(t *testing.T) {	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+func TestBatch9ConfirmFailsWhenLkgPersistFails(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
 	s := batch4TestServer(t)
 	batch4StopTimer(t, s)
 

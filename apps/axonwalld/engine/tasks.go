@@ -279,7 +279,15 @@ func (m *TaskManager) GetTaskLog(upid string, startLine int) ([]string, bool, er
 	defer file.Close()
 
 	var lines []string
+	// L17: the default scanner token limit is 64 KiB and
+	// scanner.Err() was never checked, so a single log line over
+	// 64 KiB stopped the scan and GetTaskLog returned the lines
+	// before it as if complete — and the SSE streamer re-read from
+	// the same cursor on every poll, so every line after the long
+	// one was permanently lost. Allow much longer lines and surface
+	// a scan failure instead of returning a truncated log.
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	currentLine := 0
 
 	for scanner.Scan() {
@@ -287,6 +295,9 @@ func (m *TaskManager) GetTaskLog(upid string, startLine int) ([]string, bool, er
 		if currentLine >= startLine {
 			lines = append(lines, scanner.Text())
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return lines, task.Status != "running", err
 	}
 
 	return lines, task.Status != "running", nil
