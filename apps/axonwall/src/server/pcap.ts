@@ -271,12 +271,25 @@ function executeTcpdump(
       // Read back with tcpdump -nn -tt -r
       const readProc = spawn('tcpdump', ['-nn', '-tt', '-r', outputPath]);
       let stdout = '';
+      let stderr = '';
 
       readProc.stdout.on('data', (data) => {
         stdout += data.toString();
       });
 
-      readProc.on('close', () => {
+      readProc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      readProc.on('close', (code) => {
+        // N14: a corrupt/truncated pcap makes tcpdump -r fail with
+        // empty stdout, which used to parse to [] and resolve as a
+        // successful empty capture — the same shape as "ran, saw
+        // nothing". A failed read-back is an error, not zero packets.
+        if (code !== 0) {
+          const detail = stderr.trim().split('\n')[0] || `tcpdump exited with code ${code}`;
+          return reject(new Error(`Failed to read back capture file: ${detail}`));
+        }
         const parsed = parseTcpdumpText(stdout);
         resolve(parsed);
       });
