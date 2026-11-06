@@ -850,11 +850,12 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       fi
     fi
 
-    # Also update grubenv on the target partition if /boot/grub exists there
-    if [ -d "${STAGE_DIR}/boot/grub" ]; then
-      update_grubenv_file "${STAGE_DIR}/boot/grub/grubenv" "${TARGET_SLOT}"
-    fi
-
+    # E2-3: there is deliberately no grubenv write on the target
+    # partition before this gate. The old pre-gate write armed the
+    # GRUB-visible grubenv in the B->A direction before staging was
+    # proven complete, so a failed staging still booted the half-
+    # staged slot. The arming block after the gate writes the running
+    # grubenv plus the slot-A mirror, which covers both directions.
     # E1 staging-success gate: only a staged slot with a real rootfs
     # (etc + init), a kernel, and no failed staging rsync may ever be
     # armed. A stale or partial tree fails here, not at next boot.
