@@ -513,8 +513,11 @@ func (we *WatchdogEngine) detectInitialState() {
 		slotBVer = "Rolling (Single-Root)"
 	} else if installMode == "zbm" {
 		zbmPoolName = "zroot"
-		zbmPoolTopology = "mirror"
-		zbmPoolHealth = "ONLINE"
+		// E2-9: topology/health deliberately stay empty when the
+		// reads below fail — they are omitempty, so the UI renders
+		// them unknown instead of a fabricated ONLINE/mirror.
+		// (Previously they defaulted to "mirror"/"ONLINE" before
+		// the reads, and the defaults survived a read failure.)
 
 		if topOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:topology", "zroot/ROOT"); err == nil {
 			top := strings.TrimSpace(string(topOut))
@@ -540,9 +543,9 @@ func (we *WatchdogEngine) detectInitialState() {
 				slotBVer = be.Version
 			}
 		}
-		if rootDevice == "" {
-			rootDevice = "zroot/ROOT/axonwall-" + appVer
-		}
+		// E2-9: no guessed root device — when the BE list is empty
+		// (zfs list failed, no cache) ActiveRootDevice stays ""
+		// instead of naming a dataset that may not exist.
 	} else if activeSlot == "A" {
 		slotAVer = appVer
 		if slotBVer == "" || slotBVer == slotAVer {

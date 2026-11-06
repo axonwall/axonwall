@@ -3666,20 +3666,16 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
     return {
       installMode,
       zbmPoolName: daemonData.zbmPoolName || 'zroot',
-      zbmPoolTopology: daemonData.zbmPoolTopology || 'mirror',
-      zbmPoolHealth: daemonData.zbmPoolHealth || 'ONLINE',
-      bootEnvironments: daemonData.bootEnvironments || [
-        {
-          name: `axonwall-${currentVersion}`,
-          dataset: `zroot/ROOT/axonwall-${currentVersion}`,
-          activeNow: true,
-          activeNext: true,
-          version: currentVersion,
-          usedSize: '6.4G',
-          createdAt: new Date().toISOString(),
-          snapshots: [],
-        },
-      ],
+      // E2-9: no healthy defaults — when the daemon omits topology /
+      // health (its ZFS reads failed), the page renders them unknown
+      // instead of a fabricated mirror/ONLINE.
+      zbmPoolTopology: daemonData.zbmPoolTopology,
+      zbmPoolHealth: daemonData.zbmPoolHealth,
+      // E2-9: no synthesised Boot Environment — when the daemon sends
+      // no bootEnvironments (an empty list is omitted from its JSON),
+      // the page shows no BE rows instead of an invented BE that
+      // claims activeNow and activeNext with a made-up size.
+      bootEnvironments: daemonData.bootEnvironments || [],
       slots:
         installMode === 'rolling'
           ? [
