@@ -525,7 +525,10 @@ func TestCompileNftNetlinkIPv6DisableAndDNAT(t *testing.T) {
 	if len(batch.Flowtables) != 1 || !batch.Flowtables[0].HwOffload {
 		t.Fatalf("expected flowtable with HwOffload=true, got %+v", batch.Flowtables)
 	}
-	if len(batch.Rules) != 3 {
-		t.Fatalf("expected 3 compiled rules (dnat, ipv6 drop, icmpv6 accept), got %d", len(batch.Rules))
+	// A-M36 (round 2): the "icmpv6 type { ... }" set expands to one rule
+	// per type (6), plus the dnat and ipv6-drop rules. Before, the set
+	// was silently skipped and the rule accepted ALL icmpv6 (fail-open).
+	if len(batch.Rules) != 8 {
+		t.Fatalf("expected 8 compiled rules (dnat, ipv6 drop, 6x icmpv6 accept), got %d", len(batch.Rules))
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -42,6 +43,18 @@ const (
 
 	nftContinue = 0xffffffff // -1 as uint32
 	nftBreak    = 0xfffffffe // -2 as uint32
+	nftJump     = 0xfffffffd // -3 as uint32
+	nftGoto     = 0xfffffffc // -4 as uint32
+	nftReturn   = 0xfffffffb // -5 as uint32
+
+	// nft_reject_types (NFT_REJECT_ICMP_UNREACH=0, NFT_REJECT_TCP_RST=1,
+	// NFT_REJECT_ICMPX_UNREACH=2) and nft_reject_attributes.
+	nftRejectICMPUnreach  = 0
+	nftRejectTCPRst        = 1
+	nftRejectICMPXUnreach  = 2
+	nftaRejectType         = 1
+	nftaRejectICMPCode     = 2
+	nftRejectCodePortUnrch = 3 // ICMP_PORT_UNREACH
 
 	// nf_tables_msg_types
 	nftMsgNewTable     = 0
@@ -115,6 +128,7 @@ const (
 	nftaDataValue   = 1
 	nftaDataVerdict = 2
 	nftaVerdictCode = 1
+	nftaVerdictChain = 2
 
 	// nft_immediate_attributes
 	nftaImmediateDreg = 1
@@ -323,11 +337,11 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 				parseChainHeader(line, &curChain)
 				continue
 			}
-			ruleSpec, err := compileRuleLine(curChain.Name, line)
+			ruleSpecs, err := compileRuleLine(curChain.Name, line)
 			if err != nil {
 				return nil, fmt.Errorf("chain %s rule %q: %w", curChain.Name, line, err)
 			}
-			batch.Rules = append(batch.Rules, ruleSpec)
+			batch.Rules = append(batch.Rules, ruleSpecs...)
 			continue
 		}
 
@@ -407,13 +421,33 @@ func parseChainHeader(line string, ch *NftChainSpec) {
 				}
 			case "priority":
 				if i+1 < len(fields) {
-					switch fields[i+1] {
-					case "srcnat":
-						ch.Priority = 100
-					case "dstnat":
-						ch.Priority = -100
-					default:
-						ch.Priority = 0
+					// A-M38 (round 2): only srcnat/dstnat were
+					// mapped; every other priority — numeric or
+					// named — flattened to 0, so a dstnat chain
+					// could run after hooks that expect NAT first.
+					// Numeric priorities parse as integers; named
+					// ones map to their nftables values.
+					if prio, err := strconv.Atoi(fields[i+1]); err == nil {
+						ch.Priority = int32(prio)
+					} else {
+						switch fields[i+1] {
+						case "raw":
+							ch.Priority = -300
+						case "mangle":
+							ch.Priority = -150
+						case "dstnat":
+							ch.Priority = -100
+						case "filter":
+							ch.Priority = 0
+						case "security":
+							ch.Priority = 50
+						case "srcnat":
+							ch.Priority = 100
+						case "out":
+							ch.Priority = 100
+						default:
+							ch.Priority = 0
+						}
 					}
 				}
 			case "policy":
@@ -430,7 +464,95 @@ func parseChainHeader(line string, ch *NftChainSpec) {
 }
 
 // compileRuleLine translates a single nftables rule line into kernel nf_tables expression TLVs.
-func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
+// compileRuleLine compiles one nftables rule line into one or more
+// NftRuleSpec values. A line containing "{ a, b }" match sets is expanded
+// into one rule per member (cross product when several sets appear), so
+// ordinary hub rulesets using port sets, proto sets, or address sets
+// compile natively instead of failing the whole batch (A-M36).
+func compileRuleLine(chainName, line string) ([]NftRuleSpec, error) {
+	specs := make([]NftRuleSpec, 0, 1)
+	for _, expanded := range expandRuleLineSets(line) {
+		spec, err := compileSingleRuleLine(chainName, expanded)
+		if err != nil {
+			return nil, err
+		}
+		specs = append(specs, spec)
+	}
+	return specs, nil
+}
+
+// expandRuleLineSets expands the first expandable "{ a, b }" match-set
+// group in a rule line into one line per member, recursing so several
+// sets in one line expand to their cross product. Braces inside double
+// quotes (log prefixes, comments) are left alone. The flowtable-offload
+// "meta l4proto { tcp, udp }" set is not expanded: the compiler handles
+// it by skipping the match, which preserves the existing single-rule
+// offload shape.
+func expandRuleLineSets(line string) []string {
+	openIdx, closeIdx := findFirstBraceGroup(line)
+	if openIdx < 0 {
+		return []string{line}
+	}
+	before := strings.TrimRight(line[:openIdx], " ")
+	group := line[openIdx+1 : closeIdx]
+	after := line[closeIdx+1:]
+	if strings.HasSuffix(before, "meta l4proto") &&
+		(strings.Contains(line, "flow add ") || strings.Contains(line, "flow offload ")) {
+		rest := expandRuleLineSets(after)
+		out := make([]string, 0, len(rest))
+		for _, r := range rest {
+			out = append(out, line[:closeIdx+1]+r)
+		}
+		return out
+	}
+	members := splitSetGroup(group)
+	if len(members) < 2 {
+		return []string{line}
+	}
+	var out []string
+	for _, m := range members {
+		out = append(out, expandRuleLineSets(before+" "+m+after)...)
+	}
+	return out
+}
+
+// findFirstBraceGroup returns the indexes of the first "{" and its matching
+// "}" outside double quotes, or (-1, -1) when there is none (or the group
+// is unterminated or nested).
+func findFirstBraceGroup(line string) (int, int) {
+	inQuotes := false
+	openIdx := -1
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '"':
+			inQuotes = !inQuotes
+		case '{':
+			if !inQuotes {
+				if openIdx >= 0 {
+					return -1, -1 // nested group; leave to the compiler
+				}
+				openIdx = i
+			}
+		case '}':
+			if !inQuotes && openIdx >= 0 {
+				return openIdx, i
+			}
+		}
+	}
+	return -1, -1
+}
+
+func splitSetGroup(group string) []string {
+	var members []string
+	for _, m := range strings.Split(group, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			members = append(members, m)
+		}
+	}
+	return members
+}
+
+func compileSingleRuleLine(chainName, line string) (NftRuleSpec, error) {
 	spec := NftRuleSpec{
 		Chain:   chainName,
 		RawLine: line,
@@ -502,6 +624,20 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			)
 			if strings.HasPrefix(target, "@") {
 				exprs = append(exprs, buildExprLookup(strings.TrimPrefix(target, "@"), nftReg1))
+			} else if strings.Contains(target, "/") {
+				// A-M36 (round 2): a CIDR match ("ip saddr
+				// 10.0.0.0/24") used to fail the whole ruleset
+				// with "invalid IPv4 address". Compile it as a
+				// masked compare: mask the loaded address, then
+				// compare against the masked network address.
+				_, ipNet, err := net.ParseCIDR(target)
+				if err != nil {
+					return spec, fmt.Errorf("invalid IPv4 prefix %q", target)
+				}
+				exprs = append(exprs,
+					buildExprBitwiseMaskBytes(nftReg1, nftReg1, []byte(ipNet.Mask)),
+					buildExprCmpEq(nftReg1, []byte(ipNet.IP.To4())),
+				)
 			} else {
 				ip := net.ParseIP(target).To4()
 				if ip == nil {
@@ -528,6 +664,17 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			)
 			if strings.HasPrefix(target, "@") {
 				exprs = append(exprs, buildExprLookup(strings.TrimPrefix(target, "@"), nftReg1))
+			} else if strings.Contains(target, "/") {
+				// A-M36: IPv6 prefix match, same masked-compare
+				// shape as the IPv4 case (16-byte mask).
+				_, ipNet, err := net.ParseCIDR(target)
+				if err != nil {
+					return spec, fmt.Errorf("invalid IPv6 prefix %q", target)
+				}
+				exprs = append(exprs,
+					buildExprBitwiseMaskBytes(nftReg1, nftReg1, []byte(ipNet.Mask)),
+					buildExprCmpEq(nftReg1, []byte(ipNet.IP.To16())),
+				)
 			} else {
 				ip := net.ParseIP(target).To16()
 				if ip == nil {
@@ -541,9 +688,23 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			if i+2 >= len(tokens) {
 				return spec, fmt.Errorf("incomplete ether match")
 			}
+			// A-M37 (round 2): the field token was never read, so
+			// every ether match compiled to a source-MAC match
+			// (LL-header offset 6). "ether daddr ..." dropped
+			// traffic *from* the MAC instead of *to* it.
+			field := tokens[i+1]
+			var offset uint32
+			switch field {
+			case "saddr":
+				offset = 6 // source MAC at LL-header offset 6
+			case "daddr":
+				offset = 0 // destination MAC at LL-header offset 0
+			default:
+				return spec, fmt.Errorf("unsupported ether field %q (want saddr or daddr)", field)
+			}
 			target := tokens[i+2]
 			exprs = append(exprs,
-				buildExprPayloadLoad(nftPayloadLLHeader, 6, 6, nftReg1),
+				buildExprPayloadLoad(nftPayloadLLHeader, offset, 6, nftReg1),
 			)
 			if strings.HasPrefix(target, "@") {
 				exprs = append(exprs, buildExprLookup(strings.TrimPrefix(target, "@"), nftReg1))
@@ -746,6 +907,73 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			}
 			exprs = append(exprs, buildExprDnatIPv4(nftReg1, nftReg2, hasPort))
 			i++
+
+		case "log":
+			// A-M36 (round 2): a bare "log" (or "log level ...")
+			// used to fail the whole ruleset. Logging is
+			// non-load-bearing: keep the log statement when it
+			// carries a prefix, otherwise skip it with a warning
+			// and let the rest of the rule compile. (The quoted
+			// "log prefix ..." form is extracted before tokenising.)
+			if i+2 < len(tokens) && tokens[i+1] == "level" {
+				i += 3
+				continue
+			}
+			if i+2 < len(tokens) && tokens[i+1] == "prefix" {
+				exprs = append(exprs, buildExprLog(strings.Trim(tokens[i+2], `"`)))
+				i += 3
+				continue
+			}
+			slog.Warn("Skipping bare log statement in native netlink compiler", "chain", chainName, "line", line)
+			i++
+
+		case "reject":
+			// A-M36 (round 2): bare "reject" used to fail the
+			// whole ruleset. A reject is a drop plus a
+			// notification, so the enforcement (packet not
+			// delivered) is preserved by the reject expression.
+			rejectType := uint32(nftRejectICMPUnreach)
+			icmpCode := uint32(nftRejectCodePortUnrch)
+			consumed := 1
+			if i+3 < len(tokens) && tokens[i+1] == "with" && tokens[i+2] == "tcp" && tokens[i+3] == "reset" {
+				rejectType = nftRejectTCPRst
+				consumed = 4
+			} else if i+4 < len(tokens) && tokens[i+1] == "with" && tokens[i+2] == "icmp" && tokens[i+3] == "type" {
+				switch strings.Trim(tokens[i+4], `"`) {
+				case "port-unreachable":
+					icmpCode = 3
+				case "host-unreachable":
+					icmpCode = 1
+				case "net-unreachable":
+					icmpCode = 0
+				case "admin-prohibited":
+					icmpCode = 13
+				default:
+					return spec, fmt.Errorf("unsupported reject icmp type %q", tokens[i+4])
+				}
+				consumed = 5
+			} else if i+1 < len(tokens) && tokens[i+1] == "with" {
+				return spec, fmt.Errorf("unsupported reject form %q (requires nft binary fallback)", strings.Join(tokens[i:min(i+4, len(tokens))], " "))
+			}
+			exprs = append(exprs, buildExprReject(rejectType, icmpCode))
+			i += consumed
+
+		case "return":
+			// A-M36: return from the current chain.
+			exprs = append(exprs, buildExprVerdict(nftReturn))
+			i++
+
+		case "jump", "goto":
+			// A-M36: jump/goto a named chain.
+			if i+1 >= len(tokens) {
+				return spec, fmt.Errorf("missing chain name after %s", tok)
+			}
+			code := uint32(nftJump)
+			if tok == "goto" {
+				code = nftGoto
+			}
+			exprs = append(exprs, buildExprVerdictChain(code, strings.Trim(tokens[i+1], `"`)))
+			i += 2
 
 		case "accept":
 			exprs = append(exprs, buildExprVerdict(nfAccept))
@@ -984,6 +1212,45 @@ func buildExprVerdict(code uint32) []byte {
 			),
 		),
 	)
+}
+
+// buildExprVerdictChain builds an immediate verdict that jumps to (or
+// goes to) a named chain — A-M36: "jump <chain>" / "goto <chain>".
+func buildExprVerdictChain(code uint32, chain string) []byte {
+	return wrapExpr("immediate",
+		nlAttrU32BE(nftaImmediateDreg, nftRegVerdict),
+		nlAttrNested(nftaImmediateData,
+			nlAttrNested(nftaDataVerdict,
+				nlAttrU32BE(nftaVerdictCode, code),
+				nlAttrStr(nftaVerdictChain, chain),
+			),
+		),
+	)
+}
+
+// buildExprBitwiseMaskBytes is the byte-mask variant of buildExprBitwiseMask
+// for prefix matches (A-M36): the mask is the network-order CIDR mask
+// (4 bytes for IPv4, 16 for IPv6), not a host-order uint32.
+func buildExprBitwiseMaskBytes(sreg, dreg uint32, mask []byte) []byte {
+	xor := make([]byte, len(mask))
+	return wrapExpr("bitwise",
+		nlAttrU32BE(nftaBitwiseSreg, sreg),
+		nlAttrU32BE(nftaBitwiseDreg, dreg),
+		nlAttrU32BE(nftaBitwiseLen, uint32(len(mask))),
+		nlAttrNested(nftaBitwiseMask, nlAttr(nftaDataValue, mask)),
+		nlAttrNested(nftaBitwiseXor, nlAttr(nftaDataValue, xor)),
+	)
+}
+
+// buildExprReject builds an nft_reject expression (A-M36). The packet is
+// still dropped; only the notification differs from a plain drop: ICMP
+// port-unreachable by default, TCP RST when asked for one.
+func buildExprReject(rejectType uint32, icmpCode uint32) []byte {
+	attrs := [][]byte{nlAttrU32BE(nftaRejectType, rejectType)}
+	if rejectType != nftRejectTCPRst {
+		attrs = append(attrs, nlAttrU32BE(nftaRejectICMPCode, icmpCode))
+	}
+	return wrapExpr("reject", attrs...)
 }
 
 // buildNfgenMsg builds a complete Netlink message with struct nlmsghdr + struct nfgenmsg + attributes.
