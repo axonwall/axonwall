@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -103,6 +104,11 @@ func (e *EdgeNetworkEngine) SetLinkUp(dev string, up bool) error {
 }
 
 // RemoveAddress deletes an assigned CIDR address from an interface via Netlink RTM_DELADDR.
+// A-M41 (round 2): removing an address that is already absent is success,
+// not an error — the desired state (address not present) already holds.
+// The kernel answers RTM_DELADDR for a missing address with
+// EADDRNOTAVAIL/ENOENT, and Demote used to fail (and wedge on every
+// retry) on exactly that routine case.
 func (e *EdgeNetworkEngine) RemoveAddress(dev, cidr string) error {
 	dev = strings.TrimSpace(dev)
 	cidr = strings.TrimSpace(cidr)
@@ -112,7 +118,13 @@ func (e *EdgeNetworkEngine) RemoveAddress(dev, cidr string) error {
 	if _, _, err := net.ParseCIDR(cidr); err != nil {
 		return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
 	}
-	return delInterfaceAddressNetlink(dev, cidr)
+	if err := delInterfaceAddressNetlink(dev, cidr); err != nil {
+		if errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // ConfigureInterface applies link state, MTU, CIDR address, and optional default gateway to a network device.

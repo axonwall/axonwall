@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"errors"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -340,5 +342,24 @@ config:
 	}
 	if routes[1].Destination != "0.0.0.0/0" || routes[1].Gateway != "203.0.113.1" {
 		t.Fatalf("unexpected v1 route 1: %+v", routes[1])
+	}
+}
+
+// A-M41: removing an address that is already absent must succeed (the
+// kernel answers RTM_DELADDR for a missing address with EADDRNOTAVAIL).
+// The sandbox has no CAP_NET_ADMIN, so the netlink call fails with
+// EPERM there and the test is skipped; it runs on a real box.
+func TestBatch8RemoveAddressIdempotent(t *testing.T) {
+	e := NewEdgeNetworkEngine()
+	err := e.RemoveAddress("lo", "192.0.2.99/32")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("no netlink privilege in this environment: %v", err)
+		}
+		t.Fatalf("RemoveAddress of an unassigned address failed: %v", err)
+	}
+	// A missing device must still fail (no silent success).
+	if err := e.RemoveAddress("nonexistent-dev-xyz", "192.0.2.99/32"); err == nil {
+		t.Fatalf("RemoveAddress on a missing device should fail")
 	}
 }
