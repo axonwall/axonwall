@@ -100,6 +100,46 @@ export async function testAiProviderProbe(
   const isClientConfig = Boolean(currentConfig);
   const start = Date.now();
 
+  // N11: a probe that only checks connectivity/auth passes a typo'd,
+  // retired, or not-yet-pulled model, which then fails at Send time.
+  // Verify the configured model is in the provider's reported list.
+  const modelMatches = (models: string[], configured: string): boolean => {
+    const norm = (m: string) => m.replace(/^models\//, '');
+    const want = norm(configured);
+    return models.some((m) => {
+      const got = norm(m);
+      return got === want || got === `${want}:latest` || want === `${got}:latest`;
+    });
+  };
+  const verifyConfiguredModel = (
+    configuredModel: string,
+    models: string[],
+    latencyMs: number,
+    isLocal: boolean
+  ): AiProbeResult | null => {
+    if (models.length === 0) {
+      return {
+        ok: false,
+        status: `No models available (${latencyMs}ms)`,
+        latencyMs,
+        modelsFound: models,
+        error: isLocal
+          ? `No models are available on this ${AI_PROVIDERS_META[provider].name} endpoint — pull or serve '${configuredModel}' first.`
+          : `The provider reported no models, so configured model '${configuredModel}' could not be verified.`,
+      };
+    }
+    if (!modelMatches(models, configuredModel)) {
+      return {
+        ok: false,
+        status: `Model '${configuredModel}' not available (${models.length} models, ${latencyMs}ms)`,
+        latencyMs,
+        modelsFound: models,
+        error: `Configured model '${configuredModel}' was not found among the ${models.length} model(s) reported by ${AI_PROVIDERS_META[provider].name}. Check the model name or pull/install it before using this provider.`,
+      };
+    }
+    return null;
+  };
+
   try {
     switch (provider) {
       case 'antigravity': {
@@ -137,9 +177,12 @@ export async function testAiProviderProbe(
         const models = Array.isArray(data?.models)
           ? data.models.map((m: any) => String(m.name || '').replace(/^models\//, '')).filter(Boolean)
           : [];
+        const configuredModel = p?.model || AI_PROVIDERS_META.antigravity.defaultModel;
+        const modelCheck = verifyConfiguredModel(configuredModel, models, latencyMs, false);
+        if (modelCheck) return modelCheck;
         return {
           ok: true,
-          status: `Connected & Verified (${latencyMs}ms)`,
+          status: `Connected & Verified — model '${configuredModel}' available (${models.length} models, ${latencyMs}ms)`,
           latencyMs,
           modelsFound: models,
         };
@@ -166,9 +209,12 @@ export async function testAiProviderProbe(
         const models = Array.isArray(data?.models)
           ? data.models.map((m: any) => String(m.name || '')).filter(Boolean)
           : [];
+        const configuredModel = p?.model || AI_PROVIDERS_META.ollama.defaultModel;
+        const modelCheck = verifyConfiguredModel(configuredModel, models, latencyMs, true);
+        if (modelCheck) return modelCheck;
         return {
           ok: true,
-          status: `Online (${models.length} model${models.length === 1 ? '' : 's'}, ${latencyMs}ms)`,
+          status: `Online — model '${configuredModel}' available (${models.length} models, ${latencyMs}ms)`,
           latencyMs,
           modelsFound: models,
         };
@@ -213,9 +259,12 @@ export async function testAiProviderProbe(
         const models = Array.isArray(data?.data)
           ? data.data.map((m: any) => String(m.id || '')).filter(Boolean)
           : [];
+        const configuredModel = p?.model || AI_PROVIDERS_META['claude-code'].defaultModel;
+        const modelCheck = verifyConfiguredModel(configuredModel, models, latencyMs, false);
+        if (modelCheck) return modelCheck;
         return {
           ok: true,
-          status: `Connected & Verified (${latencyMs}ms)`,
+          status: `Connected & Verified — model '${configuredModel}' available (${models.length} models, ${latencyMs}ms)`,
           latencyMs,
           modelsFound: models,
         };
@@ -259,9 +308,12 @@ export async function testAiProviderProbe(
         const models = Array.isArray(data?.data)
           ? data.data.map((m: any) => String(m.id || '')).filter(Boolean)
           : [];
+        const configuredModel = p?.model || AI_PROVIDERS_META.codex.defaultModel;
+        const modelCheck = verifyConfiguredModel(configuredModel, models, latencyMs, false);
+        if (modelCheck) return modelCheck;
         return {
           ok: true,
-          status: `Connected & Verified (${latencyMs}ms)`,
+          status: `Connected & Verified — model '${configuredModel}' available (${models.length} models, ${latencyMs}ms)`,
           latencyMs,
           modelsFound: models,
         };
@@ -300,9 +352,12 @@ export async function testAiProviderProbe(
         const models = Array.isArray(data?.data)
           ? data.data.map((m: any) => String(m.id || '')).filter(Boolean)
           : [];
+        const configuredModel = p?.model || AI_PROVIDERS_META.vllm.defaultModel;
+        const modelCheck = verifyConfiguredModel(configuredModel, models, latencyMs, true);
+        if (modelCheck) return modelCheck;
         return {
           ok: true,
-          status: `Online (${models.length} model${models.length === 1 ? '' : 's'}, ${latencyMs}ms)`,
+          status: `Online — model '${configuredModel}' available (${models.length} models, ${latencyMs}ms)`,
           latencyMs,
           modelsFound: models,
         };
