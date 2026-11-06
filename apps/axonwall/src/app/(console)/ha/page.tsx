@@ -18,7 +18,7 @@ import {
   Check,
   BookOpen,
 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState, getHASyncTrustStatus, type HASyncTrustStatus } from '@/server/agent';
+import { getCurrentDesiredState, applyDesiredState, getHASyncTrustStatus, getSystemServicesStatus, type HASyncTrustStatus, type SystemServiceInfo } from '@/server/agent';
 
 export default function HighAvailabilityPage() {
   const [enabled, setEnabled] = useState(false);
@@ -39,6 +39,13 @@ export default function HighAvailabilityPage() {
   const [syncTransport, setSyncTransport] = useState<'token-http' | 'mtls'>('mtls');
   const [requireSigned, setRequireSigned] = useState(false);
   const [trustStatus, setTrustStatus] = useState<HASyncTrustStatus | null>(null);
+  // C-A4: the sidebar status card used to assert Keepalived "Running",
+  // Conntrackd "Synced (Active)" and SQLite "Replicating (0 lag)" purely
+  // from the form toggles — a dead keepalived still rendered healthy.
+  // The two service rows are now driven by the live systemd status;
+  // the sync rows have no live check behind them, so they report
+  // "Unknown" instead of inventing a state. null = not loaded yet.
+  const [services, setServices] = useState<SystemServiceInfo[] | null>(null);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -77,6 +84,40 @@ export default function HighAvailabilityPage() {
       .then((status) => setTrustStatus(status))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    getSystemServicesStatus()
+      .then((list) => setServices(list))
+      .catch(() => setServices([]));
+  }, []);
+
+  const serviceStatus = (unit: string): SystemServiceInfo['status'] | null =>
+    services?.find((s) => s.unit === unit)?.status ?? null;
+
+  // Live systemd status for one unit. Anything that is not a known live
+  // state — not loaded yet, load failed, or the status itself unknown —
+  // renders "Unknown", never a healthy-looking default.
+  const renderServiceStatus = (unit: string) => {
+    const status = serviceStatus(unit);
+    if (status === 'active') {
+      return (
+        <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          Running
+        </span>
+      );
+    }
+    if (status === 'failed') {
+      return <span className="text-red-400 font-semibold font-mono">Failed</span>;
+    }
+    if (status === 'not-installed') {
+      return <span className="text-slate-500 font-mono">Not installed</span>;
+    }
+    if (status === 'inactive') {
+      return <span className="text-slate-500 font-mono">Stopped</span>;
+    }
+    return <span className="text-amber-400 font-semibold font-mono">Unknown</span>;
+  };
 
   const isValidCidr = (value: string): boolean => {
     const m = value.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
@@ -630,31 +671,25 @@ export default function HighAvailabilityPage() {
               <div className="flex justify-between items-center py-1">
                 <span className="text-slate-400 font-medium">Keepalived (VRRP)</span>
                 {enabled ? (
-                  <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    Running
-                  </span>
+                  renderServiceStatus('keepalived.service')
                 ) : (
-                  <span className="text-slate-500 font-mono">Stopped</span>
+                  <span className="text-slate-500 font-mono">Disabled</span>
                 )}
               </div>
 
               <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
                 <span className="text-slate-400 font-medium">Conntrackd (State Sync)</span>
                 {enabled ? (
-                  <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    Synced (Active)
-                  </span>
+                  renderServiceStatus('conntrackd.service')
                 ) : (
-                  <span className="text-slate-500 font-mono">Stopped</span>
+                  <span className="text-slate-500 font-mono">Disabled</span>
                 )}
               </div>
 
               <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
                 <span className="text-slate-400 font-medium">Configuration Sync</span>
                 {enabled && role === 'primary' ? (
-                  <span className="text-emerald-400 font-semibold font-mono">Pushing to Peer</span>
+                  <span className="text-amber-400 font-semibold font-mono">Unknown (not checked)</span>
                 ) : (
                   <span className="text-slate-500 font-mono">Standby / Idle</span>
                 )}
@@ -663,17 +698,7 @@ export default function HighAvailabilityPage() {
               <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
                 <span className="text-slate-400 font-medium">SQLite WAL Sync</span>
                 {enabled && sqliteSyncEnabled ? (
-                  role === 'primary' ? (
-                    <span className="text-indigo-400 font-semibold font-mono flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
-                      Serving (Master)
-                    </span>
-                  ) : (
-                    <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                      Replicating (0 lag)
-                    </span>
-                  )
+                  <span className="text-amber-400 font-semibold font-mono">Unknown (not checked)</span>
                 ) : (
                   <span className="text-slate-500 font-mono">Disabled</span>
                 )}
@@ -693,7 +718,12 @@ export default function HighAvailabilityPage() {
                       )
                     ) {
                       setRole(role === 'primary' ? 'secondary' : 'primary');
-                      setSyncStatusMsg('Node role transitioned. Click "Save to ha.yaml" to apply changes.');
+                      // C-A4: this used to claim "Node role transitioned."
+                      // Flipping the form field transitions nothing — the
+                      // role only changes when the save is applied.
+                      setSyncStatusMsg(
+                        `Role changed locally to ${role === 'primary' ? 'SECONDARY (BACKUP)' : 'PRIMARY (MASTER)'}. Click "Save to ha.yaml" to apply changes.`
+                      );
                     }
                   }}
                   className="w-full px-4 py-2.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer shadow-md"
