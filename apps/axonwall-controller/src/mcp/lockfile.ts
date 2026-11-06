@@ -14,6 +14,13 @@ import * as path from 'node:path';
 export function desiredStateLockPath(): string {
   const override = process.env.AXONWALL_DESIRED_STATE_LOCK_PATH;
   if (override) return override;
+  if (process.env.AXONWALL_STATE_FILE) {
+    return `${process.env.AXONWALL_STATE_FILE}.lock`;
+  }
+  const configDir = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR;
+  if (configDir) {
+    return path.join(configDir, 'state.json.lock');
+  }
   return fs.existsSync('/etc/axonwall') ? '/etc/axonwall/state.json.lock' : '/var/lib/axonwall/state.json.lock';
 }
 

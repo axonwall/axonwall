@@ -14357,7 +14357,7 @@ var require_websocket = __commonJS({
     var http3 = __require("http");
     var net2 = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes4, createHash: createHash5 } = __require("crypto");
+    var { randomBytes: randomBytes5, createHash: createHash5 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -14908,7 +14908,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes4(16).toString("base64");
+      const key = randomBytes5(16).toString("base64");
       const request3 = isSecure ? https2.request : http3.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -36480,12 +36480,18 @@ var SatelliteNodeSchema = external_exports.object({
   lanAddress: external_exports.string().optional(),
   arch: external_exports.enum(["mipsle", "arm64", "amd64", "armv7", "unknown"]).default("unknown"),
   os: external_exports.string().default("Linux"),
-  ip: external_exports.string().default("127.0.0.1"),
+  // D16: no invented defaults. A node whose address was never reported
+  // persists as unknown (undefined) instead of 127.0.0.1 — the loopback
+  // default used to be written to fleet.yaml as if it were the node's
+  // real address.
+  ip: external_exports.string().optional(),
   lastSeen: external_exports.string().optional(),
   status: external_exports.enum(["online", "offline", "enrolling", "degraded"]).default("enrolling"),
   ztpToken: external_exports.string().optional(),
   wireguard: external_exports.object({
-    tunnelIp: external_exports.string().default("10.99.0.2/24"),
+    // D16: same — no invented 10.99.0.2/24 default. Tunnel IPs are
+    // allocated explicitly (with a collision check) at enrollment time.
+    tunnelIp: external_exports.string().optional(),
     publicKey: external_exports.string().optional(),
     endpoint: external_exports.string().optional(),
     connected: external_exports.boolean().default(false)
@@ -37009,6 +37015,10 @@ var HostMalwareDefenseConfigSchema = external_exports.object({
   trustedBpfLoaderPaths: external_exports.array(external_exports.string().regex(/^\/[a-zA-Z0-9._/-]+$/, "Trusted BPF loader path must be a safe absolute path")).default([
     "/usr/sbin/bpftool",
     "/usr/local/bin/axonwalld"
+  ]),
+  blockAfAlgAeadCopyfail: external_exports.boolean().default(true),
+  trustedAfAlgPaths: external_exports.array(external_exports.string().regex(/^\/[a-zA-Z0-9._/-]+$/, "Trusted AF_ALG path must be a safe absolute path")).default([
+    "/usr/sbin/cryptsetup"
   ]),
   progIdrKcoreDiffEnabled: external_exports.boolean().default(true),
   pmuLbrBranchTracingEnabled: external_exports.boolean().default(true),
@@ -42159,7 +42169,7 @@ function lintRuleset(state) {
 }
 
 // src/index.ts
-import * as crypto5 from "node:crypto";
+import * as crypto6 from "node:crypto";
 
 // ../../node_modules/.pnpm/ws@8.22.0/node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -43279,16 +43289,24 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
 }
 
 // src/mcp/authz.ts
-import * as crypto2 from "node:crypto";
+import * as crypto3 from "node:crypto";
 import * as fs4 from "node:fs";
 import * as path3 from "node:path";
 
 // src/mcp/lockfile.ts
+import * as crypto2 from "node:crypto";
 import * as fs3 from "node:fs";
 import * as path2 from "node:path";
 function desiredStateLockPath() {
   const override = process.env.AXONWALL_DESIRED_STATE_LOCK_PATH;
   if (override) return override;
+  if (process.env.AXONWALL_STATE_FILE) {
+    return `${process.env.AXONWALL_STATE_FILE}.lock`;
+  }
+  const configDir = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR;
+  if (configDir) {
+    return path2.join(configDir, "state.json.lock");
+  }
   return fs3.existsSync("/etc/axonwall") ? "/etc/axonwall/state.json.lock" : "/var/lib/axonwall/state.json.lock";
 }
 function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
@@ -43302,8 +43320,12 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
   for (; ; ) {
     try {
       const fd = fs3.openSync(lockPath, "wx", 432);
+      const token = `${process.pid}:${Date.now()}:${crypto2.randomBytes(8).toString("hex")}`;
       try {
-        fs3.writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: (/* @__PURE__ */ new Date()).toISOString() }));
+        fs3.writeFileSync(
+          fd,
+          JSON.stringify({ pid: process.pid, createdAt: (/* @__PURE__ */ new Date()).toISOString(), token })
+        );
       } catch {
       }
       let released = false;
@@ -43315,6 +43337,14 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
         } catch {
         }
         try {
+          const raw = fs3.readFileSync(lockPath, "utf8");
+          const parsed = JSON.parse(raw);
+          if (parsed?.token !== token) {
+            console.warn(
+              `[MCP Lock] Not unlinking ${lockPath}: lock is now held by another owner (expected our token, found a different one).`
+            );
+            return;
+          }
           fs3.unlinkSync(lockPath);
         } catch {
         }
@@ -43322,13 +43352,17 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
     } catch (err) {
       if (err?.code !== "EEXIST") throw err;
       let stale = false;
+      let holderPid = null;
+      let observedMtimeMs = 0;
       try {
         const stat = fs3.statSync(lockPath);
+        observedMtimeMs = stat.mtimeMs;
         stale = Date.now() - stat.mtimeMs > staleThresholdMs;
         if (!stale && stat.size > 0) {
           const raw = fs3.readFileSync(lockPath, "utf8");
           const parsed = JSON.parse(raw);
           if (typeof parsed?.pid === "number" && parsed.pid > 0 && parsed.pid !== process.pid) {
+            holderPid = parsed.pid;
             try {
               process.kill(parsed.pid, 0);
             } catch (killErr) {
@@ -43341,9 +43375,23 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
       } catch {
       }
       if (stale) {
+        let stillStale = true;
         try {
-          fs3.unlinkSync(lockPath);
+          const restat = fs3.statSync(lockPath);
+          if (restat.mtimeMs !== observedMtimeMs) stillStale = false;
+          if (stillStale && holderPid !== null && restat.size > 0) {
+            const raw = fs3.readFileSync(lockPath, "utf8");
+            const parsed = JSON.parse(raw);
+            if (parsed?.pid !== holderPid) stillStale = false;
+          }
         } catch {
+          stillStale = false;
+        }
+        if (stillStale) {
+          try {
+            fs3.unlinkSync(lockPath);
+          } catch {
+          }
         }
         continue;
       }
@@ -43418,7 +43466,7 @@ function saveMcpKeysInternal(keys) {
   for (const keysPath of Array.from(new Set(targetPaths))) {
     try {
       fs4.mkdirSync(path3.dirname(keysPath), { recursive: true, mode: 509 });
-      const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
+      const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto3.randomUUID()}`;
       fs4.writeFileSync(tmpPath, serialized, { mode: 432 });
       try {
         fs4.chmodSync(tmpPath, 432);
@@ -43435,7 +43483,7 @@ function saveMcpKeysInternal(keys) {
   }
 }
 function hashMcpToken(rawToken) {
-  return crypto2.createHash("sha256").update(rawToken.trim()).digest("hex");
+  return crypto3.createHash("sha256").update(rawToken.trim()).digest("hex");
 }
 function readLastUsedSidecar(keysPath) {
   try {
@@ -43454,7 +43502,7 @@ function writeLastUsedSidecar(keysPath, keyId, entry) {
     const all = readLastUsedSidecar(keysPath);
     all[keyId] = entry;
     fs4.mkdirSync(path3.dirname(sidecarPath), { recursive: true, mode: 509 });
-    const tmpPath = `${sidecarPath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
+    const tmpPath = `${sidecarPath}.tmp.${process.pid}.${crypto3.randomUUID()}`;
     fs4.writeFileSync(tmpPath, JSON.stringify(all, null, 2), { mode: 432 });
     fs4.renameSync(tmpPath, sidecarPath);
   } catch {
@@ -43469,8 +43517,8 @@ function withMcpKeysLock(fn) {
   }
 }
 function createMcpApiKeyRecord(input2) {
-  const shortId = crypto2.randomBytes(4).toString("hex");
-  const secretHex = crypto2.randomBytes(32).toString("hex");
+  const shortId = crypto3.randomBytes(4).toString("hex");
+  const secretHex = crypto3.randomBytes(32).toString("hex");
   const keyPrefix = `axw_mcp_${shortId}`;
   const rawToken = `${keyPrefix}_${secretHex}`;
   const secretHashSha256 = hashMcpToken(rawToken);
@@ -43580,7 +43628,7 @@ function authenticateMcpToken(rawToken, clientIp, req) {
   let matchedKey;
   for (const k of keys) {
     const storedBuf = Buffer.from(k.secretHashSha256, "hex");
-    if (storedBuf.length === candidateBuf.length && crypto2.timingSafeEqual(storedBuf, candidateBuf)) {
+    if (storedBuf.length === candidateBuf.length && crypto3.timingSafeEqual(storedBuf, candidateBuf)) {
       matchedKey = k;
       break;
     }
@@ -43668,10 +43716,10 @@ function hasMcpScope(key, requiredScope) {
 // src/mcp/server.ts
 import * as fs6 from "node:fs";
 import * as http from "node:http";
-import * as crypto4 from "node:crypto";
+import * as crypto5 from "node:crypto";
 
 // src/mcp/audit.ts
-import * as crypto3 from "node:crypto";
+import * as crypto4 from "node:crypto";
 import * as fs5 from "node:fs";
 import * as path4 from "node:path";
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -43713,7 +43761,7 @@ function computeEntryHash(entryWithoutHash) {
     leaseId: entryWithoutHash.leaseId ?? null,
     prevHash: entryWithoutHash.prevHash
   });
-  return crypto3.createHash("sha256").update(canonical).digest("hex");
+  return crypto4.createHash("sha256").update(canonical).digest("hex");
 }
 function getLastHash(auditPath) {
   try {
@@ -43733,7 +43781,7 @@ function getLastHash(auditPath) {
 }
 function buildAuditEntry(input2, prevHash) {
   const partial2 = {
-    id: `mcp_aud_${crypto3.randomBytes(6).toString("hex")}`,
+    id: `mcp_aud_${crypto4.randomBytes(6).toString("hex")}`,
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     keyId: input2.keyId,
     keyName: input2.keyName,
@@ -43761,7 +43809,7 @@ function recordMcpAuditEntry(input2) {
     release = acquireMcpLockFile(`${auditPath}.lock`);
   } catch (err) {
     console.error("[MCP Audit] Failed to acquire audit lock; entry not recorded:", err);
-    return buildAuditEntry(input2, getLastHash(auditPath));
+    return { ...buildAuditEntry(input2, getLastHash(auditPath)), recorded: false };
   }
   try {
     const fullEntry = buildAuditEntry(input2, getLastHash(auditPath));
@@ -43774,8 +43822,9 @@ function recordMcpAuditEntry(input2) {
       }
     } catch (err) {
       console.error("[MCP Audit] Failed to append audit entry:", err);
+      return { ...fullEntry, recorded: false };
     }
-    return fullEntry;
+    return { ...fullEntry, recorded: true };
   } finally {
     release();
   }
@@ -43874,7 +43923,7 @@ function readAgentToken() {
   return "";
 }
 function newMcpApplyJobId() {
-  return `mcp_apply_${Date.now()}_${crypto4.randomBytes(4).toString("hex")}`;
+  return `mcp_apply_${Date.now()}_${crypto5.randomBytes(4).toString("hex")}`;
 }
 function insertMcpRuleIntoState(targetState, rule) {
   const isBlockOrReject = rule.action === "block" || rule.action === "reject";
@@ -44672,7 +44721,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 success: true,
                 lease,
                 fleetPropagatedSatellites: fleetPropagatedCount,
-                auditEntryHash: auditEntry.entryHash
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+                auditRecorded: auditEntry.recorded
               },
               null,
               2
@@ -44738,7 +44788,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2)
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null, auditRecorded: auditEntry.recorded }, null, 2)
           }
         ]
       };
@@ -44818,7 +44868,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2)
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null, auditRecorded: auditEntry.recorded }, null, 2)
           }
         ]
       };
@@ -44897,7 +44947,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2)
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null, auditRecorded: auditEntry.recorded }, null, 2)
           }
         ]
       };
@@ -45194,7 +45244,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           confirmTimeoutSeconds: req.confirmTimeoutSeconds,
           files: compiled.files,
           jobId: applyJobId,
-          bundleHash: crypto4.createHash("sha256").update(hashInput).digest("hex"),
+          bundleHash: crypto5.createHash("sha256").update(hashInput).digest("hex"),
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds
@@ -45258,7 +45308,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 applyStatus,
                 ...applyJobId ? { jobId: applyJobId } : {},
                 commitConfirmNotice: req.applyImmediately ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection. Confirm it with mcp_confirm_apply and jobId "${applyJobId}" before the window expires or the daemon auto-rolls the ruleset back.` : "Rule staged in DesiredState.",
-                auditEntryHash: auditEntry.entryHash
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+                auditRecorded: auditEntry.recorded
               },
               null,
               2
@@ -45429,7 +45480,7 @@ function buildArtifactBundle(jobId, state) {
     files: [...files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
     reloadServices: [...reloadServices].sort()
   });
-  const hash2 = crypto5.createHash("sha256").update(hashInput).digest("hex");
+  const hash2 = crypto6.createHash("sha256").update(hashInput).digest("hex");
   return {
     jobId,
     bundleHash: hash2,
@@ -45723,7 +45774,7 @@ function secureTokenEquals(presented, expected) {
   const presentedBuf = Buffer.from(presented);
   const expectedBuf = Buffer.from(expected);
   if (presentedBuf.length !== expectedBuf.length) return false;
-  return crypto5.timingSafeEqual(presentedBuf, expectedBuf);
+  return crypto6.timingSafeEqual(presentedBuf, expectedBuf);
 }
 function validateHaTransition(payload, fleetLanVip) {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? "").toLowerCase();
@@ -46076,7 +46127,7 @@ async function main() {
   const pendingCommands = /* @__PURE__ */ new Map();
   const sendToSatellite = (sat, type, payload) => {
     if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return null;
-    const commandId = `cmd_${crypto5.randomUUID()}`;
+    const commandId = `cmd_${crypto6.randomUUID()}`;
     pendingCommands.set(commandId, { satId: sat.id, command: type, sentAt: Date.now() });
     sat.ws.send(buildSatelliteCommandEnvelope(type, payload, commandId));
     return commandId;
@@ -46116,7 +46167,7 @@ async function main() {
   }
   function syncSatelliteDesiredState(sat, desiredState) {
     if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return;
-    const localState = desiredState !== void 0 ? desiredState : loadLocalDesiredState2();
+    const localState = desiredState !== void 0 && desiredState !== null ? desiredState : loadLocalDesiredState2();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
     sat.role = deriveSatelliteRole({ configuredRole: fleetNode?.role, currentRole: sat.role, satelliteId: sat.id });
@@ -46463,7 +46514,7 @@ async function main() {
           }
           let notified = 0;
           for (const sat of activeSatellites.values()) {
-            const isTarget = sat.role === "edge-ngfw" || sat.id.startsWith("edge-") || sat.id === "edge";
+            const isTarget = sat.role === "edge-ngfw";
             if (isTarget && sendHaTransition(sat, msgType, normalizedRole, sharedWanMac, lanVip)) notified++;
           }
           if (msgType === "DEMOTE") setActiveHaEdge(null);
@@ -46829,7 +46880,24 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           "x-forwarded-for": request3.socket?.remoteAddress || "127.0.0.1"
         }
       });
+      let wsProxyTimedOut = false;
+      const destroyWsUpstream = () => {
+        try {
+          uiWsReq.destroy();
+        } catch {
+        }
+      };
+      uiWsReq.setTimeout(3e4, () => {
+        wsProxyTimedOut = true;
+        destroyWsUpstream();
+        try {
+          socket.destroy();
+        } catch {
+        }
+      });
+      socket.on("close", destroyWsUpstream);
       uiWsReq.on("upgrade", (uiRes, uiSocket, uiHead) => {
+        uiWsReq.setTimeout(0);
         const headerLines = [];
         for (let i = 0; i < uiRes.rawHeaders.length; i += 2) {
           headerLines.push(`${uiRes.rawHeaders[i]}: ${uiRes.rawHeaders[i + 1]}`);
@@ -46846,12 +46914,14 @@ ${headerLines.join("\r\n")}\r
         socket.pipe(uiSocket);
       });
       uiWsReq.on("response", (uiRes) => {
+        uiWsReq.setTimeout(0);
         socket.end(`HTTP/1.1 ${uiRes.statusCode || 502} ${uiRes.statusMessage || "Bad Gateway"}\r
 \r
 `);
         uiRes.resume();
       });
       uiWsReq.on("error", () => {
+        if (wsProxyTimedOut) return;
         socket.destroy();
       });
       uiWsReq.end();
@@ -46957,7 +47027,7 @@ ${headerLines.join("\r\n")}\r
     let wgPrivateKey = existing?.wgPrivateKey;
     let wgPublicKey = existing?.wgPublicKey;
     if (!wgPrivateKey || !wgPublicKey) {
-      const { publicKey, privateKey } = crypto5.generateKeyPairSync("x25519");
+      const { publicKey, privateKey } = crypto6.generateKeyPairSync("x25519");
       const rawPriv = privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32);
       const rawPub = publicKey.export({ type: "spki", format: "der" }).subarray(-32);
       wgPrivateKey = rawPriv.toString("base64");
