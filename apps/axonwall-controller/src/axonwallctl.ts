@@ -721,6 +721,11 @@ async function cmdApply(autoConfirm = true) {
     const commitHash = commitToGitOps(state, `CLI apply via axonwallctl (${bundleHash.slice(0, 8)})`);
     if (commitHash) {
       console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+    } else {
+      // B2-L5: a failed GitOps commit used to be silent here, so
+      // GitOps HEAD silently stopped tracking the live config after
+      // a confirmed apply. Say so explicitly.
+      console.warn(`${cYellow}[!] Applied configuration was NOT recorded in GitOps: the GitOps commit failed (repo corrupt, unwritable, or git missing). Live config and GitOps HEAD have diverged.${cReset}`);
     }
   }
 }
@@ -938,8 +943,14 @@ async function cmdConfirm() {
         const commitHash = commitToGitOps(state, `CLI confirm via axonwallctl (${pendingJobId})`);
         if (commitHash) {
           console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+        } else {
+          // B2-L5: see cmdApply — a failed GitOps commit after a
+          // confirmed apply/confirm must not pass silently.
+          console.warn(`${cYellow}[!] Confirmed configuration was NOT recorded in GitOps: the GitOps commit failed (repo corrupt, unwritable, or git missing). Live config and GitOps HEAD have diverged.${cReset}`);
         }
-      } catch {}
+      } catch (err: any) {
+        console.warn(`${cYellow}[!] Confirmed configuration was NOT recorded in GitOps: ${err?.message || err}${cReset}`);
+      }
     } else {
       console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
       process.exit(1);
