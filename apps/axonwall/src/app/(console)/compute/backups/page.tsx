@@ -85,7 +85,11 @@ export default function WorkloadBackupsPage() {
         type: res.success ? 'success' : 'error',
         message: res.message + (res.upid ? ` (Task: ${res.upid})` : ''),
       });
-      setShowBackupModal(false);
+      // Keep the form open on failure so the operator can retry without
+      // re-entering target, pool, and destination.
+      if (res.success) {
+        setShowBackupModal(false);
+      }
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to trigger backup' });
