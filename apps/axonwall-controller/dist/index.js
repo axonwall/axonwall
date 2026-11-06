@@ -45672,6 +45672,9 @@ function parseFleetSyncBody(body) {
   }
   return { ok: true, desired: parsed.data };
 }
+function shouldRefuseFleetSync(desired, diskState) {
+  return desired === void 0 && diskState === null;
+}
 function secureTokenEquals(presented, expected) {
   if (typeof presented !== "string" || typeof expected !== "string") return false;
   const presentedBuf = Buffer.from(presented);
@@ -46061,6 +46064,10 @@ async function main() {
     };
     const { nftScript } = compileSatelliteNftables(mergedNode);
     sendToSatellite(sat, "SYNC_NFTABLES", { script: nftScript });
+    if (isEdge && localState === null) {
+      console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
+      return;
+    }
     if (isEdge) {
       const wanDev = resolvedWanInterface;
       const lanDev = resolvedLanInterface;
@@ -46413,6 +46420,11 @@ async function main() {
           return;
         }
         const desired = validation.desired;
+        if (shouldRefuseFleetSync(desired, loadLocalDesiredState2())) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: "No DesiredState on disk (/etc/axonwall/state.json) and none was supplied in the request; refusing to sync defaults" }));
+          return;
+        }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
           if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
@@ -47155,6 +47167,7 @@ export {
   revokeMcpApiKeyRecord,
   secureTokenEquals,
   shouldPruneDisconnectedSatellite,
+  shouldRefuseFleetSync,
   validateHaTransition,
   verifyMcpAuditChain
 };

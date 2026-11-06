@@ -398,6 +398,14 @@ export function parseFleetSyncBody(body: string): FleetSyncBodyValidation {
   return { ok: true, desired: parsed.data };
 }
 
+// B2-M8: /fleet/sync must fail closed when there is no
+// DesiredState anywhere — neither in the request body nor on
+// disk. An empty body means "re-sync from disk", so only the
+// combination of an absent body and an absent disk state refuses.
+export function shouldRefuseFleetSync(desired: DesiredState | undefined, diskState: DesiredState | null): boolean {
+  return desired === undefined && diskState === null;
+}
+
 // B2-H1: constant-time token comparison that cannot throw on
 // multibyte input. `String.length` counts UTF-16 code units while
 // `Buffer.from()` counts UTF-8 bytes, so comparing string lengths
@@ -1068,6 +1076,18 @@ async function main() {
     // satellite's COMMAND_ACK correlates to this send.
     sendToSatellite(sat, 'SYNC_NFTABLES', { script: nftScript });
 
+    // B2-M8 (SUSPECT, confirmed): with no DesiredState on disk
+    // there is nothing real to push for interfaces/routes — the
+    // old code fell through to hardcoded defaults (WAN DHCP, LAN
+    // 10.0.0.1/24) and reported success. Skip the edge block;
+    // SYNC_NFTABLES above still goes out, compiled from the
+    // satellite's own reported interfaces in mergedNode, not
+    // invented addressing.
+    if (isEdge && localState === null) {
+      console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
+      return;
+    }
+
     if (isEdge) {
       const wanDev = resolvedWanInterface;
       const lanDev = resolvedLanInterface;
@@ -1498,6 +1518,15 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           return;
         }
         const desired = validation.desired;
+        // B2-M8: fail closed when there is no DesiredState
+        // anywhere — neither in the request nor on disk. The old
+        // code synced hardcoded defaults to every connected
+        // satellite and reported success.
+        if (shouldRefuseFleetSync(desired, loadLocalDesiredState())) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'No DesiredState on disk (/etc/axonwall/state.json) and none was supplied in the request; refusing to sync defaults' }));
+          return;
+        }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
           if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {

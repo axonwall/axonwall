@@ -59,6 +59,7 @@ export type FleetSyncBodyValidation = {
     error: string;
 };
 export declare function parseFleetSyncBody(body: string): FleetSyncBodyValidation;
+export declare function shouldRefuseFleetSync(desired: DesiredState | undefined, diskState: DesiredState | null): boolean;
 export declare function secureTokenEquals(presented: unknown, expected: unknown): boolean;
 export declare function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?: string): HaTransitionValidation;
 export interface PersistedHaState {

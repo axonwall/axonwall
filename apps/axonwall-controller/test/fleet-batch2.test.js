@@ -15,6 +15,7 @@ import {
   loadPersistedHaState,
   persistHaState,
   computeRoutesToDelete,
+  shouldRefuseFleetSync,
 } from '../dist/index.js';
 
 // Regression tests for Batch 2 of the 2026-11-05 round-2 Axonwall
@@ -160,4 +161,15 @@ test('B2-M7: a first sync has no deletions, and device distinguishes routes', ()
   // Identical sets delete nothing.
   const routes = [{ destination: '10.1.0.0/24', gateway: '10.0.0.254', device: 'eth0' }];
   assert.deepEqual(computeRoutesToDelete(routes, routes), []);
+});
+
+test('B2-M8: /fleet/sync refuses only when no DesiredState exists anywhere', () => {
+  // Empty body + no disk state: refuse (fail closed, no defaults).
+  assert.equal(shouldRefuseFleetSync(undefined, null), true);
+  // A supplied body proceeds even with no disk state.
+  assert.equal(shouldRefuseFleetSync({ interfaces: [] }, null), false);
+  // An empty body proceeds when disk state exists.
+  assert.equal(shouldRefuseFleetSync(undefined, { interfaces: [] }), false);
+  // Both present proceeds.
+  assert.equal(shouldRefuseFleetSync({ interfaces: [] }, { interfaces: [] }), false);
 });
