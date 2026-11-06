@@ -2759,6 +2759,30 @@ export async function saveInterfaceAssignment(data: {
     mtu: data.mtu || 1500,
   });
 
+  // A15: reject a static LAN subnet that overlaps another LAN
+  // interface's subnet. Two LANs on the same subnet would each get
+  // a Kea DHCP subnet on the same CIDR. The interface being edited
+  // or renamed is excluded (matched by its pre-edit name).
+  if (role === 'lan' && data.type === 'static' && data.ipv4Address) {
+    const newSubnet = computeSubnetAndDefaultPool(data.ipv4Address);
+    if (newSubnet) {
+      for (const other of state.interfaces) {
+        if (other.name === lookupName) continue;
+        if (other.role !== 'lan' || other.type !== 'static' || !other.ipv4Address) continue;
+        const otherSubnet = computeSubnetAndDefaultPool(other.ipv4Address);
+        if (!otherSubnet) continue;
+        if (
+          newSubnet.firstUsableInt <= otherSubnet.lastUsableInt &&
+          otherSubnet.firstUsableInt <= newSubnet.lastUsableInt
+        ) {
+          throw new Error(
+            `Subnet ${newSubnet.subnetCidr} overlaps interface '${other.name}' (${otherSubnet.subnetCidr}). Choose a different subnet for '${cleanName}'.`
+          );
+        }
+      }
+    }
+  }
+
   if (idx >= 0) {
     state.interfaces[idx] = updatedIface;
   } else {
