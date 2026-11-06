@@ -19,6 +19,8 @@ import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { serializeDesiredStateToYamlFiles } from '@axonwall/lib/yaml';
 import { hasMcpScope } from './authz.js';
+import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
+export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 
 const AGENT_SOCKET_PATH = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
@@ -43,6 +45,37 @@ function readAgentToken(): string {
     }
   }
   return '';
+}
+
+// B2-M2: apply job ids. The daemon requires an exact job-id
+// match to confirm an apply, and the propose response must return
+// the id so the caller can confirm it (previously the id was
+// generated server-side and never returned, so every
+// applyImmediately rule auto-rolled back). A bare Date.now() id
+// also collides when two applies land in the same millisecond
+// against the daemon's single pending slot, so the id carries a
+// random suffix.
+export function newMcpApplyJobId(): string {
+  return `mcp_apply_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+}
+
+// B2-M4: insert a proposed rule into a DesiredState, preserving
+// the established ordering (block/reject rules go before the
+// first pass rule, everything else appends). Split out so the
+// locked reload-mutate-persist section in propose_firewall_rule
+// and its rollback path apply exactly the same mutation.
+export function insertMcpRuleIntoState(targetState: DesiredState, rule: DesiredState['rules'][number]): void {
+  const isBlockOrReject = rule.action === 'block' || rule.action === 'reject';
+  if (isBlockOrReject) {
+    const firstPassIdx = targetState.rules.findIndex((r) => r.action === 'pass');
+    if (firstPassIdx !== -1) {
+      targetState.rules.splice(firstPassIdx, 0, rule);
+    } else {
+      targetState.rules.push(rule);
+    }
+  } else {
+    targetState.rules.push(rule);
+  }
 }
 
 export async function callAxonwalldApi<T = any>(
@@ -456,7 +489,7 @@ export const MCP_TOOLS_CATALOG = [
   {
     name: 'mcp_propose_firewall_rule',
     description:
-      'Stage a persistent declarative firewall rule into DesiredState, and optionally apply it with mandatory Commit-Confirm automatic rollback protection. Requires mcp:firewall:write (and mcp:firewall:apply if applyImmediately=true).',
+      'Stage a persistent declarative firewall rule into DesiredState, and optionally apply it with mandatory Commit-Confirm automatic rollback protection. Requires mcp:firewall:write (and mcp:firewall:apply if applyImmediately=true). When applied, the response returns the jobId: confirm it with mcp_confirm_apply before the commit-confirm window expires or the daemon auto-rolls the ruleset back.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -478,6 +511,19 @@ export const MCP_TOOLS_CATALOG = [
         },
       },
       required: ['rule', 'audit'],
+    },
+  },
+  {
+    name: 'mcp_confirm_apply',
+    description:
+      'Confirm a firewall rule apply that was applied with Commit-Confirm protection (mcp_propose_firewall_rule with applyImmediately=true), promoting it to last-known-good so the daemon does not auto-roll it back. Pass the jobId returned by the propose call. Requires mcp:firewall:apply.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jobId: { type: 'string', description: 'The jobId returned by mcp_propose_firewall_rule when the rule was applied' },
+        reason: { type: 'string', description: 'Optional reason for confirming the apply' },
+      },
+      required: ['jobId'],
     },
   },
 ];
@@ -541,6 +587,12 @@ export async function handleMcpReadResource(
       payload = {
         interfaces: statusRes.ok ? statusRes.data?.interfaces ?? [] : [],
         timestamp: new Date().toISOString(),
+        // B2-M3: daemon-down must not collapse to an empty list
+        // with no signal — an empty list reads as "no interfaces",
+        // not "daemon unreachable".
+        ...(!statusRes.ok
+          ? { daemonDown: true, error: statusRes.data?.error || 'axonwalld unreachable' }
+          : {}),
       };
       break;
     }
@@ -567,17 +619,25 @@ export async function handleMcpReadResource(
 
     case 'axonwall://telemetry/flows/top': {
       const flowsRes = await callAxonwalldApi('GET', '/v1/mcp/flows?limit=50');
-      payload = {
-        flows: flowsRes.ok ? flowsRes.data?.flows ?? [] : [],
-      };
+      // B2-M3: daemon-down must not collapse to an empty list with
+      // no signal — zero flows reads as "no traffic", not "daemon
+      // unreachable". Same envelope as the tactical-write tools
+      // use to deny on daemon-down.
+      payload = flowsRes.ok
+        ? { flows: flowsRes.data?.flows ?? [] }
+        : { flows: [], daemonDown: true, error: flowsRes.data?.error || 'axonwalld unreachable' };
       break;
     }
 
     case 'axonwall://firewall/tactical-leases': {
       const leasesRes = await callAxonwalldApi('GET', '/v1/mcp/leases');
-      payload = {
-        leases: leasesRes.ok ? leasesRes.data?.leases ?? [] : [],
-      };
+      // B2-M3: zero leases while axonwalld is down would tell a
+      // SOAR agent no tactical lease is active, when the kernel
+      // may still be enforcing blackholes/shapers from before the
+      // daemon died.
+      payload = leasesRes.ok
+        ? { leases: leasesRes.data?.leases ?? [] }
+        : { leases: [], daemonDown: true, error: leasesRes.data?.error || 'axonwalld unreachable' };
       break;
     }
 
@@ -603,9 +663,16 @@ export async function handleMcpReadResource(
     case 'axonwall://topology/nastymap': {
       const arpRes = await callAxonwalldApi('GET', '/v1/arp');
       const leasesRes = await callAxonwalldApi('GET', '/v1/leases');
+      // B2-M3: "no hosts" must not be reported as a fact when the
+      // daemon is unreachable. Each source is flagged separately.
+      const daemonErrors = [
+        ...(!arpRes.ok ? [`ARP table: ${arpRes.data?.error || 'axonwalld unreachable'}`] : []),
+        ...(!leasesRes.ok ? [`DHCP leases: ${leasesRes.data?.error || 'axonwalld unreachable'}`] : []),
+      ];
       payload = {
         arpTable: arpRes.ok ? arpRes.data : [],
         dhcpLeases: leasesRes.ok ? leasesRes.data : [],
+        ...(daemonErrors.length ? { daemonDown: true, error: daemonErrors.join('; ') } : {}),
       };
       break;
     }
@@ -764,6 +831,12 @@ export async function handleMcpCallTool(
               {
                 suricataAlerts: matchingAlerts,
                 activeMcpLeases: leasesRes.ok ? leasesRes.data?.leases ?? [] : [],
+                // B2-M3: zero leases while axonwalld is down is not
+                // "no leases active" — the kernel may still be
+                // enforcing leases from before the daemon died.
+                ...(!leasesRes.ok
+                  ? { daemonDown: true, error: leasesRes.data?.error || 'axonwalld unreachable' }
+                  : {}),
               },
               null,
               2
@@ -1461,18 +1534,6 @@ export async function handleMcpCallTool(
         }
       }
 
-      const previousRules = [...state.rules];
-      if (isBlockOrReject) {
-        const firstPassIdx = state.rules.findIndex((r) => r.action === 'pass');
-        if (firstPassIdx !== -1) {
-          state.rules.splice(firstPassIdx, 0, req.rule);
-        } else {
-          state.rules.push(req.rule);
-        }
-      } else {
-        state.rules.push(req.rule);
-      }
-
       const persistDesiredState = (targetState: DesiredState) => {
         try {
           fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
@@ -1494,11 +1555,43 @@ export async function handleMcpCallTool(
         } catch {}
       };
 
-      persistDesiredState(state);
+      // B2-M4: serialize the load -> mutate -> persist window with
+      // the MCP lockfile. Two concurrent proposes (or a propose
+      // racing a console/TUI save) used to load the same state,
+      // mutate their own stale copies, and persist last-writer-wins
+      // — the loser's rule vanished from disk AND from the kernel
+      // (the second apply pushed the loser's rule-less state),
+      // while both calls reported success. The lock is held only
+      // around the synchronous reload/mutate/persist, never across
+      // the awaits (guard build above, daemon apply below), and the
+      // mutation is re-applied to a freshly reloaded state inside
+      // the lock so a concurrent writer's rule cannot be clobbered.
+      // `state` stays the guard-phase snapshot (const, so the guard
+      // closures keep their non-null narrowing); `liveState` is the
+      // freshly reloaded state the apply below compiles.
+      let liveState = state;
+      let releaseStateLock: (() => void) | null = null;
+      try {
+        try {
+          releaseStateLock = acquireMcpLockFile(desiredStateLockPath());
+        } catch (err: any) {
+          return deny('mcp:firewall:write', `Could not lock DesiredState for the rule update (${err?.message || err}); retry the propose`, req.audit);
+        }
+        const fresh = loadLocalDesiredState();
+        if (!fresh) {
+          return deny('mcp:firewall:write', 'DesiredState file (/etc/axonwall/state.json) not found on appliance', req.audit);
+        }
+        insertMcpRuleIntoState(fresh, req.rule);
+        persistDesiredState(fresh);
+        liveState = fresh;
+      } finally {
+        releaseStateLock?.();
+      }
 
       let applyStatus = 'staged_only';
+      let applyJobId: string | undefined;
       if (req.applyImmediately) {
-        const compiled = compileNftables(state);
+        const compiled = compileNftables(liveState);
         const hashInput = JSON.stringify({
           nftScript: compiled.nftScript,
           files: [...compiled.files]
@@ -1506,19 +1599,52 @@ export async function handleMcpCallTool(
             .map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
           reloadServices: [...compiled.reloadServices].sort(),
         });
+        // B2-M2: the jobId is returned in the response (below) so
+        // the caller can confirm the apply with mcp_confirm_apply
+        // before the commit-confirm window expires.
+        applyJobId = newMcpApplyJobId();
         const applyRes = await callAxonwalldApi('POST', '/v1/apply', {
           nftScript: compiled.nftScript,
           confirmTimeoutSeconds: req.confirmTimeoutSeconds,
           files: compiled.files,
-          jobId: `mcp_apply_${Date.now()}`,
+          jobId: applyJobId,
           bundleHash: crypto.createHash('sha256').update(hashInput).digest('hex'),
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds,
         });
         if (!applyRes.ok) {
-          state.rules = previousRules;
-          persistDesiredState(state);
+          // B2-M4: roll the staged rule back out under the same
+          // lock, reloaded fresh — restoring a stale snapshot here
+          // would clobber a concurrent writer's rule exactly like
+          // the bug above. The rule is removed by deep equality
+          // (rule.id is optional), so a pre-existing identical
+          // rule survives as one copy.
+          const stagedRuleJson = JSON.stringify(req.rule);
+          let releaseRollbackLock: (() => void) | null = null;
+          try {
+            try {
+              releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+            } catch {
+              // Best effort: the daemon rejected the apply, so the
+              // staged rule is inert in the kernel; a locked
+              // rollback that cannot run is logged, not fatal.
+              console.error('[MCP] Could not lock DesiredState to roll back a rejected staged rule; the staged rule remains on disk');
+              releaseRollbackLock = null;
+            }
+            if (releaseRollbackLock) {
+              const fresh = loadLocalDesiredState();
+              if (fresh) {
+                const idx = fresh.rules.findIndex((r) => JSON.stringify(r) === stagedRuleJson);
+                if (idx !== -1) {
+                  fresh.rules.splice(idx, 1);
+                  persistDesiredState(fresh);
+                }
+              }
+            }
+          } finally {
+            releaseRollbackLock?.();
+          }
           return deny(
             'mcp:firewall:apply',
             applyRes.data?.error || 'Daemon rejected ruleset apply; rolled back staged rule',
@@ -1555,10 +1681,65 @@ export async function handleMcpCallTool(
                 success: true,
                 rule: req.rule,
                 applyStatus,
+                ...(applyJobId ? { jobId: applyJobId } : {}),
                 commitConfirmNotice: req.applyImmediately
-                  ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection.`
+                  ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection. Confirm it with mcp_confirm_apply and jobId "${applyJobId}" before the window expires or the daemon auto-rolls the ruleset back.`
                   : 'Rule staged in DesiredState.',
                 auditEntryHash: auditEntry.entryHash,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_confirm_apply': {
+      const applyErr = requireScope('mcp:firewall:apply');
+      if (applyErr) return applyErr;
+
+      const jobId = typeof args.jobId === 'string' ? args.jobId.trim() : '';
+      if (!jobId) {
+        return deny('mcp:firewall:apply', 'jobId is required: pass the jobId returned by mcp_propose_firewall_rule when the rule was applied');
+      }
+
+      // B2-M2: the other half of the propose flow. The daemon
+      // requires an exact job-id match to confirm, and a mismatch
+      // (or no pending job) is a 200 with success:false, not an
+      // HTTP error — so check the payload, not just the status.
+      const confirmRes = await callAxonwalldApi('POST', '/v1/confirm', { jobId });
+      if (!confirmRes.ok) {
+        return deny(
+          'mcp:firewall:apply',
+          `Daemon unreachable: could not confirm the apply; the ruleset may auto-roll back at the end of its commit-confirm window${confirmRes.data?.error ? ` (${confirmRes.data.error})` : ''}`,
+        );
+      }
+      if (confirmRes.data?.success !== true) {
+        return deny('mcp:firewall:apply', confirmRes.data?.message || `Daemon refused to confirm job ${jobId}`);
+      }
+
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:firewall:apply',
+        decision: 'allowed',
+        paramsSummary: { jobId, reason: typeof args.reason === 'string' ? args.reason : undefined },
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                jobId,
+                confirmed: true,
+                message: confirmRes.data?.message || 'Configuration confirmed and promoted to last-known-good.',
               },
               null,
               2

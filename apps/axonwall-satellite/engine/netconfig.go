@@ -263,6 +263,54 @@ func (e *EdgeNetworkEngine) AddRoute(route EdgeRouteSpec) error {
 	return nil
 }
 
+// RemoveRoute deletes a static or default route from the kernel via native Netlink RTM_DELROUTE.
+// A route that is already gone is a success (ENOENT) — the desired end state is "route absent".
+// Unlike AddRoute it does not require the route device to exist: a deleted device takes its
+// routes with it, so a missing device means the route is already gone.
+func (e *EdgeNetworkEngine) RemoveRoute(route EdgeRouteSpec) error {
+	if err := ValidateRouteSpec(route); err != nil {
+		return err
+	}
+
+	if err := removeRouteNetlink(route); err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			return nil
+		}
+		if ipBin, lookErr := exec.LookPath("ip"); lookErr == nil {
+			args := []string{"route", "del", route.Destination, "via", route.Gateway}
+			if route.Device != "" {
+				args = append(args, "dev", route.Device)
+			}
+			if out, cmdErr := exec.Command(ipBin, args...).CombinedOutput(); cmdErr != nil {
+				// `ip route del` exits non-zero when the route is
+				// already gone ("RTNETLINK answers: No such
+				// process") or its device is already gone
+				// ("Cannot find device") — both are the desired
+				// end state.
+				if strings.Contains(string(out), "No such process") ||
+					strings.Contains(string(out), "No such file or directory") ||
+					strings.Contains(string(out), "Cannot find device") {
+					return nil
+				}
+				return fmt.Errorf("failed to delete route %s via %s: %v (%s)", route.Destination, route.Gateway, cmdErr, string(out))
+			}
+			return nil
+		}
+		return fmt.Errorf("netlink route delete failed (%s via %s): %w", route.Destination, route.Gateway, err)
+	}
+
+	slog.Info("Removed edge kernel route", "destination", route.Destination, "gateway", route.Gateway, "device", route.Device)
+	return nil
+}
+
+func removeRouteNetlink(route EdgeRouteSpec) error {
+	msg, err := buildRouteDeleteNetlinkMessage(route)
+	if err != nil {
+		return err
+	}
+	return sendNetlinkRouteMessage(msg)
+}
+
 // ifreqFlags represents the C struct ifreq for SIOCGIFFLAGS / SIOCSIFFLAGS.
 type ifreqFlags struct {
 	Name  [syscall.IFNAMSIZ]byte
@@ -400,6 +448,20 @@ func addRouteNetlink(route EdgeRouteSpec) error {
 // round-trip (the sandbox lacks CAP_NET_ADMIN, so a real route add
 // fails with EPERM before the binding question is ever reached).
 func buildRouteNetlinkMessage(route EdgeRouteSpec) ([]byte, error) {
+	return buildRouteNetlinkMessageFor(route, false)
+}
+
+// buildRouteDeleteNetlinkMessage serializes an RTM_DELROUTE request
+// for the given route (B2-M7: routes removed from DesiredState are
+// deleted from the kernel instead of lingering). It shares the
+// builder with the add path; only the message type and flags
+// differ, and a missing device is tolerated — the route is gone
+// with its device, so the OIF attribute is simply omitted.
+func buildRouteDeleteNetlinkMessage(route EdgeRouteSpec) ([]byte, error) {
+	return buildRouteNetlinkMessageFor(route, true)
+}
+
+func buildRouteNetlinkMessageFor(route EdgeRouteSpec, isDelete bool) ([]byte, error) {
 	gwIP := net.ParseIP(strings.TrimSpace(route.Gateway))
 	if gwIP == nil {
 		return nil, fmt.Errorf("invalid gateway IP: %s", route.Gateway)
@@ -449,19 +511,29 @@ func buildRouteNetlinkMessage(route EdgeRouteSpec) ([]byte, error) {
 		// A-L3: do not silently install a device-bound route with
 		// no device binding when the device does not resolve.
 		// (AddRoute checks this first; this keeps the helper
-		// fail-closed for any future caller too.)
+		// fail-closed for any future caller too.) For a delete,
+		// a missing device means the route is already gone with
+		// it, so omit the OIF and delete by destination + gateway.
 		iface, err := net.InterfaceByName(strings.TrimSpace(route.Device))
 		if err != nil {
-			return nil, fmt.Errorf("route device %q does not exist: %w", route.Device, err)
+			if !isDelete {
+				return nil, fmt.Errorf("route device %q does not exist: %w", route.Device, err)
+			}
+		} else {
+			oif := make([]byte, 4)
+			binary.NativeEndian.PutUint32(oif, uint32(iface.Index))
+			msg = addRouteAttr(msg, syscall.RTA_OIF, oif)
 		}
-		oif := make([]byte, 4)
-		binary.NativeEndian.PutUint32(oif, uint32(iface.Index))
-		msg = addRouteAttr(msg, syscall.RTA_OIF, oif)
 	}
 
 	binary.NativeEndian.PutUint32(msg[0:4], uint32(len(msg)))
-	binary.NativeEndian.PutUint16(msg[4:6], uint16(syscall.RTM_NEWROUTE))
-	binary.NativeEndian.PutUint16(msg[6:8], uint16(syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_REPLACE|syscall.NLM_F_ACK))
+	if isDelete {
+		binary.NativeEndian.PutUint16(msg[4:6], uint16(syscall.RTM_DELROUTE))
+		binary.NativeEndian.PutUint16(msg[6:8], uint16(syscall.NLM_F_REQUEST|syscall.NLM_F_ACK))
+	} else {
+		binary.NativeEndian.PutUint16(msg[4:6], uint16(syscall.RTM_NEWROUTE))
+		binary.NativeEndian.PutUint16(msg[6:8], uint16(syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_REPLACE|syscall.NLM_F_ACK))
+	}
 	binary.NativeEndian.PutUint32(msg[8:12], nlSeq.Add(1))
 	binary.NativeEndian.PutUint32(msg[12:16], uint32(os.Getpid()))
 

@@ -22,11 +22,12 @@ import {
   disablePluginWithDependents,
 } from '@axonwall/lib';
 import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
+import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { App as NastyMapApp } from './tui/nastymap/App.js';
 
 const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
-const VAR_ETC_CONFIG_DIR = '/var/lib/axonwall/etc-axonwall';
+const VAR_ETC_CONFIG_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
 const STATE_JSON_PATH = process.env.AXONWALL_STATE_FILE || '/var/lib/axonwall/state.json';
 const AGENT_API_SOCKET =
   process.env.AXONWALL_AGENT_API_SOCK || process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
@@ -179,40 +180,158 @@ function loadCurrentState(): DesiredState {
   return parseDesiredStateFromYamlFiles({});
 }
 
-function saveStateToDisk(state: DesiredState): Record<string, string> {
+// B2-M5: snapshot/restore for the on-disk config
+// handleApplyConfig overwrites (see the CLI twin in
+// axonwallctl.ts). The snapshot maps every path saveStateToDisk
+// writes to its previous contents, or null when the path did not
+// exist, so a daemon rejection can put disk back exactly as it was.
+type TuiConfigSnapshot = Map<string, Buffer | null>;
+
+function snapshotTuiConfigFiles(state: DesiredState): TuiConfigSnapshot {
+  const snap: TuiConfigSnapshot = new Map();
+  const paths: string[] = [];
   const serialized = serializeDesiredStateToYamlFiles(state);
-  const daemonFiles: Record<string, string> = {};
-  for (const [fn, content] of Object.entries(serialized)) {
-    daemonFiles[path.join(ETC_CONFIG_DIR, fn)] = content;
-    daemonFiles[path.join(VAR_ETC_CONFIG_DIR, fn)] = content;
-  }
   for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
-    try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
-      for (const [fn, content] of Object.entries(serialized)) {
-        const filePath = path.join(dir, fn);
-        fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o660 });
-        try {
-          fs.chmodSync(filePath, 0o660);
-        } catch {}
-      }
-      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
-      if (fs.existsSync(ciOverride)) {
-        fs.rmSync(ciOverride, { force: true });
-      }
-    } catch {}
+    for (const fn of Object.keys(serialized)) paths.push(path.join(dir, fn));
+    paths.push(path.join(dir, 'conf.d', '99-cloudinit.yaml'));
   }
-  const serializedJson = JSON.stringify(state, null, 2);
   for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
+    paths.push(jsonTarget);
+  }
+  for (const p of paths) {
     try {
-      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
-      fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
-      try {
-        fs.chmodSync(jsonTarget, 0o660);
-      } catch {}
+      snap.set(p, fs.existsSync(p) ? fs.readFileSync(p) : null);
+    } catch {
+      snap.set(p, null);
+    }
+  }
+  return snap;
+}
+
+function restoreTuiConfigSnapshot(snap: TuiConfigSnapshot): void {
+  for (const [p, content] of snap.entries()) {
+    try {
+      if (content === null) {
+        fs.rmSync(p, { force: true });
+      } else {
+        fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(p, content, { encoding: 'utf-8', mode: 0o660 });
+      }
     } catch {}
   }
-  return daemonFiles;
+}
+
+// B2-M4 follow-up: the B2-M5 restore is itself a full-state disk
+// write, so it takes the same lock — a restore that lands while an
+// MCP propose (or a CLI apply) is persisting would clobber that
+// writer's rule exactly like the original race. Returns false when
+// the lock could not be acquired, in which case the caller must
+// NOT claim the restore happened.
+function restoreTuiConfigSnapshotLocked(snap: TuiConfigSnapshot): boolean {
+  let release: (() => void) | null = null;
+  try {
+    try {
+      release = acquireMcpLockFile(desiredStateLockPath(), TUI_STATE_LOCK_TIMEOUT_MS);
+    } catch {
+      return false;
+    }
+    restoreTuiConfigSnapshot(snap);
+    return true;
+  } finally {
+    release?.();
+  }
+}
+
+// B2-M4 follow-up: how long a TUI save waits for the DesiredState
+// lock. The lock is normally held for milliseconds (a synchronous
+// disk write), so 2 s is ample; longer would freeze the interactive
+// UI on a stale lock, and a crashed holder's lock is broken by the
+// dead-pid check immediately anyway.
+const TUI_STATE_LOCK_TIMEOUT_MS = 2000;
+
+// B2-M4 follow-up: every TUI disk save — the apply path and every
+// in-place toggle/edit handler below — funnels through here, and
+// the whole read -> mutate -> persist window now holds the SAME
+// lockfile the MCP propose_firewall_rule path uses
+// (acquireMcpLockFile/desiredStateLockPath), so a propose racing a
+// TUI save serializes instead of interleaving full-state writes
+// and losing one side's rules. The B2-M5 snapshot is taken inside
+// the same acquisition, so the snapshot and the write it guards
+// cannot be split by a concurrent writer. The lock is released
+// before the caller talks to the daemon: the apply is a network
+// round-trip that can outlast the lockfile's stale threshold, and
+// holding the lock across it would let a concurrent writer break
+// it as stale and re-admit the race. Returns null when the lock
+// could not be acquired — nothing was written, and the caller must
+// report that instead of claiming a save. (Callers that ignore the
+// return keep their in-memory edit; the next save retries.)
+// Exported for tests: the TUI module only renders on direct
+// execution (isDirectExecution), so importing it in a test is
+// inert and this is the only way to drive a save without an Ink UI.
+export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<string, string>; snapshot: TuiConfigSnapshot } | null {
+  let release: (() => void) | null = null;
+  try {
+    try {
+      release = acquireMcpLockFile(desiredStateLockPath(), TUI_STATE_LOCK_TIMEOUT_MS);
+    } catch {
+      return null;
+    }
+    const snapshot = snapshotTuiConfigFiles(state);
+    const serialized = serializeDesiredStateToYamlFiles(state);
+    const daemonFiles: Record<string, string> = {};
+    for (const [fn, content] of Object.entries(serialized)) {
+      daemonFiles[path.join(ETC_CONFIG_DIR, fn)] = content;
+      daemonFiles[path.join(VAR_ETC_CONFIG_DIR, fn)] = content;
+    }
+    for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
+      try {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+        for (const [fn, content] of Object.entries(serialized)) {
+          const filePath = path.join(dir, fn);
+          fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o660 });
+          try {
+            fs.chmodSync(filePath, 0o660);
+          } catch {}
+        }
+        const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+        if (fs.existsSync(ciOverride)) {
+          fs.rmSync(ciOverride, { force: true });
+        }
+      } catch {}
+    }
+    const serializedJson = JSON.stringify(state, null, 2);
+    for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
+      try {
+        fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
+        try {
+          fs.chmodSync(jsonTarget, 0o660);
+        } catch {}
+      } catch {}
+    }
+    return { daemonFiles, snapshot };
+  } finally {
+    release?.();
+  }
+}
+
+// B2-M6: callDaemon used to resolve `null` for every failure —
+// socket missing, request error, timeout, and non-JSON 2xx alike
+// — so callers could not tell a daemon rejection from an outage
+// and handleApplyConfig reported an offline apply as rejected
+// (and vice versa). Failures now carry a typed errorKind; the
+// offline/malformed cases still resolve (they are not throws),
+// but the caller can tell them apart from a real rejection.
+export type DaemonErrorKind = 'offline' | 'timeout' | 'malformed' | 'daemon-error';
+export interface DaemonErrorResponse {
+  success: false;
+  errorKind: DaemonErrorKind;
+  error: string;
+  message: string;
+}
+
+function daemonErrorResponse(errorKind: DaemonErrorKind, error: string): DaemonErrorResponse {
+  return { success: false, errorKind, error, message: error };
 }
 
 function callDaemon(
@@ -223,7 +342,7 @@ function callDaemon(
 ): Promise<any> {
   return new Promise((resolve) => {
     if (!fs.existsSync(AGENT_API_SOCKET)) {
-      resolve(null);
+      resolve(daemonErrorResponse('offline', 'Daemon socket not available'));
       return;
     }
     const body = payload ? JSON.stringify(payload) : '';
@@ -265,12 +384,14 @@ function callDaemon(
               const parsed = JSON.parse(data);
               resolve({
                 success: false,
+                errorKind: 'daemon-error',
                 error: parsed.error || parsed.message || `HTTP ${status}`,
                 message: parsed.message || parsed.error || `HTTP ${status}`,
               });
             } catch {
               resolve({
                 success: false,
+                errorKind: 'daemon-error',
                 error: data.trim() || `HTTP ${status}`,
                 message: data.trim() || `HTTP ${status}`,
               });
@@ -280,15 +401,15 @@ function callDaemon(
           try {
             resolve(JSON.parse(data));
           } catch {
-            resolve(null);
+            resolve(daemonErrorResponse('malformed', 'Daemon returned a non-JSON response'));
           }
         });
       }
     );
-    req.on('error', () => resolve(null));
+    req.on('error', (err: any) => resolve(daemonErrorResponse('offline', `Daemon unreachable: ${err?.message || 'request failed'}`)));
     req.on('timeout', () => {
       req.destroy();
-      resolve(null);
+      resolve(daemonErrorResponse('timeout', `Daemon request timed out after ${timeoutMs}ms`));
     });
     if (body) req.write(body);
     req.end();
@@ -490,7 +611,23 @@ export function AxonwallTuiApp({
 
   const handleApplyConfig = async () => {
     setStatusMessage('Compiling nftables & subsystem configurations and applying with 120s commit-confirm...');
-    const yamlDaemonFiles = saveStateToDisk(state);
+    // B2-M5: the snapshot is taken inside saveStateToDisk, under
+    // the same lock acquisition as the write (see there), so the
+    // snapshot and the write it guards cannot be split by a
+    // concurrent writer. A daemon outage is different: the disk-only
+    // save below deliberately keeps the new files, and only an
+    // explicit rejection restores.
+    const saved = saveStateToDisk(state);
+    // B2-M4 follow-up: the save could not take the DesiredState
+    // lock — another save or MCP propose holds it — so nothing was
+    // written. Do not call the daemon (there is nothing new to
+    // apply) and say so plainly instead of claiming a save.
+    if (!saved) {
+      setStatusMessage('✖ Could not lock DesiredState — another save or MCP propose is in progress; nothing was written. Try again.');
+      return;
+    }
+    const diskSnapshot = saved.snapshot;
+    const yamlDaemonFiles = saved.daemonFiles;
     const { nftScript, files, reloadServices } = compileNftables(state);
     const hashInput = JSON.stringify({
       nftScript,
@@ -538,11 +675,30 @@ export function AxonwallTuiApp({
       20000
     );
 
-    if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
+    // B2-M6: a timeout is neither a rejection nor an offline save
+    // — the apply may have landed on the daemon, so neither
+    // restore the disk nor claim success; tell the operator to
+    // check the daemon's pending job. This branch is checked
+    // before the generic error branch because timeout objects
+    // also carry .error. Offline/malformed likewise keep the
+    // disk-only save (no restore); only an explicit daemon
+    // rejection restores.
+    if (resp?.errorKind === 'timeout') {
+      setStatusMessage('✖ Apply status unknown — the daemon did not answer in time; the bundle may still be pending on the daemon. Check the daemon\'s pending job before retrying.');
+    } else if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
       setStatusMessage('✔ Applied to live daemon! Press [c] within 120s to confirm, or [r] to rollback.');
       await refreshAll();
+    } else if (resp?.errorKind === 'offline' || resp?.errorKind === 'malformed') {
+      setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     } else if (resp?.error) {
-      setStatusMessage(`✖ Apply rejected by daemon: ${resp.message || resp.error}`);
+      // B2-M4 follow-up: the restore takes the same lock; a restore
+      // that cannot take it must not claim to have restored anything.
+      const restored = restoreTuiConfigSnapshotLocked(diskSnapshot);
+      setStatusMessage(
+        restored
+          ? `✖ Apply rejected by daemon: ${resp.message || resp.error} (previous on-disk configuration restored)`
+          : `✖ Apply rejected by daemon: ${resp.message || resp.error} (could NOT restore the previous on-disk configuration — the DesiredState lock is held by another save; check /etc/axonwall/*.yaml before retrying)`,
+      );
     } else {
       setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     }
