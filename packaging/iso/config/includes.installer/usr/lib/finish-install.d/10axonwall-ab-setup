@@ -796,22 +796,43 @@ ZFS_JSON_EOF
       in-target zfs create -o canmount=off -o mountpoint=none zroot/ROOT 2>/dev/null || true
       in-target zfs create -o canmount=noauto -o mountpoint=/ "$INIT_BE" 2>/dev/null || true
       in-target zfs create -o mountpoint=/mnt/tank zroot/tank 2>/dev/null || true
+      # D2-M5: the BE copy is verified BEFORE bootfs and the watchdog
+      # properties point at it. The old order armed bootfs first and
+      # snapshotted a possibly partial copy; a failed copy left a ZBM
+      # UKI with no bootable BE behind it.
+      mkdir -p /mnt/zbm_root 2>/dev/null || true
+      BE_COPY_OK=0
+      if mount -t zfs "$INIT_BE" /mnt/zbm_root 2>/dev/null; then
+        if command -v rsync >/dev/null 2>&1; then
+          if rsync -aAX --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/boot/efi/*' /target/ /mnt/zbm_root/ 2>/dev/null; then
+            BE_COPY_OK=1
+          fi
+        else
+          if cp -a /target/. /mnt/zbm_root/ 2>/dev/null; then
+            BE_COPY_OK=1
+          fi
+        fi
+        umount /mnt/zbm_root 2>/dev/null || true
+      fi
+      if [ "$BE_COPY_OK" != "1" ]; then
+        echo "[-] ERROR: failed to populate Boot Environment ${INIT_BE} (copy from /target failed); refusing to arm an empty or partial BE."
+        echo "[-] ERROR: aborting the install — a ZBM install without a populated Boot Environment cannot boot."
+        exit 1
+      fi
       in-target zpool set bootfs="$INIT_BE" zroot 2>/dev/null || true
       in-target zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:fallback_be=${INIT_BE}" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:bootlimit=3" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:topology=${RESOLVED_TOPOLOGY}" zroot/ROOT 2>/dev/null || true
-      mkdir -p /mnt/zbm_root 2>/dev/null || true
-      if mount -t zfs "$INIT_BE" /mnt/zbm_root 2>/dev/null; then
-        if command -v rsync >/dev/null 2>&1; then
-          rsync -aAX --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/boot/efi/*' /target/ /mnt/zbm_root/ 2>/dev/null || true
-        else
-          cp -a /target/. /mnt/zbm_root/ 2>/dev/null || true
-        fi
-        umount /mnt/zbm_root 2>/dev/null || true
-      fi
       in-target zfs snapshot "${INIT_BE}@factory-initial" 2>/dev/null || true
+    else
+      # D2-M5: a ZBM install without a pool cannot boot (the hook
+      # already removed GRUB and installed the ZBM UKI as the boot
+      # target), so a failed create must abort, not silently continue.
+      echo "[-] ERROR: zpool create zroot failed during the ZBM install; no Root-on-ZFS pool exists and the box cannot boot."
+      echo "[-] ERROR: aborting the install."
+      exit 1
     fi
   else
     in-target zpool create -f \
