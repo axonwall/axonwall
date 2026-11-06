@@ -3974,12 +3974,37 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
 }
 
 export async function verifySystemHealthQuorum(): Promise<SystemPartitionsTelemetry> {
-  try {
-    const session = await getSession();
-    if (isAdminSession(session)) {
-      await callAgentApi<any>('/v1/system/health/verify', 'POST');
-    }
-  } catch {}
+  // C-B3: the daemon's verify verdict is the verdict. A null response
+  // means axonwalld is unreachable (no tests ran), and healthVerified
+  // false means the quorum did not pass — both must fail loudly instead
+  // of returning local telemetry that the caller then reports as PASSED.
+  // A successful daemon verify really does reset bootcount to 0 and mark
+  // the partition permanently healthy (watchdog RunVerification), so the
+  // success path below is the only one that may claim that.
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin credentials required to verify system health');
+  }
+  const verifyResp = await callAgentApi<any>('/v1/system/health/verify', 'POST');
+  if (!verifyResp) {
+    throw new Error(
+      'Health verification unavailable: axonwalld is unreachable — no verification tests ran and bootcount was not reset.'
+    );
+  }
+  if (verifyResp.success === false) {
+    throw new Error(verifyResp.message || verifyResp.error || 'Daemon health verification failed.');
+  }
+  if (verifyResp.healthVerified !== true) {
+    const failed = Array.isArray(verifyResp.checks)
+      ? verifyResp.checks
+          .filter((c: any) => c?.status && c.status !== 'PASS')
+          .map((c: any) => `${c.name || 'check'} (${c.status})`)
+          .join(', ')
+      : '';
+    throw new Error(
+      `Daemon health verification did not pass${failed ? `: ${failed}` : ''}. Bootcount was not reset.`
+    );
+  }
   return getSystemPartitionsTelemetry();
 }
 
