@@ -45,13 +45,17 @@ export default function TrafficShaperPage() {
       .catch(() => {});
   }, []);
 
+  // A14: a cleared bandwidth field used to yield 0, which passes
+  // schema validation but is silently omitted by the tc compile, so
+  // that direction ended up unshaped. Clamp to >= 1 Mbps here so the
+  // saved config, the compiled preview, and the labels all agree.
   const currentConfig: TrafficShaperConfig = {
     enabled,
     interfaces: [
       {
         interface: shaperIface,
-        downloadBandwidthMbps: downloadMbps,
-        uploadBandwidthMbps: uploadMbps,
+        downloadBandwidthMbps: Math.max(1, downloadMbps || 1),
+        uploadBandwidthMbps: Math.max(1, uploadMbps || 1),
         scheduler,
         cakeDiffserv,
         cakeAckFilter,
@@ -154,7 +158,7 @@ export default function TrafficShaperPage() {
                   <span className="text-sm font-semibold text-slate-400">Mbps</span>
                 </div>
                 <span className="text-[11px] text-slate-500 mt-2 block">
-                  Redirected to virtual <code className="text-emerald-400">ifb-eth0</code> interface
+                  Redirected to virtual <code className="text-emerald-400">ifb-{shaperIface}</code> interface
                 </span>
               </div>
 
@@ -175,10 +179,13 @@ export default function TrafficShaperPage() {
                   <span className="text-sm font-semibold text-slate-400">Mbps</span>
                 </div>
                 <span className="text-[11px] text-slate-500 mt-2 block">
-                  Direct root qdisc shaping on <code className="text-emerald-400">eth0</code>
+                  Direct root qdisc shaping on <code className="text-emerald-400">{shaperIface}</code>
                 </span>
               </div>
             </div>
+            <p className="text-[11px] text-slate-500">
+              Bandwidths are saved at a minimum of 1 Mbps per direction; clearing a field does not disable shaping for that direction. Use the QoS Engine toggle to turn shaping off.
+            </p>
 
             {/* Scheduler Select */}
             <div className="space-y-3">
