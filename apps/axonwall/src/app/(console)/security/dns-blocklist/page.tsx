@@ -143,15 +143,20 @@ export default function DnsBlocklistPage() {
 
   const handleAddWhite = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newWhiteDomain || whitelist.includes(newWhiteDomain)) return;
-    setWhitelist([...whitelist, newWhiteDomain.trim()]);
+    // A18: the duplicate check used to run on the untrimmed value,
+    // so "example.com " passed the check and inserted a duplicate
+    // of an already-listed "example.com". Trim first.
+    const domain = newWhiteDomain.trim();
+    if (!domain || whitelist.includes(domain)) return;
+    setWhitelist([...whitelist, domain]);
     setNewWhiteDomain('');
   };
 
   const handleAddBlack = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newBlackDomain || blacklist.includes(newBlackDomain)) return;
-    setBlacklist([...blacklist, newBlackDomain.trim()]);
+    const domain = newBlackDomain.trim();
+    if (!domain || blacklist.includes(domain)) return;
+    setBlacklist([...blacklist, domain]);
     setNewBlackDomain('');
   };
 
