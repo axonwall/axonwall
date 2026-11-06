@@ -820,10 +820,12 @@ async function main() {
   // sync of default/empty state. Passing null here used to mean
   // "sync with empty state", which pushed hardcoded default edge
   // config (WAN DHCP, LAN 10.0.0.1/24) to every connected edge.
+  // B2-L2: null is treated like undefined (load from disk), so a
+  // future caller passing null cannot reopen that trap.
   function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null) {
     if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return;
 
-    const localState = desiredState !== undefined ? desiredState : loadLocalDesiredState();
+    const localState = desiredState !== undefined && desiredState !== null ? desiredState : loadLocalDesiredState();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
     // B-M5: role is derived from the fleet node's configured role on
@@ -1273,9 +1275,14 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           // Untargeted DEMOTE is the safe direction (stand down all
           // edges); untargeted PROMOTE is unreachable here because
           // validation requires a satelliteId for PROMOTE.
+          // B2-L1: match on the derived role only. The id prefix is
+          // a fallback inside deriveSatelliteRole, not a role: a
+          // node configured as 'satellite' but named 'edge-*' must
+          // never receive DEMOTE (the satellite's Demote admin-downs
+          // its WAN, which for a plain satellite is its uplink).
           let notified = 0;
           for (const sat of activeSatellites.values()) {
-            const isTarget = sat.role === 'edge-ngfw' || sat.id.startsWith('edge-') || sat.id === 'edge';
+            const isTarget = sat.role === 'edge-ngfw';
             if (isTarget && sendTransition(sat, msgType, normalizedRole)) notified++;
           }
           if (msgType === 'DEMOTE') activeHaEdgeId = null;
@@ -1695,7 +1702,23 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         },
       });
 
+      // B2-L7: same 30 s timeout + destroy discipline as the HTTP
+      // proxy path. Without it a UI that accepts the upgrade TCP
+      // connection but never answers 101 leaves a hung client socket
+      // (and a hung upstream socket) on the controller indefinitely.
+      let wsProxyTimedOut = false;
+      const destroyWsUpstream = () => {
+        try { uiWsReq.destroy(); } catch {}
+      };
+      uiWsReq.setTimeout(30000, () => {
+        wsProxyTimedOut = true;
+        destroyWsUpstream();
+        try { socket.destroy(); } catch {}
+      });
+      socket.on('close', destroyWsUpstream);
+
       uiWsReq.on('upgrade', (uiRes, uiSocket, uiHead) => {
+        uiWsReq.setTimeout(0);
         const headerLines: string[] = [];
         for (let i = 0; i < uiRes.rawHeaders.length; i += 2) {
           headerLines.push(`${uiRes.rawHeaders[i]}: ${uiRes.rawHeaders[i + 1]}`);
@@ -1711,11 +1734,15 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
       // Upstream refused the upgrade (e.g. 404): don't leave the client socket hanging
       uiWsReq.on('response', (uiRes) => {
+        uiWsReq.setTimeout(0);
         socket.end(`HTTP/1.1 ${uiRes.statusCode || 502} ${uiRes.statusMessage || 'Bad Gateway'}\r\n\r\n`);
         uiRes.resume();
       });
 
       uiWsReq.on('error', () => {
+        // The timeout path above already destroyed the client socket;
+        // do not double-handle it.
+        if (wsProxyTimedOut) return;
         socket.destroy();
       });
 
