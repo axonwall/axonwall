@@ -1560,7 +1560,31 @@ export async function applyDesiredState(
     );
   } catch {}
 
-  // Fallback for dev mode / local execution
+  // C-B2: the daemon did not answer, so the live ruleset was never
+  // changed. Never report "applied" and never arm a (mock)
+  // commit-confirm: no daemon watchdog will roll anything back at the
+  // mock deadline. The local fallback below runs ONLY in explicit dev
+  // mode (AXONWALL_DEV_MODE=1, or a Next.js dev server), where there
+  // is no daemon to apply to. On a production box the on-disk config
+  // is rolled back to its pre-apply contents (C9) and the apply fails
+  // loudly instead.
+  const devMode =
+    process.env.AXONWALL_DEV_MODE === '1' ||
+    process.env.AXONWALL_DEV_MODE === 'true' ||
+    process.env.NODE_ENV === 'development';
+  if (!devMode) {
+    const restored = restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCache();
+    lastPendingJobId = '';
+    throw new Error(
+      'axonwalld is unreachable — the configuration was NOT applied and no commit-confirm is active' +
+        (restored
+          ? '. On-disk configuration was restored to its pre-apply state.'
+          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
+    );
+  }
+
+  // Fallback for dev mode / local execution only (see C-B2 above).
   try {
     const routes = normalizedState.routes || [];
     for (const r of routes) {
@@ -1587,7 +1611,7 @@ export async function applyDesiredState(
 
   return {
     success: true,
-    message: `Configuration saved to /etc/axonwall/*.yaml and applied. Commit-confirm active for ${confirmTimeoutSeconds}s.`,
+    message: `Configuration saved to /etc/axonwall/*.yaml and applied (DEV MODE — no daemon running). Commit-confirm active for ${confirmTimeoutSeconds}s.`,
     nftScript,
     warnings,
   };
