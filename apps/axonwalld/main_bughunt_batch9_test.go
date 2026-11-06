@@ -119,3 +119,19 @@ func TestBatch9ApplyBundleWarnsOnFailedServiceReload(t *testing.T) {
 		t.Fatalf("expected the response to name the rejected service, got: %s", resp.Message)
 	}
 }
+
+// L9: stopping the NGFW daemons when a bundle disables the core
+// firewall must report failure. Pre-fix, the systemctl stop error
+// was discarded and the bundle proceeded as host mode while
+// kea/suricata/FRR/conntrackd kept enforcing.
+func TestBatch9StopNgfwDaemonsReportsFailure(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 1\n")
+	if err := stopNgfwDaemons(); err == nil {
+		t.Fatal("stopNgfwDaemons must fail when systemctl exits 1")
+	}
+
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+	if err := stopNgfwDaemons(); err != nil {
+		t.Fatalf("stopNgfwDaemons must succeed when systemctl exits 0, got: %v", err)
+	}
+}

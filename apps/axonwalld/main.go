@@ -465,6 +465,16 @@ func mirrorBundleFile(mirrorPath string, mode os.FileMode, content []byte, isSha
 	return nil
 }
 
+// stopNgfwDaemons stops the NGFW-only units when a bundle disables
+// the core firewall (host mode). L9: the caller must fail the bundle
+// when this fails — a discarded error left the box reporting host
+// mode while NGFW enforcement was still live.
+func stopNgfwDaemons() error {
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+	defer stopCancel()
+	return exec.CommandContext(stopCtx, "systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
+}
+
 func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -581,9 +591,15 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			}
 			if err := json.Unmarshal([]byte(f.Content), &fwCfg); err == nil && !fwCfg.Enabled {
 				log.Printf("[Agent] Core-Firewall plugin is disabled (Host Mode); stopping NGFW-only daemons")
-				stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
-				_ = exec.CommandContext(stopCtx, "systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
-				stopCancel()
+				// L9: the stop error used to be discarded, so the
+				// bundle proceeded as host mode while kea/suricata/
+				// FRR/conntrackd kept enforcing. Fail the bundle
+				// (with rollback, like other subsystem failures)
+				// instead of reporting host mode with NGFW live.
+				if err := stopNgfwDaemons(); err != nil {
+					subsystemErr = fmt.Errorf("failed to stop NGFW daemons for host mode: %w", err)
+					break
+				}
 			}
 		}
 
