@@ -42,7 +42,7 @@ export default function FirewallPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedInterface, setSelectedInterface] = useState<string>('lan');
   const [compiledScript, setCompiledScript] = useState<string | null>(null);
-  const [applyResult, setApplyResult] = useState<{ message: string; warnings: string[] } | null>(null);
+  const [applyResult, setApplyResult] = useState<{ ok: boolean; message: string; warnings: string[] } | null>(null);
   const [isApplying, setIsApplying] = useState(false);
   const [hasUnappliedChanges, setHasUnappliedChanges] = useState(false);
 
@@ -183,12 +183,14 @@ export default function FirewallPage() {
       const res = await applyDesiredState(state, 120);
       setCompiledScript(res.nftScript);
       setApplyResult({
+        ok: true,
         message: res.message,
         warnings: res.warnings,
       });
       setHasUnappliedChanges(false);
     } catch (err: any) {
       setApplyResult({
+        ok: false,
         message: `Apply Failed: ${err?.message || 'Configuration validation error'}`,
         warnings: ['State could not be applied to kernel nftables.'],
       });
@@ -297,9 +299,19 @@ export default function FirewallPage() {
       )}
 
       {applyResult && (
-        <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl space-y-2">
-          <div className="flex items-center gap-2 text-emerald-400 font-medium text-sm">
-            <CheckCircle2 className="w-4 h-4" />
+        <div
+          className={`p-4 rounded-xl space-y-2 ${
+            applyResult.ok
+              ? 'bg-emerald-500/10 border border-emerald-500/30'
+              : 'bg-red-500/10 border border-red-500/30'
+          }`}
+        >
+          <div
+            className={`flex items-center gap-2 font-medium text-sm ${
+              applyResult.ok ? 'text-emerald-400' : 'text-red-400'
+            }`}
+          >
+            {applyResult.ok ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
             <span>{applyResult.message}</span>
           </div>
           {applyResult.warnings.length > 0 && (
@@ -363,13 +375,34 @@ export default function FirewallPage() {
                   Default Deny WAN Policy &amp; Management Isolation ({selectedInterface.toUpperCase()})
                 </h4>
                 <p className="text-xs text-sky-200/80 leading-relaxed">
-                  By default, all unsolicited inbound connections from WAN uplinks to the Axonwall host and Web Management Console (ports 2966, 3000, 80, 443) and SSH (port 22) are strictly blocked. Inbound management is restricted to LAN and internal networks to protect the appliance from internet scanning and unauthorized access.
+                  The configured default-deny policy blocks unsolicited inbound connections from WAN uplinks to the Axonwall host and Web Management Console (ports 2966, 3000, 80, 443) and SSH (port 22). Inbound management is configured to be reachable only from LAN and internal networks, to protect the appliance from internet scanning and unauthorized access.
                 </p>
               </div>
             </div>
           );
         }
         if (role === 'lan') {
+          // A13: the badge used to render from interface-role inference
+          // alone, claiming anti-lockout protection even when the
+          // setting is disabled. Gate it on the loaded config
+          // (schema default is enabled, so an absent value still
+          // counts as enabled).
+          const antiLockoutEnabled = state.system?.antiLockout?.enabled !== false;
+          if (!antiLockoutEnabled) {
+            return (
+              <div className="p-3 bg-amber-950/30 border border-amber-500/20 rounded-xl flex items-center justify-between text-xs">
+                <div className="flex items-center gap-2 text-amber-300">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>
+                    <strong>Anti-Lockout Disabled ({selectedInterface.toUpperCase()}):</strong> the anti-lockout setting is off, so Web Console and SSH are not guaranteed to stay reachable on LAN interfaces. Re-enable it in System settings to prevent administrator lockout.
+                  </span>
+                </div>
+                <span className="px-2 py-0.5 bg-amber-500/10 text-amber-400 border border-amber-500/30 rounded font-mono text-[10px] uppercase font-semibold">
+                  LAN Anti-Lockout Off
+                </span>
+              </div>
+            );
+          }
           return (
             <div className="p-3 bg-emerald-950/30 border border-emerald-500/20 rounded-xl flex items-center justify-between text-xs">
               <div className="flex items-center gap-2 text-emerald-300">

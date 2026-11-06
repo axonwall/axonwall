@@ -115,6 +115,14 @@ export default function HighAvailabilityPage() {
           return;
         }
       }
+      // A16: a cleared sync-interval field yields 0 (the input's
+      // min/max attributes are unenforced outside a form submit),
+      // which the schema rejects and the daemon never clamps. Refuse
+      // the save with a clear message instead of persisting it.
+      if (!Number.isInteger(syncInterval) || syncInterval < 1 || syncInterval > 60) {
+        setSyncErrorMsg('Sync interval must be between 1 and 60 seconds.');
+        return;
+      }
       const vrrpInstances =
         existingVrrp.length > 0
           ? existingVrrp.map((v, idx) =>
@@ -173,9 +181,10 @@ export default function HighAvailabilityPage() {
       });
       setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
       setTimeout(() => setSyncStatusMsg(null), 4000);
-    } catch {
-      setSyncStatusMsg('Error saving High Availability configuration');
-      setTimeout(() => setSyncStatusMsg(null), 4000);
+    } catch (err: any) {
+      // A11: a failed save used to render in the emerald success
+      // banner. Route it to the amber error banner instead.
+      setSyncErrorMsg(`Failed to save High Availability configuration: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsSaving(false);
     }

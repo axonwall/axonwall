@@ -10,6 +10,8 @@ export default function AdvancedInterfacesPage() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // A11: save failures need a red banner, not the emerald one.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [vlans, setVlans] = useState<Vlan[]>([]);
   const [bridges, setBridges] = useState<Bridge[]>([]);
@@ -26,6 +28,18 @@ export default function AdvancedInterfacesPage() {
         setBonds(state.bonds || []);
         setVips(state.virtualIps || []);
         setVrfs(state.vrfs || []);
+        // A17: the default VLAN parent is 'eth1', which may not
+        // exist on a box with renamed NICs. Point it at the first
+        // real device/bond when 'eth1' is not among them.
+        const candidates = [
+          ...(state.interfaces || [])
+            .map((i) => i.device)
+            .filter((d) => d && d !== 'none'),
+          ...(state.bonds || []).map((b) => b.name),
+        ];
+        if (candidates.length > 0 && !candidates.includes('eth1')) {
+          setNewVlanParent(candidates[0]!);
+        }
       })
       .catch(() => {});
   }, []);
@@ -50,6 +64,7 @@ export default function AdvancedInterfacesPage() {
     setVrfs(nextVrfs);
     setSaving(true);
     setStatusMsg(null);
+    setErrorMsg(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -70,7 +85,7 @@ export default function AdvancedInterfacesPage() {
       setVips(prevVips);
       setVrfs(prevVrfs);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save interfaces.yaml'}`);
+      setErrorMsg(`Failed to save interfaces.yaml: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
@@ -80,6 +95,30 @@ export default function AdvancedInterfacesPage() {
   const [newVlanTag, setNewVlanTag] = useState('');
   const [newVlanParent, setNewVlanParent] = useState('eth1');
   const [newVlanDesc, setNewVlanDesc] = useState('');
+
+  // A17: the parent select used to hardcode eth0/eth1/bond0, so
+  // boxes with renamed NICs could not pick the real parent at all.
+  // Derive the options from the loaded interfaces (plus configured
+  // bonds); fall back to the hardcoded three only when nothing has
+  // loaded yet.
+  const vlanParentOptions: { value: string; label: string }[] = (() => {
+    const fromInterfaces = (fullState?.interfaces || [])
+      .filter((i) => i.device && i.device !== 'none')
+      .map((i) => ({ value: i.device, label: `${i.device} (${i.name})` }));
+    const fromBonds = (bonds || []).map((b) => ({ value: b.name, label: `${b.name} (LACP)` }));
+    const seen = new Set<string>();
+    const merged = [...fromInterfaces, ...fromBonds].filter((o) => {
+      if (seen.has(o.value)) return false;
+      seen.add(o.value);
+      return true;
+    });
+    if (merged.length > 0) return merged;
+    return [
+      { value: 'eth0', label: 'eth0 (WAN)' },
+      { value: 'eth1', label: 'eth1 (LAN)' },
+      { value: 'bond0', label: 'bond0 (LACP)' },
+    ];
+  })();
 
   const handleAddVlan = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -123,6 +162,13 @@ export default function AdvancedInterfacesPage() {
           <span>{saving ? 'Saving YAML...' : 'Save to interfaces.yaml'}</span>
         </button>
       </div>
+
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
       {statusMsg && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
@@ -274,9 +320,11 @@ export default function AdvancedInterfacesPage() {
                   onChange={(e) => setNewVlanParent(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono"
                 >
-                  <option value="eth0">eth0 (WAN)</option>
-                  <option value="eth1">eth1 (LAN)</option>
-                  <option value="bond0">bond0 (LACP)</option>
+                  {vlanParentOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>

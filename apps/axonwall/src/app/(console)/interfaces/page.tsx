@@ -79,6 +79,27 @@ function suggestPoolFromCidr(cidr: string): { start: string; end: string } | nul
   };
 }
 
+// A15: true when two CIDRs overlap (one contains the other, or they
+// are the same subnet). Used to keep the Add-LAN default IP off a
+// subnet an existing interface already uses.
+function cidrsOverlap(a: string, b: string): boolean {
+  const parse = (cidr: string): { net: number; bcast: number } | null => {
+    const parts = (cidr || '').trim().split('/');
+    const octets = (parts[0] || '').split('.').map((n) => parseInt(n, 10));
+    if (octets.length !== 4 || octets.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return null;
+    const prefix = parts[1] ? parseInt(parts[1], 10) : 24;
+    if (Number.isNaN(prefix) || prefix < 0 || prefix > 32) return null;
+    const ipInt = (((octets[0]! << 24) >>> 0) + (octets[1]! << 16) + (octets[2]! << 8) + octets[3]!) >>> 0;
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+    const net = (ipInt & mask) >>> 0;
+    return { net, bcast: (net | (~mask >>> 0)) >>> 0 };
+  };
+  const ra = parse(a);
+  const rb = parse(b);
+  if (!ra || !rb) return false;
+  return ra.net <= rb.bcast && rb.net <= ra.bcast;
+}
+
 export default function InterfacesPage() {
   const [interfaces, setInterfaces] = useState<LogicalInterfaceView[]>([]);
   const [physicalDevs, setPhysicalDevs] = useState<string[]>([]);
@@ -151,8 +172,26 @@ export default function InterfacesPage() {
   const openAddModal = (presetRole: InterfaceRole, presetDevice?: string) => {
     const nextName = getNextInterfaceName(presetRole);
     const dev = presetDevice ?? getFirstUnassignedDevice();
-    const lanIndex = interfaces.filter((i) => i.role === 'lan').length + 1;
-    const defaultStaticIp = `192.168.${lanIndex === 1 ? 1 : 10 + lanIndex}.1/24`;
+    // A15: the default LAN IP used to come from the possibly-empty
+    // local list, so after a failed first load it suggested
+    // 192.168.1.1/24 even when a real LAN already used that subnet.
+    // When the list failed to load, suggest nothing (the operator
+    // must enter an address explicitly); otherwise pick the first
+    // candidate subnet that does not overlap an existing interface.
+    // The server also rejects overlapping subnets on save.
+    let defaultStaticIp = '';
+    if (!loadError) {
+      for (let lanIndex = 1; lanIndex <= 50; lanIndex++) {
+        const candidate = `192.168.${lanIndex === 1 ? 1 : 10 + lanIndex}.1/24`;
+        const collides = interfaces.some(
+          (i) => i.ipv4Address && cidrsOverlap(candidate, i.ipv4Address)
+        );
+        if (!collides) {
+          defaultStaticIp = candidate;
+          break;
+        }
+      }
+    }
     const pool = suggestPoolFromCidr(defaultStaticIp);
 
     const isWanLike = presetRole === 'wan' || presetRole === 'wan-delegated';

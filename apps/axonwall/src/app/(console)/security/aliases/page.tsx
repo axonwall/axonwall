@@ -12,6 +12,7 @@ import {
   Terminal,
   ExternalLink,
   Flame,
+  AlertTriangle,
 } from 'lucide-react';
 import type { DesiredState, Alias } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
@@ -23,6 +24,9 @@ export default function DynamicAliasesPage() {
 
   const [refreshing, setRefreshing] = useState(false);
   const [refreshSuccess, setRefreshSuccess] = useState(false);
+  // A12: a failed subscribe/refresh/delete used to roll state back
+  // silently, with nothing on screen. Surface it.
+  const [persistError, setPersistError] = useState<string | null>(null);
   const [showNftPreview, setShowNftPreview] = useState(false);
 
   useEffect(() => {
@@ -39,6 +43,7 @@ export default function DynamicAliasesPage() {
     const prevAliases = aliases;
     setAliases(nextAliases);
     setRefreshing(true);
+    setPersistError(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -49,9 +54,10 @@ export default function DynamicAliasesPage() {
       await applyDesiredState(nextState);
       setRefreshSuccess(true);
       setTimeout(() => setRefreshSuccess(false), 3000);
-    } catch {
+    } catch (err: any) {
       setAliases(prevAliases);
       setFullState(prevFullState);
+      setPersistError(`Failed to save aliases: ${err?.message || 'Unknown error'}`);
     }
     setRefreshing(false);
   };
@@ -219,6 +225,13 @@ export default function DynamicAliasesPage() {
           <div className="px-4 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20 text-xs text-emerald-400 flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
             Feeds successfully fetched and synchronized into nftables named sets.
+          </div>
+        )}
+
+        {persistError && (
+          <div className="px-4 py-2.5 bg-red-500/10 border-b border-red-500/20 text-xs text-red-300 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            {persistError}
           </div>
         )}
 

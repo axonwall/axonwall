@@ -584,6 +584,22 @@ function cmdDiff() {
             hasDiff = true;
             console.log(res.stdout);
           }
+        } else {
+          // B2-L3: a file with no committed counterpart used to be
+          // skipped entirely, so an untracked config file reported
+          // as "no differences" while GitOps was missing a whole
+          // file. Report it as added instead.
+          hasDiff = true;
+          const res = spawnSync(
+            'diff',
+            ['-u', '--label', `committed/${filename} (no committed version)`, '--label', `/etc/axonwall/${filename}`, '/dev/null', candidatePath],
+            { encoding: 'utf-8' }
+          );
+          if (res.stdout && res.stdout.trim()) {
+            console.log(res.stdout);
+          } else {
+            console.log(`${cYellow}[!] ${filename} exists in /etc/axonwall but has no committed version in GitOps.${cReset}`);
+          }
         }
       }
       if (!hasDiff) {
@@ -836,6 +852,11 @@ async function cmdApply(autoConfirm = true) {
     const commitHash = commitToGitOps(state, `CLI apply via axonwallctl (${bundleHash.slice(0, 8)})`);
     if (commitHash) {
       console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+    } else {
+      // B2-L5: a failed GitOps commit used to be silent here, so
+      // GitOps HEAD silently stopped tracking the live config after
+      // a confirmed apply. Say so explicitly.
+      console.warn(`${cYellow}[!] Applied configuration was NOT recorded in GitOps: the GitOps commit failed (repo corrupt, unwritable, or git missing). Live config and GitOps HEAD have diverged.${cReset}`);
     }
   }
 }
@@ -1053,8 +1074,14 @@ async function cmdConfirm() {
         const commitHash = commitToGitOps(state, `CLI confirm via axonwallctl (${pendingJobId})`);
         if (commitHash) {
           console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+        } else {
+          // B2-L5: see cmdApply — a failed GitOps commit after a
+          // confirmed apply/confirm must not pass silently.
+          console.warn(`${cYellow}[!] Confirmed configuration was NOT recorded in GitOps: the GitOps commit failed (repo corrupt, unwritable, or git missing). Live config and GitOps HEAD have diverged.${cReset}`);
         }
-      } catch {}
+      } catch (err: any) {
+        console.warn(`${cYellow}[!] Confirmed configuration was NOT recorded in GitOps: ${err?.message || err}${cReset}`);
+      }
     } else {
       console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
       process.exit(1);
@@ -1072,7 +1099,11 @@ async function cmdRollback() {
     if (resp.success) {
       console.log(`${cGreen}${cBold}[✓] Rolled back to last-known-good ruleset and restored /etc/axonwall/*.yaml.${cReset}`);
     } else {
+      // B2-L4: a refused rollback used to fall through to exit 0, so
+      // a scripted caller believed the rollback had happened.
+      // Match cmdConfirm: fail loudly.
       console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+      process.exit(1);
     }
   } catch (err: any) {
     console.error(`${cRed}[✗] Failed to trigger rollback: ${err?.message || err}${cReset}`);

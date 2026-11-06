@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu } from 'lucide-react';
+import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu, AlertTriangle } from 'lucide-react';
 import { compileTrafficShaper } from '@axonwall/lib/compile/tc';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import type { DesiredState, TrafficShaperConfig } from '@axonwall/lib/schemas';
@@ -18,6 +18,8 @@ export default function TrafficShaperPage() {
   const [applied, setApplied] = useState(false);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // A11: save failures need a red banner, not the emerald one.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     getCurrentDesiredState()
@@ -43,13 +45,17 @@ export default function TrafficShaperPage() {
       .catch(() => {});
   }, []);
 
+  // A14: a cleared bandwidth field used to yield 0, which passes
+  // schema validation but is silently omitted by the tc compile, so
+  // that direction ended up unshaped. Clamp to >= 1 Mbps here so the
+  // saved config, the compiled preview, and the labels all agree.
   const currentConfig: TrafficShaperConfig = {
     enabled,
     interfaces: [
       {
         interface: shaperIface,
-        downloadBandwidthMbps: downloadMbps,
-        uploadBandwidthMbps: uploadMbps,
+        downloadBandwidthMbps: Math.max(1, downloadMbps || 1),
+        uploadBandwidthMbps: Math.max(1, uploadMbps || 1),
         scheduler,
         cakeDiffserv,
         cakeAckFilter,
@@ -66,6 +72,7 @@ export default function TrafficShaperPage() {
     const prevFullState = fullState;
     setSaving(true);
     setStatusMsg(null);
+    setErrorMsg(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -79,7 +86,7 @@ export default function TrafficShaperPage() {
       setTimeout(() => setApplied(false), 3000);
     } catch (err: any) {
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save Traffic Shaper settings'}`);
+      setErrorMsg(`Failed to save Traffic Shaper settings: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
@@ -97,6 +104,13 @@ export default function TrafficShaperPage() {
           <code className="text-emerald-400 font-mono">/etc/axonwall/firewall.yaml</code>.
         </p>
       </div>
+
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
       {statusMsg && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
@@ -144,7 +158,7 @@ export default function TrafficShaperPage() {
                   <span className="text-sm font-semibold text-slate-400">Mbps</span>
                 </div>
                 <span className="text-[11px] text-slate-500 mt-2 block">
-                  Redirected to virtual <code className="text-emerald-400">ifb-eth0</code> interface
+                  Redirected to virtual <code className="text-emerald-400">ifb-{shaperIface}</code> interface
                 </span>
               </div>
 
@@ -165,10 +179,13 @@ export default function TrafficShaperPage() {
                   <span className="text-sm font-semibold text-slate-400">Mbps</span>
                 </div>
                 <span className="text-[11px] text-slate-500 mt-2 block">
-                  Direct root qdisc shaping on <code className="text-emerald-400">eth0</code>
+                  Direct root qdisc shaping on <code className="text-emerald-400">{shaperIface}</code>
                 </span>
               </div>
             </div>
+            <p className="text-[11px] text-slate-500">
+              Bandwidths are saved at a minimum of 1 Mbps per direction; clearing a field does not disable shaping for that direction. Use the QoS Engine toggle to turn shaping off.
+            </p>
 
             {/* Scheduler Select */}
             <div className="space-y-3">

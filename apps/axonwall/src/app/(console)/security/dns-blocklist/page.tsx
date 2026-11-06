@@ -25,6 +25,9 @@ export default function DnsBlocklistPage() {
   const [showConfigPreview, setShowConfigPreview] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  // A12: a failed save used to be completely silent (the button just
+  // reverted from "Saving..." to "Save & Deploy"). Surface it.
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const [feeds, setFeeds] = useState([
     {
@@ -104,6 +107,7 @@ export default function DnsBlocklistPage() {
     const prevFullState = fullState;
     setIsSaving(true);
     setSaveSuccess(false);
+    setSaveError(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -129,8 +133,9 @@ export default function DnsBlocklistPage() {
       await applyDesiredState(nextState);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
-    } catch {
+    } catch (err: any) {
       setFullState(prevFullState);
+      setSaveError(`Failed to save DNS blocklist configuration: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsSaving(false);
     }
@@ -138,15 +143,20 @@ export default function DnsBlocklistPage() {
 
   const handleAddWhite = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newWhiteDomain || whitelist.includes(newWhiteDomain)) return;
-    setWhitelist([...whitelist, newWhiteDomain.trim()]);
+    // A18: the duplicate check used to run on the untrimmed value,
+    // so "example.com " passed the check and inserted a duplicate
+    // of an already-listed "example.com". Trim first.
+    const domain = newWhiteDomain.trim();
+    if (!domain || whitelist.includes(domain)) return;
+    setWhitelist([...whitelist, domain]);
     setNewWhiteDomain('');
   };
 
   const handleAddBlack = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newBlackDomain || blacklist.includes(newBlackDomain)) return;
-    setBlacklist([...blacklist, newBlackDomain.trim()]);
+    const domain = newBlackDomain.trim();
+    if (!domain || blacklist.includes(domain)) return;
+    setBlacklist([...blacklist, domain]);
     setNewBlackDomain('');
   };
 
@@ -192,6 +202,12 @@ export default function DnsBlocklistPage() {
       </div>
 
       {/* Stats Summary */}
+      {saveError && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{saveError}</span>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl">
           <span className="text-xs font-medium text-slate-400 uppercase tracking-wider block">
