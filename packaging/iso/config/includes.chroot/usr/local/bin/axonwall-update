@@ -112,6 +112,11 @@ extract_deb() {
   fi
 
   if command -v node >/dev/null 2>&1; then
+    deb_tmp_dir="$(mktemp -d /tmp/axonwall-deb-XXXXXX 2>/dev/null || true)"
+    if [ -z "$deb_tmp_dir" ] || [ ! -d "$deb_tmp_dir" ]; then
+      return 1
+    fi
+    chmod 0700 "$deb_tmp_dir" 2>/dev/null || true
     data_tar="$(node -e '
       const fs = require("fs");
       const buf = fs.readFileSync(process.argv[1]);
@@ -122,20 +127,20 @@ extract_deb() {
         off += 60;
         if (/^data\.tar(\.(gz|xz|zst|bz2))?$/.test(name)) {
           const out = process.argv[2] + "/" + name;
-          fs.writeFileSync(out, buf.slice(off, off + size));
+          fs.writeFileSync(out, buf.slice(off, off + size), { mode: 0o600 });
           console.log(out);
           process.exit(0);
         }
         off += size + (size % 2);
       }
       process.exit(1);
-    ' "$deb_file" "/tmp" 2>/dev/null || true)"
+    ' "$deb_file" "$deb_tmp_dir" 2>/dev/null || true)"
 
     if [ -n "$data_tar" ] && [ -f "$data_tar" ]; then
       # Tar-slip guard (audit D-S07)
       if tar -tf "$data_tar" 2>/dev/null | grep -qE '^/|(^|/)\.\.(/|$)'; then
         echo "[!] Update package contains unsafe paths; refusing to extract." >&2
-        rm -f "$data_tar"
+        rm -rf "$deb_tmp_dir"
         return 1
       fi
       # R2: tar -xf honors symlink/hardlink members, so a crafted
@@ -148,16 +153,17 @@ extract_deb() {
       # --no-same-owner is defense in depth for the same reason.
       if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^[lh]'; then
         echo "[!] Update package contains link members; refusing to extract." >&2
-        rm -f "$data_tar"
+        rm -rf "$deb_tmp_dir"
         return 1
       fi
       tar --no-same-owner -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
-        rm -f "$data_tar"
+        rm -rf "$deb_tmp_dir"
         return 1
       }
-      rm -f "$data_tar"
+      rm -rf "$deb_tmp_dir"
       return 0
     fi
+    rm -rf "$deb_tmp_dir"
   fi
 
   return 1

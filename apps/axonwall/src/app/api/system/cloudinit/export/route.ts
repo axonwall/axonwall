@@ -39,10 +39,13 @@ export async function POST(request: NextRequest) {
   try {
     const snapshot = await exportCloudInitConfigAction(options);
     const dateSuffix = new Date().toISOString().slice(0, 10);
+    const safeHost =
+      (snapshot.hostname || 'axonwall').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '') ||
+      'axonwall';
 
     if (format === 'iso') {
       const isoBytes = buildNoCloudIso(snapshot.yaml, snapshot.metaData);
-      const filename = `axonwall-${snapshot.hostname}-cidata-${dateSuffix}.iso`;
+      const filename = `axonwall-${safeHost}-cidata-${dateSuffix}.iso`;
       return new NextResponse(new Uint8Array(isoBytes), {
         status: 200,
         headers: {
@@ -63,7 +66,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const filename = `axonwall-${snapshot.hostname}-cloud-config-${dateSuffix}.yaml`;
+    const filename = `axonwall-${safeHost}-cloud-config-${dateSuffix}.yaml`;
     return new NextResponse(snapshot.yaml, {
       status: 200,
       headers: {

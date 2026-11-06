@@ -26,11 +26,11 @@ DEFAULT_IF="${DEFAULT_IF:-eth0}"
 if [[ "${1:-}" == "-c" ]]; then
   CMD="${2:-}"
   case "$CMD" in
-    "axonwall-tui")
-      exec /usr/local/bin/axonwall-tui
+    "axonwall-tui"|"axonwall-tui --readonly")
+      exec /usr/local/bin/axonwall-tui --readonly
       ;;
-    "axonwall-tui --tab nastymap"|"nastymap")
-      exec /usr/local/bin/axonwall-tui --tab nastymap
+    "axonwall-tui --tab nastymap"|"axonwall-tui --readonly --tab nastymap"|"nastymap")
+      exec /usr/local/bin/axonwall-tui --readonly --tab nastymap
       ;;
     "axonwallctl status"|"axonwallctl diff"|"axonwallctl validate")
       exec /usr/local/bin/$CMD

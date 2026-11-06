@@ -1469,7 +1469,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       method: req.method,
       headers: {
         ...req.headers,
-        'x-forwarded-proto': (req.headers['x-forwarded-proto'] as string) || (req.socket?.encrypted ? 'https' : 'http'),
+        'x-forwarded-proto': (req.socket as any)?.encrypted ? 'https' : ((req.headers['x-forwarded-proto'] as string) || 'http'),
         'x-forwarded-host': forwardedHost,
         'x-forwarded-for': req.socket?.remoteAddress || '127.0.0.1',
       },
@@ -1681,12 +1681,18 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         wss.emit('connection', ws, request, satId);
       });
     } else {
+      const rawWsHost = (request.headers.host || '127.0.0.1').replace(/[\r\n]/g, '');
       const uiWsReq = http.request({
         hostname: '127.0.0.1',
         port: uiPort,
         path: request.url,
         method: request.method,
-        headers: request.headers,
+        headers: {
+          ...request.headers,
+          'x-forwarded-proto': (request.socket as any)?.encrypted ? 'https' : 'http',
+          'x-forwarded-host': rawWsHost,
+          'x-forwarded-for': request.socket?.remoteAddress || '127.0.0.1',
+        },
       });
 
       uiWsReq.on('upgrade', (uiRes, uiSocket, uiHead) => {

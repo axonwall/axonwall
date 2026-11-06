@@ -46391,7 +46391,7 @@ data: /api/v1/mcp
       method: req.method,
       headers: {
         ...req.headers,
-        "x-forwarded-proto": req.headers["x-forwarded-proto"] || (req.socket?.encrypted ? "https" : "http"),
+        "x-forwarded-proto": req.socket?.encrypted ? "https" : req.headers["x-forwarded-proto"] || "http",
         "x-forwarded-host": forwardedHost,
         "x-forwarded-for": req.socket?.remoteAddress || "127.0.0.1"
       }
@@ -46559,12 +46559,18 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         wss.emit("connection", ws, request3, satId);
       });
     } else {
+      const rawWsHost = (request3.headers.host || "127.0.0.1").replace(/[\r\n]/g, "");
       const uiWsReq = http2.request({
         hostname: "127.0.0.1",
         port: uiPort,
         path: request3.url,
         method: request3.method,
-        headers: request3.headers
+        headers: {
+          ...request3.headers,
+          "x-forwarded-proto": request3.socket?.encrypted ? "https" : "http",
+          "x-forwarded-host": rawWsHost,
+          "x-forwarded-for": request3.socket?.remoteAddress || "127.0.0.1"
+        }
       });
       uiWsReq.on("upgrade", (uiRes, uiSocket, uiHead) => {
         const headerLines = [];

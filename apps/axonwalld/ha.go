@@ -460,16 +460,27 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
     virtual_ipaddress {
 `, instName, state, iface, vrid, prio, pass))
 
+		validKeepalivedDevRe := regexp.MustCompile(`^[a-zA-Z0-9_.:-]+$`)
 		for _, vip := range vips {
 			vip = strings.TrimSpace(vip)
 			if vip == "" || strings.ContainsAny(vip, "\n\r\"'{};#") {
 				continue
 			}
-			if strings.Contains(vip, " ") {
-				conf.WriteString(fmt.Sprintf("        %s\n", vip))
-			} else {
-				conf.WriteString(fmt.Sprintf("        %s dev %s\n", vip, iface))
+			fields := strings.Fields(vip)
+			if len(fields) == 0 {
+				continue
 			}
+			addrToken := fields[0]
+			if _, _, err := net.ParseCIDR(addrToken); err != nil && net.ParseIP(addrToken) == nil {
+				continue
+			}
+			targetDev := iface
+			if len(fields) == 3 && fields[1] == "dev" && validKeepalivedDevRe.MatchString(fields[2]) {
+				targetDev = fields[2]
+			} else if len(fields) != 1 {
+				continue
+			}
+			conf.WriteString(fmt.Sprintf("        %s dev %s\n", addrToken, targetDev))
 		}
 
 		conf.WriteString(fmt.Sprintf(`    }

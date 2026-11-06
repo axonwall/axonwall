@@ -209,6 +209,10 @@ export async function provisionEvidenceVaultAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(pool) || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(dataset)) {
+    return { success: false, message: 'Invalid ZFS pool or dataset name' };
+  }
+
   const res = await callAgentApi<{ success: boolean; message: string }>(
     '/v1/vigilante/vault/provision',
     'POST',
@@ -225,6 +229,14 @@ export async function createIncidentSnapshotAction(
 ): Promise<{ success: boolean; snapshot?: string; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+
+  if (
+    !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(pool) ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(dataset) ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(incidentId)
+  ) {
+    return { success: false, error: 'Invalid pool, dataset, or incident ID format' };
+  }
 
   const res = await callAgentApi<{ success: boolean; snapshot?: string; error?: string }>(
     '/v1/vigilante/vault/snapshot',

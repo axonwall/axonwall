@@ -872,7 +872,7 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 		http.Error(w, "Invalid dataset parameter", http.StatusBadRequest)
 		return
 	}
-	if fromSnap != "" && !validZfsSnapshotName(fromSnap) {
+	if fromSnap != "" && (!validZfsSnapshotName(fromSnap) || !strings.HasPrefix(fromSnap, dataset+"@")) {
 		http.Error(w, "Invalid from snapshot parameter", http.StatusBadRequest)
 		return
 	}

@@ -988,9 +988,20 @@ func (m *VirtManager) DownloadISO(rawURL, filename, pool, expectedSha256, user s
 	targetDir := fmt.Sprintf("/mnt/%s/isos", pool)
 	_ = os.MkdirAll(targetDir, 0755)
 
-	safeName := filepath.Base(filename)
+	safeName := filepath.Base(strings.TrimSpace(filename))
+	if safeName == "" || safeName == "." || safeName == ".." || strings.HasPrefix(safeName, ".") || strings.HasPrefix(safeName, "-") {
+		return "", fmt.Errorf("invalid ISO filename: %s", filename)
+	}
 	if !strings.HasSuffix(safeName, ".iso") && !strings.HasSuffix(safeName, ".img") {
 		safeName += ".iso"
+	}
+	for _, r := range safeName {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-') {
+			return "", fmt.Errorf("invalid characters in ISO filename: %s", filename)
+		}
+	}
+	if strings.Contains(safeName, "..") {
+		return "", fmt.Errorf("invalid ISO filename: %s", filename)
 	}
 	destPath := filepath.Join(targetDir, safeName)
 
@@ -1111,6 +1122,13 @@ func (m *VirtManager) DownloadISO(rawURL, filename, pool, expectedSha256, user s
 			return fmt.Errorf("sha256 mismatch")
 		}
 
+		if fi, lerr := os.Lstat(destPath); lerr == nil {
+			if (fi.Mode() & os.ModeSymlink) != 0 {
+				_ = os.Remove(destPath + ".tmp")
+				return fmt.Errorf("refusing symlink destination path: %s", destPath)
+			}
+		}
+
 		if err := os.Rename(destPath+".tmp", destPath); err != nil {
 			return err
 		}
@@ -1139,9 +1157,15 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 		logger("Initiating backup of %s %d to %s...", targetType, targetID, destType)
 
 		backupDir := fmt.Sprintf("/mnt/%s/backups", pool)
-		_ = os.MkdirAll(backupDir, 0755)
+		_ = os.MkdirAll(backupDir, 0700)
+		_ = os.Chmod(backupDir, 0700)
 		archiveName := fmt.Sprintf("axonwall-backup-%s-%d-%s.vma.zst", targetType, targetID, ts)
 		archivePath := filepath.Join(backupDir, archiveName)
+		if fi, lerr := os.Lstat(archivePath); lerr == nil {
+			if (fi.Mode() & os.ModeSymlink) != 0 {
+				return fmt.Errorf("refusing symlink archive path: %s", archivePath)
+			}
+		}
 
 		if targetType == "vm" {
 			dataset := fmt.Sprintf("%s/vms/vm-%d-disk-0", pool, targetID)
@@ -1155,12 +1179,12 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 			}
 
 			logger("Streaming snapshot to compressed archive %s...", archivePath)
-			sendCmd := fmt.Sprintf("set -o pipefail; zfs send %s | zstd -3 > %s", snapFull, archivePath)
-			cmdStream := exec.Command("/bin/bash", "-c", sendCmd)
+			cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
 			if out, err := cmdStream.CombinedOutput(); err != nil {
 				logger("Stream error: %s (%v)", string(out), err)
 				return fmt.Errorf("stream failed: %s", string(out))
 			}
+			_ = os.Chmod(archivePath, 0600)
 		} else {
 			dataset := fmt.Sprintf("%s/lxc/subvol-%d-disk-0", pool, targetID)
 			snapFull := fmt.Sprintf("%s@%s", dataset, snapName)
@@ -1173,12 +1197,12 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 			}
 
 			logger("Streaming container snapshot to archive %s...", archivePath)
-			sendCmd := fmt.Sprintf("set -o pipefail; zfs send %s | zstd -3 > %s", snapFull, archivePath)
-			cmdStream := exec.Command("/bin/bash", "-c", sendCmd)
+			cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
 			if out, err := cmdStream.CombinedOutput(); err != nil {
 				logger("Stream error: %s (%v)", string(out), err)
 				return fmt.Errorf("stream failed: %s", string(out))
 			}
+			_ = os.Chmod(archivePath, 0600)
 		}
 
 		logger("Backup completed successfully: %s", archivePath)

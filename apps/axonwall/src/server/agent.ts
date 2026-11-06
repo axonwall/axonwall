@@ -3563,6 +3563,9 @@ export interface SystemPartitionsTelemetry {
 }
 
 export async function getSystemInstallMode(): Promise<'ab' | 'rolling' | 'zbm'> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
   // 1. Direct file inspection (/etc/axonwall/install-mode, /var/lib/axonwall/install-mode)
   for (const p of ['/etc/axonwall/install-mode', '/var/lib/axonwall/install-mode']) {
     try {
@@ -4341,10 +4344,12 @@ export async function poweroffSystemAction(): Promise<PowerActionResult> {
   const daemonResp = await callAgentApi<any>('/v1/system/power', 'POST', {
     action: 'poweroff',
   });
-  if (daemonResp && daemonResp.success) {
+  if (daemonResp) {
     return {
-      success: true,
-      message: daemonResp.message || 'System power off initiated.',
+      success: Boolean(daemonResp.success),
+      message:
+        daemonResp.message ||
+        (daemonResp.success ? 'System power off initiated.' : 'System power off refused by daemon.'),
       action: 'poweroff',
     };
   }
@@ -4682,6 +4687,13 @@ export async function createNasSnapshotAction(
     throw new Error('Unauthorized: Admin privileges required');
   }
 
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*$/.test(dataset) || dataset.includes('..')) {
+    throw new Error('Invalid ZFS dataset name');
+  }
+  if (label !== undefined && label !== '' && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(label)) {
+    throw new Error('Invalid ZFS snapshot label');
+  }
+
   const daemonResp = await callAgentApi<any>('/v1/nas/snapshots', 'POST', { dataset, label });
   if (daemonResp) {
     return {
@@ -4703,6 +4715,10 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
   const session = await getSession();
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
+  }
+
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
+    throw new Error('Invalid ZFS pool name');
   }
 
   const daemonResp = await callAgentApi<any>('/v1/nas/scrub', 'POST', { pool: poolName });

@@ -58,7 +58,7 @@ export function bumpSessionEpoch(): void {
   const next = String(nextVal);
   for (const p of EPOCH_PATHS) {
     try {
-      fs.writeFileSync(p, next, { mode: 0o644 });
+      fs.writeFileSync(p, next, { mode: 0o660 });
     } catch {}
   }
 }
@@ -86,7 +86,7 @@ export function revokeTokenJti(jti: string): void {
   const content = entries.join('\n') + '\n';
   for (const p of REVOKED_PATHS) {
     try {
-      fs.writeFileSync(p, content, { mode: 0o644 });
+      fs.writeFileSync(p, content, { mode: 0o660 });
     } catch {}
   }
 }

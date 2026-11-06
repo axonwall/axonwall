@@ -202,7 +202,11 @@ export async function getCommitDiff(commitHash: string): Promise<string> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
+  const trimmed = (commitHash || '').trim();
+  if (!/^[0-9a-fA-F]{4,64}$/.test(trimmed)) {
+    return 'Invalid commit hash.';
+  }
+  const safeHash = trimmed;
   try {
     const yamlDiff = execFileSync('git', [...GIT_BASE_ARGS, 'show', safeHash, '--color=never', '--', '*.yaml'], {
       cwd: GITOPS_DIR,
@@ -231,7 +235,11 @@ export async function rollbackToGitOpsCommit(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const safeHash = commitHash.replace(/[^a-zA-Z0-9]/g, '');
+  const trimmed = (commitHash || '').trim();
+  if (!/^[0-9a-fA-F]{4,64}$/.test(trimmed)) {
+    return { success: false, message: 'Invalid commit hash.' };
+  }
+  const safeHash = trimmed;
   try {
     let state: DesiredState | null = null;
     const yamlMap: Record<string, string> = {};

@@ -1,16 +1,18 @@
 import { createClient, type ClickHouseClient } from '@clickhouse/client';
+import { getSession } from './auth';
+import { assertActionPermitted } from './auth-guard';
 
 let client: ClickHouseClient | null = null;
 
 function getClient(): ClickHouseClient | null {
-  if (!process.env.CLICKHOUSE_URL && process.env.NODE_ENV === 'production') {
+  if (!process.env.CLICKHOUSE_URL || !process.env.CLICKHOUSE_PASSWORD) {
     return null;
   }
   if (!client) {
     client = createClient({
-      url: process.env.CLICKHOUSE_URL || 'http://127.0.0.1:8123',
+      url: process.env.CLICKHOUSE_URL,
       username: process.env.CLICKHOUSE_USER || 'admin',
-      password: process.env.CLICKHOUSE_PASSWORD || 'axonwallclickhouse',
+      password: process.env.CLICKHOUSE_PASSWORD,
       database: process.env.CLICKHOUSE_DB || 'axonwall',
     });
   }
@@ -18,6 +20,9 @@ function getClient(): ClickHouseClient | null {
 }
 
 export async function getTopFlows() {
+  const session = await getSession();
+  assertActionPermitted(session);
+
   const ch = getClient();
   if (!ch) {
     return [];

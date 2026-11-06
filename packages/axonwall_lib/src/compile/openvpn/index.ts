@@ -29,15 +29,23 @@ export function compileOpenVpn(config?: OpenVpnConfig): CompiledOpenVpn {
   return { servers };
 }
 
+function sanitizeSingleToken(val: string | undefined, fallback: string): string {
+  const cleaned = (val ?? '').replace(/[^a-zA-Z0-9_.:-]/g, '');
+  return cleaned || fallback;
+}
+
 function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
   const safeName = server.name.replace(/[^a-zA-Z0-9_-]/g, '_');
   const safeCommentName = server.name.replace(/[\r\n]+/g, ' ').trim();
   const safeDevName = (server.devName || 'ovpn-dco0').replace(/[^a-zA-Z0-9_-]/g, '');
   const tunnelParts = server.tunnelNetwork.split('/');
-  const networkIp = tunnelParts[0];
+  const networkIp = sanitizeSingleToken(tunnelParts[0], '10.8.0.0');
   const parsedTunnelPrefix = Number.parseInt(tunnelParts[1] ?? '', 10);
   const prefix = Number.isNaN(parsedTunnelPrefix) ? 24 : Math.max(0, Math.min(32, parsedTunnelPrefix));
   const netmask = cidrToNetmask(prefix);
+  const safeCipher = sanitizeSingleToken(server.cipher, 'AES-256-GCM');
+  const safeAuth = sanitizeSingleToken(server.authDigest, 'SHA256');
+  const safeDevType = server.deviceType === 'tap' ? 'tap' : 'tun';
 
   const lines: string[] = [
     `# Axonwall OpenVPN 2.6 Server: ${safeCommentName}`,
@@ -45,11 +53,11 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
     `proto ${server.protocol === 'tcp' ? 'tcp-server' : 'udp'}`,
     `port ${server.port}`,
     `dev ${safeDevName}`,
-    `dev-type ${server.deviceType || 'tun'}`,
+    `dev-type ${safeDevType}`,
     'topology subnet',
     `server ${networkIp} ${netmask}`,
-    `data-ciphers ${server.cipher || 'AES-256-GCM'}:CHACHA20-POLY1305`,
-    `auth ${server.authDigest || 'SHA256'}`,
+    `data-ciphers ${safeCipher}:CHACHA20-POLY1305`,
+    `auth ${safeAuth}`,
     'keepalive 10 120',
     'persist-key',
     'persist-tun',
@@ -70,11 +78,13 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
 
   if (server.localNetwork) {
     const localParts = server.localNetwork.split('/');
-    const localIp = localParts[0];
+    const localIp = sanitizeSingleToken(localParts[0], '');
     const parsedLocalPrefix = Number.parseInt(localParts[1] ?? '', 10);
     const localPrefix = Number.isNaN(parsedLocalPrefix) ? 24 : Math.max(0, Math.min(32, parsedLocalPrefix));
     const localMask = cidrToNetmask(localPrefix);
-    lines.push(`push "route ${localIp} ${localMask}"`);
+    if (localIp) {
+      lines.push(`push "route ${localIp} ${localMask}"`);
+    }
   }
 
   if (server.caCert) {
@@ -103,15 +113,20 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
       }
       const csoLines: string[] = [`# Client Specific Override for ${safeCn}`];
       if (cso.assignedIp) {
-        csoLines.push(`ifconfig-push ${cso.assignedIp} ${netmask}`);
+        const safeAssignedIp = sanitizeSingleToken(cso.assignedIp, '');
+        if (safeAssignedIp) {
+          csoLines.push(`ifconfig-push ${safeAssignedIp} ${netmask}`);
+        }
       }
       for (const route of cso.pushRoutes) {
         const routeParts = route.split('/');
-        const rIp = routeParts[0];
+        const rIp = sanitizeSingleToken(routeParts[0], '');
         const parsedRoutePrefix = Number.parseInt(routeParts[1] ?? '', 10);
         const rPrefix = Number.isNaN(parsedRoutePrefix) ? 24 : Math.max(0, Math.min(32, parsedRoutePrefix));
         const rMask = cidrToNetmask(rPrefix);
-        csoLines.push(`push "route ${rIp} ${rMask}"`);
+        if (rIp) {
+          csoLines.push(`push "route ${rIp} ${rMask}"`);
+        }
       }
       ccdFiles[safeCn] = csoLines.join('\n') + '\n';
     }
@@ -136,14 +151,18 @@ export function generateClientOvpnProfile(params: {
   clientCert?: string;
   clientKey?: string;
 }): string {
-  const proto = params.protocol || 'udp';
-  const cipher = params.cipher || 'AES-256-GCM';
+  const proto = params.protocol === 'tcp' ? 'tcp' : 'udp';
+  const cipher = sanitizeSingleToken(params.cipher, 'AES-256-GCM');
+  const safeHost = sanitizeSingleToken(params.serverHost, '127.0.0.1');
+  const safePort = Number.isFinite(params.serverPort)
+    ? Math.max(1, Math.min(65535, Math.trunc(params.serverPort)))
+    : 1194;
 
   const lines: string[] = [
     'client',
     `dev tun`,
     `proto ${proto}`,
-    `remote ${params.serverHost} ${params.serverPort}`,
+    `remote ${safeHost} ${safePort}`,
     'resolv-retry infinite',
     'nobind',
     'persist-key',
@@ -154,13 +173,13 @@ export function generateClientOvpnProfile(params: {
   ];
 
   if (params.caCert) {
-    lines.push('<ca>', params.caCert.trim(), '</ca>');
+    lines.push('<ca>', params.caCert.replace(/<\/ca>/gi, '').trim(), '</ca>');
   }
   if (params.clientCert) {
-    lines.push('<cert>', params.clientCert.trim(), '</cert>');
+    lines.push('<cert>', params.clientCert.replace(/<\/cert>/gi, '').trim(), '</cert>');
   }
   if (params.clientKey) {
-    lines.push('<key>', params.clientKey.trim(), '</key>');
+    lines.push('<key>', params.clientKey.replace(/<\/key>/gi, '').trim(), '</key>');
   }
 
   return lines.join('\n') + '\n';

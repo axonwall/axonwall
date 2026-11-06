@@ -541,10 +541,24 @@ func LoadHAPKITLSConfigFromPaths(caCertPath, nodeCertPath, nodeKeyPath string) (
 // ConfigureMultiProviderSyncrepl configures OpenLDAP cn=config with TLS certificates,
 // serverID, olcMultiProvider: TRUE, and refreshAndPersist syncrepl over ldaps://<peerIP>:636.
 func ConfigureMultiProviderSyncrepl(serverID int, peerIP string, baseDN string) error {
-	cleanPeerIP := strings.Split(strings.TrimSpace(peerIP), ":")[0]
-	cleanPeerIP = strings.Split(cleanPeerIP, "/")[0]
-	if cleanPeerIP == "" {
+	rawPeer := strings.Split(strings.TrimSpace(peerIP), "/")[0]
+	if rawPeer == "" {
 		return nil
+	}
+	cleanPeerIP := rawPeer
+	if h, _, err := net.SplitHostPort(rawPeer); err == nil {
+		cleanPeerIP = h
+	} else if strings.Count(rawPeer, ":") == 1 {
+		cleanPeerIP = strings.Split(rawPeer, ":")[0]
+	}
+	cleanPeerIP = strings.Trim(cleanPeerIP, "[]")
+	parsedPeerIP := net.ParseIP(cleanPeerIP)
+	if parsedPeerIP == nil {
+		return fmt.Errorf("invalid peer IP address for LDAP syncrepl: %s", peerIP)
+	}
+	cleanPeerIP = parsedPeerIP.String()
+	if strings.ContainsAny(baseDN, "\r\n\"'") {
+		return fmt.Errorf("invalid characters in LDAP baseDN")
 	}
 
 	if err := EnsureHAPKICerts("axonwall-ha", "", cleanPeerIP); err != nil {
@@ -556,6 +570,9 @@ func ConfigureMultiProviderSyncrepl(serverID int, peerIP string, baseDN string) 
 		return fmt.Errorf("missing LDAP replication password: %w", err)
 	}
 	replPass := strings.TrimSpace(string(replBytes))
+	if strings.ContainsAny(replPass, "\r\n\"' ") {
+		return fmt.Errorf("invalid characters in LDAP replication password")
+	}
 
 	// Update cn=replicator password in local DIT to match repl.pw
 	if replHash, err := HashSSHA(replPass); err == nil {
@@ -588,7 +605,7 @@ olcTLSCertificateKeyFile: %s
 	}
 
 	// Configure olcDatabase={1}mdb with olcSyncrepl and olcMultiProvider: TRUE
-	peerURI := fmt.Sprintf("ldaps://%s:636", cleanPeerIP)
+	peerURI := fmt.Sprintf("ldaps://%s", net.JoinHostPort(cleanPeerIP, "636"))
 	syncreplVal := fmt.Sprintf(
 		`{0}rid=001 provider=%s bindmethod=simple binddn="cn=replicator,%s" credentials=%s searchbase="%s" type=refreshAndPersist retry="5 5 300 +" tls_cacert=%s tls_reqcert=demand`,
 		peerURI, baseDN, replPass, baseDN, HAPKICACertPath,

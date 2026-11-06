@@ -41,6 +41,9 @@ export async function getLocalGroups(): Promise<LocalGroup[]> {
 export async function createLocalUser(req: CreateLocalUserRequest): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  if (!req?.username || !USERNAME_REGEX.test(req.username)) {
+    throw new Error('Invalid username format');
+  }
 
   const res = await callAgentApi<{ success?: boolean; message?: string }>(
     '/v1/system/users',
@@ -97,6 +100,9 @@ export async function deleteLocalUser(
 export async function createLocalGroup(name: string): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  if (!name || !USERNAME_REGEX.test(name)) {
+    throw new Error('Invalid group name format');
+  }
 
   const res = await callAgentApi<{ success?: boolean; message?: string }>(
     '/v1/system/groups',
