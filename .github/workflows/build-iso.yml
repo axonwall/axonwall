@@ -249,6 +249,33 @@ jobs:
         run: |
           sudo ./packaging/cloud-image/build-qcow2.sh
 
+      - name: Enforce Cloud Image Size Limit (D2-L2)
+        run: |
+          # GitHub releases reject assets over 2 GiB (2,147,483,648
+          # bytes). PR #115 brought the qcow2 back to ~1.17 GiB by
+          # shipping slot B empty; fail fast here if a future change
+          # regrows it, instead of surfacing as a confusing
+          # action-gh-release upload error in the release job. The
+          # 1.9 GiB threshold leaves headroom under the hard cap.
+          max_bytes=$((19 * 1024 * 1024 * 1024 / 10))
+          fail=0
+          found=0
+          for qcow2 in packaging/cloud-image/output/*.qcow2; do
+            [ -e "$qcow2" ] || continue
+            found=1
+            size=$(stat -c%s "$qcow2")
+            echo "Cloud image $qcow2: $size bytes (limit $max_bytes)"
+            if [ "$size" -gt "$max_bytes" ]; then
+              echo "::error::Cloud image $qcow2 is $size bytes, over the $max_bytes byte (1.9 GiB) limit — GitHub releases reject assets over 2 GiB."
+              fail=1
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No qcow2 artifact found in packaging/cloud-image/output/ — the cloud image build produced nothing."
+            fail=1
+          fi
+          exit $fail
+
       - name: Compute Checksums
         run: |
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
