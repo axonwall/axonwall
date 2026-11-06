@@ -4883,9 +4883,11 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
     };
   }
 
+  // Daemon unreachable: no scrub ran. Never report success for a scrub
+  // that was never started — silent data-rot is the failure mode here.
   return {
-    success: true,
-    message: `ZFS pool scrub initiated on '${poolName}'.`,
+    success: false,
+    message: `Daemon unavailable: ZFS pool scrub was not started on '${poolName}'.`,
   };
 }
 

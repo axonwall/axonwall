@@ -103,6 +103,20 @@ export default function BattleStationPage() {
     }
   };
 
+  const handleContainIP = async (ip: string) => {
+    if (!ip.trim()) return;
+    setStatusBanner(null);
+
+    const res = await soarBlockIPAction(ip.trim(), blockTimeout);
+    if (res.success) {
+      setStatusBanner({ type: 'success', message: res.message });
+      const blocked = await getSoarBlockedIPsAction();
+      setBlockedIPs(blocked);
+    } else {
+      setStatusBanner({ type: 'error', message: res.message });
+    }
+  };
+
   const handleUnblockIP = async (ip: string) => {
     setStatusBanner(null);
     const res = await soarUnblockIPAction(ip);
@@ -248,10 +262,10 @@ export default function BattleStationPage() {
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-2">
           <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
             <span>Threat Level</span>
-            <AlertTriangle className="w-4 h-4 text-amber-400" />
+            <AlertTriangle className="w-4 h-4 text-slate-500" />
           </div>
-          <div className="text-2xl font-bold text-amber-400">ELEVATED</div>
-          <div className="text-[11px] text-slate-500">Autonomous SOAR Active</div>
+          <div className="text-2xl font-bold text-slate-400">Unknown</div>
+          <div className="text-[11px] text-slate-500">No live threat feed connected</div>
         </div>
 
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-2">
@@ -266,10 +280,10 @@ export default function BattleStationPage() {
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-2">
           <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
             <span>Canary Decoys</span>
-            <Radio className="w-4 h-4 text-cyan-400" />
+            <Radio className="w-4 h-4 text-slate-500" />
           </div>
-          <div className="text-2xl font-bold text-cyan-400">4 Active</div>
-          <div className="text-[11px] text-slate-500">Deception HoneyMesh Online</div>
+          <div className="text-2xl font-bold text-slate-400">—</div>
+          <div className="text-[11px] text-slate-500">See Deception page for live count</div>
         </div>
 
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-2">
@@ -412,19 +426,24 @@ export default function BattleStationPage() {
           <div className="p-6 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-emerald-400" />
-                <span className="text-white font-semibold text-sm">Real-Time Threat Telemetry (SSE Feed)</span>
+                <Activity className="w-4 h-4 text-slate-400" />
+                <span className="text-white font-semibold text-sm">Threat Telemetry</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] font-semibold">
+                  Feed not connected
                 </span>
-                <span className="text-[11px] text-slate-400">Live Sensors</span>
               </div>
             </div>
 
             <div className="space-y-2">
+              {events.length === 0 && (
+                <div className="p-4 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl">
+                  No telemetry feed connected — no live sensor data is reaching
+                  this page. An empty list here means &ldquo;no data&rdquo;, not
+                  &ldquo;no threats&rdquo;.
+                </div>
+              )}
               {events.map((evt, idx) => (
                 <div
                   key={idx}
@@ -462,7 +481,7 @@ export default function BattleStationPage() {
                     <span className="text-[10px] text-slate-500 font-mono">{evt.time}</span>
                     {evt.srcIp && (
                       <button
-                        onClick={() => soarBlockIPAction(evt.srcIp!)}
+                        onClick={() => handleContainIP(evt.srcIp!)}
                         className="px-2 py-1 bg-rose-950/60 border border-rose-800/60 hover:bg-rose-900/80 text-rose-300 text-[10px] font-semibold rounded transition-colors"
                       >
                         Contain IP

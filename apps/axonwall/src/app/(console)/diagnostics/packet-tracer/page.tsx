@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Play, CheckCircle2, XCircle, ArrowRight, Shield, Layers, HelpCircle } from 'lucide-react';
+import { Play, CheckCircle2, XCircle, ArrowRight, Shield, Layers, HelpCircle, AlertTriangle } from 'lucide-react';
 import { simulatePacket, type SimulationResult } from '@axonwall/lib/sim';
 import type { DesiredState, PacketTracerQuery } from '@axonwall/lib/schemas';
 
@@ -136,7 +136,9 @@ const SAMPLE_SIM_STATE: DesiredState = {
 
 export default function PacketTracerPage() {
   const [liveState, setLiveState] = useState<DesiredState | null>(null);
+  const [liveLoadFailed, setLiveLoadFailed] = useState(false);
   const [useSampleState, setUseSampleState] = useState(false);
+  const [resultUsedSample, setResultUsedSample] = useState(false);
   const [inInterface, setInInterface] = useState('lan');
   const [srcIp, setSrcIp] = useState('192.168.100.45');
   const [srcPort, setSrcPort] = useState(54321);
@@ -151,8 +153,11 @@ export default function PacketTracerPage() {
       .then(({ getCurrentDesiredState }) => getCurrentDesiredState())
       .then((s) => {
         if (s) setLiveState(s);
+        else setLiveLoadFailed(true);
       })
-      .catch(() => {});
+      .catch(() => {
+        setLiveLoadFailed(true);
+      });
   }, []);
 
   const handleSimulate = (e: React.FormEvent) => {
@@ -165,8 +170,10 @@ export default function PacketTracerPage() {
       srcPort,
       dstPort,
     };
-    const targetState = useSampleState || !liveState ? SAMPLE_SIM_STATE : liveState;
+    const usedSample = useSampleState || !liveState;
+    const targetState = usedSample ? SAMPLE_SIM_STATE : liveState;
     const res = simulatePacket(query, targetState);
+    setResultUsedSample(usedSample);
     setResult(res);
   };
 
@@ -214,6 +221,26 @@ export default function PacketTracerPage() {
           Simulate arbitrary 5-tuples through aliases, DNAT, firewall filter chains, and multi-WAN routing tables without injecting live traffic.
         </p>
       </div>
+
+      {(!liveState || useSampleState) && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs text-amber-300 flex items-center gap-2 flex-wrap">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="font-semibold">
+            {liveLoadFailed || !liveState
+              ? 'Evaluating against SAMPLE configuration — live state unavailable. Verdicts do not reflect the live firewall.'
+              : 'Evaluating against SAMPLE configuration — this is a preset scenario, not the live firewall.'}
+          </span>
+          {useSampleState && liveState && (
+            <button
+              type="button"
+              onClick={() => setUseSampleState(false)}
+              className="ml-auto px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 transition"
+            >
+              Use live configuration
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Preset Test Buttons */}
       <div className="flex gap-2 flex-wrap text-xs">
@@ -357,6 +384,11 @@ export default function PacketTracerPage() {
               <div className="flex items-center justify-between border-b border-slate-800 pb-4">
                 <div>
                   <span className="text-xs font-mono uppercase tracking-wider text-slate-400">Simulation Verdict</span>
+                  {resultUsedSample && (
+                    <span className="ml-2 px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-semibold uppercase">
+                      Sample configuration
+                    </span>
+                  )}
                   <div className="flex items-center gap-2 mt-1">
                     {result.verdict === 'ALLOW' ? (
                       <span className="inline-flex items-center gap-2 text-2xl font-bold font-mono text-emerald-400">

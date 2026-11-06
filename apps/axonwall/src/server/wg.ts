@@ -84,7 +84,10 @@ export async function generateWireGuardProfile() {
     privateKey = execFileSync('wg', ['genkey'], { timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
     publicKey = execFileSync('wg', ['pubkey'], { input: privateKey + '\n', timeout: 1000, stdio: ['pipe', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
   } catch {
-    // Generate cryptographically valid x25519 Curve25519 keypair using Node.js crypto if wg CLI is absent
+    // Generate cryptographically valid x25519 Curve25519 keypair using Node.js crypto if wg CLI is absent.
+    // (The server public key was already derived up-front via
+    // deriveWireGuardPublicKey, which falls back to Node crypto itself,
+    // so no placeholder can reach the profile below.)
     const crypto = await import('node:crypto');
     const { publicKey: pubKeyObj, privateKey: privKeyObj } = crypto.generateKeyPairSync('x25519');
     const rawPriv = privKeyObj.export({ type: 'pkcs8', format: 'der' }).subarray(-32);

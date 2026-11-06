@@ -33,6 +33,24 @@ import {
 
 type TabId = 'control' | 'telemetry' | 'simulator';
 
+/**
+ * Keep the bind hosts of loaded listen addresses, re-pointing them at a new
+ * port when the port changed. A hand-configured bind scope (e.g. a single
+ * interface in vpn.yaml) must survive a UI save of any other setting.
+ */
+function remapListenAddresses(addrs: string[], port: number): string[] {
+  return addrs.map((addr) => {
+    if (addr.startsWith('[')) {
+      const close = addr.indexOf(']');
+      if (close === -1) return addr;
+      return `${addr.slice(0, close + 1)}:${port}`;
+    }
+    const colon = addr.lastIndexOf(':');
+    if (colon === -1) return addr;
+    return `${addr.slice(0, colon)}:${port}`;
+  });
+}
+
 export default function RosenpassPage() {
   const [activeTab, setActiveTab] = useState<TabId>('control');
   const [fullState, setFullState] = useState<DesiredState | null>(null);
@@ -124,7 +142,12 @@ export default function RosenpassPage() {
         plugins,
         rosenpass: {
           ...nextCfg,
-          listenAddresses: [`0.0.0.0:${nextCfg.listenPort}`, `[::]:${nextCfg.listenPort}`],
+          // Preserve the loaded listen addresses (bind scope); only the port
+          // follows listenPort. Never silently widen binds to wildcards.
+          listenAddresses:
+            nextCfg.listenAddresses && nextCfg.listenAddresses.length > 0
+              ? remapListenAddresses(nextCfg.listenAddresses, nextCfg.listenPort)
+              : [`0.0.0.0:${nextCfg.listenPort}`, `[::]:${nextCfg.listenPort}`],
         },
       };
       const res = await applyDesiredState(nextState);

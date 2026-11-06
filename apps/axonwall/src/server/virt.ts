@@ -8,6 +8,8 @@ import {
   type WorkloadBackupJob,
   type VxlanZone,
   type VirtConfig,
+  VirtualMachineSchema,
+  LxcContainerSchema,
 } from '@axonwall/lib/schemas';
 import { compileVmProcess, compileLxcContainer } from '@axonwall/lib';
 import { getCurrentDesiredState, applyDesiredState } from './agent';
@@ -241,6 +243,17 @@ export async function saveVmAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  // Validate ranges server-side (vmid 100–99999, cores 1–128, memory >= 128
+  // MB, …): the form's min/max attributes are client-side only, and NaN or
+  // negative values previously passed straight to the daemon.
+  const parsedVm = VirtualMachineSchema.safeParse(vm);
+  if (!parsedVm.success) {
+    throw new Error(
+      `Invalid VM: ${parsedVm.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`
+    );
+  }
+  vm = parsedVm.data;
+
   const state = await getCurrentDesiredState();
   const currentVirt = state.virt ?? {
     enabled: true,
@@ -254,26 +267,15 @@ export async function saveVmAction(
     vxlanZones: [],
   };
 
+  // This action is the create path (the VMs page has no edit flow): an
+  // existing ID must never silently overwrite that workload.
   const existingIdx = currentVirt.vms.findIndex((v) => v.vmid === vm.vmid);
-  if (existingIdx >= 0 && vm.cloudInit?.password === '********') {
-    const prevPw = currentVirt.vms[existingIdx]?.cloudInit?.password;
-    if (prevPw && prevPw !== '********') {
-      vm = {
-        ...vm,
-        cloudInit: {
-          ...vm.cloudInit,
-          password: prevPw,
-        },
-      };
-    }
-  }
-  let updatedVms: VirtualMachine[];
   if (existingIdx >= 0) {
-    updatedVms = [...currentVirt.vms];
-    updatedVms[existingIdx] = vm;
-  } else {
-    updatedVms = [...currentVirt.vms, vm];
+    throw new Error(
+      `VM ${vm.vmid} already exists (${currentVirt.vms[existingIdx]?.name || 'unnamed'}). Creating a VM with an existing ID would overwrite it — pick a different ID.`
+    );
   }
+  const updatedVms: VirtualMachine[] = [...currentVirt.vms, vm];
 
   const updatedState = {
     ...state,
@@ -518,6 +520,16 @@ export async function saveContainerAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  // Validate ranges server-side (ctid 100–99999, cores 1–128, memory >= 256
+  // MB, …): the form's min/max attributes are client-side only.
+  const parsedCt = LxcContainerSchema.safeParse(container);
+  if (!parsedCt.success) {
+    throw new Error(
+      `Invalid container: ${parsedCt.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`
+    );
+  }
+  container = parsedCt.data;
+
   const state = await getCurrentDesiredState();
   const currentVirt = state.virt ?? {
     enabled: true,
@@ -531,14 +543,15 @@ export async function saveContainerAction(
     vxlanZones: [],
   };
 
+  // This action is the create path (the LXC page has no edit flow): an
+  // existing ID must never silently overwrite that workload.
   const existingIdx = currentVirt.containers.findIndex((c) => c.ctid === container.ctid);
-  let updatedCts: LxcContainer[];
   if (existingIdx >= 0) {
-    updatedCts = [...currentVirt.containers];
-    updatedCts[existingIdx] = container;
-  } else {
-    updatedCts = [...currentVirt.containers, container];
+    throw new Error(
+      `Container ${container.ctid} already exists (${currentVirt.containers[existingIdx]?.hostname || 'unnamed'}). Creating a container with an existing ID would overwrite it — pick a different ID.`
+    );
   }
+  const updatedCts: LxcContainer[] = [...currentVirt.containers, container];
 
   const updatedState = {
     ...state,
@@ -740,6 +753,29 @@ export async function configureSriovAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
   validatePciBdf(bdf);
+
+  // A negative count is not a no-op: the daemon writes 0 to sriov_numvfs
+  // (teardown) and then skips re-allocation, destroying every VF while
+  // reporting success. Reject before anything reaches the daemon. The upper
+  // bound is enforced when the inventory knows this device's total; a
+  // missing inventory entry must not block the daemon's own check.
+  if (!Number.isInteger(numVfs) || numVfs < 0) {
+    throw new Error(`Invalid SR-IOV VF count for ${bdf}: expected an integer >= 0, got ${numVfs}`);
+  }
+  let devices: PciDeviceItem[] = [];
+  try {
+    devices = await getPciInventoryAction();
+  } catch {
+    // Inventory unavailable (daemon down): the daemon call below fails
+    // closed, and the daemon still enforces its own upper bound.
+    devices = [];
+  }
+  const device = devices.find((d) => d.bdf === bdf);
+  if (device && Number.isInteger(device.sriovTotalVfs) && numVfs > device.sriovTotalVfs) {
+    throw new Error(
+      `Invalid SR-IOV VF count for ${bdf}: ${numVfs} exceeds the device total of ${device.sriovTotalVfs}`
+    );
+  }
 
   const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'sriov',

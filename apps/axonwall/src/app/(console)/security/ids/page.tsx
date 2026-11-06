@@ -25,6 +25,7 @@ export default function IdsIpsPage() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [alerts, setAlerts] = useState<ThreatAlert[]>([]);
   const [services, setServices] = useState<LiveServiceInfo[]>([]);
+  const [servicesLoaded, setServicesLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [suricataEnabled, setSuricataEnabled] = useState(false);
   const [suricataMode, setSuricataMode] = useState<'ids' | 'ips'>('ips');
@@ -36,6 +37,7 @@ export default function IdsIpsPage() {
       .then(([alertData, serviceData, state]) => {
         setAlerts(alertData);
         setServices(serviceData);
+        setServicesLoaded(true);
         setFullState(state);
         if (state.suricata) {
           setSuricataEnabled(state.suricata.enabled);
@@ -45,6 +47,7 @@ export default function IdsIpsPage() {
       .catch(() => {
         setAlerts([]);
         setServices([]);
+        setServicesLoaded(false);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -91,7 +94,9 @@ export default function IdsIpsPage() {
   };
 
   const suricataService = services.find((s) => s.unit === 'suricata.service');
-  const suricataRunning = suricataService?.status === 'active' || suricataEnabled;
+  // Live service status only: the config flag says Suricata is desired, not
+  // that suricata.service is actually running.
+  const suricataRunning = suricataService?.status === 'active';
 
   const crowdsecService = services.find((s) => s.unit === 'crowdsec.service');
   const crowdsecRunning = crowdsecService?.status === 'active';
@@ -145,7 +150,7 @@ export default function IdsIpsPage() {
               variant={suricataRunning ? 'default' : 'secondary'}
               className={suricataRunning ? 'bg-emerald-500' : ''}
             >
-              {suricataRunning ? 'ONLINE' : 'STOPPED'}
+              {!servicesLoaded ? 'UNKNOWN' : suricataRunning ? 'ONLINE' : 'STOPPED'}
             </Badge>
           </CardHeader>
           <CardContent>
@@ -153,12 +158,18 @@ export default function IdsIpsPage() {
               <ShieldAlert className={`h-8 w-8 ${suricataRunning ? 'text-emerald-500' : 'text-gray-400'}`} />
               <div>
                 <div className="font-medium">
-                  Status: {suricataRunning ? `Active (${suricataMode.toUpperCase()} / NFQUEUE)` : 'Disabled / Inactive'}
+                  {!servicesLoaded
+                    ? 'Status unknown — service list failed to load'
+                    : suricataRunning
+                      ? `Active (${suricataMode.toUpperCase()} / NFQUEUE)`
+                      : 'Disabled / Inactive'}
                 </div>
                 <div className="text-sm text-muted-foreground">
-                  {suricataRunning
-                    ? `PID: ${suricataService?.pid || 'active'} · Memory: ${suricataService?.memory || 'configured in security.yaml'}`
-                    : 'Systemd service suricata.service is not currently active'}
+                  {!servicesLoaded
+                    ? 'Could not read systemd service status; the config flag alone does not prove Suricata is running'
+                    : suricataRunning
+                      ? `PID: ${suricataService?.pid || 'active'} · Memory: ${suricataService?.memory || 'configured in security.yaml'}`
+                      : 'Systemd service suricata.service is not currently active'}
                 </div>
               </div>
             </div>

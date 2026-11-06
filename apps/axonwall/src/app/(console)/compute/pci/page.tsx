@@ -52,7 +52,7 @@ export default function PciPassthroughPage() {
     setStatusBanner(null);
     try {
       const res = await bindPciVfioAction(bdf);
-      setStatusBanner({ type: 'success', message: res.message });
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || `Failed to bind ${bdf}` });
@@ -66,7 +66,7 @@ export default function PciPassthroughPage() {
     setStatusBanner(null);
     try {
       const res = await unbindPciVfioAction(bdf);
-      setStatusBanner({ type: 'success', message: res.message });
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || `Failed to unbind ${bdf}` });
@@ -78,12 +78,18 @@ export default function PciPassthroughPage() {
   const handleSriovSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sriovDev) return;
+    if (!Number.isInteger(sriovNumVfs) || sriovNumVfs < 0) {
+      setStatusBanner({ type: 'error', message: 'Invalid SR-IOV VF count: expected an integer >= 0.' });
+      return;
+    }
 
     setActionLoading(sriovDev.bdf);
     try {
       const res = await configureSriovAction(sriovDev.bdf, sriovNumVfs);
-      setStatusBanner({ type: 'success', message: res.message });
-      setSriovDev(null);
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+      if (res.success) {
+        setSriovDev(null);
+      }
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to configure SR-IOV' });
