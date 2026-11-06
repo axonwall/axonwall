@@ -596,10 +596,15 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 	}
 
 	// Set SSH keys if provided
+	// A-M27: a writeUserSSHKeys failure used to be discarded, so a user
+	// could be created "successfully" with no SSH key installed.
 	if len(req.SSHKeys) > 0 {
 		u, err := user.Lookup(username)
-		if err == nil {
-			_ = m.writeUserSSHKeys(username, u.HomeDir, req.SSHKeys)
+		if err != nil {
+			return fmt.Errorf("created user %s, but failed to look up home directory for SSH keys: %w", username, err)
+		}
+		if err := m.writeUserSSHKeys(username, u.HomeDir, req.SSHKeys); err != nil {
+			return fmt.Errorf("created user %s, but failed to install SSH keys: %w", username, err)
 		}
 	}
 
@@ -703,19 +708,25 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 	}
 
 	// Update lock status
+	// A-M27: usermod/passwd lock failures used to be discarded, so a
+	// "locked" local user stayed unlocked.
 	if req.PasswordLocked != nil {
+		action := "unlock"
+		usermodFlag, passwdFlag := "-U", "-u"
 		if *req.PasswordLocked {
-			if usermodPath, err := exec.LookPath("usermod"); err == nil {
-				_ = exec.Command(usermodPath, "-L", username).Run()
-			} else if passwdPath, err := exec.LookPath("passwd"); err == nil {
-				_ = exec.Command(passwdPath, "-l", username).Run()
-			}
+			action = "lock"
+			usermodFlag, passwdFlag = "-L", "-l"
+		}
+		var lockErr error
+		if usermodPath, err := exec.LookPath("usermod"); err == nil {
+			lockErr = exec.Command(usermodPath, usermodFlag, username).Run()
+		} else if passwdPath, err := exec.LookPath("passwd"); err == nil {
+			lockErr = exec.Command(passwdPath, passwdFlag, username).Run()
 		} else {
-			if usermodPath, err := exec.LookPath("usermod"); err == nil {
-				_ = exec.Command(usermodPath, "-U", username).Run()
-			} else if passwdPath, err := exec.LookPath("passwd"); err == nil {
-				_ = exec.Command(passwdPath, "-u", username).Run()
-			}
+			return fmt.Errorf("failed to %s user %s: neither usermod nor passwd is available", action, username)
+		}
+		if lockErr != nil {
+			return fmt.Errorf("failed to %s user %s: %w", action, username, lockErr)
 		}
 	}
 

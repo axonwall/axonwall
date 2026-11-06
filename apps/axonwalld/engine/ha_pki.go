@@ -612,12 +612,32 @@ func ConfigureMultiProviderSyncrepl(serverID int, peerIP string, baseDN string) 
 		return fmt.Errorf("invalid characters in LDAP replication password")
 	}
 
-	// Update cn=replicator password in local DIT to match repl.pw
-	if replHash, err := HashSSHA(replPass); err == nil {
-		replLDIF := fmt.Sprintf("dn: cn=replicator,%s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n", baseDN, replHash)
+	// Update cn=replicator password in local DIT to match repl.pw.
+	// A-M28: this step used to be the one whose error was discarded, so
+	// syncrepl was configured with credentials that were never set and
+	// replication silently never worked. A failed modify now fails the
+	// whole setup. `replace:` fails with "No such attribute" when the
+	// entry has no userPassword yet (same trap as H6), so fall back to
+	// `add:` in that case.
+	replHash, err := HashSSHA(replPass)
+	if err != nil {
+		return fmt.Errorf("failed to hash LDAP replication password: %w", err)
+	}
+	modifyReplPassword := func(action string) (string, error) {
+		replLDIF := fmt.Sprintf("dn: cn=replicator,%s\nchangetype: modify\n%s: userPassword\nuserPassword: %s\n", baseDN, action, replHash)
 		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
 		cmd.Stdin = strings.NewReader(replLDIF)
-		_ = cmd.Run()
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := modifyReplPassword("replace"); err != nil {
+		if strings.Contains(out, "No such attribute") {
+			if out2, err2 := modifyReplPassword("add"); err2 != nil {
+				return fmt.Errorf("failed to set cn=replicator password (add fallback): %s (%w)", strings.TrimSpace(out2), err2)
+			}
+		} else {
+			return fmt.Errorf("failed to set cn=replicator password: %s (%w)", strings.TrimSpace(out), err)
+		}
 	}
 
 	// Configure cn=config with TLS certificates and ServerID

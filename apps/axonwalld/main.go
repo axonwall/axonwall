@@ -2563,7 +2563,12 @@ func main() {
 					return
 				}
 				if req.Action == "register" && req.Spec != nil {
-					virtManager.RegisterVMSpec(*req.Spec)
+					// A-M26: surface a rejected spec instead of reporting
+					// success for a register that stored nothing.
+					if err := virtManager.RegisterVMSpec(*req.Spec); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 					return

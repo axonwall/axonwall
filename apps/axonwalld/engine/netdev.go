@@ -100,17 +100,28 @@ func hardenDelegatedWANWithRoots(procSysNetRoot string, runIpCmds bool, devs ...
 			fullPath := filepath.Join(procSysNetRoot, s.relPath)
 			_ = os.MkdirAll(filepath.Dir(fullPath), 0755)
 			if err := os.WriteFile(fullPath, []byte(s.val+"\n"), 0644); err != nil {
-				// On live systems where /proc/sys/net/... might not exist yet if interface isn't created,
-				// only return error if the directory exists and write failed, or in unit tests with custom root.
-				if procSysNetRoot != "/proc/sys/net" {
+				// A-M30: a failed sysctl write used to be swallowed on
+				// live systems, so hardening could silently do nothing
+				// and return nil. Only tolerate the failure when the
+				// interface's sysctl directory does not exist yet (the
+				// interface is not created, or the feature is compiled
+				// out); when the directory exists, the write itself
+				// failed and the host is not isolated.
+				if _, statErr := os.Stat(filepath.Dir(fullPath)); statErr == nil {
 					return fmt.Errorf("failed to write sysctl %s: %w", fullPath, err)
 				}
 			}
 		}
 
 		if runIpCmds {
-			_ = exec.Command("ip", "addr", "flush", "dev", dev).Run()
-			_ = exec.Command("ip", "link", "set", "dev", dev, "up").Run()
+			// A-M30: the flush and link-up used to be discarded, so a
+			// hardening step that never ran still reported success.
+			if out, err := exec.Command("ip", "addr", "flush", "dev", dev).CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to flush addresses on %s: %s (%w)", dev, strings.TrimSpace(string(out)), err)
+			}
+			if out, err := exec.Command("ip", "link", "set", "dev", dev, "up").CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to bring up %s: %s (%w)", dev, strings.TrimSpace(string(out)), err)
+			}
 		}
 	}
 	return nil
@@ -133,36 +144,65 @@ func EnsureBridge(spec BridgeSpec) error {
 	}
 
 	// 2. Configure bridge sysfs attributes
+	// A-M30: attribute failures used to be discarded, so the bridge
+	// could come up without the requested filtering/STP/netfilter state.
 	bridgeSysDir := filepath.Join(SysfsNetRoot, spec.Name, "bridge")
+	writeBridgeAttr := func(name, val string) error {
+		if err := os.WriteFile(filepath.Join(bridgeSysDir, name), []byte(val+"\n"), 0644); err != nil {
+			return fmt.Errorf("failed to write bridge attribute %s=%s on %s: %w", name, val, spec.Name, err)
+		}
+		return nil
+	}
 	if spec.DisableNetfilter {
 		for _, nfFile := range []string{"nf_call_iptables", "nf_call_ip6tables", "nf_call_arptables"} {
-			_ = os.WriteFile(filepath.Join(bridgeSysDir, nfFile), []byte("0\n"), 0644)
+			if err := writeBridgeAttr(nfFile, "0"); err != nil {
+				return err
+			}
 		}
-		_ = exec.Command("ip", "link", "set", "dev", spec.Name, "type", "bridge",
-			"nf_call_iptables", "0", "nf_call_ip6tables", "0", "nf_call_arptables", "0").Run()
+		if out, err := exec.Command("ip", "link", "set", "dev", spec.Name, "type", "bridge",
+			"nf_call_iptables", "0", "nf_call_ip6tables", "0", "nf_call_arptables", "0").CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to disable netfilter on bridge %s: %s (%w)", spec.Name, strings.TrimSpace(string(out)), err)
+		}
 	}
 
 	vlanVal := "0"
 	if spec.VlanFiltering {
 		vlanVal = "1"
 	}
-	_ = os.WriteFile(filepath.Join(bridgeSysDir, "vlan_filtering"), []byte(vlanVal+"\n"), 0644)
-	_ = exec.Command("ip", "link", "set", "dev", spec.Name, "type", "bridge", "vlan_filtering", vlanVal).Run()
+	if err := writeBridgeAttr("vlan_filtering", vlanVal); err != nil {
+		return err
+	}
+	if out, err := exec.Command("ip", "link", "set", "dev", spec.Name, "type", "bridge", "vlan_filtering", vlanVal).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to set vlan_filtering=%s on bridge %s: %s (%w)", vlanVal, spec.Name, strings.TrimSpace(string(out)), err)
+	}
 
 	// Disable STP on WAN/LAN appliance bridges by default to avoid forwarding delay
-	_ = os.WriteFile(filepath.Join(bridgeSysDir, "stp_state"), []byte("0\n"), 0644)
+	if err := writeBridgeAttr("stp_state", "0"); err != nil {
+		return err
+	}
 
 	// 3. Enslave member interfaces and bring them up
+	// A-M30: a renamed/removed member used to be silently skipped, so
+	// the bridge came up empty and address-less while reporting success.
 	for _, member := range spec.Members {
-		_ = exec.Command("ip", "link", "set", "dev", member, "master", spec.Name).Run()
-		_ = exec.Command("ip", "link", "set", "dev", member, "up").Run()
+		if _, err := net.InterfaceByName(member); err != nil {
+			return fmt.Errorf("bridge member interface %q does not exist: %w", member, err)
+		}
+		if out, err := exec.Command("ip", "link", "set", "dev", member, "master", spec.Name).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to enslave %s to bridge %s: %s (%w)", member, spec.Name, strings.TrimSpace(string(out)), err)
+		}
+		if out, err := exec.Command("ip", "link", "set", "dev", member, "up").CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to bring up bridge member %s: %s (%w)", member, strings.TrimSpace(string(out)), err)
+		}
 	}
 
 	// 4. Configure optional IPv4/IPv6 CIDR address on the bridge
 	if spec.AddressCIDR != "" {
 		out, _ := exec.Command("ip", "addr", "show", "dev", spec.Name).CombinedOutput()
 		if !strings.Contains(string(out), spec.AddressCIDR) {
-			_ = exec.Command("ip", "addr", "add", spec.AddressCIDR, "dev", spec.Name).Run()
+			if out, err := exec.Command("ip", "addr", "add", spec.AddressCIDR, "dev", spec.Name).CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to assign %s to bridge %s: %s (%w)", spec.AddressCIDR, spec.Name, strings.TrimSpace(string(out)), err)
+			}
 		}
 	}
 
@@ -173,11 +213,15 @@ func EnsureBridge(spec BridgeSpec) error {
 
 	// 6. Isolate host stack if requested (e.g., on br-wan)
 	if spec.IsolateHostStack {
-		_ = HardenDelegatedWAN(spec.Name)
+		if err := HardenDelegatedWAN(spec.Name); err != nil {
+			return fmt.Errorf("failed to isolate host stack on bridge %s: %w", spec.Name, err)
+		}
 		nftRules := BuildWanBridgeHostIsolationNft(spec.Name)
 		cmd := exec.Command("nft", "-f", "-")
 		cmd.Stdin = strings.NewReader(nftRules)
-		_ = cmd.Run()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to apply host-isolation nft rules on bridge %s: %s (%w)", spec.Name, strings.TrimSpace(string(out)), err)
+		}
 	}
 
 	return nil
