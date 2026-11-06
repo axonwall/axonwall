@@ -43,33 +43,51 @@ export default function HighAvailabilityPage() {
   const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        if (state.ha) {
-          setEnabled(state.ha.enabled);
-          const haRole = state.ha.role || state.ha.nodeRole || 'master';
-          setRole(haRole === 'backup' ? 'secondary' : 'primary');
-          const firstVrrp = state.ha.vrrpInstances?.[0];
-          if (firstVrrp) {
-            setVrid(firstVrrp.vrid);
-            if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
-            if (firstVrrp.virtualIps?.[0]) setVirtualIp(firstVrrp.virtualIps[0]);
-          }
-          if (state.ha.syncInterface) setSyncInterface(state.ha.syncInterface);
-          if (state.ha.peerIp || state.ha.peerAddress) {
-            setPeerIp(state.ha.peerIp || state.ha.peerAddress);
-          }
-          if (state.ha.sqliteSync) {
-            setSqliteSyncEnabled(state.ha.sqliteSync.enabled);
-            setSqliteSyncMode(state.ha.sqliteSync.mode);
-            setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
-            setSyncTransport(state.ha.sqliteSync.transport || 'mtls');
-            setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
-          }
+  // C-A1: nothing editable renders until the real HA config loads. A
+  // save before (or after a failed) load used to persist the defaults
+  // above — HA disabled, VRID 51, empty sync password — over the live
+  // configuration (the C17 validation only runs when enabled is true).
+  const [isLoadingHa, setIsLoadingHa] = useState(true);
+  const [haLoaded, setHaLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadHaState = async () => {
+    setIsLoadingHa(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      if (state.ha) {
+        setEnabled(state.ha.enabled);
+        const haRole = state.ha.role || state.ha.nodeRole || 'master';
+        setRole(haRole === 'backup' ? 'secondary' : 'primary');
+        const firstVrrp = state.ha.vrrpInstances?.[0];
+        if (firstVrrp) {
+          setVrid(firstVrrp.vrid);
+          if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
+          if (firstVrrp.virtualIps?.[0]) setVirtualIp(firstVrrp.virtualIps[0]);
         }
-      })
-      .catch(() => {});
+        if (state.ha.syncInterface) setSyncInterface(state.ha.syncInterface);
+        if (state.ha.peerIp || state.ha.peerAddress) {
+          setPeerIp(state.ha.peerIp || state.ha.peerAddress);
+        }
+        if (state.ha.sqliteSync) {
+          setSqliteSyncEnabled(state.ha.sqliteSync.enabled);
+          setSqliteSyncMode(state.ha.sqliteSync.mode);
+          setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
+          setSyncTransport(state.ha.sqliteSync.transport || 'mtls');
+          setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
+        }
+      }
+      setHaLoaded(true);
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load High Availability configuration.');
+    } finally {
+      setIsLoadingHa(false);
+    }
+  };
+
+  useEffect(() => {
+    loadHaState();
   }, []);
 
   useEffect(() => {
@@ -87,6 +105,9 @@ export default function HighAvailabilityPage() {
   };
 
   const handleSaveHa = async () => {
+    // C-A1: defense in depth — the form does not render before a
+    // successful load, but never save from unloaded defaults either.
+    if (!haLoaded) return;
     setIsSaving(true);
     setSyncErrorMsg(null);
     try {
@@ -192,6 +213,42 @@ export default function HighAvailabilityPage() {
     );
   };
 
+  // C-A1: loading/error screens until the real HA config loads, so Save
+  // can never persist defaults over the live configuration. The sync
+  // trust status load is display-only and does not gate the form.
+  if (isLoadingHa) {
+    return (
+      <div className="p-8 space-y-8 max-w-7xl mx-auto pb-16">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading High Availability configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !haLoaded) {
+    return (
+      <div className="p-8 space-y-8 max-w-7xl mx-auto pb-16">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <ShieldAlert className="w-4 h-4" />
+            <span>{loadError || 'High Availability configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current HA configuration is unknown, so editing and saving are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadHaState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto pb-16">
       {/* Top Banner */}
@@ -237,7 +294,7 @@ export default function HighAvailabilityPage() {
           <button
             type="button"
             onClick={handleSaveHa}
-            disabled={isSaving}
+            disabled={isSaving || !haLoaded}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
           >
             <Save className="w-4 h-4" />

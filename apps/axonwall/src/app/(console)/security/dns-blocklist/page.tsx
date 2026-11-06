@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Sliders,
   Check,
+  XCircle,
 } from 'lucide-react';
 import type { DesiredState, DnsBlocklistConfig } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
@@ -57,29 +58,45 @@ export default function DnsBlocklistPage() {
   const [newWhiteDomain, setNewWhiteDomain] = useState('');
   const [newBlackDomain, setNewBlackDomain] = useState('');
 
-  useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        if (state.dns?.blocklist) {
-          setEnabled(state.dns.blocklist.enabled);
-          setAction(state.dns.blocklist.action || 'always_null');
-          if (state.dns.blocklist.feeds?.length) {
-            setFeeds(
-              state.dns.blocklist.feeds.map((f, i) => ({
-                id: f.id || `feed-${i}`,
-                name: f.name,
-                url: f.url,
-                entriesCount: f.entriesCount || 0,
-                enabled: f.enabled,
-              }))
-            );
-          }
-          setWhitelist(state.dns.blocklist.whitelist || []);
-          setBlacklist(state.dns.blocklist.blacklist || []);
+  // C-A1: nothing editable renders until the real blocklist config
+  // loads. A save before (or after a failed) load used to persist the
+  // local defaults — including the demo feeds (see C-A2) — over the
+  // live configuration.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      if (state.dns?.blocklist) {
+        setEnabled(state.dns.blocklist.enabled);
+        setAction(state.dns.blocklist.action || 'always_null');
+        if (state.dns.blocklist.feeds?.length) {
+          setFeeds(
+            state.dns.blocklist.feeds.map((f, i) => ({
+              id: f.id || `feed-${i}`,
+              name: f.name,
+              url: f.url,
+              entriesCount: f.entriesCount || 0,
+              enabled: f.enabled,
+            }))
+          );
         }
-      })
-      .catch(() => {});
+        setWhitelist(state.dns.blocklist.whitelist || []);
+        setBlacklist(state.dns.blocklist.blacklist || []);
+      }
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load DNS blocklist configuration.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadState();
   }, []);
 
   const toggleFeed = (id: string) => {
@@ -149,6 +166,41 @@ export default function DnsBlocklistPage() {
     setBlacklist([...blacklist, newBlackDomain.trim()]);
     setNewBlackDomain('');
   };
+
+  // C-A1: loading/error screens until the real blocklist config loads,
+  // so Save & Deploy can never persist defaults over the live config.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading DNS blocklist configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'DNS blocklist configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current blocklist configuration is unknown, so editing and saving are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
