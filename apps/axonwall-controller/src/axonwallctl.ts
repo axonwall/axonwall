@@ -583,6 +583,22 @@ function cmdDiff() {
             hasDiff = true;
             console.log(res.stdout);
           }
+        } else {
+          // B2-L3: a file with no committed counterpart used to be
+          // skipped entirely, so an untracked config file reported
+          // as "no differences" while GitOps was missing a whole
+          // file. Report it as added instead.
+          hasDiff = true;
+          const res = spawnSync(
+            'diff',
+            ['-u', '--label', `committed/${filename} (no committed version)`, '--label', `/etc/axonwall/${filename}`, '/dev/null', candidatePath],
+            { encoding: 'utf-8' }
+          );
+          if (res.stdout && res.stdout.trim()) {
+            console.log(res.stdout);
+          } else {
+            console.log(`${cYellow}[!] ${filename} exists in /etc/axonwall but has no committed version in GitOps.${cReset}`);
+          }
         }
       }
       if (!hasDiff) {
