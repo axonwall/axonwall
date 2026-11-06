@@ -2,10 +2,12 @@
 
 import React, { useState, useEffect } from 'react';
 import { Shield, Download, AlertTriangle, Key, CheckCircle2, Plus, Trash2 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function TlsDecryptionPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [bypassedDomains, setBypassedDomains] = useState<string[]>([
@@ -50,7 +52,7 @@ export default function TlsDecryptionPage() {
         tlsDecryption: tlsObj,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved TLS Decryption policy to /etc/axonwall/security.yaml');
     } catch (err: any) {
       setEnabled(prevEnabled);

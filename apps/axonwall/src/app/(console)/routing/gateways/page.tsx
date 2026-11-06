@@ -11,15 +11,14 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Activity, Plus, ServerCrash, Settings2, ShieldCheck, Wifi, Loader2, Trash2 } from 'lucide-react';
-import {
-  getGatewaysTelemetry,
+import { getGatewaysTelemetry,
   getCurrentDesiredState,
-  applyDesiredState,
-  type LiveGatewayInfo,
-} from '@/server/agent';
+  type LiveGatewayInfo } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, Gateway, GatewayGroup } from '@axonwall/lib/schemas';
 
 export default function GatewaysPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [gateways, setGateways] = useState<LiveGatewayInfo[]>([]);
   const [configuredGateways, setConfiguredGateways] = useState<Gateway[]>([]);
@@ -82,7 +81,7 @@ export default function GatewaysPage() {
       const nextState: DesiredState = { ...current, gateways: nextGws };
       setFullState(nextState);
       setConfiguredGateways(nextGws);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved gateway to /etc/axonwall/routing.yaml');
       setNewName('');
       setNewIp('');
@@ -103,7 +102,7 @@ export default function GatewaysPage() {
       const nextState: DesiredState = { ...current, gateways: nextGws };
       setFullState(nextState);
       setConfiguredGateways(nextGws);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Removed gateway from /etc/axonwall/routing.yaml');
     } catch (err: any) {
       setConfiguredGateways(prevConfiguredGateways);

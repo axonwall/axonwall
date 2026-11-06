@@ -341,7 +341,12 @@ export async function logoutAction() {
   redirect('/login');
 }
 
-let pendingMfaEnrollment: { secret: string; expiresAt: number } | null = null;
+// D17: pending MFA enrollments are keyed per user (Map<username, ...>),
+// not a single process-global slot. A second admin's Setup must not
+// overwrite the first admin's pending secret, and a restart between
+// Setup and Verify must fail closed instead of silently falling back to
+// trusting whatever secret the client supplies.
+const pendingMfaEnrollments = new Map<string, { secret: string; expiresAt: number }>();
 
 export async function generateMfaSetup() {
   const session = await getSession();
@@ -353,7 +358,13 @@ export async function generateMfaSetup() {
   const { generateSecret, generateURI } = require('otplib');
   const plugins = totpPlugins();
   const secret = generateSecret(plugins);
-  pendingMfaEnrollment = { secret, expiresAt: Date.now() + 10 * 60 * 1000 };
+  // D17: store this admin's pending secret under their own username so a
+  // concurrent enrollment by another admin cannot overwrite it. Drop
+  // expired entries opportunistically so the map cannot grow unboundedly.
+  for (const [user, entry] of pendingMfaEnrollments) {
+    if (entry.expiresAt <= Date.now()) pendingMfaEnrollments.delete(user);
+  }
+  pendingMfaEnrollments.set(session.username, { secret, expiresAt: Date.now() + 10 * 60 * 1000 });
   const otpauth = generateURI({ issuer: 'Axonwall', label: session.username, secret, ...plugins });
 
   const QRCode = require('qrcode');
@@ -369,13 +380,21 @@ export async function verifyMfaSetup(secret: string, token: string) {
     throw new Error('Forbidden: Only the local break-glass administrator can configure local MFA');
   }
 
-  const enrolledSecret =
-    pendingMfaEnrollment && pendingMfaEnrollment.expiresAt > Date.now()
-      ? pendingMfaEnrollment.secret
-      : secret;
-  if (!enrolledSecret || (pendingMfaEnrollment && pendingMfaEnrollment.secret !== secret)) {
+  // D17: fail closed when this user has no live pending enrollment for
+  // the secret they present. There is no fallback to the client-supplied
+  // secret: after a restart (or expiry) the server holds no proof that
+  // the secret was ever displayed to this user as a QR code, so Verify
+  // must refuse instead of accepting any self-chosen secret whose TOTP
+  // happens to check out.
+  const pending = pendingMfaEnrollments.get(session.username);
+  if (!pending || pending.expiresAt <= Date.now()) {
+    if (pending) pendingMfaEnrollments.delete(session.username);
     return { success: false, error: 'MFA setup session expired or secret mismatch. Please generate a new QR code.' };
   }
+  if (pending.secret !== secret) {
+    return { success: false, error: 'MFA setup session expired or secret mismatch. Please generate a new QR code.' };
+  }
+  const enrolledSecret = pending.secret;
 
   const { verify } = require('otplib');
   const result = await verify({ secret: enrolledSecret, token, ...totpPlugins(), epochTolerance: 30 });
@@ -384,7 +403,7 @@ export async function verifyMfaSetup(secret: string, token: string) {
     return { success: false, error: 'Invalid TOTP code.' };
   }
 
-  pendingMfaEnrollment = null;
+  pendingMfaEnrollments.delete(session.username);
 
   // Persist the enrollment (audit B-08): the secret is written to
   // /etc/axonwall/mfa.env -- the same file the console's MFA reset

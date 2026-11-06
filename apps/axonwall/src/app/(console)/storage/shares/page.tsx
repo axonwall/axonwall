@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { FolderKanban, Plus, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function NasSharesPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [smbName, setSmbName] = useState('corp-share');
   const [smbPath, setSmbPath] = useState('/mnt/tank/shares/general');
@@ -30,7 +32,7 @@ export default function NasSharesPage() {
       if (next.nas) {
         next.nas.smbShares = next.nas.smbShares.filter((s) => s.name !== shareName);
       }
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Removed SMB share ${shareName}.`);
     } catch (err: any) {
@@ -49,7 +51,7 @@ export default function NasSharesPage() {
       if (next.nas) {
         next.nas.nfsExports = next.nas.nfsExports.filter((e) => e.path !== exportPath);
       }
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Removed NFS export ${exportPath}.`);
     } catch (err: any) {
@@ -92,7 +94,7 @@ export default function NasSharesPage() {
           enabled: true,
         },
       ];
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Saved SMB share ${smbName.trim()}.`);
     } catch (err: any) {
@@ -131,7 +133,7 @@ export default function NasSharesPage() {
           enabled: true,
         },
       ];
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Saved NFSv4 export ${nfsPath.trim()}.`);
     } catch (err: any) {

@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import { Server, Plus, Trash2, CheckCircle2, AlertTriangle, FileCode, ShieldCheck, Save } from 'lucide-react';
 import { compileKeaDhcp4 } from '@axonwall/lib/compile/kea';
 import { inferInterfaceRole, isInterfaceAuthoritativeDhcp, type DesiredState, type DhcpConfig, type Interface } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 const DEFAULT_DHCP: DhcpConfig = {
   enabled: true,
@@ -23,6 +24,7 @@ interface ReservationDraft {
 }
 
 export default function DhcpPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [dhcp, setDhcp] = useState<DhcpConfig>(DEFAULT_DHCP);
   const [interfaces, setInterfaces] = useState<Interface[]>(DEFAULT_INTERFACES);
@@ -75,7 +77,7 @@ export default function DhcpPage() {
         dhcp: updatedDhcp,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       // B19: check res.success — a daemon success:false message must
       // not render in the green success banner.
       if (res.success) {

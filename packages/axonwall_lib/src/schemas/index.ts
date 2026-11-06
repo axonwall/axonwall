@@ -1059,12 +1059,18 @@ export const SatelliteNodeSchema = z.object({
   lanAddress: z.string().optional(),
   arch: z.enum(['mipsle', 'arm64', 'amd64', 'armv7', 'unknown']).default('unknown'),
   os: z.string().default('Linux'),
-  ip: z.string().default('127.0.0.1'),
+  // D16: no invented defaults. A node whose address was never reported
+  // persists as unknown (undefined) instead of 127.0.0.1 — the loopback
+  // default used to be written to fleet.yaml as if it were the node's
+  // real address.
+  ip: z.string().optional(),
   lastSeen: z.string().optional(),
   status: z.enum(['online', 'offline', 'enrolling', 'degraded']).default('enrolling'),
   ztpToken: z.string().optional(),
   wireguard: z.object({
-    tunnelIp: z.string().default('10.99.0.2/24'),
+    // D16: same — no invented 10.99.0.2/24 default. Tunnel IPs are
+    // allocated explicitly (with a collision check) at enrollment time.
+    tunnelIp: z.string().optional(),
     publicKey: z.string().optional(),
     endpoint: z.string().optional(),
     connected: z.boolean().default(false),

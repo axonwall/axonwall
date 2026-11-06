@@ -18,9 +18,11 @@ import {
   Check,
   BookOpen,
 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState, getHASyncTrustStatus, getSystemServicesStatus, type HASyncTrustStatus, type SystemServiceInfo } from '@/server/agent';
+import { getCurrentDesiredState, getHASyncTrustStatus, getSystemServicesStatus, type HASyncTrustStatus, type SystemServiceInfo } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function HighAvailabilityPage() {
+  const { applyState } = useDesiredStateApply();
   const [enabled, setEnabled] = useState(false);
   const [role, setRole] = useState<'primary' | 'secondary'>('primary');
   const [vrid, setVrid] = useState(51);
@@ -61,7 +63,10 @@ export default function HighAvailabilityPage() {
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-
+  // C17 residual: the form used to be live from first paint while the
+  // mount load ran (or silently failed), so a save before load completed
+  // disabled HA, reset VRID to 51, and wiped instance-0's VRRP auth
+  // password. Nothing saves until the load succeeds.
   // C-A1: nothing editable renders until the real HA config loads. A
   // save before (or after a failed) load used to persist the defaults
   // above — HA disabled, VRID 51, empty sync password — over the live
@@ -163,7 +168,10 @@ export default function HighAvailabilityPage() {
   const handleSaveHa = async () => {
     // C-A1: defense in depth — the form does not render before a
     // successful load, but never save from unloaded defaults either.
-    if (!haLoaded) return;
+    if (!haLoaded) {
+      setSyncErrorMsg('HA configuration has not loaded yet. Wait for it to load (or retry) before saving.');
+      return;
+    }
     setIsSaving(true);
     setSyncErrorMsg(null);
     try {
@@ -243,7 +251,7 @@ export default function HighAvailabilityPage() {
                 },
               ]
             : [];
-      await applyDesiredState({
+      await applyState({
         ...state,
         ha: {
           ...state.ha,
@@ -289,9 +297,13 @@ export default function HighAvailabilityPage() {
       }
       setTimeout(() => setSyncStatusMsg(null), 4000);
     } catch (err: any) {
-      // A11: a failed save used to render in the emerald success
-      // banner. Route it to the amber error banner instead.
-      setSyncErrorMsg(`Failed to save High Availability configuration: ${err?.message || 'Unknown error'}`);
+      // C2: surface a fingerprint conflict verbatim — it tells the
+      // operator to reload instead of retrying into the same refusal.
+      // Other failures go to the error banner (A11) with detail.
+      const message = err?.message?.includes('Configuration changed since it was loaded')
+        ? err.message
+        : `Failed to save High Availability configuration: ${err?.message || 'Unknown error'}`;
+      setSyncErrorMsg(message);
     } finally {
       setIsSaving(false);
     }
@@ -390,6 +402,7 @@ export default function HighAvailabilityPage() {
             type="button"
             onClick={handleSaveHa}
             disabled={isSaving || !haLoaded}
+            title={!haLoaded ? 'HA configuration is still loading' : undefined}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
           >
             <Save className="w-4 h-4" />
@@ -424,6 +437,27 @@ export default function HighAvailabilityPage() {
             className="text-slate-400 hover:text-white text-xs cursor-pointer"
           >
             ✕
+          </button>
+        </div>
+      )}
+
+      {/* C17 residual: loading / load-error state. The form shows empty
+          defaults until the load succeeds, so saving must stay impossible
+          until then. */}
+      {!haLoaded && !loadError && (
+        <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-400 text-sm">
+          Loading HA configuration…
+        </div>
+      )}
+
+      {loadError && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-center justify-between">
+          <span>{loadError}</span>
+          <button
+            onClick={loadHaState}
+            className="ml-4 shrink-0 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs font-semibold transition cursor-pointer"
+          >
+            Retry
           </button>
         </div>
       )}
@@ -764,7 +798,8 @@ export default function HighAvailabilityPage() {
                     <button
                       type="button"
                       onClick={handleSaveHa}
-                      disabled={isSaving}
+                      disabled={isSaving || !haLoaded}
+                      title={!haLoaded ? 'HA configuration is still loading' : undefined}
                       className="w-full sm:w-auto px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
                     >
                       <Check className="w-4 h-4" />

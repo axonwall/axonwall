@@ -3,10 +3,12 @@
 import { useState, useEffect } from 'react';
 import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu, AlertTriangle, XCircle } from 'lucide-react';
 import { compileTrafficShaper } from '@axonwall/lib/compile/tc';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, TrafficShaperConfig } from '@axonwall/lib/schemas';
 
 export default function TrafficShaperPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [shaperIface, setShaperIface] = useState('eth0');
@@ -95,7 +97,7 @@ export default function TrafficShaperPage() {
         trafficShaper: currentConfig,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved Traffic Shaper configuration to /etc/axonwall/firewall.yaml');
       setApplied(true);
       setTimeout(() => setApplied(false), 3000);

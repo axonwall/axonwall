@@ -5,11 +5,13 @@ import Link from 'next/link';
 import { KeyRound, Plus, Trash2, Copy, Check, FileText, Save, CheckCircle2, ShieldCheck, AlertCircle } from 'lucide-react';
 import { compileWireGuard } from '@axonwall/lib/compile/wireguard';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
 import { getWireGuardServerPublicKey } from '@/server/wg';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function WireGuardPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedClientConf, setSelectedClientConf] = useState<string | null>(null);
@@ -99,7 +101,7 @@ export default function WireGuardPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved WireGuard configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
       setServerConfig(prevServerConfig);

@@ -16,7 +16,6 @@ import {
 } from 'lucide-react';
 import {
   getDeceptionMeshStatusAction,
-  soarBlockIPAction,
   type DeceptionCanary,
 } from '@/server/vigilante';
 
@@ -45,23 +44,10 @@ export default function DeceptionMeshPage() {
     loadData();
   }, []);
 
-  const handleContain = async (attackerIp?: string) => {
-    setStatusBanner(null);
-    if (!attackerIp) {
-      setStatusBanner({
-        type: 'error',
-        message: 'No external attacker source IP recorded for this decoy canary; refusing to quarantine the local decoy address.',
-      });
-      return;
-    }
-    const res = await soarBlockIPAction(attackerIp, 86400);
-    if (res.success) {
-      setStatusBanner({ type: 'success', message: `Offender contained: ${res.message}` });
-      loadData();
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
-    }
-  };
+  // D13: handleContain was removed with the live Quarantine button: it
+  // could only ever error, because no canary ever carries an attacker IP.
+  // If canary-trip telemetry starts supplying one, re-add the button and
+  // a handler that passes that real IP to soarBlockIPAction.
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
@@ -171,13 +157,21 @@ export default function DeceptionMeshPage() {
                   <span className="text-[10px] text-slate-500 uppercase block">Trip Count</span>
                   <span className="font-mono font-bold text-amber-300">{canary.trippedCount} Hits</span>
                 </div>
+                {/* D13: no attacker IP is ever supplied for a canary
+                    (DeceptionCanary carries no lastAttackerIp and the
+                    server action returns none), so a live "Quarantine
+                    Source" button can only ever produce the error banner.
+                    Render it disabled with the reason instead of a button
+                    that always fails. It becomes live only when canary-trip
+                    telemetry supplies a real attacker IP. */}
                 {canary.status === 'triggered' && (
                   <button
-                    onClick={() => handleContain((canary as any).lastAttackerIp)}
-                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white font-semibold rounded-lg text-xs transition-colors flex items-center gap-1.5 shadow-lg shadow-rose-900/30"
+                    disabled
+                    title="No attacker source IP was recorded for this canary, so there is nothing to quarantine."
+                    className="px-3 py-1.5 bg-slate-800 text-slate-500 font-semibold rounded-lg text-xs flex items-center gap-1.5 cursor-not-allowed"
                   >
                     <Zap className="w-3.5 h-3.5" />
-                    Quarantine Source
+                    Quarantine Source (no attacker IP recorded)
                   </button>
                 )}
               </div>

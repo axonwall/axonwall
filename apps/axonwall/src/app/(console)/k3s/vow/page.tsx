@@ -19,7 +19,8 @@ import {
   Boxes,
   KeyRound,
 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { VowConfigSchema, type DesiredState, type VowConfig, type VowCdRunner } from '@axonwall/lib/schemas';
 import {
   isPluginEnabled,
@@ -50,6 +51,7 @@ const CATEGORIES: Array<'All' | VowAppCategory> = [
 ];
 
 export default function VigilantOctoWafflePage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [saving, setSaving] = useState(false);
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -111,7 +113,7 @@ export default function VigilantOctoWafflePage() {
       const next = structuredClone(state);
       const currentVow = next.vow ?? VowConfigSchema.parse({ enabled: true });
       next.vow = updater(currentVow, next);
-      const res = await applyDesiredState(next);
+      const res = await applyState(next);
       setState(next);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));
@@ -136,7 +138,7 @@ export default function VigilantOctoWafflePage() {
     setBanner(null);
     try {
       const { state: next, autoEnabledDependencies } = enablePluginWithDependencies('vigilant-octo-waffle', state);
-      const res = await applyDesiredState(next);
+      const res = await applyState(next);
       setState(next);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));

@@ -2,12 +2,14 @@
 
 import { useState, useEffect } from 'react';
 import { Shield, Plus, Copy, Check, Server, Users, Key, Save, CheckCircle2, AlertCircle } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 type Tab = 'machines' | 'users' | 'keys';
 
 export default function MeshVpnPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<Tab>('machines');
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [headscaleEnabled, setHeadscaleEnabled] = useState(false);
@@ -55,7 +57,7 @@ export default function MeshVpnPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       }

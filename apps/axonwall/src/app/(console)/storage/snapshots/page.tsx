@@ -4,14 +4,15 @@ import { useState, useEffect } from 'react';
 import { Camera, Plus, ArrowRightLeft, AlertTriangle } from 'lucide-react';
 import {
   getCurrentDesiredState,
-  applyDesiredState,
   getNasSnapshotsRuntime,
   createNasSnapshotAction,
   type NasSnapshotItem,
 } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function ZfsSnapshotsPage() {
+  const { applyState } = useDesiredStateApply();
   // C-B13: the runtime snapshot list was fetched into `snapshots` and
   // then never rendered, so a snapshot created by "Create Snapshot
   // Now" could only be trusted from the banner text. The list is now
@@ -86,7 +87,7 @@ export default function ZfsSnapshotsPage() {
           enabled: true,
         },
       ];
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       // C-B7: no scheduler or `zfs send` loop consumes snapshotPolicies
       // anywhere — the policy is only recorded. Say so, instead of

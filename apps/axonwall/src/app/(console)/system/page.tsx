@@ -28,13 +28,14 @@ import {
 } from '@/server/gitops';
 import {
   getCurrentDesiredState,
-  applyDesiredState,
   getYamlConfigFilesSnapshot,
   saveYamlDomainFile,
 } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { AXONWALL_YAML_DOMAINS, type AxonwallYamlDomainFile } from '@axonwall/lib/yaml';
 
 export default function SystemPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<'yaml' | 'general' | 'gitops'>('yaml');
 
   // General System Settings
@@ -134,7 +135,7 @@ export default function SystemPage() {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      await applyDesiredState({
+      await applyState({
         ...state,
         system: {
           ...state.system,

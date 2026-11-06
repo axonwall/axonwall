@@ -17,7 +17,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { MeshGraph } from './MeshGraph';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 interface WifiRadioInfo {
   radio: string;
@@ -70,6 +71,7 @@ function formatUptime(seconds: number): string {
 }
 
 export default function FleetPage() {
+  const { applyState } = useDesiredStateApply();
   const [satellites, setSatellites] = useState<SatelliteNodeView[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [listenPort, setListenPort] = useState(2966);
@@ -90,6 +92,9 @@ export default function FleetPage() {
   const [newNodeFastpath, setNewNodeFastpath] = useState(true);
   const [copied, setCopied] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  // D16: persist failures used to be silently swallowed, leaving the UI
+  // showing a change as applied when it was not.
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [hubHostname, setHubHostname] = useState('127.0.0.1');
 
   useEffect(() => {
@@ -164,16 +169,17 @@ export default function FleetPage() {
 
   const persistSatellites = async (nextSatellites: SatelliteNodeView[]) => {
     setIsSaving(true);
+    setSaveError(null);
     try {
       const state = await getCurrentDesiredState();
-      await applyDesiredState({
+      await applyState({
         ...state,
         fleet: {
           enabled: true,
           listenPort: state.fleet?.listenPort ?? listenPort,
           defaultHeartbeatIntervalSec: state.fleet?.defaultHeartbeatIntervalSec ?? heartbeatIntervalSec,
           watchdogTimeoutSec: state.fleet?.watchdogTimeoutSec ?? watchdogTimeoutSec,
-          nodes: nextSatellites.map((s, idx) => ({
+          nodes: nextSatellites.map((s) => ({
             id: s.id,
             name: s.name,
             role: s.role,
@@ -183,11 +189,16 @@ export default function FleetPage() {
             lanInterface: s.lanInterface,
             arch: s.arch,
             os: s.os,
-            ip: s.ip === '—' ? '127.0.0.1' : s.ip,
+            // D16: unknown stays unknown. A node with no reported IP
+            // used to be persisted as 127.0.0.1 and a node with no
+            // tunnel IP as an index-derived 10.99.0.x/24 that could
+            // collide with a real node's tunnel IP. The schema no longer
+            // supplies those invented defaults either.
+            ip: s.ip === '—' ? undefined : s.ip,
             lastSeen: s.lastSeen === 'Never' ? undefined : s.lastSeen,
             status: s.status,
             wireguard: {
-              tunnelIp: s.tunnelIp === '—' ? `10.99.0.${idx + 2}/24` : s.tunnelIp,
+              tunnelIp: s.tunnelIp === '—' ? undefined : s.tunnelIp,
               connected: s.wgConnected,
             },
             wifi: s.wifiRadios,
@@ -212,8 +223,11 @@ export default function FleetPage() {
         }
         return nextSatellites[0] ?? null;
       });
-    } catch {
-      // Ignore apply errors in UI
+    } catch (err: any) {
+      // D16: surface persist failures instead of silently dropping them —
+      // the local list is left unchanged so the UI never shows a change
+      // as applied when it was not.
+      setSaveError(err?.message || 'Failed to save fleet changes.');
     } finally {
       setIsSaving(false);
     }
@@ -223,6 +237,23 @@ export default function FleetPage() {
     await persistSatellites(satellites);
   };
 
+  // D16: allocate the first tunnel octet not already in use by a live
+  // node, instead of list length + 2. Length-based allocation collided
+  // after a removal: removing a node shrank the list, so the next
+  // enrollment reused an octet still held by a remaining node.
+  const allocateTunnelIp = (existing: SatelliteNodeView[]): string => {
+    const used = new Set(
+      existing
+        .map((s) => s.tunnelIp.match(/^10\.99\.0\.(\d+)\/24$/)?.[1])
+        .filter((o): o is string => o !== undefined)
+        .map(Number)
+    );
+    for (let octet = 2; octet <= 254; octet++) {
+      if (!used.has(octet)) return `10.99.0.${octet}/24`;
+    }
+    throw new Error('No free WireGuard tunnel addresses remain in 10.99.0.0/24.');
+  };
+
   const handleEnrollNode = async () => {
     const cleanId = newNodeId.trim() || `${newNodeRole === 'edge-ngfw' ? 'edge-ngfw' : 'sat-node'}-${satellites.length + 1}`;
     const cleanName = newNodeName.trim() || cleanId;
@@ -230,7 +261,13 @@ export default function FleetPage() {
       alert(`Satellite node ID "${cleanId}" is already registered.`);
       return;
     }
-    const nextTunnelOctet = Math.min(254, satellites.length + 2);
+    let tunnelIp: string;
+    try {
+      tunnelIp = allocateTunnelIp(satellites);
+    } catch (err: any) {
+      alert(err?.message || 'Could not allocate a tunnel IP.');
+      return;
+    }
     const created: SatelliteNodeView = {
       id: cleanId,
       name: cleanName,
@@ -242,7 +279,7 @@ export default function FleetPage() {
       arch: newNodeRole === 'edge-ngfw' && newNodeSku === 'sku-arm64-router' ? 'arm64' : newNodeArch,
       os: newNodeRole === 'edge-ngfw' ? `AxonWall Edge UKI (${newNodeSku})` : 'Linux Edge Appliance',
       ip: '—',
-      tunnelIp: `10.99.0.${nextTunnelOctet}/24`,
+      tunnelIp,
       wgConnected: false,
       status: 'enrolling',
       cpuPercent: 0,
@@ -269,6 +306,11 @@ export default function FleetPage() {
     await persistSatellites(nextList);
   };
 
+  // D16: these only bump a version number / flip a status in the local
+  // fleet record and persist it. There is no controller call behind them:
+  // a "pushed" policy is never sent to the node and a "quarantined" node
+  // keeps its WireGuard tunnel up. The buttons are labelled as local
+  // record changes (see below) until a real push/disconnect exists.
   const handlePushPolicy = async (id: string) => {
     const nextList = satellites.map((s) =>
       s.id === id ? { ...s, activePolicyVersion: s.activePolicyVersion + 1 } : s
@@ -357,6 +399,16 @@ export default function FleetPage() {
           </button>
         </div>
       </div>
+
+      {/* D16: fleet save failures are surfaced here instead of swallowed. */}
+      {saveError && (
+        <div className="p-4 rounded-xl border text-xs font-medium bg-rose-500/10 border-rose-500/30 text-rose-300 flex items-center justify-between">
+          <span>Fleet changes were NOT saved: {saveError}</span>
+          <button onClick={() => setSaveError(null)} className="text-slate-400 hover:text-white">
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Overview Stat Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -612,14 +664,14 @@ export default function FleetPage() {
                         <td className="px-4 py-3.5 text-right">
                           <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
                             <button
-                              title="Push Policy"
+                              title="Bump policy version (local record only — nothing is pushed to the node)"
                               onClick={() => handlePushPolicy(sat.id)}
                               className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800 transition cursor-pointer"
                             >
                               <RefreshCw className="w-4 h-4" />
                             </button>
                             <button
-                              title="Quarantine"
+                              title="Mark degraded (local record only — the WireGuard tunnel stays up)"
                               onClick={() => handleQuarantine(sat.id)}
                               className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition cursor-pointer"
                             >
@@ -674,16 +726,18 @@ export default function FleetPage() {
             </div>
             <div className="flex items-center gap-2">
               <button
+                title="Bump policy version in the local fleet record only — nothing is pushed to the node"
                 onClick={() => handlePushPolicy(selectedSat.id)}
                 className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 rounded-lg text-xs font-semibold transition cursor-pointer"
               >
-                Sync nftables
+                Bump policy version
               </button>
               <button
+                title="Mark degraded in the local fleet record only — the WireGuard tunnel stays up"
                 onClick={() => handleQuarantine(selectedSat.id)}
                 className="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20 rounded-lg text-xs font-semibold transition cursor-pointer"
               >
-                Isolate Node
+                Mark degraded
               </button>
               <button
                 onClick={() => handleRemoveNode(selectedSat.id)}

@@ -16,10 +16,12 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { DesiredState, DnsBlocklistConfig } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { compileUnboundSinkhole } from '@axonwall/lib/compile/unbound';
 
 export default function DnsBlocklistPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [action, setAction] = useState<'always_null' | 'always_nxdomain'>('always_null');
@@ -129,7 +131,7 @@ export default function DnsBlocklistPage() {
         },
       };
       setFullState(nextState);
-      await applyDesiredState(nextState);
+      await applyState(nextState);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err: any) {

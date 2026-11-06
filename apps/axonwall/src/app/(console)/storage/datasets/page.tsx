@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { Layers, Plus, Trash2 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, ZfsDataset } from '@axonwall/lib/schemas';
 
 export default function ZfsDatasetsPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [pool, setPool] = useState('tank');
   const [name, setName] = useState('shares/general');
@@ -58,8 +60,14 @@ export default function ZfsDatasetsPage() {
           description: '',
         },
       ];
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
+    } catch (err: any) {
+      // C2: a fingerprint mismatch (or any apply failure) must be visible,
+      // not an unhandled rejection — the dataset was not added. This page
+      // has no banner state, so the failure is alerted like the fleet page
+      // does for its errors.
+      alert(err?.message || 'Failed to add dataset.');
     } finally {
       setSaving(false);
     }
@@ -71,8 +79,13 @@ export default function ZfsDatasetsPage() {
     if (next.nas) {
       next.nas.datasets = next.nas.datasets.filter((d) => !(d.pool === dsPool && d.name === dsName));
     }
-    await applyDesiredState(next);
-    setState(next);
+    // C2: see handleAddDataset above — a refused apply must be visible.
+    try {
+      await applyState(next);
+      setState(next);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to remove dataset.');
+    }
   };
 
   const datasets = state?.nas?.datasets ?? [];

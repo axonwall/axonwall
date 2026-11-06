@@ -3,10 +3,12 @@
 import { useState, useEffect } from 'react';
 import { KeyRound, Terminal, Download, Cpu, CheckCircle2, Copy, Plus, Trash2 } from 'lucide-react';
 import { compileOpenVpn, generateClientOvpnProfile } from '@axonwall/lib/compile/openvpn';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, OpenVpnServer } from '@axonwall/lib/schemas';
 
 export default function OpenVpnPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [servers, setServers] = useState<OpenVpnServer[]>([]);
   const [copied, setCopied] = useState(false);
@@ -46,7 +48,7 @@ export default function OpenVpnPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved OpenVPN configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
       setServers(prevServers);

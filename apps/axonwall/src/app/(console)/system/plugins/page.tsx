@@ -29,11 +29,13 @@ import {
   arePluginDependenciesMet,
   type PluginManifest,
 } from '@axonwall/lib/plugins';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { getExtensionPlugins, executePluginAction, type ExtensionPluginLiveStatus } from '@/server/plugins';
 import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas';
 
 export default function PluginManagerPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [savingRole, setSavingRole] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; text: string; output?: string } | null>(null);
@@ -184,7 +186,7 @@ export default function PluginManagerPage() {
         }
       }
 
-      const res = await applyDesiredState(next);
+      const res = await applyState(next);
       setState(next);
       window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       setStatusBanner({
@@ -358,7 +360,7 @@ export default function PluginManagerPage() {
         return;
       }
 
-      const res = await applyDesiredState(next);
+      const res = await applyState(next);
       setState(next);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));

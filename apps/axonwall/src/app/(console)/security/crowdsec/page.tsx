@@ -3,7 +3,8 @@
 import { useState, useEffect } from 'react';
 import { Shield, ShieldAlert, CheckCircle2, Terminal, RefreshCw, Trash2, Save } from 'lucide-react';
 import { compileCrowdSec } from '@axonwall/lib/compile/crowdsec';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, CrowdSecConfig } from '@axonwall/lib/schemas';
 
 interface RemediationDecision {
@@ -15,6 +16,7 @@ interface RemediationDecision {
 }
 
 export default function CrowdSecPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [lapiUrl, setLapiUrl] = useState('http://127.0.0.1:8080/');
@@ -59,7 +61,7 @@ export default function CrowdSecPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved CrowdSec configuration to /etc/axonwall/security.yaml');
     } catch (err: any) {
       setEnabled(prevEnabled);

@@ -14,6 +14,11 @@ export default function VPNPortal() {
   const [mfaQr, setMfaQr] = useState('');
   const [mfaToken, setMfaToken] = useState('');
   const [mfaVerified, setMfaVerified] = useState(false);
+  // D18: SSO/directory users authenticate via IdP MFA and never enroll
+  // local TOTP. Track that separately from mfaVerified so the page never
+  // tells them "MFA successfully configured and verified!" when no MFA
+  // was configured or verified here.
+  const [mfaIdpExempt, setMfaIdpExempt] = useState(false);
 
   const handleSetupMfa = async () => {
     setLoading(true);
@@ -24,8 +29,10 @@ export default function VPNPortal() {
       setMfaQr(res.qrDataUrl);
     } catch (err: any) {
       if (err.message?.includes('local break-glass administrator')) {
-        // SSO / Directory users authenticate via IdP MFA and can provision directly
-        setMfaVerified(true);
+        // SSO / Directory users authenticate via IdP MFA and can provision directly.
+        // D18: this is an IdP-MFA exemption, not a local MFA verification —
+        // do not set mfaVerified or show the verified banner for it.
+        setMfaIdpExempt(true);
       } else {
         setError(err.message);
       }
@@ -68,14 +75,14 @@ export default function VPNPortal() {
     <div className="space-y-8">
       <div className="bg-slate-800 p-8 rounded-lg shadow-xl border border-slate-700">
         <h2 className="text-xl font-semibold mb-6">Enterprise Identity & MFA Setup</h2>
-        {!mfaQr ? (
+        {!mfaQr && !mfaIdpExempt ? (
           <div>
             <p className="text-slate-400 mb-4">Secure your account by enabling Multi-Factor Authentication (MFA).</p>
             <button onClick={handleSetupMfa} disabled={loading} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white font-medium disabled:opacity-50">
               Setup MFA
             </button>
           </div>
-        ) : !mfaVerified ? (
+        ) : !mfaVerified && !mfaIdpExempt ? (
           <div className="space-y-4">
             <p className="text-slate-300">Scan this QR code with Google Authenticator or Authy:</p>
             <div className="bg-white inline-block p-4 rounded">
@@ -95,6 +102,10 @@ export default function VPNPortal() {
             </div>
             {error && <p className="text-red-400">{error}</p>}
           </div>
+        ) : mfaIdpExempt ? (
+          <div className="text-sky-400 font-medium bg-sky-900/30 border border-sky-800 p-4 rounded">
+            MFA is handled by your identity provider — no local TOTP was configured or verified here.
+          </div>
         ) : (
           <div className="text-green-400 font-medium bg-green-900/30 border border-green-800 p-4 rounded">
             MFA successfully configured and verified!
@@ -111,16 +122,16 @@ export default function VPNPortal() {
               Generate a new WireGuard VPN profile for your mobile device or laptop.
               This will provision a secure tunnel directly to the corporate network.
             </p>
-            <button 
+            <button
               onClick={handleGenerateVPN}
-              disabled={loading || !mfaVerified}
+              disabled={loading || (!mfaVerified && !mfaIdpExempt)}
               className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-md font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              title={!mfaVerified ? "Setup MFA first" : ""}
+              title={!mfaVerified && !mfaIdpExempt ? "Setup MFA first" : ""}
             >
               {loading ? 'Provisioning...' : 'Generate Device Profile'}
             </button>
-            {error && !mfaVerified && <p className="text-red-400 mt-4">Please complete MFA setup first.</p>}
-            {error && mfaVerified && <p className="text-red-400 mt-4">{error}</p>}
+            {error && !mfaVerified && !mfaIdpExempt && <p className="text-red-400 mt-4">Please complete MFA setup first.</p>}
+            {error && (mfaVerified || mfaIdpExempt) && <p className="text-red-400 mt-4">{error}</p>}
           </div>
         ) : (
           <div className="space-y-6">

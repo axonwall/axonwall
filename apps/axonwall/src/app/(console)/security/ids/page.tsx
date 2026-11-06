@@ -11,17 +11,16 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Shield, ShieldAlert, Zap, Loader2, CheckCircle2, Save } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
-import {
-  getRecentThreatAlerts,
+import { getRecentThreatAlerts,
   getSystemServicesStatus,
   getCurrentDesiredState,
-  applyDesiredState,
   type ThreatAlert,
-  type LiveServiceInfo,
-} from '@/server/agent';
+  type LiveServiceInfo } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function IdsIpsPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [alerts, setAlerts] = useState<ThreatAlert[]>([]);
   const [services, setServices] = useState<LiveServiceInfo[]>([]);
@@ -81,7 +80,7 @@ export default function IdsIpsPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved Suricata configuration to /etc/axonwall/security.yaml');
     } catch (err: any) {
       setSuricataEnabled(prevSuricataEnabled);

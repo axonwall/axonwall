@@ -29,6 +29,7 @@ import {
   type SoarBlockedIP,
 } from '@/server/vigilante';
 import type { VigilanteConfig } from '@axonwall/lib/schemas';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 interface TelemetryEvent {
   source: string;
@@ -40,6 +41,10 @@ interface TelemetryEvent {
 }
 
 export default function BattleStationPage() {
+  // C2: the config saves below go through saveVigilanteConfigAction, which
+  // applies state server-side — pass the load-time fingerprint so a
+  // same-slice cross-tab change is refused instead of overwritten.
+  const { getFingerprint, refreshFingerprint } = useDesiredStateApply();
   const [config, setConfig] = useState<VigilanteConfig | null>(null);
   const [blockedIPs, setBlockedIPs] = useState<SoarBlockedIP[]>([]);
   const [loading, setLoading] = useState(true);
@@ -170,8 +175,13 @@ export default function BattleStationPage() {
   const handleModeChange = async (posture: 'monitoring' | 'enforcing' | 'hybrid') => {
     if (!config) return;
     setStatusBanner(null);
-    const res = await saveVigilanteConfigAction({ posture });
+    const fingerprint = getFingerprint();
+    const res = await saveVigilanteConfigAction(
+      { posture },
+      fingerprint ? { expectedFingerprint: fingerprint } : undefined
+    );
     if (res.success) {
+      await refreshFingerprint();
       setConfig({ ...config, posture });
       setStatusBanner({ type: 'success', message: `Defense posture changed to ${posture.toUpperCase()}` });
     } else {
@@ -192,8 +202,13 @@ export default function BattleStationPage() {
       syncModuleSso: config.ldapAuth?.syncModuleSso ?? true,
       ...patch,
     };
-    const res = await saveVigilanteConfigAction({ ldapAuth: nextLdapAuth });
+    const fingerprint = getFingerprint();
+    const res = await saveVigilanteConfigAction(
+      { ldapAuth: nextLdapAuth },
+      fingerprint ? { expectedFingerprint: fingerprint } : undefined
+    );
     if (res.success) {
+      await refreshFingerprint();
       setConfig({ ...config, ldapAuth: nextLdapAuth });
       setStatusBanner({
         type: 'success',

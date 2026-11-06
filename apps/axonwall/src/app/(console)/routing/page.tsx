@@ -2,10 +2,12 @@
 
 import { Route, CheckCircle2, Plus, Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
-import { getCurrentDesiredState, applyDesiredState, getGatewaysTelemetry, type LiveGatewayInfo } from '@/server/agent';
+import { getCurrentDesiredState, getGatewaysTelemetry, type LiveGatewayInfo } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, Gateway, StaticRoute } from '@axonwall/lib/schemas';
 
 export default function RoutingPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [gateways, setGateways] = useState<Gateway[]>([]);
   const [routes, setRoutes] = useState<StaticRoute[]>([]);
@@ -73,7 +75,7 @@ export default function RoutingPage() {
         routes: nextRoutes,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved routing configuration to /etc/axonwall/routing.yaml');
     } catch (err: any) {
       setGateways(prevGateways);

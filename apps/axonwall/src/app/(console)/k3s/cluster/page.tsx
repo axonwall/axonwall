@@ -4,14 +4,15 @@ import { useState, useEffect } from 'react';
 import { Cpu, ArrowRightLeft, CheckCircle2, RefreshCw } from 'lucide-react';
 import {
   getCurrentDesiredState,
-  applyDesiredState,
   getK3sRuntimeStatus,
   triggerK3sHaAutoJoin,
   type K3sRuntimeStatus,
 } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function K3sClusterPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [status, setStatus] = useState<K3sRuntimeStatus | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -72,9 +73,15 @@ export default function K3sClusterPage() {
       workloads: [],
     };
     next.k3s.enabled = true;
-    const res = await applyDesiredState(next);
-    setState(next);
-    setMsg(`K3s control plane configuration applied (${res.message})`);
+    // C2: a fingerprint mismatch (or any apply failure) must be visible,
+    // not an unhandled rejection — the save did not happen.
+    try {
+      const res = await applyState(next);
+      setState(next);
+      setMsg(`K3s control plane configuration applied (${res.message})`);
+    } catch (err: any) {
+      setMsg(err?.message || 'Failed to save K3s configuration.');
+    }
     await load();
   };
 
