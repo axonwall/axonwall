@@ -115,6 +115,14 @@ export default function HighAvailabilityPage() {
           return;
         }
       }
+      // A16: a cleared sync-interval field yields 0 (the input's
+      // min/max attributes are unenforced outside a form submit),
+      // which the schema rejects and the daemon never clamps. Refuse
+      // the save with a clear message instead of persisting it.
+      if (!Number.isInteger(syncInterval) || syncInterval < 1 || syncInterval > 60) {
+        setSyncErrorMsg('Sync interval must be between 1 and 60 seconds.');
+        return;
+      }
       const vrrpInstances =
         existingVrrp.length > 0
           ? existingVrrp.map((v, idx) =>
