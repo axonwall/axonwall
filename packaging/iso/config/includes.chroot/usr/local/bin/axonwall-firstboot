@@ -89,7 +89,19 @@ if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
         mkdir -p "$_ab_mnt"
         if mount "$_ab_dev" "$_ab_mnt" 2>/dev/null; then
           # Safety: never clobber a standby slot that already holds an OS.
-          if [[ -e "$_ab_mnt/bin/bash" || -e "$_ab_mnt/usr/bin/bash" ]]; then
+          # E2-8: the old probe (/bin/bash existence) could not tell a
+          # complete clone from a torn one — a clone whose rsync failed
+          # after /usr/bin/bash landed looked "populated", the pending
+          # marker was consumed, and slot B was permanently stranded
+          # partial. Require the same completeness markers the
+          # updater's E1 gate uses (/etc, /sbin/init, a kernel); a
+          # tree that fails them is re-synced below (rsync --delete
+          # repairs it) instead of being declared populated.
+          _ab_populated=0
+          if [[ -d "$_ab_mnt/etc" && -e "$_ab_mnt/sbin/init" ]] && ls "$_ab_mnt/boot"/vmlinuz-* >/dev/null 2>&1; then
+            _ab_populated=1
+          fi
+          if [[ "$_ab_populated" == "1" ]]; then
             echo "[Axonwall Firstboot] Standby slot already populated; skipping clone and consuming the pending marker."
             _ab_ok=1
           elif rsync -aHAX --delete \
