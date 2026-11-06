@@ -513,13 +513,28 @@ if [ "$ZBM_MODE" = "1" ]; then
       zfs snapshot "$PRE_SNAP"
     fi
 
-    if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
-      echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Recreating clone..."
-      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
+    # E2-13: clone to a temporary BE name FIRST and only destroy the
+    # old target once the clone has succeeded. The old order destroyed
+    # the target (which may be the current fallback_be) and then
+    # cloned; a clone failure (pool full, transient ZFS error) aborted
+    # under `set -e` with the target gone and fallback_be dangling.
+    # A stale tmp dataset can only come from an earlier interrupted
+    # run — it is never armed or referenced — so remove it first.
+    TARGET_BE_TMP="${TARGET_BE}.tmp"
+    TARGET_BE_TMP_DS="${PARENT_DS}/${TARGET_BE_TMP}"
+    if zfs list -H -o name "$TARGET_BE_TMP_DS" >/dev/null 2>&1; then
+      echo "[!] Removing stale temporary Boot Environment ${TARGET_BE_TMP_DS} from an earlier interrupted update..."
+      zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
     fi
 
-    echo "[+] Cloning ${PRE_SNAP} -> ${TARGET_BE_DS}..."
-    zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_DS"
+    echo "[+] Cloning ${PRE_SNAP} -> ${TARGET_BE_TMP_DS}..."
+    zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_TMP_DS"
+
+    if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
+      echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Replacing it with the new clone..."
+      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
+    fi
+    zfs rename "$TARGET_BE_TMP_DS" "$TARGET_BE_DS"
 
     ZBM_STAGE_MNT="/tmp/axonwall-zbm-stage-${CLEAN_VER}"
     rm -rf "${ZBM_STAGE_MNT}"
