@@ -191,6 +191,10 @@ export default function VirtualMachinesPage() {
 
     try {
       const res = await saveVmAction(newVm);
+      if (!res.success) {
+        setStatusBanner({ type: 'error', message: res.message });
+        return;
+      }
       setStatusBanner({ type: 'success', message: res.message });
       setShowCreateModal(false);
       setName('');

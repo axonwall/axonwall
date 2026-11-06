@@ -145,6 +145,10 @@ export default function LxcContainersPage() {
 
     try {
       const res = await saveContainerAction(newCt);
+      if (!res.success) {
+        setStatusBanner({ type: 'error', message: res.message });
+        return;
+      }
       setStatusBanner({ type: 'success', message: res.message });
       setShowCreateModal(false);
       setHostname('');
