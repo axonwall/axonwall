@@ -16,6 +16,25 @@ import { compileNutUps } from '@axonwall/lib/compile/nut';
 import type { NutUpsConfig } from '@axonwall/lib/schemas';
 import { getUpsStatus, getCurrentDesiredState, applyDesiredState, type UpsStatus } from '@/server/agent';
 
+// B20: NUT ups.status is a space-separated token list (OL, OB, LB,
+// CHRG, DISCHRG, ...). The badge used to claim "(Online Utility
+// Power)" for every connected state, including OB/LB — the states
+// where the distinction matters most.
+function upsStatusLabel(status: string): string {
+  const tokens = status.toUpperCase().split(/\s+/);
+  if (tokens.includes('LB')) return 'Low Battery';
+  if (tokens.includes('OB')) return 'On Battery';
+  if (tokens.includes('OL')) return 'Online Utility Power';
+  return status;
+}
+
+function upsStatusTone(status: string): 'online' | 'battery' | 'low' {
+  const tokens = status.toUpperCase().split(/\s+/);
+  if (tokens.includes('LB')) return 'low';
+  if (tokens.includes('OB')) return 'battery';
+  return 'online';
+}
+
 export default function UpsMonitoringPage() {
   const [upsStatus, setUpsStatus] = useState<UpsStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -109,9 +128,25 @@ export default function UpsMonitoringPage() {
           </button>
 
           {upsStatus?.connected ? (
-            <span className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Status: {upsStatus.status} (Online Utility Power)
+            <span
+              className={
+                upsStatusTone(upsStatus.status) === 'online'
+                  ? 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-2'
+                  : upsStatusTone(upsStatus.status) === 'low'
+                    ? 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20 flex items-center gap-2'
+                    : 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-2'
+              }
+            >
+              <span
+                className={
+                  upsStatusTone(upsStatus.status) === 'online'
+                    ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse'
+                    : upsStatusTone(upsStatus.status) === 'low'
+                      ? 'w-2 h-2 rounded-full bg-rose-400 animate-pulse'
+                      : 'w-2 h-2 rounded-full bg-amber-400 animate-pulse'
+                }
+              />
+              Status: {upsStatus.status} ({upsStatusLabel(upsStatus.status)})
             </span>
           ) : (
             <span className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800/80 text-slate-400 border border-slate-700 flex items-center gap-2">
