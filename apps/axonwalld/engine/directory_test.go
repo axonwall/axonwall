@@ -202,6 +202,40 @@ func TestHAPKICorruptCAMaterialRefusesToReRoot(t *testing.T) {
 	})
 }
 
+func TestLDAPDeleteEntry(t *testing.T) {
+	// A-H5 (round 2): DeleteUser discarded both ldapdelete errors and
+	// reported success while the user still existed.
+	installFakeLDAPDelete := func(t *testing.T, script string) {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "ldapdelete"), []byte(script), 0755); err != nil {
+			t.Fatalf("Failed to write fake ldapdelete: %v", err)
+		}
+		t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	}
+
+	t.Run("success", func(t *testing.T) {
+		installFakeLDAPDelete(t, "#!/bin/sh\nexit 0\n")
+		if err := ldapDeleteEntry("uid=test,ou=users,dc=example,dc=com"); err != nil {
+			t.Errorf("expected nil for successful delete, got %v", err)
+		}
+	})
+
+	t.Run("no such object is tolerated", func(t *testing.T) {
+		installFakeLDAPDelete(t, "#!/bin/sh\necho 'ldap_delete: No such object' >&2\nexit 32\n")
+		if err := ldapDeleteEntry("uid=test,ou=users,dc=example,dc=com"); err != nil {
+			t.Errorf("expected nil for missing entry, got %v", err)
+		}
+	})
+
+	t.Run("other failures are errors", func(t *testing.T) {
+		installFakeLDAPDelete(t, "#!/bin/sh\necho 'ldap_sasl_bind: connection refused' >&2\nexit 1\n")
+		if err := ldapDeleteEntry("uid=test,ou=users,dc=example,dc=com"); err == nil {
+			t.Errorf("expected error when ldapdelete fails, got nil")
+		}
+	})
+}
+
 func TestVowPluginLDAPIntegrationSpec(t *testing.T) {
 	plugins := GetExtensionPluginDefinitions()
 	var vowFound bool

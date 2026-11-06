@@ -1190,15 +1190,31 @@ func (d *DirectoryManager) DeleteUser(username string, removeHome bool) error {
 	baseDN := d.baseDN
 	d.mu.RUnlock()
 
-	// Remove from all groups
+	// Remove from all groups. A-H5 (round 2): group-removal failures used
+	// to be discarded, so a "deleted" user could keep its roles.
 	allGroups, _, _, _ := d.listLDAPGroupsInternal()
+	var errs []string
 	for _, g := range allGroups {
-		_ = d.setGroupMembership(g.Name, username, false)
+		if err := d.setGroupMembership(g.Name, username, false); err != nil {
+			errs = append(errs, fmt.Sprintf("remove from group %s: %v", g.Name, err))
+		}
 	}
 
-	// Delete user entry and personal group
-	_ = exec.Command("ldapdelete", "-Y", "EXTERNAL", "-H", "ldapi:///", fmt.Sprintf("uid=%s,ou=users,%s", username, baseDN)).Run()
-	_ = exec.Command("ldapdelete", "-Y", "EXTERNAL", "-H", "ldapi:///", fmt.Sprintf("cn=%s,ou=groups,%s", username, baseDN)).Run()
+	// Delete user entry and personal group. A-H5 (round 2): both deletes
+	// used to be discarded and the function unconditionally returned nil,
+	// so a "deleted" user still existed and could still log in.
+	userDN := fmt.Sprintf("uid=%s,ou=users,%s", username, baseDN)
+	if err := ldapDeleteEntry(userDN); err != nil {
+		errs = append(errs, err.Error())
+		// The entry (and its password/SSH keys) is still there: do not
+		// remove the home directory or sync the NSS mirror as if the
+		// user were gone.
+		return fmt.Errorf("failed to delete user '%s': %s", username, strings.Join(errs, "; "))
+	}
+	groupDN := fmt.Sprintf("cn=%s,ou=groups,%s", username, baseDN)
+	if err := ldapDeleteEntry(groupDN); err != nil {
+		errs = append(errs, err.Error())
+	}
 
 	if removeHome {
 		_ = os.RemoveAll(filepath.Join("/home", username))
@@ -1207,6 +1223,20 @@ func (d *DirectoryManager) DeleteUser(username string, removeHome bool) error {
 	d.syncLocalNSSMirrorIfNoSSSD(username)
 	InvalidateSSSDCache(username)
 	_ = d.SyncRootSshPolicy()
+	if len(errs) > 0 {
+		return fmt.Errorf("deleted user '%s' but with failures: %s", username, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// ldapDeleteEntry deletes one DN with ldapdelete. A missing entry ("No such
+// object", e.g. a personal group that was never created) is not an error;
+// any other failure is, and must fail the caller's delete (A-H5).
+func ldapDeleteEntry(dn string) error {
+	out, err := exec.Command("ldapdelete", "-Y", "EXTERNAL", "-H", "ldapi:///", dn).CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "No such object") {
+		return fmt.Errorf("ldapdelete %s: %s (%w)", dn, strings.TrimSpace(string(out)), err)
+	}
 	return nil
 }
 
