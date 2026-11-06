@@ -673,6 +673,14 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 				if be.ActiveNow {
 					we.status.ActiveRootDevice = be.Dataset
 					we.status.SlotAVersion = be.Version
+				} else if be.ActiveNext && be.Version != "" {
+					// E2-6: the BE armed for next boot is the standby
+					// slot's version. loadSlotVersions above filled
+					// SlotBVersion with the running version (the
+					// updater writes slotB = running), so the old
+					// "Standby BE"/"" guard below never fired and both
+					// slots reported the running version after arming.
+					we.status.SlotBVersion = be.Version
 				} else if we.status.SlotBVersion == "Standby BE" || we.status.SlotBVersion == "" {
 					we.status.SlotBVersion = be.Version
 				}
@@ -875,7 +883,12 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 	beName = strings.TrimSpace(beName)
 	beName = strings.TrimPrefix(beName, "zroot/ROOT/")
 	if beName == "" || beName == "axonwall-active" {
-		we.mu.RLock()
+		// E2-7 (same staleness shape as DeleteBootEnvironment):
+		// resolve the active BE from a freshly listed set, so a
+		// script-side arming since the last refresh does not send
+		// the snapshot to the previously-active BE.
+		we.mu.Lock()
+		we.status.BootEnvironments = we.listBootEnvironmentsLocked()
 		for _, be := range we.status.BootEnvironments {
 			if be.ActiveNow {
 				beName = be.Name
@@ -885,7 +898,7 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 		if beName == "" && len(we.status.BootEnvironments) > 0 {
 			beName = we.status.BootEnvironments[0].Name
 		}
-		we.mu.RUnlock()
+		we.mu.Unlock()
 	}
 	label = strings.TrimSpace(label)
 	label = strings.ReplaceAll(label, " ", "-")
@@ -1142,20 +1155,27 @@ func (we *WatchdogEngine) DeleteBootEnvironment(beName string) error {
 		}
 	}
 
-	we.mu.RLock()
+	// E2-7: the ActiveNow/ActiveNext guard must read the live BE
+	// list, not the cache. Script-side arming (axonwall-update
+	// --zbm) changes bootfs/active_be without telling the daemon,
+	// so a BE armed since the last status refresh could otherwise
+	// be deleted out from under the next boot. Same live-read
+	// discipline as the E4 fallback guard above.
+	we.mu.Lock()
+	we.status.BootEnvironments = we.listBootEnvironmentsLocked()
 	for _, be := range we.status.BootEnvironments {
 		if be.Dataset == targetDataset {
 			if be.ActiveNow {
-				we.mu.RUnlock()
+				we.mu.Unlock()
 				return fmt.Errorf("cannot delete currently running Boot Environment (%s)", beName)
 			}
 			if be.ActiveNext {
-				we.mu.RUnlock()
+				we.mu.Unlock()
 				return fmt.Errorf("cannot delete Boot Environment staged for next boot (%s); activate another BE first", beName)
 			}
 		}
 	}
-	we.mu.RUnlock()
+	we.mu.Unlock()
 
 	out, err := we.runZfsCmd("destroy", "-r", targetDataset)
 	if err != nil {
@@ -1708,27 +1728,54 @@ func (we *WatchdogEngine) readGrubEnvInternal() map[string]string {
 // writeGrubEnvKey updates or appends a key in the grubenv file.
 func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 	err := writeGrubEnvKeyAtPath(we.grubenvPath, we.readGrubEnvInternal(), key, value)
+	if err != nil {
+		return err
+	}
 
 	// When booted into Slot B on a dual-root disk where GRUB's $prefix lives on Slot A (axon_root_a),
 	// mirror grubenv updates to axon_root_a's /boot/grub/grubenv as well.
-	if we.grubenvPath == "/boot/grub/grubenv" && os.Geteuid() == 0 {
-		slotADev := resolveLabelDevice("axon_root_a")
-		if info, statErr := os.Stat(slotADev); statErr == nil && (info.Mode()&os.ModeDevice) != 0 {
-			if cmdlineBytes, cErr := os.ReadFile(we.cmdlinePath); cErr == nil && strings.Contains(string(cmdlineBytes), "axon_root_b") {
-				_ = os.MkdirAll("/run/axonwall", 0750)
-				mntDir := "/run/axonwall/grubsync-a"
-				_ = os.MkdirAll(mntDir, 0700)
-				if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr == nil {
-					targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")
-					_ = writeGrubEnvKeyAtPath(targetEnv, we.readGrubEnvInternal(), key, value)
-					_ = exec.Command("umount", mntDir).Run()
-				}
-				_ = os.Remove(mntDir)
-			}
-		}
+	// E2-4: on B the mirror IS the arming — GRUB never reads B's
+	// grubenv — so a mirror failure is a write failure, not a
+	// best-effort side effect. Return it like the primary error so
+	// ActivateSlot/TriggerRollback report "not armed" instead of
+	// claiming a slot switch the next boot will ignore. The mirror
+	// only applies to the real grubenv path; tests and non-A/B
+	// layouts keep the old return-early behaviour.
+	if we.grubenvPath != "/boot/grub/grubenv" {
+		return nil
 	}
-
-	return err
+	cmdlineBytes, cErr := os.ReadFile(we.cmdlinePath)
+	if cErr != nil || !strings.Contains(string(cmdlineBytes), "axon_root_b") {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: daemon is not running as root (euid %d), so the GRUB-visible grubenv was not updated", os.Geteuid())
+	}
+	slotADev := resolveLabelDevice("axon_root_a")
+	info, statErr := os.Stat(slotADev)
+	if statErr != nil || (info.Mode()&os.ModeDevice) == 0 {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: device %s is not a block device: %v", slotADev, statErr)
+	}
+	mntDir := "/run/axonwall/grubsync-a"
+	if mErr := os.MkdirAll(mntDir, 0700); mErr != nil {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: cannot create mount point %s: %w", mntDir, mErr)
+	}
+	if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr != nil {
+		_ = os.Remove(mntDir)
+		return fmt.Errorf("cannot mirror grubenv to Slot A: mount %s failed: %w", slotADev, mErr)
+	}
+	targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")
+	mirrorErr := writeGrubEnvKeyAtPath(targetEnv, we.readGrubEnvInternal(), key, value)
+	if uErr := exec.Command("umount", mntDir).Run(); uErr != nil {
+		// The mirror write already landed; a stuck mount is loud
+		// but does not change what GRUB will boot.
+		log.Printf("[Watchdog] Warning: failed to unmount Slot A grubenv mirror %s: %v", mntDir, uErr)
+	}
+	_ = os.Remove(mntDir)
+	if mirrorErr != nil {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: %w", mirrorErr)
+	}
+	return nil
 }
 
 func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, value string) error {

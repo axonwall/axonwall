@@ -1665,7 +1665,10 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
       --exclude='/mnt/*' \
       /mnt/slot_a/ /mnt/slot_b/
   else
-    cp -a /mnt/slot_a/. /mnt/slot_b/ 2>/dev/null || true
+    # D2-M2: like the rsync path above, a failed fallback copy must
+    # abort the install under set -e instead of silently continuing
+    # to the "Factory Standby" slot_versions write below.
+    cp -a /mnt/slot_a/. /mnt/slot_b/ 2>/dev/null
   fi
   sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
 
@@ -1678,6 +1681,15 @@ else
   SLOT_B_DESC="Rolling (Single-Root)"
   if [ "$INSTALL_MODE" = "zbm" ]; then
     SLOT_B_DESC="axonwall-${INSTALL_VER}@factory-initial"
+  elif [ "$INSTALL_MODE" = "ab" ]; then
+    # D2-M2: A/B mode with no slot-B block device (e.g. manual
+    # partitioning without the axon_root_b label): never claim
+    # "Rolling" for an A/B install -- install-mode still says ab,
+    # and the watchdog/UI would disagree about the layout. Warn
+    # loudly and record the honest state, mirroring the d-i hook.
+    ui_echo "[-] WARNING: A/B install: no slot B device found; NO standby system was synced."
+    ui_echo "[-] WARNING: this install has no working fallback slot until a successful update populates slot B."
+    SLOT_B_DESC="Missing (no standby slot)"
   fi
   INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$SLOT_B_DESC" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
   printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_a/etc/axonwall/slot_versions.json

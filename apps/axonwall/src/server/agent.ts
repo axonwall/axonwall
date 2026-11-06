@@ -3929,10 +3929,6 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
         stdio: 'ignore',
         timeout: 1500,
       });
-      return {
-        success: true,
-        message: `Partition Slot ${cleanSlot} armed in GRUB environment. System will boot into Slot ${cleanSlot} on next reboot.`,
-      };
     } catch (err: any) {
       // C7: a failed privileged grub-editenv write is a failure, not an
       // "emulated environment" success. The active slot was not changed.
@@ -3941,6 +3937,63 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
         message: `Failed to arm Slot ${cleanSlot}: ${err?.message || 'grub-editenv write failed'}. The active slot was not changed; do not reboot on the basis of this result.`,
       };
     }
+
+    // E2-4: when running on slot B, GRUB reads slot A's grubenv, so
+    // the write above went to a grubenv GRUB never reads. Mirror it
+    // onto slot A the way the daemon and axonwall-update do; a mirror
+    // failure means the slot was NOT armed, and must be reported as
+    // such rather than as success.
+    try {
+      const cmdline = fs.existsSync('/proc/cmdline') ? fs.readFileSync('/proc/cmdline', 'utf8') : '';
+      if (cmdline.includes('axon_root_b') || cmdline.includes('slot=B')) {
+        const slotADev = '/dev/disk/by-label/axon_root_a';
+        if (!fs.existsSync(slotADev)) {
+          return {
+            success: false,
+            message: `Slot ${cleanSlot} was written to the local GRUB environment, but the Slot A mirror could not be made (device ${slotADev} not found); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
+          };
+        }
+        const mntDir = '/tmp/axonwall-grubenv-slot-a';
+        fs.mkdirSync(mntDir, { recursive: true });
+        try {
+          execFileSync('mount', [slotADev, mntDir], { stdio: 'ignore', timeout: 5000 });
+        } catch (mountErr: any) {
+          return {
+            success: false,
+            message: `Slot ${cleanSlot} was written to the local GRUB environment, but Slot A could not be mounted to mirror it (${mountErr?.message || 'mount failed'}); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
+          };
+        }
+        try {
+          execFileSync('grub-editenv', [`${mntDir}/boot/grub/grubenv`, 'set', `active_slot=${cleanSlot}`, 'bootcount=0'], {
+            stdio: 'ignore',
+            timeout: 1500,
+          });
+        } catch (mirrorErr: any) {
+          try {
+            execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+          } catch {}
+          return {
+            success: false,
+            message: `Slot ${cleanSlot} was written to the local GRUB environment, but the Slot A grubenv mirror failed (${mirrorErr?.message || 'grub-editenv failed'}); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
+          };
+        }
+        // A stuck unmount after a successful mirror write does not
+        // change what GRUB will boot; ignore it.
+        try {
+          execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+        } catch {}
+      }
+    } catch (err: any) {
+      return {
+        success: false,
+        message: `Failed to mirror the GRUB environment to Slot A: ${err?.message || 'mirror failed'}. The slot was NOT armed; do not reboot on the basis of this result.`,
+      };
+    }
+
+    return {
+      success: true,
+      message: `Partition Slot ${cleanSlot} armed in GRUB environment. System will boot into Slot ${cleanSlot} on next reboot.`,
+    };
   } catch (err: any) {
     return {
       success: false,
