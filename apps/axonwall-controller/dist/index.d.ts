@@ -27,6 +27,7 @@ export interface ControllerTlsConfig {
     ca?: Buffer | string;
     isFallback?: boolean;
 }
+export declare function verifyFreshLeafOrThrow(certPath: string, caPath: string): void;
 export declare function ensureControllerTls(certPath?: string, keyPath?: string, caPath?: string, caKeyPath?: string): ControllerTlsConfig | null;
 export { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord, processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, acquireMcpLockFile, recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries, isMcpServerEnabled, getMcpServerStatus, };
 export declare function isValidMacAddress(value: unknown): boolean;

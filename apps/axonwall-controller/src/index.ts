@@ -97,6 +97,163 @@ function assertNotOperatorCaWithoutKey(caPath: string, caKeyPath: string): void 
   }
 }
 
+const HUB_CERT_SAN = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
+
+// B2-M9: mint a pure self-signed hub certificate. Split out of
+// generateSignedOrSelfSignedCert so the emergency fallback can
+// reach it directly when the CA-signed path throws (unusable
+// ca.key) instead of letting the throw kill the whole fallback
+// and the controller start in plaintext HTTP.
+function generateSelfSignedCert(targetKeyPath: string, targetCertPath: string, days: string): void {
+  child_process.execFileSync(
+    'openssl',
+    [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-keyout',
+      targetKeyPath,
+      '-out',
+      targetCertPath,
+      '-days',
+      days,
+      '-subj',
+      '/O=Axonwall/OU=Appliance/CN=axonwall',
+      '-addext',
+      `subjectAltName=${HUB_CERT_SAN}`,
+    ],
+    { timeout: 15000, stdio: 'ignore' }
+  );
+}
+
+// Mint a hub certificate signed by the on-box CA when a CA key
+// exists, otherwise a pure self-signed one. Throws when the CA
+// path is chosen but openssl fails (e.g. ca.key exists but is
+// corrupt or does not match ca.crt) — callers that must stay
+// encrypted fall back to generateSelfSignedCert instead.
+function generateSignedOrSelfSignedCert(
+  targetKeyPath: string,
+  targetCertPath: string,
+  days: string,
+  caPath: string,
+  caKeyPath: string,
+): void {
+  if (fs.existsSync(caPath) && fs.existsSync(caKeyPath)) {
+    const csrPath = `${targetCertPath}.csr`;
+    const extPath = `${targetCertPath}.ext`;
+    try {
+      child_process.execFileSync(
+        'openssl',
+        [
+          'req',
+          '-newkey',
+          'rsa:2048',
+          '-nodes',
+          '-keyout',
+          targetKeyPath,
+          '-out',
+          csrPath,
+          '-subj',
+          '/O=Axonwall/OU=Appliance/CN=axonwall',
+        ],
+        { timeout: 15000, stdio: 'ignore' }
+      );
+      fs.writeFileSync(
+        extPath,
+        `basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${HUB_CERT_SAN}\n`,
+        { mode: 0o600 }
+      );
+      child_process.execFileSync(
+        'openssl',
+        [
+          'x509',
+          '-req',
+          '-in',
+          csrPath,
+          '-CA',
+          caPath,
+          '-CAkey',
+          caKeyPath,
+          '-CAcreateserial',
+          '-out',
+          targetCertPath,
+          '-days',
+          days,
+          '-sha256',
+          '-extfile',
+          extPath,
+        ],
+        { timeout: 15000, stdio: 'ignore' }
+      );
+    } finally {
+      try { fs.unlinkSync(csrPath); } catch {}
+      try { fs.unlinkSync(extPath); } catch {}
+    }
+  } else {
+    generateSelfSignedCert(targetKeyPath, targetCertPath, days);
+  }
+}
+
+// B2-M9: a freshly minted leaf that does not chain to the on-disk
+// CA is a provisioning bug, not a usable certificate — serving it
+// would put the controller in the B-H3 bad-leaf trap, and
+// re-minting would just reproduce it identically forever. Fail
+// startup loudly. Only an explicit `false` throws (a `null` means
+// openssl could not run, and the check is skipped rather than
+// failing a healthy mint); only when a CA file exists, since
+// `openssl verify` fails on a missing CA file.
+export function verifyFreshLeafOrThrow(certPath: string, caPath: string): void {
+  if (!fs.existsSync(caPath)) return;
+  if (leafChainsToCa(certPath, caPath) === false) {
+    throw new Error(
+      `[Axonwall Controller] Freshly minted hub certificate does not chain to the on-disk CA (${caPath}); refusing to serve it. Regenerate the CA or remove the stale CA certificate.`
+    );
+  }
+}
+
+// B2-M9: mint a 30-day emergency certificate in a temp dir. Tries
+// the CA-signed path first (when a CA key exists), then a pure
+// self-signed cert when the CA path throws (unusable ca.key) or
+// the minted leaf does not chain to the on-disk CA. A leaf that
+// does not chain is never served (B-H3 trap). Returns null only
+// when both paths fail.
+function mintEmergencyTlsCert(caPath: string, caKeyPath: string): { cert: Buffer; key: Buffer } | null {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-tls-'));
+  const tmpKey = path.join(tmpDir, 'hub.key');
+  const tmpCert = path.join(tmpDir, 'hub.crt');
+  try {
+    let caSigned = true;
+    try {
+      generateSignedOrSelfSignedCert(tmpKey, tmpCert, '30', caPath, caKeyPath);
+    } catch (mintErr) {
+      console.warn('[Axonwall Controller] CA-signed emergency certificate failed; minting a pure self-signed fallback instead:', mintErr);
+      generateSelfSignedCert(tmpKey, tmpCert, '30');
+      caSigned = false;
+    }
+    // A CA-signed emergency leaf that does not chain to the
+    // on-disk CA must not be served (B-H3 trap) — replace it with
+    // a pure self-signed one. A self-signed fallback has nothing
+    // to chain to, so it is served as-is.
+    if (caSigned && fs.existsSync(caPath) && leafChainsToCa(tmpCert, caPath) === false) {
+      console.warn('[Axonwall Controller] Emergency CA-signed certificate does not chain to the on-disk CA; minting a pure self-signed fallback instead.');
+      generateSelfSignedCert(tmpKey, tmpCert, '30');
+    }
+    const cert = fs.readFileSync(tmpCert);
+    const key = fs.readFileSync(tmpKey);
+    if (cert.length > 0 && key.length > 0) return { cert, key };
+    return null;
+  } catch (err) {
+    console.error('[Axonwall Controller] Critical error generating emergency TLS certificate:', err);
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmpKey); } catch {}
+    try { fs.unlinkSync(tmpCert); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
+  }
+}
+
 export function ensureControllerTls(
   certPath: string = '/etc/axonwall/certs/hub.crt',
   keyPath: string = '/etc/axonwall/certs/hub.key',
@@ -160,89 +317,21 @@ export function ensureControllerTls(
   // B-H3: never self-generate when an operator CA exists without a
   // matching on-box CA key — fail startup loudly instead.
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  const generateSignedOrSelfSignedCert = (targetKeyPath: string, targetCertPath: string, days: string) => {
-    const san = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
-    if (fs.existsSync(caPath) && fs.existsSync(caKeyPath)) {
-      const csrPath = `${targetCertPath}.csr`;
-      const extPath = `${targetCertPath}.ext`;
-      try {
-        child_process.execFileSync(
-          'openssl',
-          [
-            'req',
-            '-newkey',
-            'rsa:2048',
-            '-nodes',
-            '-keyout',
-            targetKeyPath,
-            '-out',
-            csrPath,
-            '-subj',
-            '/O=Axonwall/OU=Appliance/CN=axonwall',
-          ],
-          { timeout: 15000, stdio: 'ignore' }
-        );
-        fs.writeFileSync(
-          extPath,
-          `basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${san}\n`,
-          { mode: 0o600 }
-        );
-        child_process.execFileSync(
-          'openssl',
-          [
-            'x509',
-            '-req',
-            '-in',
-            csrPath,
-            '-CA',
-            caPath,
-            '-CAkey',
-            caKeyPath,
-            '-CAcreateserial',
-            '-out',
-            targetCertPath,
-            '-days',
-            days,
-            '-sha256',
-            '-extfile',
-            extPath,
-          ],
-          { timeout: 15000, stdio: 'ignore' }
-        );
-      } finally {
-        try { fs.unlinkSync(csrPath); } catch {}
-        try { fs.unlinkSync(extPath); } catch {}
-      }
-    } else {
-      child_process.execFileSync(
-        'openssl',
-        [
-          'req',
-          '-x509',
-          '-newkey',
-          'rsa:2048',
-          '-nodes',
-          '-keyout',
-          targetKeyPath,
-          '-out',
-          targetCertPath,
-          '-days',
-          days,
-          '-subj',
-          '/O=Axonwall/OU=Appliance/CN=axonwall',
-          '-addext',
-          `subjectAltName=${san}`,
-        ],
-        { timeout: 15000, stdio: 'ignore' }
-      );
-    }
-  };
+  // B2-M9: the mint stays in the try (a mint failure falls through
+  // to the emergency fallback), but the chain verification and the
+  // return are outside it — a freshly minted leaf that does not
+  // chain to the on-disk CA is a provisioning bug, and the throw
+  // must escape ensureControllerTls and fail startup loudly
+  // instead of being swallowed by the catch below (which would
+  // fall through to step 4 and mint an identical non-chaining
+  // leaf forever).
+  let minted: { cert: Buffer; key: Buffer } | null = null;
   try {
     const certDir = path.dirname(certPath);
     if (!fs.existsSync(certDir)) {
       fs.mkdirSync(certDir, { recursive: true, mode: 0o750 });
     }
-    generateSignedOrSelfSignedCert(keyPath, certPath, '3650');
+    generateSignedOrSelfSignedCert(keyPath, certPath, '3650', caPath, caKeyPath);
 
     if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
       const cert = fs.readFileSync(certPath);
@@ -252,46 +341,38 @@ export function ensureControllerTls(
         fs.chmodSync(certPath, 0o644);
       } catch {}
       if (cert.length > 0 && key.length > 0) {
-        console.log('[Axonwall Controller] Successfully generated local hub certificate via openssl');
-        // B-H3: include the on-disk CA when it exists, so the mTLS
-        // gate (requestCert) is actually armed for CA-issued satellites.
-        const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
-        return { cert, key, ca };
+        minted = { cert, key };
       }
     }
   } catch (err) {
     console.warn('[Axonwall Controller] Generating certificate in target directory failed:', err);
   }
+  if (minted) {
+    console.log('[Axonwall Controller] Successfully generated local hub certificate via openssl');
+    // B-H3: include the on-disk CA when it exists, so the mTLS
+    // gate (requestCert) is actually armed for CA-issued satellites.
+    const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
+    verifyFreshLeafOrThrow(certPath, caPath);
+    return { cert: minted.cert, key: minted.key, ca };
+  }
 
   // 4. Emergency fallback: generate temporary self-signed cert in tmpdir.
   // B-H3: the fallback must not defeat the operator-CA refusal either.
+  // B2-M9: the CA-signed path throws when ca.key exists but is
+  // unusable — the old code let that throw kill the whole fallback
+  // and the controller started in plaintext HTTP. mintEmergencyTlsCert
+  // falls back to a pure self-signed cert instead (and never serves
+  // a non-chaining leaf), so the controller stays encrypted.
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  try {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-tls-'));
-    const tmpKey = path.join(tmpDir, 'hub.key');
-    const tmpCert = path.join(tmpDir, 'hub.crt');
-    generateSignedOrSelfSignedCert(tmpKey, tmpCert, '30');
-
-    const cert = fs.readFileSync(tmpCert);
-    const key = fs.readFileSync(tmpKey);
-    try {
-      fs.unlinkSync(tmpKey);
-      fs.unlinkSync(tmpCert);
-      fs.rmdirSync(tmpDir);
-    } catch {}
-
-    if (cert.length > 0 && key.length > 0) {
-      console.warn(
-        '[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted'
-      );
-      // B-H3: include the on-disk CA when it exists (see step 3).
-      const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
-      return { cert, key, ca, isFallback: true };
-    }
-  } catch (err) {
-    console.error('[Axonwall Controller] Critical error generating emergency TLS certificate:', err);
+  const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
+  const emergency = mintEmergencyTlsCert(caPath, caKeyPath);
+  if (emergency) {
+    console.warn(
+      '[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted'
+    );
+    return { cert: emergency.cert, key: emergency.key, ca, isFallback: true };
   }
-
+  console.error('[Axonwall Controller] Critical error generating emergency TLS certificate');
   return null;
 }
 

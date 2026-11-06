@@ -45454,6 +45454,143 @@ function assertNotOperatorCaWithoutKey(caPath, caKeyPath) {
     );
   }
 }
+var HUB_CERT_SAN = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
+function generateSelfSignedCert(targetKeyPath, targetCertPath, days) {
+  child_process.execFileSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-keyout",
+      targetKeyPath,
+      "-out",
+      targetCertPath,
+      "-days",
+      days,
+      "-subj",
+      "/O=Axonwall/OU=Appliance/CN=axonwall",
+      "-addext",
+      `subjectAltName=${HUB_CERT_SAN}`
+    ],
+    { timeout: 15e3, stdio: "ignore" }
+  );
+}
+function generateSignedOrSelfSignedCert(targetKeyPath, targetCertPath, days, caPath, caKeyPath) {
+  if (fs7.existsSync(caPath) && fs7.existsSync(caKeyPath)) {
+    const csrPath = `${targetCertPath}.csr`;
+    const extPath = `${targetCertPath}.ext`;
+    try {
+      child_process.execFileSync(
+        "openssl",
+        [
+          "req",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          targetKeyPath,
+          "-out",
+          csrPath,
+          "-subj",
+          "/O=Axonwall/OU=Appliance/CN=axonwall"
+        ],
+        { timeout: 15e3, stdio: "ignore" }
+      );
+      fs7.writeFileSync(
+        extPath,
+        `basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=${HUB_CERT_SAN}
+`,
+        { mode: 384 }
+      );
+      child_process.execFileSync(
+        "openssl",
+        [
+          "x509",
+          "-req",
+          "-in",
+          csrPath,
+          "-CA",
+          caPath,
+          "-CAkey",
+          caKeyPath,
+          "-CAcreateserial",
+          "-out",
+          targetCertPath,
+          "-days",
+          days,
+          "-sha256",
+          "-extfile",
+          extPath
+        ],
+        { timeout: 15e3, stdio: "ignore" }
+      );
+    } finally {
+      try {
+        fs7.unlinkSync(csrPath);
+      } catch {
+      }
+      try {
+        fs7.unlinkSync(extPath);
+      } catch {
+      }
+    }
+  } else {
+    generateSelfSignedCert(targetKeyPath, targetCertPath, days);
+  }
+}
+function verifyFreshLeafOrThrow(certPath, caPath) {
+  if (!fs7.existsSync(caPath)) return;
+  if (leafChainsToCa(certPath, caPath) === false) {
+    throw new Error(
+      `[Axonwall Controller] Freshly minted hub certificate does not chain to the on-disk CA (${caPath}); refusing to serve it. Regenerate the CA or remove the stale CA certificate.`
+    );
+  }
+}
+function mintEmergencyTlsCert(caPath, caKeyPath) {
+  const tmpDir = fs7.mkdtempSync(path5.join(os.tmpdir(), "axonwall-tls-"));
+  const tmpKey = path5.join(tmpDir, "hub.key");
+  const tmpCert = path5.join(tmpDir, "hub.crt");
+  try {
+    let caSigned = true;
+    try {
+      generateSignedOrSelfSignedCert(tmpKey, tmpCert, "30", caPath, caKeyPath);
+    } catch (mintErr) {
+      console.warn("[Axonwall Controller] CA-signed emergency certificate failed; minting a pure self-signed fallback instead:", mintErr);
+      generateSelfSignedCert(tmpKey, tmpCert, "30");
+      caSigned = false;
+    }
+    if (caSigned && fs7.existsSync(caPath) && leafChainsToCa(tmpCert, caPath) === false) {
+      console.warn("[Axonwall Controller] Emergency CA-signed certificate does not chain to the on-disk CA; minting a pure self-signed fallback instead.");
+      generateSelfSignedCert(tmpKey, tmpCert, "30");
+    }
+    const cert = fs7.readFileSync(tmpCert);
+    const key = fs7.readFileSync(tmpKey);
+    if (cert.length > 0 && key.length > 0) return { cert, key };
+    return null;
+  } catch (err) {
+    console.error("[Axonwall Controller] Critical error generating emergency TLS certificate:", err);
+    return null;
+  } finally {
+    try {
+      fs7.unlinkSync(tmpKey);
+    } catch {
+    }
+    try {
+      fs7.unlinkSync(tmpCert);
+    } catch {
+    }
+    try {
+      fs7.rmdirSync(tmpDir);
+    } catch {
+    }
+  }
+}
 function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath = "/etc/axonwall/certs/hub.key", caPath = "/etc/axonwall/certs/ca.crt", caKeyPath = path5.join(path5.dirname(caPath), "ca.key")) {
   if (process.env.AXONWALL_INSECURE_HTTP === "1") {
     console.warn("[Axonwall Controller] AXONWALL_INSECURE_HTTP=1 is set: running in plaintext mode (DEV/TEST ONLY)");
@@ -45466,11 +45603,11 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
       if (certStat.size > 0 && keyStat.size > 0) {
         const cert = fs7.readFileSync(certPath);
         const key = fs7.readFileSync(keyPath);
-        const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-        if (ca && leafChainsToCa(certPath, caPath) === false) {
+        const ca2 = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+        if (ca2 && leafChainsToCa(certPath, caPath) === false) {
           console.warn("[Axonwall Controller] Existing hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
         } else {
-          return { cert, key, ca };
+          return { cert, key, ca: ca2 };
         }
       }
     } catch (err) {
@@ -45487,11 +45624,11 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
         const cert = fs7.readFileSync(certPath);
         const key = fs7.readFileSync(keyPath);
         if (cert.length > 0 && key.length > 0) {
-          const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-          if (ca && leafChainsToCa(certPath, caPath) === false) {
+          const ca2 = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+          if (ca2 && leafChainsToCa(certPath, caPath) === false) {
             console.warn("[Axonwall Controller] Rotated hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
           } else {
-            return { cert, key, ca };
+            return { cert, key, ca: ca2 };
           }
         }
       }
@@ -45500,99 +45637,13 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
     }
   }
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  const generateSignedOrSelfSignedCert = (targetKeyPath, targetCertPath, days) => {
-    const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
-    if (fs7.existsSync(caPath) && fs7.existsSync(caKeyPath)) {
-      const csrPath = `${targetCertPath}.csr`;
-      const extPath = `${targetCertPath}.ext`;
-      try {
-        child_process.execFileSync(
-          "openssl",
-          [
-            "req",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            targetKeyPath,
-            "-out",
-            csrPath,
-            "-subj",
-            "/O=Axonwall/OU=Appliance/CN=axonwall"
-          ],
-          { timeout: 15e3, stdio: "ignore" }
-        );
-        fs7.writeFileSync(
-          extPath,
-          `basicConstraints=CA:FALSE
-keyUsage=digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth
-subjectAltName=${san}
-`,
-          { mode: 384 }
-        );
-        child_process.execFileSync(
-          "openssl",
-          [
-            "x509",
-            "-req",
-            "-in",
-            csrPath,
-            "-CA",
-            caPath,
-            "-CAkey",
-            caKeyPath,
-            "-CAcreateserial",
-            "-out",
-            targetCertPath,
-            "-days",
-            days,
-            "-sha256",
-            "-extfile",
-            extPath
-          ],
-          { timeout: 15e3, stdio: "ignore" }
-        );
-      } finally {
-        try {
-          fs7.unlinkSync(csrPath);
-        } catch {
-        }
-        try {
-          fs7.unlinkSync(extPath);
-        } catch {
-        }
-      }
-    } else {
-      child_process.execFileSync(
-        "openssl",
-        [
-          "req",
-          "-x509",
-          "-newkey",
-          "rsa:2048",
-          "-nodes",
-          "-keyout",
-          targetKeyPath,
-          "-out",
-          targetCertPath,
-          "-days",
-          days,
-          "-subj",
-          "/O=Axonwall/OU=Appliance/CN=axonwall",
-          "-addext",
-          `subjectAltName=${san}`
-        ],
-        { timeout: 15e3, stdio: "ignore" }
-      );
-    }
-  };
+  let minted = null;
   try {
     const certDir = path5.dirname(certPath);
     if (!fs7.existsSync(certDir)) {
       fs7.mkdirSync(certDir, { recursive: true, mode: 488 });
     }
-    generateSignedOrSelfSignedCert(keyPath, certPath, "3650");
+    generateSignedOrSelfSignedCert(keyPath, certPath, "3650", caPath, caKeyPath);
     if (fs7.existsSync(certPath) && fs7.existsSync(keyPath)) {
       const cert = fs7.readFileSync(certPath);
       const key = fs7.readFileSync(keyPath);
@@ -45602,38 +45653,28 @@ subjectAltName=${san}
       } catch {
       }
       if (cert.length > 0 && key.length > 0) {
-        console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
-        const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-        return { cert, key, ca };
+        minted = { cert, key };
       }
     }
   } catch (err) {
     console.warn("[Axonwall Controller] Generating certificate in target directory failed:", err);
   }
-  assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  try {
-    const tmpDir = fs7.mkdtempSync(path5.join(os.tmpdir(), "axonwall-tls-"));
-    const tmpKey = path5.join(tmpDir, "hub.key");
-    const tmpCert = path5.join(tmpDir, "hub.crt");
-    generateSignedOrSelfSignedCert(tmpKey, tmpCert, "30");
-    const cert = fs7.readFileSync(tmpCert);
-    const key = fs7.readFileSync(tmpKey);
-    try {
-      fs7.unlinkSync(tmpKey);
-      fs7.unlinkSync(tmpCert);
-      fs7.rmdirSync(tmpDir);
-    } catch {
-    }
-    if (cert.length > 0 && key.length > 0) {
-      console.warn(
-        "[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted"
-      );
-      const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-      return { cert, key, ca, isFallback: true };
-    }
-  } catch (err) {
-    console.error("[Axonwall Controller] Critical error generating emergency TLS certificate:", err);
+  if (minted) {
+    console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
+    const ca2 = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+    verifyFreshLeafOrThrow(certPath, caPath);
+    return { cert: minted.cert, key: minted.key, ca: ca2 };
   }
+  assertNotOperatorCaWithoutKey(caPath, caKeyPath);
+  const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+  const emergency = mintEmergencyTlsCert(caPath, caKeyPath);
+  if (emergency) {
+    console.warn(
+      "[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted"
+    );
+    return { cert: emergency.cert, key: emergency.key, ca, isFallback: true };
+  }
+  console.error("[Axonwall Controller] Critical error generating emergency TLS certificate");
   return null;
 }
 var HA_PROMOTE_ROLES = /* @__PURE__ */ new Set(["master", "active", "promote"]);
@@ -47169,5 +47210,6 @@ export {
   shouldPruneDisconnectedSatellite,
   shouldRefuseFleetSync,
   validateHaTransition,
+  verifyFreshLeafOrThrow,
   verifyMcpAuditChain
 };
