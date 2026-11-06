@@ -400,6 +400,30 @@ func readPidFile(path string) int {
 	return pid
 }
 
+// waitForQmpSocket polls for the QMP socket QEMU creates after daemonizing
+// and verifies the QEMU pid from the pidfile is still alive. With
+// -daemonize the parent exits 0 once the child forks, so post-fork failures
+// (socket bind conflicts, pidfile failure) are invisible to the launch
+// command's exit code and this wait is the only liveness check (A-M25).
+func waitForQmpSocket(qmpSock, pidFile string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(qmpSock); err == nil {
+			if pid := readPidFile(pidFile); pid > 0 && !isPidRunning(pid) {
+				return fmt.Errorf("QMP socket %s appeared but QEMU pid %d from %s is no longer running", qmpSock, pid, pidFile)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if pid := readPidFile(pidFile); pid > 0 && !isPidRunning(pid) {
+				return fmt.Errorf("QMP socket %s did not appear within %s and QEMU pid %d from %s is no longer running; QEMU died after daemonizing", qmpSock, timeout, pid, pidFile)
+			}
+			return fmt.Errorf("QMP socket %s did not appear within %s; QEMU may have died after daemonizing", qmpSock, timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // SendQMPCommand sends a JSON-RPC command over QMP Unix domain socket
 func SendQMPCommand(socketPath string, command string, args map[string]any) (map[string]any, error) {
 	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
@@ -655,24 +679,18 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 
 		// Wait briefly and verify QMP socket
 		qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
-		ready := false
-		for i := 0; i < 20; i++ {
-			time.Sleep(100 * time.Millisecond)
-			if _, err := os.Stat(qmpSock); err == nil {
-				ready = true
-				break
-			}
+		// A-M25: a missing QMP socket means QEMU died after
+		// daemonizing (the parent exits 0 once the child forks), so
+		// this must fail the start task instead of warning and
+		// reporting success.
+		if err := waitForQmpSocket(qmpSock, pidFile, 2*time.Second); err != nil {
+			logger("VM %d failed to start: %v", vmid, err)
+			return err
 		}
-
-		if ready {
-			logger("VM %d launched successfully. QMP & VNC sockets online.", vmid)
-			m.mu.Lock()
-			m.vmStartTimes[vmid] = time.Now().Unix()
-			m.mu.Unlock()
-			return nil
-		}
-
-		logger("Warning: VM %d process started but QMP socket not detected yet.", vmid)
+		logger("VM %d launched successfully. QMP & VNC sockets online.", vmid)
+		m.mu.Lock()
+		m.vmStartTimes[vmid] = time.Now().Unix()
+		m.mu.Unlock()
 		return nil
 	})
 

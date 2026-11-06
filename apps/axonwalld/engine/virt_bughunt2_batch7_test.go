@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestVirtManager(t *testing.T) *VirtManager {
@@ -54,5 +57,46 @@ func TestBatch7_StartVMRefusesUnregisteredVM(t *testing.T) {
 	virtMgr := newTestVirtManager(t)
 	if _, err := virtMgr.StartVM(999, "test@batch7"); err == nil {
 		t.Fatal("StartVM unregistered VMID returned nil error, want refusal")
+	}
+}
+
+// A-M25: StartVM must fail when QEMU died and the QMP socket never
+// appeared, instead of warning and reporting task success.
+func TestBatch7_WaitForQmpSocket(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "vm-999.sock")
+	pidFile := filepath.Join(dir, "vm-999.pid")
+
+	// No socket at all: must fail after the timeout.
+	if err := waitForQmpSocket(sock, pidFile, 250*time.Millisecond); err == nil {
+		t.Fatal("waitForQmpSocket with no socket returned nil, want error")
+	}
+
+	// Socket present but the pid from the pidfile is dead: must fail
+	// (a stale socket from a previous run must not count as live).
+	if err := os.WriteFile(sock, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidFile, []byte("999999\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForQmpSocket(sock, pidFile, 100*time.Millisecond); err == nil {
+		t.Fatal("waitForQmpSocket with dead pid returned nil, want error")
+	}
+
+	// Socket present and the pid is alive (our own pid): must succeed.
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForQmpSocket(sock, pidFile, 100*time.Millisecond); err != nil {
+		t.Fatalf("waitForQmpSocket with live pid: %v", err)
+	}
+
+	// Socket present and no pidfile yet (pidfile race): must succeed.
+	if err := os.Remove(pidFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForQmpSocket(sock, pidFile, 100*time.Millisecond); err != nil {
+		t.Fatalf("waitForQmpSocket with no pidfile: %v", err)
 	}
 }
