@@ -796,34 +796,17 @@ func r2Batch6FakePathWithSysctl(t *testing.T, systemctlScript string) {
 	t.Cleanup(func() { _ = os.Setenv("PATH", orig) })
 }
 
-// r2Batch6K3sFootprint records the pre-existing K3s file state and
-// registers a cleanup that restores it. K3s ApplyConfig writes the
-// real /etc/rancher/k3s/config.yaml (the engine package's path vars
-// are not visible from package main), so the test removes what it
-// created and restores any pre-existing file.
+// r2Batch6K3sFootprint isolates K3s file paths into a temp directory
+// so tests don't require root permissions to write to /etc/rancher/k3s.
 func r2Batch6K3sFootprint(t *testing.T) {
 	t.Helper()
-	cfgPath := "/etc/rancher/k3s/config.yaml"
-	origData, origErr := os.ReadFile(cfgPath)
-	dirs := []string{"/etc/rancher/k3s", "/var/lib/rancher/k3s/server/manifests", "/var/lib/axonwall"}
-	existed := make(map[string]bool, len(dirs))
-	for _, d := range dirs {
-		_, err := os.Stat(d)
-		existed[d] = err == nil
-	}
-	t.Cleanup(func() {
-		if origErr == nil {
-			_ = os.MkdirAll(filepath.Dir(cfgPath), 0755)
-			_ = os.WriteFile(cfgPath, origData, 0600)
-		} else {
-			_ = os.Remove(cfgPath)
-		}
-		for _, d := range dirs {
-			if !existed[d] {
-				_ = os.Remove(d)
-			}
-		}
-	})
+	dir := t.TempDir()
+	etcDir := filepath.Join(dir, "etc-k3s")
+	manifestDir := filepath.Join(dir, "manifests")
+	stateDir := filepath.Join(dir, "state")
+	vowDir := filepath.Join(dir, "vow")
+	cleanup := engine.SetK3sPathsForTest(etcDir, manifestDir, stateDir, vowDir)
+	t.Cleanup(cleanup)
 }
 
 func r2Batch6K3sApplyRequest(t *testing.T) *pb.ApplyBundleRequest {

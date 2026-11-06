@@ -253,14 +253,10 @@ func (vm *VigilanteManager) UnblockIP(rawIP string) error {
 	cmd := exec.Command("nft", "delete", "element", "inet", "axonwall", setName, elementSpec)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("[VigilanteManager] nft delete element warning: %v, out: %s", err, string(out))
-		// A-M11: mirror BlockIP — as root a failed kernel delete
-		// is an error and the map entry stays, so ListBlockedIPs
-		// never reports an IP unblocked while the kernel may still
-		// drop its traffic. As non-root the nft call is
-		// best-effort (the sandbox/CI case), as in BlockIP.
-		if os.Geteuid() == 0 {
-			return fmt.Errorf("failed to remove IP %s from nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
-		}
+		// A-M11: mirror BlockIP — a failed kernel delete is an error
+		// and the map entry stays, so ListBlockedIPs never reports an IP
+		// unblocked while the kernel may still drop its traffic.
+		return fmt.Errorf("failed to remove IP %s from nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
 	}
 
 	vm.mu.Lock()

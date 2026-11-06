@@ -85,6 +85,16 @@ var (
 	vowEtcDir            = "/etc/axonwall/vow"
 )
 
+// SetK3sPathsForTest redirects K3s and VOW filesystem roots for testing.
+// Returns a cleanup function that restores the prior values.
+func SetK3sPathsForTest(etcDir, manifestDir, stateDir, vowDir string) func() {
+	origE, origM, origS, origV := k3sEtcDir, k3sServerManifestDir, k3sStateDir, vowEtcDir
+	k3sEtcDir, k3sServerManifestDir, k3sStateDir, vowEtcDir = etcDir, manifestDir, stateDir, vowDir
+	return func() {
+		k3sEtcDir, k3sServerManifestDir, k3sStateDir, vowEtcDir = origE, origM, origS, origV
+	}
+}
+
 func NewK3sManager() *K3sManager {
 	return &K3sManager{
 		lastMessage: "K3s + OpenEBS orchestrator initialized",
