@@ -628,7 +628,17 @@ if [ "$ZBM_MODE" = "1" ]; then
     # E2: every arming step is checked. On any failure, restore the
     # previous bootfs, print an error, and exit non-zero — never claim
     # the Boot Environment is armed.
+    # E2-5: snapshot every arming property before touching them, so
+    # the rollback below restores all of them (the daemon's E3 fix
+    # does the same). Restoring bootfs alone left active_be pointing
+    # at the new BE while bootfs pointed at the old one, and the
+    # watchdog hook then counted healthy boots of the old BE against
+    # the new BE and spuriously rolled back days later.
     PREV_BOOTFS="$(zpool get -H -o value bootfs "${POOL_NAME}" 2>/dev/null || true)"
+    PREV_FALLBACK_BE="$(zfs get -H -o value org.axonwall:fallback_be "${PARENT_DS}" 2>/dev/null || true)"
+    PREV_ACTIVE_BE="$(zfs get -H -o value org.axonwall:active_be "${PARENT_DS}" 2>/dev/null || true)"
+    PREV_BOOTCOUNT="$(zfs get -H -o value org.axonwall:bootcount "${PARENT_DS}" 2>/dev/null || true)"
+    PREV_BOOTLIMIT="$(zfs get -H -o value org.axonwall:bootlimit "${PARENT_DS}" 2>/dev/null || true)"
     ZBM_ARM_OK=1
     zpool set bootfs="${TARGET_BE_DS}" "${POOL_NAME}" 2>/dev/null || ZBM_ARM_OK=0
     zfs set org.axonwall:fallback_be="${CURRENT_BE_DS}" "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
@@ -637,9 +647,21 @@ if [ "$ZBM_MODE" = "1" ]; then
     zfs set org.axonwall:bootlimit=3 "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
     if [ "$ZBM_ARM_OK" != "1" ]; then
       echo "[-] ERROR: Failed to arm Boot Environment ${TARGET_BE} (one or more zpool/zfs arming steps failed); the Boot Environment is NOT armed." >&2
-      if [ -n "$PREV_BOOTFS" ]; then
-        zpool set bootfs="${PREV_BOOTFS}" "${POOL_NAME}" 2>/dev/null || true
+      if [ -n "$PREV_BOOTFS" ] && [ "$PREV_BOOTFS" != "-" ]; then
+        zpool set bootfs="${PREV_BOOTFS}" "${POOL_NAME}" 2>/dev/null || echo "[!] WARNING: Failed to roll back bootfs to ${PREV_BOOTFS} after arming failure." >&2
       fi
+      # A prior value of "-" (or empty/unreadable) means the property
+      # was unset: inherit clears whatever the failed arming set,
+      # mirroring the daemon's E3 rollback.
+      for _rb in "org.axonwall:fallback_be|${PREV_FALLBACK_BE}" "org.axonwall:active_be|${PREV_ACTIVE_BE}" "org.axonwall:bootcount|${PREV_BOOTCOUNT}" "org.axonwall:bootlimit|${PREV_BOOTLIMIT}"; do
+        _rb_prop="${_rb%%|*}"
+        _rb_prev="${_rb#*|}"
+        if [ -n "$_rb_prev" ] && [ "$_rb_prev" != "-" ]; then
+          zfs set "${_rb_prop}=${_rb_prev}" "${PARENT_DS}" 2>/dev/null || echo "[!] WARNING: Failed to roll back ${_rb_prop} to ${_rb_prev} after arming failure." >&2
+        else
+          zfs inherit "$_rb_prop" "${PARENT_DS}" 2>/dev/null || true
+        fi
+      done
       exit 1
     fi
 
