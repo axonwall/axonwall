@@ -43286,6 +43286,11 @@ import * as path3 from "node:path";
 // src/mcp/lockfile.ts
 import * as fs3 from "node:fs";
 import * as path2 from "node:path";
+function desiredStateLockPath() {
+  const override = process.env.AXONWALL_DESIRED_STATE_LOCK_PATH;
+  if (override) return override;
+  return fs3.existsSync("/etc/axonwall") ? "/etc/axonwall/state.json.lock" : "/var/lib/axonwall/state.json.lock";
+}
 function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
   const deadline = Date.now() + timeoutMs;
   const staleThresholdMs = Math.min(Math.max(1e3, timeoutMs - 500), 1e4);
@@ -43870,9 +43875,6 @@ function readAgentToken() {
 }
 function newMcpApplyJobId() {
   return `mcp_apply_${Date.now()}_${crypto4.randomBytes(4).toString("hex")}`;
-}
-function desiredStateLockPath() {
-  return fs6.existsSync("/etc/axonwall") ? "/etc/axonwall/state.json.lock" : "/var/lib/axonwall/state.json.lock";
 }
 function insertMcpRuleIntoState(targetState, rule) {
   const isBlockOrReject = rule.action === "block" || rule.action === "reject";

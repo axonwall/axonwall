@@ -1,6 +1,21 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+// B2-M4: the lockfile path for DesiredState mutation. The lock
+// must be one path for every process sharing the state files (the
+// HTTP controller, the stdio MCP server, axonwallctl, and the TUI).
+// Prefer the primary state dir when it exists; the lock helper
+// creates the lock dir itself, so only the choice needs to be
+// deterministic across processes. AXONWALL_DESIRED_STATE_LOCK_PATH
+// overrides the path (tests); it lives here, next to the lock
+// itself, so the CLI and TUI can import the lock and its path from
+// this one tiny module instead of the whole MCP server.
+export function desiredStateLockPath(): string {
+  const override = process.env.AXONWALL_DESIRED_STATE_LOCK_PATH;
+  if (override) return override;
+  return fs.existsSync('/etc/axonwall') ? '/etc/axonwall/state.json.lock' : '/var/lib/axonwall/state.json.lock';
+}
+
 export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => void {
   const deadline = Date.now() + timeoutMs;
   const staleThresholdMs = Math.min(Math.max(1000, timeoutMs - 500), 10000);

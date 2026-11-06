@@ -23,6 +23,7 @@ import {
 } from '@axonwall/lib/plugins';
 import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
 import { isValidDevice } from '@axonwall/lib/util';
+import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import {
   parseCloudInitYaml,
   parseCloudInitNetworkConfig,
@@ -640,44 +641,100 @@ function restoreCliConfigSnapshot(snap: CliConfigSnapshot): void {
   }
 }
 
+// B2-M4 follow-up: the B2-M5 restore is itself a full-state disk
+// write, so it takes the same lock — a restore that lands while an
+// MCP propose (or a TUI save) is persisting would clobber that
+// writer's rule exactly like the original race. Returns false when
+// the lock could not be acquired, in which case the caller must
+// NOT claim the restore happened.
+function restoreCliConfigSnapshotLocked(snap: CliConfigSnapshot): boolean {
+  let release: (() => void) | null = null;
+  try {
+    try {
+      release = acquireMcpLockFile(desiredStateLockPath());
+    } catch {
+      return false;
+    }
+    restoreCliConfigSnapshot(snap);
+    return true;
+  } finally {
+    release?.();
+  }
+}
+
 async function cmdApply(autoConfirm = true) {
-  const state = cmdValidate();
-
-  // B2-M5: snapshot the on-disk config before overwriting it, so a
-  // daemon rejection can restore the previous version instead of
-  // leaving the rejected config on disk as if it were current
-  // (disk, GitOps, and kernel would then disagree). A daemon
-  // outage is different: the disk-only sync below deliberately
-  // keeps the new files, and only an explicit rejection restores.
-  const yamlFiles = serializeDesiredStateToYamlFiles(state);
-  const diskSnapshot = snapshotCliConfigFiles(yamlFiles);
-
-  // Persist normalized YAML files + state.json
-  const serializedJson = JSON.stringify(state, null, 2);
-
-  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
-    try {
-      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
-      for (const [filename, content] of Object.entries(yamlFiles)) {
-        const target = path.join(dir, filename);
-        fs.writeFileSync(target, content, { mode: 0o660 });
-        try { fs.chmodSync(target, 0o660); } catch {}
-      }
-      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
-      if (fs.existsSync(ciOverride)) {
-        fs.rmSync(ciOverride, { force: true });
-      }
-    } catch {}
+  // B2-M4 follow-up: a CLI apply used to read YAML, serialize, and
+  // persist with no lock at all, so an MCP propose_firewall_rule
+  // landing anywhere in that window lost its rule to this apply's
+  // full-state write (and vice versa) — the "propose races a
+  // console/TUI save" trigger. The whole read -> mutate -> persist
+  // window now holds the SAME lockfile the MCP propose path uses
+  // (acquireMcpLockFile/desiredStateLockPath), so the two processes
+  // serialize instead of interleaving. The lock is released before
+  // the daemon apply below: the apply is a network round-trip that
+  // can outlast the lockfile's stale threshold, and holding the
+  // lock across it would let a concurrent writer break it as stale
+  // and re-admit the race. A concurrent MCP propose that lands
+  // after our release reloads fresh state, so it builds on top of
+  // this apply instead of clobbering it. On lock-acquire failure
+  // the apply fails closed (exit 1, nothing written) instead of
+  // proceeding unlocked. Note cmdValidate() calls process.exit(1)
+  // on invalid YAML; process.exit skips the finally below, so a
+  // failed validation leaves the lockfile behind — but its pid is
+  // dead, and the next acquirer's dead-pid check breaks it
+  // immediately, so nothing waits on it.
+  let releaseStateLock: (() => void) | null = null;
+  try {
+    releaseStateLock = acquireMcpLockFile(desiredStateLockPath());
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Could not lock DesiredState for apply (${err?.message || err}); another save or MCP propose is in progress. Nothing was written — retry the apply.${cReset}`);
+    process.exit(1);
   }
+  let state: DesiredState;
+  let yamlFiles: Record<string, string>;
+  let diskSnapshot: CliConfigSnapshot;
+  let serializedJson: string;
+  try {
+    state = cmdValidate();
 
-  for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
-    try {
-      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
-      fs.writeFileSync(jsonTarget, serializedJson, { mode: 0o660 });
-      try { fs.chmodSync(jsonTarget, 0o660); } catch {}
-    } catch {}
+    // B2-M5: snapshot the on-disk config before overwriting it, so a
+    // daemon rejection can restore the previous version instead of
+    // leaving the rejected config on disk as if it were current
+    // (disk, GitOps, and kernel would then disagree). A daemon
+    // outage is different: the disk-only sync below deliberately
+    // keeps the new files, and only an explicit rejection restores.
+    yamlFiles = serializeDesiredStateToYamlFiles(state);
+    diskSnapshot = snapshotCliConfigFiles(yamlFiles);
+
+    // Persist normalized YAML files + state.json
+    serializedJson = JSON.stringify(state, null, 2);
+
+    for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+      try {
+        fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
+        for (const [filename, content] of Object.entries(yamlFiles)) {
+          const target = path.join(dir, filename);
+          fs.writeFileSync(target, content, { mode: 0o660 });
+          try { fs.chmodSync(target, 0o660); } catch {}
+        }
+        const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+        if (fs.existsSync(ciOverride)) {
+          fs.rmSync(ciOverride, { force: true });
+        }
+      } catch {}
+    }
+
+    for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
+      try {
+        fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(jsonTarget, serializedJson, { mode: 0o660 });
+        try { fs.chmodSync(jsonTarget, 0o660); } catch {}
+      } catch {}
+    }
+    fixSharedConfigOwnership();
+  } finally {
+    releaseStateLock?.();
   }
-  fixSharedConfigOwnership();
 
   // Compile artifacts via compileNftables(state)
   const { nftScript, files, reloadServices } = compileNftables(state);
@@ -723,9 +780,16 @@ async function cmdApply(autoConfirm = true) {
     });
 
     if (!resp.success) {
-      restoreCliConfigSnapshot(diskSnapshot);
+      // B2-M4 follow-up: the restore is a full-state disk write, so
+      // it takes the same lock; a restore that cannot take the lock
+      // must not claim to have restored anything.
+      const restored = restoreCliConfigSnapshotLocked(diskSnapshot);
       console.error(`${cRed}[✗] Daemon rejected bundle: ${resp.message}${cReset}`);
-      console.error(`${cYellow}[!] Restored the previous on-disk configuration; the rejected bundle was not kept.${cReset}`);
+      if (restored) {
+        console.error(`${cYellow}[!] Restored the previous on-disk configuration; the rejected bundle was not kept.${cReset}`);
+      } else {
+        console.error(`${cYellow}[!] Could NOT restore the previous on-disk configuration — the DesiredState lock is held by another save or MCP propose. The rejected bundle is still on disk; check /etc/axonwall/*.yaml before retrying.${cReset}`);
+      }
       process.exit(1);
     }
   } catch (err: any) {

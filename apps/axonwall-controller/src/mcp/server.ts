@@ -19,7 +19,8 @@ import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { serializeDesiredStateToYamlFiles } from '@axonwall/lib/yaml';
 import { hasMcpScope } from './authz.js';
-import { acquireMcpLockFile } from './lockfile.js';
+import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
+export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 
 const AGENT_SOCKET_PATH = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
@@ -56,16 +57,6 @@ function readAgentToken(): string {
 // random suffix.
 export function newMcpApplyJobId(): string {
   return `mcp_apply_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-}
-
-// B2-M4: the lockfile path for DesiredState mutation. The lock
-// must be one path for every process sharing the state files (the
-// HTTP controller and the stdio MCP server). Prefer the primary
-// state dir when it exists; the lock helper creates the lock dir
-// itself, so only the choice needs to be deterministic across
-// processes.
-export function desiredStateLockPath(): string {
-  return fs.existsSync('/etc/axonwall') ? '/etc/axonwall/state.json.lock' : '/var/lib/axonwall/state.json.lock';
 }
 
 // B2-M4: insert a proposed rule into a DesiredState, preserving

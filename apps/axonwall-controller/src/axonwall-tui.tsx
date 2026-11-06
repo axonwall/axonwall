@@ -22,11 +22,12 @@ import {
   disablePluginWithDependents,
 } from '@axonwall/lib';
 import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
+import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { App as NastyMapApp } from './tui/nastymap/App.js';
 
 const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
-const VAR_ETC_CONFIG_DIR = '/var/lib/axonwall/etc-axonwall';
+const VAR_ETC_CONFIG_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
 const STATE_JSON_PATH = process.env.AXONWALL_STATE_FILE || '/var/lib/axonwall/state.json';
 const AGENT_API_SOCKET =
   process.env.AXONWALL_AGENT_API_SOCK || process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
@@ -220,40 +221,98 @@ function restoreTuiConfigSnapshot(snap: TuiConfigSnapshot): void {
   }
 }
 
-function saveStateToDisk(state: DesiredState): Record<string, string> {
-  const serialized = serializeDesiredStateToYamlFiles(state);
-  const daemonFiles: Record<string, string> = {};
-  for (const [fn, content] of Object.entries(serialized)) {
-    daemonFiles[path.join(ETC_CONFIG_DIR, fn)] = content;
-    daemonFiles[path.join(VAR_ETC_CONFIG_DIR, fn)] = content;
-  }
-  for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
+// B2-M4 follow-up: the B2-M5 restore is itself a full-state disk
+// write, so it takes the same lock — a restore that lands while an
+// MCP propose (or a CLI apply) is persisting would clobber that
+// writer's rule exactly like the original race. Returns false when
+// the lock could not be acquired, in which case the caller must
+// NOT claim the restore happened.
+function restoreTuiConfigSnapshotLocked(snap: TuiConfigSnapshot): boolean {
+  let release: (() => void) | null = null;
+  try {
     try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
-      for (const [fn, content] of Object.entries(serialized)) {
-        const filePath = path.join(dir, fn);
-        fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o660 });
-        try {
-          fs.chmodSync(filePath, 0o660);
-        } catch {}
-      }
-      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
-      if (fs.existsSync(ciOverride)) {
-        fs.rmSync(ciOverride, { force: true });
-      }
-    } catch {}
+      release = acquireMcpLockFile(desiredStateLockPath(), TUI_STATE_LOCK_TIMEOUT_MS);
+    } catch {
+      return false;
+    }
+    restoreTuiConfigSnapshot(snap);
+    return true;
+  } finally {
+    release?.();
   }
-  const serializedJson = JSON.stringify(state, null, 2);
-  for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
+}
+
+// B2-M4 follow-up: how long a TUI save waits for the DesiredState
+// lock. The lock is normally held for milliseconds (a synchronous
+// disk write), so 2 s is ample; longer would freeze the interactive
+// UI on a stale lock, and a crashed holder's lock is broken by the
+// dead-pid check immediately anyway.
+const TUI_STATE_LOCK_TIMEOUT_MS = 2000;
+
+// B2-M4 follow-up: every TUI disk save — the apply path and every
+// in-place toggle/edit handler below — funnels through here, and
+// the whole read -> mutate -> persist window now holds the SAME
+// lockfile the MCP propose_firewall_rule path uses
+// (acquireMcpLockFile/desiredStateLockPath), so a propose racing a
+// TUI save serializes instead of interleaving full-state writes
+// and losing one side's rules. The B2-M5 snapshot is taken inside
+// the same acquisition, so the snapshot and the write it guards
+// cannot be split by a concurrent writer. The lock is released
+// before the caller talks to the daemon: the apply is a network
+// round-trip that can outlast the lockfile's stale threshold, and
+// holding the lock across it would let a concurrent writer break
+// it as stale and re-admit the race. Returns null when the lock
+// could not be acquired — nothing was written, and the caller must
+// report that instead of claiming a save. (Callers that ignore the
+// return keep their in-memory edit; the next save retries.)
+// Exported for tests: the TUI module only renders on direct
+// execution (isDirectExecution), so importing it in a test is
+// inert and this is the only way to drive a save without an Ink UI.
+export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<string, string>; snapshot: TuiConfigSnapshot } | null {
+  let release: (() => void) | null = null;
+  try {
     try {
-      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
-      fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
+      release = acquireMcpLockFile(desiredStateLockPath(), TUI_STATE_LOCK_TIMEOUT_MS);
+    } catch {
+      return null;
+    }
+    const snapshot = snapshotTuiConfigFiles(state);
+    const serialized = serializeDesiredStateToYamlFiles(state);
+    const daemonFiles: Record<string, string> = {};
+    for (const [fn, content] of Object.entries(serialized)) {
+      daemonFiles[path.join(ETC_CONFIG_DIR, fn)] = content;
+      daemonFiles[path.join(VAR_ETC_CONFIG_DIR, fn)] = content;
+    }
+    for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
       try {
-        fs.chmodSync(jsonTarget, 0o660);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+        for (const [fn, content] of Object.entries(serialized)) {
+          const filePath = path.join(dir, fn);
+          fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o660 });
+          try {
+            fs.chmodSync(filePath, 0o660);
+          } catch {}
+        }
+        const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+        if (fs.existsSync(ciOverride)) {
+          fs.rmSync(ciOverride, { force: true });
+        }
       } catch {}
-    } catch {}
+    }
+    const serializedJson = JSON.stringify(state, null, 2);
+    for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
+      try {
+        fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
+        try {
+          fs.chmodSync(jsonTarget, 0o660);
+        } catch {}
+      } catch {}
+    }
+    return { daemonFiles, snapshot };
+  } finally {
+    release?.();
   }
-  return daemonFiles;
 }
 
 // B2-M6: callDaemon used to resolve `null` for every failure —
@@ -552,14 +611,23 @@ export function AxonwallTuiApp({
 
   const handleApplyConfig = async () => {
     setStatusMessage('Compiling nftables & subsystem configurations and applying with 120s commit-confirm...');
-    // B2-M5: snapshot the on-disk config before overwriting it,
-    // so a daemon rejection can restore the previous version
-    // instead of leaving the rejected config on disk as if it
-    // were current. A daemon outage is different: the disk-only
+    // B2-M5: the snapshot is taken inside saveStateToDisk, under
+    // the same lock acquisition as the write (see there), so the
+    // snapshot and the write it guards cannot be split by a
+    // concurrent writer. A daemon outage is different: the disk-only
     // save below deliberately keeps the new files, and only an
     // explicit rejection restores.
-    const diskSnapshot = snapshotTuiConfigFiles(state);
-    const yamlDaemonFiles = saveStateToDisk(state);
+    const saved = saveStateToDisk(state);
+    // B2-M4 follow-up: the save could not take the DesiredState
+    // lock — another save or MCP propose holds it — so nothing was
+    // written. Do not call the daemon (there is nothing new to
+    // apply) and say so plainly instead of claiming a save.
+    if (!saved) {
+      setStatusMessage('✖ Could not lock DesiredState — another save or MCP propose is in progress; nothing was written. Try again.');
+      return;
+    }
+    const diskSnapshot = saved.snapshot;
+    const yamlDaemonFiles = saved.daemonFiles;
     const { nftScript, files, reloadServices } = compileNftables(state);
     const hashInput = JSON.stringify({
       nftScript,
@@ -623,8 +691,14 @@ export function AxonwallTuiApp({
     } else if (resp?.errorKind === 'offline' || resp?.errorKind === 'malformed') {
       setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     } else if (resp?.error) {
-      restoreTuiConfigSnapshot(diskSnapshot);
-      setStatusMessage(`✖ Apply rejected by daemon: ${resp.message || resp.error} (previous on-disk configuration restored)`);
+      // B2-M4 follow-up: the restore takes the same lock; a restore
+      // that cannot take it must not claim to have restored anything.
+      const restored = restoreTuiConfigSnapshotLocked(diskSnapshot);
+      setStatusMessage(
+        restored
+          ? `✖ Apply rejected by daemon: ${resp.message || resp.error} (previous on-disk configuration restored)`
+          : `✖ Apply rejected by daemon: ${resp.message || resp.error} (could NOT restore the previous on-disk configuration — the DesiredState lock is held by another save; check /etc/axonwall/*.yaml before retrying)`,
+      );
     } else {
       setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     }
