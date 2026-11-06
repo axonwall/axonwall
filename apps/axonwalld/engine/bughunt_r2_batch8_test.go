@@ -234,3 +234,38 @@ func TestBatch8CaddyAliveFresh(t *testing.T) {
 		t.Fatalf("fresh IAPManager should report no caddy alive")
 	}
 }
+
+// A-M44: provisioning the vault on a box without zfs must fail instead
+// of reporting "provisioned" while evidence lands on the root
+// filesystem. (Skipped where zfs exists; there the dataset path is
+// exercised by the live box, not this sandbox.)
+func TestBatch8ProvisionEvidenceVaultRequiresZFS(t *testing.T) {
+	if _, err := exec.LookPath("zfs"); err == nil {
+		t.Skip("zfs is installed on this host; the no-zfs case does not apply")
+	}
+	root := t.TempDir()
+	vm := NewVigilanteManager(root)
+	if err := vm.ProvisionEvidenceVault("tank", "vigilante-evidence"); err == nil {
+		t.Fatalf("ProvisionEvidenceVault should fail with no zfs dataset present")
+	}
+	// The old fallback created the subdirs under the evidence root
+	// on /; nothing must be created now.
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 0 {
+		t.Fatalf("no vault subdirs must be created when provisioning fails, found %v", entries)
+	}
+}
+
+// A-M44: isMountpoint must distinguish a real mount from a directory
+// that merely exists.
+func TestBatch8IsMountpoint(t *testing.T) {
+	if !isMountpoint("/") {
+		t.Fatalf("isMountpoint(/) should be true")
+	}
+	if isMountpoint(t.TempDir()) {
+		t.Fatalf("isMountpoint(temp dir) should be false")
+	}
+	if got := unescapeMountField(`/mnt/my\040data`); got != "/mnt/my data" {
+		t.Fatalf("unescapeMountField = %q, want %q", got, "/mnt/my data")
+	}
+}
