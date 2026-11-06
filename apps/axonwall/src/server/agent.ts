@@ -3359,7 +3359,10 @@ export interface LiveFlowRecord {
 }
 
 export interface NetworkInsightTelemetry {
-  conntrackCount: number;
+  // G8: null when the /proc read fails (no nf_conntrack module,
+  // unreadable /proc) — 0 is a legitimate count, so null marks
+  // "unavailable" distinctly.
+  conntrackCount: number | null;
   totalRxBytes: number;
   totalTxBytes: number;
   flows: LiveFlowRecord[];
@@ -3369,10 +3372,11 @@ export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTeleme
   const session = await getSession();
   assertActionPermitted(session);
 
-  let conntrackCount = 0;
+  let conntrackCount: number | null = null;
   try {
     const raw = fs.readFileSync('/proc/sys/net/netfilter/nf_conntrack_count', 'utf8');
-    conntrackCount = parseInt(raw.trim(), 10) || 0;
+    const parsed = parseInt(raw.trim(), 10);
+    conntrackCount = Number.isNaN(parsed) ? null : parsed;
   } catch {}
 
   let totalRxBytes = 0;
@@ -3415,10 +3419,10 @@ export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTeleme
     }
   } catch {}
 
-  if (conntrackCount === 0 && flows.length > 0) {
-    conntrackCount = flows.length;
-  }
-
+  // G8: the old code silently replaced a failed /proc read with the
+  // number of displayed flows (capped at 50) and labelled it the
+  // kernel conntrack count. Return null (unavailable) instead of
+  // substituting an unrelated number.
   return {
     conntrackCount,
     totalRxBytes,
@@ -3862,26 +3866,10 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
       healthVerified: Boolean(daemonData.healthVerified),
       kernelVersion: daemonData.kernelVersion || kernel,
       osVersion: daemonData.osVersion || `Axonwall OS v${currentVersion}`,
-      checks: daemonData.checks || [
-        {
-          name: 'Network Interface Initialization',
-          status: 'PASS',
-          detail: 'Loopback and network carrier operational',
-          durationMs: 14,
-        },
-        {
-          name: 'Kernel nftables Netfilter Baseline',
-          status: 'PASS',
-          detail: 'Atomic ruleset compiler validation verified',
-          durationMs: 28,
-        },
-        {
-          name: 'Control Plane & Management Quorum',
-          status: 'PASS',
-          detail: 'Privileged IPC socket active and responding',
-          durationMs: 8,
-        },
-      ],
+      // B22: when the daemon omits checks, do not substitute three
+      // hardcoded PASS checks that never ran — an empty list means
+      // "checks unavailable" and the page renders it as such.
+      checks: daemonData.checks ?? [],
     };
   }
 

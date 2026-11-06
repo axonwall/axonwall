@@ -20,12 +20,19 @@ import { getSystemHealthTelemetry, getHubCertStatus, type SystemHealthMetrics, t
 export default function SystemHealthPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [metrics, setMetrics] = useState<SystemHealthMetrics | null>(null);
+  // B21: metrics stays null both before the first load completes and
+  // when the load fails. Track the load outcome so a failed load
+  // renders "Unknown" instead of the fake "Active" + 20%/25% bars.
+  const [metricsLoaded, setMetricsLoaded] = useState(false);
   // null = not loaded yet. The server action now distinguishes 'missing'
   // from 'error', so a failed cert read renders an alert, not nothing.
   const [cert, setCert] = useState<HubCertStatus | null>(null);
 
   useEffect(() => {
-    getSystemHealthTelemetry().then(setMetrics).catch(() => {});
+    getSystemHealthTelemetry()
+      .then(setMetrics)
+      .catch(() => {})
+      .finally(() => setMetricsLoaded(true));
     getHubCertStatus()
       .then(setCert)
       .catch((err: any) =>
@@ -39,6 +46,8 @@ export default function SystemHealthPage() {
       const data = await getSystemHealthTelemetry();
       setMetrics(data);
     } catch {
+    } finally {
+      setMetricsLoaded(true);
     }
     try {
       // C12: Refresh used to fetch telemetry only, so a stale cert
@@ -93,16 +102,16 @@ export default function SystemHealthPage() {
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono">
-              {metrics ? `${metrics.loadAvg[0].toFixed(2)}` : 'Active'}
+              {metrics ? `${metrics.loadAvg[0].toFixed(2)}` : metricsLoaded ? 'Unknown' : '…'}
             </span>
             <span className="text-xs text-emerald-400">
-              {metrics ? `${metrics.cpuCount} Cores (${metrics.arch})` : 'Cores Active'}
+              {metrics ? `${metrics.cpuCount} Cores (${metrics.arch})` : metricsLoaded ? 'Failed to load' : ''}
             </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
             <div
               className="bg-emerald-500 h-full rounded-full transition-all"
-              style={{ width: metrics ? `${Math.min(100, Math.round(metrics.loadAvg[0] * 25))}%` : '20%' }}
+              style={{ width: metrics ? `${Math.min(100, Math.round(metrics.loadAvg[0] * 25))}%` : '0%' }}
             />
           </div>
         </div>
@@ -115,16 +124,16 @@ export default function SystemHealthPage() {
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono">
-              {metrics ? `${metrics.usedMemGB} GB` : 'Active'}
+              {metrics ? `${metrics.usedMemGB} GB` : metricsLoaded ? 'Unknown' : '…'}
             </span>
             <span className="text-xs text-slate-400">
-              {metrics ? `/ ${metrics.totalMemGB} GB` : ''}
+              {metrics ? `/ ${metrics.totalMemGB} GB` : metricsLoaded ? 'Failed to load' : ''}
             </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
             <div
               className="bg-sky-500 h-full rounded-full transition-all"
-              style={{ width: metrics ? `${metrics.memPercent}%` : '25%' }}
+              style={{ width: metrics ? `${metrics.memPercent}%` : '0%' }}
             />
           </div>
         </div>

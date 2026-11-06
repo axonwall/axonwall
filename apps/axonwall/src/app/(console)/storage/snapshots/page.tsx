@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Camera, Plus, ArrowRightLeft } from 'lucide-react';
+import { Camera, Plus, ArrowRightLeft, AlertTriangle } from 'lucide-react';
 import {
   getCurrentDesiredState,
   applyDesiredState,
@@ -30,7 +30,9 @@ export default function ZfsSnapshotsPage() {
   const [interval, setIntervalVal] = useState<'hourly' | 'daily' | 'weekly'>('hourly');
   const [keepCount, setKeepCount] = useState(24);
   const [msg, setMsg] = useState<string | null>(null);
-  const [msgIsError, setMsgIsError] = useState(false);
+  // B19: the banner used to be always emerald, so a failed snapshot
+  // or save looked like a confirmed one. Type it so errors render red.
+  const [msgKind, setMsgKind] = useState<'success' | 'error'>('success');
 
   const load = async () => {
     try {
@@ -47,14 +49,15 @@ export default function ZfsSnapshotsPage() {
   const handleManualSnapshot = async () => {
     try {
       const res = await createNasSnapshotAction(dataset, label || undefined);
+      // B19: check res.success — a daemon success:false message must
+      // not render in the green success banner. (C-B1: the operator may
+      // be about to upgrade on its strength.)
+      setMsgKind(res.success ? 'success' : 'error');
       setMsg(res.message);
-      // C-B1: a failed snapshot must not render in the green success
-      // banner — the operator may be about to upgrade on its strength.
-      setMsgIsError(!res.success);
       await load();
     } catch (err: any) {
+      setMsgKind('error');
       setMsg(`Error: ${err?.message || 'Failed to create snapshot'}`);
-      setMsgIsError(true);
     }
   };
 
@@ -88,13 +91,13 @@ export default function ZfsSnapshotsPage() {
       // C-B7: no scheduler or `zfs send` loop consumes snapshotPolicies
       // anywhere — the policy is only recorded. Say so, instead of
       // promising automated snapshots and HA replication that never run.
+      setMsgKind('success');
       setMsg(
         `Snapshot policy recorded for ${dataset} (${interval}, keep ${keepCount}). Note: no automatic scheduler exists yet — snapshots are manual only and nothing is replicated to the HA peer.`
       );
-      setMsgIsError(false);
     } catch (err: any) {
+      setMsgKind('error');
       setMsg(`Error: ${err?.message || 'Failed to save snapshot policy'}`);
-      setMsgIsError(true);
     }
   };
 
@@ -115,12 +118,13 @@ export default function ZfsSnapshotsPage() {
 
       {msg && (
         <div
-          className={`p-4 rounded-xl text-xs ${
-            msgIsError
-              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
-              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
-          }`}
+          className={
+            msgKind === 'error'
+              ? 'p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 flex items-start gap-2'
+              : 'p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300'
+          }
         >
+          {msgKind === 'error' && <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />}
           {msg}
         </div>
       )}

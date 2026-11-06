@@ -22,6 +22,7 @@ export default function ZfsPoolsPage() {
   const [selectedDisks, setSelectedDisks] = useState<string[]>([]);
   const [compression, setCompression] = useState<ZfsPool['compression']>('lz4');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusKind, setStatusKind] = useState<'success' | 'error'>('success');
   const [saving, setSaving] = useState(false);
 
   const loadAll = async () => {
@@ -94,9 +95,11 @@ export default function ZfsPoolsPage() {
       ];
       const res = await applyDesiredState(next);
       setState(next);
+      setStatusKind('success');
       setStatusMsg(`Pool '${poolName}' provisioned (${res.message})`);
       await loadAll();
     } catch (err: any) {
+      setStatusKind('error');
       setStatusMsg(err?.message || 'Failed to create ZFS pool');
     } finally {
       setSaving(false);
@@ -106,6 +109,7 @@ export default function ZfsPoolsPage() {
   const handleDeletePool = async (name: string) => {
     if (!state) return;
     setSaving(true);
+    setStatusMsg(null);
     try {
       const next = structuredClone(state);
       if (next.nas) {
@@ -113,7 +117,15 @@ export default function ZfsPoolsPage() {
       }
       await applyDesiredState(next);
       setState(next);
+      setStatusKind('success');
+      setStatusMsg(`Pool '${name}' deleted.`);
       await loadAll();
+    } catch (err: any) {
+      // G10: the old code had no catch at all — a failed delete
+      // rejected unhandled and the operator got zero feedback about
+      // why the pool was still listed. Surface the error.
+      setStatusKind('error');
+      setStatusMsg(`Failed to delete pool '${name}': ${err?.message || 'unknown error'}`);
     } finally {
       setSaving(false);
     }
@@ -143,7 +155,13 @@ export default function ZfsPoolsPage() {
       </div>
 
       {statusMsg && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 flex items-center justify-between">
+        <div
+          className={
+            statusKind === 'error'
+              ? 'p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 flex items-center justify-between'
+              : 'p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 flex items-center justify-between'
+          }
+        >
           <span>{statusMsg}</span>
           <button onClick={() => setStatusMsg(null)}>✕</button>
         </div>

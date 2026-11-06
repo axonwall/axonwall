@@ -475,7 +475,58 @@ export async function containerPowerAction(
   }
 
   if (action === 'reboot' || action === 'reset') {
-    await callAgentApi('/v1/virt/containers', 'POST', { action: 'stop', ctid, force: true });
+    // D19: the old code awaited the stop but discarded its result, so
+    // rebooting a stopped container reported "restarted" when nothing
+    // was running to restart. Check the live status first: a container
+    // that is not running is started (not restarted) and the stop is
+    // skipped. (The daemon runs stop/start as async tasks, so a stop
+    // response cannot report an lxc-stop failure — the live status is
+    // what makes the restarted/started distinction honest.)
+    let wasRunning: boolean | null = null;
+    const liveResp = await callAgentApi<{ containers: { ctid: number; status: string }[] }>(
+      '/v1/virt/containers'
+    );
+    if (liveResp?.containers) {
+      const live = liveResp.containers.find((c) => c.ctid === ctid);
+      wasRunning = live?.status === 'running';
+    }
+    if (wasRunning === false) {
+      const startResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+        '/v1/virt/containers',
+        'POST',
+        { action: 'start', ctid, force }
+      );
+      if (startResp) {
+        return {
+          success: startResp.success,
+          upid: startResp.upid,
+          message: startResp.message || `Container ${ctid} started (was not running).`,
+        };
+      }
+      return {
+        success: false,
+        message: `Daemon unavailable: failed to start container ${ctid}.`,
+      };
+    }
+    const stopResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+      '/v1/virt/containers',
+      'POST',
+      { action: 'stop', ctid, force: true }
+    );
+    // D19: surface a stop failure instead of masking it with the
+    // start result.
+    if (!stopResp) {
+      return {
+        success: false,
+        message: `Daemon unavailable: failed to stop container ${ctid} for restart.`,
+      };
+    }
+    if (!stopResp.success) {
+      return {
+        success: false,
+        message: stopResp.message || `Failed to stop container ${ctid} for restart.`,
+      };
+    }
     const startResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
       '/v1/virt/containers',
       'POST',

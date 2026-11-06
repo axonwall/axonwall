@@ -608,7 +608,7 @@ export default function BackupPage() {
                 />
               </div>
               <span className="text-[11px] text-slate-500 mt-1 block">
-                Derived with PBKDF2 (100,000 rounds). Store this passphrase securely.
+                Derived with PBKDF2 (600,000 rounds). Store this passphrase securely.
               </span>
             </div>
 

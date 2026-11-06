@@ -28,6 +28,16 @@ export async function POST(req: Request) {
       );
     }
     const body = await req.json();
+    // N12: only an explicit 'create' creates a user, mirroring the
+    // keys route (C21). The old fall-through created a user for any
+    // action value, so a caller that meant 'delete' (or typo'd the
+    // action) silently created the user instead.
+    if (body.action !== 'create') {
+      return NextResponse.json(
+        { status: 'error', error: `Invalid action '${body.action}': expected 'create'` },
+        { status: 400 }
+      );
+    }
     if (!body.name) {
       return NextResponse.json({ status: 'error', error: 'Name is required' }, { status: 400 });
     }

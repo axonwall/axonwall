@@ -291,6 +291,11 @@ export default function SystemUpdatesPage() {
   };
 
   const handleCreateSnapshot = async (beName: string, presetLabel?: string) => {
+    // B24: never snapshot an invented/empty BE name.
+    if (!beName) {
+      setErrorMessage('No boot environment selected to snapshot.');
+      return;
+    }
     setSelectedBeForSnap(beName);
     const labelToUse = sanitizeZfsIdentifier(presetLabel || customSnapLabel) || makeTimestampLabel('manual');
     setIsZbmActionLoading(true);
@@ -871,10 +876,15 @@ export default function SystemUpdatesPage() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    const activeBe = bootEnvironments.find((b) => b.activeNow)?.name || 'axonwall-active';
+                    // B24: with no boot environments loaded there is no
+                    // active BE to snapshot — do not fire with the
+                    // invented 'axonwall-active' fallback name.
+                    const activeBe = bootEnvironments.find((b) => b.activeNow)?.name;
+                    if (!activeBe) return;
                     handleCreateSnapshot(activeBe, makeTimestampLabel('quick'));
                   }}
-                  disabled={isZbmActionLoading}
+                  disabled={isZbmActionLoading || bootEnvironments.length === 0}
+                  title={bootEnvironments.length === 0 ? 'No boot environment loaded' : 'Snapshot the active boot environment'}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer disabled:opacity-50"
                 >
                   <Camera className="w-3.5 h-3.5 text-cyan-400" />

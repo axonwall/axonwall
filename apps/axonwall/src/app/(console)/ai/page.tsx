@@ -272,7 +272,11 @@ export default function AiCopilotPage() {
       setTestStatus((prev) => ({
         ...prev,
         [providerKey]: {
-          text: res.status,
+          // N11: the probe status now names the configured model and
+          // how many models the provider reported. On failure show the
+          // full error (hoverable via title) so a missing model is
+          // distinguishable from a connectivity/auth failure.
+          text: res.ok ? res.status : res.error || res.status,
           ok: res.ok,
         },
       }));

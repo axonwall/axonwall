@@ -271,12 +271,25 @@ function executeTcpdump(
       // Read back with tcpdump -nn -tt -r
       const readProc = spawn('tcpdump', ['-nn', '-tt', '-r', outputPath]);
       let stdout = '';
+      let stderr = '';
 
       readProc.stdout.on('data', (data) => {
         stdout += data.toString();
       });
 
-      readProc.on('close', () => {
+      readProc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      readProc.on('close', (code) => {
+        // N14: a corrupt/truncated pcap makes tcpdump -r fail with
+        // empty stdout, which used to parse to [] and resolve as a
+        // successful empty capture — the same shape as "ran, saw
+        // nothing". A failed read-back is an error, not zero packets.
+        if (code !== 0) {
+          const detail = stderr.trim().split('\n')[0] || `tcpdump exited with code ${code}`;
+          return reject(new Error(`Failed to read back capture file: ${detail}`));
+        }
         const parsed = parseTcpdumpText(stdout);
         resolve(parsed);
       });
@@ -290,17 +303,34 @@ function parseTcpdumpText(raw: string): CapturedPacket[] {
   const lines = raw.split('\n');
   const packets: CapturedPacket[] = [];
   const ipPortRegex = /^(\d+\.\d+)\s+IP\s+([0-9a-fA-F.:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F.:]+)\.([0-9]+):\s+(.*)$/;
+  const ip6PortRegex = /^(\d+\.\d+)\s+IP6\s+([0-9a-fA-F:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F:]+)\.([0-9]+):\s+(.*)$/;
   const genericIpRegex = /^(\d+\.\d+)\s+IP\s+([0-9a-fA-F.:]+)\s+>\s+([0-9a-fA-F.:]+):\s+(.*)$/;
+  const genericIp6Regex = /^(\d+\.\d+)\s+IP6\s+([0-9a-fA-F:]+)\s+>\s+([0-9a-fA-F:]+):\s+(.*)$/;
+  const arpRegex = /^(\d+\.\d+)\s+ARP,\s+(.*)$/;
+  // Any other tcpdump line (STP, LLDP, ...): tcpdump prints one line
+  // per frame, so count it instead of silently dropping it.
+  const genericLineRegex = /^(\d+\.\d+)\s+([A-Za-z0-9]+)[,\s]+(.*)$/;
+
+  const toTimeStr = (tsSec: number): string => {
+    const date = new Date(tsSec * 1000);
+    return date.toTimeString().split(' ')[0] + '.' + String(Math.floor((tsSec % 1) * 1000000)).padStart(6, '0');
+  };
+  // N13: tcpdump reports the frame length as `length N` in the packet
+  // summary. The old code used line.length — the length of the printed
+  // text line — and presented it as frame bytes (~90 B for a 1500 B
+  // frame). Parse the real reported length; 0 when tcpdump omits it.
+  const frameLength = (info: string): number => {
+    const m = info.match(/length (\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  };
 
   let idx = 1;
   for (const line of lines) {
     if (!line.trim()) continue;
 
-    const matchPort = line.match(ipPortRegex);
+    const matchPort = line.match(ipPortRegex) || line.match(ip6PortRegex);
     if (matchPort) {
       const tsSec = parseFloat(matchPort[1]);
-      const date = new Date(tsSec * 1000);
-      const timeStr = date.toTimeString().split(' ')[0] + '.' + String(Math.floor((tsSec % 1) * 1000000)).padStart(6, '0');
       const srcPort = matchPort[3];
       const dstPort = matchPort[5];
       let proto = 'TCP';
@@ -313,36 +343,80 @@ function parseTcpdumpText(raw: string): CapturedPacket[] {
 
       packets.push({
         index: idx++,
-        timestamp: timeStr,
+        timestamp: toTimeStr(tsSec),
         srcIp: matchPort[2],
         srcPort,
         dstIp: matchPort[4],
         dstPort,
         protocol: proto,
-        length: line.length,
+        length: frameLength(matchPort[6]),
         info: matchPort[6],
       });
       continue;
     }
 
-    const matchGeneric = line.match(genericIpRegex);
+    const matchGeneric = line.match(genericIpRegex) || line.match(genericIp6Regex);
     if (matchGeneric) {
       const tsSec = parseFloat(matchGeneric[1]);
-      const date = new Date(tsSec * 1000);
-      const timeStr = date.toTimeString().split(' ')[0] + '.' + String(Math.floor((tsSec % 1) * 1000000)).padStart(6, '0');
       const info = matchGeneric[4];
-      const proto = info.includes('ICMP') ? 'ICMP' : 'IP';
+      const proto = info.includes('ICMP') ? 'ICMP' : line.includes('IP6') ? 'IP6' : 'IP';
 
       packets.push({
         index: idx++,
-        timestamp: timeStr,
+        timestamp: toTimeStr(tsSec),
         srcIp: matchGeneric[2],
         srcPort: '-',
         dstIp: matchGeneric[3],
         dstPort: '-',
         protocol: proto,
-        length: line.length,
+        length: frameLength(info),
         info,
+      });
+      continue;
+    }
+
+    // N13: ARP and other non-IP frames used to be silently dropped,
+    // so packetCount undercounted the frames in the downloaded .pcap.
+    const matchArp = line.match(arpRegex);
+    if (matchArp) {
+      const tsSec = parseFloat(matchArp[1]);
+      const info = matchArp[2];
+      let srcIp = '-';
+      let dstIp = '-';
+      const request = info.match(/who-has\s+([0-9a-fA-F.:]+)\s+tel+l\s+([0-9a-fA-F.:]+)/);
+      const reply = info.match(/([0-9a-fA-F.:]+)\s+is-at\s+/);
+      if (request) {
+        dstIp = request[1];
+        srcIp = request[2];
+      } else if (reply) {
+        srcIp = reply[1];
+      }
+      packets.push({
+        index: idx++,
+        timestamp: toTimeStr(tsSec),
+        srcIp,
+        srcPort: '-',
+        dstIp,
+        dstPort: '-',
+        protocol: 'ARP',
+        length: frameLength(info),
+        info: `ARP, ${info}`,
+      });
+      continue;
+    }
+
+    const matchOther = line.match(genericLineRegex);
+    if (matchOther) {
+      packets.push({
+        index: idx++,
+        timestamp: toTimeStr(parseFloat(matchOther[1])),
+        srcIp: '-',
+        srcPort: '-',
+        dstIp: '-',
+        dstPort: '-',
+        protocol: matchOther[2].toUpperCase(),
+        length: frameLength(matchOther[3]),
+        info: matchOther[3],
       });
     }
   }
