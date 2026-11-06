@@ -42,11 +42,18 @@ export default function HighAvailabilityPage() {
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  // C17 residual: the form used to be live from first paint while the
+  // mount load ran (or silently failed), so a save before load completed
+  // disabled HA, reset VRID to 51, and wiped instance-0's VRRP auth
+  // password. Nothing saves until the load succeeds.
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        if (state.ha) {
+  const loadHaState = async () => {
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      if (state.ha) {
           setEnabled(state.ha.enabled);
           const haRole = state.ha.role || state.ha.nodeRole || 'master';
           setRole(haRole === 'backup' ? 'secondary' : 'primary');
@@ -67,9 +74,17 @@ export default function HighAvailabilityPage() {
             setSyncTransport(state.ha.sqliteSync.transport || 'mtls');
             setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
           }
-        }
-      })
-      .catch(() => {});
+      }
+      setLoaded(true);
+    } catch {
+      setLoadError(
+        'Failed to load HA configuration. Saving is disabled until it loads — saving now could overwrite the real configuration with empty defaults.'
+      );
+    }
+  };
+
+  useEffect(() => {
+    loadHaState();
   }, []);
 
   useEffect(() => {
@@ -87,6 +102,13 @@ export default function HighAvailabilityPage() {
   };
 
   const handleSaveHa = async () => {
+    // C17 residual: refuse to save before the load succeeds — the form
+    // state is empty defaults until then, and persisting it would disable
+    // HA and wipe the VRRP auth password.
+    if (!loaded) {
+      setSyncErrorMsg('HA configuration has not loaded yet. Wait for it to load (or retry) before saving.');
+      return;
+    }
     setIsSaving(true);
     setSyncErrorMsg(null);
     try {
@@ -237,7 +259,8 @@ export default function HighAvailabilityPage() {
           <button
             type="button"
             onClick={handleSaveHa}
-            disabled={isSaving}
+            disabled={isSaving || !loaded}
+            title={!loaded ? 'HA configuration is still loading' : undefined}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
           >
             <Save className="w-4 h-4" />
@@ -272,6 +295,27 @@ export default function HighAvailabilityPage() {
             className="text-slate-400 hover:text-white text-xs cursor-pointer"
           >
             ✕
+          </button>
+        </div>
+      )}
+
+      {/* C17 residual: loading / load-error state. The form shows empty
+          defaults until the load succeeds, so saving must stay impossible
+          until then. */}
+      {!loaded && !loadError && (
+        <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-400 text-sm">
+          Loading HA configuration…
+        </div>
+      )}
+
+      {loadError && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-center justify-between">
+          <span>{loadError}</span>
+          <button
+            onClick={loadHaState}
+            className="ml-4 shrink-0 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs font-semibold transition cursor-pointer"
+          >
+            Retry
           </button>
         </div>
       )}
@@ -592,7 +636,8 @@ export default function HighAvailabilityPage() {
                     <button
                       type="button"
                       onClick={handleSaveHa}
-                      disabled={isSaving}
+                      disabled={isSaving || !loaded}
+                      title={!loaded ? 'HA configuration is still loading' : undefined}
                       className="w-full sm:w-auto px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
                     >
                       <Check className="w-4 h-4" />
