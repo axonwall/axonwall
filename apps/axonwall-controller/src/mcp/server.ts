@@ -566,6 +566,12 @@ export async function handleMcpReadResource(
       payload = {
         interfaces: statusRes.ok ? statusRes.data?.interfaces ?? [] : [],
         timestamp: new Date().toISOString(),
+        // B2-M3: daemon-down must not collapse to an empty list
+        // with no signal — an empty list reads as "no interfaces",
+        // not "daemon unreachable".
+        ...(!statusRes.ok
+          ? { daemonDown: true, error: statusRes.data?.error || 'axonwalld unreachable' }
+          : {}),
       };
       break;
     }
@@ -592,17 +598,25 @@ export async function handleMcpReadResource(
 
     case 'axonwall://telemetry/flows/top': {
       const flowsRes = await callAxonwalldApi('GET', '/v1/mcp/flows?limit=50');
-      payload = {
-        flows: flowsRes.ok ? flowsRes.data?.flows ?? [] : [],
-      };
+      // B2-M3: daemon-down must not collapse to an empty list with
+      // no signal — zero flows reads as "no traffic", not "daemon
+      // unreachable". Same envelope as the tactical-write tools
+      // use to deny on daemon-down.
+      payload = flowsRes.ok
+        ? { flows: flowsRes.data?.flows ?? [] }
+        : { flows: [], daemonDown: true, error: flowsRes.data?.error || 'axonwalld unreachable' };
       break;
     }
 
     case 'axonwall://firewall/tactical-leases': {
       const leasesRes = await callAxonwalldApi('GET', '/v1/mcp/leases');
-      payload = {
-        leases: leasesRes.ok ? leasesRes.data?.leases ?? [] : [],
-      };
+      // B2-M3: zero leases while axonwalld is down would tell a
+      // SOAR agent no tactical lease is active, when the kernel
+      // may still be enforcing blackholes/shapers from before the
+      // daemon died.
+      payload = leasesRes.ok
+        ? { leases: leasesRes.data?.leases ?? [] }
+        : { leases: [], daemonDown: true, error: leasesRes.data?.error || 'axonwalld unreachable' };
       break;
     }
 
@@ -628,9 +642,16 @@ export async function handleMcpReadResource(
     case 'axonwall://topology/nastymap': {
       const arpRes = await callAxonwalldApi('GET', '/v1/arp');
       const leasesRes = await callAxonwalldApi('GET', '/v1/leases');
+      // B2-M3: "no hosts" must not be reported as a fact when the
+      // daemon is unreachable. Each source is flagged separately.
+      const daemonErrors = [
+        ...(!arpRes.ok ? [`ARP table: ${arpRes.data?.error || 'axonwalld unreachable'}`] : []),
+        ...(!leasesRes.ok ? [`DHCP leases: ${leasesRes.data?.error || 'axonwalld unreachable'}`] : []),
+      ];
       payload = {
         arpTable: arpRes.ok ? arpRes.data : [],
         dhcpLeases: leasesRes.ok ? leasesRes.data : [],
+        ...(daemonErrors.length ? { daemonDown: true, error: daemonErrors.join('; ') } : {}),
       };
       break;
     }
@@ -789,6 +810,12 @@ export async function handleMcpCallTool(
               {
                 suricataAlerts: matchingAlerts,
                 activeMcpLeases: leasesRes.ok ? leasesRes.data?.leases ?? [] : [],
+                // B2-M3: zero leases while axonwalld is down is not
+                // "no leases active" — the kernel may still be
+                // enforcing leases from before the daemon died.
+                ...(!leasesRes.ok
+                  ? { daemonDown: true, error: leasesRes.data?.error || 'axonwalld unreachable' }
+                  : {}),
               },
               null,
               2

@@ -44323,7 +44323,11 @@ async function handleMcpReadResource(uri, env) {
       const statusRes = await callAxonwalldApi("GET", "/v1/status");
       payload = {
         interfaces: statusRes.ok ? statusRes.data?.interfaces ?? [] : [],
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        // B2-M3: daemon-down must not collapse to an empty list
+        // with no signal — an empty list reads as "no interfaces",
+        // not "daemon unreachable".
+        ...!statusRes.ok ? { daemonDown: true, error: statusRes.data?.error || "axonwalld unreachable" } : {}
       };
       break;
     }
@@ -44346,16 +44350,12 @@ async function handleMcpReadResource(uri, env) {
     }
     case "axonwall://telemetry/flows/top": {
       const flowsRes = await callAxonwalldApi("GET", "/v1/mcp/flows?limit=50");
-      payload = {
-        flows: flowsRes.ok ? flowsRes.data?.flows ?? [] : []
-      };
+      payload = flowsRes.ok ? { flows: flowsRes.data?.flows ?? [] } : { flows: [], daemonDown: true, error: flowsRes.data?.error || "axonwalld unreachable" };
       break;
     }
     case "axonwall://firewall/tactical-leases": {
       const leasesRes = await callAxonwalldApi("GET", "/v1/mcp/leases");
-      payload = {
-        leases: leasesRes.ok ? leasesRes.data?.leases ?? [] : []
-      };
+      payload = leasesRes.ok ? { leases: leasesRes.data?.leases ?? [] } : { leases: [], daemonDown: true, error: leasesRes.data?.error || "axonwalld unreachable" };
       break;
     }
     case "axonwall://firewall/ruleset-summary": {
@@ -44377,9 +44377,14 @@ async function handleMcpReadResource(uri, env) {
     case "axonwall://topology/nastymap": {
       const arpRes = await callAxonwalldApi("GET", "/v1/arp");
       const leasesRes = await callAxonwalldApi("GET", "/v1/leases");
+      const daemonErrors = [
+        ...!arpRes.ok ? [`ARP table: ${arpRes.data?.error || "axonwalld unreachable"}`] : [],
+        ...!leasesRes.ok ? [`DHCP leases: ${leasesRes.data?.error || "axonwalld unreachable"}`] : []
+      ];
       payload = {
         arpTable: arpRes.ok ? arpRes.data : [],
-        dhcpLeases: leasesRes.ok ? leasesRes.data : []
+        dhcpLeases: leasesRes.ok ? leasesRes.data : [],
+        ...daemonErrors.length ? { daemonDown: true, error: daemonErrors.join("; ") } : {}
       };
       break;
     }
@@ -44515,7 +44520,11 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
             text: JSON.stringify(
               {
                 suricataAlerts: matchingAlerts,
-                activeMcpLeases: leasesRes.ok ? leasesRes.data?.leases ?? [] : []
+                activeMcpLeases: leasesRes.ok ? leasesRes.data?.leases ?? [] : [],
+                // B2-M3: zero leases while axonwalld is down is not
+                // "no leases active" — the kernel may still be
+                // enforcing leases from before the daemon died.
+                ...!leasesRes.ok ? { daemonDown: true, error: leasesRes.data?.error || "axonwalld unreachable" } : {}
               },
               null,
               2
