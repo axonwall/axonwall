@@ -883,7 +883,12 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 	beName = strings.TrimSpace(beName)
 	beName = strings.TrimPrefix(beName, "zroot/ROOT/")
 	if beName == "" || beName == "axonwall-active" {
-		we.mu.RLock()
+		// E2-7 (same staleness shape as DeleteBootEnvironment):
+		// resolve the active BE from a freshly listed set, so a
+		// script-side arming since the last refresh does not send
+		// the snapshot to the previously-active BE.
+		we.mu.Lock()
+		we.status.BootEnvironments = we.listBootEnvironmentsLocked()
 		for _, be := range we.status.BootEnvironments {
 			if be.ActiveNow {
 				beName = be.Name
@@ -893,7 +898,7 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 		if beName == "" && len(we.status.BootEnvironments) > 0 {
 			beName = we.status.BootEnvironments[0].Name
 		}
-		we.mu.RUnlock()
+		we.mu.Unlock()
 	}
 	label = strings.TrimSpace(label)
 	label = strings.ReplaceAll(label, " ", "-")
@@ -1131,20 +1136,27 @@ func (we *WatchdogEngine) DeleteBootEnvironment(beName string) error {
 		}
 	}
 
-	we.mu.RLock()
+	// E2-7: the ActiveNow/ActiveNext guard must read the live BE
+	// list, not the cache. Script-side arming (axonwall-update
+	// --zbm) changes bootfs/active_be without telling the daemon,
+	// so a BE armed since the last status refresh could otherwise
+	// be deleted out from under the next boot. Same live-read
+	// discipline as the E4 fallback guard above.
+	we.mu.Lock()
+	we.status.BootEnvironments = we.listBootEnvironmentsLocked()
 	for _, be := range we.status.BootEnvironments {
 		if be.Dataset == targetDataset {
 			if be.ActiveNow {
-				we.mu.RUnlock()
+				we.mu.Unlock()
 				return fmt.Errorf("cannot delete currently running Boot Environment (%s)", beName)
 			}
 			if be.ActiveNext {
-				we.mu.RUnlock()
+				we.mu.Unlock()
 				return fmt.Errorf("cannot delete Boot Environment staged for next boot (%s); activate another BE first", beName)
 			}
 		}
 	}
-	we.mu.RUnlock()
+	we.mu.Unlock()
 
 	out, err := we.runZfsCmd("destroy", "-r", targetDataset)
 	if err != nil {
