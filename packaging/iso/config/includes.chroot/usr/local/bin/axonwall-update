@@ -200,18 +200,25 @@ ensure_cli_symlinks() {
 }
 
 # Apply extracted .deb staging tree onto a destination root (standby slot or live root)
+# E2-2: copy failures are load-bearing, not cosmetic. Every copy used
+# to return success unconditionally (|| true), so a disk-full or I/O
+# error mid-overlay staged a partial tree that was then armed as the
+# new version. Track failures and return non-zero; every caller treats
+# a non-zero return as fatal. mkdir/chown/chmod and the static-asset
+# sync stay best-effort (they cannot leave a half-copied package tree).
 apply_staged_tree() {
   pkg_stage="$1"
   dest_root="${2:-/}"
   dest_root="${dest_root%/}"
+  _apply_failed=0
 
   if [ -d "${pkg_stage}/opt/axonwall" ]; then
     mkdir -p "${dest_root}/opt/axonwall"
     if command -v rsync >/dev/null 2>&1; then
-      rsync -a --delete "${pkg_stage}/opt/axonwall/" "${dest_root}/opt/axonwall/" 2>/dev/null || true
+      rsync -a --delete "${pkg_stage}/opt/axonwall/" "${dest_root}/opt/axonwall/" 2>/dev/null || _apply_failed=1
     else
       rm -rf "${dest_root}/opt/axonwall"
-      cp -a "${pkg_stage}/opt/axonwall" "${dest_root}/opt/axonwall" 2>/dev/null || true
+      cp -a "${pkg_stage}/opt/axonwall" "${dest_root}/opt/axonwall" 2>/dev/null || _apply_failed=1
     fi
     chown -R root:root "${dest_root}/opt/axonwall" 2>/dev/null || true
     chmod -R go-w "${dest_root}/opt/axonwall" 2>/dev/null || true
@@ -223,7 +230,7 @@ apply_staged_tree() {
       if [ -e "$sbin_f" ] || [ -L "$sbin_f" ]; then
         bname="$(basename "$sbin_f")"
         rm -f "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
-        cp -af "$sbin_f" "${dest_root}/usr/sbin/" 2>/dev/null || true
+        cp -af "$sbin_f" "${dest_root}/usr/sbin/" 2>/dev/null || _apply_failed=1
         if [ -f "${dest_root}/usr/sbin/${bname}" ] && [ ! -L "${dest_root}/usr/sbin/${bname}" ]; then
           chmod 755 "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
         fi
@@ -237,7 +244,7 @@ apply_staged_tree() {
       if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
         bname="$(basename "$bin_f")"
         rm -f "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
-        cp -af "$bin_f" "${dest_root}/usr/local/bin/" 2>/dev/null || true
+        cp -af "$bin_f" "${dest_root}/usr/local/bin/" 2>/dev/null || _apply_failed=1
         if [ -f "${dest_root}/usr/local/bin/${bname}" ] && [ ! -L "${dest_root}/usr/local/bin/${bname}" ]; then
           chmod 755 "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
         fi
@@ -248,21 +255,26 @@ apply_staged_tree() {
   for sub in usr/lib/axonwall usr/lib/sysusers.d usr/lib/tmpfiles.d usr/share/oh-my-zsh usr/share/axonwall etc/zsh etc/zfsbootmenu etc/modprobe.d etc/sysctl.d etc/vim; do
     if [ -d "${pkg_stage}/${sub}" ]; then
       mkdir -p "${dest_root}/${sub}" 2>/dev/null || true
-      cp -af "${pkg_stage}/${sub}/." "${dest_root}/${sub}/" 2>/dev/null || true
+      cp -af "${pkg_stage}/${sub}/." "${dest_root}/${sub}/" 2>/dev/null || _apply_failed=1
     fi
   done
 
   for cfg_f in etc/tmux.conf etc/rkhunter.conf.local; do
     if [ -f "${pkg_stage}/${cfg_f}" ]; then
       mkdir -p "$(dirname "${dest_root}/${cfg_f}")" 2>/dev/null || true
-      cp -af "${pkg_stage}/${cfg_f}" "${dest_root}/${cfg_f}" 2>/dev/null || true
+      cp -af "${pkg_stage}/${cfg_f}" "${dest_root}/${cfg_f}" 2>/dev/null || _apply_failed=1
     fi
   done
 
   if [ -d "${pkg_stage}/lib/systemd/system" ]; then
     mkdir -p "${dest_root}/lib/systemd/system" 2>/dev/null || true
-    cp -af "${pkg_stage}/lib/systemd/system/"*.service "${dest_root}/lib/systemd/system/" 2>/dev/null || true
-    cp -af "${pkg_stage}/lib/systemd/system/"*.timer "${dest_root}/lib/systemd/system/" 2>/dev/null || true
+    # Loop (not a bare glob copy): a package with services but no
+    # timers must not fail the overlay on the unmatched *.timer glob.
+    for unit_f in "${pkg_stage}/lib/systemd/system/"*.service "${pkg_stage}/lib/systemd/system/"*.timer; do
+      if [ -e "$unit_f" ]; then
+        cp -af "$unit_f" "${dest_root}/lib/systemd/system/" 2>/dev/null || _apply_failed=1
+      fi
+    done
   fi
 
   if [ -d "${pkg_stage}/etc/axonwall" ]; then
@@ -273,6 +285,11 @@ apply_staged_tree() {
   fi
 
   ensure_cli_symlinks "${dest_root}"
+
+  if [ "$_apply_failed" != "0" ]; then
+    return 1
+  fi
+  return 0
 }
 
 # Helper: Resolve partition block device by label
@@ -538,7 +555,13 @@ if [ "$ZBM_MODE" = "1" ]; then
         rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
         exit 1
       fi
-      apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"
+      if ! apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"; then
+        echo "[-] ERROR: Failed to apply firmware payload into ${TARGET_BE_DS} (staged copy failed); the Boot Environment is NOT armed." >&2
+        rm -rf "${PKG_STAGE}"
+        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        exit 1
+      fi
       rm -rf "${PKG_STAGE}"
       if [ -d "${ZBM_STAGE_MNT}/etc/axonwall" ] && [ -d /var/lib/axonwall/etc-axonwall ]; then
         sync_static_etc_axonwall "${ZBM_STAGE_MNT}/etc/axonwall" /var/lib/axonwall/etc-axonwall
@@ -719,7 +742,16 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       rm -rf "${PKG_STAGE}"
       mkdir -p "${PKG_STAGE}"
       if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
-        apply_staged_tree "${PKG_STAGE}" "${STAGE_DIR}"
+        # E2-2: a failed overlay must fail the update, not stage a
+        # partial tree that the E1 gate then arms as the new version.
+        # Unmount before exiting so no standby mount is left behind.
+        if ! apply_staged_tree "${PKG_STAGE}" "${STAGE_DIR}"; then
+          echo "[-] ERROR: Failed to apply firmware payload onto Slot ${TARGET_SLOT} (staged copy failed); refusing to arm it." >&2
+          rm -rf "${PKG_STAGE}"
+          umount "${STAGE_DIR}" 2>/dev/null || true
+          rmdir "${STAGE_DIR}" 2>/dev/null || true
+          exit 1
+        fi
         if [ -f "${STAGE_DIR}/usr/local/bin/axonwall-update" ]; then
           if sh -n "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null; then
             cp -f "${STAGE_DIR}/usr/local/bin/axonwall-update" /usr/local/bin/axonwall-update 2>/dev/null || true
@@ -906,7 +938,13 @@ else
     rm -rf "${PKG_STAGE}"
     mkdir -p "${PKG_STAGE}"
     if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
-      apply_staged_tree "${PKG_STAGE}" "/"
+      # E2-2: a failed in-place overlay must fail the update, not
+      # print success for a half-updated live root.
+      if ! apply_staged_tree "${PKG_STAGE}" "/"; then
+        echo "[-] ERROR: Failed to apply firmware payload in place (staged copy failed); the update did NOT complete." >&2
+        rm -rf "${PKG_STAGE}"
+        exit 1
+      fi
     fi
     rm -rf "${PKG_STAGE}"
 
