@@ -54,9 +54,10 @@ interface SatelliteNodeView {
   activePolicyVersion: number;
 }
 
-const generateZtpToken = (): string =>
-  'ztp_axon_' +
-  Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
+// N4: there is no per-node token generation. The hub validates the
+// presented token against its single shared AXONWALL_ZTP_TOKEN, so the
+// modal holds a paste of that hub token — a locally generated token would
+// always be rejected with 401. The token is never persisted here.
 
 function formatUptime(seconds: number): string {
   if (!seconds || seconds <= 0) return '—';
@@ -78,7 +79,7 @@ export default function FleetPage() {
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'online' | 'enrolling' | 'degraded' | 'offline'>('ALL');
   const [selectedSat, setSelectedSat] = useState<SatelliteNodeView | null>(null);
   const [isZtpModalOpen, setIsZtpModalOpen] = useState(false);
-  const [generatedToken, setGeneratedToken] = useState('');
+  const [hubZtpToken, setHubZtpToken] = useState('');
   const [newNodeId, setNewNodeId] = useState('');
   const [newNodeName, setNewNodeName] = useState('');
   const [newNodeRole, setNewNodeRole] = useState<'edge-ngfw' | 'satellite'>('edge-ngfw');
@@ -303,12 +304,12 @@ export default function FleetPage() {
   const wifiApCount = satellites.filter((s) => s.wifiRadios.some((r) => r.enabled)).length;
 
   const bootstrapNodeId = newNodeId.trim() || (newNodeRole === 'edge-ngfw' ? 'edge-ngfw-01' : 'sat-node-$(cat /sys/class/net/eth0/address | tr -d \':\')');
-  const ukiCmdline = `console=ttyS0,115200 quiet loglevel=3 axonwall.hub=wss://${hubHostname}:${listenPort}/ws/satellite axonwall.id=${bootstrapNodeId} axonwall.token=${generatedToken} axonwall.sku=${newNodeSku} axonwall.slot=A axonwall.wan=${newNodeWan}:dhcp axonwall.lan=${newNodeLan}:192.168.1.1/24`;
-  const cloudInitSnippet = `#cloud-config\nhostname: ${bootstrapNodeId}\naxonwall:\n  hub: wss://${hubHostname}:${listenPort}/ws/satellite\n  id: ${bootstrapNodeId}\n  token: ${generatedToken}\n  sku: ${newNodeSku}\n  interfaces:\n    - name: wan\n      device: ${newNodeWan}\n      address: dhcp\n    - name: lan\n      device: ${newNodeLan}\n      address: 192.168.1.1/24`;
+  const ukiCmdline = `console=ttyS0,115200 quiet loglevel=3 axonwall.hub=wss://${hubHostname}:${listenPort}/ws/satellite axonwall.id=${bootstrapNodeId} axonwall.token=${hubZtpToken} axonwall.sku=${newNodeSku} axonwall.slot=A axonwall.wan=${newNodeWan}:dhcp axonwall.lan=${newNodeLan}:192.168.1.1/24`;
+  const cloudInitSnippet = `#cloud-config\nhostname: ${bootstrapNodeId}\naxonwall:\n  hub: wss://${hubHostname}:${listenPort}/ws/satellite\n  id: ${bootstrapNodeId}\n  token: ${hubZtpToken}\n  sku: ${newNodeSku}\n  interfaces:\n    - name: wan\n      device: ${newNodeWan}\n      address: dhcp\n    - name: lan\n      device: ${newNodeLan}\n      address: 192.168.1.1/24`;
   const bootstrapCommand =
     newNodeRole === 'edge-ngfw'
       ? `./packaging/edge-uki/build-edge-uki.sh \\\n  --sku ${newNodeSku} \\\n  --cmdline "${ukiCmdline}"`
-      : `./axonwall-satellite \\\n  -core wss://${hubHostname}:${listenPort}/ws/satellite \\\n  -id ${bootstrapNodeId} \\\n  -token ${generatedToken}`;
+      : `./axonwall-satellite \\\n  -core wss://${hubHostname}:${listenPort}/ws/satellite \\\n  -id ${bootstrapNodeId} \\\n  -token ${hubZtpToken}`;
 
   const handleCopyZtp = () => {
     navigator.clipboard.writeText(newNodeRole === 'edge-ngfw' ? cloudInitSnippet : bootstrapCommand);
@@ -338,7 +339,7 @@ export default function FleetPage() {
         <div className="flex items-center gap-3">
           <button
             onClick={() => {
-              setGeneratedToken(generateZtpToken());
+              setHubZtpToken('');
               setIsZtpModalOpen(true);
             }}
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-sm hover:bg-emerald-400 transition shadow-lg shadow-emerald-500/20 cursor-pointer"
@@ -929,24 +930,21 @@ export default function FleetPage() {
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-1.5">
-                  One-Time Enrollment Token
+                  Hub ZTP Enrollment Token (shared)
                 </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={generatedToken}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm font-mono text-emerald-400"
-                  />
-                  <button
-                    onClick={() => {
-                      setGeneratedToken(generateZtpToken());
-                    }}
-                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 cursor-pointer"
-                  >
-                    Regenerate
-                  </button>
-                </div>
+                <input
+                  type="text"
+                  value={hubZtpToken}
+                  onChange={(e) => setHubZtpToken(e.target.value.trim())}
+                  placeholder="Paste the hub's AXONWALL_ZTP_TOKEN"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm font-mono text-emerald-400 placeholder:text-slate-600"
+                />
+                <p className="text-xs text-amber-300/90 mt-1.5">
+                  Paste the token configured on the hub (<code className="font-mono">AXONWALL_ZTP_TOKEN</code>).
+                  The hub rejects any other value with 401 — a token generated here would never work.
+                  The token is used only in the snippet below and is never stored.
+                  {hubZtpToken === '' && ' Paste the hub token before copying the snippet.'}
+                </p>
               </div>
 
               <div>
