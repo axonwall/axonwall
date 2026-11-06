@@ -60,7 +60,9 @@ export default function DhcpPage() {
       .catch(() => {});
   }, []);
 
-  const persistDhcp = async (updatedDhcp: DhcpConfig) => {
+  // B23: report whether the persist actually landed so callers can
+  // keep the operator's draft when the save fails.
+  const persistDhcp = async (updatedDhcp: DhcpConfig): Promise<boolean> => {
     const prevFullState = fullState;
     const prevDhcp = dhcp;
     setDhcp(updatedDhcp);
@@ -79,15 +81,19 @@ export default function DhcpPage() {
       if (res.success) {
         setStatusKind('success');
         setStatusMsg(res.message || 'Saved to /etc/axonwall/services.yaml');
-      } else {
-        setStatusKind('error');
-        setStatusMsg(res.message || 'Failed to save DHCP configuration');
+        return true;
       }
+      setDhcp(prevDhcp);
+      setFullState(prevFullState);
+      setStatusKind('error');
+      setStatusMsg(res.message || 'Failed to save DHCP configuration');
+      return false;
     } catch (err: any) {
       setDhcp(prevDhcp);
       setFullState(prevFullState);
       setStatusKind('error');
       setStatusMsg(`Error: ${err?.message || 'Failed to save DHCP configuration'}`);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -97,6 +103,22 @@ export default function DhcpPage() {
     e.preventDefault();
     const draft = getDraft(subnetIdx);
     if (!draft.mac.trim() || !draft.ip.trim()) return;
+    const mac = draft.mac.trim().toLowerCase();
+    const ip = draft.ip.trim();
+    // B23: reject a duplicate MAC/IP in this subnet — rows key on
+    // m.mac and delete-by-MAC removes every entry sharing it, so a
+    // second entry with the same MAC corrupts both reservations.
+    const existing = dhcp.subnets[subnetIdx]?.staticMappings ?? [];
+    if (existing.some((m) => m.mac.trim().toLowerCase() === mac)) {
+      setStatusKind('error');
+      setStatusMsg(`A reservation for MAC ${draft.mac.trim()} already exists in this subnet.`);
+      return;
+    }
+    if (existing.some((m) => m.ip.trim() === ip)) {
+      setStatusKind('error');
+      setStatusMsg(`A reservation for IP ${ip} already exists in this subnet.`);
+      return;
+    }
     const nextSubnets = dhcp.subnets.map((s, idx) =>
       idx === subnetIdx
         ? {
@@ -113,8 +135,12 @@ export default function DhcpPage() {
           }
         : s
     );
-    updateDraft(subnetIdx, { mac: '', ip: '', hostname: '', desc: '' });
-    await persistDhcp({ ...dhcp, subnets: nextSubnets });
+    // B23: clear the draft only after the persist succeeds, so a
+    // failed save does not make the operator retype the reservation.
+    const saved = await persistDhcp({ ...dhcp, subnets: nextSubnets });
+    if (saved) {
+      updateDraft(subnetIdx, { mac: '', ip: '', hostname: '', desc: '' });
+    }
   };
 
   const handleDeleteStaticMapping = async (subnetIdx: number, mac: string) => {
