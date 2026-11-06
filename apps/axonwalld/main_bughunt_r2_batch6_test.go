@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -634,5 +636,81 @@ func TestR2Batch6HAUnsetInterfaceKeepsEth0Default(t *testing.T) {
 	}
 	if !strings.Contains(string(conf), "eth99") {
 		t.Fatalf("generated keepalived.conf does not carry the configured device name:\n%s", string(conf))
+	}
+}
+
+// M5: the per-device pidfile list must not contain the daemon-global
+// dhcpcd pidfiles — a daemon managing any interface must not make
+// every other DHCP interface look "already running".
+func TestR2Batch6DhcpCheckIgnoresGlobalPidfiles(t *testing.T) {
+	for _, global := range []string{
+		"/var/run/dhcpcd/pid", "/run/dhcpcd/pid",
+		"/var/run/dhcpcd.pid", "/run/dhcpcd.pid",
+	} {
+		for _, p := range dhcpPidFilesForDev("eth1") {
+			if p == global {
+				t.Fatalf("per-device pidfile list contains global pidfile %s", global)
+			}
+		}
+	}
+	if got := len(dhcpPidFilesForDev("eth1")); got == 0 {
+		t.Fatal("per-device pidfile list is empty")
+	}
+}
+
+// M5: a live process whose cmdline names a DHCP client counts; a
+// pid recycled by an unrelated process, a dead pid, and garbage
+// pidfile content do not.
+func TestR2Batch6DhcpClientRunningForDev(t *testing.T) {
+	dir := t.TempDir()
+
+	// A process whose argv[0] is a DHCP client binary.
+	dhcpProc := exec.Command("sleep", "30")
+	dhcpProc.Args[0] = "dhcpcd"
+	if err := dhcpProc.Start(); err != nil {
+		t.Fatalf("failed to start dhcpcd-argv process: %v", err)
+	}
+	t.Cleanup(func() { _ = dhcpProc.Process.Kill() })
+
+	// A process whose argv[0] is unrelated (the pid-recycling case).
+	otherProc := exec.Command("sleep", "30")
+	if err := otherProc.Start(); err != nil {
+		t.Fatalf("failed to start unrelated process: %v", err)
+	}
+	t.Cleanup(func() { _ = otherProc.Process.Kill() })
+
+	writePid := func(name string, pid int) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(strconv.Itoa(pid)+"\n"), 0644); err != nil {
+			t.Fatalf("failed to write pidfile: %v", err)
+		}
+		return p
+	}
+
+	dhcpPidFile := writePid("dhcpcd-eth1.pid", dhcpProc.Process.Pid)
+	if !dhcpClientRunningForDev("eth1", []string{dhcpPidFile}) {
+		t.Fatal("live dhcpcd process behind a per-device pidfile was not recognised as a running client")
+	}
+
+	otherPidFile := writePid("dhcpcd-eth2.pid", otherProc.Process.Pid)
+	if dhcpClientRunningForDev("eth2", []string{otherPidFile}) {
+		t.Fatal("unrelated process holding a pidfile pid was mistaken for a running DHCP client")
+	}
+
+	deadPidFile := writePid("dhcpcd-eth3.pid", 999999)
+	if dhcpClientRunningForDev("eth3", []string{deadPidFile}) {
+		t.Fatal("dead pid in a pidfile was mistaken for a running DHCP client")
+	}
+
+	garbage := filepath.Join(dir, "garbage.pid")
+	if err := os.WriteFile(garbage, []byte("not-a-pid\n"), 0644); err != nil {
+		t.Fatalf("failed to write garbage pidfile: %v", err)
+	}
+	if dhcpClientRunningForDev("eth4", []string{garbage}) {
+		t.Fatal("garbage pidfile content was mistaken for a running DHCP client")
+	}
+
+	if dhcpClientRunningForDev("eth5", []string{filepath.Join(dir, "missing.pid")}) {
+		t.Fatal("missing pidfile was mistaken for a running DHCP client")
 	}
 }
