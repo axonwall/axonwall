@@ -91,7 +91,11 @@ func DeriveDeterministicULA(seed string) string {
 	return fmt.Sprintf("fd%02x:%02x%02x:%02x%02x::/48", sum[0], sum[1], sum[2], sum[3], sum[4])
 }
 
-// CarveSubnet64 carves a /64 subnet + hostID (e.g. ::1/64) out of a /48 or /56 IPv6 prefix.
+// CarveSubnet64 carves a /64 subnet + hostID (e.g. ::1/64) out of a /48,
+// /52, /56, or /60 IPv6 prefix. The subnet ID occupies bits
+// [ones, 64): its least-significant bit lands on bit 63 and its
+// most-significant bit on bit `ones`, so it is right-aligned in the
+// low (64-ones) bits of the 16-bit field at bytes 6-7.
 func CarveSubnet64(prefixCIDR string, subnetID uint16, hostID uint16) (string, error) {
 	ip, ipNet, err := net.ParseCIDR(strings.TrimSpace(prefixCIDR))
 	if err != nil {
@@ -109,12 +113,28 @@ func CarveSubnet64(prefixCIDR string, subnetID uint16, hostID uint16) (string, e
 	out := make(net.IP, 16)
 	copy(out, v6.Mask(ipNet.Mask))
 
-	if ones <= 48 {
-		binary.BigEndian.PutUint16(out[6:8], subnetID)
-	} else {
-		// e.g. /56 -> modify byte 7
-		out[7] = (out[7] & ipNet.Mask[7]) | byte(subnetID&0xff)
+	// A-L40 (round 2): the old code special-cased bytes 6-7 and only
+	// ever wrote byte 7, dropping the high bits of a /52 subnet ID
+	// (0x123 carved ...:23:: instead of ...:123::). Place the ID
+	// by masking the prefix bits properly, and reject IDs that do
+	// not fit in the (64-ones) subnet bits instead of truncating
+	// them silently.
+	// NOTE on the report's /60 expectation: bits 60-63 are the LOW
+	// nibble of byte 7, so /60 subnet 5 correctly carves ...:5::,
+	// not ...:50:: (that would put the subnet bits at 56-59, which
+	// are prefix bits for a /60). The pre-fix code already produced
+	// ...:5:: for in-range /60 IDs; only the missing range check
+	// (and the /52 placement) was wrong.
+	subnetBits := 64 - ones
+	if subnetBits > 16 {
+		subnetBits = 16
 	}
+	if uint32(subnetID) >= uint32(1)<<uint(subnetBits) {
+		return "", fmt.Errorf("subnet ID %d does not fit in the %d subnet bits of %q", subnetID, subnetBits, prefixCIDR)
+	}
+	field := binary.BigEndian.Uint16(out[6:8])
+	highMask := ^uint16(0) << uint(subnetBits)
+	binary.BigEndian.PutUint16(out[6:8], field&highMask|subnetID)
 
 	if hostID > 0 {
 		binary.BigEndian.PutUint16(out[14:16], hostID)
@@ -281,10 +301,10 @@ func BuildRouterAdvertisementICMPv6(prefixes []string, rdnssIPv6 string, mtu uin
 		masked := v6.Mask(ipNet.Mask)
 
 		pio := make([]byte, 32)
-		pio[0] = 3            // Option Type: Prefix Information
-		pio[1] = 4            // Length in 8-octet units (32 bytes)
-		pio[2] = byte(ones)   // Prefix Length (e.g. 64)
-		pio[3] = 0xc0         // Flags: L=1 (on-link), A=1 (autonomous address-configuration)
+		pio[0] = 3                                   // Option Type: Prefix Information
+		pio[1] = 4                                   // Length in 8-octet units (32 bytes)
+		pio[2] = byte(ones)                          // Prefix Length (e.g. 64)
+		pio[3] = 0xc0                                // Flags: L=1 (on-link), A=1 (autonomous address-configuration)
 		binary.BigEndian.PutUint32(pio[4:8], 86400)  // Valid Lifetime: 24h
 		binary.BigEndian.PutUint32(pio[8:12], 14400) // Preferred Lifetime: 4h
 		copy(pio[16:32], masked)
@@ -297,8 +317,8 @@ func BuildRouterAdvertisementICMPv6(prefixes []string, rdnssIPv6 string, mtu uin
 		dnsIP := net.ParseIP(dnsStr)
 		if dnsIP != nil && dnsIP.To16() != nil && dnsIP.To4() == nil {
 			rdnss := make([]byte, 24)
-			rdnss[0] = 25 // Type: RDNSS
-			rdnss[1] = 3  // Length: 3 * 8 = 24 bytes
+			rdnss[0] = 25                                // Type: RDNSS
+			rdnss[1] = 3                                 // Length: 3 * 8 = 24 bytes
 			binary.BigEndian.PutUint32(rdnss[4:8], 3600) // Lifetime: 1h
 			copy(rdnss[8:24], dnsIP.To16())
 			ra = append(ra, rdnss...)

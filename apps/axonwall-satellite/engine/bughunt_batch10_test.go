@@ -7,6 +7,7 @@ package engine
 // build + vet and code review, and still need live-box verification.
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -103,5 +104,143 @@ func TestBatch10NftLimitRateOver(t *testing.T) {
 	}
 	if _, err := CompileNftScriptToNetlinkBatch("table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    limit rate over banana/second drop\n  }\n}"); err == nil {
 		t.Fatalf("an unparseable limit rate compiled without an error")
+	}
+}
+
+// A-L36: ConfigureInterface must surface MTU, IPv6-mode, and
+// IPv6-address failures instead of acking them as configured.
+func TestBatch10ConfigureInterfaceErrors(t *testing.T) {
+	eng := &EdgeNetworkEngine{SysClassNetDir: "/sys/class/net"}
+	cases := []struct {
+		name string
+		spec EdgeInterfaceSpec
+		want string
+	}{
+		{
+			"MTU",
+			EdgeInterfaceSpec{Name: "wan", Device: "eth99missing", MTU: 1500, Enabled: true},
+			"MTU",
+		},
+		{
+			"IPv6Mode",
+			EdgeInterfaceSpec{Name: "wan", Device: "eth99missing", IPv6Mode: "auto", Enabled: true},
+			"IPv6 mode",
+		},
+		{
+			"IPv6Address",
+			EdgeInterfaceSpec{Name: "wan", Device: "eth99missing", IPv6Address: "fd00::1/64", Enabled: true},
+			"IPv6 address",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := eng.ConfigureInterface(tc.spec)
+			if err == nil {
+				t.Fatalf("ConfigureInterface(%+v) returned nil, want an error mentioning %s", tc.spec, tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ConfigureInterface error %v does not mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A-L37: a JSON user-data seed must honour numeric scalars and
+// interfaces/routes lists, like the YAML path does.
+func TestBatch10CloudInitJSONNumbersAndLists(t *testing.T) {
+	cfg := &EdgeBootConfig{}
+	raw := `{"axonwall": {"hub": "https://hub.example:2966", "token": "tok", "watchdog_sec": 60, ` +
+		`"interfaces": [{"name": "wan", "device": "eth0", "address": "10.0.0.2/24", "gateway": "10.0.0.1"}, ` +
+		`{"name": "lan", "device": "eth1", "address": "10.1.0.1/24"}], ` +
+		`"routes": [{"destination": "10.20.0.0/16", "gateway": "10.0.0.1", "device": "eth0"}]}}`
+	if err := applyCloudInitJSON(cfg, raw, t.TempDir()); err != nil {
+		t.Fatalf("applyCloudInitJSON failed: %v", err)
+	}
+	if cfg.HubURL != "https://hub.example:2966" {
+		t.Fatalf("HubURL = %q, want https://hub.example:2966", cfg.HubURL)
+	}
+	if cfg.ZtpToken != "tok" {
+		t.Fatalf("ZtpToken = %q, want tok", cfg.ZtpToken)
+	}
+	if cfg.WatchdogSec != 60 {
+		t.Fatalf("WatchdogSec = %d, want 60 (numeric scalars were dropped)", cfg.WatchdogSec)
+	}
+	if len(cfg.Interfaces) != 2 {
+		t.Fatalf("Interfaces = %d, want 2 (JSON interface lists were dropped)", len(cfg.Interfaces))
+	}
+	if cfg.Interfaces[0].Device != "eth0" || cfg.Interfaces[0].Address != "10.0.0.2/24" || cfg.Interfaces[0].Gateway != "10.0.0.1" {
+		t.Fatalf("Interfaces[0] = %+v, want wan eth0 10.0.0.2/24 gw 10.0.0.1", cfg.Interfaces[0])
+	}
+	if cfg.Interfaces[1].Device != "eth1" || cfg.Interfaces[1].Address != "10.1.0.1/24" {
+		t.Fatalf("Interfaces[1] = %+v, want lan eth1 10.1.0.1/24", cfg.Interfaces[1])
+	}
+	if len(cfg.Routes) != 1 {
+		t.Fatalf("Routes = %d, want 1 (JSON route lists were dropped)", len(cfg.Routes))
+	}
+	if cfg.Routes[0].Destination != "10.20.0.0/16" || cfg.Routes[0].Gateway != "10.0.0.1" || cfg.Routes[0].Device != "eth0" {
+		t.Fatalf("Routes[0] = %+v, want 10.20.0.0/16 via 10.0.0.1 dev eth0", cfg.Routes[0])
+	}
+}
+
+// A-L39: an empty TunnelIP must be rejected, not configured as an
+// unnumbered mesh interface that reports success.
+func TestBatch10ConfigureMeshRejectsEmptyTunnelIP(t *testing.T) {
+	wg := NewWireGuardEngine()
+	err := wg.ConfigureMesh(WireGuardConfig{
+		InterfaceName: "wg-axon0",
+		ListenPort:    51820,
+		PrivateKey:    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	})
+	if err == nil {
+		t.Fatalf("ConfigureMesh with an empty TunnelIP returned nil")
+	}
+	if !strings.Contains(err.Error(), "tunnel") {
+		t.Fatalf("ConfigureMesh error %v does not mention the tunnel IP", err)
+	}
+}
+
+// A-L40: subnet IDs must be placed in bits [ones, 64) for every
+// prefix width, and IDs that do not fit must be rejected instead of
+// silently truncated.
+//
+// NOTE on the report's /60 expectation: bits 60-63 are the LOW
+// nibble of byte 7, so /60 subnet 5 correctly carves ...:5::, not
+// ...:50:: (that would put subnet bits at 56-59, which are prefix
+// bits for a /60). The /52 placement below is the real bug the
+// report verified.
+func TestBatch10CarveSubnet64PrefixWidths(t *testing.T) {
+	cases := []struct {
+		prefix string
+		subnet uint16
+		host   uint16
+		want   string
+	}{
+		{"2001:db8:abcd::/48", 0x123, 1, "2001:db8:abcd:123::1/64"},
+		{"2001:db8:abcd::/52", 0x123, 1, "2001:db8:abcd:123::1/64"},
+		{"2001:db8:abcd:1200::/56", 0x34, 0, "2001:db8:abcd:1234::/64"},
+		{"2001:db8:abcd:1230::/60", 5, 0, "2001:db8:abcd:1235::/64"},
+		{"2001:db8:abcd::/48", 0, 0, "2001:db8:abcd::/64"},
+	}
+	for _, tc := range cases {
+		got, err := CarveSubnet64(tc.prefix, tc.subnet, tc.host)
+		if err != nil {
+			t.Fatalf("CarveSubnet64(%s, %#x, %d) failed: %v", tc.prefix, tc.subnet, tc.host, err)
+		}
+		if got != tc.want {
+			t.Errorf("CarveSubnet64(%s, %#x, %d) = %s, want %s", tc.prefix, tc.subnet, tc.host, got, tc.want)
+		}
+	}
+	overflow := []struct {
+		prefix string
+		subnet uint16
+	}{
+		{"2001:db8:abcd:1230::/60", 16},
+		{"2001:db8:abcd::/52", 0x1000},
+		{"2001:db8:abcd:1200::/56", 256},
+	}
+	for _, tc := range overflow {
+		if got, err := CarveSubnet64(tc.prefix, tc.subnet, 0); err == nil {
+			t.Errorf("CarveSubnet64(%s, %#x, 0) = %s, want an error (ID does not fit)", tc.prefix, tc.subnet, got)
+		}
 	}
 }

@@ -1086,8 +1086,73 @@ func applyCloudInitJSONMap(cfg *EdgeBootConfig, m map[string]interface{}) {
 			applyScalarConfigKV(cfg, k, tv)
 		case bool:
 			applyScalarConfigKV(cfg, k, strconv.FormatBool(tv))
+		case float64:
+			// A-L37: the old walker dropped every numeric scalar,
+			// so watchdog_sec (and any other number) silently
+			// stayed zero. Format it and route it through the
+			// same scalar handling the YAML path uses.
+			applyScalarConfigKV(cfg, k, strconv.FormatFloat(tv, 'f', -1, 64))
+		case []interface{}:
+			// A-L37: interfaces/routes lists were silently
+			// dropped; the YAML path supports them.
+			applyCloudInitJSONArray(cfg, k, tv)
 		case map[string]interface{}:
 			applyCloudInitJSONMap(cfg, tv)
+		}
+	}
+}
+
+// applyCloudInitJSONArray maps a JSON interfaces/routes list onto the
+// boot config, mirroring the YAML list handling. Entries are decoded
+// through the structs' JSON tags (keys match case-insensitively, and
+// underscores are stripped, so "ipv6_mode" and "ipv6Mode" both work);
+// unparseable entries are skipped rather than failing the boot.
+func applyCloudInitJSONArray(cfg *EdgeBootConfig, key string, arr []interface{}) {
+	decodeEntry := func(item interface{}) map[string]interface{} {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		normalised := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			normalised[strings.ReplaceAll(strings.ToLower(k), "_", "")] = v
+		}
+		return normalised
+	}
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "interfaces":
+		var ifaces []EdgeInterfaceSpec
+		for _, item := range arr {
+			entry := decodeEntry(item)
+			if entry == nil {
+				continue
+			}
+			raw, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			spec := EdgeInterfaceSpec{MTU: 1500, Enabled: true}
+			if err := json.Unmarshal(raw, &spec); err != nil {
+				continue
+			}
+			ifaces = append(ifaces, spec)
+		}
+		cfg.Interfaces = mergeInterfaceSpecs(cfg.Interfaces, ifaces)
+	case "routes":
+		for _, item := range arr {
+			entry := decodeEntry(item)
+			if entry == nil {
+				continue
+			}
+			raw, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			var rt EdgeRouteSpec
+			if err := json.Unmarshal(raw, &rt); err != nil {
+				continue
+			}
+			cfg.Routes = append(cfg.Routes, rt)
 		}
 	}
 }
@@ -1101,8 +1166,14 @@ func applyCloudInitJSON(cfg *EdgeBootConfig, rawJSON, rootDir string) error {
 		applyCloudInitJSONMap(cfg, ax)
 	}
 	for k, v := range doc {
-		if s, ok := v.(string); ok {
-			applyScalarConfigKV(cfg, k, s)
+		// A-L37: the top-level loop also dropped numbers and lists.
+		switch tv := v.(type) {
+		case string:
+			applyScalarConfigKV(cfg, k, tv)
+		case float64:
+			applyScalarConfigKV(cfg, k, strconv.FormatFloat(tv, 'f', -1, 64))
+		case []interface{}:
+			applyCloudInitJSONArray(cfg, k, tv)
 		}
 	}
 	return nil

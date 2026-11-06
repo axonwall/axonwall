@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
@@ -472,9 +473,20 @@ func main() {
 							slog.Error("Failed to apply nftables script", "error", err)
 							sendAck(env.Type, env.CommandID, err)
 						} else {
-							_ = engine.SetForwarding("", true)
-							slog.Info("nftables ruleset applied successfully")
-							sendAck(env.Type, env.CommandID, nil)
+							// A-L38: the old code discarded the
+							// SetForwarding error and acked success
+							// anyway, so the hub believed the
+							// router was live with the new ruleset
+							// while the box was not forwarding at
+							// all. A forwarding failure fails the
+							// command.
+							if err := engine.SetForwarding("", true); err != nil {
+								slog.Error("Failed to enable IP forwarding after nftables apply", "error", err)
+								sendAck(env.Type, env.CommandID, fmt.Errorf("nftables ruleset applied but IP forwarding could not be enabled: %w", err))
+							} else {
+								slog.Info("nftables ruleset applied successfully")
+								sendAck(env.Type, env.CommandID, nil)
+							}
 						}
 					}
 

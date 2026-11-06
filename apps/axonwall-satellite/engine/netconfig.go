@@ -124,9 +124,13 @@ func (e *EdgeNetworkEngine) ConfigureInterface(spec EdgeInterfaceSpec) error {
 	dev := strings.TrimSpace(spec.Device)
 
 	// 1. Set MTU via /sys/class/net/<dev>/mtu if specified
+	// A-L36: the old code discarded the write, so a hub-pushed MTU
+	// the kernel refused was acked as configured.
 	if spec.MTU > 0 {
 		mtuPath := filepath.Join(e.SysClassNetDir, dev, "mtu")
-		_ = os.WriteFile(mtuPath, []byte(strconv.Itoa(spec.MTU)+"\n"), 0644)
+		if err := os.WriteFile(mtuPath, []byte(strconv.Itoa(spec.MTU)+"\n"), 0644); err != nil {
+			return fmt.Errorf("failed to set MTU %d on %s: %w", spec.MTU, dev, err)
+		}
 	}
 
 	// 2. Set link UP or DOWN via ioctl SIOCSIFFLAGS
@@ -139,8 +143,12 @@ func (e *EdgeNetworkEngine) ConfigureInterface(spec EdgeInterfaceSpec) error {
 	}
 
 	// 2b. Apply per-interface IPv6 mode (e.g. "disabled", "auto", "delegated", "static")
+	// A-L36: the old code discarded the error, so a hub-pushed
+	// IPv6Mode that failed to apply was acked as configured.
 	if strings.TrimSpace(spec.IPv6Mode) != "" {
-		_ = ApplyInterfaceIPv6Mode("/proc/sys", dev, spec.IPv6Mode)
+		if err := ApplyInterfaceIPv6Mode("/proc/sys", dev, spec.IPv6Mode); err != nil {
+			return fmt.Errorf("failed to apply IPv6 mode %q on %s: %w", spec.IPv6Mode, dev, err)
+		}
 	}
 
 	// 3. Assign CIDR address via native Netlink RTM_NEWADDR (or pure-Go DHCPv4 DORA handshake)
@@ -174,9 +182,21 @@ func (e *EdgeNetworkEngine) ConfigureInterface(spec EdgeInterfaceSpec) error {
 	}
 
 	// 3b. Assign static/ULA IPv6 address if configured and IPv6 is not disabled on the interface
+	// A-L36: the old code discarded the error while the IPv4 path
+	// (round-1 A-L2) returns it, so a failing IPv6 address was
+	// acked as configured. Mirror the IPv4 netlink + `ip`
+	// fallback here so a working fallback still succeeds.
 	v6Addr := strings.TrimSpace(spec.IPv6Address)
 	if v6Addr != "" && !strings.EqualFold(strings.TrimSpace(spec.IPv6Mode), "disabled") {
-		_ = addInterfaceAddressNetlink(dev, v6Addr)
+		if err := addInterfaceAddressNetlink(dev, v6Addr); err != nil {
+			if ipBin, lookErr := exec.LookPath("ip"); lookErr == nil {
+				if fbErr := exec.Command(ipBin, "addr", "replace", v6Addr, "dev", dev).Run(); fbErr != nil {
+					return fmt.Errorf("IPv6 address assignment failed on %s (%s): netlink: %v; ip fallback: %w", dev, v6Addr, err, fbErr)
+				}
+			} else {
+				return fmt.Errorf("netlink IPv6 address assignment failed on %s (%s): %w", dev, v6Addr, err)
+			}
+		}
 	}
 
 	// 4. Configure default route if Gateway is specified
