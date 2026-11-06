@@ -82,7 +82,11 @@ export default function ReportingInsightPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold font-mono">{telemetry?.conntrackCount ?? '--'}</div>
-            <p className="text-xs text-muted-foreground mt-1">Kernel nf_conntrack active entries</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {telemetry?.conntrackCount == null
+                ? 'Conntrack count unavailable — /proc read failed'
+                : 'Kernel nf_conntrack active entries'}
+            </p>
           </CardContent>
         </Card>
         <Card>

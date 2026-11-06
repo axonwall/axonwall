@@ -3255,7 +3255,10 @@ export interface LiveFlowRecord {
 }
 
 export interface NetworkInsightTelemetry {
-  conntrackCount: number;
+  // G8: null when the /proc read fails (no nf_conntrack module,
+  // unreadable /proc) — 0 is a legitimate count, so null marks
+  // "unavailable" distinctly.
+  conntrackCount: number | null;
   totalRxBytes: number;
   totalTxBytes: number;
   flows: LiveFlowRecord[];
@@ -3265,10 +3268,11 @@ export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTeleme
   const session = await getSession();
   assertActionPermitted(session);
 
-  let conntrackCount = 0;
+  let conntrackCount: number | null = null;
   try {
     const raw = fs.readFileSync('/proc/sys/net/netfilter/nf_conntrack_count', 'utf8');
-    conntrackCount = parseInt(raw.trim(), 10) || 0;
+    const parsed = parseInt(raw.trim(), 10);
+    conntrackCount = Number.isNaN(parsed) ? null : parsed;
   } catch {}
 
   let totalRxBytes = 0;
@@ -3311,10 +3315,10 @@ export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTeleme
     }
   } catch {}
 
-  if (conntrackCount === 0 && flows.length > 0) {
-    conntrackCount = flows.length;
-  }
-
+  // G8: the old code silently replaced a failed /proc read with the
+  // number of displayed flows (capped at 50) and labelled it the
+  // kernel conntrack count. Return null (unavailable) instead of
+  // substituting an unrelated number.
   return {
     conntrackCount,
     totalRxBytes,
