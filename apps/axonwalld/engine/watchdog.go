@@ -673,6 +673,14 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 				if be.ActiveNow {
 					we.status.ActiveRootDevice = be.Dataset
 					we.status.SlotAVersion = be.Version
+				} else if be.ActiveNext && be.Version != "" {
+					// E2-6: the BE armed for next boot is the standby
+					// slot's version. loadSlotVersions above filled
+					// SlotBVersion with the running version (the
+					// updater writes slotB = running), so the old
+					// "Standby BE"/"" guard below never fired and both
+					// slots reported the running version after arming.
+					we.status.SlotBVersion = be.Version
 				} else if we.status.SlotBVersion == "Standby BE" || we.status.SlotBVersion == "" {
 					we.status.SlotBVersion = be.Version
 				}
