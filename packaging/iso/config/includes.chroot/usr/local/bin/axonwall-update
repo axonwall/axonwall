@@ -930,18 +930,35 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     echo "[-] ERROR: Failed to arm GRUB boot watchdog for Slot ${TARGET_SLOT} (grubenv write failed); the previous boot target is unchanged." >&2
     exit 1
   fi
+  # E2-4: running on B, GRUB reads slot A's grubenv, so this mirror
+  # IS the arming — the primary write above went to B's grubenv,
+  # which GRUB never reads. A mount or write failure here must fail
+  # the update, not warn and exit 0 for a slot that was never armed.
   if [ "$ACTIVE_SLOT" = "B" ]; then
     SLOT_A_DEV="$(resolve_label_dev "axon_root_a")"
+    MIRROR_OK=0
     if [ -n "$SLOT_A_DEV" ] && [ -b "$SLOT_A_DEV" ]; then
       SLOT_A_MNT="/tmp/axonwall-grubenv-slot-a"
       mkdir -p "$SLOT_A_MNT" 2>/dev/null || true
       if mount "$SLOT_A_DEV" "$SLOT_A_MNT" 2>/dev/null; then
         if [ -d "$SLOT_A_MNT/boot/grub" ]; then
-          update_grubenv_file "$SLOT_A_MNT/boot/grub/grubenv" "${TARGET_SLOT}" || echo "[!] WARNING: Failed to update the Slot A grubenv copy; the primary grubenv was armed." >&2
+          if update_grubenv_file "$SLOT_A_MNT/boot/grub/grubenv" "${TARGET_SLOT}"; then
+            MIRROR_OK=1
+          fi
+        else
+          echo "[-] ERROR: Slot A has no /boot/grub directory; cannot mirror the GRUB environment." >&2
         fi
         umount "$SLOT_A_MNT" 2>/dev/null || true
+      else
+        echo "[-] ERROR: Failed to mount Slot A (${SLOT_A_DEV}) to mirror the GRUB environment." >&2
       fi
       rmdir "$SLOT_A_MNT" 2>/dev/null || true
+    else
+      echo "[-] ERROR: Slot A device (label axon_root_a) could not be resolved; cannot mirror the GRUB environment." >&2
+    fi
+    if [ "$MIRROR_OK" != "1" ]; then
+      echo "[-] ERROR: Failed to mirror the GRUB environment to Slot A; Slot ${TARGET_SLOT} was NOT armed for next boot (GRUB reads Slot A's grubenv). The previous boot target is unchanged." >&2
+      exit 1
     fi
   fi
 elif [ "$ROLLING_MODE" != "1" ] && ( [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline ); then
