@@ -229,18 +229,38 @@ if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/de
   chmod 0400 "$TEMP_KEY"
 
   if cryptsetup luksFormat --type luks2 --batch-mode --cipher aes-xts-plain64 -s 512 -d "$TEMP_KEY" "$DATA_DEV"; then
-    cryptsetup open -d "$TEMP_KEY" "$DATA_DEV" axon_crypt_data 2>/dev/null || true
+    # D2-M3: a failed open after a successful format used to be
+    # swallowed (|| true), leaving no crypttab entry, no mounted
+    # data volume, and an fstab entry for a LABEL=axon_data device
+    # that was never created — first boot dropped to emergency mode.
+    # Fail the install, like the luksFormat branch below. There is
+    # nothing to restore onto: the device now carries a LUKS header,
+    # so the plain-mount restore in the luksFormat abort cannot work.
+    if ! cryptsetup open -d "$TEMP_KEY" "$DATA_DEV" axon_crypt_data 2>/dev/null; then
+      echo "[-] ERROR: cryptsetup open failed on ${DATA_DEV} after a successful format; the encrypted data volume cannot be used."
+      echo "[-] ERROR: aborting the install rather than shipping a target whose first boot drops to emergency mode."
+      exit 1
+    fi
     TARGET_DATA_MAPPER="/dev/mapper/axon_crypt_data"
 
     if [ -b "$TARGET_DATA_MAPPER" ]; then
       if [ "$DATA_FSTYPE" = "xfs" ]; then
-        mkfs.xfs -f -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
+        if ! mkfs.xfs -f -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null; then
+          echo "[-] ERROR: mkfs.xfs failed on ${TARGET_DATA_MAPPER}; aborting the install rather than writing crypttab/fstab entries for a volume that was never created."
+          exit 1
+        fi
       else
-        mkfs.ext4 -F -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null || true
+        if ! mkfs.ext4 -F -L axon_data "$TARGET_DATA_MAPPER" 2>/dev/null; then
+          echo "[-] ERROR: mkfs.ext4 failed on ${TARGET_DATA_MAPPER}; aborting the install rather than writing crypttab/fstab entries for a volume that was never created."
+          exit 1
+        fi
       fi
 
       mkdir -p /target/var/lib/axonwall
-      mount "$TARGET_DATA_MAPPER" /target/var/lib/axonwall 2>/dev/null || true
+      if ! mount "$TARGET_DATA_MAPPER" /target/var/lib/axonwall 2>/dev/null; then
+        echo "[-] ERROR: failed to mount ${TARGET_DATA_MAPPER} on /target/var/lib/axonwall; aborting the install rather than writing crypttab/fstab entries for a volume that was never mounted."
+        exit 1
+      fi
 
       if [ -d "$STAGE_DATA" ] && [ -n "$(ls -A "$STAGE_DATA" 2>/dev/null || true)" ]; then
         cp -a "$STAGE_DATA/." /target/var/lib/axonwall/ 2>/dev/null || true
@@ -277,6 +297,12 @@ if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/de
       else
         echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard" >> /target/etc/crypttab
       fi
+    else
+      # D2-M3: cryptsetup open reported success but the mapper node
+      # never appeared — the same unusable-volume state as an open
+      # failure; abort instead of writing crypttab/fstab entries.
+      echo "[-] ERROR: encrypted mapper ${TARGET_DATA_MAPPER} is not a block device after cryptsetup open succeeded; aborting the install."
+      exit 1
     fi
   else
     echo "[-] ERROR: cryptsetup luksFormat failed on ${DATA_DEV}; the requested LUKS encryption is NOT in place."
