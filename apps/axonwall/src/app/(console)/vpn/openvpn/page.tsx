@@ -90,18 +90,42 @@ export default function OpenVpnPage() {
     servers,
   });
 
-  const clientProfile = selectedServer
-    ? generateClientOvpnProfile({
-        serverHost: 'vpn.axonwall.example.com',
-        serverPort: selectedServer.port || 1194,
-        protocol: selectedServer.protocol || 'udp',
-        cipher: selectedServer.cipher || 'AES-256-GCM',
-        caCert: '-----BEGIN CERTIFICATE-----\n# Provisioned CA Certificate\n-----END CERTIFICATE-----',
-      })
-    : '# No OpenVPN server instance selected or configured.';
+  // G5: the exported profile used to carry a hardcoded example host and a
+  // fake CA block, so it could never connect. Derive the host from the
+  // appliance hostname and embed the server's real provisioned CA
+  // certificate; when either is missing, refuse the export with an
+  // explanation instead of emitting a dead profile.
+  const ovpnHost = (fullState as any)?.system?.hostname
+    ? `${(fullState as any).system.hostname}.${(fullState as any).system?.domain || 'axonwall.local'}`
+    : '';
+  const ovpnCaCert =
+    selectedServer?.caCert &&
+    selectedServer.caCert.includes('-----BEGIN CERTIFICATE-----') &&
+    !selectedServer.caCert.includes('Provisioned CA Certificate')
+      ? selectedServer.caCert
+      : '';
+  const clientProfileAvailable = Boolean(selectedServer && ovpnHost && ovpnCaCert);
+  const clientProfile = !selectedServer
+    ? '# No OpenVPN server instance selected or configured.'
+    : !clientProfileAvailable
+      ? '# Client profile unavailable: ' +
+        (!ovpnHost
+          ? 'the appliance hostname is not configured, so no server host can be derived. '
+          : '') +
+        (!ovpnCaCert
+          ? 'no provisioned CA certificate is stored for this server instance — provision one before exporting a client profile. '
+          : '') +
+        'No .ovpn file is emitted rather than a profile that could never connect.'
+      : generateClientOvpnProfile({
+          serverHost: ovpnHost,
+          serverPort: selectedServer.port || 1194,
+          protocol: selectedServer.protocol || 'udp',
+          cipher: selectedServer.cipher || 'AES-256-GCM',
+          caCert: ovpnCaCert,
+        });
 
   const handleCopy = () => {
-    if (!selectedServer) return;
+    if (!selectedServer || !clientProfileAvailable) return;
     navigator.clipboard.writeText(clientProfile);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -246,7 +270,9 @@ export default function OpenVpnPage() {
                 <button
                   type="button"
                   onClick={handleCopy}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-white transition flex items-center gap-1.5 border border-slate-700"
+                  disabled={!clientProfileAvailable}
+                  title={clientProfileAvailable ? undefined : 'Client profile unavailable: no appliance hostname or provisioned CA certificate'}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs text-white transition flex items-center gap-1.5 border border-slate-700"
                 >
                   {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   {copied ? 'Copied!' : 'Copy .ovpn'}

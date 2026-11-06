@@ -199,7 +199,13 @@ export async function getSoarBlockedIPsAction(): Promise<SoarBlockedIP[]> {
     'GET'
   );
 
-  return res?.blockedIPs ?? [];
+  // C25: a daemon outage used to collapse to "0 blocked IPs / nothing under
+  // SOAR quarantine" mid-incident. Throw so the page shows an unknown state
+  // and keeps its previous list instead of an empty one.
+  if (!res?.blockedIPs) {
+    throw new Error('Daemon unavailable: could not load SOAR blocked IPs from axonwalld');
+  }
+  return res.blockedIPs;
 }
 
 export async function provisionEvidenceVaultAction(
