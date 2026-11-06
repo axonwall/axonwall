@@ -30,22 +30,12 @@ export default function ForensicsVaultPage() {
   const [creating, setCreating] = useState(false);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([
-    {
-      name: 'tank/vigilante-evidence@incident-INC-2026-081',
-      incidentId: 'INC-2026-081',
-      timestamp: '2026-10-17 14:22:00 UTC',
-      size: '1.4 GB',
-      verified: true,
-    },
-    {
-      name: 'tank/vigilante-evidence@incident-INC-2026-042',
-      incidentId: 'INC-2026-042',
-      timestamp: '2026-10-15 09:11:15 UTC',
-      size: '890 MB',
-      verified: true,
-    },
-  ]);
+  // D14: start from an empty list. The two hardcoded seed rows used to
+  // present incidents that were never snapshotted on this box as preserved,
+  // verified, immutable evidence, and no list action exists to fetch real
+  // snapshots — so nothing is shown until a snapshot is actually created
+  // here, and even then it is unverified (see handleCreate).
+  const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -72,8 +62,12 @@ export default function ForensicsVaultPage() {
           name: res.snapshot!,
           incidentId: incidentId.trim(),
           timestamp: new Date().toISOString(),
-          size: '120 MB',
-          verified: true,
+          // D14: the create call returns no size and performs no
+          // verification, so neither is claimed. Size stays unknown and
+          // the snapshot is unverified until a real hash/immutability
+          // check runs against it.
+          size: 'Unknown',
+          verified: false,
         },
         ...prev,
       ]);
@@ -162,6 +156,12 @@ export default function ForensicsVaultPage() {
         </div>
 
         <div className="space-y-3">
+          {snapshots.length === 0 && (
+            <p className="text-xs text-slate-500">
+              No incident snapshots recorded on this appliance. Snapshots created here appear below; none are
+              shown as verified until a real hash/immutability check has run against them.
+            </p>
+          )}
           {snapshots.map((snap) => (
             <div
               key={snap.name}
@@ -180,11 +180,24 @@ export default function ForensicsVaultPage() {
                 </div>
               </div>
 
+              {/* D14: "Verified Immutable" is shown only after a real
+                  verification step — which does not exist yet — so a
+                  freshly created snapshot renders as Unverified. */}
               <div className="flex items-center gap-2">
-                <span className="flex items-center gap-1 text-[11px] text-emerald-400 font-semibold bg-emerald-950/50 border border-emerald-800/60 px-2.5 py-1 rounded-lg">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  Verified Immutable
-                </span>
+                {snap.verified ? (
+                  <span className="flex items-center gap-1 text-[11px] text-emerald-400 font-semibold bg-emerald-950/50 border border-emerald-800/60 px-2.5 py-1 rounded-lg">
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    Verified Immutable
+                  </span>
+                ) : (
+                  <span
+                    title="No hash or immutability check has been run against this snapshot."
+                    className="flex items-center gap-1 text-[11px] text-amber-400 font-semibold bg-amber-950/50 border border-amber-800/60 px-2.5 py-1 rounded-lg"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    Unverified
+                  </span>
+                )}
               </div>
             </div>
           ))}

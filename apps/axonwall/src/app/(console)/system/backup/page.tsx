@@ -9,6 +9,7 @@ import {
   Cloud,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   RefreshCw,
   HardDrive,
   FileCheck,
@@ -607,7 +608,7 @@ export default function BackupPage() {
                 />
               </div>
               <span className="text-[11px] text-slate-500 mt-1 block">
-                Derived with PBKDF2 (100,000 rounds). Store this passphrase securely.
+                Derived with PBKDF2 (600,000 rounds). Store this passphrase securely.
               </span>
             </div>
 
@@ -695,6 +696,23 @@ export default function BackupPage() {
       </div>
 
       {/* Cloud S3 & GitOps Automation Grid */}
+      {/* C-B9: these two cards have no save button, no server action,
+          and no backend — the toggles and inputs are local state only.
+          Until a persisted settings action exists they are disabled
+          and labelled not implemented, so enabling "S3 sync" can no
+          longer imply off-site backups that never happen. The GitOps
+          recording in applyDesiredState runs unconditionally, so the
+          status below must never be derived from this toggle. */}
+      <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex gap-3">
+        <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+        <div className="space-y-1">
+          <p className="font-bold text-white">S3 and GitOps settings are not implemented</p>
+          <p className="text-amber-300/80 leading-relaxed">
+            These controls do not save anything and no backups are uploaded or synced by them. Do not
+            rely on this page for off-site backup until a persisted settings action exists.
+          </p>
+        </div>
+      </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* S3 Object Storage Card */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
@@ -712,7 +730,9 @@ export default function BackupPage() {
               type="checkbox"
               checked={s3Enabled}
               onChange={(e) => setS3Enabled(e.target.checked)}
-              className="w-4 h-4 rounded bg-slate-950 border-slate-800 text-emerald-500 focus:ring-emerald-500"
+              disabled
+              title="Not implemented: this setting is not saved and no S3 upload runs"
+              className="w-4 h-4 rounded bg-slate-950 border-slate-800 text-emerald-500 focus:ring-emerald-500 disabled:opacity-50"
             />
           </div>
 
@@ -723,7 +743,8 @@ export default function BackupPage() {
                 type="text"
                 value={s3Bucket}
                 onChange={(e) => setS3Bucket(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono"
+                disabled
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono disabled:opacity-50"
               />
             </div>
             <div>
@@ -732,7 +753,8 @@ export default function BackupPage() {
                 type="text"
                 value={s3Endpoint}
                 onChange={(e) => setS3Endpoint(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono"
+                disabled
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono disabled:opacity-50"
               />
             </div>
             <div>
@@ -740,7 +762,8 @@ export default function BackupPage() {
               <select
                 value={s3Schedule}
                 onChange={(e) => setS3Schedule(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white"
+                disabled
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white disabled:opacity-50"
               >
                 <option value="hourly">Hourly Automated Snapshot</option>
                 <option value="daily">Daily at 02:00 UTC (Recommended)</option>
@@ -766,7 +789,9 @@ export default function BackupPage() {
               type="checkbox"
               checked={gitOpsEnabled}
               onChange={(e) => setGitOpsEnabled(e.target.checked)}
-              className="w-4 h-4 rounded bg-slate-950 border-slate-800 text-emerald-500 focus:ring-emerald-500"
+              disabled
+              title="Not implemented: this setting is not saved and does not control GitOps recording"
+              className="w-4 h-4 rounded bg-slate-950 border-slate-800 text-emerald-500 focus:ring-emerald-500 disabled:opacity-50"
             />
           </div>
 
@@ -777,7 +802,8 @@ export default function BackupPage() {
                 type="text"
                 value={gitRepo}
                 onChange={(e) => setGitRepo(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono"
+                disabled
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono disabled:opacity-50"
               />
             </div>
             <div>
@@ -786,20 +812,13 @@ export default function BackupPage() {
                 type="text"
                 value={gitBranch}
                 onChange={(e) => setGitBranch(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono"
+                disabled
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-white font-mono disabled:opacity-50"
               />
             </div>
             <div className="p-2.5 bg-slate-950/70 border border-slate-800/80 rounded-lg flex items-center justify-between">
               <span className="text-slate-400">Git Sync Status:</span>
-              <span className={`${gitOpsEnabled && gitRepo.trim() ? 'text-emerald-400' : 'text-slate-500'} font-mono font-medium flex items-center gap-1.5`}>
-                {gitOpsEnabled && gitRepo.trim() ? (
-                  <>
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Enabled ({gitBranch || 'main'})
-                  </>
-                ) : (
-                  'Disabled (No repository configured)'
-                )}
-              </span>
+              <span className="text-slate-500 font-mono font-medium">Not configured (no backend)</span>
             </div>
           </div>
         </div>

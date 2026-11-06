@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import {
   ensureControllerTls,
+  verifyFreshLeafOrThrow,
   validateHaTransition,
   isValidMacAddress,
   isValidCidr,
@@ -208,4 +209,56 @@ test('B-H3: an existing leaf that does not chain to the on-disk CA is ignored, n
   assert.ok(tlsConfig, 'a replacement certificate must be provisioned');
   assert.ok(!tlsConfig.cert.equals(before), 'the non-chaining leaf must not be served as-is');
   assert.ok(tlsConfig.ca, 'the on-disk CA must be included in the returned config');
+});
+
+test('B2-M9: a freshly minted leaf that does not chain to the CA throws instead of being served', (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axon_tls_bm9_'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const caPath = path.join(tmpDir, 'ca.crt');
+  const leafPath = path.join(tmpDir, 'leaf.crt');
+  const leafKeyPath = path.join(tmpDir, 'leaf.key');
+  // An unrelated CA and a self-signed leaf: the leaf does not
+  // chain, so the fresh-mint check must throw.
+  execSync(`openssl req -x509 -newkey rsa:2048 -keyout ${path.join(tmpDir, 'ca.key')} -out ${caPath} -days 3650 -nodes -subj "/CN=test-ca"`, { stdio: 'ignore' });
+  execSync(`openssl req -x509 -newkey rsa:2048 -keyout ${leafKeyPath} -out ${leafPath} -days 3650 -nodes -subj "/CN=axonwall"`, { stdio: 'ignore' });
+  assert.throws(
+    () => verifyFreshLeafOrThrow(leafPath, caPath),
+    /does not chain to the on-disk CA/,
+    'a non-chaining fresh leaf must fail loudly, not be served',
+  );
+});
+
+test('B2-M9: a CA-signed leaf passes the fresh-mint check, and no CA file skips it', (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axon_tls_bm9_ok_'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const caPath = path.join(tmpDir, 'ca.crt');
+  const caKeyPath = path.join(tmpDir, 'ca.key');
+  const leafPath = path.join(tmpDir, 'leaf.crt');
+  const leafKeyPath = path.join(tmpDir, 'leaf.key');
+  execSync(`openssl req -x509 -newkey rsa:2048 -keyout ${caKeyPath} -out ${caPath} -days 3650 -nodes -subj "/CN=test-ca"`, { stdio: 'ignore' });
+  execSync(`openssl req -newkey rsa:2048 -keyout ${leafKeyPath} -out ${path.join(tmpDir, 'leaf.csr')} -nodes -subj "/CN=axonwall"`, { stdio: 'ignore' });
+  execSync(`openssl x509 -req -in ${path.join(tmpDir, 'leaf.csr')} -CA ${caPath} -CAkey ${caKeyPath} -CAcreateserial -out ${leafPath} -days 3650 -sha256`, { stdio: 'ignore' });
+  assert.doesNotThrow(() => verifyFreshLeafOrThrow(leafPath, caPath), 'a chaining leaf must pass');
+  // No CA file at all: the check is skipped, not failed.
+  assert.doesNotThrow(() => verifyFreshLeafOrThrow(leafPath, path.join(tmpDir, 'no-such-ca.crt')));
+});
+
+test('B2-M9: an unusable CA key falls back to an encrypted self-signed cert, not plaintext', (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axon_tls_bm9_badkey_'));
+  const certPath = path.join(tmpDir, 'hub.crt');
+  const keyPath = path.join(tmpDir, 'hub.key');
+  const caPath = path.join(tmpDir, 'ca.crt');
+  const caKeyPath = path.join(tmpDir, 'ca.key');
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  // A real CA cert, but a garbage CA key: the CA-signed mint in
+  // step 3 and in the step-4 emergency path both throw. The old
+  // code let the step-4 throw kill the fallback and returned
+  // null, so the controller started in plaintext HTTP.
+  execSync(`openssl req -x509 -newkey rsa:2048 -keyout ${path.join(tmpDir, 'real-ca.key')} -out ${caPath} -days 3650 -nodes -subj "/CN=test-ca"`, { stdio: 'ignore' });
+  fs.writeFileSync(caKeyPath, 'not a private key at all\n');
+  const tlsConfig = ensureControllerTls(certPath, keyPath, caPath, caKeyPath);
+  assert.ok(tlsConfig, 'an unusable CA key must still yield an encrypted fallback, never null (plaintext)');
+  assert.equal(tlsConfig.isFallback, true);
+  assert.ok(tlsConfig.cert && tlsConfig.key, 'the fallback must carry a cert and key');
 });

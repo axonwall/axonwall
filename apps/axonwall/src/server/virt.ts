@@ -8,6 +8,8 @@ import {
   type WorkloadBackupJob,
   type VxlanZone,
   type VirtConfig,
+  VirtualMachineSchema,
+  LxcContainerSchema,
 } from '@axonwall/lib/schemas';
 import { compileVmProcess, compileLxcContainer } from '@axonwall/lib';
 import { getCurrentDesiredState, applyDesiredState } from './agent';
@@ -113,6 +115,12 @@ export async function getVmListAction(): Promise<VMStatusItem[]> {
   const configuredVms = state.virt?.vms ?? [];
 
   const daemonResp = await callAgentApi<{ vms: VMStatusItem[] }>('/v1/virt/vms');
+  // C25: a daemon outage used to collapse to "every VM stopped". Throw a
+  // distinct daemon-unavailable error so pages render an unknown state
+  // instead of a fabricated fleet-wide outage.
+  if (!daemonResp) {
+    throw new Error('Daemon unavailable: could not load live VM status from axonwalld');
+  }
   const liveMap = new Map<number, VMStatusItem>();
   if (daemonResp?.vms) {
     for (const live of daemonResp.vms) {
@@ -158,9 +166,23 @@ export async function vmPowerAction(
   if (action === 'start') {
     const state = await getCurrentDesiredState();
     const vm = state.virt?.vms?.find((v) => v.vmid === vmid);
-    if (vm) {
-      const compiled = compileVmProcess(vm);
-      await callAgentApi('/v1/virt/vms', 'POST', {
+    // D1: never start a VM with no configured spec — the daemon would boot
+    // a generic diskless VM (2 vCPU / 2048 MB, no disks, no NICs) that is
+    // invisible in the VMs table.
+    if (!vm) {
+      return {
+        success: false,
+        message: `VM ${vmid} is not configured — refusing to start. Starting without a registered spec would boot a generic diskless VM.`,
+      };
+    }
+    const compiled = compileVmProcess(vm);
+    // D1: the register result used to be discarded, so a failed register
+    // was invisible and the power POST booted the daemon's fallback spec.
+    // Abort the start when registration fails or the daemon is unreachable.
+    const registerResp = await callAgentApi<{ success: boolean; message?: string }>(
+      '/v1/virt/vms',
+      'POST',
+      {
         action: 'register',
         vmid: vm.vmid,
         spec: {
@@ -183,7 +205,15 @@ export async function vmPowerAction(
               }
             : null,
         },
-      });
+      }
+    );
+    if (!registerResp || registerResp.success === false) {
+      return {
+        success: false,
+        message:
+          registerResp?.message ||
+          `VM ${vmid} spec registration failed${registerResp ? '' : ' (daemon unreachable)'} — start aborted so no generic fallback VM boots.`,
+      };
     }
   }
 
@@ -213,6 +243,17 @@ export async function saveVmAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  // Validate ranges server-side (vmid 100–99999, cores 1–128, memory >= 128
+  // MB, …): the form's min/max attributes are client-side only, and NaN or
+  // negative values previously passed straight to the daemon.
+  const parsedVm = VirtualMachineSchema.safeParse(vm);
+  if (!parsedVm.success) {
+    throw new Error(
+      `Invalid VM: ${parsedVm.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`
+    );
+  }
+  vm = parsedVm.data;
+
   const state = await getCurrentDesiredState();
   const currentVirt = state.virt ?? {
     enabled: true,
@@ -226,26 +267,15 @@ export async function saveVmAction(
     vxlanZones: [],
   };
 
+  // This action is the create path (the VMs page has no edit flow): an
+  // existing ID must never silently overwrite that workload.
   const existingIdx = currentVirt.vms.findIndex((v) => v.vmid === vm.vmid);
-  if (existingIdx >= 0 && vm.cloudInit?.password === '********') {
-    const prevPw = currentVirt.vms[existingIdx]?.cloudInit?.password;
-    if (prevPw && prevPw !== '********') {
-      vm = {
-        ...vm,
-        cloudInit: {
-          ...vm.cloudInit,
-          password: prevPw,
-        },
-      };
-    }
-  }
-  let updatedVms: VirtualMachine[];
   if (existingIdx >= 0) {
-    updatedVms = [...currentVirt.vms];
-    updatedVms[existingIdx] = vm;
-  } else {
-    updatedVms = [...currentVirt.vms, vm];
+    throw new Error(
+      `VM ${vm.vmid} already exists (${currentVirt.vms[existingIdx]?.name || 'unnamed'}). Creating a VM with an existing ID would overwrite it — pick a different ID.`
+    );
   }
+  const updatedVms: VirtualMachine[] = [...currentVirt.vms, vm];
 
   const updatedState = {
     ...state,
@@ -267,7 +297,10 @@ export async function saveVmAction(
 
   // Register with daemon engine
   const compiled = compileVmProcess(vm);
-  await callAgentApi('/v1/virt/vms', 'POST', {
+  // D1: the register result used to be discarded. The config is saved, so
+  // the save still succeeds — but a failed registration must be visible,
+  // or the next start silently boots the daemon's generic fallback spec.
+  const registerResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/vms', 'POST', {
     action: 'register',
     vmid: vm.vmid,
     spec: {
@@ -294,7 +327,11 @@ export async function saveVmAction(
 
   return {
     success: true,
-    message: `VM ${vm.vmid} (${vm.name}) saved to /etc/axonwall/virt.yaml.`,
+    message:
+      `VM ${vm.vmid} (${vm.name}) saved to /etc/axonwall/virt.yaml.` +
+      (!registerResp || registerResp.success === false
+        ? ' Warning: daemon spec registration failed (daemon unreachable or refused) — re-save once the daemon is back, or the next start may boot a generic fallback VM.'
+        : ''),
   };
 }
 
@@ -306,7 +343,28 @@ export async function deleteVmAction(
 
   const state = await getCurrentDesiredState();
   if (!state.virt?.vms) {
-    return { success: true, message: 'No VMs configured.' };
+    return { success: false, message: 'No VMs configured — nothing deleted.' };
+  }
+  if (!state.virt.vms.some((v) => v.vmid === vmid)) {
+    return { success: false, message: `VM ${vmid} is not configured — nothing deleted.` };
+  }
+
+  // D2: deregister with the daemon BEFORE removing the config, and refuse
+  // to pretend the delete happened when the daemon cannot be reached —
+  // otherwise the registration (and disk) survive and re-creating the ID
+  // resurrects the old VM. Best-effort stop first so a running VM is not
+  // left orphaned after its spec is gone.
+  await callAgentApi('/v1/virt/vms', 'POST', { action: 'stop', vmid, force: true });
+  const unregisterResp = await callAgentApi<{ success: boolean; message?: string }>(
+    '/v1/virt/vms',
+    'POST',
+    { action: 'unregister', vmid }
+  );
+  if (!unregisterResp || unregisterResp.success === false) {
+    return {
+      success: false,
+      message: `Daemon unavailable or unregister refused — VM ${vmid} was NOT deleted; configuration and daemon registration preserved. Retry once axonwalld is reachable.`,
+    };
   }
 
   const updatedState = {
@@ -320,7 +378,7 @@ export async function deleteVmAction(
   await applyDesiredState(updatedState);
   return {
     success: true,
-    message: `VM ${vmid} removed from configuration.`,
+    message: `VM ${vmid} removed from configuration and unregistered from the daemon. NOTE: the ZVOL disk was NOT deleted and storage was not freed — re-creating VM ${vmid} will reuse the old disk.`,
   };
 }
 
@@ -334,6 +392,11 @@ export async function getContainerListAction(): Promise<ContainerStatusItem[]> {
   const daemonResp = await callAgentApi<{ containers: ContainerStatusItem[] }>(
     '/v1/virt/containers'
   );
+  // C25: same as VMs — never render configured containers as "stopped"
+  // when the daemon simply did not answer.
+  if (!daemonResp) {
+    throw new Error('Daemon unavailable: could not load live container status from axonwalld');
+  }
   const liveMap = new Map<number, ContainerStatusItem>();
   if (daemonResp?.containers) {
     for (const live of daemonResp.containers) {
@@ -375,9 +438,19 @@ export async function containerPowerAction(
   if (action === 'start' || action === 'reboot' || action === 'reset') {
     const state = await getCurrentDesiredState();
     const ct = state.virt?.containers?.find((c) => c.ctid === ctid);
-    if (ct) {
-      const compiled = compileLxcContainer(ct);
-      await callAgentApi('/v1/virt/containers', 'POST', {
+    // D1 (container shape): same discarded-register hole as VMs — a failed
+    // register must abort before any stop/start, never silently proceed.
+    if (!ct) {
+      return {
+        success: false,
+        message: `Container ${ctid} is not configured — refusing to ${action}.`,
+      };
+    }
+    const compiled = compileLxcContainer(ct);
+    const registerResp = await callAgentApi<{ success: boolean; message?: string }>(
+      '/v1/virt/containers',
+      'POST',
+      {
         action: 'register',
         ctid: ct.ctid,
         spec: {
@@ -389,12 +462,71 @@ export async function containerPowerAction(
           rootfsPath: compiled.rootfsPath,
           features: ct.features,
         },
-      });
+      }
+    );
+    if (!registerResp || registerResp.success === false) {
+      return {
+        success: false,
+        message:
+          registerResp?.message ||
+          `Container ${ctid} spec registration failed${registerResp ? '' : ' (daemon unreachable)'} — ${action} aborted.`,
+      };
     }
   }
 
   if (action === 'reboot' || action === 'reset') {
-    await callAgentApi('/v1/virt/containers', 'POST', { action: 'stop', ctid, force: true });
+    // D19: the old code awaited the stop but discarded its result, so
+    // rebooting a stopped container reported "restarted" when nothing
+    // was running to restart. Check the live status first: a container
+    // that is not running is started (not restarted) and the stop is
+    // skipped. (The daemon runs stop/start as async tasks, so a stop
+    // response cannot report an lxc-stop failure — the live status is
+    // what makes the restarted/started distinction honest.)
+    let wasRunning: boolean | null = null;
+    const liveResp = await callAgentApi<{ containers: { ctid: number; status: string }[] }>(
+      '/v1/virt/containers'
+    );
+    if (liveResp?.containers) {
+      const live = liveResp.containers.find((c) => c.ctid === ctid);
+      wasRunning = live?.status === 'running';
+    }
+    if (wasRunning === false) {
+      const startResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+        '/v1/virt/containers',
+        'POST',
+        { action: 'start', ctid, force }
+      );
+      if (startResp) {
+        return {
+          success: startResp.success,
+          upid: startResp.upid,
+          message: startResp.message || `Container ${ctid} started (was not running).`,
+        };
+      }
+      return {
+        success: false,
+        message: `Daemon unavailable: failed to start container ${ctid}.`,
+      };
+    }
+    const stopResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+      '/v1/virt/containers',
+      'POST',
+      { action: 'stop', ctid, force: true }
+    );
+    // D19: surface a stop failure instead of masking it with the
+    // start result.
+    if (!stopResp) {
+      return {
+        success: false,
+        message: `Daemon unavailable: failed to stop container ${ctid} for restart.`,
+      };
+    }
+    if (!stopResp.success) {
+      return {
+        success: false,
+        message: stopResp.message || `Failed to stop container ${ctid} for restart.`,
+      };
+    }
     const startResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
       '/v1/virt/containers',
       'POST',
@@ -439,6 +571,16 @@ export async function saveContainerAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
+  // Validate ranges server-side (ctid 100–99999, cores 1–128, memory >= 256
+  // MB, …): the form's min/max attributes are client-side only.
+  const parsedCt = LxcContainerSchema.safeParse(container);
+  if (!parsedCt.success) {
+    throw new Error(
+      `Invalid container: ${parsedCt.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`
+    );
+  }
+  container = parsedCt.data;
+
   const state = await getCurrentDesiredState();
   const currentVirt = state.virt ?? {
     enabled: true,
@@ -452,14 +594,15 @@ export async function saveContainerAction(
     vxlanZones: [],
   };
 
+  // This action is the create path (the LXC page has no edit flow): an
+  // existing ID must never silently overwrite that workload.
   const existingIdx = currentVirt.containers.findIndex((c) => c.ctid === container.ctid);
-  let updatedCts: LxcContainer[];
   if (existingIdx >= 0) {
-    updatedCts = [...currentVirt.containers];
-    updatedCts[existingIdx] = container;
-  } else {
-    updatedCts = [...currentVirt.containers, container];
+    throw new Error(
+      `Container ${container.ctid} already exists (${currentVirt.containers[existingIdx]?.hostname || 'unnamed'}). Creating a container with an existing ID would overwrite it — pick a different ID.`
+    );
   }
+  const updatedCts: LxcContainer[] = [...currentVirt.containers, container];
 
   const updatedState = {
     ...state,
@@ -481,7 +624,9 @@ export async function saveContainerAction(
 
   // Register with daemon engine
   const compiled = compileLxcContainer(container);
-  await callAgentApi('/v1/virt/containers', 'POST', {
+  // D1 (container shape): surface a failed registration instead of
+  // discarding it — the config is saved, but the daemon may not know it.
+  const registerResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/containers', 'POST', {
     action: 'register',
     ctid: container.ctid,
     spec: {
@@ -497,7 +642,11 @@ export async function saveContainerAction(
 
   return {
     success: true,
-    message: `LXC Container ${container.ctid} (${container.hostname}) saved to /etc/axonwall/virt.yaml.`,
+    message:
+      `LXC Container ${container.ctid} (${container.hostname}) saved to /etc/axonwall/virt.yaml.` +
+      (!registerResp || registerResp.success === false
+        ? ' Warning: daemon spec registration failed (daemon unreachable or refused) — re-save once the daemon is back.'
+        : ''),
   };
 }
 
@@ -509,8 +658,18 @@ export async function deleteContainerAction(
 
   const state = await getCurrentDesiredState();
   if (!state.virt?.containers) {
-    return { success: true, message: 'No containers configured.' };
+    return { success: false, message: 'No containers configured — nothing deleted.' };
   }
+  if (!state.virt.containers.some((c) => c.ctid === ctid)) {
+    return { success: false, message: `Container ${ctid} is not configured — nothing deleted.` };
+  }
+
+  // D2: best-effort stop so a running container is not left orphaned.
+  // There is no daemon container-unregister action (the daemon handler only
+  // knows register/start/stop), so the registration and rootfs CANNOT be
+  // removed from here — say so explicitly instead of implying a clean
+  // delete. Re-creating this CTID will reuse the old rootfs.
+  await callAgentApi('/v1/virt/containers', 'POST', { action: 'stop', ctid, force: true });
 
   const updatedState = {
     ...state,
@@ -523,7 +682,7 @@ export async function deleteContainerAction(
   await applyDesiredState(updatedState);
   return {
     success: true,
-    message: `Container ${ctid} removed from configuration.`,
+    message: `Container ${ctid} removed from configuration. NOTE: the daemon registration and rootfs were NOT removed (no container unregister action exists) and storage was not freed — re-creating CTID ${ctid} will reuse the old rootfs.`,
   };
 }
 
@@ -532,11 +691,13 @@ export async function getPciInventoryAction(): Promise<PciDeviceItem[]> {
   assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<{ devices: PciDeviceItem[] }>('/v1/virt/pci');
-  if (daemonResp?.devices) {
-    return daemonResp.devices;
+  // C25: a daemon outage used to render as "No PCI devices detected",
+  // implying VT-d / IOMMU trouble that did not exist.
+  if (!daemonResp?.devices) {
+    throw new Error('Daemon unavailable: could not load PCI inventory from axonwalld');
   }
 
-  return [];
+  return daemonResp.devices;
 }
 
 function validatePoolName(pool: string): void {
@@ -644,6 +805,29 @@ export async function configureSriovAction(
   assertActionPermitted(session, 'admin');
   validatePciBdf(bdf);
 
+  // A negative count is not a no-op: the daemon writes 0 to sriov_numvfs
+  // (teardown) and then skips re-allocation, destroying every VF while
+  // reporting success. Reject before anything reaches the daemon. The upper
+  // bound is enforced when the inventory knows this device's total; a
+  // missing inventory entry must not block the daemon's own check.
+  if (!Number.isInteger(numVfs) || numVfs < 0) {
+    throw new Error(`Invalid SR-IOV VF count for ${bdf}: expected an integer >= 0, got ${numVfs}`);
+  }
+  let devices: PciDeviceItem[] = [];
+  try {
+    devices = await getPciInventoryAction();
+  } catch {
+    // Inventory unavailable (daemon down): the daemon call below fails
+    // closed, and the daemon still enforces its own upper bound.
+    devices = [];
+  }
+  const device = devices.find((d) => d.bdf === bdf);
+  if (device && Number.isInteger(device.sriovTotalVfs) && numVfs > device.sriovTotalVfs) {
+    throw new Error(
+      `Invalid SR-IOV VF count for ${bdf}: ${numVfs} exceeds the device total of ${device.sriovTotalVfs}`
+    );
+  }
+
   const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'sriov',
     bdf,
@@ -672,10 +856,11 @@ export async function getIsoListAction(pool?: string): Promise<IsoItem[]> {
 
   const path = pool ? `/v1/virt/isos?pool=${encodeURIComponent(pool)}` : '/v1/virt/isos';
   const daemonResp = await callAgentApi<{ isos: IsoItem[] }>(path);
-  if (daemonResp?.isos) {
-    return daemonResp.isos;
+  // C25: never render "No ISO images found" for a daemon outage.
+  if (!daemonResp?.isos) {
+    throw new Error('Daemon unavailable: could not load ISO images from axonwalld');
   }
-  return [];
+  return daemonResp.isos;
 }
 
 export async function downloadIsoAction(
@@ -719,10 +904,11 @@ export async function getBackupListAction(pool?: string): Promise<BackupItem[]> 
 
   const path = pool ? `/v1/virt/backups?pool=${encodeURIComponent(pool)}` : '/v1/virt/backups';
   const daemonResp = await callAgentApi<{ backups: BackupItem[] }>(path);
-  if (daemonResp?.backups) {
-    return daemonResp.backups;
+  // C25: never render "No backup archives found" for a daemon outage.
+  if (!daemonResp?.backups) {
+    throw new Error('Daemon unavailable: could not load backups from axonwalld');
   }
-  return [];
+  return daemonResp.backups;
 }
 
 export async function triggerBackupAction(
@@ -762,8 +948,9 @@ export async function getTaskListAction(): Promise<TaskItem[]> {
   assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<{ tasks: TaskItem[] }>('/v1/tasks');
-  if (daemonResp?.tasks) {
-    return daemonResp.tasks;
+  // C25: never render an empty task list for a daemon outage.
+  if (!daemonResp?.tasks) {
+    throw new Error('Daemon unavailable: could not load tasks from axonwalld');
   }
-  return [];
+  return daemonResp.tasks;
 }

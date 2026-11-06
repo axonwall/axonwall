@@ -1,12 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu } from 'lucide-react';
+import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu, AlertTriangle, XCircle } from 'lucide-react';
 import { compileTrafficShaper } from '@axonwall/lib/compile/tc';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, TrafficShaperConfig } from '@axonwall/lib/schemas';
 
 export default function TrafficShaperPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [shaperIface, setShaperIface] = useState('eth0');
@@ -18,38 +20,59 @@ export default function TrafficShaperPage() {
   const [applied, setApplied] = useState(false);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // A11: save failures need a red banner, not the emerald one.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // C-A1: nothing editable renders until the real shaper config loads.
+  // A save before (or after a failed) load used to persist the defaults
+  // above — shaper disabled, 250/50 Mbps on eth0.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      const wanDev = state.interfaces?.find((i) => i.role === 'wan' || i.name === 'wan')?.device;
+      if (wanDev && wanDev !== 'none') {
+        setShaperIface(wanDev);
+      }
+      if (state.trafficShaper) {
+        setEnabled(state.trafficShaper.enabled);
+        const first = state.trafficShaper.interfaces?.[0];
+        if (first) {
+          if (first.interface) setShaperIface(first.interface);
+          setDownloadMbps(first.downloadBandwidthMbps);
+          setUploadMbps(first.uploadBandwidthMbps);
+          setScheduler(first.scheduler);
+          setCakeDiffserv(first.cakeDiffserv);
+          setCakeAckFilter(first.cakeAckFilter);
+        }
+      }
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load traffic shaper configuration.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        const wanDev = state.interfaces?.find((i) => i.role === 'wan' || i.name === 'wan')?.device;
-        if (wanDev && wanDev !== 'none') {
-          setShaperIface(wanDev);
-        }
-        if (state.trafficShaper) {
-          setEnabled(state.trafficShaper.enabled);
-          const first = state.trafficShaper.interfaces?.[0];
-          if (first) {
-            if (first.interface) setShaperIface(first.interface);
-            setDownloadMbps(first.downloadBandwidthMbps);
-            setUploadMbps(first.uploadBandwidthMbps);
-            setScheduler(first.scheduler);
-            setCakeDiffserv(first.cakeDiffserv);
-            setCakeAckFilter(first.cakeAckFilter);
-          }
-        }
-      })
-      .catch(() => {});
+    loadState();
   }, []);
 
+  // A14: a cleared bandwidth field used to yield 0, which passes
+  // schema validation but is silently omitted by the tc compile, so
+  // that direction ended up unshaped. Clamp to >= 1 Mbps here so the
+  // saved config, the compiled preview, and the labels all agree.
   const currentConfig: TrafficShaperConfig = {
     enabled,
     interfaces: [
       {
         interface: shaperIface,
-        downloadBandwidthMbps: downloadMbps,
-        uploadBandwidthMbps: uploadMbps,
+        downloadBandwidthMbps: Math.max(1, downloadMbps || 1),
+        uploadBandwidthMbps: Math.max(1, uploadMbps || 1),
         scheduler,
         cakeDiffserv,
         cakeAckFilter,
@@ -66,6 +89,7 @@ export default function TrafficShaperPage() {
     const prevFullState = fullState;
     setSaving(true);
     setStatusMsg(null);
+    setErrorMsg(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -73,17 +97,52 @@ export default function TrafficShaperPage() {
         trafficShaper: currentConfig,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved Traffic Shaper configuration to /etc/axonwall/firewall.yaml');
       setApplied(true);
       setTimeout(() => setApplied(false), 3000);
     } catch (err: any) {
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save Traffic Shaper settings'}`);
+      setErrorMsg(`Failed to save Traffic Shaper settings: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
   };
+
+  // C-A1: loading/error screens until the real shaper config loads, so
+  // Save & Apply can never persist defaults over the live configuration.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading traffic shaper configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'Traffic shaper configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current shaper configuration is unknown, so editing and applying are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -97,6 +156,13 @@ export default function TrafficShaperPage() {
           <code className="text-emerald-400 font-mono">/etc/axonwall/firewall.yaml</code>.
         </p>
       </div>
+
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
       {statusMsg && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
@@ -144,7 +210,7 @@ export default function TrafficShaperPage() {
                   <span className="text-sm font-semibold text-slate-400">Mbps</span>
                 </div>
                 <span className="text-[11px] text-slate-500 mt-2 block">
-                  Redirected to virtual <code className="text-emerald-400">ifb-eth0</code> interface
+                  Redirected to virtual <code className="text-emerald-400">ifb-{shaperIface}</code> interface
                 </span>
               </div>
 
@@ -165,10 +231,13 @@ export default function TrafficShaperPage() {
                   <span className="text-sm font-semibold text-slate-400">Mbps</span>
                 </div>
                 <span className="text-[11px] text-slate-500 mt-2 block">
-                  Direct root qdisc shaping on <code className="text-emerald-400">eth0</code>
+                  Direct root qdisc shaping on <code className="text-emerald-400">{shaperIface}</code>
                 </span>
               </div>
             </div>
+            <p className="text-[11px] text-slate-500">
+              Bandwidths are saved at a minimum of 1 Mbps per direction; clearing a field does not disable shaping for that direction. Use the QoS Engine toggle to turn shaping off.
+            </p>
 
             {/* Scheduler Select */}
             <div className="space-y-3">

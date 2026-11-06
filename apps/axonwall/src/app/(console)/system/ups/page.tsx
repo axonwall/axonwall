@@ -11,15 +11,42 @@ import {
   Settings,
   HelpCircle,
   Save,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { compileNutUps } from '@axonwall/lib/compile/nut';
 import type { NutUpsConfig } from '@axonwall/lib/schemas';
-import { getUpsStatus, getCurrentDesiredState, applyDesiredState, type UpsStatus } from '@/server/agent';
+import { getUpsStatus, getCurrentDesiredState, type UpsStatus } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+
+// B20: NUT ups.status is a space-separated token list (OL, OB, LB,
+// CHRG, DISCHRG, ...). The badge used to claim "(Online Utility
+// Power)" for every connected state, including OB/LB — the states
+// where the distinction matters most.
+function upsStatusLabel(status: string): string {
+  const tokens = status.toUpperCase().split(/\s+/);
+  if (tokens.includes('LB')) return 'Low Battery';
+  if (tokens.includes('OB')) return 'On Battery';
+  if (tokens.includes('OL')) return 'Online Utility Power';
+  return status;
+}
+
+function upsStatusTone(status: string): 'online' | 'battery' | 'low' {
+  const tokens = status.toUpperCase().split(/\s+/);
+  if (tokens.includes('LB')) return 'low';
+  if (tokens.includes('OB')) return 'battery';
+  return 'online';
+}
 
 export default function UpsMonitoringPage() {
+  const { applyState } = useDesiredStateApply();
   const [upsStatus, setUpsStatus] = useState<UpsStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  // C-B14: the save handler used to swallow both success and failure
+  // in an empty catch, so a failed apply was indistinguishable from a
+  // saved one. The result is now surfaced in a typed banner.
+  const [saveMsg, setSaveMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [upsConfig, setUpsConfig] = useState<NutUpsConfig>({
     enabled: false,
     name: 'axonups',
@@ -62,13 +89,20 @@ export default function UpsMonitoringPage() {
 
   const handleSaveUps = async () => {
     setIsSaving(true);
+    setSaveMsg(null);
     try {
       const state = await getCurrentDesiredState();
-      await applyDesiredState({ ...state, ups: upsConfig });
+      await applyState({ ...state, ups: upsConfig });
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       }
-    } catch {}
+      setSaveMsg({ type: 'success', text: 'Saved UPS configuration to /etc/axonwall/system.yaml' });
+    } catch (err: any) {
+      setSaveMsg({
+        type: 'error',
+        text: `Failed to save UPS configuration: ${err?.message || 'unknown error'}. The previous shutdown thresholds are still in effect.`,
+      });
+    }
     setIsSaving(false);
   };
 
@@ -109,9 +143,25 @@ export default function UpsMonitoringPage() {
           </button>
 
           {upsStatus?.connected ? (
-            <span className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Status: {upsStatus.status} (Online Utility Power)
+            <span
+              className={
+                upsStatusTone(upsStatus.status) === 'online'
+                  ? 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-2'
+                  : upsStatusTone(upsStatus.status) === 'low'
+                    ? 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20 flex items-center gap-2'
+                    : 'px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-2'
+              }
+            >
+              <span
+                className={
+                  upsStatusTone(upsStatus.status) === 'online'
+                    ? 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse'
+                    : upsStatusTone(upsStatus.status) === 'low'
+                      ? 'w-2 h-2 rounded-full bg-rose-400 animate-pulse'
+                      : 'w-2 h-2 rounded-full bg-amber-400 animate-pulse'
+                }
+              />
+              Status: {upsStatus.status} ({upsStatusLabel(upsStatus.status)})
             </span>
           ) : (
             <span className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800/80 text-slate-400 border border-slate-700 flex items-center gap-2">
@@ -121,6 +171,23 @@ export default function UpsMonitoringPage() {
           )}
         </div>
       </div>
+
+      {saveMsg && (
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            saveMsg.type === 'error'
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {saveMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{saveMsg.text}</span>
+        </div>
+      )}
 
       {/* Disconnected / Virtual Machine Info Callout */}
       {!upsStatus?.connected && (

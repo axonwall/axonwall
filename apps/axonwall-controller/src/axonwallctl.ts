@@ -23,6 +23,7 @@ import {
 } from '@axonwall/lib/plugins';
 import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
 import { isValidDevice } from '@axonwall/lib/util';
+import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import {
   parseCloudInitYaml,
   parseCloudInitNetworkConfig,
@@ -583,6 +584,22 @@ function cmdDiff() {
             hasDiff = true;
             console.log(res.stdout);
           }
+        } else {
+          // B2-L3: a file with no committed counterpart used to be
+          // skipped entirely, so an untracked config file reported
+          // as "no differences" while GitOps was missing a whole
+          // file. Report it as added instead.
+          hasDiff = true;
+          const res = spawnSync(
+            'diff',
+            ['-u', '--label', `committed/${filename} (no committed version)`, '--label', `/etc/axonwall/${filename}`, '/dev/null', candidatePath],
+            { encoding: 'utf-8' }
+          );
+          if (res.stdout && res.stdout.trim()) {
+            console.log(res.stdout);
+          } else {
+            console.log(`${cYellow}[!] ${filename} exists in /etc/axonwall but has no committed version in GitOps.${cReset}`);
+          }
         }
       }
       if (!hasDiff) {
@@ -599,36 +616,141 @@ function cmdDiff() {
   console.log(nftScript.split('\n').slice(0, 35).join('\n'));
 }
 
-async function cmdApply(autoConfirm = true) {
-  const state = cmdValidate();
+// B2-M5: snapshot/restore for the on-disk config cmdApply
+// overwrites. The snapshot maps every path cmdApply writes (YAML
+// files and state.json in both dirs, plus the cloud-init override
+// it deletes) to its previous contents, or null when the path did
+// not exist, so a daemon rejection can put disk back exactly as it
+// was.
+type CliConfigSnapshot = Map<string, Buffer | null>;
 
-  // Persist normalized YAML files + state.json
-  const yamlFiles = serializeDesiredStateToYamlFiles(state);
-  const serializedJson = JSON.stringify(state, null, 2);
-
+function snapshotCliConfigFiles(yamlFiles: Record<string, string>): CliConfigSnapshot {
+  const snap: CliConfigSnapshot = new Map();
+  const paths: string[] = [];
   for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
-    try {
-      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
-      for (const [filename, content] of Object.entries(yamlFiles)) {
-        const target = path.join(dir, filename);
-        fs.writeFileSync(target, content, { mode: 0o660 });
-        try { fs.chmodSync(target, 0o660); } catch {}
-      }
-      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
-      if (fs.existsSync(ciOverride)) {
-        fs.rmSync(ciOverride, { force: true });
-      }
-    } catch {}
+    for (const filename of Object.keys(yamlFiles)) paths.push(path.join(dir, filename));
+    paths.push(path.join(dir, 'conf.d', '99-cloudinit.yaml'));
   }
-
   for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
+    paths.push(jsonTarget);
+  }
+  for (const p of paths) {
     try {
-      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
-      fs.writeFileSync(jsonTarget, serializedJson, { mode: 0o660 });
-      try { fs.chmodSync(jsonTarget, 0o660); } catch {}
+      snap.set(p, fs.existsSync(p) ? fs.readFileSync(p) : null);
+    } catch {
+      snap.set(p, null);
+    }
+  }
+  return snap;
+}
+
+function restoreCliConfigSnapshot(snap: CliConfigSnapshot): void {
+  for (const [p, content] of snap.entries()) {
+    try {
+      if (content === null) {
+        fs.rmSync(p, { force: true });
+      } else {
+        fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(p, content, { mode: 0o660 });
+      }
     } catch {}
   }
-  fixSharedConfigOwnership();
+}
+
+// B2-M4 follow-up: the B2-M5 restore is itself a full-state disk
+// write, so it takes the same lock — a restore that lands while an
+// MCP propose (or a TUI save) is persisting would clobber that
+// writer's rule exactly like the original race. Returns false when
+// the lock could not be acquired, in which case the caller must
+// NOT claim the restore happened.
+function restoreCliConfigSnapshotLocked(snap: CliConfigSnapshot): boolean {
+  let release: (() => void) | null = null;
+  try {
+    try {
+      release = acquireMcpLockFile(desiredStateLockPath());
+    } catch {
+      return false;
+    }
+    restoreCliConfigSnapshot(snap);
+    return true;
+  } finally {
+    release?.();
+  }
+}
+
+async function cmdApply(autoConfirm = true) {
+  // B2-M4 follow-up: a CLI apply used to read YAML, serialize, and
+  // persist with no lock at all, so an MCP propose_firewall_rule
+  // landing anywhere in that window lost its rule to this apply's
+  // full-state write (and vice versa) — the "propose races a
+  // console/TUI save" trigger. The whole read -> mutate -> persist
+  // window now holds the SAME lockfile the MCP propose path uses
+  // (acquireMcpLockFile/desiredStateLockPath), so the two processes
+  // serialize instead of interleaving. The lock is released before
+  // the daemon apply below: the apply is a network round-trip that
+  // can outlast the lockfile's stale threshold, and holding the
+  // lock across it would let a concurrent writer break it as stale
+  // and re-admit the race. A concurrent MCP propose that lands
+  // after our release reloads fresh state, so it builds on top of
+  // this apply instead of clobbering it. On lock-acquire failure
+  // the apply fails closed (exit 1, nothing written) instead of
+  // proceeding unlocked. Note cmdValidate() calls process.exit(1)
+  // on invalid YAML; process.exit skips the finally below, so a
+  // failed validation leaves the lockfile behind — but its pid is
+  // dead, and the next acquirer's dead-pid check breaks it
+  // immediately, so nothing waits on it.
+  let releaseStateLock: (() => void) | null = null;
+  try {
+    releaseStateLock = acquireMcpLockFile(desiredStateLockPath());
+  } catch (err: any) {
+    console.error(`${cRed}[✗] Could not lock DesiredState for apply (${err?.message || err}); another save or MCP propose is in progress. Nothing was written — retry the apply.${cReset}`);
+    process.exit(1);
+  }
+  let state: DesiredState;
+  let yamlFiles: Record<string, string>;
+  let diskSnapshot: CliConfigSnapshot;
+  let serializedJson: string;
+  try {
+    state = cmdValidate();
+
+    // B2-M5: snapshot the on-disk config before overwriting it, so a
+    // daemon rejection can restore the previous version instead of
+    // leaving the rejected config on disk as if it were current
+    // (disk, GitOps, and kernel would then disagree). A daemon
+    // outage is different: the disk-only sync below deliberately
+    // keeps the new files, and only an explicit rejection restores.
+    yamlFiles = serializeDesiredStateToYamlFiles(state);
+    diskSnapshot = snapshotCliConfigFiles(yamlFiles);
+
+    // Persist normalized YAML files + state.json
+    serializedJson = JSON.stringify(state, null, 2);
+
+    for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+      try {
+        fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
+        for (const [filename, content] of Object.entries(yamlFiles)) {
+          const target = path.join(dir, filename);
+          fs.writeFileSync(target, content, { mode: 0o660 });
+          try { fs.chmodSync(target, 0o660); } catch {}
+        }
+        const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+        if (fs.existsSync(ciOverride)) {
+          fs.rmSync(ciOverride, { force: true });
+        }
+      } catch {}
+    }
+
+    for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
+      try {
+        fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
+        fs.writeFileSync(jsonTarget, serializedJson, { mode: 0o660 });
+        try { fs.chmodSync(jsonTarget, 0o660); } catch {}
+      } catch {}
+    }
+    fixSharedConfigOwnership();
+  } finally {
+    releaseStateLock?.();
+  }
 
   // Compile artifacts via compileNftables(state)
   const { nftScript, files, reloadServices } = compileNftables(state);
@@ -674,15 +796,40 @@ async function cmdApply(autoConfirm = true) {
     });
 
     if (!resp.success) {
+      // B2-M4 follow-up: the restore is a full-state disk write, so
+      // it takes the same lock; a restore that cannot take the lock
+      // must not claim to have restored anything.
+      const restored = restoreCliConfigSnapshotLocked(diskSnapshot);
       console.error(`${cRed}[✗] Daemon rejected bundle: ${resp.message}${cReset}`);
+      if (restored) {
+        console.error(`${cYellow}[!] Restored the previous on-disk configuration; the rejected bundle was not kept.${cReset}`);
+      } else {
+        console.error(`${cYellow}[!] Could NOT restore the previous on-disk configuration — the DesiredState lock is held by another save or MCP propose. The rejected bundle is still on disk; check /etc/axonwall/*.yaml before retrying.${cReset}`);
+      }
       process.exit(1);
     }
   } catch (err: any) {
-    // Apply itself never reached the daemon: disk-only sync, and the
-    // revision is deliberately NOT recorded in GitOps as applied.
-    console.log(
-      `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk only (daemon socket offline: ${err?.message || 'standalone'}). Not recorded in GitOps: nothing was applied.${cReset}`
-    );
+    // B2-M6: the old catch printed "daemon socket offline" for ANY
+    // apply error — including a timeout, when the bundle may have
+    // landed on the daemon and be sitting in its commit-confirm
+    // window. Distinguish: a timeout is status-unknown (the disk
+    // sync still stands, but say so); a missing socket is the
+    // disk-only sync; anything else is a generic failure, not an
+    // offline message.
+    const msg = err?.message || 'standalone';
+    if (/timed out/i.test(msg)) {
+      console.log(
+        `${cYellow}[!] Apply status unknown — the daemon did not answer in time (${msg}). The new config is on disk; the bundle may still be pending on the daemon. Check the daemon's pending job before retrying; not recorded in GitOps.${cReset}`
+      );
+    } else if (/Socket not found/i.test(msg)) {
+      console.log(
+        `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk only (daemon socket offline: ${msg}). Not recorded in GitOps: nothing was applied.${cReset}`
+      );
+    } else {
+      console.error(
+        `${cRed}[✗] Apply failed: ${msg}. The new config is on disk; nothing was recorded in GitOps.${cReset}`
+      );
+    }
     return;
   }
 
@@ -705,6 +852,11 @@ async function cmdApply(autoConfirm = true) {
     const commitHash = commitToGitOps(state, `CLI apply via axonwallctl (${bundleHash.slice(0, 8)})`);
     if (commitHash) {
       console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+    } else {
+      // B2-L5: a failed GitOps commit used to be silent here, so
+      // GitOps HEAD silently stopped tracking the live config after
+      // a confirmed apply. Say so explicitly.
+      console.warn(`${cYellow}[!] Applied configuration was NOT recorded in GitOps: the GitOps commit failed (repo corrupt, unwritable, or git missing). Live config and GitOps HEAD have diverged.${cReset}`);
     }
   }
 }
@@ -922,8 +1074,14 @@ async function cmdConfirm() {
         const commitHash = commitToGitOps(state, `CLI confirm via axonwallctl (${pendingJobId})`);
         if (commitHash) {
           console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+        } else {
+          // B2-L5: see cmdApply — a failed GitOps commit after a
+          // confirmed apply/confirm must not pass silently.
+          console.warn(`${cYellow}[!] Confirmed configuration was NOT recorded in GitOps: the GitOps commit failed (repo corrupt, unwritable, or git missing). Live config and GitOps HEAD have diverged.${cReset}`);
         }
-      } catch {}
+      } catch (err: any) {
+        console.warn(`${cYellow}[!] Confirmed configuration was NOT recorded in GitOps: ${err?.message || err}${cReset}`);
+      }
     } else {
       console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
       process.exit(1);
@@ -941,7 +1099,11 @@ async function cmdRollback() {
     if (resp.success) {
       console.log(`${cGreen}${cBold}[✓] Rolled back to last-known-good ruleset and restored /etc/axonwall/*.yaml.${cReset}`);
     } else {
+      // B2-L4: a refused rollback used to fall through to exit 0, so
+      // a scripted caller believed the rollback had happened.
+      // Match cmdConfirm: fail loudly.
       console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+      process.exit(1);
     }
   } catch (err: any) {
     console.error(`${cRed}[✗] Failed to trigger rollback: ${err?.message || err}${cReset}`);

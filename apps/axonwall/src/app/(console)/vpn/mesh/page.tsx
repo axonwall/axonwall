@@ -1,13 +1,15 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Shield, Plus, Copy, Check, Server, Users, Key, Network, Save, CheckCircle2 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { Shield, Plus, Copy, Check, Server, Users, Key, Save, CheckCircle2, AlertCircle } from 'lucide-react';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 type Tab = 'machines' | 'users' | 'keys';
 
 export default function MeshVpnPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<Tab>('machines');
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [headscaleEnabled, setHeadscaleEnabled] = useState(false);
@@ -55,7 +57,7 @@ export default function MeshVpnPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       }
@@ -121,6 +123,7 @@ export default function MeshVpnPage() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newUserName.trim()) return;
+    setError(null);
     try {
       const res = await fetch('/api/v1/vpn/mesh/users', {
         method: 'POST',
@@ -130,15 +133,19 @@ export default function MeshVpnPage() {
       if (res.ok) {
         setNewUserName('');
         fetchData();
+      } else {
+        const body = await res.json().catch(() => null);
+        setError(body?.error || `Failed to create user (HTTP ${res.status})`);
       }
-    } catch (err) {
-      console.error('Failed to create user', err);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create user');
     }
   };
 
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newKeyUser.trim()) return;
+    setError(null);
     try {
       const res = await fetch('/api/v1/vpn/mesh/keys', {
         method: 'POST',
@@ -154,9 +161,12 @@ export default function MeshVpnPage() {
       if (res.ok) {
         setNewKeyUser('');
         fetchData();
+      } else {
+        const body = await res.json().catch(() => null);
+        setError(body?.error || `Failed to create auth key (HTTP ${res.status})`);
       }
-    } catch (err) {
-      console.error('Failed to create key', err);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create auth key');
     }
   };
 
@@ -185,8 +195,18 @@ export default function MeshVpnPage() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            statusMsg.startsWith('Error:')
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.startsWith('Error:') ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
           <span>{statusMsg}</span>
         </div>
       )}
@@ -266,10 +286,6 @@ export default function MeshVpnPage() {
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
           <div className="p-5 border-b border-slate-800 flex justify-between items-center">
             <h2 className="text-base font-bold text-white">Connected Machines</h2>
-            <button className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1">
-              <Network className="w-3.5 h-3.5" />
-              Manage Routes
-            </button>
           </div>
           {loading ? (
             <div className="p-5 text-sm text-slate-400">Loading machines...</div>

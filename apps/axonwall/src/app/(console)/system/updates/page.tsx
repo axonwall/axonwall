@@ -73,7 +73,11 @@ export default function SystemUpdatesPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [bootCount, setBootCount] = useState(0);
   const [bootLimit, setBootLimit] = useState(3);
-  const [healthVerified, setHealthVerified] = useState(true);
+  // C-B10: healthVerified used to initialise `true`, so the dashboard
+  // rendered "Quorum Verified" / "Committed / bootcount reset to 0"
+  // before any telemetry had loaded. It starts unknown (false) and
+  // is only set by loaded telemetry.
+  const [healthVerified, setHealthVerified] = useState(false);
   const [healthChecks, setHealthChecks] = useState<HealthCheckItem[]>([]);
   const [isVerifying, setIsVerifying] = useState(false);
   const [isCheckingCloud, setIsCheckingCloud] = useState(false);
@@ -113,8 +117,9 @@ export default function SystemUpdatesPage() {
           if (data.telemetry.zbmPoolName) {
             setZbmPool({
               name: data.telemetry.zbmPoolName,
-              topology: data.telemetry.zbmPoolTopology || 'mirror',
-              health: data.telemetry.zbmPoolHealth || 'ONLINE',
+              // E2-9: unknown, not healthy, when the daemon omits these.
+              topology: data.telemetry.zbmPoolTopology || 'Unknown',
+              health: data.telemetry.zbmPoolHealth || 'Unknown',
             });
           }
           if (data.telemetry.bootEnvironments) {
@@ -154,8 +159,9 @@ export default function SystemUpdatesPage() {
       if (telemetry.zbmPoolName) {
         setZbmPool({
           name: telemetry.zbmPoolName,
-          topology: telemetry.zbmPoolTopology || 'mirror',
-          health: telemetry.zbmPoolHealth || 'ONLINE',
+          // E2-9: unknown, not healthy, when the daemon omits these.
+          topology: telemetry.zbmPoolTopology || 'Unknown',
+          health: telemetry.zbmPoolHealth || 'Unknown',
         });
       }
       if (telemetry.bootEnvironments) {
@@ -197,6 +203,31 @@ export default function SystemUpdatesPage() {
     }));
   };
 
+  // C-B8: both clone paths used to fire the zbm-activate fetch with
+  // `await` and never inspect the response, then report the clone as
+  // armed. A daemon refusal left the old BE booting next time while
+  // the banner claimed otherwise. The activate result is now checked
+  // and a failure throws, so the error banner — not a success banner —
+  // is what the operator sees.
+  const armClonedBe = async (beName: string) => {
+    const armResp = await fetch('/api/system/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'zbm-activate', beName }),
+    });
+    let armData: { success?: boolean; message?: string } | null = null;
+    try {
+      armData = await armResp.json();
+    } catch {}
+    if (!armResp.ok || !armData?.success) {
+      throw new Error(
+        `Snapshot cloned to ${beName} but arming it for next boot FAILED: ${
+          armData?.message || `HTTP ${armResp.status}`
+        }. The clone exists but will NOT boot next.`
+      );
+    }
+  };
+
   const handleSubmitArbitrarySnapshot = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const targetBe =
@@ -233,18 +264,18 @@ export default function SystemUpdatesPage() {
       if (!data.success) throw new Error(data.message || 'Snapshot creation failed');
 
       if (cloneImmediately && cleanNewBe && armClonedBeNext) {
-        await fetch('/api/system/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'zbm-activate', beName: cleanNewBe }),
-        });
+        await armClonedBe(cleanNewBe);
       }
 
-      setAlertMessage(
+      const baseMsg =
         data.message ||
-          `Snapshot zroot/ROOT/${targetBe}@${cleanLabel} created successfully${
-            cleanNewBe ? ` and cloned to ${cleanNewBe}` : ''
-          }.`
+        `Snapshot zroot/ROOT/${targetBe}@${cleanLabel} created successfully${
+          cleanNewBe ? ` and cloned to ${cleanNewBe}` : ''
+        }.`;
+      setAlertMessage(
+        cloneImmediately && cleanNewBe && armClonedBeNext
+          ? `${baseMsg} Armed '${cleanNewBe}' for next boot.`
+          : baseMsg
       );
       setCustomSnapLabel(makeTimestampLabel('manual'));
       if (cloneImmediately) {
@@ -260,6 +291,11 @@ export default function SystemUpdatesPage() {
   };
 
   const handleCreateSnapshot = async (beName: string, presetLabel?: string) => {
+    // B24: never snapshot an invented/empty BE name.
+    if (!beName) {
+      setErrorMessage('No boot environment selected to snapshot.');
+      return;
+    }
     setSelectedBeForSnap(beName);
     const labelToUse = sanitizeZfsIdentifier(presetLabel || customSnapLabel) || makeTimestampLabel('manual');
     setIsZbmActionLoading(true);
@@ -317,11 +353,7 @@ export default function SystemUpdatesPage() {
       if (!data.success) throw new Error(data.message);
 
       if (cloneModalState.armNext) {
-        await fetch('/api/system/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'zbm-activate', beName: cleanNewBe }),
-        });
+        await armClonedBe(cleanNewBe);
       }
 
       setAlertMessage(
@@ -646,7 +678,23 @@ export default function SystemUpdatesPage() {
       setHealthChecks(telemetry.checks);
       setTelemetryError(null);
       setTelemetryDaemonUnreachable(Boolean(telemetry.daemonUnreachable));
-      alert('Watchdog Health Quorum: All verification tests PASSED. Partition marked permanently healthy (bootcount=0).');
+      // C-B3: never claim PASSED / bootcount=0 unless the daemon verify
+      // actually ran and passed. A daemon-down run returns telemetry
+      // whose only check is the WARN "Daemon telemetry unavailable",
+      // and verifySystemHealthQuorum now throws before we get here —
+      // but report the real statuses here too, as defense in depth.
+      const failing = (telemetry.checks || []).filter((c: HealthCheckItem) => c?.status && c.status !== 'PASS');
+      if (telemetry.daemonUnreachable || !telemetry.healthVerified || failing.length > 0) {
+        alert(
+          `Watchdog Health Quorum: verification did NOT pass${
+            failing.length
+              ? ` — non-passing checks: ${failing.map((c: HealthCheckItem) => `${c.name} (${c.status})`).join(', ')}`
+              : ''
+          }. Bootcount was not reset.`
+        );
+      } else {
+        alert('Watchdog Health Quorum: All verification tests PASSED. Partition marked permanently healthy (bootcount=0).');
+      }
     } catch (err: any) {
       alert(`Health verification check failed: ${err?.message || String(err)}`);
     } finally {
@@ -814,10 +862,10 @@ export default function SystemUpdatesPage() {
                       Root Pool: {zbmPool?.name || 'zroot'}
                     </h2>
                     <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      {zbmPool?.health || 'ONLINE'}
+                      {zbmPool?.health || 'Unknown'}
                     </span>
                     <span className="px-2 py-0.5 rounded-full text-xs font-mono font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 uppercase">
-                      {zbmPool?.topology || 'Mirror'}
+                      {zbmPool?.topology || 'Unknown'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-0.5">
@@ -828,10 +876,15 @@ export default function SystemUpdatesPage() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => {
-                    const activeBe = bootEnvironments.find((b) => b.activeNow)?.name || 'axonwall-active';
+                    // B24: with no boot environments loaded there is no
+                    // active BE to snapshot — do not fire with the
+                    // invented 'axonwall-active' fallback name.
+                    const activeBe = bootEnvironments.find((b) => b.activeNow)?.name;
+                    if (!activeBe) return;
                     handleCreateSnapshot(activeBe, makeTimestampLabel('quick'));
                   }}
-                  disabled={isZbmActionLoading}
+                  disabled={isZbmActionLoading || bootEnvironments.length === 0}
+                  title={bootEnvironments.length === 0 ? 'No boot environment loaded' : 'Snapshot the active boot environment'}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer disabled:opacity-50"
                 >
                   <Camera className="w-3.5 h-3.5 text-cyan-400" />
@@ -1469,13 +1522,35 @@ export default function SystemUpdatesPage() {
 
           <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80">
             <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Health Commitment</div>
-            <div className="text-2xl font-bold text-white mt-1 flex items-center gap-2">
-              <span>Committed</span>
-              <Check className="w-5 h-5 text-emerald-400" />
-            </div>
-            <p className="text-[11px] text-slate-500 mt-1">
-              GRUB grubenv: bootcount reset to 0
-            </p>
+            {telemetryLoading ? (
+              <>
+                <div className="text-2xl font-bold text-white mt-1">Loading…</div>
+                <p className="text-[11px] text-slate-500 mt-1">Waiting for slot telemetry.</p>
+              </>
+            ) : telemetryError ? (
+              <>
+                <div className="text-2xl font-bold text-amber-400 mt-1">Unknown</div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Slot telemetry unavailable — commitment not verified.
+                </p>
+              </>
+            ) : healthVerified && bootCount === 0 ? (
+              <>
+                <div className="text-2xl font-bold text-white mt-1 flex items-center gap-2">
+                  <span>Committed</span>
+                  <Check className="w-5 h-5 text-emerald-400" />
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">GRUB grubenv: bootcount reset to 0</p>
+              </>
+            ) : (
+              <>
+                <div className="text-2xl font-bold text-amber-400 mt-1">Not committed</div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  GRUB grubenv: bootcount {bootCount} / {bootLimit}
+                  {healthVerified ? '' : ' (quorum not verified)'}
+                </p>
+              </>
+            )}
           </div>
 
           <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80">
@@ -1494,26 +1569,21 @@ export default function SystemUpdatesPage() {
           </h3>
 
           <div className="space-y-2">
-            {(healthChecks.length > 0 ? healthChecks : [
-              {
-                name: 'Network Interface Initialization',
-                status: 'PASS' as const,
-                detail: 'Loopback (lo) operational and link carrier detected across all active NICs',
-                durationMs: 14,
-              },
-              {
-                name: 'Kernel nftables Netfilter Baseline',
-                status: 'PASS' as const,
-                detail: 'Atomic ruleset syntax validation and kernel table hooks applied cleanly',
-                durationMs: 28,
-              },
-              {
-                name: 'Control Plane & Management Quorum',
-                status: 'PASS' as const,
-                detail: 'Privileged IPC socket /run/axonwall/agent.sock is active and responding',
-                durationMs: 8,
-              },
-            ]).map((check) => (
+            {/* C-B10: when no checks have loaded, the page used to show
+                three hardcoded PASS checks with fabricated durations —
+                including a socket check that never ran. An empty list
+                now says so explicitly instead of inventing passes. */}
+            {telemetryLoading ? (
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-400">
+                Loading health checks…
+              </div>
+            ) : healthChecks.length === 0 ? (
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-amber-300">
+                Health checks unavailable — no verification results have loaded. No checks have passed
+                or failed yet; do not treat this partition as verified.
+              </div>
+            ) : (
+              healthChecks.map((check) => (
               <div key={check.name} className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <CheckCircle2
@@ -1542,7 +1612,7 @@ export default function SystemUpdatesPage() {
                   {check.status} ({check.durationMs}ms)
                 </span>
               </div>
-            ))}
+            )))}
           </div>
         </div>
       </div>

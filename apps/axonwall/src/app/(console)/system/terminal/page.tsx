@@ -44,25 +44,18 @@ export default function TerminalPage() {
   const [activeTab, setActiveTab] = useState<'terminal' | 'hardware'>('terminal');
   const [commandInput, setCommandInput] = useState('');
   const [isExecuting, setIsExecuting] = useState(false);
-  const [history, setHistory] = useState<HistoryItem[]>([
-    {
-      command: 'systemctl status axonwalld',
-      output: `● axonwalld.service - Axonwall Privileged Agent
-   Loaded: loaded (/lib/systemd/system/axonwalld.service; enabled)
-   Active: active (running)
-   Main PID: 1042 (axonwalld)
-   Tasks: 14 (limit: 4915)
-   Memory: 24.2M
-   CGroup: /system.slice/axonwalld.service
-           └─1042 /usr/sbin/axonwalld --bundle-dir=/var/lib/axonwall/bundles`,
-      exitCode: 0,
-      latencyMs: 12,
-      timestamp: new Date().toLocaleTimeString(),
-    },
-  ]);
+  // C-B16: the transcript used to open with a pre-seeded `systemctl
+  // status axonwalld` output — "Active: active (running), Main PID:
+  // 1042, Memory: 24.2M" — timestamped with the current time, so it
+  // read as a freshly run command on a box where axonwalld might be
+  // dead. It starts empty; only commands actually run here appear.
+  const [history, setHistory] = useState<HistoryItem[]>([]);
 
   const [telemetry, setTelemetry] = useState<HardwareTelemetry | null>(null);
   const [isLoadingTelem, setIsLoadingTelem] = useState(false);
+  // C-B5: a failed load must surface as "unavailable", never as empty
+  // grids the operator could read as "no sensors / all normal".
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
 
@@ -78,10 +71,14 @@ export default function TerminalPage() {
 
   const loadTelemetry = async () => {
     setIsLoadingTelem(true);
+    setTelemetryError(null);
     try {
       const data = await getHardwareTelemetry();
       setTelemetry(data);
-    } catch {}
+    } catch (err: any) {
+      setTelemetry(null);
+      setTelemetryError(err?.message || 'Failed to load hardware telemetry.');
+    }
     setIsLoadingTelem(false);
   };
 
@@ -201,6 +198,12 @@ export default function TerminalPage() {
 
             {/* Scrollable Command Transcript */}
             <div className="flex-1 p-4 overflow-y-auto space-y-4 font-mono text-xs text-slate-200 leading-relaxed">
+              {history.length === 0 && (
+                <p className="text-slate-500">
+                  No commands run yet in this session. Type a command below — only output from
+                  commands actually executed here will appear.
+                </p>
+              )}
               {history.map((item, idx) => (
                 <div key={idx} className="space-y-1">
                   <div className="flex items-center gap-2 text-emerald-400">
@@ -272,6 +275,11 @@ export default function TerminalPage() {
           </div>
 
           {/* Temperature Grid */}
+          {telemetryError && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300">
+              Hardware readings unavailable: {telemetryError} No sensor, fan, voltage, or optic values shown below were measured.
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {telemetry?.temperatures.map((temp) => (
               <div

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,10 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -72,6 +73,17 @@ type K3sManager struct {
 	haAutoJoined bool
 	lastMessage  string
 }
+
+// K3s filesystem roots are vars (not literals) so tests can redirect
+// K3s file writes into a temp dir; the production values are
+// unchanged. k3sServerManifestDir is also used by the Vigilante
+// manager, which writes its manifest into the same directory.
+var (
+	k3sEtcDir            = "/etc/rancher/k3s"
+	k3sServerManifestDir = "/var/lib/rancher/k3s/server/manifests"
+	k3sStateDir          = "/var/lib/axonwall"
+	vowEtcDir            = "/etc/axonwall/vow"
+)
 
 func NewK3sManager() *K3sManager {
 	return &K3sManager{
@@ -205,15 +217,21 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	// Ensure IP forwarding and loose reverse-path filtering (rp_filter=2) are active for K3s CNI overlay pod traffic
 	_ = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.default.rp_filter=2").Run()
 
-	_ = os.MkdirAll("/etc/rancher/k3s", 0755)
-	_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
-	_ = os.MkdirAll("/var/lib/axonwall", 0755)
+	if err := os.MkdirAll(k3sEtcDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s config dir %q: %w", k3sEtcDir, err)
+	}
+	if err := os.MkdirAll(k3sServerManifestDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s manifest dir %q: %w", k3sServerManifestDir, err)
+	}
+	if err := os.MkdirAll(k3sStateDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s state dir %q: %w", k3sStateDir, err)
+	}
 
 	// If this node is the HA secondary/backup and autoJoinHaPeer is enabled, fetch the join token from the primary node
 	if (bundle.Role == "backup" || bundle.Role == "secondary") && bundle.AutoJoinHaPeer && bundle.PeerIp != "" {
 		tok, err := FetchPeerClusterToken(bundle.PeerIp, bundle.SyncPort, bundle.AuthToken)
 		if err == nil && tok != "" {
-			_ = os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600)
+			_ = os.WriteFile(filepath.Join(k3sStateDir, "k3s-join.token"), []byte(tok+"\n"), 0600)
 			m.mu.Lock()
 			m.haAutoJoined = true
 			m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(bundle.PeerIp, "6443"))
@@ -224,30 +242,45 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		}
 	}
 
+	// A-M15: every file write failure is returned (the old code
+	// swallowed open failures with `if f, err := ...; err == nil`
+	// and reported success), and the writes land all-or-nothing via
+	// temp+rename so a failed apply never leaves a truncated file
+	// behind.
+	var writes []atomicFileWrite
 	if bundle.K3sConfigYaml != "" {
-		if f, err := os.OpenFile("/etc/rancher/k3s/config.yaml", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600); err == nil {
-			_, _ = f.WriteString(bundle.K3sConfigYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sEtcDir, "config.yaml"),
+			content: bundle.K3sConfigYaml,
+			perm:    0600,
+		})
 	}
 
 	if bundle.OpenEbsManifestYaml != "" {
-		manifestPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-openebs.yaml")
-		if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.OpenEbsManifestYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sServerManifestDir, "axonwall-openebs.yaml"),
+			content: bundle.OpenEbsManifestYaml,
+			perm:    0644,
+		})
 	}
 
 	if bundle.WorkloadsManifestYaml != "" {
-		wlPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-workloads.yaml")
-		if f, err := os.OpenFile(wlPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.WorkloadsManifestYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sServerManifestDir, "axonwall-workloads.yaml"),
+			content: bundle.WorkloadsManifestYaml,
+			perm:    0644,
+		})
+	}
+	if err := writeFilesAtomic(writes); err != nil {
+		return err
 	}
 
-	_ = exec.Command("systemctl", "reload-or-restart", "k3s").Run()
+	// A-M15: a failed k3s restart fails the apply instead of being
+	// discarded while the bundle reports success and the cluster runs
+	// the old manifests or no k3s at all.
+	if out, err := exec.Command("systemctl", "reload-or-restart", "k3s").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload-or-restart k3s: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
@@ -267,37 +300,60 @@ func (m *K3sManager) ApplyVowConfig(rawJSON []byte) error {
 		return fmt.Errorf("invalid VOW runtime bundle json: %w", err)
 	}
 
-	manifestPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-vow.yaml")
+	manifestPath := filepath.Join(k3sServerManifestDir, "axonwall-vow.yaml")
 	if !bundle.Enabled || !bundle.K3sDependencyMet {
-		_ = os.Remove(manifestPath)
+		if err := removeFileIfExists(manifestPath); err != nil {
+			return fmt.Errorf("failed to remove stale VOW manifest %q: %w", manifestPath, err)
+		}
 		return nil
 	}
 
-	_ = os.MkdirAll("/etc/axonwall/vow", 0750)
-	_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
+	if err := os.MkdirAll(vowEtcDir, 0750); err != nil {
+		return fmt.Errorf("failed to create VOW config dir %q: %w", vowEtcDir, err)
+	}
+	if err := os.MkdirAll(k3sServerManifestDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s manifest dir %q: %w", k3sServerManifestDir, err)
+	}
 
-	if bundle.EnablerEnv != "" {
-		envPath := "/etc/axonwall/vow/.env.enabler"
-		if f, err := os.OpenFile(envPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
-			_, _ = f.WriteString(bundle.EnablerEnv)
-			_ = f.Close()
+	// A-M15: an enabled bundle with an empty manifests field withdraws
+	// the deployment — remove the stale manifest instead of leaving
+	// k3s applying it. The removal runs before the env/authz writes
+	// so a later write failure cannot leave new config paired with a
+	// manifest the bundle meant to withdraw.
+	if bundle.CombinedK3sManifestsYaml == "" {
+		if err := removeFileIfExists(manifestPath); err != nil {
+			return fmt.Errorf("failed to remove stale VOW manifest %q: %w", manifestPath, err)
 		}
+	} else if err := validateK3sManifest(bundle.CombinedK3sManifestsYaml); err != nil {
+		return fmt.Errorf("vow bundle rejected: %w", err)
+	}
+
+	// A-M15: every file write failure is returned (the old code
+	// swallowed open failures and reported success).
+	var writes []atomicFileWrite
+	if bundle.EnablerEnv != "" {
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(vowEtcDir, ".env.enabler"),
+			content: bundle.EnablerEnv,
+			perm:    0640,
+		})
 	}
 	if bundle.AuthzYaml != "" {
-		authzPath := "/etc/axonwall/vow/authz.yaml"
-		if f, err := os.OpenFile(authzPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
-			_, _ = f.WriteString(bundle.AuthzYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(vowEtcDir, "authz.yaml"),
+			content: bundle.AuthzYaml,
+			perm:    0640,
+		})
 	}
 	if bundle.CombinedK3sManifestsYaml != "" {
-		if err := validateK3sManifest(bundle.CombinedK3sManifestsYaml); err != nil {
-			return fmt.Errorf("vow bundle rejected: %w", err)
-		}
-		if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.CombinedK3sManifestsYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    manifestPath,
+			content: bundle.CombinedK3sManifestsYaml,
+			perm:    0644,
+		})
+	}
+	if err := writeFilesAtomic(writes); err != nil {
+		return err
 	}
 
 	slog.Info("Reconciled Vigilant Octo Waffle manifests onto in-house K3s cluster")
@@ -309,15 +365,20 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	if err != nil {
 		return err
 	}
-	_ = os.MkdirAll("/var/lib/axonwall", 0755)
-	if err := os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600); err != nil {
+	_ = os.MkdirAll(k3sStateDir, 0755)
+	if err := os.WriteFile(filepath.Join(k3sStateDir, "k3s-join.token"), []byte(tok+"\n"), 0600); err != nil {
 		return err
+	}
+	// A-M15: only record the join AFTER k3s restarts successfully.
+	// The old code set haAutoJoined before the (discarded) restart,
+	// so GetStatus reported the node joined while k3s was still down.
+	if out, err := exec.Command("systemctl", "reload-or-restart", "k3s").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload-or-restart k3s after auto-join: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 	m.mu.Lock()
 	m.haAutoJoined = true
 	m.lastMessage = fmt.Sprintf("Joined K3s HA cluster via https://%s", net.JoinHostPort(peerIp, "6443"))
 	m.mu.Unlock()
-	_ = exec.Command("systemctl", "reload-or-restart", "k3s").Run()
 	return nil
 }
 
@@ -328,70 +389,229 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 	lastMsg := m.lastMessage
 	m.mu.Unlock()
 
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "axonwall-node1"
+	// A-H2 (round 2): this used to fabricate a healthy 2-node cluster
+	// with bound volumes out of constants, even with k3s stopped or
+	// never installed. Probe reality instead and report unknown/down
+	// when the probes fail: a peer IP in config is not evidence of a
+	// joined cluster, and no probe means no nodes and no volumes.
+	serviceActive := isSystemdServiceActive("k3s")
+	var nodes []K3sNodeInfo
+	var volumes []OpenEbsVolumeInfo
+	running := false
+	openEbsReady := false
+	openEbsHealthy := false
+	if serviceActive {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if probed, err := probeK3sNodes(ctx); err == nil {
+			nodes = probed
+			running = true
+			volumes = probeK3sPVCs(ctx)
+			openEbsReady, openEbsHealthy = probeOpenEBSHealth(ctx)
+		} else {
+			// The service is up but the API does not answer: the
+			// cluster is not running as far as anyone can tell.
+			lastMsg = fmt.Sprintf("k3s service is active but kubectl get nodes failed: %v", err)
+		}
 	}
 
-	nodes := []K3sNodeInfo{
-		{
-			Name:       hostname,
-			Role:       "control-plane,etcd,master",
-			Roles:      "control-plane,etcd,master",
-			Status:     "Ready",
-			Version:    "v1.31.2+k3s1",
-			IpAddress:  "192.168.1.1",
-			InternalIp: "192.168.1.1",
-		},
-	}
-	if cfg.PeerIp != "" {
-		nodes = append(nodes, K3sNodeInfo{
-			Name:       hostname + "-ha-peer",
-			Role:       "control-plane,etcd,master",
-			Roles:      "control-plane,etcd,master",
-			Status:     "Ready",
-			Version:    "v1.31.2+k3s1",
-			IpAddress:  cfg.PeerIp,
-			InternalIp: cfg.PeerIp,
-		})
-	}
-
-	volumes := []OpenEbsVolumeInfo{
-		{
-			Name:         "pvc-openebs-zfs-system",
-			Namespace:    "openebs",
-			StorageClass: "axonwall-zfs-local",
-			Capacity:     "20Gi",
-			ReplicaState: "ONLINE (ZFS-LocalPV)",
-			Status:       "Bound",
-		},
-		{
-			Name:         "pvc-ha-replicated-store",
-			Namespace:    "default",
-			StorageClass: "axonwall-replicated-ha",
-			Capacity:     "50Gi",
-			ReplicaState: "2/2 Synchronous Replicas Healthy",
-			Status:       "Bound",
-		},
-	}
-
+	// ClusterJoined is the latched join only: a peer IP in config never
+	// proves a join (the token fetch may have failed, and ApplyConfig
+	// only warns about that).
 	role := "primary-server"
-	if joined || cfg.PeerIp != "" {
+	if joined {
 		role = "secondary-ha-server"
 	}
 
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
-		Running:         cfg.Enabled,
-		ServiceActive:   cfg.Enabled,
-		ClusterJoined:   joined || cfg.PeerIp != "",
+		Running:         running,
+		ServiceActive:   serviceActive,
+		ClusterJoined:   joined,
 		Role:            role,
-		HaAutoJoined:    joined || cfg.PeerIp != "",
-		OpenEbsReady:    true,
-		OpenEbsHealthy:  true,
+		HaAutoJoined:    joined,
+		OpenEbsReady:    openEbsReady,
+		OpenEbsHealthy:  openEbsHealthy,
 		ZfsLocalPvPool:  "tank",
 		Nodes:           nodes,
 		Volumes:         volumes,
 		LastSyncMessage: lastMsg,
 	}
+}
+
+// isSystemdServiceActive reports whether a systemd unit is active.
+// A missing systemctl binary or any error means "not active".
+func isSystemdServiceActive(unit string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil
+}
+
+// runKubectlJSON runs `kubectl get <args...> -o json`, preferring plain
+// kubectl (with the k3s kubeconfig when present) and falling back to
+// `k3s kubectl`, which finds its own config.
+func runKubectlJSON(ctx context.Context, args ...string) ([]byte, error) {
+	fullArgs := append([]string{"get"}, args...)
+	fullArgs = append(fullArgs, "-o", "json")
+	if out, err := runKubectlCmd(ctx, "kubectl", fullArgs); err == nil {
+		return out, nil
+	}
+	return runKubectlCmd(ctx, "k3s", append([]string{"kubectl"}, fullArgs...))
+}
+
+func runKubectlCmd(ctx context.Context, name string, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if name == "kubectl" {
+		if _, err := os.Stat("/etc/rancher/k3s/k3s.yaml"); err == nil {
+			cmd.Env = append(os.Environ(), "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+		}
+	}
+	return cmd.Output()
+}
+
+type kubectlNodeList struct {
+	Items []struct {
+		Metadata struct {
+			Name   string            `json:"name"`
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+		Status struct {
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+			NodeInfo struct {
+				KubeletVersion string `json:"kubeletVersion"`
+			} `json:"nodeInfo"`
+			Addresses []struct {
+				Type    string `json:"type"`
+				Address string `json:"address"`
+			} `json:"addresses"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+// probeK3sNodes returns the nodes the Kubernetes API actually reports.
+func probeK3sNodes(ctx context.Context) ([]K3sNodeInfo, error) {
+	out, err := runKubectlJSON(ctx, "nodes")
+	if err != nil {
+		return nil, err
+	}
+	var list kubectlNodeList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parsing kubectl get nodes output: %w", err)
+	}
+	nodes := make([]K3sNodeInfo, 0, len(list.Items))
+	for _, item := range list.Items {
+		status := "NotReady"
+		for _, c := range item.Status.Conditions {
+			if c.Type == "Ready" && c.Status == "True" {
+				status = "Ready"
+			}
+		}
+		var roles []string
+		for label := range item.Metadata.Labels {
+			if strings.HasPrefix(label, "node-role.kubernetes.io/") {
+				roles = append(roles, strings.TrimPrefix(label, "node-role.kubernetes.io/"))
+			}
+		}
+		role := "worker"
+		if len(roles) > 0 {
+			sort.Strings(roles)
+			role = strings.Join(roles, ",")
+		}
+		var internalIP string
+		for _, a := range item.Status.Addresses {
+			if a.Type == "InternalIP" {
+				internalIP = a.Address
+			}
+		}
+		nodes = append(nodes, K3sNodeInfo{
+			Name:       item.Metadata.Name,
+			Role:       role,
+			Roles:      role,
+			Status:     status,
+			Version:    item.Status.NodeInfo.KubeletVersion,
+			IpAddress:  internalIP,
+			InternalIp: internalIP,
+		})
+	}
+	return nodes, nil
+}
+
+type kubectlPVCList struct {
+	Items []struct {
+		Metadata struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"metadata"`
+		Spec struct {
+			StorageClassName string `json:"storageClassName"`
+		} `json:"spec"`
+		Status struct {
+			Phase    string `json:"phase"`
+			Capacity struct {
+				Storage string `json:"storage"`
+			} `json:"capacity"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+// probeK3sPVCs returns the persistent volume claims the API reports, or
+// nil when the probe fails — never invented volumes.
+func probeK3sPVCs(ctx context.Context) []OpenEbsVolumeInfo {
+	out, err := runKubectlJSON(ctx, "pvc", "-A")
+	if err != nil {
+		return nil
+	}
+	var list kubectlPVCList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil
+	}
+	volumes := make([]OpenEbsVolumeInfo, 0, len(list.Items))
+	for _, item := range list.Items {
+		volumes = append(volumes, OpenEbsVolumeInfo{
+			Name:         item.Metadata.Name,
+			Namespace:    item.Metadata.Namespace,
+			StorageClass: item.Spec.StorageClassName,
+			Capacity:     item.Status.Capacity.Storage,
+			Status:       item.Status.Phase,
+		})
+	}
+	return volumes
+}
+
+type kubectlPodList struct {
+	Items []struct {
+		Status struct {
+			Phase             string `json:"phase"`
+			ContainerStatuses []struct {
+				Ready bool `json:"ready"`
+			} `json:"containerStatuses"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+// probeOpenEBSHealth reports whether the OpenEBS pods are all running
+// with ready containers. No pods, or a failed probe, means not ready.
+func probeOpenEBSHealth(ctx context.Context) (ready, healthy bool) {
+	out, err := runKubectlJSON(ctx, "pods", "-n", "openebs")
+	if err != nil {
+		return false, false
+	}
+	var list kubectlPodList
+	if err := json.Unmarshal(out, &list); err != nil || len(list.Items) == 0 {
+		return false, false
+	}
+	for _, item := range list.Items {
+		if item.Status.Phase != "Running" {
+			return false, false
+		}
+		for _, c := range item.Status.ContainerStatuses {
+			if !c.Ready {
+				return false, false
+			}
+		}
+	}
+	return true, true
 }

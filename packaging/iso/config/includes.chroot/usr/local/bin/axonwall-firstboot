@@ -89,7 +89,19 @@ if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
         mkdir -p "$_ab_mnt"
         if mount "$_ab_dev" "$_ab_mnt" 2>/dev/null; then
           # Safety: never clobber a standby slot that already holds an OS.
-          if [[ -e "$_ab_mnt/bin/bash" || -e "$_ab_mnt/usr/bin/bash" ]]; then
+          # E2-8: the old probe (/bin/bash existence) could not tell a
+          # complete clone from a torn one — a clone whose rsync failed
+          # after /usr/bin/bash landed looked "populated", the pending
+          # marker was consumed, and slot B was permanently stranded
+          # partial. Require the same completeness markers the
+          # updater's E1 gate uses (/etc, /sbin/init, a kernel); a
+          # tree that fails them is re-synced below (rsync --delete
+          # repairs it) instead of being declared populated.
+          _ab_populated=0
+          if [[ -d "$_ab_mnt/etc" && -e "$_ab_mnt/sbin/init" ]] && ls "$_ab_mnt/boot"/vmlinuz-* >/dev/null 2>&1; then
+            _ab_populated=1
+          fi
+          if [[ "$_ab_populated" == "1" ]]; then
             echo "[Axonwall Firstboot] Standby slot already populated; skipping clone and consuming the pending marker."
             _ab_ok=1
           elif rsync -aHAX --delete \
@@ -861,4 +873,14 @@ echo "==========================================================================
 # enabling, daemon restart, axonwallctl apply) has run: removing it
 # earlier meant a failure or power cut in that window left a
 # half-provisioned box that never retried.
-rm -f "$MARKER"
+# D2-M1: do not consume the marker while the standby clone is still
+# pending. The firstboot service is gated on this marker, so removing
+# it ended all retries of the clone — the pending marker then sat
+# with no consumer until the next update populated B. Keeping the
+# marker makes the next boot re-run firstboot (its steps are written
+# to be re-runnable; see step 6) and retry the clone.
+if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
+  echo "[Axonwall Firstboot] WARNING: standby slot clone is still pending; keeping the firstboot marker so the next boot retries the clone." >&2
+else
+  rm -f "$MARKER"
+fi

@@ -68,10 +68,14 @@ export default function IsoManagementPage() {
         type: res.success ? 'success' : 'error',
         message: res.message + (res.upid ? ` (Task: ${res.upid})` : ''),
       });
-      setShowDownloadModal(false);
-      setUrl('');
-      setFilename('');
-      setSha256('');
+      // Keep the form open on failure so the operator can retry without
+      // re-entering the URL, filename, and checksum.
+      if (res.success) {
+        setShowDownloadModal(false);
+        setUrl('');
+        setFilename('');
+        setSha256('');
+      }
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to trigger ISO download' });

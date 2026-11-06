@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -117,6 +118,10 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 		http.Error(w, fmt.Sprintf("packet capture failed to start: %v", pipeErr), http.StatusInternalServerError)
 		return
 	}
+	// A-M19: capture stderr so a failed tcpdump run can be reported
+	// instead of ending the stream silently.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		http.Error(w, fmt.Sprintf("packet capture failed to start: %v", err), http.StatusInternalServerError)
 		return
@@ -181,5 +186,28 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 		}
 		flusher.Flush()
 		idx++
+	}
+
+	// A-M19: tcpdump's exit status used to be discarded (the deferred
+	// Wait swallowed it) and its stderr was never wired up, so a failed
+	// run — down/nonexistent interface, bad BPF — ended the stream
+	// silently and looked exactly like a live, idle interface. Surface
+	// the failure as an SSE error event instead. A client disconnect
+	// (ctx done) is not an error.
+	waitErr := cmd.Wait()
+	if ctx.Err() == nil {
+		errMsg := ""
+		if serr := scanner.Err(); serr != nil {
+			errMsg = fmt.Sprintf("packet capture stream failed: %v", serr)
+		} else if waitErr != nil {
+			errMsg = fmt.Sprintf("packet capture failed: %v", waitErr)
+			if detail := strings.TrimSpace(stderr.String()); detail != "" {
+				errMsg = fmt.Sprintf("%s: %s", errMsg, detail)
+			}
+		}
+		if errMsg != "" {
+			_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", errMsg)
+			flusher.Flush()
+		}
 	}
 }

@@ -3,10 +3,12 @@
 import { useState, useEffect } from 'react';
 import { ShieldCheck, Plus, Trash2, Terminal, CheckCircle2 } from 'lucide-react';
 import { compileIpsec } from '@axonwall/lib/compile/ipsec';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, IpsecTunnel } from '@axonwall/lib/schemas';
 
 export default function IpsecPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [tunnels, setTunnels] = useState<IpsecTunnel[]>([]);
   const [saving, setSaving] = useState(false);
@@ -44,7 +46,7 @@ export default function IpsecPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved IPsec configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
       setTunnels(prevTunnels);

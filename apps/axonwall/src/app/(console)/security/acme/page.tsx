@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { Lock, Plus, RefreshCw, CheckCircle2, Trash2 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, AcmeCertificate } from '@axonwall/lib/schemas';
 
 export default function AcmeCertificatesPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [certificates, setCertificates] = useState<AcmeCertificate[]>([]);
   const [renewing, setRenewing] = useState(false);
@@ -41,7 +43,7 @@ export default function AcmeCertificatesPage() {
         },
       };
       setFullState(nextState);
-      await applyDesiredState(nextState);
+      await applyState(nextState);
       setRenewDone(true);
       setTimeout(() => setRenewDone(false), 3000);
     } catch {

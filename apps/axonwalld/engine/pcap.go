@@ -163,54 +163,9 @@ func (m *PacketCaptureManager) parsePcap(pcapFile string) ([]CapturedPacket, err
 
 	scanner := bufio.NewScanner(out)
 	idx := 1
-	ipPortRegex := regexp.MustCompile(`^(\d+\.\d+)\s+IP\s+([0-9a-fA-F.:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F.:]+)\.([0-9]+):\s+(.*)$`)
-	genericIPRegex := regexp.MustCompile(`^(\d+\.\d+)\s+IP\s+([0-9a-fA-F.:]+)\s+>\s+([0-9a-fA-F.:]+):\s+(.*)$`)
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		var pkt CapturedPacket
-		pkt.Index = idx
-
-		if matches := ipPortRegex.FindStringSubmatch(line); len(matches) >= 7 {
-			tsSec, _ := strconv.ParseFloat(matches[1], 64)
-			pkt.Timestamp = time.Unix(int64(tsSec), int64((tsSec-float64(int64(tsSec)))*1e9)).Format("15:04:05.000000")
-			pkt.SrcIP = matches[2]
-			pkt.SrcPort = matches[3]
-			pkt.DstIP = matches[4]
-			pkt.DstPort = matches[5]
-			pkt.Info = matches[6]
-
-			// Protocol inference
-			if pkt.SrcPort == "53" || pkt.DstPort == "53" {
-				pkt.Protocol = "DNS"
-			} else if pkt.SrcPort == "443" || pkt.DstPort == "443" {
-				pkt.Protocol = "TLS/HTTPS"
-			} else if pkt.SrcPort == "80" || pkt.DstPort == "80" {
-				pkt.Protocol = "HTTP"
-			} else if pkt.SrcPort == "22" || pkt.DstPort == "22" {
-				pkt.Protocol = "SSH"
-			} else if pkt.SrcPort == "51820" || pkt.DstPort == "51820" {
-				pkt.Protocol = "WireGuard"
-			} else if strings.Contains(pkt.Info, "Flags") {
-				pkt.Protocol = "TCP"
-			} else {
-				pkt.Protocol = "UDP"
-			}
-			pkt.Length = len(line)
-			packets = append(packets, pkt)
-			idx++
-		} else if matches := genericIPRegex.FindStringSubmatch(line); len(matches) >= 5 {
-			tsSec, _ := strconv.ParseFloat(matches[1], 64)
-			pkt.Timestamp = time.Unix(int64(tsSec), int64((tsSec-float64(int64(tsSec)))*1e9)).Format("15:04:05.000000")
-			pkt.SrcIP = matches[2]
-			pkt.DstIP = matches[3]
-			pkt.Info = matches[4]
-			if strings.Contains(pkt.Info, "ICMP") {
-				pkt.Protocol = "ICMP"
-			} else {
-				pkt.Protocol = "IP"
-			}
-			pkt.Length = len(line)
+		if pkt, ok := parseTcpdumpLine(scanner.Text(), idx); ok {
 			packets = append(packets, pkt)
 			idx++
 		}
@@ -218,4 +173,111 @@ func (m *PacketCaptureManager) parsePcap(pcapFile string) ([]CapturedPacket, err
 	_ = cmd.Wait()
 
 	return packets, nil
+}
+
+var (
+	pcapIPPortRegex     = regexp.MustCompile(`^(\d+\.\d+)\s+IP\s+([0-9a-fA-F.:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F.:]+)\.([0-9]+):\s+(.*)$`)
+	pcapGenericIPRegex  = regexp.MustCompile(`^(\d+\.\d+)\s+IP\s+([0-9a-fA-F.:]+)\s+>\s+([0-9a-fA-F.:]+):\s+(.*)$`)
+	pcapIP6PortRegex    = regexp.MustCompile(`^(\d+\.\d+)\s+IP6\s+([0-9a-fA-F:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F:]+)\.([0-9]+):\s+(.*)$`)
+	pcapIP6GenericRegex = regexp.MustCompile(`^(\d+\.\d+)\s+IP6\s+(\S+)\s+>\s+(\S+):\s+(.*)$`)
+	pcapARPRegex        = regexp.MustCompile(`^(\d+\.\d+)\s+ARP,\s+(.*)$`)
+)
+
+func pcapTimestamp(tsSec float64) string {
+	return time.Unix(int64(tsSec), int64((tsSec-float64(int64(tsSec)))*1e9)).Format("15:04:05.000000")
+}
+
+// parseTcpdumpLine parses one tcpdump -tt line into a packet. L13:
+// IPv6 (IP6) and ARP lines used to fall through both regexes and be
+// dropped without a trace, so PacketCount reported only the parsed
+// IPv4 subset as if it were the whole capture.
+func parseTcpdumpLine(line string, idx int) (CapturedPacket, bool) {
+	var pkt CapturedPacket
+	pkt.Index = idx
+
+	if matches := pcapIPPortRegex.FindStringSubmatch(line); len(matches) >= 7 {
+		tsSec, _ := strconv.ParseFloat(matches[1], 64)
+		pkt.Timestamp = pcapTimestamp(tsSec)
+		pkt.SrcIP = matches[2]
+		pkt.SrcPort = matches[3]
+		pkt.DstIP = matches[4]
+		pkt.DstPort = matches[5]
+		pkt.Info = matches[6]
+
+		// Protocol inference
+		if pkt.SrcPort == "53" || pkt.DstPort == "53" {
+			pkt.Protocol = "DNS"
+		} else if pkt.SrcPort == "443" || pkt.DstPort == "443" {
+			pkt.Protocol = "TLS/HTTPS"
+		} else if pkt.SrcPort == "80" || pkt.DstPort == "80" {
+			pkt.Protocol = "HTTP"
+		} else if pkt.SrcPort == "22" || pkt.DstPort == "22" {
+			pkt.Protocol = "SSH"
+		} else if pkt.SrcPort == "51820" || pkt.DstPort == "51820" {
+			pkt.Protocol = "WireGuard"
+		} else if strings.Contains(pkt.Info, "Flags") {
+			pkt.Protocol = "TCP"
+		} else {
+			pkt.Protocol = "UDP"
+		}
+		pkt.Length = len(line)
+		return pkt, true
+	}
+	if matches := pcapGenericIPRegex.FindStringSubmatch(line); len(matches) >= 5 {
+		tsSec, _ := strconv.ParseFloat(matches[1], 64)
+		pkt.Timestamp = pcapTimestamp(tsSec)
+		pkt.SrcIP = matches[2]
+		pkt.DstIP = matches[3]
+		pkt.Info = matches[4]
+		if strings.Contains(pkt.Info, "ICMP") {
+			pkt.Protocol = "ICMP"
+		} else {
+			pkt.Protocol = "IP"
+		}
+		pkt.Length = len(line)
+		return pkt, true
+	}
+	if matches := pcapIP6PortRegex.FindStringSubmatch(line); len(matches) >= 7 {
+		tsSec, _ := strconv.ParseFloat(matches[1], 64)
+		pkt.Timestamp = pcapTimestamp(tsSec)
+		pkt.SrcIP = matches[2]
+		pkt.SrcPort = matches[3]
+		pkt.DstIP = matches[4]
+		pkt.DstPort = matches[5]
+		pkt.Info = matches[6]
+		if pkt.SrcPort == "53" || pkt.DstPort == "53" {
+			pkt.Protocol = "DNS"
+		} else if pkt.SrcPort == "443" || pkt.DstPort == "443" {
+			pkt.Protocol = "TLS/HTTPS"
+		} else if strings.Contains(pkt.Info, "Flags") {
+			pkt.Protocol = "TCP"
+		} else {
+			pkt.Protocol = "UDP"
+		}
+		pkt.Length = len(line)
+		return pkt, true
+	}
+	if matches := pcapIP6GenericRegex.FindStringSubmatch(line); len(matches) >= 5 {
+		tsSec, _ := strconv.ParseFloat(matches[1], 64)
+		pkt.Timestamp = pcapTimestamp(tsSec)
+		pkt.SrcIP = matches[2]
+		pkt.DstIP = matches[3]
+		pkt.Info = matches[4]
+		if strings.Contains(pkt.Info, "ICMP6") {
+			pkt.Protocol = "ICMPv6"
+		} else {
+			pkt.Protocol = "IPv6"
+		}
+		pkt.Length = len(line)
+		return pkt, true
+	}
+	if matches := pcapARPRegex.FindStringSubmatch(line); len(matches) >= 3 {
+		tsSec, _ := strconv.ParseFloat(matches[1], 64)
+		pkt.Timestamp = pcapTimestamp(tsSec)
+		pkt.Info = matches[2]
+		pkt.Protocol = "ARP"
+		pkt.Length = len(line)
+		return pkt, true
+	}
+	return pkt, false
 }

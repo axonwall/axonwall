@@ -77,10 +77,17 @@ export default function FlowsDashboardPage() {
     // daemon is unreachable, instead of streaming fabricated traffic.
     // Surface that as a "live feed unavailable" banner and stop
     // streaming rather than letting EventSource retry forever.
+    // N15: this handler ALSO fires for transport-level EventSource
+    // errors, which carry no data. Only stop on the route's
+    // server-sent error event (a MessageEvent with data); a bare
+    // transport error must fall through so EventSource's built-in
+    // reconnect retries the feed.
     sse.addEventListener('error', (event) => {
+      const data = (event as MessageEvent).data;
+      if (!data) return;
       try {
-        const data = JSON.parse((event as MessageEvent).data || '{}');
-        setFeedError(data.error || 'Live packet feed unavailable.');
+        const parsed = JSON.parse(data || '{}');
+        setFeedError(parsed.error || 'Live packet feed unavailable.');
       } catch {
         setFeedError('Live packet feed unavailable.');
       }

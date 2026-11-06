@@ -106,7 +106,9 @@ function buildAuditEntry(input: RecordAuditInput, prevHash: string): McpAuditLog
   };
 }
 
-export function recordMcpAuditEntry(input: RecordAuditInput): McpAuditLogEntry {
+export type RecordedMcpAuditEntry = McpAuditLogEntry & { recorded: boolean };
+
+export function recordMcpAuditEntry(input: RecordAuditInput): RecordedMcpAuditEntry {
   const auditPath = resolveMcpAuditPath();
 
   // B-S2: appending is read-last-hash + append, and at least two
@@ -122,8 +124,11 @@ export function recordMcpAuditEntry(input: RecordAuditInput): McpAuditLogEntry {
     // A lock that cannot be acquired must not fork the chain: skip
     // the append (the entry is returned unrecorded) rather than
     // writing an entry chained to a stale tail hash.
+    // B2-L6: mark the entry unrecorded. Callers used to embed
+    // entryHash in success responses unconditionally, handing out a
+    // hash that does not exist in the log.
     console.error('[MCP Audit] Failed to acquire audit lock; entry not recorded:', err);
-    return buildAuditEntry(input, getLastHash(auditPath));
+    return { ...buildAuditEntry(input, getLastHash(auditPath)), recorded: false };
   }
 
   try {
@@ -135,9 +140,12 @@ export function recordMcpAuditEntry(input: RecordAuditInput): McpAuditLogEntry {
         fs.chmodSync(auditPath, 0o660);
       } catch {}
     } catch (err) {
+      // B2-L6: an append failure (disk full, perms) used to return
+      // the entry as if recorded, with a verifiable-looking hash.
       console.error('[MCP Audit] Failed to append audit entry:', err);
+      return { ...fullEntry, recorded: false };
     }
-    return fullEntry;
+    return { ...fullEntry, recorded: true };
   } finally {
     release();
   }

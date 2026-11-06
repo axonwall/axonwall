@@ -1,12 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Route, Terminal, Shield, CheckCircle2 } from 'lucide-react';
+import { Route, Terminal, Shield, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import { compileFrr } from '@axonwall/lib/compile/frr';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, getSystemServicesStatus } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, FrrConfig } from '@axonwall/lib/schemas';
 
 export default function DynamicRoutingPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [bgpEnabled, setBgpEnabled] = useState(false);
   const [bgpAs, setBgpAs] = useState(64512);
@@ -20,26 +22,55 @@ export default function DynamicRoutingPage() {
   const [applied, setApplied] = useState(false);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // A11: save failures need a red banner, not the emerald one.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // C-A1: nothing editable renders until the real FRR config loads. An
+  // apply before (or after a failed) load used to persist the defaults
+  // above — BGP/OSPF disabled, AS reset to 64512, empty networks.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      if (state.frr) {
+        if (state.frr.bgp) {
+          setBgpEnabled(state.frr.bgp.enabled);
+          setBgpAs(state.frr.bgp.asNumber || 64512);
+          setBgpRouterId(state.frr.bgp.routerId || '1.1.1.1');
+          setBgpNetworks(state.frr.bgp.networks || []);
+        }
+        if (state.frr.ospf) {
+          setOspfEnabled(state.frr.ospf.enabled);
+          setOspfRouterId(state.frr.ospf.routerId || '1.1.1.1');
+          setOspfRedistribute(state.frr.ospf.redistributeConnected ?? true);
+        }
+      }
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load dynamic routing configuration.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  // C-A8: every neighbour used to render a green "ESTABLISHED" badge
+  // from the configured list alone — no BGP session state was ever
+  // read, and no BGP status query exists. Until one does, the badge
+  // is honest: "Down" only when FRR itself is not running, otherwise
+  // "Unknown". null = service status not loaded yet.
+  const [frrStatus, setFrrStatus] = useState<string | null>(null);
 
   useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        if (state.frr) {
-          if (state.frr.bgp) {
-            setBgpEnabled(state.frr.bgp.enabled);
-            setBgpAs(state.frr.bgp.asNumber || 64512);
-            setBgpRouterId(state.frr.bgp.routerId || '1.1.1.1');
-            setBgpNetworks(state.frr.bgp.networks || []);
-          }
-          if (state.frr.ospf) {
-            setOspfEnabled(state.frr.ospf.enabled);
-            setOspfRouterId(state.frr.ospf.routerId || '1.1.1.1');
-            setOspfRedistribute(state.frr.ospf.redistributeConnected ?? true);
-          }
-        }
-      })
-      .catch(() => {});
+    getSystemServicesStatus()
+      .then((list) => setFrrStatus(list.find((s) => s.unit === 'frr.service')?.status ?? 'unknown'))
+      .catch(() => setFrrStatus('unknown'));
+  }, []);
+
+  useEffect(() => {
+    loadState();
   }, []);
 
   const frrConfig: FrrConfig = {
@@ -66,6 +97,7 @@ export default function DynamicRoutingPage() {
     const prevFullState = fullState;
     setSaving(true);
     setStatusMsg(null);
+    setErrorMsg(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -73,17 +105,52 @@ export default function DynamicRoutingPage() {
         frr: frrConfig,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved FRR configuration to /etc/axonwall/routing.yaml');
       setApplied(true);
       setTimeout(() => setApplied(false), 3000);
     } catch (err: any) {
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save FRR settings'}`);
+      setErrorMsg(`Failed to save FRR settings: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
   };
+
+  // C-A1: loading/error screens until the real FRR config loads, so
+  // Apply can never persist defaults over the live configuration.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading dynamic routing configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'Dynamic routing configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current FRR configuration is unknown, so editing and applying are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -97,6 +164,13 @@ export default function DynamicRoutingPage() {
           <code className="text-emerald-400 font-mono">/etc/axonwall/routing.yaml</code>.
         </p>
       </div>
+
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
       {statusMsg && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
@@ -163,7 +237,13 @@ export default function DynamicRoutingPage() {
                         BFD Fast Failover
                       </span>
                     )}
-                    <span className="text-emerald-400 font-bold">ESTABLISHED</span>
+                    {frrStatus === 'inactive' || frrStatus === 'failed' || frrStatus === 'not-installed' ? (
+                      <span className="text-red-400 font-bold">DOWN (FRR {frrStatus})</span>
+                    ) : (
+                      <span className="text-amber-400 font-bold" title="BGP session state is not checked on this page">
+                        UNKNOWN
+                      </span>
+                    )}
                   </div>
                 </div>
               ))}

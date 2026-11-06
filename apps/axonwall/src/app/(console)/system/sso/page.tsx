@@ -9,15 +9,12 @@ import {
   AlertCircle,
   Key,
   Globe,
-  Plus,
-  Trash2,
   RefreshCw,
   ExternalLink,
   Users,
-  Save,
 } from 'lucide-react';
-import type { SsoConfig, SsoRoleMapping } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState, testOidcDiscoveryAction } from '@/server/agent';
+import type { SsoConfig } from '@axonwall/lib/schemas';
+import { getCurrentDesiredState, testOidcDiscoveryAction } from '@/server/agent';
 
 const PRESET_PROVIDERS = [
   {
@@ -51,6 +48,11 @@ export default function SsoSettingsPage() {
   // populated, enabled Entra config belonging to nobody's tenant — and
   // Save applied it, enabling SSO against a wrong issuer. The form now
   // starts empty and disabled; only a saved config replaces it.
+  // N3: the form below is READ-ONLY reference. The login flow reads SSO
+  // only from the OIDC_* environment variables and never reads the config
+  // saved to security.yaml, so the page's Save path was removed entirely
+  // rather than keep pretending a save here configures sign-in. What is
+  // shown is the last-saved intended IdP, for reference only.
   const [config, setConfig] = useState<SsoConfig>({
     enabled: false,
     provider: 'entra',
@@ -66,15 +68,21 @@ export default function SsoSettingsPage() {
 
   // null = load not finished yet; false = no saved SSO config exists.
   const [hasSavedConfig, setHasSavedConfig] = useState<boolean | null>(null);
+  // C-B17: a load failure used to set hasSavedConfig=false — the same
+  // value as "no config exists" — leaving the empty form on screen,
+  // and saving then clobbered the real config with near-empty values.
+  // Load failure is now tracked separately; saving is refused until
+  // a load has succeeded.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadOk, setLoadOk] = useState(false);
   const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [newGroup, setNewGroup] = useState('');
-  const [newRole, setNewRole] = useState<'admin' | 'operator' | 'readonly'>('operator');
 
   useEffect(() => {
     getCurrentDesiredState()
       .then((state) => {
+        setLoadOk(true);
+        setLoadError(null);
         if (state.sso) {
           setConfig(state.sso);
           setHasSavedConfig(true);
@@ -82,46 +90,15 @@ export default function SsoSettingsPage() {
           setHasSavedConfig(false);
         }
       })
-      .catch(() => {
-        setHasSavedConfig(false);
+      .catch((err: any) => {
+        // C-B17: do NOT set hasSavedConfig=false here — that is the
+        // "no config exists" state. A failed load leaves it null and
+        // records the error, so the page cannot present an empty form
+        // as "not configured".
+        setLoadOk(false);
+        setLoadError(err?.message || 'Failed to load SSO configuration');
       });
   }, []);
-
-  async function handleSaveConfig() {
-    setIsSaving(true);
-    setTestResult(null);
-    try {
-      const state = await getCurrentDesiredState();
-      await applyDesiredState({ ...state, sso: config });
-      setHasSavedConfig(true);
-      setTestResult({ type: 'success', text: 'Saved SSO configuration to /etc/axonwall/security.yaml' });
-    } catch (err: any) {
-      // C16: a failed save used to be swallowed silently, so the
-      // operator could not tell whether the config landed.
-      setTestResult({
-        type: 'error',
-        text: `Failed to save SSO configuration: ${err?.message || 'unknown error'}. The previous configuration is unchanged.`,
-      });
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  function handleAddMapping() {
-    if (!newGroup.trim()) return;
-    setConfig((prev) => ({
-      ...prev,
-      roleMappings: [...prev.roleMappings, { idpGroup: newGroup.trim(), role: newRole }],
-    }));
-    setNewGroup('');
-  }
-
-  function handleRemoveMapping(index: number) {
-    setConfig((prev) => ({
-      ...prev,
-      roleMappings: prev.roleMappings.filter((_, i) => i !== index),
-    }));
-  }
 
   // C4: the test used to be a 1200 ms timer that always reported a
   // verified discovery document. It now performs a real live fetch of
@@ -169,15 +146,6 @@ export default function SsoSettingsPage() {
           </Link>
           <button
             type="button"
-            onClick={handleSaveConfig}
-            disabled={isSaving}
-            className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium px-3.5 py-2 rounded-lg transition cursor-pointer disabled:opacity-50"
-          >
-            <Save className="w-4 h-4" />
-            <span>{isSaving ? 'Saving...' : 'Save to security.yaml'}</span>
-          </button>
-          <button
-            type="button"
             onClick={handleTestIdP}
             disabled={isTesting}
             className="inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium px-3.5 py-2 rounded-lg border border-slate-700 transition cursor-pointer disabled:opacity-50"
@@ -191,7 +159,7 @@ export default function SsoSettingsPage() {
             className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition cursor-pointer flex items-center gap-2 shadow-sm"
           >
             <ExternalLink className="w-4 h-4" />
-            <span>Simulate SSO Login</span>
+            <span>Test SSO Login (env config)</span>
           </a>
         </div>
       </div>
@@ -213,17 +181,53 @@ export default function SsoSettingsPage() {
         </div>
       )}
 
+      {/* N3: the login flow reads SSO only from environment variables
+          (OIDC_ISSUER_URL / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET, plus
+          OIDC_ADMIN_GROUPS / OIDC_OPERATOR_GROUPS for roles and a hardcoded
+          `groups` claim). It never reads the config saved from this page,
+          so this page no longer has a Save action: the form below is a
+          read-only display of the last-saved intended IdP, for reference
+          only. To change live SSO sign-in, set the OIDC_* variables in
+          the appliance environment. */}
+      <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-start gap-3 text-amber-200 text-sm">
+        <AlertCircle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
+        <span>
+          SSO sign-in is environment-configured only. The login flow reads{' '}
+          <code className="text-amber-300 font-mono">OIDC_ISSUER_URL</code>,{' '}
+          <code className="text-amber-300 font-mono">OIDC_CLIENT_ID</code> and{' '}
+          <code className="text-amber-300 font-mono">OIDC_CLIENT_SECRET</code> (roles from{' '}
+          <code className="text-amber-300 font-mono">OIDC_ADMIN_GROUPS</code> /{' '}
+          <code className="text-amber-300 font-mono">OIDC_OPERATOR_GROUPS</code>); it never reads a
+          config saved from this page, including the group claim and role mappings. This page
+          shows the last-saved intended IdP for reference only — there is no Save action,
+          because saving here cannot change sign-in behaviour.
+        </span>
+      </div>
+
       {hasSavedConfig === false && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-center gap-3 text-amber-200 text-sm">
           <AlertCircle className="w-5 h-5 shrink-0 text-amber-400" />
           <span>
-            SSO is not configured on this appliance. The form starts empty and disabled — enter
-            your own IdP details before saving.
+            No saved SSO reference config exists on this appliance, and SSO
+            sign-in is configured only via the OIDC_* environment variables —
+            there is nothing to display here until those are set.
+          </span>
+        </div>
+      )}
+
+      {loadError && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3 text-red-300 text-sm">
+          <AlertCircle className="w-5 h-5 shrink-0 text-red-400" />
+          <span>
+            Failed to load the saved SSO configuration: {loadError}. The form may not reflect the
+            real configuration, so editing and saving are disabled until it loads — saving an
+            empty form here would overwrite the real IdP settings.
           </span>
         </div>
       )}
 
       {/* Main Settings Grid */}
+      <fieldset disabled={loadError !== null} className="border-0 p-0 m-0 min-w-0">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Identity Provider Parameters */}
         <div className="lg:col-span-2 space-y-6">
@@ -237,7 +241,8 @@ export default function SsoSettingsPage() {
                 <input
                   type="checkbox"
                   checked={config.enabled}
-                  onChange={(e) => setConfig({ ...config, enabled: e.target.checked })}
+                  disabled
+                  readOnly
                   className="sr-only peer"
                 />
                 <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
@@ -254,7 +259,7 @@ export default function SsoSettingsPage() {
                     <button
                       key={p.id}
                       type="button"
-                      onClick={() => setConfig({ ...config, provider: p.id as any })}
+                      disabled
                       className={`p-3 rounded-lg border text-left transition ${
                         config.provider === p.id
                           ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 font-semibold'
@@ -274,7 +279,8 @@ export default function SsoSettingsPage() {
                 <input
                   type="text"
                   value={config.issuerUrl}
-                  onChange={(e) => setConfig({ ...config, issuerUrl: e.target.value })}
+                  disabled
+                  readOnly
                   placeholder="https://login.microsoftonline.com/{tenant-id}/v2.0"
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono text-xs"
                 />
@@ -288,7 +294,8 @@ export default function SsoSettingsPage() {
                   <input
                     type="text"
                     value={config.clientId}
-                    onChange={(e) => setConfig({ ...config, clientId: e.target.value })}
+                    disabled
+                    readOnly
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono text-xs"
                   />
                 </div>
@@ -300,7 +307,8 @@ export default function SsoSettingsPage() {
                   <input
                     type="password"
                     value={config.clientSecret}
-                    onChange={(e) => setConfig({ ...config, clientSecret: e.target.value })}
+                    disabled
+                    readOnly
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono text-xs"
                   />
                 </div>
@@ -314,7 +322,8 @@ export default function SsoSettingsPage() {
                   <input
                     type="text"
                     value={config.groupClaim}
-                    onChange={(e) => setConfig({ ...config, groupClaim: e.target.value })}
+                    disabled
+                    readOnly
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono text-xs"
                   />
                 </div>
@@ -326,9 +335,8 @@ export default function SsoSettingsPage() {
                   <input
                     type="text"
                     value={config.scopes.join(', ')}
-                    onChange={(e) =>
-                      setConfig({ ...config, scopes: e.target.value.split(',').map((s) => s.trim()) })
-                    }
+                    disabled
+                    readOnly
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 font-mono text-xs"
                   />
                 </div>
@@ -347,6 +355,8 @@ export default function SsoSettingsPage() {
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
                 Map IdP directory groups to Axonwall permission roles.
+                Reference only — the login flow does not read these mappings
+                (see banner above).
               </p>
             </div>
 
@@ -372,49 +382,13 @@ export default function SsoSettingsPage() {
                       &rarr; Role: {mapping.role}
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveMapping(idx)}
-                    className="text-slate-500 hover:text-rose-400 transition p-1"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
                 </div>
               ))}
-            </div>
-
-            {/* Add New Mapping */}
-            <div className="pt-3 border-t border-slate-800 space-y-2">
-              <input
-                type="text"
-                value={newGroup}
-                onChange={(e) => setNewGroup(e.target.value)}
-                placeholder="IdP Security Group Name..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-              />
-              <div className="flex gap-2">
-                <select
-                  value={newRole}
-                  onChange={(e) => setNewRole(e.target.value as any)}
-                  className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 flex-1"
-                >
-                  <option value="admin">admin (Full Control)</option>
-                  <option value="operator">operator (Network Ops)</option>
-                  <option value="readonly">readonly (Auditor)</option>
-                </select>
-                <button
-                  type="button"
-                  onClick={handleAddMapping}
-                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700 transition flex items-center gap-1"
-                >
-                  <Plus className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Add</span>
-                </button>
-              </div>
             </div>
           </div>
         </div>
       </div>
+      </fieldset>
     </div>
   );
 }

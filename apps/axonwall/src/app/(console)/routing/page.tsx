@@ -2,10 +2,12 @@
 
 import { Route, CheckCircle2, Plus, Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, getGatewaysTelemetry, type LiveGatewayInfo } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, Gateway, StaticRoute } from '@axonwall/lib/schemas';
 
 export default function RoutingPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [gateways, setGateways] = useState<Gateway[]>([]);
   const [routes, setRoutes] = useState<StaticRoute[]>([]);
@@ -13,6 +15,12 @@ export default function RoutingPage() {
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // C-A7: the gateway table used to hardcode "Online" for every row.
+  // Telemetry comes from the kernel routing table via
+  // getGatewaysTelemetry; a gateway with no telemetry entry is
+  // "Unknown", not online — the check only covers the active default
+  // route, so a non-default gateway cannot be claimed either way.
+  const [liveGateways, setLiveGateways] = useState<LiveGatewayInfo[]>([]);
 
   // Static route form
   const [newNetwork, setNewNetwork] = useState('');
@@ -25,10 +33,14 @@ export default function RoutingPage() {
     setErrorMsg(null);
     if (isManual) setStatusMsg(null);
     try {
-      const state = await getCurrentDesiredState();
+      const [state, live] = await Promise.all([
+        getCurrentDesiredState(),
+        getGatewaysTelemetry().catch(() => [] as LiveGatewayInfo[]),
+      ]);
       setFullState(state);
       setGateways(state.gateways || []);
       setRoutes(state.routes || []);
+      setLiveGateways(live);
       if (isManual) {
         setStatusMsg(`Successfully loaded ${state.routes?.length || 0} static route(s) from /etc/axonwall/routing.yaml`);
       }
@@ -44,6 +56,10 @@ export default function RoutingPage() {
   }, [loadRoutingData]);
 
   const persistRouting = async (nextGateways: Gateway[], nextRoutes: StaticRoute[]) => {
+    // C-A1: never persist while the load is still in flight or has
+    // failed — the local lists are empty defaults then, and an add or
+    // delete would wipe every gateway/route from disk.
+    if (loading || errorMsg) return;
     const prevFullState = fullState;
     const prevGateways = gateways;
     const prevRoutes = routes;
@@ -59,13 +75,15 @@ export default function RoutingPage() {
         routes: nextRoutes,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved routing configuration to /etc/axonwall/routing.yaml');
     } catch (err: any) {
       setGateways(prevGateways);
       setRoutes(prevRoutes);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save routing state'}`);
+      // A11: a failed save used to be rendered in the emerald
+      // success banner ("Error: ..."). Route it to the red banner.
+      setErrorMsg(`Failed to save routing configuration: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
@@ -73,6 +91,8 @@ export default function RoutingPage() {
 
   const handleAddRoute = async (e: React.FormEvent) => {
     e.preventDefault();
+    // C-A1: see persistRouting — no adds before a successful load.
+    if (loading || errorMsg) return;
     if (!newNetwork.trim() || !newGwIp.trim()) return;
     const nextRoutes: StaticRoute[] = [
       ...routes,
@@ -115,7 +135,7 @@ export default function RoutingPage() {
       {errorMsg && (
         <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-          <span>{errorMsg}</span>
+          <span>{errorMsg} Adding or deleting routes is disabled until the configuration loads successfully — use “Reload from Disk” to retry.</span>
         </div>
       )}
 
@@ -156,10 +176,24 @@ export default function RoutingPage() {
                 <td className="px-4 py-3 text-slate-300">{gw.gatewayIp}</td>
                 <td className="px-4 py-3 text-cyan-400">{gw.monitorIp || 'Auto'}</td>
                 <td className="px-4 py-3">
-                  <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Online
-                  </span>
+                  {(() => {
+                    const live = liveGateways.find((g) => g.ip === gw.gatewayIp);
+                    if (!live) {
+                      return <span className="inline-flex items-center gap-1 text-amber-400 font-medium">Unknown</span>;
+                    }
+                    if (live.status === 'online') {
+                      return (
+                        <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Online
+                        </span>
+                      );
+                    }
+                    if (live.status === 'standby') {
+                      return <span className="inline-flex items-center gap-1 text-amber-400 font-medium">Standby</span>;
+                    }
+                    return <span className="inline-flex items-center gap-1 text-red-400 font-medium">Offline</span>;
+                  })()}
                 </td>
               </tr>
             ))}
@@ -207,13 +241,14 @@ export default function RoutingPage() {
                   <td className="px-4 py-2.5 text-right">
                     <button
                       type="button"
+                      disabled={loading || !!errorMsg}
                       onClick={() =>
                         persistRouting(
                           gateways,
                           routes.filter((_, i) => i !== idx)
                         )
                       }
-                      className="text-slate-500 hover:text-red-400 transition"
+                      className="text-slate-500 hover:text-red-400 transition disabled:opacity-30"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -271,8 +306,8 @@ export default function RoutingPage() {
           />
           <button
             type="submit"
-            disabled={saving}
-            className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
+            disabled={saving || loading || !!errorMsg}
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg px-3 py-1.5 text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add Static Route</span>

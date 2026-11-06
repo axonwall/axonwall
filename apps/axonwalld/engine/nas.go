@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -26,17 +27,23 @@ type InstallZfsBootstrapSpec struct {
 }
 
 type DiskInventoryItem struct {
-	Name           string `json:"name"`
-	Path           string `json:"path"`
-	SizeBytes      uint64 `json:"sizeBytes"`
-	Model          string `json:"model"`
-	Serial         string `json:"serial"`
-	Type           string `json:"type"` // "disk", "part", "raid1"
-	FsType         string `json:"fsType"`
-	Mountpoint     string `json:"mountpoint"`
-	PartLabel      string `json:"partLabel"`
-	Rotational     bool   `json:"rotational"`
-	SmartPassed    bool   `json:"smartPassed"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	SizeBytes   uint64 `json:"sizeBytes"`
+	Model       string `json:"model"`
+	Serial      string `json:"serial"`
+	Type        string `json:"type"` // "disk", "part", "raid1"
+	FsType      string `json:"fsType"`
+	Mountpoint  string `json:"mountpoint"`
+	PartLabel   string `json:"partLabel"`
+	Rotational  bool   `json:"rotational"`
+	SmartPassed bool   `json:"smartPassed"`
+	// SmartUnknown reports that no SMART data could be read for this
+	// disk (no smartctl, unsupported device). L18: the field used to
+	// be absent and every disk was reported SmartPassed=true at a
+	// hardcoded temperature, so a failing disk displayed as healthy.
+	// SmartPassed is true only when smartctl reports PASSED.
+	SmartUnknown   bool   `json:"smartUnknown"`
 	TemperatureC   int    `json:"temperatureC"`
 	EligibleForZfs bool   `json:"eligibleForZfs"`
 	Role           string `json:"role"` // "available", "boot_zfs_partition", "system_raid_member", "in_use"
@@ -310,6 +317,60 @@ func (m *NasManager) BootstrapInstallZfsPool() {
 	}
 }
 
+// querySmartHealth runs smartctl for one device and reports the
+// overall-health result and temperature. L18: DiscoverDisks used to
+// hardcode SmartPassed=true and a fixed temperature for every disk,
+// so a failing disk displayed as healthy. When smartctl is missing
+// or the device reports nothing, the disk is unknown — never
+// "passed" — and the temperature is 0.
+func querySmartHealth(devPath string) (passed, known bool, tempC int) {
+	tool, err := exec.LookPath("smartctl")
+	if err != nil {
+		return false, false, 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, tool, "-H", "-A", devPath).CombinedOutput()
+	passed, known = parseSmartctlHealth(string(out))
+	tempC, _ = parseSmartctlTemperature(string(out))
+	return passed, known, tempC
+}
+
+// parseSmartctlHealth reads the overall-health self-assessment line
+// ("SMART overall-health self-assessment test result: PASSED").
+// Anything else, including no such line, is unknown.
+func parseSmartctlHealth(out string) (passed, known bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "SMART overall-health self-assessment test result:") {
+			if strings.Contains(line, "PASSED") {
+				return true, true
+			}
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// parseSmartctlTemperature reads the drive temperature: the SATA
+// attribute 194 ("Temperature_Celsius ... 36 (Min/Max ...)") or the
+// NVMe line ("Temperature: 36 Celsius").
+func parseSmartctlTemperature(out string) (int, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 10 && fields[1] == "Temperature_Celsius" {
+			if v, err := strconv.Atoi(fields[9]); err == nil {
+				return v, true
+			}
+		}
+		if len(fields) >= 2 && fields[0] == "Temperature:" {
+			if v, err := strconv.Atoi(fields[1]); err == nil {
+				return v, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 	var items []DiskInventoryItem
 
@@ -359,6 +420,16 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 					rota = v != 0
 				}
 
+				devPath := dev.Path
+				if devPath == "" {
+					devPath = "/dev/" + dev.Name
+				}
+				// L18: query real SMART data instead of hardcoding
+				// SmartPassed=true and a fixed temperature. The
+				// ZFS-partition children below inherit the parent
+				// disk's readings.
+				smartPassed, smartKnown, smartTemp := querySmartHealth(devPath)
+
 				hasSystemParts := false
 				for _, ch := range dev.Children {
 					if strings.HasPrefix(ch.Partlabel, "axon_zfs") {
@@ -384,8 +455,9 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 							Mountpoint:     ch.Mountpoint,
 							PartLabel:      ch.Partlabel,
 							Rotational:     rota,
-							SmartPassed:    true,
-							TemperatureC:   34,
+							SmartPassed:    smartPassed,
+							SmartUnknown:   !smartKnown,
+							TemperatureC:   smartTemp,
 							EligibleForZfs: true,
 							Role:           "boot_zfs_partition",
 						})
@@ -394,10 +466,6 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 					}
 				}
 
-				devPath := dev.Path
-				if devPath == "" {
-					devPath = "/dev/" + dev.Name
-				}
 				eligible := !hasSystemParts && dev.Mountpoint == "" && len(dev.Children) == 0
 				role := "available"
 				if hasSystemParts {
@@ -418,8 +486,9 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 					Mountpoint:     dev.Mountpoint,
 					PartLabel:      dev.Partlabel,
 					Rotational:     rota,
-					SmartPassed:    true,
-					TemperatureC:   36,
+					SmartPassed:    smartPassed,
+					SmartUnknown:   !smartKnown,
+					TemperatureC:   smartTemp,
 					EligibleForZfs: eligible,
 					Role:           role,
 				})
@@ -433,80 +502,52 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 func (m *NasManager) ListPools() []ZfsPoolStatus {
 	m.mu.Lock()
 	cfgPools := append([]ZfsPoolSpec(nil), m.cfg.Pools...)
-	installSpec := m.installSpec
 	m.mu.Unlock()
 
 	var result []ZfsPoolStatus
 	out, err := exec.Command("zpool", "list", "-H", "-p", "-o", "name,size,alloc,free,frag,cap,health").Output()
-	if err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if line == "" {
-				continue
-			}
-			fields := strings.Split(line, "\t")
-			if len(fields) < 7 {
-				continue
-			}
-			sizeB, _ := strconv.ParseUint(fields[1], 10, 64)
-			allocB, _ := strconv.ParseUint(fields[2], 10, 64)
-			freeB, _ := strconv.ParseUint(fields[3], 10, 64)
-			frag, _ := strconv.Atoi(strings.TrimSuffix(fields[4], "%"))
-			capPct, _ := strconv.Atoi(strings.TrimSuffix(fields[5], "%"))
-
-			topo := "mirror"
-			var disks []string
-			for _, cp := range cfgPools {
-				if cp.Name == fields[0] {
-					topo = cp.Topology
-					disks = cp.DataDisks
-					break
-				}
-			}
-			result = append(result, ZfsPoolStatus{
-				Name:          fields[0],
-				Topology:      topo,
-				SizeBytes:     sizeB,
-				AllocBytes:    allocB,
-				FreeBytes:     freeB,
-				Fragmentation: frag,
-				CapacityPct:   capPct,
-				Health:        fields[6],
-				DataDisks:     disks,
-			})
-		}
+	if err != nil {
+		// A-M18: never synthesise pool health or sizes from config
+		// when zpool has no data. A pool that was never created, failed
+		// to import, or lost its disks used to be displayed as a
+		// healthy 100 GiB ONLINE pool. No live data means no pools.
+		slog.Warn("NAS ListPools: zpool list failed; reporting no pools instead of synthesising configured pools", "error", err)
+		return result
 	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 7 {
+			continue
+		}
+		sizeB, _ := strconv.ParseUint(fields[1], 10, 64)
+		allocB, _ := strconv.ParseUint(fields[2], 10, 64)
+		freeB, _ := strconv.ParseUint(fields[3], 10, 64)
+		frag, _ := strconv.Atoi(strings.TrimSuffix(fields[4], "%"))
+		capPct, _ := strconv.Atoi(strings.TrimSuffix(fields[5], "%"))
 
-	if len(result) == 0 {
+		topo := "mirror"
+		var disks []string
 		for _, cp := range cfgPools {
-			result = append(result, ZfsPoolStatus{
-				Name:          cp.Name,
-				Topology:      cp.Topology,
-				SizeBytes:     100 * 1024 * 1024 * 1024,
-				AllocBytes:    4 * 1024 * 1024 * 1024,
-				FreeBytes:     96 * 1024 * 1024 * 1024,
-				Fragmentation: 1,
-				CapacityPct:   4,
-				Health:        "ONLINE",
-				DataDisks:     cp.DataDisks,
-			})
-		}
-		if len(result) == 0 && installSpec != nil && installSpec.PoolName != "" {
-			sizeB := uint64(installSpec.SizeGb) * 1024 * 1024 * 1024
-			if sizeB == 0 {
-				sizeB = 64 * 1024 * 1024 * 1024
+			if cp.Name == fields[0] {
+				topo = cp.Topology
+				disks = cp.DataDisks
+				break
 			}
-			result = append(result, ZfsPoolStatus{
-				Name:          installSpec.PoolName,
-				Topology:      installSpec.Topology,
-				SizeBytes:     sizeB,
-				AllocBytes:    1024 * 1024 * 1024,
-				FreeBytes:     sizeB - 1024*1024*1024,
-				Fragmentation: 0,
-				CapacityPct:   2,
-				Health:        "ONLINE",
-				DataDisks:     installSpec.Vdevs,
-			})
 		}
+		result = append(result, ZfsPoolStatus{
+			Name:          fields[0],
+			Topology:      topo,
+			SizeBytes:     sizeB,
+			AllocBytes:    allocB,
+			FreeBytes:     freeB,
+			Fragmentation: frag,
+			CapacityPct:   capPct,
+			Health:        fields[6],
+			DataDisks:     disks,
+		})
 	}
 
 	return result
@@ -569,10 +610,14 @@ func (m *NasManager) CreateSnapshot(dataset string, label string) (string, error
 		label = fmt.Sprintf("auto-%s", time.Now().UTC().Format("20060102-150405"))
 	}
 	snapName := fmt.Sprintf("%s@%s", dataset, label)
-	if _, err := exec.LookPath("zfs"); err == nil {
-		if out, err := exec.Command("zfs", "snapshot", "-r", snapName).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("zfs snapshot failed: %s (%w)", string(out), err)
-		}
+	// L12: without zfs installed this used to return the snapshot
+	// name and nil — the caller was told a snapshot was created
+	// when nothing happened and no snapshot exists.
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return "", fmt.Errorf("cannot create snapshot: zfs is not installed on this system")
+	}
+	if out, err := exec.Command("zfs", "snapshot", "-r", snapName).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("zfs snapshot failed: %s (%w)", string(out), err)
 	}
 	return snapName, nil
 }
@@ -581,10 +626,13 @@ func (m *NasManager) ScrubPool(poolName string) error {
 	if !validZfsPath(poolName, false) {
 		return fmt.Errorf("invalid pool name")
 	}
-	if _, err := exec.LookPath("zpool"); err == nil {
-		if out, err := exec.Command("zpool", "scrub", poolName).CombinedOutput(); err != nil {
-			return fmt.Errorf("zpool scrub failed: %s (%w)", string(out), err)
-		}
+	// L12: without zpool installed this used to return nil — the
+	// caller was told a scrub ran when nothing happened.
+	if _, err := exec.LookPath("zpool"); err != nil {
+		return fmt.Errorf("cannot scrub pool: zpool is not installed on this system")
+	}
+	if out, err := exec.Command("zpool", "scrub", poolName).CombinedOutput(); err != nil {
+		return fmt.Errorf("zpool scrub failed: %s (%w)", string(out), err)
 	}
 	return nil
 }
@@ -608,62 +656,117 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		}
 	}
 
-	m.mu.Lock()
-	m.cfg = bundle
-	m.mu.Unlock()
+	// A-M16: validate pool/dataset specs before storing the bundle, so
+	// an invalid bundle is neither stored as the live config nor
+	// reported as applied.
+	for _, pool := range bundle.Pools {
+		if err := ValidateZfsPoolSpec(pool); err != nil {
+			return fmt.Errorf("invalid ZFS pool spec %q: %w", pool.Name, err)
+		}
+	}
+	for _, ds := range bundle.Datasets {
+		if err := ValidateZfsDatasetSpec(ds); err != nil {
+			return fmt.Errorf("invalid ZFS dataset spec %q: %w", ds.Name, err)
+		}
+	}
 
+	// A-M16: only store the bundle as the live config once it has
+	// actually applied. Storing it first meant a bundle that failed
+	// provisioning still counted as the current NAS config.
 	if !bundle.Enabled {
+		m.mu.Lock()
+		m.cfg = bundle
+		m.mu.Unlock()
 		slog.Info("NAS plugin is disabled; stopping SMB and NFS share daemons")
 		_ = exec.Command("systemctl", "stop", "smbd", "nfs-server").Run()
 		return nil
 	}
 
-	// 1. Reconcile ZFS pools and datasets if zpool/zfs are available on host
-	if _, err := exec.LookPath("zpool"); err == nil {
+	// 1. Reconcile ZFS pools and datasets.
+	// A-M16: pool/dataset/config failures used to be swallowed (`_ =`)
+	// while the bundle was reported as applied. Every failure below now
+	// fails the apply, so ApplyBundle surfaces it instead of the UI
+	// showing shares that do not exist.
+	if len(bundle.Pools) > 0 {
+		if _, err := exec.LookPath("zpool"); err != nil {
+			return fmt.Errorf("cannot provision %d ZFS pool(s): zpool is not installed", len(bundle.Pools))
+		}
 		for _, pool := range bundle.Pools {
-			if err := ValidateZfsPoolSpec(pool); err != nil {
-				slog.Warn("Skipping ZFS pool with invalid spec", "pool", pool.Name, "error", err)
-				continue
-			}
 			if err := exec.Command("zpool", "list", "-H", pool.Name).Run(); err != nil {
 				args := BuildZfsPoolCreateArgs(pool)
 				slog.Info("Provisioning ZFS pool", "name", pool.Name, "topology", pool.Topology)
-				_ = exec.Command("zpool", args...).Run()
+				if out, err := exec.Command("zpool", args...).CombinedOutput(); err != nil {
+					return fmt.Errorf("zpool create %s failed: %s (%w)", pool.Name, strings.TrimSpace(string(out)), err)
+				}
 			}
 		}
 	}
 
-	if _, err := exec.LookPath("zfs"); err == nil {
+	if len(bundle.Datasets) > 0 {
+		if _, err := exec.LookPath("zfs"); err != nil {
+			return fmt.Errorf("cannot provision %d ZFS dataset(s): zfs is not installed", len(bundle.Datasets))
+		}
 		for _, ds := range bundle.Datasets {
-			if err := ValidateZfsDatasetSpec(ds); err != nil {
-				slog.Warn("Skipping ZFS dataset with invalid spec", "dataset", ds.Name, "error", err)
-				continue
-			}
 			for _, cmdArgs := range BuildZfsDatasetCreateArgs(ds) {
-				_ = exec.Command("zfs", cmdArgs...).Run()
+				// `zfs create` is not idempotent: re-applying a bundle
+				// whose dataset already exists fails with "dataset
+				// already exists". Skip the create when the dataset
+				// is already there (the `set` commands below it stay
+				// idempotent and still run).
+				if len(cmdArgs) > 0 && cmdArgs[0] == "create" {
+					if err := exec.Command("zfs", "list", "-H", cmdArgs[len(cmdArgs)-1]).Run(); err == nil {
+						continue
+					}
+				}
+				if out, err := exec.Command("zfs", cmdArgs...).CombinedOutput(); err != nil {
+					return fmt.Errorf("zfs %s failed: %s (%w)", strings.Join(cmdArgs, " "), strings.TrimSpace(string(out)), err)
+				}
 			}
 		}
 	}
 
 	// 2. Write Samba configuration & reload smbd
 	if bundle.SmbConf != "" {
-		_ = os.MkdirAll("/etc/samba", 0755)
-		if f, err := os.OpenFile("/etc/samba/smb.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.SmbConf)
-			_ = f.Close()
+		if err := os.MkdirAll("/etc/samba", 0755); err != nil {
+			return fmt.Errorf("failed to create /etc/samba: %w", err)
 		}
-		_ = exec.Command("systemctl", "reload-or-restart", "smbd").Run()
+		f, err := os.OpenFile("/etc/samba/smb.conf", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open /etc/samba/smb.conf: %w", err)
+		}
+		if _, err := f.WriteString(bundle.SmbConf); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("failed to write /etc/samba/smb.conf: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to close /etc/samba/smb.conf: %w", err)
+		}
+		if out, err := exec.Command("systemctl", "reload-or-restart", "smbd").CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to reload smbd: %s (%w)", strings.TrimSpace(string(out)), err)
+		}
 	}
 
 	// 3. Write NFS exports & reload exportfs
 	if bundle.NfsExports != "" {
-		if f, err := os.OpenFile("/etc/exports", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.NfsExports)
-			_ = f.Close()
+		f, err := os.OpenFile("/etc/exports", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open /etc/exports: %w", err)
 		}
-		_ = exec.Command("exportfs", "-ra").Run()
+		if _, err := f.WriteString(bundle.NfsExports); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("failed to write /etc/exports: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to close /etc/exports: %w", err)
+		}
+		if out, err := exec.Command("exportfs", "-ra").CombinedOutput(); err != nil {
+			return fmt.Errorf("exportfs -ra failed: %s (%w)", strings.TrimSpace(string(out)), err)
+		}
 	}
 
+	m.mu.Lock()
+	m.cfg = bundle
+	m.mu.Unlock()
 	return nil
 }
 

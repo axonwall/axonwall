@@ -28,7 +28,8 @@ import {
   parseDraftedRules,
 } from '@axonwall/lib/ai';
 import type { AiProviderType, AiConfig, FirewallRule } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { testAiProviderProbe, generateAiCompletion } from '@/server/ai';
 
 interface ChatMessage {
@@ -41,6 +42,7 @@ interface ChatMessage {
 }
 
 export default function AiCopilotPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<'copilot' | 'threat-explainer' | 'providers'>('copilot');
   const [activeProvider, setActiveProvider] = useState<AiProviderType>('antigravity');
   const [inputPrompt, setInputPrompt] = useState('');
@@ -132,7 +134,7 @@ export default function AiCopilotPage() {
     setIsSavingConfig(true);
     try {
       const state = await getCurrentDesiredState();
-      await applyDesiredState({
+      await applyState({
         ...state,
         ai: { ...config, activeProvider },
       });
@@ -245,7 +247,7 @@ export default function AiCopilotPage() {
         ...rule,
         id: rule.id || crypto.randomUUID(),
       };
-      await applyDesiredState({
+      await applyState({
         ...state,
         rules: [...(state.rules || []), stagedRule],
       });
@@ -272,7 +274,11 @@ export default function AiCopilotPage() {
       setTestStatus((prev) => ({
         ...prev,
         [providerKey]: {
-          text: res.status,
+          // N11: the probe status now names the configured model and
+          // how many models the provider reported. On failure show the
+          // full error (hoverable via title) so a missing model is
+          // distinguishable from a connectivity/auth failure.
+          text: res.ok ? res.status : res.error || res.status,
           ok: res.ok,
         },
       }));

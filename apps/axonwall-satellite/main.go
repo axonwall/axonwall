@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
@@ -75,6 +76,10 @@ type SyncInterfacesPayload struct {
 
 type SyncRoutesPayload struct {
 	Routes []engine.EdgeRouteSpec `json:"routes"`
+	// B2-M7: routes the controller pushed on an earlier sync that
+	// are no longer in the enabled set — delete them from the
+	// kernel instead of letting them linger forever.
+	RoutesToDelete []engine.EdgeRouteSpec `json:"routesToDelete,omitempty"`
 }
 
 type BlockTargetPayload struct {
@@ -89,6 +94,62 @@ type TelemetryReportPayload struct {
 	// hubs that do not consume COMMAND_ACK yet (A-M9 fallback). It is
 	// empty when the last command succeeded.
 	LastApplyError string `json:"lastApplyError,omitempty"`
+	// HeadscaleEnrolled is the node's live tailscale login state
+	// (B-H4 residual): the hub must not trust its latched
+	// headscaleEnrolled flag alone, because a wiped/reimaged
+	// satellite reconnects with the same ID and is never
+	// re-provisioned. Nil when the state cannot be determined, so
+	// the hub ignores the field instead of acting on a guess.
+	HeadscaleEnrolled *bool `json:"headscaleEnrolled,omitempty"`
+}
+
+// parseTailscaleBackendState maps `tailscale status --json`
+// BackendState to a Headscale enrollment verdict: Running means
+// logged in; NeedsLogin/NoState/Stopped/NeedsMachineAuth mean
+// not enrolled; anything else (Starting, unparsable output, an
+// unknown state) is indeterminate and returns nil.
+func parseTailscaleBackendState(data []byte) *bool {
+	var status struct {
+		BackendState string `json:"BackendState"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return nil
+	}
+	switch status.BackendState {
+	case "Running":
+		enrolled := true
+		return &enrolled
+	case "NeedsLogin", "NoState", "Stopped", "NeedsMachineAuth":
+		enrolled := false
+		return &enrolled
+	default:
+		return nil
+	}
+}
+
+// headscaleEnrolledStatus asks tailscaled whether this node is
+// logged in, via `tailscale status --json`. The result is cached
+// for a minute: the check runs from the 15 s telemetry loop, and
+// forking the tailscale CLI on every tick would be wasteful.
+var (
+	headscaleStatusCache     *bool
+	headscaleStatusCheckedAt time.Time
+)
+
+func headscaleEnrolledStatus() *bool {
+	if !headscaleStatusCheckedAt.IsZero() && time.Since(headscaleStatusCheckedAt) < time.Minute {
+		return headscaleStatusCache
+	}
+	headscaleStatusCheckedAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
+	if err != nil {
+		headscaleStatusCache = nil
+		return nil
+	}
+	headscaleStatusCache = parseTailscaleBackendState(out)
+	return headscaleStatusCache
 }
 
 // exitOrHalt exits normally, except as PID 1 where exiting would panic the kernel.
@@ -472,9 +533,20 @@ func main() {
 							slog.Error("Failed to apply nftables script", "error", err)
 							sendAck(env.Type, env.CommandID, err)
 						} else {
-							_ = engine.SetForwarding("", true)
-							slog.Info("nftables ruleset applied successfully")
-							sendAck(env.Type, env.CommandID, nil)
+							// A-L38: the old code discarded the
+							// SetForwarding error and acked success
+							// anyway, so the hub believed the
+							// router was live with the new ruleset
+							// while the box was not forwarding at
+							// all. A forwarding failure fails the
+							// command.
+							if err := engine.SetForwarding("", true); err != nil {
+								slog.Error("Failed to enable IP forwarding after nftables apply", "error", err)
+								sendAck(env.Type, env.CommandID, fmt.Errorf("nftables ruleset applied but IP forwarding could not be enabled: %w", err))
+							} else {
+								slog.Info("nftables ruleset applied successfully")
+								sendAck(env.Type, env.CommandID, nil)
+							}
 						}
 					}
 
@@ -535,11 +607,18 @@ func main() {
 						slog.Error("Malformed routes sync payload", "error", err)
 						sendAck(env.Type, env.CommandID, err)
 					} else {
-						slog.Info("Applying edge kernel routes...", "count", len(rtPayload.Routes))
+						slog.Info("Applying edge kernel routes...", "count", len(rtPayload.Routes), "deleteCount", len(rtPayload.RoutesToDelete))
 						var errs []error
 						for _, rt := range rtPayload.Routes {
 							if err := netEngine.AddRoute(rt); err != nil {
 								slog.Error("Failed to add edge route", "destination", rt.Destination, "error", err)
+								errs = append(errs, err)
+							}
+						}
+						// B2-M7: routes removed from DesiredState.
+						for _, rt := range rtPayload.RoutesToDelete {
+							if err := netEngine.RemoveRoute(rt); err != nil {
+								slog.Error("Failed to delete edge route", "destination", rt.Destination, "error", err)
 								errs = append(errs, err)
 							}
 						}
@@ -570,8 +649,19 @@ func main() {
 							continue
 						}
 						slog.Info("Enrolling in Headscale mesh via tailscaled...", "serverUrl", hsURL)
-						cmd := exec.Command("tailscale", "up", "--login-server="+hsURL, "--authkey="+hsKey, "--reset")
+						// A-M42 (round 2): this exec used to run
+						// unbounded inline in the websocket read
+						// loop — the only goroutine that reads hub
+						// messages or processes pongs — so a hung
+						// tailscale invocation wedged all command
+						// processing and the reconnect loop. Bound
+						// it to 30s; on timeout the command is
+						// killed and the failure is acked to the hub
+						// instead of stalling the session.
+						hsCtx, hsCancel := context.WithTimeout(context.Background(), 30*time.Second)
+						cmd := exec.CommandContext(hsCtx, "tailscale", "up", "--login-server="+hsURL, "--authkey="+hsKey, "--reset")
 						out, err := cmd.CombinedOutput()
+						hsCancel()
 						if err != nil {
 							slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
 							sendAck(env.Type, env.CommandID, err)
@@ -652,9 +742,10 @@ func main() {
 				lastErr := lastApplyError
 				lastApplyErrMu.Unlock()
 				report := TelemetryReportPayload{
-					SatelliteID:    *satID,
-					Metrics:        metrics,
-					LastApplyError: lastErr,
+					SatelliteID:       *satID,
+					Metrics:           metrics,
+					LastApplyError:    lastErr,
+					HeadscaleEnrolled: headscaleEnrolledStatus(),
 				}
 
 				payloadBytes, err := json.Marshal(report)

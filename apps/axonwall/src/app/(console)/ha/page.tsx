@@ -18,9 +18,11 @@ import {
   Check,
   BookOpen,
 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState, getHASyncTrustStatus, type HASyncTrustStatus } from '@/server/agent';
+import { getCurrentDesiredState, getHASyncTrustStatus, getSystemServicesStatus, type HASyncTrustStatus, type SystemServiceInfo } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function HighAvailabilityPage() {
+  const { applyState } = useDesiredStateApply();
   const [enabled, setEnabled] = useState(false);
   const [role, setRole] = useState<'primary' | 'secondary'>('primary');
   const [vrid, setVrid] = useState(51);
@@ -30,46 +32,89 @@ export default function HighAvailabilityPage() {
   // them as real config. Fields start empty; nothing is persisted
   // until the operator enters it explicitly (see handleSaveHa).
   const [syncInterface, setSyncInterface] = useState('');
+  // C-A5: the first VRRP instance used to be created on the sync
+  // interface — the dedicated point-to-point conntrackd link — so a
+  // LAN gateway VIP ended up unreachable from the LAN. The VRRP
+  // interface is now asked for separately and must be entered
+  // explicitly when no instance exists yet; it is never defaulted
+  // from the sync interface.
+  const [vrrpInterface, setVrrpInterface] = useState('');
+  const [hasExistingVrrp, setHasExistingVrrp] = useState(false);
   const [peerIp, setPeerIp] = useState('');
   const [syncPassword, setSyncPassword] = useState('');
   const [virtualIp, setVirtualIp] = useState('');
+  // C-A6: the VIP as loaded, so an unchanged legacy value that is not
+  // CIDR-shaped does not block unrelated saves; only an edited VIP is
+  // validated and applied.
+  const [initialVirtualIp, setInitialVirtualIp] = useState('');
   const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(false);
   const [sqliteSyncMode, setSqliteSyncMode] = useState<'direct_stream' | 'litestream'>('direct_stream');
   const [syncInterval, setSyncInterval] = useState(5);
   const [syncTransport, setSyncTransport] = useState<'token-http' | 'mtls'>('mtls');
   const [requireSigned, setRequireSigned] = useState(false);
   const [trustStatus, setTrustStatus] = useState<HASyncTrustStatus | null>(null);
+  // C-A4: the sidebar status card used to assert Keepalived "Running",
+  // Conntrackd "Synced (Active)" and SQLite "Replicating (0 lag)" purely
+  // from the form toggles — a dead keepalived still rendered healthy.
+  // The two service rows are now driven by the live systemd status;
+  // the sync rows have no live check behind them, so they report
+  // "Unknown" instead of inventing a state. null = not loaded yet.
+  const [services, setServices] = useState<SystemServiceInfo[] | null>(null);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
   const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  // C17 residual: the form used to be live from first paint while the
+  // mount load ran (or silently failed), so a save before load completed
+  // disabled HA, reset VRID to 51, and wiped instance-0's VRRP auth
+  // password. Nothing saves until the load succeeds.
+  // C-A1: nothing editable renders until the real HA config loads. A
+  // save before (or after a failed) load used to persist the defaults
+  // above — HA disabled, VRID 51, empty sync password — over the live
+  // configuration (the C17 validation only runs when enabled is true).
+  const [isLoadingHa, setIsLoadingHa] = useState(true);
+  const [haLoaded, setHaLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadHaState = async () => {
+    setIsLoadingHa(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      if (state.ha) {
+        setEnabled(state.ha.enabled);
+        const haRole = state.ha.role || state.ha.nodeRole || 'master';
+        setRole(haRole === 'backup' ? 'secondary' : 'primary');
+        const firstVrrp = state.ha.vrrpInstances?.[0];
+        setHasExistingVrrp(Boolean(firstVrrp));
+        if (firstVrrp) {
+          setVrid(firstVrrp.vrid);
+          if (firstVrrp.interface) setVrrpInterface(firstVrrp.interface);
+          if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
+          if (firstVrrp.virtualIps?.[0]) setVirtualIp(firstVrrp.virtualIps[0]);
+          setInitialVirtualIp(firstVrrp.virtualIps?.[0] || '');
+        }
+        if (state.ha.syncInterface) setSyncInterface(state.ha.syncInterface);
+        if (state.ha.peerIp || state.ha.peerAddress) {
+          setPeerIp(state.ha.peerIp || state.ha.peerAddress);
+        }
+        if (state.ha.sqliteSync) {
+          setSqliteSyncEnabled(state.ha.sqliteSync.enabled);
+          setSqliteSyncMode(state.ha.sqliteSync.mode);
+          setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
+          setSyncTransport(state.ha.sqliteSync.transport || 'mtls');
+          setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
+        }
+      }
+      setHaLoaded(true);
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load High Availability configuration.');
+    } finally {
+      setIsLoadingHa(false);
+    }
+  };
 
   useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        if (state.ha) {
-          setEnabled(state.ha.enabled);
-          const haRole = state.ha.role || state.ha.nodeRole || 'master';
-          setRole(haRole === 'backup' ? 'secondary' : 'primary');
-          const firstVrrp = state.ha.vrrpInstances?.[0];
-          if (firstVrrp) {
-            setVrid(firstVrrp.vrid);
-            if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
-            if (firstVrrp.virtualIps?.[0]) setVirtualIp(firstVrrp.virtualIps[0]);
-          }
-          if (state.ha.syncInterface) setSyncInterface(state.ha.syncInterface);
-          if (state.ha.peerIp || state.ha.peerAddress) {
-            setPeerIp(state.ha.peerIp || state.ha.peerAddress);
-          }
-          if (state.ha.sqliteSync) {
-            setSqliteSyncEnabled(state.ha.sqliteSync.enabled);
-            setSqliteSyncMode(state.ha.sqliteSync.mode);
-            setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
-            setSyncTransport(state.ha.sqliteSync.transport || 'mtls');
-            setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
-          }
-        }
-      })
-      .catch(() => {});
+    loadHaState();
   }, []);
 
   useEffect(() => {
@@ -77,6 +122,40 @@ export default function HighAvailabilityPage() {
       .then((status) => setTrustStatus(status))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    getSystemServicesStatus()
+      .then((list) => setServices(list))
+      .catch(() => setServices([]));
+  }, []);
+
+  const serviceStatus = (unit: string): SystemServiceInfo['status'] | null =>
+    services?.find((s) => s.unit === unit)?.status ?? null;
+
+  // Live systemd status for one unit. Anything that is not a known live
+  // state — not loaded yet, load failed, or the status itself unknown —
+  // renders "Unknown", never a healthy-looking default.
+  const renderServiceStatus = (unit: string) => {
+    const status = serviceStatus(unit);
+    if (status === 'active') {
+      return (
+        <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          Running
+        </span>
+      );
+    }
+    if (status === 'failed') {
+      return <span className="text-red-400 font-semibold font-mono">Failed</span>;
+    }
+    if (status === 'not-installed') {
+      return <span className="text-slate-500 font-mono">Not installed</span>;
+    }
+    if (status === 'inactive') {
+      return <span className="text-slate-500 font-mono">Stopped</span>;
+    }
+    return <span className="text-amber-400 font-semibold font-mono">Unknown</span>;
+  };
 
   const isValidCidr = (value: string): boolean => {
     const m = value.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
@@ -87,6 +166,12 @@ export default function HighAvailabilityPage() {
   };
 
   const handleSaveHa = async () => {
+    // C-A1: defense in depth — the form does not render before a
+    // successful load, but never save from unloaded defaults either.
+    if (!haLoaded) {
+      setSyncErrorMsg('HA configuration has not loaded yet. Wait for it to load (or retry) before saving.');
+      return;
+    }
     setIsSaving(true);
     setSyncErrorMsg(null);
     try {
@@ -114,25 +199,59 @@ export default function HighAvailabilityPage() {
           setSyncErrorMsg('Enter a virtual IP in CIDR form (e.g. 192.168.1.254/24) for the first VRRP instance.');
           return;
         }
+        if (existingVrrp.length === 0 && !vrrpInterface.trim()) {
+          setSyncErrorMsg('Enter the VRRP interface that carries the virtual IP (usually the LAN interface) — not the sync interface, which is the dedicated point-to-point link.');
+          return;
+        }
+        // C-A6: the VIP field used to be a dead control once an instance
+        // existed — edits were silently dropped on save. An edited VIP
+        // must be CIDR-shaped or the save is refused.
+        if (
+          existingVrrp.length > 0 &&
+          virtualIp.trim() !== '' &&
+          virtualIp.trim() !== initialVirtualIp &&
+          !isValidCidr(virtualIp)
+        ) {
+          setSyncErrorMsg('Enter a virtual IP in CIDR form (e.g. 192.168.1.254/24) to change the first VRRP instance.');
+          return;
+        }
+      }
+      // A16: a cleared sync-interval field yields 0 (the input's
+      // min/max attributes are unenforced outside a form submit),
+      // which the schema rejects and the daemon never clamps. Refuse
+      // the save with a clear message instead of persisting it.
+      if (!Number.isInteger(syncInterval) || syncInterval < 1 || syncInterval > 60) {
+        setSyncErrorMsg('Sync interval must be between 1 and 60 seconds.');
+        return;
       }
       const vrrpInstances =
         existingVrrp.length > 0
           ? existingVrrp.map((v, idx) =>
-              idx === 0 ? { ...v, vrid, authPassword: syncPassword } : v
+              idx === 0
+                ? {
+                    ...v,
+                    vrid,
+                    authPassword: syncPassword,
+                    // C-A6: apply an edited, CIDR-valid VIP to the first
+                    // instance instead of carrying the old one over
+                    // untouched; an empty or unchanged value keeps it.
+                    virtualIps: isValidCidr(virtualIp) ? [virtualIp.trim()] : v.virtualIps,
+                  }
+                : v
             )
           : enabled
             ? [
                 {
                   name: 'VI_WAN',
                   vrid,
-                  interface: syncInterface,
+                  interface: vrrpInterface.trim(),
                   priority: mappedRole === 'master' ? 150 : 100,
                   virtualIps: [virtualIp.trim()],
                   authPassword: syncPassword,
                 },
               ]
             : [];
-      await applyDesiredState({
+      await applyState({
         ...state,
         ha: {
           ...state.ha,
@@ -172,10 +291,19 @@ export default function HighAvailabilityPage() {
         },
       });
       setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
+      if (vrrpInstances.length > 0) {
+        setHasExistingVrrp(true);
+        setInitialVirtualIp(virtualIp.trim());
+      }
       setTimeout(() => setSyncStatusMsg(null), 4000);
-    } catch {
-      setSyncStatusMsg('Error saving High Availability configuration');
-      setTimeout(() => setSyncStatusMsg(null), 4000);
+    } catch (err: any) {
+      // C2: surface a fingerprint conflict verbatim — it tells the
+      // operator to reload instead of retrying into the same refusal.
+      // Other failures go to the error banner (A11) with detail.
+      const message = err?.message?.includes('Configuration changed since it was loaded')
+        ? err.message
+        : `Failed to save High Availability configuration: ${err?.message || 'Unknown error'}`;
+      setSyncErrorMsg(message);
     } finally {
       setIsSaving(false);
     }
@@ -191,6 +319,42 @@ export default function HighAvailabilityPage() {
       'Replica verification is not implemented: no snapshot was verified and no sync was triggered. See Sync Trust above for the live daemon-reported state.'
     );
   };
+
+  // C-A1: loading/error screens until the real HA config loads, so Save
+  // can never persist defaults over the live configuration. The sync
+  // trust status load is display-only and does not gate the form.
+  if (isLoadingHa) {
+    return (
+      <div className="p-8 space-y-8 max-w-7xl mx-auto pb-16">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading High Availability configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !haLoaded) {
+    return (
+      <div className="p-8 space-y-8 max-w-7xl mx-auto pb-16">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <ShieldAlert className="w-4 h-4" />
+            <span>{loadError || 'High Availability configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current HA configuration is unknown, so editing and saving are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadHaState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto pb-16">
@@ -237,7 +401,8 @@ export default function HighAvailabilityPage() {
           <button
             type="button"
             onClick={handleSaveHa}
-            disabled={isSaving}
+            disabled={isSaving || !haLoaded}
+            title={!haLoaded ? 'HA configuration is still loading' : undefined}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
           >
             <Save className="w-4 h-4" />
@@ -272,6 +437,27 @@ export default function HighAvailabilityPage() {
             className="text-slate-400 hover:text-white text-xs cursor-pointer"
           >
             ✕
+          </button>
+        </div>
+      )}
+
+      {/* C17 residual: loading / load-error state. The form shows empty
+          defaults until the load succeeds, so saving must stay impossible
+          until then. */}
+      {!haLoaded && !loadError && (
+        <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 text-slate-400 text-sm">
+          Loading HA configuration…
+        </div>
+      )}
+
+      {loadError && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-center justify-between">
+          <span>{loadError}</span>
+          <button
+            onClick={loadHaState}
+            className="ml-4 shrink-0 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs font-semibold transition cursor-pointer"
+          >
+            Retry
           </button>
         </div>
       )}
@@ -400,6 +586,26 @@ export default function HighAvailabilityPage() {
                     VIP could collide with the real LAN gateway.
                   </p>
                 </div>
+
+                {!hasExistingVrrp && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                      VRRP Interface (carries the virtual IP)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="eth1"
+                      value={vrrpInterface}
+                      onChange={(e) => setVrrpInterface(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition font-mono"
+                    />
+                    <p className="text-xs text-slate-500 mt-1.5">
+                      Required when no VRRP instance exists yet. Usually the LAN interface — never
+                      the sync interface above, which is the dedicated point-to-point link and is
+                      unreachable from the LAN.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -592,7 +798,8 @@ export default function HighAvailabilityPage() {
                     <button
                       type="button"
                       onClick={handleSaveHa}
-                      disabled={isSaving}
+                      disabled={isSaving || !haLoaded}
+                      title={!haLoaded ? 'HA configuration is still loading' : undefined}
                       className="w-full sm:w-auto px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/20 transition cursor-pointer disabled:opacity-50"
                     >
                       <Check className="w-4 h-4" />
@@ -630,31 +837,25 @@ export default function HighAvailabilityPage() {
               <div className="flex justify-between items-center py-1">
                 <span className="text-slate-400 font-medium">Keepalived (VRRP)</span>
                 {enabled ? (
-                  <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    Running
-                  </span>
+                  renderServiceStatus('keepalived.service')
                 ) : (
-                  <span className="text-slate-500 font-mono">Stopped</span>
+                  <span className="text-slate-500 font-mono">Disabled</span>
                 )}
               </div>
 
               <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
                 <span className="text-slate-400 font-medium">Conntrackd (State Sync)</span>
                 {enabled ? (
-                  <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    Synced (Active)
-                  </span>
+                  renderServiceStatus('conntrackd.service')
                 ) : (
-                  <span className="text-slate-500 font-mono">Stopped</span>
+                  <span className="text-slate-500 font-mono">Disabled</span>
                 )}
               </div>
 
               <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
                 <span className="text-slate-400 font-medium">Configuration Sync</span>
                 {enabled && role === 'primary' ? (
-                  <span className="text-emerald-400 font-semibold font-mono">Pushing to Peer</span>
+                  <span className="text-amber-400 font-semibold font-mono">Unknown (not checked)</span>
                 ) : (
                   <span className="text-slate-500 font-mono">Standby / Idle</span>
                 )}
@@ -663,17 +864,7 @@ export default function HighAvailabilityPage() {
               <div className="flex justify-between items-center py-1 border-t border-slate-800/80 pt-3">
                 <span className="text-slate-400 font-medium">SQLite WAL Sync</span>
                 {enabled && sqliteSyncEnabled ? (
-                  role === 'primary' ? (
-                    <span className="text-indigo-400 font-semibold font-mono flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
-                      Serving (Master)
-                    </span>
-                  ) : (
-                    <span className="text-emerald-400 font-semibold font-mono flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                      Replicating (0 lag)
-                    </span>
-                  )
+                  <span className="text-amber-400 font-semibold font-mono">Unknown (not checked)</span>
                 ) : (
                   <span className="text-slate-500 font-mono">Disabled</span>
                 )}
@@ -693,7 +884,12 @@ export default function HighAvailabilityPage() {
                       )
                     ) {
                       setRole(role === 'primary' ? 'secondary' : 'primary');
-                      setSyncStatusMsg('Node role transitioned. Click "Save to ha.yaml" to apply changes.');
+                      // C-A4: this used to claim "Node role transitioned."
+                      // Flipping the form field transitions nothing — the
+                      // role only changes when the save is applied.
+                      setSyncStatusMsg(
+                        `Role changed locally to ${role === 'primary' ? 'SECONDARY (BACKUP)' : 'PRIMARY (MASTER)'}. Click "Save to ha.yaml" to apply changes.`
+                      );
                     }
                   }}
                   className="w-full px-4 py-2.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer shadow-md"

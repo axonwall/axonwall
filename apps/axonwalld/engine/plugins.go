@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -13,16 +14,16 @@ import (
 )
 
 type PluginDefinition struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Version          string   `json:"version"`
-	Category         string   `json:"category"`
-	Description      string   `json:"description"`
-	Author           string   `json:"author"`
-	DefaultEnabled   bool     `json:"defaultEnabled"`
-	Dependencies     []string `json:"dependencies,omitempty"`
-	SystemdUnits     []string `json:"systemdUnits"`
-	Privileges       []string `json:"privileges"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Version          string          `json:"version"`
+	Category         string          `json:"category"`
+	Description      string          `json:"description"`
+	Author           string          `json:"author"`
+	DefaultEnabled   bool            `json:"defaultEnabled"`
+	Dependencies     []string        `json:"dependencies,omitempty"`
+	SystemdUnits     []string        `json:"systemdUnits"`
+	Privileges       []string        `json:"privileges"`
 	DebianPackages   []string        `json:"debianPackages"`
 	AlpinePackages   []string        `json:"alpinePackages"`
 	RequiredBinaries []string        `json:"requiredBinaries"`
@@ -562,14 +563,6 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 }
 
 func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
-	pm.mu.Lock()
-	delete(pm.disabledMap, pluginID)
-	if pm.installedMap[pluginID] == "" {
-		pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
-	}
-	pm.saveState()
-	pm.mu.Unlock()
-
 	if pluginID == "cli-workstation" {
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
 		if err := pm.provisionWorkstationConfigs(); err != nil {
@@ -578,56 +571,185 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 				Message: fmt.Sprintf("Failed to enable workstation shell environment: %v", err),
 			}
 		}
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
 		return PluginActionResponse{
 			Success: true,
 			Message: "Enabled Modern Operator Shell & Editor (ZSH + Oh My Zsh + Starship + VIM + Full Stack Completions).",
 		}
 	}
 
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		for _, d := range GetExtensionPluginDefinitions() {
-			if d.ID == pluginID {
-				for _, unit := range d.SystemdUnits {
-					_ = exec.Command("systemctl", "enable", "--now", unit).Run()
-				}
-				break
+	// A-M33 (round 2): reconfigure FIRST so unit files the plugin
+	// provisions exist before systemd is asked to enable them. The old
+	// order ran "systemctl enable --now" before ReconfigurePlugin
+	// wrote the unit, so a first enable always failed — silently —
+	// for plugins like rosenpass whose unit is written by reconfigure.
+	resp := pm.ReconfigurePlugin(pluginID)
+	if !resp.Success {
+		return resp
+	}
+	if def, ok := findExtensionPluginDefinition(pluginID); ok {
+		if err := enablePluginUnits(def); err != nil {
+			// The service is not actually running: record the
+			// plugin disabled so ListPlugins does not report it
+			// enabled while its service is down.
+			pm.mu.Lock()
+			pm.disabledMap[pluginID] = true
+			pm.saveState()
+			pm.mu.Unlock()
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to enable plugin %s: %v", pluginID, err),
 			}
 		}
 	}
 
-	return pm.ReconfigurePlugin(pluginID)
+	pm.mu.Lock()
+	delete(pm.disabledMap, pluginID)
+	if pm.installedMap[pluginID] == "" {
+		pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+	}
+	pm.saveState()
+	pm.mu.Unlock()
+	return resp
 }
 
 func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
-	pm.mu.Lock()
-	pm.disabledMap[pluginID] = true
-	pm.saveState()
-	pm.mu.Unlock()
-
 	if pluginID == "cli-workstation" {
 		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
+		pm.mu.Lock()
+		pm.disabledMap[pluginID] = true
+		pm.saveState()
+		pm.mu.Unlock()
 		return PluginActionResponse{
 			Success: true,
 			Message: "Disabled Modern Operator Shell & Editor (attack-surface reduction mode active).",
 		}
 	}
 
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		for _, d := range GetExtensionPluginDefinitions() {
-			if d.ID == pluginID {
-				for _, unit := range d.SystemdUnits {
-					_ = exec.Command("systemctl", "disable", "--now", unit).Run()
-				}
-				break
+	// A-M33 (round 2): the old code discarded every "systemctl
+	// disable --now" error and reported success while the service
+	// kept running. Only record the plugin disabled once its units
+	// are actually stopped.
+	if def, ok := findExtensionPluginDefinition(pluginID); ok {
+		if err := disablePluginUnits(def); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to disable plugin %s: %v", pluginID, err),
 			}
 		}
 	}
+
+	pm.mu.Lock()
+	pm.disabledMap[pluginID] = true
+	pm.saveState()
+	pm.mu.Unlock()
 
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Disabled plugin %s.", pluginID),
 	}
+}
+
+// systemctlAvailable reports whether systemd is present on this host.
+func systemctlAvailable() bool {
+	_, err := exec.LookPath("systemctl")
+	return err == nil
+}
+
+// findExtensionPluginDefinition returns the definition for an extension
+// plugin id, if it is a known extension plugin.
+func findExtensionPluginDefinition(pluginID string) (PluginDefinition, bool) {
+	for _, d := range GetExtensionPluginDefinitions() {
+		if d.ID == pluginID {
+			return d, true
+		}
+	}
+	return PluginDefinition{}, false
+}
+
+// enablePluginUnits runs "systemctl enable --now" for each declared unit
+// and verifies each one is actually active afterwards.
+//
+// A-M33 (round 2): the old code discarded every systemctl error, so
+// enabling a plugin whose unit failed to start still reported success
+// (and the UI toggle reported success while the service kept running
+// or never started). A daemon-reload runs first so units written by
+// ReconfigurePlugin are visible to systemd.
+func enablePluginUnits(def PluginDefinition) error {
+	if !systemctlAvailable() {
+		return nil
+	}
+	_ = exec.Command("systemctl", "daemon-reload").Run()
+	for _, unit := range def.SystemdUnits {
+		if out, err := exec.Command("systemctl", "enable", "--now", unit).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to enable unit %s: %w (output: %s)", unit, err, strings.TrimSpace(string(out)))
+		}
+		if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err != nil {
+			return fmt.Errorf("unit %s is not active after enable", unit)
+		}
+	}
+	return nil
+}
+
+// disablePluginUnits runs "systemctl disable --now" for each declared
+// unit and verifies none is still active afterwards. A disable error
+// for a unit that is not loaded is tolerated — what matters is that the
+// service is actually stopped; a unit still active after the disable
+// attempt is a failure.
+func disablePluginUnits(def PluginDefinition) error {
+	if !systemctlAvailable() {
+		return nil
+	}
+	var errs []error
+	for _, unit := range def.SystemdUnits {
+		_ = exec.Command("systemctl", "disable", "--now", unit).Run()
+		if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err == nil {
+			errs = append(errs, fmt.Errorf("unit %s is still active after disable", unit))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// verifyRosenpassUnit checks that the rosenpass systemd unit written by
+// ProvisionRosenpassEnvironment is loadable and that the binary its
+// ExecStart points at exists. It returns nil when there is no systemd
+// on this host (nothing to verify against) so Alpine/OpenRC hosts are
+// not failed for lacking systemctl.
+func verifyRosenpassUnit() error {
+	if !systemctlAvailable() {
+		return nil
+	}
+	unitPath := "/etc/systemd/system/rosenpass.service"
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		return fmt.Errorf("rosenpass unit %s is missing: %w", unitPath, err)
+	}
+	_ = exec.Command("systemctl", "daemon-reload").Run()
+	if out, err := exec.Command("systemctl", "cat", "rosenpass.service").CombinedOutput(); err != nil {
+		return fmt.Errorf("rosenpass unit does not load: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		bin := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
+		if len(bin) == 0 {
+			return fmt.Errorf("rosenpass unit has an empty ExecStart")
+		}
+		if _, err := os.Stat(bin[0]); err != nil {
+			return fmt.Errorf("rosenpass ExecStart binary %s does not exist: %w", bin[0], err)
+		}
+		return nil
+	}
+	return fmt.Errorf("rosenpass unit has no ExecStart line")
 }
 
 func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
@@ -837,9 +959,13 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		for _, unit := range target.SystemdUnits {
-			_ = exec.Command("systemctl", "disable", "--now", unit).Run()
+	// A-M33 (round 2): the old code discarded the disable errors, so
+	// an uninstall could report success while the service kept
+	// running. Refuse to uninstall while its units are still active.
+	if err := disablePluginUnits(*target); err != nil {
+		return PluginActionResponse{
+			Success: false,
+			Message: fmt.Sprintf("Failed to stop plugin %s services: %v", pluginID, err),
 		}
 	}
 
@@ -930,9 +1056,26 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 				Message: fmt.Sprintf("Failed to provision Rosenpass environment: %v", err),
 			}
 		}
+		// A-M33 (round 2): Reconfigure claimed the keypair and unit
+		// were "verified" without verifying anything. Verify the
+		// unit loads and its ExecStart binary exists before saying
+		// so; on a host without systemd there is nothing to verify
+		// against and the message says provisioned, not verified.
+		if err := verifyRosenpassUnit(); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Rosenpass keypair provisioned but systemd unit not verified: %v", err),
+			}
+		}
+		if systemctlAvailable() {
+			return PluginActionResponse{
+				Success: true,
+				Message: "Rosenpass Post-Quantum McEliece 460896 keypair and systemd unit verified.",
+			}
+		}
 		return PluginActionResponse{
 			Success: true,
-			Message: "Rosenpass Post-Quantum McEliece 460896 keypair and systemd unit verified.",
+			Message: "Rosenpass Post-Quantum McEliece 460896 keypair and systemd unit provisioned (no systemd on this host; service start not verified).",
 		}
 	}
 	if pluginID == "vigilant-octo-waffle" {
@@ -949,7 +1092,7 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		pm.ensurePluginLDAP(pluginID)
 		return PluginActionResponse{
 			Success: true,
-			Message: "Vigilant Octo Waffle (K8s GitOps & App Platform) enabled and verified on in-house K3s cluster (Dependency: core-k3s).",
+			Message: "Vigilant Octo Waffle (K8s GitOps & App Platform) enabled; K3s configuration provisioned (Dependency: core-k3s).",
 		}
 	}
 	if pluginID == "core-vigilante" || pluginID == "vigilante" {
@@ -960,7 +1103,7 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		pm.ensurePluginLDAP("core-vigilante")
 		return PluginActionResponse{
 			Success: true,
-			Message: "Vigilante Cyber Defense, SOAR & Autonomous SOC OpenLDAP integration and in-house K3s runtime verified (Dependency: core-k3s).",
+			Message: "Vigilante Cyber Defense, SOAR & Autonomous SOC OpenLDAP integration and in-house K3s runtime configured (Dependency: core-k3s).",
 		}
 	}
 	if pluginID == "host-malware-rootkit" {
@@ -973,7 +1116,7 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		pm.mu.Unlock()
 		return PluginActionResponse{
 			Success: true,
-			Message: "Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter enabled and verified.",
+			Message: "Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter enabled.",
 		}
 	}
 	if pluginID == "eluvix" {
@@ -988,7 +1131,7 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		pm.ensurePluginLDAP(pluginID)
 		return PluginActionResponse{
 			Success: true,
-			Message: "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard enabled and verified.",
+			Message: "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard enabled; configuration provisioned.",
 		}
 	}
 	pm.ensurePluginLDAP(pluginID)

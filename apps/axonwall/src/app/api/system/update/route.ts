@@ -100,8 +100,21 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'verify') {
-      const result = await verifySystemHealthQuorum();
-      return NextResponse.json({ success: true, ...result });
+      // C-B3: a failed quorum used to be wrapped as success: true, which
+      // made the page's `if (!data.success)` check dead. Surface the
+      // failure so the page reports the actual check statuses.
+      try {
+        const result = await verifySystemHealthQuorum();
+        return NextResponse.json({ success: true, ...result });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        const status = message.includes('Unauthorized')
+          ? 401
+          : message.includes('Admin') || message.includes('Forbidden')
+            ? 403
+            : 400;
+        return NextResponse.json({ success: false, message }, { status });
+      }
     }
 
     if (action === 'zbm-snapshot') {

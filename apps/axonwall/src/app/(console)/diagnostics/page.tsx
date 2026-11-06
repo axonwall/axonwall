@@ -90,6 +90,7 @@ export default function DiagnosticsPage() {
   const [probeTarget, setProbeTarget] = useState('1.1.1.1');
   const [probePort, setProbePort] = useState(443);
   const [probeOutput, setProbeOutput] = useState<string | null>(null);
+  const [probeFailed, setProbeFailed] = useState(false);
   const [isProbing, setIsProbing] = useState(false);
 
   useEffect(() => {
@@ -165,10 +166,13 @@ export default function DiagnosticsPage() {
             }
           } catch {}
         }
-        context.updateHost((prev) => ({
-          tags: Array.from(new Set([...(prev.tags || []), 'deep-scanned', 'verified'])),
-        }));
-        context.notify?.(`Completed verification scan for ${hostIp}.`, 'success');
+        // No scan data was produced (simulated mode, nmap missing, or the
+        // live scan errored): do not tag the host — there is no evidence it
+        // was probed, let alone verified.
+        context.notify?.(
+          `Deep scan produced no data for ${hostIp} — host not verified.`,
+          'error'
+        );
       },
     },
   ];
@@ -202,13 +206,23 @@ export default function DiagnosticsPage() {
         }
       }
 
-      // Generate topology scenario tailored to the target subnet when simulated or no live hosts responded
+      // A live scan that found no hosts must say so explicitly — never
+      // render an invented topology as if it were scanned.
+      if (res.mode === 'live') {
+        setActiveScanLabel(`No hosts found: ${scanTarget}`);
+        setScanStatusMsg(
+          `Live Nmap scan of ${scanTarget} completed in ${(res.durationMs / 1000).toFixed(1)}s — no responding hosts found.`
+        );
+        return;
+      }
+
+      // Generate topology scenario tailored to the target subnet when simulated
       const { scan: generated } = generateNetworkScenario({
         subnet: scanTarget.includes('/') ? scanTarget : `${scanTarget}/24`,
       });
       setCurrentScan(generated);
       setActiveScanLabel(
-        `${res.mode === 'live' ? 'Scanned' : 'Simulated'}: ${scanTarget} (${generated.hosts.length} hosts)`
+        `Simulated: ${scanTarget} (${generated.hosts.length} hosts)`
       );
       setScanStatusMsg(
         `Rendered topology for ${scanTarget} via '${res.command}' (${res.durationMs}ms).`
@@ -239,8 +253,12 @@ export default function DiagnosticsPage() {
   async function handleRunProbe() {
     setIsProbing(true);
     setProbeOutput('Executing diagnostic probe...');
+    setProbeFailed(false);
     try {
       const res = await runDiagnostic(probeTool, probeTarget, probePort);
+      // N1: surface the verdict, not just the text — a failed probe used
+      // to render as green console output indistinguishable from success.
+      setProbeFailed(!res.success);
       setProbeOutput(res.output);
     } finally {
       setIsProbing(false);
@@ -832,12 +850,12 @@ export default function DiagnosticsPage() {
           </div>
 
           {probeOutput && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-2">
+            <div className={`bg-slate-900 border rounded-xl p-5 space-y-2 ${probeFailed ? 'border-red-500/40' : 'border-slate-800'}`}>
               <div className="flex items-center gap-2 text-sm font-semibold text-white">
-                <Terminal className="w-4 h-4 text-emerald-400" />
-                <span>Console Output</span>
+                <Terminal className={`w-4 h-4 ${probeFailed ? 'text-red-400' : 'text-emerald-400'}`} />
+                <span>Console Output{probeFailed ? ' — Probe Failed' : ''}</span>
               </div>
-              <pre className="bg-slate-950 border border-slate-800/80 rounded-lg p-4 font-mono text-xs text-emerald-400 whitespace-pre-wrap">
+              <pre className={`bg-slate-950 border border-slate-800/80 rounded-lg p-4 font-mono text-xs whitespace-pre-wrap ${probeFailed ? 'text-red-400' : 'text-emerald-400'}`}>
                 {probeOutput}
               </pre>
             </div>

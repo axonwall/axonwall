@@ -1,15 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Layers, Network, GitFork, ShieldAlert, Cpu, Plus, Trash2, CheckCircle2, Save } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { Layers, Network, GitFork, ShieldAlert, Cpu, Plus, Trash2, CheckCircle2, Save, XCircle } from 'lucide-react';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, Vlan, Bridge, Bond, VirtualIp, Vrf } from '@axonwall/lib/schemas';
 
 export default function AdvancedInterfacesPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<'vlan' | 'bridge' | 'bond' | 'vip' | 'vrf'>('vlan');
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // A11: save failures need a red banner, not the emerald one.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [vlans, setVlans] = useState<Vlan[]>([]);
   const [bridges, setBridges] = useState<Bridge[]>([]);
@@ -17,17 +21,44 @@ export default function AdvancedInterfacesPage() {
   const [vips, setVips] = useState<VirtualIp[]>([]);
   const [vrfs, setVrfs] = useState<Vrf[]>([]);
 
+  // C-A1: nothing editable renders until the real topology loads. A
+  // save before (or after a failed) load used to persist the empty
+  // defaults above, wiping the whole topology from disk.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      setVlans(state.vlans || []);
+      setBridges(state.bridges || []);
+      setBonds(state.bonds || []);
+      setVips(state.virtualIps || []);
+      setVrfs(state.vrfs || []);
+      // A17: the default VLAN parent is 'eth1', which may not
+      // exist on a box with renamed NICs. Point it at the first
+      // real device/bond when 'eth1' is not among them.
+      const candidates = [
+        ...(state.interfaces || [])
+          .map((i) => i.device)
+          .filter((d) => d && d !== 'none'),
+        ...(state.bonds || []).map((b) => b.name),
+      ];
+      if (candidates.length > 0 && !candidates.includes('eth1')) {
+        setNewVlanParent(candidates[0]!);
+      }
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load interface topology.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        setVlans(state.vlans || []);
-        setBridges(state.bridges || []);
-        setBonds(state.bonds || []);
-        setVips(state.virtualIps || []);
-        setVrfs(state.vrfs || []);
-      })
-      .catch(() => {});
+    loadState();
   }, []);
 
   const persistTopology = async (
@@ -50,6 +81,7 @@ export default function AdvancedInterfacesPage() {
     setVrfs(nextVrfs);
     setSaving(true);
     setStatusMsg(null);
+    setErrorMsg(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -61,7 +93,7 @@ export default function AdvancedInterfacesPage() {
         vrfs: nextVrfs,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved topology to /etc/axonwall/interfaces.yaml');
     } catch (err: any) {
       setVlans(prevVlans);
@@ -70,7 +102,7 @@ export default function AdvancedInterfacesPage() {
       setVips(prevVips);
       setVrfs(prevVrfs);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save interfaces.yaml'}`);
+      setErrorMsg(`Failed to save interfaces.yaml: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
@@ -81,10 +113,41 @@ export default function AdvancedInterfacesPage() {
   const [newVlanParent, setNewVlanParent] = useState('eth1');
   const [newVlanDesc, setNewVlanDesc] = useState('');
 
+  // A17: the parent select used to hardcode eth0/eth1/bond0, so
+  // boxes with renamed NICs could not pick the real parent at all.
+  // Derive the options from the loaded interfaces (plus configured
+  // bonds); fall back to the hardcoded three only when nothing has
+  // loaded yet.
+  const vlanParentOptions: { value: string; label: string }[] = (() => {
+    const fromInterfaces = (fullState?.interfaces || [])
+      .filter((i) => i.device && i.device !== 'none')
+      .map((i) => ({ value: i.device, label: `${i.device} (${i.name})` }));
+    const fromBonds = (bonds || []).map((b) => ({ value: b.name, label: `${b.name} (LACP)` }));
+    const seen = new Set<string>();
+    const merged = [...fromInterfaces, ...fromBonds].filter((o) => {
+      if (seen.has(o.value)) return false;
+      seen.add(o.value);
+      return true;
+    });
+    if (merged.length > 0) return merged;
+    return [
+      { value: 'eth0', label: 'eth0 (WAN)' },
+      { value: 'eth1', label: 'eth1 (LAN)' },
+      { value: 'bond0', label: 'bond0 (LACP)' },
+    ];
+  })();
+
   const handleAddVlan = async (e: React.FormEvent) => {
     e.preventDefault();
     const tag = Number.parseInt(newVlanTag, 10);
     if (!tag || tag < 1 || tag > 4094) return;
+    // C-A9: a duplicate (parent, tag) used to be accepted, creating two
+    // `eth1.100` sub-interfaces — and deleting one row then removed
+    // every VLAN sharing the tag. Reject the add with an error.
+    if (vlans.some((v) => v.parentInterface === newVlanParent && v.tag === tag)) {
+      setStatusMsg(`Error: VLAN ${newVlanParent}.${tag} already exists. Delete the existing VLAN first if you want to replace it.`);
+      return;
+    }
     const nextVlans: Vlan[] = [
       ...vlans,
       {
@@ -99,6 +162,41 @@ export default function AdvancedInterfacesPage() {
     setNewVlanDesc('');
     await persistTopology(nextVlans, bridges, bonds, vips, vrfs);
   };
+
+  // C-A1: loading/error screens until the real topology loads, so Save
+  // can never persist empty defaults over the live configuration.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading interface topology…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'Interface topology could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current topology is unknown, so editing and saving are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -124,9 +222,26 @@ export default function AdvancedInterfacesPage() {
         </button>
       </div>
 
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
+
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            statusMsg.startsWith('Error:')
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.startsWith('Error:') ? (
+            <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
           <span>{statusMsg}</span>
         </div>
       )}
@@ -214,8 +329,8 @@ export default function AdvancedInterfacesPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                  {vlans.map((vlan) => (
-                    <tr key={vlan.id || vlan.tag} className="hover:bg-slate-800/30">
+                  {vlans.map((vlan, vlanIdx) => (
+                    <tr key={vlan.id || vlan.vlanInterface} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 font-mono text-emerald-400 font-semibold">
                         Tag {vlan.tag}
                       </td>
@@ -227,8 +342,12 @@ export default function AdvancedInterfacesPage() {
                         <button
                           type="button"
                           onClick={() =>
+                            // C-A9: delete exactly the clicked row. The
+                            // old predicate matched on tag alone, so
+                            // deleting one tag-100 row removed every
+                            // VLAN sharing that tag.
                             persistTopology(
-                              vlans.filter((v) => v.tag !== vlan.tag),
+                              vlans.filter((_, i) => i !== vlanIdx),
                               bridges,
                               bonds,
                               vips,
@@ -274,9 +393,11 @@ export default function AdvancedInterfacesPage() {
                   onChange={(e) => setNewVlanParent(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 font-mono"
                 >
-                  <option value="eth0">eth0 (WAN)</option>
-                  <option value="eth1">eth1 (LAN)</option>
-                  <option value="bond0">bond0 (LACP)</option>
+                  {vlanParentOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div>

@@ -2,16 +2,20 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { KeyRound, Plus, Trash2, Copy, Check, FileText, Save, CheckCircle2, ShieldCheck } from 'lucide-react';
+import { KeyRound, Plus, Trash2, Copy, Check, FileText, Save, CheckCircle2, ShieldCheck, AlertCircle } from 'lucide-react';
 import { compileWireGuard } from '@axonwall/lib/compile/wireguard';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { getWireGuardServerPublicKey } from '@/server/wg';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function WireGuardPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedClientConf, setSelectedClientConf] = useState<string | null>(null);
+  const [clientConfError, setClientConfError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
@@ -19,7 +23,7 @@ export default function WireGuardPage() {
     enabled: false,
     address: '10.50.0.1/24',
     listenPort: 51820,
-    publicKey: 'AxonwallWgServerPublicKeyBase64Placeholder000=',
+    publicKey: '',
     privateKey: '',
     peers: [] as Array<{
       id?: string;
@@ -47,11 +51,19 @@ export default function WireGuardPage() {
             enabled: state.wireguard.enabled,
             address: state.wireguard.address || '10.50.0.1/24',
             listenPort: state.wireguard.listenPort || 51820,
-            publicKey: 'AxonwallWgServerPublicKeyBase64Placeholder000=',
+            publicKey: '',
             privateKey: state.wireguard.privateKey || '',
             peers: state.wireguard.peers || [],
           });
         }
+        // G3: derive the real server public key from the stored private key
+        // server-side. An empty result means no server key is configured —
+        // never display (or export) a placeholder as the server key.
+        getWireGuardServerPublicKey()
+          .then((derived) => {
+            setServerConfig((prev) => ({ ...prev, publicKey: derived ?? '' }));
+          })
+          .catch(() => {});
       })
       .catch(() => {});
   }, []);
@@ -70,7 +82,13 @@ export default function WireGuardPage() {
           enabled: nextWg.enabled,
           address: nextWg.address,
           listenPort: Number(nextWg.listenPort) || 51820,
-          privateKey: nextWg.privateKey && nextWg.privateKey.length >= 32 ? nextWg.privateKey : undefined,
+          // G9: the old code silently replaced a stored server private
+          // key shorter than 32 chars with undefined on any save, so
+          // the saved config lost its server key with no warning.
+          // Preserve the loaded value verbatim; a short key now fails
+          // schema validation loudly (save refused with an error)
+          // instead of being silently dropped.
+          privateKey: nextWg.privateKey || undefined,
           peers: nextWg.peers.map((p) => ({
             id: p.id,
             name: p.name,
@@ -83,7 +101,7 @@ export default function WireGuardPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved WireGuard configuration to /etc/axonwall/vpn.yaml');
     } catch (err: any) {
       setServerConfig(prevServerConfig);
@@ -97,10 +115,22 @@ export default function WireGuardPage() {
   const handleAddPeer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!peerName.trim() || !peerPubKey.trim()) return;
-    const paddedKey =
-      peerPubKey.trim().length >= 32
-        ? peerPubKey.trim()
-        : `${peerPubKey.trim()}${'A'.repeat(32 - peerPubKey.trim().length)}=`;
+    // A WireGuard public key is 32 raw bytes = 44 base64 chars. Never pad or
+    // otherwise mutate pasted key material: a short key is a typo, and the
+    // padded key would belong to nobody.
+    const key = peerPubKey.trim();
+    let keyBytes: Buffer | null = null;
+    try {
+      keyBytes = Buffer.from(key, 'base64');
+    } catch {
+      keyBytes = null;
+    }
+    if (key.length !== 44 || !keyBytes || keyBytes.length !== 32 || keyBytes.toString('base64') !== key) {
+      setStatusMsg(
+        'Error: Invalid WireGuard public key — expected a 44-character base64 key (32 bytes). Peer not added.'
+      );
+      return;
+    }
     const nextWg = {
       ...serverConfig,
       enabled: true,
@@ -108,7 +138,7 @@ export default function WireGuardPage() {
         ...serverConfig.peers,
         {
           name: peerName.trim(),
-          publicKey: paddedKey,
+          publicKey: key,
           allowedIps: peerAllowedIps
             .split(',')
             .map((s) => s.trim())
@@ -136,18 +166,33 @@ export default function WireGuardPage() {
   compileWireGuard(serverConfig as any);
 
   function generateClientProfile(peerNameStr: string, allowedIp: string) {
+    // G3: never emit a client conf with a placeholder server key — refuse
+    // the export with an explanation instead of handing out a dead config.
+    if (!serverConfig.publicKey) {
+      setClientConfError('Cannot export client config: no WireGuard server public key is configured. Set a server private key first — the server public key is derived from it.');
+      setSelectedClientConf(null);
+      return;
+    }
+    // The server never stores a peer's private key, so no real PrivateKey
+    // value exists to emit. Emit a commented instruction instead of a fake
+    // key value; the profile is incomplete until the device's own private
+    // key is pasted in (see the warning on the export card).
     const conf = `# Axonwall WireGuard Client Profile: ${peerNameStr}
 [Interface]
-PrivateKey = <CLIENT_PRIVATE_KEY_HERE>
+# PrivateKey: paste the private key generated on this device below.
+# The server never stores it, so this profile cannot connect until you add it.
+# PrivateKey = <paste-this-device-private-key-here>
 Address = ${allowedIp}
 DNS = ${serverConfig.address.split('/')[0]}
 
 [Peer]
 PublicKey = ${serverConfig.publicKey}
-Endpoint = vpn.axonwall.local:${serverConfig.listenPort}
+Endpoint = ${(fullState as any)?.system?.hostname || 'vpn'}.${(fullState as any)?.system?.domain || 'axonwall.local'}:${serverConfig.listenPort}
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 `;
+    setStatusMsg(null);
+    setClientConfError(null);
     setSelectedClientConf(conf);
   }
 
@@ -179,8 +224,18 @@ PersistentKeepalive = 25
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            statusMsg.startsWith('Error:')
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.startsWith('Error:') ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
           <span>{statusMsg}</span>
         </div>
       )}
@@ -264,7 +319,13 @@ PersistentKeepalive = 25
         <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 font-mono text-xs text-slate-300 flex items-center justify-between">
           <div>
             <span className="text-slate-500 block font-sans text-[11px]">Server Public Key</span>
-            <span className="text-slate-400 select-all">{serverConfig.publicKey}</span>
+            {serverConfig.publicKey ? (
+              <span className="text-slate-400 select-all">{serverConfig.publicKey}</span>
+            ) : (
+              <span className="text-amber-300 font-sans">
+                Not configured — set a server private key; the public key is derived from it.
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -340,7 +401,7 @@ PersistentKeepalive = 25
             type="text"
             value={peerPubKey}
             onChange={(e) => setPeerPubKey(e.target.value)}
-            placeholder="Base64 Public Key (min 32 chars)"
+            placeholder="Base64 Public Key (44 chars)"
             className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
             required
           />
@@ -371,6 +432,11 @@ PersistentKeepalive = 25
       </div>
 
       {/* Generated Client Conf Modal/Card */}
+      {clientConfError && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm text-red-300">
+          {clientConfError}
+        </div>
+      )}
       {selectedClientConf && (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
           <div className="flex items-center justify-between">
@@ -387,6 +453,11 @@ PersistentKeepalive = 25
               <span>{copied ? 'Copied!' : 'Copy to Clipboard'}</span>
             </button>
           </div>
+          <p className="text-xs text-amber-300/90">
+            Incomplete template: the server never stores this device&apos;s private key, so paste
+            the device&apos;s own private key into the PrivateKey line before importing — until
+            then this profile cannot connect.
+          </p>
           <pre className="bg-slate-950 p-4 rounded-lg font-mono text-xs text-slate-300 overflow-x-auto">
             {selectedClientConf}
           </pre>

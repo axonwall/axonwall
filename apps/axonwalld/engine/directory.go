@@ -42,22 +42,25 @@ func DefaultPasswordPolicyConfig() PasswordPolicyConfig {
 }
 
 type DirectoryStatus struct {
-	SlapdRunning        bool                 `json:"slapdRunning"`
-	SssdRunning         bool                 `json:"sssdRunning"`
-	BaseDN              string               `json:"baseDn"`
-	ServerID            int                  `json:"serverId"`
-	HaSyncEnabled       bool                 `json:"haSyncEnabled"`
-	HaRole              string               `json:"haRole"`
-	PeerURI             string               `json:"peerUri,omitempty"`
-	ContextCSN          string               `json:"contextCsn,omitempty"`
-	PeerContextCSN      string               `json:"peerContextCsn,omitempty"`
-	InSync              bool                 `json:"inSync"`
-	ClockSkewMs         float64              `json:"clockSkewMs"`
-	RootSshDisabled     bool                 `json:"rootSshDisabled"`
-	TotalDirectoryUsers int                  `json:"totalDirectoryUsers"`
-	AdminUsersCount     int                  `json:"adminUsersCount"`
-	UnmigratedLocalCount int                 `json:"unmigratedLocalCount"`
-	PasswordPolicy      PasswordPolicyConfig `json:"passwordPolicy"`
+	SlapdRunning         bool    `json:"slapdRunning"`
+	SssdRunning          bool    `json:"sssdRunning"`
+	BaseDN               string  `json:"baseDn"`
+	ServerID             int     `json:"serverId"`
+	HaSyncEnabled        bool    `json:"haSyncEnabled"`
+	HaRole               string  `json:"haRole"`
+	PeerURI              string  `json:"peerUri,omitempty"`
+	ContextCSN           string  `json:"contextCsn,omitempty"`
+	PeerContextCSN       string  `json:"peerContextCsn,omitempty"`
+	InSync               bool    `json:"inSync"`
+	ClockSkewMs          float64 `json:"clockSkewMs"`
+	RootSshDisabled      bool    `json:"rootSshDisabled"`
+	TotalDirectoryUsers  int     `json:"totalDirectoryUsers"`
+	AdminUsersCount      int     `json:"adminUsersCount"`
+	UnmigratedLocalCount int     `json:"unmigratedLocalCount"`
+	// AdminSeedError records a break-glass admin seeding failure (A-M32):
+	// when set, the box may have no admin account.
+	AdminSeedError string               `json:"adminSeedError,omitempty"`
+	PasswordPolicy PasswordPolicyConfig `json:"passwordPolicy"`
 }
 
 type PluginLdapGroupSpec struct {
@@ -91,16 +94,19 @@ type PluginLDAPBinding struct {
 }
 
 type DirectoryManager struct {
-	mu          sync.RWMutex
-	baseDN      string
-	serverID    int
-	haRole      string
-	haEnabled   bool
-	peerURI     string
-	policy      PasswordPolicyConfig
-	localUsers  *UserManager
-	etckeeper   *EtckeeperManager
-	policyFile  string
+	mu         sync.RWMutex
+	baseDN     string
+	serverID   int
+	haRole     string
+	haEnabled  bool
+	peerURI    string
+	policy     PasswordPolicyConfig
+	localUsers *UserManager
+	etckeeper  *EtckeeperManager
+	policyFile string
+	// adminSeedError records the last break-glass admin seeding failure
+	// (A-M32); surfaced in GetStatus so a box with no admin is visible.
+	adminSeedError string
 }
 
 func NewDirectoryManager(localUsers *UserManager, etckeeper *EtckeeperManager) *DirectoryManager {
@@ -207,46 +213,7 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 	}
 
 	// Ensure at least one admin user exists in LDAP; if not, seed initial break-glass 'admin'
-	users, err := d.listLDAPUsersInternal()
-	if err == nil {
-		hasAdmin := false
-		for _, u := range users {
-			if u.ApplianceRole == "admin" && !u.PasswordLocked {
-				hasAdmin = true
-			}
-			// Upgrade existing shell users (admin / os_only) from legacy /bin/bash to /usr/bin/zsh
-			if (u.ApplianceRole == "admin" || u.ApplianceRole == "os_only") && (u.Shell == "/bin/bash" || u.Shell == "") {
-				zshShell := "/usr/bin/zsh"
-				_ = d.UpdateUser(u.Username, UpdateUserRequest{Shell: &zshShell})
-			}
-			if u.HomeDir != "" && u.UID >= 1000 {
-				seedUserZshrc(u.HomeDir, u.UID, u.GID)
-			}
-		}
-		if !hasAdmin {
-			adminPass, hasExistingScrypt := d.readInitialAdminPasswordWithState()
-			log.Printf("[Directory] No active admin user found in LDAP; seeding default 'admin' account...")
-			var savedEnv map[string][]byte
-			if hasExistingScrypt {
-				savedEnv = make(map[string][]byte)
-				for _, p := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
-					if b, err := os.ReadFile(p); err == nil {
-						savedEnv[p] = b
-					}
-				}
-			}
-			_ = d.CreateUser(CreateUserRequest{
-				Username:      "admin",
-				Comment:       "Axonwall Break-Glass Administrator",
-				Password:      adminPass,
-				ApplianceRole: "admin",
-				Shell:         "/usr/bin/zsh",
-			})
-			for p, b := range savedEnv {
-				_ = os.WriteFile(p, b, 0600)
-			}
-		}
-	}
+	seedErr := d.ensureBreakGlassAdmin()
 
 	d.syncLocalNSSMirrorIfNoSSSD("")
 	_ = d.SyncRootSshPolicy()
@@ -262,6 +229,113 @@ func (d *DirectoryManager) Bootstrap(domain string, serverID int) error {
 			}
 		}()
 	}
+	// A-M32: a failed admin seeding used to be swallowed entirely.
+	// Return it so the startup goroutine logs it (and GetStatus
+	// already carries it via AdminSeedError).
+	if seedErr != nil {
+		return seedErr
+	}
+	return nil
+}
+
+// setAdminSeedError records a break-glass admin seeding failure for
+// GetStatus; clearAdminSeedError clears it after a successful seed.
+func (d *DirectoryManager) setAdminSeedError(msg string) {
+	d.mu.Lock()
+	d.adminSeedError = msg
+	d.mu.Unlock()
+}
+
+func (d *DirectoryManager) clearAdminSeedError() {
+	d.mu.Lock()
+	d.adminSeedError = ""
+	d.mu.Unlock()
+}
+
+// ensureBreakGlassAdmin verifies at least one unlocked admin exists in
+// LDAP and seeds the break-glass "admin" account when none does.
+//
+// A-M32 (round 2): the old code skipped this whole block silently when
+// the user list failed, and discarded the CreateUser error, so a box
+// could boot with no admin account and nothing in the log said so.
+// Listing and seeding are now retried, failures are logged loudly,
+// recorded for GetStatus, and returned.
+func (d *DirectoryManager) ensureBreakGlassAdmin() error {
+	var users []LocalUser
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		users, err = d.listLDAPUsersInternal()
+		if err == nil {
+			break
+		}
+		log.Printf("[Directory] ERROR: cannot list LDAP users to check for an admin account (attempt %d/4): %v", attempt+1, err)
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+		}
+	}
+	if err != nil {
+		msg := fmt.Sprintf("break-glass admin seeding skipped: cannot list LDAP users: %v", err)
+		log.Printf("[Directory] ERROR: %s — the box may have no admin account", msg)
+		d.setAdminSeedError(msg)
+		return fmt.Errorf("%s", msg)
+	}
+
+	hasAdmin := false
+	for _, u := range users {
+		if u.ApplianceRole == "admin" && !u.PasswordLocked {
+			hasAdmin = true
+		}
+		// Upgrade existing shell users (admin / os_only) from legacy /bin/bash to /usr/bin/zsh
+		if (u.ApplianceRole == "admin" || u.ApplianceRole == "os_only") && (u.Shell == "/bin/bash" || u.Shell == "") {
+			zshShell := "/usr/bin/zsh"
+			_ = d.UpdateUser(u.Username, UpdateUserRequest{Shell: &zshShell})
+		}
+		if u.HomeDir != "" && u.UID >= 1000 {
+			seedUserZshrc(u.HomeDir, u.UID, u.GID)
+		}
+	}
+	if hasAdmin {
+		d.clearAdminSeedError()
+		return nil
+	}
+
+	adminPass, hasExistingScrypt := d.readInitialAdminPasswordWithState()
+	log.Printf("[Directory] No active admin user found in LDAP; seeding default 'admin' account...")
+	var savedEnv map[string][]byte
+	if hasExistingScrypt {
+		savedEnv = make(map[string][]byte)
+		for _, p := range []string{"/var/lib/axonwall/etc-axonwall/admin.env", "/etc/axonwall/admin.env", "/etc/axonwall/axonwall.env"} {
+			if b, err := os.ReadFile(p); err == nil {
+				savedEnv[p] = b
+			}
+		}
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		err = d.CreateUser(CreateUserRequest{
+			Username:      "admin",
+			Comment:       "Axonwall Break-Glass Administrator",
+			Password:      adminPass,
+			ApplianceRole: "admin",
+			Shell:         "/usr/bin/zsh",
+		})
+		if err == nil {
+			break
+		}
+		log.Printf("[Directory] ERROR: failed to seed break-glass 'admin' account (attempt %d/3): %v", attempt+1, err)
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+		}
+	}
+	if err != nil {
+		msg := fmt.Sprintf("break-glass admin seeding failed: %v", err)
+		log.Printf("[Directory] ERROR: %s — the box may have no admin account", msg)
+		d.setAdminSeedError(msg)
+		return fmt.Errorf("%s", msg)
+	}
+	for p, b := range savedEnv {
+		_ = os.WriteFile(p, b, 0600)
+	}
+	d.clearAdminSeedError()
 	return nil
 }
 
@@ -975,13 +1049,30 @@ loginShell: %s
 	for _, g := range RoleToGroups(role) {
 		groupSet[g] = true
 	}
+	// Attach POSIX groups
+	// A-M27: group-attach failures used to be discarded, so a user could
+	// be created "successfully" without its role groups (e.g. sudo) and
+	// the admin could not sudo. Attempt every group, then report the
+	// failures instead of returning success.
+	var groupErrs []string
 	for g := range groupSet {
-		_, _ = d.EnsureLDAPGroupExists(g, 0)
-		_ = d.setGroupMembership(g, username, true)
+		if _, err := d.EnsureLDAPGroupExists(g, 0); err != nil {
+			groupErrs = append(groupErrs, fmt.Sprintf("group %s: ensure failed: %v", g, err))
+			continue
+		}
+		if err := d.setGroupMembership(g, username, true); err != nil {
+			groupErrs = append(groupErrs, fmt.Sprintf("group %s: attach failed: %v", g, err))
+			continue
+		}
 		// Also mirror membership in /etc/group for local groups like sudo/adm so OS tools work even if nsswitch caches
 		if g == "sudo" || g == "adm" {
-			_ = exec.Command("usermod", "-a", "-G", g, username).Run()
+			if err := exec.Command("usermod", "-a", "-G", g, username).Run(); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: local mirror failed: %v", g, err))
+			}
 		}
+	}
+	if len(groupErrs) > 0 {
+		return fmt.Errorf("created LDAP user %s, but failed to attach groups: %s", username, strings.Join(groupErrs, "; "))
 	}
 
 	// Pre-create home directory on persistent /var/lib/axonwall/home (bind-mounted at /home) and seed .zshrc
@@ -1091,12 +1182,8 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 	}
 
 	for _, mod := range mods {
-		ldif := fmt.Sprintf("dn: uid=%s,ou=users,%s\nchangetype: modify\n%s\n", username, baseDN, mod)
-		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
-		cmd.Stdin = strings.NewReader(ldif)
-		out, err := cmd.CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "No such attribute") {
-			return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, string(out), err)
+		if err := d.runLDAPModify(username, baseDN, mod); err != nil {
+			return err
 		}
 	}
 
@@ -1126,16 +1213,33 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 			}
 		}
 
-		allGroups, _, _, _ := d.listLDAPGroupsInternal()
+		// A-M27: a list failure used to be discarded, silently skipping
+		// the whole membership sync, and every group add/remove failure
+		// was discarded too. Attempt every group, then report failures.
+		allGroups, _, _, err := d.listLDAPGroupsInternal()
+		if err != nil {
+			return fmt.Errorf("failed to list LDAP groups for membership sync of %s: %w", username, err)
+		}
+		var groupErrs []string
 		for _, g := range allGroups {
 			if g.Name == username {
 				continue
 			}
-			_ = d.setGroupMembership(g.Name, username, desired[g.Name])
+			if err := d.setGroupMembership(g.Name, username, desired[g.Name]); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: sync failed: %v", g.Name, err))
+			}
 		}
 		for g := range desired {
-			_, _ = d.EnsureLDAPGroupExists(g, 0)
-			_ = d.setGroupMembership(g, username, true)
+			if _, err := d.EnsureLDAPGroupExists(g, 0); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: ensure failed: %v", g, err))
+				continue
+			}
+			if err := d.setGroupMembership(g, username, true); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: attach failed: %v", g, err))
+			}
+		}
+		if len(groupErrs) > 0 {
+			return fmt.Errorf("updated LDAP user %s, but failed to sync groups: %s", username, strings.Join(groupErrs, "; "))
 		}
 	}
 
@@ -1147,6 +1251,87 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 	InvalidateSSSDCache(username)
 	_ = d.SyncRootSshPolicy()
 	return nil
+}
+
+// runLDAPModify applies one LDIF modify block for a user.
+//
+// A "No such attribute" failure is only benign for delete: operations
+// (removing an attribute that was never set, e.g. unlocking a user that
+// was never locked). For replace: it means the attribute does not exist
+// — which is expected for pwdAccountLockedTime and sshPublicKey, two
+// attributes CreateUser never sets — so those retry once as add:.
+// Anything else is a real error (A-H6, round 2: the old code swallowed
+// "No such attribute" for every modify, silently dropping a first-time
+// account lock and a first SSH key).
+func (d *DirectoryManager) runLDAPModify(username, baseDN, mod string) error {
+	run := func(ldifMod string) (string, error) {
+		ldif := fmt.Sprintf("dn: uid=%s,ou=users,%s\nchangetype: modify\n%s\n", username, baseDN, ldifMod)
+		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+		cmd.Stdin = strings.NewReader(ldif)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	out, err := run(mod)
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(out, "No such attribute") {
+		return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, out, err)
+	}
+	if strings.HasPrefix(mod, "delete:") {
+		return nil
+	}
+	// replace: on an attribute that does not exist yet — retry as add:
+	// when the block targets an add-if-absent attribute and carries
+	// values; a bare replace of an absent attribute ("", true) is
+	// already in the desired state.
+	addMod, ok := replaceToAddForAbsentAttrs(mod)
+	if !ok {
+		return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, out, err)
+	}
+	if addMod == "" {
+		return nil
+	}
+	if out2, err2 := run(addMod); err2 != nil {
+		return fmt.Errorf("failed to modify LDAP user %s: %s (%w)", username, out2, err2)
+	}
+	return nil
+}
+
+// replaceToAddForAbsentAttrs converts a replace: block into an add:
+// block when it targets only attributes that may legitimately be absent
+// (pwdAccountLockedTime, sshPublicKey — CreateUser never sets them) and
+// carries values to add. It reports ok=false when the block targets
+// other attributes (a missing attribute there is a real inconsistency,
+// not a first-time set) or mixes in other operations. It returns
+// ("", true) for a bare replace with no values: deleting an attribute
+// that is already absent is the desired end state.
+func replaceToAddForAbsentAttrs(mod string) (string, bool) {
+	hasAbsentAttr := false
+	hasValue := false
+	var lines []string
+	for _, ln := range strings.Split(mod, "\n") {
+		if strings.HasPrefix(ln, "replace: ") {
+			attr := strings.TrimSpace(strings.TrimPrefix(ln, "replace: "))
+			if attr == "pwdAccountLockedTime" || attr == "sshPublicKey" {
+				hasAbsentAttr = true
+				lines = append(lines, "add: "+attr)
+				continue
+			}
+			return "", false
+		}
+		if strings.HasPrefix(ln, "sshPublicKey: ") || strings.HasPrefix(ln, "pwdAccountLockedTime: ") {
+			hasValue = true
+		}
+		lines = append(lines, ln)
+	}
+	if !hasAbsentAttr {
+		return "", false
+	}
+	if !hasValue {
+		return "", true
+	}
+	return strings.Join(lines, "\n"), true
 }
 
 // DeleteUser removes a human user from the OpenLDAP directory (after verifying at least one unlocked admin remains).
@@ -1190,15 +1375,31 @@ func (d *DirectoryManager) DeleteUser(username string, removeHome bool) error {
 	baseDN := d.baseDN
 	d.mu.RUnlock()
 
-	// Remove from all groups
+	// Remove from all groups. A-H5 (round 2): group-removal failures used
+	// to be discarded, so a "deleted" user could keep its roles.
 	allGroups, _, _, _ := d.listLDAPGroupsInternal()
+	var errs []string
 	for _, g := range allGroups {
-		_ = d.setGroupMembership(g.Name, username, false)
+		if err := d.setGroupMembership(g.Name, username, false); err != nil {
+			errs = append(errs, fmt.Sprintf("remove from group %s: %v", g.Name, err))
+		}
 	}
 
-	// Delete user entry and personal group
-	_ = exec.Command("ldapdelete", "-Y", "EXTERNAL", "-H", "ldapi:///", fmt.Sprintf("uid=%s,ou=users,%s", username, baseDN)).Run()
-	_ = exec.Command("ldapdelete", "-Y", "EXTERNAL", "-H", "ldapi:///", fmt.Sprintf("cn=%s,ou=groups,%s", username, baseDN)).Run()
+	// Delete user entry and personal group. A-H5 (round 2): both deletes
+	// used to be discarded and the function unconditionally returned nil,
+	// so a "deleted" user still existed and could still log in.
+	userDN := fmt.Sprintf("uid=%s,ou=users,%s", username, baseDN)
+	if err := ldapDeleteEntry(userDN); err != nil {
+		errs = append(errs, err.Error())
+		// The entry (and its password/SSH keys) is still there: do not
+		// remove the home directory or sync the NSS mirror as if the
+		// user were gone.
+		return fmt.Errorf("failed to delete user '%s': %s", username, strings.Join(errs, "; "))
+	}
+	groupDN := fmt.Sprintf("cn=%s,ou=groups,%s", username, baseDN)
+	if err := ldapDeleteEntry(groupDN); err != nil {
+		errs = append(errs, err.Error())
+	}
 
 	if removeHome {
 		_ = os.RemoveAll(filepath.Join("/home", username))
@@ -1207,6 +1408,20 @@ func (d *DirectoryManager) DeleteUser(username string, removeHome bool) error {
 	d.syncLocalNSSMirrorIfNoSSSD(username)
 	InvalidateSSSDCache(username)
 	_ = d.SyncRootSshPolicy()
+	if len(errs) > 0 {
+		return fmt.Errorf("deleted user '%s' but with failures: %s", username, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// ldapDeleteEntry deletes one DN with ldapdelete. A missing entry ("No such
+// object", e.g. a personal group that was never created) is not an error;
+// any other failure is, and must fail the caller's delete (A-H5).
+func ldapDeleteEntry(dn string) error {
+	out, err := exec.Command("ldapdelete", "-Y", "EXTERNAL", "-H", "ldapi:///", dn).CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "No such object") {
+		return fmt.Errorf("ldapdelete %s: %s (%w)", dn, strings.TrimSpace(string(out)), err)
+	}
 	return nil
 }
 
@@ -1587,6 +1802,10 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 	}
 }
 
+// axonwallSshdConfPath is the sshd drop-in written by SyncRootSshPolicy.
+// It is a variable so tests can point it at a fixture path.
+var axonwallSshdConfPath = "/etc/ssh/sshd_config.d/axonwall.conf"
+
 // SyncRootSshPolicy checks whether at least one active axonwall-admin user exists in OpenLDAP.
 // Once an admin user exists (and DisableRootSshWhenAdminExists is true), it sets PermitRootLogin no
 // in /etc/ssh/sshd_config.d/axonwall.conf and reloads sshd.
@@ -1628,14 +1847,22 @@ X11Forwarding no
 MaxAuthTries 3
 `, permitRoot, usePAMLine)
 
-	confPath := "/etc/ssh/sshd_config.d/axonwall.conf"
+	confPath := axonwallSshdConfPath
 	existing, _ := os.ReadFile(confPath)
 	if string(existing) != sshdConf {
-		_ = os.MkdirAll(filepath.Dir(confPath), 0755)
-		if err := os.WriteFile(confPath, []byte(sshdConf), 0644); err == nil {
-			if exec.Command("systemctl", "reload", "ssh").Run() != nil {
-				if exec.Command("systemctl", "reload", "sshd").Run() != nil {
-					_ = exec.Command("rc-service", "sshd", "reload").Run()
+		// A-L30: the old code swallowed both the config write and
+		// the reload, returning nil while the running sshd kept
+		// the old root-login policy. Both failures are errors now.
+		if err := os.MkdirAll(filepath.Dir(confPath), 0755); err != nil {
+			return fmt.Errorf("failed to create sshd config dir %s: %w", filepath.Dir(confPath), err)
+		}
+		if err := os.WriteFile(confPath, []byte(sshdConf), 0644); err != nil {
+			return fmt.Errorf("failed to write sshd config %s: %w", confPath, err)
+		}
+		if exec.Command("systemctl", "reload", "ssh").Run() != nil {
+			if exec.Command("systemctl", "reload", "sshd").Run() != nil {
+				if err := exec.Command("rc-service", "sshd", "reload").Run(); err != nil {
+					return fmt.Errorf("failed to reload sshd after updating %s (tried systemctl reload ssh, systemctl reload sshd, rc-service sshd reload): %w", confPath, err)
 				}
 			}
 		}
@@ -1764,6 +1991,7 @@ func (d *DirectoryManager) GetStatus() DirectoryStatus {
 		HaSyncEnabled:  d.haEnabled,
 		HaRole:         d.haRole,
 		PeerURI:        d.peerURI,
+		AdminSeedError: d.adminSeedError,
 		PasswordPolicy: d.policy,
 	}
 	d.mu.RUnlock()
@@ -1850,6 +2078,14 @@ func (d *DirectoryManager) GetStatus() DirectoryStatus {
 	return status
 }
 
+// ldapPluginClientsDir and ldapPluginSecretsDir mirror the
+// LDAPPlugin* constants but are variables so tests can redirect the
+// binding and secret files at fixtures.
+var (
+	ldapPluginClientsDir = LDAPPluginClientsDir
+	ldapPluginSecretsDir = LDAPPluginSecretsDir
+)
+
 // EnsurePluginLDAPIntegration idempotently provisions a dedicated least-privilege LDAP
 // service bind account in ou=services,<baseDN>, creates plugin POSIX groups in ou=groups,<baseDN>,
 // and writes standard credentials to /etc/axonwall/ldap-plugins/<pluginId>.json and .env.
@@ -1869,8 +2105,8 @@ func (d *DirectoryManager) EnsurePluginLDAPIntegration(pluginID string, spec Plu
 		d.mu.Unlock()
 	}
 
-	_ = os.MkdirAll(LDAPPluginClientsDir, 0755)
-	_ = os.MkdirAll(LDAPPluginSecretsDir, 0700)
+	_ = os.MkdirAll(ldapPluginClientsDir, 0755)
+	_ = os.MkdirAll(ldapPluginSecretsDir, 0700)
 
 	// Ensure ou=services,<baseDN> exists
 	ouLdif := fmt.Sprintf("dn: ou=services,%s\nobjectClass: top\nobjectClass: organizationalUnit\nou: services\n", baseDN)
@@ -1884,7 +2120,7 @@ func (d *DirectoryManager) EnsurePluginLDAPIntegration(pluginID string, spec Plu
 	}
 	svcDN := fmt.Sprintf("cn=%s,ou=services,%s", svcCN, baseDN)
 
-	secretFile := filepath.Join(LDAPPluginSecretsDir, pluginID+".pw")
+	secretFile := filepath.Join(ldapPluginSecretsDir, pluginID+".pw")
 	secret, err := ensureRandomSecretFile(secretFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate plugin LDAP secret: %w", err)
@@ -1911,7 +2147,13 @@ userPassword: %s
 		modLdif := fmt.Sprintf("dn: %s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n", svcDN, sshaHash)
 		mCmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
 		mCmd.Stdin = strings.NewReader(modLdif)
-		_ = mCmd.Run()
+		// A-L32: the password rotation was discarded. If the
+		// service-account entry exists without a userPassword, a
+		// failed rotation leaves the binding's password wrong
+		// while the function reports success.
+		if modOut, modErr := mCmd.CombinedOutput(); modErr != nil {
+			return nil, fmt.Errorf("failed to rotate plugin LDAP service account password for %s: %s (%w)", pluginID, string(modOut), modErr)
+		}
 	}
 
 	roleGroups := make(map[string][]string)
@@ -1947,9 +2189,16 @@ userPassword: %s
 	}
 
 	// Write /etc/axonwall/ldap-plugins/<pluginId>.json
-	jsonPath := filepath.Join(LDAPPluginClientsDir, pluginID+".json")
+	// A-L32: the binding-file writes were discarded, so a plugin
+	// could be told it was integrated while its binding file did
+	// not exist (disk full, read-only dir). The primary files are
+	// errors; the per-plugin mirrors below are best-effort copies
+	// of the same data and only warn on failure.
+	jsonPath := filepath.Join(ldapPluginClientsDir, pluginID+".json")
 	jsonData, _ := json.MarshalIndent(binding, "", "  ")
-	_ = os.WriteFile(jsonPath, append(jsonData, '\n'), 0640)
+	if err := os.WriteFile(jsonPath, append(jsonData, '\n'), 0640); err != nil {
+		return nil, fmt.Errorf("failed to write plugin LDAP binding %s: %w", jsonPath, err)
+	}
 
 	// Write /etc/axonwall/ldap-plugins/<pluginId>.env
 	envPrefix := spec.EnvPrefix
@@ -1970,27 +2219,40 @@ userPassword: %s
 	envBuf.WriteString(fmt.Sprintf("%sOPERATOR_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["operator"], ",")))
 	envBuf.WriteString(fmt.Sprintf("%sREADONLY_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["readonly"], ",")))
 
-	envPath := filepath.Join(LDAPPluginClientsDir, pluginID+".env")
-	_ = os.WriteFile(envPath, []byte(envBuf.String()), 0640)
+	envPath := filepath.Join(ldapPluginClientsDir, pluginID+".env")
+	if err := os.WriteFile(envPath, []byte(envBuf.String()), 0640); err != nil {
+		return nil, fmt.Errorf("failed to write plugin LDAP binding %s: %w", envPath, err)
+	}
 
-	// Also ensure per-plugin destination config dir exists and has copy if standard
+	// Also ensure per-plugin destination config dir exists and has copy if standard.
+	// These are redundant mirrors of the primary files above: a
+	// failed mirror is logged, not fatal.
+	var mirrorErrs []string
+	mirrorWrite := func(path string, data []byte) {
+		if err := os.WriteFile(path, data, 0640); err != nil {
+			mirrorErrs = append(mirrorErrs, fmt.Sprintf("%s: %v", path, err))
+		}
+	}
 	if pluginID == "eluvix" {
 		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
-		_ = os.WriteFile("/etc/axonwall/eluvix/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/etc/axonwall/eluvix/ldap.json", append(jsonData, '\n'))
 	}
 	if pluginID == "vigilant-octo-waffle" {
 		_ = os.MkdirAll("/etc/axonwall/vow", 0755)
-		_ = os.WriteFile("/etc/axonwall/vow/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/etc/axonwall/vow/ldap.json", append(jsonData, '\n'))
 	}
 	if pluginID == "core-vigilante" || pluginID == "vigilante" {
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "vigilante.json"), append(jsonData, '\n'), 0640)
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "vigilante.env"), []byte(envBuf.String()), 0640)
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "core-vigilante.json"), append(jsonData, '\n'), 0640)
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "core-vigilante.env"), []byte(envBuf.String()), 0640)
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.json"), append(jsonData, '\n'))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.env"), []byte(envBuf.String()))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "core-vigilante.json"), append(jsonData, '\n'))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "core-vigilante.env"), []byte(envBuf.String()))
 		_ = os.MkdirAll("/etc/axonwall/vigilante", 0755)
-		_ = os.WriteFile("/etc/axonwall/vigilante/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/etc/axonwall/vigilante/ldap.json", append(jsonData, '\n'))
 		_ = os.MkdirAll("/var/lib/axonwall/vigilante", 0755)
-		_ = os.WriteFile("/var/lib/axonwall/vigilante/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/var/lib/axonwall/vigilante/ldap.json", append(jsonData, '\n'))
+	}
+	if len(mirrorErrs) > 0 {
+		log.Printf("[Directory] Warning: failed to write plugin LDAP binding mirrors for %s: %s", pluginID, strings.Join(mirrorErrs, "; "))
 	}
 
 	return binding, nil

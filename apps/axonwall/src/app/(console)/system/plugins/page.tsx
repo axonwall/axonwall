@@ -29,11 +29,13 @@ import {
   arePluginDependenciesMet,
   type PluginManifest,
 } from '@axonwall/lib/plugins';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { getExtensionPlugins, executePluginAction, type ExtensionPluginLiveStatus } from '@/server/plugins';
 import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas';
 
 export default function PluginManagerPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [savingRole, setSavingRole] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; text: string; output?: string } | null>(null);
@@ -184,7 +186,7 @@ export default function PluginManagerPage() {
         }
       }
 
-      const res = await applyDesiredState(next);
+      const res = await applyState(next);
       setState(next);
       window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       setStatusBanner({
@@ -338,23 +340,27 @@ export default function PluginManagerPage() {
         next.plugins = plugins;
       }
 
-      if (id === 'cli-workstation' || id === 'vigilant-octo-waffle') {
-        // C22: the plugin action's failure used to be swallowed, then
-        // the state apply ran and the banner claimed the toggle was
-        // done while the plugin service never started/stopped. Await
-        // and check it; on failure, abort the state apply and the
-        // success banner entirely.
-        const actionRes = await executePluginAction(id, !isCurrentlyEnabled ? 'enable' : 'disable');
-        if (!actionRes.success) {
-          setStatusBanner({
-            type: 'error',
-            text: `Plugin action failed for ${id}: ${actionRes.message}. The toggle was not applied.`,
-          });
-          return;
-        }
+      // C22: the plugin action's failure used to be swallowed, then the
+      // state apply ran and the banner claimed the toggle was done while
+      // the plugin service never started/stopped. The gate originally
+      // covered only cli-workstation and vigilant-octo-waffle, so disabling
+      // any other extension (haproxy, freeradius, snmp, NUT, rosenpass,
+      // eluvix, ...) reported success while the service kept running.
+      // Gate EVERY extension toggle on the daemon action and abort the
+      // state apply and the success banner on failure. (The daemon side
+      // still swallows systemctl errors — A-M33, owned by another batch —
+      // so a failed stop the daemon reports as success is still invisible
+      // here; this gate catches daemon-unreachable and daemon refusals.)
+      const actionRes = await executePluginAction(id, !isCurrentlyEnabled ? 'enable' : 'disable');
+      if (!actionRes.success) {
+        setStatusBanner({
+          type: 'error',
+          text: `Plugin action failed for ${id}: ${actionRes.message}. The toggle was not applied.`,
+        });
+        return;
       }
 
-      const res = await applyDesiredState(next);
+      const res = await applyState(next);
       setState(next);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));

@@ -22,6 +22,11 @@ type EtckeeperStatus struct {
 	LastCommitMsg  string    `json:"lastCommitMsg,omitempty"`
 	LastCommitTime time.Time `json:"lastCommitTime,omitempty"`
 	TrackedPath    string    `json:"trackedPath"`
+	// Initialized reports whether the tracked path actually holds a
+	// git repository. Clean is false (not true) when the repo is
+	// absent or git status fails, so a never-initialised /etc is
+	// never reported as clean (round-2 A-L26).
+	Initialized bool `json:"initialized"`
 }
 
 // EtckeeperCommitLog represents a historical git log entry from etckeeper.
@@ -146,7 +151,8 @@ func (m *EtckeeperManager) GetStatus() EtckeeperStatus {
 		Installed:   m.IsInstalled(),
 		TrackedPath: m.etcDir,
 		VCS:         "git",
-		Clean:       true,
+		Clean:       false,
+		Initialized: false,
 	}
 
 	if !status.Installed {
@@ -157,12 +163,16 @@ func (m *EtckeeperManager) GetStatus() EtckeeperStatus {
 	if _, err := os.Stat(m.etcDir + "/.git"); os.IsNotExist(err) {
 		return status
 	}
+	status.Initialized = true
 
 	// Check git status
 	cmdStatus := m.execCmd("git", "-C", m.etcDir, "status", "--porcelain")
 	if out, err := cmdStatus.Output(); err == nil {
 		status.Clean = len(strings.TrimSpace(string(out))) == 0
 	}
+	// A-L26: a failed git status leaves Clean false. The old code
+	// defaulted Clean to true and never cleared it, so a broken
+	// /etc/.git reported "Installed: true, Clean: true".
 
 	// Check last commit
 	cmdLog := m.execCmd("git", "-C", m.etcDir, "log", "-1", "--format=%H|%s|%aI")

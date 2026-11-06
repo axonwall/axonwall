@@ -26,7 +26,8 @@ import {
 } from '@axonwall/lib/compile/eluvix';
 import { enablePluginWithDependencies, disablePluginWithDependents } from '@axonwall/lib/plugins';
 import { EluvixConfigSchema, type DesiredState, type EluvixConfig } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 const TEST_PROMPT_PRESETS = [
   {
@@ -51,6 +52,7 @@ const TEST_PROMPT_PRESETS = [
 ];
 
 export default function EluvixRouterStudioPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [config, setConfig] = useState<EluvixConfig>(() => EluvixConfigSchema.parse({ enabled: true }));
   const [activeTab, setActiveTab] = useState<'tokenomics' | 'guards' | 'harnesses' | 'identity' | 'artifacts'>('tokenomics');
@@ -94,7 +96,7 @@ export default function EluvixRouterStudioPage() {
         nextState = disablePluginWithDependents('eluvix', nextState).state;
         nextState.eluvix = nextConfig;
       }
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setState(nextState);
       setConfig(nextConfig);
       if (typeof window !== 'undefined') {

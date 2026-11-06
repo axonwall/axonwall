@@ -54,7 +54,8 @@ import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { listUsers, createUser, createPreAuthKey } from './headscale.js';
 import { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord } from './mcp/authz.js';
-import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, type JsonRpcRequest } from './mcp/server.js';
+import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, type JsonRpcRequest } from './mcp/server.js';
+import { acquireMcpLockFile } from './mcp/lockfile.js';
 import { recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries } from './mcp/audit.js';
 import { isMcpServerEnabled, getMcpServerStatus } from '@axonwall/lib/mcp';
 
@@ -93,6 +94,163 @@ function assertNotOperatorCaWithoutKey(caPath: string, caKeyPath: string): void 
       'matching on-box CA key was found (operator-CA mode). Install an operator-issued hub.crt/hub.key ' +
       'pair that chains to ca.crt, or remove ca.crt to use appliance-CA provisioning.'
     );
+  }
+}
+
+const HUB_CERT_SAN = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
+
+// B2-M9: mint a pure self-signed hub certificate. Split out of
+// generateSignedOrSelfSignedCert so the emergency fallback can
+// reach it directly when the CA-signed path throws (unusable
+// ca.key) instead of letting the throw kill the whole fallback
+// and the controller start in plaintext HTTP.
+function generateSelfSignedCert(targetKeyPath: string, targetCertPath: string, days: string): void {
+  child_process.execFileSync(
+    'openssl',
+    [
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-keyout',
+      targetKeyPath,
+      '-out',
+      targetCertPath,
+      '-days',
+      days,
+      '-subj',
+      '/O=Axonwall/OU=Appliance/CN=axonwall',
+      '-addext',
+      `subjectAltName=${HUB_CERT_SAN}`,
+    ],
+    { timeout: 15000, stdio: 'ignore' }
+  );
+}
+
+// Mint a hub certificate signed by the on-box CA when a CA key
+// exists, otherwise a pure self-signed one. Throws when the CA
+// path is chosen but openssl fails (e.g. ca.key exists but is
+// corrupt or does not match ca.crt) — callers that must stay
+// encrypted fall back to generateSelfSignedCert instead.
+function generateSignedOrSelfSignedCert(
+  targetKeyPath: string,
+  targetCertPath: string,
+  days: string,
+  caPath: string,
+  caKeyPath: string,
+): void {
+  if (fs.existsSync(caPath) && fs.existsSync(caKeyPath)) {
+    const csrPath = `${targetCertPath}.csr`;
+    const extPath = `${targetCertPath}.ext`;
+    try {
+      child_process.execFileSync(
+        'openssl',
+        [
+          'req',
+          '-newkey',
+          'rsa:2048',
+          '-nodes',
+          '-keyout',
+          targetKeyPath,
+          '-out',
+          csrPath,
+          '-subj',
+          '/O=Axonwall/OU=Appliance/CN=axonwall',
+        ],
+        { timeout: 15000, stdio: 'ignore' }
+      );
+      fs.writeFileSync(
+        extPath,
+        `basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${HUB_CERT_SAN}\n`,
+        { mode: 0o600 }
+      );
+      child_process.execFileSync(
+        'openssl',
+        [
+          'x509',
+          '-req',
+          '-in',
+          csrPath,
+          '-CA',
+          caPath,
+          '-CAkey',
+          caKeyPath,
+          '-CAcreateserial',
+          '-out',
+          targetCertPath,
+          '-days',
+          days,
+          '-sha256',
+          '-extfile',
+          extPath,
+        ],
+        { timeout: 15000, stdio: 'ignore' }
+      );
+    } finally {
+      try { fs.unlinkSync(csrPath); } catch {}
+      try { fs.unlinkSync(extPath); } catch {}
+    }
+  } else {
+    generateSelfSignedCert(targetKeyPath, targetCertPath, days);
+  }
+}
+
+// B2-M9: a freshly minted leaf that does not chain to the on-disk
+// CA is a provisioning bug, not a usable certificate — serving it
+// would put the controller in the B-H3 bad-leaf trap, and
+// re-minting would just reproduce it identically forever. Fail
+// startup loudly. Only an explicit `false` throws (a `null` means
+// openssl could not run, and the check is skipped rather than
+// failing a healthy mint); only when a CA file exists, since
+// `openssl verify` fails on a missing CA file.
+export function verifyFreshLeafOrThrow(certPath: string, caPath: string): void {
+  if (!fs.existsSync(caPath)) return;
+  if (leafChainsToCa(certPath, caPath) === false) {
+    throw new Error(
+      `[Axonwall Controller] Freshly minted hub certificate does not chain to the on-disk CA (${caPath}); refusing to serve it. Regenerate the CA or remove the stale CA certificate.`
+    );
+  }
+}
+
+// B2-M9: mint a 30-day emergency certificate in a temp dir. Tries
+// the CA-signed path first (when a CA key exists), then a pure
+// self-signed cert when the CA path throws (unusable ca.key) or
+// the minted leaf does not chain to the on-disk CA. A leaf that
+// does not chain is never served (B-H3 trap). Returns null only
+// when both paths fail.
+function mintEmergencyTlsCert(caPath: string, caKeyPath: string): { cert: Buffer; key: Buffer } | null {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-tls-'));
+  const tmpKey = path.join(tmpDir, 'hub.key');
+  const tmpCert = path.join(tmpDir, 'hub.crt');
+  try {
+    let caSigned = true;
+    try {
+      generateSignedOrSelfSignedCert(tmpKey, tmpCert, '30', caPath, caKeyPath);
+    } catch (mintErr) {
+      console.warn('[Axonwall Controller] CA-signed emergency certificate failed; minting a pure self-signed fallback instead:', mintErr);
+      generateSelfSignedCert(tmpKey, tmpCert, '30');
+      caSigned = false;
+    }
+    // A CA-signed emergency leaf that does not chain to the
+    // on-disk CA must not be served (B-H3 trap) — replace it with
+    // a pure self-signed one. A self-signed fallback has nothing
+    // to chain to, so it is served as-is.
+    if (caSigned && fs.existsSync(caPath) && leafChainsToCa(tmpCert, caPath) === false) {
+      console.warn('[Axonwall Controller] Emergency CA-signed certificate does not chain to the on-disk CA; minting a pure self-signed fallback instead.');
+      generateSelfSignedCert(tmpKey, tmpCert, '30');
+    }
+    const cert = fs.readFileSync(tmpCert);
+    const key = fs.readFileSync(tmpKey);
+    if (cert.length > 0 && key.length > 0) return { cert, key };
+    return null;
+  } catch (err) {
+    console.error('[Axonwall Controller] Critical error generating emergency TLS certificate:', err);
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmpKey); } catch {}
+    try { fs.unlinkSync(tmpCert); } catch {}
+    try { fs.rmdirSync(tmpDir); } catch {}
   }
 }
 
@@ -159,89 +317,21 @@ export function ensureControllerTls(
   // B-H3: never self-generate when an operator CA exists without a
   // matching on-box CA key — fail startup loudly instead.
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  const generateSignedOrSelfSignedCert = (targetKeyPath: string, targetCertPath: string, days: string) => {
-    const san = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
-    if (fs.existsSync(caPath) && fs.existsSync(caKeyPath)) {
-      const csrPath = `${targetCertPath}.csr`;
-      const extPath = `${targetCertPath}.ext`;
-      try {
-        child_process.execFileSync(
-          'openssl',
-          [
-            'req',
-            '-newkey',
-            'rsa:2048',
-            '-nodes',
-            '-keyout',
-            targetKeyPath,
-            '-out',
-            csrPath,
-            '-subj',
-            '/O=Axonwall/OU=Appliance/CN=axonwall',
-          ],
-          { timeout: 15000, stdio: 'ignore' }
-        );
-        fs.writeFileSync(
-          extPath,
-          `basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${san}\n`,
-          { mode: 0o600 }
-        );
-        child_process.execFileSync(
-          'openssl',
-          [
-            'x509',
-            '-req',
-            '-in',
-            csrPath,
-            '-CA',
-            caPath,
-            '-CAkey',
-            caKeyPath,
-            '-CAcreateserial',
-            '-out',
-            targetCertPath,
-            '-days',
-            days,
-            '-sha256',
-            '-extfile',
-            extPath,
-          ],
-          { timeout: 15000, stdio: 'ignore' }
-        );
-      } finally {
-        try { fs.unlinkSync(csrPath); } catch {}
-        try { fs.unlinkSync(extPath); } catch {}
-      }
-    } else {
-      child_process.execFileSync(
-        'openssl',
-        [
-          'req',
-          '-x509',
-          '-newkey',
-          'rsa:2048',
-          '-nodes',
-          '-keyout',
-          targetKeyPath,
-          '-out',
-          targetCertPath,
-          '-days',
-          days,
-          '-subj',
-          '/O=Axonwall/OU=Appliance/CN=axonwall',
-          '-addext',
-          `subjectAltName=${san}`,
-        ],
-        { timeout: 15000, stdio: 'ignore' }
-      );
-    }
-  };
+  // B2-M9: the mint stays in the try (a mint failure falls through
+  // to the emergency fallback), but the chain verification and the
+  // return are outside it — a freshly minted leaf that does not
+  // chain to the on-disk CA is a provisioning bug, and the throw
+  // must escape ensureControllerTls and fail startup loudly
+  // instead of being swallowed by the catch below (which would
+  // fall through to step 4 and mint an identical non-chaining
+  // leaf forever).
+  let minted: { cert: Buffer; key: Buffer } | null = null;
   try {
     const certDir = path.dirname(certPath);
     if (!fs.existsSync(certDir)) {
       fs.mkdirSync(certDir, { recursive: true, mode: 0o750 });
     }
-    generateSignedOrSelfSignedCert(keyPath, certPath, '3650');
+    generateSignedOrSelfSignedCert(keyPath, certPath, '3650', caPath, caKeyPath);
 
     if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
       const cert = fs.readFileSync(certPath);
@@ -251,46 +341,38 @@ export function ensureControllerTls(
         fs.chmodSync(certPath, 0o644);
       } catch {}
       if (cert.length > 0 && key.length > 0) {
-        console.log('[Axonwall Controller] Successfully generated local hub certificate via openssl');
-        // B-H3: include the on-disk CA when it exists, so the mTLS
-        // gate (requestCert) is actually armed for CA-issued satellites.
-        const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
-        return { cert, key, ca };
+        minted = { cert, key };
       }
     }
   } catch (err) {
     console.warn('[Axonwall Controller] Generating certificate in target directory failed:', err);
   }
+  if (minted) {
+    console.log('[Axonwall Controller] Successfully generated local hub certificate via openssl');
+    // B-H3: include the on-disk CA when it exists, so the mTLS
+    // gate (requestCert) is actually armed for CA-issued satellites.
+    const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
+    verifyFreshLeafOrThrow(certPath, caPath);
+    return { cert: minted.cert, key: minted.key, ca };
+  }
 
   // 4. Emergency fallback: generate temporary self-signed cert in tmpdir.
   // B-H3: the fallback must not defeat the operator-CA refusal either.
+  // B2-M9: the CA-signed path throws when ca.key exists but is
+  // unusable — the old code let that throw kill the whole fallback
+  // and the controller started in plaintext HTTP. mintEmergencyTlsCert
+  // falls back to a pure self-signed cert instead (and never serves
+  // a non-chaining leaf), so the controller stays encrypted.
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  try {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-tls-'));
-    const tmpKey = path.join(tmpDir, 'hub.key');
-    const tmpCert = path.join(tmpDir, 'hub.crt');
-    generateSignedOrSelfSignedCert(tmpKey, tmpCert, '30');
-
-    const cert = fs.readFileSync(tmpCert);
-    const key = fs.readFileSync(tmpKey);
-    try {
-      fs.unlinkSync(tmpKey);
-      fs.unlinkSync(tmpCert);
-      fs.rmdirSync(tmpDir);
-    } catch {}
-
-    if (cert.length > 0 && key.length > 0) {
-      console.warn(
-        '[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted'
-      );
-      // B-H3: include the on-disk CA when it exists (see step 3).
-      const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
-      return { cert, key, ca, isFallback: true };
-    }
-  } catch (err) {
-    console.error('[Axonwall Controller] Critical error generating emergency TLS certificate:', err);
+  const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
+  const emergency = mintEmergencyTlsCert(caPath, caKeyPath);
+  if (emergency) {
+    console.warn(
+      '[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted'
+    );
+    return { cert: emergency.cert, key: emergency.key, ca, isFallback: true };
   }
-
+  console.error('[Axonwall Controller] Critical error generating emergency TLS certificate');
   return null;
 }
 
@@ -302,6 +384,10 @@ export {
   processMcpJsonRpcMessage,
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
+  newMcpApplyJobId,
+  insertMcpRuleIntoState,
+  desiredStateLockPath,
+  acquireMcpLockFile,
   recordMcpAuditEntry,
   verifyMcpAuditChain,
   queryMcpAuditEntries,
@@ -393,6 +479,32 @@ export function parseFleetSyncBody(body: string): FleetSyncBodyValidation {
   return { ok: true, desired: parsed.data };
 }
 
+// B2-M8: /fleet/sync must fail closed when there is no
+// DesiredState anywhere — neither in the request body nor on
+// disk. An empty body means "re-sync from disk", so only the
+// combination of an absent body and an absent disk state refuses.
+export function shouldRefuseFleetSync(desired: DesiredState | undefined, diskState: DesiredState | null): boolean {
+  return desired === undefined && diskState === null;
+}
+
+// B2-H1: constant-time token comparison that cannot throw on
+// multibyte input. `String.length` counts UTF-16 code units while
+// `Buffer.from()` counts UTF-8 bytes, so comparing string lengths
+// first and then calling `crypto.timingSafeEqual` throws
+// ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH for a wrong token with the
+// same UTF-16 length but a different byte length (e.g. 29 ASCII +
+// 'é'). Both call sites used to do exactly that with no try/catch
+// and no uncaughtException handler, so any unauthenticated client
+// could crash the whole controller by spraying token lengths.
+// Compare byte lengths (never string lengths) before comparing.
+export function secureTokenEquals(presented: unknown, expected: unknown): boolean {
+  if (typeof presented !== 'string' || typeof expected !== 'string') return false;
+  const presentedBuf = Buffer.from(presented);
+  const expectedBuf = Buffer.from(expected);
+  if (presentedBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(presentedBuf, expectedBuf);
+}
+
 export function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?: string): HaTransitionValidation {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? '').toLowerCase();
   if (!rawRole) {
@@ -437,10 +549,74 @@ export function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?:
   };
 }
 
+// B-H2b residual: the last-promoted HA edge, persisted. The id
+// used to live only in controller RAM, and the close handler
+// cleared it whenever the active edge disconnected, so after a
+// controller restart or an active-edge flap the controller had
+// forgotten who was active while the old edge still held the LAN
+// VIP and shared WAN MAC in its kernel — and the next promote
+// demoted nobody. The record (edge id plus the VIP/MAC that
+// promotion used, so a reconnect can re-assert the same promotion)
+// is written to disk on every change and reloaded at startup.
+// Only an explicit DEMOTE clears it; a disconnect deliberately
+// does not, because the edge keeps its kernel HA state across a
+// flap. AXONWALL_HA_STATE_PATH overrides the path (tests).
+export interface PersistedHaState {
+  activeHaEdgeId: string | null;
+  sharedWanMac?: string;
+  lanVip?: string;
+}
+
+const HA_STATE_PATHS = ['/var/lib/axonwall/active-ha-edge.json', '/etc/axonwall/active-ha-edge.json'];
+
+export function loadPersistedHaState(): PersistedHaState | null {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (raw && typeof raw === 'object' && (typeof raw.activeHaEdgeId === 'string' || raw.activeHaEdgeId === null)) {
+          const out: PersistedHaState = { activeHaEdgeId: raw.activeHaEdgeId ?? null };
+          if (typeof raw.sharedWanMac === 'string') out.sharedWanMac = raw.sharedWanMac;
+          if (typeof raw.lanVip === 'string') out.lanVip = raw.lanVip;
+          return out;
+        }
+      }
+    } catch {
+      // Ignore unreadable/corrupt state; the controller proceeds
+      // with no recorded active edge.
+    }
+  }
+  return null;
+}
+
+export function persistHaState(state: PersistedHaState): void {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  const payload = JSON.stringify(state, null, 2);
+  for (const p of paths) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(p, payload, { mode: 0o600 });
+    } catch {
+      // Best effort: the in-memory record is still authoritative
+      // for this process lifetime.
+    }
+  }
+}
+
 // B-M2: disconnected satellites are retained (for reconnect identity)
 // only for a grace period, then pruned. The mesh peer filter itself is
 // stricter: only OPEN sockets are ever broadcast as live peers.
 export const MESH_DISCONNECTED_GRACE_MS = 24 * 60 * 60 * 1000;
+
+// B2-H2: satellite socket liveness. The controller pings every
+// connected satellite on this interval and terminates sockets that
+// miss two pongs; the lastSeen grace is the backstop for sockets
+// that never answer at all. It is 5x the ping interval and 10x the
+// satellite's 15 s telemetry cadence, so a live socket is never
+// killed for one slow interval.
+export const SATELLITE_HEARTBEAT_MS = 30 * 1000;
+export const SATELLITE_LAST_SEEN_GRACE_MS = 150 * 1000;
 
 export function shouldPruneDisconnectedSatellite(
   disconnectedAt: string | undefined,
@@ -453,12 +629,144 @@ export function shouldPruneDisconnectedSatellite(
   return nowMs - t >= graceMs;
 }
 
+// B2-M7: one pushed route, keyed the way the satellite
+// identifies it (destination + gateway + device). SYNC_ROUTES
+// used to send only additions, so a route removed from
+// DesiredState lingered in the kernel forever; the controller now
+// tracks what it last pushed per satellite and sends the
+// difference as a delete list.
+export interface SyncedRoute {
+  destination: string;
+  gateway: string;
+  device?: string;
+}
+
+// B2-M7: routes that were pushed on an earlier sync but are no
+// longer in the enabled set. A first sync with no previous record
+// (no prior push, or a record that predates the persisted file
+// below) has no deletions — the controller cannot know about kernel
+// routes that predate its own pushes.
+export function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRoute[]): SyncedRoute[] {
+  const routeKey = (r: SyncedRoute): string => `${r.destination}|${r.gateway}|${r.device ?? ''}`;
+  const currentKeys = new Set(current.map(routeKey));
+  return previous.filter((r) => !currentKeys.has(routeKey(r)));
+}
+
+// B2-M7 follow-up: the synced-routes record, persisted. The record
+// used to live only in controller RAM, so after a controller
+// restart the first sync had no deletions and any route removed
+// from DesiredState while the controller was down (or pushed before
+// this code deployed) lingered in every edge kernel forever. The
+// record is now written to disk on every successful sync and
+// reloaded at startup, following the same pattern as the B-H2b
+// persisted HA state (AXONWALL_SYNCED_ROUTES_PATH overrides the
+// path for tests). Routes pushed before this code deployed are
+// still unknown — only routes the controller itself pushed after
+// this landed are recorded. Full replace semantics were NOT chosen
+// instead: the satellite has no ownership marker distinguishing
+// Axonwall-pushed kernel routes from operator-added ones, so a
+// reconcile-against-desired-set would delete hand-added routes;
+// the explicit delete list only ever deletes routes the controller
+// itself pushed. Records are retained after a satellite is pruned
+// (disconnect grace), so a later reconnect still gets its
+// deletions; the file is bounded by fleet size in practice.
+export type PersistedSyncedRoutes = Record<string, SyncedRoute[]>;
+
+const SYNCED_ROUTES_STATE_PATHS = ['/var/lib/axonwall/synced-routes.json', '/etc/axonwall/synced-routes.json'];
+
+export function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs.existsSync(p)) {
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          const out: PersistedSyncedRoutes = {};
+          for (const [satId, routes] of Object.entries(raw)) {
+            if (!Array.isArray(routes)) continue;
+            out[satId] = (routes as unknown[])
+              .filter(
+                (r): r is SyncedRoute =>
+                  !!r &&
+                  typeof r === 'object' &&
+                  typeof (r as SyncedRoute).destination === 'string' &&
+                  typeof (r as SyncedRoute).gateway === 'string' &&
+                  ((r as SyncedRoute).device === undefined || typeof (r as SyncedRoute).device === 'string'),
+              )
+              .map((r) => ({ destination: r.destination, gateway: r.gateway, ...(r.device ? { device: r.device } : {}) }));
+          }
+          return out;
+        }
+      }
+    } catch {
+      // Ignore unreadable/corrupt state; the controller proceeds
+      // with no recorded routes (a first sync then has no deletions).
+    }
+  }
+  return null;
+}
+
+export function persistSyncedRoutes(routes: PersistedSyncedRoutes): void {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  const payload = JSON.stringify(routes, null, 2);
+  for (const p of paths) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(p, payload, { mode: 0o600 });
+    } catch {
+      // Best effort: the in-memory record is still authoritative
+      // for this process lifetime.
+    }
+  }
+}
+
+// B2-M1: satellite command acknowledgements. The satellite acks
+// every acted-on hub command (SYNC_*, PROMOTE, DEMOTE,
+// BLOCK_TARGET, SYNC_HEADSCALE) with success or failure, echoing
+// the commandId the hub stamped on the outbound envelope. The
+// controller used to send without ids and never read the acks, so
+// a ws.send counted as success while the satellite had failed the
+// apply. These helpers are the testable core: the envelope format,
+// the staleness rule for acks that never arrive, and the
+// last-failure bookkeeping surfaced in /fleet/satellites.
+export const PENDING_COMMAND_STALE_MS = 5 * 60 * 1000;
+
+export interface SatelliteCommandAck {
+  command: string;
+  commandId?: string;
+  success: boolean;
+  error?: string;
+}
+
+export function buildSatelliteCommandEnvelope(type: string, payload: unknown, commandId: string): string {
+  return JSON.stringify({ type, commandId, payload });
+}
+
+export function isPendingCommandStale(sentAtMs: number, nowMs: number, staleMs: number = PENDING_COMMAND_STALE_MS): boolean {
+  return nowMs - sentAtMs > staleMs;
+}
+
+export function recordCommandAck(state: { lastApplyError?: string }, ack: SatelliteCommandAck): void {
+  if (ack.success) {
+    if (ack.command && state.lastApplyError?.startsWith(`${ack.command}:`)) delete state.lastApplyError;
+    return;
+  }
+  state.lastApplyError = `${ack.command}: ${ack.error || 'failed'}`;
+}
+
 // B-H4: Headscale provisioning retries on bounded backoff while the
 // socket is open, instead of a single attempt per controller lifetime.
 // Delays are the waits before each attempt (first attempt immediate).
 export function headscaleRetryDelaysMs(): number[] {
   return [0, 5000, 15000, 30000, 60000];
 }
+
+// B-H4 residual: the slow re-check interval after the bounded
+// backoff above exhausts (~110 s). Without it, nothing retried on
+// a socket that stayed open after Headscale recovered. Five
+// minutes is deliberately far above one backoff run so a
+// recovering Headscale is not hammered.
+export const HEADSCALE_RECHECK_MS = 5 * 60 * 1000;
 
 export interface HeadscaleProvisionDeps {
   listUsers: () => Promise<any[]>;
@@ -772,9 +1080,22 @@ async function main() {
     wireguard?: { tunnelIp: string };
     ws?: WebSocket;
     headscaleEnrolled?: boolean;
+    // B2-M1: the last hub-command failure this satellite reported,
+    // via COMMAND_ACK or the telemetry lastApplyError fallback.
+    // Surfaced in /fleet/satellites (the endpoint returns the rest
+    // of this state) so a failed apply is visible instead of
+    // counted as a successful sync.
+    lastApplyError?: string;
     // B-M2: set when the socket closes; the entry is pruned after the
     // grace period instead of being retained until the fleet cap.
     disconnectedAt?: string;
+    // B2-M7: routes last pushed to this satellite, so a route
+    // removed from DesiredState can be deleted from the kernel
+    // instead of lingering forever (SYNC_ROUTES used to send only
+    // additions). Carried over from the previous entry on
+    // reconnect, like headscaleEnrolled, and seeded from the
+    // persisted synced-routes file after a controller restart.
+    lastSyncedRoutes?: SyncedRoute[];
     metrics?: {
       uptimeSeconds: number;
       cpuUsagePercent: number;
@@ -792,9 +1113,61 @@ async function main() {
 
   const activeSatellites = new Map<string, SatelliteState>();
 
-  // B-H2b: the edge last promoted to active via /fleet/ha-transition.
-  // The controller demotes this edge before promoting a different one.
-  let activeHaEdgeId: string | null = null;
+  // B2-M1: outbound hub commands awaiting their satellite
+  // COMMAND_ACK, keyed by commandId. Acks correlate sends to
+  // results; entries that never ack are swept by the heartbeat
+  // timer instead of leaking forever.
+  const pendingCommands = new Map<string, { satId: string; command: string; sentAt: number }>();
+  const sendToSatellite = (sat: SatelliteState, type: string, payload: unknown): string | null => {
+    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return null;
+    const commandId = `cmd_${crypto.randomUUID()}`;
+    pendingCommands.set(commandId, { satId: sat.id, command: type, sentAt: Date.now() });
+    sat.ws.send(buildSatelliteCommandEnvelope(type, payload, commandId));
+    return commandId;
+  };
+
+  // B-H2b residual: the edge last promoted to active via
+  // /fleet/ha-transition, reloaded from disk (see
+  // loadPersistedHaState). The record survives a controller
+  // restart and an active-edge flap, so demote-before-promote keeps
+  // working across both; only an explicit DEMOTE clears it.
+  const persistedHa = loadPersistedHaState();
+  let activeHaEdgeId: string | null = persistedHa?.activeHaEdgeId ?? null;
+  let activeHaSharedWanMac: string | undefined = persistedHa?.sharedWanMac;
+  let activeHaLanVip: string | undefined = persistedHa?.lanVip;
+  const setActiveHaEdge = (id: string | null, sharedWanMac?: string, lanVip?: string): void => {
+    activeHaEdgeId = id;
+    activeHaSharedWanMac = sharedWanMac;
+    activeHaLanVip = lanVip;
+    persistHaState({ activeHaEdgeId: id, sharedWanMac, lanVip });
+  };
+
+  // B2-M7 follow-up: routes last pushed per satellite, reloaded
+  // from disk (see loadPersistedSyncedRoutes). The record survives
+  // a controller restart, so the first sync after a restart still
+  // deletes routes removed from DesiredState while the controller
+  // was down. Updated (and re-persisted) on every successful
+  // SYNC_ROUTES send below; the in-memory map is authoritative
+  // for this process lifetime.
+  const persistedSyncedRoutes: PersistedSyncedRoutes = loadPersistedSyncedRoutes() ?? {};
+
+  // B-H2b residual: one send path for HA transitions, shared by
+  // the /fleet/ha-transition endpoint and the reconnect re-assert
+  // below so the two cannot drift apart. Returns false when the
+  // socket is not OPEN (a half-open socket's readyState stays OPEN
+  // only until the B2-H2 heartbeat terminates it, so a buffered
+  // send into a dead socket no longer counts as notified).
+  const sendHaTransition = (sat: SatelliteState, type: 'PROMOTE' | 'DEMOTE', role: 'active' | 'standby', sharedWanMac?: string, lanVip?: string): boolean => {
+    // The satellite's EdgeHATransitionPayload reads lanVipV4
+    // (lanVip is kept for backward compatibility with any
+    // consumer that still reads the old field name).
+    return sendToSatellite(sat, type, {
+      role,
+      sharedWanMac,
+      lanVip,
+      lanVipV4: lanVip,
+    }) !== null;
+  };
 
   function loadLocalDesiredState(): DesiredState | null {
     const candidates = ['/etc/axonwall/state.json', '/var/lib/axonwall/state.json'];
@@ -820,10 +1193,12 @@ async function main() {
   // sync of default/empty state. Passing null here used to mean
   // "sync with empty state", which pushed hardcoded default edge
   // config (WAN DHCP, LAN 10.0.0.1/24) to every connected edge.
+  // B2-L2: null is treated like undefined (load from disk), so a
+  // future caller passing null cannot reopen that trap.
   function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null) {
     if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return;
 
-    const localState = desiredState !== undefined ? desiredState : loadLocalDesiredState();
+    const localState = desiredState !== undefined && desiredState !== null ? desiredState : loadLocalDesiredState();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
     // B-M5: role is derived from the fleet node's configured role on
@@ -859,14 +1234,21 @@ async function main() {
     };
 
     const { nftScript } = compileSatelliteNftables(mergedNode);
-    sat.ws.send(
-      JSON.stringify({
-        type: 'SYNC_NFTABLES',
-        payload: {
-          script: nftScript,
-        },
-      }),
-    );
+    // B2-M1: every outbound command carries a commandId so the
+    // satellite's COMMAND_ACK correlates to this send.
+    sendToSatellite(sat, 'SYNC_NFTABLES', { script: nftScript });
+
+    // B2-M8 (SUSPECT, confirmed): with no DesiredState on disk
+    // there is nothing real to push for interfaces/routes — the
+    // old code fell through to hardcoded defaults (WAN DHCP, LAN
+    // 10.0.0.1/24) and reported success. Skip the edge block;
+    // SYNC_NFTABLES above still goes out, compiled from the
+    // satellite's own reported interfaces in mergedNode, not
+    // invented addressing.
+    if (isEdge && localState === null) {
+      console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
+      return;
+    }
 
     if (isEdge) {
       const wanDev = resolvedWanInterface;
@@ -924,12 +1306,7 @@ async function main() {
         }
       }
 
-      sat.ws.send(
-        JSON.stringify({
-          type: 'SYNC_INTERFACES',
-          payload: { interfaces },
-        }),
-      );
+      sendToSatellite(sat, 'SYNC_INTERFACES', { interfaces });
 
       const enabledRoutes = (localState?.routes ?? [])
         .filter((r) => r.enabled)
@@ -938,12 +1315,21 @@ async function main() {
           gateway: r.gateway,
           ...(r.interface ? { device: r.interface } : {}),
         }));
-      sat.ws.send(
-        JSON.stringify({
-          type: 'SYNC_ROUTES',
-          payload: { routes: enabledRoutes },
-        }),
-      );
+      // B2-M7: delete routes that were pushed on an earlier sync
+      // but are no longer in the enabled set. The record is only
+      // updated when the send actually went out (sendToSatellite
+      // returns null on a dead socket); otherwise the next sync
+      // would believe the deletions had landed.
+      const routesToDelete = computeRoutesToDelete(sat.lastSyncedRoutes ?? [], enabledRoutes);
+      if (sendToSatellite(sat, 'SYNC_ROUTES', { routes: enabledRoutes, routesToDelete }) !== null) {
+        sat.lastSyncedRoutes = enabledRoutes;
+        // B2-M7 follow-up: persist the record so a controller
+        // restart still knows what was pushed and can delete routes
+        // removed while it was down. Best-effort disk write; the
+        // in-memory record is authoritative for this lifetime.
+        persistedSyncedRoutes[sat.id] = enabledRoutes;
+        persistSyncedRoutes(persistedSyncedRoutes);
+      }
     }
   }
 
@@ -1048,8 +1434,10 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         res.end(JSON.stringify({ error: 'Fleet management authentication unconfigured' }));
         return false;
       }
-      const isValid = token && token.length === expectedToken.length &&
-        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      // B2-H1: compare byte lengths, never string lengths (see
+      // secureTokenEquals): a multibyte token with the same UTF-16
+      // length as the expected token must be a 401, never a throw.
+      const isValid = secureTokenEquals(token, expectedToken);
       if (!isValid) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized: Valid X-Axonwall-ZTP-Token required' }));
@@ -1226,25 +1614,6 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           const lanVip = validation.lanVip;
           const targetId = validation.satelliteId || '';
 
-          const sendTransition = (sat: SatelliteState, type: 'PROMOTE' | 'DEMOTE', role: 'active' | 'standby'): boolean => {
-            if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return false;
-            // The satellite's EdgeHATransitionPayload reads lanVipV4
-            // (lanVip is kept for backward compatibility with any
-            // consumer that still reads the old field name).
-            sat.ws.send(
-              JSON.stringify({
-                type,
-                payload: {
-                  role,
-                  sharedWanMac,
-                  lanVip,
-                  lanVipV4: lanVip,
-                },
-              }),
-            );
-            return true;
-          };
-
           // B-M6: a named target that matches no connected satellite
           // must not report success with zero notified.
           if (targetId) {
@@ -1257,14 +1626,16 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
             let demoted = 0;
             // B-H2b: demote the previously active edge before
             // promoting the new one, so two edges never hold the
-            // same VIP / shared WAN MAC at once.
+            // same VIP / shared WAN MAC at once. The previous edge
+            // is the persisted record, so this works across a
+            // controller restart and an active-edge flap.
             if (msgType === 'PROMOTE' && activeHaEdgeId && activeHaEdgeId !== targetId) {
               const previous = activeSatellites.get(activeHaEdgeId);
-              if (previous && sendTransition(previous, 'DEMOTE', 'standby')) demoted++;
+              if (previous && sendHaTransition(previous, 'DEMOTE', 'standby', sharedWanMac, lanVip)) demoted++;
             }
-            const notified = sendTransition(target, msgType, normalizedRole) ? 1 : 0;
-            if (msgType === 'PROMOTE' && notified === 1) activeHaEdgeId = targetId;
-            if (msgType === 'DEMOTE' && activeHaEdgeId === targetId) activeHaEdgeId = null;
+            const notified = sendHaTransition(target, msgType, normalizedRole, sharedWanMac, lanVip) ? 1 : 0;
+            if (msgType === 'PROMOTE' && notified === 1) setActiveHaEdge(targetId, sharedWanMac, lanVip);
+            if (msgType === 'DEMOTE' && activeHaEdgeId === targetId) setActiveHaEdge(null);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified, demotedEdges: demoted }));
             return;
@@ -1273,12 +1644,17 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           // Untargeted DEMOTE is the safe direction (stand down all
           // edges); untargeted PROMOTE is unreachable here because
           // validation requires a satelliteId for PROMOTE.
+          // B2-L1: match on the derived role only. The id prefix is
+          // a fallback inside deriveSatelliteRole, not a role: a
+          // node configured as 'satellite' but named 'edge-*' must
+          // never receive DEMOTE (the satellite's Demote admin-downs
+          // its WAN, which for a plain satellite is its uplink).
           let notified = 0;
           for (const sat of activeSatellites.values()) {
-            const isTarget = sat.role === 'edge-ngfw' || sat.id.startsWith('edge-') || sat.id === 'edge';
-            if (isTarget && sendTransition(sat, msgType, normalizedRole)) notified++;
+            const isTarget = sat.role === 'edge-ngfw';
+            if (isTarget && sendHaTransition(sat, msgType, normalizedRole, sharedWanMac, lanVip)) notified++;
           }
-          if (msgType === 'DEMOTE') activeHaEdgeId = null;
+          if (msgType === 'DEMOTE') setActiveHaEdge(null);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified }));
         } catch {
@@ -1315,6 +1691,15 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
           return;
         }
         const desired = validation.desired;
+        // B2-M8: fail closed when there is no DesiredState
+        // anywhere — neither in the request nor on disk. The old
+        // code synced hardcoded defaults to every connected
+        // satellite and reported success.
+        if (shouldRefuseFleetSync(desired, loadLocalDesiredState())) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'No DesiredState on disk (/etc/axonwall/state.json) and none was supplied in the request; refusing to sync defaults' }));
+          return;
+        }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
           if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
@@ -1415,11 +1800,9 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
               onFleetBroadcastBlock: (targetIp: string) => {
                 let notified = 0;
                 for (const sat of activeSatellites.values()) {
-                  if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
-                    sat.ws.send(JSON.stringify({
-                      type: 'BLOCK_TARGET',
-                      payload: { target: targetIp, isMac: false },
-                    }));
+                  // B2-M1: stamp a commandId so the satellite's
+                  // COMMAND_ACK correlates to this block send.
+                  if (sendToSatellite(sat, 'BLOCK_TARGET', { target: targetIp, isMac: false }) !== null) {
                     notified++;
                   }
                 }
@@ -1608,8 +1991,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         return;
       }
 
-      const isTokenValid = token.length === expectedToken.length &&
-        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      // B2-H1: compare byte lengths, never string lengths (see
+      // secureTokenEquals): a multibyte token with the same UTF-16
+      // length as the expected token must be a 401, never a throw.
+      const isTokenValid = secureTokenEquals(token, expectedToken);
 
       if (!isTokenValid) {
         console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
@@ -1695,7 +2080,23 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         },
       });
 
+      // B2-L7: same 30 s timeout + destroy discipline as the HTTP
+      // proxy path. Without it a UI that accepts the upgrade TCP
+      // connection but never answers 101 leaves a hung client socket
+      // (and a hung upstream socket) on the controller indefinitely.
+      let wsProxyTimedOut = false;
+      const destroyWsUpstream = () => {
+        try { uiWsReq.destroy(); } catch {}
+      };
+      uiWsReq.setTimeout(30000, () => {
+        wsProxyTimedOut = true;
+        destroyWsUpstream();
+        try { socket.destroy(); } catch {}
+      });
+      socket.on('close', destroyWsUpstream);
+
       uiWsReq.on('upgrade', (uiRes, uiSocket, uiHead) => {
+        uiWsReq.setTimeout(0);
         const headerLines: string[] = [];
         for (let i = 0; i < uiRes.rawHeaders.length; i += 2) {
           headerLines.push(`${uiRes.rawHeaders[i]}: ${uiRes.rawHeaders[i + 1]}`);
@@ -1711,11 +2112,15 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
       // Upstream refused the upgrade (e.g. 404): don't leave the client socket hanging
       uiWsReq.on('response', (uiRes) => {
+        uiWsReq.setTimeout(0);
         socket.end(`HTTP/1.1 ${uiRes.statusCode || 502} ${uiRes.statusMessage || 'Bad Gateway'}\r\n\r\n`);
         uiRes.resume();
       });
 
       uiWsReq.on('error', () => {
+        // The timeout path above already destroyed the client socket;
+        // do not double-handle it.
+        if (wsProxyTimedOut) return;
         socket.destroy();
       });
 
@@ -1773,6 +2178,57 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     }
   }, 60 * 1000);
   meshPruneTimer.unref?.();
+
+  // B2-H2: WS ping/pong heartbeat plus a lastSeen sweep. The
+  // controller used to never probe satellite sockets: no ping/pong,
+  // no TCP keepalive, no lastSeen sweep, and the prune timer above
+  // only deletes entries with no socket at all. A half-open socket
+  // keeps `ws` set and `readyState === OPEN`, so a dead satellite
+  // was broadcast as a live WireGuard peer forever and HA
+  // transitions "sent" to it reported success. Every 30 s each
+  // connected socket is pinged; a socket that misses two pongs, or
+  // whose lastSeen is stale past the grace period, is terminated so
+  // the close handler clears it. The grace period is deliberately
+  // far above the satellite's 15 s telemetry cadence so a live
+  // socket is never killed for one slow interval.
+  const heartbeatTimer = setInterval(() => {
+    const now = Date.now();
+    // B2-M1: drop outbound commands whose COMMAND_ACK never
+    // arrived (a satellite too old to ack, or an ack lost with a
+    // dead socket) instead of leaking the entry forever.
+    for (const [commandId, pending] of pendingCommands.entries()) {
+      if (isPendingCommandStale(pending.sentAt, now)) {
+        pendingCommands.delete(commandId);
+        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1000)}s ago`);
+      }
+    }
+    for (const [id, sat] of activeSatellites.entries()) {
+      const socket = sat.ws;
+      if (!socket) continue;
+      const lastSeenMs = Date.parse(sat.lastSeen) || 0;
+      if (now - lastSeenMs > SATELLITE_LAST_SEEN_GRACE_MS) {
+        console.log(`[Fleet Manager] Terminating stale satellite socket ${id}: no message for ${Math.round((now - lastSeenMs) / 1000)}s`);
+        try { socket.terminate(); } catch {}
+        continue;
+      }
+      if ((socket as any).isAlive === false) {
+        console.log(`[Fleet Manager] Terminating satellite socket ${id}: missed heartbeat pong`);
+        try { socket.terminate(); } catch {}
+        continue;
+      }
+      (socket as any).isAlive = false;
+      try {
+        socket.ping((err: any) => {
+          if (err) {
+            try { socket.terminate(); } catch {}
+          }
+        });
+      } catch {
+        try { socket.terminate(); } catch {}
+      }
+    }
+  }, SATELLITE_HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
 
   wss.on('connection', async (ws: WebSocket, request: http.IncomingMessage, satId: string) => {
     const remoteIp = request.socket.remoteAddress || '127.0.0.1';
@@ -1835,8 +2291,31 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       wireguard: { tunnelIp },
       ws: ws,
       headscaleEnrolled: existing?.headscaleEnrolled || false,
+      // B2-M7 follow-up: seed from the persisted synced-routes
+      // file when there is no live previous entry — i.e. after a
+      // controller restart — so the first sync still deletes routes
+      // removed while the controller was down.
+      lastSyncedRoutes: existing?.lastSyncedRoutes ?? (persistedSyncedRoutes[satId] ? [...persistedSyncedRoutes[satId]] : undefined),
     };
     activeSatellites.set(satId, state);
+
+    // B-H4 residual: the slow re-check timer for this socket (see
+    // the provisioning section below). Declared here so the close
+    // handler can clear it.
+    let headscaleRecheckTimer: NodeJS.Timeout | null = null;
+
+    // B2-H2: liveness probes for this socket. TCP keepalive catches
+    // a dead peer at the transport layer; the ws ping/pong pair (the
+    // heartbeat timer above) catches a peer that holds the socket
+    // open without answering. The error listener exists so a socket
+    // error surfaces as a close, not an unhandled 'error' throw.
+    try { (ws as any)._socket?.setKeepAlive?.(true, 30000); } catch {}
+    (ws as any).isAlive = true;
+    ws.on('pong', () => {
+      (ws as any).isAlive = true;
+      state.lastSeen = new Date().toISOString();
+    });
+    ws.on('error', () => {});
 
     // Register event listeners immediately before any async provisioning
     ws.on('message', (message) => {
@@ -1850,6 +2329,29 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           // headscaleEnrolled flag would otherwise never re-send
           // credentials). Runs even when the flag is latched.
           void requestHeadscaleProvision();
+        } else if (parsed.type === 'COMMAND_ACK') {
+          // B2-M1: the satellite acks every acted-on command
+          // (success or failure). These used to fall through the
+          // handler unexamined, so /fleet/sync, the HA endpoint
+          // and /fleet/block counted a ws.send as success while
+          // the satellite had failed the apply and said so.
+          // Correlate by commandId, record the outcome, and
+          // surface the last failure in /fleet/satellites.
+          let ack: any = parsed.payload;
+          if (typeof ack === 'string') {
+            try { ack = JSON.parse(ack); } catch { ack = null; }
+          }
+          if (ack && typeof ack === 'object') {
+            const commandId = typeof ack.commandId === 'string' ? ack.commandId : undefined;
+            if (commandId) pendingCommands.delete(commandId);
+            const command = typeof ack.command === 'string' ? ack.command : 'unknown';
+            const success = ack.success === true;
+            const error = typeof ack.error === 'string' ? ack.error : undefined;
+            recordCommandAck(state, { command, commandId, success, error });
+            if (!success) {
+              console.error(`[Fleet Manager] Satellite ${satId} failed ${command}${commandId ? ` (${commandId})` : ''}: ${error || 'failed'}`);
+            }
+          }
         } else if (parsed.type === 'TELEMETRY_REPORT') {
           let report: any;
           if (typeof parsed.payload === 'string') {
@@ -1865,6 +2367,33 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           // send PING for a well-formed report.
           if (!report || typeof report !== 'object') {
             return;
+          }
+          // B2-M1: the telemetry fallback for the last hub-command
+          // failure (A-M9): the satellite reports it every 15 s,
+          // so a COMMAND_ACK lost with a dead socket still surfaces
+          // here instead of the failure staying local to the edge.
+          if (typeof report.lastApplyError === 'string') {
+            if (report.lastApplyError) state.lastApplyError = report.lastApplyError;
+            else if (state.lastApplyError) delete state.lastApplyError;
+          }
+          // B-H4 residual: do not trust the latched enrolled flag
+          // alone. The satellite reports its live Headscale
+          // enrollment in every telemetry report (absent on old
+          // satellites, which is ignored): a reconnected satellite
+          // that was wiped/reimaged reports false here, which
+          // clears the latched true and re-provisions it, and a
+          // true report is positive evidence the node is enrolled.
+          // The in-flight/timer guards keep a 15 s telemetry
+          // cadence from restarting the bounded backoff run on
+          // every report while a retry is already scheduled.
+          if (typeof report.headscaleEnrolled === 'boolean') {
+            if (report.headscaleEnrolled === false && state.headscaleEnrolled) {
+              console.log(`[Fleet Manager] Satellite ${satId} reports no Headscale identity; re-provisioning despite the latched enrolled flag`);
+              state.headscaleEnrolled = false;
+              if (!headscaleProvisioning && !headscaleRecheckTimer) void requestHeadscaleProvision();
+            } else if (report.headscaleEnrolled === true) {
+              state.headscaleEnrolled = true;
+            }
           }
           if (report.metrics) {
             state.metrics = report.metrics;
@@ -1930,6 +2459,13 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
     ws.on('close', () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
+      // B-H4 residual: a disconnect cancels the slow re-check for
+      // this socket; the next connect starts a fresh provisioning
+      // run instead.
+      if (headscaleRecheckTimer) {
+        clearTimeout(headscaleRecheckTimer);
+        headscaleRecheckTimer = null;
+      }
       const current = activeSatellites.get(satId);
       if (current?.ws === ws) {
         satUptimeGauge.remove({ satellite_id: satId });
@@ -1947,7 +2483,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         current.ws = undefined;
         // B-M2: timestamp the disconnect for grace-period pruning.
         current.disconnectedAt = new Date().toISOString();
-        if (activeHaEdgeId === satId) activeHaEdgeId = null;
+        // B-H2b residual: a disconnect deliberately does NOT clear
+        // the recorded active edge. The edge keeps its kernel HA
+        // state (LAN VIP, shared WAN MAC) across a network flap, so
+        // forgetting it here is what let the next promote skip the
+        // demote and create a dual-active split-brain. Only an
+        // explicit DEMOTE clears the record.
         broadcastMeshTopology();
       }
     });
@@ -1965,12 +2506,30 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       createPreAuthKey,
       serverUrl: process.env.HEADSCALE_EXTERNAL_URL || 'https://hub.axonwall.local',
       send: (msg) => {
-        if (ws.readyState !== WebSocket.OPEN) throw new Error('satellite socket closed before SYNC_HEADSCALE could be sent');
-        ws.send(JSON.stringify(msg));
+        // B2-M1: stamp a commandId so the satellite's COMMAND_ACK
+        // for the SYNC_HEADSCALE correlates to this send.
+        const m = msg as { type: string; payload: unknown };
+        if (!sendToSatellite(state, m.type, m.payload)) {
+          throw new Error('satellite socket closed before SYNC_HEADSCALE could be sent');
+        }
       },
       isOpen: () => ws.readyState === WebSocket.OPEN,
     });
     let headscaleProvisioning: Promise<boolean> | null = null;
+    const scheduleHeadscaleRecheck = (): void => {
+      // B-H4 residual: the bounded backoff above exhausts after
+      // ~110 s, and then nothing retried on this socket even after
+      // Headscale recovered. Keep a slow re-check until the
+      // satellite is enrolled or the socket closes.
+      if (headscaleRecheckTimer) return;
+      headscaleRecheckTimer = setTimeout(() => {
+        headscaleRecheckTimer = null;
+        if (ws.readyState === WebSocket.OPEN && !state.headscaleEnrolled) {
+          void requestHeadscaleProvision();
+        }
+      }, HEADSCALE_RECHECK_MS);
+      headscaleRecheckTimer.unref?.();
+    };
     const requestHeadscaleProvision = (): Promise<boolean> => {
       if (headscaleProvisioning) return headscaleProvisioning;
       headscaleProvisioning = provisionHeadscale().then((ok) => {
@@ -1979,7 +2538,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         state.headscaleEnrolled = ok;
         headscaleProvisioning = null;
         if (ok) console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
-        else console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect or on a REQUEST_HEADSCALE message`);
+        else {
+          console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect, on a REQUEST_HEADSCALE message, or on the slow re-check`);
+          scheduleHeadscaleRecheck();
+        }
         return ok;
       });
       return headscaleProvisioning;
@@ -1991,6 +2553,25 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     // 2. Push initial compiled nftables ruleset (and SYNC_INTERFACES / SYNC_ROUTES for edge-ngfw)
     if (ws.readyState === WebSocket.OPEN) {
       syncSatelliteDesiredState(state);
+    }
+
+    // 2b. B-H2b residual: re-assert HA state on (re)connect. The
+    // recorded active edge keeps its kernel VIP/MAC across a flap
+    // and the controller may have restarted since it was promoted,
+    // so re-send the recorded promotion to it; demote any other
+    // edge that reconnects while a different edge is recorded
+    // active, since it may still hold a stale VIP from being
+    // superseded while it was disconnected. A DEMOTE to an edge
+    // that was never promoted is a harmless standby no-op.
+    if (activeHaEdgeId === satId) {
+      const vip = activeHaLanVip || loadLocalDesiredState()?.hostedEdge?.lan?.edgeAddress;
+      if (vip) {
+        sendHaTransition(state, 'PROMOTE', 'active', activeHaSharedWanMac, vip);
+      } else {
+        console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
+      }
+    } else if (activeHaEdgeId && (state.role === 'edge-ngfw' || satId.startsWith('edge-') || satId === 'edge')) {
+      sendHaTransition(state, 'DEMOTE', 'standby');
     }
 
     // 3. Broadcast mesh update to all satellites (including the new one)

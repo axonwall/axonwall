@@ -55,6 +55,164 @@ func blackholeReq() McpBlackholeReq {
 	}
 }
 
+// installFakeBinary prepends a directory containing a fake executable of the
+// given name to PATH and returns the path of the file the fake appends its
+// arguments to. The fake exits with the given status, so tests do not depend
+// on the sandbox's real tc/ip binaries or kernel.
+func installFakeBinary(t *testing.T, name string, exitCode int) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, name+"-args.log")
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"" + logPath + "\"\n" +
+		"exit " + string(rune('0'+exitCode)) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
+		t.Fatalf("Failed to write fake %s: %v", name, err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	return logPath
+}
+
+func shapeReq() McpShapeReq {
+	return McpShapeReq{
+		Target:           "198.51.100.20",
+		Interface:        "lo",
+		Direction:        "both",
+		RateKbps:         1024,
+		CeilKbps:         2048,
+		TTLSeconds:       3600,
+		CallerIP:         "10.42.1.25",
+		MaxIPv4PrefixLen: 24,
+		MaxIPv6PrefixLen: 64,
+		KeyID:            "test-key",
+		KeyName:          "test-agent",
+	}
+}
+
+func redirectReq() McpRedirectReq {
+	return McpRedirectReq{
+		Source:            "198.51.100.30",
+		TargetDestination: "198.51.100.99",
+		RedirectType:      "policy_route",
+		Protocol:          "tcp",
+		TTLSeconds:        3600,
+		CallerIP:          "10.42.1.25",
+		MaxIPv4PrefixLen:  24,
+		MaxIPv6PrefixLen:  64,
+		KeyID:             "test-key",
+		KeyName:           "test-agent",
+	}
+}
+
+// A-H3: when a tc command fails, shape-lease creation must fail and the
+// lease must not be stored, persisted, or listed as active.
+func TestMcpShapeCreationFailsWhenTcFails(t *testing.T) {
+	installFakeNft(t, 0)
+	tcLog := installFakeBinary(t, "tc", 1)
+	mgr := newTestTrafficManager(t)
+
+	lease, err := mgr.ShapeTraffic(shapeReq())
+	if err == nil {
+		t.Fatalf("expected ShapeTraffic to fail when tc fails, got lease %+v", lease)
+	}
+	if len(mgr.leases) != 0 {
+		t.Fatalf("expected no stored lease after tc failure, got %d", len(mgr.leases))
+	}
+	if _, statErr := os.Stat(tcLog); statErr != nil {
+		t.Fatalf("expected tc to be invoked, no log at %s: %v", tcLog, statErr)
+	}
+}
+
+// A-H3: the success path still stores the lease when tc and nft succeed.
+func TestMcpShapeCreationSucceedsWhenTcSucceeds(t *testing.T) {
+	installFakeNft(t, 0)
+	tcLog := installFakeBinary(t, "tc", 0)
+	mgr := newTestTrafficManager(t)
+
+	lease, err := mgr.ShapeTraffic(shapeReq())
+	if err != nil {
+		t.Fatalf("ShapeTraffic failed with working tc: %v", err)
+	}
+	if lease == nil || lease.Kind != "shape" {
+		t.Fatalf("expected a shape lease, got %+v", lease)
+	}
+	if len(mgr.leases) != 1 {
+		t.Fatalf("expected 1 stored lease, got %d", len(mgr.leases))
+	}
+	if _, statErr := os.Stat(tcLog); statErr != nil {
+		t.Fatalf("expected tc to be invoked, no log at %s: %v", tcLog, statErr)
+	}
+}
+
+// A-H3: a shape lease for an interface that does not resolve to a live
+// device must fail before any tc command runs.
+func TestMcpShapeRejectsUnknownInterface(t *testing.T) {
+	installFakeNft(t, 0)
+	tcLog := installFakeBinary(t, "tc", 0)
+	mgr := newTestTrafficManager(t)
+
+	req := shapeReq()
+	req.Interface = "nonexistent99"
+	if _, err := mgr.ShapeTraffic(req); err == nil {
+		t.Fatalf("expected ShapeTraffic to fail for an unresolvable interface")
+	}
+	if _, statErr := os.Stat(tcLog); statErr == nil {
+		t.Fatalf("expected tc NOT to be invoked for an unresolvable interface")
+	}
+}
+
+// A-H3: unvalidated shape parameters that make `tc netem` fail must be
+// rejected up front instead of producing a lease that shapes nothing.
+func TestMcpShapeRejectsInvalidNetemParams(t *testing.T) {
+	mgr := newTestTrafficManager(t)
+
+	req := shapeReq()
+	req.PacketLossPercent = 101
+	if _, err := mgr.ShapeTraffic(req); err == nil {
+		t.Errorf("expected ShapeTraffic to reject packetLossPercent > 100")
+	}
+	req = shapeReq()
+	req.LatencyMs = 100
+	req.JitterMs = 200
+	if _, err := mgr.ShapeTraffic(req); err == nil {
+		t.Errorf("expected ShapeTraffic to reject jitterMs > latencyMs")
+	}
+}
+
+// A-H3: when an ip command fails, policy-route redirect creation must fail
+// and the lease must not be stored.
+func TestMcpRedirectPolicyRouteFailsWhenIpFails(t *testing.T) {
+	installFakeNft(t, 0)
+	installFakeBinary(t, "ip", 1)
+	mgr := newTestTrafficManager(t)
+
+	lease, err := mgr.RedirectTraffic(redirectReq())
+	if err == nil {
+		t.Fatalf("expected RedirectTraffic to fail when ip fails, got lease %+v", lease)
+	}
+	if len(mgr.leases) != 0 {
+		t.Fatalf("expected no stored lease after ip failure, got %d", len(mgr.leases))
+	}
+}
+
+// A-H3: the success path still stores the lease when ip and nft succeed.
+func TestMcpRedirectPolicyRouteSucceedsWhenIpSucceeds(t *testing.T) {
+	installFakeNft(t, 0)
+	installFakeBinary(t, "ip", 0)
+	mgr := newTestTrafficManager(t)
+
+	lease, err := mgr.RedirectTraffic(redirectReq())
+	if err != nil {
+		t.Fatalf("RedirectTraffic failed with working ip: %v", err)
+	}
+	if lease == nil || lease.Kind != "redirect" {
+		t.Fatalf("expected a redirect lease, got %+v", lease)
+	}
+	if len(mgr.leases) != 1 {
+		t.Fatalf("expected 1 stored lease, got %d", len(mgr.leases))
+	}
+}
+
 // A-M13: when the nftables apply fails, lease creation must fail and the
 // lease must not be stored, persisted, or listed as active.
 func TestMcpBlackholeCreationFailsWhenNftApplyFails(t *testing.T) {
@@ -128,10 +286,18 @@ func TestMcpRevertFailsWhenNftApplyFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected RevertLease to fail when nft fails; got nil (pre-fix success lie)")
 	}
+	// M8: the record must survive a failed rebuild — the lease stays
+	// listed and revertable instead of vanishing while the kernel may
+	// still enforce it.
+	if got := len(mgr.ListLeases()); got != 1 {
+		t.Errorf("Expected the lease to still be listed after a failed revert, got %d listed", got)
+	}
 }
 
-// A-M13: flush must report failure (with the cleared count) when the
-// kernel rebuild fails, not success with a cleared count.
+// A-M13: flush must report failure when the kernel rebuild fails.
+// M8: on failure nothing is cleared — the records are kept so the
+// leases stay listed and revertable instead of vanishing while the
+// kernel may still enforce them.
 func TestMcpFlushFailsWhenNftApplyFails(t *testing.T) {
 	installFakeNft(t, 1)
 	mgr := newTestTrafficManager(t)
@@ -151,7 +317,10 @@ func TestMcpFlushFailsWhenNftApplyFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected FlushAllLeases to fail when nft fails; got nil (pre-fix success lie)")
 	}
-	if cleared != 2 {
-		t.Errorf("Expected cleared count 2 alongside the error, got %d", cleared)
+	if cleared != 0 {
+		t.Errorf("Expected cleared count 0 alongside the error (nothing was cleared), got %d", cleared)
+	}
+	if got := len(mgr.ListLeases()); got != 2 {
+		t.Errorf("Expected both leases to still be listed after a failed flush, got %d", got)
 	}
 }

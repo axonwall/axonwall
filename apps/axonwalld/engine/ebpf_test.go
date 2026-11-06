@@ -7,6 +7,40 @@ import (
 	"time"
 )
 
+func TestEBPF_StopWithoutStartDoesNotDeadlock(t *testing.T) {
+	// A-M23 (round 2, regression in 29c6eda): Start() returns early when
+	// the eBPF objects fail to load, before the monitor goroutine starts,
+	// so doneChan is never closed — and Stop() used to wait on it
+	// forever, wedging daemon shutdown. The same applies when Start()
+	// was never called at all.
+	for _, tc := range []struct {
+		name  string
+		setup func(*EBPFManager)
+	}{
+		{"never started", func(*EBPFManager) {}},
+		{"start attempted", func(m *EBPFManager) {
+			// Whether Start succeeds (monitor running) or fails early
+			// (no monitor), Stop must return promptly either way.
+			_ = m.Start(nil)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewEBPFManager()
+			tc.setup(mgr)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				mgr.Stop()
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Stop() blocked for 5s: deadlock (doneChan never closed)")
+			}
+		})
+	}
+}
+
 func TestEBPF_PortByteOrderAndReturnTrafficFilter(t *testing.T) {
 	// In flow_tracker.c, tcp->source and dest are copied directly in network byte order (Big Endian)
 	// On Little Endian architectures (x86_64, arm64 LE), port 80 (0x0050) is stored in memory as:

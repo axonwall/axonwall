@@ -14357,7 +14357,7 @@ var require_websocket = __commonJS({
     var http3 = __require("http");
     var net2 = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes3, createHash: createHash5 } = __require("crypto");
+    var { randomBytes: randomBytes4, createHash: createHash5 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -14908,7 +14908,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes3(16).toString("base64");
+      const key = randomBytes4(16).toString("base64");
       const request3 = isSecure ? https2.request : http3.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -43286,6 +43286,11 @@ import * as path3 from "node:path";
 // src/mcp/lockfile.ts
 import * as fs3 from "node:fs";
 import * as path2 from "node:path";
+function desiredStateLockPath() {
+  const override = process.env.AXONWALL_DESIRED_STATE_LOCK_PATH;
+  if (override) return override;
+  return fs3.existsSync("/etc/axonwall") ? "/etc/axonwall/state.json.lock" : "/var/lib/axonwall/state.json.lock";
+}
 function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
   const deadline = Date.now() + timeoutMs;
   const staleThresholdMs = Math.min(Math.max(1e3, timeoutMs - 500), 1e4);
@@ -43868,6 +43873,22 @@ function readAgentToken() {
   }
   return "";
 }
+function newMcpApplyJobId() {
+  return `mcp_apply_${Date.now()}_${crypto4.randomBytes(4).toString("hex")}`;
+}
+function insertMcpRuleIntoState(targetState, rule) {
+  const isBlockOrReject = rule.action === "block" || rule.action === "reject";
+  if (isBlockOrReject) {
+    const firstPassIdx = targetState.rules.findIndex((r) => r.action === "pass");
+    if (firstPassIdx !== -1) {
+      targetState.rules.splice(firstPassIdx, 0, rule);
+    } else {
+      targetState.rules.push(rule);
+    }
+  } else {
+    targetState.rules.push(rule);
+  }
+}
 async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
   if (!fs6.existsSync(AGENT_SOCKET_PATH)) {
     return {
@@ -44241,7 +44262,7 @@ var MCP_TOOLS_CATALOG = [
   },
   {
     name: "mcp_propose_firewall_rule",
-    description: "Stage a persistent declarative firewall rule into DesiredState, and optionally apply it with mandatory Commit-Confirm automatic rollback protection. Requires mcp:firewall:write (and mcp:firewall:apply if applyImmediately=true).",
+    description: "Stage a persistent declarative firewall rule into DesiredState, and optionally apply it with mandatory Commit-Confirm automatic rollback protection. Requires mcp:firewall:write (and mcp:firewall:apply if applyImmediately=true). When applied, the response returns the jobId: confirm it with mcp_confirm_apply before the commit-confirm window expires or the daemon auto-rolls the ruleset back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -44263,6 +44284,18 @@ var MCP_TOOLS_CATALOG = [
         }
       },
       required: ["rule", "audit"]
+    }
+  },
+  {
+    name: "mcp_confirm_apply",
+    description: "Confirm a firewall rule apply that was applied with Commit-Confirm protection (mcp_propose_firewall_rule with applyImmediately=true), promoting it to last-known-good so the daemon does not auto-roll it back. Pass the jobId returned by the propose call. Requires mcp:firewall:apply.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        jobId: { type: "string", description: "The jobId returned by mcp_propose_firewall_rule when the rule was applied" },
+        reason: { type: "string", description: "Optional reason for confirming the apply" }
+      },
+      required: ["jobId"]
     }
   }
 ];
@@ -44308,7 +44341,11 @@ async function handleMcpReadResource(uri, env) {
       const statusRes = await callAxonwalldApi("GET", "/v1/status");
       payload = {
         interfaces: statusRes.ok ? statusRes.data?.interfaces ?? [] : [],
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        // B2-M3: daemon-down must not collapse to an empty list
+        // with no signal — an empty list reads as "no interfaces",
+        // not "daemon unreachable".
+        ...!statusRes.ok ? { daemonDown: true, error: statusRes.data?.error || "axonwalld unreachable" } : {}
       };
       break;
     }
@@ -44331,16 +44368,12 @@ async function handleMcpReadResource(uri, env) {
     }
     case "axonwall://telemetry/flows/top": {
       const flowsRes = await callAxonwalldApi("GET", "/v1/mcp/flows?limit=50");
-      payload = {
-        flows: flowsRes.ok ? flowsRes.data?.flows ?? [] : []
-      };
+      payload = flowsRes.ok ? { flows: flowsRes.data?.flows ?? [] } : { flows: [], daemonDown: true, error: flowsRes.data?.error || "axonwalld unreachable" };
       break;
     }
     case "axonwall://firewall/tactical-leases": {
       const leasesRes = await callAxonwalldApi("GET", "/v1/mcp/leases");
-      payload = {
-        leases: leasesRes.ok ? leasesRes.data?.leases ?? [] : []
-      };
+      payload = leasesRes.ok ? { leases: leasesRes.data?.leases ?? [] } : { leases: [], daemonDown: true, error: leasesRes.data?.error || "axonwalld unreachable" };
       break;
     }
     case "axonwall://firewall/ruleset-summary": {
@@ -44362,9 +44395,14 @@ async function handleMcpReadResource(uri, env) {
     case "axonwall://topology/nastymap": {
       const arpRes = await callAxonwalldApi("GET", "/v1/arp");
       const leasesRes = await callAxonwalldApi("GET", "/v1/leases");
+      const daemonErrors = [
+        ...!arpRes.ok ? [`ARP table: ${arpRes.data?.error || "axonwalld unreachable"}`] : [],
+        ...!leasesRes.ok ? [`DHCP leases: ${leasesRes.data?.error || "axonwalld unreachable"}`] : []
+      ];
       payload = {
         arpTable: arpRes.ok ? arpRes.data : [],
-        dhcpLeases: leasesRes.ok ? leasesRes.data : []
+        dhcpLeases: leasesRes.ok ? leasesRes.data : [],
+        ...daemonErrors.length ? { daemonDown: true, error: daemonErrors.join("; ") } : {}
       };
       break;
     }
@@ -44500,7 +44538,11 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
             text: JSON.stringify(
               {
                 suricataAlerts: matchingAlerts,
-                activeMcpLeases: leasesRes.ok ? leasesRes.data?.leases ?? [] : []
+                activeMcpLeases: leasesRes.ok ? leasesRes.data?.leases ?? [] : [],
+                // B2-M3: zero leases while axonwalld is down is not
+                // "no leases active" — the kernel may still be
+                // enforcing leases from before the daemon died.
+                ...!leasesRes.ok ? { daemonDown: true, error: leasesRes.data?.error || "axonwalld unreachable" } : {}
               },
               null,
               2
@@ -45098,17 +45140,6 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           }
         }
       }
-      const previousRules = [...state.rules];
-      if (isBlockOrReject) {
-        const firstPassIdx = state.rules.findIndex((r) => r.action === "pass");
-        if (firstPassIdx !== -1) {
-          state.rules.splice(firstPassIdx, 0, req.rule);
-        } else {
-          state.rules.push(req.rule);
-        }
-      } else {
-        state.rules.push(req.rule);
-      }
       const persistDesiredState = (targetState) => {
         try {
           fs6.writeFileSync("/etc/axonwall/state.json", JSON.stringify(targetState, null, 2), { mode: 384 });
@@ -45130,28 +45161,67 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         } catch {
         }
       };
-      persistDesiredState(state);
+      let liveState = state;
+      let releaseStateLock = null;
+      try {
+        try {
+          releaseStateLock = acquireMcpLockFile(desiredStateLockPath());
+        } catch (err) {
+          return deny("mcp:firewall:write", `Could not lock DesiredState for the rule update (${err?.message || err}); retry the propose`, req.audit);
+        }
+        const fresh = loadLocalDesiredState();
+        if (!fresh) {
+          return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
+        }
+        insertMcpRuleIntoState(fresh, req.rule);
+        persistDesiredState(fresh);
+        liveState = fresh;
+      } finally {
+        releaseStateLock?.();
+      }
       let applyStatus = "staged_only";
+      let applyJobId;
       if (req.applyImmediately) {
-        const compiled = compileNftables(state);
+        const compiled = compileNftables(liveState);
         const hashInput = JSON.stringify({
           nftScript: compiled.nftScript,
           files: [...compiled.files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
           reloadServices: [...compiled.reloadServices].sort()
         });
+        applyJobId = newMcpApplyJobId();
         const applyRes = await callAxonwalldApi("POST", "/v1/apply", {
           nftScript: compiled.nftScript,
           confirmTimeoutSeconds: req.confirmTimeoutSeconds,
           files: compiled.files,
-          jobId: `mcp_apply_${Date.now()}`,
+          jobId: applyJobId,
           bundleHash: crypto4.createHash("sha256").update(hashInput).digest("hex"),
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds
         });
         if (!applyRes.ok) {
-          state.rules = previousRules;
-          persistDesiredState(state);
+          const stagedRuleJson = JSON.stringify(req.rule);
+          let releaseRollbackLock = null;
+          try {
+            try {
+              releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+            } catch {
+              console.error("[MCP] Could not lock DesiredState to roll back a rejected staged rule; the staged rule remains on disk");
+              releaseRollbackLock = null;
+            }
+            if (releaseRollbackLock) {
+              const fresh = loadLocalDesiredState();
+              if (fresh) {
+                const idx = fresh.rules.findIndex((r) => JSON.stringify(r) === stagedRuleJson);
+                if (idx !== -1) {
+                  fresh.rules.splice(idx, 1);
+                  persistDesiredState(fresh);
+                }
+              }
+            }
+          } finally {
+            releaseRollbackLock?.();
+          }
           return deny(
             "mcp:firewall:apply",
             applyRes.data?.error || "Daemon rejected ruleset apply; rolled back staged rule",
@@ -45186,8 +45256,54 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 success: true,
                 rule: req.rule,
                 applyStatus,
-                commitConfirmNotice: req.applyImmediately ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection.` : "Rule staged in DesiredState.",
+                ...applyJobId ? { jobId: applyJobId } : {},
+                commitConfirmNotice: req.applyImmediately ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection. Confirm it with mcp_confirm_apply and jobId "${applyJobId}" before the window expires or the daemon auto-rolls the ruleset back.` : "Rule staged in DesiredState.",
                 auditEntryHash: auditEntry.entryHash
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+    case "mcp_confirm_apply": {
+      const applyErr = requireScope("mcp:firewall:apply");
+      if (applyErr) return applyErr;
+      const jobId = typeof args.jobId === "string" ? args.jobId.trim() : "";
+      if (!jobId) {
+        return deny("mcp:firewall:apply", "jobId is required: pass the jobId returned by mcp_propose_firewall_rule when the rule was applied");
+      }
+      const confirmRes = await callAxonwalldApi("POST", "/v1/confirm", { jobId });
+      if (!confirmRes.ok) {
+        return deny(
+          "mcp:firewall:apply",
+          `Daemon unreachable: could not confirm the apply; the ruleset may auto-roll back at the end of its commit-confirm window${confirmRes.data?.error ? ` (${confirmRes.data.error})` : ""}`
+        );
+      }
+      if (confirmRes.data?.success !== true) {
+        return deny("mcp:firewall:apply", confirmRes.data?.message || `Daemon refused to confirm job ${jobId}`);
+      }
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:firewall:apply",
+        decision: "allowed",
+        paramsSummary: { jobId, reason: typeof args.reason === "string" ? args.reason : void 0 }
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                jobId,
+                confirmed: true,
+                message: confirmRes.data?.message || "Configuration confirmed and promoted to last-known-good."
               },
               null,
               2
@@ -45340,6 +45456,143 @@ function assertNotOperatorCaWithoutKey(caPath, caKeyPath) {
     );
   }
 }
+var HUB_CERT_SAN = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
+function generateSelfSignedCert(targetKeyPath, targetCertPath, days) {
+  child_process.execFileSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-keyout",
+      targetKeyPath,
+      "-out",
+      targetCertPath,
+      "-days",
+      days,
+      "-subj",
+      "/O=Axonwall/OU=Appliance/CN=axonwall",
+      "-addext",
+      `subjectAltName=${HUB_CERT_SAN}`
+    ],
+    { timeout: 15e3, stdio: "ignore" }
+  );
+}
+function generateSignedOrSelfSignedCert(targetKeyPath, targetCertPath, days, caPath, caKeyPath) {
+  if (fs7.existsSync(caPath) && fs7.existsSync(caKeyPath)) {
+    const csrPath = `${targetCertPath}.csr`;
+    const extPath = `${targetCertPath}.ext`;
+    try {
+      child_process.execFileSync(
+        "openssl",
+        [
+          "req",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          targetKeyPath,
+          "-out",
+          csrPath,
+          "-subj",
+          "/O=Axonwall/OU=Appliance/CN=axonwall"
+        ],
+        { timeout: 15e3, stdio: "ignore" }
+      );
+      fs7.writeFileSync(
+        extPath,
+        `basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=${HUB_CERT_SAN}
+`,
+        { mode: 384 }
+      );
+      child_process.execFileSync(
+        "openssl",
+        [
+          "x509",
+          "-req",
+          "-in",
+          csrPath,
+          "-CA",
+          caPath,
+          "-CAkey",
+          caKeyPath,
+          "-CAcreateserial",
+          "-out",
+          targetCertPath,
+          "-days",
+          days,
+          "-sha256",
+          "-extfile",
+          extPath
+        ],
+        { timeout: 15e3, stdio: "ignore" }
+      );
+    } finally {
+      try {
+        fs7.unlinkSync(csrPath);
+      } catch {
+      }
+      try {
+        fs7.unlinkSync(extPath);
+      } catch {
+      }
+    }
+  } else {
+    generateSelfSignedCert(targetKeyPath, targetCertPath, days);
+  }
+}
+function verifyFreshLeafOrThrow(certPath, caPath) {
+  if (!fs7.existsSync(caPath)) return;
+  if (leafChainsToCa(certPath, caPath) === false) {
+    throw new Error(
+      `[Axonwall Controller] Freshly minted hub certificate does not chain to the on-disk CA (${caPath}); refusing to serve it. Regenerate the CA or remove the stale CA certificate.`
+    );
+  }
+}
+function mintEmergencyTlsCert(caPath, caKeyPath) {
+  const tmpDir = fs7.mkdtempSync(path5.join(os.tmpdir(), "axonwall-tls-"));
+  const tmpKey = path5.join(tmpDir, "hub.key");
+  const tmpCert = path5.join(tmpDir, "hub.crt");
+  try {
+    let caSigned = true;
+    try {
+      generateSignedOrSelfSignedCert(tmpKey, tmpCert, "30", caPath, caKeyPath);
+    } catch (mintErr) {
+      console.warn("[Axonwall Controller] CA-signed emergency certificate failed; minting a pure self-signed fallback instead:", mintErr);
+      generateSelfSignedCert(tmpKey, tmpCert, "30");
+      caSigned = false;
+    }
+    if (caSigned && fs7.existsSync(caPath) && leafChainsToCa(tmpCert, caPath) === false) {
+      console.warn("[Axonwall Controller] Emergency CA-signed certificate does not chain to the on-disk CA; minting a pure self-signed fallback instead.");
+      generateSelfSignedCert(tmpKey, tmpCert, "30");
+    }
+    const cert = fs7.readFileSync(tmpCert);
+    const key = fs7.readFileSync(tmpKey);
+    if (cert.length > 0 && key.length > 0) return { cert, key };
+    return null;
+  } catch (err) {
+    console.error("[Axonwall Controller] Critical error generating emergency TLS certificate:", err);
+    return null;
+  } finally {
+    try {
+      fs7.unlinkSync(tmpKey);
+    } catch {
+    }
+    try {
+      fs7.unlinkSync(tmpCert);
+    } catch {
+    }
+    try {
+      fs7.rmdirSync(tmpDir);
+    } catch {
+    }
+  }
+}
 function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath = "/etc/axonwall/certs/hub.key", caPath = "/etc/axonwall/certs/ca.crt", caKeyPath = path5.join(path5.dirname(caPath), "ca.key")) {
   if (process.env.AXONWALL_INSECURE_HTTP === "1") {
     console.warn("[Axonwall Controller] AXONWALL_INSECURE_HTTP=1 is set: running in plaintext mode (DEV/TEST ONLY)");
@@ -45352,11 +45605,11 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
       if (certStat.size > 0 && keyStat.size > 0) {
         const cert = fs7.readFileSync(certPath);
         const key = fs7.readFileSync(keyPath);
-        const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-        if (ca && leafChainsToCa(certPath, caPath) === false) {
+        const ca2 = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+        if (ca2 && leafChainsToCa(certPath, caPath) === false) {
           console.warn("[Axonwall Controller] Existing hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
         } else {
-          return { cert, key, ca };
+          return { cert, key, ca: ca2 };
         }
       }
     } catch (err) {
@@ -45373,11 +45626,11 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
         const cert = fs7.readFileSync(certPath);
         const key = fs7.readFileSync(keyPath);
         if (cert.length > 0 && key.length > 0) {
-          const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-          if (ca && leafChainsToCa(certPath, caPath) === false) {
+          const ca2 = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+          if (ca2 && leafChainsToCa(certPath, caPath) === false) {
             console.warn("[Axonwall Controller] Rotated hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
           } else {
-            return { cert, key, ca };
+            return { cert, key, ca: ca2 };
           }
         }
       }
@@ -45386,99 +45639,13 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
     }
   }
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  const generateSignedOrSelfSignedCert = (targetKeyPath, targetCertPath, days) => {
-    const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
-    if (fs7.existsSync(caPath) && fs7.existsSync(caKeyPath)) {
-      const csrPath = `${targetCertPath}.csr`;
-      const extPath = `${targetCertPath}.ext`;
-      try {
-        child_process.execFileSync(
-          "openssl",
-          [
-            "req",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            targetKeyPath,
-            "-out",
-            csrPath,
-            "-subj",
-            "/O=Axonwall/OU=Appliance/CN=axonwall"
-          ],
-          { timeout: 15e3, stdio: "ignore" }
-        );
-        fs7.writeFileSync(
-          extPath,
-          `basicConstraints=CA:FALSE
-keyUsage=digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth
-subjectAltName=${san}
-`,
-          { mode: 384 }
-        );
-        child_process.execFileSync(
-          "openssl",
-          [
-            "x509",
-            "-req",
-            "-in",
-            csrPath,
-            "-CA",
-            caPath,
-            "-CAkey",
-            caKeyPath,
-            "-CAcreateserial",
-            "-out",
-            targetCertPath,
-            "-days",
-            days,
-            "-sha256",
-            "-extfile",
-            extPath
-          ],
-          { timeout: 15e3, stdio: "ignore" }
-        );
-      } finally {
-        try {
-          fs7.unlinkSync(csrPath);
-        } catch {
-        }
-        try {
-          fs7.unlinkSync(extPath);
-        } catch {
-        }
-      }
-    } else {
-      child_process.execFileSync(
-        "openssl",
-        [
-          "req",
-          "-x509",
-          "-newkey",
-          "rsa:2048",
-          "-nodes",
-          "-keyout",
-          targetKeyPath,
-          "-out",
-          targetCertPath,
-          "-days",
-          days,
-          "-subj",
-          "/O=Axonwall/OU=Appliance/CN=axonwall",
-          "-addext",
-          `subjectAltName=${san}`
-        ],
-        { timeout: 15e3, stdio: "ignore" }
-      );
-    }
-  };
+  let minted = null;
   try {
     const certDir = path5.dirname(certPath);
     if (!fs7.existsSync(certDir)) {
       fs7.mkdirSync(certDir, { recursive: true, mode: 488 });
     }
-    generateSignedOrSelfSignedCert(keyPath, certPath, "3650");
+    generateSignedOrSelfSignedCert(keyPath, certPath, "3650", caPath, caKeyPath);
     if (fs7.existsSync(certPath) && fs7.existsSync(keyPath)) {
       const cert = fs7.readFileSync(certPath);
       const key = fs7.readFileSync(keyPath);
@@ -45488,38 +45655,28 @@ subjectAltName=${san}
       } catch {
       }
       if (cert.length > 0 && key.length > 0) {
-        console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
-        const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-        return { cert, key, ca };
+        minted = { cert, key };
       }
     }
   } catch (err) {
     console.warn("[Axonwall Controller] Generating certificate in target directory failed:", err);
   }
-  assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  try {
-    const tmpDir = fs7.mkdtempSync(path5.join(os.tmpdir(), "axonwall-tls-"));
-    const tmpKey = path5.join(tmpDir, "hub.key");
-    const tmpCert = path5.join(tmpDir, "hub.crt");
-    generateSignedOrSelfSignedCert(tmpKey, tmpCert, "30");
-    const cert = fs7.readFileSync(tmpCert);
-    const key = fs7.readFileSync(tmpKey);
-    try {
-      fs7.unlinkSync(tmpKey);
-      fs7.unlinkSync(tmpCert);
-      fs7.rmdirSync(tmpDir);
-    } catch {
-    }
-    if (cert.length > 0 && key.length > 0) {
-      console.warn(
-        "[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted"
-      );
-      const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
-      return { cert, key, ca, isFallback: true };
-    }
-  } catch (err) {
-    console.error("[Axonwall Controller] Critical error generating emergency TLS certificate:", err);
+  if (minted) {
+    console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
+    const ca2 = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+    verifyFreshLeafOrThrow(certPath, caPath);
+    return { cert: minted.cert, key: minted.key, ca: ca2 };
   }
+  assertNotOperatorCaWithoutKey(caPath, caKeyPath);
+  const ca = fs7.existsSync(caPath) ? fs7.readFileSync(caPath) : void 0;
+  const emergency = mintEmergencyTlsCert(caPath, caKeyPath);
+  if (emergency) {
+    console.warn(
+      "[Axonwall Controller] Using emergency temporary self-signed TLS certificate to ensure port 2966 stays encrypted"
+    );
+    return { cert: emergency.cert, key: emergency.key, ca, isFallback: true };
+  }
+  console.error("[Axonwall Controller] Critical error generating emergency TLS certificate");
   return null;
 }
 var HA_PROMOTE_ROLES = /* @__PURE__ */ new Set(["master", "active", "promote"]);
@@ -45557,6 +45714,16 @@ function parseFleetSyncBody(body) {
     return { ok: false, status: 400, error: `Invalid DesiredState body${detail}` };
   }
   return { ok: true, desired: parsed.data };
+}
+function shouldRefuseFleetSync(desired, diskState) {
+  return desired === void 0 && diskState === null;
+}
+function secureTokenEquals(presented, expected) {
+  if (typeof presented !== "string" || typeof expected !== "string") return false;
+  const presentedBuf = Buffer.from(presented);
+  const expectedBuf = Buffer.from(expected);
+  if (presentedBuf.length !== expectedBuf.length) return false;
+  return crypto5.timingSafeEqual(presentedBuf, expectedBuf);
 }
 function validateHaTransition(payload, fleetLanVip) {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? "").toLowerCase();
@@ -45601,16 +45768,102 @@ function validateHaTransition(payload, fleetLanVip) {
     lanVip
   };
 }
+var HA_STATE_PATHS = ["/var/lib/axonwall/active-ha-edge.json", "/etc/axonwall/active-ha-edge.json"];
+function loadPersistedHaState() {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs7.existsSync(p)) {
+        const raw = JSON.parse(fs7.readFileSync(p, "utf8"));
+        if (raw && typeof raw === "object" && (typeof raw.activeHaEdgeId === "string" || raw.activeHaEdgeId === null)) {
+          const out = { activeHaEdgeId: raw.activeHaEdgeId ?? null };
+          if (typeof raw.sharedWanMac === "string") out.sharedWanMac = raw.sharedWanMac;
+          if (typeof raw.lanVip === "string") out.lanVip = raw.lanVip;
+          return out;
+        }
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function persistHaState(state) {
+  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  const payload = JSON.stringify(state, null, 2);
+  for (const p of paths) {
+    try {
+      fs7.mkdirSync(path5.dirname(p), { recursive: true, mode: 509 });
+      fs7.writeFileSync(p, payload, { mode: 384 });
+    } catch {
+    }
+  }
+}
 var MESH_DISCONNECTED_GRACE_MS = 24 * 60 * 60 * 1e3;
+var SATELLITE_HEARTBEAT_MS = 30 * 1e3;
+var SATELLITE_LAST_SEEN_GRACE_MS = 150 * 1e3;
 function shouldPruneDisconnectedSatellite(disconnectedAt, nowMs, graceMs = MESH_DISCONNECTED_GRACE_MS) {
   if (!disconnectedAt) return false;
   const t = Date.parse(disconnectedAt);
   if (Number.isNaN(t)) return false;
   return nowMs - t >= graceMs;
 }
+function computeRoutesToDelete(previous, current) {
+  const routeKey = (r) => `${r.destination}|${r.gateway}|${r.device ?? ""}`;
+  const currentKeys = new Set(current.map(routeKey));
+  return previous.filter((r) => !currentKeys.has(routeKey(r)));
+}
+var SYNCED_ROUTES_STATE_PATHS = ["/var/lib/axonwall/synced-routes.json", "/etc/axonwall/synced-routes.json"];
+function loadPersistedSyncedRoutes() {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  for (const p of paths) {
+    try {
+      if (fs7.existsSync(p)) {
+        const raw = JSON.parse(fs7.readFileSync(p, "utf8"));
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          const out = {};
+          for (const [satId, routes] of Object.entries(raw)) {
+            if (!Array.isArray(routes)) continue;
+            out[satId] = routes.filter(
+              (r) => !!r && typeof r === "object" && typeof r.destination === "string" && typeof r.gateway === "string" && (r.device === void 0 || typeof r.device === "string")
+            ).map((r) => ({ destination: r.destination, gateway: r.gateway, ...r.device ? { device: r.device } : {} }));
+          }
+          return out;
+        }
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function persistSyncedRoutes(routes) {
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  const payload = JSON.stringify(routes, null, 2);
+  for (const p of paths) {
+    try {
+      fs7.mkdirSync(path5.dirname(p), { recursive: true, mode: 509 });
+      fs7.writeFileSync(p, payload, { mode: 384 });
+    } catch {
+    }
+  }
+}
+var PENDING_COMMAND_STALE_MS = 5 * 60 * 1e3;
+function buildSatelliteCommandEnvelope(type, payload, commandId) {
+  return JSON.stringify({ type, commandId, payload });
+}
+function isPendingCommandStale(sentAtMs, nowMs, staleMs = PENDING_COMMAND_STALE_MS) {
+  return nowMs - sentAtMs > staleMs;
+}
+function recordCommandAck(state, ack) {
+  if (ack.success) {
+    if (ack.command && state.lastApplyError?.startsWith(`${ack.command}:`)) delete state.lastApplyError;
+    return;
+  }
+  state.lastApplyError = `${ack.command}: ${ack.error || "failed"}`;
+}
 function headscaleRetryDelaysMs() {
   return [0, 5e3, 15e3, 3e4, 6e4];
 }
+var HEADSCALE_RECHECK_MS = 5 * 60 * 1e3;
 async function provisionHeadscaleWithRetry(deps) {
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
   const delays = deps.delaysMs ?? headscaleRetryDelaysMs();
@@ -45820,7 +46073,33 @@ async function main() {
   console.log("[Axonwall Controller] Starting Axonwall Control Plane Worker...");
   console.log("[Axonwall Controller] Monitoring config changes and apply pipeline.");
   const activeSatellites = /* @__PURE__ */ new Map();
-  let activeHaEdgeId = null;
+  const pendingCommands = /* @__PURE__ */ new Map();
+  const sendToSatellite = (sat, type, payload) => {
+    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return null;
+    const commandId = `cmd_${crypto5.randomUUID()}`;
+    pendingCommands.set(commandId, { satId: sat.id, command: type, sentAt: Date.now() });
+    sat.ws.send(buildSatelliteCommandEnvelope(type, payload, commandId));
+    return commandId;
+  };
+  const persistedHa = loadPersistedHaState();
+  let activeHaEdgeId = persistedHa?.activeHaEdgeId ?? null;
+  let activeHaSharedWanMac = persistedHa?.sharedWanMac;
+  let activeHaLanVip = persistedHa?.lanVip;
+  const setActiveHaEdge = (id, sharedWanMac, lanVip) => {
+    activeHaEdgeId = id;
+    activeHaSharedWanMac = sharedWanMac;
+    activeHaLanVip = lanVip;
+    persistHaState({ activeHaEdgeId: id, sharedWanMac, lanVip });
+  };
+  const persistedSyncedRoutes = loadPersistedSyncedRoutes() ?? {};
+  const sendHaTransition = (sat, type, role, sharedWanMac, lanVip) => {
+    return sendToSatellite(sat, type, {
+      role,
+      sharedWanMac,
+      lanVip,
+      lanVipV4: lanVip
+    }) !== null;
+  };
   function loadLocalDesiredState2() {
     const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
     for (const p of candidates) {
@@ -45862,14 +46141,11 @@ async function main() {
       ]
     };
     const { nftScript } = compileSatelliteNftables(mergedNode);
-    sat.ws.send(
-      JSON.stringify({
-        type: "SYNC_NFTABLES",
-        payload: {
-          script: nftScript
-        }
-      })
-    );
+    sendToSatellite(sat, "SYNC_NFTABLES", { script: nftScript });
+    if (isEdge && localState === null) {
+      console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
+      return;
+    }
     if (isEdge) {
       const wanDev = resolvedWanInterface;
       const lanDev = resolvedLanInterface;
@@ -45909,23 +46185,18 @@ async function main() {
           }
         }
       }
-      sat.ws.send(
-        JSON.stringify({
-          type: "SYNC_INTERFACES",
-          payload: { interfaces }
-        })
-      );
+      sendToSatellite(sat, "SYNC_INTERFACES", { interfaces });
       const enabledRoutes = (localState?.routes ?? []).filter((r) => r.enabled).map((r) => ({
         destination: r.network,
         gateway: r.gateway,
         ...r.interface ? { device: r.interface } : {}
       }));
-      sat.ws.send(
-        JSON.stringify({
-          type: "SYNC_ROUTES",
-          payload: { routes: enabledRoutes }
-        })
-      );
+      const routesToDelete = computeRoutesToDelete(sat.lastSyncedRoutes ?? [], enabledRoutes);
+      if (sendToSatellite(sat, "SYNC_ROUTES", { routes: enabledRoutes, routesToDelete }) !== null) {
+        sat.lastSyncedRoutes = enabledRoutes;
+        persistedSyncedRoutes[sat.id] = enabledRoutes;
+        persistSyncedRoutes(persistedSyncedRoutes);
+      }
     }
   }
   const prometheusRegistry = new import_prom_client.default.Registry();
@@ -46011,7 +46282,7 @@ async function main() {
         res2.end(JSON.stringify({ error: "Fleet management authentication unconfigured" }));
         return false;
       }
-      const isValid = token && token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      const isValid = secureTokenEquals(token, expectedToken);
       if (!isValid) {
         res2.writeHead(401, { "Content-Type": "application/json" });
         res2.end(JSON.stringify({ error: "Unauthorized: Valid X-Axonwall-ZTP-Token required" }));
@@ -46171,21 +46442,6 @@ async function main() {
           const sharedWanMac = validation.sharedWanMac;
           const lanVip = validation.lanVip;
           const targetId = validation.satelliteId || "";
-          const sendTransition = (sat, type, role) => {
-            if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return false;
-            sat.ws.send(
-              JSON.stringify({
-                type,
-                payload: {
-                  role,
-                  sharedWanMac,
-                  lanVip,
-                  lanVipV4: lanVip
-                }
-              })
-            );
-            return true;
-          };
           if (targetId) {
             const target = activeSatellites.get(targetId);
             if (!target || !target.ws || target.ws.readyState !== import_websocket.default.OPEN) {
@@ -46196,11 +46452,11 @@ async function main() {
             let demoted = 0;
             if (msgType === "PROMOTE" && activeHaEdgeId && activeHaEdgeId !== targetId) {
               const previous = activeSatellites.get(activeHaEdgeId);
-              if (previous && sendTransition(previous, "DEMOTE", "standby")) demoted++;
+              if (previous && sendHaTransition(previous, "DEMOTE", "standby", sharedWanMac, lanVip)) demoted++;
             }
-            const notified2 = sendTransition(target, msgType, normalizedRole) ? 1 : 0;
-            if (msgType === "PROMOTE" && notified2 === 1) activeHaEdgeId = targetId;
-            if (msgType === "DEMOTE" && activeHaEdgeId === targetId) activeHaEdgeId = null;
+            const notified2 = sendHaTransition(target, msgType, normalizedRole, sharedWanMac, lanVip) ? 1 : 0;
+            if (msgType === "PROMOTE" && notified2 === 1) setActiveHaEdge(targetId, sharedWanMac, lanVip);
+            if (msgType === "DEMOTE" && activeHaEdgeId === targetId) setActiveHaEdge(null);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified2, demotedEdges: demoted }));
             return;
@@ -46208,9 +46464,9 @@ async function main() {
           let notified = 0;
           for (const sat of activeSatellites.values()) {
             const isTarget = sat.role === "edge-ngfw" || sat.id.startsWith("edge-") || sat.id === "edge";
-            if (isTarget && sendTransition(sat, msgType, normalizedRole)) notified++;
+            if (isTarget && sendHaTransition(sat, msgType, normalizedRole, sharedWanMac, lanVip)) notified++;
           }
-          if (msgType === "DEMOTE") activeHaEdgeId = null;
+          if (msgType === "DEMOTE") setActiveHaEdge(null);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true, transition: msgType, role: normalizedRole, notifiedEdges: notified }));
         } catch {
@@ -46244,6 +46500,11 @@ async function main() {
           return;
         }
         const desired = validation.desired;
+        if (shouldRefuseFleetSync(desired, loadLocalDesiredState2())) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: "No DesiredState on disk (/etc/axonwall/state.json) and none was supplied in the request; refusing to sync defaults" }));
+          return;
+        }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
           if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
@@ -46338,11 +46599,7 @@ data: /api/v1/mcp
               onFleetBroadcastBlock: (targetIp) => {
                 let notified = 0;
                 for (const sat of activeSatellites.values()) {
-                  if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-                    sat.ws.send(JSON.stringify({
-                      type: "BLOCK_TARGET",
-                      payload: { target: targetIp, isMac: false }
-                    }));
+                  if (sendToSatellite(sat, "BLOCK_TARGET", { target: targetIp, isMac: false }) !== null) {
                     notified++;
                   }
                 }
@@ -46505,7 +46762,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         socket.destroy();
         return;
       }
-      const isTokenValid = token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      const isTokenValid = secureTokenEquals(token, expectedToken);
       if (!isTokenValid) {
         console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -46639,6 +46896,53 @@ ${headerLines.join("\r\n")}\r
     }
   }, 60 * 1e3);
   meshPruneTimer.unref?.();
+  const heartbeatTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [commandId, pending] of pendingCommands.entries()) {
+      if (isPendingCommandStale(pending.sentAt, now)) {
+        pendingCommands.delete(commandId);
+        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1e3)}s ago`);
+      }
+    }
+    for (const [id, sat] of activeSatellites.entries()) {
+      const socket = sat.ws;
+      if (!socket) continue;
+      const lastSeenMs = Date.parse(sat.lastSeen) || 0;
+      if (now - lastSeenMs > SATELLITE_LAST_SEEN_GRACE_MS) {
+        console.log(`[Fleet Manager] Terminating stale satellite socket ${id}: no message for ${Math.round((now - lastSeenMs) / 1e3)}s`);
+        try {
+          socket.terminate();
+        } catch {
+        }
+        continue;
+      }
+      if (socket.isAlive === false) {
+        console.log(`[Fleet Manager] Terminating satellite socket ${id}: missed heartbeat pong`);
+        try {
+          socket.terminate();
+        } catch {
+        }
+        continue;
+      }
+      socket.isAlive = false;
+      try {
+        socket.ping((err) => {
+          if (err) {
+            try {
+              socket.terminate();
+            } catch {
+            }
+          }
+        });
+      } catch {
+        try {
+          socket.terminate();
+        } catch {
+        }
+      }
+    }
+  }, SATELLITE_HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
   wss.on("connection", async (ws, request3, satId) => {
     const remoteIp = request3.socket.remoteAddress || "127.0.0.1";
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
@@ -46694,9 +46998,26 @@ ${headerLines.join("\r\n")}\r
       tunnelIp,
       wireguard: { tunnelIp },
       ws,
-      headscaleEnrolled: existing?.headscaleEnrolled || false
+      headscaleEnrolled: existing?.headscaleEnrolled || false,
+      // B2-M7 follow-up: seed from the persisted synced-routes
+      // file when there is no live previous entry — i.e. after a
+      // controller restart — so the first sync still deletes routes
+      // removed while the controller was down.
+      lastSyncedRoutes: existing?.lastSyncedRoutes ?? (persistedSyncedRoutes[satId] ? [...persistedSyncedRoutes[satId]] : void 0)
     };
     activeSatellites.set(satId, state);
+    let headscaleRecheckTimer = null;
+    try {
+      ws._socket?.setKeepAlive?.(true, 3e4);
+    } catch {
+    }
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+      state.lastSeen = (/* @__PURE__ */ new Date()).toISOString();
+    });
+    ws.on("error", () => {
+    });
     ws.on("message", (message) => {
       state.lastSeen = (/* @__PURE__ */ new Date()).toISOString();
       try {
@@ -46704,6 +47025,26 @@ ${headerLines.join("\r\n")}\r
         const parsed = JSON.parse(text);
         if (parsed.type === "REQUEST_HEADSCALE") {
           void requestHeadscaleProvision();
+        } else if (parsed.type === "COMMAND_ACK") {
+          let ack = parsed.payload;
+          if (typeof ack === "string") {
+            try {
+              ack = JSON.parse(ack);
+            } catch {
+              ack = null;
+            }
+          }
+          if (ack && typeof ack === "object") {
+            const commandId = typeof ack.commandId === "string" ? ack.commandId : void 0;
+            if (commandId) pendingCommands.delete(commandId);
+            const command = typeof ack.command === "string" ? ack.command : "unknown";
+            const success2 = ack.success === true;
+            const error62 = typeof ack.error === "string" ? ack.error : void 0;
+            recordCommandAck(state, { command, commandId, success: success2, error: error62 });
+            if (!success2) {
+              console.error(`[Fleet Manager] Satellite ${satId} failed ${command}${commandId ? ` (${commandId})` : ""}: ${error62 || "failed"}`);
+            }
+          }
         } else if (parsed.type === "TELEMETRY_REPORT") {
           let report;
           if (typeof parsed.payload === "string") {
@@ -46713,6 +47054,19 @@ ${headerLines.join("\r\n")}\r
           }
           if (!report || typeof report !== "object") {
             return;
+          }
+          if (typeof report.lastApplyError === "string") {
+            if (report.lastApplyError) state.lastApplyError = report.lastApplyError;
+            else if (state.lastApplyError) delete state.lastApplyError;
+          }
+          if (typeof report.headscaleEnrolled === "boolean") {
+            if (report.headscaleEnrolled === false && state.headscaleEnrolled) {
+              console.log(`[Fleet Manager] Satellite ${satId} reports no Headscale identity; re-provisioning despite the latched enrolled flag`);
+              state.headscaleEnrolled = false;
+              if (!headscaleProvisioning && !headscaleRecheckTimer) void requestHeadscaleProvision();
+            } else if (report.headscaleEnrolled === true) {
+              state.headscaleEnrolled = true;
+            }
           }
           if (report.metrics) {
             state.metrics = report.metrics;
@@ -46764,6 +47118,10 @@ ${headerLines.join("\r\n")}\r
     });
     ws.on("close", () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
+      if (headscaleRecheckTimer) {
+        clearTimeout(headscaleRecheckTimer);
+        headscaleRecheckTimer = null;
+      }
       const current = activeSatellites.get(satId);
       if (current?.ws === ws) {
         satUptimeGauge.remove({ satellite_id: satId });
@@ -46776,7 +47134,6 @@ ${headerLines.join("\r\n")}\r
         lastRxTxBytes.delete(satId);
         current.ws = void 0;
         current.disconnectedAt = (/* @__PURE__ */ new Date()).toISOString();
-        if (activeHaEdgeId === satId) activeHaEdgeId = null;
         broadcastMeshTopology();
       }
     });
@@ -46786,19 +47143,34 @@ ${headerLines.join("\r\n")}\r
       createPreAuthKey,
       serverUrl: process.env.HEADSCALE_EXTERNAL_URL || "https://hub.axonwall.local",
       send: (msg) => {
-        if (ws.readyState !== import_websocket.default.OPEN) throw new Error("satellite socket closed before SYNC_HEADSCALE could be sent");
-        ws.send(JSON.stringify(msg));
+        const m = msg;
+        if (!sendToSatellite(state, m.type, m.payload)) {
+          throw new Error("satellite socket closed before SYNC_HEADSCALE could be sent");
+        }
       },
       isOpen: () => ws.readyState === import_websocket.default.OPEN
     });
     let headscaleProvisioning = null;
+    const scheduleHeadscaleRecheck = () => {
+      if (headscaleRecheckTimer) return;
+      headscaleRecheckTimer = setTimeout(() => {
+        headscaleRecheckTimer = null;
+        if (ws.readyState === import_websocket.default.OPEN && !state.headscaleEnrolled) {
+          void requestHeadscaleProvision();
+        }
+      }, HEADSCALE_RECHECK_MS);
+      headscaleRecheckTimer.unref?.();
+    };
     const requestHeadscaleProvision = () => {
       if (headscaleProvisioning) return headscaleProvisioning;
       headscaleProvisioning = provisionHeadscale().then((ok) => {
         state.headscaleEnrolled = ok;
         headscaleProvisioning = null;
         if (ok) console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
-        else console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect or on a REQUEST_HEADSCALE message`);
+        else {
+          console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect, on a REQUEST_HEADSCALE message, or on the slow re-check`);
+          scheduleHeadscaleRecheck();
+        }
         return ok;
       });
       return headscaleProvisioning;
@@ -46808,6 +47180,16 @@ ${headerLines.join("\r\n")}\r
     }
     if (ws.readyState === import_websocket.default.OPEN) {
       syncSatelliteDesiredState(state);
+    }
+    if (activeHaEdgeId === satId) {
+      const vip = activeHaLanVip || loadLocalDesiredState2()?.hostedEdge?.lan?.edgeAddress;
+      if (vip) {
+        sendHaTransition(state, "PROMOTE", "active", activeHaSharedWanMac, vip);
+      } else {
+        console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
+      }
+    } else if (activeHaEdgeId && (state.role === "edge-ngfw" || satId.startsWith("edge-") || satId === "edge")) {
+      sendHaTransition(state, "DEMOTE", "standby");
     }
     broadcastMeshTopology();
   });
@@ -46830,30 +47212,49 @@ if (isDirectExecution()) {
   });
 }
 export {
+  HEADSCALE_RECHECK_MS,
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
   MESH_DISCONNECTED_GRACE_MS,
+  PENDING_COMMAND_STALE_MS,
+  SATELLITE_HEARTBEAT_MS,
+  SATELLITE_LAST_SEEN_GRACE_MS,
+  acquireMcpLockFile,
   authenticateMcpToken,
   buildArtifactBundle,
+  buildSatelliteCommandEnvelope,
+  computeRoutesToDelete,
   createHttpRedirectServer,
   createMcpApiKeyRecord,
   createPortMultiplexer,
   deriveSatelliteRole,
+  desiredStateLockPath,
   ensureControllerTls,
   getMcpServerStatus,
   headscaleRetryDelaysMs,
+  insertMcpRuleIntoState,
   isMcpServerEnabled,
+  isPendingCommandStale,
   isValidCidr,
   isValidMacAddress,
   listMcpApiKeys,
+  loadPersistedHaState,
+  loadPersistedSyncedRoutes,
+  newMcpApplyJobId,
   normalizeMacAddress,
   parseFleetSyncBody,
+  persistHaState,
+  persistSyncedRoutes,
   processMcpJsonRpcMessage,
   provisionHeadscaleWithRetry,
   queryMcpAuditEntries,
+  recordCommandAck,
   recordMcpAuditEntry,
   revokeMcpApiKeyRecord,
+  secureTokenEquals,
   shouldPruneDisconnectedSatellite,
+  shouldRefuseFleetSync,
   validateHaTransition,
+  verifyFreshLeafOrThrow,
   verifyMcpAuditChain
 };

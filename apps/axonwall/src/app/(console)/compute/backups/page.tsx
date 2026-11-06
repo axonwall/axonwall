@@ -85,7 +85,11 @@ export default function WorkloadBackupsPage() {
         type: res.success ? 'success' : 'error',
         message: res.message + (res.upid ? ` (Task: ${res.upid})` : ''),
       });
-      setShowBackupModal(false);
+      // Keep the form open on failure so the operator can retry without
+      // re-entering target, pool, and destination.
+      if (res.success) {
+        setShowBackupModal(false);
+      }
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to trigger backup' });
@@ -163,19 +167,21 @@ export default function WorkloadBackupsPage() {
         <div className="p-5 rounded-xl bg-slate-900/60 border border-slate-800">
           <div className="text-slate-400 text-sm font-medium">Archive Footprint</div>
           <div className="mt-2 text-3xl font-bold text-cyan-400">{totalGb} GB</div>
-          <div className="mt-1 text-xs text-slate-500">Compressed with zstd-3</div>
+          <div className="mt-1 text-xs text-slate-500">Sum of listed archive sizes</div>
         </div>
 
         <div className="p-5 rounded-xl bg-slate-900/60 border border-slate-800">
           <div className="text-slate-400 text-sm font-medium">Deduplication Ratio</div>
-          <div className="mt-2 text-3xl font-bold text-emerald-400">3.4x</div>
-          <div className="mt-1 text-xs text-slate-500">Block-level chunk dedup</div>
+          <div className="mt-2 text-3xl font-bold text-slate-500">—</div>
+          <div className="mt-1 text-xs text-slate-500">No dedup data reported</div>
         </div>
 
         <div className="p-5 rounded-xl bg-slate-900/60 border border-slate-800">
           <div className="text-slate-400 text-sm font-medium">Active Backup Jobs</div>
-          <div className="mt-2 text-3xl font-bold text-indigo-400">{backupJobs.length}</div>
-          <div className="mt-1 text-xs text-slate-500">Cron schedules configured</div>
+          <div className="mt-2 text-3xl font-bold text-indigo-400">
+            {backupJobs.filter((job) => job.enabled !== false).length}
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Enabled cron schedules configured</div>
         </div>
       </div>
 
@@ -278,9 +284,15 @@ export default function WorkloadBackupsPage() {
                     </td>
                     <td className="px-6 py-4 text-emerald-400">{job.destinationType}</td>
                     <td className="px-6 py-4">
-                      <span className="inline-flex items-center gap-1 text-emerald-400 font-sans">
-                        <CheckCircle2 className="w-3.5 h-3.5" /> Active
-                      </span>
+                      {job.enabled !== false ? (
+                        <span className="inline-flex items-center gap-1 text-emerald-400 font-sans">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Active
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-slate-500 font-sans">
+                          Disabled
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))

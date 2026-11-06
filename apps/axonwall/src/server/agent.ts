@@ -1105,12 +1105,27 @@ export async function saveYamlDomainFile(
   }
 
   if (applyImmediately) {
-    const res = await applyDesiredState(validation.state);
-    return {
-      success: res.success,
-      message: `Saved /etc/axonwall/${filename} and applied configuration.`,
-      warnings: res.warnings,
-    };
+    // C-B2 residual: a daemon-down apply throws ('axonwalld is
+    // unreachable') — return it as a structured failure instead of
+    // propagating, so the caller can show the operator that nothing
+    // was applied. Same for a fingerprint conflict, if one is ever
+    // threaded through this path.
+    try {
+      const res = await applyDesiredState(validation.state);
+      return {
+        success: res.success,
+        message: `Saved /etc/axonwall/${filename} and applied configuration.`,
+        warnings: res.warnings,
+      };
+    } catch (err: any) {
+      if (
+        err?.message?.includes('axonwalld is unreachable') ||
+        err?.message?.includes('Configuration changed since it was loaded')
+      ) {
+        return { success: false, message: err.message, warnings: [] };
+      }
+      throw err;
+    }
   }
 
   persistDesiredStateToDisk(validation.state);
@@ -1560,7 +1575,31 @@ export async function applyDesiredState(
     );
   } catch {}
 
-  // Fallback for dev mode / local execution
+  // C-B2: the daemon did not answer, so the live ruleset was never
+  // changed. Never report "applied" and never arm a (mock)
+  // commit-confirm: no daemon watchdog will roll anything back at the
+  // mock deadline. The local fallback below runs ONLY in explicit dev
+  // mode (AXONWALL_DEV_MODE=1, or a Next.js dev server), where there
+  // is no daemon to apply to. On a production box the on-disk config
+  // is rolled back to its pre-apply contents (C9) and the apply fails
+  // loudly instead.
+  const devMode =
+    process.env.AXONWALL_DEV_MODE === '1' ||
+    process.env.AXONWALL_DEV_MODE === 'true' ||
+    process.env.NODE_ENV === 'development';
+  if (!devMode) {
+    const restored = restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCache();
+    lastPendingJobId = '';
+    throw new Error(
+      'axonwalld is unreachable — the configuration was NOT applied and no commit-confirm is active' +
+        (restored
+          ? '. On-disk configuration was restored to its pre-apply state.'
+          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
+    );
+  }
+
+  // Fallback for dev mode / local execution only (see C-B2 above).
   try {
     const routes = normalizedState.routes || [];
     for (const r of routes) {
@@ -1587,7 +1626,7 @@ export async function applyDesiredState(
 
   return {
     success: true,
-    message: `Configuration saved to /etc/axonwall/*.yaml and applied. Commit-confirm active for ${confirmTimeoutSeconds}s.`,
+    message: `Configuration saved to /etc/axonwall/*.yaml and applied (DEV MODE — no daemon running). Commit-confirm active for ${confirmTimeoutSeconds}s.`,
     nftScript,
     warnings,
   };
@@ -1637,13 +1676,12 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
     };
   }
 
-  // Daemon unreachable: dev-mode fallback — confirm the local mock pending state.
-  mockPendingConfirm = false;
-  mockDeadline = 0;
-  lastPendingJobId = '';
+  // C11: daemon unreachable — do NOT clear the local pending state or
+  // claim success. The daemon may still auto-roll back at its deadline,
+  // so the job id and banner survive for a retry once it is back.
   return {
-    success: true,
-    message: 'Configuration confirmed. Promoted to last-known-good.',
+    success: false,
+    message: 'Daemon unavailable — confirm not acknowledged; pending state preserved. Retry once axonwalld is reachable.',
   };
 }
 
@@ -1668,14 +1706,12 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
     };
   }
 
-  // Daemon unreachable: dev-mode fallback.
-  mockPendingConfirm = false;
-  mockDeadline = 0;
-  cachedDesiredState = null;
-  lastLoadedFingerprint = '';
+  // C11: daemon unreachable — do NOT clear the local pending/cache state
+  // or claim success. The daemon still holds the unconfirmed ruleset, so
+  // the cached state keeps describing what it is actually running.
   return {
-    success: true,
-    message: 'Successfully rolled back to previous last-known-good configuration.',
+    success: false,
+    message: 'Daemon unavailable — rollback not acknowledged; pending state preserved. Retry once axonwalld is reachable.',
   };
 }
 
@@ -1742,10 +1778,11 @@ export async function runDiagnostic(
     }
   } catch {}
 
-  // Ping fallback
+  // N1: the daemon did not answer (or returned no output). Never fabricate
+  // a perfect ping result — report the probe as not run.
   return {
-    success: true,
-    output: `PING ${cleanTarget} - 3 packets transmitted, 3 received, 0% packet loss, avg 1.2ms`,
+    success: false,
+    output: `Ping unavailable: axonwalld unreachable — no ping of ${cleanTarget} was run.`,
   };
 }
 
@@ -1977,13 +2014,38 @@ export interface SystemServiceInfo {
   name: string;
   unit: string;
   description: string;
-  status: 'active' | 'inactive' | 'failed' | 'not-installed';
+  // C-B15: 'unknown' means the state could not be read (systemctl
+  // failed); it is distinct from 'not-installed' (no unit file) and
+  // from 'inactive' (installed but stopped).
+  status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown';
   pid: number | null;
   memory: string | null;
   uptime: string | null;
 }
 
 export type LiveServiceInfo = SystemServiceInfo;
+
+// C-B15: file-based unit existence check, used when `systemctl show`
+// fails and the state is otherwise unreadable. `list-unit-files`
+// reads unit files from disk (no manager connection), so it still
+// answers during a dbus outage. Returns true when the unit file
+// exists, false when it is provably absent (exit 1, no output), and
+// null when the probe itself is inconclusive (binary missing,
+// timeout, unexpected exit) — inconclusive must never be reported
+// as "not installed".
+function isSystemdUnitFilePresent(unit: string): boolean | null {
+  try {
+    const out = execFileSync('systemctl', ['list-unit-files', unit, '--no-legend', '--no-pager'], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.split('\n').some((line) => line.trim().startsWith(unit));
+  } catch (err: any) {
+    if (err?.status === 1) return false;
+    return null;
+  }
+}
 
 export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   const session = await getSession();
@@ -2007,7 +2069,7 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   const results: SystemServiceInfo[] = [];
 
   for (const u of units) {
-    let status: 'active' | 'inactive' | 'failed' | 'not-installed' = 'inactive';
+    let status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown' = 'inactive';
     let pid: number | null = null;
     let memory: string | null = null;
     let uptime: string | null = null;
@@ -2025,7 +2087,11 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
       }
 
       const activeState = props['ActiveState'];
-      if (activeState === 'active') status = 'active';
+      // C-B15: `systemctl show` exits 0 for a unit with no unit file
+      // (LoadState=not-found, ActiveState=inactive) — without this
+      // check a missing unit rendered as "Inactive (stopped)".
+      if (props['LoadState'] === 'not-found') status = 'not-installed';
+      else if (activeState === 'active') status = 'active';
       else if (activeState === 'failed') status = 'failed';
       else status = 'inactive';
 
@@ -2041,7 +2107,11 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
         uptime = 'Active';
       }
     } catch {
-      status = 'not-installed';
+      // C-B15: any `systemctl show` failure used to mark the unit "Not
+      // Installed" — so a systemd/dbus outage rendered all 12 services
+      // as not installed. A failed probe means the state is unknown;
+      // only a unit file provably absent is not-installed.
+      status = isSystemdUnitFilePresent(u.unit) === false ? 'not-installed' : 'unknown';
     }
 
     results.push({
@@ -2079,7 +2149,17 @@ export async function getServiceJournalLogs(unit: string): Promise<string> {
     try {
       if (fs.existsSync(logPath)) {
         const raw = execFileSync('tail', ['-n', '50', logPath], { encoding: 'utf8', timeout: 1000 });
-        if (raw.trim()) return raw.trim();
+        if (raw.trim()) {
+          // C-B15: fallback log sources used to be returned bare, so
+          // the last 50 lines of the global /var/log/messages were
+          // presented as the unit's own "Journal Logs". Every fallback
+          // is now labelled with its source; the global log is
+          // explicitly flagged as NOT this unit's logs.
+          if (logPath === '/var/log/messages') {
+            return `-- Source: /var/log/messages (system-wide log — no logs found for ${safeUnit}; entries below are NOT this unit's logs) --\n${raw.trim()}`;
+          }
+          return `-- Source: ${logPath} (service log file, not the journal) --\n${raw.trim()}`;
+        }
       }
     } catch {}
   }
@@ -2737,6 +2817,21 @@ export async function saveInterfaceAssignment(data: {
       );
     }
   }
+  // C-A10: mirror the name-collision check for devices. The UI used to
+  // both suggest and permit a device already bound to another logical
+  // interface (including a disabled one), and the server accepted it,
+  // so two logical interfaces could share one NIC. Renames
+  // (originalName present) may keep their own device.
+  if (normalizedDevice !== 'none') {
+    const holder = state.interfaces.find(
+      (i) => i.device === normalizedDevice && i.name.toLowerCase() !== lookupName
+    );
+    if (holder) {
+      throw new Error(
+        `Device '${normalizedDevice}' is already assigned to interface '${holder.name}'. Remove or reassign that interface first.`
+      );
+    }
+  }
   const idx = state.interfaces.findIndex((i) => i.name === lookupName);
 
   const defaultDesc =
@@ -2758,6 +2853,30 @@ export async function saveInterfaceAssignment(data: {
     description: data.description || defaultDesc,
     mtu: data.mtu || 1500,
   });
+
+  // A15: reject a static LAN subnet that overlaps another LAN
+  // interface's subnet. Two LANs on the same subnet would each get
+  // a Kea DHCP subnet on the same CIDR. The interface being edited
+  // or renamed is excluded (matched by its pre-edit name).
+  if (role === 'lan' && data.type === 'static' && data.ipv4Address) {
+    const newSubnet = computeSubnetAndDefaultPool(data.ipv4Address);
+    if (newSubnet) {
+      for (const other of state.interfaces) {
+        if (other.name === lookupName) continue;
+        if (other.role !== 'lan' || other.type !== 'static' || !other.ipv4Address) continue;
+        const otherSubnet = computeSubnetAndDefaultPool(other.ipv4Address);
+        if (!otherSubnet) continue;
+        if (
+          newSubnet.firstUsableInt <= otherSubnet.lastUsableInt &&
+          otherSubnet.firstUsableInt <= newSubnet.lastUsableInt
+        ) {
+          throw new Error(
+            `Subnet ${newSubnet.subnetCidr} overlaps interface '${other.name}' (${otherSubnet.subnetCidr}). Choose a different subnet for '${cleanName}'.`
+          );
+        }
+      }
+    }
+  }
 
   if (idx >= 0) {
     state.interfaces[idx] = updatedIface;
@@ -2882,6 +3001,11 @@ export async function saveInterfaceAssignment(data: {
   // Delegate persistence, interface bring-up, Kea reload, and nftables commit to root axonwalld daemon
   let daemonApplied = false;
   let daemonError: string | null = null;
+  // C10 residual: set when the daemon was never reached at all
+  // (callAgentApi resolves null on socket error/timeout, and the old bare
+  // `catch {}` discarded it). Distinct from an explicit rejection above:
+  // the disk write stands, but nothing may report the change as applied.
+  let daemonUnreachable: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
     const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
@@ -2934,15 +3058,24 @@ export async function saveInterfaceAssignment(data: {
       });
       if (confirmResp && !confirmResp.success) {
         daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface change';
-      } else {
+      } else if (confirmResp) {
         daemonApplied = true;
+      } else {
+        // C10 residual: the confirm call never reached the daemon.
+        daemonUnreachable = 'confirm call failed';
       }
     } else if (applyResp) {
       // C10: the daemon answered and rejected the change. Do not fall
       // through to a success return; the caller handles the rollback below.
       daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface change';
+    } else {
+      // C10 residual: callAgentApi resolves null when the daemon socket is
+      // unreachable — the daemon never saw this change.
+      daemonUnreachable = 'apply call failed';
     }
-  } catch {}
+  } catch (err: any) {
+    daemonUnreachable = err?.message || 'daemon call threw';
+  }
 
   // C10: on an explicit daemon rejection, roll the disk write back and
   // report failure — never present the disk-only change as applied.
@@ -2966,6 +3099,18 @@ export async function saveInterfaceAssignment(data: {
     );
   } catch {}
 
+  // C10 residual: the local fallback below used to swallow every step's
+  // failure (`catch {}`) and still return success. Every step is now
+  // checked and its failure recorded, so the final return can report it.
+  const localErrors: string[] = [];
+  const runLocalStep = (label: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (err: any) {
+      localErrors.push(`${label}: ${err?.message || 'failed'}`);
+    }
+  };
+
   // Sync Kea DHCPv4 config directly if running in standalone/dev mode (when axonwalld did not apply)
   if (!daemonApplied) {
     try {
@@ -2973,54 +3118,117 @@ export async function saveInterfaceAssignment(data: {
       const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
       if (keaFile && fs.existsSync('/etc/kea')) {
         fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
-        try {
-          execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 });
-        } catch {}
+        runLocalStep('kea reload', () =>
+          execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 })
+        );
       }
-    } catch {}
+    } catch (err: any) {
+      localErrors.push(`kea sync: ${err?.message || 'failed'}`);
+    }
   }
 
   // Apply basic network state directly only when axonwalld was not reachable
   if (!daemonApplied && validDev) {
     if (normalizedEnabled) {
-      try {
-        execFileSync('ip', ['link', 'set', normalizedDevice, 'up'], { stdio: 'ignore', timeout: 2000 });
-      } catch {}
+      runLocalStep('ip link up', () =>
+        execFileSync('ip', ['link', 'set', normalizedDevice, 'up'], { stdio: 'ignore', timeout: 2000 })
+      );
       if (data.type === 'static' && data.ipv4Address) {
+        // C10 residual: the old order flushed the interface BEFORE adding
+        // the new address, so a failed add left the interface address-less
+        // while the UI reported success. Add first, then delete only the
+        // old addresses that differ — and verify the new address is
+        // actually present afterwards.
+        const newAddr = data.ipv4Address;
+        // An add that fails only because the address is already present
+        // is not a failure — the verify step below is the arbiter.
+        let addrAddError: string | null = null;
         try {
-          execFileSync('ip', ['addr', 'flush', 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
-        } catch {}
+          execFileSync('ip', ['addr', 'add', newAddr, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
+        } catch (err: any) {
+          addrAddError = err?.message || 'failed';
+        }
         try {
-          execFileSync('ip', ['addr', 'add', data.ipv4Address, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
-        } catch {}
+          const shown = execFileSync('ip', ['-j', 'addr', 'show', 'dev', normalizedDevice], {
+            encoding: 'utf8',
+            timeout: 2000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          });
+          const parsed = JSON.parse(shown) as Array<{ addr_info?: Array<{ family?: string; local?: string; prefixlen?: number }> }>;
+          const oldAddrs = (parsed?.[0]?.addr_info ?? [])
+            .filter((a) => a.family === 'inet' && a.local)
+            .map((a) => `${a.local}/${a.prefixlen}`)
+            .filter((a) => a !== newAddr);
+          for (const old of oldAddrs) {
+            runLocalStep(`ip addr del ${old}`, () =>
+              execFileSync('ip', ['addr', 'del', old, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 })
+            );
+          }
+        } catch (err: any) {
+          localErrors.push(`ip addr list: ${err?.message || 'failed'}`);
+        }
+        try {
+          const after = execFileSync('ip', ['addr', 'show', 'dev', normalizedDevice], {
+            encoding: 'utf8',
+            timeout: 2000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          });
+          if (!after.includes(newAddr)) {
+            localErrors.push(
+              `ip addr add: ${newAddr} is not present on ${normalizedDevice} after applying${addrAddError ? ` (add failed: ${addrAddError})` : ''}`
+            );
+          }
+        } catch (err: any) {
+          localErrors.push(`ip addr verify: ${err?.message || 'failed'}`);
+        }
         if (role === 'wan' && data.ipv4Gateway) {
-          try {
-            execFileSync('ip', ['route', 'replace', 'default', 'via', data.ipv4Gateway, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
-          } catch {}
+          const gateway = data.ipv4Gateway;
+          runLocalStep('ip route replace', () =>
+            execFileSync('ip', ['route', 'replace', 'default', 'via', gateway, 'dev', normalizedDevice], {
+              stdio: 'ignore',
+              timeout: 2000,
+            })
+          );
         }
       } else if (data.type === 'dhcp') {
         let handledByDhcpcd = false;
         if (fs.existsSync('/usr/sbin/dhcpcd') || fs.existsSync('/sbin/dhcpcd')) {
-          try {
-            const dhcpcdBin = fs.existsSync('/usr/sbin/dhcpcd') ? '/usr/sbin/dhcpcd' : '/sbin/dhcpcd';
-            execFileSync(dhcpcdBin, ['-4', normalizedDevice], { stdio: 'ignore', timeout: 8000 });
-            handledByDhcpcd = true;
-          } catch {}
+          const dhcpcdBin = fs.existsSync('/usr/sbin/dhcpcd') ? '/usr/sbin/dhcpcd' : '/sbin/dhcpcd';
+          const before = localErrors.length;
+          runLocalStep('dhcpcd', () =>
+            execFileSync(dhcpcdBin, ['-4', normalizedDevice], { stdio: 'ignore', timeout: 8000 })
+          );
+          handledByDhcpcd = localErrors.length === before;
         }
         if (!handledByDhcpcd) {
-          try {
-            execFileSync('dhclient', ['-r', normalizedDevice], { stdio: 'ignore', timeout: 3000 });
-          } catch {}
-          try {
-            execFileSync('dhclient', [normalizedDevice], { stdio: 'ignore', timeout: 5000 });
-          } catch {}
+          runLocalStep('dhclient release', () =>
+            execFileSync('dhclient', ['-r', normalizedDevice], { stdio: 'ignore', timeout: 3000 })
+          );
+          runLocalStep('dhclient', () =>
+            execFileSync('dhclient', [normalizedDevice], { stdio: 'ignore', timeout: 5000 })
+          );
         }
       }
     } else {
-      try {
-        execFileSync('ip', ['link', 'set', normalizedDevice, 'down'], { stdio: 'ignore', timeout: 2000 });
-      } catch {}
+      runLocalStep('ip link down', () =>
+        execFileSync('ip', ['link', 'set', normalizedDevice, 'down'], { stdio: 'ignore', timeout: 2000 })
+      );
     }
+  }
+
+  // C10 residual: when the daemon was never reached, the change was saved
+  // to disk (and the local commands above ran best-effort) but the daemon
+  // — owner of nftables/Kea — never applied anything. Report that
+  // explicitly instead of "saved on eth1" success.
+  if (daemonUnreachable) {
+    const localNote =
+      localErrors.length > 0
+        ? ` Local fallback steps failed: ${localErrors.join('; ')}.`
+        : ' Local interface commands ran as a best-effort fallback only.';
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was saved to disk but NOT applied: axonwalld is unreachable (${daemonUnreachable}).${localNote}`,
+    };
   }
 
   return {
@@ -3061,6 +3269,10 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
   const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
 
   let daemonError: string | null = null;
+  // C10 residual: set when the daemon was never reached at all (see the
+  // save path above). The removal was written to disk but the daemon —
+  // owner of nftables/Kea — never applied it.
+  let daemonUnreachable: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
     const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
@@ -3113,12 +3325,21 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
       });
       if (confirmResp && !confirmResp.success) {
         daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface removal';
+      } else if (!confirmResp) {
+        // C10 residual: the confirm call never reached the daemon.
+        daemonUnreachable = 'confirm call failed';
       }
     } else if (applyResp) {
       // C10: the daemon answered and rejected the removal.
       daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface removal';
+    } else {
+      // C10 residual: callAgentApi resolves null when the daemon socket
+      // is unreachable — the daemon never saw this removal.
+      daemonUnreachable = 'apply call failed';
     }
-  } catch {}
+  } catch (err: any) {
+    daemonUnreachable = err?.message || 'daemon call threw';
+  }
 
   // C10: on an explicit daemon rejection, roll the disk write back and
   // report failure — never present the disk-only removal as applied.
@@ -3128,6 +3349,16 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was not removed: ${daemonError}`,
+    };
+  }
+
+  // C10 residual: when the daemon was never reached, the removal was
+  // written to disk but never applied by the daemon. Report that
+  // explicitly instead of "removed" success.
+  if (daemonUnreachable) {
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was removed from disk state but NOT applied: axonwalld is unreachable (${daemonUnreachable}).`,
     };
   }
 
@@ -3255,7 +3486,10 @@ export interface LiveFlowRecord {
 }
 
 export interface NetworkInsightTelemetry {
-  conntrackCount: number;
+  // G8: null when the /proc read fails (no nf_conntrack module,
+  // unreadable /proc) — 0 is a legitimate count, so null marks
+  // "unavailable" distinctly.
+  conntrackCount: number | null;
   totalRxBytes: number;
   totalTxBytes: number;
   flows: LiveFlowRecord[];
@@ -3265,10 +3499,11 @@ export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTeleme
   const session = await getSession();
   assertActionPermitted(session);
 
-  let conntrackCount = 0;
+  let conntrackCount: number | null = null;
   try {
     const raw = fs.readFileSync('/proc/sys/net/netfilter/nf_conntrack_count', 'utf8');
-    conntrackCount = parseInt(raw.trim(), 10) || 0;
+    const parsed = parseInt(raw.trim(), 10);
+    conntrackCount = Number.isNaN(parsed) ? null : parsed;
   } catch {}
 
   let totalRxBytes = 0;
@@ -3311,10 +3546,10 @@ export async function getNetworkInsightTelemetry(): Promise<NetworkInsightTeleme
     }
   } catch {}
 
-  if (conntrackCount === 0 && flows.length > 0) {
-    conntrackCount = flows.length;
-  }
-
+  // G8: the old code silently replaced a failed /proc read with the
+  // number of displayed flows (capped at 50) and labelled it the
+  // kernel conntrack count. Return null (unavailable) instead of
+  // substituting an unrelated number.
   return {
     conntrackCount,
     totalRxBytes,
@@ -3666,20 +3901,16 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
     return {
       installMode,
       zbmPoolName: daemonData.zbmPoolName || 'zroot',
-      zbmPoolTopology: daemonData.zbmPoolTopology || 'mirror',
-      zbmPoolHealth: daemonData.zbmPoolHealth || 'ONLINE',
-      bootEnvironments: daemonData.bootEnvironments || [
-        {
-          name: `axonwall-${currentVersion}`,
-          dataset: `zroot/ROOT/axonwall-${currentVersion}`,
-          activeNow: true,
-          activeNext: true,
-          version: currentVersion,
-          usedSize: '6.4G',
-          createdAt: new Date().toISOString(),
-          snapshots: [],
-        },
-      ],
+      // E2-9: no healthy defaults — when the daemon omits topology /
+      // health (its ZFS reads failed), the page renders them unknown
+      // instead of a fabricated mirror/ONLINE.
+      zbmPoolTopology: daemonData.zbmPoolTopology,
+      zbmPoolHealth: daemonData.zbmPoolHealth,
+      // E2-9: no synthesised Boot Environment — when the daemon sends
+      // no bootEnvironments (an empty list is omitted from its JSON),
+      // the page shows no BE rows instead of an invented BE that
+      // claims activeNow and activeNext with a made-up size.
+      bootEnvironments: daemonData.bootEnvironments || [],
       slots:
         installMode === 'rolling'
           ? [
@@ -3762,26 +3993,10 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
       healthVerified: Boolean(daemonData.healthVerified),
       kernelVersion: daemonData.kernelVersion || kernel,
       osVersion: daemonData.osVersion || `Axonwall OS v${currentVersion}`,
-      checks: daemonData.checks || [
-        {
-          name: 'Network Interface Initialization',
-          status: 'PASS',
-          detail: 'Loopback and network carrier operational',
-          durationMs: 14,
-        },
-        {
-          name: 'Kernel nftables Netfilter Baseline',
-          status: 'PASS',
-          detail: 'Atomic ruleset compiler validation verified',
-          durationMs: 28,
-        },
-        {
-          name: 'Control Plane & Management Quorum',
-          status: 'PASS',
-          detail: 'Privileged IPC socket active and responding',
-          durationMs: 8,
-        },
-      ],
+      // B22: when the daemon omits checks, do not substitute three
+      // hardcoded PASS checks that never ran — an empty list means
+      // "checks unavailable" and the page renders it as such.
+      checks: daemonData.checks ?? [],
     };
   }
 
@@ -3929,10 +4144,6 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
         stdio: 'ignore',
         timeout: 1500,
       });
-      return {
-        success: true,
-        message: `Partition Slot ${cleanSlot} armed in GRUB environment. System will boot into Slot ${cleanSlot} on next reboot.`,
-      };
     } catch (err: any) {
       // C7: a failed privileged grub-editenv write is a failure, not an
       // "emulated environment" success. The active slot was not changed.
@@ -3941,6 +4152,63 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
         message: `Failed to arm Slot ${cleanSlot}: ${err?.message || 'grub-editenv write failed'}. The active slot was not changed; do not reboot on the basis of this result.`,
       };
     }
+
+    // E2-4: when running on slot B, GRUB reads slot A's grubenv, so
+    // the write above went to a grubenv GRUB never reads. Mirror it
+    // onto slot A the way the daemon and axonwall-update do; a mirror
+    // failure means the slot was NOT armed, and must be reported as
+    // such rather than as success.
+    try {
+      const cmdline = fs.existsSync('/proc/cmdline') ? fs.readFileSync('/proc/cmdline', 'utf8') : '';
+      if (cmdline.includes('axon_root_b') || cmdline.includes('slot=B')) {
+        const slotADev = '/dev/disk/by-label/axon_root_a';
+        if (!fs.existsSync(slotADev)) {
+          return {
+            success: false,
+            message: `Slot ${cleanSlot} was written to the local GRUB environment, but the Slot A mirror could not be made (device ${slotADev} not found); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
+          };
+        }
+        const mntDir = '/tmp/axonwall-grubenv-slot-a';
+        fs.mkdirSync(mntDir, { recursive: true });
+        try {
+          execFileSync('mount', [slotADev, mntDir], { stdio: 'ignore', timeout: 5000 });
+        } catch (mountErr: any) {
+          return {
+            success: false,
+            message: `Slot ${cleanSlot} was written to the local GRUB environment, but Slot A could not be mounted to mirror it (${mountErr?.message || 'mount failed'}); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
+          };
+        }
+        try {
+          execFileSync('grub-editenv', [`${mntDir}/boot/grub/grubenv`, 'set', `active_slot=${cleanSlot}`, 'bootcount=0'], {
+            stdio: 'ignore',
+            timeout: 1500,
+          });
+        } catch (mirrorErr: any) {
+          try {
+            execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+          } catch {}
+          return {
+            success: false,
+            message: `Slot ${cleanSlot} was written to the local GRUB environment, but the Slot A grubenv mirror failed (${mirrorErr?.message || 'grub-editenv failed'}); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
+          };
+        }
+        // A stuck unmount after a successful mirror write does not
+        // change what GRUB will boot; ignore it.
+        try {
+          execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+        } catch {}
+      }
+    } catch (err: any) {
+      return {
+        success: false,
+        message: `Failed to mirror the GRUB environment to Slot A: ${err?.message || 'mirror failed'}. The slot was NOT armed; do not reboot on the basis of this result.`,
+      };
+    }
+
+    return {
+      success: true,
+      message: `Partition Slot ${cleanSlot} armed in GRUB environment. System will boot into Slot ${cleanSlot} on next reboot.`,
+    };
   } catch (err: any) {
     return {
       success: false,
@@ -3950,12 +4218,37 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
 }
 
 export async function verifySystemHealthQuorum(): Promise<SystemPartitionsTelemetry> {
-  try {
-    const session = await getSession();
-    if (isAdminSession(session)) {
-      await callAgentApi<any>('/v1/system/health/verify', 'POST');
-    }
-  } catch {}
+  // C-B3: the daemon's verify verdict is the verdict. A null response
+  // means axonwalld is unreachable (no tests ran), and healthVerified
+  // false means the quorum did not pass — both must fail loudly instead
+  // of returning local telemetry that the caller then reports as PASSED.
+  // A successful daemon verify really does reset bootcount to 0 and mark
+  // the partition permanently healthy (watchdog RunVerification), so the
+  // success path below is the only one that may claim that.
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin credentials required to verify system health');
+  }
+  const verifyResp = await callAgentApi<any>('/v1/system/health/verify', 'POST');
+  if (!verifyResp) {
+    throw new Error(
+      'Health verification unavailable: axonwalld is unreachable — no verification tests ran and bootcount was not reset.'
+    );
+  }
+  if (verifyResp.success === false) {
+    throw new Error(verifyResp.message || verifyResp.error || 'Daemon health verification failed.');
+  }
+  if (verifyResp.healthVerified !== true) {
+    const failed = Array.isArray(verifyResp.checks)
+      ? verifyResp.checks
+          .filter((c: any) => c?.status && c.status !== 'PASS')
+          .map((c: any) => `${c.name || 'check'} (${c.status})`)
+          .join(', ')
+      : '';
+    throw new Error(
+      `Daemon health verification did not pass${failed ? `: ${failed}` : ''}. Bootcount was not reset.`
+    );
+  }
   return getSystemPartitionsTelemetry();
 }
 
@@ -4080,7 +4373,20 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
           ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
           { stdio: 'ignore', timeout: 1500 }
         );
-      } catch {}
+      } catch (err: any) {
+        // C-B11: a failed grubenv write used to be swallowed while the
+        // success message below claimed "Watchdog bootcount armed
+        // (bootlimit=3)". Like activatePartitionSlot (C7), a failed
+        // privileged write is a failure: the firmware WAS flashed, but
+        // the watchdog was NOT armed, so a bad boot will not count
+        // toward the rollback limit. Say so loudly instead.
+        return {
+          success: false,
+          message: `Firmware v${targetVersion} was flashed to Slot ${cleanSlot}, but the watchdog bootcount could NOT be armed: ${err?.message || 'grub-editenv write failed'}. A failed boot will not count toward the rollback limit; fix /boot/grub/grubenv and re-arm before relying on watchdog rollback.`,
+          targetSlot: cleanSlot,
+          newVersion: targetVersion,
+        };
+      }
     }
 
     // Persist per-slot version metadata
@@ -4429,52 +4735,13 @@ export async function getHardwareTelemetry(): Promise<HardwareTelemetry> {
     return daemonTelem;
   }
 
-  // Fallback telemetry
-  return {
-    hostname: os.hostname(),
-    cpuTempC: 42.0,
-    temperatures: [
-      { name: 'cpu_core0', label: 'CPU Core 0', value: 41.5, unit: '°C', warning: 85, critical: 100 },
-      { name: 'cpu_core1', label: 'CPU Core 1', value: 42.5, unit: '°C', warning: 85, critical: 100 },
-      { name: 'pch_temp', label: 'Platform Controller Hub (PCH)', value: 46.2, unit: '°C', warning: 90, critical: 105 },
-      { name: 'ambient_zone', label: 'Chassis Intake Ambient', value: 24.8, unit: '°C', warning: 45, critical: 60 },
-    ],
-    fans: [
-      { name: 'fan_chassis1', label: 'Chassis Exhaust Fan 1', rpm: 2450 },
-      { name: 'fan_chassis2', label: 'Chassis Exhaust Fan 2', rpm: 2380 },
-      { name: 'fan_cpu', label: 'CPU PWM Cooler', rpm: 1820 },
-    ],
-    voltages: [
-      { name: 'vcore', label: 'CPU Vcore', value: 1.15, unit: 'V' },
-      { name: '12v', label: '+12V Rail', value: 12.08, unit: 'V' },
-      { name: '5v', label: '+5V Rail', value: 5.02, unit: 'V' },
-      { name: '3v3', label: '+3.3V Rail', value: 3.31, unit: 'V' },
-    ],
-    transceivers: [
-      {
-        interface: 'eth1 (WAN SFP+)',
-        vendor: 'CISCO-FINISAR',
-        partNumber: 'FTLX8571D3BCL',
-        temperature: 38.4,
-        voltage: 3.29,
-        txPowerDbm: -2.1,
-        rxPowerDbm: -3.4,
-        biasCurrentMa: 6.8,
-        status: 'Optimal Link (10G-SR)',
-      },
-      {
-        interface: 'eth2 (LAN SFP+)',
-        vendor: 'FS.COM',
-        partNumber: 'SFP-10GSR-85',
-        temperature: 36.1,
-        voltage: 3.31,
-        txPowerDbm: -1.8,
-        rxPowerDbm: -2.2,
-        biasCurrentMa: 7.1,
-        status: 'Optimal Link (10G-SR)',
-      },
-    ],
-  };
+  // C-B5: the daemon did not answer, so no sensor was ever read. Never
+  // return invented healthy-looking readings — an operator checking a
+  // thermal/fan/optic incident would be told everything is normal.
+  // Callers render an "unavailable" state instead (see terminal page).
+  throw new Error(
+    'Hardware telemetry unavailable: axonwalld is unreachable — no sensor readings were taken.'
+  );
 }
 
 export async function executeTerminalCommand(command: string): Promise<TerminalExecResponse> {
@@ -4703,11 +4970,13 @@ export async function createNasSnapshotAction(
     };
   }
 
-  const snapName = `${dataset}@${label || `manual-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}`}`;
+  // C-B1: the daemon is unreachable, so no snapshot was taken anywhere.
+  // Never invent a snapshot name and report success — an operator about
+  // to upgrade on the strength of that banner would have no safety net.
   return {
-    success: true,
-    snapshot: snapName,
-    message: `Snapshot ${snapName} created.`,
+    success: false,
+    snapshot: '',
+    message: 'Snapshot not created: axonwalld is unreachable. No snapshot exists for this dataset.',
   };
 }
 
@@ -4729,9 +4998,11 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
     };
   }
 
+  // Daemon unreachable: no scrub ran. Never report success for a scrub
+  // that was never started — silent data-rot is the failure mode here.
   return {
-    success: true,
-    message: `ZFS pool scrub initiated on '${poolName}'.`,
+    success: false,
+    message: `Daemon unavailable: ZFS pool scrub was not started on '${poolName}'.`,
   };
 }
 
@@ -5663,19 +5934,38 @@ export async function revertMcpLeaseAction(
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<any>('/v1/mcp/revert', 'POST', { leaseId, reason });
-  if (res && !res.success && res.error) {
-    return { success: false, error: res.error };
+  // C-B6: a null response means the daemon never ran the revert — it is
+  // a failure, not a success. The lease is still in the kernel.
+  if (!res) {
+    return { success: false, error: 'Daemon unavailable — lease was not reverted.' };
+  }
+  if (!res.success) {
+    return { success: false, error: res.error || res.message || 'Failed to revert lease' };
   }
   return { success: true };
 }
 
 export async function emergencyFlushMcpLeasesAction(
   reason = 'Emergency Panic Flush triggered by administrator from Web Console'
-): Promise<{ success: boolean; clearedCount: number }> {
+): Promise<{ success: boolean; clearedCount: number; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<any>('/v1/mcp/flush', 'POST', { reason });
+  // C-B6: a null response means the daemon never ran the flush — the
+  // blackholes/shapers/DNAT/DNS sinkholes are all still in the kernel.
+  // A daemon-reported failure is a failure too. Never report purged
+  // leases that were never purged.
+  if (!res) {
+    return { success: false, clearedCount: 0, error: 'Daemon unavailable — no leases were purged.' };
+  }
+  if (res.success === false) {
+    return {
+      success: false,
+      clearedCount: 0,
+      error: res.error || res.message || 'Emergency flush failed on the daemon.',
+    };
+  }
   return {
     success: true,
     clearedCount: res?.clearedCount ?? 0,

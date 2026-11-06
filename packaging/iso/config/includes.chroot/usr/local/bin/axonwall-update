@@ -200,18 +200,25 @@ ensure_cli_symlinks() {
 }
 
 # Apply extracted .deb staging tree onto a destination root (standby slot or live root)
+# E2-2: copy failures are load-bearing, not cosmetic. Every copy used
+# to return success unconditionally (|| true), so a disk-full or I/O
+# error mid-overlay staged a partial tree that was then armed as the
+# new version. Track failures and return non-zero; every caller treats
+# a non-zero return as fatal. mkdir/chown/chmod and the static-asset
+# sync stay best-effort (they cannot leave a half-copied package tree).
 apply_staged_tree() {
   pkg_stage="$1"
   dest_root="${2:-/}"
   dest_root="${dest_root%/}"
+  _apply_failed=0
 
   if [ -d "${pkg_stage}/opt/axonwall" ]; then
     mkdir -p "${dest_root}/opt/axonwall"
     if command -v rsync >/dev/null 2>&1; then
-      rsync -a --delete "${pkg_stage}/opt/axonwall/" "${dest_root}/opt/axonwall/" 2>/dev/null || true
+      rsync -a --delete "${pkg_stage}/opt/axonwall/" "${dest_root}/opt/axonwall/" 2>/dev/null || _apply_failed=1
     else
       rm -rf "${dest_root}/opt/axonwall"
-      cp -a "${pkg_stage}/opt/axonwall" "${dest_root}/opt/axonwall" 2>/dev/null || true
+      cp -a "${pkg_stage}/opt/axonwall" "${dest_root}/opt/axonwall" 2>/dev/null || _apply_failed=1
     fi
     chown -R root:root "${dest_root}/opt/axonwall" 2>/dev/null || true
     chmod -R go-w "${dest_root}/opt/axonwall" 2>/dev/null || true
@@ -223,7 +230,7 @@ apply_staged_tree() {
       if [ -e "$sbin_f" ] || [ -L "$sbin_f" ]; then
         bname="$(basename "$sbin_f")"
         rm -f "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
-        cp -af "$sbin_f" "${dest_root}/usr/sbin/" 2>/dev/null || true
+        cp -af "$sbin_f" "${dest_root}/usr/sbin/" 2>/dev/null || _apply_failed=1
         if [ -f "${dest_root}/usr/sbin/${bname}" ] && [ ! -L "${dest_root}/usr/sbin/${bname}" ]; then
           chmod 755 "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
         fi
@@ -237,7 +244,7 @@ apply_staged_tree() {
       if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
         bname="$(basename "$bin_f")"
         rm -f "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
-        cp -af "$bin_f" "${dest_root}/usr/local/bin/" 2>/dev/null || true
+        cp -af "$bin_f" "${dest_root}/usr/local/bin/" 2>/dev/null || _apply_failed=1
         if [ -f "${dest_root}/usr/local/bin/${bname}" ] && [ ! -L "${dest_root}/usr/local/bin/${bname}" ]; then
           chmod 755 "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
         fi
@@ -248,21 +255,26 @@ apply_staged_tree() {
   for sub in usr/lib/axonwall usr/lib/sysusers.d usr/lib/tmpfiles.d usr/share/oh-my-zsh usr/share/axonwall etc/zsh etc/zfsbootmenu etc/modprobe.d etc/sysctl.d etc/vim; do
     if [ -d "${pkg_stage}/${sub}" ]; then
       mkdir -p "${dest_root}/${sub}" 2>/dev/null || true
-      cp -af "${pkg_stage}/${sub}/." "${dest_root}/${sub}/" 2>/dev/null || true
+      cp -af "${pkg_stage}/${sub}/." "${dest_root}/${sub}/" 2>/dev/null || _apply_failed=1
     fi
   done
 
   for cfg_f in etc/tmux.conf etc/rkhunter.conf.local; do
     if [ -f "${pkg_stage}/${cfg_f}" ]; then
       mkdir -p "$(dirname "${dest_root}/${cfg_f}")" 2>/dev/null || true
-      cp -af "${pkg_stage}/${cfg_f}" "${dest_root}/${cfg_f}" 2>/dev/null || true
+      cp -af "${pkg_stage}/${cfg_f}" "${dest_root}/${cfg_f}" 2>/dev/null || _apply_failed=1
     fi
   done
 
   if [ -d "${pkg_stage}/lib/systemd/system" ]; then
     mkdir -p "${dest_root}/lib/systemd/system" 2>/dev/null || true
-    cp -af "${pkg_stage}/lib/systemd/system/"*.service "${dest_root}/lib/systemd/system/" 2>/dev/null || true
-    cp -af "${pkg_stage}/lib/systemd/system/"*.timer "${dest_root}/lib/systemd/system/" 2>/dev/null || true
+    # Loop (not a bare glob copy): a package with services but no
+    # timers must not fail the overlay on the unmatched *.timer glob.
+    for unit_f in "${pkg_stage}/lib/systemd/system/"*.service "${pkg_stage}/lib/systemd/system/"*.timer; do
+      if [ -e "$unit_f" ]; then
+        cp -af "$unit_f" "${dest_root}/lib/systemd/system/" 2>/dev/null || _apply_failed=1
+      fi
+    done
   fi
 
   if [ -d "${pkg_stage}/etc/axonwall" ]; then
@@ -273,6 +285,11 @@ apply_staged_tree() {
   fi
 
   ensure_cli_symlinks "${dest_root}"
+
+  if [ "$_apply_failed" != "0" ]; then
+    return 1
+  fi
+  return 0
 }
 
 # Helper: Resolve partition block device by label
@@ -513,13 +530,28 @@ if [ "$ZBM_MODE" = "1" ]; then
       zfs snapshot "$PRE_SNAP"
     fi
 
-    if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
-      echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Recreating clone..."
-      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
+    # E2-13: clone to a temporary BE name FIRST and only destroy the
+    # old target once the clone has succeeded. The old order destroyed
+    # the target (which may be the current fallback_be) and then
+    # cloned; a clone failure (pool full, transient ZFS error) aborted
+    # under `set -e` with the target gone and fallback_be dangling.
+    # A stale tmp dataset can only come from an earlier interrupted
+    # run — it is never armed or referenced — so remove it first.
+    TARGET_BE_TMP="${TARGET_BE}.tmp"
+    TARGET_BE_TMP_DS="${PARENT_DS}/${TARGET_BE_TMP}"
+    if zfs list -H -o name "$TARGET_BE_TMP_DS" >/dev/null 2>&1; then
+      echo "[!] Removing stale temporary Boot Environment ${TARGET_BE_TMP_DS} from an earlier interrupted update..."
+      zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
     fi
 
-    echo "[+] Cloning ${PRE_SNAP} -> ${TARGET_BE_DS}..."
-    zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_DS"
+    echo "[+] Cloning ${PRE_SNAP} -> ${TARGET_BE_TMP_DS}..."
+    zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_TMP_DS"
+
+    if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
+      echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Replacing it with the new clone..."
+      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
+    fi
+    zfs rename "$TARGET_BE_TMP_DS" "$TARGET_BE_DS"
 
     ZBM_STAGE_MNT="/tmp/axonwall-zbm-stage-${CLEAN_VER}"
     rm -rf "${ZBM_STAGE_MNT}"
@@ -538,7 +570,13 @@ if [ "$ZBM_MODE" = "1" ]; then
         rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
         exit 1
       fi
-      apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"
+      if ! apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"; then
+        echo "[-] ERROR: Failed to apply firmware payload into ${TARGET_BE_DS} (staged copy failed); the Boot Environment is NOT armed." >&2
+        rm -rf "${PKG_STAGE}"
+        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        exit 1
+      fi
       rm -rf "${PKG_STAGE}"
       if [ -d "${ZBM_STAGE_MNT}/etc/axonwall" ] && [ -d /var/lib/axonwall/etc-axonwall ]; then
         sync_static_etc_axonwall "${ZBM_STAGE_MNT}/etc/axonwall" /var/lib/axonwall/etc-axonwall
@@ -605,7 +643,17 @@ if [ "$ZBM_MODE" = "1" ]; then
     # E2: every arming step is checked. On any failure, restore the
     # previous bootfs, print an error, and exit non-zero — never claim
     # the Boot Environment is armed.
+    # E2-5: snapshot every arming property before touching them, so
+    # the rollback below restores all of them (the daemon's E3 fix
+    # does the same). Restoring bootfs alone left active_be pointing
+    # at the new BE while bootfs pointed at the old one, and the
+    # watchdog hook then counted healthy boots of the old BE against
+    # the new BE and spuriously rolled back days later.
     PREV_BOOTFS="$(zpool get -H -o value bootfs "${POOL_NAME}" 2>/dev/null || true)"
+    PREV_FALLBACK_BE="$(zfs get -H -o value org.axonwall:fallback_be "${PARENT_DS}" 2>/dev/null || true)"
+    PREV_ACTIVE_BE="$(zfs get -H -o value org.axonwall:active_be "${PARENT_DS}" 2>/dev/null || true)"
+    PREV_BOOTCOUNT="$(zfs get -H -o value org.axonwall:bootcount "${PARENT_DS}" 2>/dev/null || true)"
+    PREV_BOOTLIMIT="$(zfs get -H -o value org.axonwall:bootlimit "${PARENT_DS}" 2>/dev/null || true)"
     ZBM_ARM_OK=1
     zpool set bootfs="${TARGET_BE_DS}" "${POOL_NAME}" 2>/dev/null || ZBM_ARM_OK=0
     zfs set org.axonwall:fallback_be="${CURRENT_BE_DS}" "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
@@ -614,9 +662,21 @@ if [ "$ZBM_MODE" = "1" ]; then
     zfs set org.axonwall:bootlimit=3 "${PARENT_DS}" 2>/dev/null || ZBM_ARM_OK=0
     if [ "$ZBM_ARM_OK" != "1" ]; then
       echo "[-] ERROR: Failed to arm Boot Environment ${TARGET_BE} (one or more zpool/zfs arming steps failed); the Boot Environment is NOT armed." >&2
-      if [ -n "$PREV_BOOTFS" ]; then
-        zpool set bootfs="${PREV_BOOTFS}" "${POOL_NAME}" 2>/dev/null || true
+      if [ -n "$PREV_BOOTFS" ] && [ "$PREV_BOOTFS" != "-" ]; then
+        zpool set bootfs="${PREV_BOOTFS}" "${POOL_NAME}" 2>/dev/null || echo "[!] WARNING: Failed to roll back bootfs to ${PREV_BOOTFS} after arming failure." >&2
       fi
+      # A prior value of "-" (or empty/unreadable) means the property
+      # was unset: inherit clears whatever the failed arming set,
+      # mirroring the daemon's E3 rollback.
+      for _rb in "org.axonwall:fallback_be|${PREV_FALLBACK_BE}" "org.axonwall:active_be|${PREV_ACTIVE_BE}" "org.axonwall:bootcount|${PREV_BOOTCOUNT}" "org.axonwall:bootlimit|${PREV_BOOTLIMIT}"; do
+        _rb_prop="${_rb%%|*}"
+        _rb_prev="${_rb#*|}"
+        if [ -n "$_rb_prev" ] && [ "$_rb_prev" != "-" ]; then
+          zfs set "${_rb_prop}=${_rb_prev}" "${PARENT_DS}" 2>/dev/null || echo "[!] WARNING: Failed to roll back ${_rb_prop} to ${_rb_prev} after arming failure." >&2
+        else
+          zfs inherit "$_rb_prop" "${PARENT_DS}" 2>/dev/null || true
+        fi
+      done
       exit 1
     fi
 
@@ -719,7 +779,16 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       rm -rf "${PKG_STAGE}"
       mkdir -p "${PKG_STAGE}"
       if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
-        apply_staged_tree "${PKG_STAGE}" "${STAGE_DIR}"
+        # E2-2: a failed overlay must fail the update, not stage a
+        # partial tree that the E1 gate then arms as the new version.
+        # Unmount before exiting so no standby mount is left behind.
+        if ! apply_staged_tree "${PKG_STAGE}" "${STAGE_DIR}"; then
+          echo "[-] ERROR: Failed to apply firmware payload onto Slot ${TARGET_SLOT} (staged copy failed); refusing to arm it." >&2
+          rm -rf "${PKG_STAGE}"
+          umount "${STAGE_DIR}" 2>/dev/null || true
+          rmdir "${STAGE_DIR}" 2>/dev/null || true
+          exit 1
+        fi
         if [ -f "${STAGE_DIR}/usr/local/bin/axonwall-update" ]; then
           if sh -n "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null; then
             cp -f "${STAGE_DIR}/usr/local/bin/axonwall-update" /usr/local/bin/axonwall-update 2>/dev/null || true
@@ -742,6 +811,17 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           done
         fi
         ensure_cli_symlinks "/"
+      else
+        # E2-1: mirror the ZBM branch — a verified .deb that fails to
+        # extract must fail the update, not silently skip the apply
+        # and let the version write + E1 gate arm the stale slot as
+        # the new version. Unmount before exiting so no standby
+        # mount is left behind.
+        echo "[-] ERROR: Failed to extract firmware archive ${DEB_TMP}; refusing to arm Slot ${TARGET_SLOT}." >&2
+        rm -rf "${PKG_STAGE}"
+        umount "${STAGE_DIR}" 2>/dev/null || true
+        rmdir "${STAGE_DIR}" 2>/dev/null || true
+        exit 1
       fi
       rm -rf "${PKG_STAGE}"
     elif [ -d /opt/axonwall ]; then
@@ -807,11 +887,12 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       fi
     fi
 
-    # Also update grubenv on the target partition if /boot/grub exists there
-    if [ -d "${STAGE_DIR}/boot/grub" ]; then
-      update_grubenv_file "${STAGE_DIR}/boot/grub/grubenv" "${TARGET_SLOT}"
-    fi
-
+    # E2-3: there is deliberately no grubenv write on the target
+    # partition before this gate. The old pre-gate write armed the
+    # GRUB-visible grubenv in the B->A direction before staging was
+    # proven complete, so a failed staging still booted the half-
+    # staged slot. The arming block after the gate writes the running
+    # grubenv plus the slot-A mirror, which covers both directions.
     # E1 staging-success gate: only a staged slot with a real rootfs
     # (etc + init), a kernel, and no failed staging rsync may ever be
     # armed. A stale or partial tree fails here, not at next boot.
@@ -864,18 +945,35 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     echo "[-] ERROR: Failed to arm GRUB boot watchdog for Slot ${TARGET_SLOT} (grubenv write failed); the previous boot target is unchanged." >&2
     exit 1
   fi
+  # E2-4: running on B, GRUB reads slot A's grubenv, so this mirror
+  # IS the arming — the primary write above went to B's grubenv,
+  # which GRUB never reads. A mount or write failure here must fail
+  # the update, not warn and exit 0 for a slot that was never armed.
   if [ "$ACTIVE_SLOT" = "B" ]; then
     SLOT_A_DEV="$(resolve_label_dev "axon_root_a")"
+    MIRROR_OK=0
     if [ -n "$SLOT_A_DEV" ] && [ -b "$SLOT_A_DEV" ]; then
       SLOT_A_MNT="/tmp/axonwall-grubenv-slot-a"
       mkdir -p "$SLOT_A_MNT" 2>/dev/null || true
       if mount "$SLOT_A_DEV" "$SLOT_A_MNT" 2>/dev/null; then
         if [ -d "$SLOT_A_MNT/boot/grub" ]; then
-          update_grubenv_file "$SLOT_A_MNT/boot/grub/grubenv" "${TARGET_SLOT}" || echo "[!] WARNING: Failed to update the Slot A grubenv copy; the primary grubenv was armed." >&2
+          if update_grubenv_file "$SLOT_A_MNT/boot/grub/grubenv" "${TARGET_SLOT}"; then
+            MIRROR_OK=1
+          fi
+        else
+          echo "[-] ERROR: Slot A has no /boot/grub directory; cannot mirror the GRUB environment." >&2
         fi
         umount "$SLOT_A_MNT" 2>/dev/null || true
+      else
+        echo "[-] ERROR: Failed to mount Slot A (${SLOT_A_DEV}) to mirror the GRUB environment." >&2
       fi
       rmdir "$SLOT_A_MNT" 2>/dev/null || true
+    else
+      echo "[-] ERROR: Slot A device (label axon_root_a) could not be resolved; cannot mirror the GRUB environment." >&2
+    fi
+    if [ "$MIRROR_OK" != "1" ]; then
+      echo "[-] ERROR: Failed to mirror the GRUB environment to Slot A; Slot ${TARGET_SLOT} was NOT armed for next boot (GRUB reads Slot A's grubenv). The previous boot target is unchanged." >&2
+      exit 1
     fi
   fi
 elif [ "$ROLLING_MODE" != "1" ] && ( [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline ); then
@@ -893,20 +991,23 @@ else
     fi
   fi
 
-  if [ -n "$CLEAN_VER" ]; then
-    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
-    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
-    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Rolling",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$SV_TIMESTAMP")"
-    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
-    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
-  fi
-
   if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
     PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
     rm -rf "${PKG_STAGE}"
     mkdir -p "${PKG_STAGE}"
-    if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
-      apply_staged_tree "${PKG_STAGE}" "/"
+    # E2-1: mirror the ZBM branch — a failed extraction must fail the
+    # update, not silently skip the apply and print success.
+    if ! extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
+      echo "[-] ERROR: Failed to extract firmware archive ${DEB_TMP}; the update did NOT complete." >&2
+      rm -rf "${PKG_STAGE}"
+      exit 1
+    fi
+    # E2-2: a failed in-place overlay must fail the update, not
+    # print success for a half-updated live root.
+    if ! apply_staged_tree "${PKG_STAGE}" "/"; then
+      echo "[-] ERROR: Failed to apply firmware payload in place (staged copy failed); the update did NOT complete." >&2
+      rm -rf "${PKG_STAGE}"
+      exit 1
     fi
     rm -rf "${PKG_STAGE}"
 
@@ -916,6 +1017,17 @@ else
       echo "[+] Scheduling asynchronous reload of Axonwall services..."
       nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &
     fi
+  fi
+
+  # E2-1: the version file is written only after a successful apply.
+  # It used to be written before the extract attempt, so a failed
+  # extraction still stamped the new version on the live root.
+  if [ -n "$CLEAN_VER" ]; then
+    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
+    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Rolling",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$SV_TIMESTAMP")"
+    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
   fi
 fi
 

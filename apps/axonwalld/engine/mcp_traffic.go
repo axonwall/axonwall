@@ -21,8 +21,13 @@ import (
 )
 
 const (
-	unboundMcpSinkholePath = "/etc/unbound/unbound.conf.d/mcp-sinkhole.conf"
+	// unboundMcpSinkholePath and unboundControlBinary are vars (not
+	// consts) so tests can redirect the sinkhole config and reload
+	// command; the production values are unchanged.
+	unboundControlBinary = "unbound-control"
 )
+
+var unboundMcpSinkholePath = "/etc/unbound/unbound.conf.d/mcp-sinkhole.conf"
 
 // mcpStateFilePath is a var (not a const) so tests can redirect persisted
 // lease state into a temp dir; the production value is unchanged.
@@ -149,6 +154,11 @@ type McpTrafficManager struct {
 	// allocated and still in kernel setup, or freed by a delete whose
 	// kernel cleanup has not finished yet. See allocClassIDLocked.
 	reservedClassIDs map[int]struct{}
+	// reconcileDirty is set when a kernel rebuild fails (M9): the
+	// lease records changed but the kernel table may not match them.
+	// The janitor retries the rebuild on every tick until it lands
+	// instead of forgetting the failure. Guarded by mu.
+	reconcileDirty bool
 }
 
 // mcpClassIDRange is the shared pool for tc classes (shape) and
@@ -219,9 +229,23 @@ func NewMcpTrafficManager() *McpTrafficManager {
 	mgr.loadState()
 	if err := mgr.ReconcileKernelState(); err != nil {
 		log.Printf("[MCP Traffic] Initial kernel reconciliation warning: %v", err)
+		// M9: the startup rebuild failed, so the leases reloaded from
+		// disk are listed as active with a stale (or empty) kernel
+		// table. Mark it dirty so the janitor retries the rebuild
+		// until it lands instead of waiting for a lease event.
+		mgr.reconcileDirty = true
 	}
 	go mgr.janitorLoop()
 	return mgr
+}
+
+// ReconcileDirty reports whether a kernel rebuild failed and has not
+// yet been retried to success (M9). The stale-enforcement state is
+// surfaced to the API alongside the lease list.
+func (m *McpTrafficManager) ReconcileDirty() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reconcileDirty
 }
 
 func generateLeaseID() string {
@@ -302,6 +326,9 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 	}
 	if len(expired) == 0 {
 		m.mu.Unlock()
+		// M9: even a tick with nothing to expire retries a
+		// previously failed rebuild (see retryDirtyReconcile).
+		m.retryDirtyReconcile()
 		return
 	}
 	m.saveStateLocked()
@@ -320,7 +347,39 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 	// are gone from the records, but the kernel table may still enforce them.
 	if err := m.ReconcileKernelState(); err != nil {
 		log.Printf("[MCP Traffic] Janitor kernel reconciliation failed (kernel table may still enforce expired leases): %v", err)
+		// M9: keep the failure sticky. The next tick finds no
+		// expired leases left, so without a dirty flag nothing
+		// would ever retry the rebuild and the expired leases
+		// could stay enforced indefinitely.
+		m.mu.Lock()
+		m.reconcileDirty = true
+		m.mu.Unlock()
+		return
 	}
+	m.mu.Lock()
+	m.reconcileDirty = false
+	m.mu.Unlock()
+}
+
+// retryDirtyReconcile retries a previously failed kernel rebuild
+// (M9). It runs at the end of every janitor tick, including ticks
+// with nothing to expire, so a failed rebuild is retried until it
+// lands instead of being forgotten after one log line.
+func (m *McpTrafficManager) retryDirtyReconcile() {
+	m.mu.Lock()
+	dirty := m.reconcileDirty
+	m.mu.Unlock()
+	if !dirty {
+		return
+	}
+	if err := m.ReconcileKernelState(); err != nil {
+		log.Printf("[MCP Traffic] Retrying failed kernel reconciliation (kernel table may still be stale): %v", err)
+		return
+	}
+	m.mu.Lock()
+	m.reconcileDirty = false
+	m.mu.Unlock()
+	log.Printf("[MCP Traffic] Previously failed kernel reconciliation succeeded on retry")
 }
 
 // ListLeases returns all currently active tactical leases with updated remaining TTL seconds.
@@ -349,6 +408,14 @@ func (m *McpTrafficManager) ListLeases() []*McpTacticalLease {
 // and Unbound DNS sinkhole configs from the active lease map.
 func (m *McpTrafficManager) ReconcileKernelState() error {
 	m.mu.Lock()
+	leases := m.activeLeasesLocked()
+	m.mu.Unlock()
+	return m.reconcileKernelStateWith(leases)
+}
+
+// activeLeasesLocked returns the currently unexpired leases. Callers
+// hold m.mu.
+func (m *McpTrafficManager) activeLeasesLocked() []*McpTacticalLease {
 	leases := make([]*McpTacticalLease, 0, len(m.leases))
 	now := time.Now().UTC()
 	for _, l := range m.leases {
@@ -356,7 +423,13 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 			leases = append(leases, l)
 		}
 	}
-	m.mu.Unlock()
+	return leases
+}
+
+// reconcileKernelStateWith rebuilds the kernel table from an explicit
+// lease set instead of the live map, so RevertLease/FlushAllLeases
+// can rebuild the post-delete table BEFORE deleting any record (M8).
+func (m *McpTrafficManager) reconcileKernelStateWith(leases []*McpTacticalLease) error {
 
 	posture := DiscoverProtectedPosture()
 	protectedV4 := []string{"127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4"}
@@ -441,6 +514,18 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 				verdict = "counter reject"
 			}
 
+			// M7 (defence in depth): a lease with an unrecognised
+			// direction must fail the reconcile instead of silently
+			// emitting no rule. Creation now rejects these, so this
+			// can only fire for a lease persisted before the fix —
+			// and a revert of that lease reconciles the set without
+			// it, so it stays removable.
+			switch dir {
+			case "", "both", "inbound", "outbound":
+			default:
+				return fmt.Errorf("lease %s has unrecognised blackhole direction %q", l.ID, dir)
+			}
+
 			protoMatch := ""
 			if proto == "tcp" || proto == "udp" {
 				if port > 0 {
@@ -471,6 +556,12 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 			shapeDir, _ := l.Parameters["direction"].(string)
 			if shapeDir == "" {
 				shapeDir = "both"
+			}
+			// M7 (defence in depth): see the blackhole case above.
+			switch shapeDir {
+			case "both", "ingress", "inbound", "egress", "outbound":
+			default:
+				return fmt.Errorf("lease %s has unrecognised shape direction %q", l.ID, shapeDir)
 			}
 			if l.FwMark > 0 {
 				if shapeDir == "both" || shapeDir == "ingress" || shapeDir == "inbound" {
@@ -620,13 +711,29 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 		return fmt.Errorf("nftables apply failed: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// Reconcile Unbound DNS sinkhole configuration
-	m.reconcileDnsSinkholes(leases)
+	// Reconcile Unbound DNS sinkhole configuration. A-M10: a failed
+	// sinkhole reconcile fails the whole rebuild — the lease create
+	// paths already drop the lease on any ReconcileKernelState error
+	// (A-M13), so a sinkhole lease no longer reports active while
+	// DNS is not sinkholed.
+	if err := m.reconcileDnsSinkholes(leases); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func (m *McpTrafficManager) reconcileDnsSinkholes(leases []*McpTacticalLease) {
+// reconcileDnsSinkholes writes the Unbound sinkhole config for the
+// active dns_sinkhole leases and reloads Unbound. It returns an error
+// instead of logging failures away (A-M10): a config write failure
+// (disk full, perms) or a failed `unbound-control reload` (Unbound
+// down, bad generated config) used to leave the lease stored,
+// persisted, and listed as active while the domain kept resolving.
+// The reload runs only when sinkhole state actually changes, so an
+// unrelated lease create does not fail just because Unbound is down:
+// with no sinkhole leases and no sinkhole file on disk there is
+// nothing to reconcile.
+func (m *McpTrafficManager) reconcileDnsSinkholes(leases []*McpTacticalLease) error {
 	var lines []string
 	lines = append(lines, "# Auto-generated by Axonwall MCP Tactical Traffic Engine")
 	lines = append(lines, "server:")
@@ -654,13 +761,27 @@ func (m *McpTrafficManager) reconcileDnsSinkholes(leases []*McpTacticalLease) {
 		count++
 	}
 
-	_ = os.MkdirAll(filepath.Dir(unboundMcpSinkholePath), 0755)
 	if count == 0 {
-		_ = os.Remove(unboundMcpSinkholePath)
+		if err := os.Remove(unboundMcpSinkholePath); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to remove stale dns sinkhole config %s: %w", unboundMcpSinkholePath, err)
+		}
+		// A stale config was removed: reload so Unbound drops the
+		// sinkhole instead of serving it until the next restart.
 	} else {
-		_ = os.WriteFile(unboundMcpSinkholePath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+		if err := os.MkdirAll(filepath.Dir(unboundMcpSinkholePath), 0755); err != nil {
+			return fmt.Errorf("failed to create unbound config dir %s: %w", filepath.Dir(unboundMcpSinkholePath), err)
+		}
+		if err := os.WriteFile(unboundMcpSinkholePath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+			return fmt.Errorf("failed to write dns sinkhole config %s: %w", unboundMcpSinkholePath, err)
+		}
 	}
-	_ = exec.Command("unbound-control", "reload").Run()
+	if out, err := exec.Command(unboundControlBinary, "reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("unbound-control reload failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (m *McpTrafficManager) cleanupKernelArtifactsForLease(l *McpTacticalLease) {
@@ -696,6 +817,23 @@ func (m *McpTrafficManager) cleanupKernelArtifactsForLease(l *McpTacticalLease) 
 			}
 		}
 	}
+}
+
+// runEnforcementCmd runs one tc/ip enforcement command and returns a
+// descriptive error on failure. "File exists" is tolerated: the
+// enforcement the command would install is already in place (idempotent
+// re-apply after a restart, e.g. a root qdisc or an ip rule that survived
+// a daemon crash), so it is not a failure.
+func runEnforcementCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "File exists") {
+			return nil
+		}
+		return fmt.Errorf("%s %s failed: %v (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func resolveKernelDevice(logicalOrDev string) string {
@@ -756,6 +894,15 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 	if req.Direction == "" {
 		req.Direction = "both"
 	}
+	// M7: an unrecognised direction used to be accepted and then
+	// match no rule branch in ReconcileKernelState, so the lease was
+	// stored and reported as active while the kernel enforced
+	// nothing for it.
+	switch req.Direction {
+	case "both", "inbound", "outbound":
+	default:
+		return nil, fmt.Errorf("invalid blackhole direction %q: must be both, inbound, or outbound", req.Direction)
+	}
 	if req.Protocol == "" {
 		req.Protocol = "any"
 	}
@@ -796,14 +943,10 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 		}
 	}
 
-	// Terminate active conntrack sessions immediately to sever established C2 channels
-	if req.KillActiveConnections {
-		hostOnly := strings.Split(normTarget, "/")[0]
-		if net.ParseIP(hostOnly) != nil {
-			_ = exec.Command("conntrack", "-D", "-s", normTarget).Run()
-			_ = exec.Command("conntrack", "-D", "-d", normTarget).Run()
-		}
-	}
+	// A-M22: the conntrack kill runs AFTER the drop rule lands (see
+	// below, post-reconcile). Killing first left a window where a
+	// connection established between the kill and the rule survived,
+	// and the kill result was `_ =`-discarded.
 
 	m.mu.Lock()
 	m.leases[lease.ID] = lease
@@ -835,7 +978,56 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 		}
 		return nil, fmt.Errorf("kernel reconcile failed for lease %s: %w", lease.ID, err)
 	}
+
+	// A-M22: terminate active conntrack sessions now that the drop rule
+	// is in place, so established C2 channels are severed with no window
+	// for a new connection to slip in between the kill and the rule. A
+	// failed kill does not fail the lease — the drop rule is already
+	// enforcing — but the outcome is recorded on the lease (and
+	// re-persisted) instead of silently discarded.
+	if req.KillActiveConnections {
+		killErr := killConntrackEntries(normTarget)
+		m.mu.Lock()
+		if killErr != nil {
+			log.Printf("[MCP Traffic] conntrack kill failed for blackhole %s (%s): %v", lease.ID, normTarget, killErr)
+			lease.Parameters["conntrackKill"] = "failed: " + killErr.Error()
+		} else {
+			lease.Parameters["conntrackKill"] = "ok"
+		}
+		m.saveStateLocked()
+		m.mu.Unlock()
+	}
 	return lease, nil
+}
+
+// killConntrackEntries deletes conntrack entries for a blackholed target
+// in both directions. It returns an error when conntrack is unavailable
+// or a deletion is rejected. A target with no matching entries is not an
+// error: conntrack exits 1 with no output (or "0 flow entries have been
+// deleted") when nothing matched, which means there was nothing to kill.
+func killConntrackEntries(normTarget string) error {
+	hostOnly := strings.Split(normTarget, "/")[0]
+	if net.ParseIP(hostOnly) == nil {
+		return fmt.Errorf("invalid target %q", normTarget)
+	}
+	if _, err := exec.LookPath("conntrack"); err != nil {
+		return fmt.Errorf("conntrack binary not found: %w", err)
+	}
+	var failures []string
+	for _, dir := range []string{"-s", "-d"} {
+		out, err := exec.Command("conntrack", "-D", dir, normTarget).CombinedOutput()
+		if err != nil {
+			trimmed := strings.TrimSpace(string(out))
+			if trimmed == "" || strings.Contains(trimmed, "0 flow entries") {
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("%s: %v (%s)", dir, err, trimmed))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("conntrack kill failed: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 // ShapeTraffic validates and applies a dynamic per-IP/subnet Linux `tc` HTB bandwidth limit and/or `netem` latency tarpit.
@@ -860,8 +1052,39 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	if req.LatencyMs < 0 || req.LatencyMs > 5000 {
 		return nil, fmt.Errorf("latencyMs must be between 0 and 5000 ms")
 	}
+	if req.PacketLossPercent < 0 || req.PacketLossPercent > 100 {
+		return nil, fmt.Errorf("packetLossPercent must be between 0 and 100")
+	}
+	if req.JitterMs < 0 {
+		return nil, fmt.Errorf("jitterMs must not be negative")
+	}
+	if req.JitterMs > req.LatencyMs {
+		return nil, fmt.Errorf("jitterMs (%d) must not exceed latencyMs (%d)", req.JitterMs, req.LatencyMs)
+	}
+	// M7: same direction validation as BlackholeTraffic (see there).
+	if req.Direction == "" {
+		req.Direction = "both"
+	}
+	switch req.Direction {
+	case "both", "ingress", "inbound", "egress", "outbound":
+	default:
+		return nil, fmt.Errorf("invalid shape direction %q: must be both, ingress, inbound, egress, or outbound", req.Direction)
+	}
 	if req.TTLSeconds < 10 {
 		req.TTLSeconds = 3600
+	}
+
+	// A-H3 (round 2): the tc class is the only enforcement for a shape
+	// lease (the nft mangle rule just sets a mark nothing consumes), so
+	// the interface must resolve to a live kernel device before a class
+	// ID is allocated — a typo'd or renamed interface used to produce
+	// a lease that shaped nothing.
+	dev := resolveKernelDevice(req.Interface)
+	if dev == "" {
+		return nil, fmt.Errorf("interface %q does not resolve to a device", req.Interface)
+	}
+	if _, err := net.InterfaceByName(dev); err != nil {
+		return nil, fmt.Errorf("interface %q does not resolve to a live device: %v", req.Interface, err)
 	}
 
 	m.mu.Lock()
@@ -873,17 +1096,24 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	fwMark := 0x2000 + classID
 	m.mu.Unlock()
 
-	dev := resolveKernelDevice(req.Interface)
-	if dev != "" {
-		// Ensure a root HTB qdisc exists on dev if none is active, then attach the tactical class + netem leaf
-		_ = exec.Command("tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb", "default", "99").Run()
-		_ = exec.Command("tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb", "rate", "10000mbit", "ceil", "10000mbit").Run()
-
-		classStr := fmt.Sprintf("1:%d", classID)
-		rateStr := fmt.Sprintf("%dkbit", req.RateKbps)
-		ceilStr := fmt.Sprintf("%dkbit", req.CeilKbps)
-		_ = exec.Command("tc", "class", "replace", "dev", dev, "parent", "1:1", "classid", classStr, "htb", "rate", rateStr, "ceil", ceilStr, "prio", "7").Run()
-
+	// A-H3 (round 2): every tc failure used to be discarded (`_ =`),
+	// so the lease was stored and reported active while no shaping
+	// existed. Fail the creation instead, cleaning up any partial tc
+	// state first. "File exists" is tolerated by runEnforcementCmd
+	// (idempotent re-apply of the shared root qdisc / class).
+	classStr := fmt.Sprintf("1:%d", classID)
+	rateStr := fmt.Sprintf("%dkbit", req.RateKbps)
+	ceilStr := fmt.Sprintf("%dkbit", req.CeilKbps)
+	tcErr := func() error {
+		if err := runEnforcementCmd("tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb", "default", "99"); err != nil {
+			return err
+		}
+		if err := runEnforcementCmd("tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb", "rate", "10000mbit", "ceil", "10000mbit"); err != nil {
+			return err
+		}
+		if err := runEnforcementCmd("tc", "class", "replace", "dev", dev, "parent", "1:1", "classid", classStr, "htb", "rate", rateStr, "ceil", ceilStr, "prio", "7"); err != nil {
+			return err
+		}
 		if req.LatencyMs > 0 || req.PacketLossPercent > 0 {
 			netemArgs := []string{"qdisc", "replace", "dev", dev, "parent", classStr, "handle", fmt.Sprintf("%d:", classID), "netem"}
 			if req.LatencyMs > 0 {
@@ -895,16 +1125,32 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 			if req.PacketLossPercent > 0 {
 				netemArgs = append(netemArgs, "loss", fmt.Sprintf("%.1f%%", req.PacketLossPercent))
 			}
-			_ = exec.Command("tc", netemArgs...).Run()
+			if err := runEnforcementCmd("tc", netemArgs...); err != nil {
+				return err
+			}
 		} else {
-			_ = exec.Command("tc", "qdisc", "replace", "dev", dev, "parent", classStr, "handle", fmt.Sprintf("%d:", classID), "fq_codel").Run()
+			if err := runEnforcementCmd("tc", "qdisc", "replace", "dev", dev, "parent", classStr, "handle", fmt.Sprintf("%d:", classID), "fq_codel"); err != nil {
+				return err
+			}
 		}
-
 		proto := "ip"
 		if isV6 {
 			proto = "ipv6"
 		}
-		_ = exec.Command("tc", "filter", "add", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", fmt.Sprintf("0x%x", fwMark), "fw", "flowid", classStr).Run()
+		return runEnforcementCmd("tc", "filter", "add", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", fmt.Sprintf("0x%x", fwMark), "fw", "flowid", classStr)
+	}()
+	if tcErr != nil {
+		m.cleanupKernelArtifactsForLease(&McpTacticalLease{
+			Kind:       "shape",
+			ClassID:    classID,
+			FwMark:     fwMark,
+			IsIPv6:     isV6,
+			Parameters: map[string]interface{}{"interface": req.Interface},
+		})
+		m.mu.Lock()
+		m.releaseClassIDLocked(classID)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("tc enforcement failed for shape lease: %w", tcErr)
 	}
 
 	now := time.Now().UTC()
@@ -1014,14 +1260,44 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 	m.mu.Unlock()
 
 	if req.RedirectType == "policy_route" {
+		// A-H3 (round 2): the ip route/rule pair is the only
+		// enforcement for a policy_route lease, and both failures used
+		// to be discarded (`_ =`). Fail the creation instead, cleaning
+		// up the half-installed route/rule first.
 		tableStr := strconv.Itoa(tableID)
 		markHex := fmt.Sprintf("0x%x", fwMark)
+		var cmdErr error
 		if isV6 {
-			_ = exec.Command("ip", "-6", "route", "replace", "default", "via", destHostIP, "table", tableStr).Run()
-			_ = exec.Command("ip", "-6", "rule", "add", "fwmark", markHex, "table", tableStr).Run()
+			cmdErr = runEnforcementCmd("ip", "-6", "route", "replace", "default", "via", destHostIP, "table", tableStr)
+			if cmdErr == nil {
+				cmdErr = runEnforcementCmd("ip", "-6", "rule", "add", "fwmark", markHex, "table", tableStr)
+			}
 		} else {
-			_ = exec.Command("ip", "route", "replace", "default", "via", destHostIP, "table", tableStr).Run()
-			_ = exec.Command("ip", "rule", "add", "fwmark", markHex, "table", tableStr).Run()
+			cmdErr = runEnforcementCmd("ip", "route", "replace", "default", "via", destHostIP, "table", tableStr)
+			if cmdErr == nil {
+				cmdErr = runEnforcementCmd("ip", "rule", "add", "fwmark", markHex, "table", tableStr)
+			}
+		}
+		if cmdErr != nil {
+			m.cleanupKernelArtifactsForLease(&McpTacticalLease{
+				Kind:       "redirect",
+				ClassID:    tableID,
+				FwMark:     fwMark,
+				IsIPv6:     isV6,
+				Parameters: map[string]interface{}{"redirectType": "policy_route"},
+			})
+			// cleanupKernelArtifactsForLease removes the rule but not
+			// the route; drop the inert default route in the custom
+			// table too.
+			if isV6 {
+				_ = exec.Command("ip", "-6", "route", "del", "default", "table", tableStr).Run()
+			} else {
+				_ = exec.Command("ip", "route", "del", "default", "table", tableStr).Run()
+			}
+			m.mu.Lock()
+			m.releaseClassIDLocked(tableID)
+			m.mu.Unlock()
+			return nil, fmt.Errorf("ip policy-route enforcement failed for redirect lease: %w", cmdErr)
 		}
 	}
 
@@ -1168,6 +1444,32 @@ func (m *McpTrafficManager) RevertLease(leaseID string) (*McpTacticalLease, erro
 		m.mu.Unlock()
 		return nil, fmt.Errorf("tactical lease '%s' not found or already expired", leaseID)
 	}
+	// M8: rebuild the kernel table WITHOUT the lease first, and only
+	// delete the record once the rebuild lands. The old code deleted
+	// the record (and saved state) before the rebuild, so a failed
+	// rebuild left the lease enforced in the kernel with no record
+	// and no way to address it except a daemon restart.
+	remaining := make([]*McpTacticalLease, 0, len(m.leases))
+	for _, l := range m.activeLeasesLocked() {
+		if l.ID != leaseID {
+			remaining = append(remaining, l)
+		}
+	}
+	m.mu.Unlock()
+
+	if err := m.reconcileKernelStateWith(remaining); err != nil {
+		// A-M13: a failed rebuild means the kernel table may still
+		// enforce the lease. A healing rebuild is attempted for the
+		// remaining leases; if it also fails, the record is kept so
+		// the lease stays listed and revertable.
+		if herr := m.reconcileKernelStateWith(remaining); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed while reverting lease %s: %v", lease.ID, herr)
+			return nil, fmt.Errorf("kernel reconcile failed while reverting lease %s: %w", lease.ID, err)
+		}
+		log.Printf("[MCP Traffic] Healing kernel reconciliation succeeded while reverting lease %s after an initial failure", lease.ID)
+	}
+
+	m.mu.Lock()
 	delete(m.leases, leaseID)
 	// A-L5: hold the ID reserved until kernel cleanup finishes (see
 	// allocClassIDLocked).
@@ -1179,28 +1481,33 @@ func (m *McpTrafficManager) RevertLease(leaseID string) (*McpTacticalLease, erro
 	m.mu.Lock()
 	m.releaseClassIDLocked(lease.ClassID)
 	m.mu.Unlock()
-	// A-M13: a failed rebuild means the kernel table may still enforce the
-	// lease (or may be partial). Report the failure so the caller does not
-	// record the revert as complete; a healing rebuild is attempted for
-	// the remaining leases.
-	if err := m.ReconcileKernelState(); err != nil {
-		if herr := m.ReconcileKernelState(); herr != nil {
-			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after revert of lease %s: %v", lease.ID, herr)
-		}
-		return nil, fmt.Errorf("kernel reconcile failed while reverting lease %s: %w", lease.ID, err)
-	}
 	return lease, nil
 }
 
 // FlushAllLeases is the emergency panic switch: clears all MCP tactical leases and flushes kernel artifacts.
-// It returns the number of leases cleared and, on a failed kernel rebuild, an error: the records are
-// cleared but the kernel table may still enforce some leases, which must not be reported as flushed.
+// It returns the number of leases cleared. On a failed kernel rebuild
+// it returns 0 and an error: no record is cleared, so the leases stay
+// listed and revertable instead of vanishing while the kernel may
+// still enforce them (M8).
 func (m *McpTrafficManager) FlushAllLeases() (int, error) {
 	m.mu.Lock()
 	all := make([]*McpTacticalLease, 0, len(m.leases))
 	for _, l := range m.leases {
 		all = append(all, l)
 	}
+	m.mu.Unlock()
+
+	// M8: rebuild the kernel table empty FIRST; only when it lands
+	// are the records cleared (same reasoning as RevertLease).
+	if err := m.reconcileKernelStateWith(nil); err != nil {
+		if herr := m.reconcileKernelStateWith(nil); herr != nil {
+			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after flush: %v", herr)
+			return 0, fmt.Errorf("kernel reconcile failed while flushing %d leases: %w", len(all), err)
+		}
+		log.Printf("[MCP Traffic] Healing kernel reconciliation succeeded while flushing after an initial failure")
+	}
+
+	m.mu.Lock()
 	m.leases = make(map[string]*McpTacticalLease)
 	// A-L5: hold every cleared ID reserved until its kernel cleanup
 	// finishes (see allocClassIDLocked).
@@ -1218,12 +1525,6 @@ func (m *McpTrafficManager) FlushAllLeases() (int, error) {
 		m.releaseClassIDLocked(l.ClassID)
 	}
 	m.mu.Unlock()
-	if err := m.ReconcileKernelState(); err != nil {
-		if herr := m.ReconcileKernelState(); herr != nil {
-			log.Printf("[MCP Traffic] Warning: healing kernel reconciliation also failed after flush: %v", herr)
-		}
-		return len(all), fmt.Errorf("kernel reconcile failed while flushing %d leases: %w", len(all), err)
-	}
 	return len(all), nil
 }
 
@@ -1492,8 +1793,20 @@ func (m *McpTrafficManager) CapturePacketSample(iface, srcIP, dstIP, proto strin
 		args = append(args, strings.Join(bpfParts, " and "))
 	}
 
-	cmd := exec.CommandContext(ctx, "tcpdump", args...)
-	out, _ := cmd.Output()
+	// L11: a failed tcpdump run used to return "success, 0 packets"
+	// — the same lie A-M15 fixed in RunCapture. There is deliberately
+	// no mock fallback here: a box without tcpdump gets an error, not
+	// a plausible-looking empty sample.
+	tcpdumpPath, err := exec.LookPath("tcpdump")
+	if err != nil {
+		return nil, fmt.Errorf("packet capture unavailable: tcpdump is not installed on this system")
+	}
+
+	cmd := exec.CommandContext(ctx, tcpdumpPath, args...)
+	// Capture stderr so a failed run can be reported, not swallowed.
+	var tcpdumpStderr strings.Builder
+	cmd.Stderr = &tcpdumpStderr
+	out, runErr := cmd.Output()
 
 	ipPortRegex := regexp.MustCompile(`^(\d+\.\d+)\s+IP6?\s+([0-9a-fA-F.:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F.:]+)\.([0-9]+):\s+(.*)$`)
 	packets := []CapturedPacket{}
@@ -1534,6 +1847,18 @@ func (m *McpTrafficManager) CapturePacketSample(iface, srcIP, dstIP, proto strin
 		}
 		packets = append(packets, pkt)
 		idx++
+	}
+
+	if len(packets) == 0 && runErr != nil {
+		// A failed tcpdump run (down/nonexistent interface, bad
+		// BPF) used to return "success, 0 packets". Return the
+		// error instead, as RunCapture does.
+		return nil, fmt.Errorf("tcpdump failed on interface %s: %w (stderr: %s)", dev, runErr, strings.TrimSpace(tcpdumpStderr.String()))
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		// The duration cap cut the sample short: say so instead
+		// of presenting the partial output as a complete sample.
+		log.Printf("[McpTraffic] CapturePacketSample on %s truncated by the %ds duration cap (%d packets)", dev, durationSec, len(packets))
 	}
 
 	return packets, nil

@@ -80,15 +80,34 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 
 	caCertBytes, errCert := os.ReadFile(caCertPath)
 	caKeyBytes, errKey := os.ReadFile(caKeyPath)
+	// A-H4 (round 2): never silently re-root the cluster. Existing CA
+	// material that fails to parse must fail loudly instead of being
+	// overwritten with a brand-new CA (which would orphan every peer
+	// certificate chained to the old CA).
 	if errCert == nil {
-		if certBlock, _ := pem.Decode(caCertBytes); certBlock != nil {
-			caCert, _ = x509.ParseCertificate(certBlock.Bytes)
+		certBlock, _ := pem.Decode(caCertBytes)
+		if certBlock == nil {
+			return fmt.Errorf("existing HA CA certificate %s is present but not valid PEM; refusing to overwrite it", caCertPath)
 		}
+		cert, err := x509.ParseCertificate(certBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("existing HA CA certificate %s is present but unparseable (%v); refusing to overwrite it", caCertPath, err)
+		}
+		if time.Now().After(cert.NotAfter) {
+			return fmt.Errorf("existing HA CA certificate %s expired on %s; refusing to issue from it", caCertPath, cert.NotAfter.Format(time.RFC3339))
+		}
+		caCert = cert
 	}
 	if errKey == nil {
-		if keyBlock, _ := pem.Decode(caKeyBytes); keyBlock != nil {
-			caKey, _ = x509.ParseECPrivateKey(keyBlock.Bytes)
+		keyBlock, _ := pem.Decode(caKeyBytes)
+		if keyBlock == nil {
+			return fmt.Errorf("existing HA CA key %s is present but not valid PEM; refusing to overwrite it", caKeyPath)
 		}
+		key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("existing HA CA key %s is present but unparseable (%v); refusing to overwrite it", caKeyPath, err)
+		}
+		caKey = key
 	}
 
 	// If this node was enrolled via CSR (has ca.crt, node.crt, and node.key, but no ca.key),
@@ -103,6 +122,16 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 				}
 			}
 		}
+		// A-H4: the enrolled node's key/certificate is missing or
+		// unparseable. Minting a new CA here would silently re-root
+		// the cluster; re-enroll via CSR (or rotate explicitly).
+		return fmt.Errorf("node is CSR-enrolled (CA certificate present without CA key) but its node key/certificate is missing or unparseable; re-enroll via CSR instead of minting a new CA")
+	}
+	if caCert == nil && caKey != nil {
+		// A-H4: the CA key survived but the certificate did not.
+		// Overwriting the good key with a fresh CA would orphan it;
+		// fail loudly instead of minting a replacement.
+		return fmt.Errorf("HA CA key %s is present but the CA certificate %s is missing or unparseable; refusing to overwrite the key", caKeyPath, caCertPath)
 	}
 
 	if caCert == nil || caKey == nil {
@@ -272,9 +301,18 @@ func GenerateHAPKICSR(extraIPs []string) ([]byte, error) {
 	}
 	var nodeKey *ecdsa.PrivateKey
 	if keyBytes, err := os.ReadFile(HAPKINodeKeyPath); err == nil {
-		if block, _ := pem.Decode(keyBytes); block != nil {
-			nodeKey, _ = x509.ParseECPrivateKey(block.Bytes)
+		// A-H4 (round 2): a corrupt/unparseable existing node key used
+		// to be silently replaced with a fresh key, orphaning the
+		// enrolled node certificate. Refuse instead.
+		block, _ := pem.Decode(keyBytes)
+		if block == nil {
+			return nil, fmt.Errorf("existing HA node key %s is present but not valid PEM; refusing to replace it without an explicit rotation", HAPKINodeKeyPath)
 		}
+		key, err := x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("existing HA node key %s is present but unparseable (%v); refusing to replace it without an explicit rotation", HAPKINodeKeyPath, err)
+		}
+		nodeKey = key
 	}
 	if nodeKey == nil {
 		var err error
@@ -438,11 +476,73 @@ func SignHAPKICSR(csrPEM []byte, extraIPs []string) (*HAPKICSRResponse, error) {
 	}, nil
 }
 
+// parsePEMCertificate parses the first PEM block of data as an X.509
+// certificate, rejecting empty input, non-PEM input, and unparseable
+// certificates.
+//
+// A-M34 (round 2): HA PKI imports used to write whatever PEM they were
+// handed — including empty strings — to disk and report success, and
+// the failure only surfaced later as TLS/syncrepl errors far from the
+// cause. Every block is validated before anything is written.
+func parsePEMCertificate(what, pemData string) (*x509.Certificate, error) {
+	if strings.TrimSpace(pemData) == "" {
+		return nil, fmt.Errorf("%s is empty", what)
+	}
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, fmt.Errorf("%s is not valid PEM", what)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not a valid X.509 certificate: %w", what, err)
+	}
+	return cert, nil
+}
+
+// validatePEMCertKeyPair checks that certPEM parses as a certificate and
+// that a non-empty keyPEM parses as the matching private key. An empty
+// key is allowed (the key may already exist on disk); a present but
+// invalid or mismatched key is an error.
+func validatePEMCertKeyPair(whatCert, certPEM, whatKey, keyPEM string) error {
+	if _, err := parsePEMCertificate(whatCert, certPEM); err != nil {
+		return err
+	}
+	if strings.TrimSpace(keyPEM) == "" {
+		return nil
+	}
+	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+		return fmt.Errorf("%s does not match %s: %w", whatKey, whatCert, err)
+	}
+	return nil
+}
+
 // InstallHAPKICSRResponse installs the CA certificate, signed local leaf certificate,
 // peer signer certificate, and LDAP replication secret received from CSR enrollment.
 func InstallHAPKICSRResponse(resp *HAPKICSRResponse) error {
 	if resp == nil || resp.CACertPEM == "" || resp.SignedCertPEM == "" {
 		return fmt.Errorf("incomplete CSR enrollment response")
+	}
+	// A-M34: validate every PEM block before writing anything. An
+	// empty ca.crt used to feed H4: the next EnsureHAPKICertsInDir
+	// saw an unparseable CA and silently minted a new one.
+	if err := validatePEMCertKeyPair("CA certificate", resp.CACertPEM, "", ""); err != nil {
+		return err
+	}
+	if err := validatePEMCertKeyPair("signed node certificate", resp.SignedCertPEM, "", ""); err != nil {
+		return err
+	}
+	if resp.PeerSignerCertPEM != "" {
+		if _, err := parsePEMCertificate("peer signer certificate", resp.PeerSignerCertPEM); err != nil {
+			return err
+		}
+	}
+	// When the local node key already exists (the normal CSR flow —
+	// the CSR was generated from it), the signed certificate must
+	// match it; otherwise the installed cert can never be used.
+	if keyBytes, err := os.ReadFile(HAPKINodeKeyPath); err == nil {
+		if _, err := tls.X509KeyPair([]byte(resp.SignedCertPEM), keyBytes); err != nil {
+			return fmt.Errorf("signed node certificate does not match the local node key: %w", err)
+		}
 	}
 	if err := os.MkdirAll(HAPKIDir, 0750); err != nil {
 		return err
@@ -465,19 +565,39 @@ func InstallHAPKICSRResponse(resp *HAPKICSRResponse) error {
 	}
 	fixHAPKIPermissions()
 
+	// A-M34 (secondary): the LDAP secret/base-DN writes were also
+	// swallowed; a failed write left replication broken while the
+	// import reported success.
 	if resp.LDAPReplSecret != "" {
-		_ = os.MkdirAll(LDAPSecretsDir, 0700)
-		_ = os.WriteFile(LDAPReplPassFile, []byte(resp.LDAPReplSecret+"\n"), 0600)
+		if err := os.MkdirAll(LDAPSecretsDir, 0700); err != nil {
+			return fmt.Errorf("failed to create LDAP secrets dir: %w", err)
+		}
+		if err := os.WriteFile(LDAPReplPassFile, []byte(resp.LDAPReplSecret+"\n"), 0600); err != nil {
+			return fmt.Errorf("failed to write LDAP replication secret: %w", err)
+		}
 	}
 	if resp.LDAPBaseDN != "" {
-		_ = os.MkdirAll(LDAPBaseDir, 0750)
-		_ = os.WriteFile(LDAPBaseDNFile, []byte(resp.LDAPBaseDN+"\n"), 0644)
+		if err := os.MkdirAll(LDAPBaseDir, 0750); err != nil {
+			return fmt.Errorf("failed to create LDAP base dir: %w", err)
+		}
+		if err := os.WriteFile(LDAPBaseDNFile, []byte(resp.LDAPBaseDN+"\n"), 0644); err != nil {
+			return fmt.Errorf("failed to write LDAP base DN: %w", err)
+		}
 	}
 	return nil
 }
 
 // ImportHAPKIBundle installs the HA PKI bundle and LDAP replication secret received from the primary HA node.
 func ImportHAPKIBundle(bundle HAPKIBundle) error {
+	// A-M34: validate every PEM block (cert parses, key matches cert)
+	// before writing anything — an empty or truncated bundle used to
+	// be installed and reported as success.
+	if err := validatePEMCertKeyPair("CA certificate", bundle.CACertPEM, "CA key", bundle.CAKeyPEM); err != nil {
+		return err
+	}
+	if err := validatePEMCertKeyPair("node certificate", bundle.NodeCertPEM, "node key", bundle.NodeKeyPEM); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(HAPKIDir, 0750); err != nil {
 		return err
 	}
@@ -485,7 +605,9 @@ func ImportHAPKIBundle(bundle HAPKIBundle) error {
 		return err
 	}
 	if bundle.CAKeyPEM != "" {
-		_ = os.WriteFile(HAPKICAKeyPath, []byte(bundle.CAKeyPEM), 0600)
+		if err := os.WriteFile(HAPKICAKeyPath, []byte(bundle.CAKeyPEM), 0600); err != nil {
+			return err
+		}
 	}
 	if err := os.WriteFile(HAPKINodeCertPath, []byte(bundle.NodeCertPEM), 0644); err != nil {
 		return err
@@ -497,13 +619,23 @@ func ImportHAPKIBundle(bundle HAPKIBundle) error {
 	}
 	fixHAPKIPermissions()
 
+	// A-M34 (secondary): see InstallHAPKICSRResponse — the LDAP
+	// secret/base-DN writes were swallowed too.
 	if bundle.LDAPReplSecret != "" {
-		_ = os.MkdirAll(LDAPSecretsDir, 0700)
-		_ = os.WriteFile(LDAPReplPassFile, []byte(bundle.LDAPReplSecret+"\n"), 0600)
+		if err := os.MkdirAll(LDAPSecretsDir, 0700); err != nil {
+			return fmt.Errorf("failed to create LDAP secrets dir: %w", err)
+		}
+		if err := os.WriteFile(LDAPReplPassFile, []byte(bundle.LDAPReplSecret+"\n"), 0600); err != nil {
+			return fmt.Errorf("failed to write LDAP replication secret: %w", err)
+		}
 	}
 	if bundle.LDAPBaseDN != "" {
-		_ = os.MkdirAll(LDAPBaseDir, 0750)
-		_ = os.WriteFile(LDAPBaseDNFile, []byte(bundle.LDAPBaseDN+"\n"), 0644)
+		if err := os.MkdirAll(LDAPBaseDir, 0750); err != nil {
+			return fmt.Errorf("failed to create LDAP base dir: %w", err)
+		}
+		if err := os.WriteFile(LDAPBaseDNFile, []byte(bundle.LDAPBaseDN+"\n"), 0644); err != nil {
+			return fmt.Errorf("failed to write LDAP base DN: %w", err)
+		}
 	}
 	return nil
 }
@@ -574,12 +706,32 @@ func ConfigureMultiProviderSyncrepl(serverID int, peerIP string, baseDN string) 
 		return fmt.Errorf("invalid characters in LDAP replication password")
 	}
 
-	// Update cn=replicator password in local DIT to match repl.pw
-	if replHash, err := HashSSHA(replPass); err == nil {
-		replLDIF := fmt.Sprintf("dn: cn=replicator,%s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n", baseDN, replHash)
+	// Update cn=replicator password in local DIT to match repl.pw.
+	// A-M28: this step used to be the one whose error was discarded, so
+	// syncrepl was configured with credentials that were never set and
+	// replication silently never worked. A failed modify now fails the
+	// whole setup. `replace:` fails with "No such attribute" when the
+	// entry has no userPassword yet (same trap as H6), so fall back to
+	// `add:` in that case.
+	replHash, err := HashSSHA(replPass)
+	if err != nil {
+		return fmt.Errorf("failed to hash LDAP replication password: %w", err)
+	}
+	modifyReplPassword := func(action string) (string, error) {
+		replLDIF := fmt.Sprintf("dn: cn=replicator,%s\nchangetype: modify\n%s: userPassword\nuserPassword: %s\n", baseDN, action, replHash)
 		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
 		cmd.Stdin = strings.NewReader(replLDIF)
-		_ = cmd.Run()
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := modifyReplPassword("replace"); err != nil {
+		if strings.Contains(out, "No such attribute") {
+			if out2, err2 := modifyReplPassword("add"); err2 != nil {
+				return fmt.Errorf("failed to set cn=replicator password (add fallback): %s (%w)", strings.TrimSpace(out2), err2)
+			}
+		} else {
+			return fmt.Errorf("failed to set cn=replicator password: %s (%w)", strings.TrimSpace(out), err)
+		}
 	}
 
 	// Configure cn=config with TLS certificates and ServerID

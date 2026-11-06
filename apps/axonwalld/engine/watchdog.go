@@ -211,9 +211,12 @@ func detectActiveSlotFromSystem(cmdlinePath string) (string, string) {
 	// 1. Inspect kernel cmdline if accessible
 	if cmdlineBytes, err := os.ReadFile(cmdlinePath); err == nil {
 		cmdline := string(cmdlineBytes)
-		if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
+		// E2-11: rootfsB/rootfsA are matched as exact tokens, never
+		// bare substrings — firstboot treats rootfsB=0 as slot A
+		// (rootfsB=1 is B), and a bare Contains read rootfsB=0 as B.
+		if strings.Contains(cmdline, "axon_root_b") || cmdlineHasToken(cmdline, "rootfsB=1") || cmdlineHasToken(cmdline, "rootfsA=0") || strings.Contains(cmdline, "slot=B") {
 			return "B", resolveLabelDevice("axon_root_b")
-		} else if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
+		} else if strings.Contains(cmdline, "axon_root_a") || cmdlineHasToken(cmdline, "rootfsB=0") || cmdlineHasToken(cmdline, "rootfsA=1") || strings.Contains(cmdline, "slot=A") {
 			return "A", resolveLabelDevice("axon_root_a")
 		}
 	}
@@ -354,6 +357,18 @@ var (
 	zbmSnapshotRegex   = regexp.MustCompile(`^([a-zA-Z0-9._/-]+@)?[a-zA-Z0-9._-]+$`)
 )
 
+// cmdlineHasToken reports whether cmdline carries token as a whole
+// whitespace-delimited word. E2-11: bare strings.Contains matching
+// mistook "rootfsB=0" (firstboot: slot A) for slot B.
+func cmdlineHasToken(cmdline, token string) bool {
+	for _, field := range strings.Fields(cmdline) {
+		if field == token {
+			return true
+		}
+	}
+	return false
+}
+
 // detectRunningSlotFromCmdline reports which slot the running kernel
 // actually booted from, based only on the kernel cmdline. The second
 // return is false when the cmdline is unreadable or carries no slot
@@ -367,10 +382,11 @@ func detectRunningSlotFromCmdline(cmdlinePath string) (string, bool) {
 		return "", false
 	}
 	cmdline := string(cmdlineBytes)
-	if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
+	// E2-11: exact-token matches only (see cmdlineHasToken).
+	if strings.Contains(cmdline, "axon_root_b") || cmdlineHasToken(cmdline, "rootfsB=1") || cmdlineHasToken(cmdline, "rootfsA=0") || strings.Contains(cmdline, "slot=B") {
 		return "B", true
 	}
-	if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
+	if strings.Contains(cmdline, "axon_root_a") || cmdlineHasToken(cmdline, "rootfsB=0") || cmdlineHasToken(cmdline, "rootfsA=1") || strings.Contains(cmdline, "slot=A") {
 		return "A", true
 	}
 	return "", false
@@ -497,8 +513,11 @@ func (we *WatchdogEngine) detectInitialState() {
 		slotBVer = "Rolling (Single-Root)"
 	} else if installMode == "zbm" {
 		zbmPoolName = "zroot"
-		zbmPoolTopology = "mirror"
-		zbmPoolHealth = "ONLINE"
+		// E2-9: topology/health deliberately stay empty when the
+		// reads below fail — they are omitempty, so the UI renders
+		// them unknown instead of a fabricated ONLINE/mirror.
+		// (Previously they defaulted to "mirror"/"ONLINE" before
+		// the reads, and the defaults survived a read failure.)
 
 		if topOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:topology", "zroot/ROOT"); err == nil {
 			top := strings.TrimSpace(string(topOut))
@@ -524,9 +543,9 @@ func (we *WatchdogEngine) detectInitialState() {
 				slotBVer = be.Version
 			}
 		}
-		if rootDevice == "" {
-			rootDevice = "zroot/ROOT/axonwall-" + appVer
-		}
+		// E2-9: no guessed root device — when the BE list is empty
+		// (zfs list failed, no cache) ActiveRootDevice stays ""
+		// instead of naming a dataset that may not exist.
 	} else if activeSlot == "A" {
 		slotAVer = appVer
 		if slotBVer == "" || slotBVer == slotAVer {
@@ -673,6 +692,14 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 				if be.ActiveNow {
 					we.status.ActiveRootDevice = be.Dataset
 					we.status.SlotAVersion = be.Version
+				} else if be.ActiveNext && be.Version != "" {
+					// E2-6: the BE armed for next boot is the standby
+					// slot's version. loadSlotVersions above filled
+					// SlotBVersion with the running version (the
+					// updater writes slotB = running), so the old
+					// "Standby BE"/"" guard below never fired and both
+					// slots reported the running version after arming.
+					we.status.SlotBVersion = be.Version
 				} else if we.status.SlotBVersion == "Standby BE" || we.status.SlotBVersion == "" {
 					we.status.SlotBVersion = be.Version
 				}
@@ -875,7 +902,12 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 	beName = strings.TrimSpace(beName)
 	beName = strings.TrimPrefix(beName, "zroot/ROOT/")
 	if beName == "" || beName == "axonwall-active" {
-		we.mu.RLock()
+		// E2-7 (same staleness shape as DeleteBootEnvironment):
+		// resolve the active BE from a freshly listed set, so a
+		// script-side arming since the last refresh does not send
+		// the snapshot to the previously-active BE.
+		we.mu.Lock()
+		we.status.BootEnvironments = we.listBootEnvironmentsLocked()
 		for _, be := range we.status.BootEnvironments {
 			if be.ActiveNow {
 				beName = be.Name
@@ -885,7 +917,7 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 		if beName == "" && len(we.status.BootEnvironments) > 0 {
 			beName = we.status.BootEnvironments[0].Name
 		}
-		we.mu.RUnlock()
+		we.mu.Unlock()
 	}
 	label = strings.TrimSpace(label)
 	label = strings.ReplaceAll(label, " ", "-")
@@ -912,6 +944,21 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 	return fullSnap, nil
 }
 
+// zbmRequireRootSnapshot rejects a normalised snapshot reference whose
+// dataset is not a Boot Environment under zroot/ROOT. E2-12: the
+// snapshot argument was accepted if it merely matched
+// zbmSnapshotRegex, so a data-dataset snapshot (e.g.
+// zroot/tank@backup) could be cloned into a BE — or rolled back or
+// destroyed — through the BE-scoped API, producing an unbootable BE
+// or destroying data outside the BE tree.
+func zbmRequireRootSnapshot(fullSnap string) error {
+	ds, _, _ := strings.Cut(fullSnap, "@")
+	if !strings.HasPrefix(ds, "zroot/ROOT/") {
+		return fmt.Errorf("snapshot %q is not a Boot Environment snapshot under zroot/ROOT", fullSnap)
+	}
+	return nil
+}
+
 // DeleteBootEnvironmentSnapshot destroys an existing ZFS snapshot on a Boot Environment dataset.
 func (we *WatchdogEngine) DeleteBootEnvironmentSnapshot(snapshot string) error {
 	snapshot = strings.TrimSpace(snapshot)
@@ -926,6 +973,9 @@ func (we *WatchdogEngine) DeleteBootEnvironmentSnapshot(snapshot string) error {
 	}
 	if !strings.Contains(fullSnap, "@") {
 		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return err
 	}
 
 	out, err := we.runZfsCmd("destroy", fullSnap)
@@ -955,6 +1005,9 @@ func (we *WatchdogEngine) RollbackBootEnvironmentSnapshot(snapshot string) error
 	}
 	if !strings.Contains(fullSnap, "@") {
 		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return err
 	}
 
 	out, err := we.runZfsCmd("rollback", "-r", fullSnap)
@@ -986,6 +1039,12 @@ func (we *WatchdogEngine) CloneSnapshotToBootEnvironment(snapshot, newBeName str
 	} else if !strings.HasPrefix(fullSnap, "zroot/") {
 		fullSnap = "zroot/ROOT/" + strings.TrimPrefix(fullSnap, "/")
 	}
+	if !strings.Contains(fullSnap, "@") {
+		return "", fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return "", err
+	}
 
 	targetDataset := "zroot/ROOT/" + newBeName
 	out, err := we.runZfsCmd("clone", "-o", "canmount=noauto", "-o", "mountpoint=/", fullSnap, targetDataset)
@@ -1013,8 +1072,10 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	}
 	targetDataset := "zroot/ROOT/" + beName
 	prevBootfs := ""
+	prevBootfsRead := false
 	if out, err := we.runZpoolCmd("get", "-H", "-o", "value", "bootfs", "zroot"); err == nil {
 		prevBootfs = strings.TrimSpace(string(out))
+		prevBootfsRead = true
 	}
 	prevActiveBe := ""
 	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:active_be", "zroot/ROOT"); err == nil {
@@ -1028,6 +1089,20 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:bootlimit", "zroot/ROOT"); err == nil {
 		prevBootlimit = strings.TrimSpace(string(out))
 	}
+	// L14 (E3 residual): if the current bootfs cannot be read, the
+	// rollback below cannot restore it — a later arming failure
+	// would leave bootfs pointed at the new target while
+	// active_be/bootcount/bootlimit roll back to their previous
+	// values, and the watchdog's view of the staged BE would
+	// disagree with bootfs. Refuse to arm rather than create that
+	// split state. An empty value is NOT an unreadable one: it
+	// means no bootfs was set (zpool reports that as "-"; the
+	// batch-16 mock reports it as "") — a known state, and the
+	// rollback below clears bootfs again for it.
+	if !prevBootfsRead {
+		return fmt.Errorf("cannot determine current bootfs; refusing to activate %q: zpool get bootfs failed", beName)
+	}
+
 	out, err := we.runZpoolCmd("set", "bootfs="+targetDataset, "zroot")
 	if err != nil {
 		return fmt.Errorf("zpool set bootfs failed: %v (%s)", err, strings.TrimSpace(string(out)))
@@ -1052,6 +1127,14 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 		if prevBootfs != "" && prevBootfs != "-" && prevBootfs != targetDataset {
 			if _, rerr := we.runZpoolCmd("set", "bootfs="+prevBootfs, "zroot"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back bootfs to %s after arming failure: %v", prevBootfs, rerr)
+			}
+		} else if prevBootfs == "-" || prevBootfs == "" {
+			// L14: no bootfs was set before, so clear it again
+			// instead of leaving it pointed at the failed target.
+			// ("-" is zpool's report for unset; "" is the batch-16
+			// mock's.)
+			if _, rerr := we.runZpoolCmd("set", "bootfs=", "zroot"); rerr != nil {
+				log.Printf("[Watchdog/ZBM] Warning: Failed to clear bootfs after arming failure: %v", rerr)
 			}
 		}
 		if prevActiveBe != "" && prevActiveBe != "-" {
@@ -1123,20 +1206,27 @@ func (we *WatchdogEngine) DeleteBootEnvironment(beName string) error {
 		}
 	}
 
-	we.mu.RLock()
+	// E2-7: the ActiveNow/ActiveNext guard must read the live BE
+	// list, not the cache. Script-side arming (axonwall-update
+	// --zbm) changes bootfs/active_be without telling the daemon,
+	// so a BE armed since the last status refresh could otherwise
+	// be deleted out from under the next boot. Same live-read
+	// discipline as the E4 fallback guard above.
+	we.mu.Lock()
+	we.status.BootEnvironments = we.listBootEnvironmentsLocked()
 	for _, be := range we.status.BootEnvironments {
 		if be.Dataset == targetDataset {
 			if be.ActiveNow {
-				we.mu.RUnlock()
+				we.mu.Unlock()
 				return fmt.Errorf("cannot delete currently running Boot Environment (%s)", beName)
 			}
 			if be.ActiveNext {
-				we.mu.RUnlock()
+				we.mu.Unlock()
 				return fmt.Errorf("cannot delete Boot Environment staged for next boot (%s); activate another BE first", beName)
 			}
 		}
 	}
-	we.mu.RUnlock()
+	we.mu.Unlock()
 
 	out, err := we.runZfsCmd("destroy", "-r", targetDataset)
 	if err != nil {
@@ -1196,14 +1286,19 @@ func (we *WatchdogEngine) runVerificationSequence() {
 	we.status.LastVerifiedAt = time.Now()
 
 	if allPassed {
-		we.status.HealthVerified = true
-		we.status.BootCount = 0
-		log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s (mode=%s).", we.status.ActiveSlot, we.status.InstallMode)
-
+		// L15: the healthy state is only committed to memory after
+		// the on-disk commit succeeds. The old code set
+		// HealthVerified/BootCount first and only logged a commit
+		// failure, so the status API reported a permanently-healthy
+		// slot while the on-disk bootcount still counted up toward
+		// fallback — and the next boot followed the disk, not the
+		// in-memory flag.
+		commitOK := false
 		if we.status.InstallMode == "zbm" {
 			if _, err := we.runZfsCmd("set", "org.axonwall:bootcount=0", "zroot/ROOT"); err != nil {
-				log.Printf("[Watchdog] Warning: Failed to commit bootcount=0 to zroot/ROOT: %v", err)
+				log.Printf("[Watchdog] ERROR: Failed to commit bootcount=0 to zroot/ROOT: %v; slot is NOT marked healthy", err)
 			} else {
+				commitOK = true
 				log.Printf("[Watchdog] Committed bootcount=0 to zroot/ROOT. Boot Environment is marked permanently healthy.")
 			}
 			activeBe := we.status.ActiveRootDevice
@@ -1224,10 +1319,19 @@ func (we *WatchdogEngine) runVerificationSequence() {
 		} else {
 			// Reset bootcount in GRUB environment
 			if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
-				log.Printf("[Watchdog] Warning: Failed to commit bootcount to grubenv: %v", err)
+				log.Printf("[Watchdog] ERROR: Failed to commit bootcount to grubenv: %v; slot is NOT marked healthy", err)
 			} else {
+				commitOK = true
 				log.Printf("[Watchdog] Committed bootcount=0 to %s. Partition is marked permanently healthy.", we.grubenvPath)
 			}
+		}
+		if commitOK {
+			we.status.HealthVerified = true
+			we.status.BootCount = 0
+			log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s (mode=%s).", we.status.ActiveSlot, we.status.InstallMode)
+		} else {
+			we.status.HealthVerified = false
+			log.Printf("[Watchdog] FAILED: Health verification checks passed for Slot %s but the healthy state could not be committed to disk; bootcount is %d/%d.", we.status.ActiveSlot, we.status.BootCount, we.status.BootLimit)
 		}
 	} else {
 		we.status.HealthVerified = false
@@ -1248,15 +1352,20 @@ func (we *WatchdogEngine) verifyInterfaces() HealthCheckResult {
 	}
 
 	hasLoopback := false
-	upCount := 0
+	nonLoopbackUp := 0
 	for _, iface := range ifaces {
 		// A-M17 (slice E note): loopback must exist AND be up; the
 		// old check counted a merely-present loopback as healthy.
 		if (iface.Flags&net.FlagLoopback) != 0 && (iface.Flags&net.FlagUp) != 0 {
 			hasLoopback = true
 		}
-		if (iface.Flags & net.FlagUp) != 0 {
-			upCount++
+		// A-M20: loopback alone must not pass the check. A box with
+		// every physical NIC down used to pass with N=1 (loopback
+		// counted in the total) and the watchdog then committed
+		// bootcount=0, disarming the A/B fallback for a network-dead
+		// box.
+		if (iface.Flags&net.FlagUp) != 0 && (iface.Flags&net.FlagLoopback) == 0 {
+			nonLoopbackUp++
 		}
 	}
 
@@ -1268,10 +1377,18 @@ func (we *WatchdogEngine) verifyInterfaces() HealthCheckResult {
 		}
 	}
 
+	if nonLoopbackUp == 0 {
+		return HealthCheckResult{
+			Name:   "Network Interface Initialization",
+			Status: CheckStatusFail,
+			Detail: "No non-loopback network interface is up; loopback alone cannot carry traffic",
+		}
+	}
+
 	return HealthCheckResult{
 		Name:   "Network Interface Initialization",
 		Status: CheckStatusPass,
-		Detail: fmt.Sprintf("Detected %d operational network interfaces with active loopback.", upCount),
+		Detail: fmt.Sprintf("Detected %d operational non-loopback network interface(s) with active loopback.", nonLoopbackUp),
 	}
 }
 
@@ -1396,6 +1513,40 @@ func (we *WatchdogEngine) verifyControlPlane() HealthCheckResult {
 	}
 }
 
+// selectStandbyBE picks the Boot Environment a slot-letter or rollback
+// caller should arm when no explicit BE is named. E2-10: taking the
+// first non-active entry of the cached list armed the alphabetically
+// first standby — usually the oldest version — once several standbys
+// existed. Prefer the BE already armed for next boot, else the newest
+// by creation time; fall back to the last standby in dataset-name
+// order when no creation time parses. Returns nil when no standby
+// exists. Callers must refresh the list first (the cache is stale
+// after script-side arming).
+func selectStandbyBE(bes []ZfsBootEnvironment) *ZfsBootEnvironment {
+	var newest *ZfsBootEnvironment
+	var newestTime time.Time
+	var last *ZfsBootEnvironment
+	for i := range bes {
+		be := &bes[i]
+		if be.ActiveNow {
+			continue
+		}
+		if be.ActiveNext {
+			return be
+		}
+		last = be
+		if t, err := time.Parse("Mon Jan _2 15:04 2006", be.CreatedAt); err == nil {
+			if newest == nil || t.After(newestTime) {
+				newest, newestTime = be, t
+			}
+		}
+	}
+	if newest != nil {
+		return newest
+	}
+	return last
+}
+
 // TriggerRollback manually switches the target boot slot to the alternate partition or fallback BE and reboots.
 func (we *WatchdogEngine) TriggerRollback() error {
 	we.mu.Lock()
@@ -1417,11 +1568,12 @@ func (we *WatchdogEngine) TriggerRollback() error {
 			fallbackBe = strings.TrimSpace(string(fallbackOut))
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
-			for _, be := range we.status.BootEnvironments {
-				if !be.ActiveNow {
-					fallbackBe = be.Dataset
-					break
-				}
+			// E2-10: refresh the list (script-side arming never
+			// tells the daemon) and prefer the armed/newest standby
+			// instead of the first non-active cached entry.
+			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+			if be := selectStandbyBE(we.status.BootEnvironments); be != nil {
+				fallbackBe = be.Dataset
 			}
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
@@ -1437,11 +1589,15 @@ func (we *WatchdogEngine) TriggerRollback() error {
 	targetSlot := we.status.InactiveSlot
 	log.Printf("[Watchdog] Triggering safe manual rollback to Slot %s...", targetSlot)
 
-	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
-		return fmt.Errorf("failed to set active_slot in grubenv: %w", err)
-	}
+	// A-M21: write bootcount BEFORE active_slot, so a bootcount failure
+	// cannot leave the boot target already flipped with stale boot
+	// accounting. The old order (active_slot first) booted the target
+	// slot with the previous bootcount on the next boot.
 	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 		return fmt.Errorf("failed to reset bootcount in grubenv: %w", err)
+	}
+	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
+		return fmt.Errorf("failed to set active_slot in grubenv: %w", err)
 	}
 
 	oldActive := we.status.ActiveSlot
@@ -1476,11 +1632,14 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 				}
 			}
 		} else if strings.EqualFold(targetBE, "B") {
-			for _, be := range we.status.BootEnvironments {
-				if !be.ActiveNow {
-					targetBE = be.Name
-					break
-				}
+			// E2-10: refresh the list (script-side arming never
+			// tells the daemon) and prefer the armed/newest standby
+			// instead of the first non-active cached entry.
+			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+			if be := selectStandbyBE(we.status.BootEnvironments); be != nil {
+				targetBE = be.Name
+			} else {
+				return fmt.Errorf("no standby Boot Environment available for slot B")
 			}
 		}
 		we.mu.Unlock()
@@ -1494,11 +1653,13 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 		return fmt.Errorf("invalid partition slot: %s (must be A or B)", targetSlot)
 	}
 
-	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
-		return fmt.Errorf("failed to set active_slot: %w", err)
-	}
+	// A-M21: write bootcount BEFORE active_slot (see TriggerRollback):
+	// a bootcount failure must not leave the boot target flipped.
 	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 		return fmt.Errorf("failed to reset bootcount: %w", err)
+	}
+	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
+		return fmt.Errorf("failed to set active_slot: %w", err)
 	}
 
 	inactiveSlot := "B"
@@ -1590,14 +1751,17 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		return fmt.Sprintf("Firmware v%s successfully staged to new ZFS Boot Environment (axonwall-%s)! Watchdog bootcount armed (bootlimit=3). Reboot when ready.", targetVersion, targetVersion), nil
 	}
 
-	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
-		return "", fmt.Errorf("failed to set active_slot in grubenv: %w", err)
-	}
+	// A-M21: write bootcount/bootlimit BEFORE active_slot (see
+	// TriggerRollback): a later write failure must not leave the boot
+	// target flipped with stale boot accounting.
 	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 		return "", fmt.Errorf("failed to reset bootcount in grubenv: %w", err)
 	}
 	if err := we.writeGrubEnvKey("bootlimit", "3"); err != nil {
 		return "", fmt.Errorf("failed to set bootlimit in grubenv: %w", err)
+	}
+	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
+		return "", fmt.Errorf("failed to set active_slot in grubenv: %w", err)
 	}
 
 	currentRunningVer := readInstalledVersion()
@@ -1630,8 +1794,14 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 
 // readGrubEnvInternal parses GRUB key=value pairs from the environment block.
 func (we *WatchdogEngine) readGrubEnvInternal() map[string]string {
+	return readGrubEnvAtPath(we.grubenvPath)
+}
+
+// readGrubEnvAtPath parses GRUB key=value pairs from the environment
+// block at envPath.
+func readGrubEnvAtPath(envPath string) map[string]string {
 	res := make(map[string]string)
-	data, err := os.ReadFile(we.grubenvPath)
+	data, err := os.ReadFile(envPath)
 	if err != nil {
 		return res
 	}
@@ -1653,27 +1823,59 @@ func (we *WatchdogEngine) readGrubEnvInternal() map[string]string {
 // writeGrubEnvKey updates or appends a key in the grubenv file.
 func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 	err := writeGrubEnvKeyAtPath(we.grubenvPath, we.readGrubEnvInternal(), key, value)
+	if err != nil {
+		return err
+	}
 
 	// When booted into Slot B on a dual-root disk where GRUB's $prefix lives on Slot A (axon_root_a),
 	// mirror grubenv updates to axon_root_a's /boot/grub/grubenv as well.
-	if we.grubenvPath == "/boot/grub/grubenv" && os.Geteuid() == 0 {
-		slotADev := resolveLabelDevice("axon_root_a")
-		if info, statErr := os.Stat(slotADev); statErr == nil && (info.Mode()&os.ModeDevice) != 0 {
-			if cmdlineBytes, cErr := os.ReadFile(we.cmdlinePath); cErr == nil && strings.Contains(string(cmdlineBytes), "axon_root_b") {
-				_ = os.MkdirAll("/run/axonwall", 0750)
-				mntDir := "/run/axonwall/grubsync-a"
-				_ = os.MkdirAll(mntDir, 0700)
-				if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr == nil {
-					targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")
-					_ = writeGrubEnvKeyAtPath(targetEnv, we.readGrubEnvInternal(), key, value)
-					_ = exec.Command("umount", mntDir).Run()
-				}
-				_ = os.Remove(mntDir)
-			}
-		}
+	// E2-4: on B the mirror IS the arming — GRUB never reads B's
+	// grubenv — so a mirror failure is a write failure, not a
+	// best-effort side effect. Return it like the primary error so
+	// ActivateSlot/TriggerRollback report "not armed" instead of
+	// claiming a slot switch the next boot will ignore. The mirror
+	// only applies to the real grubenv path; tests and non-A/B
+	// layouts keep the old return-early behaviour.
+	if we.grubenvPath != "/boot/grub/grubenv" {
+		return nil
 	}
-
-	return err
+	cmdlineBytes, cErr := os.ReadFile(we.cmdlinePath)
+	if cErr != nil || !strings.Contains(string(cmdlineBytes), "axon_root_b") {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: daemon is not running as root (euid %d), so the GRUB-visible grubenv was not updated", os.Geteuid())
+	}
+	slotADev := resolveLabelDevice("axon_root_a")
+	info, statErr := os.Stat(slotADev)
+	if statErr != nil || (info.Mode()&os.ModeDevice) == 0 {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: device %s is not a block device: %v", slotADev, statErr)
+	}
+	mntDir := "/run/axonwall/grubsync-a"
+	if mErr := os.MkdirAll(mntDir, 0700); mErr != nil {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: cannot create mount point %s: %w", mntDir, mErr)
+	}
+	if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr != nil {
+		_ = os.Remove(mntDir)
+		return fmt.Errorf("cannot mirror grubenv to Slot A: mount %s failed: %w", slotADev, mErr)
+	}
+	targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")
+	// D2-L1: base the mirror write on the TARGET file's own env, not
+	// the booted slot's — the direct-write fallback serialises the
+	// whole base map, and the booted slot's map still carries
+	// clone-time values (e.g. active_slot=A) that would flip the next
+	// boot back to A.
+	mirrorErr := writeGrubEnvKeyAtPath(targetEnv, readGrubEnvAtPath(targetEnv), key, value)
+	if uErr := exec.Command("umount", mntDir).Run(); uErr != nil {
+		// The mirror write already landed; a stuck mount is loud
+		// but does not change what GRUB will boot.
+		log.Printf("[Watchdog] Warning: failed to unmount Slot A grubenv mirror %s: %v", mntDir, uErr)
+	}
+	_ = os.Remove(mntDir)
+	if mirrorErr != nil {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: %w", mirrorErr)
+	}
+	return nil
 }
 
 func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, value string) error {

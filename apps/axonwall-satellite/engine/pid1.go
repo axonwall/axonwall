@@ -115,6 +115,11 @@ func ParseKernelCmdline(cmdline string) EdgeBootConfig {
 			role := strings.TrimPrefix(key, "axonwall.")
 			if spec, ok := parseInterfaceBootArg(role, val); ok {
 				cfg.Interfaces = append(cfg.Interfaces, spec)
+			} else {
+				// A-M35 (round 2): a rejected interface spec used to
+				// vanish silently, so the interface simply never
+				// existed. Log it so a bad boot arg is diagnosable.
+				slog.Warn("Ignoring unparseable interface boot arg", "key", key, "value", val)
 			}
 		}
 	}
@@ -133,17 +138,38 @@ func parseInterfaceBootArg(role, arg string) (EdgeInterfaceSpec, bool) {
 	addr := rest
 	gw := ""
 
-	if !strings.EqualFold(rest, "dhcp") {
+	// A-M35 (round 2): the dhcp-with-gateway form ("dhcp:<gateway>")
+	// must be split before the CIDR branch. The old code only entered
+	// the gateway branch when rest was exactly "dhcp", in which case
+	// there was no colon to split on — dead code — so
+	// "eth0:dhcp:10.0.0.1" fell through to ParseCIDR and the whole
+	// interface spec was dropped.
+	if strings.HasPrefix(strings.ToLower(rest), "dhcp:") {
+		addr = "dhcp"
+		gw = strings.TrimSpace(rest[len("dhcp:"):])
+	} else if !strings.EqualFold(rest, "dhcp") {
 		if slashIdx := strings.IndexByte(rest, '/'); slashIdx > 0 {
 			afterSlash := rest[slashIdx+1:]
 			if gwColon := strings.IndexByte(afterSlash, ':'); gwColon > 0 {
 				addr = strings.TrimSpace(rest[:slashIdx+1+gwColon])
 				gw = strings.TrimSpace(afterSlash[gwColon+1:])
 			}
+		} else if colonIdx := strings.LastIndexByte(rest, ':'); colonIdx > 0 {
+			// Bare IP with gateway, e.g. "10.0.0.1:10.0.0.254" (no
+			// prefix). Only split when both sides parse as IPs so
+			// bare IPv6 literals are never mangled here, and only
+			// for IPv4: the bare address takes the host CIDR, the
+			// same normalization the fallback below applies to a
+			// bare address without a gateway (and the IPv6 analogue
+			// is /128). (The v1 cloud-init path defaults a bare
+			// IPv4 to /24 instead; the boot-arg path uses host
+			// CIDRs.)
+			candAddr, candGw := strings.TrimSpace(rest[:colonIdx]), strings.TrimSpace(rest[colonIdx+1:])
+			if ip := net.ParseIP(candAddr); ip != nil && ip.To4() != nil && net.ParseIP(candGw) != nil {
+				addr = candAddr + "/32"
+				gw = candGw
+			}
 		}
-	} else if colonIdx := strings.IndexByte(rest, ':'); colonIdx > 0 {
-		addr = strings.TrimSpace(rest[:colonIdx])
-		gw = strings.TrimSpace(rest[colonIdx+1:])
 	}
 
 	if !validRadioRegex.MatchString(dev) || strings.HasPrefix(dev, "-") || strings.Contains(dev, "..") {
@@ -152,7 +178,18 @@ func parseInterfaceBootArg(role, arg string) (EdgeInterfaceSpec, bool) {
 
 	if !strings.EqualFold(addr, "dhcp") {
 		if _, _, err := net.ParseCIDR(addr); err != nil {
-			return EdgeInterfaceSpec{}, false
+			// Bare host address with no prefix (`eth0:10.0.0.1:10.0.0.254`):
+			// normalize to a host CIDR so the spec stays valid for
+			// ValidateInterfaceSpec and the netlink apply path.
+			if ip := net.ParseIP(addr); ip != nil {
+				if ip.To4() != nil {
+					addr += "/32"
+				} else {
+					addr += "/128"
+				}
+			} else {
+				return EdgeInterfaceSpec{}, false
+			}
 		}
 	}
 

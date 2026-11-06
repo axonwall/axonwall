@@ -77,6 +77,15 @@ type VirtManager struct {
 	ctSpecs      map[int]CompiledCtSpec
 	vmStartTimes map[int]int64
 	defaultPool  string
+	// startMu guards startingVMs: the set of VMIDs whose StartVM
+	// task is still running. The already-running pid check in
+	// StartVM races a concurrent start (both pass before either
+	// QEMU writes its pidfile), so two concurrent starts could
+	// launch two QEMU processes for the same VM (round-2 A-L22).
+	// The flag is held from the pid check until the start task
+	// finishes, covering provisioning, socket cleanup, and launch.
+	startMu     sync.Mutex
+	startingVMs map[int]bool
 }
 
 type CompiledVmSpec struct {
@@ -146,6 +155,7 @@ func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
 		ctSpecs:      make(map[int]CompiledCtSpec),
 		vmStartTimes: make(map[int]int64),
 		defaultPool:  "tank",
+		startingVMs:  make(map[int]bool),
 	}
 	m.loadPersistedSpecs()
 	return m
@@ -214,30 +224,34 @@ func validateSafeQemuArgs(args []string) error {
 }
 
 // RegisterVMSpec stores or updates the compiled specification for a VM and persists to disk.
-func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) {
+// It returns an error instead of silently dropping an invalid spec: a
+// dropped spec used to be reported as a successful register, and the VM
+// then booted with a generic diskless fallback spec (A-M26 / C-D1).
+func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) error {
 	switch spec.Binary {
 	case "", "qemu-system-x86_64", "/usr/bin/qemu-system-x86_64":
 		spec.Binary = "/usr/bin/qemu-system-x86_64"
 	case "qemu-system-aarch64", "/usr/bin/qemu-system-aarch64":
 		spec.Binary = "/usr/bin/qemu-system-aarch64"
 	default:
-		return
+		return fmt.Errorf("unsupported QEMU binary %q", spec.Binary)
 	}
 	if err := validateSafeQemuArgs(spec.Args); err != nil {
-		return
+		return err
 	}
 	for _, disk := range spec.Disks {
 		if disk.Pool != "" && !validZfsPoolName(disk.Pool) {
-			return
+			return fmt.Errorf("invalid ZFS pool name %q for disk %q", disk.Pool, disk.Name)
 		}
 		if disk.Zvol != "" && !validZfsPath(disk.Zvol, true) {
-			return
+			return fmt.Errorf("invalid ZFS zvol path %q for disk %q", disk.Zvol, disk.Name)
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.vmSpecs[spec.VMID] = spec
 	m.savePersistedSpecsLocked()
+	return nil
 }
 
 // UnregisterVMSpec removes a VM specification and updates persisted state.
@@ -396,6 +410,30 @@ func readPidFile(path string) int {
 	return pid
 }
 
+// waitForQmpSocket polls for the QMP socket QEMU creates after daemonizing
+// and verifies the QEMU pid from the pidfile is still alive. With
+// -daemonize the parent exits 0 once the child forks, so post-fork failures
+// (socket bind conflicts, pidfile failure) are invisible to the launch
+// command's exit code and this wait is the only liveness check (A-M25).
+func waitForQmpSocket(qmpSock, pidFile string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(qmpSock); err == nil {
+			if pid := readPidFile(pidFile); pid > 0 && !isPidRunning(pid) {
+				return fmt.Errorf("QMP socket %s appeared but QEMU pid %d from %s is no longer running", qmpSock, pid, pidFile)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if pid := readPidFile(pidFile); pid > 0 && !isPidRunning(pid) {
+				return fmt.Errorf("QMP socket %s did not appear within %s and QEMU pid %d from %s is no longer running; QEMU died after daemonizing", qmpSock, timeout, pid, pidFile)
+			}
+			return fmt.Errorf("QMP socket %s did not appear within %s; QEMU may have died after daemonizing", qmpSock, timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // SendQMPCommand sends a JSON-RPC command over QMP Unix domain socket
 func SendQMPCommand(socketPath string, command string, args map[string]any) (map[string]any, error) {
 	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
@@ -466,38 +504,52 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 	spec, exists := m.vmSpecs[vmid]
 	m.mu.Unlock()
 
-	if !exists {
-		// Provide a default fallback spec if not yet parsed from yaml
-		spec = CompiledVmSpec{
-			VMID:     vmid,
-			Name:     fmt.Sprintf("vm-%d", vmid),
-			Binary:   "qemu-system-x86_64",
-			Cores:    2,
-			MemoryMb: 2048,
-			Args: []string{
-				"-name", fmt.Sprintf("vm-%d,process=axonwall-vm-%d", vmid, vmid),
-				"-enable-kvm",
-				"-machine", "q35,accel=kvm",
-				"-cpu", "host",
-				"-smp", "2",
-				"-m", "2048",
-				"-chardev", fmt.Sprintf("socket,id=qmp,path=/run/axonwall/qmp/vm-%d.sock,server=on,wait=off", vmid),
-				"-mon", "chardev=qmp,mode=control",
-				"-chardev", fmt.Sprintf("socket,id=serial0,path=/run/axonwall/serial/vm-%d.sock,server=on,wait=off", vmid),
-				"-serial", "chardev:serial0",
-				"-vnc", fmt.Sprintf("unix:/run/axonwall/vnc/vm-%d.sock", vmid),
-				"-vga", "std",
-				"-daemonize",
-			},
-		}
+	pidFile := fmt.Sprintf("/run/axonwall/pids/vm-%d.pid", vmid)
+
+	// A-L22: claim the start before the pid check — and before the
+	// spec check below, so a second StartVM for a VM whose start is
+	// already in flight is refused as "already in progress" even
+	// though the spec lookup would fail first. The task below runs
+	// asynchronously, so without this flag a second concurrent
+	// StartVM would pass the pid check (no pidfile yet) and launch
+	// a second QEMU for the same VM.
+	m.startMu.Lock()
+	if m.startingVMs == nil {
+		m.startingVMs = make(map[int]bool)
+	}
+	if m.startingVMs[vmid] {
+		m.startMu.Unlock()
+		return "", fmt.Errorf("VM %d start already in progress", vmid)
+	}
+	m.startingVMs[vmid] = true
+	m.startMu.Unlock()
+	clearStarting := func() {
+		m.startMu.Lock()
+		delete(m.startingVMs, vmid)
+		m.startMu.Unlock()
 	}
 
-	pidFile := fmt.Sprintf("/run/axonwall/pids/vm-%d.pid", vmid)
+	if !exists {
+		// A-M26 / C-D1: refuse to boot a VM with no registered spec.
+		// The old code invented a generic 2 vCPU / 2048 MB diskless,
+		// NIC-less QEMU spec here, so a failed or skipped register
+		// silently booted a VM the operator never configured (and
+		// which ListVMs never showed, since it only lists configured
+		// VMs). Callers must register a spec first; a failed register
+		// now returns an error instead of success.
+		clearStarting()
+		return "", fmt.Errorf("VM %d has no registered spec; refusing to boot a generic fallback VM (register a spec first)", vmid)
+	}
+
 	if pid := readPidFile(pidFile); pid > 0 && isPidRunning(pid) {
+		clearStarting()
 		return "", fmt.Errorf("VM %d is already running (PID %d)", vmid, pid)
 	}
 
 	upid := m.taskMgr.StartTask("qmstart", strconv.Itoa(vmid), user, func(logger func(format string, args ...any)) error {
+		// Release the claim when the start task finishes (success
+		// or failure) so a later retry is not blocked forever.
+		defer clearStarting()
 		logger("Starting VM %d (%s)...", vmid, spec.Name)
 
 		// 1. Ensure ZVOL disks exist
@@ -666,24 +718,18 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 
 		// Wait briefly and verify QMP socket
 		qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
-		ready := false
-		for i := 0; i < 20; i++ {
-			time.Sleep(100 * time.Millisecond)
-			if _, err := os.Stat(qmpSock); err == nil {
-				ready = true
-				break
-			}
+		// A-M25: a missing QMP socket means QEMU died after
+		// daemonizing (the parent exits 0 once the child forks), so
+		// this must fail the start task instead of warning and
+		// reporting success.
+		if err := waitForQmpSocket(qmpSock, pidFile, 2*time.Second); err != nil {
+			logger("VM %d failed to start: %v", vmid, err)
+			return err
 		}
-
-		if ready {
-			logger("VM %d launched successfully. QMP & VNC sockets online.", vmid)
-			m.mu.Lock()
-			m.vmStartTimes[vmid] = time.Now().Unix()
-			m.mu.Unlock()
-			return nil
-		}
-
-		logger("Warning: VM %d process started but QMP socket not detected yet.", vmid)
+		logger("VM %d launched successfully. QMP & VNC sockets online.", vmid)
+		m.mu.Lock()
+		m.vmStartTimes[vmid] = time.Now().Unix()
+		m.mu.Unlock()
 		return nil
 	})
 
@@ -1150,8 +1196,12 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 	if targetType != "vm" && targetType != "lxc" {
 		return "", fmt.Errorf("invalid backup target type '%s': must be 'vm' or 'lxc'", targetType)
 	}
-	ts := time.Now().Format("20060102-150405")
-	snapName := fmt.Sprintf("backup-%s", ts)
+	// A-M24: snapshot and archive names carry a nanosecond suffix so two
+	// backups of the same target in the same second can no longer collide
+	// (the old second-granularity snapshot name made the second backup
+	// fail, and the archive name would have been overwritten).
+	stamp := fmt.Sprintf("%s-%09d", time.Now().Format("20060102-150405"), time.Now().Nanosecond())
+	snapName := fmt.Sprintf("backup-%s", stamp)
 
 	upid := m.taskMgr.StartTask("vzdump", fmt.Sprintf("%s-%d", targetType, targetID), user, func(logger func(format string, args ...any)) error {
 		logger("Initiating backup of %s %d to %s...", targetType, targetID, destType)
@@ -1159,57 +1209,90 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 		backupDir := fmt.Sprintf("/mnt/%s/backups", pool)
 		_ = os.MkdirAll(backupDir, 0700)
 		_ = os.Chmod(backupDir, 0700)
-		archiveName := fmt.Sprintf("axonwall-backup-%s-%d-%s.vma.zst", targetType, targetID, ts)
-		archivePath := filepath.Join(backupDir, archiveName)
-		if fi, lerr := os.Lstat(archivePath); lerr == nil {
-			if (fi.Mode() & os.ModeSymlink) != 0 {
-				return fmt.Errorf("refusing symlink archive path: %s", archivePath)
+
+		// A-M24: back up every disk, not just disk-0. A multi-disk VM
+		// used to report "Backup completed successfully" while only
+		// disk-0 was snapshotted and streamed; a restore would
+		// silently lose every other disk.
+		datasets := m.backupDatasetsForTarget(targetType, targetID, pool)
+		var archives []string
+		for idx, dataset := range datasets {
+			archiveName := fmt.Sprintf("axonwall-backup-%s-%d-%s.vma.zst", targetType, targetID, stamp)
+			if len(datasets) > 1 {
+				archiveName = fmt.Sprintf("axonwall-backup-%s-%d-%s-disk-%d.vma.zst", targetType, targetID, stamp, idx)
 			}
+			archivePath := filepath.Join(backupDir, archiveName)
+			if fi, lerr := os.Lstat(archivePath); lerr == nil {
+				if (fi.Mode() & os.ModeSymlink) != 0 {
+					return fmt.Errorf("refusing symlink archive path: %s", archivePath)
+				}
+			}
+			if err := backupDataset(dataset, snapName, archivePath, logger); err != nil {
+				return err
+			}
+			archives = append(archives, archivePath)
 		}
 
-		if targetType == "vm" {
-			dataset := fmt.Sprintf("%s/vms/vm-%d-disk-0", pool, targetID)
-			snapFull := fmt.Sprintf("%s@%s", dataset, snapName)
-
-			logger("Creating ZFS snapshot %s...", snapFull)
-			cmdSnap := exec.Command("zfs", "snapshot", snapFull)
-			if out, err := cmdSnap.CombinedOutput(); err != nil {
-				logger("Snapshot error: %s (%v)", string(out), err)
-				return fmt.Errorf("snapshot failed: %s", string(out))
-			}
-
-			logger("Streaming snapshot to compressed archive %s...", archivePath)
-			cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
-			if out, err := cmdStream.CombinedOutput(); err != nil {
-				logger("Stream error: %s (%v)", string(out), err)
-				return fmt.Errorf("stream failed: %s", string(out))
-			}
-			_ = os.Chmod(archivePath, 0600)
-		} else {
-			dataset := fmt.Sprintf("%s/lxc/subvol-%d-disk-0", pool, targetID)
-			snapFull := fmt.Sprintf("%s@%s", dataset, snapName)
-
-			logger("Creating ZFS snapshot %s...", snapFull)
-			cmdSnap := exec.Command("zfs", "snapshot", snapFull)
-			if out, err := cmdSnap.CombinedOutput(); err != nil {
-				logger("Snapshot error: %s (%v)", string(out), err)
-				return fmt.Errorf("snapshot failed: %s", string(out))
-			}
-
-			logger("Streaming container snapshot to archive %s...", archivePath)
-			cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
-			if out, err := cmdStream.CombinedOutput(); err != nil {
-				logger("Stream error: %s (%v)", string(out), err)
-				return fmt.Errorf("stream failed: %s", string(out))
-			}
-			_ = os.Chmod(archivePath, 0600)
-		}
-
-		logger("Backup completed successfully: %s", archivePath)
+		logger("Backup completed successfully: %s", strings.Join(archives, ", "))
 		return nil
 	})
 
 	return upid, nil
+}
+
+// backupDatasetsForTarget returns the ZFS datasets a backup must cover. A
+// registered VM backs up every disk in its spec (same naming StartVM
+// provisions them under); an unregistered VM, or an LXC container (which
+// has a single rootfs dataset), falls back to the historical disk-0
+// dataset (A-M24).
+func (m *VirtManager) backupDatasetsForTarget(targetType string, targetID int, pool string) []string {
+	if targetType == "vm" {
+		m.mu.RLock()
+		spec, ok := m.vmSpecs[targetID]
+		m.mu.RUnlock()
+		if ok && len(spec.Disks) > 0 {
+			datasets := make([]string, 0, len(spec.Disks))
+			for idx, disk := range spec.Disks {
+				zvolName := disk.Zvol
+				if zvolName == "" {
+					p := disk.Pool
+					if p == "" {
+						p = pool
+					}
+					zvolName = fmt.Sprintf("%s/vms/vm-%d-disk-%d", p, targetID, idx)
+				}
+				datasets = append(datasets, zvolName)
+			}
+			return datasets
+		}
+		return []string{fmt.Sprintf("%s/vms/vm-%d-disk-0", pool, targetID)}
+	}
+	return []string{fmt.Sprintf("%s/lxc/subvol-%d-disk-0", pool, targetID)}
+}
+
+// backupDataset snapshots one ZFS dataset and streams it to a compressed
+// archive. On stream failure the partial archive is removed and the
+// snapshot destroyed, so a failed backup leaves neither a bogus archive
+// for ListBackups to list nor a stray snapshot (A-M24).
+func backupDataset(dataset, snapName, archivePath string, logger func(format string, args ...any)) error {
+	snapFull := fmt.Sprintf("%s@%s", dataset, snapName)
+
+	logger("Creating ZFS snapshot %s...", snapFull)
+	if out, err := exec.Command("zfs", "snapshot", snapFull).CombinedOutput(); err != nil {
+		logger("Snapshot error: %s (%v)", string(out), err)
+		return fmt.Errorf("snapshot failed: %s", string(out))
+	}
+
+	logger("Streaming snapshot to compressed archive %s...", archivePath)
+	cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
+	if out, err := cmdStream.CombinedOutput(); err != nil {
+		logger("Stream error: %s (%v)", string(out), err)
+		_ = os.Remove(archivePath)
+		_ = exec.Command("zfs", "destroy", snapFull).Run()
+		return fmt.Errorf("stream failed: %s", string(out))
+	}
+	_ = os.Chmod(archivePath, 0600)
+	return nil
 }
 
 // ListBackups scans for existing backup archives in pools

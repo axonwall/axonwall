@@ -1,11 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { FolderKanban, Plus, Trash2 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { FolderKanban, Plus, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function NasSharesPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [smbName, setSmbName] = useState('corp-share');
   const [smbPath, setSmbPath] = useState('/mnt/tank/shares/general');
@@ -30,7 +32,7 @@ export default function NasSharesPage() {
       if (next.nas) {
         next.nas.smbShares = next.nas.smbShares.filter((s) => s.name !== shareName);
       }
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Removed SMB share ${shareName}.`);
     } catch (err: any) {
@@ -49,7 +51,7 @@ export default function NasSharesPage() {
       if (next.nas) {
         next.nas.nfsExports = next.nas.nfsExports.filter((e) => e.path !== exportPath);
       }
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Removed NFS export ${exportPath}.`);
     } catch (err: any) {
@@ -92,7 +94,7 @@ export default function NasSharesPage() {
           enabled: true,
         },
       ];
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Saved SMB share ${smbName.trim()}.`);
     } catch (err: any) {
@@ -131,7 +133,7 @@ export default function NasSharesPage() {
           enabled: true,
         },
       ];
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusMsg(`Saved NFSv4 export ${nfsPath.trim()}.`);
     } catch (err: any) {
@@ -154,6 +156,25 @@ export default function NasSharesPage() {
           </p>
         </div>
       </div>
+
+      {/* C-B12: statusMsg was set by all four handlers but never
+          rendered anywhere, so a failed add/remove was invisible. */}
+      {statusMsg && (
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            statusMsg.startsWith('Error:')
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.startsWith('Error:') ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* SMB Share Builder */}

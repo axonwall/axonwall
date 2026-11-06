@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -47,8 +49,43 @@ type InterfacesConfigYaml struct {
 	} `yaml:"interfaces" json:"interfaces"`
 }
 
+// errNoRoutesKey marks a routing document that parses but carries no
+// usable `routes` key (A-M13). LoadRoutingConfig treats it as fatal
+// for routing.yaml candidates and as "try the next candidate" for
+// state.json, which is a grab-bag document that legitimately may not
+// carry routes.
+var errNoRoutesKey = errors.New("routing document has no \"routes\" key")
+
 // LoadRoutingConfigFromBytes parses static route definitions from raw YAML or JSON bytes.
 func LoadRoutingConfigFromBytes(data []byte) (*RoutingDomainConfig, error) {
+	// An empty (or whitespace/comment-only) document is the
+	// explicitly-empty config, not a wrong-schema document.
+	if len(bytes.TrimSpace(data)) == 0 {
+		return &RoutingDomainConfig{Routes: []StaticRouteConfig{}}, nil
+	}
+	// A-M13 (A-H1 residual): the round-1 fix errored only when the
+	// file parsed under NEITHER YAML nor JSON. A file that parses
+	// cleanly but carries no `routes:` key — a typo'd top-level key
+	// (`route:` instead of `routes:`), a `gateways:`-only document,
+	// an interfaces.yaml accidentally written to routing.yaml, or
+	// `routes: null` — used to be accepted as "zero routes", so the
+	// reconciler pruned every owned route. Require the document to
+	// contain a `routes` key holding a list; an explicitly empty list
+	// (`routes: []`) is still the legitimate empty config.
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err == nil {
+		if doc == nil {
+			// A null/comment-only document defines nothing.
+			return &RoutingDomainConfig{Routes: []StaticRouteConfig{}}, nil
+		}
+		routes, ok := doc["routes"]
+		if !ok || routes == nil {
+			return nil, errNoRoutesKey
+		}
+		if _, isList := routes.([]any); !isList {
+			return nil, fmt.Errorf("%w: \"routes\" must be a list", errNoRoutesKey)
+		}
+	}
 	var yamlCfg RoutingDomainConfig
 	yamlErr := yaml.Unmarshal(data, &yamlCfg)
 	if yamlErr == nil && yamlCfg.Routes != nil {
@@ -62,9 +99,7 @@ func LoadRoutingConfigFromBytes(data []byte) (*RoutingDomainConfig, error) {
 	// A-H1: a file that parses under neither encoding is corrupt, not
 	// "zero routes". The old code returned an empty config with a nil
 	// error here, so ReconcileStaticRoutes pruned every kernel static
-	// route after a typo or a truncated bundle write. A file that
-	// parses cleanly but simply defines no routes still yields the
-	// empty config below, unchanged.
+	// route after a typo or a truncated bundle write.
 	if yamlErr != nil && jsonErr != nil {
 		return nil, fmt.Errorf("routing config is neither valid YAML nor valid JSON (yaml: %v; json: %v)", yamlErr, jsonErr)
 	}
@@ -91,8 +126,17 @@ func LoadRoutingConfig() (*RoutingDomainConfig, error) {
 		// set that would prune every static route. A bundle write
 		// mirrors /etc/axonwall/*.yaml to /var/lib, so the mirror
 		// carries the same corruption and is no safety net here.
+		// A-M13: a state.json candidate with no `routes` key is not
+		// a routing document at all — fall through to the next
+		// candidate instead of failing closed or returning an empty
+		// desired set. A routing.yaml candidate with no `routes`
+		// key is a wrong-schema document and fails closed: it
+		// shadows any good state.json.
 		cfg, err := LoadRoutingConfigFromBytes(data)
 		if err != nil {
+			if errors.Is(err, errNoRoutesKey) && strings.HasSuffix(path, "state.json") {
+				continue
+			}
 			return nil, fmt.Errorf("failed to parse %s: %w", path, err)
 		}
 		if cfg.Routes != nil {
@@ -265,6 +309,10 @@ func reconcileStaticRoutesLocked() error {
 	desiredRoutes := make(map[string]StaticRouteConfig)
 
 	appliedCount := 0
+	// L2: destinations whose disabled-route delete fails, kept owned
+	// so the next reconcile retries the delete (same retained-list
+	// mechanism as pruneObsoleteRoutes).
+	var failedDeletes []string
 	for _, r := range cfg.Routes {
 		r.Network = strings.TrimSpace(r.Network)
 		r.Gateway = strings.TrimSpace(r.Gateway)
@@ -301,11 +349,20 @@ func reconcileStaticRoutesLocked() error {
 		}
 
 		if r.IsEnabled() {
-			desiredRoutes[r.Network] = r
-			if strings.HasSuffix(r.Network, "/32") {
-				desiredRoutes[strings.TrimSuffix(r.Network, "/32")] = r
-			} else if strings.HasSuffix(r.Network, "/128") {
-				desiredRoutes[strings.TrimSuffix(r.Network, "/128")] = r
+			// L1: record the destination as owned only after the
+			// install succeeds. The owned set is the A-H1 fix's
+			// sole record of "routes this reconciler installed";
+			// adding the entry before the exec persisted
+			// destinations the kernel never got, so a later
+			// reconcile could delete an operator-installed route
+			// for the same destination.
+			markApplied := func() {
+				desiredRoutes[r.Network] = r
+				if strings.HasSuffix(r.Network, "/32") {
+					desiredRoutes[strings.TrimSuffix(r.Network, "/32")] = r
+				} else if strings.HasSuffix(r.Network, "/128") {
+					desiredRoutes[strings.TrimSuffix(r.Network, "/128")] = r
+				}
 			}
 
 			args := []string{family, "route", "replace", r.Network, "via", r.Gateway}
@@ -320,6 +377,7 @@ func reconcileStaticRoutesLocked() error {
 				if dev != "" {
 					fallbackArgs := []string{family, "route", "replace", r.Network, "via", r.Gateway, "dev", dev, "proto", "static"}
 					if fbOut, fbErr := exec.Command("ip", fallbackArgs...).CombinedOutput(); fbErr == nil {
+						markApplied()
 						appliedCount++
 						log.Printf("[Agent] Applied static route: %s via %s (dev=%s)", r.Network, r.Gateway, dev)
 						continue
@@ -330,13 +388,21 @@ func reconcileStaticRoutesLocked() error {
 				}
 				log.Printf("[Agent] Failed to apply static route %s via %s: %s", r.Network, r.Gateway, strings.TrimSpace(string(out)))
 			} else {
+				markApplied()
 				appliedCount++
 				log.Printf("[Agent] Applied static route: %s via %s (dev=%s, onlink)", r.Network, r.Gateway, dev)
 			}
 		} else {
-			// If explicitly disabled, remove from kernel if present with proto static
+			// If explicitly disabled, remove from kernel if present with proto static.
+			// A delete that fails once (route busy, transient
+			// netlink error) must stay owned and be retried next
+			// run; dropping it here left the route installed
+			// forever while the config said disabled.
 			args := []string{family, "route", "del", r.Network, "proto", "static"}
-			_ = exec.Command("ip", args...).Run()
+			if err := exec.Command("ip", args...).Run(); err != nil {
+				log.Printf("[Agent] Failed to delete disabled static route %s: %v; keeping it owned for retry", r.Network, err)
+				failedDeletes = append(failedDeletes, r.Network)
+			}
 		}
 	}
 
@@ -359,6 +425,9 @@ func reconcileStaticRoutesLocked() error {
 		mergedOwned[r] = StaticRouteConfig{Network: r}
 	}
 	for _, r := range retained6 {
+		mergedOwned[r] = StaticRouteConfig{Network: r}
+	}
+	for _, r := range failedDeletes {
 		mergedOwned[r] = StaticRouteConfig{Network: r}
 	}
 	saveOwnedStaticRoutes(mergedOwned)

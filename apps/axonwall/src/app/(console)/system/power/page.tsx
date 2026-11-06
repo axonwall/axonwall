@@ -22,6 +22,11 @@ import { getSystemPartitionsTelemetry, type SystemPartitionsTelemetry, type Part
 export default function PowerManagementPage() {
   const [telemetry, setTelemetry] = useState<SystemPartitionsTelemetry | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  // C-B4: when telemetry never loads, the page used to render invented
+  // slot identities and leave reboot/power-off live. A failed load is
+  // now an error state with retry, and no power action renders until
+  // real telemetry (and a real active slot) is known.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedSlot, setSelectedSlot] = useState<'A' | 'B'>('B');
   const [modalAction, setModalAction] = useState<'reboot_current' | 'reboot_slot' | 'poweroff' | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
@@ -37,6 +42,8 @@ export default function PowerManagementPage() {
   }, []);
 
   const fetchTelemetry = async () => {
+    setIsLoading(true);
+    setLoadError(null);
     try {
       let data: SystemPartitionsTelemetry | null = null;
       try {
@@ -50,9 +57,15 @@ export default function PowerManagementPage() {
         setTelemetry(data);
         const standby = data.slots.find((s) => !s.isActive);
         if (standby) setSelectedSlot(standby.slot);
+      } else {
+        // The update route returned no telemetry (non-OK/error body).
+        setTelemetry(null);
+        setLoadError('Partition telemetry could not be loaded: the system update service returned no telemetry.');
       }
     } catch (err) {
       console.error('Failed to load system partitions telemetry:', err);
+      setTelemetry(null);
+      setLoadError(`Partition telemetry could not be loaded: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsLoading(false);
     }
@@ -135,6 +148,42 @@ export default function PowerManagementPage() {
     probeTimerRef.current = interval;
   };
 
+  // C-B4: nothing below renders until real telemetry (and a real active
+  // slot) is known. A failed load shows an error with retry instead of
+  // invented slot identities with live reboot/power-off buttons.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto pb-12">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading partition telemetry…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !telemetry || !activeSlot) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto pb-12">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <AlertTriangle className="w-4 h-4" />
+            <span>{loadError || 'Partition telemetry could not be loaded, so the active slot is unknown.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            Reboot and power-off are disabled until real partition telemetry loads — rebooting on invented slot data could boot the wrong partition.
+          </p>
+          <button
+            type="button"
+            onClick={fetchTelemetry}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading telemetry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
       {/* Header */}
@@ -210,18 +259,18 @@ export default function PowerManagementPage() {
                 </span>
               </div>
               <h3 className="text-lg font-bold text-foreground">
-                Slot {activeSlot?.slot || 'A'} &mdash; {activeSlot?.name || 'Primary Rootfs'}
+                Slot {activeSlot?.slot} &mdash; {activeSlot?.name || 'Unknown slot'}
               </h3>
               <p className="text-xs text-muted-foreground font-mono">
-                {activeSlot?.device || '/dev/disk/by-label/axon_root_a'} ({activeSlot?.size || '16.0 GB ext4'})
+                {activeSlot?.device || 'Unknown device'} ({activeSlot?.size || 'Unknown size'})
               </p>
             </div>
             <div className="px-3 py-1 rounded-md bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-mono text-xs font-semibold">
-              v{activeSlot?.version || '0.5.0'}
+              v{activeSlot?.version || 'Unknown'}
             </div>
           </div>
           <div className="mt-4 pt-3 border-t border-emerald-500/20 flex items-center justify-between text-xs text-muted-foreground">
-            <span>Kernel: {activeSlot?.kernel || 'Linux 6.12.111'}</span>
+            <span>Kernel: {activeSlot?.kernel || 'Unknown kernel'}</span>
             <span className="text-emerald-400 font-medium">Currently Booted & Serving Traffic</span>
           </div>
         </div>
@@ -237,18 +286,18 @@ export default function PowerManagementPage() {
                 </span>
               </div>
               <h3 className="text-lg font-bold text-foreground">
-                Slot {standbySlot?.slot || 'B'} &mdash; {standbySlot?.name || 'Alternate Standby'}
+                Slot {standbySlot?.slot} &mdash; {standbySlot?.name || 'Unknown slot'}
               </h3>
               <p className="text-xs text-muted-foreground font-mono">
-                {standbySlot?.device || '/dev/disk/by-label/axon_root_b'} ({standbySlot?.size || '16.0 GB ext4'})
+                {standbySlot?.device || 'Unknown device'} ({standbySlot?.size || 'Unknown size'})
               </p>
             </div>
             <div className="px-3 py-1 rounded-md bg-blue-500/20 border border-blue-500/30 text-blue-300 font-mono text-xs font-semibold">
-              v{standbySlot?.version || '0.5.0'}
+              v{standbySlot?.version || 'Unknown'}
             </div>
           </div>
           <div className="mt-4 pt-3 border-t border-blue-500/20 flex items-center justify-between text-xs text-muted-foreground">
-            <span>Kernel: {standbySlot?.kernel || 'Linux 6.12.111'}</span>
+            <span>Kernel: {standbySlot?.kernel || 'Unknown kernel'}</span>
             <span className="text-blue-400 font-medium">Ready for Boot Switch / Rollback</span>
           </div>
         </div>
@@ -267,24 +316,24 @@ export default function PowerManagementPage() {
               <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
                 Cleanly restarts all firewall, network, and storage services, cleanly syncs filesystem caches, and boots
                 back into the currently active slot (
-                <strong className="text-foreground">Slot {activeSlot?.slot || 'A'}</strong>).
+                <strong className="text-foreground">Slot {activeSlot?.slot}</strong>).
               </p>
             </div>
             <div className="rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground space-y-1">
               <div className="flex items-center justify-between">
                 <span>Active Slot:</span>
-                <span className="font-semibold text-foreground">Slot {activeSlot?.slot || 'A'}</span>
+                <span className="font-semibold text-foreground">Slot {activeSlot?.slot}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span>Version:</span>
-                <span className="font-mono text-foreground">v{activeSlot?.version || '0.5.0'}</span>
+                <span className="font-mono text-foreground">v{activeSlot?.version || 'Unknown'}</span>
               </div>
             </div>
           </div>
 
           <button
             onClick={() => setModalAction('reboot_current')}
-            disabled={isExecuting || isReconnecting}
+            disabled={isExecuting || isReconnecting || !telemetry}
             className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-amber-500 hover:bg-amber-600 text-amber-950 font-semibold text-xs tracking-wide transition-colors shadow-sm disabled:opacity-50"
           >
             <RotateCcw className="w-4 h-4" />
@@ -325,7 +374,7 @@ export default function PowerManagementPage() {
                     )}
                   </div>
                   <div className="text-[11px] font-mono text-muted-foreground mt-0.5">
-                    v{telemetry?.slots.find((s) => s.slot === 'A')?.version || '0.5.0'}
+                    v{telemetry?.slots.find((s) => s.slot === 'A')?.version || 'Unknown'}
                   </div>
                 </button>
 
@@ -345,7 +394,7 @@ export default function PowerManagementPage() {
                     )}
                   </div>
                   <div className="text-[11px] font-mono text-muted-foreground mt-0.5">
-                    v{telemetry?.slots.find((s) => s.slot === 'B')?.version || '0.5.0'}
+                    v{telemetry?.slots.find((s) => s.slot === 'B')?.version || 'Unknown'}
                   </div>
                 </button>
               </div>
@@ -354,7 +403,7 @@ export default function PowerManagementPage() {
 
           <button
             onClick={() => setModalAction('reboot_slot')}
-            disabled={isExecuting || isReconnecting}
+            disabled={isExecuting || isReconnecting || !telemetry}
             className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-xs tracking-wide transition-colors shadow-sm disabled:opacity-50"
           >
             <ArrowRight className="w-4 h-4" />
@@ -388,7 +437,7 @@ export default function PowerManagementPage() {
 
           <button
             onClick={() => setModalAction('poweroff')}
-            disabled={isExecuting || isReconnecting}
+            disabled={isExecuting || isReconnecting || !telemetry}
             className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold text-xs tracking-wide transition-colors shadow-sm disabled:opacity-50"
           >
             <Power className="w-4 h-4" />
@@ -425,7 +474,7 @@ export default function PowerManagementPage() {
               {modalAction === 'reboot_current' && (
                 <p>
                   Are you sure you want to reboot Axonwall into{' '}
-                  <strong className="text-foreground">Slot {activeSlot?.slot || 'A'} (v{activeSlot?.version || '0.5.0'})</strong>?
+                  <strong className="text-foreground">Slot {activeSlot?.slot} (v{activeSlot?.version || 'Unknown'})</strong>?
                   All active firewall connections will be momentarily interrupted while services reload.
                 </p>
               )}
@@ -433,7 +482,7 @@ export default function PowerManagementPage() {
                 <p>
                   Are you sure you want to reboot into{' '}
                   <strong className="text-foreground">
-                    Slot {selectedSlot} (v{telemetry?.slots.find((s) => s.slot === selectedSlot)?.version || '0.5.0'})
+                    Slot {selectedSlot} (v{telemetry?.slots.find((s) => s.slot === selectedSlot)?.version || 'Unknown'})
                   </strong>
                   ? The GRUB bootloader will be armed to switch roots. Watchdog will run a 3-step health check upon boot.
                 </p>
@@ -459,7 +508,7 @@ export default function PowerManagementPage() {
               {modalAction === 'reboot_current' && (
                 <button
                   type="button"
-                  onClick={() => handleExecutePower('reboot', activeSlot?.slot || 'A')}
+                  onClick={() => handleExecutePower('reboot', activeSlot?.slot)}
                   disabled={isExecuting}
                   className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-amber-950 text-xs font-semibold transition-colors flex items-center gap-1.5"
                 >

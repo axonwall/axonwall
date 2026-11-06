@@ -54,7 +54,7 @@ export interface SecurityModuleStatus {
   category: 'threat_detection' | 'deception' | 'ad_identity' | 'vulnerability' | 'siem_edr' | 'purple_team';
   description: string;
   enabled: boolean;
-  health: 'healthy' | 'warning' | 'offline' | 'unconfigured';
+  health: 'healthy' | 'warning' | 'offline' | 'unconfigured' | 'unknown';
   port: number;
   subdomain: string;
   telemetryEps: number;
@@ -120,7 +120,10 @@ export async function getVigilanteConfigAction(): Promise<VigilanteConfig> {
 }
 
 export async function saveVigilanteConfigAction(
-  patch: Partial<VigilanteConfig>
+  patch: Partial<VigilanteConfig>,
+  // C2: fingerprint captured by the calling page at load time; the apply
+  // is refused instead of silently overwriting newer on-disk state.
+  options?: { expectedFingerprint?: string }
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -150,11 +153,32 @@ export async function saveVigilanteConfigAction(
     state.capabilities.vigilanteEnabled = false;
   }
 
-  const result = await applyDesiredState(state);
-  return {
-    success: result.success,
-    message: result.message,
-  };
+  // C2: a fingerprint mismatch is an expected conflict, not a crash —
+  // return it as a failure result so the page can tell the operator to
+  // reload instead of surfacing an unhandled rejection.
+  try {
+    const result = await applyDesiredState(
+      state,
+      120,
+      options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+    );
+    return {
+      success: result.success,
+      message: result.message,
+    };
+  } catch (err: any) {
+    // C-B2 residual: a daemon-down apply throws 'axonwalld is
+    // unreachable' — same as a fingerprint conflict, return it as a
+    // failure result so the page can tell the operator nothing was
+    // applied instead of surfacing an unhandled rejection.
+    if (
+      err?.message?.includes('Configuration changed since it was loaded') ||
+      err?.message?.includes('axonwalld is unreachable')
+    ) {
+      return { success: false, message: err.message };
+    }
+    throw err;
+  }
 }
 
 export async function soarBlockIPAction(
@@ -199,7 +223,13 @@ export async function getSoarBlockedIPsAction(): Promise<SoarBlockedIP[]> {
     'GET'
   );
 
-  return res?.blockedIPs ?? [];
+  // C25: a daemon outage used to collapse to "0 blocked IPs / nothing under
+  // SOAR quarantine" mid-incident. Throw so the page shows an unknown state
+  // and keeps its previous list instead of an empty one.
+  if (!res?.blockedIPs) {
+    throw new Error('Daemon unavailable: could not load SOAR blocked IPs from axonwalld');
+  }
+  return res.blockedIPs;
 }
 
 export async function provisionEvidenceVaultAction(
@@ -257,22 +287,30 @@ export async function listSecurityModulesAction(): Promise<SecurityModuleStatus[
   return DEFAULT_MODULE_SPECS.map((spec) => {
     const configured = configuredModules.find((m) => m.id === spec.id);
     const enabled = configured ? configured.enabled : (state.vigilante?.enabled ?? false);
-    const health = enabled ? 'healthy' : 'offline';
-    const eps = enabled ? Math.floor(Math.random() * 45) + 5 : 0;
+    // D15: no module is ever probed (no port check, process check, or
+    // daemon query), so an enabled module's health is unknown — never
+    // "healthy" just because it is enabled — and its throughput is
+    // unmeasured (0 EPS, no last-event time). A disabled module is
+    // genuinely offline. Do not invent a random 5–49 EPS.
+    const health = enabled ? 'unknown' : 'offline';
+    const eps = 0;
 
     return {
       ...spec,
       enabled,
       health,
       telemetryEps: eps,
-      lastEventAt: enabled ? new Date().toISOString() : undefined,
+      lastEventAt: undefined,
     };
   });
 }
 
 export async function toggleSecurityModuleAction(
   moduleId: string,
-  enabled: boolean
+  enabled: boolean,
+  // C2: fingerprint captured by the calling page at load time; see
+  // saveVigilanteConfigAction above.
+  options?: { expectedFingerprint?: string }
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -298,11 +336,32 @@ export async function toggleSecurityModuleAction(
     );
   }
 
-  const result = await applyDesiredState(state);
-  return {
-    success: result.success,
-    message: result.message,
-  };
+  // C2: a fingerprint mismatch is an expected conflict, not a crash —
+  // return it as a failure result so the page can tell the operator to
+  // reload instead of surfacing an unhandled rejection.
+  try {
+    const result = await applyDesiredState(
+      state,
+      120,
+      options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+    );
+    return {
+      success: result.success,
+      message: result.message,
+    };
+  } catch (err: any) {
+    // C-B2 residual: a daemon-down apply throws 'axonwalld is
+    // unreachable' — same as a fingerprint conflict, return it as a
+    // failure result so the page can tell the operator nothing was
+    // applied instead of surfacing an unhandled rejection.
+    if (
+      err?.message?.includes('Configuration changed since it was loaded') ||
+      err?.message?.includes('axonwalld is unreachable')
+    ) {
+      return { success: false, message: err.message };
+    }
+    throw err;
+  }
 }
 
 export async function getAttackGraphDataAction(): Promise<{
