@@ -27,29 +27,11 @@ export default function DnsBlocklistPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  const [feeds, setFeeds] = useState([
-    {
-      id: 'feed-stevenblack',
-      name: 'StevenBlack Unified Malware & Adware',
-      url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',
-      entriesCount: 84210,
-      enabled: true,
-    },
-    {
-      id: 'feed-oisd',
-      name: 'OISD Full Telemetry & Tracking Shield',
-      url: 'https://big.oisd.nl/unbound',
-      entriesCount: 154800,
-      enabled: true,
-    },
-    {
-      id: 'feed-abuse-ch',
-      name: 'abuse.ch URLhaus Host & Domain Blocklist',
-      url: 'https://urlhaus.abuse.ch/downloads/hostfile/',
-      entriesCount: 19430,
-      enabled: true,
-    },
-  ]);
+  // C-A2: feeds start empty. The three hardcoded demo feeds (StevenBlack
+  // 84,210 / OISD 154,800 / URLhaus 19,430) used to display as subscribed
+  // on a box with no feeds configured, fabricate a 259,440 total, and get
+  // persisted as the real blocklist on Save & Deploy.
+  const [feeds, setFeeds] = useState<Array<{ id: string; name: string; url: string; entriesCount: number; enabled: boolean }>>([]);
 
   const [whitelist, setWhitelist] = useState<string[]>([]);
 
@@ -252,7 +234,11 @@ export default function DnsBlocklistPage() {
           <span className="text-2xl font-bold font-mono text-emerald-400 mt-1 block">
             {totalBlockedDomains.toLocaleString()}
           </span>
-          <span className="text-[11px] text-slate-500 mt-0.5 block">Aggregated from active threat feeds</span>
+          <span className="text-[11px] text-slate-500 mt-0.5 block">
+            {feeds.length === 0
+              ? 'No feeds configured — custom blacklist entries only'
+              : 'Aggregated from active threat feeds'}
+          </span>
         </div>
 
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl">
@@ -295,10 +281,37 @@ export default function DnsBlocklistPage() {
           <span className="text-xs font-medium text-slate-400 uppercase tracking-wider block">
             DNS Protection State
           </span>
-          <span className="text-xl font-bold font-mono text-emerald-400 mt-1 flex items-center gap-2">
-            <CheckCircle2 className="w-5 h-5" /> Active & Enforcing
-          </span>
-          <span className="text-[11px] text-slate-500 mt-0.5 block">Applied across all LAN subnets</span>
+          {/* C-A2: the card used to read "Active & Enforcing" permanently,
+              without consulting `enabled` at all. It now reflects the
+              configured state — and says so when no feeds are configured. */}
+          {enabled ? (
+            feeds.length === 0 ? (
+              <>
+                <span className="text-xl font-bold font-mono text-amber-400 mt-1 flex items-center gap-2">
+                  <ShieldAlert className="w-5 h-5" /> Enabled — No Feeds Configured
+                </span>
+                <span className="text-[11px] text-slate-500 mt-0.5 block">
+                  Sinkholing is on but no threat feed is subscribed, so only the custom blacklist applies
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-xl font-bold font-mono text-emerald-400 mt-1 flex items-center gap-2">
+                  <CheckCircle2 className="w-5 h-5" /> Active & Enforcing
+                </span>
+                <span className="text-[11px] text-slate-500 mt-0.5 block">Applied across all LAN subnets</span>
+              </>
+            )
+          ) : (
+            <>
+              <span className="text-xl font-bold font-mono text-slate-400 mt-1 flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5" /> Disabled — Sinkholing Off
+              </span>
+              <span className="text-[11px] text-slate-500 mt-0.5 block">
+                DNS blocklist is disabled; no domains are being sinkholed
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -339,7 +352,15 @@ export default function DnsBlocklistPage() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60 text-slate-300">
-            {feeds.map((f) => (
+            {feeds.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-xs text-slate-500">
+                  No threat feeds configured. Feed subscriptions are loaded from the saved DNS blocklist configuration;
+                  nothing is subscribed by default.
+                </td>
+              </tr>
+            ) : (
+              feeds.map((f) => (
               <tr key={f.id} className="hover:bg-slate-800/30">
                 <td className="px-4 py-3 font-semibold text-white text-xs">{f.name}</td>
                 <td className="px-4 py-3 font-mono text-xs text-slate-400 truncate max-w-xs">{f.url}</td>
@@ -360,7 +381,8 @@ export default function DnsBlocklistPage() {
                   </button>
                 </td>
               </tr>
-            ))}
+              ))
+            )}
           </tbody>
         </table>
       </div>
