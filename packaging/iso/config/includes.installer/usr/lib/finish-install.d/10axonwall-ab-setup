@@ -423,8 +423,13 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
 
   if [ $IS_MOUNTED -gt 0 ]; then
     echo "[+] Replicating base system from Slot A to Slot B..."
+    # D2-M2: track the copy result. The mount-failure case below
+    # already records an honest "Missing" state, but a copy failure
+    # after a successful mount used to fall through to the
+    # "Factory Standby" slot_versions write below.
+    SYNC_OK=0
     if command -v rsync >/dev/null 2>&1; then
-      rsync -aAX --delete \
+      if rsync -aAX --delete \
         --exclude=/mnt/standby \
         --exclude=/mnt/tank \
         --exclude=/media/* \
@@ -435,9 +440,13 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
         --exclude=/dev/* \
         --exclude=/run/* \
         --exclude=/tmp/* \
-        /target/ "$STAGE_B/" 2>/dev/null || true
+        /target/ "$STAGE_B/" 2>/dev/null; then
+        SYNC_OK=1
+      fi
     else
-      tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' --exclude='./boot/efi/*' -cf - . | tar -C "$STAGE_B" -xf - || true
+      if tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' --exclude='./boot/efi/*' -cf - . | tar -C "$STAGE_B" -xf -; then
+        SYNC_OK=1
+      fi
     fi
 
     # Configure Slot B's /etc/fstab for independent booting
@@ -481,7 +490,16 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
     fi
 
     # Persist initial per-slot versions
-    INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
+    if [ "$SYNC_OK" = "1" ]; then
+      INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
+    else
+      # D2-M2: the copy failed after a successful mount — record the
+      # honest state (mirroring the mount-failure branch below) so
+      # the watchdog/UI never believe the partial standby is usable.
+      echo "[-] WARNING: A/B install: slot B sync (rsync/tar copy) failed; NO standby system was synced."
+      echo "[-] WARNING: this install has no working fallback slot until a successful update populates slot B."
+      INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "Missing (standby sync failed: slot B copy failed)" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
+    fi
     mkdir -p /target/etc/axonwall /target/var/lib/axonwall "$STAGE_B/etc/axonwall" 2>/dev/null || true
     printf '%s' "$INIT_SLOT_JSON" > /target/etc/axonwall/slot_versions.json 2>/dev/null || true
     printf '%s' "$INIT_SLOT_JSON" > /target/var/lib/axonwall/slot_versions.json 2>/dev/null || true
