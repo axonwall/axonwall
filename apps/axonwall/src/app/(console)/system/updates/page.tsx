@@ -73,7 +73,11 @@ export default function SystemUpdatesPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [bootCount, setBootCount] = useState(0);
   const [bootLimit, setBootLimit] = useState(3);
-  const [healthVerified, setHealthVerified] = useState(true);
+  // C-B10: healthVerified used to initialise `true`, so the dashboard
+  // rendered "Quorum Verified" / "Committed / bootcount reset to 0"
+  // before any telemetry had loaded. It starts unknown (false) and
+  // is only set by loaded telemetry.
+  const [healthVerified, setHealthVerified] = useState(false);
   const [healthChecks, setHealthChecks] = useState<HealthCheckItem[]>([]);
   const [isVerifying, setIsVerifying] = useState(false);
   const [isCheckingCloud, setIsCheckingCloud] = useState(false);
@@ -1490,13 +1494,35 @@ export default function SystemUpdatesPage() {
 
           <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80">
             <div className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Health Commitment</div>
-            <div className="text-2xl font-bold text-white mt-1 flex items-center gap-2">
-              <span>Committed</span>
-              <Check className="w-5 h-5 text-emerald-400" />
-            </div>
-            <p className="text-[11px] text-slate-500 mt-1">
-              GRUB grubenv: bootcount reset to 0
-            </p>
+            {telemetryLoading ? (
+              <>
+                <div className="text-2xl font-bold text-white mt-1">Loading…</div>
+                <p className="text-[11px] text-slate-500 mt-1">Waiting for slot telemetry.</p>
+              </>
+            ) : telemetryError ? (
+              <>
+                <div className="text-2xl font-bold text-amber-400 mt-1">Unknown</div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Slot telemetry unavailable — commitment not verified.
+                </p>
+              </>
+            ) : healthVerified && bootCount === 0 ? (
+              <>
+                <div className="text-2xl font-bold text-white mt-1 flex items-center gap-2">
+                  <span>Committed</span>
+                  <Check className="w-5 h-5 text-emerald-400" />
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">GRUB grubenv: bootcount reset to 0</p>
+              </>
+            ) : (
+              <>
+                <div className="text-2xl font-bold text-amber-400 mt-1">Not committed</div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  GRUB grubenv: bootcount {bootCount} / {bootLimit}
+                  {healthVerified ? '' : ' (quorum not verified)'}
+                </p>
+              </>
+            )}
           </div>
 
           <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80">
@@ -1515,26 +1541,21 @@ export default function SystemUpdatesPage() {
           </h3>
 
           <div className="space-y-2">
-            {(healthChecks.length > 0 ? healthChecks : [
-              {
-                name: 'Network Interface Initialization',
-                status: 'PASS' as const,
-                detail: 'Loopback (lo) operational and link carrier detected across all active NICs',
-                durationMs: 14,
-              },
-              {
-                name: 'Kernel nftables Netfilter Baseline',
-                status: 'PASS' as const,
-                detail: 'Atomic ruleset syntax validation and kernel table hooks applied cleanly',
-                durationMs: 28,
-              },
-              {
-                name: 'Control Plane & Management Quorum',
-                status: 'PASS' as const,
-                detail: 'Privileged IPC socket /run/axonwall/agent.sock is active and responding',
-                durationMs: 8,
-              },
-            ]).map((check) => (
+            {/* C-B10: when no checks have loaded, the page used to show
+                three hardcoded PASS checks with fabricated durations —
+                including a socket check that never ran. An empty list
+                now says so explicitly instead of inventing passes. */}
+            {telemetryLoading ? (
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-400">
+                Loading health checks…
+              </div>
+            ) : healthChecks.length === 0 ? (
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-amber-300">
+                Health checks unavailable — no verification results have loaded. No checks have passed
+                or failed yet; do not treat this partition as verified.
+              </div>
+            ) : (
+              healthChecks.map((check) => (
               <div key={check.name} className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <CheckCircle2
@@ -1563,7 +1584,7 @@ export default function SystemUpdatesPage() {
                   {check.status} ({check.durationMs}ms)
                 </span>
               </div>
-            ))}
+            )))}
           </div>
         </div>
       </div>
