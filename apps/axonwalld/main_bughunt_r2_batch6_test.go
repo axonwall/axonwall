@@ -568,3 +568,71 @@ func TestR2Batch6ApplyPersistsPendingState(t *testing.T) {
 		t.Fatal("Confirm did not clear the persisted pending-confirm record")
 	}
 }
+
+// M4: a configured HA interface that resolves to nothing (placeholder
+// name, or a logical name whose mapping was deleted/disabled) must
+// fail the apply instead of silently falling back to eth0.
+func TestR2Batch6HAUnresolvableInterfaceFailsApply(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  HAConfig
+		want string
+	}{
+		{"sync auto", HAConfig{Enabled: true, Role: "master", SyncInterface: "auto"}, "sync interface"},
+		{"sync none", HAConfig{Enabled: true, Role: "master", SyncInterface: "none"}, "sync interface"},
+		{"sync unassigned", HAConfig{Enabled: true, Role: "master", SyncInterface: "unassigned"}, "sync interface"},
+		{"conntrack auto", HAConfig{Enabled: true, Role: "master", ConntrackSync: ConntrackSyncConfig{Interface: "auto"}}, "conntrack sync interface"},
+		{"vrrp disabled", HAConfig{Enabled: true, Role: "master", VRRPInstances: []VRRPInstanceConfig{{Interface: "disabled"}}}, "VRRP instance"},
+		{"vrrp name with no valid device spelling", HAConfig{Enabled: true, Role: "master", VRRPInstances: []VRRPInstanceConfig{{Interface: "wan 1"}}}, "VRRP instance"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := NewHAEngine(nil)
+			err := e.Apply(tc.cfg)
+			if err == nil {
+				t.Fatalf("Apply with an unresolvable interface succeeded; expected an error naming the %s", tc.want)
+			}
+			if !strings.Contains(err.Error(), "does not resolve to a network device") {
+				t.Fatalf("Apply error did not name the unresolvable interface, got: %v", err)
+			}
+		})
+	}
+}
+
+// M4 guard: an UNSET interface still falls back to the long-standing
+// eth0 default, and a regex-valid but not-yet-present device name
+// still passes through (it fails loudly at reload time, as before).
+func TestR2Batch6HAUnsetInterfaceKeepsEth0Default(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+	dir := t.TempDir()
+	origKeepalived, origConntrackd := keepalivedConfPath, conntrackdConfPath
+	keepalivedConfPath = filepath.Join(dir, "keepalived.conf")
+	conntrackdConfPath = filepath.Join(dir, "conntrackd.conf")
+	t.Cleanup(func() { keepalivedConfPath, conntrackdConfPath = origKeepalived, origConntrackd })
+
+	e := NewHAEngine(nil)
+	if err := e.Apply(HAConfig{Enabled: true, Role: "master"}); err != nil {
+		t.Fatalf("Apply with an unset interface failed: %v", err)
+	}
+	conf, err := os.ReadFile(keepalivedConfPath)
+	if err != nil {
+		t.Fatalf("failed to read generated keepalived.conf: %v", err)
+	}
+	if !strings.Contains(string(conf), "eth0") {
+		t.Fatalf("generated keepalived.conf does not use the eth0 default for an unset interface:\n%s", string(conf))
+	}
+
+	// A regex-valid name that is not a live device passes through
+	// unchanged (no M4 error); it is the reload's job to fail loudly.
+	e2 := NewHAEngine(nil)
+	if err := e2.Apply(HAConfig{Enabled: true, Role: "master", SyncInterface: "eth99"}); err != nil {
+		t.Fatalf("Apply with a regex-valid device name failed: %v", err)
+	}
+	conf, err = os.ReadFile(keepalivedConfPath)
+	if err != nil {
+		t.Fatalf("failed to read generated keepalived.conf: %v", err)
+	}
+	if !strings.Contains(string(conf), "eth99") {
+		t.Fatalf("generated keepalived.conf does not carry the configured device name:\n%s", string(conf))
+	}
+}
