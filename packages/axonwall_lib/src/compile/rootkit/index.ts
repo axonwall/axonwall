@@ -139,14 +139,19 @@ export const HOST_MALWARE_SCANNERS: HostMalwareScannerSpec[] = [
   },
   {
     id: 'bpf-lsm-lockdown',
-    name: 'Ghost-in-the-Ring: Preventive BPF_LSM & Lockdown Policy',
+    name: 'Ghost-in-the-Ring: Preventive BPF_LSM & Copy Fail (CVE-2026-31431) Guard',
     binary: 'bpftool',
     category: 'kernel_lockdown',
     layer: 'lsm_enforcement',
     description:
-      'Enforces SEC("lsm/bpf") inode allowlisting for BPF_PROG_LOAD, SEC("lsm/uring_sqpoll") -EPERM blocking, kernel.io_uring_disabled, and lockdown=confidentiality.',
+      'Enforces unspoofable (s_dev, i_ino) executable allowlisting for SEC("lsm/bpf") BPF_PROG_LOAD, SEC("lsm/socket_bind") AF_ALG AEAD Copy Fail (CVE-2026-31431) blocking, SEC("lsm/uring_sqpoll") -EPERM blocking, and BPF_MAP_TYPE_RINGBUF telemetry.',
     defaultCommand: 'sysctl kernel.io_uring_disabled kernel.unprivileged_bpf_disabled',
-    detects: ['Unauthorized BPF_PROG_LOAD', 'Rogue IORING_SETUP_SQPOLL creation', 'Unprivileged eBPF exploitation'],
+    detects: [
+      'Copy Fail (CVE-2026-31431) AF_ALG AEAD LPE',
+      'Unauthorized BPF_PROG_LOAD',
+      'Rogue IORING_SETUP_SQPOLL creation',
+      'Unprivileged eBPF exploitation',
+    ],
   },
 ];
 
@@ -237,25 +242,36 @@ export function compileKernelHardeningSysctl(state?: Partial<DesiredState> | nul
 
 /**
  * Generates the preventive BPF_LSM C source program that:
- * 1. Hooks SEC("lsm/bpf") to block BPF_PROG_LOAD unless the calling task's executable inode
+ * 1. Hooks SEC("lsm/socket_bind") to mitigate Copy Fail (CVE-2026-31431) by blocking
+ *    AF_ALG (38) "aead" socket binds unless the caller executable's (s_dev, i_ino)
+ *    is allowlisted in `trusted_bpf_loaders`.
+ * 2. Hooks SEC("lsm/bpf") to block BPF_PROG_LOAD unless the calling task's (s_dev, i_ino)
  *    is present in the pinned `trusted_bpf_loaders` allowlist map.
- * 2. Hooks SEC("lsm/uring_sqpoll") to return -EPERM and prevent zero-syscall IORING_SETUP_SQPOLL
+ * 3. Hooks SEC("lsm/uring_sqpoll") to return -EPERM and prevent zero-syscall IORING_SETUP_SQPOLL
  *    kernel busy-polling threads system-wide.
+ * 4. Preserves prior stacked LSM verdicts (`if (ret) return ret;`) and emits structured
+ *    denial telemetry over a 64 KB `BPF_MAP_TYPE_RINGBUF`.
  */
 export function compileBpfLsmGuardC(state?: Partial<DesiredState> | null): string {
   const cfg = resolveHostDefenseConfig(state);
   const trustedPathsComment = cfg.trustedBpfLoaderPaths
-    .map((p) => ` *   - ${String(p).replace(/[\r\n]+/g, '')}`)
+    .map((p) => ` *   - ${String(p).replace(/[\r\n]+/g, '')} (ALLOW_FLAG_BPF_LOAD)`)
+    .join('\n');
+  const trustedAfAlgComment = (cfg.trustedAfAlgPaths ?? ['/usr/sbin/cryptsetup'])
+    .map((p) => ` *   - ${String(p).replace(/[\r\n]+/g, '')} (ALLOW_FLAG_AF_ALG_AEAD)`)
     .join('\n');
   const sqpollReturn = cfg.blockIoUringSqpoll ? '-EPERM' : '0';
+  const copyfailReturn = cfg.blockAfAlgAeadCopyfail !== false ? '-EPERM' : '0';
 
-  return `// SPDX-License-Identifier: GPL-2.0
+  return `// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 // =============================================================================
-// Axonwall Ghost-in-the-Ring Preventive BPF_LSM Lockdown Guard
+// Axonwall Ghost-in-the-Ring Preventive BPF_LSM & Copy Fail (CVE-2026-31431) Guard
 // Requires boot parameter: lsm=landlock,lockdown,yama,integrity,apparmor,bpf
 // Recommended kernel lockdown mode: lockdown=${cfg.kernelLockdownMode}
-// Trusted BPF Loader Binaries (populate inode numbers in trusted_bpf_loaders):
+// Userspace loader packs st_dev via: kernel_dev = ((__u64)major(dev) << 20) | minor(dev)
+// Trusted BPF Loader & AF_ALG Binaries (populate (s_dev, i_ino) in trusted_bpf_loaders):
 ${trustedPathsComment}
+${trustedAfAlgComment}
 // =============================================================================
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -263,42 +279,146 @@ ${trustedPathsComment}
 #include <bpf/bpf_core_read.h>
 
 #define EPERM 1
+#define AF_ALG 38
+#define COMM_LEN 16
+#define SALG_TYPE_LEN 14
+#define SALG_NAME_LEN 64
 
-char LICENSE[] SEC("license") = "GPL";
+#define ALLOW_FLAG_BPF_LOAD    (1U << 0)
+#define ALLOW_FLAG_AF_ALG_AEAD (1U << 1)
 
-// Map of allowed executable inodes permitted to call BPF_PROG_LOAD
+char LICENSE[] SEC("license") = "Dual MIT/GPL";
+
+struct exe_id {
+    __u64 dev;
+    __u64 ino;
+};
+
+struct alg_addr {
+    __u16 family;
+    char type[SALG_TYPE_LEN];
+    __u32 feat;
+    __u32 mask;
+    char name[SALG_NAME_LEN];
+};
+
+struct lsm_event {
+    __u32 pid;
+    __u32 uid;
+    __u32 hook_id;
+    __u32 blocked;
+    __u64 dev;
+    __u64 ino;
+    char comm[COMM_LEN];
+    char detail[SALG_NAME_LEN];
+};
+
+static const char aead_type[] = "aead";
+
+// Map of allowed executable (s_dev, i_ino) pairs permitted to call BPF_PROG_LOAD or bind AF_ALG AEAD
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 64);
-    __type(key, u64);   // Executable inode number (i_ino)
-    __type(value, u8);  // 1 = allowed
+    __uint(max_entries, 128);
+    __type(key, struct exe_id);
+    __type(value, __u8);
 } trusted_bpf_loaders SEC(".maps");
 
-SEC("lsm/bpf")
-int BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int size)
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 64 * 1024);
+} events SEC(".maps");
+
+static __always_inline bool current_exe_has_flag(__u8 flag, struct exe_id *id)
 {
+    struct task_struct *task = bpf_get_current_task_btf();
+    id->ino = BPF_CORE_READ(task, mm, exe_file, f_inode, i_ino);
+    id->dev = BPF_CORE_READ(task, mm, exe_file, f_inode, i_sb, s_dev);
+
+    __u8 *allowed = bpf_map_lookup_elem(&trusted_bpf_loaders, id);
+    return allowed && ((*allowed & flag) != 0);
+}
+
+static __always_inline void emit_lsm_denial(__u32 hook_id, const struct exe_id *id, const char *detail)
+{
+    struct lsm_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    e->uid = bpf_get_current_uid_gid();
+    e->hook_id = hook_id;
+    e->blocked = 1;
+    e->dev = id->dev;
+    e->ino = id->ino;
+    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    __builtin_memcpy(e->detail, detail, sizeof(e->detail));
+    e->detail[sizeof(e->detail) - 1] = '\\0';
+    bpf_ringbuf_submit(e, 0);
+}
+
+// 1. Copy Fail (CVE-2026-31431) Mitigation: block untrusted AF_ALG "aead" socket_bind
+SEC("lsm/socket_bind")
+int BPF_PROG(copyfail_guard, struct socket *sock, struct sockaddr *address, int addrlen, int ret)
+{
+    struct alg_addr alg = {};
+    struct exe_id id = {};
+
+    if (ret)
+        return ret;
+
+    if (!address || address->sa_family != AF_ALG)
+        return 0;
+
+    if (addrlen < sizeof(alg))
+        return 0;
+
+    if (bpf_probe_read_kernel(&alg, sizeof(alg), address) < 0)
+        return 0;
+
+    if (bpf_strncmp(alg.type, sizeof(alg.type), aead_type) != 0)
+        return 0;
+
+    if (current_exe_has_flag(ALLOW_FLAG_AF_ALG_AEAD, &id))
+        return 0;
+
+    emit_lsm_denial(1, &id, alg.name);
+    return ${copyfailReturn};
+}
+
+// 2. Unauthorized BPF_PROG_LOAD Lockdown
+SEC("lsm/bpf")
+int BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int size, int ret)
+{
+    struct exe_id id = {};
+    const char detail[SALG_NAME_LEN] = "BPF_PROG_LOAD";
+
+    if (ret)
+        return ret;
+
     if (cmd != BPF_PROG_LOAD)
         return 0;
 
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    u64 ino = BPF_CORE_READ(task, mm, exe_file, f_inode, i_ino);
+    if (current_exe_has_flag(ALLOW_FLAG_BPF_LOAD, &id))
+        return 0;
 
-    u8 *allowed = bpf_map_lookup_elem(&trusted_bpf_loaders, &ino);
-    if (!allowed) {
-        u32 pid = bpf_get_current_pid_tgid() >> 32;
-        bpf_printk("AXONWALL_LSM_BLOCK: unauthorized BPF_PROG_LOAD pid=%d ino=%llu\\n", pid, ino);
-        return -EPERM;
-    }
-
-    return 0;
+    emit_lsm_denial(2, &id, detail);
+    return -EPERM;
 }
 
-// Block io_uring SQPOLL zero-syscall kernel thread creation system-wide
+// 3. Block io_uring SQPOLL zero-syscall kernel thread creation system-wide
 SEC("lsm/uring_sqpoll")
-int BPF_PROG(block_uring_sqpoll)
+int BPF_PROG(block_uring_sqpoll, int ret)
 {
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    bpf_printk("AXONWALL_LSM_BLOCK: io_uring IORING_SETUP_SQPOLL denied for pid=%d\\n", pid);
+    struct exe_id id = {};
+    const char detail[SALG_NAME_LEN] = "IORING_SETUP_SQPOLL";
+
+    if (ret)
+        return ret;
+
+    struct task_struct *task = bpf_get_current_task_btf();
+    id.ino = BPF_CORE_READ(task, mm, exe_file, f_inode, i_ino);
+    id.dev = BPF_CORE_READ(task, mm, exe_file, f_inode, i_sb, s_dev);
+    emit_lsm_denial(3, &id, detail);
     return ${sqpollReturn};
 }
 `;

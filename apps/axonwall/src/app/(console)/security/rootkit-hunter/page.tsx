@@ -2,7 +2,12 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { getCurrentDesiredState } from '@/server/agent';
+import {
+  getCurrentDesiredState,
+  getHostRootkitAuditStatus,
+  runHostRootkitScan,
+  type HostRootkitAuditApiResponse,
+} from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import {
   HOST_MALWARE_SCANNERS,
@@ -45,6 +50,8 @@ export default function RootkitHunterPage() {
   );
   const [simulateAttack, setSimulateAttack] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
+  const [scanning, setScanning] = useState<boolean>(false);
+  const [liveAudit, setLiveAudit] = useState<HostRootkitAuditApiResponse | null>(null);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
   useEffect(() => {
@@ -52,6 +59,11 @@ export default function RootkitHunterPage() {
       .then((st) => {
         setState(st);
         setConfig(resolveHostDefenseConfig(st));
+      })
+      .catch(() => {});
+    getHostRootkitAuditStatus()
+      .then((res) => {
+        if (res) setLiveAudit(res);
       })
       .catch(() => {});
   }, []);
@@ -139,17 +151,67 @@ export default function RootkitHunterPage() {
     }
   };
 
-  // C4: this button used to be a 600 ms timer that reported either a
-  // canned "0 anomalies" pass or a canned critical alert — neither from
-  // any scan. No host-audit backend (rkhunter/chkrootkit/ClamAV/AIDE)
-  // is wired to this page, so it is now an explicit not-implemented
-  // notice that cannot report a pass. The simulation toggle above is
-  // a separate, labelled simulation of the Ghost-in-the-Ring analysis
-  // views, not an audit result.
-  const handleRunFullAudit = () => {
-    setStatusBanner(
-      'Not implemented: no host audit backend is wired to this button — no scan was run and no result is claimed. Policy saving above is unaffected.'
-    );
+  const lsmDenialEvents = useMemo(() => {
+    const liveEvents = liveAudit?.bpfLsmDenialEvents ?? [];
+    if (!simulateAttack) return liveEvents;
+    return [
+      {
+        timestamp: new Date().toISOString(),
+        pid: 4192,
+        uid: 1000,
+        hookId: 1,
+        hook: 'lsm/socket_bind (AF_ALG AEAD / CVE-2026-31431)',
+        blocked: true,
+        dev: 271581186,
+        ino: 987654,
+        comm: 'try-bind',
+        detail: 'authencesn(hmac(sha256),cbc(aes))',
+        mitreTechnique: 'T1068',
+      },
+      {
+        timestamp: new Date().toISOString(),
+        pid: 5104,
+        uid: 0,
+        hookId: 2,
+        hook: 'lsm/bpf (BPF_PROG_LOAD)',
+        blocked: true,
+        dev: 271581186,
+        ino: 441209,
+        comm: 'boopkit-loader',
+        detail: 'BPF_PROG_LOAD',
+        mitreTechnique: 'T1014',
+      },
+      ...liveEvents,
+    ];
+  }, [liveAudit, simulateAttack]);
+
+  const handleRunFullAudit = async () => {
+    setScanning(true);
+    setStatusBanner(null);
+    try {
+      const res = await runHostRootkitScan();
+      if (res) {
+        setLiveAudit(res);
+        const lsmStatus = res.bpfLsmGuardAttached
+          ? `BPF-LSM active (${(res.bpfLsmAttachedHooks || []).join(', ')})`
+          : res.kernelPosture?.bpfLsmActive
+            ? 'BPF-LSM kernel active'
+            : 'BPF-LSM inactive in boot cmdline';
+        setStatusBanner(
+          `${res.overallVerdict === 'CLEAN' ? 'Audit Clean' : `CRITICAL: ${res.overallVerdict}`} — ${
+            (res.findings || []).length
+          } finding(s), ${(res.ioUringRings || []).length} live io_uring ring(s), ${lsmStatus}.`
+        );
+      } else {
+        setStatusBanner(
+          'Error: axonwalld host audit endpoint (/v1/security/rootkit/scan) is unreachable on this host.'
+        );
+      }
+    } catch (err: any) {
+      setStatusBanner(`Error running host rootkit audit: ${err?.message || String(err)}`);
+    } finally {
+      setScanning(false);
+    }
   };
 
   return (
@@ -205,10 +267,11 @@ export default function RootkitHunterPage() {
           <button
             type="button"
             onClick={handleRunFullAudit}
+            disabled={scanning}
             className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 transition"
           >
             <Play className="w-4 h-4" />
-            Run Full 12-Layer Audit (not implemented)
+            {scanning ? 'Scanning Ring-0 & Host...' : 'Run Full 12-Layer Audit'}
           </button>
           <button
             type="button"
@@ -297,7 +360,7 @@ export default function RootkitHunterPage() {
             {config.bpfLsmGuardEnabled ? 'ENFORCING' : 'MONITOR'}
           </div>
           <div className="mt-1 text-[11px] text-slate-400">
-            lockdown={config.kernelLockdownMode} | lsm/bpf + lsm/uring_sqpoll
+            lockdown={config.kernelLockdownMode} | lsm/socket_bind + lsm/bpf + lsm/uring_sqpoll
           </div>
         </div>
       </div>
@@ -697,33 +760,167 @@ export default function RootkitHunterPage() {
 
       {/* TAB 4: PREVENTIVE BPF_LSM & GENERATED ARTIFACTS */}
       {activeTab === 'lsm_artifacts' && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-            <div>
-              <h2 className="text-base font-semibold text-white flex items-center gap-2">
-                <FileCode2 className="w-4 h-4 text-emerald-400" />
-                Compiled Ghost-in-the-Ring Enforcement &amp; Audit Artifacts
-              </h2>
-              <p className="text-xs text-slate-400">
-                Inspect the live C source, sysctl lockdown drop-in, YARA rules, and drgn/perf triage scripts generated
-                by <code>@axonwall/lib/compile/rootkit</code>.
-              </p>
+        <div className="space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-semibold text-white flex items-center gap-2">
+                  <Lock className="w-4 h-4 text-purple-400" />
+                  In-Kernel BPF-LSM Trampoline Controls &amp; Copy Fail (CVE-2026-31431) Mitigation
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Attaches CO-RE BPF-LSM programs to <code>lsm/socket_bind</code>, <code>lsm/bpf</code>, and{' '}
+                  <code>lsm/uring_sqpoll</code> using unspoofable <code>(s_dev, i_ino)</code> executable allowlisting
+                  and a 64 KB <code>BPF_MAP_TYPE_RINGBUF</code> event stream.
+                </p>
+              </div>
+              <span className="px-2.5 py-1 rounded text-xs font-mono bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                {liveAudit?.bpfLsmGuardAttached
+                  ? `ATTACHED (${(liveAudit.bpfLsmAttachedHooks || []).length} hooks)`
+                  : 'CO-RE READY'}
+              </span>
             </div>
-            <select
-              value={selectedArtifactPath}
-              onChange={(e) => setSelectedArtifactPath(e.target.value)}
-              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-emerald-300 font-mono"
-            >
-              {Object.keys(bundle.files).map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <label className="flex items-start gap-3 p-3.5 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.bpfLsmGuardEnabled}
+                  onChange={(e) =>
+                    setConfig((prev) => ({ ...prev, bpfLsmGuardEnabled: e.target.checked }))
+                  }
+                  className="mt-1 rounded border-slate-700 bg-slate-900 text-emerald-500"
+                />
+                <div>
+                  <div className="text-xs font-semibold text-slate-200">
+                    Restrict sys_bpf(BPF_PROG_LOAD) via SEC(&quot;lsm/bpf&quot;)
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    Allows only binaries whose <code>(s_dev, i_ino)</code> matches{' '}
+                    <code>{config.trustedBpfLoaderPaths.join(', ')}</code>
+                  </div>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3.5 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.blockAfAlgAeadCopyfail !== false}
+                  onChange={(e) =>
+                    setConfig((prev) => ({ ...prev, blockAfAlgAeadCopyfail: e.target.checked }))
+                  }
+                  className="mt-1 rounded border-slate-700 bg-slate-900 text-emerald-500"
+                />
+                <div>
+                  <div className="text-xs font-semibold text-slate-200">
+                    Block Copy Fail (CVE-2026-31431) AF_ALG AEAD Binds
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    Hooks <code>SEC(&quot;lsm/socket_bind&quot;)</code> for <code>AF_ALG</code> (38){' '}
+                    <code>alg.type == &quot;aead&quot;</code> while preserving hash/skcipher sockets
+                  </div>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3.5 rounded-lg bg-slate-950 border border-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.blockIoUringSqpoll}
+                  onChange={(e) =>
+                    setConfig((prev) => ({ ...prev, blockIoUringSqpoll: e.target.checked }))
+                  }
+                  className="mt-1 rounded border-slate-700 bg-slate-900 text-emerald-500"
+                />
+                <div>
+                  <div className="text-xs font-semibold text-slate-200">
+                    Block io_uring SQPOLL via SEC(&quot;lsm/uring_sqpoll&quot;)
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    Denies zero-syscall <code>IORING_SETUP_SQPOLL</code> kernel busy-polling threads
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <div className="border-t border-slate-800 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                  <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                  BPF-LSM Ring-Buffer Denial Telemetry (BPF_MAP_TYPE_RINGBUF)
+                </h3>
+                <span className="text-[11px] font-mono text-slate-400">
+                  {lsmDenialEvents.length} event(s)
+                </span>
+              </div>
+              {lsmDenialEvents.length === 0 ? (
+                <div className="text-xs font-mono text-emerald-400 bg-slate-950 border border-slate-800 rounded-lg p-3">
+                  [+] Clean: Zero denied operations recorded on lsm/socket_bind, lsm/bpf, or lsm/uring_sqpoll ring buffer.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-slate-800">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-slate-950 text-slate-400 uppercase text-[10px]">
+                      <tr>
+                        <th className="px-3 py-2">Hook</th>
+                        <th className="px-3 py-2">Process (PID / UID)</th>
+                        <th className="px-3 py-2">Executable (s_dev : i_ino)</th>
+                        <th className="px-3 py-2">Blocked Target / Algorithm</th>
+                        <th className="px-3 py-2">Verdict</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/70 bg-slate-950/60">
+                      {lsmDenialEvents.map((ev, i) => (
+                        <tr key={`${ev.pid}-${ev.hookId}-${i}`} className="bg-red-950/20">
+                          <td className="px-3 py-2 text-purple-300">{ev.hook}</td>
+                          <td className="px-3 py-2 text-white">
+                            {ev.comm} (pid={ev.pid} uid={ev.uid})
+                          </td>
+                          <td className="px-3 py-2 text-slate-300">
+                            0x{ev.dev.toString(16)} : {ev.ino}
+                          </td>
+                          <td className="px-3 py-2 text-amber-300">{ev.detail}</td>
+                          <td className="px-3 py-2">
+                            <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/40 text-[10px] font-bold">
+                              {ev.blocked ? '-EPERM DENIED' : 'AUDIT'} ({ev.mitreTechnique})
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
-          <pre className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-slate-200 overflow-x-auto max-h-[540px]">
-            {(bundle.files as Record<string, string>)[selectedArtifactPath] || ''}
-          </pre>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-white flex items-center gap-2">
+                  <FileCode2 className="w-4 h-4 text-emerald-400" />
+                  Compiled Ghost-in-the-Ring Enforcement &amp; Audit Artifacts
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Inspect the live C source, sysctl lockdown drop-in, YARA rules, and drgn/perf triage scripts generated
+                  by <code>@axonwall/lib/compile/rootkit</code>.
+                </p>
+              </div>
+              <select
+                value={selectedArtifactPath}
+                onChange={(e) => setSelectedArtifactPath(e.target.value)}
+                className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-emerald-300 font-mono"
+              >
+                {Object.keys(bundle.files).map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <pre className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-slate-200 overflow-x-auto max-h-[540px]">
+              {(bundle.files as Record<string, string>)[selectedArtifactPath] || ''}
+            </pre>
+          </div>
         </div>
       )}
     </div>

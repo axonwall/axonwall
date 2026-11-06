@@ -68,13 +68,17 @@ type HostRootkitFinding struct {
 }
 
 type HostRootkitAuditStatus struct {
-	Timestamp       string                `json:"timestamp"`
-	OverallVerdict  string                `json:"overallVerdict"`
-	KernelPosture   KernelPostureStatus   `json:"kernelPosture"`
-	Scanners        []ScannerBinaryStatus `json:"scanners"`
-	IoUringRings    []IoUringRingFinding  `json:"ioUringRings"`
-	TrampolineHooks []string              `json:"trampolineHooks"`
-	Findings        []HostRootkitFinding  `json:"findings"`
+	Timestamp           string                 `json:"timestamp"`
+	OverallVerdict      string                 `json:"overallVerdict"`
+	KernelPosture       KernelPostureStatus    `json:"kernelPosture"`
+	Scanners            []ScannerBinaryStatus  `json:"scanners"`
+	IoUringRings        []IoUringRingFinding   `json:"ioUringRings"`
+	TrampolineHooks     []string               `json:"trampolineHooks"`
+	BpfLsmGuardAttached bool                   `json:"bpfLsmGuardAttached"`
+	BpfLsmAttachedHooks []string               `json:"bpfLsmAttachedHooks"`
+	BpfLsmAllowlist     []BpfLsmAllowlistEntry `json:"bpfLsmAllowlist"`
+	BpfLsmDenialEvents  []BpfLsmDenialEvent    `json:"bpfLsmDenialEvents"`
+	Findings            []HostRootkitFinding   `json:"findings"`
 }
 
 func readSysctlFileTrimmed(path, fallback string) string {
@@ -351,6 +355,22 @@ func RunHostRootkitAudit() HostRootkitAuditStatus {
 		}
 	}
 
+	lsmAttached, lsmHooks, lsmAllowlist, lsmEvents := GetDefaultLsmGuardManager().Snapshot()
+	for _, ev := range lsmEvents {
+		action := "Audited"
+		if ev.Blocked {
+			action = "Blocked"
+		}
+		findings = append(findings, HostRootkitFinding{
+			Detector:       "bpf-lsm-lockdown",
+			Category:       "lsm_enforcement",
+			Severity:       "CRITICAL",
+			Target:         ev.Comm + " (PID " + strconv.FormatUint(uint64(ev.PID), 10) + ")",
+			Description:    action + " via " + ev.Hook + " — detail=" + ev.Detail + " (dev=" + strconv.FormatUint(ev.Dev, 10) + " ino=" + strconv.FormatUint(ev.Ino, 10) + ")",
+			MitreTechnique: ev.MitreTechnique,
+		})
+	}
+
 	verdict := "CLEAN"
 	for _, f := range findings {
 		if f.Severity == "CRITICAL" {
@@ -363,12 +383,16 @@ func RunHostRootkitAudit() HostRootkitAuditStatus {
 	}
 
 	return HostRootkitAuditStatus{
-		Timestamp:       time.Now().UTC().Format(time.RFC3339),
-		OverallVerdict:  verdict,
-		KernelPosture:   posture,
-		Scanners:        scanners,
-		IoUringRings:    rings,
-		TrampolineHooks: trampolines,
-		Findings:        findings,
+		Timestamp:           time.Now().UTC().Format(time.RFC3339),
+		OverallVerdict:      verdict,
+		KernelPosture:       posture,
+		Scanners:            scanners,
+		IoUringRings:        rings,
+		TrampolineHooks:     trampolines,
+		BpfLsmGuardAttached: lsmAttached,
+		BpfLsmAttachedHooks: lsmHooks,
+		BpfLsmAllowlist:     lsmAllowlist,
+		BpfLsmDenialEvents:  lsmEvents,
+		Findings:            findings,
 	}
 }

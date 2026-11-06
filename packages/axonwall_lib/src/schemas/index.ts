@@ -1712,6 +1712,12 @@ export const HostMalwareDefenseConfigSchema = z.object({
     '/usr/sbin/bpftool',
     '/usr/local/bin/axonwalld',
   ]),
+  blockAfAlgAeadCopyfail: z.boolean().default(true),
+  trustedAfAlgPaths: z.array(
+    z.string().regex(/^\/[a-zA-Z0-9._/-]+$/, 'Trusted AF_ALG path must be a safe absolute path'),
+  ).default([
+    '/usr/sbin/cryptsetup',
+  ]),
   progIdrKcoreDiffEnabled: z.boolean().default(true),
   pmuLbrBranchTracingEnabled: z.boolean().default(true),
   autoQuarantineOnCritical: z.boolean().default(true),

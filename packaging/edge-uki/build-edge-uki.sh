@@ -164,7 +164,7 @@ echo "[+] Packing zero-shell initramfs archive: ${INITRAMFS_OUT}..."
 
 # 4. Generate merged monolithic kernel configuration
 MERGED_KCONFIG="${OUTPUT_DIR}/axonwall-edge-${SKU}.kernel.config"
-DEFAULT_CMDLINE="quiet console=ttyS0,115200 console=tty0 axonwall.sku=${SKU} axonwall.hub=${HUB_URL} ${EXTRA_CMDLINE}"
+DEFAULT_CMDLINE="quiet lsm=lockdown,yama,integrity,bpf console=ttyS0,115200 console=tty0 axonwall.sku=${SKU} axonwall.hub=${HUB_URL} ${EXTRA_CMDLINE}"
 cat "${BASE_CONFIG}" "${SKU_CONFIG}" > "${MERGED_KCONFIG}"
 cat <<EOF >> "${MERGED_KCONFIG}"
 

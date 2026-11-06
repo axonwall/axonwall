@@ -2622,6 +2622,12 @@ func main() {
 		log.Printf("[Agent] Warning: Failed to start eBPF manager: %v", err)
 	}
 
+	// Start in-kernel BPF-LSM Preventive Guard & Copy Fail (CVE-2026-31431) Mitigation
+	lsmGuardManager := engine.NewLsmGuardManager()
+	if err := lsmGuardManager.Start(engine.DefaultLsmGuardPolicyConfig()); err != nil {
+		log.Printf("[Agent] Warning: Failed to start BPF-LSM guard: %v", err)
+	}
+
 	// Start HTTP REST listener over Unix socket for local UI and management tooling
 	apiSocketPath := filepath.Join(sockDir, "agent-api.sock")
 	_ = os.Remove(apiSocketPath)
@@ -4252,6 +4258,7 @@ func main() {
 		iapManager.Stop()
 		haEngine.Stop()
 		sdwanProber.stop()
+		lsmGuardManager.Stop()
 		ebpfManager.Stop()
 		etckeeperManager.Close()
 		grpcServer.GracefulStop()

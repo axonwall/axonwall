@@ -93,8 +93,14 @@ describe('Host Malware, Rootkit & Ghost-in-the-Ring Kernel Defense Suite', () =>
     expect(sysctl).toContain('kernel.unprivileged_bpf_disabled = 1');
 
     const lsmC = compileBpfLsmGuardC(state);
+    expect(lsmC).toContain('SEC("lsm/socket_bind")');
     expect(lsmC).toContain('SEC("lsm/bpf")');
     expect(lsmC).toContain('SEC("lsm/uring_sqpoll")');
+    expect(lsmC).toContain('struct exe_id');
+    expect(lsmC).toContain('BPF_CORE_READ(task, mm, exe_file, f_inode, i_sb, s_dev)');
+    expect(lsmC).toContain('BPF_MAP_TYPE_RINGBUF');
+    expect(lsmC).toContain('if (ret)');
+    expect(lsmC).toContain('address->sa_family != AF_ALG');
     expect(lsmC).toContain('trusted_bpf_loaders');
     expect(lsmC).toContain('return -EPERM;');
 

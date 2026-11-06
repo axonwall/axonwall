@@ -6208,6 +6208,94 @@ export async function uploadRosenpassPeerPublicKeyAction(
   }
 }
 
+export interface HostRootkitAuditApiResponse {
+  timestamp: string;
+  overallVerdict: string;
+  kernelPosture: {
+    taintValue: number;
+    ioUringDisabled: string;
+    ioUringGroup: string;
+    unprivilegedBpfDisabled: string;
+    bpfJitHarden: string;
+    lockdownMode: string;
+    activeLsms: string[];
+    bpfLsmActive: boolean;
+    ldSoPreloadPresent: boolean;
+    ldSoPreloadEntries?: string;
+  };
+  scanners: Array<{
+    id: string;
+    name: string;
+    binary: string;
+    installed: boolean;
+    path?: string;
+    category: string;
+    layer: string;
+  }>;
+  ioUringRings: Array<{
+    pid: number;
+    comm: string;
+    exe: string;
+    fd: number;
+    sqThread: number;
+    sqThreadCpu: number;
+    sqHead: number;
+    sqTail: number;
+    cqHead: number;
+    cqTail: number;
+    userFiles: number;
+    sqPollActive: boolean;
+    fixedFilesActive: boolean;
+    severity: 'INFO' | 'HIGH' | 'CRITICAL';
+    reasons: string[];
+  }>;
+  trampolineHooks: string[];
+  bpfLsmGuardAttached?: boolean;
+  bpfLsmAttachedHooks?: string[];
+  bpfLsmAllowlist?: Array<{
+    path: string;
+    dev: number;
+    ino: number;
+    flags: number;
+  }>;
+  bpfLsmDenialEvents?: Array<{
+    timestamp: string;
+    pid: number;
+    uid: number;
+    hookId: number;
+    hook: string;
+    blocked: boolean;
+    dev: number;
+    ino: number;
+    comm: string;
+    detail: string;
+    mitreTechnique: string;
+  }>;
+  findings: Array<{
+    detector: string;
+    category: string;
+    severity: string;
+    target: string;
+    description: string;
+    mitreTechnique: string;
+  }>;
+}
+
+export async function getHostRootkitAuditStatus(): Promise<HostRootkitAuditApiResponse | null> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  await enforceRateLimit(30, 60000, 'rootkit-status');
+  return callAgentApi<HostRootkitAuditApiResponse>('/v1/security/rootkit/status', 'GET', undefined, 10000);
+}
+
+export async function runHostRootkitScan(): Promise<HostRootkitAuditApiResponse | null> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(10, 60000, 'rootkit-scan');
+  return callAgentApi<HostRootkitAuditApiResponse>('/v1/security/rootkit/scan', 'POST', {}, 30000);
+}
+
+
 
 
 

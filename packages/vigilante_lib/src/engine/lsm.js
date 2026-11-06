@@ -44,7 +44,8 @@ function escapeCComment(value) {
 const HOOK_CONDITIONS = {
   bprm_check_security: ['comm', 'parentComm', 'path', 'uid'],
   file_open: ['comm', 'parentComm', 'path', 'uid'],
-  socket_connect: ['comm', 'parentComm', 'uid', 'port']
+  socket_connect: ['comm', 'parentComm', 'uid', 'port'],
+  socket_bind: ['comm', 'parentComm', 'uid', 'port']
 };
 
 /**
@@ -247,6 +248,7 @@ export function exportLsmCSource(policy) {
   const bprmRules = (policy.rules || []).filter(r => r.hook === 'bprm_check_security');
   const fileRules = (policy.rules || []).filter(r => r.hook === 'file_open');
   const socketRules = (policy.rules || []).filter(r => r.hook === 'socket_connect');
+  const bindRules = (policy.rules || []).filter(r => r.hook === 'socket_bind');
 
   // Every hook body declares every variable the filter compiler can
   // reference for that hook (see HOOK_CONDITIONS): previously the socket
@@ -318,8 +320,11 @@ ${bprmRules.map(r => ruleBlock(r, 'execve: %s')).join('\n\n')}
 }
 
 SEC("lsm/file_open")
-int BPF_PROG(lsm_file_open, struct file *file)
+int BPF_PROG(lsm_file_open, struct file *file, int ret)
 {
+    if (ret != 0)
+        return ret;
+
 ${commonDecls}
 
     char target_path[256];
@@ -331,8 +336,11 @@ ${fileRules.map(r => ruleBlock(r, 'file_open: %s')).join('\n\n')}
 }
 
 SEC("lsm/socket_connect")
-int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *address, int addrlen)
+int BPF_PROG(lsm_socket_connect, struct socket *sock, struct sockaddr *address, int addrlen, int ret)
 {
+    if (ret != 0)
+        return ret;
+
 ${commonDecls}
 
     __u16 dst_port = 0;
@@ -340,6 +348,23 @@ ${commonDecls}
         dst_port = bpf_ntohs(((struct sockaddr_in *)address)->sin_port);
 
 ${socketRules.map(r => ruleBlock(r, 'socket_connect')).join('\n\n')}
+
+    return 0;
+}
+
+SEC("lsm/socket_bind")
+int BPF_PROG(lsm_socket_bind, struct socket *sock, struct sockaddr *address, int addrlen, int ret)
+{
+    if (ret != 0)
+        return ret;
+
+${commonDecls}
+
+    __u16 dst_port = 0;
+    if (address && address->sa_family == 2) /* AF_INET */
+        dst_port = bpf_ntohs(((struct sockaddr_in *)address)->sin_port);
+
+${bindRules.map(r => ruleBlock(r, 'socket_bind')).join('\n\n')}
 
     return 0;
 }
