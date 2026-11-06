@@ -1157,8 +1157,12 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 	if targetType != "vm" && targetType != "lxc" {
 		return "", fmt.Errorf("invalid backup target type '%s': must be 'vm' or 'lxc'", targetType)
 	}
-	ts := time.Now().Format("20060102-150405")
-	snapName := fmt.Sprintf("backup-%s", ts)
+	// A-M24: snapshot and archive names carry a nanosecond suffix so two
+	// backups of the same target in the same second can no longer collide
+	// (the old second-granularity snapshot name made the second backup
+	// fail, and the archive name would have been overwritten).
+	stamp := fmt.Sprintf("%s-%09d", time.Now().Format("20060102-150405"), time.Now().Nanosecond())
+	snapName := fmt.Sprintf("backup-%s", stamp)
 
 	upid := m.taskMgr.StartTask("vzdump", fmt.Sprintf("%s-%d", targetType, targetID), user, func(logger func(format string, args ...any)) error {
 		logger("Initiating backup of %s %d to %s...", targetType, targetID, destType)
@@ -1166,57 +1170,90 @@ func (m *VirtManager) RunBackup(targetType string, targetID int, pool string, de
 		backupDir := fmt.Sprintf("/mnt/%s/backups", pool)
 		_ = os.MkdirAll(backupDir, 0700)
 		_ = os.Chmod(backupDir, 0700)
-		archiveName := fmt.Sprintf("axonwall-backup-%s-%d-%s.vma.zst", targetType, targetID, ts)
-		archivePath := filepath.Join(backupDir, archiveName)
-		if fi, lerr := os.Lstat(archivePath); lerr == nil {
-			if (fi.Mode() & os.ModeSymlink) != 0 {
-				return fmt.Errorf("refusing symlink archive path: %s", archivePath)
+
+		// A-M24: back up every disk, not just disk-0. A multi-disk VM
+		// used to report "Backup completed successfully" while only
+		// disk-0 was snapshotted and streamed; a restore would
+		// silently lose every other disk.
+		datasets := m.backupDatasetsForTarget(targetType, targetID, pool)
+		var archives []string
+		for idx, dataset := range datasets {
+			archiveName := fmt.Sprintf("axonwall-backup-%s-%d-%s.vma.zst", targetType, targetID, stamp)
+			if len(datasets) > 1 {
+				archiveName = fmt.Sprintf("axonwall-backup-%s-%d-%s-disk-%d.vma.zst", targetType, targetID, stamp, idx)
 			}
+			archivePath := filepath.Join(backupDir, archiveName)
+			if fi, lerr := os.Lstat(archivePath); lerr == nil {
+				if (fi.Mode() & os.ModeSymlink) != 0 {
+					return fmt.Errorf("refusing symlink archive path: %s", archivePath)
+				}
+			}
+			if err := backupDataset(dataset, snapName, archivePath, logger); err != nil {
+				return err
+			}
+			archives = append(archives, archivePath)
 		}
 
-		if targetType == "vm" {
-			dataset := fmt.Sprintf("%s/vms/vm-%d-disk-0", pool, targetID)
-			snapFull := fmt.Sprintf("%s@%s", dataset, snapName)
-
-			logger("Creating ZFS snapshot %s...", snapFull)
-			cmdSnap := exec.Command("zfs", "snapshot", snapFull)
-			if out, err := cmdSnap.CombinedOutput(); err != nil {
-				logger("Snapshot error: %s (%v)", string(out), err)
-				return fmt.Errorf("snapshot failed: %s", string(out))
-			}
-
-			logger("Streaming snapshot to compressed archive %s...", archivePath)
-			cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
-			if out, err := cmdStream.CombinedOutput(); err != nil {
-				logger("Stream error: %s (%v)", string(out), err)
-				return fmt.Errorf("stream failed: %s", string(out))
-			}
-			_ = os.Chmod(archivePath, 0600)
-		} else {
-			dataset := fmt.Sprintf("%s/lxc/subvol-%d-disk-0", pool, targetID)
-			snapFull := fmt.Sprintf("%s@%s", dataset, snapName)
-
-			logger("Creating ZFS snapshot %s...", snapFull)
-			cmdSnap := exec.Command("zfs", "snapshot", snapFull)
-			if out, err := cmdSnap.CombinedOutput(); err != nil {
-				logger("Snapshot error: %s (%v)", string(out), err)
-				return fmt.Errorf("snapshot failed: %s", string(out))
-			}
-
-			logger("Streaming container snapshot to archive %s...", archivePath)
-			cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
-			if out, err := cmdStream.CombinedOutput(); err != nil {
-				logger("Stream error: %s (%v)", string(out), err)
-				return fmt.Errorf("stream failed: %s", string(out))
-			}
-			_ = os.Chmod(archivePath, 0600)
-		}
-
-		logger("Backup completed successfully: %s", archivePath)
+		logger("Backup completed successfully: %s", strings.Join(archives, ", "))
 		return nil
 	})
 
 	return upid, nil
+}
+
+// backupDatasetsForTarget returns the ZFS datasets a backup must cover. A
+// registered VM backs up every disk in its spec (same naming StartVM
+// provisions them under); an unregistered VM, or an LXC container (which
+// has a single rootfs dataset), falls back to the historical disk-0
+// dataset (A-M24).
+func (m *VirtManager) backupDatasetsForTarget(targetType string, targetID int, pool string) []string {
+	if targetType == "vm" {
+		m.mu.RLock()
+		spec, ok := m.vmSpecs[targetID]
+		m.mu.RUnlock()
+		if ok && len(spec.Disks) > 0 {
+			datasets := make([]string, 0, len(spec.Disks))
+			for idx, disk := range spec.Disks {
+				zvolName := disk.Zvol
+				if zvolName == "" {
+					p := disk.Pool
+					if p == "" {
+						p = pool
+					}
+					zvolName = fmt.Sprintf("%s/vms/vm-%d-disk-%d", p, targetID, idx)
+				}
+				datasets = append(datasets, zvolName)
+			}
+			return datasets
+		}
+		return []string{fmt.Sprintf("%s/vms/vm-%d-disk-0", pool, targetID)}
+	}
+	return []string{fmt.Sprintf("%s/lxc/subvol-%d-disk-0", pool, targetID)}
+}
+
+// backupDataset snapshots one ZFS dataset and streams it to a compressed
+// archive. On stream failure the partial archive is removed and the
+// snapshot destroyed, so a failed backup leaves neither a bogus archive
+// for ListBackups to list nor a stray snapshot (A-M24).
+func backupDataset(dataset, snapName, archivePath string, logger func(format string, args ...any)) error {
+	snapFull := fmt.Sprintf("%s@%s", dataset, snapName)
+
+	logger("Creating ZFS snapshot %s...", snapFull)
+	if out, err := exec.Command("zfs", "snapshot", snapFull).CombinedOutput(); err != nil {
+		logger("Snapshot error: %s (%v)", string(out), err)
+		return fmt.Errorf("snapshot failed: %s", string(out))
+	}
+
+	logger("Streaming snapshot to compressed archive %s...", archivePath)
+	cmdStream := exec.Command("/bin/bash", "-c", `umask 0077; set -o pipefail; zfs send "$1" | zstd -3 > "$2"`, "_", snapFull, archivePath)
+	if out, err := cmdStream.CombinedOutput(); err != nil {
+		logger("Stream error: %s (%v)", string(out), err)
+		_ = os.Remove(archivePath)
+		_ = exec.Command("zfs", "destroy", snapFull).Run()
+		return fmt.Errorf("stream failed: %s", string(out))
+	}
+	_ = os.Chmod(archivePath, 0600)
+	return nil
 }
 
 // ListBackups scans for existing backup archives in pools

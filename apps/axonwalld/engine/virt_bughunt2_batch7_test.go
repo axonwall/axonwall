@@ -60,6 +60,42 @@ func TestBatch7_StartVMRefusesUnregisteredVM(t *testing.T) {
 	}
 }
 
+// A-M24: a multi-disk VM backup must cover every disk, not just disk-0.
+func TestBatch7_BackupDatasetsForTarget(t *testing.T) {
+	virtMgr := newTestVirtManager(t)
+	if err := virtMgr.RegisterVMSpec(CompiledVmSpec{
+		VMID: 300, Name: "multi", Binary: "qemu-system-x86_64",
+		Disks: []VmDisk{
+			{Name: "disk0", Pool: "tank", SizeGb: 10},
+			{Name: "disk1", Pool: "tank", SizeGb: 20},
+			{Name: "disk2", Pool: "fast", Zvol: "fast/vms/custom-disk", SizeGb: 5},
+		},
+	}); err != nil {
+		t.Fatalf("RegisterVMSpec: %v", err)
+	}
+
+	got := virtMgr.backupDatasetsForTarget("vm", 300, "tank")
+	want := []string{"tank/vms/vm-300-disk-0", "tank/vms/vm-300-disk-1", "fast/vms/custom-disk"}
+	if len(got) != len(want) {
+		t.Fatalf("multi-disk datasets = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("dataset %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Unregistered VM and LXC keep the historical single disk-0 dataset.
+	got = virtMgr.backupDatasetsForTarget("vm", 301, "tank")
+	if len(got) != 1 || got[0] != "tank/vms/vm-301-disk-0" {
+		t.Fatalf("unregistered VM datasets = %v, want [tank/vms/vm-301-disk-0]", got)
+	}
+	got = virtMgr.backupDatasetsForTarget("lxc", 400, "tank")
+	if len(got) != 1 || got[0] != "tank/lxc/subvol-400-disk-0" {
+		t.Fatalf("LXC datasets = %v, want [tank/lxc/subvol-400-disk-0]", got)
+	}
+}
+
 // A-M25: StartVM must fail when QEMU died and the QMP socket never
 // appeared, instead of warning and reporting task success.
 func TestBatch7_WaitForQmpSocket(t *testing.T) {
