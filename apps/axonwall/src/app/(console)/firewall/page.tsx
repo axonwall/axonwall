@@ -42,7 +42,7 @@ export default function FirewallPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedInterface, setSelectedInterface] = useState<string>('lan');
   const [compiledScript, setCompiledScript] = useState<string | null>(null);
-  const [applyResult, setApplyResult] = useState<{ message: string; warnings: string[] } | null>(null);
+  const [applyResult, setApplyResult] = useState<{ ok: boolean; message: string; warnings: string[] } | null>(null);
   const [isApplying, setIsApplying] = useState(false);
   const [hasUnappliedChanges, setHasUnappliedChanges] = useState(false);
 
@@ -183,12 +183,14 @@ export default function FirewallPage() {
       const res = await applyDesiredState(state, 120);
       setCompiledScript(res.nftScript);
       setApplyResult({
+        ok: true,
         message: res.message,
         warnings: res.warnings,
       });
       setHasUnappliedChanges(false);
     } catch (err: any) {
       setApplyResult({
+        ok: false,
         message: `Apply Failed: ${err?.message || 'Configuration validation error'}`,
         warnings: ['State could not be applied to kernel nftables.'],
       });
@@ -297,9 +299,19 @@ export default function FirewallPage() {
       )}
 
       {applyResult && (
-        <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl space-y-2">
-          <div className="flex items-center gap-2 text-emerald-400 font-medium text-sm">
-            <CheckCircle2 className="w-4 h-4" />
+        <div
+          className={`p-4 rounded-xl space-y-2 ${
+            applyResult.ok
+              ? 'bg-emerald-500/10 border border-emerald-500/30'
+              : 'bg-red-500/10 border border-red-500/30'
+          }`}
+        >
+          <div
+            className={`flex items-center gap-2 font-medium text-sm ${
+              applyResult.ok ? 'text-emerald-400' : 'text-red-400'
+            }`}
+          >
+            {applyResult.ok ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
             <span>{applyResult.message}</span>
           </div>
           {applyResult.warnings.length > 0 && (

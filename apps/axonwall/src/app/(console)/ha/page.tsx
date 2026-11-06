@@ -173,9 +173,10 @@ export default function HighAvailabilityPage() {
       });
       setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
       setTimeout(() => setSyncStatusMsg(null), 4000);
-    } catch {
-      setSyncStatusMsg('Error saving High Availability configuration');
-      setTimeout(() => setSyncStatusMsg(null), 4000);
+    } catch (err: any) {
+      // A11: a failed save used to render in the emerald success
+      // banner. Route it to the amber error banner instead.
+      setSyncErrorMsg(`Failed to save High Availability configuration: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsSaving(false);
     }

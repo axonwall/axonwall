@@ -65,7 +65,9 @@ export default function RoutingPage() {
       setGateways(prevGateways);
       setRoutes(prevRoutes);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save routing state'}`);
+      // A11: a failed save used to be rendered in the emerald
+      // success banner ("Error: ..."). Route it to the red banner.
+      setErrorMsg(`Failed to save routing configuration: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }

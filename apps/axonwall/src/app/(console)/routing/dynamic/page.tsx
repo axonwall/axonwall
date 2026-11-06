@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Route, Terminal, Shield, CheckCircle2 } from 'lucide-react';
+import { Route, Terminal, Shield, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { compileFrr } from '@axonwall/lib/compile/frr';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import type { DesiredState, FrrConfig } from '@axonwall/lib/schemas';
@@ -20,6 +20,8 @@ export default function DynamicRoutingPage() {
   const [applied, setApplied] = useState(false);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // A11: save failures need a red banner, not the emerald one.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     getCurrentDesiredState()
@@ -66,6 +68,7 @@ export default function DynamicRoutingPage() {
     const prevFullState = fullState;
     setSaving(true);
     setStatusMsg(null);
+    setErrorMsg(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -79,7 +82,7 @@ export default function DynamicRoutingPage() {
       setTimeout(() => setApplied(false), 3000);
     } catch (err: any) {
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save FRR settings'}`);
+      setErrorMsg(`Failed to save FRR settings: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
@@ -97,6 +100,13 @@ export default function DynamicRoutingPage() {
           <code className="text-emerald-400 font-mono">/etc/axonwall/routing.yaml</code>.
         </p>
       </div>
+
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
       {statusMsg && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">

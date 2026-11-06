@@ -10,6 +10,8 @@ export default function AdvancedInterfacesPage() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // A11: save failures need a red banner, not the emerald one.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [vlans, setVlans] = useState<Vlan[]>([]);
   const [bridges, setBridges] = useState<Bridge[]>([]);
@@ -50,6 +52,7 @@ export default function AdvancedInterfacesPage() {
     setVrfs(nextVrfs);
     setSaving(true);
     setStatusMsg(null);
+    setErrorMsg(null);
     try {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -70,7 +73,7 @@ export default function AdvancedInterfacesPage() {
       setVips(prevVips);
       setVrfs(prevVrfs);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save interfaces.yaml'}`);
+      setErrorMsg(`Failed to save interfaces.yaml: ${err?.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
     }
@@ -123,6 +126,13 @@ export default function AdvancedInterfacesPage() {
           <span>{saving ? 'Saving YAML...' : 'Save to interfaces.yaml'}</span>
         </button>
       </div>
+
+      {errorMsg && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+          <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
       {statusMsg && (
         <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
