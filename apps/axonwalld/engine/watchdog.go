@@ -1714,8 +1714,14 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 
 // readGrubEnvInternal parses GRUB key=value pairs from the environment block.
 func (we *WatchdogEngine) readGrubEnvInternal() map[string]string {
+	return readGrubEnvAtPath(we.grubenvPath)
+}
+
+// readGrubEnvAtPath parses GRUB key=value pairs from the environment
+// block at envPath.
+func readGrubEnvAtPath(envPath string) map[string]string {
 	res := make(map[string]string)
-	data, err := os.ReadFile(we.grubenvPath)
+	data, err := os.ReadFile(envPath)
 	if err != nil {
 		return res
 	}
@@ -1749,7 +1755,15 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 				_ = os.MkdirAll(mntDir, 0700)
 				if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr == nil {
 					targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")
-					_ = writeGrubEnvKeyAtPath(targetEnv, we.readGrubEnvInternal(), key, value)
+					// D2-L1: base the mirror write on the TARGET
+					// file's own env, not the booted slot's — the
+					// direct-write fallback serialises the whole
+					// base map, and the booted slot's map still
+					// carries clone-time values (e.g. active_slot=A)
+					// that would flip the next boot back to A.
+					if mErr := writeGrubEnvKeyAtPath(targetEnv, readGrubEnvAtPath(targetEnv), key, value); mErr != nil {
+						log.Printf("[Watchdog] grubenv mirror to slot A failed: %v", mErr)
+					}
 					_ = exec.Command("umount", mntDir).Run()
 				}
 				_ = os.Remove(mntDir)
