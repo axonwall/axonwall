@@ -79,3 +79,48 @@ func TestBatch9NasSnapshotScrubErrorWithoutZfs(t *testing.T) {
 		t.Fatal("ScrubPool must fail without zpool installed")
 	}
 }
+
+// L13: the pcap parser must count IPv6 and ARP packets. Pre-fix,
+// both regexes matched only "IP " lines, so IP6 and ARP packets
+// were dropped without a trace and PacketCount understated the
+// capture.
+func TestBatch9ParseTcpdumpLineIPv6AndARP(t *testing.T) {
+	pkt, ok := parseTcpdumpLine("1700000000.123456 IP6 2001:db8::1.54321 > 2001:db8::2.443: Flags [S], seq 1", 1)
+	if !ok {
+		t.Fatal("IP6 port line must parse")
+	}
+	if pkt.SrcIP != "2001:db8::1" || pkt.DstIP != "2001:db8::2" || pkt.SrcPort != "54321" || pkt.DstPort != "443" {
+		t.Fatalf("unexpected IP6 packet: %+v", pkt)
+	}
+	if pkt.Protocol != "TLS/HTTPS" {
+		t.Fatalf("expected TLS/HTTPS for port 443, got %q", pkt.Protocol)
+	}
+
+	pkt, ok = parseTcpdumpLine("1700000000.123456 IP6 2001:db8::1 > 2001:db8::2: ICMP6, echo request, seq 1", 2)
+	if !ok {
+		t.Fatal("IP6 generic line must parse")
+	}
+	if pkt.Protocol != "ICMPv6" {
+		t.Fatalf("expected ICMPv6, got %q", pkt.Protocol)
+	}
+
+	pkt, ok = parseTcpdumpLine("1700000000.123456 ARP, Request who-has 192.168.1.1 tell 192.168.1.2, length 28", 3)
+	if !ok {
+		t.Fatal("ARP line must parse")
+	}
+	if pkt.Protocol != "ARP" {
+		t.Fatalf("expected ARP, got %q", pkt.Protocol)
+	}
+	if !strings.Contains(pkt.Info, "who-has 192.168.1.1") {
+		t.Fatalf("unexpected ARP info: %q", pkt.Info)
+	}
+
+	// IPv4 behaviour is unchanged.
+	pkt, ok = parseTcpdumpLine("1700000000.123456 IP 10.0.0.1.1234 > 10.0.0.2.80: Flags [S], seq 1", 4)
+	if !ok || pkt.Protocol != "HTTP" {
+		t.Fatalf("IPv4 line must still parse as HTTP, got ok=%v pkt=%+v", ok, pkt)
+	}
+	if _, ok := parseTcpdumpLine("reading from file test.pcap, link-type EN10MB", 5); ok {
+		t.Fatal("tcpdump banner lines must not parse as packets")
+	}
+}
