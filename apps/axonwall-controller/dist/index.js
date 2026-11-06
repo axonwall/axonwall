@@ -45558,6 +45558,13 @@ function parseFleetSyncBody(body) {
   }
   return { ok: true, desired: parsed.data };
 }
+function secureTokenEquals(presented, expected) {
+  if (typeof presented !== "string" || typeof expected !== "string") return false;
+  const presentedBuf = Buffer.from(presented);
+  const expectedBuf = Buffer.from(expected);
+  if (presentedBuf.length !== expectedBuf.length) return false;
+  return crypto5.timingSafeEqual(presentedBuf, expectedBuf);
+}
 function validateHaTransition(payload, fleetLanVip) {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? "").toLowerCase();
   if (!rawRole) {
@@ -46011,7 +46018,7 @@ async function main() {
         res2.end(JSON.stringify({ error: "Fleet management authentication unconfigured" }));
         return false;
       }
-      const isValid = token && token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      const isValid = secureTokenEquals(token, expectedToken);
       if (!isValid) {
         res2.writeHead(401, { "Content-Type": "application/json" });
         res2.end(JSON.stringify({ error: "Unauthorized: Valid X-Axonwall-ZTP-Token required" }));
@@ -46505,7 +46512,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         socket.destroy();
         return;
       }
-      const isTokenValid = token.length === expectedToken.length && crypto5.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      const isTokenValid = secureTokenEquals(token, expectedToken);
       if (!isTokenValid) {
         console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -46853,6 +46860,7 @@ export {
   queryMcpAuditEntries,
   recordMcpAuditEntry,
   revokeMcpApiKeyRecord,
+  secureTokenEquals,
   shouldPruneDisconnectedSatellite,
   validateHaTransition,
   verifyMcpAuditChain

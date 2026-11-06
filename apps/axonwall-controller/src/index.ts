@@ -393,6 +393,24 @@ export function parseFleetSyncBody(body: string): FleetSyncBodyValidation {
   return { ok: true, desired: parsed.data };
 }
 
+// B2-H1: constant-time token comparison that cannot throw on
+// multibyte input. `String.length` counts UTF-16 code units while
+// `Buffer.from()` counts UTF-8 bytes, so comparing string lengths
+// first and then calling `crypto.timingSafeEqual` throws
+// ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH for a wrong token with the
+// same UTF-16 length but a different byte length (e.g. 29 ASCII +
+// 'é'). Both call sites used to do exactly that with no try/catch
+// and no uncaughtException handler, so any unauthenticated client
+// could crash the whole controller by spraying token lengths.
+// Compare byte lengths (never string lengths) before comparing.
+export function secureTokenEquals(presented: unknown, expected: unknown): boolean {
+  if (typeof presented !== 'string' || typeof expected !== 'string') return false;
+  const presentedBuf = Buffer.from(presented);
+  const expectedBuf = Buffer.from(expected);
+  if (presentedBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(presentedBuf, expectedBuf);
+}
+
 export function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?: string): HaTransitionValidation {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? '').toLowerCase();
   if (!rawRole) {
@@ -1048,8 +1066,10 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         res.end(JSON.stringify({ error: 'Fleet management authentication unconfigured' }));
         return false;
       }
-      const isValid = token && token.length === expectedToken.length &&
-        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      // B2-H1: compare byte lengths, never string lengths (see
+      // secureTokenEquals): a multibyte token with the same UTF-16
+      // length as the expected token must be a 401, never a throw.
+      const isValid = secureTokenEquals(token, expectedToken);
       if (!isValid) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized: Valid X-Axonwall-ZTP-Token required' }));
@@ -1608,8 +1628,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         return;
       }
 
-      const isTokenValid = token.length === expectedToken.length &&
-        crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+      // B2-H1: compare byte lengths, never string lengths (see
+      // secureTokenEquals): a multibyte token with the same UTF-16
+      // length as the expected token must be a 401, never a throw.
+      const isTokenValid = secureTokenEquals(token, expectedToken);
 
       if (!isTokenValid) {
         console.log(`[Fleet Manager] Rejected connection: invalid ZTP token for ${satId}`);
