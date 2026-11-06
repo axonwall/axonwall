@@ -66,6 +66,13 @@ export default function SsoSettingsPage() {
 
   // null = load not finished yet; false = no saved SSO config exists.
   const [hasSavedConfig, setHasSavedConfig] = useState<boolean | null>(null);
+  // C-B17: a load failure used to set hasSavedConfig=false — the same
+  // value as "no config exists" — leaving the empty form on screen,
+  // and saving then clobbered the real config with near-empty values.
+  // Load failure is now tracked separately; saving is refused until
+  // a load has succeeded.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadOk, setLoadOk] = useState(false);
   const [testResult, setTestResult] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -75,6 +82,8 @@ export default function SsoSettingsPage() {
   useEffect(() => {
     getCurrentDesiredState()
       .then((state) => {
+        setLoadOk(true);
+        setLoadError(null);
         if (state.sso) {
           setConfig(state.sso);
           setHasSavedConfig(true);
@@ -82,12 +91,24 @@ export default function SsoSettingsPage() {
           setHasSavedConfig(false);
         }
       })
-      .catch(() => {
-        setHasSavedConfig(false);
+      .catch((err: any) => {
+        // C-B17: do NOT set hasSavedConfig=false here — that is the
+        // "no config exists" state. A failed load leaves it null and
+        // records the error, so the page cannot present an empty form
+        // as "not configured".
+        setLoadOk(false);
+        setLoadError(err?.message || 'Failed to load SSO configuration');
       });
   }, []);
 
   async function handleSaveConfig() {
+    if (!loadOk) {
+      setTestResult({
+        type: 'error',
+        text: 'SSO configuration has not loaded — refusing to save so the saved configuration cannot be overwritten with this empty form. Reload the page and try again.',
+      });
+      return;
+    }
     setIsSaving(true);
     setTestResult(null);
     try {
@@ -170,7 +191,8 @@ export default function SsoSettingsPage() {
           <button
             type="button"
             onClick={handleSaveConfig}
-            disabled={isSaving}
+            disabled={isSaving || !loadOk}
+            title={!loadOk ? 'Disabled until the saved SSO configuration has loaded' : undefined}
             className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium px-3.5 py-2 rounded-lg transition cursor-pointer disabled:opacity-50"
           >
             <Save className="w-4 h-4" />
@@ -223,7 +245,19 @@ export default function SsoSettingsPage() {
         </div>
       )}
 
+      {loadError && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 flex items-center gap-3 text-red-300 text-sm">
+          <AlertCircle className="w-5 h-5 shrink-0 text-red-400" />
+          <span>
+            Failed to load the saved SSO configuration: {loadError}. The form may not reflect the
+            real configuration, so editing and saving are disabled until it loads — saving an
+            empty form here would overwrite the real IdP settings.
+          </span>
+        </div>
+      )}
+
       {/* Main Settings Grid */}
+      <fieldset disabled={loadError !== null} className="border-0 p-0 m-0 min-w-0">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Identity Provider Parameters */}
         <div className="lg:col-span-2 space-y-6">
@@ -415,6 +449,7 @@ export default function SsoSettingsPage() {
           </div>
         </div>
       </div>
+      </fieldset>
     </div>
   );
 }
