@@ -29,3 +29,23 @@ func TestBatch8SSSDConfigNoMissingCACert(t *testing.T) {
 		t.Fatalf("SSSD config should fall back to reqcert=never with no CA file:\n%s", cfg)
 	}
 }
+
+// A-M32: a break-glass admin seeding failure must be recorded and
+// surfaced in GetStatus instead of being silently skipped.
+func TestBatch8AdminSeedErrorSurfaced(t *testing.T) {
+	// A zero manager would nil-deref in GetStatus (it reads user
+	// counts via localUsers); a manager with a real UserManager is
+	// enough — no LDAP is touched when slapd is down.
+	d := &DirectoryManager{localUsers: NewUserManager(nil)}
+	if got := d.GetStatus().AdminSeedError; got != "" {
+		t.Fatalf("fresh manager should have no admin seed error, got %q", got)
+	}
+	d.setAdminSeedError("break-glass admin seeding failed: boom")
+	if got := d.GetStatus().AdminSeedError; got != "break-glass admin seeding failed: boom" {
+		t.Fatalf("GetStatus did not surface the seed error, got %q", got)
+	}
+	d.clearAdminSeedError()
+	if got := d.GetStatus().AdminSeedError; got != "" {
+		t.Fatalf("seed error should clear after success, got %q", got)
+	}
+}
