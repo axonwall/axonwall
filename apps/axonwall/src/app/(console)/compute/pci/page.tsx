@@ -52,7 +52,7 @@ export default function PciPassthroughPage() {
     setStatusBanner(null);
     try {
       const res = await bindPciVfioAction(bdf);
-      setStatusBanner({ type: 'success', message: res.message });
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || `Failed to bind ${bdf}` });
@@ -66,7 +66,7 @@ export default function PciPassthroughPage() {
     setStatusBanner(null);
     try {
       const res = await unbindPciVfioAction(bdf);
-      setStatusBanner({ type: 'success', message: res.message });
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || `Failed to unbind ${bdf}` });
@@ -82,8 +82,10 @@ export default function PciPassthroughPage() {
     setActionLoading(sriovDev.bdf);
     try {
       const res = await configureSriovAction(sriovDev.bdf, sriovNumVfs);
-      setStatusBanner({ type: 'success', message: res.message });
-      setSriovDev(null);
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+      if (res.success) {
+        setSriovDev(null);
+      }
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to configure SR-IOV' });
