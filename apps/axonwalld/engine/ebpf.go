@@ -19,14 +19,15 @@ import (
 )
 
 type EBPFManager struct {
-	objs         ebpf.FlowTrackerObjects
-	links        []link.Link
-	ch           driver.Conn
-	stopChan     chan struct{}
-	doneChan     chan struct{}
-	prevPackets  map[ebpf.FlowTrackerFlowKey]uint64
-	blockedUntil map[uint32]time.Time
-	blockMu      sync.Mutex
+	objs           ebpf.FlowTrackerObjects
+	links          []link.Link
+	ch             driver.Conn
+	stopChan       chan struct{}
+	doneChan       chan struct{}
+	monitorStarted bool // true once the monitor goroutine is running
+	prevPackets    map[ebpf.FlowTrackerFlowKey]uint64
+	blockedUntil   map[uint32]time.Time
+	blockMu        sync.Mutex
 }
 
 func NewEBPFManager() *EBPFManager {
@@ -116,6 +117,7 @@ func (m *EBPFManager) Start(interfaces []string) error {
 	}
 
 	go m.monitorFlows()
+	m.monitorStarted = true
 
 	return nil
 }
@@ -268,8 +270,14 @@ func (m *EBPFManager) Stop() {
 	if m.stopChan != nil {
 		close(m.stopChan)
 		m.stopChan = nil
-		if m.doneChan != nil {
+		// A-M23 (round 2, regression in 29c6eda): Start() returns early
+		// when the eBPF objects fail to load, before the monitor
+		// goroutine starts — so doneChan is never closed and an
+		// unconditional wait here deadlocks shutdown forever. Only
+		// wait when the monitor actually started.
+		if m.monitorStarted && m.doneChan != nil {
 			<-m.doneChan
+			m.monitorStarted = false
 		}
 	}
 	for _, l := range m.links {
