@@ -729,11 +729,27 @@ async function cmdApply(autoConfirm = true) {
       process.exit(1);
     }
   } catch (err: any) {
-    // Apply itself never reached the daemon: disk-only sync, and the
-    // revision is deliberately NOT recorded in GitOps as applied.
-    console.log(
-      `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk only (daemon socket offline: ${err?.message || 'standalone'}). Not recorded in GitOps: nothing was applied.${cReset}`
-    );
+    // B2-M6: the old catch printed "daemon socket offline" for ANY
+    // apply error — including a timeout, when the bundle may have
+    // landed on the daemon and be sitting in its commit-confirm
+    // window. Distinguish: a timeout is status-unknown (the disk
+    // sync still stands, but say so); a missing socket is the
+    // disk-only sync; anything else is a generic failure, not an
+    // offline message.
+    const msg = err?.message || 'standalone';
+    if (/timed out/i.test(msg)) {
+      console.log(
+        `${cYellow}[!] Apply status unknown — the daemon did not answer in time (${msg}). The new config is on disk; the bundle may still be pending on the daemon. Check the daemon's pending job before retrying; not recorded in GitOps.${cReset}`
+      );
+    } else if (/Socket not found/i.test(msg)) {
+      console.log(
+        `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk only (daemon socket offline: ${msg}). Not recorded in GitOps: nothing was applied.${cReset}`
+      );
+    } else {
+      console.error(
+        `${cRed}[✗] Apply failed: ${msg}. The new config is on disk; nothing was recorded in GitOps.${cReset}`
+      );
+    }
     return;
   }
 

@@ -67,8 +67,12 @@ function assertSameSnapshot(a, b) {
 }
 
 // Fake daemon: rejects the apply when rejectMode is true.
+// When silentMode is true it never answers, so the CLI's 15s
+// request timeout fires (B2-M6 timeout case).
 let rejectMode = true;
+let silentMode = false;
 const fakeDaemon = http.createServer((req, res) => {
+  if (silentMode) return; // accept the connection, never answer
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
@@ -141,4 +145,21 @@ test('B2-M5: an offline apply keeps the new disk writes (no restore)', async () 
   assert.equal(res.status, 0, `offline apply must exit 0, got ${res.status}: ${res.stderr}`);
   const after = snapshotAllFiles();
   assert.ok(!after.get(sentinelFile).includes('b2-m5-sentinel'), 'the offline rewrite must keep the new files');
+});
+
+test('B2-M6: a daemon timeout is status-unknown, not "socket offline"', async () => {
+  await new Promise((resolve, reject) => {
+    fakeDaemon.listen(sockPath, (err) => (err ? reject(err) : resolve()));
+  });
+  silentMode = true;
+  // Mark a file: the apply rewrites it, and the timeout path must
+  // keep the new writes (no restore) while saying the status is
+  // unknown — never "socket offline".
+  fs.appendFileSync(path.join(tmpRoot, sentinelFile), '\n# b2-m6-sentinel\n');
+  const res = await runApply();
+  assert.equal(res.status, 0, `a timed-out apply must exit 0, got ${res.status}: ${res.stderr}`);
+  assert.match(res.stdout + res.stderr, /Apply status unknown/);
+  assert.doesNotMatch(res.stdout + res.stderr, /daemon socket offline/);
+  const after = snapshotAllFiles();
+  assert.ok(!after.get(sentinelFile).includes('b2-m6-sentinel'), 'the timed-out rewrite must keep the new files');
 });

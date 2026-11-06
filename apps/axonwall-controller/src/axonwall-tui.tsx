@@ -256,6 +256,25 @@ function saveStateToDisk(state: DesiredState): Record<string, string> {
   return daemonFiles;
 }
 
+// B2-M6: callDaemon used to resolve `null` for every failure —
+// socket missing, request error, timeout, and non-JSON 2xx alike
+// — so callers could not tell a daemon rejection from an outage
+// and handleApplyConfig reported an offline apply as rejected
+// (and vice versa). Failures now carry a typed errorKind; the
+// offline/malformed cases still resolve (they are not throws),
+// but the caller can tell them apart from a real rejection.
+export type DaemonErrorKind = 'offline' | 'timeout' | 'malformed' | 'daemon-error';
+export interface DaemonErrorResponse {
+  success: false;
+  errorKind: DaemonErrorKind;
+  error: string;
+  message: string;
+}
+
+function daemonErrorResponse(errorKind: DaemonErrorKind, error: string): DaemonErrorResponse {
+  return { success: false, errorKind, error, message: error };
+}
+
 function callDaemon(
   endpoint: string,
   method: 'GET' | 'POST' | 'PUT' | 'DELETE',
@@ -264,7 +283,7 @@ function callDaemon(
 ): Promise<any> {
   return new Promise((resolve) => {
     if (!fs.existsSync(AGENT_API_SOCKET)) {
-      resolve(null);
+      resolve(daemonErrorResponse('offline', 'Daemon socket not available'));
       return;
     }
     const body = payload ? JSON.stringify(payload) : '';
@@ -306,12 +325,14 @@ function callDaemon(
               const parsed = JSON.parse(data);
               resolve({
                 success: false,
+                errorKind: 'daemon-error',
                 error: parsed.error || parsed.message || `HTTP ${status}`,
                 message: parsed.message || parsed.error || `HTTP ${status}`,
               });
             } catch {
               resolve({
                 success: false,
+                errorKind: 'daemon-error',
                 error: data.trim() || `HTTP ${status}`,
                 message: data.trim() || `HTTP ${status}`,
               });
@@ -321,15 +342,15 @@ function callDaemon(
           try {
             resolve(JSON.parse(data));
           } catch {
-            resolve(null);
+            resolve(daemonErrorResponse('malformed', 'Daemon returned a non-JSON response'));
           }
         });
       }
     );
-    req.on('error', () => resolve(null));
+    req.on('error', (err: any) => resolve(daemonErrorResponse('offline', `Daemon unreachable: ${err?.message || 'request failed'}`)));
     req.on('timeout', () => {
       req.destroy();
-      resolve(null);
+      resolve(daemonErrorResponse('timeout', `Daemon request timed out after ${timeoutMs}ms`));
     });
     if (body) req.write(body);
     req.end();
@@ -586,9 +607,21 @@ export function AxonwallTuiApp({
       20000
     );
 
-    if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
+    // B2-M6: a timeout is neither a rejection nor an offline save
+    // — the apply may have landed on the daemon, so neither
+    // restore the disk nor claim success; tell the operator to
+    // check the daemon's pending job. This branch is checked
+    // before the generic error branch because timeout objects
+    // also carry .error. Offline/malformed likewise keep the
+    // disk-only save (no restore); only an explicit daemon
+    // rejection restores.
+    if (resp?.errorKind === 'timeout') {
+      setStatusMessage('✖ Apply status unknown — the daemon did not answer in time; the bundle may still be pending on the daemon. Check the daemon\'s pending job before retrying.');
+    } else if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
       setStatusMessage('✔ Applied to live daemon! Press [c] within 120s to confirm, or [r] to rollback.');
       await refreshAll();
+    } else if (resp?.errorKind === 'offline' || resp?.errorKind === 'malformed') {
+      setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     } else if (resp?.error) {
       restoreTuiConfigSnapshot(diskSnapshot);
       setStatusMessage(`✖ Apply rejected by daemon: ${resp.message || resp.error} (previous on-disk configuration restored)`);
