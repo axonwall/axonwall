@@ -584,6 +584,15 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	// A-M29: rosenpass's unit file is written by ReconfigurePlugin, so
+	// enabling its units here — before reconfiguring — always fails on
+	// first enable (and the failure was swallowed). Reconfigure first
+	// for this plugin; it now starts the service and verifies it is
+	// active, so the generic enable loop below has nothing left to do.
+	if pluginID == "rosenpass" {
+		return pm.ReconfigurePlugin(pluginID)
+	}
+
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		for _, d := range GetExtensionPluginDefinitions() {
 			if d.ID == pluginID {

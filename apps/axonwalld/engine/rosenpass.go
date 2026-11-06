@@ -175,9 +175,19 @@ secret_key = "%s/pq.sk"
 listen = ["0.0.0.0:9999"]
 verbosity = "Quiet"
 `, baseDir, baseDir)
-			_ = os.WriteFile(cfgPath, []byte(defaultToml), 0600)
+			if err := os.WriteFile(cfgPath, []byte(defaultToml), 0600); err != nil {
+				return fmt.Errorf("failed to write rosenpass config %s: %w", cfgPath, err)
+			}
 		}
-		unitContent := `[Unit]
+		// A-M29: ExecStart must point at the rosenpass binary that is
+		// actually installed. The unit hardcoded /usr/bin/rosenpass
+		// (correct only for the Alpine apk package) while InstallPlugin
+		// downloads the binary to /usr/local/bin/rosenpass on Debian.
+		binPath := "/usr/bin/rosenpass"
+		if resolved, err := exec.LookPath("rosenpass"); err == nil && resolved != "" {
+			binPath = resolved
+		}
+		unitContent := fmt.Sprintf(`[Unit]
 Description=Rosenpass Post-Quantum Hybrid Dual-KEM Key Exchange Daemon (Axonwall)
 Documentation=https://rosenpass.eu/
 After=network-online.target wg-quick@wg0.service
@@ -185,7 +195,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/rosenpass exchange-config /etc/rosenpass/config.toml
+ExecStart=%s exchange-config /etc/rosenpass/config.toml
 Restart=on-failure
 RestartSec=5s
 CapabilityBoundingSet=CAP_NET_ADMIN
@@ -200,10 +210,41 @@ MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target
-`
-		if err := os.MkdirAll("/etc/systemd/system", 0755); err == nil {
-			_ = os.WriteFile("/etc/systemd/system/rosenpass.service", []byte(unitContent), 0644)
+`, binPath)
+		if err := os.MkdirAll("/etc/systemd/system", 0755); err != nil {
+			return fmt.Errorf("failed to create /etc/systemd/system: %w", err)
 		}
+		unitPath := "/etc/systemd/system/rosenpass.service"
+		if err := os.WriteFile(unitPath, []byte(unitContent), 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", unitPath, err)
+		}
+		// A-M29: writing the unit is not starting the daemon. Reload,
+		// enable, start, and verify it is actually active; only then
+		// may callers claim the environment is "verified".
+		if err := startAndVerifyService("rosenpass"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startAndVerifyService reloads systemd, enables and starts a unit, and
+// verifies it is actually active. It returns an error when systemd is
+// absent (no supported init to start the daemon under) or when any step
+// fails, so callers never report a service as "verified" while its daemon
+// never started (A-M29).
+func startAndVerifyService(unit string) error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return fmt.Errorf("systemd not available; %s daemon was provisioned but not started (no supported init)", unit)
+	}
+	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl daemon-reload failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	if out, err := exec.Command("systemctl", "enable", "--now", unit+".service").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl enable --now %s failed: %s (%w)", unit, strings.TrimSpace(string(out)), err)
+	}
+	if out, err := exec.Command("systemctl", "is-active", "--quiet", unit).Output(); err != nil {
+		return fmt.Errorf("%s service is not active after start: %s (%w)", unit, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
