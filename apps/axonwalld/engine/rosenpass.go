@@ -81,6 +81,12 @@ func GenerateRosenpassKeypair(baseDir string, force bool) (string, int64, error)
 				sum := sha256.Sum256(pkData)
 				return hex.EncodeToString(sum[:]), int64(len(pkData)), nil
 			}
+			// A-L31: the public key exists but the secret key is
+			// missing. Re-keying here would silently orphan every
+			// peer holding the old public key, with no rotation
+			// event recorded. Refuse; the operator must pass
+			// force=true to re-key deliberately.
+			return "", 0, fmt.Errorf("rosenpass public key exists at %s but secret key %s is missing; refusing to re-key without force (peers holding the old public key would be orphaned)", pkPath, skPath)
 		}
 	}
 

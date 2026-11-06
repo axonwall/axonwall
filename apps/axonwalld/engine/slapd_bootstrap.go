@@ -430,6 +430,39 @@ func ResolveOrCreateBaseDN(domain string) (string, string, error) {
 
 // EnsureOpenLDAPBootstrapped ensures OpenLDAP is configured on the shared /var/lib/axonwall/ldap
 // partition, starts slapd, and seeds the base DIT if needed.
+// isSystemdPID1 reports whether PID 1 is systemd, i.e. whether a
+// systemd-managed daemon can be expected to be supervised. The
+// manual slapd fallback is only valid when this is false (OpenRC or
+// a container without systemd as PID 1).
+func isSystemdPID1() bool {
+	data, err := os.ReadFile("/proc/1/comm")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "systemd"
+}
+
+// slapdReadyProbe runs the ldapsearch readiness check for slapd. It
+// is a variable so tests can substitute a fake probe.
+var slapdReadyProbe = func() bool {
+	return exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", "cn=config", "-s", "base", "dn").Run() == nil
+}
+
+// waitForSlapdReady polls the slapd readiness probe until it
+// succeeds or the timeout elapses.
+func waitForSlapdReady(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if slapdReadyProbe() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPolicyConfig) (string, error) {
 	if _, err := exec.LookPath("slapd"); err != nil {
 		return "", fmt.Errorf("slapd binary not installed: %w", err)
@@ -504,10 +537,24 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 
 	// Ensure slapd is enabled and running
 	_ = exec.Command("systemctl", "enable", "slapd").Run()
-	if exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", "cn=config", "-s", "base", "dn").Run() != nil {
+	if !waitForSlapdReady(2 * time.Second) {
+		// A-L23: the old code waited only 200ms after a restart and
+		// then assumed systemd was unavailable, killed the
+		// just-started supervised daemon, and launched an
+		// unsupervised manual slapd that systemd could no longer
+		// stop. Give a slow start a full polling window, and only
+		// fall back to a manual slapd when systemd is not PID 1:
+		// under systemd a failed restart or an unanswering daemon
+		// is a real error, not a cue to pkill it.
 		out, err := exec.Command("systemctl", "restart", "slapd").CombinedOutput()
-		time.Sleep(200 * time.Millisecond)
-		if err != nil || exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", "cn=config", "-s", "base", "dn").Run() != nil {
+		if err == nil && waitForSlapdReady(10*time.Second) {
+			// Restarted and answering.
+		} else if isSystemdPID1() {
+			if err != nil {
+				return "", fmt.Errorf("systemctl restart slapd failed: %s (%w)", string(out), err)
+			}
+			return "", fmt.Errorf("slapd did not answer within 10s after systemctl restart")
+		} else {
 			// Fallback when running on OpenRC or inside a container without systemd as PID 1
 			_ = exec.Command("pkill", "-x", "slapd").Run()
 			time.Sleep(100 * time.Millisecond)
@@ -516,7 +563,9 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 			if out2, err2 := slapdCmd.CombinedOutput(); err2 != nil {
 				return "", fmt.Errorf("failed to start slapd: %s / %s (%w)", string(out), string(out2), err2)
 			}
-			time.Sleep(300 * time.Millisecond)
+			if !waitForSlapdReady(5 * time.Second) {
+				return "", fmt.Errorf("manually started slapd did not answer within 5s")
+			}
 		}
 	}
 

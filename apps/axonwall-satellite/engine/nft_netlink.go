@@ -119,9 +119,9 @@ const (
 	nftaExprData = 2
 
 	// nft_data_attributes & nft_verdict_attributes
-	nftaDataValue   = 1
-	nftaDataVerdict = 2
-	nftaVerdictCode = 1
+	nftaDataValue    = 1
+	nftaDataVerdict  = 2
+	nftaVerdictCode  = 1
 	nftaVerdictChain = 2
 
 	// nft_reject_types (NFT_REJECT_ICMP_UNREACH / TCP_RST / ICMPX_UNREACH)
@@ -206,6 +206,12 @@ type NftCompiledBatch struct {
 	Chains     []NftChainSpec
 	Rules      []NftRuleSpec
 	RawMsgs    [][]byte
+	// DroppedFlowOffloadRules records flow_offload rules that
+	// serializeNftBatch skipped because the batch defines no
+	// flowtable. CompileNftScriptToNetlinkBatch treats any entry
+	// here as a compile error (round-2 A-L34); the field exists so
+	// the drop is observable instead of silent.
+	DroppedFlowOffloadRules []string
 }
 
 type NftSetSpec struct {
@@ -462,8 +468,17 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 				continue
 			}
 			if strings.HasPrefix(line, "type ") {
-				t := strings.TrimSuffix(strings.TrimPrefix(line, "type "), ";")
-				t = strings.TrimSpace(t)
+				// A-L33: type and flags may share one line
+				// ("type ipv4_addr; flags interval;"). The old
+				// if/else-if took the type branch and never saw
+				// the interval flag, and recorded the whole
+				// remainder as the key type. Take only the first
+				// token as the key type, and check the same line
+				// for an interval flag independently.
+				t := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "type "), ";"))
+				if fields := strings.Fields(t); len(fields) > 0 {
+					t = strings.TrimSuffix(fields[0], ";")
+				}
 				curSet.KeyType = t
 				switch t {
 				case "ipv4_addr":
@@ -474,6 +489,9 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 					curSet.KeyLen = 6
 				default:
 					curSet.KeyLen = 4
+				}
+				if strings.Contains(line, "interval") {
+					curSet.Interval = true
 				}
 			} else if strings.Contains(line, "interval") {
 				curSet.Interval = true
@@ -591,8 +609,40 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 		return nil, fmt.Errorf("nftables script contained no valid chains")
 	}
 
+	// A-L34: fail compilation when a rule references a flowtable
+	// the batch does not define. The old code silently dropped
+	// such rules at serialization, so the batch applied without
+	// the requested offload and the hub got a success ack.
+	definedFlowtables := make(map[string]bool, len(batch.Flowtables))
+	for _, ft := range batch.Flowtables {
+		definedFlowtables[ft.Name] = true
+	}
+	for _, r := range batch.Rules {
+		if name := referencedFlowtable(r.RawLine); name != "" && !definedFlowtables[name] {
+			return nil, fmt.Errorf("chain %s rule %q references flowtable %q which is not defined in this ruleset", r.Chain, r.RawLine, name)
+		}
+	}
+
 	batch.RawMsgs = serializeNftBatch(batch)
+	if len(batch.DroppedFlowOffloadRules) > 0 {
+		return nil, fmt.Errorf("nftables script references flowtable(s) not defined in the batch; dropped %d flow_offload rule(s): %q", len(batch.DroppedFlowOffloadRules), batch.DroppedFlowOffloadRules)
+	}
 	return batch, nil
+}
+
+// referencedFlowtable extracts the flowtable name from a rule line
+// like "flow add @fastpath" or "flow offload @fastpath", or "" when
+// the rule does not reference a flowtable.
+func referencedFlowtable(rawLine string) string {
+	for _, prefix := range []string{"flow add @", "flow offload @"} {
+		if idx := strings.Index(rawLine, prefix); idx >= 0 {
+			rest := rawLine[idx+len(prefix):]
+			if fields := strings.Fields(rest); len(fields) > 0 {
+				return strings.Trim(fields[0], `";,`)
+			}
+		}
+	}
+	return ""
 }
 
 func parseChainHeader(line string, ch *NftChainSpec) {
@@ -1067,16 +1117,57 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, baseExprs [][]b
 			i += consumed
 
 		case "limit":
-			// e.g. limit rate 10/second
+			// e.g. limit rate 10/second, or the canonical
+			// limit rate over 100/second [burst 20]
 			if i+2 < len(tokens) && tokens[i+1] == "rate" {
-				rateStr := tokens[i+2]
-				rateParts := strings.SplitN(rateStr, "/", 2)
-				rateVal, _ := strconv.ParseUint(rateParts[0], 10, 64)
-				if rateVal == 0 {
-					rateVal = 10
+				// A-L35: the old code took tokens[i+2] as the
+				// rate, but in the canonical form that token is
+				// "over", so ParseUint failed, the error was
+				// discarded, and every "limit rate over N/..."
+				// rule silently compiled to a 10/second limit.
+				// Skip an optional "over", honour an explicit
+				// burst, and map the rate unit instead of
+				// assuming seconds.
+				j := i + 2
+				if j < len(tokens) && tokens[j] == "over" {
+					j++
 				}
-				exprs = append(exprs, buildExprLimit(rateVal, 1))
-				i += 3
+				if j >= len(tokens) {
+					return spec, fmt.Errorf("limit rate without a rate value")
+				}
+				rateStr := tokens[j]
+				rateParts := strings.SplitN(rateStr, "/", 2)
+				rateVal, err := strconv.ParseUint(rateParts[0], 10, 64)
+				if err != nil || rateVal == 0 {
+					return spec, fmt.Errorf("invalid limit rate %q", rateStr)
+				}
+				unitSec := uint64(1)
+				if len(rateParts) == 2 {
+					switch strings.ToLower(strings.TrimSpace(rateParts[1])) {
+					case "second", "seconds", "s":
+						unitSec = 1
+					case "minute", "minutes", "m":
+						unitSec = 60
+					case "hour", "hours", "h":
+						unitSec = 3600
+					case "day", "days", "d":
+						unitSec = 86400
+					default:
+						return spec, fmt.Errorf("unsupported limit rate unit %q", rateParts[1])
+					}
+				}
+				burst := uint64(5)
+				consumed := j + 1
+				if consumed+1 < len(tokens) && tokens[consumed] == "burst" {
+					burstVal, err := strconv.ParseUint(tokens[consumed+1], 10, 32)
+					if err != nil {
+						return spec, fmt.Errorf("invalid limit burst %q", tokens[consumed+1])
+					}
+					burst = burstVal
+					consumed += 2
+				}
+				exprs = append(exprs, buildExprLimit(rateVal, unitSec, burst))
+				i = consumed
 				continue
 			}
 			i++
@@ -1390,11 +1481,11 @@ func buildExprBitwiseMaskBytes(sreg, dreg uint32, maskBytes []byte) []byte {
 	)
 }
 
-func buildExprLimit(rate, unitSec uint64) []byte {
+func buildExprLimit(rate, unitSec, burst uint64) []byte {
 	return wrapExpr("limit",
 		nlAttrU64BE(nftaLimitRate, rate),
 		nlAttrU64BE(nftaLimitUnit, unitSec),
-		nlAttrU32BE(nftaLimitBurst, 5),
+		nlAttrU32BE(nftaLimitBurst, uint32(burst)),
 		nlAttrU32BE(nftaLimitType, 0),
 	)
 }
@@ -1633,9 +1724,16 @@ func serializeNftBatch(b *NftCompiledBatch) [][]byte {
 
 	// 5. Append rules to chains
 	for _, r := range b.Rules {
-		// Skip flow_offload rules if flowtable wasn't created in the kernel transaction
-		hasFlowOffload := strings.Contains(r.RawLine, "flow add @")
+		// A-L34: a flow_offload rule whose flowtable is not in the
+		// batch used to be skipped silently, so the batch applied
+		// without the requested offload. Record the drop (Compile
+		// turns it into an error) and warn loudly; the kernel
+		// would otherwise have rejected the whole batch, which at
+		// least fails loudly.
+		hasFlowOffload := strings.Contains(r.RawLine, "flow add @") || strings.Contains(r.RawLine, "flow offload @")
 		if hasFlowOffload && len(b.Flowtables) == 0 {
+			b.DroppedFlowOffloadRules = append(b.DroppedFlowOffloadRules, r.RawLine)
+			slog.Warn("Dropping flow_offload rule: no flowtable defined in batch", "rule", r.RawLine)
 			continue
 		}
 		msgs = append(msgs, buildNfgenMsg(
@@ -1667,6 +1765,20 @@ func ApplyNftBatchNetlink(batch *NftCompiledBatch) error {
 		return fmt.Errorf("empty nftables netlink batch")
 	}
 
+	// A-L41 (round 2): the old table used to be deleted in one
+	// NETLINK batch and the new ruleset created in a second. A
+	// crash between the two left the box with no axonwall table
+	// while IP forwarding stayed on — fail-open until the next
+	// rollback or restart. The delete cannot move into the create
+	// batch (deleting a not-yet-existing table would fail the whole
+	// transaction on first apply), so instead forwarding is
+	// disabled before the delete and re-enabled only after the new
+	// ruleset is confirmed applied: a crash mid-replace now fails
+	// closed.
+	if err := SetForwarding("", false); err != nil {
+		slog.Warn("Could not disable IP forwarding before nftables table replace; a crash mid-apply could fail open", "error", err)
+	}
+
 	// Best-effort delete existing table first so rules are replaced cleanly
 	_ = DeleteTableNetlink(batch.TableName)
 
@@ -1675,7 +1787,17 @@ func ApplyNftBatchNetlink(batch *NftCompiledBatch) error {
 		wire.Write(m)
 	}
 
-	return sendNetfilterNetlinkBatch(wire.Bytes())
+	if err := sendNetfilterNetlinkBatch(wire.Bytes()); err != nil {
+		return err
+	}
+	// The new ruleset is in place; re-enable forwarding. A failure
+	// here is an error, not a success: the ruleset is applied but
+	// the box is not forwarding, and the caller must not report
+	// the apply as fully successful.
+	if err := SetForwarding("", true); err != nil {
+		return fmt.Errorf("nftables ruleset applied but IP forwarding could not be re-enabled: %w", err)
+	}
+	return nil
 }
 
 // DeleteTableNetlink deletes `table inet <tableName>` via a NETLINK_NETFILTER batch.

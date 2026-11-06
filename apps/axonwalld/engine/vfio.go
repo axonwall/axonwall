@@ -27,10 +27,29 @@ type PciDeviceInventory struct {
 
 type VFIOManager struct {
 	mu sync.RWMutex
+	// sysfsRoot is the root of the PCI sysfs tree ("/sys" in
+	// production). It is a field so tests can point it at a fixture
+	// tree; an empty value means "/sys".
+	sysfsRoot string
 }
 
 func NewVFIOManager() *VFIOManager {
-	return &VFIOManager{}
+	return &VFIOManager{sysfsRoot: "/sys"}
+}
+
+// sysRoot returns the PCI sysfs root for this manager.
+func (m *VFIOManager) sysRoot() string {
+	if m.sysfsRoot == "" {
+		return "/sys"
+	}
+	return m.sysfsRoot
+}
+
+// isBoundToVfio reports whether the device at devDir is currently
+// bound to the vfio-pci driver.
+func isBoundToVfio(devDir string) bool {
+	dl, err := os.Readlink(filepath.Join(devDir, "driver"))
+	return err == nil && filepath.Base(dl) == "vfio-pci"
 }
 
 var bdfRegex = regexp.MustCompile(`^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$`)
@@ -48,11 +67,13 @@ func (m *VFIOManager) DiscoverPciDevices() ([]PciDeviceInventory, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	pciRoot := "/sys/bus/pci/devices"
+	pciRoot := filepath.Join(m.sysRoot(), "bus", "pci", "devices")
 	entries, err := os.ReadDir(pciRoot)
 	if err != nil {
-		// Fallback for mock/test environments
-		return []PciDeviceInventory{}, nil
+		// A-L29: an unreadable sysfs tree is an error, not an empty
+		// device list. The old code returned [] + nil, which is
+		// indistinguishable from a box with no PCI devices.
+		return nil, fmt.Errorf("cannot read PCI sysfs %s: %w", pciRoot, err)
 	}
 
 	// Try reading lspci map if available for human-readable device names
@@ -176,7 +197,14 @@ func (m *VFIOManager) BindVfio(bdf string) error {
 	return nil
 }
 
-// UnbindVfio releases the device from vfio-pci and triggers a rescan
+// UnbindVfio releases the device from vfio-pci and triggers a rescan.
+// It returns an error when the device is still bound to vfio-pci
+// afterwards: the old code discarded all three sysfs writes and
+// returned nil unconditionally, so a device still in use by a VM was
+// reported as released (round-2 A-L29). A device that was never bound
+// to vfio-pci is already released and returns nil even if the unbind
+// write itself fails (the kernel rejects unbinding a device that
+// belongs to another driver).
 func (m *VFIOManager) UnbindVfio(bdf string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -185,15 +213,30 @@ func (m *VFIOManager) UnbindVfio(bdf string) error {
 		return fmt.Errorf("invalid PCI BDF format: %s", bdf)
 	}
 
-	devDir := filepath.Join("/sys/bus/pci/devices", bdf)
-	unbindPath := "/sys/bus/pci/drivers/vfio-pci/unbind"
-	_ = os.WriteFile(unbindPath, []byte(bdf), 0200)
+	devDir := filepath.Join(m.sysRoot(), "bus", "pci", "devices", bdf)
+	unbindPath := filepath.Join(m.sysRoot(), "bus", "pci", "drivers", "vfio-pci", "unbind")
+	var firstErr error
+	if err := os.WriteFile(unbindPath, []byte(bdf), 0200); err != nil {
+		firstErr = err
+	}
 
 	overridePath := filepath.Join(devDir, "driver_override")
-	_ = os.WriteFile(overridePath, []byte("\n"), 0644)
+	if err := os.WriteFile(overridePath, []byte("\n"), 0644); err != nil && firstErr == nil {
+		firstErr = err
+	}
 
-	rescanPath := "/sys/bus/pci/rescan"
-	_ = os.WriteFile(rescanPath, []byte("1"), 0200)
+	rescanPath := filepath.Join(m.sysRoot(), "bus", "pci", "rescan")
+	if err := os.WriteFile(rescanPath, []byte("1"), 0200); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	// Verify the end state instead of trusting the writes.
+	if isBoundToVfio(devDir) {
+		if firstErr != nil {
+			return fmt.Errorf("failed to unbind %s from vfio-pci: %w", bdf, firstErr)
+		}
+		return fmt.Errorf("device %s is still bound to vfio-pci after unbind", bdf)
+	}
 
 	return nil
 }

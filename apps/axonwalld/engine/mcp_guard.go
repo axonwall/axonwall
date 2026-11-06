@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +17,15 @@ type ProtectedPosture struct {
 	ApplianceIPs     []string `json:"applianceIps"`
 	GatewayAndHaIPs  []string `json:"gatewayAndHaIps"`
 	AntiLockoutPorts []int    `json:"antiLockoutPorts"`
+}
+
+// protectedPostureStatePaths lists the state.json copies read by
+// DiscoverProtectedPosture. Two copies exist, written by different
+// paths, so both are read and merged (round-2 A-L27). It is a
+// variable so tests can point it at fixtures.
+var protectedPostureStatePaths = []string{
+	"/etc/axonwall/state.json",
+	"/var/lib/axonwall/state.json",
 }
 
 // DiscoverProtectedPosture collects all local OS interface IPs, configured gateway IPs, HA peer/VIPs,
@@ -61,11 +71,10 @@ func DiscoverProtectedPosture() ProtectedPosture {
 	}
 
 	// 2. Inspect state.json for configured interfaces, gateways, HA peers, and anti-lockout ports
-	statePaths := []string{
-		"/etc/axonwall/state.json",
-		"/var/lib/axonwall/state.json",
-	}
-	for _, p := range statePaths {
+	// A-L27: every copy is merged. The old code stopped at the first
+	// parseable file, so when the two copies diverged the guard's
+	// protected-IP set could be stale.
+	for _, p := range protectedPostureStatePaths {
 		data, err := os.ReadFile(p)
 		if err != nil || len(data) == 0 {
 			continue
@@ -146,7 +155,6 @@ func DiscoverProtectedPosture() ProtectedPosture {
 					addApplianceIP(vip)
 				}
 			}
-			break
 		}
 	}
 
@@ -319,8 +327,11 @@ func ValidateRedirectDestination(dest string) (hostIP string, port int, isV6 boo
 
 	// Check if host:port
 	if h, pStr, splitErr := net.SplitHostPort(trimmed); splitErr == nil {
-		var p int
-		if _, scanErr := fmt.Sscanf(pStr, "%d", &p); scanErr != nil || p < 1 || p > 65535 {
+		// A-L28: parse the whole port string. fmt.Sscanf("%d")
+		// accepted "80abc" as 80 (trailing junk ignored), silently
+		// reinterpreting a typo'd destination.
+		p, err := strconv.Atoi(pStr)
+		if err != nil || p < 1 || p > 65535 {
 			return "", 0, false, "", fmt.Errorf("invalid redirect port '%s'", pStr)
 		}
 		parsedIP := net.ParseIP(h)
@@ -383,4 +394,3 @@ func IsMcpSubsystemEnabled() (bool, string) {
 
 	return false, "MCP server is disabled by default; must be explicitly enabled via Web Console or AXONWALL_MCP_ENABLED=true"
 }
-

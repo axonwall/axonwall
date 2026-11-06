@@ -33,6 +33,15 @@ type EBPFManager struct {
 	prevPackets    map[ebpf.FlowTrackerFlowKey]uint64
 	blockedUntil   map[uint32]time.Time
 	blockMu        sync.Mutex
+	// mu guards running and the channel lifecycle. Start() refuses a
+	// second call while running, and Stop() recreates the channels so
+	// a later Start() gets fresh ones (round-2 A-L21: a double Start
+	// used to spawn a second monitorFlows whose defer closed the
+	// same doneChan twice, panicking, and Start-after-Stop left the
+	// new monitor reading a nil stopChan it could never be stopped
+	// from while Stop() closed its links underneath it).
+	mu      sync.Mutex
+	running bool
 }
 
 func NewEBPFManager() *EBPFManager {
@@ -94,12 +103,29 @@ func (m *EBPFManager) initClickHouse() error {
 }
 
 func (m *EBPFManager) Start(interfaces []string) error {
+	// A-L21: refuse a second Start while the manager is running.
+	// The flag is set before the (slow) load so two concurrent
+	// callers cannot both spawn a monitor.
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return fmt.Errorf("eBPF manager already started")
+	}
+	m.running = true
+	m.mu.Unlock()
+	clearRunning := func() {
+		m.mu.Lock()
+		m.running = false
+		m.mu.Unlock()
+	}
+
 	if err := m.initClickHouse(); err != nil {
 		log.Printf("Warning: failed to init ClickHouse: %v. Historical forensics will be disabled.", err)
 	}
 
 	// Load pre-compiled programs into the kernel.
 	if err := ebpf.LoadFlowTrackerObjects(&m.objs, nil); err != nil {
+		clearRunning()
 		return fmt.Errorf("loading objects: %w", err)
 	}
 
@@ -120,6 +146,18 @@ func (m *EBPFManager) Start(interfaces []string) error {
 		}
 		m.links = append(m.links, l)
 	}
+
+	// Fresh channels for this run: Stop() nils them after the previous
+	// monitor exits, so a Start-after-Stop gets a stoppable monitor
+	// instead of one reading a nil stopChan.
+	m.mu.Lock()
+	if m.stopChan == nil {
+		m.stopChan = make(chan struct{})
+	}
+	if m.doneChan == nil {
+		m.doneChan = make(chan struct{})
+	}
+	m.mu.Unlock()
 
 	// A-M23: mark the monitor as started before launching it, so Stop()
 	// only waits on doneChan when a goroutine will actually close it.
@@ -274,22 +312,45 @@ func (m *EBPFManager) monitorFlows() {
 }
 
 func (m *EBPFManager) Stop() {
-	if m.stopChan != nil {
-		close(m.stopChan)
-		m.stopChan = nil
-		// A-M23: only wait for the monitor goroutine when one actually
-		// started. Start() returns early on object-load failure before
-		// `go m.monitorFlows()`, so doneChan is never closed and an
-		// unconditional wait deadlocks daemon shutdown (systemd must
-		// SIGKILL it). Same when Start() was never called at all.
-		if m.monitorStarted.Load() && m.doneChan != nil {
-			<-m.doneChan
+	m.mu.Lock()
+	wasRunning := m.running
+	stopChan := m.stopChan
+	doneChan := m.doneChan
+	m.mu.Unlock()
+
+	if wasRunning && stopChan != nil {
+		close(stopChan)
+		// Wait for the monitor to exit without holding mu: the
+		// monitor's defer closes doneChan, and a concurrent Start
+		// must see running=true (and be refused) rather than
+		// block on the mutex while we wait here.
+		//
+		// A-M23: the wait is gated on wasRunning, not on
+		// monitorStarted. running is set before the (slow) object
+		// load and cleared by clearRunning() on load failure, so
+		// wasRunning is false exactly when no monitor will ever
+		// close doneChan (never started, or load failed). Gating
+		// on monitorStarted instead would skip the wait while
+		// Start() is still mid-load, letting Stop() nil the
+		// channels underneath it and leak a monitor that runs
+		// forever; waiting here lets Start() launch the monitor
+		// into the closed stopChan, so it exits at once and
+		// closes doneChan. monitorStarted is still maintained
+		// below as the monitor-lifecycle record.
+		if doneChan != nil {
+			<-doneChan
 			m.monitorStarted.Store(false)
 		}
+		m.mu.Lock()
+		m.stopChan = nil
+		m.doneChan = nil
+		m.running = false
+		m.mu.Unlock()
 	}
 	for _, l := range m.links {
 		l.Close()
 	}
+	m.links = nil
 	m.objs.Close()
 	if m.ch != nil {
 		_ = m.ch.Close()

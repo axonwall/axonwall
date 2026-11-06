@@ -41,6 +41,15 @@ func (w *WireGuardEngine) ConfigureMesh(cfg WireGuardConfig) error {
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 51820
 	}
+	// A-L39: an empty TunnelIP used to flow through to
+	// ConfigureInterface, which skips address assignment for an
+	// empty address and returns nil — the mesh reported success
+	// for a tunnel interface with no IP, so no mesh traffic could
+	// flow. (A malformed TunnelIP is already caught by
+	// ValidateInterfaceSpec; only the empty case slipped through.)
+	if strings.TrimSpace(cfg.TunnelIP) == "" {
+		return fmt.Errorf("wireguard tunnel IP is required: an empty tunnelIp would leave the mesh interface unnumbered")
+	}
 
 	importStrings := []string{cfg.InterfaceName, cfg.TunnelIP, cfg.PrivateKey}
 	for _, p := range cfg.Peers {
@@ -78,13 +87,13 @@ func (w *WireGuardEngine) ConfigureMesh(cfg WireGuardConfig) error {
 		if keepAlive == 0 {
 			keepAlive = 25
 		}
-		
+
 		peerSection := fmt.Sprintf("[Peer]\nPublicKey = %s\nAllowedIPs = %s\nPersistentKeepalive = %d\n", p.PublicKey, p.AllowedIPs, keepAlive)
 		if p.Endpoint != "" {
 			peerSection += fmt.Sprintf("Endpoint = %s\n", p.Endpoint)
 		}
 		peerSection += "\n"
-		
+
 		wgQuickConf.WriteString(peerSection)
 		wgSyncConf.WriteString(peerSection)
 	}
