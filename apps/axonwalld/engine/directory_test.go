@@ -131,6 +131,77 @@ func TestHAPKICertGeneration(t *testing.T) {
 	}
 }
 
+func TestHAPKICorruptCAMaterialRefusesToReRoot(t *testing.T) {
+	// A-H4 (round 2): a corrupt CA cert/key, or a CSR-enrolled node
+	// missing its key, used to silently mint a brand-new CA and
+	// overwrite the old one — orphaning every peer cert in the cluster.
+	setup := func(t *testing.T) (dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath string) {
+		t.Helper()
+		dir = t.TempDir()
+		caPath = filepath.Join(dir, "ca.crt")
+		caKeyPath = filepath.Join(dir, "ca.key")
+		nodeCertPath = filepath.Join(dir, "node.crt")
+		nodeKeyPath = filepath.Join(dir, "node.key")
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err != nil {
+			t.Fatalf("setup EnsureHAPKICertsInDir failed: %v", err)
+		}
+		return dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath
+	}
+
+	t.Run("corrupt CA cert", func(t *testing.T) {
+		_, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		corrupt := []byte("-----BEGIN CERTIFICATE-----\ncorrupt\n-----END CERTIFICATE-----\n")
+		if err := os.WriteFile(caPath, corrupt, 0644); err != nil {
+			t.Fatalf("failed to corrupt ca.crt: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(filepath.Dir(caPath), caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for corrupt CA certificate, got nil")
+		}
+		after, _ := os.ReadFile(caPath)
+		if string(after) != string(corrupt) {
+			t.Fatalf("corrupt CA certificate was overwritten instead of refused")
+		}
+	})
+
+	t.Run("corrupt CA key", func(t *testing.T) {
+		_, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		if err := os.WriteFile(caKeyPath, []byte("not a pem key"), 0600); err != nil {
+			t.Fatalf("failed to corrupt ca.key: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(filepath.Dir(caPath), caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for corrupt CA key, got nil")
+		}
+	})
+
+	t.Run("CA key without certificate", func(t *testing.T) {
+		_, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		if err := os.Remove(caPath); err != nil {
+			t.Fatalf("failed to remove ca.crt: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(filepath.Dir(caPath), caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for CA key without certificate, got nil")
+		}
+	})
+
+	t.Run("CSR-enrolled node keeps working, missing node key fails", func(t *testing.T) {
+		dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		// Simulate CSR enrollment: CA cert without the CA key.
+		if err := os.Remove(caKeyPath); err != nil {
+			t.Fatalf("failed to remove ca.key: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err != nil {
+			t.Fatalf("CSR-enrolled node with intact key/cert should be preserved, got: %v", err)
+		}
+		// Now lose the node key: must fail, not mint a new CA.
+		if err := os.Remove(nodeKeyPath); err != nil {
+			t.Fatalf("failed to remove node.key: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for CSR-enrolled node missing its key, got nil")
+		}
+	})
+}
+
 func TestVowPluginLDAPIntegrationSpec(t *testing.T) {
 	plugins := GetExtensionPluginDefinitions()
 	var vowFound bool
