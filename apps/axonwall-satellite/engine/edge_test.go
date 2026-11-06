@@ -338,6 +338,71 @@ func TestCompileNftCtStateMasks(t *testing.T) {
 	}
 }
 
+func TestCompileNftSetInitialElements(t *testing.T) {
+	// A-H7 (round 2): `elements = { ... }` in a set block used to be
+	// discarded, so the set was created empty and blocklists failed open.
+	script := "table inet axonwall {\n  set blocked_ips {\n    type ipv4_addr;\n    flags interval;\n    elements = { 10.0.0.0/24, 192.168.1.1 }\n  }\n  set blocked_ips6 {\n    type ipv6_addr;\n    flags interval;\n    elements = {\n      fd00::/64,\n      fd00::1\n    }\n  }\n  set blocked_macs {\n    type ether_addr;\n    elements = { aa:bb:cc:dd:ee:ff }\n  }\n  chain input {\n    type filter hook input priority filter; policy drop;\n    ip saddr @blocked_ips drop\n  }\n}\n"
+	batch, err := CompileNftScriptToNetlinkBatch(script)
+	if err != nil {
+		t.Fatalf("CompileNftScriptToNetlinkBatch failed: %v", err)
+	}
+	if len(batch.Sets) != 3 {
+		t.Fatalf("expected 3 sets, got %d", len(batch.Sets))
+	}
+	// 10.0.0.0/24 -> [10.0.0.0, 10.0.1.0); 192.168.1.1 -> [192.168.1.1, 192.168.1.2)
+	v4 := batch.Sets[0]
+	if len(v4.Elements) != 2 {
+		t.Fatalf("blocked_ips: expected 2 elements, got %d", len(v4.Elements))
+	}
+	if !bytes.Equal(v4.Elements[0].Key, net.ParseIP("10.0.0.0").To4()) || !bytes.Equal(v4.Elements[0].End, net.ParseIP("10.0.1.0").To4()) {
+		t.Errorf("blocked_ips[0]: got [%v, %v), want [10.0.0.0, 10.0.1.0)", v4.Elements[0].Key, v4.Elements[0].End)
+	}
+	if !bytes.Equal(v4.Elements[1].Key, net.ParseIP("192.168.1.1").To4()) || !bytes.Equal(v4.Elements[1].End, net.ParseIP("192.168.1.2").To4()) {
+		t.Errorf("blocked_ips[1]: got [%v, %v), want [192.168.1.1, 192.168.1.2)", v4.Elements[1].Key, v4.Elements[1].End)
+	}
+	// fd00::/64 -> [fd00::, fd00::1:0:0:0:0); fd00::1 -> [fd00::1, fd00::2)
+	v6 := batch.Sets[1]
+	if len(v6.Elements) != 2 {
+		t.Fatalf("blocked_ips6: expected 2 elements, got %d", len(v6.Elements))
+	}
+	if !bytes.Equal(v6.Elements[0].Key, net.ParseIP("fd00::").To16()) || !bytes.Equal(v6.Elements[0].End, net.ParseIP("fd00::1:0:0:0:0").To16()) {
+		t.Errorf("blocked_ips6[0]: got [%v, %v), want [fd00::, fd00::1:0:0:0:0)", v6.Elements[0].Key, v6.Elements[0].End)
+	}
+	if !bytes.Equal(v6.Elements[1].Key, net.ParseIP("fd00::1").To16()) || !bytes.Equal(v6.Elements[1].End, net.ParseIP("fd00::2").To16()) {
+		t.Errorf("blocked_ips6[1]: got [%v, %v), want [fd00::1, fd00::2)", v6.Elements[1].Key, v6.Elements[1].End)
+	}
+	// MAC singleton in a non-interval set has no end.
+	macs := batch.Sets[2]
+	if len(macs.Elements) != 1 || macs.Elements[0].End != nil {
+		t.Fatalf("blocked_macs: expected 1 singleton element, got %+v", macs.Elements)
+	}
+	if hw, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff"); !bytes.Equal(macs.Elements[0].Key, []byte(hw)) {
+		t.Errorf("blocked_macs[0]: got %v, want aa:bb:cc:dd:ee:ff", macs.Elements[0].Key)
+	}
+	// One NEW_SET_ELEM message per set with elements.
+	elemMsgs := 0
+	for _, m := range batch.RawMsgs {
+		if len(m) >= 6 && binary.LittleEndian.Uint16(m[4:6]) == nftMsgType(nftMsgNewSetElem) {
+			elemMsgs++
+		}
+	}
+	if elemMsgs != 3 {
+		t.Errorf("expected 3 NEW_SET_ELEM messages, got %d (of %d total)", elemMsgs, len(batch.RawMsgs))
+	}
+
+	// A CIDR in a non-interval set, or an unparseable element, must fail
+	// compilation (so the nft binary fallback applies) instead of
+	// silently producing an empty set.
+	for _, bad := range []string{
+		"table inet axonwall {\n  set s {\n    type ipv4_addr;\n    elements = { 10.0.0.0/24 }\n  }\n  chain input {\n    type filter hook input priority filter; policy drop;\n  }\n}\n",
+		"table inet axonwall {\n  set s {\n    type ipv4_addr;\n    flags interval;\n    elements = { not-an-ip }\n  }\n  chain input {\n    type filter hook input priority filter; policy drop;\n  }\n}\n",
+	} {
+		if _, err := CompileNftScriptToNetlinkBatch(bad); err == nil {
+			t.Errorf("expected compile error for script %q, got nil", bad)
+		}
+	}
+}
+
 func TestBuildWireGuardSetDeviceAttrs(t *testing.T) {
 	priv := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	pub := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))

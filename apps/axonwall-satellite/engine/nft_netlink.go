@@ -197,6 +197,18 @@ type NftSetSpec struct {
 	KeyLen   uint32
 	Interval bool
 	SetID    uint32
+	// ElementSpecs holds the raw `elements = { ... }` entries as written
+	// in the script; Elements holds the same entries resolved to key
+	// bytes (with End set for interval elements) once the set closes.
+	ElementSpecs []string
+	Elements     []NftSetElement
+}
+
+// NftSetElement is one initial element of a named set: a single key, or a
+// half-open interval [Key, End) for interval sets (CIDRs and ranges).
+type NftSetElement struct {
+	Key []byte
+	End []byte // nil for a singleton element
 }
 
 type NftFlowtableSpec struct {
@@ -223,6 +235,142 @@ type NftRuleSpec struct {
 	Expressions [][]byte
 }
 
+// splitSetElementEntries splits a raw `elements = { ... }` body on commas,
+// dropping empty entries and trailing semicolons/quotes.
+func splitSetElementEntries(body string) []string {
+	var out []string
+	for _, e := range strings.Split(body, ",") {
+		e = strings.TrimSpace(e)
+		e = strings.TrimSuffix(e, ";")
+		e = strings.Trim(e, `"`)
+		e = strings.TrimSpace(e)
+		if e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// resolveSetElements converts a set's raw element strings into key bytes
+// once the set's key type is known. CIDRs and ranges become half-open
+// intervals [network, broadcast+1); singletons in an interval set become
+// [addr, addr+1), matching AddSetElementNetlink. A prefix or range in a
+// non-interval set is an error: the kernel would reject it, so failing
+// compilation (and falling back to the nft binary) is the honest outcome.
+func resolveSetElements(s *NftSetSpec) error {
+	if len(s.ElementSpecs) == 0 {
+		return nil
+	}
+	keyLen := int(s.KeyLen)
+	if keyLen == 0 {
+		// No `type` line was seen; mirror the serializer's ipv4 default.
+		s.KeyType = "ipv4_addr"
+		s.KeyLen = 4
+		keyLen = 4
+	}
+	parseKey := func(text string) ([]byte, error) {
+		switch s.KeyType {
+		case "ipv6_addr":
+			ip := net.ParseIP(text)
+			if ip == nil || ip.To4() != nil {
+				return nil, fmt.Errorf("invalid IPv6 address %q", text)
+			}
+			return []byte(ip.To16()), nil
+		case "ether_addr":
+			hw, err := net.ParseMAC(text)
+			if err != nil {
+				return nil, fmt.Errorf("invalid MAC %q: %w", text, err)
+			}
+			return []byte(hw), nil
+		default:
+			ip := net.ParseIP(text)
+			if ip == nil || ip.To4() == nil {
+				return nil, fmt.Errorf("invalid IPv4 address %q", text)
+			}
+			return []byte(ip.To4()), nil
+		}
+	}
+	for _, entry := range s.ElementSpecs {
+		if strings.Contains(entry, " - ") || (strings.Contains(entry, "-") && !strings.Contains(entry, "/") && !strings.Contains(entry, ":")) {
+			// Range `10.0.0.1 - 10.0.0.10` (the "-" check excludes
+			// IPv6 addresses and CIDRs, which contain ":" or "/").
+			parts := strings.SplitN(entry, "-", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("malformed set element range %q", entry)
+			}
+			if !s.Interval {
+				return fmt.Errorf("range element %q requires an interval set", entry)
+			}
+			start, err := parseKey(strings.TrimSpace(parts[0]))
+			if err != nil {
+				return err
+			}
+			endIP, err := parseKey(strings.TrimSpace(parts[1]))
+			if err != nil {
+				return err
+			}
+			end, ok := incrementIPBytes(endIP)
+			if !ok {
+				return fmt.Errorf("range element %q overflows the address space", entry)
+			}
+			s.Elements = append(s.Elements, NftSetElement{Key: start, End: end})
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			_, ipNet, err := net.ParseCIDR(entry)
+			if err != nil {
+				return fmt.Errorf("invalid CIDR element %q: %w", entry, err)
+			}
+			if !s.Interval {
+				return fmt.Errorf("CIDR element %q requires an interval set", entry)
+			}
+			start := []byte(ipNet.IP)
+			if len(start) != keyLen {
+				// net.ParseCIDR returns a 4-byte IP for v4 CIDRs and
+				// 16-byte for v6; normalize to the set's key length.
+				if ip4 := ipNet.IP.To4(); ip4 != nil && keyLen == 4 {
+					start = []byte(ip4)
+				} else if keyLen == 16 {
+					start = []byte(ipNet.IP.To16())
+				} else {
+					return fmt.Errorf("CIDR element %q does not match set key length %d", entry, keyLen)
+				}
+			}
+			mask := []byte(ipNet.Mask)
+			if len(mask) != keyLen {
+				return fmt.Errorf("CIDR element %q does not match set key length %d", entry, keyLen)
+			}
+			last := make([]byte, keyLen)
+			for i := range start {
+				last[i] = start[i] | ^mask[i]
+			}
+			end, ok := incrementIPBytes(last)
+			if !ok {
+				return fmt.Errorf("CIDR element %q covers the whole address space", entry)
+			}
+			s.Elements = append(s.Elements, NftSetElement{Key: start, End: end})
+			continue
+		}
+		key, err := parseKey(entry)
+		if err != nil {
+			return err
+		}
+		if len(key) != keyLen {
+			return fmt.Errorf("set element %q does not match set key length %d", entry, keyLen)
+		}
+		el := NftSetElement{Key: key}
+		if s.Interval {
+			end, ok := incrementIPBytes(key)
+			if !ok {
+				return fmt.Errorf("set element %q overflows the address space", entry)
+			}
+			el.End = end
+		}
+		s.Elements = append(s.Elements, el)
+	}
+	return nil
+}
+
 // CompileNftScriptToNetlinkBatch parses an Axonwall nftables script (emergency lockdown or
 // satellite/edge-ngfw policy) into an atomic sequence of NETLINK_NETFILTER messages.
 // It requires zero userland binaries (/usr/sbin/nft) or C libraries.
@@ -240,6 +388,8 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 	inChain := ""
 	var curChain NftChainSpec
 	nextSetID := uint32(1)
+	inElements := false
+	var elemBuf strings.Builder
 
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
@@ -262,7 +412,34 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 		}
 
 		if inSet != "" {
+			// A-H7 (round 2): `elements = { ... }` inside a set block
+			// used to be discarded, so the set was created empty and
+			// blocklists failed open. Accumulate the element list
+			// (which may span lines) and resolve it when the set closes.
+			if inElements {
+				if idx := strings.Index(line, "}"); idx >= 0 {
+					elemBuf.WriteString(line[:idx])
+					curSet.ElementSpecs = append(curSet.ElementSpecs, splitSetElementEntries(elemBuf.String())...)
+					elemBuf.Reset()
+					inElements = false
+					// A trailing "}" on the same line closes the set itself.
+					if strings.TrimSpace(line[idx+1:]) == "}" {
+						if err := resolveSetElements(&curSet); err != nil {
+							return nil, fmt.Errorf("set %s: %w", curSet.Name, err)
+						}
+						batch.Sets = append(batch.Sets, curSet)
+						inSet = ""
+					}
+				} else {
+					elemBuf.WriteString(line)
+					elemBuf.WriteString(",")
+				}
+				continue
+			}
 			if line == "}" {
+				if err := resolveSetElements(&curSet); err != nil {
+					return nil, fmt.Errorf("set %s: %w", curSet.Name, err)
+				}
 				batch.Sets = append(batch.Sets, curSet)
 				inSet = ""
 				continue
@@ -283,6 +460,29 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 				}
 			} else if strings.Contains(line, "interval") {
 				curSet.Interval = true
+			} else if strings.HasPrefix(line, "elements") {
+				rest := strings.TrimSpace(strings.TrimPrefix(line, "elements"))
+				rest = strings.TrimSpace(strings.TrimPrefix(rest, "="))
+				openIdx := strings.Index(rest, "{")
+				if openIdx < 0 {
+					return nil, fmt.Errorf("set %s: malformed elements line %q", curSet.Name, line)
+				}
+				rest = rest[openIdx+1:]
+				if closeIdx := strings.Index(rest, "}"); closeIdx >= 0 {
+					curSet.ElementSpecs = append(curSet.ElementSpecs, splitSetElementEntries(rest[:closeIdx])...)
+					// A trailing "}" on the same line closes the set itself.
+					if strings.TrimSpace(rest[closeIdx+1:]) == "}" {
+						if err := resolveSetElements(&curSet); err != nil {
+							return nil, fmt.Errorf("set %s: %w", curSet.Name, err)
+						}
+						batch.Sets = append(batch.Sets, curSet)
+						inSet = ""
+					}
+				} else {
+					elemBuf.WriteString(rest)
+					elemBuf.WriteString(",")
+					inElements = true
+				}
 			}
 			continue
 		}
@@ -1064,6 +1264,36 @@ func nftMsgType(op uint16) uint16 {
 	return (uint16(nfnlSubsysNftables) << 8) | op
 }
 
+// buildSetElemMsg builds one NFT_MSG_NEW_SET_ELEM message carrying all of a
+// set's initial elements, using the same element encoding as
+// AddSetElementNetlink / AddIntervalSetElementNetlink: a singleton is a
+// single key element, an interval is a start element plus an end element
+// flagged NFT_SET_ELEM_INTERVAL_END.
+func buildSetElemMsg(tableName, setName string, elems []NftSetElement, seq uint32) []byte {
+	var elemBuf bytes.Buffer
+	for _, e := range elems {
+		elemBuf.Write(nlAttrNested(nftaListElem,
+			nlAttrNested(nftaSetElemKey, nlAttr(nftaDataValue, e.Key)),
+		))
+		if e.End != nil {
+			elemBuf.Write(nlAttrNested(nftaListElem,
+				nlAttrU32BE(nftaSetElemFlags, 1), // NFT_SET_ELEM_INTERVAL_END
+				nlAttrNested(nftaSetElemKey, nlAttr(nftaDataValue, e.End)),
+			))
+		}
+	}
+	return buildNfgenMsg(
+		nftMsgType(nftMsgNewSetElem),
+		syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE,
+		seq,
+		nfprotoInet,
+		0,
+		nlAttrStr(nftaSetElemListTable, tableName),
+		nlAttrStr(nftaSetElemListSet, setName),
+		nlAttrNested(nftaSetElemListElements, elemBuf.Bytes()),
+	)
+}
+
 func serializeNftBatch(b *NftCompiledBatch) [][]byte {
 	var msgs [][]byte
 	seq := uint32(1)
@@ -1111,6 +1341,13 @@ func serializeNftBatch(b *NftCompiledBatch) [][]byte {
 			nlAttrU32BE(nftaSetID, s.SetID),
 		))
 		seq++
+
+		// 3a. Populate initial `elements = { ... }` (A-H7, round 2):
+		// a set created without them silently enforces nothing.
+		if len(s.Elements) > 0 {
+			msgs = append(msgs, buildSetElemMsg(b.TableName, s.Name, s.Elements, seq))
+			seq++
+		}
 	}
 
 	// 3b. Create flowtables (e.g. fastpath)
