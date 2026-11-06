@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -72,6 +71,17 @@ type K3sManager struct {
 	haAutoJoined bool
 	lastMessage  string
 }
+
+// K3s filesystem roots are vars (not literals) so tests can redirect
+// K3s file writes into a temp dir; the production values are
+// unchanged. k3sServerManifestDir is also used by the Vigilante
+// manager, which writes its manifest into the same directory.
+var (
+	k3sEtcDir            = "/etc/rancher/k3s"
+	k3sServerManifestDir = "/var/lib/rancher/k3s/server/manifests"
+	k3sStateDir          = "/var/lib/axonwall"
+	vowEtcDir            = "/etc/axonwall/vow"
+)
 
 func NewK3sManager() *K3sManager {
 	return &K3sManager{
@@ -205,15 +215,21 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	// Ensure IP forwarding and loose reverse-path filtering (rp_filter=2) are active for K3s CNI overlay pod traffic
 	_ = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=2", "net.ipv4.conf.default.rp_filter=2").Run()
 
-	_ = os.MkdirAll("/etc/rancher/k3s", 0755)
-	_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
-	_ = os.MkdirAll("/var/lib/axonwall", 0755)
+	if err := os.MkdirAll(k3sEtcDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s config dir %q: %w", k3sEtcDir, err)
+	}
+	if err := os.MkdirAll(k3sServerManifestDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s manifest dir %q: %w", k3sServerManifestDir, err)
+	}
+	if err := os.MkdirAll(k3sStateDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s state dir %q: %w", k3sStateDir, err)
+	}
 
 	// If this node is the HA secondary/backup and autoJoinHaPeer is enabled, fetch the join token from the primary node
 	if (bundle.Role == "backup" || bundle.Role == "secondary") && bundle.AutoJoinHaPeer && bundle.PeerIp != "" {
 		tok, err := FetchPeerClusterToken(bundle.PeerIp, bundle.SyncPort, bundle.AuthToken)
 		if err == nil && tok != "" {
-			_ = os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600)
+			_ = os.WriteFile(filepath.Join(k3sStateDir, "k3s-join.token"), []byte(tok+"\n"), 0600)
 			m.mu.Lock()
 			m.haAutoJoined = true
 			m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(bundle.PeerIp, "6443"))
@@ -224,30 +240,45 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		}
 	}
 
+	// A-M15: every file write failure is returned (the old code
+	// swallowed open failures with `if f, err := ...; err == nil`
+	// and reported success), and the writes land all-or-nothing via
+	// temp+rename so a failed apply never leaves a truncated file
+	// behind.
+	var writes []atomicFileWrite
 	if bundle.K3sConfigYaml != "" {
-		if f, err := os.OpenFile("/etc/rancher/k3s/config.yaml", os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600); err == nil {
-			_, _ = f.WriteString(bundle.K3sConfigYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sEtcDir, "config.yaml"),
+			content: bundle.K3sConfigYaml,
+			perm:    0600,
+		})
 	}
 
 	if bundle.OpenEbsManifestYaml != "" {
-		manifestPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-openebs.yaml")
-		if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.OpenEbsManifestYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sServerManifestDir, "axonwall-openebs.yaml"),
+			content: bundle.OpenEbsManifestYaml,
+			perm:    0644,
+		})
 	}
 
 	if bundle.WorkloadsManifestYaml != "" {
-		wlPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-workloads.yaml")
-		if f, err := os.OpenFile(wlPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.WorkloadsManifestYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sServerManifestDir, "axonwall-workloads.yaml"),
+			content: bundle.WorkloadsManifestYaml,
+			perm:    0644,
+		})
+	}
+	if err := writeFilesAtomic(writes); err != nil {
+		return err
 	}
 
-	_ = exec.Command("systemctl", "reload-or-restart", "k3s").Run()
+	// A-M15: a failed k3s restart fails the apply instead of being
+	// discarded while the bundle reports success and the cluster runs
+	// the old manifests or no k3s at all.
+	if out, err := exec.Command("systemctl", "reload-or-restart", "k3s").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload-or-restart k3s: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
@@ -267,37 +298,60 @@ func (m *K3sManager) ApplyVowConfig(rawJSON []byte) error {
 		return fmt.Errorf("invalid VOW runtime bundle json: %w", err)
 	}
 
-	manifestPath := filepath.Join("/var/lib/rancher/k3s/server/manifests", "axonwall-vow.yaml")
+	manifestPath := filepath.Join(k3sServerManifestDir, "axonwall-vow.yaml")
 	if !bundle.Enabled || !bundle.K3sDependencyMet {
-		_ = os.Remove(manifestPath)
+		if err := removeFileIfExists(manifestPath); err != nil {
+			return fmt.Errorf("failed to remove stale VOW manifest %q: %w", manifestPath, err)
+		}
 		return nil
 	}
 
-	_ = os.MkdirAll("/etc/axonwall/vow", 0750)
-	_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
+	if err := os.MkdirAll(vowEtcDir, 0750); err != nil {
+		return fmt.Errorf("failed to create VOW config dir %q: %w", vowEtcDir, err)
+	}
+	if err := os.MkdirAll(k3sServerManifestDir, 0755); err != nil {
+		return fmt.Errorf("failed to create k3s manifest dir %q: %w", k3sServerManifestDir, err)
+	}
 
-	if bundle.EnablerEnv != "" {
-		envPath := "/etc/axonwall/vow/.env.enabler"
-		if f, err := os.OpenFile(envPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
-			_, _ = f.WriteString(bundle.EnablerEnv)
-			_ = f.Close()
+	// A-M15: an enabled bundle with an empty manifests field withdraws
+	// the deployment — remove the stale manifest instead of leaving
+	// k3s applying it. The removal runs before the env/authz writes
+	// so a later write failure cannot leave new config paired with a
+	// manifest the bundle meant to withdraw.
+	if bundle.CombinedK3sManifestsYaml == "" {
+		if err := removeFileIfExists(manifestPath); err != nil {
+			return fmt.Errorf("failed to remove stale VOW manifest %q: %w", manifestPath, err)
 		}
+	} else if err := validateK3sManifest(bundle.CombinedK3sManifestsYaml); err != nil {
+		return fmt.Errorf("vow bundle rejected: %w", err)
+	}
+
+	// A-M15: every file write failure is returned (the old code
+	// swallowed open failures and reported success).
+	var writes []atomicFileWrite
+	if bundle.EnablerEnv != "" {
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(vowEtcDir, ".env.enabler"),
+			content: bundle.EnablerEnv,
+			perm:    0640,
+		})
 	}
 	if bundle.AuthzYaml != "" {
-		authzPath := "/etc/axonwall/vow/authz.yaml"
-		if f, err := os.OpenFile(authzPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0640); err == nil {
-			_, _ = f.WriteString(bundle.AuthzYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(vowEtcDir, "authz.yaml"),
+			content: bundle.AuthzYaml,
+			perm:    0640,
+		})
 	}
 	if bundle.CombinedK3sManifestsYaml != "" {
-		if err := validateK3sManifest(bundle.CombinedK3sManifestsYaml); err != nil {
-			return fmt.Errorf("vow bundle rejected: %w", err)
-		}
-		if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
-			_, _ = f.WriteString(bundle.CombinedK3sManifestsYaml)
-			_ = f.Close()
-		}
+		writes = append(writes, atomicFileWrite{
+			path:    manifestPath,
+			content: bundle.CombinedK3sManifestsYaml,
+			perm:    0644,
+		})
+	}
+	if err := writeFilesAtomic(writes); err != nil {
+		return err
 	}
 
 	slog.Info("Reconciled Vigilant Octo Waffle manifests onto in-house K3s cluster")
@@ -309,15 +363,20 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	if err != nil {
 		return err
 	}
-	_ = os.MkdirAll("/var/lib/axonwall", 0755)
-	if err := os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600); err != nil {
+	_ = os.MkdirAll(k3sStateDir, 0755)
+	if err := os.WriteFile(filepath.Join(k3sStateDir, "k3s-join.token"), []byte(tok+"\n"), 0600); err != nil {
 		return err
+	}
+	// A-M15: only record the join AFTER k3s restarts successfully.
+	// The old code set haAutoJoined before the (discarded) restart,
+	// so GetStatus reported the node joined while k3s was still down.
+	if out, err := exec.Command("systemctl", "reload-or-restart", "k3s").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload-or-restart k3s after auto-join: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 	m.mu.Lock()
 	m.haAutoJoined = true
 	m.lastMessage = fmt.Sprintf("Joined K3s HA cluster via https://%s", net.JoinHostPort(peerIp, "6443"))
 	m.mu.Unlock()
-	_ = exec.Command("systemctl", "reload-or-restart", "k3s").Run()
 	return nil
 }
 
