@@ -796,14 +796,10 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 		}
 	}
 
-	// Terminate active conntrack sessions immediately to sever established C2 channels
-	if req.KillActiveConnections {
-		hostOnly := strings.Split(normTarget, "/")[0]
-		if net.ParseIP(hostOnly) != nil {
-			_ = exec.Command("conntrack", "-D", "-s", normTarget).Run()
-			_ = exec.Command("conntrack", "-D", "-d", normTarget).Run()
-		}
-	}
+	// A-M22: the conntrack kill runs AFTER the drop rule lands (see
+	// below, post-reconcile). Killing first left a window where a
+	// connection established between the kill and the rule survived,
+	// and the kill result was `_ =`-discarded.
 
 	m.mu.Lock()
 	m.leases[lease.ID] = lease
@@ -835,7 +831,56 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 		}
 		return nil, fmt.Errorf("kernel reconcile failed for lease %s: %w", lease.ID, err)
 	}
+
+	// A-M22: terminate active conntrack sessions now that the drop rule
+	// is in place, so established C2 channels are severed with no window
+	// for a new connection to slip in between the kill and the rule. A
+	// failed kill does not fail the lease — the drop rule is already
+	// enforcing — but the outcome is recorded on the lease (and
+	// re-persisted) instead of silently discarded.
+	if req.KillActiveConnections {
+		killErr := killConntrackEntries(normTarget)
+		m.mu.Lock()
+		if killErr != nil {
+			log.Printf("[MCP Traffic] conntrack kill failed for blackhole %s (%s): %v", lease.ID, normTarget, killErr)
+			lease.Parameters["conntrackKill"] = "failed: " + killErr.Error()
+		} else {
+			lease.Parameters["conntrackKill"] = "ok"
+		}
+		m.saveStateLocked()
+		m.mu.Unlock()
+	}
 	return lease, nil
+}
+
+// killConntrackEntries deletes conntrack entries for a blackholed target
+// in both directions. It returns an error when conntrack is unavailable
+// or a deletion is rejected. A target with no matching entries is not an
+// error: conntrack exits 1 with no output (or "0 flow entries have been
+// deleted") when nothing matched, which means there was nothing to kill.
+func killConntrackEntries(normTarget string) error {
+	hostOnly := strings.Split(normTarget, "/")[0]
+	if net.ParseIP(hostOnly) == nil {
+		return fmt.Errorf("invalid target %q", normTarget)
+	}
+	if _, err := exec.LookPath("conntrack"); err != nil {
+		return fmt.Errorf("conntrack binary not found: %w", err)
+	}
+	var failures []string
+	for _, dir := range []string{"-s", "-d"} {
+		out, err := exec.Command("conntrack", "-D", dir, normTarget).CombinedOutput()
+		if err != nil {
+			trimmed := strings.TrimSpace(string(out))
+			if trimmed == "" || strings.Contains(trimmed, "0 flow entries") {
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("%s: %v (%s)", dir, err, trimmed))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("conntrack kill failed: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 // ShapeTraffic validates and applies a dynamic per-IP/subnet Linux `tc` HTB bandwidth limit and/or `netem` latency tarpit.
