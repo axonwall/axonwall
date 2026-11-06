@@ -61,6 +61,13 @@ type AgentServer struct {
 	pendingJobID     string
 	confirmDeadline  time.Time
 	rollbackTimer    *time.Timer
+	// rollbackGen counts every arming of the auto-rollback timer (M2).
+	// The timer callback captures the generation it was armed with
+	// and refuses to roll back unless it still matches: Timer.Stop
+	// cannot stop a callback that already started, so without this a
+	// stale callback could fire into a newer bundle's apply window
+	// and roll back the wrong bundle.
+	rollbackGen      uint64
 	nodeId           string
 	startTime        time.Time
 	iapManager       *engine.IAPManager
@@ -304,6 +311,11 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 // a large ruleset and a slow unit reload are legitimate slow paths.
 var nftValidateTimeout = 60 * time.Second
 var nftApplyTimeout = 120 * time.Second
+
+// autoRollbackDeferDelay is how long a commit-confirm timer callback
+// waits before retrying when it fires while an apply is in progress
+// (M2). A variable so tests can shrink it.
+var autoRollbackDeferDelay = 10 * time.Second
 
 // validatedBundleFile is one bundle file after all path, symlink, and
 // mode checks have passed, before anything is written (A-H2).
@@ -735,8 +747,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	_ = os.MkdirAll("/run/axonwall", 0755)
 	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (%ds)", timeoutSec)), 0644)
 
+	// M2: the callback captures the generation it was armed with.
+	// A stale callback (already running when a newer bundle armed
+	// its own timer) must not roll back the newer bundle.
+	s.rollbackGen++
+	rollbackGen := s.rollbackGen
 	s.rollbackTimer = time.AfterFunc(time.Duration(timeoutSec)*time.Second, func() {
-		s.triggerAutoRollback(req.JobId)
+		s.triggerAutoRollback(req.JobId, rollbackGen)
 	})
 
 	log.Printf("[Agent] Configuration applied successfully. Pending confirmation for job %s (deadline: %v)", req.JobId, s.confirmDeadline)
@@ -828,11 +845,34 @@ func (s *AgentServer) executeRollback(reason string) error {
 	return nil
 }
 
-func (s *AgentServer) triggerAutoRollback(jobId string) {
+func (s *AgentServer) triggerAutoRollback(jobId string, gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if !s.pendingConfirm {
+		return
+	}
+
+	// M2: the callback only rolls back the bundle it was armed for.
+	// Timer.Stop cannot stop a callback that already started, so a
+	// stale callback can acquire the lock after a newer bundle went
+	// pending; without the job-id and generation checks it would
+	// roll back the newer bundle.
+	if jobId != s.pendingJobID || gen != s.rollbackGen {
+		return
+	}
+
+	// M2/M1: an apply in progress owns the config files and the
+	// kernel state right now; rolling back underneath it would
+	// restore LKG files under the new bundle's writes. Defer the
+	// rollback instead of dropping it: the re-armed callback
+	// re-checks the job id and generation, so it becomes a no-op
+	// if the apply armed a newer pending bundle in the meantime.
+	if s.applyInProgress {
+		log.Printf("[Agent] WARNING: Commit-confirm deadline expired for job %s, but a configuration apply is in progress; deferring automatic rollback.", jobId)
+		s.rollbackTimer = time.AfterFunc(autoRollbackDeferDelay, func() {
+			s.triggerAutoRollback(jobId, gen)
+		})
 		return
 	}
 

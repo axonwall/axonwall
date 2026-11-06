@@ -234,3 +234,81 @@ func TestR2Batch6ConcurrentAppliesSerialise(t *testing.T) {
 		t.Fatalf("Confirm for the pending job B failed: %s", resp.Message)
 	}
 }
+
+// M2: a stale auto-rollback timer callback must not roll back a newer
+// bundle. Pre-fix, triggerAutoRollback checked only pendingConfirm, so
+// a callback for job A that started before bundle B went pending
+// (Timer.Stop cannot stop an already-running callback) rolled back B
+// the moment B finished applying.
+func TestR2Batch6StaleRollbackTimerIsIgnored(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+	s := batch4TestServer(t)
+	batch4StopTimer(t, s)
+	s.lastGoodScript = batch4NftScript
+
+	s.mu.Lock()
+	s.pendingConfirm = true
+	s.pendingJobID = "r2-m2-job-b"
+	s.rollbackGen = 2
+	s.mu.Unlock()
+
+	// Wrong job id, right generation: must not roll back.
+	s.triggerAutoRollback("r2-m2-job-a", 2)
+	s.mu.Lock()
+	stillPending := s.pendingConfirm
+	s.mu.Unlock()
+	if !stillPending {
+		t.Fatal("stale timer callback for job A rolled back the pending job B")
+	}
+
+	// Right job id, wrong generation: must not roll back.
+	s.triggerAutoRollback("r2-m2-job-b", 1)
+	s.mu.Lock()
+	stillPending = s.pendingConfirm
+	s.mu.Unlock()
+	if !stillPending {
+		t.Fatal("stale timer callback from an old generation rolled back the pending job B")
+	}
+
+	// Matching job id and generation: this is the live callback, and
+	// it must roll back.
+	s.triggerAutoRollback("r2-m2-job-b", 2)
+	s.mu.Lock()
+	stillPending = s.pendingConfirm
+	s.mu.Unlock()
+	if stillPending {
+		t.Fatal("matching timer callback did not roll back the pending job B")
+	}
+}
+
+// M2: a timer callback that fires while an apply is in progress must
+// defer (re-arm) instead of rolling back underneath the apply. The
+// re-armed callback carries the original job id and generation, so it
+// becomes a no-op if the apply armed a newer pending bundle.
+func TestR2Batch6RollbackTimerDefersDuringApply(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+	s := batch4TestServer(t)
+	batch4StopTimer(t, s)
+	s.lastGoodScript = batch4NftScript
+
+	s.mu.Lock()
+	s.pendingConfirm = true
+	s.pendingJobID = "r2-m2-job-b"
+	s.rollbackGen = 2
+	s.applyInProgress = true
+	s.mu.Unlock()
+
+	s.triggerAutoRollback("r2-m2-job-b", 2)
+
+	s.mu.Lock()
+	stillPending := s.pendingConfirm
+	rearmed := s.rollbackTimer != nil
+	s.applyInProgress = false
+	s.mu.Unlock()
+	if !stillPending {
+		t.Fatal("timer callback rolled back a bundle while an apply was in progress")
+	}
+	if !rearmed {
+		t.Fatal("timer callback did not re-arm itself while an apply was in progress; the rollback safety net was dropped")
+	}
+}
