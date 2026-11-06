@@ -130,24 +130,12 @@ func (m *HardwareManager) CollectTelemetry() (*HardwareTelemetry, error) {
 		}
 	}
 
-	// Fallback mock sensors if running inside a container / VM without virtual hwmon
-	if len(telem.Temperatures) == 0 {
-		telem.CPUTempC = 41.5
-		telem.Temperatures = []SensorReading{
-			{Name: "cpu_core0", Label: "CPU Core 0", Value: 41.5, Unit: "°C", Warning: 85.0, Crit: 100.0},
-			{Name: "cpu_core1", Label: "CPU Core 1", Value: 42.0, Unit: "°C", Warning: 85.0, Crit: 100.0},
-			{Name: "pch_temp", Label: "Platform Controller Hub (PCH)", Value: 46.2, Unit: "°C", Warning: 90.0, Crit: 105.0},
-			{Name: "ambient_zone", Label: "Chassis Intake Ambient", Value: 24.8, Unit: "°C", Warning: 45.0, Crit: 60.0},
-		}
-	}
-
-	if len(telem.Fans) == 0 {
-		telem.Fans = []FanReading{
-			{Name: "fan_chassis1", Label: "Chassis Exhaust Fan 1", RPM: 2450},
-			{Name: "fan_chassis2", Label: "Chassis Exhaust Fan 2", RPM: 2380},
-			{Name: "fan_cpu", Label: "CPU PWM Cooler", RPM: 1820},
-		}
-	}
+	// A-L24: no fallback mock sensors. When no hwmon sensors exist
+	// (any VM/container, the common case) the old code returned
+	// hardcoded fake temperatures and fan speeds in exactly the
+	// same shape as real readings, so the dashboard showed a flat
+	// 41.5 °C forever while a real thermal event was invisible.
+	// An empty reading list is honest: no data was observed.
 
 	// 2. Optical SFP+ / QSFP DOM inspection
 	telem.Transceivers = m.collectOpticalTransceivers()
@@ -177,34 +165,10 @@ func (m *HardwareManager) collectOpticalTransceivers() []OpticalModule {
 		}
 	}
 
-	// Mock SFP+ optics if none detected (e.g. running in standard VM or test bench)
-	if len(modules) == 0 {
-		modules = []OpticalModule{
-			{
-				Interface:   "eth1 (WAN SFP+)",
-				Vendor:      "CISCO-FINISAR",
-				PartNumber:  "FTLX8571D3BCL",
-				Temperature: 38.4,
-				Voltage:     3.29,
-				TxPowerDbm:  -2.1,
-				RxPowerDbm:  -3.4,
-				BiasCurrent: 6.8,
-				Status:      "Optimal Link (10G-SR)",
-			},
-			{
-				Interface:   "eth2 (LAN SFP+)",
-				Vendor:      "FS.COM",
-				PartNumber:  "SFP-10GSR-85",
-				Temperature: 36.1,
-				Voltage:     3.31,
-				TxPowerDbm:  -1.8,
-				RxPowerDbm:  -2.2,
-				BiasCurrent: 7.1,
-				Status:      "Optimal Link (10G-SR)",
-			},
-		}
-	}
-
+	// A-L24: no mock optics. When no ethtool-visible optics are
+	// detected the old code returned invented Cisco-Finisar / FS.COM
+	// SFP+ modules with plausible DOM values, indistinguishable
+	// from real readings. An empty list is honest.
 	return modules
 }
 

@@ -49,6 +49,13 @@ type KernelPostureStatus struct {
 	BpfLsmActive            bool     `json:"bpfLsmActive"`
 	LdSoPreloadPresent      bool     `json:"ldSoPreloadPresent"`
 	LdSoPreloadEntries      string   `json:"ldSoPreloadEntries,omitempty"`
+	// UnknownFields lists the posture inputs that could not be read
+	// (missing sysctl/sysfs file). Those fields are empty, not
+	// substituted with secure-looking defaults (round-2 A-L25: the
+	// old code reported unprivileged_bpf_disabled "1",
+	// bpf_jit_harden "2", and LSM "lockdown,yama,apparmor" for
+	// values it never observed).
+	UnknownFields []string `json:"unknownFields,omitempty"`
 }
 
 type HostRootkitFinding struct {
@@ -66,7 +73,6 @@ type HostRootkitAuditStatus struct {
 	KernelPosture   KernelPostureStatus   `json:"kernelPosture"`
 	Scanners        []ScannerBinaryStatus `json:"scanners"`
 	IoUringRings    []IoUringRingFinding  `json:"ioUringRings"`
-	HiddenModules   []string              `json:"hiddenModules"`
 	TrampolineHooks []string              `json:"trampolineHooks"`
 	Findings        []HostRootkitFinding  `json:"findings"`
 }
@@ -159,11 +165,24 @@ func ParseProcFdInfoIoUring(pid int, comm, exe string, fd int, fdInfoText string
 }
 
 // InspectKernelPosture reads live /proc/sys and /sys/kernel/security files.
+// A posture input that cannot be read is reported as unknown (listed in
+// UnknownFields, value left empty) instead of being replaced with a
+// secure-looking default (round-2 A-L25).
 func InspectKernelPosture() KernelPostureStatus {
-	taintStr := readSysctlFileTrimmed("/proc/sys/kernel/tainted", "0")
+	var unknown []string
+	readPosture := func(path, field string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			unknown = append(unknown, field)
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
+
+	taintStr := readPosture("/proc/sys/kernel/tainted", "kernel.tainted")
 	taintVal, _ := strconv.Atoi(taintStr)
 
-	lockdownRaw := readSysctlFileTrimmed("/sys/kernel/security/lockdown", "[none] integrity confidentiality")
+	lockdownRaw := readPosture("/sys/kernel/security/lockdown", "kernel.security.lockdown")
 	lockdownMode := "none"
 	if strings.Contains(lockdownRaw, "[confidentiality]") {
 		lockdownMode = "confidentiality"
@@ -171,7 +190,7 @@ func InspectKernelPosture() KernelPostureStatus {
 		lockdownMode = "integrity"
 	}
 
-	lsmRaw := readSysctlFileTrimmed("/sys/kernel/security/lsm", "lockdown,yama,apparmor")
+	lsmRaw := readPosture("/sys/kernel/security/lsm", "kernel.security.lsm")
 	var activeLsms []string
 	bpfLsm := false
 	for _, item := range strings.Split(lsmRaw, ",") {
@@ -184,19 +203,22 @@ func InspectKernelPosture() KernelPostureStatus {
 		}
 	}
 
+	// A missing /etc/ld.so.preload is the normal "no entries" state,
+	// not an unknown: it is not tracked in UnknownFields.
 	preloadEntries := readSysctlFileTrimmed("/etc/ld.so.preload", "")
 
 	return KernelPostureStatus{
 		TaintValue:              taintVal,
-		IoUringDisabled:         readSysctlFileTrimmed("/proc/sys/kernel/io_uring_disabled", "0"),
-		IoUringGroup:            readSysctlFileTrimmed("/proc/sys/kernel/io_uring_group", "-1"),
-		UnprivilegedBpfDisabled: readSysctlFileTrimmed("/proc/sys/kernel/unprivileged_bpf_disabled", "1"),
-		BpfJitHarden:            readSysctlFileTrimmed("/proc/sys/net/core/bpf_jit_harden", "2"),
+		IoUringDisabled:         readPosture("/proc/sys/kernel/io_uring_disabled", "kernel.io_uring_disabled"),
+		IoUringGroup:            readPosture("/proc/sys/kernel/io_uring_group", "kernel.io_uring_group"),
+		UnprivilegedBpfDisabled: readPosture("/proc/sys/kernel/unprivileged_bpf_disabled", "kernel.unprivileged_bpf_disabled"),
+		BpfJitHarden:            readPosture("/proc/sys/net/core/bpf_jit_harden", "net.core.bpf_jit_harden"),
 		LockdownMode:            lockdownMode,
 		ActiveLsms:              activeLsms,
 		BpfLsmActive:            bpfLsm,
 		LdSoPreloadPresent:      preloadEntries != "",
 		LdSoPreloadEntries:      preloadEntries,
+		UnknownFields:           unknown,
 	}
 }
 
@@ -346,7 +368,6 @@ func RunHostRootkitAudit() HostRootkitAuditStatus {
 		KernelPosture:   posture,
 		Scanners:        scanners,
 		IoUringRings:    rings,
-		HiddenModules:   []string{},
 		TrampolineHooks: trampolines,
 		Findings:        findings,
 	}

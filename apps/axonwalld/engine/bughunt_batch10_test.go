@@ -7,6 +7,7 @@ package engine
 // services; see the batch report for the live-box items.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -90,5 +91,67 @@ func TestBatch10VirtDoubleStartVMRefused(t *testing.T) {
 	}
 	if _, err := mgr.StartVM(102, "root@axonwall"); err == nil || !strings.Contains(err.Error(), "already in progress") {
 		t.Fatalf("second StartVM(102) = %v, want \"already in progress\" error", err)
+	}
+}
+
+// A-L24: without hwmon sensors the telemetry must be empty, not
+// hardcoded fake temperatures, fans, and optics.
+func TestBatch10CollectTelemetryHasNoMockFallback(t *testing.T) {
+	if entries, err := os.ReadDir("/sys/class/hwmon"); err == nil && len(entries) > 0 {
+		t.Skip("host has real hwmon sensors; the mock-fallback path is not exercised here")
+	}
+	telem, err := NewHardwareManager().CollectTelemetry()
+	if err != nil {
+		t.Fatalf("CollectTelemetry failed: %v", err)
+	}
+	if len(telem.Temperatures) != 0 {
+		t.Fatalf("expected no temperatures without hwmon, got %+v", telem.Temperatures)
+	}
+	if telem.CPUTempC != 0 {
+		t.Fatalf("expected CPUTempC 0 without hwmon, got %v", telem.CPUTempC)
+	}
+	if len(telem.Fans) != 0 {
+		t.Fatalf("expected no fans without hwmon, got %+v", telem.Fans)
+	}
+	if len(telem.Transceivers) != 0 {
+		t.Fatalf("expected no transceivers without optics, got %+v", telem.Transceivers)
+	}
+}
+
+// A-L25: unreadable posture inputs must be reported as unknown with
+// empty values, not substituted with secure-looking defaults; and the
+// audit no longer claims a hidden-module check ran (the
+// HiddenModules field was removed).
+func TestBatch10RootkitPostureUnknownNotFabricated(t *testing.T) {
+	posture := InspectKernelPosture()
+	checkUnknown := func(path, field string, get func() string) {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if got := get(); got != "" {
+				t.Errorf("expected empty %s when %s is unreadable, got %q", field, path, got)
+			}
+			found := false
+			for _, f := range posture.UnknownFields {
+				if f == field {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected %q in UnknownFields %v", field, posture.UnknownFields)
+			}
+		}
+	}
+	checkUnknown("/sys/kernel/security/lsm", "kernel.security.lsm", func() string {
+		return strings.Join(posture.ActiveLsms, ",")
+	})
+	checkUnknown("/proc/sys/kernel/unprivileged_bpf_disabled", "kernel.unprivileged_bpf_disabled", func() string {
+		return posture.UnprivilegedBpfDisabled
+	})
+	checkUnknown("/proc/sys/net/core/bpf_jit_harden", "net.core.bpf_jit_harden", func() string {
+		return posture.BpfJitHarden
+	})
+
+	audit := RunHostRootkitAudit()
+	if audit.Timestamp == "" {
+		t.Fatalf("expected a non-empty audit timestamp")
 	}
 }
