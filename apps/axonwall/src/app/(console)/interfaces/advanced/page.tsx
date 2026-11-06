@@ -85,6 +85,13 @@ export default function AdvancedInterfacesPage() {
     e.preventDefault();
     const tag = Number.parseInt(newVlanTag, 10);
     if (!tag || tag < 1 || tag > 4094) return;
+    // C-A9: a duplicate (parent, tag) used to be accepted, creating two
+    // `eth1.100` sub-interfaces — and deleting one row then removed
+    // every VLAN sharing the tag. Reject the add with an error.
+    if (vlans.some((v) => v.parentInterface === newVlanParent && v.tag === tag)) {
+      setStatusMsg(`Error: VLAN ${newVlanParent}.${tag} already exists. Delete the existing VLAN first if you want to replace it.`);
+      return;
+    }
     const nextVlans: Vlan[] = [
       ...vlans,
       {
@@ -125,8 +132,18 @@ export default function AdvancedInterfacesPage() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            statusMsg.startsWith('Error:')
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.startsWith('Error:') ? (
+            <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
           <span>{statusMsg}</span>
         </div>
       )}
@@ -214,8 +231,8 @@ export default function AdvancedInterfacesPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                  {vlans.map((vlan) => (
-                    <tr key={vlan.id || vlan.tag} className="hover:bg-slate-800/30">
+                  {vlans.map((vlan, vlanIdx) => (
+                    <tr key={vlan.id || vlan.vlanInterface} className="hover:bg-slate-800/30">
                       <td className="px-4 py-3 font-mono text-emerald-400 font-semibold">
                         Tag {vlan.tag}
                       </td>
@@ -227,8 +244,12 @@ export default function AdvancedInterfacesPage() {
                         <button
                           type="button"
                           onClick={() =>
+                            // C-A9: delete exactly the clicked row. The
+                            // old predicate matched on tag alone, so
+                            // deleting one tag-100 row removed every
+                            // VLAN sharing that tag.
                             persistTopology(
-                              vlans.filter((v) => v.tag !== vlan.tag),
+                              vlans.filter((_, i) => i !== vlanIdx),
                               bridges,
                               bonds,
                               vips,
