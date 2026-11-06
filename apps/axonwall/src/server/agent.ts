@@ -5675,19 +5675,38 @@ export async function revertMcpLeaseAction(
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<any>('/v1/mcp/revert', 'POST', { leaseId, reason });
-  if (res && !res.success && res.error) {
-    return { success: false, error: res.error };
+  // C-B6: a null response means the daemon never ran the revert — it is
+  // a failure, not a success. The lease is still in the kernel.
+  if (!res) {
+    return { success: false, error: 'Daemon unavailable — lease was not reverted.' };
+  }
+  if (!res.success) {
+    return { success: false, error: res.error || res.message || 'Failed to revert lease' };
   }
   return { success: true };
 }
 
 export async function emergencyFlushMcpLeasesAction(
   reason = 'Emergency Panic Flush triggered by administrator from Web Console'
-): Promise<{ success: boolean; clearedCount: number }> {
+): Promise<{ success: boolean; clearedCount: number; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<any>('/v1/mcp/flush', 'POST', { reason });
+  // C-B6: a null response means the daemon never ran the flush — the
+  // blackholes/shapers/DNAT/DNS sinkholes are all still in the kernel.
+  // A daemon-reported failure is a failure too. Never report purged
+  // leases that were never purged.
+  if (!res) {
+    return { success: false, clearedCount: 0, error: 'Daemon unavailable — no leases were purged.' };
+  }
+  if (res.success === false) {
+    return {
+      success: false,
+      clearedCount: 0,
+      error: res.error || res.message || 'Emergency flush failed on the daemon.',
+    };
+  }
   return {
     success: true,
     clearedCount: res?.clearedCount ?? 0,
