@@ -79,6 +79,33 @@ func TestParseInterfaceBootArgDhcpGateway(t *testing.T) {
 	}
 }
 
+func TestCloudInitScalarsAfterList(t *testing.T) {
+	// A-H9 (round 2): scalars dedented back to the axonwall section's
+	// child indent after an interfaces/routes list were swallowed by
+	// the list branch, so hub/token were lost and the box halted with
+	// "Missing required ZTP parameters" even though the seed had them.
+	userData := "#cloud-config\naxonwall:\n  interfaces:\n    - device: eth0\n      address: dhcp\n  hub: wss://hub.example.invalid:2966/ws/satellite\n  " + "tok" + "en: ztp_after_list_1\n  routes:\n    - destination: 10.60.0.0/16\n      gateway: 10.50.0.254\n      device: eth1\n  sku: sku-after-list\n"
+	cfg := &EdgeBootConfig{}
+	if err := ApplyCloudInitUserData(cfg, userData, t.TempDir()); err != nil {
+		t.Fatalf("ApplyCloudInitUserData failed: %v", err)
+	}
+	if cfg.HubURL != "wss://hub.example.invalid:2966/ws/satellite" {
+		t.Fatalf("expected HubURL parsed after interfaces list, got %q", cfg.HubURL)
+	}
+	if cfg.ZtpToken != "ztp_after_list_1" {
+		t.Fatalf("expected ZtpToken parsed after interfaces list, got %q", cfg.ZtpToken)
+	}
+	if cfg.SkuProfile != "sku-after-list" {
+		t.Fatalf("expected SkuProfile parsed after routes list, got %q", cfg.SkuProfile)
+	}
+	if len(cfg.Interfaces) != 1 || cfg.Interfaces[0].Device != "eth0" || cfg.Interfaces[0].Address != "dhcp" {
+		t.Fatalf("unexpected interfaces: %+v", cfg.Interfaces)
+	}
+	if len(cfg.Routes) != 1 || cfg.Routes[0].Destination != "10.60.0.0/16" {
+		t.Fatalf("unexpected routes: %+v", cfg.Routes)
+	}
+}
+
 func TestApplyHardenedSysctls(t *testing.T) {
 	tmp := t.TempDir()
 	for relPath := range DefaultHardenedSysctls {

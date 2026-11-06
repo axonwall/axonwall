@@ -157,6 +157,7 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 		inInterfacesList    bool
 		inRoutesList        bool
 		inWriteFilesList    bool
+		listSectionIndent   int
 		currentBlockKey     string
 		currentBlockIndent  int
 		currentBlockBuilder strings.Builder
@@ -245,7 +246,11 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 		}
 
 		// Exit any active list section when dedented back to or above the list section header
-		if (inInterfacesList || inRoutesList || inWriteFilesList) && !strings.HasPrefix(trimmedLine, "-") && indent == 0 {
+		// (A-H9, round 2): the old check only closed on indent 0, so a
+		// scalar dedented back to the axonwall section's child indent
+		// (e.g. `hub:` / `token:` after an `interfaces:` list) was
+		// consumed by the list branch and silently dropped.
+		if (inInterfacesList || inRoutesList || inWriteFilesList) && !strings.HasPrefix(trimmedLine, "-") && indent <= listSectionIndent {
 			flushPendingItems()
 			inInterfacesList = false
 			inRoutesList = false
@@ -268,16 +273,19 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 				inInterfacesList = true
 				inRoutesList = false
 				inWriteFilesList = false
+				listSectionIndent = indent
 				continue
 			case "routes":
 				inRoutesList = true
 				inInterfacesList = false
 				inWriteFilesList = false
+				listSectionIndent = indent
 				continue
 			case "write_files":
 				inWriteFilesList = true
 				inInterfacesList = false
 				inRoutesList = false
+				listSectionIndent = indent
 				continue
 			default:
 				inInterfacesList = false
