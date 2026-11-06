@@ -14357,7 +14357,7 @@ var require_websocket = __commonJS({
     var http3 = __require("http");
     var net2 = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes3, createHash: createHash5 } = __require("crypto");
+    var { randomBytes: randomBytes4, createHash: createHash5 } = __require("crypto");
     var { Duplex, Readable } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -14908,7 +14908,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key = randomBytes3(16).toString("base64");
+      const key = randomBytes4(16).toString("base64");
       const request3 = isSecure ? https2.request : http3.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -43868,6 +43868,9 @@ function readAgentToken() {
   }
   return "";
 }
+function newMcpApplyJobId() {
+  return `mcp_apply_${Date.now()}_${crypto4.randomBytes(4).toString("hex")}`;
+}
 async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
   if (!fs6.existsSync(AGENT_SOCKET_PATH)) {
     return {
@@ -44241,7 +44244,7 @@ var MCP_TOOLS_CATALOG = [
   },
   {
     name: "mcp_propose_firewall_rule",
-    description: "Stage a persistent declarative firewall rule into DesiredState, and optionally apply it with mandatory Commit-Confirm automatic rollback protection. Requires mcp:firewall:write (and mcp:firewall:apply if applyImmediately=true).",
+    description: "Stage a persistent declarative firewall rule into DesiredState, and optionally apply it with mandatory Commit-Confirm automatic rollback protection. Requires mcp:firewall:write (and mcp:firewall:apply if applyImmediately=true). When applied, the response returns the jobId: confirm it with mcp_confirm_apply before the commit-confirm window expires or the daemon auto-rolls the ruleset back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -44263,6 +44266,18 @@ var MCP_TOOLS_CATALOG = [
         }
       },
       required: ["rule", "audit"]
+    }
+  },
+  {
+    name: "mcp_confirm_apply",
+    description: "Confirm a firewall rule apply that was applied with Commit-Confirm protection (mcp_propose_firewall_rule with applyImmediately=true), promoting it to last-known-good so the daemon does not auto-roll it back. Pass the jobId returned by the propose call. Requires mcp:firewall:apply.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        jobId: { type: "string", description: "The jobId returned by mcp_propose_firewall_rule when the rule was applied" },
+        reason: { type: "string", description: "Optional reason for confirming the apply" }
+      },
+      required: ["jobId"]
     }
   }
 ];
@@ -45132,6 +45147,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       };
       persistDesiredState(state);
       let applyStatus = "staged_only";
+      let applyJobId;
       if (req.applyImmediately) {
         const compiled = compileNftables(state);
         const hashInput = JSON.stringify({
@@ -45139,11 +45155,12 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           files: [...compiled.files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
           reloadServices: [...compiled.reloadServices].sort()
         });
+        applyJobId = newMcpApplyJobId();
         const applyRes = await callAxonwalldApi("POST", "/v1/apply", {
           nftScript: compiled.nftScript,
           confirmTimeoutSeconds: req.confirmTimeoutSeconds,
           files: compiled.files,
-          jobId: `mcp_apply_${Date.now()}`,
+          jobId: applyJobId,
           bundleHash: crypto4.createHash("sha256").update(hashInput).digest("hex"),
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
@@ -45186,8 +45203,54 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 success: true,
                 rule: req.rule,
                 applyStatus,
-                commitConfirmNotice: req.applyImmediately ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection.` : "Rule staged in DesiredState.",
+                ...applyJobId ? { jobId: applyJobId } : {},
+                commitConfirmNotice: req.applyImmediately ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection. Confirm it with mcp_confirm_apply and jobId "${applyJobId}" before the window expires or the daemon auto-rolls the ruleset back.` : "Rule staged in DesiredState.",
                 auditEntryHash: auditEntry.entryHash
+              },
+              null,
+              2
+            )
+          }
+        ]
+      };
+    }
+    case "mcp_confirm_apply": {
+      const applyErr = requireScope("mcp:firewall:apply");
+      if (applyErr) return applyErr;
+      const jobId = typeof args.jobId === "string" ? args.jobId.trim() : "";
+      if (!jobId) {
+        return deny("mcp:firewall:apply", "jobId is required: pass the jobId returned by mcp_propose_firewall_rule when the rule was applied");
+      }
+      const confirmRes = await callAxonwalldApi("POST", "/v1/confirm", { jobId });
+      if (!confirmRes.ok) {
+        return deny(
+          "mcp:firewall:apply",
+          `Daemon unreachable: could not confirm the apply; the ruleset may auto-roll back at the end of its commit-confirm window${confirmRes.data?.error ? ` (${confirmRes.data.error})` : ""}`
+        );
+      }
+      if (confirmRes.data?.success !== true) {
+        return deny("mcp:firewall:apply", confirmRes.data?.message || `Daemon refused to confirm job ${jobId}`);
+      }
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: "mcp:firewall:apply",
+        decision: "allowed",
+        paramsSummary: { jobId, reason: typeof args.reason === "string" ? args.reason : void 0 }
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                jobId,
+                confirmed: true,
+                message: confirmRes.data?.message || "Configuration confirmed and promoted to last-known-good."
               },
               null,
               2
@@ -47016,6 +47079,7 @@ export {
   isValidMacAddress,
   listMcpApiKeys,
   loadPersistedHaState,
+  newMcpApplyJobId,
   normalizeMacAddress,
   parseFleetSyncBody,
   persistHaState,
