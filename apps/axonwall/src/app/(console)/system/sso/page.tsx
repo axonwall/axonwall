@@ -94,7 +94,7 @@ export default function SsoSettingsPage() {
       const state = await getCurrentDesiredState();
       await applyDesiredState({ ...state, sso: config });
       setHasSavedConfig(true);
-      setTestResult({ type: 'success', text: 'Saved SSO configuration to /etc/axonwall/security.yaml' });
+      setTestResult({ type: 'success', text: 'Saved SSO configuration to /etc/axonwall/security.yaml. NOTE: the login flow does not read this file — SSO sign-in is configured only via the OIDC_* environment variables, so this saved config is not live until those are set to the same IdP.' });
     } catch (err: any) {
       // C16: a failed save used to be swallowed silently, so the
       // operator could not tell whether the config landed.
@@ -191,7 +191,7 @@ export default function SsoSettingsPage() {
             className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition cursor-pointer flex items-center gap-2 shadow-sm"
           >
             <ExternalLink className="w-4 h-4" />
-            <span>Simulate SSO Login</span>
+            <span>Test SSO Login (env config)</span>
           </a>
         </div>
       </div>
@@ -212,6 +212,26 @@ export default function SsoSettingsPage() {
           <span>{testResult.text}</span>
         </div>
       )}
+
+      {/* N3: the login flow reads SSO only from environment variables
+          (OIDC_ISSUER_URL / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET, plus
+          OIDC_ADMIN_GROUPS / OIDC_OPERATOR_GROUPS for roles and a hardcoded
+          `groups` claim). Nothing on this page is live until those match
+          the IdP below — saving here stores the config for reference only. */}
+      <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-start gap-3 text-amber-200 text-sm">
+        <AlertCircle className="w-5 h-5 shrink-0 text-amber-400 mt-0.5" />
+        <span>
+          SSO sign-in is environment-configured only. The login flow reads{' '}
+          <code className="text-amber-300 font-mono">OIDC_ISSUER_URL</code>,{' '}
+          <code className="text-amber-300 font-mono">OIDC_CLIENT_ID</code> and{' '}
+          <code className="text-amber-300 font-mono">OIDC_CLIENT_SECRET</code> (roles from{' '}
+          <code className="text-amber-300 font-mono">OIDC_ADMIN_GROUPS</code> /{' '}
+          <code className="text-amber-300 font-mono">OIDC_OPERATOR_GROUPS</code>); it never reads the
+          config saved from this page, including the group claim and role mappings. Saving below
+          records your intended IdP in <code className="text-amber-300 font-mono">security.yaml</code> —
+          set the same IdP in the environment for logins to actually use it.
+        </span>
+      </div>
 
       {hasSavedConfig === false && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-center gap-3 text-amber-200 text-sm">
