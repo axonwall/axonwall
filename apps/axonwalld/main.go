@@ -82,6 +82,13 @@ type AgentServer struct {
 	directoryManager *engine.DirectoryManager
 }
 
+// lkgConfigSrcDirs and lkgConfigDstDirs are the config trees the
+// last-known-good snapshot is copied from / restored to. Package
+// variables (not constants) so tests can redirect them into temp
+// dirs; the production values are unchanged.
+var lkgConfigSrcDirs = []string{"/var/lib/axonwall/etc-axonwall", "/etc/axonwall"}
+var lkgConfigDstDirs = []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+
 func snapshotLkgConfig(bundleDir string) {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
 	if err := os.MkdirAll(lkgConfigDir, 0700); err != nil {
@@ -89,7 +96,7 @@ func snapshotLkgConfig(bundleDir string) {
 	}
 
 	// Read fallback dir first so live /etc/axonwall files take precedence
-	srcDirs := []string{"/var/lib/axonwall/etc-axonwall", "/etc/axonwall"}
+	srcDirs := lkgConfigSrcDirs
 	for _, srcDir := range srcDirs {
 		entries, err := os.ReadDir(srcDir)
 		if err != nil {
@@ -205,13 +212,18 @@ func normalizeConfigTreePermissions() {
 	}
 }
 
-func restoreLkgConfig(bundleDir string) {
+// restoreLkgConfig restores the last-known-good config snapshot over
+// the live config trees. It reports whether it restored at least one
+// file, so callers can tell "nothing to restore" apart from a
+// successful restore (M3).
+func restoreLkgConfig(bundleDir string) bool {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
 	entries, err := os.ReadDir(lkgConfigDir)
 	if err != nil {
-		return
+		return false
 	}
 
+	restored := false
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -234,27 +246,41 @@ func restoreLkgConfig(bundleDir string) {
 			mode = 0664
 		}
 
-		targetDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+		targetDirs := lkgConfigDstDirs
 		for _, dir := range targetDirs {
 			_ = os.MkdirAll(dir, 0775)
 			dst := filepath.Join(dir, name)
 			if fi, lerr := os.Lstat(dst); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
 				continue
 			}
-			_ = os.WriteFile(dst, data, mode)
-			ensureSharedConfigPerm(dst, mode)
+			if err := os.WriteFile(dst, data, mode); err == nil {
+				ensureSharedConfigPerm(dst, mode)
+				restored = true
+			}
 		}
 		if name == "state.json" {
 			if fi, lerr := os.Lstat("/var/lib/axonwall/state.json"); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
-				_ = os.WriteFile("/var/lib/axonwall/state.json", data, 0660)
-				ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+				if err := os.WriteFile("/var/lib/axonwall/state.json", data, 0660); err == nil {
+					ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+					restored = true
+				}
 			}
 		}
 	}
+	return restored
 }
 
 func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager, etckeeperManager *engine.EtckeeperManager, directoryManager *engine.DirectoryManager) *AgentServer {
 	hostname, _ := os.Hostname()
+
+	// M3: a pending-confirm record from a previous run means the live
+	// config/ruleset is an UNCONFIRMED bundle. It must never be
+	// adopted as last-known-good below, and the startup LKG snapshot
+	// must not copy it over the confirmed snapshot.
+	pendingExists := false
+	if _, err := os.Stat(pendingConfirmStatePath(bundleDir)); err == nil {
+		pendingExists = true
+	}
 
 	initHash := ""
 	lastGoodScript := ""
@@ -266,7 +292,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 			break
 		}
 	}
-	if lastGoodScript == "" {
+	if lastGoodScript == "" && !pendingExists {
 		if out, err := exec.Command("nft", "list", "ruleset").CombinedOutput(); err == nil && len(out) > 0 {
 			scriptStr := string(out)
 			if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
@@ -282,9 +308,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		}
 	}
 
-	snapshotLkgConfig(bundleDir)
-
-	return &AgentServer{
+	s := &AgentServer{
 		bundleDir:        bundleDir,
 		activeHash:       initHash,
 		lastGoodHash:     initHash,
@@ -302,6 +326,88 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		etckeeperManager: etckeeperManager,
 		directoryManager: directoryManager,
 	}
+
+	if pendingExists {
+		s.handlePendingConfirmAtStartup(bundleDir)
+	} else {
+		snapshotLkgConfig(bundleDir)
+	}
+
+	return s
+}
+
+// handlePendingConfirmAtStartup reconciles a pending-confirm record
+// left by a previous run (M3). If the deadline is still in the
+// future, the pending state is restored (with the timer re-armed from
+// the remaining time) so the operator can still confirm it; the
+// startup LKG snapshot is skipped so the unconfirmed bundle is not
+// promoted. If the deadline already passed (or the record is
+// corrupt), the daemon rolls back to last-known-good before doing
+// anything else.
+func (s *AgentServer) handlePendingConfirmAtStartup(bundleDir string) {
+	state, candidate, ok := loadPendingConfirmState(bundleDir)
+	if !ok {
+		log.Printf("[Agent] WARNING: pending-confirm record in %s is corrupt or incomplete; rolling back to last-known-good", bundleDir)
+		s.rollbackPendingAtStartup(bundleDir)
+		return
+	}
+	remaining := time.Until(time.Unix(state.DeadlineUnix, 0))
+	if remaining <= 0 {
+		log.Printf("[Agent] WARNING: previous run exited with unconfirmed bundle (job %s, deadline %s); rolling back to last-known-good", state.JobID, time.Unix(state.DeadlineUnix, 0).Format(time.RFC3339))
+		s.rollbackPendingAtStartup(bundleDir)
+		return
+	}
+
+	// Deadline still in the future: restore the pending state.
+	s.pendingConfirm = true
+	s.pendingJobID = state.JobID
+	s.confirmDeadline = time.Unix(state.DeadlineUnix, 0)
+	s.candidateScript = candidate
+	if state.ActiveHash != "" {
+		s.activeHash = state.ActiveHash
+	}
+	s.rollbackGen++
+	gen := s.rollbackGen
+	s.rollbackTimer = time.AfterFunc(remaining, func() {
+		s.triggerAutoRollback(state.JobID, gen)
+	})
+	_ = os.MkdirAll("/run/axonwall", 0755)
+	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (restored, %ds remaining)", int(remaining.Seconds()))), 0644)
+	log.Printf("[Agent] WARNING: restored pending confirmation for job %s from previous run (deadline %s, %ds remaining); confirm it or it will roll back automatically", state.JobID, s.confirmDeadline.Format(time.RFC3339), int(remaining.Seconds()))
+	// NOTE: no snapshotLkgConfig here — the live files are the
+	// unconfirmed bundle's; snapshotting them would promote it.
+}
+
+// rollbackPendingAtStartup restores the last-known-good config files
+// and ruleset after a previous run exited with an unconfirmed bundle
+// (M3). When no confirmed LKG exists at all there is nothing to roll
+// back to: the unconfirmed bundle stays live, but it is NOT adopted
+// as LKG and the live files are NOT snapshotted as LKG.
+func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
+	restored := restoreLkgConfig(bundleDir)
+	if s.lastGoodScript != "" {
+		if err := applyNftScriptString(s.lastGoodScript); err != nil {
+			log.Printf("[Agent] WARNING: startup rollback could not apply last-known-good ruleset: %v", err)
+		} else {
+			log.Printf("[Agent] Startup rollback applied last-known-good ruleset")
+			if s.lastGoodHash != "" {
+				s.activeHash = s.lastGoodHash
+			}
+		}
+	}
+	if restored {
+		// The restored files are the confirmed LKG config; snapshot
+		// them so the lkg-config dir matches what is live now.
+		snapshotLkgConfig(bundleDir)
+	} else {
+		if s.lastGoodScript == "" {
+			log.Printf("[Agent] WARNING: no last-known-good configuration exists to roll back to; the unconfirmed bundle from the previous run stays live but is NOT promoted to last-known-good")
+		} else {
+			log.Printf("[Agent] WARNING: no last-known-good config snapshot exists to restore; config files left as-is while the ruleset was rolled back")
+		}
+	}
+	clearPendingConfirmFiles(bundleDir)
+	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 }
 
 // Timeouts bounding the slow external commands ApplyBundle runs (A-M2).
@@ -756,6 +862,19 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		s.triggerAutoRollback(req.JobId, rollbackGen)
 	})
 
+	// M3: persist the pending-confirm state (job, deadline, candidate
+	// script) so a daemon restart neither promotes the unconfirmed
+	// bundle to last-known-good nor loses the chance to confirm or
+	// roll it back. A persist failure is loud but does not fail the
+	// apply: the in-memory state is still correct for this run.
+	if err := writePendingConfirmState(s.bundleDir, pendingConfirmState{
+		JobID:        req.JobId,
+		DeadlineUnix: s.confirmDeadline.Unix(),
+		ActiveHash:   s.activeHash,
+	}, s.candidateScript); err != nil {
+		log.Printf("[Agent] WARNING: failed to persist pending-confirm state: %v (a restart will roll back to last-known-good)", err)
+	}
+
 	log.Printf("[Agent] Configuration applied successfully. Pending confirmation for job %s (deadline: %v)", req.JobId, s.confirmDeadline)
 
 	return &pb.ApplyBundleResponse{
@@ -780,6 +899,115 @@ func (s *AgentServer) clearPendingLocked() {
 	s.pendingJobID = ""
 	s.candidateScript = ""
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
+	// M3: drop the persisted pending-confirm record too, so a later
+	// restart does not try to confirm or roll back a bundle that
+	// already finished.
+	clearPendingConfirmFiles(s.bundleDir)
+}
+
+// pendingConfirmState is the on-disk record of an unconfirmed bundle
+// (M3). Pending-confirm state used to live only in memory plus the
+// /run marker file, which nothing read at startup — so a daemon
+// restart silently promoted an unconfirmed bundle to last-known-good
+// (NewAgentServer snapshotted the live files as LKG, and adopted the
+// live ruleset as the LKG script when no LKG file existed yet). The
+// record lives in the bundle dir (persistent, unlike /run) next to
+// last-known-good.nft; the candidate script is stored alongside it
+// so a restarted daemon can still confirm or roll back the pending
+// bundle.
+type pendingConfirmState struct {
+	JobID        string `json:"jobId"`
+	DeadlineUnix int64  `json:"deadlineUnix"`
+	ActiveHash   string `json:"activeHash"`
+}
+
+func pendingConfirmStatePath(bundleDir string) string {
+	return filepath.Join(bundleDir, "pending-confirm.json")
+}
+
+func pendingCandidatePath(bundleDir string) string {
+	return filepath.Join(bundleDir, "candidate.nft")
+}
+
+// writePendingConfirmState persists a pending-confirm record and its
+// candidate script. A failure to persist is reported but must not
+// fail the apply itself: the in-memory state is still correct for
+// this run, and the startup path treats a missing record as "roll
+// back to last-known-good".
+func writePendingConfirmState(bundleDir string, state pendingConfirmState, candidateScript string) error {
+	if err := os.MkdirAll(bundleDir, 0700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(pendingConfirmStatePath(bundleDir), data, 0600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(pendingCandidatePath(bundleDir), []byte(candidateScript), 0600); err != nil {
+		_ = os.Remove(pendingConfirmStatePath(bundleDir))
+		return err
+	}
+	return nil
+}
+
+// loadPendingConfirmState reads a persisted pending-confirm record.
+// It reports ok=false when no confirm was pending or the record is
+// unusable (missing/corrupt state or candidate); callers treat that
+// as "no live pending bundle" and roll back if a record exists.
+func loadPendingConfirmState(bundleDir string) (pendingConfirmState, string, bool) {
+	var state pendingConfirmState
+	data, err := os.ReadFile(pendingConfirmStatePath(bundleDir))
+	if err != nil || len(data) == 0 {
+		return state, "", false
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return state, "", false
+	}
+	candidate, err := os.ReadFile(pendingCandidatePath(bundleDir))
+	if err != nil || len(candidate) == 0 {
+		return state, "", false
+	}
+	return state, string(candidate), true
+}
+
+// pendingConfirmIsLive reports whether a previous run left a pending
+// confirm whose deadline is still in the future.
+func pendingConfirmIsLive(bundleDir string) bool {
+	state, _, ok := loadPendingConfirmState(bundleDir)
+	if !ok {
+		return false
+	}
+	return time.Now().Unix() < state.DeadlineUnix
+}
+
+func clearPendingConfirmFiles(bundleDir string) {
+	_ = os.Remove(pendingConfirmStatePath(bundleDir))
+	_ = os.Remove(pendingCandidatePath(bundleDir))
+}
+
+// applyNftScriptString applies an nftables script via a temp file,
+// bounded by nftApplyTimeout like the apply/rollback execs (A-M2).
+func applyNftScriptString(script string) error {
+	tmpFile, err := os.CreateTemp("", "axonwall-script-*.nft")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	_ = tmpFile.Close()
+	defer os.Remove(tmpFile.Name())
+
+	if err := os.WriteFile(tmpFile.Name(), []byte(script), 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nftApplyTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nft", "-f", tmpFile.Name())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nft -f failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (s *AgentServer) executeRollback(reason string) error {
@@ -796,27 +1024,10 @@ func (s *AgentServer) executeRollback(reason string) error {
 	}
 
 	if s.lastGoodScript != "" {
-		tmpFile, err := os.CreateTemp("", "axonwall-rollback-*.nft")
-		if err != nil {
+		if err := applyNftScriptString(s.lastGoodScript); err != nil {
+			log.Printf("[Agent] ERROR applying rollback ruleset: %v", err)
 			s.clearPendingLocked()
-			return fmt.Errorf("failed to create rollback temp file: %w", err)
-		}
-		_ = tmpFile.Close()
-		defer os.Remove(tmpFile.Name())
-
-		if err := os.WriteFile(tmpFile.Name(), []byte(s.lastGoodScript), 0644); err != nil {
-			s.clearPendingLocked()
-			return fmt.Errorf("failed to write rollback script: %w", err)
-		}
-
-		// A-M2: bound the rollback exec like the apply exec.
-		rbCtx, rbCancel := context.WithTimeout(context.Background(), nftApplyTimeout)
-		defer rbCancel()
-		cmd := exec.CommandContext(rbCtx, "nft", "-f", tmpFile.Name())
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[Agent] ERROR applying rollback ruleset: %s", string(out))
-			s.clearPendingLocked()
-			return fmt.Errorf("failed to execute rollback nftables application: %s", string(out))
+			return fmt.Errorf("failed to execute rollback nftables application: %w", err)
 		}
 
 		if s.lastGoodHash != "" {
@@ -930,6 +1141,8 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	s.pendingConfirm = false
 	s.pendingJobID = ""
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
+	// M3: drop the persisted pending-confirm record too.
+	clearPendingConfirmFiles(s.bundleDir)
 	if s.candidateScript != "" {
 		s.lastGoodScript = s.candidateScript
 		if s.activeHash == "" {
@@ -1893,7 +2106,14 @@ func main() {
 
 		lkgPath := filepath.Join(*bundleDir, "last-known-good.nft")
 		hasLkg := false
-		if _, err := os.Stat(lkgPath); err == nil {
+		if pendingConfirmIsLive(*bundleDir) {
+			// M3: a confirm is still pending from the previous run
+			// with time left on its deadline. The live ruleset is
+			// that unconfirmed bundle; applying LKG here would roll
+			// it back underneath the restored pending state (see
+			// NewAgentServer), so leave the kernel alone.
+			log.Printf("[Agent] Early-boot: a configuration confirm is still pending from the previous run; skipping last-known-good apply so the pending bundle stays live until its deadline")
+		} else if _, err := os.Stat(lkgPath); err == nil {
 			log.Printf("[Agent] Early-boot: applying last-known-good bundle from %s", lkgPath)
 			cmd := exec.Command("nft", "-f", lkgPath)
 			if out, err := cmd.CombinedOutput(); err != nil {

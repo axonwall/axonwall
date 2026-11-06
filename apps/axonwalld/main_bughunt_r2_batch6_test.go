@@ -312,3 +312,259 @@ func TestR2Batch6RollbackTimerDefersDuringApply(t *testing.T) {
 		t.Fatal("timer callback did not re-arm itself while an apply was in progress; the rollback safety net was dropped")
 	}
 }
+
+// M3: the pending-confirm record round-trips through disk, and a
+// missing/corrupt record loads as "no pending bundle".
+func TestR2Batch6PendingStateRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	state := pendingConfirmState{JobID: "r2-m3-job", DeadlineUnix: time.Now().Add(time.Hour).Unix(), ActiveHash: "abc123"}
+	if err := writePendingConfirmState(dir, state, batch4NftScript); err != nil {
+		t.Fatalf("writePendingConfirmState failed: %v", err)
+	}
+	got, candidate, ok := loadPendingConfirmState(dir)
+	if !ok {
+		t.Fatal("loadPendingConfirmState did not find the record just written")
+	}
+	if got != state {
+		t.Fatalf("loaded state %+v, want %+v", got, state)
+	}
+	if candidate != batch4NftScript {
+		t.Fatalf("loaded candidate %q, want the written script", candidate)
+	}
+	if pendingConfirmIsLive(dir) != true {
+		t.Fatal("pendingConfirmIsLive should be true before the deadline")
+	}
+
+	clearPendingConfirmFiles(dir)
+	if _, _, ok := loadPendingConfirmState(dir); ok {
+		t.Fatal("loadPendingConfirmState found a record after clearPendingConfirmFiles")
+	}
+
+	// A corrupt record loads as "no pending bundle" (the startup
+	// path then rolls back rather than trusting it).
+	if err := os.WriteFile(pendingConfirmStatePath(dir), []byte("{not json"), 0600); err != nil {
+		t.Fatalf("failed to write corrupt record: %v", err)
+	}
+	if _, _, ok := loadPendingConfirmState(dir); ok {
+		t.Fatal("corrupt pending-confirm record loaded as valid")
+	}
+}
+
+// r2RedirectLkgDirs points the LKG snapshot/restore trees at temp
+// dirs so NewAgentServer tests never touch /etc/axonwall.
+func r2RedirectLkgDirs(t *testing.T, liveDir string) {
+	t.Helper()
+	origSrc, origDst := lkgConfigSrcDirs, lkgConfigDstDirs
+	lkgConfigSrcDirs = []string{liveDir}
+	lkgConfigDstDirs = []string{liveDir}
+	t.Cleanup(func() { lkgConfigSrcDirs, lkgConfigDstDirs = origSrc, origDst })
+}
+
+// M3: a restart with a still-live pending confirm restores the
+// pending state (job, deadline, candidate, timer) and does NOT
+// snapshot the live (unconfirmed) config as last-known-good.
+func TestR2Batch6StartupRestoresLivePending(t *testing.T) {
+	bundleDir := t.TempDir()
+	liveDir := t.TempDir()
+	r2RedirectLkgDirs(t, liveDir)
+
+	lkgScript := "table inet axonwall {\n chain input {\n  type filter hook input priority 0;\n }\n}\n"
+	if err := os.WriteFile(filepath.Join(bundleDir, "last-known-good.nft"), []byte(lkgScript), 0600); err != nil {
+		t.Fatalf("failed to write LKG script: %v", err)
+	}
+	deadline := time.Now().Add(time.Hour)
+	if err := writePendingConfirmState(bundleDir, pendingConfirmState{
+		JobID:        "r2-m3-live",
+		DeadlineUnix: deadline.Unix(),
+		ActiveHash:   "candidate-hash",
+	}, batch4NftScript); err != nil {
+		t.Fatalf("failed to write pending state: %v", err)
+	}
+
+	s := NewAgentServer(bundleDir, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	batch4StopTimer(t, s)
+	t.Cleanup(func() { _ = os.Remove("/run/axonwall/commit-confirm.pending") })
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pendingConfirm {
+		t.Fatal("startup did not restore the pending confirmation")
+	}
+	if s.pendingJobID != "r2-m3-live" {
+		t.Fatalf("pending job is %q, want %q", s.pendingJobID, "r2-m3-live")
+	}
+	if s.candidateScript != batch4NftScript {
+		t.Fatal("startup did not restore the candidate script")
+	}
+	if s.activeHash != "candidate-hash" {
+		t.Fatalf("active hash is %q, want the pending bundle's hash", s.activeHash)
+	}
+	if s.rollbackTimer == nil {
+		t.Fatal("startup did not re-arm the auto-rollback timer")
+	}
+	if s.lastGoodScript != lkgScript {
+		t.Fatal("startup overwrote the confirmed last-known-good script")
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "lkg-config")); !os.IsNotExist(err) {
+		t.Fatal("startup snapshotted the live (unconfirmed) config as last-known-good")
+	}
+}
+
+// M3: a restart after the pending deadline rolls back to
+// last-known-good (config files restored, LKG ruleset applied) and
+// clears the pending record.
+func TestR2Batch6StartupRollsBackExpiredPending(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+	bundleDir := t.TempDir()
+	liveDir := t.TempDir()
+	r2RedirectLkgDirs(t, liveDir)
+
+	lkgScript := "table inet axonwall {\n chain input {\n  type filter hook input priority 0;\n }\n}\n"
+	if err := os.WriteFile(filepath.Join(bundleDir, "last-known-good.nft"), []byte(lkgScript), 0600); err != nil {
+		t.Fatalf("failed to write LKG script: %v", err)
+	}
+	// The confirmed LKG config snapshot…
+	if err := os.MkdirAll(filepath.Join(bundleDir, "lkg-config"), 0700); err != nil {
+		t.Fatalf("failed to create lkg-config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "lkg-config", "routing.yaml"), []byte("routes: []\n"), 0600); err != nil {
+		t.Fatalf("failed to write LKG routing.yaml: %v", err)
+	}
+	// …while the live tree holds the unconfirmed bundle's file.
+	if err := os.WriteFile(filepath.Join(liveDir, "routing.yaml"), []byte("routes:\n  - network: 10.99.0.0/24\n    gateway: 10.99.0.1\n"), 0600); err != nil {
+		t.Fatalf("failed to write live routing.yaml: %v", err)
+	}
+	deadline := time.Now().Add(-time.Hour)
+	if err := writePendingConfirmState(bundleDir, pendingConfirmState{
+		JobID:        "r2-m3-expired",
+		DeadlineUnix: deadline.Unix(),
+		ActiveHash:   "candidate-hash",
+	}, batch4NftScript); err != nil {
+		t.Fatalf("failed to write pending state: %v", err)
+	}
+
+	s := NewAgentServer(bundleDir, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	batch4StopTimer(t, s)
+	t.Cleanup(func() { _ = os.Remove("/run/axonwall/commit-confirm.pending") })
+
+	s.mu.Lock()
+	pending := s.pendingConfirm
+	timer := s.rollbackTimer
+	s.mu.Unlock()
+	if pending {
+		t.Fatal("startup kept an expired pending confirmation")
+	}
+	if timer != nil {
+		t.Fatal("startup armed a timer for an expired pending confirmation")
+	}
+	if _, err := os.Stat(pendingConfirmStatePath(bundleDir)); !os.IsNotExist(err) {
+		t.Fatal("startup did not clear the expired pending-confirm record")
+	}
+	data, err := os.ReadFile(filepath.Join(liveDir, "routing.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read live routing.yaml: %v", err)
+	}
+	if string(data) != "routes: []\n" {
+		t.Fatalf("live routing.yaml was not restored to LKG, got: %s", string(data))
+	}
+}
+
+// M3: with a pending confirm and no confirmed LKG at all, startup
+// must NOT adopt the live kernel ruleset as last-known-good.
+func TestR2Batch6StartupDoesNotAdoptLiveRulesetWhenPending(t *testing.T) {
+	dir := t.TempDir()
+	nftLog := filepath.Join(dir, "nft-args.log")
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"" + nftLog + "\"\n" +
+		"if [ \"$1\" = \"list\" ]; then echo \"table inet axonwall { chain input { type filter hook input priority 0; } }\"; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write fake nft: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", dir+":"+origPath); err != nil {
+		t.Fatalf("failed to set PATH: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("PATH", origPath) })
+
+	bundleDir := t.TempDir()
+	if err := writePendingConfirmState(bundleDir, pendingConfirmState{
+		JobID:        "r2-m3-nolkg",
+		DeadlineUnix: time.Now().Add(time.Hour).Unix(),
+		ActiveHash:   "candidate-hash",
+	}, batch4NftScript); err != nil {
+		t.Fatalf("failed to write pending state: %v", err)
+	}
+
+	s := NewAgentServer(bundleDir, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	batch4StopTimer(t, s)
+	t.Cleanup(func() { _ = os.Remove("/run/axonwall/commit-confirm.pending") })
+
+	s.mu.Lock()
+	lastGood := s.lastGoodScript
+	s.mu.Unlock()
+	// The file-based fallbacks (/etc/nftables.conf) may still supply a
+	// rollback target — that is pre-existing behaviour. What must NOT
+	// happen is adopting the LIVE kernel ruleset (the fake nft's
+	// `list ruleset` output) as last-known-good.
+	if lastGood == "table inet axonwall { chain input { type filter hook input priority 0; } }" {
+		t.Fatal("startup adopted the live ruleset as last-known-good while a confirm was pending")
+	}
+	if etcData, err := os.ReadFile("/etc/nftables.conf"); err == nil && len(etcData) > 0 {
+		if lastGood != string(etcData) {
+			t.Fatalf("startup loaded last-known-good from somewhere other than the file fallback while a confirm was pending")
+		}
+	} else if lastGood != "" {
+		t.Fatal("startup adopted a last-known-good script from somewhere other than the file fallback while a confirm was pending")
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "last-known-good.nft")); !os.IsNotExist(err) {
+		t.Fatal("startup wrote the live ruleset to last-known-good.nft while a confirm was pending")
+	}
+	if argsLog, err := os.ReadFile(nftLog); err == nil && strings.Contains(string(argsLog), "list ruleset") {
+		t.Fatal("startup ran `nft list ruleset` to adopt the live ruleset while a confirm was pending")
+	}
+}
+
+// M3: a successful ApplyBundle persists the pending-confirm record,
+// and Confirm removes it.
+func TestR2Batch6ApplyPersistsPendingState(t *testing.T) {
+	batch4FakePath(t, "#!/bin/sh\nexit 0\n")
+	s := batch4TestServer(t)
+	batch4StopTimer(t, s)
+
+	resp, err := s.ApplyBundle(context.Background(), &pb.ApplyBundleRequest{
+		JobId:                 "r2-m3-apply",
+		NftScript:             batch4NftScript,
+		ConfirmTimeoutSeconds: 60,
+	})
+	if err != nil {
+		t.Fatalf("ApplyBundle failed: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("ApplyBundle reported failure: %s", resp.Message)
+	}
+	state, candidate, ok := loadPendingConfirmState(s.bundleDir)
+	if !ok {
+		t.Fatal("ApplyBundle did not persist the pending-confirm record")
+	}
+	if state.JobID != "r2-m3-apply" {
+		t.Fatalf("persisted job is %q, want %q", state.JobID, "r2-m3-apply")
+	}
+	if candidate != batch4NftScript {
+		t.Fatal("persisted candidate script does not match the applied script")
+	}
+	if state.DeadlineUnix != resp.ConfirmDeadlineUnix {
+		t.Fatalf("persisted deadline %d, want the reported deadline %d", state.DeadlineUnix, resp.ConfirmDeadlineUnix)
+	}
+
+	confirmResp, err := s.Confirm(context.Background(), &pb.ConfirmRequest{JobId: "r2-m3-apply"})
+	if err != nil {
+		t.Fatalf("Confirm failed: %v", err)
+	}
+	if !confirmResp.Success {
+		t.Fatalf("Confirm failed: %s", confirmResp.Message)
+	}
+	if _, _, ok := loadPendingConfirmState(s.bundleDir); ok {
+		t.Fatal("Confirm did not clear the persisted pending-confirm record")
+	}
+}
