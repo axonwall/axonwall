@@ -63,3 +63,19 @@ func TestBatch9CapturePacketSampleErrorsWithoutTcpdump(t *testing.T) {
 		t.Fatalf("expected a tcpdump error, got: %v", err)
 	}
 }
+
+// L12: snapshot/scrub must fail when the ZFS tooling is absent.
+// Pre-fix, both returned success on a box without zfs/zpool — the
+// caller was told a snapshot was created / a scrub ran when nothing
+// happened.
+func TestBatch9NasSnapshotScrubErrorWithoutZfs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	mgr := NewNasManager()
+	if _, err := mgr.CreateSnapshot("tank/data", "test"); err == nil {
+		t.Fatal("CreateSnapshot must fail without zfs installed")
+	}
+	if err := mgr.ScrubPool("tank"); err == nil {
+		t.Fatal("ScrubPool must fail without zpool installed")
+	}
+}

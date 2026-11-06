@@ -569,10 +569,14 @@ func (m *NasManager) CreateSnapshot(dataset string, label string) (string, error
 		label = fmt.Sprintf("auto-%s", time.Now().UTC().Format("20060102-150405"))
 	}
 	snapName := fmt.Sprintf("%s@%s", dataset, label)
-	if _, err := exec.LookPath("zfs"); err == nil {
-		if out, err := exec.Command("zfs", "snapshot", "-r", snapName).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("zfs snapshot failed: %s (%w)", string(out), err)
-		}
+	// L12: without zfs installed this used to return the snapshot
+	// name and nil — the caller was told a snapshot was created
+	// when nothing happened and no snapshot exists.
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return "", fmt.Errorf("cannot create snapshot: zfs is not installed on this system")
+	}
+	if out, err := exec.Command("zfs", "snapshot", "-r", snapName).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("zfs snapshot failed: %s (%w)", string(out), err)
 	}
 	return snapName, nil
 }
@@ -581,10 +585,13 @@ func (m *NasManager) ScrubPool(poolName string) error {
 	if !validZfsPath(poolName, false) {
 		return fmt.Errorf("invalid pool name")
 	}
-	if _, err := exec.LookPath("zpool"); err == nil {
-		if out, err := exec.Command("zpool", "scrub", poolName).CombinedOutput(); err != nil {
-			return fmt.Errorf("zpool scrub failed: %s (%w)", string(out), err)
-		}
+	// L12: without zpool installed this used to return nil — the
+	// caller was told a scrub ran when nothing happened.
+	if _, err := exec.LookPath("zpool"); err != nil {
+		return fmt.Errorf("cannot scrub pool: zpool is not installed on this system")
+	}
+	if out, err := exec.Command("zpool", "scrub", poolName).CombinedOutput(); err != nil {
+		return fmt.Errorf("zpool scrub failed: %s (%w)", string(out), err)
 	}
 	return nil
 }
