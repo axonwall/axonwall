@@ -197,6 +197,31 @@ export default function SystemUpdatesPage() {
     }));
   };
 
+  // C-B8: both clone paths used to fire the zbm-activate fetch with
+  // `await` and never inspect the response, then report the clone as
+  // armed. A daemon refusal left the old BE booting next time while
+  // the banner claimed otherwise. The activate result is now checked
+  // and a failure throws, so the error banner — not a success banner —
+  // is what the operator sees.
+  const armClonedBe = async (beName: string) => {
+    const armResp = await fetch('/api/system/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'zbm-activate', beName }),
+    });
+    let armData: { success?: boolean; message?: string } | null = null;
+    try {
+      armData = await armResp.json();
+    } catch {}
+    if (!armResp.ok || !armData?.success) {
+      throw new Error(
+        `Snapshot cloned to ${beName} but arming it for next boot FAILED: ${
+          armData?.message || `HTTP ${armResp.status}`
+        }. The clone exists but will NOT boot next.`
+      );
+    }
+  };
+
   const handleSubmitArbitrarySnapshot = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const targetBe =
@@ -233,18 +258,18 @@ export default function SystemUpdatesPage() {
       if (!data.success) throw new Error(data.message || 'Snapshot creation failed');
 
       if (cloneImmediately && cleanNewBe && armClonedBeNext) {
-        await fetch('/api/system/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'zbm-activate', beName: cleanNewBe }),
-        });
+        await armClonedBe(cleanNewBe);
       }
 
-      setAlertMessage(
+      const baseMsg =
         data.message ||
-          `Snapshot zroot/ROOT/${targetBe}@${cleanLabel} created successfully${
-            cleanNewBe ? ` and cloned to ${cleanNewBe}` : ''
-          }.`
+        `Snapshot zroot/ROOT/${targetBe}@${cleanLabel} created successfully${
+          cleanNewBe ? ` and cloned to ${cleanNewBe}` : ''
+        }.`;
+      setAlertMessage(
+        cloneImmediately && cleanNewBe && armClonedBeNext
+          ? `${baseMsg} Armed '${cleanNewBe}' for next boot.`
+          : baseMsg
       );
       setCustomSnapLabel(makeTimestampLabel('manual'));
       if (cloneImmediately) {
@@ -317,11 +342,7 @@ export default function SystemUpdatesPage() {
       if (!data.success) throw new Error(data.message);
 
       if (cloneModalState.armNext) {
-        await fetch('/api/system/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'zbm-activate', beName: cleanNewBe }),
-        });
+        await armClonedBe(cleanNewBe);
       }
 
       setAlertMessage(
