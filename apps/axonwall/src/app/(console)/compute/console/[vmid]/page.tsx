@@ -4,13 +4,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import {
   Terminal,
-  Monitor,
-  Maximize2,
   RotateCcw,
   Power,
-  Square,
-  AlertCircle,
-  CheckCircle2,
   RefreshCw,
 } from 'lucide-react';
 import { vmPowerAction, containerPowerAction } from '@/server/virt';
@@ -20,19 +15,41 @@ export default function WorkloadConsolePage() {
   const searchParams = useSearchParams();
 
   const vmid = Number(params?.vmid || 100);
-  const initialType = (searchParams?.get('type') || 'vnc') as 'vnc' | 'serial';
-  const workloadKind = (searchParams?.get('kind') || (initialType === 'serial' && vmid >= 200 ? 'lxc' : 'vm')) as 'vm' | 'lxc';
+  // D4: the workload kind must come from the link (?kind=vm|lxc). The old
+  // `vmid >= 200` heuristic guessed wrong in both directions (VM 250 got
+  // container power actions, CTID 100-199 got VM power actions), so a
+  // missing/invalid kind fails closed instead of guessing.
+  const kindParam = searchParams?.get('kind');
+  const workloadKind: 'vm' | 'lxc' | null =
+    kindParam === 'vm' || kindParam === 'lxc' ? kindParam : null;
 
-  const [consoleType, setConsoleType] = useState<'vnc' | 'serial'>(initialType);
+  // D3: there is no VNC/RFB client in this build — the old VNC mode showed
+  // a blank canvas and a "Negotiating RFB VNC handshake…" message while
+  // decoding binary RFB frames as text. VNC mode is removed; VMs get the
+  // serial console and containers get the LXC console the daemon actually
+  // serves (type=lxc -> /run/axonwall/lxc/ct-<id>.sock, not type=serial).
+  const consoleType: 'serial' | 'lxc' = workloadKind === 'lxc' ? 'lxc' : 'serial';
+  const socketPath =
+    workloadKind === 'lxc'
+      ? `/run/axonwall/lxc/ct-${vmid}.sock`
+      : `/run/axonwall/serial/vm-${vmid}.sock`;
+
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
   const [logMessages, setLogMessages] = useState<string[]>([]);
   const [inputBuffer, setInputBuffer] = useState('');
 
   const terminalRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const connectWebSocket = () => {
+    if (!workloadKind) {
+      setStatus('error');
+      setLogMessages((prev) => [
+        ...prev,
+        '[Error] Console link is missing the workload kind (?kind=vm or ?kind=lxc). Refusing to guess which workload to power-cycle.',
+      ]);
+      return;
+    }
     setStatus('connecting');
     if (wsRef.current) {
       wsRef.current.close();
@@ -48,14 +65,14 @@ export default function WorkloadConsolePage() {
 
     ws.onopen = () => {
       setStatus('connected');
-      setLogMessages((prev) => [...prev, `[System] Connected to VM ${vmid} (${consoleType.toUpperCase()} console)`]);
+      setLogMessages((prev) => [...prev, `[System] Connected to ${workloadKind === 'lxc' ? 'container' : 'VM'} ${vmid} (${consoleType.toUpperCase()} console)`]);
     };
 
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
         setLogMessages((prev) => [...prev.slice(-200), event.data]);
       } else if (event.data instanceof ArrayBuffer) {
-        // Decode bytes to text for serial, or RFB frame
+        // Decode bytes to text for the serial / LXC console.
         const text = new TextDecoder('utf-8').decode(event.data);
         setLogMessages((prev) => [...prev.slice(-200), text]);
       }
@@ -68,7 +85,7 @@ export default function WorkloadConsolePage() {
       setStatus('error');
       setLogMessages((prev) => [
         ...prev,
-        `[Error] Connection failed to VM ${vmid} console. Is the VM online?`,
+        `[Error] Connection failed to ${workloadKind === 'lxc' ? 'container' : 'VM'} ${vmid} console. Is the workload online?`,
       ]);
     };
 
@@ -98,15 +115,8 @@ export default function WorkloadConsolePage() {
     setInputBuffer('');
   };
 
-  const handleCtrlAltDel = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      // Send QEMU monitor sendkey ctrl-alt-delete or RFB key event
-      wsRef.current.send(new Uint8Array([0x04, 0x01, 0xff, 0xe3])); // Ctrl-Alt-Del sequence
-      setLogMessages((prev) => [...prev, '[Action] Sent Ctrl+Alt+Del']);
-    }
-  };
-
   const handlePower = async (action: 'stop' | 'reset', force = false) => {
+    if (!workloadKind) return;
     try {
       if (workloadKind === 'lxc') {
         const res = await containerPowerAction(vmid, action === 'reset' ? 'reboot' : 'stop', force);
@@ -120,18 +130,29 @@ export default function WorkloadConsolePage() {
     }
   };
 
+  if (!workloadKind) {
+    return (
+      <div className="flex flex-col h-[calc(100vh-8rem)] rounded-xl bg-slate-950 border border-red-500/40 overflow-hidden shadow-2xl items-center justify-center p-8 text-center space-y-3">
+        <Terminal className="w-10 h-10 text-red-400" />
+        <p className="font-semibold text-white">Console link is missing the workload kind</p>
+        <p className="text-sm text-slate-400 max-w-md">
+          This console cannot tell whether {vmid} is a VM or an LXC container, and guessing has
+          previously power-cycled the wrong workload. Open the console from the VMs page (for a VM)
+          or the LXC page (for a container), or add <code className="font-mono text-slate-200">?kind=vm</code> or{' '}
+          <code className="font-mono text-slate-200">?kind=lxc</code> to the URL.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)] rounded-xl bg-slate-950 border border-slate-800 overflow-hidden shadow-2xl">
       {/* Console Top Toolbar */}
       <div className="flex items-center justify-between px-4 py-3 bg-slate-900 border-b border-slate-800 text-sm">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 font-mono font-bold text-slate-100">
-            {consoleType === 'vnc' ? (
-              <Monitor className="w-4 h-4 text-cyan-400" />
-            ) : (
-              <Terminal className="w-4 h-4 text-emerald-400" />
-            )}
-            <span>VM {vmid} Console</span>
+            <Terminal className="w-4 h-4 text-emerald-400" />
+            <span>{workloadKind === 'lxc' ? `Container ${vmid} Console` : `VM ${vmid} Console`}</span>
           </div>
 
           <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-slate-950">
@@ -150,38 +171,10 @@ export default function WorkloadConsolePage() {
 
         {/* Action Controls */}
         <div className="flex items-center gap-2">
-          {/* Console Mode Switcher */}
-          <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-xs font-medium">
-            <button
-              onClick={() => setConsoleType('vnc')}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                consoleType === 'vnc' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              VNC (HTML5)
-            </button>
-            <button
-              onClick={() => setConsoleType('serial')}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                consoleType === 'serial' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Serial (xterm)
-            </button>
-          </div>
-
-          <button
-            onClick={handleCtrlAltDel}
-            className="px-2.5 py-1 text-xs font-mono font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 transition-colors"
-            title="Send Ctrl+Alt+Del"
-          >
-            Ctrl+Alt+Del
-          </button>
-
           <button
             onClick={() => handlePower('reset')}
             className="p-1.5 text-amber-400 hover:bg-amber-500/10 rounded transition-colors"
-            title="Reset VM"
+            title={workloadKind === 'lxc' ? 'Restart container' : 'Reset VM'}
           >
             <RotateCcw className="w-4 h-4" />
           </button>
@@ -189,7 +182,7 @@ export default function WorkloadConsolePage() {
           <button
             onClick={() => handlePower('stop')}
             className="p-1.5 text-rose-400 hover:bg-rose-500/10 rounded transition-colors"
-            title="Shutdown VM"
+            title={workloadKind === 'lxc' ? 'Stop container' : 'Shutdown VM'}
           >
             <Power className="w-4 h-4" />
           </button>
@@ -206,61 +199,35 @@ export default function WorkloadConsolePage() {
 
       {/* Screen Area */}
       <div className="flex-1 bg-black relative flex flex-col min-h-0 overflow-hidden">
-        {consoleType === 'vnc' ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-4">
-            <canvas
-              ref={canvasRef}
-              width={1024}
-              height={768}
-              className="max-w-full max-h-full aspect-[4/3] border border-slate-800 rounded bg-slate-950 shadow-inner"
-            />
-            {status !== 'connected' && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/90 text-slate-300 space-y-3">
-                <Monitor className="w-12 h-12 text-cyan-400 animate-pulse" />
-                <p className="font-mono text-sm">
-                  {status === 'connecting'
-                    ? `Negotiating RFB VNC handshake for VM ${vmid}...`
-                    : `VNC session inactive. Ensure VM ${vmid} is running.`}
-                </p>
-                {status !== 'connecting' && (
-                  <button
-                    onClick={connectWebSocket}
-                    className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-xs font-semibold"
-                  >
-                    Retry Connection
-                  </button>
-                )}
-              </div>
-            )}
+        <div className="flex-1 flex flex-col min-h-0 p-4 font-mono text-xs text-emerald-400 bg-black">
+          <div className="text-slate-500">
+            # Axonwall VT100 Serial Virtual Terminal - {workloadKind === 'lxc' ? `Container ${vmid}` : `VM ${vmid}`}
           </div>
-        ) : (
-          <div className="flex-1 flex flex-col min-h-0 p-4 font-mono text-xs text-emerald-400 bg-black">
-            <div ref={terminalRef} className="flex-1 overflow-y-auto space-y-1 select-text">
-              <div className="text-slate-500">
-                # Axonwall VT100 Serial Virtual Terminal - VM {vmid}
+          <div className="text-slate-500">
+            # Connected to {socketPath}
+          </div>
+          <div className="text-slate-500">
+            # Note: graphical VNC console is not implemented in this build — serial console only.
+          </div>
+          <div ref={terminalRef} className="flex-1 overflow-y-auto space-y-1 select-text mt-2">
+            {logMessages.map((msg, idx) => (
+              <div key={idx} className="whitespace-pre-wrap">
+                {msg}
               </div>
-              <div className="text-slate-500">
-                # Connected to /run/axonwall/serial/vm-{vmid}.sock
-              </div>
-              {logMessages.map((msg, idx) => (
-                <div key={idx} className="whitespace-pre-wrap">
-                  {msg}
-                </div>
-              ))}
-            </div>
+            ))}
+          </div>
 
-            <form onSubmit={sendTerminalInput} className="mt-2 flex items-center gap-2 border-t border-slate-800 pt-2">
-              <span className="text-cyan-400 font-bold">&gt;</span>
-              <input
-                type="text"
-                value={inputBuffer}
-                onChange={(e) => setInputBuffer(e.target.value)}
-                placeholder="Type command and press Enter..."
-                className="flex-1 bg-transparent border-0 text-slate-100 text-xs font-mono focus:ring-0 focus:outline-none"
-              />
-            </form>
-          </div>
-        )}
+          <form onSubmit={sendTerminalInput} className="mt-2 flex items-center gap-2 border-t border-slate-800 pt-2">
+            <span className="text-cyan-400 font-bold">&gt;</span>
+            <input
+              type="text"
+              value={inputBuffer}
+              onChange={(e) => setInputBuffer(e.target.value)}
+              placeholder="Type command and press Enter..."
+              className="flex-1 bg-transparent border-0 text-slate-100 text-xs font-mono focus:ring-0 focus:outline-none"
+            />
+          </form>
+        </div>
       </div>
     </div>
   );

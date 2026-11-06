@@ -320,7 +320,7 @@ export default function LxcContainersPage() {
                         )}
 
                         <Link
-                          href={`/compute/console/${ct.ctid}?type=serial`}
+                          href={`/compute/console/${ct.ctid}?kind=lxc&type=lxc`}
                           target="_blank"
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded text-xs transition-colors"
                         >
