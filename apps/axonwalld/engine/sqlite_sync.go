@@ -1160,6 +1160,42 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 		return fmt.Errorf("sync stopped before applying database %s", dbPath)
 	}
 
+	// A-M17: validate the downloaded bytes are a usable SQLite database
+	// before they replace the live one. The checksum only proves the
+	// bytes arrived as the peer sent them; the peer's own fallback serves
+	// a raw copy of a live DB when `.backup` fails, so a torn copy can
+	// arrive with a valid checksum and signature.
+	if err := validateSqliteDbFile(tmpFile); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("downloaded database %s failed validation: %w", dbPath, err)
+	}
+
+	// A-M17: keep a backup of the database being replaced, so a bad
+	// apply can be undone. The previous .bak (if any) is overwritten.
+	if _, err := os.Stat(dbPath); err == nil {
+		if err := copyFile(dbPath, dbPath+".bak"); err != nil {
+			slog.Warn("HA sync: failed to back up replaced database", "db", dbPath, "error", err)
+		}
+	}
+
+	// A-M17: pause the local consumer while its database file is
+	// replaced underneath it. With autoPromoteHeadscale off, headscale
+	// keeps the DB open while its WAL is deleted and the file replaced,
+	// corrupting the local daemon or killing it at next access. Only a
+	// service that is actually active is stopped, and it is restarted
+	// on every exit path below.
+	headscaleWasActive := false
+	if strings.Contains(filepath.Base(dbPath), "headscale") {
+		headscaleWasActive = stopServiceIfActive("headscale")
+	}
+	if headscaleWasActive {
+		defer func() {
+			if err := exec.Command("systemctl", "start", "headscale").Run(); err != nil {
+				slog.Error("HA sync: FAILED to restart headscale after database replace; service is down", "error", err)
+			}
+		}()
+	}
+
 	// Keep the replaced database's ownership on the downloaded copy
 	// (see preserveFileOwnership) before it becomes the live file.
 	preserveFileOwnership(tmpFile, dbPath)
@@ -1175,6 +1211,55 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 	}
 
 	return nil
+}
+
+// validateSqliteDbFile checks a downloaded database file is a usable
+// SQLite database: the 16-byte header magic, plus a full
+// `PRAGMA integrity_check` when the sqlite3 CLI is available. A torn or
+// non-SQLite payload must never replace the live database (A-M17).
+func validateSqliteDbFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var magic [16]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return fmt.Errorf("cannot read SQLite header: %w", err)
+	}
+	if string(magic[:]) != "SQLite format 3\x00" {
+		return fmt.Errorf("not a SQLite database (bad header magic)")
+	}
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		slog.Warn("HA sync: sqlite3 CLI not found; skipping PRAGMA integrity_check, header magic only", "path", path)
+		return nil
+	}
+	out, err := exec.Command("sqlite3", path, "PRAGMA integrity_check;").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("PRAGMA integrity_check failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		return fmt.Errorf("PRAGMA integrity_check reported corruption: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// stopServiceIfActive stops a systemd service only if it is currently
+// active, reporting whether it stopped one (so the caller can restart
+// exactly what it stopped). It returns false when systemctl is absent,
+// the service is not active, or the stop fails (A-M17).
+func stopServiceIfActive(unit string) bool {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false
+	}
+	if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err != nil {
+		return false
+	}
+	if err := exec.Command("systemctl", "stop", unit).Run(); err != nil {
+		slog.Warn("HA sync: failed to stop service before database replace", "service", unit, "error", err)
+		return false
+	}
+	return true
 }
 
 func (m *SqliteSyncManager) startLitestream() error {
