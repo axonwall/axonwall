@@ -460,6 +460,15 @@ export function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?:
 // stricter: only OPEN sockets are ever broadcast as live peers.
 export const MESH_DISCONNECTED_GRACE_MS = 24 * 60 * 60 * 1000;
 
+// B2-H2: satellite socket liveness. The controller pings every
+// connected satellite on this interval and terminates sockets that
+// miss two pongs; the lastSeen grace is the backstop for sockets
+// that never answer at all. It is 5x the ping interval and 10x the
+// satellite's 15 s telemetry cadence, so a live socket is never
+// killed for one slow interval.
+export const SATELLITE_HEARTBEAT_MS = 30 * 1000;
+export const SATELLITE_LAST_SEEN_GRACE_MS = 150 * 1000;
+
 export function shouldPruneDisconnectedSatellite(
   disconnectedAt: string | undefined,
   nowMs: number,
@@ -1796,6 +1805,48 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
   }, 60 * 1000);
   meshPruneTimer.unref?.();
 
+  // B2-H2: WS ping/pong heartbeat plus a lastSeen sweep. The
+  // controller used to never probe satellite sockets: no ping/pong,
+  // no TCP keepalive, no lastSeen sweep, and the prune timer above
+  // only deletes entries with no socket at all. A half-open socket
+  // keeps `ws` set and `readyState === OPEN`, so a dead satellite
+  // was broadcast as a live WireGuard peer forever and HA
+  // transitions "sent" to it reported success. Every 30 s each
+  // connected socket is pinged; a socket that misses two pongs, or
+  // whose lastSeen is stale past the grace period, is terminated so
+  // the close handler clears it. The grace period is deliberately
+  // far above the satellite's 15 s telemetry cadence so a live
+  // socket is never killed for one slow interval.
+  const heartbeatTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [id, sat] of activeSatellites.entries()) {
+      const socket = sat.ws;
+      if (!socket) continue;
+      const lastSeenMs = Date.parse(sat.lastSeen) || 0;
+      if (now - lastSeenMs > SATELLITE_LAST_SEEN_GRACE_MS) {
+        console.log(`[Fleet Manager] Terminating stale satellite socket ${id}: no message for ${Math.round((now - lastSeenMs) / 1000)}s`);
+        try { socket.terminate(); } catch {}
+        continue;
+      }
+      if ((socket as any).isAlive === false) {
+        console.log(`[Fleet Manager] Terminating satellite socket ${id}: missed heartbeat pong`);
+        try { socket.terminate(); } catch {}
+        continue;
+      }
+      (socket as any).isAlive = false;
+      try {
+        socket.ping((err: any) => {
+          if (err) {
+            try { socket.terminate(); } catch {}
+          }
+        });
+      } catch {
+        try { socket.terminate(); } catch {}
+      }
+    }
+  }, SATELLITE_HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
+
   wss.on('connection', async (ws: WebSocket, request: http.IncomingMessage, satId: string) => {
     const remoteIp = request.socket.remoteAddress || '127.0.0.1';
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
@@ -1859,6 +1910,19 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       headscaleEnrolled: existing?.headscaleEnrolled || false,
     };
     activeSatellites.set(satId, state);
+
+    // B2-H2: liveness probes for this socket. TCP keepalive catches
+    // a dead peer at the transport layer; the ws ping/pong pair (the
+    // heartbeat timer above) catches a peer that holds the socket
+    // open without answering. The error listener exists so a socket
+    // error surfaces as a close, not an unhandled 'error' throw.
+    try { (ws as any)._socket?.setKeepAlive?.(true, 30000); } catch {}
+    (ws as any).isAlive = true;
+    ws.on('pong', () => {
+      (ws as any).isAlive = true;
+      state.lastSeen = new Date().toISOString();
+    });
+    ws.on('error', () => {});
 
     // Register event listeners immediately before any async provisioning
     ws.on('message', (message) => {

@@ -45609,6 +45609,8 @@ function validateHaTransition(payload, fleetLanVip) {
   };
 }
 var MESH_DISCONNECTED_GRACE_MS = 24 * 60 * 60 * 1e3;
+var SATELLITE_HEARTBEAT_MS = 30 * 1e3;
+var SATELLITE_LAST_SEEN_GRACE_MS = 150 * 1e3;
 function shouldPruneDisconnectedSatellite(disconnectedAt, nowMs, graceMs = MESH_DISCONNECTED_GRACE_MS) {
   if (!disconnectedAt) return false;
   const t = Date.parse(disconnectedAt);
@@ -46646,6 +46648,47 @@ ${headerLines.join("\r\n")}\r
     }
   }, 60 * 1e3);
   meshPruneTimer.unref?.();
+  const heartbeatTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [id, sat] of activeSatellites.entries()) {
+      const socket = sat.ws;
+      if (!socket) continue;
+      const lastSeenMs = Date.parse(sat.lastSeen) || 0;
+      if (now - lastSeenMs > SATELLITE_LAST_SEEN_GRACE_MS) {
+        console.log(`[Fleet Manager] Terminating stale satellite socket ${id}: no message for ${Math.round((now - lastSeenMs) / 1e3)}s`);
+        try {
+          socket.terminate();
+        } catch {
+        }
+        continue;
+      }
+      if (socket.isAlive === false) {
+        console.log(`[Fleet Manager] Terminating satellite socket ${id}: missed heartbeat pong`);
+        try {
+          socket.terminate();
+        } catch {
+        }
+        continue;
+      }
+      socket.isAlive = false;
+      try {
+        socket.ping((err) => {
+          if (err) {
+            try {
+              socket.terminate();
+            } catch {
+            }
+          }
+        });
+      } catch {
+        try {
+          socket.terminate();
+        } catch {
+        }
+      }
+    }
+  }, SATELLITE_HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
   wss.on("connection", async (ws, request3, satId) => {
     const remoteIp = request3.socket.remoteAddress || "127.0.0.1";
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
@@ -46704,6 +46747,17 @@ ${headerLines.join("\r\n")}\r
       headscaleEnrolled: existing?.headscaleEnrolled || false
     };
     activeSatellites.set(satId, state);
+    try {
+      ws._socket?.setKeepAlive?.(true, 3e4);
+    } catch {
+    }
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+      state.lastSeen = (/* @__PURE__ */ new Date()).toISOString();
+    });
+    ws.on("error", () => {
+    });
     ws.on("message", (message) => {
       state.lastSeen = (/* @__PURE__ */ new Date()).toISOString();
       try {
@@ -46840,6 +46894,8 @@ export {
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
   MESH_DISCONNECTED_GRACE_MS,
+  SATELLITE_HEARTBEAT_MS,
+  SATELLITE_LAST_SEEN_GRACE_MS,
   authenticateMcpToken,
   buildArtifactBundle,
   createHttpRedirectServer,
