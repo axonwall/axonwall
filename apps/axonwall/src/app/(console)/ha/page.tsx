@@ -41,6 +41,10 @@ export default function HighAvailabilityPage() {
   const [peerIp, setPeerIp] = useState('');
   const [syncPassword, setSyncPassword] = useState('');
   const [virtualIp, setVirtualIp] = useState('');
+  // C-A6: the VIP as loaded, so an unchanged legacy value that is not
+  // CIDR-shaped does not block unrelated saves; only an edited VIP is
+  // validated and applied.
+  const [initialVirtualIp, setInitialVirtualIp] = useState('');
   const [sqliteSyncEnabled, setSqliteSyncEnabled] = useState(false);
   const [sqliteSyncMode, setSqliteSyncMode] = useState<'direct_stream' | 'litestream'>('direct_stream');
   const [syncInterval, setSyncInterval] = useState(5);
@@ -72,6 +76,7 @@ export default function HighAvailabilityPage() {
             if (firstVrrp.interface) setVrrpInterface(firstVrrp.interface);
             if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
             if (firstVrrp.virtualIps?.[0]) setVirtualIp(firstVrrp.virtualIps[0]);
+            setInitialVirtualIp(firstVrrp.virtualIps?.[0] || '');
           }
           if (state.ha.syncInterface) setSyncInterface(state.ha.syncInterface);
           if (state.ha.peerIp || state.ha.peerAddress) {
@@ -169,11 +174,33 @@ export default function HighAvailabilityPage() {
           setSyncErrorMsg('Enter the VRRP interface that carries the virtual IP (usually the LAN interface) — not the sync interface, which is the dedicated point-to-point link.');
           return;
         }
+        // C-A6: the VIP field used to be a dead control once an instance
+        // existed — edits were silently dropped on save. An edited VIP
+        // must be CIDR-shaped or the save is refused.
+        if (
+          existingVrrp.length > 0 &&
+          virtualIp.trim() !== '' &&
+          virtualIp.trim() !== initialVirtualIp &&
+          !isValidCidr(virtualIp)
+        ) {
+          setSyncErrorMsg('Enter a virtual IP in CIDR form (e.g. 192.168.1.254/24) to change the first VRRP instance.');
+          return;
+        }
       }
       const vrrpInstances =
         existingVrrp.length > 0
           ? existingVrrp.map((v, idx) =>
-              idx === 0 ? { ...v, vrid, authPassword: syncPassword } : v
+              idx === 0
+                ? {
+                    ...v,
+                    vrid,
+                    authPassword: syncPassword,
+                    // C-A6: apply an edited, CIDR-valid VIP to the first
+                    // instance instead of carrying the old one over
+                    // untouched; an empty or unchanged value keeps it.
+                    virtualIps: isValidCidr(virtualIp) ? [virtualIp.trim()] : v.virtualIps,
+                  }
+                : v
             )
           : enabled
             ? [
@@ -227,7 +254,10 @@ export default function HighAvailabilityPage() {
         },
       });
       setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
-      if (vrrpInstances.length > 0) setHasExistingVrrp(true);
+      if (vrrpInstances.length > 0) {
+        setHasExistingVrrp(true);
+        setInitialVirtualIp(virtualIp.trim());
+      }
       setTimeout(() => setSyncStatusMsg(null), 4000);
     } catch {
       setSyncStatusMsg('Error saving High Availability configuration');
