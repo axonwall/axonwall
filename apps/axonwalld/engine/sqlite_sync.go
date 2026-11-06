@@ -802,8 +802,16 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 	if _, err := os.Stat(HAPKICACertPath); os.IsNotExist(err) {
 		if csrResp, err := EnrollPKIFromPeer(cfg.PeerAddress, peerPort, cfg.AuthToken); err == nil && csrResp != nil {
 			slog.Info("HA Backup Poller: Enrolled HA PKI via CSR & LDAP replication credentials from primary peer")
-			_, _ = EnsureOpenLDAPBootstrapped(csrResp.LDAPBaseDN, 2, DefaultPasswordPolicyConfig())
-			_ = ConfigureMultiProviderSyncrepl(2, cfg.PeerAddress, csrResp.LDAPBaseDN)
+			// L19: the post-enrollment steps used to discard their
+			// errors while the log line above claimed success, so
+			// syncrepl could silently never be configured. Log
+			// failures loudly instead.
+			if _, err := EnsureOpenLDAPBootstrapped(csrResp.LDAPBaseDN, 2, DefaultPasswordPolicyConfig()); err != nil {
+				slog.Error("HA Backup Poller: OpenLDAP bootstrap after PKI enrollment failed", "error", err)
+			}
+			if err := ConfigureMultiProviderSyncrepl(2, cfg.PeerAddress, csrResp.LDAPBaseDN); err != nil {
+				slog.Error("HA Backup Poller: syncrepl configuration after PKI enrollment failed", "error", err)
+			}
 		}
 	}
 
@@ -814,10 +822,20 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 	// Automatically fetch K3s cluster join token if not yet present on backup node
 	if _, err := os.Stat("/var/lib/axonwall/k3s-join.token"); err != nil {
 		if tok, err := FetchPeerClusterTokenWithClient(cfg.PeerAddress, peerPort, cfg.AuthToken, client, scheme); err == nil && tok != "" {
-			_ = os.MkdirAll("/var/lib/axonwall", 0755)
-			_ = os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600)
-			slog.Info("HA Backup Poller: Automatically retrieved K3s cluster join token from primary peer")
-			_ = exec.Command("systemctl", "reload-or-restart", "k3s").Run()
+			// L19: the token write and the k3s reload used to
+			// discard their errors. A failed write self-heals
+			// next round (the stat check re-runs), but it must
+			// still be logged, not silently skipped.
+			if err := os.MkdirAll("/var/lib/axonwall", 0755); err != nil {
+				slog.Error("HA Backup Poller: Failed to create directory for K3s join token", "error", err)
+			} else if err := os.WriteFile("/var/lib/axonwall/k3s-join.token", []byte(tok+"\n"), 0600); err != nil {
+				slog.Error("HA Backup Poller: Failed to persist K3s join token", "error", err)
+			} else {
+				slog.Info("HA Backup Poller: Automatically retrieved K3s cluster join token from primary peer")
+				if err := exec.Command("systemctl", "reload-or-restart", "k3s").Run(); err != nil {
+					slog.Error("HA Backup Poller: Failed to reload k3s after retrieving join token", "error", err)
+				}
+			}
 		}
 	}
 }
