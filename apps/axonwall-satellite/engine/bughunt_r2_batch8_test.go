@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Round-2 batch 8 (daemon-med-3) regression tests.
@@ -232,5 +234,36 @@ func TestBatch8NftFlowOffloadSetNotExpanded(t *testing.T) {
 	))
 	if len(batch.Rules) != 1 {
 		t.Fatalf("expected 1 flow-offload rule, got %d", len(batch.Rules))
+	}
+}
+
+// A-M39: the pkill fallback pattern "hostapd <confPath>" could never
+// match the daemon this code starts ("hostapd -B <confPath>"). The
+// pattern must match the real argv and must not match the old shape.
+func TestBatch8HostapdPattern(t *testing.T) {
+	confPath := "/etc/axonwall/wifi/hostapd-wlan0.conf"
+	pattern := hostapdPattern(confPath)
+	realArgv := "hostapd -B /etc/axonwall/wifi/hostapd-wlan0.conf"
+	matched, err := regexp.MatchString(pattern, realArgv)
+	if err != nil || !matched {
+		t.Fatalf("hostapdPattern(%q) = %q does not match %q (err=%v)", confPath, pattern, realArgv, err)
+	}
+	oldArgv := "hostapd /etc/axonwall/wifi/hostapd-wlan0.conf"
+	if matched, _ := regexp.MatchString(pattern, oldArgv); matched {
+		t.Fatalf("hostapdPattern must not match the argv without -B: %q", oldArgv)
+	}
+	// No hostapd is running for a nonexistent config: the wait must
+	// return immediately instead of hanging or failing.
+	if !waitHostapdGone("/nonexistent/hostapd-test.conf", time.Second) {
+		t.Fatalf("waitHostapdGone should report gone when no such process exists")
+	}
+}
+
+// A-M39: Teardown must succeed (and not claim success while an AP is
+// up) when no hostapd is running for the radio.
+func TestBatch8WifiTeardownNoDaemon(t *testing.T) {
+	e := &WiFiEngine{ConfigDir: t.TempDir()}
+	if err := e.Teardown("wlan0"); err != nil {
+		t.Fatalf("Teardown with no hostapd running failed: %v", err)
 	}
 }
