@@ -211,9 +211,12 @@ func detectActiveSlotFromSystem(cmdlinePath string) (string, string) {
 	// 1. Inspect kernel cmdline if accessible
 	if cmdlineBytes, err := os.ReadFile(cmdlinePath); err == nil {
 		cmdline := string(cmdlineBytes)
-		if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
+		// E2-11: rootfsB/rootfsA are matched as exact tokens, never
+		// bare substrings — firstboot treats rootfsB=0 as slot A
+		// (rootfsB=1 is B), and a bare Contains read rootfsB=0 as B.
+		if strings.Contains(cmdline, "axon_root_b") || cmdlineHasToken(cmdline, "rootfsB=1") || cmdlineHasToken(cmdline, "rootfsA=0") || strings.Contains(cmdline, "slot=B") {
 			return "B", resolveLabelDevice("axon_root_b")
-		} else if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
+		} else if strings.Contains(cmdline, "axon_root_a") || cmdlineHasToken(cmdline, "rootfsB=0") || cmdlineHasToken(cmdline, "rootfsA=1") || strings.Contains(cmdline, "slot=A") {
 			return "A", resolveLabelDevice("axon_root_a")
 		}
 	}
@@ -354,6 +357,18 @@ var (
 	zbmSnapshotRegex   = regexp.MustCompile(`^([a-zA-Z0-9._/-]+@)?[a-zA-Z0-9._-]+$`)
 )
 
+// cmdlineHasToken reports whether cmdline carries token as a whole
+// whitespace-delimited word. E2-11: bare strings.Contains matching
+// mistook "rootfsB=0" (firstboot: slot A) for slot B.
+func cmdlineHasToken(cmdline, token string) bool {
+	for _, field := range strings.Fields(cmdline) {
+		if field == token {
+			return true
+		}
+	}
+	return false
+}
+
 // detectRunningSlotFromCmdline reports which slot the running kernel
 // actually booted from, based only on the kernel cmdline. The second
 // return is false when the cmdline is unreadable or carries no slot
@@ -367,10 +382,11 @@ func detectRunningSlotFromCmdline(cmdlinePath string) (string, bool) {
 		return "", false
 	}
 	cmdline := string(cmdlineBytes)
-	if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
+	// E2-11: exact-token matches only (see cmdlineHasToken).
+	if strings.Contains(cmdline, "axon_root_b") || cmdlineHasToken(cmdline, "rootfsB=1") || cmdlineHasToken(cmdline, "rootfsA=0") || strings.Contains(cmdline, "slot=B") {
 		return "B", true
 	}
-	if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
+	if strings.Contains(cmdline, "axon_root_a") || cmdlineHasToken(cmdline, "rootfsB=0") || cmdlineHasToken(cmdline, "rootfsA=1") || strings.Contains(cmdline, "slot=A") {
 		return "A", true
 	}
 	return "", false
@@ -497,8 +513,11 @@ func (we *WatchdogEngine) detectInitialState() {
 		slotBVer = "Rolling (Single-Root)"
 	} else if installMode == "zbm" {
 		zbmPoolName = "zroot"
-		zbmPoolTopology = "mirror"
-		zbmPoolHealth = "ONLINE"
+		// E2-9: topology/health deliberately stay empty when the
+		// reads below fail — they are omitempty, so the UI renders
+		// them unknown instead of a fabricated ONLINE/mirror.
+		// (Previously they defaulted to "mirror"/"ONLINE" before
+		// the reads, and the defaults survived a read failure.)
 
 		if topOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:topology", "zroot/ROOT"); err == nil {
 			top := strings.TrimSpace(string(topOut))
@@ -524,9 +543,9 @@ func (we *WatchdogEngine) detectInitialState() {
 				slotBVer = be.Version
 			}
 		}
-		if rootDevice == "" {
-			rootDevice = "zroot/ROOT/axonwall-" + appVer
-		}
+		// E2-9: no guessed root device — when the BE list is empty
+		// (zfs list failed, no cache) ActiveRootDevice stays ""
+		// instead of naming a dataset that may not exist.
 	} else if activeSlot == "A" {
 		slotAVer = appVer
 		if slotBVer == "" || slotBVer == slotAVer {
@@ -925,6 +944,21 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 	return fullSnap, nil
 }
 
+// zbmRequireRootSnapshot rejects a normalised snapshot reference whose
+// dataset is not a Boot Environment under zroot/ROOT. E2-12: the
+// snapshot argument was accepted if it merely matched
+// zbmSnapshotRegex, so a data-dataset snapshot (e.g.
+// zroot/tank@backup) could be cloned into a BE — or rolled back or
+// destroyed — through the BE-scoped API, producing an unbootable BE
+// or destroying data outside the BE tree.
+func zbmRequireRootSnapshot(fullSnap string) error {
+	ds, _, _ := strings.Cut(fullSnap, "@")
+	if !strings.HasPrefix(ds, "zroot/ROOT/") {
+		return fmt.Errorf("snapshot %q is not a Boot Environment snapshot under zroot/ROOT", fullSnap)
+	}
+	return nil
+}
+
 // DeleteBootEnvironmentSnapshot destroys an existing ZFS snapshot on a Boot Environment dataset.
 func (we *WatchdogEngine) DeleteBootEnvironmentSnapshot(snapshot string) error {
 	snapshot = strings.TrimSpace(snapshot)
@@ -939,6 +973,9 @@ func (we *WatchdogEngine) DeleteBootEnvironmentSnapshot(snapshot string) error {
 	}
 	if !strings.Contains(fullSnap, "@") {
 		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return err
 	}
 
 	out, err := we.runZfsCmd("destroy", fullSnap)
@@ -969,6 +1006,9 @@ func (we *WatchdogEngine) RollbackBootEnvironmentSnapshot(snapshot string) error
 	if !strings.Contains(fullSnap, "@") {
 		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
 	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return err
+	}
 
 	out, err := we.runZfsCmd("rollback", "-r", fullSnap)
 	if err != nil {
@@ -998,6 +1038,12 @@ func (we *WatchdogEngine) CloneSnapshotToBootEnvironment(snapshot, newBeName str
 		fullSnap = "zroot/ROOT/" + fullSnap
 	} else if !strings.HasPrefix(fullSnap, "zroot/") {
 		fullSnap = "zroot/ROOT/" + strings.TrimPrefix(fullSnap, "/")
+	}
+	if !strings.Contains(fullSnap, "@") {
+		return "", fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return "", err
 	}
 
 	targetDataset := "zroot/ROOT/" + newBeName
@@ -1462,6 +1508,40 @@ func (we *WatchdogEngine) verifyControlPlane() HealthCheckResult {
 	}
 }
 
+// selectStandbyBE picks the Boot Environment a slot-letter or rollback
+// caller should arm when no explicit BE is named. E2-10: taking the
+// first non-active entry of the cached list armed the alphabetically
+// first standby — usually the oldest version — once several standbys
+// existed. Prefer the BE already armed for next boot, else the newest
+// by creation time; fall back to the last standby in dataset-name
+// order when no creation time parses. Returns nil when no standby
+// exists. Callers must refresh the list first (the cache is stale
+// after script-side arming).
+func selectStandbyBE(bes []ZfsBootEnvironment) *ZfsBootEnvironment {
+	var newest *ZfsBootEnvironment
+	var newestTime time.Time
+	var last *ZfsBootEnvironment
+	for i := range bes {
+		be := &bes[i]
+		if be.ActiveNow {
+			continue
+		}
+		if be.ActiveNext {
+			return be
+		}
+		last = be
+		if t, err := time.Parse("Mon Jan _2 15:04 2006", be.CreatedAt); err == nil {
+			if newest == nil || t.After(newestTime) {
+				newest, newestTime = be, t
+			}
+		}
+	}
+	if newest != nil {
+		return newest
+	}
+	return last
+}
+
 // TriggerRollback manually switches the target boot slot to the alternate partition or fallback BE and reboots.
 func (we *WatchdogEngine) TriggerRollback() error {
 	we.mu.Lock()
@@ -1483,11 +1563,12 @@ func (we *WatchdogEngine) TriggerRollback() error {
 			fallbackBe = strings.TrimSpace(string(fallbackOut))
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
-			for _, be := range we.status.BootEnvironments {
-				if !be.ActiveNow {
-					fallbackBe = be.Dataset
-					break
-				}
+			// E2-10: refresh the list (script-side arming never
+			// tells the daemon) and prefer the armed/newest standby
+			// instead of the first non-active cached entry.
+			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+			if be := selectStandbyBE(we.status.BootEnvironments); be != nil {
+				fallbackBe = be.Dataset
 			}
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
@@ -1546,11 +1627,14 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 				}
 			}
 		} else if strings.EqualFold(targetBE, "B") {
-			for _, be := range we.status.BootEnvironments {
-				if !be.ActiveNow {
-					targetBE = be.Name
-					break
-				}
+			// E2-10: refresh the list (script-side arming never
+			// tells the daemon) and prefer the armed/newest standby
+			// instead of the first non-active cached entry.
+			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+			if be := selectStandbyBE(we.status.BootEnvironments); be != nil {
+				targetBE = be.Name
+			} else {
+				return fmt.Errorf("no standby Boot Environment available for slot B")
 			}
 		}
 		we.mu.Unlock()
@@ -1705,8 +1789,14 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 
 // readGrubEnvInternal parses GRUB key=value pairs from the environment block.
 func (we *WatchdogEngine) readGrubEnvInternal() map[string]string {
+	return readGrubEnvAtPath(we.grubenvPath)
+}
+
+// readGrubEnvAtPath parses GRUB key=value pairs from the environment
+// block at envPath.
+func readGrubEnvAtPath(envPath string) map[string]string {
 	res := make(map[string]string)
-	data, err := os.ReadFile(we.grubenvPath)
+	data, err := os.ReadFile(envPath)
 	if err != nil {
 		return res
 	}
@@ -1765,7 +1855,12 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 		return fmt.Errorf("cannot mirror grubenv to Slot A: mount %s failed: %w", slotADev, mErr)
 	}
 	targetEnv := filepath.Join(mntDir, "boot", "grub", "grubenv")
-	mirrorErr := writeGrubEnvKeyAtPath(targetEnv, we.readGrubEnvInternal(), key, value)
+	// D2-L1: base the mirror write on the TARGET file's own env, not
+	// the booted slot's — the direct-write fallback serialises the
+	// whole base map, and the booted slot's map still carries
+	// clone-time values (e.g. active_slot=A) that would flip the next
+	// boot back to A.
+	mirrorErr := writeGrubEnvKeyAtPath(targetEnv, readGrubEnvAtPath(targetEnv), key, value)
 	if uErr := exec.Command("umount", mntDir).Run(); uErr != nil {
 		// The mirror write already landed; a stuck mount is loud
 		// but does not change what GRUB will boot.

@@ -113,8 +113,9 @@ export default function SystemUpdatesPage() {
           if (data.telemetry.zbmPoolName) {
             setZbmPool({
               name: data.telemetry.zbmPoolName,
-              topology: data.telemetry.zbmPoolTopology || 'mirror',
-              health: data.telemetry.zbmPoolHealth || 'ONLINE',
+              // E2-9: unknown, not healthy, when the daemon omits these.
+              topology: data.telemetry.zbmPoolTopology || 'Unknown',
+              health: data.telemetry.zbmPoolHealth || 'Unknown',
             });
           }
           if (data.telemetry.bootEnvironments) {
@@ -154,8 +155,9 @@ export default function SystemUpdatesPage() {
       if (telemetry.zbmPoolName) {
         setZbmPool({
           name: telemetry.zbmPoolName,
-          topology: telemetry.zbmPoolTopology || 'mirror',
-          health: telemetry.zbmPoolHealth || 'ONLINE',
+          // E2-9: unknown, not healthy, when the daemon omits these.
+          topology: telemetry.zbmPoolTopology || 'Unknown',
+          health: telemetry.zbmPoolHealth || 'Unknown',
         });
       }
       if (telemetry.bootEnvironments) {
@@ -814,10 +816,10 @@ export default function SystemUpdatesPage() {
                       Root Pool: {zbmPool?.name || 'zroot'}
                     </h2>
                     <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      {zbmPool?.health || 'ONLINE'}
+                      {zbmPool?.health || 'Unknown'}
                     </span>
                     <span className="px-2 py-0.5 rounded-full text-xs font-mono font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 uppercase">
-                      {zbmPool?.topology || 'Mirror'}
+                      {zbmPool?.topology || 'Unknown'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-0.5">
