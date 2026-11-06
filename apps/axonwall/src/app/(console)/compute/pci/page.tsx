@@ -78,6 +78,10 @@ export default function PciPassthroughPage() {
   const handleSriovSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sriovDev) return;
+    if (!Number.isInteger(sriovNumVfs) || sriovNumVfs < 0) {
+      setStatusBanner({ type: 'error', message: 'Invalid SR-IOV VF count: expected an integer >= 0.' });
+      return;
+    }
 
     setActionLoading(sriovDev.bdf);
     try {

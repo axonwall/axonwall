@@ -644,6 +644,29 @@ export async function configureSriovAction(
   assertActionPermitted(session, 'admin');
   validatePciBdf(bdf);
 
+  // A negative count is not a no-op: the daemon writes 0 to sriov_numvfs
+  // (teardown) and then skips re-allocation, destroying every VF while
+  // reporting success. Reject before anything reaches the daemon. The upper
+  // bound is enforced when the inventory knows this device's total; a
+  // missing inventory entry must not block the daemon's own check.
+  if (!Number.isInteger(numVfs) || numVfs < 0) {
+    throw new Error(`Invalid SR-IOV VF count for ${bdf}: expected an integer >= 0, got ${numVfs}`);
+  }
+  let devices: PciDeviceItem[] = [];
+  try {
+    devices = await getPciInventoryAction();
+  } catch {
+    // Inventory unavailable (daemon down): the daemon call below fails
+    // closed, and the daemon still enforces its own upper bound.
+    devices = [];
+  }
+  const device = devices.find((d) => d.bdf === bdf);
+  if (device && Number.isInteger(device.sriovTotalVfs) && numVfs > device.sriovTotalVfs) {
+    throw new Error(
+      `Invalid SR-IOV VF count for ${bdf}: ${numVfs} exceeds the device total of ${device.sriovTotalVfs}`
+    );
+  }
+
   const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'sriov',
     bdf,
