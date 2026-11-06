@@ -35,7 +35,23 @@ import (
 
 type AgentServer struct {
 	pb.UnimplementedAgentServiceServer
-	mu               sync.Mutex
+	mu sync.Mutex
+	// applyMu serialises whole ApplyBundle calls (M1). The A-M2 fix
+	// releases s.mu around service reloads so a hung reload cannot
+	// wedge the API — but nothing serialised two applies across that
+	// window, so a second apply could arm its own timer and pending
+	// state while the first was still reloading, disarming the first
+	// bundle's auto-rollback and leaving it unconfirmable. A second
+	// ApplyBundle now waits on applyMu; GetStatus/Confirm/Rollback
+	// only take s.mu, so they stay live during an apply (Confirm and
+	// Rollback fail fast while one is in progress — see
+	// applyInProgress — instead of acting on state mid-apply).
+	applyMu sync.Mutex
+	// applyInProgress is set under s.mu for the whole of ApplyBundle
+	// (including the windows where s.mu itself is released) so
+	// Confirm, Rollback, and the auto-rollback timer can tell an
+	// apply is running without taking applyMu.
+	applyInProgress  bool
 	bundleDir        string
 	activeHash       string
 	lastGoodHash     string
@@ -409,6 +425,9 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 // in this window is premature — ApplyBundle has not returned success
 // yet — and the commit-confirm timer is not armed until after the
 // reloads, so releasing the lock here changes no committed state.
+// (M1: Confirm now fails fast while an apply is in progress, and a
+// second ApplyBundle waits on applyMu, so nothing can act on the
+// half-applied state from this window.)
 func reloadBundleServices(services []string) {
 	for _, svc := range services {
 		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
@@ -422,7 +441,22 @@ func reloadBundleServices(services []string) {
 }
 
 func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
+	// M1: serialise whole applies. A second ApplyBundle waits here
+	// instead of interleaving with the first across the lock-release
+	// windows below and corrupting its pending-confirm state.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+
 	s.mu.Lock()
+	s.applyInProgress = true
+	// Registered before the deferred s.mu.Unlock below, so it runs
+	// after the lock is released at return: clear the flag under the
+	// lock, then let the deferred applyMu unlock run.
+	defer func() {
+		s.mu.Lock()
+		s.applyInProgress = false
+		s.mu.Unlock()
+	}()
 	defer s.mu.Unlock()
 
 	log.Printf("[Agent] Received ApplyBundle request (hash: %s, timeout: %ds)", req.BundleHash, req.ConfirmTimeoutSeconds)
@@ -814,6 +848,18 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 
 	log.Printf("[Agent] Received Confirm request for job %s", req.JobId)
 
+	// M1: a confirm arriving while an apply is in progress is
+	// premature — the pending state it would act on belongs to the
+	// previous bundle, while the new bundle's files are already on
+	// disk. Fail fast instead of confirming (and snapshotting) a
+	// half-applied state; the caller retries after the apply returns.
+	if s.applyInProgress {
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: "Configuration apply in progress; retry the confirm after it completes.",
+		}, nil
+	}
+
 	if !s.pendingConfirm {
 		return &pb.ConfirmResponse{
 			Success: false,
@@ -874,6 +920,17 @@ func (s *AgentServer) Rollback(ctx context.Context, req *pb.RollbackRequest) (*p
 	defer s.mu.Unlock()
 
 	log.Printf("[Agent] Manual Rollback requested: %s", req.Reason)
+
+	// M1: same premature-action guard as Confirm — rolling back
+	// while an apply is mid-flight would restore LKG files under
+	// the new bundle's writes. Fail fast; the caller retries after
+	// the apply returns.
+	if s.applyInProgress {
+		return &pb.RollbackResponse{
+			Success: false,
+			Message: "Configuration apply in progress; retry the rollback after it completes.",
+		}, nil
+	}
 
 	if s.rollbackTimer != nil {
 		s.rollbackTimer.Stop()
