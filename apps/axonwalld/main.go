@@ -589,26 +589,80 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 	return out, nil
 }
 
-// reloadBundleServices reloads the requested units. It touches no
-// AgentServer state, so ApplyBundle calls it without holding s.mu
-// (A-M2): a hung unit reload must not wedge GetStatus, Confirm, or
-// the auto-rollback timer behind the agent lock. A Confirm arriving
-// in this window is premature — ApplyBundle has not returned success
-// yet — and the commit-confirm timer is not armed until after the
-// reloads, so releasing the lock here changes no committed state.
-// (M1: Confirm now fails fast while an apply is in progress, and a
-// second ApplyBundle waits on applyMu, so nothing can act on the
-// half-applied state from this window.)
-func reloadBundleServices(services []string) {
+// reloadBundleServices reloads the requested units and returns every
+// failure. It touches no AgentServer state, so ApplyBundle calls it
+// without holding s.mu (A-M2): a hung unit reload must not wedge
+// GetStatus, Confirm, or the auto-rollback timer behind the agent
+// lock. A Confirm arriving in this window is premature — ApplyBundle
+// has not returned success yet — and the commit-confirm timer is not
+// armed until after the reloads, so releasing the lock here changes
+// no committed state. (M1: Confirm now fails fast while an apply is
+// in progress, and a second ApplyBundle waits on applyMu, so nothing
+// can act on the half-applied state from this window.) L6: the
+// results used to be discarded, so a bundle naming a typo'd, renamed,
+// or non-allowlisted unit reported full success while the service
+// kept running its old config.
+func reloadBundleServices(services []string) []error {
+	var errs []error
 	for _, svc := range services {
 		// Validate service name to prevent loading arbitrary unit files via path (e.g., /tmp/pwn.service)
 		if strings.Contains(svc, "/") || strings.Contains(svc, "\\") || strings.HasPrefix(svc, ".") {
 			log.Printf("[Agent] Rejected malformed/malicious service reload request: %s", svc)
+			errs = append(errs, fmt.Errorf("rejected malformed service reload request: %s", svc))
 			continue
 		}
 		log.Printf("[Agent] Reloading system service: %s", svc)
-		_, _ = reloadOrRestartService(svc)
+		if _, err := reloadOrRestartService(svc); err != nil {
+			log.Printf("[Agent] ERROR: Failed to reload system service %s: %v", svc, err)
+			errs = append(errs, fmt.Errorf("failed to reload service %s: %w", svc, err))
+		}
 	}
+	return errs
+}
+
+// mirrorBundleFile writes one bundle file into the A/B persistence
+// mirror. L5: every step of the mirror write used to discard its
+// error (open, write, chmod, close), so a bundle could be live in
+// /etc and reported successful while its mirror was stale or missing
+// — and the boot-time sync could not heal a file that never reached
+// the mirror. All failures are returned now; a symlinked mirror
+// entry is left alone, never followed.
+func mirrorBundleFile(mirrorPath string, mode os.FileMode, content []byte, isSharedAxonwallCfg bool) error {
+	if fi, lerr := os.Lstat(mirrorPath); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(mirrorPath), 0775); err != nil {
+		return fmt.Errorf("create mirror directory: %w", err)
+	}
+	pf, err := os.OpenFile(mirrorPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+	if err != nil {
+		return fmt.Errorf("open mirror file: %w", err)
+	}
+	if _, err := pf.Write(content); err != nil {
+		_ = pf.Close()
+		return fmt.Errorf("write mirror file: %w", err)
+	}
+	if err := pf.Chmod(mode); err != nil {
+		_ = pf.Close()
+		return fmt.Errorf("chmod mirror file: %w", err)
+	}
+	if err := pf.Close(); err != nil {
+		return fmt.Errorf("close mirror file: %w", err)
+	}
+	if isSharedAxonwallCfg {
+		ensureSharedConfigPerm(mirrorPath, mode)
+	}
+	return nil
+}
+
+// stopNgfwDaemons stops the NGFW-only units when a bundle disables
+// the core firewall (host mode). L9: the caller must fail the bundle
+// when this fails — a discarded error left the box reporting host
+// mode while NGFW enforcement was still live.
+func stopNgfwDaemons() error {
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+	defer stopCancel()
+	return exec.CommandContext(stopCtx, "systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
 }
 
 // pendingSubsystemApply is one subsystem apply queued while the
@@ -740,6 +794,10 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// Rollback, and the auto-rollback timer behind s.mu.
 	var subsystemErr error
 	var pendingApplies []pendingSubsystemApply
+	// applyWarnings collects non-fatal apply problems (L5 mirror
+	// failures, L6 service-reload failures) to surface in the
+	// ApplyBundle response instead of silently discarding them.
+	var applyWarnings []string
 	for _, vf := range validatedFiles {
 		f := vf.file
 		cleanPath := vf.cleanPath
@@ -770,31 +828,24 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			ensureSharedConfigPerm(cleanPath, mode)
 		}
 
-		// Mirror /etc/axonwall/*.yaml, *.json, and interfaces.conf to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence
+		// Mirror /etc/axonwall/*.yaml, *.json, and interfaces.conf to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence.
+		// L5: the mirror write used to discard every error, so a
+		// bundle could be live in /etc and reported successful
+		// while its mirror was stale or missing. Failures are
+		// logged loudly and carried into the ApplyBundle response
+		// as warnings instead.
 		if strings.HasPrefix(cleanPath, "/etc/axonwall/") &&
 			(strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml") || strings.HasSuffix(cleanPath, ".json") || filepath.Base(cleanPath) == "interfaces.conf") {
 			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
 			persistPath := filepath.Join("/var/lib/axonwall/etc-axonwall", relPath)
-			_ = os.MkdirAll(filepath.Dir(persistPath), 0775)
-			if fi, lerr := os.Lstat(persistPath); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
-				if pf, perr := os.OpenFile(persistPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode); perr == nil {
-					_, _ = pf.Write([]byte(f.Content))
-					_ = pf.Chmod(mode)
-					_ = pf.Close()
-				}
-				if isSharedAxonwallCfg {
-					ensureSharedConfigPerm(persistPath, mode)
-				}
+			if err := mirrorBundleFile(persistPath, mode, []byte(f.Content), isSharedAxonwallCfg); err != nil {
+				log.Printf("[Agent] ERROR: Failed to mirror bundle file %s to %s: %v; the live config is applied but will not survive an A/B slot switch", cleanPath, persistPath, err)
+				applyWarnings = append(applyWarnings, fmt.Sprintf("mirror write failed for %s: %v", relPath, err))
 			}
 			if filepath.Base(cleanPath) == "state.json" {
-				varStatePath := "/var/lib/axonwall/state.json"
-				if fi, lerr := os.Lstat(varStatePath); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
-					if sf, serr := os.OpenFile(varStatePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0660); serr == nil {
-						_, _ = sf.Write([]byte(f.Content))
-						_ = sf.Chmod(0660)
-						_ = sf.Close()
-					}
-					ensureSharedConfigPerm(varStatePath, 0660)
+				if err := mirrorBundleFile("/var/lib/axonwall/state.json", 0660, []byte(f.Content), true); err != nil {
+					log.Printf("[Agent] ERROR: Failed to mirror state.json to /var/lib/axonwall/state.json: %v", err)
+					applyWarnings = append(applyWarnings, fmt.Sprintf("mirror write failed for state.json: %v", err))
 				}
 			}
 		}
@@ -805,9 +856,15 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			}
 			if err := json.Unmarshal([]byte(f.Content), &fwCfg); err == nil && !fwCfg.Enabled {
 				log.Printf("[Agent] Core-Firewall plugin is disabled (Host Mode); stopping NGFW-only daemons")
-				stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
-				_ = exec.CommandContext(stopCtx, "systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
-				stopCancel()
+				// L9: the stop error used to be discarded, so the
+				// bundle proceeded as host mode while kea/suricata/
+				// FRR/conntrackd kept enforcing. Fail the bundle
+				// (with rollback, like other subsystem failures)
+				// instead of reporting host mode with NGFW live.
+				if err := stopNgfwDaemons(); err != nil {
+					subsystemErr = fmt.Errorf("failed to stop NGFW daemons for host mode: %w", err)
+					break
+				}
 			}
 		}
 
@@ -949,7 +1006,9 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// without holding s.mu (see reloadBundleServices); the deferred
 	// unlock at the top of ApplyBundle releases the re-acquired lock.
 	s.mu.Unlock()
-	reloadBundleServices(req.ReloadServices)
+	for _, err := range reloadBundleServices(req.ReloadServices) {
+		applyWarnings = append(applyWarnings, err.Error())
+	}
 	s.mu.Lock()
 
 	// 6. Setup Commit-Confirm deadline
@@ -1004,9 +1063,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 
 	log.Printf("[Agent] Configuration applied successfully. Pending confirmation for job %s (deadline: %v)", req.JobId, s.confirmDeadline)
 
+	applyMsg := "Configuration applied. Pending confirmation before timeout."
+	if len(applyWarnings) > 0 {
+		applyMsg += " Warnings: " + strings.Join(applyWarnings, "; ")
+	}
 	return &pb.ApplyBundleResponse{
 		Success:             true,
-		Message:             "Configuration applied. Pending confirmation before timeout.",
+		Message:             applyMsg,
 		ConfirmDeadlineUnix: s.confirmDeadline.Unix(),
 	}, nil
 }
@@ -1379,12 +1442,29 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 		s.lastGoodHash = s.activeHash
 	}
 
-	// Save to bundle directory
-	if err := os.MkdirAll(s.bundleDir, 0700); err == nil {
-		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
-		_ = os.WriteFile(lkgPath, []byte(s.lastGoodScript), 0600)
-		log.Printf("[Agent] Persisted last-known-good configuration to %s", lkgPath)
+	// Save to bundle directory. L4: the write error used to be
+	// discarded while the success log below was emitted regardless,
+	// so a Confirm on an unwritable bundle dir logged "persisted"
+	// and the next daemon restart silently loaded the previous LKG
+	// as the rollback target. Surface the failure in the response:
+	// the in-memory state is already promoted, but the on-disk
+	// last-known-good is stale.
+	if err := os.MkdirAll(s.bundleDir, 0700); err != nil {
+		log.Printf("[Agent] ERROR: Failed to create bundle directory for last-known-good persist: %v", err)
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: fmt.Sprintf("Configuration confirmed in memory, but persisting last-known-good failed (%v); a daemon restart will fall back to the previous last-known-good bundle.", err),
+		}, nil
 	}
+	lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
+	if err := os.WriteFile(lkgPath, []byte(s.lastGoodScript), 0600); err != nil {
+		log.Printf("[Agent] ERROR: Failed to persist last-known-good configuration to %s: %v", lkgPath, err)
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: fmt.Sprintf("Configuration confirmed in memory, but persisting last-known-good failed (%v); a daemon restart will fall back to the previous last-known-good bundle.", err),
+		}, nil
+	}
+	log.Printf("[Agent] Persisted last-known-good configuration to %s", lkgPath)
 
 	// Snapshot confirmed YAML configuration to LKG
 	snapshotLkgConfig(s.bundleDir)
@@ -1902,6 +1982,28 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 // the device as secondary addresses) along with the stale static
 // address it meant to remove. Secondary addresses are therefore never
 // returned here, so a VIP survives an unrelated bundle apply.
+// bootAddrMatches reports whether `ip addr show` output already
+// contains the exact CIDR in wantCIDR. L10: the old check also
+// matched any prefix length for the same IP ("inet 192.168.1.1/"),
+// so a prefix change (/24 -> /25) was silently accepted and the
+// kernel kept the old prefix while the config said the new one. A
+// bare IP without a prefix still matches any prefix for that IP.
+func bootAddrMatches(addrShowOut, wantCIDR string) bool {
+	for _, line := range strings.Split(addrShowOut, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "inet" {
+			continue
+		}
+		if fields[1] == wantCIDR {
+			return true
+		}
+		if !strings.Contains(wantCIDR, "/") && strings.Split(fields[1], "/")[0] == wantCIDR {
+			return true
+		}
+	}
+	return false
+}
+
 func staleStaticAddrs(addrShowOut string, targetCIDR string) []string {
 	targetIP := strings.Split(targetCIDR, "/")[0]
 	var stale []string
@@ -2045,8 +2147,7 @@ func applyBootInterfaces() error {
 		_ = exec.Command("ip", "link", "set", spec.Device, "up").Run()
 		if spec.Mode == "static" && spec.IPv4 != "" {
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
-			ipOnly := strings.Split(spec.IPv4, "/")[0]
-			if !strings.Contains(string(out), "inet "+spec.IPv4) && !strings.Contains(string(out), "inet "+ipOnly+"/") {
+			if !bootAddrMatches(string(out), spec.IPv4) {
 				log.Printf("[Agent] Boot-apply: configuring static IP %s on %s (%s, role=%s)", spec.IPv4, spec.Name, spec.Device, spec.Role)
 				if spec.Role == "wan" {
 					// A-M16: never flush the device — that deletes
@@ -2331,6 +2432,45 @@ func syncPersistentYamlConfigs() {
 	syncFile(filepath.Join(srcDir, "mcp-settings.json"), filepath.Join(dstDir, "mcp-settings.json"), 0660)
 	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0640)
 	syncFile(filepath.Join(srcDir, "interfaces.conf"), filepath.Join(dstDir, "interfaces.conf"), 0664)
+
+	// L5: mirror /etc-only files into the mirror as well. The loop
+	// above only iterates mirror entries, so a config file that never
+	// reached the mirror (a failed mirror write during a bundle
+	// apply) was never healed: after an A/B slot switch the box
+	// booted with the pre-bundle config and no record of why.
+	// syncFile copies a missing destination from the source, so
+	// syncing each /etc-only mirrorable file heals exactly that case.
+	mirrorable := func(name string) bool {
+		return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") ||
+			strings.HasSuffix(name, ".json") || name == "interfaces.conf"
+	}
+	if etcEntries, err := os.ReadDir(dstDir); err == nil {
+		for _, entry := range etcEntries {
+			if entry.IsDir() {
+				if entry.Name() != "conf.d" {
+					continue
+				}
+				_ = os.MkdirAll(filepath.Join(srcDir, "conf.d"), 0775)
+				if confEntries, err := os.ReadDir(filepath.Join(dstDir, "conf.d")); err == nil {
+					for _, ce := range confEntries {
+						if ce.IsDir() || !mirrorable(ce.Name()) {
+							continue
+						}
+						if _, err := os.Lstat(filepath.Join(srcDir, "conf.d", ce.Name())); os.IsNotExist(err) {
+							syncFile(filepath.Join(dstDir, "conf.d", ce.Name()), filepath.Join(srcDir, "conf.d", ce.Name()), 0660)
+						}
+					}
+				}
+				continue
+			}
+			if !mirrorable(entry.Name()) {
+				continue
+			}
+			if _, err := os.Lstat(filepath.Join(srcDir, entry.Name())); os.IsNotExist(err) {
+				syncFile(filepath.Join(dstDir, entry.Name()), filepath.Join(srcDir, entry.Name()), 0660)
+			}
+		}
+	}
 	normalizeConfigTreePermissions()
 }
 
@@ -2848,6 +2988,29 @@ func main() {
 				log.Printf("[Agent] Armed Slot %s in bootloader before reboot", targetSlot)
 			}
 
+			// L8: the handler used to answer success and only then fire
+			// a goroutine that discarded every command error, so a
+			// box without working reboot/poweroff commands stayed up
+			// while the caller believed a reboot was in progress.
+			// Verify at least one command exists before responding.
+			var powerCmds []string
+			if action == "reboot" {
+				powerCmds = []string{"systemctl", "/sbin/reboot", "reboot"}
+			} else {
+				powerCmds = []string{"systemctl", "/sbin/poweroff", "poweroff", "/sbin/halt", "halt"}
+			}
+			powerAvailable := false
+			for _, cmd := range powerCmds {
+				if _, err := exec.LookPath(cmd); err == nil {
+					powerAvailable = true
+					break
+				}
+			}
+			if !powerAvailable {
+				http.Error(w, fmt.Sprintf("no %s command available on this system", action), http.StatusInternalServerError)
+				return
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
@@ -2858,18 +3021,41 @@ func main() {
 
 			go func() {
 				time.Sleep(500 * time.Millisecond)
+				// Log each attempt's failure instead of discarding
+				// it, and stop after the first command that
+				// succeeds: on a real box the reboot/poweroff then
+				// proceeds and the later fallbacks never run.
+				runPower := func(name string, args ...string) bool {
+					if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+						log.Printf("[Agent] System %s via %s failed: %v (%s)", action, name, err, strings.TrimSpace(string(out)))
+						return false
+					}
+					return true
+				}
 				if action == "reboot" {
 					log.Printf("[Agent] System reboot initiated via API")
-					_ = exec.Command("systemctl", "reboot").Run()
-					_ = exec.Command("/sbin/reboot").Run()
-					_ = exec.Command("reboot").Run()
+					if runPower("systemctl", "reboot") {
+						return
+					}
+					if runPower("/sbin/reboot") {
+						return
+					}
+					runPower("reboot")
 				} else {
 					log.Printf("[Agent] System poweroff initiated via API")
-					_ = exec.Command("systemctl", "poweroff").Run()
-					_ = exec.Command("/sbin/poweroff").Run()
-					_ = exec.Command("poweroff").Run()
-					_ = exec.Command("/sbin/halt", "-p").Run()
-					_ = exec.Command("halt", "-p").Run()
+					if runPower("systemctl", "poweroff") {
+						return
+					}
+					if runPower("/sbin/poweroff") {
+						return
+					}
+					if runPower("poweroff") {
+						return
+					}
+					if runPower("/sbin/halt", "-p") {
+						return
+					}
+					runPower("halt", "-p")
 				}
 			}()
 		})

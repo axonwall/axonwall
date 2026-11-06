@@ -661,5 +661,12 @@ func sendHANotification(state string) error {
 		}
 		return fmt.Errorf("server reply: %s", reply)
 	}
-	return nil
+	// L7: a dropped connection (no reply) used to return nil, so the
+	// keepalived notify path exited 0 and the MASTER/BACKUP/FAULT
+	// transition was treated as delivered while the daemon never ran
+	// OnTransition. A missing reply is a delivery failure.
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("no reply from axonwalld ha socket: %w", err)
+	}
+	return fmt.Errorf("no reply from axonwalld ha socket: connection closed without a reply")
 }

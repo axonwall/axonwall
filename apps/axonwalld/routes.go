@@ -309,6 +309,10 @@ func reconcileStaticRoutesLocked() error {
 	desiredRoutes := make(map[string]StaticRouteConfig)
 
 	appliedCount := 0
+	// L2: destinations whose disabled-route delete fails, kept owned
+	// so the next reconcile retries the delete (same retained-list
+	// mechanism as pruneObsoleteRoutes).
+	var failedDeletes []string
 	for _, r := range cfg.Routes {
 		r.Network = strings.TrimSpace(r.Network)
 		r.Gateway = strings.TrimSpace(r.Gateway)
@@ -345,11 +349,20 @@ func reconcileStaticRoutesLocked() error {
 		}
 
 		if r.IsEnabled() {
-			desiredRoutes[r.Network] = r
-			if strings.HasSuffix(r.Network, "/32") {
-				desiredRoutes[strings.TrimSuffix(r.Network, "/32")] = r
-			} else if strings.HasSuffix(r.Network, "/128") {
-				desiredRoutes[strings.TrimSuffix(r.Network, "/128")] = r
+			// L1: record the destination as owned only after the
+			// install succeeds. The owned set is the A-H1 fix's
+			// sole record of "routes this reconciler installed";
+			// adding the entry before the exec persisted
+			// destinations the kernel never got, so a later
+			// reconcile could delete an operator-installed route
+			// for the same destination.
+			markApplied := func() {
+				desiredRoutes[r.Network] = r
+				if strings.HasSuffix(r.Network, "/32") {
+					desiredRoutes[strings.TrimSuffix(r.Network, "/32")] = r
+				} else if strings.HasSuffix(r.Network, "/128") {
+					desiredRoutes[strings.TrimSuffix(r.Network, "/128")] = r
+				}
 			}
 
 			args := []string{family, "route", "replace", r.Network, "via", r.Gateway}
@@ -364,6 +377,7 @@ func reconcileStaticRoutesLocked() error {
 				if dev != "" {
 					fallbackArgs := []string{family, "route", "replace", r.Network, "via", r.Gateway, "dev", dev, "proto", "static"}
 					if fbOut, fbErr := exec.Command("ip", fallbackArgs...).CombinedOutput(); fbErr == nil {
+						markApplied()
 						appliedCount++
 						log.Printf("[Agent] Applied static route: %s via %s (dev=%s)", r.Network, r.Gateway, dev)
 						continue
@@ -374,13 +388,21 @@ func reconcileStaticRoutesLocked() error {
 				}
 				log.Printf("[Agent] Failed to apply static route %s via %s: %s", r.Network, r.Gateway, strings.TrimSpace(string(out)))
 			} else {
+				markApplied()
 				appliedCount++
 				log.Printf("[Agent] Applied static route: %s via %s (dev=%s, onlink)", r.Network, r.Gateway, dev)
 			}
 		} else {
-			// If explicitly disabled, remove from kernel if present with proto static
+			// If explicitly disabled, remove from kernel if present with proto static.
+			// A delete that fails once (route busy, transient
+			// netlink error) must stay owned and be retried next
+			// run; dropping it here left the route installed
+			// forever while the config said disabled.
 			args := []string{family, "route", "del", r.Network, "proto", "static"}
-			_ = exec.Command("ip", args...).Run()
+			if err := exec.Command("ip", args...).Run(); err != nil {
+				log.Printf("[Agent] Failed to delete disabled static route %s: %v; keeping it owned for retry", r.Network, err)
+				failedDeletes = append(failedDeletes, r.Network)
+			}
 		}
 	}
 
@@ -403,6 +425,9 @@ func reconcileStaticRoutesLocked() error {
 		mergedOwned[r] = StaticRouteConfig{Network: r}
 	}
 	for _, r := range retained6 {
+		mergedOwned[r] = StaticRouteConfig{Network: r}
+	}
+	for _, r := range failedDeletes {
 		mergedOwned[r] = StaticRouteConfig{Network: r}
 	}
 	saveOwnedStaticRoutes(mergedOwned)

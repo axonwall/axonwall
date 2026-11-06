@@ -58,9 +58,15 @@ func TestVigilanteManagerBlockedIPs(t *testing.T) {
 
 	// Test BlockIP validation
 	err := vm.BlockIP("192.0.2.100", 3600)
-	// Even if nft command fails in unit test environment (no root/no nftables), in-memory map records the block
 	if err != nil {
-		t.Fatalf("BlockIP failed: %v", err)
+		// L20: when nft fails (no privileges, no table), the block
+		// must not be recorded as if the kernel got it. The old
+		// test asserted the opposite (recorded despite failure);
+		// that was the bug.
+		if blocked := vm.ListBlockedIPs(); len(blocked) != 0 {
+			t.Fatalf("BlockIP failed but the IP was still recorded as blocked: %+v", blocked)
+		}
+		return
 	}
 
 	blocked := vm.ListBlockedIPs()

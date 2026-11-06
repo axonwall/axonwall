@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -214,10 +216,11 @@ func (vm *VigilanteManager) BlockIP(rawIP string, timeoutSec int) error {
 	elementSpec := fmt.Sprintf("{ %s timeout %ds }", cleanIP, timeoutSec)
 	cmd := exec.Command("nft", "add", "element", "inet", "axonwall", setName, elementSpec)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[VigilanteManager] nft add element warning: %v, out: %s", err, string(out))
-		if os.Geteuid() == 0 {
-			return fmt.Errorf("failed to add IP %s to nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
-		}
+		// L20: the error used to be returned only when running as
+		// root; as non-root the IP was recorded in blockedIPs and
+		// returned nil while the kernel never got the element.
+		// A block the kernel never got must not be recorded.
+		return fmt.Errorf("failed to add IP %s to nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
 	}
 
 	vm.mu.Lock()
@@ -447,6 +450,44 @@ func (vm *VigilanteManager) ApplyConfig(rawJSON []byte) error {
 }
 
 // StreamLiveTelemetry handles SSE streaming of live security alerts
+// telemetryConsumedOffset returns how many bytes of the open file
+// have been consumed through reader (the fd offset minus bytes the
+// bufio reader has buffered but not yet delivered).
+func telemetryConsumedOffset(f *os.File, reader *bufio.Reader) int64 {
+	off, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0
+	}
+	return off - int64(reader.Buffered())
+}
+
+// telemetryFileRotated reports whether the file at path is no longer
+// the file openFile points at (rotated away), or has shrunk below
+// the offset already consumed (truncated in place). Either way the
+// open fd will return EOF forever. A stat failure (file deleted but
+// not yet recreated) reports neither: the caller keeps polling.
+func telemetryFileRotated(openFile *os.File, path string, consumed int64) (rotated bool, truncated bool) {
+	openInfo, err := openFile.Stat()
+	if err != nil {
+		return false, false
+	}
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		return false, false
+	}
+	if openStat, ok := openInfo.Sys().(*syscall.Stat_t); ok {
+		if pathStat, ok := pathInfo.Sys().(*syscall.Stat_t); ok {
+			if openStat.Ino != pathStat.Ino || openStat.Dev != pathStat.Dev {
+				return true, false
+			}
+		}
+	}
+	if pathInfo.Size() < consumed {
+		return false, true
+	}
+	return false, false
+}
+
 func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -538,6 +579,36 @@ func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.R
 					}
 				}
 			} else {
+				// L16: eve.json may have been rotated (replaced)
+				// or truncated while the stream is open. The open
+				// fd then points at a deleted inode (or past EOF)
+				// and ReadString returns EOF forever; detect that
+				// and reopen instead of spinning silently on the
+				// dead fd while the operator watches a live stream
+				// that will never deliver another alert.
+				if rotated, truncated := telemetryFileRotated(logFile, vm.telemetryLog, telemetryConsumedOffset(logFile, reader)); rotated || truncated {
+					if rotated {
+						if reopened, err := os.Open(vm.telemetryLog); err == nil {
+							_ = logFile.Close()
+							logFile = reopened
+							_, _ = logFile.Seek(0, io.SeekEnd)
+							reader = bufio.NewReader(logFile)
+							pendingLine = ""
+							log.Printf("[VigilanteManager] Telemetry log rotated; reopened %s", vm.telemetryLog)
+						}
+						// If the new file is not there yet, keep
+						// polling the old fd (EOF) and retry.
+					} else {
+						// Same inode, shrunk in place
+						// (copytruncate): everything in the file
+						// now is new content, so rewind to the
+						// start instead of the (stale) end.
+						_, _ = logFile.Seek(0, io.SeekStart)
+						reader = bufio.NewReader(logFile)
+						pendingLine = ""
+						log.Printf("[VigilanteManager] Telemetry log truncated; rewound %s", vm.telemetryLog)
+					}
+				}
 				time.Sleep(200 * time.Millisecond)
 			}
 		}

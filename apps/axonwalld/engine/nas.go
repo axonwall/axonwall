@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -26,17 +27,23 @@ type InstallZfsBootstrapSpec struct {
 }
 
 type DiskInventoryItem struct {
-	Name           string `json:"name"`
-	Path           string `json:"path"`
-	SizeBytes      uint64 `json:"sizeBytes"`
-	Model          string `json:"model"`
-	Serial         string `json:"serial"`
-	Type           string `json:"type"` // "disk", "part", "raid1"
-	FsType         string `json:"fsType"`
-	Mountpoint     string `json:"mountpoint"`
-	PartLabel      string `json:"partLabel"`
-	Rotational     bool   `json:"rotational"`
-	SmartPassed    bool   `json:"smartPassed"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	SizeBytes   uint64 `json:"sizeBytes"`
+	Model       string `json:"model"`
+	Serial      string `json:"serial"`
+	Type        string `json:"type"` // "disk", "part", "raid1"
+	FsType      string `json:"fsType"`
+	Mountpoint  string `json:"mountpoint"`
+	PartLabel   string `json:"partLabel"`
+	Rotational  bool   `json:"rotational"`
+	SmartPassed bool   `json:"smartPassed"`
+	// SmartUnknown reports that no SMART data could be read for this
+	// disk (no smartctl, unsupported device). L18: the field used to
+	// be absent and every disk was reported SmartPassed=true at a
+	// hardcoded temperature, so a failing disk displayed as healthy.
+	// SmartPassed is true only when smartctl reports PASSED.
+	SmartUnknown   bool   `json:"smartUnknown"`
 	TemperatureC   int    `json:"temperatureC"`
 	EligibleForZfs bool   `json:"eligibleForZfs"`
 	Role           string `json:"role"` // "available", "boot_zfs_partition", "system_raid_member", "in_use"
@@ -310,6 +317,60 @@ func (m *NasManager) BootstrapInstallZfsPool() {
 	}
 }
 
+// querySmartHealth runs smartctl for one device and reports the
+// overall-health result and temperature. L18: DiscoverDisks used to
+// hardcode SmartPassed=true and a fixed temperature for every disk,
+// so a failing disk displayed as healthy. When smartctl is missing
+// or the device reports nothing, the disk is unknown — never
+// "passed" — and the temperature is 0.
+func querySmartHealth(devPath string) (passed, known bool, tempC int) {
+	tool, err := exec.LookPath("smartctl")
+	if err != nil {
+		return false, false, 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, tool, "-H", "-A", devPath).CombinedOutput()
+	passed, known = parseSmartctlHealth(string(out))
+	tempC, _ = parseSmartctlTemperature(string(out))
+	return passed, known, tempC
+}
+
+// parseSmartctlHealth reads the overall-health self-assessment line
+// ("SMART overall-health self-assessment test result: PASSED").
+// Anything else, including no such line, is unknown.
+func parseSmartctlHealth(out string) (passed, known bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "SMART overall-health self-assessment test result:") {
+			if strings.Contains(line, "PASSED") {
+				return true, true
+			}
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// parseSmartctlTemperature reads the drive temperature: the SATA
+// attribute 194 ("Temperature_Celsius ... 36 (Min/Max ...)") or the
+// NVMe line ("Temperature: 36 Celsius").
+func parseSmartctlTemperature(out string) (int, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 10 && fields[1] == "Temperature_Celsius" {
+			if v, err := strconv.Atoi(fields[9]); err == nil {
+				return v, true
+			}
+		}
+		if len(fields) >= 2 && fields[0] == "Temperature:" {
+			if v, err := strconv.Atoi(fields[1]); err == nil {
+				return v, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 	var items []DiskInventoryItem
 
@@ -359,6 +420,16 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 					rota = v != 0
 				}
 
+				devPath := dev.Path
+				if devPath == "" {
+					devPath = "/dev/" + dev.Name
+				}
+				// L18: query real SMART data instead of hardcoding
+				// SmartPassed=true and a fixed temperature. The
+				// ZFS-partition children below inherit the parent
+				// disk's readings.
+				smartPassed, smartKnown, smartTemp := querySmartHealth(devPath)
+
 				hasSystemParts := false
 				for _, ch := range dev.Children {
 					if strings.HasPrefix(ch.Partlabel, "axon_zfs") {
@@ -384,8 +455,9 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 							Mountpoint:     ch.Mountpoint,
 							PartLabel:      ch.Partlabel,
 							Rotational:     rota,
-							SmartPassed:    true,
-							TemperatureC:   34,
+							SmartPassed:    smartPassed,
+							SmartUnknown:   !smartKnown,
+							TemperatureC:   smartTemp,
 							EligibleForZfs: true,
 							Role:           "boot_zfs_partition",
 						})
@@ -394,10 +466,6 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 					}
 				}
 
-				devPath := dev.Path
-				if devPath == "" {
-					devPath = "/dev/" + dev.Name
-				}
 				eligible := !hasSystemParts && dev.Mountpoint == "" && len(dev.Children) == 0
 				role := "available"
 				if hasSystemParts {
@@ -418,8 +486,9 @@ func (m *NasManager) DiscoverDisks() []DiskInventoryItem {
 					Mountpoint:     dev.Mountpoint,
 					PartLabel:      dev.Partlabel,
 					Rotational:     rota,
-					SmartPassed:    true,
-					TemperatureC:   36,
+					SmartPassed:    smartPassed,
+					SmartUnknown:   !smartKnown,
+					TemperatureC:   smartTemp,
 					EligibleForZfs: eligible,
 					Role:           role,
 				})
@@ -541,10 +610,14 @@ func (m *NasManager) CreateSnapshot(dataset string, label string) (string, error
 		label = fmt.Sprintf("auto-%s", time.Now().UTC().Format("20060102-150405"))
 	}
 	snapName := fmt.Sprintf("%s@%s", dataset, label)
-	if _, err := exec.LookPath("zfs"); err == nil {
-		if out, err := exec.Command("zfs", "snapshot", "-r", snapName).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("zfs snapshot failed: %s (%w)", string(out), err)
-		}
+	// L12: without zfs installed this used to return the snapshot
+	// name and nil — the caller was told a snapshot was created
+	// when nothing happened and no snapshot exists.
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return "", fmt.Errorf("cannot create snapshot: zfs is not installed on this system")
+	}
+	if out, err := exec.Command("zfs", "snapshot", "-r", snapName).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("zfs snapshot failed: %s (%w)", string(out), err)
 	}
 	return snapName, nil
 }
@@ -553,10 +626,13 @@ func (m *NasManager) ScrubPool(poolName string) error {
 	if !validZfsPath(poolName, false) {
 		return fmt.Errorf("invalid pool name")
 	}
-	if _, err := exec.LookPath("zpool"); err == nil {
-		if out, err := exec.Command("zpool", "scrub", poolName).CombinedOutput(); err != nil {
-			return fmt.Errorf("zpool scrub failed: %s (%w)", string(out), err)
-		}
+	// L12: without zpool installed this used to return nil — the
+	// caller was told a scrub ran when nothing happened.
+	if _, err := exec.LookPath("zpool"); err != nil {
+		return fmt.Errorf("cannot scrub pool: zpool is not installed on this system")
+	}
+	if out, err := exec.Command("zpool", "scrub", poolName).CombinedOutput(); err != nil {
+		return fmt.Errorf("zpool scrub failed: %s (%w)", string(out), err)
 	}
 	return nil
 }

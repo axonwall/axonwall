@@ -1013,8 +1013,10 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	}
 	targetDataset := "zroot/ROOT/" + beName
 	prevBootfs := ""
+	prevBootfsKnown := false
 	if out, err := we.runZpoolCmd("get", "-H", "-o", "value", "bootfs", "zroot"); err == nil {
 		prevBootfs = strings.TrimSpace(string(out))
+		prevBootfsKnown = prevBootfs != ""
 	}
 	prevActiveBe := ""
 	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:active_be", "zroot/ROOT"); err == nil {
@@ -1028,6 +1030,17 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:bootlimit", "zroot/ROOT"); err == nil {
 		prevBootlimit = strings.TrimSpace(string(out))
 	}
+	// L14 (E3 residual): if the current bootfs cannot be read, the
+	// rollback below cannot restore it — a later arming failure
+	// would leave bootfs pointed at the new target while
+	// active_be/bootcount/bootlimit roll back to their previous
+	// values, and the watchdog's view of the staged BE would
+	// disagree with bootfs. Refuse to arm rather than create that
+	// split state.
+	if !prevBootfsKnown {
+		return fmt.Errorf("cannot determine current bootfs; refusing to activate %q: zpool get bootfs failed", beName)
+	}
+
 	out, err := we.runZpoolCmd("set", "bootfs="+targetDataset, "zroot")
 	if err != nil {
 		return fmt.Errorf("zpool set bootfs failed: %v (%s)", err, strings.TrimSpace(string(out)))
@@ -1052,6 +1065,12 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 		if prevBootfs != "" && prevBootfs != "-" && prevBootfs != targetDataset {
 			if _, rerr := we.runZpoolCmd("set", "bootfs="+prevBootfs, "zroot"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back bootfs to %s after arming failure: %v", prevBootfs, rerr)
+			}
+		} else if prevBootfs == "-" {
+			// L14: no bootfs was set before, so clear it again
+			// instead of leaving it pointed at the failed target.
+			if _, rerr := we.runZpoolCmd("set", "bootfs=", "zroot"); rerr != nil {
+				log.Printf("[Watchdog/ZBM] Warning: Failed to clear bootfs after arming failure: %v", rerr)
 			}
 		}
 		if prevActiveBe != "" && prevActiveBe != "-" {
@@ -1196,14 +1215,19 @@ func (we *WatchdogEngine) runVerificationSequence() {
 	we.status.LastVerifiedAt = time.Now()
 
 	if allPassed {
-		we.status.HealthVerified = true
-		we.status.BootCount = 0
-		log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s (mode=%s).", we.status.ActiveSlot, we.status.InstallMode)
-
+		// L15: the healthy state is only committed to memory after
+		// the on-disk commit succeeds. The old code set
+		// HealthVerified/BootCount first and only logged a commit
+		// failure, so the status API reported a permanently-healthy
+		// slot while the on-disk bootcount still counted up toward
+		// fallback — and the next boot followed the disk, not the
+		// in-memory flag.
+		commitOK := false
 		if we.status.InstallMode == "zbm" {
 			if _, err := we.runZfsCmd("set", "org.axonwall:bootcount=0", "zroot/ROOT"); err != nil {
-				log.Printf("[Watchdog] Warning: Failed to commit bootcount=0 to zroot/ROOT: %v", err)
+				log.Printf("[Watchdog] ERROR: Failed to commit bootcount=0 to zroot/ROOT: %v; slot is NOT marked healthy", err)
 			} else {
+				commitOK = true
 				log.Printf("[Watchdog] Committed bootcount=0 to zroot/ROOT. Boot Environment is marked permanently healthy.")
 			}
 			activeBe := we.status.ActiveRootDevice
@@ -1224,10 +1248,19 @@ func (we *WatchdogEngine) runVerificationSequence() {
 		} else {
 			// Reset bootcount in GRUB environment
 			if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
-				log.Printf("[Watchdog] Warning: Failed to commit bootcount to grubenv: %v", err)
+				log.Printf("[Watchdog] ERROR: Failed to commit bootcount to grubenv: %v; slot is NOT marked healthy", err)
 			} else {
+				commitOK = true
 				log.Printf("[Watchdog] Committed bootcount=0 to %s. Partition is marked permanently healthy.", we.grubenvPath)
 			}
+		}
+		if commitOK {
+			we.status.HealthVerified = true
+			we.status.BootCount = 0
+			log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s (mode=%s).", we.status.ActiveSlot, we.status.InstallMode)
+		} else {
+			we.status.HealthVerified = false
+			log.Printf("[Watchdog] FAILED: Health verification checks passed for Slot %s but the healthy state could not be committed to disk; bootcount is %d/%d.", we.status.ActiveSlot, we.status.BootCount, we.status.BootLimit)
 		}
 	} else {
 		we.status.HealthVerified = false
