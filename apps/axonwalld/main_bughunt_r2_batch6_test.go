@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -712,5 +713,60 @@ func TestR2Batch6DhcpClientRunningForDev(t *testing.T) {
 
 	if dhcpClientRunningForDev("eth5", []string{filepath.Join(dir, "missing.pid")}) {
 		t.Fatal("missing pidfile was mistaken for a running DHCP client")
+	}
+}
+
+// M6: the default route comes from the first static WAN gateway that
+// accepts it — a failed first gateway must not block the second — and
+// the apply fails loudly when no gateway yields a route.
+func TestR2Batch6StaticDefaultRouteTriesEachGateway(t *testing.T) {
+	orig := ipRouteReplaceDefault
+	t.Cleanup(func() { ipRouteReplaceDefault = orig })
+
+	var attempted []string
+	ipRouteReplaceDefault = func(gateway, dev string) error {
+		attempted = append(attempted, gateway+"@"+dev)
+		if gateway == "10.0.0.1" {
+			return fmt.Errorf("network unreachable")
+		}
+		return nil
+	}
+
+	if err := installStaticDefaultRoute([]staticWanGateway{
+		{gateway: "10.0.0.1", device: "eth0"},
+		{gateway: "10.0.0.2", device: "eth1"},
+	}); err != nil {
+		t.Fatalf("installStaticDefaultRoute failed after the second gateway accepted the route: %v", err)
+	}
+	if len(attempted) != 2 || attempted[0] != "10.0.0.1@eth0" || attempted[1] != "10.0.0.2@eth1" {
+		t.Fatalf("gateways attempted in order %v, want [10.0.0.1@eth0 10.0.0.2@eth1]", attempted)
+	}
+}
+
+// M6: when no static WAN gateway yields a default route, the error
+// is returned (so the apply fails loudly) instead of being discarded
+// with the route marked as set.
+func TestR2Batch6StaticDefaultRouteFailsWhenNoneWork(t *testing.T) {
+	orig := ipRouteReplaceDefault
+	t.Cleanup(func() { ipRouteReplaceDefault = orig })
+
+	var attempted []string
+	ipRouteReplaceDefault = func(gateway, dev string) error {
+		attempted = append(attempted, gateway+"@"+dev)
+		return fmt.Errorf("network unreachable")
+	}
+
+	err := installStaticDefaultRoute([]staticWanGateway{
+		{gateway: "10.0.0.1", device: "eth0"},
+		{gateway: "10.0.0.2", device: "eth1"},
+	})
+	if err == nil {
+		t.Fatal("installStaticDefaultRoute succeeded when every gateway failed")
+	}
+	if len(attempted) != 2 {
+		t.Fatalf("only %d gateways attempted, want both tried before failing: %v", len(attempted), attempted)
+	}
+	if err := installStaticDefaultRoute(nil); err != nil {
+		t.Fatalf("installStaticDefaultRoute with no gateways failed: %v", err)
 	}
 }

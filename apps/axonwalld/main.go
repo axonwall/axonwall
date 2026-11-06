@@ -1705,6 +1705,40 @@ func staleStaticAddrs(addrShowOut string, targetCIDR string) []string {
 	return stale
 }
 
+// staticWanGateway is one static WAN's default-route candidate.
+type staticWanGateway struct {
+	gateway string
+	device  string
+}
+
+// ipRouteReplaceDefault installs the default route via one gateway.
+// A variable so tests can simulate failing/succeeding gateways
+// without touching kernel routes.
+var ipRouteReplaceDefault = func(gateway, dev string) error {
+	return exec.Command("ip", "route", "replace", "default", "via", gateway, "dev", dev).Run()
+}
+
+// installStaticDefaultRoute tries each static WAN gateway in order
+// until one installs (M6). Pre-fix, the first attempt's error was
+// discarded and the route was marked set regardless, so a second
+// configured WAN gateway was never tried and the box could end up
+// with no default route while a reachable gateway was configured.
+func installStaticDefaultRoute(gateways []staticWanGateway) error {
+	var lastErr error
+	for _, gw := range gateways {
+		if err := ipRouteReplaceDefault(gw.gateway, gw.device); err != nil {
+			lastErr = err
+			log.Printf("[Agent] Boot-apply: failed to install default route via %s on %s: %v", gw.gateway, gw.device, err)
+			continue
+		}
+		return nil
+	}
+	if lastErr == nil {
+		return nil
+	}
+	return fmt.Errorf("no static WAN gateway yielded a default route (last error: %w)", lastErr)
+}
+
 func applyBootInterfaces() error {
 	sanitizeEtcNetworkInterfaces()
 
@@ -1755,7 +1789,10 @@ func applyBootInterfaces() error {
 	}
 
 	var dhcpSpecs []bootIfaceSpec
-	defaultRouteSet := false
+	// M6: static WAN gateways are collected during the loop and the
+	// default route is installed afterwards by
+	// installStaticDefaultRoute, which tries each in turn.
+	var staticGateways []staticWanGateway
 	// A-M16: the first static-WAN address failure is returned to the
 	// caller (ApplyBundle fails the apply) instead of being logged
 	// while the WAN is left address-less after a flush.
@@ -1803,9 +1840,8 @@ func applyBootInterfaces() error {
 					}
 				}
 			}
-			if spec.Gateway != "" && spec.Role == "wan" && !defaultRouteSet {
-				_ = exec.Command("ip", "route", "replace", "default", "via", spec.Gateway, "dev", spec.Device).Run()
-				defaultRouteSet = true
+			if spec.Gateway != "" && spec.Role == "wan" {
+				staticGateways = append(staticGateways, staticWanGateway{gateway: spec.Gateway, device: spec.Device})
 			}
 			if spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
 				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr != nil || len(strings.TrimSpace(string(rData))) == 0 {
@@ -1826,6 +1862,18 @@ func applyBootInterfaces() error {
 			if !strings.Contains(string(out), "inet ") {
 				log.Printf("[Agent] Boot-apply: starting DHCP client on %s (%s, role=%s)", spec.Name, spec.Device, spec.Role)
 				triggerDhcpClient(spec.Device, spec.Role)
+			}
+		}
+	}
+
+	// M6: install the default route from the first static WAN gateway
+	// that accepts it. If no WAN yields one, the apply fails loudly
+	// instead of reporting success with no default route.
+	if len(staticGateways) > 0 {
+		if err := installStaticDefaultRoute(staticGateways); err != nil {
+			log.Printf("[Agent] Boot-apply: %v", err)
+			if firstIfaceErr == nil {
+				firstIfaceErr = err
 			}
 		}
 	}
