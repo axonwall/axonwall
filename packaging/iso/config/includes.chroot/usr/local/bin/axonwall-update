@@ -774,6 +774,17 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           done
         fi
         ensure_cli_symlinks "/"
+      else
+        # E2-1: mirror the ZBM branch — a verified .deb that fails to
+        # extract must fail the update, not silently skip the apply
+        # and let the version write + E1 gate arm the stale slot as
+        # the new version. Unmount before exiting so no standby
+        # mount is left behind.
+        echo "[-] ERROR: Failed to extract firmware archive ${DEB_TMP}; refusing to arm Slot ${TARGET_SLOT}." >&2
+        rm -rf "${PKG_STAGE}"
+        umount "${STAGE_DIR}" 2>/dev/null || true
+        rmdir "${STAGE_DIR}" 2>/dev/null || true
+        exit 1
       fi
       rm -rf "${PKG_STAGE}"
     elif [ -d /opt/axonwall ]; then
@@ -925,26 +936,23 @@ else
     fi
   fi
 
-  if [ -n "$CLEAN_VER" ]; then
-    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
-    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
-    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Rolling",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$SV_TIMESTAMP")"
-    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
-    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
-  fi
-
   if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
     PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
     rm -rf "${PKG_STAGE}"
     mkdir -p "${PKG_STAGE}"
-    if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
-      # E2-2: a failed in-place overlay must fail the update, not
-      # print success for a half-updated live root.
-      if ! apply_staged_tree "${PKG_STAGE}" "/"; then
-        echo "[-] ERROR: Failed to apply firmware payload in place (staged copy failed); the update did NOT complete." >&2
-        rm -rf "${PKG_STAGE}"
-        exit 1
-      fi
+    # E2-1: mirror the ZBM branch — a failed extraction must fail the
+    # update, not silently skip the apply and print success.
+    if ! extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
+      echo "[-] ERROR: Failed to extract firmware archive ${DEB_TMP}; the update did NOT complete." >&2
+      rm -rf "${PKG_STAGE}"
+      exit 1
+    fi
+    # E2-2: a failed in-place overlay must fail the update, not
+    # print success for a half-updated live root.
+    if ! apply_staged_tree "${PKG_STAGE}" "/"; then
+      echo "[-] ERROR: Failed to apply firmware payload in place (staged copy failed); the update did NOT complete." >&2
+      rm -rf "${PKG_STAGE}"
+      exit 1
     fi
     rm -rf "${PKG_STAGE}"
 
@@ -954,6 +962,17 @@ else
       echo "[+] Scheduling asynchronous reload of Axonwall services..."
       nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &
     fi
+  fi
+
+  # E2-1: the version file is written only after a successful apply.
+  # It used to be written before the extract attempt, so a failed
+  # extraction still stamped the new version on the live root.
+  if [ -n "$CLEAN_VER" ]; then
+    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
+    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Rolling",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$SV_TIMESTAMP")"
+    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
   fi
 fi
 
