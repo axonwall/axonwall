@@ -28,7 +28,8 @@ import {
   parseDraftedRules,
 } from '@axonwall/lib/ai';
 import type { AiProviderType, AiConfig, FirewallRule } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { testAiProviderProbe, generateAiCompletion } from '@/server/ai';
 
 interface ChatMessage {
@@ -41,6 +42,7 @@ interface ChatMessage {
 }
 
 export default function AiCopilotPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<'copilot' | 'threat-explainer' | 'providers'>('copilot');
   const [activeProvider, setActiveProvider] = useState<AiProviderType>('antigravity');
   const [inputPrompt, setInputPrompt] = useState('');
@@ -132,7 +134,7 @@ export default function AiCopilotPage() {
     setIsSavingConfig(true);
     try {
       const state = await getCurrentDesiredState();
-      await applyDesiredState({
+      await applyState({
         ...state,
         ai: { ...config, activeProvider },
       });
@@ -245,7 +247,7 @@ export default function AiCopilotPage() {
         ...rule,
         id: rule.id || crypto.randomUUID(),
       };
-      await applyDesiredState({
+      await applyState({
         ...state,
         rules: [...(state.rules || []), stagedRule],
       });

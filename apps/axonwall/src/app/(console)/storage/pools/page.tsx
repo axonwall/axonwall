@@ -4,16 +4,17 @@ import { useState, useEffect } from 'react';
 import { Database, Plus, Trash2, RefreshCw, ShieldCheck, HardDrive } from 'lucide-react';
 import {
   getCurrentDesiredState,
-  applyDesiredState,
   getNasDisksInventory,
   getNasPoolsRuntime,
   scrubNasPoolAction,
   type NasDiskItem,
   type NasPoolStatus,
 } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, ZfsPool } from '@axonwall/lib/schemas';
 
 export default function ZfsPoolsPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [disks, setDisks] = useState<NasDiskItem[]>([]);
   const [runtimePools, setRuntimePools] = useState<NasPoolStatus[]>([]);
@@ -92,7 +93,7 @@ export default function ZfsPoolsPage() {
           description: `ZFS ${topology.toUpperCase()} storage pool`,
         },
       ];
-      const res = await applyDesiredState(next);
+      const res = await applyState(next);
       setState(next);
       setStatusMsg(`Pool '${poolName}' provisioned (${res.message})`);
       await loadAll();
@@ -111,9 +112,13 @@ export default function ZfsPoolsPage() {
       if (next.nas) {
         next.nas.pools = next.nas.pools.filter((p) => p.name !== name);
       }
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       await loadAll();
+    } catch (err: any) {
+      // C2: a fingerprint mismatch (or any apply failure) must be visible,
+      // not an unhandled rejection — the pool was not deleted.
+      setStatusMsg(err?.message || 'Failed to delete ZFS pool');
     } finally {
       setSaving(false);
     }

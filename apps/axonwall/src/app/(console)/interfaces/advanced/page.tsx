@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { Layers, Network, GitFork, ShieldAlert, Cpu, Plus, Trash2, CheckCircle2, Save } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, Vlan, Bridge, Bond, VirtualIp, Vrf } from '@axonwall/lib/schemas';
 
 export default function AdvancedInterfacesPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<'vlan' | 'bridge' | 'bond' | 'vip' | 'vrf'>('vlan');
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [saving, setSaving] = useState(false);
@@ -61,7 +63,7 @@ export default function AdvancedInterfacesPage() {
         vrfs: nextVrfs,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved topology to /etc/axonwall/interfaces.yaml');
     } catch (err: any) {
       setVlans(prevVlans);

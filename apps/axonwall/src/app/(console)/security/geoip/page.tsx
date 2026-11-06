@@ -17,7 +17,8 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { compileGeoIp, COUNTRY_CIDR_TABLE } from '@axonwall/lib/compile/geoip';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, GeoIpConfig } from '@axonwall/lib/schemas';
 
 interface CountryItem {
@@ -52,6 +53,7 @@ const COUNTRIES: CountryItem[] = [
 ];
 
 export default function GeoIpPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [config, setConfig] = useState<GeoIpConfig>({
     enabled: true,
@@ -115,7 +117,7 @@ export default function GeoIpPage() {
         geoip: config,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setSavedMessage(res.message || 'GeoIP configuration saved to /etc/axonwall/security.yaml.');
     } catch (err: any) {
       setFullState(prevFullState);

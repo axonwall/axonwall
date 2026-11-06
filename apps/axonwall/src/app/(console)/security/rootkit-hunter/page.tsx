@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import {
   HOST_MALWARE_SCANNERS,
   compileHostDefenseBundle,
@@ -31,6 +32,7 @@ import {
 } from 'lucide-react';
 
 export default function RootkitHunterPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [config, setConfig] = useState<HostMalwareDefenseConfig>(() =>
     resolveHostDefenseConfig(null)
@@ -125,7 +127,7 @@ export default function RootkitHunterPage() {
         ...state,
         hostDefense: config,
       };
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setStatusBanner(
         'Saved Host Malware, Rootkit & Ghost-in-the-Ring Kernel Lockdown policy to /etc/axonwall/security.yaml.'

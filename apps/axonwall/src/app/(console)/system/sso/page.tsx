@@ -17,7 +17,8 @@ import {
   Save,
 } from 'lucide-react';
 import type { SsoConfig, SsoRoleMapping } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState, testOidcDiscoveryAction } from '@/server/agent';
+import { getCurrentDesiredState, testOidcDiscoveryAction } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 const PRESET_PROVIDERS = [
   {
@@ -47,6 +48,7 @@ const PRESET_PROVIDERS = [
 ];
 
 export default function SsoSettingsPage() {
+  const { applyState } = useDesiredStateApply();
   // C16: an appliance with no SSO configured used to display a fully
   // populated, enabled Entra config belonging to nobody's tenant — and
   // Save applied it, enabling SSO against a wrong issuer. The form now
@@ -92,7 +94,7 @@ export default function SsoSettingsPage() {
     setTestResult(null);
     try {
       const state = await getCurrentDesiredState();
-      await applyDesiredState({ ...state, sso: config });
+      await applyState({ ...state, sso: config });
       setHasSavedConfig(true);
       setTestResult({ type: 'success', text: 'Saved SSO configuration to /etc/axonwall/security.yaml' });
     } catch (err: any) {

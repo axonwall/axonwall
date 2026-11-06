@@ -3,10 +3,12 @@
 import { useState, useEffect } from 'react';
 import { Route, Terminal, Shield, CheckCircle2 } from 'lucide-react';
 import { compileFrr } from '@axonwall/lib/compile/frr';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, FrrConfig } from '@axonwall/lib/schemas';
 
 export default function DynamicRoutingPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [bgpEnabled, setBgpEnabled] = useState(false);
   const [bgpAs, setBgpAs] = useState(64512);
@@ -73,7 +75,7 @@ export default function DynamicRoutingPage() {
         frr: frrConfig,
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved FRR configuration to /etc/axonwall/routing.yaml');
       setApplied(true);
       setTimeout(() => setApplied(false), 3000);

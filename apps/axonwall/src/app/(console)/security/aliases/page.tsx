@@ -14,10 +14,12 @@ import {
   Flame,
 } from 'lucide-react';
 import type { DesiredState, Alias } from '@axonwall/lib/schemas';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { COMMUNITY_THREAT_FEEDS, compileThreatFeedNft } from '@axonwall/lib/alias';
 
 export default function DynamicAliasesPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [aliases, setAliases] = useState<Alias[]>([]);
 
@@ -46,7 +48,7 @@ export default function DynamicAliasesPage() {
         aliases: nextAliases,
       };
       setFullState(nextState);
-      await applyDesiredState(nextState);
+      await applyState(nextState);
       setRefreshSuccess(true);
       setTimeout(() => setRefreshSuccess(false), 3000);
     } catch {

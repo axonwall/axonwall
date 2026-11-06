@@ -23,17 +23,18 @@ import { compileWireGuard } from '@axonwall/lib/compile/wireguard';
 import type { DesiredState, RosenpassConfig, RosenpassPeer } from '@axonwall/lib/schemas';
 import {
   getCurrentDesiredState,
-  applyDesiredState,
   getRosenpassStatusAction,
   generateRosenpassKeypairAction,
   exportRosenpassPublicKeyAction,
   uploadRosenpassPeerPublicKeyAction,
   type RosenpassLiveStatus,
 } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 type TabId = 'control' | 'telemetry' | 'simulator';
 
 export default function RosenpassPage() {
+  const { applyState } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<TabId>('control');
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [liveStatus, setLiveStatus] = useState<RosenpassLiveStatus | null>(null);
@@ -127,7 +128,7 @@ export default function RosenpassPage() {
           listenAddresses: [`0.0.0.0:${nextCfg.listenPort}`, `[::]:${nextCfg.listenPort}`],
         },
       };
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setFullState(nextState);
       setStatusBanner({
         type: 'success',

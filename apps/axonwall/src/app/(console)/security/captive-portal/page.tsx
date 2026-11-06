@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { Users, Wifi, Trash2, Plus, CheckCircle2, Clock, ArrowDown, ArrowUp } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, CaptivePortalZone } from '@axonwall/lib/schemas';
 
 interface ActiveSessionView {
@@ -16,6 +17,7 @@ interface ActiveSessionView {
 }
 
 export default function CaptivePortalPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [zones, setZones] = useState<CaptivePortalZone[]>([]);
   const [sessions, setSessions] = useState<ActiveSessionView[]>([]);
@@ -53,7 +55,7 @@ export default function CaptivePortalPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved Captive Portal zones to /etc/axonwall/services.yaml');
     } catch (err: any) {
       setZones(prevZones);

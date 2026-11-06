@@ -17,7 +17,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { MeshGraph } from './MeshGraph';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 interface WifiRadioInfo {
   radio: string;
@@ -69,6 +70,7 @@ function formatUptime(seconds: number): string {
 }
 
 export default function FleetPage() {
+  const { applyState } = useDesiredStateApply();
   const [satellites, setSatellites] = useState<SatelliteNodeView[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [listenPort, setListenPort] = useState(2966);
@@ -169,7 +171,7 @@ export default function FleetPage() {
     setSaveError(null);
     try {
       const state = await getCurrentDesiredState();
-      await applyDesiredState({
+      await applyState({
         ...state,
         fleet: {
           enabled: true,

@@ -14,7 +14,8 @@ import {
   X,
   Sliders,
 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '../../../server/agent';
+import { getCurrentDesiredState } from '../../../server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { inferInterfaceRole, type DesiredState, type FirewallRule } from '@axonwall/lib/schemas';
 
 const DEFAULT_RULE: FirewallRule = {
@@ -34,6 +35,7 @@ const DEFAULT_RULE: FirewallRule = {
 };
 
 export default function FirewallPage() {
+  const { applyState } = useDesiredStateApply();
   // C1: never render a placeholder ruleset. State starts null and the page
   // shows a loading/error screen until the real config loads, so Apply can
   // never persist demo rules over the live configuration.
@@ -180,7 +182,7 @@ export default function FirewallPage() {
     if (!state) return;
     setIsApplying(true);
     try {
-      const res = await applyDesiredState(state, 120);
+      const res = await applyState(state, 120);
       setCompiledScript(res.nftScript);
       setApplyResult({
         message: res.message,

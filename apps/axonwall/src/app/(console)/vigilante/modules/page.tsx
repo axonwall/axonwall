@@ -18,8 +18,13 @@ import {
   toggleSecurityModuleAction,
   type SecurityModuleStatus,
 } from '@/server/vigilante';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function SecurityModulesPage() {
+  // C2: the toggle applies state server-side — pass the load-time
+  // fingerprint so a same-slice cross-tab change is refused instead of
+  // overwritten.
+  const { getFingerprint, refreshFingerprint } = useDesiredStateApply();
   const [modules, setModules] = useState<SecurityModuleStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -46,10 +51,16 @@ export default function SecurityModulesPage() {
   const handleToggle = async (id: string, currentEnabled: boolean) => {
     setTogglingId(id);
     setStatusBanner(null);
-    const res = await toggleSecurityModuleAction(id, !currentEnabled);
+    const fingerprint = getFingerprint();
+    const res = await toggleSecurityModuleAction(
+      id,
+      !currentEnabled,
+      fingerprint ? { expectedFingerprint: fingerprint } : undefined
+    );
     setTogglingId(null);
 
     if (res.success) {
+      await refreshFingerprint();
       setStatusBanner({ type: 'success', message: `${id} ${!currentEnabled ? 'enabled' : 'disabled'}` });
       // D15: enabling a module does not prove it healthy — nothing probes
       // it — so the optimistic state is "unknown", never "healthy".

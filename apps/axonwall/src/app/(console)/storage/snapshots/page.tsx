@@ -4,14 +4,15 @@ import { useState, useEffect } from 'react';
 import { Camera, Plus, ArrowRightLeft } from 'lucide-react';
 import {
   getCurrentDesiredState,
-  applyDesiredState,
   getNasSnapshotsRuntime,
   createNasSnapshotAction,
   type NasSnapshotItem,
 } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function ZfsSnapshotsPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [snapshots, setSnapshots] = useState<NasSnapshotItem[]>([]);
   const [dataset, setDataset] = useState('tank/shares/general');
@@ -67,7 +68,7 @@ export default function ZfsSnapshotsPage() {
           enabled: true,
         },
       ];
-      await applyDesiredState(next);
+      await applyState(next);
       setState(next);
       setMsg(`Automated ${interval} snapshot & HA replication policy saved for ${dataset}.`);
     } catch (err: any) {

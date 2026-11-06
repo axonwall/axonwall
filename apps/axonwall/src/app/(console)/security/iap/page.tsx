@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { Shield, Plus, Trash2, CheckCircle2 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, ZeroTrustApp } from '@axonwall/lib/schemas';
 
 export default function IAPDashboardPage() {
+  const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [apps, setApps] = useState<ZeroTrustApp[]>([]);
   const [saving, setSaving] = useState(false);
@@ -53,7 +55,7 @@ export default function IAPDashboardPage() {
         },
       };
       setFullState(nextState);
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved Zero-Trust IAP applications to /etc/axonwall/security.yaml');
     } catch (err: any) {
       setApps(prevApps);

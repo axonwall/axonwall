@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { Boxes, Plus, Trash2 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
+import { getCurrentDesiredState } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function K3sWorkloadsPage() {
+  const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [name, setName] = useState('minio-s3');
   const [image, setImage] = useState('quay.io/minio/minio:latest');
@@ -52,8 +54,16 @@ export default function K3sWorkloadsPage() {
         enabled: true,
       },
     ];
-    await applyDesiredState(next);
-    setState(next);
+    // C2: a fingerprint mismatch (or any apply failure) must be visible,
+    // not an unhandled rejection — the workload was not added. This page
+    // has no banner state, so the failure is alerted like the fleet page
+    // does for its errors.
+    try {
+      await applyState(next);
+      setState(next);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to add workload.');
+    }
   };
 
   const removeWorkload = async (wlName: string) => {
@@ -62,8 +72,13 @@ export default function K3sWorkloadsPage() {
     if (next.k3s) {
       next.k3s.workloads = next.k3s.workloads.filter((w) => w.name !== wlName);
     }
-    await applyDesiredState(next);
-    setState(next);
+    // C2: see addWorkload above — a refused apply must be visible.
+    try {
+      await applyState(next);
+      setState(next);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to remove workload.');
+    }
   };
 
   return (

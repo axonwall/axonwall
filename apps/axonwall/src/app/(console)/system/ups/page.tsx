@@ -14,9 +14,11 @@ import {
 } from 'lucide-react';
 import { compileNutUps } from '@axonwall/lib/compile/nut';
 import type { NutUpsConfig } from '@axonwall/lib/schemas';
-import { getUpsStatus, getCurrentDesiredState, applyDesiredState, type UpsStatus } from '@/server/agent';
+import { getUpsStatus, getCurrentDesiredState, type UpsStatus } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function UpsMonitoringPage() {
+  const { applyState } = useDesiredStateApply();
   const [upsStatus, setUpsStatus] = useState<UpsStatus | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -64,7 +66,7 @@ export default function UpsMonitoringPage() {
     setIsSaving(true);
     try {
       const state = await getCurrentDesiredState();
-      await applyDesiredState({ ...state, ups: upsConfig });
+      await applyState({ ...state, ups: upsConfig });
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       }

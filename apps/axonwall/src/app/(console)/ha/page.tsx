@@ -18,9 +18,11 @@ import {
   Check,
   BookOpen,
 } from 'lucide-react';
-import { getCurrentDesiredState, applyDesiredState, getHASyncTrustStatus, type HASyncTrustStatus } from '@/server/agent';
+import { getCurrentDesiredState, getHASyncTrustStatus, type HASyncTrustStatus } from '@/server/agent';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function HighAvailabilityPage() {
+  const { applyState } = useDesiredStateApply();
   const [enabled, setEnabled] = useState(false);
   const [role, setRole] = useState<'primary' | 'secondary'>('primary');
   const [vrid, setVrid] = useState(51);
@@ -154,7 +156,7 @@ export default function HighAvailabilityPage() {
                 },
               ]
             : [];
-      await applyDesiredState({
+      await applyState({
         ...state,
         ha: {
           ...state.ha,
@@ -195,9 +197,15 @@ export default function HighAvailabilityPage() {
       });
       setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
       setTimeout(() => setSyncStatusMsg(null), 4000);
-    } catch {
-      setSyncStatusMsg('Error saving High Availability configuration');
-      setTimeout(() => setSyncStatusMsg(null), 4000);
+    } catch (err: any) {
+      // C2: surface a fingerprint conflict verbatim — it tells the
+      // operator to reload instead of retrying into the same refusal.
+      // Shown in the error banner, not the success one.
+      const message =
+        err?.message?.includes('Configuration changed since it was loaded')
+          ? err.message
+          : 'Error saving High Availability configuration';
+      setSyncErrorMsg(message);
     } finally {
       setIsSaving(false);
     }

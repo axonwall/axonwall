@@ -120,7 +120,10 @@ export async function getVigilanteConfigAction(): Promise<VigilanteConfig> {
 }
 
 export async function saveVigilanteConfigAction(
-  patch: Partial<VigilanteConfig>
+  patch: Partial<VigilanteConfig>,
+  // C2: fingerprint captured by the calling page at load time; the apply
+  // is refused instead of silently overwriting newer on-disk state.
+  options?: { expectedFingerprint?: string }
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -150,11 +153,25 @@ export async function saveVigilanteConfigAction(
     state.capabilities.vigilanteEnabled = false;
   }
 
-  const result = await applyDesiredState(state);
-  return {
-    success: result.success,
-    message: result.message,
-  };
+  // C2: a fingerprint mismatch is an expected conflict, not a crash —
+  // return it as a failure result so the page can tell the operator to
+  // reload instead of surfacing an unhandled rejection.
+  try {
+    const result = await applyDesiredState(
+      state,
+      120,
+      options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+    );
+    return {
+      success: result.success,
+      message: result.message,
+    };
+  } catch (err: any) {
+    if (err?.message?.includes('Configuration changed since it was loaded')) {
+      return { success: false, message: err.message };
+    }
+    throw err;
+  }
 }
 
 export async function soarBlockIPAction(
@@ -277,7 +294,10 @@ export async function listSecurityModulesAction(): Promise<SecurityModuleStatus[
 
 export async function toggleSecurityModuleAction(
   moduleId: string,
-  enabled: boolean
+  enabled: boolean,
+  // C2: fingerprint captured by the calling page at load time; see
+  // saveVigilanteConfigAction above.
+  options?: { expectedFingerprint?: string }
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -303,11 +323,25 @@ export async function toggleSecurityModuleAction(
     );
   }
 
-  const result = await applyDesiredState(state);
-  return {
-    success: result.success,
-    message: result.message,
-  };
+  // C2: a fingerprint mismatch is an expected conflict, not a crash —
+  // return it as a failure result so the page can tell the operator to
+  // reload instead of surfacing an unhandled rejection.
+  try {
+    const result = await applyDesiredState(
+      state,
+      120,
+      options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+    );
+    return {
+      success: result.success,
+      message: result.message,
+    };
+  } catch (err: any) {
+    if (err?.message?.includes('Configuration changed since it was loaded')) {
+      return { success: false, message: err.message };
+    }
+    throw err;
+  }
 }
 
 export async function getAttackGraphDataAction(): Promise<{
