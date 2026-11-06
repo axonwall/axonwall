@@ -1215,14 +1215,19 @@ func (we *WatchdogEngine) runVerificationSequence() {
 	we.status.LastVerifiedAt = time.Now()
 
 	if allPassed {
-		we.status.HealthVerified = true
-		we.status.BootCount = 0
-		log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s (mode=%s).", we.status.ActiveSlot, we.status.InstallMode)
-
+		// L15: the healthy state is only committed to memory after
+		// the on-disk commit succeeds. The old code set
+		// HealthVerified/BootCount first and only logged a commit
+		// failure, so the status API reported a permanently-healthy
+		// slot while the on-disk bootcount still counted up toward
+		// fallback — and the next boot followed the disk, not the
+		// in-memory flag.
+		commitOK := false
 		if we.status.InstallMode == "zbm" {
 			if _, err := we.runZfsCmd("set", "org.axonwall:bootcount=0", "zroot/ROOT"); err != nil {
-				log.Printf("[Watchdog] Warning: Failed to commit bootcount=0 to zroot/ROOT: %v", err)
+				log.Printf("[Watchdog] ERROR: Failed to commit bootcount=0 to zroot/ROOT: %v; slot is NOT marked healthy", err)
 			} else {
+				commitOK = true
 				log.Printf("[Watchdog] Committed bootcount=0 to zroot/ROOT. Boot Environment is marked permanently healthy.")
 			}
 			activeBe := we.status.ActiveRootDevice
@@ -1243,10 +1248,19 @@ func (we *WatchdogEngine) runVerificationSequence() {
 		} else {
 			// Reset bootcount in GRUB environment
 			if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
-				log.Printf("[Watchdog] Warning: Failed to commit bootcount to grubenv: %v", err)
+				log.Printf("[Watchdog] ERROR: Failed to commit bootcount to grubenv: %v; slot is NOT marked healthy", err)
 			} else {
+				commitOK = true
 				log.Printf("[Watchdog] Committed bootcount=0 to %s. Partition is marked permanently healthy.", we.grubenvPath)
 			}
+		}
+		if commitOK {
+			we.status.HealthVerified = true
+			we.status.BootCount = 0
+			log.Printf("[Watchdog] SUCCESS: All health verification checks passed for Slot %s (mode=%s).", we.status.ActiveSlot, we.status.InstallMode)
+		} else {
+			we.status.HealthVerified = false
+			log.Printf("[Watchdog] FAILED: Health verification checks passed for Slot %s but the healthy state could not be committed to disk; bootcount is %d/%d.", we.status.ActiveSlot, we.status.BootCount, we.status.BootLimit)
 		}
 	} else {
 		we.status.HealthVerified = false

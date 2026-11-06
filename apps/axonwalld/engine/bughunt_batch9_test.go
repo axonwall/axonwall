@@ -174,3 +174,69 @@ func TestBatch9ActivateClearsBootfsWhenPreviousWasNone(t *testing.T) {
 		t.Fatalf("expected bootfs to be cleared on rollback when the previous value was none; sets: %v", zpoolFake.sets)
 	}
 }
+// L15: verification must not mark the slot healthy in memory when
+// the bootcount commit to disk fails. Pre-fix, HealthVerified and
+// BootCount=0 were set before the zfs/grubenv commit and both
+// failures were only logged, so the status API reported a
+// permanently-healthy slot while the on-disk bootcount still counted
+// up toward fallback.
+func TestBatch9VerificationDoesNotMarkHealthyOnCommitFailure(t *testing.T) {
+	zfsFake := &fakeZxCommands{
+		props:    map[string]string{},
+		failSets: map[string]bool{"org.axonwall:bootcount=0": true},
+	}
+	zpoolFake := &fakeZxCommands{props: map[string]string{}}
+	engine := newZbmActivateTestEngine(t, zfsFake, zpoolFake)
+	passCheck := func(name string) func() HealthCheckResult {
+		return func() HealthCheckResult {
+			return HealthCheckResult{Name: name, Status: CheckStatusPass, Detail: "stubbed"}
+		}
+	}
+	engine.checkInterfaces = passCheck("Network Interface Initialization")
+	engine.checkNftables = passCheck("Atomic nftables kernel baseline")
+	engine.checkControlPlane = passCheck("Control plane and management quorum")
+	engine.status.InstallMode = "zbm"
+	engine.status.ActiveRootDevice = "zroot/ROOT/axonwall-0.11.30"
+	engine.status.BootCount = 2
+	engine.status.BootLimit = 3
+
+	engine.runVerificationSequence()
+
+	status := engine.GetStatus()
+	if status.HealthVerified {
+		t.Fatal("slot must not be marked healthy when the bootcount commit fails")
+	}
+	if status.BootCount != 2 {
+		t.Fatalf("BootCount must stay 2 when the commit fails, got %d", status.BootCount)
+	}
+}
+
+// L15 (positive control): when the commit succeeds, the slot is
+// marked healthy exactly as before.
+func TestBatch9VerificationMarksHealthyOnCommitSuccess(t *testing.T) {
+	zfsFake := &fakeZxCommands{props: map[string]string{}}
+	zpoolFake := &fakeZxCommands{props: map[string]string{}}
+	engine := newZbmActivateTestEngine(t, zfsFake, zpoolFake)
+	passCheck := func(name string) func() HealthCheckResult {
+		return func() HealthCheckResult {
+			return HealthCheckResult{Name: name, Status: CheckStatusPass, Detail: "stubbed"}
+		}
+	}
+	engine.checkInterfaces = passCheck("Network Interface Initialization")
+	engine.checkNftables = passCheck("Atomic nftables kernel baseline")
+	engine.checkControlPlane = passCheck("Control plane and management quorum")
+	engine.status.InstallMode = "zbm"
+	engine.status.ActiveRootDevice = "zroot/ROOT/axonwall-0.11.30"
+	engine.status.BootCount = 2
+	engine.status.BootLimit = 3
+
+	engine.runVerificationSequence()
+
+	status := engine.GetStatus()
+	if !status.HealthVerified {
+		t.Fatal("slot must be marked healthy when the bootcount commit succeeds")
+	}
+	if status.BootCount != 0 {
+		t.Fatalf("BootCount must reset to 0 on a committed verification, got %d", status.BootCount)
+	}
+}
