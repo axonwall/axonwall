@@ -8,6 +8,8 @@ import (
 	"encoding/pem"
 	"math/big"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -176,5 +178,59 @@ func TestBatch8HAPKIBundleValidation(t *testing.T) {
 		if err := InstallHAPKICSRResponse(tc.resp); err == nil {
 			t.Fatalf("InstallHAPKICSRResponse(%s) should fail", tc.name)
 		}
+	}
+}
+
+// A-M43: process liveness must distinguish a living process from a
+// dead (or zombie) one — Signal(0) alone also succeeds for zombies.
+func TestBatch8ProcessAlive(t *testing.T) {
+	if !processAlive(os.Getpid()) {
+		t.Fatalf("processAlive(self) should be true")
+	}
+	if processAlive(1 << 22) {
+		t.Fatalf("processAlive on a nonexistent pid should be false")
+	}
+	// A reaped child is dead.
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn test child: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("waiting for test child: %v", err)
+	}
+	if processAlive(pid) {
+		t.Fatalf("processAlive(reaped child %d) should be false", pid)
+	}
+}
+
+// A-M43: with no caddy running and no caddy binary installed, a reload
+// must report failure instead of claiming the proxy started.
+func TestBatch8ReloadCaddyFailsWithoutBinary(t *testing.T) {
+	if _, err := exec.LookPath("caddy"); err == nil {
+		t.Skip("caddy is installed on this host; the no-binary case does not apply")
+	}
+	if pid, err := readCaddyPidFile(); err == nil && processAlive(pid) {
+		t.Skip("a caddy from another lifetime is recorded alive; skipping")
+	}
+	m := NewIAPManager()
+	if err := m.ReloadCaddy(filepath.Join(t.TempDir(), "Caddyfile")); err == nil {
+		t.Fatalf("ReloadCaddy should fail when caddy cannot be started")
+	}
+	// Stop on a fresh manager must be a harmless no-op.
+	m.Stop()
+}
+
+// A-M43: a fresh manager must report no caddy alive (no handle, and no
+// live pid in the pidfile).
+func TestBatch8CaddyAliveFresh(t *testing.T) {
+	if pid, err := readCaddyPidFile(); err == nil && processAlive(pid) {
+		t.Skip("a caddy from another lifetime is recorded alive; skipping")
+	}
+	m := NewIAPManager()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.caddyAliveLocked() {
+		t.Fatalf("fresh IAPManager should report no caddy alive")
 	}
 }
