@@ -651,12 +651,12 @@ export default function SystemUpdatesPage() {
       // whose only check is the WARN "Daemon telemetry unavailable",
       // and verifySystemHealthQuorum now throws before we get here —
       // but report the real statuses here too, as defense in depth.
-      const failing = (telemetry.checks || []).filter((c) => c?.status && c.status !== 'PASS');
+      const failing = (telemetry.checks || []).filter((c: HealthCheckItem) => c?.status && c.status !== 'PASS');
       if (telemetry.daemonUnreachable || !telemetry.healthVerified || failing.length > 0) {
         alert(
           `Watchdog Health Quorum: verification did NOT pass${
             failing.length
-              ? ` — non-passing checks: ${failing.map((c) => `${c.name} (${c.status})`).join(', ')}`
+              ? ` — non-passing checks: ${failing.map((c: HealthCheckItem) => `${c.name} (${c.status})`).join(', ')}`
               : ''
           }. Bootcount was not reset.`
         );
