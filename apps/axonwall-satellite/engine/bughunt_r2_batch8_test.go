@@ -24,7 +24,13 @@ func TestBatch8ParseInterfaceBootArgDHCPGateway(t *testing.T) {
 	}{
 		{"eth0:dhcp:10.0.0.1", true, "dhcp", "10.0.0.1"},
 		{"eth0:DHCP:10.0.0.1", true, "dhcp", "10.0.0.1"},
-		{"eth0:10.0.0.1:10.0.0.254", true, "10.0.0.1/24", "10.0.0.254"},
+		// Merge resolution: a bare IPv4 with a gateway takes the
+		// host CIDR /32, matching batch 1's edge_test expectation
+		// for the same input and the /128 this path gives a bare
+		// IPv6 address. (The v1 cloud-init path defaults a bare
+		// IPv4 to /24, but that is a different input path; the
+		// boot-arg path uses host CIDRs.)
+		{"eth0:10.0.0.1:10.0.0.254", true, "10.0.0.1/32", "10.0.0.254"},
 		{"eth0:dhcp", true, "dhcp", ""},
 		{"eth0:10.0.0.2/24:10.0.0.1", true, "10.0.0.2/24", "10.0.0.1"},
 		{"eth0:fd00::1/64:fd00::ffff", true, "fd00::1/64", "fd00::ffff"},
@@ -234,9 +240,13 @@ func TestBatch8NftCompilerCommonConstructs(t *testing.T) {
 // original single-rule expectation is superseded by this; edge_test
 // encodes the same 26-rule count for the lockdown script.
 func TestBatch8NftFlowOffloadSetExpanded(t *testing.T) {
-	batch := compileNftRules(t, nftScriptWithRules(
-		"meta l4proto { tcp, udp } ct state established flow add @fastpath",
-	))
+	// The flowtable must be defined in the script: the compiler
+	// validates flow-add references against it.
+	batch := compileNftRules(t, "table inet axonwall {\n"+
+		"  flowtable fastpath {\n    hook ingress priority 0; devices = { \"eth0\" };\n  }\n"+
+		"  chain input {\n    type filter hook input priority filter; policy drop;\n"+
+		"    meta l4proto { tcp, udp } ct state established flow add @fastpath\n"+
+		"  }\n}\n")
 	if len(batch.Rules) != 2 {
 		t.Fatalf("expected 2 flow-offload rules (one per protocol), got %d", len(batch.Rules))
 	}

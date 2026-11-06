@@ -810,8 +810,8 @@ func expandRuleTokenSets(tokens []string) ([][]string, error) {
 }
 
 // expandableSetGroup reports whether the `{ ... }` group opening at openIdx
-// (closing at closeIdx) is a port or protocol set the compiler can expand,
-// and returns its values with trailing commas stripped.
+// (closing at closeIdx) is a port, protocol, or icmpv6-type set the compiler
+// can expand, and returns its values with trailing commas stripped.
 func expandableSetGroup(tokens []string, openIdx, closeIdx int) ([]string, bool) {
 	if openIdx < 1 {
 		return nil, false
@@ -824,6 +824,14 @@ func expandableSetGroup(tokens []string, openIdx, closeIdx int) ([]string, bool)
 		}
 	case "l4proto":
 		if openIdx < 2 || tokens[openIdx-2] != "meta" {
+			return nil, false
+		}
+	case "type":
+		// icmpv6 type set: expand to one rule per type. Skipping
+		// the set (as the token compiler does for an unexpanded
+		// group) would accept ALL icmpv6 types — fail-open — which
+		// is what the pre-batch-8 compiler did.
+		if openIdx < 2 || tokens[openIdx-2] != "icmpv6" {
 			return nil, false
 		}
 	default:

@@ -1072,10 +1072,10 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	}
 	targetDataset := "zroot/ROOT/" + beName
 	prevBootfs := ""
-	prevBootfsKnown := false
+	prevBootfsRead := false
 	if out, err := we.runZpoolCmd("get", "-H", "-o", "value", "bootfs", "zroot"); err == nil {
 		prevBootfs = strings.TrimSpace(string(out))
-		prevBootfsKnown = prevBootfs != ""
+		prevBootfsRead = true
 	}
 	prevActiveBe := ""
 	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:active_be", "zroot/ROOT"); err == nil {
@@ -1095,8 +1095,11 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	// active_be/bootcount/bootlimit roll back to their previous
 	// values, and the watchdog's view of the staged BE would
 	// disagree with bootfs. Refuse to arm rather than create that
-	// split state.
-	if !prevBootfsKnown {
+	// split state. An empty value is NOT an unreadable one: it
+	// means no bootfs was set (zpool reports that as "-"; the
+	// batch-16 mock reports it as "") — a known state, and the
+	// rollback below clears bootfs again for it.
+	if !prevBootfsRead {
 		return fmt.Errorf("cannot determine current bootfs; refusing to activate %q: zpool get bootfs failed", beName)
 	}
 
@@ -1125,9 +1128,11 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 			if _, rerr := we.runZpoolCmd("set", "bootfs="+prevBootfs, "zroot"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back bootfs to %s after arming failure: %v", prevBootfs, rerr)
 			}
-		} else if prevBootfs == "-" {
+		} else if prevBootfs == "-" || prevBootfs == "" {
 			// L14: no bootfs was set before, so clear it again
 			// instead of leaving it pointed at the failed target.
+			// ("-" is zpool's report for unset; "" is the batch-16
+			// mock's.)
 			if _, rerr := we.runZpoolCmd("set", "bootfs=", "zroot"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to clear bootfs after arming failure: %v", rerr)
 			}

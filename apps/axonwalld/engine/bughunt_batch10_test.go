@@ -84,6 +84,12 @@ func TestBatch10VirtDoubleStartVMRefused(t *testing.T) {
 	// Live pin: two sequential starts; the first task is still
 	// running (it has to fail through QEMU provisioning first), so
 	// the second must hit the guard, not launch a second QEMU.
+	// A-M26/C-D1 removed the fallback spec StartVM used to invent,
+	// so the live pin registers a minimal spec first — the guard
+	// under test is the double-start refusal, not the spec check.
+	if err := mgr.RegisterVMSpec(CompiledVmSpec{VMID: 102, Name: "vm-102"}); err != nil {
+		t.Fatalf("RegisterVMSpec(102) failed: %v", err)
+	}
 	upid, err := mgr.StartVM(102, "root@axonwall")
 	if err != nil {
 		t.Fatalf("first StartVM(102) failed: %v", err)

@@ -158,11 +158,15 @@ func parseInterfaceBootArg(role, arg string) (EdgeInterfaceSpec, bool) {
 			// Bare IP with gateway, e.g. "10.0.0.1:10.0.0.254" (no
 			// prefix). Only split when both sides parse as IPs so
 			// bare IPv6 literals are never mangled here, and only
-			// for IPv4: the bare address takes the /24 the v1
-			// cloud-init path in this package also defaults to.
+			// for IPv4: the bare address takes the host CIDR, the
+			// same normalization the fallback below applies to a
+			// bare address without a gateway (and the IPv6 analogue
+			// is /128). (The v1 cloud-init path defaults a bare
+			// IPv4 to /24 instead; the boot-arg path uses host
+			// CIDRs.)
 			candAddr, candGw := strings.TrimSpace(rest[:colonIdx]), strings.TrimSpace(rest[colonIdx+1:])
 			if ip := net.ParseIP(candAddr); ip != nil && ip.To4() != nil && net.ParseIP(candGw) != nil {
-				addr = candAddr + "/24"
+				addr = candAddr + "/32"
 				gw = candGw
 			}
 		}

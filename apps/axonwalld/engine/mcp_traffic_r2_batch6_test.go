@@ -25,8 +25,12 @@ func installFakeTc(t *testing.T) {
 
 func shapeReqR2Batch6() McpShapeReq {
 	return McpShapeReq{
-		Target:           "198.51.100.20",
-		Interface:        "eth0",
+		Target: "198.51.100.20",
+		// "lo" resolves to a live device in any net namespace;
+		// "eth0" does not exist in the sandbox, and the A-H3 check
+		// in ShapeTraffic refuses interfaces that do not resolve.
+		// (Matches the main shapeReq() helper.)
+		Interface:  "lo",
 		Direction:        "both",
 		RateKbps:         1000,
 		CeilKbps:         2000,

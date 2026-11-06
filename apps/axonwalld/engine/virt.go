@@ -504,21 +504,13 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 	spec, exists := m.vmSpecs[vmid]
 	m.mu.Unlock()
 
-	if !exists {
-		// A-M26 / C-D1: refuse to boot a VM with no registered spec.
-		// The old code invented a generic 2 vCPU / 2048 MB diskless,
-		// NIC-less QEMU spec here, so a failed or skipped register
-		// silently booted a VM the operator never configured (and
-		// which ListVMs never showed, since it only lists configured
-		// VMs). Callers must register a spec first; a failed register
-		// now returns an error instead of success.
-		return "", fmt.Errorf("VM %d has no registered spec; refusing to boot a generic fallback VM (register a spec first)", vmid)
-	}
-
 	pidFile := fmt.Sprintf("/run/axonwall/pids/vm-%d.pid", vmid)
 
-	// A-L22: claim the start before the pid check. The task below
-	// runs asynchronously, so without this flag a second concurrent
+	// A-L22: claim the start before the pid check — and before the
+	// spec check below, so a second StartVM for a VM whose start is
+	// already in flight is refused as "already in progress" even
+	// though the spec lookup would fail first. The task below runs
+	// asynchronously, so without this flag a second concurrent
 	// StartVM would pass the pid check (no pidfile yet) and launch
 	// a second QEMU for the same VM.
 	m.startMu.Lock()
@@ -535,6 +527,18 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 		m.startMu.Lock()
 		delete(m.startingVMs, vmid)
 		m.startMu.Unlock()
+	}
+
+	if !exists {
+		// A-M26 / C-D1: refuse to boot a VM with no registered spec.
+		// The old code invented a generic 2 vCPU / 2048 MB diskless,
+		// NIC-less QEMU spec here, so a failed or skipped register
+		// silently booted a VM the operator never configured (and
+		// which ListVMs never showed, since it only lists configured
+		// VMs). Callers must register a spec first; a failed register
+		// now returns an error instead of success.
+		clearStarting()
+		return "", fmt.Errorf("VM %d has no registered spec; refusing to boot a generic fallback VM (register a spec first)", vmid)
 	}
 
 	if pid := readPidFile(pidFile); pid > 0 && isPidRunning(pid) {
