@@ -1248,15 +1248,20 @@ func (we *WatchdogEngine) verifyInterfaces() HealthCheckResult {
 	}
 
 	hasLoopback := false
-	upCount := 0
+	nonLoopbackUp := 0
 	for _, iface := range ifaces {
 		// A-M17 (slice E note): loopback must exist AND be up; the
 		// old check counted a merely-present loopback as healthy.
 		if (iface.Flags&net.FlagLoopback) != 0 && (iface.Flags&net.FlagUp) != 0 {
 			hasLoopback = true
 		}
-		if (iface.Flags & net.FlagUp) != 0 {
-			upCount++
+		// A-M20: loopback alone must not pass the check. A box with
+		// every physical NIC down used to pass with N=1 (loopback
+		// counted in the total) and the watchdog then committed
+		// bootcount=0, disarming the A/B fallback for a network-dead
+		// box.
+		if (iface.Flags&net.FlagUp) != 0 && (iface.Flags&net.FlagLoopback) == 0 {
+			nonLoopbackUp++
 		}
 	}
 
@@ -1268,10 +1273,18 @@ func (we *WatchdogEngine) verifyInterfaces() HealthCheckResult {
 		}
 	}
 
+	if nonLoopbackUp == 0 {
+		return HealthCheckResult{
+			Name:   "Network Interface Initialization",
+			Status: CheckStatusFail,
+			Detail: "No non-loopback network interface is up; loopback alone cannot carry traffic",
+		}
+	}
+
 	return HealthCheckResult{
 		Name:   "Network Interface Initialization",
 		Status: CheckStatusPass,
-		Detail: fmt.Sprintf("Detected %d operational network interfaces with active loopback.", upCount),
+		Detail: fmt.Sprintf("Detected %d operational non-loopback network interface(s) with active loopback.", nonLoopbackUp),
 	}
 }
 
@@ -1437,11 +1450,15 @@ func (we *WatchdogEngine) TriggerRollback() error {
 	targetSlot := we.status.InactiveSlot
 	log.Printf("[Watchdog] Triggering safe manual rollback to Slot %s...", targetSlot)
 
-	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
-		return fmt.Errorf("failed to set active_slot in grubenv: %w", err)
-	}
+	// A-M21: write bootcount BEFORE active_slot, so a bootcount failure
+	// cannot leave the boot target already flipped with stale boot
+	// accounting. The old order (active_slot first) booted the target
+	// slot with the previous bootcount on the next boot.
 	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 		return fmt.Errorf("failed to reset bootcount in grubenv: %w", err)
+	}
+	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
+		return fmt.Errorf("failed to set active_slot in grubenv: %w", err)
 	}
 
 	oldActive := we.status.ActiveSlot
@@ -1494,11 +1511,13 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 		return fmt.Errorf("invalid partition slot: %s (must be A or B)", targetSlot)
 	}
 
-	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
-		return fmt.Errorf("failed to set active_slot: %w", err)
-	}
+	// A-M21: write bootcount BEFORE active_slot (see TriggerRollback):
+	// a bootcount failure must not leave the boot target flipped.
 	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 		return fmt.Errorf("failed to reset bootcount: %w", err)
+	}
+	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
+		return fmt.Errorf("failed to set active_slot: %w", err)
 	}
 
 	inactiveSlot := "B"
@@ -1590,14 +1609,17 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		return fmt.Sprintf("Firmware v%s successfully staged to new ZFS Boot Environment (axonwall-%s)! Watchdog bootcount armed (bootlimit=3). Reboot when ready.", targetVersion, targetVersion), nil
 	}
 
-	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
-		return "", fmt.Errorf("failed to set active_slot in grubenv: %w", err)
-	}
+	// A-M21: write bootcount/bootlimit BEFORE active_slot (see
+	// TriggerRollback): a later write failure must not leave the boot
+	// target flipped with stale boot accounting.
 	if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
 		return "", fmt.Errorf("failed to reset bootcount in grubenv: %w", err)
 	}
 	if err := we.writeGrubEnvKey("bootlimit", "3"); err != nil {
 		return "", fmt.Errorf("failed to set bootlimit in grubenv: %w", err)
+	}
+	if err := we.writeGrubEnvKey("active_slot", targetSlot); err != nil {
+		return "", fmt.Errorf("failed to set active_slot in grubenv: %w", err)
 	}
 
 	currentRunningVer := readInstalledVersion()
