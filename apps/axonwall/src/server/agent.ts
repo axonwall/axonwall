@@ -2882,6 +2882,11 @@ export async function saveInterfaceAssignment(data: {
   // Delegate persistence, interface bring-up, Kea reload, and nftables commit to root axonwalld daemon
   let daemonApplied = false;
   let daemonError: string | null = null;
+  // C10 residual: set when the daemon was never reached at all
+  // (callAgentApi resolves null on socket error/timeout, and the old bare
+  // `catch {}` discarded it). Distinct from an explicit rejection above:
+  // the disk write stands, but nothing may report the change as applied.
+  let daemonUnreachable: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
     const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
@@ -2934,15 +2939,24 @@ export async function saveInterfaceAssignment(data: {
       });
       if (confirmResp && !confirmResp.success) {
         daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface change';
-      } else {
+      } else if (confirmResp) {
         daemonApplied = true;
+      } else {
+        // C10 residual: the confirm call never reached the daemon.
+        daemonUnreachable = 'confirm call failed';
       }
     } else if (applyResp) {
       // C10: the daemon answered and rejected the change. Do not fall
       // through to a success return; the caller handles the rollback below.
       daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface change';
+    } else {
+      // C10 residual: callAgentApi resolves null when the daemon socket is
+      // unreachable — the daemon never saw this change.
+      daemonUnreachable = 'apply call failed';
     }
-  } catch {}
+  } catch (err: any) {
+    daemonUnreachable = err?.message || 'daemon call threw';
+  }
 
   // C10: on an explicit daemon rejection, roll the disk write back and
   // report failure — never present the disk-only change as applied.
@@ -2966,6 +2980,18 @@ export async function saveInterfaceAssignment(data: {
     );
   } catch {}
 
+  // C10 residual: the local fallback below used to swallow every step's
+  // failure (`catch {}`) and still return success. Every step is now
+  // checked and its failure recorded, so the final return can report it.
+  const localErrors: string[] = [];
+  const runLocalStep = (label: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (err: any) {
+      localErrors.push(`${label}: ${err?.message || 'failed'}`);
+    }
+  };
+
   // Sync Kea DHCPv4 config directly if running in standalone/dev mode (when axonwalld did not apply)
   if (!daemonApplied) {
     try {
@@ -2973,54 +2999,117 @@ export async function saveInterfaceAssignment(data: {
       const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
       if (keaFile && fs.existsSync('/etc/kea')) {
         fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
-        try {
-          execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 });
-        } catch {}
+        runLocalStep('kea reload', () =>
+          execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 })
+        );
       }
-    } catch {}
+    } catch (err: any) {
+      localErrors.push(`kea sync: ${err?.message || 'failed'}`);
+    }
   }
 
   // Apply basic network state directly only when axonwalld was not reachable
   if (!daemonApplied && validDev) {
     if (normalizedEnabled) {
-      try {
-        execFileSync('ip', ['link', 'set', normalizedDevice, 'up'], { stdio: 'ignore', timeout: 2000 });
-      } catch {}
+      runLocalStep('ip link up', () =>
+        execFileSync('ip', ['link', 'set', normalizedDevice, 'up'], { stdio: 'ignore', timeout: 2000 })
+      );
       if (data.type === 'static' && data.ipv4Address) {
+        // C10 residual: the old order flushed the interface BEFORE adding
+        // the new address, so a failed add left the interface address-less
+        // while the UI reported success. Add first, then delete only the
+        // old addresses that differ — and verify the new address is
+        // actually present afterwards.
+        const newAddr = data.ipv4Address;
+        // An add that fails only because the address is already present
+        // is not a failure — the verify step below is the arbiter.
+        let addrAddError: string | null = null;
         try {
-          execFileSync('ip', ['addr', 'flush', 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
-        } catch {}
+          execFileSync('ip', ['addr', 'add', newAddr, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
+        } catch (err: any) {
+          addrAddError = err?.message || 'failed';
+        }
         try {
-          execFileSync('ip', ['addr', 'add', data.ipv4Address, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
-        } catch {}
+          const shown = execFileSync('ip', ['-j', 'addr', 'show', 'dev', normalizedDevice], {
+            encoding: 'utf8',
+            timeout: 2000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          });
+          const parsed = JSON.parse(shown) as Array<{ addr_info?: Array<{ family?: string; local?: string; prefixlen?: number }> }>;
+          const oldAddrs = (parsed?.[0]?.addr_info ?? [])
+            .filter((a) => a.family === 'inet' && a.local)
+            .map((a) => `${a.local}/${a.prefixlen}`)
+            .filter((a) => a !== newAddr);
+          for (const old of oldAddrs) {
+            runLocalStep(`ip addr del ${old}`, () =>
+              execFileSync('ip', ['addr', 'del', old, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 })
+            );
+          }
+        } catch (err: any) {
+          localErrors.push(`ip addr list: ${err?.message || 'failed'}`);
+        }
+        try {
+          const after = execFileSync('ip', ['addr', 'show', 'dev', normalizedDevice], {
+            encoding: 'utf8',
+            timeout: 2000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          });
+          if (!after.includes(newAddr)) {
+            localErrors.push(
+              `ip addr add: ${newAddr} is not present on ${normalizedDevice} after applying${addrAddError ? ` (add failed: ${addrAddError})` : ''}`
+            );
+          }
+        } catch (err: any) {
+          localErrors.push(`ip addr verify: ${err?.message || 'failed'}`);
+        }
         if (role === 'wan' && data.ipv4Gateway) {
-          try {
-            execFileSync('ip', ['route', 'replace', 'default', 'via', data.ipv4Gateway, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
-          } catch {}
+          const gateway = data.ipv4Gateway;
+          runLocalStep('ip route replace', () =>
+            execFileSync('ip', ['route', 'replace', 'default', 'via', gateway, 'dev', normalizedDevice], {
+              stdio: 'ignore',
+              timeout: 2000,
+            })
+          );
         }
       } else if (data.type === 'dhcp') {
         let handledByDhcpcd = false;
         if (fs.existsSync('/usr/sbin/dhcpcd') || fs.existsSync('/sbin/dhcpcd')) {
-          try {
-            const dhcpcdBin = fs.existsSync('/usr/sbin/dhcpcd') ? '/usr/sbin/dhcpcd' : '/sbin/dhcpcd';
-            execFileSync(dhcpcdBin, ['-4', normalizedDevice], { stdio: 'ignore', timeout: 8000 });
-            handledByDhcpcd = true;
-          } catch {}
+          const dhcpcdBin = fs.existsSync('/usr/sbin/dhcpcd') ? '/usr/sbin/dhcpcd' : '/sbin/dhcpcd';
+          const before = localErrors.length;
+          runLocalStep('dhcpcd', () =>
+            execFileSync(dhcpcdBin, ['-4', normalizedDevice], { stdio: 'ignore', timeout: 8000 })
+          );
+          handledByDhcpcd = localErrors.length === before;
         }
         if (!handledByDhcpcd) {
-          try {
-            execFileSync('dhclient', ['-r', normalizedDevice], { stdio: 'ignore', timeout: 3000 });
-          } catch {}
-          try {
-            execFileSync('dhclient', [normalizedDevice], { stdio: 'ignore', timeout: 5000 });
-          } catch {}
+          runLocalStep('dhclient release', () =>
+            execFileSync('dhclient', ['-r', normalizedDevice], { stdio: 'ignore', timeout: 3000 })
+          );
+          runLocalStep('dhclient', () =>
+            execFileSync('dhclient', [normalizedDevice], { stdio: 'ignore', timeout: 5000 })
+          );
         }
       }
     } else {
-      try {
-        execFileSync('ip', ['link', 'set', normalizedDevice, 'down'], { stdio: 'ignore', timeout: 2000 });
-      } catch {}
+      runLocalStep('ip link down', () =>
+        execFileSync('ip', ['link', 'set', normalizedDevice, 'down'], { stdio: 'ignore', timeout: 2000 })
+      );
     }
+  }
+
+  // C10 residual: when the daemon was never reached, the change was saved
+  // to disk (and the local commands above ran best-effort) but the daemon
+  // — owner of nftables/Kea — never applied anything. Report that
+  // explicitly instead of "saved on eth1" success.
+  if (daemonUnreachable) {
+    const localNote =
+      localErrors.length > 0
+        ? ` Local fallback steps failed: ${localErrors.join('; ')}.`
+        : ' Local interface commands ran as a best-effort fallback only.';
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was saved to disk but NOT applied: axonwalld is unreachable (${daemonUnreachable}).${localNote}`,
+    };
   }
 
   return {
@@ -3061,6 +3150,10 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
   const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
 
   let daemonError: string | null = null;
+  // C10 residual: set when the daemon was never reached at all (see the
+  // save path above). The removal was written to disk but the daemon —
+  // owner of nftables/Kea — never applied it.
+  let daemonUnreachable: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
     const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
@@ -3113,12 +3206,21 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
       });
       if (confirmResp && !confirmResp.success) {
         daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface removal';
+      } else if (!confirmResp) {
+        // C10 residual: the confirm call never reached the daemon.
+        daemonUnreachable = 'confirm call failed';
       }
     } else if (applyResp) {
       // C10: the daemon answered and rejected the removal.
       daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface removal';
+    } else {
+      // C10 residual: callAgentApi resolves null when the daemon socket
+      // is unreachable — the daemon never saw this removal.
+      daemonUnreachable = 'apply call failed';
     }
-  } catch {}
+  } catch (err: any) {
+    daemonUnreachable = err?.message || 'daemon call threw';
+  }
 
   // C10: on an explicit daemon rejection, roll the disk write back and
   // report failure — never present the disk-only removal as applied.
@@ -3128,6 +3230,16 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was not removed: ${daemonError}`,
+    };
+  }
+
+  // C10 residual: when the daemon was never reached, the removal was
+  // written to disk but never applied by the daemon. Report that
+  // explicitly instead of "removed" success.
+  if (daemonUnreachable) {
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was removed from disk state but NOT applied: axonwalld is unreachable (${daemonUnreachable}).`,
     };
   }
 
