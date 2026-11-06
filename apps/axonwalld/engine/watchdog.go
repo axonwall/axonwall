@@ -1442,6 +1442,40 @@ func (we *WatchdogEngine) verifyControlPlane() HealthCheckResult {
 	}
 }
 
+// selectStandbyBE picks the Boot Environment a slot-letter or rollback
+// caller should arm when no explicit BE is named. E2-10: taking the
+// first non-active entry of the cached list armed the alphabetically
+// first standby — usually the oldest version — once several standbys
+// existed. Prefer the BE already armed for next boot, else the newest
+// by creation time; fall back to the last standby in dataset-name
+// order when no creation time parses. Returns nil when no standby
+// exists. Callers must refresh the list first (the cache is stale
+// after script-side arming).
+func selectStandbyBE(bes []ZfsBootEnvironment) *ZfsBootEnvironment {
+	var newest *ZfsBootEnvironment
+	var newestTime time.Time
+	var last *ZfsBootEnvironment
+	for i := range bes {
+		be := &bes[i]
+		if be.ActiveNow {
+			continue
+		}
+		if be.ActiveNext {
+			return be
+		}
+		last = be
+		if t, err := time.Parse("Mon Jan _2 15:04 2006", be.CreatedAt); err == nil {
+			if newest == nil || t.After(newestTime) {
+				newest, newestTime = be, t
+			}
+		}
+	}
+	if newest != nil {
+		return newest
+	}
+	return last
+}
+
 // TriggerRollback manually switches the target boot slot to the alternate partition or fallback BE and reboots.
 func (we *WatchdogEngine) TriggerRollback() error {
 	we.mu.Lock()
@@ -1463,11 +1497,12 @@ func (we *WatchdogEngine) TriggerRollback() error {
 			fallbackBe = strings.TrimSpace(string(fallbackOut))
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
-			for _, be := range we.status.BootEnvironments {
-				if !be.ActiveNow {
-					fallbackBe = be.Dataset
-					break
-				}
+			// E2-10: refresh the list (script-side arming never
+			// tells the daemon) and prefer the armed/newest standby
+			// instead of the first non-active cached entry.
+			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+			if be := selectStandbyBE(we.status.BootEnvironments); be != nil {
+				fallbackBe = be.Dataset
 			}
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
@@ -1522,11 +1557,14 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 				}
 			}
 		} else if strings.EqualFold(targetBE, "B") {
-			for _, be := range we.status.BootEnvironments {
-				if !be.ActiveNow {
-					targetBE = be.Name
-					break
-				}
+			// E2-10: refresh the list (script-side arming never
+			// tells the daemon) and prefer the armed/newest standby
+			// instead of the first non-active cached entry.
+			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+			if be := selectStandbyBE(we.status.BootEnvironments); be != nil {
+				targetBE = be.Name
+			} else {
+				return fmt.Errorf("no standby Boot Environment available for slot B")
 			}
 		}
 		we.mu.Unlock()
