@@ -211,9 +211,12 @@ func detectActiveSlotFromSystem(cmdlinePath string) (string, string) {
 	// 1. Inspect kernel cmdline if accessible
 	if cmdlineBytes, err := os.ReadFile(cmdlinePath); err == nil {
 		cmdline := string(cmdlineBytes)
-		if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
+		// E2-11: rootfsB/rootfsA are matched as exact tokens, never
+		// bare substrings — firstboot treats rootfsB=0 as slot A
+		// (rootfsB=1 is B), and a bare Contains read rootfsB=0 as B.
+		if strings.Contains(cmdline, "axon_root_b") || cmdlineHasToken(cmdline, "rootfsB=1") || cmdlineHasToken(cmdline, "rootfsA=0") || strings.Contains(cmdline, "slot=B") {
 			return "B", resolveLabelDevice("axon_root_b")
-		} else if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
+		} else if strings.Contains(cmdline, "axon_root_a") || cmdlineHasToken(cmdline, "rootfsB=0") || cmdlineHasToken(cmdline, "rootfsA=1") || strings.Contains(cmdline, "slot=A") {
 			return "A", resolveLabelDevice("axon_root_a")
 		}
 	}
@@ -354,6 +357,18 @@ var (
 	zbmSnapshotRegex   = regexp.MustCompile(`^([a-zA-Z0-9._/-]+@)?[a-zA-Z0-9._-]+$`)
 )
 
+// cmdlineHasToken reports whether cmdline carries token as a whole
+// whitespace-delimited word. E2-11: bare strings.Contains matching
+// mistook "rootfsB=0" (firstboot: slot A) for slot B.
+func cmdlineHasToken(cmdline, token string) bool {
+	for _, field := range strings.Fields(cmdline) {
+		if field == token {
+			return true
+		}
+	}
+	return false
+}
+
 // detectRunningSlotFromCmdline reports which slot the running kernel
 // actually booted from, based only on the kernel cmdline. The second
 // return is false when the cmdline is unreadable or carries no slot
@@ -367,10 +382,11 @@ func detectRunningSlotFromCmdline(cmdlinePath string) (string, bool) {
 		return "", false
 	}
 	cmdline := string(cmdlineBytes)
-	if strings.Contains(cmdline, "axon_root_b") || strings.Contains(cmdline, "rootfsB") || strings.Contains(cmdline, "slot=B") {
+	// E2-11: exact-token matches only (see cmdlineHasToken).
+	if strings.Contains(cmdline, "axon_root_b") || cmdlineHasToken(cmdline, "rootfsB=1") || cmdlineHasToken(cmdline, "rootfsA=0") || strings.Contains(cmdline, "slot=B") {
 		return "B", true
 	}
-	if strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "rootfsA") || strings.Contains(cmdline, "slot=A") {
+	if strings.Contains(cmdline, "axon_root_a") || cmdlineHasToken(cmdline, "rootfsB=0") || cmdlineHasToken(cmdline, "rootfsA=1") || strings.Contains(cmdline, "slot=A") {
 		return "A", true
 	}
 	return "", false
