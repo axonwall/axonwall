@@ -301,11 +301,20 @@ func reconcileStaticRoutesLocked() error {
 		}
 
 		if r.IsEnabled() {
-			desiredRoutes[r.Network] = r
-			if strings.HasSuffix(r.Network, "/32") {
-				desiredRoutes[strings.TrimSuffix(r.Network, "/32")] = r
-			} else if strings.HasSuffix(r.Network, "/128") {
-				desiredRoutes[strings.TrimSuffix(r.Network, "/128")] = r
+			// L1: record the destination as owned only after the
+			// install succeeds. The owned set is the A-H1 fix's
+			// sole record of "routes this reconciler installed";
+			// adding the entry before the exec persisted
+			// destinations the kernel never got, so a later
+			// reconcile could delete an operator-installed route
+			// for the same destination.
+			markApplied := func() {
+				desiredRoutes[r.Network] = r
+				if strings.HasSuffix(r.Network, "/32") {
+					desiredRoutes[strings.TrimSuffix(r.Network, "/32")] = r
+				} else if strings.HasSuffix(r.Network, "/128") {
+					desiredRoutes[strings.TrimSuffix(r.Network, "/128")] = r
+				}
 			}
 
 			args := []string{family, "route", "replace", r.Network, "via", r.Gateway}
@@ -320,6 +329,7 @@ func reconcileStaticRoutesLocked() error {
 				if dev != "" {
 					fallbackArgs := []string{family, "route", "replace", r.Network, "via", r.Gateway, "dev", dev, "proto", "static"}
 					if fbOut, fbErr := exec.Command("ip", fallbackArgs...).CombinedOutput(); fbErr == nil {
+						markApplied()
 						appliedCount++
 						log.Printf("[Agent] Applied static route: %s via %s (dev=%s)", r.Network, r.Gateway, dev)
 						continue
@@ -330,6 +340,7 @@ func reconcileStaticRoutesLocked() error {
 				}
 				log.Printf("[Agent] Failed to apply static route %s via %s: %s", r.Network, r.Gateway, strings.TrimSpace(string(out)))
 			} else {
+				markApplied()
 				appliedCount++
 				log.Printf("[Agent] Applied static route: %s via %s (dev=%s, onlink)", r.Network, r.Gateway, dev)
 			}
