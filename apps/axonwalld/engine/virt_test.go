@@ -64,7 +64,7 @@ func TestVirtManagerRegistrationAndListing(t *testing.T) {
 	nasMgr := NewNasManager()
 	virtMgr := NewVirtManager(taskMgr, nasMgr)
 
-	virtMgr.RegisterVMSpec(CompiledVmSpec{
+	if err := virtMgr.RegisterVMSpec(CompiledVmSpec{
 		VMID:      105,
 		Name:      "database-vm",
 		Binary:    "qemu-system-x86_64",
@@ -77,7 +77,9 @@ func TestVirtManagerRegistrationAndListing(t *testing.T) {
 		Disks: []VmDisk{
 			{Name: "disk0", Pool: "tank", SizeGb: 100},
 		},
-	})
+	}); err != nil {
+		t.Fatalf("RegisterVMSpec valid spec: %v", err)
+	}
 
 	vms := virtMgr.ListVMs()
 	if len(vms) != 1 {

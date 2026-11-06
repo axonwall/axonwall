@@ -214,30 +214,34 @@ func validateSafeQemuArgs(args []string) error {
 }
 
 // RegisterVMSpec stores or updates the compiled specification for a VM and persists to disk.
-func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) {
+// It returns an error instead of silently dropping an invalid spec: a
+// dropped spec used to be reported as a successful register, and the VM
+// then booted with a generic diskless fallback spec (A-M26 / C-D1).
+func (m *VirtManager) RegisterVMSpec(spec CompiledVmSpec) error {
 	switch spec.Binary {
 	case "", "qemu-system-x86_64", "/usr/bin/qemu-system-x86_64":
 		spec.Binary = "/usr/bin/qemu-system-x86_64"
 	case "qemu-system-aarch64", "/usr/bin/qemu-system-aarch64":
 		spec.Binary = "/usr/bin/qemu-system-aarch64"
 	default:
-		return
+		return fmt.Errorf("unsupported QEMU binary %q", spec.Binary)
 	}
 	if err := validateSafeQemuArgs(spec.Args); err != nil {
-		return
+		return err
 	}
 	for _, disk := range spec.Disks {
 		if disk.Pool != "" && !validZfsPoolName(disk.Pool) {
-			return
+			return fmt.Errorf("invalid ZFS pool name %q for disk %q", disk.Pool, disk.Name)
 		}
 		if disk.Zvol != "" && !validZfsPath(disk.Zvol, true) {
-			return
+			return fmt.Errorf("invalid ZFS zvol path %q for disk %q", disk.Zvol, disk.Name)
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.vmSpecs[spec.VMID] = spec
 	m.savePersistedSpecsLocked()
+	return nil
 }
 
 // UnregisterVMSpec removes a VM specification and updates persisted state.
@@ -467,29 +471,14 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 	m.mu.Unlock()
 
 	if !exists {
-		// Provide a default fallback spec if not yet parsed from yaml
-		spec = CompiledVmSpec{
-			VMID:     vmid,
-			Name:     fmt.Sprintf("vm-%d", vmid),
-			Binary:   "qemu-system-x86_64",
-			Cores:    2,
-			MemoryMb: 2048,
-			Args: []string{
-				"-name", fmt.Sprintf("vm-%d,process=axonwall-vm-%d", vmid, vmid),
-				"-enable-kvm",
-				"-machine", "q35,accel=kvm",
-				"-cpu", "host",
-				"-smp", "2",
-				"-m", "2048",
-				"-chardev", fmt.Sprintf("socket,id=qmp,path=/run/axonwall/qmp/vm-%d.sock,server=on,wait=off", vmid),
-				"-mon", "chardev=qmp,mode=control",
-				"-chardev", fmt.Sprintf("socket,id=serial0,path=/run/axonwall/serial/vm-%d.sock,server=on,wait=off", vmid),
-				"-serial", "chardev:serial0",
-				"-vnc", fmt.Sprintf("unix:/run/axonwall/vnc/vm-%d.sock", vmid),
-				"-vga", "std",
-				"-daemonize",
-			},
-		}
+		// A-M26 / C-D1: refuse to boot a VM with no registered spec.
+		// The old code invented a generic 2 vCPU / 2048 MB diskless,
+		// NIC-less QEMU spec here, so a failed or skipped register
+		// silently booted a VM the operator never configured (and
+		// which ListVMs never showed, since it only lists configured
+		// VMs). Callers must register a spec first; a failed register
+		// now returns an error instead of success.
+		return "", fmt.Errorf("VM %d has no registered spec; refusing to boot a generic fallback VM (register a spec first)", vmid)
 	}
 
 	pidFile := fmt.Sprintf("/run/axonwall/pids/vm-%d.pid", vmid)
