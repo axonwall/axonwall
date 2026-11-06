@@ -20,7 +20,7 @@
     "jose": "^6.0.8",
     "lucide-react": "^1.60.0",
     "nastymap": "workspace:*",
-    "next": "^15.5.27",
+    "next": "^16.4.4",
     "otplib": "^13.5.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
