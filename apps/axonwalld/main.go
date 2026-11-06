@@ -2359,6 +2359,29 @@ func main() {
 				log.Printf("[Agent] Armed Slot %s in bootloader before reboot", targetSlot)
 			}
 
+			// L8: the handler used to answer success and only then fire
+			// a goroutine that discarded every command error, so a
+			// box without working reboot/poweroff commands stayed up
+			// while the caller believed a reboot was in progress.
+			// Verify at least one command exists before responding.
+			var powerCmds []string
+			if action == "reboot" {
+				powerCmds = []string{"systemctl", "/sbin/reboot", "reboot"}
+			} else {
+				powerCmds = []string{"systemctl", "/sbin/poweroff", "poweroff", "/sbin/halt", "halt"}
+			}
+			powerAvailable := false
+			for _, cmd := range powerCmds {
+				if _, err := exec.LookPath(cmd); err == nil {
+					powerAvailable = true
+					break
+				}
+			}
+			if !powerAvailable {
+				http.Error(w, fmt.Sprintf("no %s command available on this system", action), http.StatusInternalServerError)
+				return
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
@@ -2369,18 +2392,41 @@ func main() {
 
 			go func() {
 				time.Sleep(500 * time.Millisecond)
+				// Log each attempt's failure instead of discarding
+				// it, and stop after the first command that
+				// succeeds: on a real box the reboot/poweroff then
+				// proceeds and the later fallbacks never run.
+				runPower := func(name string, args ...string) bool {
+					if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+						log.Printf("[Agent] System %s via %s failed: %v (%s)", action, name, err, strings.TrimSpace(string(out)))
+						return false
+					}
+					return true
+				}
 				if action == "reboot" {
 					log.Printf("[Agent] System reboot initiated via API")
-					_ = exec.Command("systemctl", "reboot").Run()
-					_ = exec.Command("/sbin/reboot").Run()
-					_ = exec.Command("reboot").Run()
+					if runPower("systemctl", "reboot") {
+						return
+					}
+					if runPower("/sbin/reboot") {
+						return
+					}
+					runPower("reboot")
 				} else {
 					log.Printf("[Agent] System poweroff initiated via API")
-					_ = exec.Command("systemctl", "poweroff").Run()
-					_ = exec.Command("/sbin/poweroff").Run()
-					_ = exec.Command("poweroff").Run()
-					_ = exec.Command("/sbin/halt", "-p").Run()
-					_ = exec.Command("halt", "-p").Run()
+					if runPower("systemctl", "poweroff") {
+						return
+					}
+					if runPower("/sbin/poweroff") {
+						return
+					}
+					if runPower("poweroff") {
+						return
+					}
+					if runPower("/sbin/halt", "-p") {
+						return
+					}
+					runPower("halt", "-p")
 				}
 			}()
 		})
