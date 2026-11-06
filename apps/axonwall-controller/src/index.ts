@@ -540,6 +540,28 @@ export function shouldPruneDisconnectedSatellite(
   return nowMs - t >= graceMs;
 }
 
+// B2-M7: one pushed route, keyed the way the satellite
+// identifies it (destination + gateway + device). SYNC_ROUTES
+// used to send only additions, so a route removed from
+// DesiredState lingered in the kernel forever; the controller now
+// tracks what it last pushed per satellite and sends the
+// difference as a delete list.
+export interface SyncedRoute {
+  destination: string;
+  gateway: string;
+  device?: string;
+}
+
+// B2-M7: routes that were pushed on an earlier sync but are no
+// longer in the enabled set. A first sync (no previous record)
+// has no deletions — the controller cannot know about kernel
+// routes that predate its own pushes.
+export function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRoute[]): SyncedRoute[] {
+  const routeKey = (r: SyncedRoute): string => `${r.destination}|${r.gateway}|${r.device ?? ''}`;
+  const currentKeys = new Set(current.map(routeKey));
+  return previous.filter((r) => !currentKeys.has(routeKey(r)));
+}
+
 // B2-M1: satellite command acknowledgements. The satellite acks
 // every acted-on hub command (SYNC_*, PROMOTE, DEMOTE,
 // BLOCK_TARGET, SYNC_HEADSCALE) with success or failure, echoing
@@ -909,6 +931,12 @@ async function main() {
     // B-M2: set when the socket closes; the entry is pruned after the
     // grace period instead of being retained until the fleet cap.
     disconnectedAt?: string;
+    // B2-M7: routes last pushed to this satellite, so a route
+    // removed from DesiredState can be deleted from the kernel
+    // instead of lingering forever (SYNC_ROUTES used to send only
+    // additions). Carried over from the previous entry on
+    // reconnect, like headscaleEnrolled.
+    lastSyncedRoutes?: SyncedRoute[];
     metrics?: {
       uptimeSeconds: number;
       cpuUsagePercent: number;
@@ -1105,7 +1133,15 @@ async function main() {
           gateway: r.gateway,
           ...(r.interface ? { device: r.interface } : {}),
         }));
-      sendToSatellite(sat, 'SYNC_ROUTES', { routes: enabledRoutes });
+      // B2-M7: delete routes that were pushed on an earlier sync
+      // but are no longer in the enabled set. The record is only
+      // updated when the send actually went out (sendToSatellite
+      // returns null on a dead socket); otherwise the next sync
+      // would believe the deletions had landed.
+      const routesToDelete = computeRoutesToDelete(sat.lastSyncedRoutes ?? [], enabledRoutes);
+      if (sendToSatellite(sat, 'SYNC_ROUTES', { routes: enabledRoutes, routesToDelete }) !== null) {
+        sat.lastSyncedRoutes = enabledRoutes;
+      }
     }
   }
 
@@ -2033,6 +2069,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       wireguard: { tunnelIp },
       ws: ws,
       headscaleEnrolled: existing?.headscaleEnrolled || false,
+      lastSyncedRoutes: existing?.lastSyncedRoutes,
     };
     activeSatellites.set(satId, state);
 

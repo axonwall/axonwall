@@ -72,6 +72,12 @@ export declare const MESH_DISCONNECTED_GRACE_MS: number;
 export declare const SATELLITE_HEARTBEAT_MS: number;
 export declare const SATELLITE_LAST_SEEN_GRACE_MS: number;
 export declare function shouldPruneDisconnectedSatellite(disconnectedAt: string | undefined, nowMs: number, graceMs?: number): boolean;
+export interface SyncedRoute {
+    destination: string;
+    gateway: string;
+    device?: string;
+}
+export declare function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRoute[]): SyncedRoute[];
 export declare const PENDING_COMMAND_STALE_MS: number;
 export interface SatelliteCommandAck {
     command: string;

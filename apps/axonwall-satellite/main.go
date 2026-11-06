@@ -75,6 +75,10 @@ type SyncInterfacesPayload struct {
 
 type SyncRoutesPayload struct {
 	Routes []engine.EdgeRouteSpec `json:"routes"`
+	// B2-M7: routes the controller pushed on an earlier sync that
+	// are no longer in the enabled set — delete them from the
+	// kernel instead of letting them linger forever.
+	RoutesToDelete []engine.EdgeRouteSpec `json:"routesToDelete,omitempty"`
 }
 
 type BlockTargetPayload struct {
@@ -591,11 +595,18 @@ func main() {
 						slog.Error("Malformed routes sync payload", "error", err)
 						sendAck(env.Type, env.CommandID, err)
 					} else {
-						slog.Info("Applying edge kernel routes...", "count", len(rtPayload.Routes))
+						slog.Info("Applying edge kernel routes...", "count", len(rtPayload.Routes), "deleteCount", len(rtPayload.RoutesToDelete))
 						var errs []error
 						for _, rt := range rtPayload.Routes {
 							if err := netEngine.AddRoute(rt); err != nil {
 								slog.Error("Failed to add edge route", "destination", rt.Destination, "error", err)
+								errs = append(errs, err)
+							}
+						}
+						// B2-M7: routes removed from DesiredState.
+						for _, rt := range rtPayload.RoutesToDelete {
+							if err := netEngine.RemoveRoute(rt); err != nil {
+								slog.Error("Failed to delete edge route", "destination", rt.Destination, "error", err)
 								errs = append(errs, err)
 							}
 						}

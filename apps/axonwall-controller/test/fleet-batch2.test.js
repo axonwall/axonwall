@@ -14,6 +14,7 @@ import {
   recordCommandAck,
   loadPersistedHaState,
   persistHaState,
+  computeRoutesToDelete,
 } from '../dist/index.js';
 
 // Regression tests for Batch 2 of the 2026-11-05 round-2 Axonwall
@@ -128,4 +129,35 @@ test('B-H4 residual: slow Headscale re-check is far above one bounded backoff ru
     HEADSCALE_RECHECK_MS >= 2 * backoffTotalMs,
     `re-check (${HEADSCALE_RECHECK_MS}ms) must be far above one backoff run (${backoffTotalMs}ms)`,
   );
+});
+
+test('B2-M7: routes removed from the enabled set are computed as deletions', () => {
+  const previous = [
+    { destination: '10.1.0.0/24', gateway: '10.0.0.254', device: 'eth0' },
+    { destination: '10.2.0.0/24', gateway: '10.0.0.254', device: 'eth0' },
+    { destination: 'default', gateway: '10.0.0.1' },
+  ];
+  const current = [
+    { destination: '10.1.0.0/24', gateway: '10.0.0.254', device: 'eth0' },
+    { destination: 'default', gateway: '10.0.0.1' },
+  ];
+  assert.deepEqual(computeRoutesToDelete(previous, current), [
+    { destination: '10.2.0.0/24', gateway: '10.0.0.254', device: 'eth0' },
+  ]);
+});
+
+test('B2-M7: a first sync has no deletions, and device distinguishes routes', () => {
+  assert.deepEqual(computeRoutesToDelete([], [{ destination: '10.1.0.0/24', gateway: '10.0.0.254' }]), []);
+  // Same destination + gateway on a different device is a
+  // different route: the old device binding must be deleted.
+  assert.deepEqual(
+    computeRoutesToDelete(
+      [{ destination: '10.1.0.0/24', gateway: '10.0.0.254', device: 'eth0' }],
+      [{ destination: '10.1.0.0/24', gateway: '10.0.0.254', device: 'eth1' }],
+    ),
+    [{ destination: '10.1.0.0/24', gateway: '10.0.0.254', device: 'eth0' }],
+  );
+  // Identical sets delete nothing.
+  const routes = [{ destination: '10.1.0.0/24', gateway: '10.0.0.254', device: 'eth0' }];
+  assert.deepEqual(computeRoutesToDelete(routes, routes), []);
 });

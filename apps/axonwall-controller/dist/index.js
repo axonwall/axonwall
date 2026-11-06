@@ -45761,6 +45761,11 @@ function shouldPruneDisconnectedSatellite(disconnectedAt, nowMs, graceMs = MESH_
   if (Number.isNaN(t)) return false;
   return nowMs - t >= graceMs;
 }
+function computeRoutesToDelete(previous, current) {
+  const routeKey = (r) => `${r.destination}|${r.gateway}|${r.device ?? ""}`;
+  const currentKeys = new Set(current.map(routeKey));
+  return previous.filter((r) => !currentKeys.has(routeKey(r)));
+}
 var PENDING_COMMAND_STALE_MS = 5 * 60 * 1e3;
 function buildSatelliteCommandEnvelope(type, payload, commandId) {
   return JSON.stringify({ type, commandId, payload });
@@ -46101,7 +46106,10 @@ async function main() {
         gateway: r.gateway,
         ...r.interface ? { device: r.interface } : {}
       }));
-      sendToSatellite(sat, "SYNC_ROUTES", { routes: enabledRoutes });
+      const routesToDelete = computeRoutesToDelete(sat.lastSyncedRoutes ?? [], enabledRoutes);
+      if (sendToSatellite(sat, "SYNC_ROUTES", { routes: enabledRoutes, routesToDelete }) !== null) {
+        sat.lastSyncedRoutes = enabledRoutes;
+      }
     }
   }
   const prometheusRegistry = new import_prom_client.default.Registry();
@@ -46898,7 +46906,8 @@ ${headerLines.join("\r\n")}\r
       tunnelIp,
       wireguard: { tunnelIp },
       ws,
-      headscaleEnrolled: existing?.headscaleEnrolled || false
+      headscaleEnrolled: existing?.headscaleEnrolled || false,
+      lastSyncedRoutes: existing?.lastSyncedRoutes
     };
     activeSatellites.set(satId, state);
     let headscaleRecheckTimer = null;
@@ -47118,6 +47127,7 @@ export {
   authenticateMcpToken,
   buildArtifactBundle,
   buildSatelliteCommandEnvelope,
+  computeRoutesToDelete,
   createHttpRedirectServer,
   createMcpApiKeyRecord,
   createPortMultiplexer,

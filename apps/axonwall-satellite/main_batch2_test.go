@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // B-H4 residual regression: the hub must not trust its latched
 // headscaleEnrolled flag alone, because a wiped/reimaged
@@ -49,3 +52,27 @@ func TestParseTailscaleBackendState(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// B2-M7: the SYNC_ROUTES payload carries the routes the controller
+// pushed earlier that are no longer enabled, so the satellite can
+// delete them from the kernel.
+func TestSyncRoutesPayloadCarriesDeletions(t *testing.T) {
+	var p SyncRoutesPayload
+	if err := json.Unmarshal([]byte(`{"routes":[{"destination":"10.1.0.0/24","gateway":"10.0.0.254","device":"eth0"}],"routesToDelete":[{"destination":"10.2.0.0/24","gateway":"10.0.0.254","device":"eth0"}]}`), &p); err != nil {
+		t.Fatalf("unmarshalling a SYNC_ROUTES payload must succeed: %v", err)
+	}
+	if len(p.Routes) != 1 || p.Routes[0].Destination != "10.1.0.0/24" {
+		t.Fatalf("routes parsed as %+v, want one route to 10.1.0.0/24", p.Routes)
+	}
+	if len(p.RoutesToDelete) != 1 || p.RoutesToDelete[0].Destination != "10.2.0.0/24" {
+		t.Fatalf("routesToDelete parsed as %+v, want one route to 10.2.0.0/24", p.RoutesToDelete)
+	}
+	// The delete list is optional: older hubs send only routes.
+	var p2 SyncRoutesPayload
+	if err := json.Unmarshal([]byte(`{"routes":[]}`), &p2); err != nil {
+		t.Fatalf("unmarshalling a routes-only payload must succeed: %v", err)
+	}
+	if len(p2.RoutesToDelete) != 0 {
+		t.Fatalf("routesToDelete must default to empty, got %+v", p2.RoutesToDelete)
+	}
+}
