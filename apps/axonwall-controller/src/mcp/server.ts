@@ -913,7 +913,8 @@ export async function handleMcpCallTool(
                 success: true,
                 lease,
                 fleetPropagatedSatellites: fleetPropagatedCount,
-                auditEntryHash: auditEntry.entryHash,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+                auditRecorded: auditEntry.recorded,
               },
               null,
               2
@@ -989,7 +990,7 @@ export async function handleMcpCallTool(
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2),
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null, auditRecorded: auditEntry.recorded }, null, 2),
           },
         ],
       };
@@ -1081,7 +1082,7 @@ export async function handleMcpCallTool(
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2),
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null, auditRecorded: auditEntry.recorded }, null, 2),
           },
         ],
       };
@@ -1179,7 +1180,7 @@ export async function handleMcpCallTool(
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.entryHash }, null, 2),
+            text: JSON.stringify({ success: true, lease, auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null, auditRecorded: auditEntry.recorded }, null, 2),
           },
         ],
       };
@@ -1558,7 +1559,8 @@ export async function handleMcpCallTool(
                 commitConfirmNotice: req.applyImmediately
                   ? `Declarative state applied with ${req.confirmTimeoutSeconds}s Commit-Confirm watchdog protection.`
                   : 'Rule staged in DesiredState.',
-                auditEntryHash: auditEntry.entryHash,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+                auditRecorded: auditEntry.recorded,
               },
               null,
               2
