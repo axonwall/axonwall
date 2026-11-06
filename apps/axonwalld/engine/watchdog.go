@@ -931,6 +931,21 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 	return fullSnap, nil
 }
 
+// zbmRequireRootSnapshot rejects a normalised snapshot reference whose
+// dataset is not a Boot Environment under zroot/ROOT. E2-12: the
+// snapshot argument was accepted if it merely matched
+// zbmSnapshotRegex, so a data-dataset snapshot (e.g.
+// zroot/tank@backup) could be cloned into a BE — or rolled back or
+// destroyed — through the BE-scoped API, producing an unbootable BE
+// or destroying data outside the BE tree.
+func zbmRequireRootSnapshot(fullSnap string) error {
+	ds, _, _ := strings.Cut(fullSnap, "@")
+	if !strings.HasPrefix(ds, "zroot/ROOT/") {
+		return fmt.Errorf("snapshot %q is not a Boot Environment snapshot under zroot/ROOT", fullSnap)
+	}
+	return nil
+}
+
 // DeleteBootEnvironmentSnapshot destroys an existing ZFS snapshot on a Boot Environment dataset.
 func (we *WatchdogEngine) DeleteBootEnvironmentSnapshot(snapshot string) error {
 	snapshot = strings.TrimSpace(snapshot)
@@ -945,6 +960,9 @@ func (we *WatchdogEngine) DeleteBootEnvironmentSnapshot(snapshot string) error {
 	}
 	if !strings.Contains(fullSnap, "@") {
 		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return err
 	}
 
 	out, err := we.runZfsCmd("destroy", fullSnap)
@@ -975,6 +993,9 @@ func (we *WatchdogEngine) RollbackBootEnvironmentSnapshot(snapshot string) error
 	if !strings.Contains(fullSnap, "@") {
 		return fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
 	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return err
+	}
 
 	out, err := we.runZfsCmd("rollback", "-r", fullSnap)
 	if err != nil {
@@ -1004,6 +1025,12 @@ func (we *WatchdogEngine) CloneSnapshotToBootEnvironment(snapshot, newBeName str
 		fullSnap = "zroot/ROOT/" + fullSnap
 	} else if !strings.HasPrefix(fullSnap, "zroot/") {
 		fullSnap = "zroot/ROOT/" + strings.TrimPrefix(fullSnap, "/")
+	}
+	if !strings.Contains(fullSnap, "@") {
+		return "", fmt.Errorf("snapshot identifier must include '@label': %q", snapshot)
+	}
+	if err := zbmRequireRootSnapshot(fullSnap); err != nil {
+		return "", err
 	}
 
 	targetDataset := "zroot/ROOT/" + newBeName
