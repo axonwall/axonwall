@@ -75,17 +75,17 @@ func installFakeBinary(t *testing.T, name string, exitCode int) string {
 
 func shapeReq() McpShapeReq {
 	return McpShapeReq{
-		Target:            "198.51.100.20",
-		Interface:         "lo",
-		Direction:         "both",
-		RateKbps:          1024,
-		CeilKbps:          2048,
-		TTLSeconds:        3600,
-		CallerIP:          "10.42.1.25",
-		MaxIPv4PrefixLen:  24,
-		MaxIPv6PrefixLen:  64,
-		KeyID:             "test-key",
-		KeyName:           "test-agent",
+		Target:           "198.51.100.20",
+		Interface:        "lo",
+		Direction:        "both",
+		RateKbps:         1024,
+		CeilKbps:         2048,
+		TTLSeconds:       3600,
+		CallerIP:         "10.42.1.25",
+		MaxIPv4PrefixLen: 24,
+		MaxIPv6PrefixLen: 64,
+		KeyID:            "test-key",
+		KeyName:          "test-agent",
 	}
 }
 

@@ -1105,12 +1105,27 @@ export async function saveYamlDomainFile(
   }
 
   if (applyImmediately) {
-    const res = await applyDesiredState(validation.state);
-    return {
-      success: res.success,
-      message: `Saved /etc/axonwall/${filename} and applied configuration.`,
-      warnings: res.warnings,
-    };
+    // C-B2 residual: a daemon-down apply throws ('axonwalld is
+    // unreachable') — return it as a structured failure instead of
+    // propagating, so the caller can show the operator that nothing
+    // was applied. Same for a fingerprint conflict, if one is ever
+    // threaded through this path.
+    try {
+      const res = await applyDesiredState(validation.state);
+      return {
+        success: res.success,
+        message: `Saved /etc/axonwall/${filename} and applied configuration.`,
+        warnings: res.warnings,
+      };
+    } catch (err: any) {
+      if (
+        err?.message?.includes('axonwalld is unreachable') ||
+        err?.message?.includes('Configuration changed since it was loaded')
+      ) {
+        return { success: false, message: err.message, warnings: [] };
+      }
+      throw err;
+    }
   }
 
   persistDesiredStateToDisk(validation.state);

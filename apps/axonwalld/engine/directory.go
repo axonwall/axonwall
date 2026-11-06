@@ -42,25 +42,25 @@ func DefaultPasswordPolicyConfig() PasswordPolicyConfig {
 }
 
 type DirectoryStatus struct {
-	SlapdRunning        bool                 `json:"slapdRunning"`
-	SssdRunning         bool                 `json:"sssdRunning"`
-	BaseDN              string               `json:"baseDn"`
-	ServerID            int                  `json:"serverId"`
-	HaSyncEnabled       bool                 `json:"haSyncEnabled"`
-	HaRole              string               `json:"haRole"`
-	PeerURI             string               `json:"peerUri,omitempty"`
-	ContextCSN          string               `json:"contextCsn,omitempty"`
-	PeerContextCSN      string               `json:"peerContextCsn,omitempty"`
-	InSync              bool                 `json:"inSync"`
-	ClockSkewMs         float64              `json:"clockSkewMs"`
-	RootSshDisabled     bool                 `json:"rootSshDisabled"`
-	TotalDirectoryUsers int                  `json:"totalDirectoryUsers"`
-	AdminUsersCount     int                  `json:"adminUsersCount"`
-	UnmigratedLocalCount int                 `json:"unmigratedLocalCount"`
+	SlapdRunning         bool    `json:"slapdRunning"`
+	SssdRunning          bool    `json:"sssdRunning"`
+	BaseDN               string  `json:"baseDn"`
+	ServerID             int     `json:"serverId"`
+	HaSyncEnabled        bool    `json:"haSyncEnabled"`
+	HaRole               string  `json:"haRole"`
+	PeerURI              string  `json:"peerUri,omitempty"`
+	ContextCSN           string  `json:"contextCsn,omitempty"`
+	PeerContextCSN       string  `json:"peerContextCsn,omitempty"`
+	InSync               bool    `json:"inSync"`
+	ClockSkewMs          float64 `json:"clockSkewMs"`
+	RootSshDisabled      bool    `json:"rootSshDisabled"`
+	TotalDirectoryUsers  int     `json:"totalDirectoryUsers"`
+	AdminUsersCount      int     `json:"adminUsersCount"`
+	UnmigratedLocalCount int     `json:"unmigratedLocalCount"`
 	// AdminSeedError records a break-glass admin seeding failure (A-M32):
 	// when set, the box may have no admin account.
-	AdminSeedError      string               `json:"adminSeedError,omitempty"`
-	PasswordPolicy      PasswordPolicyConfig `json:"passwordPolicy"`
+	AdminSeedError string               `json:"adminSeedError,omitempty"`
+	PasswordPolicy PasswordPolicyConfig `json:"passwordPolicy"`
 }
 
 type PluginLdapGroupSpec struct {
@@ -94,16 +94,16 @@ type PluginLDAPBinding struct {
 }
 
 type DirectoryManager struct {
-	mu          sync.RWMutex
-	baseDN      string
-	serverID    int
-	haRole      string
-	haEnabled   bool
-	peerURI     string
-	policy      PasswordPolicyConfig
-	localUsers  *UserManager
-	etckeeper   *EtckeeperManager
-	policyFile  string
+	mu         sync.RWMutex
+	baseDN     string
+	serverID   int
+	haRole     string
+	haEnabled  bool
+	peerURI    string
+	policy     PasswordPolicyConfig
+	localUsers *UserManager
+	etckeeper  *EtckeeperManager
+	policyFile string
 	// adminSeedError records the last break-glass admin seeding failure
 	// (A-M32); surfaced in GetStatus so a box with no admin is visible.
 	adminSeedError string

@@ -51,16 +51,16 @@ type AgentServer struct {
 	// (including the windows where s.mu itself is released) so
 	// Confirm, Rollback, and the auto-rollback timer can tell an
 	// apply is running without taking applyMu.
-	applyInProgress  bool
-	bundleDir        string
-	activeHash       string
-	lastGoodHash     string
-	lastGoodScript   string
-	candidateScript  string
-	pendingConfirm   bool
-	pendingJobID     string
-	confirmDeadline  time.Time
-	rollbackTimer    *time.Timer
+	applyInProgress bool
+	bundleDir       string
+	activeHash      string
+	lastGoodHash    string
+	lastGoodScript  string
+	candidateScript string
+	pendingConfirm  bool
+	pendingJobID    string
+	confirmDeadline time.Time
+	rollbackTimer   *time.Timer
 	// rollbackGen counts every arming of the auto-rollback timer (M2).
 	// The timer callback captures the generation it was armed with
 	// and refuses to roll back unless it still matches: Timer.Stop

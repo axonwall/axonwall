@@ -14,16 +14,16 @@ import (
 )
 
 type PluginDefinition struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Version          string   `json:"version"`
-	Category         string   `json:"category"`
-	Description      string   `json:"description"`
-	Author           string   `json:"author"`
-	DefaultEnabled   bool     `json:"defaultEnabled"`
-	Dependencies     []string `json:"dependencies,omitempty"`
-	SystemdUnits     []string `json:"systemdUnits"`
-	Privileges       []string `json:"privileges"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Version          string          `json:"version"`
+	Category         string          `json:"category"`
+	Description      string          `json:"description"`
+	Author           string          `json:"author"`
+	DefaultEnabled   bool            `json:"defaultEnabled"`
+	Dependencies     []string        `json:"dependencies,omitempty"`
+	SystemdUnits     []string        `json:"systemdUnits"`
+	Privileges       []string        `json:"privileges"`
 	DebianPackages   []string        `json:"debianPackages"`
 	AlpinePackages   []string        `json:"alpinePackages"`
 	RequiredBinaries []string        `json:"requiredBinaries"`

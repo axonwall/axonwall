@@ -377,4 +377,3 @@ func TestCoreVigilantePluginLDAPIntegrationSpec(t *testing.T) {
 		}
 	}
 }
-

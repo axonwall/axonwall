@@ -167,7 +167,14 @@ export async function saveVigilanteConfigAction(
       message: result.message,
     };
   } catch (err: any) {
-    if (err?.message?.includes('Configuration changed since it was loaded')) {
+    // C-B2 residual: a daemon-down apply throws 'axonwalld is
+    // unreachable' — same as a fingerprint conflict, return it as a
+    // failure result so the page can tell the operator nothing was
+    // applied instead of surfacing an unhandled rejection.
+    if (
+      err?.message?.includes('Configuration changed since it was loaded') ||
+      err?.message?.includes('axonwalld is unreachable')
+    ) {
       return { success: false, message: err.message };
     }
     throw err;
@@ -343,7 +350,14 @@ export async function toggleSecurityModuleAction(
       message: result.message,
     };
   } catch (err: any) {
-    if (err?.message?.includes('Configuration changed since it was loaded')) {
+    // C-B2 residual: a daemon-down apply throws 'axonwalld is
+    // unreachable' — same as a fingerprint conflict, return it as a
+    // failure result so the page can tell the operator nothing was
+    // applied instead of surfacing an unhandled rejection.
+    if (
+      err?.message?.includes('Configuration changed since it was loaded') ||
+      err?.message?.includes('axonwalld is unreachable')
+    ) {
       return { success: false, message: err.message };
     }
     throw err;

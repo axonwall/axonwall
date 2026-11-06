@@ -11,8 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -584,7 +584,7 @@ func probeK3sPVCs(ctx context.Context) []OpenEbsVolumeInfo {
 type kubectlPodList struct {
 	Items []struct {
 		Status struct {
-			Phase string `json:"phase"`
+			Phase             string `json:"phase"`
 			ContainerStatuses []struct {
 				Ready bool `json:"ready"`
 			} `json:"containerStatuses"`

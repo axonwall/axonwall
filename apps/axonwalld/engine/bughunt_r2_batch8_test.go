@@ -103,6 +103,7 @@ func TestBatch8VerifyRosenpassUnitMissing(t *testing.T) {
 		t.Fatalf("verifyRosenpassUnit should fail with no unit file present")
 	}
 }
+
 // A-M34: HA PKI imports must reject empty/unparseable PEM and
 // mismatched keys instead of writing them to disk and reporting success.
 // These tests assert rejection only: validation runs before any write,
@@ -114,12 +115,12 @@ func batch8TestSelfSignedCert(t *testing.T) (certPEM, keyPEM string) {
 		t.Fatalf("generating test key: %v", err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "batch8-test"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		IsCA:         true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "batch8-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
