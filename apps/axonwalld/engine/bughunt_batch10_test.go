@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A-L21: a second Start() while the manager is running must be
@@ -92,6 +93,46 @@ func TestBatch10VirtDoubleStartVMRefused(t *testing.T) {
 	}
 	if _, err := mgr.StartVM(102, "root@axonwall"); err == nil || !strings.Contains(err.Error(), "already in progress") {
 		t.Fatalf("second StartVM(102) = %v, want \"already in progress\" error", err)
+	}
+}
+
+// A-L23: the readiness poll must keep polling until the probe
+// succeeds or the deadline passes.
+func TestBatch10WaitForSlapdReady(t *testing.T) {
+	orig := slapdReadyProbe
+	defer func() { slapdReadyProbe = orig }()
+
+	calls := 0
+	slapdReadyProbe = func() bool {
+		calls++
+		return calls >= 3
+	}
+	if !waitForSlapdReady(5 * time.Second) {
+		t.Fatalf("waitForSlapdReady did not return true once the probe succeeded")
+	}
+	if calls != 3 {
+		t.Fatalf("expected the probe to run 3 times, ran %d times", calls)
+	}
+
+	slapdReadyProbe = func() bool { return false }
+	start := time.Now()
+	if waitForSlapdReady(400 * time.Millisecond) {
+		t.Fatalf("waitForSlapdReady returned true with a probe that never succeeds")
+	}
+	if elapsed := time.Since(start); elapsed < 350*time.Millisecond {
+		t.Fatalf("waitForSlapdReady returned after %v, faster than its 400ms deadline", elapsed)
+	}
+}
+
+// A-L23: the systemd gate must reflect the real PID 1.
+func TestBatch10IsSystemdPID1MatchesProc(t *testing.T) {
+	data, err := os.ReadFile("/proc/1/comm")
+	if err != nil {
+		t.Skipf("no /proc/1/comm in this environment: %v", err)
+	}
+	want := strings.TrimSpace(string(data)) == "systemd"
+	if got := isSystemdPID1(); got != want {
+		t.Fatalf("isSystemdPID1() = %v, want %v (/proc/1/comm = %q)", got, want, strings.TrimSpace(string(data)))
 	}
 }
 
@@ -322,5 +363,125 @@ func TestBatch10UnbindVfioAlreadyUnboundSucceeds(t *testing.T) {
 	mgr := &VFIOManager{sysfsRoot: root}
 	if err := mgr.UnbindVfio(bdf); err != nil {
 		t.Fatalf("UnbindVfio on a device bound to another driver failed: %v", err)
+	}
+}
+
+// A-L30: a failed sshd reload after writing the policy must be an
+// error, not a silent success.
+func TestBatch10SyncRootSshPolicyReloadFailureIsError(t *testing.T) {
+	dir := t.TempDir()
+	old := axonwallSshdConfPath
+	axonwallSshdConfPath = filepath.Join(dir, "axonwall.conf")
+	defer func() { axonwallSshdConfPath = old }()
+
+	dm := &DirectoryManager{policy: DefaultPasswordPolicyConfig()}
+	if err := dm.SyncRootSshPolicy(); err == nil {
+		t.Fatalf("SyncRootSshPolicy returned nil even though no sshd reload can succeed here")
+	}
+	if _, err := os.Stat(axonwallSshdConfPath); err != nil {
+		t.Fatalf("expected the config to have been written before the reload failed: %v", err)
+	}
+	// Second call: content is unchanged, so no write and no reload.
+	if err := dm.SyncRootSshPolicy(); err != nil {
+		t.Fatalf("unchanged config should not reload: %v", err)
+	}
+}
+
+// A-L30: a failed config write must be an error too.
+func TestBatch10SyncRootSshPolicyWriteFailureIsError(t *testing.T) {
+	old := axonwallSshdConfPath
+	axonwallSshdConfPath = "/proc/definitely-not-here/axonwall.conf"
+	defer func() { axonwallSshdConfPath = old }()
+
+	dm := &DirectoryManager{policy: DefaultPasswordPolicyConfig()}
+	if err := dm.SyncRootSshPolicy(); err == nil {
+		t.Fatalf("SyncRootSshPolicy returned nil for an unwritable config path")
+	}
+}
+
+// A-L31: a public key whose secret key is missing must not trigger a
+// silent re-key; only an explicit force may rotate.
+func TestBatch10GenerateRosenpassKeypairRefusesRekeyWhenSecretMissing(t *testing.T) {
+	dir := t.TempDir()
+	sha1, _, err := GenerateRosenpassKeypair(dir, false)
+	if err != nil {
+		t.Fatalf("GenerateRosenpassKeypair failed: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "pq.sk")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := GenerateRosenpassKeypair(dir, false); err == nil {
+		t.Fatalf("GenerateRosenpassKeypair re-keyed silently with pq.pk present but pq.sk missing")
+	}
+	sha2, _, err := GenerateRosenpassKeypair(dir, true)
+	if err != nil {
+		t.Fatalf("force re-key failed: %v", err)
+	}
+	if sha2 == sha1 {
+		t.Fatalf("force re-key produced an identical key")
+	}
+}
+
+// A-L32: the plugin LDAP integration must fail when its binding
+// files cannot be written, not report success.
+func TestBatch10EnsurePluginLDAPIntegrationBindingWriteFailure(t *testing.T) {
+	oldClients, oldSecrets := ldapPluginClientsDir, ldapPluginSecretsDir
+	ldapPluginClientsDir = "/proc/definitely-not-here/ldap-plugins"
+	ldapPluginSecretsDir = filepath.Join(t.TempDir(), "secrets")
+	defer func() { ldapPluginClientsDir, ldapPluginSecretsDir = oldClients, oldSecrets }()
+
+	dm := &DirectoryManager{baseDN: "dc=axonwall,dc=local", policy: DefaultPasswordPolicyConfig()}
+	if _, err := dm.EnsurePluginLDAPIntegration("test-plugin", PluginLDAPSpec{ServiceAccountCN: "svc-test-plugin"}); err == nil {
+		t.Fatalf("EnsurePluginLDAPIntegration returned nil even though the binding files cannot be written")
+	}
+}
+
+// A-L32: with writable dirs the binding files must actually exist.
+func TestBatch10EnsurePluginLDAPIntegrationWritesBinding(t *testing.T) {
+	dir := t.TempDir()
+	oldClients, oldSecrets := ldapPluginClientsDir, ldapPluginSecretsDir
+	ldapPluginClientsDir = filepath.Join(dir, "clients")
+	ldapPluginSecretsDir = filepath.Join(dir, "secrets")
+	defer func() { ldapPluginClientsDir, ldapPluginSecretsDir = oldClients, oldSecrets }()
+
+	dm := &DirectoryManager{baseDN: "dc=axonwall,dc=local", policy: DefaultPasswordPolicyConfig()}
+	binding, err := dm.EnsurePluginLDAPIntegration("test-plugin", PluginLDAPSpec{ServiceAccountCN: "svc-test-plugin"})
+	if err != nil {
+		t.Fatalf("EnsurePluginLDAPIntegration failed: %v", err)
+	}
+	if binding == nil || binding.BindDN == "" {
+		t.Fatalf("expected a binding with a BindDN, got %+v", binding)
+	}
+	for _, name := range []string{"test-plugin.json", "test-plugin.env"} {
+		if _, err := os.Stat(filepath.Join(ldapPluginClientsDir, name)); err != nil {
+			t.Fatalf("expected binding file %s to exist: %v", name, err)
+		}
+	}
+}
+
+// A-L32: a failed password rotation on an existing service account
+// must be an error, not a discarded ldapmodify.
+func TestBatch10EnsurePluginLDAPIntegrationRotationFailure(t *testing.T) {
+	binDir := t.TempDir()
+	ldapadd := "#!/bin/sh\necho \"Already exists\"\nexit 1\n"
+	ldapmodify := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ldapadd"), []byte(ldapadd), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "ldapmodify"), []byte(ldapmodify), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	oldClients, oldSecrets := ldapPluginClientsDir, ldapPluginSecretsDir
+	ldapPluginClientsDir = filepath.Join(dir, "clients")
+	ldapPluginSecretsDir = filepath.Join(dir, "secrets")
+	defer func() { ldapPluginClientsDir, ldapPluginSecretsDir = oldClients, oldSecrets }()
+
+	dm := &DirectoryManager{baseDN: "dc=axonwall,dc=local", policy: DefaultPasswordPolicyConfig()}
+	_, err := dm.EnsurePluginLDAPIntegration("test-plugin", PluginLDAPSpec{ServiceAccountCN: "svc-test-plugin"})
+	if err == nil || !strings.Contains(err.Error(), "rotate") {
+		t.Fatalf("expected a rotation error, got: %v", err)
 	}
 }

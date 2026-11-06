@@ -42,22 +42,22 @@ func DefaultPasswordPolicyConfig() PasswordPolicyConfig {
 }
 
 type DirectoryStatus struct {
-	SlapdRunning        bool                 `json:"slapdRunning"`
-	SssdRunning         bool                 `json:"sssdRunning"`
-	BaseDN              string               `json:"baseDn"`
-	ServerID            int                  `json:"serverId"`
-	HaSyncEnabled       bool                 `json:"haSyncEnabled"`
-	HaRole              string               `json:"haRole"`
-	PeerURI             string               `json:"peerUri,omitempty"`
-	ContextCSN          string               `json:"contextCsn,omitempty"`
-	PeerContextCSN      string               `json:"peerContextCsn,omitempty"`
-	InSync              bool                 `json:"inSync"`
-	ClockSkewMs         float64              `json:"clockSkewMs"`
-	RootSshDisabled     bool                 `json:"rootSshDisabled"`
-	TotalDirectoryUsers int                  `json:"totalDirectoryUsers"`
-	AdminUsersCount     int                  `json:"adminUsersCount"`
-	UnmigratedLocalCount int                 `json:"unmigratedLocalCount"`
-	PasswordPolicy      PasswordPolicyConfig `json:"passwordPolicy"`
+	SlapdRunning         bool                 `json:"slapdRunning"`
+	SssdRunning          bool                 `json:"sssdRunning"`
+	BaseDN               string               `json:"baseDn"`
+	ServerID             int                  `json:"serverId"`
+	HaSyncEnabled        bool                 `json:"haSyncEnabled"`
+	HaRole               string               `json:"haRole"`
+	PeerURI              string               `json:"peerUri,omitempty"`
+	ContextCSN           string               `json:"contextCsn,omitempty"`
+	PeerContextCSN       string               `json:"peerContextCsn,omitempty"`
+	InSync               bool                 `json:"inSync"`
+	ClockSkewMs          float64              `json:"clockSkewMs"`
+	RootSshDisabled      bool                 `json:"rootSshDisabled"`
+	TotalDirectoryUsers  int                  `json:"totalDirectoryUsers"`
+	AdminUsersCount      int                  `json:"adminUsersCount"`
+	UnmigratedLocalCount int                  `json:"unmigratedLocalCount"`
+	PasswordPolicy       PasswordPolicyConfig `json:"passwordPolicy"`
 }
 
 type PluginLdapGroupSpec struct {
@@ -91,16 +91,16 @@ type PluginLDAPBinding struct {
 }
 
 type DirectoryManager struct {
-	mu          sync.RWMutex
-	baseDN      string
-	serverID    int
-	haRole      string
-	haEnabled   bool
-	peerURI     string
-	policy      PasswordPolicyConfig
-	localUsers  *UserManager
-	etckeeper   *EtckeeperManager
-	policyFile  string
+	mu         sync.RWMutex
+	baseDN     string
+	serverID   int
+	haRole     string
+	haEnabled  bool
+	peerURI    string
+	policy     PasswordPolicyConfig
+	localUsers *UserManager
+	etckeeper  *EtckeeperManager
+	policyFile string
 }
 
 func NewDirectoryManager(localUsers *UserManager, etckeeper *EtckeeperManager) *DirectoryManager {
@@ -1587,6 +1587,10 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 	}
 }
 
+// axonwallSshdConfPath is the sshd drop-in written by SyncRootSshPolicy.
+// It is a variable so tests can point it at a fixture path.
+var axonwallSshdConfPath = "/etc/ssh/sshd_config.d/axonwall.conf"
+
 // SyncRootSshPolicy checks whether at least one active axonwall-admin user exists in OpenLDAP.
 // Once an admin user exists (and DisableRootSshWhenAdminExists is true), it sets PermitRootLogin no
 // in /etc/ssh/sshd_config.d/axonwall.conf and reloads sshd.
@@ -1628,14 +1632,22 @@ X11Forwarding no
 MaxAuthTries 3
 `, permitRoot, usePAMLine)
 
-	confPath := "/etc/ssh/sshd_config.d/axonwall.conf"
+	confPath := axonwallSshdConfPath
 	existing, _ := os.ReadFile(confPath)
 	if string(existing) != sshdConf {
-		_ = os.MkdirAll(filepath.Dir(confPath), 0755)
-		if err := os.WriteFile(confPath, []byte(sshdConf), 0644); err == nil {
-			if exec.Command("systemctl", "reload", "ssh").Run() != nil {
-				if exec.Command("systemctl", "reload", "sshd").Run() != nil {
-					_ = exec.Command("rc-service", "sshd", "reload").Run()
+		// A-L30: the old code swallowed both the config write and
+		// the reload, returning nil while the running sshd kept
+		// the old root-login policy. Both failures are errors now.
+		if err := os.MkdirAll(filepath.Dir(confPath), 0755); err != nil {
+			return fmt.Errorf("failed to create sshd config dir %s: %w", filepath.Dir(confPath), err)
+		}
+		if err := os.WriteFile(confPath, []byte(sshdConf), 0644); err != nil {
+			return fmt.Errorf("failed to write sshd config %s: %w", confPath, err)
+		}
+		if exec.Command("systemctl", "reload", "ssh").Run() != nil {
+			if exec.Command("systemctl", "reload", "sshd").Run() != nil {
+				if err := exec.Command("rc-service", "sshd", "reload").Run(); err != nil {
+					return fmt.Errorf("failed to reload sshd after updating %s (tried systemctl reload ssh, systemctl reload sshd, rc-service sshd reload): %w", confPath, err)
 				}
 			}
 		}
@@ -1850,6 +1862,14 @@ func (d *DirectoryManager) GetStatus() DirectoryStatus {
 	return status
 }
 
+// ldapPluginClientsDir and ldapPluginSecretsDir mirror the
+// LDAPPlugin* constants but are variables so tests can redirect the
+// binding and secret files at fixtures.
+var (
+	ldapPluginClientsDir = LDAPPluginClientsDir
+	ldapPluginSecretsDir = LDAPPluginSecretsDir
+)
+
 // EnsurePluginLDAPIntegration idempotently provisions a dedicated least-privilege LDAP
 // service bind account in ou=services,<baseDN>, creates plugin POSIX groups in ou=groups,<baseDN>,
 // and writes standard credentials to /etc/axonwall/ldap-plugins/<pluginId>.json and .env.
@@ -1869,8 +1889,8 @@ func (d *DirectoryManager) EnsurePluginLDAPIntegration(pluginID string, spec Plu
 		d.mu.Unlock()
 	}
 
-	_ = os.MkdirAll(LDAPPluginClientsDir, 0755)
-	_ = os.MkdirAll(LDAPPluginSecretsDir, 0700)
+	_ = os.MkdirAll(ldapPluginClientsDir, 0755)
+	_ = os.MkdirAll(ldapPluginSecretsDir, 0700)
 
 	// Ensure ou=services,<baseDN> exists
 	ouLdif := fmt.Sprintf("dn: ou=services,%s\nobjectClass: top\nobjectClass: organizationalUnit\nou: services\n", baseDN)
@@ -1884,7 +1904,7 @@ func (d *DirectoryManager) EnsurePluginLDAPIntegration(pluginID string, spec Plu
 	}
 	svcDN := fmt.Sprintf("cn=%s,ou=services,%s", svcCN, baseDN)
 
-	secretFile := filepath.Join(LDAPPluginSecretsDir, pluginID+".pw")
+	secretFile := filepath.Join(ldapPluginSecretsDir, pluginID+".pw")
 	secret, err := ensureRandomSecretFile(secretFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate plugin LDAP secret: %w", err)
@@ -1911,7 +1931,13 @@ userPassword: %s
 		modLdif := fmt.Sprintf("dn: %s\nchangetype: modify\nreplace: userPassword\nuserPassword: %s\n", svcDN, sshaHash)
 		mCmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
 		mCmd.Stdin = strings.NewReader(modLdif)
-		_ = mCmd.Run()
+		// A-L32: the password rotation was discarded. If the
+		// service-account entry exists without a userPassword, a
+		// failed rotation leaves the binding's password wrong
+		// while the function reports success.
+		if modOut, modErr := mCmd.CombinedOutput(); modErr != nil {
+			return nil, fmt.Errorf("failed to rotate plugin LDAP service account password for %s: %s (%w)", pluginID, string(modOut), modErr)
+		}
 	}
 
 	roleGroups := make(map[string][]string)
@@ -1947,9 +1973,16 @@ userPassword: %s
 	}
 
 	// Write /etc/axonwall/ldap-plugins/<pluginId>.json
-	jsonPath := filepath.Join(LDAPPluginClientsDir, pluginID+".json")
+	// A-L32: the binding-file writes were discarded, so a plugin
+	// could be told it was integrated while its binding file did
+	// not exist (disk full, read-only dir). The primary files are
+	// errors; the per-plugin mirrors below are best-effort copies
+	// of the same data and only warn on failure.
+	jsonPath := filepath.Join(ldapPluginClientsDir, pluginID+".json")
 	jsonData, _ := json.MarshalIndent(binding, "", "  ")
-	_ = os.WriteFile(jsonPath, append(jsonData, '\n'), 0640)
+	if err := os.WriteFile(jsonPath, append(jsonData, '\n'), 0640); err != nil {
+		return nil, fmt.Errorf("failed to write plugin LDAP binding %s: %w", jsonPath, err)
+	}
 
 	// Write /etc/axonwall/ldap-plugins/<pluginId>.env
 	envPrefix := spec.EnvPrefix
@@ -1970,27 +2003,40 @@ userPassword: %s
 	envBuf.WriteString(fmt.Sprintf("%sOPERATOR_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["operator"], ",")))
 	envBuf.WriteString(fmt.Sprintf("%sREADONLY_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["readonly"], ",")))
 
-	envPath := filepath.Join(LDAPPluginClientsDir, pluginID+".env")
-	_ = os.WriteFile(envPath, []byte(envBuf.String()), 0640)
+	envPath := filepath.Join(ldapPluginClientsDir, pluginID+".env")
+	if err := os.WriteFile(envPath, []byte(envBuf.String()), 0640); err != nil {
+		return nil, fmt.Errorf("failed to write plugin LDAP binding %s: %w", envPath, err)
+	}
 
-	// Also ensure per-plugin destination config dir exists and has copy if standard
+	// Also ensure per-plugin destination config dir exists and has copy if standard.
+	// These are redundant mirrors of the primary files above: a
+	// failed mirror is logged, not fatal.
+	var mirrorErrs []string
+	mirrorWrite := func(path string, data []byte) {
+		if err := os.WriteFile(path, data, 0640); err != nil {
+			mirrorErrs = append(mirrorErrs, fmt.Sprintf("%s: %v", path, err))
+		}
+	}
 	if pluginID == "eluvix" {
 		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
-		_ = os.WriteFile("/etc/axonwall/eluvix/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/etc/axonwall/eluvix/ldap.json", append(jsonData, '\n'))
 	}
 	if pluginID == "vigilant-octo-waffle" {
 		_ = os.MkdirAll("/etc/axonwall/vow", 0755)
-		_ = os.WriteFile("/etc/axonwall/vow/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/etc/axonwall/vow/ldap.json", append(jsonData, '\n'))
 	}
 	if pluginID == "core-vigilante" || pluginID == "vigilante" {
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "vigilante.json"), append(jsonData, '\n'), 0640)
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "vigilante.env"), []byte(envBuf.String()), 0640)
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "core-vigilante.json"), append(jsonData, '\n'), 0640)
-		_ = os.WriteFile(filepath.Join(LDAPPluginClientsDir, "core-vigilante.env"), []byte(envBuf.String()), 0640)
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.json"), append(jsonData, '\n'))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.env"), []byte(envBuf.String()))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "core-vigilante.json"), append(jsonData, '\n'))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "core-vigilante.env"), []byte(envBuf.String()))
 		_ = os.MkdirAll("/etc/axonwall/vigilante", 0755)
-		_ = os.WriteFile("/etc/axonwall/vigilante/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/etc/axonwall/vigilante/ldap.json", append(jsonData, '\n'))
 		_ = os.MkdirAll("/var/lib/axonwall/vigilante", 0755)
-		_ = os.WriteFile("/var/lib/axonwall/vigilante/ldap.json", append(jsonData, '\n'), 0640)
+		mirrorWrite("/var/lib/axonwall/vigilante/ldap.json", append(jsonData, '\n'))
+	}
+	if len(mirrorErrs) > 0 {
+		log.Printf("[Directory] Warning: failed to write plugin LDAP binding mirrors for %s: %s", pluginID, strings.Join(mirrorErrs, "; "))
 	}
 
 	return binding, nil
