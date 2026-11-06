@@ -70,7 +70,13 @@ export default function WireGuardPage() {
           enabled: nextWg.enabled,
           address: nextWg.address,
           listenPort: Number(nextWg.listenPort) || 51820,
-          privateKey: nextWg.privateKey && nextWg.privateKey.length >= 32 ? nextWg.privateKey : undefined,
+          // G9: the old code silently replaced a stored server private
+          // key shorter than 32 chars with undefined on any save, so
+          // the saved config lost its server key with no warning.
+          // Preserve the loaded value verbatim; a short key now fails
+          // schema validation loudly (save refused with an error)
+          // instead of being silently dropped.
+          privateKey: nextWg.privateKey || undefined,
           peers: nextWg.peers.map((p) => ({
             id: p.id,
             name: p.name,
