@@ -113,6 +113,12 @@ export async function getVmListAction(): Promise<VMStatusItem[]> {
   const configuredVms = state.virt?.vms ?? [];
 
   const daemonResp = await callAgentApi<{ vms: VMStatusItem[] }>('/v1/virt/vms');
+  // C25: a daemon outage used to collapse to "every VM stopped". Throw a
+  // distinct daemon-unavailable error so pages render an unknown state
+  // instead of a fabricated fleet-wide outage.
+  if (!daemonResp) {
+    throw new Error('Daemon unavailable: could not load live VM status from axonwalld');
+  }
   const liveMap = new Map<number, VMStatusItem>();
   if (daemonResp?.vms) {
     for (const live of daemonResp.vms) {
@@ -384,6 +390,11 @@ export async function getContainerListAction(): Promise<ContainerStatusItem[]> {
   const daemonResp = await callAgentApi<{ containers: ContainerStatusItem[] }>(
     '/v1/virt/containers'
   );
+  // C25: same as VMs — never render configured containers as "stopped"
+  // when the daemon simply did not answer.
+  if (!daemonResp) {
+    throw new Error('Daemon unavailable: could not load live container status from axonwalld');
+  }
   const liveMap = new Map<number, ContainerStatusItem>();
   if (daemonResp?.containers) {
     for (const live of daemonResp.containers) {
@@ -616,11 +627,13 @@ export async function getPciInventoryAction(): Promise<PciDeviceItem[]> {
   assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<{ devices: PciDeviceItem[] }>('/v1/virt/pci');
-  if (daemonResp?.devices) {
-    return daemonResp.devices;
+  // C25: a daemon outage used to render as "No PCI devices detected",
+  // implying VT-d / IOMMU trouble that did not exist.
+  if (!daemonResp?.devices) {
+    throw new Error('Daemon unavailable: could not load PCI inventory from axonwalld');
   }
 
-  return [];
+  return daemonResp.devices;
 }
 
 function validatePoolName(pool: string): void {
@@ -756,10 +769,11 @@ export async function getIsoListAction(pool?: string): Promise<IsoItem[]> {
 
   const path = pool ? `/v1/virt/isos?pool=${encodeURIComponent(pool)}` : '/v1/virt/isos';
   const daemonResp = await callAgentApi<{ isos: IsoItem[] }>(path);
-  if (daemonResp?.isos) {
-    return daemonResp.isos;
+  // C25: never render "No ISO images found" for a daemon outage.
+  if (!daemonResp?.isos) {
+    throw new Error('Daemon unavailable: could not load ISO images from axonwalld');
   }
-  return [];
+  return daemonResp.isos;
 }
 
 export async function downloadIsoAction(
@@ -803,10 +817,11 @@ export async function getBackupListAction(pool?: string): Promise<BackupItem[]> 
 
   const path = pool ? `/v1/virt/backups?pool=${encodeURIComponent(pool)}` : '/v1/virt/backups';
   const daemonResp = await callAgentApi<{ backups: BackupItem[] }>(path);
-  if (daemonResp?.backups) {
-    return daemonResp.backups;
+  // C25: never render "No backup archives found" for a daemon outage.
+  if (!daemonResp?.backups) {
+    throw new Error('Daemon unavailable: could not load backups from axonwalld');
   }
-  return [];
+  return daemonResp.backups;
 }
 
 export async function triggerBackupAction(
@@ -846,8 +861,9 @@ export async function getTaskListAction(): Promise<TaskItem[]> {
   assertActionPermitted(session);
 
   const daemonResp = await callAgentApi<{ tasks: TaskItem[] }>('/v1/tasks');
-  if (daemonResp?.tasks) {
-    return daemonResp.tasks;
+  // C25: never render an empty task list for a daemon outage.
+  if (!daemonResp?.tasks) {
+    throw new Error('Daemon unavailable: could not load tasks from axonwalld');
   }
-  return [];
+  return daemonResp.tasks;
 }
