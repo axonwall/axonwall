@@ -8,6 +8,7 @@ package engine
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -153,5 +154,173 @@ func TestBatch10RootkitPostureUnknownNotFabricated(t *testing.T) {
 	audit := RunHostRootkitAudit()
 	if audit.Timestamp == "" {
 		t.Fatalf("expected a non-empty audit timestamp")
+	}
+}
+
+// A-L26: an installed-but-never-initialised etckeeper repo must not
+// report Clean=true.
+func TestBatch10EtckeeperUninitializedIsNotClean(t *testing.T) {
+	mgr := NewEtckeeperManager(t.TempDir())
+	mgr.execCmd = func(name string, args ...string) *exec.Cmd {
+		if name == "which" {
+			return exec.Command("true")
+		}
+		return exec.Command("true")
+	}
+	status := mgr.GetStatus()
+	if !status.Installed {
+		t.Fatalf("expected Installed=true with a mocked etckeeper binary")
+	}
+	if status.Initialized {
+		t.Fatalf("expected Initialized=false with no .git in the tracked dir")
+	}
+	if status.Clean {
+		t.Fatalf("uninitialized etckeeper repo reported Clean=true")
+	}
+}
+
+// A-L26: a failed git status must not report Clean=true either.
+func TestBatch10EtckeeperFailedGitStatusIsNotClean(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewEtckeeperManager(dir)
+	mgr.execCmd = func(name string, args ...string) *exec.Cmd {
+		if name == "which" {
+			return exec.Command("true")
+		}
+		if name == "git" {
+			return exec.Command("false")
+		}
+		return exec.Command("true")
+	}
+	status := mgr.GetStatus()
+	if !status.Initialized {
+		t.Fatalf("expected Initialized=true with a .git dir present")
+	}
+	if status.Clean {
+		t.Fatalf("failed git status reported Clean=true")
+	}
+}
+
+// A-L27: both state.json copies must be merged; a peer IP that only
+// exists in the second copy must still be protected.
+func TestBatch10DiscoverProtectedPostureMergesBothStateFiles(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "state1.json")
+	second := filepath.Join(dir, "state2.json")
+	if err := os.WriteFile(first, []byte(`{"ha": {"peerIp": "10.0.0.11"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte(`{"ha": {"peerIp": "10.0.0.12"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	old := protectedPostureStatePaths
+	protectedPostureStatePaths = []string{first, second}
+	defer func() { protectedPostureStatePaths = old }()
+
+	posture := DiscoverProtectedPosture()
+	has := func(ip string) bool {
+		for _, g := range posture.GatewayAndHaIPs {
+			if g == ip {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("10.0.0.11") || !has("10.0.0.12") {
+		t.Fatalf("expected both HA peer IPs protected, got %v", posture.GatewayAndHaIPs)
+	}
+}
+
+// A-L28: a port with trailing junk ("80abc") must be rejected, not
+// silently parsed as 80.
+func TestBatch10ValidateRedirectDestinationRejectsTrailingJunkPort(t *testing.T) {
+	for _, dest := range []string{"10.0.0.5:8080x", "10.0.0.5:80abc"} {
+		if _, _, _, _, err := ValidateRedirectDestination(dest); err == nil {
+			t.Fatalf("ValidateRedirectDestination(%q) succeeded, want an error", dest)
+		}
+	}
+	host, port, _, norm, err := ValidateRedirectDestination("10.0.0.5:8080")
+	if err != nil {
+		t.Fatalf("ValidateRedirectDestination(10.0.0.5:8080) failed: %v", err)
+	}
+	if host != "10.0.0.5" || port != 8080 || norm != "10.0.0.5:8080" {
+		t.Fatalf("ValidateRedirectDestination(10.0.0.5:8080) = (%q, %d, %q), want (10.0.0.5, 8080, 10.0.0.5:8080)", host, port, norm)
+	}
+}
+
+// A-L29: an unreadable PCI sysfs tree must be an error, not an empty
+// device list.
+func TestBatch10DiscoverPciDevicesErrorsWhenSysfsUnreadable(t *testing.T) {
+	mgr := &VFIOManager{sysfsRoot: filepath.Join(t.TempDir(), "nosuchsys")}
+	if _, err := mgr.DiscoverPciDevices(); err == nil {
+		t.Fatalf("DiscoverPciDevices with unreadable sysfs returned nil error")
+	}
+}
+
+// A-L29: UnbindVfio must report an error when the device is still
+// bound to vfio-pci after the unbind writes.
+func TestBatch10UnbindVfioReportsStillBound(t *testing.T) {
+	root := t.TempDir()
+	bdf := "0000:00:01.0"
+	devDir := filepath.Join(root, "bus", "pci", "devices", bdf)
+	if err := os.MkdirAll(devDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "bus", "pci", "drivers", "vfio-pci"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(root, "bus", "pci", "drivers", "vfio-pci", "unbind"),
+		filepath.Join(root, "bus", "pci", "rescan"),
+		filepath.Join(devDir, "driver_override"),
+	} {
+		if err := os.WriteFile(p, []byte{}, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The writes succeed but the driver symlink never moves: the
+	// device is still bound, so UnbindVfio must fail.
+	if err := os.Symlink(filepath.Join(root, "bus", "pci", "drivers", "vfio-pci"), filepath.Join(devDir, "driver")); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &VFIOManager{sysfsRoot: root}
+	if err := mgr.UnbindVfio(bdf); err == nil {
+		t.Fatalf("UnbindVfio returned nil while the device is still bound to vfio-pci")
+	}
+}
+
+// A-L29: a device bound to another driver is already released.
+func TestBatch10UnbindVfioAlreadyUnboundSucceeds(t *testing.T) {
+	root := t.TempDir()
+	bdf := "0000:00:01.0"
+	devDir := filepath.Join(root, "bus", "pci", "devices", bdf)
+	if err := os.MkdirAll(devDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "bus", "pci", "drivers", "vfio-pci"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	otherDriver := filepath.Join(root, "bus", "pci", "drivers", "virtio-pci")
+	if err := os.MkdirAll(otherDriver, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(root, "bus", "pci", "drivers", "vfio-pci", "unbind"),
+		filepath.Join(root, "bus", "pci", "rescan"),
+		filepath.Join(devDir, "driver_override"),
+	} {
+		if err := os.WriteFile(p, []byte{}, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(otherDriver, filepath.Join(devDir, "driver")); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &VFIOManager{sysfsRoot: root}
+	if err := mgr.UnbindVfio(bdf); err != nil {
+		t.Fatalf("UnbindVfio on a device bound to another driver failed: %v", err)
 	}
 }
