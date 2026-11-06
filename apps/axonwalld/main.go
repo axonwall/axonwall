@@ -853,12 +853,29 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 		s.lastGoodHash = s.activeHash
 	}
 
-	// Save to bundle directory
-	if err := os.MkdirAll(s.bundleDir, 0700); err == nil {
-		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
-		_ = os.WriteFile(lkgPath, []byte(s.lastGoodScript), 0600)
-		log.Printf("[Agent] Persisted last-known-good configuration to %s", lkgPath)
+	// Save to bundle directory. L4: the write error used to be
+	// discarded while the success log below was emitted regardless,
+	// so a Confirm on an unwritable bundle dir logged "persisted"
+	// and the next daemon restart silently loaded the previous LKG
+	// as the rollback target. Surface the failure in the response:
+	// the in-memory state is already promoted, but the on-disk
+	// last-known-good is stale.
+	if err := os.MkdirAll(s.bundleDir, 0700); err != nil {
+		log.Printf("[Agent] ERROR: Failed to create bundle directory for last-known-good persist: %v", err)
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: fmt.Sprintf("Configuration confirmed in memory, but persisting last-known-good failed (%v); a daemon restart will fall back to the previous last-known-good bundle.", err),
+		}, nil
 	}
+	lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
+	if err := os.WriteFile(lkgPath, []byte(s.lastGoodScript), 0600); err != nil {
+		log.Printf("[Agent] ERROR: Failed to persist last-known-good configuration to %s: %v", lkgPath, err)
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: fmt.Sprintf("Configuration confirmed in memory, but persisting last-known-good failed (%v); a daemon restart will fall back to the previous last-known-good bundle.", err),
+		}, nil
+	}
+	log.Printf("[Agent] Persisted last-known-good configuration to %s", lkgPath)
 
 	// Snapshot confirmed YAML configuration to LKG
 	snapshotLkgConfig(s.bundleDir)
