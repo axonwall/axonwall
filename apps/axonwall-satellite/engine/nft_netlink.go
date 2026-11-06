@@ -162,6 +162,7 @@ const (
 	// IP_CT_ESTABLISHED=0 (bit 1 -> 2), IP_CT_RELATED=1 (bit 2 -> 4), IP_CT_NEW=2 (bit 3 -> 8), INVALID=bit 0 -> 1
 	nfCtStateInvalidBit     = 1 << 0
 	nfCtStateEstablishedBit = (1 << 1) | (1 << 2) // ESTABLISHED | RELATED
+	nfCtStateNewBit         = 1 << 3
 
 	// nft_limit_attributes
 	nftaLimitRate  = 1
@@ -672,17 +673,48 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			if i+2 >= len(tokens) || tokens[i+1] != "state" {
 				return spec, fmt.Errorf("unsupported ct expression")
 			}
-			stateSpec := tokens[i+2]
-			var mask uint32 = nfCtStateEstablishedBit
-			if strings.Contains(stateSpec, "invalid") {
-				mask = nfCtStateInvalidBit
+			// A-H8 (round 2): the mask used to be built by starting from
+			// ESTABLISHED|RELATED and only switching to INVALID, so
+			// `ct state new` compiled to established|related — the
+			// exact inverse of the written rule. Build the mask from
+			// the named states instead, and fail on an unknown name
+			// rather than silently defaulting.
+			var mask uint32
+			consumed := 3
+			if tokens[i+2] == "{" {
+				// `ct state { established, new }`
+				j := i + 3
+				for j < len(tokens) && tokens[j] != "}" {
+					bit, ok := ctStateBit(strings.TrimSuffix(tokens[j], ","))
+					if !ok {
+						return spec, fmt.Errorf("unsupported ct state %q", tokens[j])
+					}
+					mask |= bit
+					j++
+				}
+				if j >= len(tokens) {
+					return spec, fmt.Errorf("unterminated ct state set")
+				}
+				consumed = j - i + 1
+			} else {
+				// `ct state new` or `ct state established,related,new`
+				for _, name := range strings.Split(tokens[i+2], ",") {
+					bit, ok := ctStateBit(name)
+					if !ok {
+						return spec, fmt.Errorf("unsupported ct state %q", name)
+					}
+					mask |= bit
+				}
+			}
+			if mask == 0 {
+				return spec, fmt.Errorf("empty ct state match")
 			}
 			exprs = append(exprs,
 				buildExprCtLoad(nftCtState, nftReg1),
 				buildExprBitwiseMask(nftReg1, nftReg1, mask),
 				buildExprCmpNeqZero(nftReg1),
 			)
-			i += 3
+			i += consumed
 
 		case "limit":
 			// e.g. limit rate 10/second
@@ -775,6 +807,23 @@ func tokenizeNftLine(s string) []string {
 	s = strings.ReplaceAll(s, "{", " { ")
 	s = strings.ReplaceAll(s, "}", " } ")
 	return strings.Fields(s)
+}
+
+// ctStateBit maps one conntrack state name to its bit in the
+// NFT_CT_STATE bitmask (see the nfCtState*Bit constants above).
+func ctStateBit(name string) (uint32, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "invalid":
+		return nfCtStateInvalidBit, true
+	case "established":
+		return 1 << 1, true
+	case "related":
+		return 1 << 2, true
+	case "new":
+		return nfCtStateNewBit, true
+	default:
+		return 0, false
+	}
 }
 
 func encodeIfnameBytes(dev string) []byte {

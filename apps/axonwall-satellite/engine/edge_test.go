@@ -291,6 +291,53 @@ table inet axonwall {
 	}
 }
 
+// decodeCtStateMask extracts the bitmask from the nft bitwise expression of
+// a compiled `ct state ...` rule: the mask is a nested NFTA_BITWISE_MASK
+// attribute (len 12, type 0x8004) wrapping an NFTA_DATA_VALUE attribute
+// (len 8, type 1) holding the 4 mask bytes in native byte order.
+func decodeCtStateMask(t *testing.T, rule NftRuleSpec) uint32 {
+	t.Helper()
+	pat := []byte{0x0c, 0x00, 0x04, 0x80, 0x08, 0x00, 0x01, 0x00}
+	for _, expr := range rule.Expressions {
+		for i := 0; i+len(pat)+4 <= len(expr); i++ {
+			if bytes.Equal(expr[i:i+len(pat)], pat) {
+				return binary.LittleEndian.Uint32(expr[i+len(pat):])
+			}
+		}
+	}
+	t.Fatalf("no ct state bitmask found in compiled rule %q", rule.RawLine)
+	return 0
+}
+
+func TestCompileNftCtStateMasks(t *testing.T) {
+	// A-H8 (round 2): `ct state new` used to compile to the
+	// ESTABLISHED|RELATED mask (6) instead of NEW (8).
+	script := "table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    ct state new accept\n    ct state established,related,new accept\n    ct state { new, invalid } drop\n    ct state established,related accept\n    ct state invalid drop\n  }\n}\n"
+	batch, err := CompileNftScriptToNetlinkBatch(script)
+	if err != nil {
+		t.Fatalf("CompileNftScriptToNetlinkBatch failed: %v", err)
+	}
+	if len(batch.Rules) != 5 {
+		t.Fatalf("expected 5 rules, got %d", len(batch.Rules))
+	}
+	want := []uint32{8, 14, 9, 6, 1}
+	for i, w := range want {
+		if got := decodeCtStateMask(t, batch.Rules[i]); got != w {
+			t.Errorf("rule %d (%q): ct mask=%d, want %d", i, batch.Rules[i].RawLine, got, w)
+		}
+	}
+
+	for _, bad := range []string{
+		"ct state bogus accept",
+		"ct state != new accept",
+	} {
+		badScript := "table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    " + bad + "\n  }\n}\n"
+		if _, err := CompileNftScriptToNetlinkBatch(badScript); err == nil {
+			t.Errorf("expected compile error for %q, got nil", bad)
+		}
+	}
+}
+
 func TestBuildWireGuardSetDeviceAttrs(t *testing.T) {
 	priv := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	pub := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
