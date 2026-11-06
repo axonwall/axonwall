@@ -44,6 +44,41 @@ func TestParseKernelCmdline(t *testing.T) {
 	}
 }
 
+func TestParseInterfaceBootArgDhcpGateway(t *testing.T) {
+	// A-M35 (round 2, regression in 29c6eda): `eth0:dhcp:<gateway>` was
+	// rejected outright and the interface silently never existed.
+	cases := []struct {
+		arg     string
+		wantOK  bool
+		wantDev string
+		wantAdr string
+		wantGw  string
+	}{
+		{"eth0:dhcp:10.0.0.1", true, "eth0", "dhcp", "10.0.0.1"},
+		{"eth0:DHCP:10.0.0.1", true, "eth0", "dhcp", "10.0.0.1"},
+		{"eth0:dhcp", true, "eth0", "dhcp", ""},
+		{"eth0:10.0.0.2/24:10.0.0.1", true, "eth0", "10.0.0.2/24", "10.0.0.1"},
+		{"eth0:10.0.0.1:10.0.0.254", true, "eth0", "10.0.0.1/32", "10.0.0.254"},
+		{"eth0:fd00::1/64:fd00::ffff", true, "eth0", "fd00::1/64", "fd00::ffff"},
+		{"eth0:fd00::1", true, "eth0", "fd00::1/128", ""},
+		{"eth0:dhcp:not-an-ip", false, "", "", ""},
+		{"eth0:not-an-address", false, "", "", ""},
+	}
+	for _, tc := range cases {
+		spec, ok := parseInterfaceBootArg("wan", tc.arg)
+		if ok != tc.wantOK {
+			t.Errorf("parseInterfaceBootArg(%q): ok=%v, want %v", tc.arg, ok, tc.wantOK)
+			continue
+		}
+		if !tc.wantOK {
+			continue
+		}
+		if spec.Device != tc.wantDev || spec.Address != tc.wantAdr || spec.Gateway != tc.wantGw {
+			t.Errorf("parseInterfaceBootArg(%q): got %+v, want dev=%q addr=%q gw=%q", tc.arg, spec, tc.wantDev, tc.wantAdr, tc.wantGw)
+		}
+	}
+}
+
 func TestApplyHardenedSysctls(t *testing.T) {
 	tmp := t.TempDir()
 	for relPath := range DefaultHardenedSysctls {
