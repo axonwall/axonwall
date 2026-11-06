@@ -121,10 +121,11 @@ func (vm *VigilanteManager) BlockIP(rawIP string, timeoutSec int) error {
 	elementSpec := fmt.Sprintf("{ %s timeout %ds }", cleanIP, timeoutSec)
 	cmd := exec.Command("nft", "add", "element", "inet", "axonwall", setName, elementSpec)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[VigilanteManager] nft add element warning: %v, out: %s", err, string(out))
-		if os.Geteuid() == 0 {
-			return fmt.Errorf("failed to add IP %s to nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
-		}
+		// L20: the error used to be returned only when running as
+		// root; as non-root the IP was recorded in blockedIPs and
+		// returned nil while the kernel never got the element.
+		// A block the kernel never got must not be recorded.
+		return fmt.Errorf("failed to add IP %s to nftables SOAR blocklist: %s (%w)", cleanIP, string(out), err)
 	}
 
 	vm.mu.Lock()
