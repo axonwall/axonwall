@@ -13,6 +13,7 @@ import {
   ExternalLink,
   Flame,
   AlertTriangle,
+  XCircle,
 } from 'lucide-react';
 import type { DesiredState, Alias } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
@@ -29,13 +30,28 @@ export default function DynamicAliasesPage() {
   const [persistError, setPersistError] = useState<string | null>(null);
   const [showNftPreview, setShowNftPreview] = useState(false);
 
+  // C-A1: nothing editable renders until the real alias list loads. A
+  // refresh/subscribe before (or after a failed) load used to persist
+  // the empty defaults above — wiping every alias from disk.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      setAliases(state.aliases || []);
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load dynamic aliases.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        setAliases(state.aliases || []);
-      })
-      .catch(() => {});
+    loadState();
   }, []);
 
   const persistAliases = async (nextAliases: Alias[]) => {
@@ -70,12 +86,17 @@ export default function DynamicAliasesPage() {
     const existing = aliases.find((a) => a.url === feed.url);
     if (existing) return;
 
+    // C-A3: subscribe with NO entries. The old TEST-NET placeholders
+    // (198.51.100.0/24, 203.0.113.0/24) were compiled into the nftables
+    // sets as the feed's real content, and nothing ever replaces them —
+    // there is no urltable fetch anywhere in the repo. An empty entry
+    // list renders as "Not fetched yet" until a real fetcher exists.
     const newAlias: Alias = {
       name: feed.name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 31),
       type: 'urltable',
       url: feed.url,
       refreshIntervalHours: 24,
-      entries: ['198.51.100.0/24', '203.0.113.0/24'],
+      entries: [],
       description: feed.description,
       enabled: true,
     };
@@ -93,6 +114,43 @@ export default function DynamicAliasesPage() {
       chunkSize: 10,
     });
   }, [aliases]);
+
+  // C-A1: loading/error screens until the real alias list loads, so
+  // subscribe/refresh/delete can never persist an empty list over the
+  // live configuration.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading dynamic aliases…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'Dynamic aliases could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current alias list is unknown, so subscribing, refreshing, and deleting are disabled until it loads
+            successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -121,10 +179,11 @@ export default function DynamicAliasesPage() {
             type="button"
             onClick={handleRefreshAll}
             disabled={refreshing}
+            title="Re-applies the current alias list. No feed is fetched — no feed fetcher exists yet."
             className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs text-white transition flex items-center gap-1.5 shadow font-medium cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-            <span>{refreshing ? 'Updating Feeds...' : 'Refresh All Feeds'}</span>
+            <span>{refreshing ? 'Re-applying...' : 'Re-apply Aliases'}</span>
           </button>
         </div>
       </div>
@@ -224,7 +283,8 @@ export default function DynamicAliasesPage() {
         {refreshSuccess && (
           <div className="px-4 py-2.5 bg-emerald-500/10 border-b border-emerald-500/20 text-xs text-emerald-400 flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
-            Feeds successfully fetched and synchronized into nftables named sets.
+            Alias configuration re-applied. Note: no feed was fetched — no feed fetcher exists yet, so entries are
+            unchanged.
           </div>
         )}
 
@@ -242,7 +302,7 @@ export default function DynamicAliasesPage() {
               <th className="px-4 py-3">Type</th>
               <th className="px-4 py-3">Source / Feeds</th>
               <th className="px-4 py-3">Elements</th>
-              <th className="px-4 py-3">Refresh Cycle</th>
+              <th className="px-4 py-3">Refresh Interval (Configured)</th>
               <th className="px-4 py-3">Description</th>
               <th className="px-4 py-3 text-right">Actions</th>
             </tr>
@@ -274,10 +334,15 @@ export default function DynamicAliasesPage() {
                   )}
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-emerald-400 font-semibold">
-                  {a.entries.length} Prefixes
+                  {/* C-A3: an empty urltable alias was never fetched — say
+                      so instead of "0 Prefixes", which reads as a
+                      fetched-but-empty feed. */}
+                  {a.entries.length === 0 && a.type === 'urltable'
+                    ? 'Not fetched yet'
+                    : `${a.entries.length} Prefixes`}
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-slate-400">
-                  Every {a.refreshIntervalHours}h
+                  Every {a.refreshIntervalHours}h (configured — no fetcher runs it yet)
                 </td>
                 <td className="px-4 py-3 text-slate-400 text-xs">{a.description}</td>
                 <td className="px-4 py-3 text-right">

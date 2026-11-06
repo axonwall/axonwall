@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu, AlertTriangle } from 'lucide-react';
+import { Gauge, CheckCircle2, Shield, Terminal, ArrowDown, ArrowUp, Cpu, AlertTriangle, XCircle } from 'lucide-react';
 import { compileTrafficShaper } from '@axonwall/lib/compile/tc';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import type { DesiredState, TrafficShaperConfig } from '@axonwall/lib/schemas';
@@ -21,28 +21,43 @@ export default function TrafficShaperPage() {
   // A11: save failures need a red banner, not the emerald one.
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // C-A1: nothing editable renders until the real shaper config loads.
+  // A save before (or after a failed) load used to persist the defaults
+  // above — shaper disabled, 250/50 Mbps on eth0.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      const wanDev = state.interfaces?.find((i) => i.role === 'wan' || i.name === 'wan')?.device;
+      if (wanDev && wanDev !== 'none') {
+        setShaperIface(wanDev);
+      }
+      if (state.trafficShaper) {
+        setEnabled(state.trafficShaper.enabled);
+        const first = state.trafficShaper.interfaces?.[0];
+        if (first) {
+          if (first.interface) setShaperIface(first.interface);
+          setDownloadMbps(first.downloadBandwidthMbps);
+          setUploadMbps(first.uploadBandwidthMbps);
+          setScheduler(first.scheduler);
+          setCakeDiffserv(first.cakeDiffserv);
+          setCakeAckFilter(first.cakeAckFilter);
+        }
+      }
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load traffic shaper configuration.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        const wanDev = state.interfaces?.find((i) => i.role === 'wan' || i.name === 'wan')?.device;
-        if (wanDev && wanDev !== 'none') {
-          setShaperIface(wanDev);
-        }
-        if (state.trafficShaper) {
-          setEnabled(state.trafficShaper.enabled);
-          const first = state.trafficShaper.interfaces?.[0];
-          if (first) {
-            if (first.interface) setShaperIface(first.interface);
-            setDownloadMbps(first.downloadBandwidthMbps);
-            setUploadMbps(first.uploadBandwidthMbps);
-            setScheduler(first.scheduler);
-            setCakeDiffserv(first.cakeDiffserv);
-            setCakeAckFilter(first.cakeAckFilter);
-          }
-        }
-      })
-      .catch(() => {});
+    loadState();
   }, []);
 
   // A14: a cleared bandwidth field used to yield 0, which passes
@@ -91,6 +106,41 @@ export default function TrafficShaperPage() {
       setSaving(false);
     }
   };
+
+  // C-A1: loading/error screens until the real shaper config loads, so
+  // Save & Apply can never persist defaults over the live configuration.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading traffic shaper configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'Traffic shaper configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current shaper configuration is unknown, so editing and applying are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

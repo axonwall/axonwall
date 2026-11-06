@@ -648,7 +648,23 @@ export default function SystemUpdatesPage() {
       setHealthChecks(telemetry.checks);
       setTelemetryError(null);
       setTelemetryDaemonUnreachable(Boolean(telemetry.daemonUnreachable));
-      alert('Watchdog Health Quorum: All verification tests PASSED. Partition marked permanently healthy (bootcount=0).');
+      // C-B3: never claim PASSED / bootcount=0 unless the daemon verify
+      // actually ran and passed. A daemon-down run returns telemetry
+      // whose only check is the WARN "Daemon telemetry unavailable",
+      // and verifySystemHealthQuorum now throws before we get here —
+      // but report the real statuses here too, as defense in depth.
+      const failing = (telemetry.checks || []).filter((c: HealthCheckItem) => c?.status && c.status !== 'PASS');
+      if (telemetry.daemonUnreachable || !telemetry.healthVerified || failing.length > 0) {
+        alert(
+          `Watchdog Health Quorum: verification did NOT pass${
+            failing.length
+              ? ` — non-passing checks: ${failing.map((c: HealthCheckItem) => `${c.name} (${c.status})`).join(', ')}`
+              : ''
+          }. Bootcount was not reset.`
+        );
+      } else {
+        alert('Watchdog Health Quorum: All verification tests PASSED. Partition marked permanently healthy (bootcount=0).');
+      }
     } catch (err: any) {
       alert(`Health verification check failed: ${err?.message || String(err)}`);
     } finally {

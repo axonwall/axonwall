@@ -243,11 +243,20 @@ export default function McpControlPlanePage() {
       return;
     }
     const res = await emergencyFlushMcpLeasesAction();
-    setStatusMsg({
-      type: 'success',
-      text: `Emergency Panic Flush completed (${res.clearedCount} active AI tactical lease(s) purged from kernel).`,
-    });
-    await refreshData();
+    // C-B6: a failed flush must show the error, never the success banner
+    // claiming kernel leases were purged.
+    if (res.success) {
+      setStatusMsg({
+        type: 'success',
+        text: `Emergency Panic Flush completed (${res.clearedCount} active AI tactical lease(s) purged from kernel).`,
+      });
+      await refreshData();
+    } else {
+      setStatusMsg({
+        type: 'error',
+        text: res.error || 'Emergency Panic Flush failed: no leases were purged.',
+      });
+    }
   };
 
   return (

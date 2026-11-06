@@ -44,6 +44,10 @@ export default function RoutingPage() {
   }, [loadRoutingData]);
 
   const persistRouting = async (nextGateways: Gateway[], nextRoutes: StaticRoute[]) => {
+    // C-A1: never persist while the load is still in flight or has
+    // failed — the local lists are empty defaults then, and an add or
+    // delete would wipe every gateway/route from disk.
+    if (loading || errorMsg) return;
     const prevFullState = fullState;
     const prevGateways = gateways;
     const prevRoutes = routes;
@@ -75,6 +79,8 @@ export default function RoutingPage() {
 
   const handleAddRoute = async (e: React.FormEvent) => {
     e.preventDefault();
+    // C-A1: see persistRouting — no adds before a successful load.
+    if (loading || errorMsg) return;
     if (!newNetwork.trim() || !newGwIp.trim()) return;
     const nextRoutes: StaticRoute[] = [
       ...routes,
@@ -117,7 +123,7 @@ export default function RoutingPage() {
       {errorMsg && (
         <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-          <span>{errorMsg}</span>
+          <span>{errorMsg} Adding or deleting routes is disabled until the configuration loads successfully — use “Reload from Disk” to retry.</span>
         </div>
       )}
 
@@ -209,13 +215,14 @@ export default function RoutingPage() {
                   <td className="px-4 py-2.5 text-right">
                     <button
                       type="button"
+                      disabled={loading || !!errorMsg}
                       onClick={() =>
                         persistRouting(
                           gateways,
                           routes.filter((_, i) => i !== idx)
                         )
                       }
-                      className="text-slate-500 hover:text-red-400 transition"
+                      className="text-slate-500 hover:text-red-400 transition disabled:opacity-30"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -273,8 +280,8 @@ export default function RoutingPage() {
           />
           <button
             type="submit"
-            disabled={saving}
-            className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
+            disabled={saving || loading || !!errorMsg}
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg px-3 py-1.5 text-xs font-medium flex items-center justify-center gap-1.5 transition cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add Static Route</span>

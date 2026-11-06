@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Layers, Network, GitFork, ShieldAlert, Cpu, Plus, Trash2, CheckCircle2, Save } from 'lucide-react';
+import { Layers, Network, GitFork, ShieldAlert, Cpu, Plus, Trash2, CheckCircle2, Save, XCircle } from 'lucide-react';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import type { DesiredState, Vlan, Bridge, Bond, VirtualIp, Vrf } from '@axonwall/lib/schemas';
 
@@ -19,29 +19,44 @@ export default function AdvancedInterfacesPage() {
   const [vips, setVips] = useState<VirtualIp[]>([]);
   const [vrfs, setVrfs] = useState<Vrf[]>([]);
 
+  // C-A1: nothing editable renders until the real topology loads. A
+  // save before (or after a failed) load used to persist the empty
+  // defaults above, wiping the whole topology from disk.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      setVlans(state.vlans || []);
+      setBridges(state.bridges || []);
+      setBonds(state.bonds || []);
+      setVips(state.virtualIps || []);
+      setVrfs(state.vrfs || []);
+      // A17: the default VLAN parent is 'eth1', which may not
+      // exist on a box with renamed NICs. Point it at the first
+      // real device/bond when 'eth1' is not among them.
+      const candidates = [
+        ...(state.interfaces || [])
+          .map((i) => i.device)
+          .filter((d) => d && d !== 'none'),
+        ...(state.bonds || []).map((b) => b.name),
+      ];
+      if (candidates.length > 0 && !candidates.includes('eth1')) {
+        setNewVlanParent(candidates[0]!);
+      }
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load interface topology.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        setVlans(state.vlans || []);
-        setBridges(state.bridges || []);
-        setBonds(state.bonds || []);
-        setVips(state.virtualIps || []);
-        setVrfs(state.vrfs || []);
-        // A17: the default VLAN parent is 'eth1', which may not
-        // exist on a box with renamed NICs. Point it at the first
-        // real device/bond when 'eth1' is not among them.
-        const candidates = [
-          ...(state.interfaces || [])
-            .map((i) => i.device)
-            .filter((d) => d && d !== 'none'),
-          ...(state.bonds || []).map((b) => b.name),
-        ];
-        if (candidates.length > 0 && !candidates.includes('eth1')) {
-          setNewVlanParent(candidates[0]!);
-        }
-      })
-      .catch(() => {});
+    loadState();
   }, []);
 
   const persistTopology = async (
@@ -138,6 +153,41 @@ export default function AdvancedInterfacesPage() {
     setNewVlanDesc('');
     await persistTopology(nextVlans, bridges, bonds, vips, vrfs);
   };
+
+  // C-A1: loading/error screens until the real topology loads, so Save
+  // can never persist empty defaults over the live configuration.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading interface topology…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'Interface topology could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current topology is unknown, so editing and saving are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

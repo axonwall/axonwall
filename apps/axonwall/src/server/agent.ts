@@ -1560,7 +1560,31 @@ export async function applyDesiredState(
     );
   } catch {}
 
-  // Fallback for dev mode / local execution
+  // C-B2: the daemon did not answer, so the live ruleset was never
+  // changed. Never report "applied" and never arm a (mock)
+  // commit-confirm: no daemon watchdog will roll anything back at the
+  // mock deadline. The local fallback below runs ONLY in explicit dev
+  // mode (AXONWALL_DEV_MODE=1, or a Next.js dev server), where there
+  // is no daemon to apply to. On a production box the on-disk config
+  // is rolled back to its pre-apply contents (C9) and the apply fails
+  // loudly instead.
+  const devMode =
+    process.env.AXONWALL_DEV_MODE === '1' ||
+    process.env.AXONWALL_DEV_MODE === 'true' ||
+    process.env.NODE_ENV === 'development';
+  if (!devMode) {
+    const restored = restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCache();
+    lastPendingJobId = '';
+    throw new Error(
+      'axonwalld is unreachable — the configuration was NOT applied and no commit-confirm is active' +
+        (restored
+          ? '. On-disk configuration was restored to its pre-apply state.'
+          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
+    );
+  }
+
+  // Fallback for dev mode / local execution only (see C-B2 above).
   try {
     const routes = normalizedState.routes || [];
     for (const r of routes) {
@@ -1587,7 +1611,7 @@ export async function applyDesiredState(
 
   return {
     success: true,
-    message: `Configuration saved to /etc/axonwall/*.yaml and applied. Commit-confirm active for ${confirmTimeoutSeconds}s.`,
+    message: `Configuration saved to /etc/axonwall/*.yaml and applied (DEV MODE — no daemon running). Commit-confirm active for ${confirmTimeoutSeconds}s.`,
     nftScript,
     warnings,
   };
@@ -4023,12 +4047,37 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
 }
 
 export async function verifySystemHealthQuorum(): Promise<SystemPartitionsTelemetry> {
-  try {
-    const session = await getSession();
-    if (isAdminSession(session)) {
-      await callAgentApi<any>('/v1/system/health/verify', 'POST');
-    }
-  } catch {}
+  // C-B3: the daemon's verify verdict is the verdict. A null response
+  // means axonwalld is unreachable (no tests ran), and healthVerified
+  // false means the quorum did not pass — both must fail loudly instead
+  // of returning local telemetry that the caller then reports as PASSED.
+  // A successful daemon verify really does reset bootcount to 0 and mark
+  // the partition permanently healthy (watchdog RunVerification), so the
+  // success path below is the only one that may claim that.
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin credentials required to verify system health');
+  }
+  const verifyResp = await callAgentApi<any>('/v1/system/health/verify', 'POST');
+  if (!verifyResp) {
+    throw new Error(
+      'Health verification unavailable: axonwalld is unreachable — no verification tests ran and bootcount was not reset.'
+    );
+  }
+  if (verifyResp.success === false) {
+    throw new Error(verifyResp.message || verifyResp.error || 'Daemon health verification failed.');
+  }
+  if (verifyResp.healthVerified !== true) {
+    const failed = Array.isArray(verifyResp.checks)
+      ? verifyResp.checks
+          .filter((c: any) => c?.status && c.status !== 'PASS')
+          .map((c: any) => `${c.name || 'check'} (${c.status})`)
+          .join(', ')
+      : '';
+    throw new Error(
+      `Daemon health verification did not pass${failed ? `: ${failed}` : ''}. Bootcount was not reset.`
+    );
+  }
   return getSystemPartitionsTelemetry();
 }
 
@@ -4502,52 +4551,13 @@ export async function getHardwareTelemetry(): Promise<HardwareTelemetry> {
     return daemonTelem;
   }
 
-  // Fallback telemetry
-  return {
-    hostname: os.hostname(),
-    cpuTempC: 42.0,
-    temperatures: [
-      { name: 'cpu_core0', label: 'CPU Core 0', value: 41.5, unit: '°C', warning: 85, critical: 100 },
-      { name: 'cpu_core1', label: 'CPU Core 1', value: 42.5, unit: '°C', warning: 85, critical: 100 },
-      { name: 'pch_temp', label: 'Platform Controller Hub (PCH)', value: 46.2, unit: '°C', warning: 90, critical: 105 },
-      { name: 'ambient_zone', label: 'Chassis Intake Ambient', value: 24.8, unit: '°C', warning: 45, critical: 60 },
-    ],
-    fans: [
-      { name: 'fan_chassis1', label: 'Chassis Exhaust Fan 1', rpm: 2450 },
-      { name: 'fan_chassis2', label: 'Chassis Exhaust Fan 2', rpm: 2380 },
-      { name: 'fan_cpu', label: 'CPU PWM Cooler', rpm: 1820 },
-    ],
-    voltages: [
-      { name: 'vcore', label: 'CPU Vcore', value: 1.15, unit: 'V' },
-      { name: '12v', label: '+12V Rail', value: 12.08, unit: 'V' },
-      { name: '5v', label: '+5V Rail', value: 5.02, unit: 'V' },
-      { name: '3v3', label: '+3.3V Rail', value: 3.31, unit: 'V' },
-    ],
-    transceivers: [
-      {
-        interface: 'eth1 (WAN SFP+)',
-        vendor: 'CISCO-FINISAR',
-        partNumber: 'FTLX8571D3BCL',
-        temperature: 38.4,
-        voltage: 3.29,
-        txPowerDbm: -2.1,
-        rxPowerDbm: -3.4,
-        biasCurrentMa: 6.8,
-        status: 'Optimal Link (10G-SR)',
-      },
-      {
-        interface: 'eth2 (LAN SFP+)',
-        vendor: 'FS.COM',
-        partNumber: 'SFP-10GSR-85',
-        temperature: 36.1,
-        voltage: 3.31,
-        txPowerDbm: -1.8,
-        rxPowerDbm: -2.2,
-        biasCurrentMa: 7.1,
-        status: 'Optimal Link (10G-SR)',
-      },
-    ],
-  };
+  // C-B5: the daemon did not answer, so no sensor was ever read. Never
+  // return invented healthy-looking readings — an operator checking a
+  // thermal/fan/optic incident would be told everything is normal.
+  // Callers render an "unavailable" state instead (see terminal page).
+  throw new Error(
+    'Hardware telemetry unavailable: axonwalld is unreachable — no sensor readings were taken.'
+  );
 }
 
 export async function executeTerminalCommand(command: string): Promise<TerminalExecResponse> {
@@ -4776,11 +4786,13 @@ export async function createNasSnapshotAction(
     };
   }
 
-  const snapName = `${dataset}@${label || `manual-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}`}`;
+  // C-B1: the daemon is unreachable, so no snapshot was taken anywhere.
+  // Never invent a snapshot name and report success — an operator about
+  // to upgrade on the strength of that banner would have no safety net.
   return {
-    success: true,
-    snapshot: snapName,
-    message: `Snapshot ${snapName} created.`,
+    success: false,
+    snapshot: '',
+    message: 'Snapshot not created: axonwalld is unreachable. No snapshot exists for this dataset.',
   };
 }
 
@@ -5736,19 +5748,38 @@ export async function revertMcpLeaseAction(
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<any>('/v1/mcp/revert', 'POST', { leaseId, reason });
-  if (res && !res.success && res.error) {
-    return { success: false, error: res.error };
+  // C-B6: a null response means the daemon never ran the revert — it is
+  // a failure, not a success. The lease is still in the kernel.
+  if (!res) {
+    return { success: false, error: 'Daemon unavailable — lease was not reverted.' };
+  }
+  if (!res.success) {
+    return { success: false, error: res.error || res.message || 'Failed to revert lease' };
   }
   return { success: true };
 }
 
 export async function emergencyFlushMcpLeasesAction(
   reason = 'Emergency Panic Flush triggered by administrator from Web Console'
-): Promise<{ success: boolean; clearedCount: number }> {
+): Promise<{ success: boolean; clearedCount: number; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<any>('/v1/mcp/flush', 'POST', { reason });
+  // C-B6: a null response means the daemon never ran the flush — the
+  // blackholes/shapers/DNAT/DNS sinkholes are all still in the kernel.
+  // A daemon-reported failure is a failure too. Never report purged
+  // leases that were never purged.
+  if (!res) {
+    return { success: false, clearedCount: 0, error: 'Daemon unavailable — no leases were purged.' };
+  }
+  if (res.success === false) {
+    return {
+      success: false,
+      clearedCount: 0,
+      error: res.error || res.message || 'Emergency flush failed on the daemon.',
+    };
+  }
   return {
     success: true,
     clearedCount: res?.clearedCount ?? 0,

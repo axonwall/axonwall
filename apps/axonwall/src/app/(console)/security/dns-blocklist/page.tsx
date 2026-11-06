@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Sliders,
   Check,
+  XCircle,
 } from 'lucide-react';
 import type { DesiredState, DnsBlocklistConfig } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
@@ -29,29 +30,11 @@ export default function DnsBlocklistPage() {
   // reverted from "Saving..." to "Save & Deploy"). Surface it.
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [feeds, setFeeds] = useState([
-    {
-      id: 'feed-stevenblack',
-      name: 'StevenBlack Unified Malware & Adware',
-      url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',
-      entriesCount: 84210,
-      enabled: true,
-    },
-    {
-      id: 'feed-oisd',
-      name: 'OISD Full Telemetry & Tracking Shield',
-      url: 'https://big.oisd.nl/unbound',
-      entriesCount: 154800,
-      enabled: true,
-    },
-    {
-      id: 'feed-abuse-ch',
-      name: 'abuse.ch URLhaus Host & Domain Blocklist',
-      url: 'https://urlhaus.abuse.ch/downloads/hostfile/',
-      entriesCount: 19430,
-      enabled: true,
-    },
-  ]);
+  // C-A2: feeds start empty. The three hardcoded demo feeds (StevenBlack
+  // 84,210 / OISD 154,800 / URLhaus 19,430) used to display as subscribed
+  // on a box with no feeds configured, fabricate a 259,440 total, and get
+  // persisted as the real blocklist on Save & Deploy.
+  const [feeds, setFeeds] = useState<Array<{ id: string; name: string; url: string; entriesCount: number; enabled: boolean }>>([]);
 
   const [whitelist, setWhitelist] = useState<string[]>([]);
 
@@ -60,29 +43,45 @@ export default function DnsBlocklistPage() {
   const [newWhiteDomain, setNewWhiteDomain] = useState('');
   const [newBlackDomain, setNewBlackDomain] = useState('');
 
-  useEffect(() => {
-    getCurrentDesiredState()
-      .then((state) => {
-        setFullState(state);
-        if (state.dns?.blocklist) {
-          setEnabled(state.dns.blocklist.enabled);
-          setAction(state.dns.blocklist.action || 'always_null');
-          if (state.dns.blocklist.feeds?.length) {
-            setFeeds(
-              state.dns.blocklist.feeds.map((f, i) => ({
-                id: f.id || `feed-${i}`,
-                name: f.name,
-                url: f.url,
-                entriesCount: f.entriesCount || 0,
-                enabled: f.enabled,
-              }))
-            );
-          }
-          setWhitelist(state.dns.blocklist.whitelist || []);
-          setBlacklist(state.dns.blocklist.blacklist || []);
+  // C-A1: nothing editable renders until the real blocklist config
+  // loads. A save before (or after a failed) load used to persist the
+  // local defaults — including the demo feeds (see C-A2) — over the
+  // live configuration.
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const loadState = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const state = await getCurrentDesiredState();
+      setFullState(state);
+      if (state.dns?.blocklist) {
+        setEnabled(state.dns.blocklist.enabled);
+        setAction(state.dns.blocklist.action || 'always_null');
+        if (state.dns.blocklist.feeds?.length) {
+          setFeeds(
+            state.dns.blocklist.feeds.map((f, i) => ({
+              id: f.id || `feed-${i}`,
+              name: f.name,
+              url: f.url,
+              entriesCount: f.entriesCount || 0,
+              enabled: f.enabled,
+            }))
+          );
         }
-      })
-      .catch(() => {});
+        setWhitelist(state.dns.blocklist.whitelist || []);
+        setBlacklist(state.dns.blocklist.blacklist || []);
+      }
+    } catch (err: any) {
+      setLoadError(err?.message || 'Failed to load DNS blocklist configuration.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadState();
   }, []);
 
   const toggleFeed = (id: string) => {
@@ -160,6 +159,41 @@ export default function DnsBlocklistPage() {
     setNewBlackDomain('');
   };
 
+  // C-A1: loading/error screens until the real blocklist config loads,
+  // so Save & Deploy can never persist defaults over the live config.
+  if (isLoading) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-slate-900 border border-slate-800 rounded-xl text-sm text-slate-300">
+          Loading DNS blocklist configuration…
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError || !fullState) {
+    return (
+      <div className="space-y-6 max-w-7xl mx-auto">
+        <div className="p-6 bg-red-500/10 border border-red-500/30 rounded-xl space-y-3">
+          <div className="flex items-center gap-2 text-red-400 font-medium text-sm">
+            <XCircle className="w-4 h-4" />
+            <span>{loadError || 'DNS blocklist configuration could not be loaded.'}</span>
+          </div>
+          <p className="text-xs text-slate-400">
+            The current blocklist configuration is unknown, so editing and saving are disabled until it loads successfully.
+          </p>
+          <button
+            type="button"
+            onClick={loadState}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm cursor-pointer"
+          >
+            Retry loading configuration
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -216,7 +250,11 @@ export default function DnsBlocklistPage() {
           <span className="text-2xl font-bold font-mono text-emerald-400 mt-1 block">
             {totalBlockedDomains.toLocaleString()}
           </span>
-          <span className="text-[11px] text-slate-500 mt-0.5 block">Aggregated from active threat feeds</span>
+          <span className="text-[11px] text-slate-500 mt-0.5 block">
+            {feeds.length === 0
+              ? 'No feeds configured — custom blacklist entries only'
+              : 'Aggregated from active threat feeds'}
+          </span>
         </div>
 
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl">
@@ -259,10 +297,37 @@ export default function DnsBlocklistPage() {
           <span className="text-xs font-medium text-slate-400 uppercase tracking-wider block">
             DNS Protection State
           </span>
-          <span className="text-xl font-bold font-mono text-emerald-400 mt-1 flex items-center gap-2">
-            <CheckCircle2 className="w-5 h-5" /> Active & Enforcing
-          </span>
-          <span className="text-[11px] text-slate-500 mt-0.5 block">Applied across all LAN subnets</span>
+          {/* C-A2: the card used to read "Active & Enforcing" permanently,
+              without consulting `enabled` at all. It now reflects the
+              configured state — and says so when no feeds are configured. */}
+          {enabled ? (
+            feeds.length === 0 ? (
+              <>
+                <span className="text-xl font-bold font-mono text-amber-400 mt-1 flex items-center gap-2">
+                  <ShieldAlert className="w-5 h-5" /> Enabled — No Feeds Configured
+                </span>
+                <span className="text-[11px] text-slate-500 mt-0.5 block">
+                  Sinkholing is on but no threat feed is subscribed, so only the custom blacklist applies
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-xl font-bold font-mono text-emerald-400 mt-1 flex items-center gap-2">
+                  <CheckCircle2 className="w-5 h-5" /> Active & Enforcing
+                </span>
+                <span className="text-[11px] text-slate-500 mt-0.5 block">Applied across all LAN subnets</span>
+              </>
+            )
+          ) : (
+            <>
+              <span className="text-xl font-bold font-mono text-slate-400 mt-1 flex items-center gap-2">
+                <ShieldAlert className="w-5 h-5" /> Disabled — Sinkholing Off
+              </span>
+              <span className="text-[11px] text-slate-500 mt-0.5 block">
+                DNS blocklist is disabled; no domains are being sinkholed
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -303,7 +368,15 @@ export default function DnsBlocklistPage() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60 text-slate-300">
-            {feeds.map((f) => (
+            {feeds.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-xs text-slate-500">
+                  No threat feeds configured. Feed subscriptions are loaded from the saved DNS blocklist configuration;
+                  nothing is subscribed by default.
+                </td>
+              </tr>
+            ) : (
+              feeds.map((f) => (
               <tr key={f.id} className="hover:bg-slate-800/30">
                 <td className="px-4 py-3 font-semibold text-white text-xs">{f.name}</td>
                 <td className="px-4 py-3 font-mono text-xs text-slate-400 truncate max-w-xs">{f.url}</td>
@@ -324,7 +397,8 @@ export default function DnsBlocklistPage() {
                   </button>
                 </td>
               </tr>
-            ))}
+              ))
+            )}
           </tbody>
         </table>
       </div>
