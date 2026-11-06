@@ -1,5 +1,6 @@
 import { normalizeAntiLockoutInterfaces, inferInterfaceRole } from '../schemas/index.js';
-import type { Alias, DesiredState, FirewallRule, NatRule, PacketTracerQuery } from '../schemas/index.js';
+import type { Alias, DesiredState, FirewallRule, Interface, NatRule, PacketTracerQuery } from '../schemas/index.js';
+import { COUNTRY_CIDR_TABLE } from '../compile/geoip/index.js';
 
 export interface TraceStep {
   stage: 'interface' | 'dnat' | 'filter' | 'routing' | 'snat';
@@ -99,12 +100,15 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
   }
 
   // 3. DNAT (Port Forwarding) Stage
-  for (const nat of state.nat) {
+  const sortedNat = [...state.nat].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  for (const nat of sortedNat) {
     if (!nat.enabled || nat.type !== 'dnat') continue;
     if (nat.interface !== inIface.name && nat.interface !== 'any') continue;
+    if (nat.source && nat.source !== 'any' && !matchAddress(nat.source, query.srcIp, state.aliases, state.interfaces)) continue;
+    if (nat.destination && nat.destination !== 'any' && !matchAddress(nat.destination, currentDstIp, state.aliases, state.interfaces)) continue;
 
     if (matchProtocol(nat.protocol, query.protocol)) {
-      const portMatch = !nat.destinationPort || Number.parseInt(nat.destinationPort, 10) === query.dstPort;
+      const portMatch = !nat.destinationPort || nat.destinationPort === 'any' || matchPort(nat.destinationPort, query.dstPort, state.aliases);
       if (portMatch && nat.targetIp) {
         currentDstIp = nat.targetIp;
         if (nat.targetPort) {
@@ -143,8 +147,8 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
 
   for (const rule of applicableRules) {
     if (!matchProtocol(rule.protocol, query.protocol)) continue;
-    if (!matchAddress(rule.source, query.srcIp, state.aliases)) continue;
-    if (!matchAddress(rule.destination, currentDstIp, state.aliases)) continue;
+    if (!matchAddress(rule.source, query.srcIp, state.aliases, state.interfaces)) continue;
+    if (!matchAddress(rule.destination, currentDstIp, state.aliases, state.interfaces)) continue;
     if (!matchPort(rule.sourcePort, query.srcPort, state.aliases)) continue;
     if (!matchPort(rule.destinationPort, currentDstPort, state.aliases)) continue;
 
@@ -239,19 +243,41 @@ function matchProtocol(ruleProto: string, packetProto: string): boolean {
   return ruleProto.toLowerCase() === packetProto.toLowerCase();
 }
 
-function matchAddress(ruleAddr: string, packetIp: string, aliases: Alias[]): boolean {
+function matchAddress(ruleAddr: string, packetIp: string, aliases: Alias[], interfaces: Interface[] = []): boolean {
   if (!ruleAddr || ruleAddr === 'any') return true;
   if (ruleAddr.startsWith('$')) {
     const aliasName = ruleAddr.slice(1);
-    const alias = aliases.find((a) => a.name === aliasName);
-    if (!alias) return false;
-    return alias.entries.some((entry) => matchSingleAddress(entry, packetIp));
+    const alias = aliases.find((a) => a.name.toLowerCase() === aliasName.toLowerCase());
+    if (!alias || !alias.enabled) return false;
+    return alias.entries.some((entry) => matchSingleAddress(entry, packetIp, interfaces));
   }
-  return matchSingleAddress(ruleAddr, packetIp);
+  return matchSingleAddress(ruleAddr, packetIp, interfaces);
 }
 
-function matchSingleAddress(spec: string, ip: string): boolean {
+function matchSingleAddress(spec: string, ip: string, interfaces: Interface[] = []): boolean {
+  if (spec === 'any') return true;
+  if (spec === 'wan_ip') {
+    const wanIfaces = interfaces.filter((i) => i.enabled && inferInterfaceRole(i) === 'wan' && i.ipv4Address);
+    if (wanIfaces.length === 0) return true;
+    return wanIfaces.some((i) => i.ipv4Address!.split('/')[0] === ip);
+  }
+  if (spec === 'self') {
+    const selfIps = interfaces.filter((i) => i.enabled && i.ipv4Address).map((i) => i.ipv4Address!.split('/')[0]);
+    return selfIps.includes(ip);
+  }
+  if (spec === 'lan_net') {
+    const lanIfaces = interfaces.filter((i) => i.enabled && inferInterfaceRole(i) === 'lan' && i.ipv4Address);
+    if (lanIfaces.length === 0) return isIpInCidr(ip, '192.168.1.0/24');
+    return lanIfaces.some((i) => {
+      const addr = i.ipv4Address!;
+      return isIpInCidr(ip, addr.includes('/') ? addr : `${addr}/24`);
+    });
+  }
   if (spec === ip) return true;
+  const upper = spec.trim().toUpperCase();
+  if (COUNTRY_CIDR_TABLE[upper]) {
+    return COUNTRY_CIDR_TABLE[upper].some((cidr) => isIpInCidr(ip, cidr));
+  }
   if (spec.includes('/')) {
     return isIpInCidr(ip, spec);
   }

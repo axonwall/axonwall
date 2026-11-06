@@ -28,6 +28,7 @@ export function WorldMapView({ scan, onSelectHost }: WorldMapViewProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   useInput((input, key) => {
+    if (hosts.length === 0) return;
     if (key.downArrow) {
       setSelectedIndex((prev) => (prev + 1) % hosts.length);
     } else if (key.upArrow) {

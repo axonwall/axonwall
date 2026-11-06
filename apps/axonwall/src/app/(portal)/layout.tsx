@@ -1,6 +1,12 @@
 import React from 'react';
+import { redirect } from 'next/navigation';
+import { getSession } from '@/server/auth';
 
-export default function PortalLayout({ children }: { children: React.ReactNode }) {
+export default async function PortalLayout({ children }: { children: React.ReactNode }) {
+  const session = await getSession();
+  if (!session) {
+    redirect('/login');
+  }
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center pt-20">
       <header className="mb-10 text-center">

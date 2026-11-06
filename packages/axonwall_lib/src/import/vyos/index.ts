@@ -302,18 +302,20 @@ export function importVyosConfig(configText: string): ImportReport {
       let srcPort = '';
       if (r.source) {
         if (r.source.address) src = String(r.source.address);
-        else if (r.source.group?.['address-group']) src = `$${r.source.group['address-group']}`;
-        else if (r.source.group?.['network-group']) src = `$${r.source.group['network-group']}`;
+        else if (r.source.group?.['address-group']) src = `$${String(r.source.group['address-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        else if (r.source.group?.['network-group']) src = `$${String(r.source.group['network-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
         if (r.source.port) srcPort = String(r.source.port);
+        else if (r.source.group?.['port-group']) srcPort = `$${String(r.source.group['port-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
       }
 
       let dst = 'any';
       let dstPort = '';
       if (r.destination) {
         if (r.destination.address) dst = String(r.destination.address);
-        else if (r.destination.group?.['address-group']) dst = `$${r.destination.group['address-group']}`;
-        else if (r.destination.group?.['network-group']) dst = `$${r.destination.group['network-group']}`;
+        else if (r.destination.group?.['address-group']) dst = `$${String(r.destination.group['address-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        else if (r.destination.group?.['network-group']) dst = `$${String(r.destination.group['network-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
         if (r.destination.port) dstPort = String(r.destination.port);
+        else if (r.destination.group?.['port-group']) dstPort = `$${String(r.destination.group['port-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
       }
 
       rules.push({

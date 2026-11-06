@@ -447,12 +447,21 @@ func sendNetlinkRouteMessage(msg []byte) error {
 	if err := syscall.Bind(fd, sa); err != nil {
 		return err
 	}
+	tv := syscall.Timeval{Sec: 2, Usec: 0}
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 	if err := syscall.Sendto(fd, msg, 0, sa); err != nil {
 		return err
 	}
 
 	reply := make([]byte, 4096)
-	n, _, err := syscall.Recvfrom(fd, reply, 0)
+	var n int
+	for {
+		n, _, err = syscall.Recvfrom(fd, reply, 0)
+		if err == syscall.EINTR {
+			continue
+		}
+		break
+	}
 	if err != nil {
 		return err
 	}

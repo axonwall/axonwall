@@ -80,20 +80,27 @@ fi
 conf_val() {
   grep "^$1=" "$CONF" 2>/dev/null | head -n1 | cut -d= -f2- || true
 }
+conf_has_key() {
+  grep -q "^$1=" "$CONF" 2>/dev/null
+}
 if [ -s "$CONF" ]; then
-  _v="$(conf_val WAN_INTERFACE)"; [ -n "$_v" ] && WAN_IF="$_v"
+  if conf_has_key WAN_INTERFACE; then WAN_IF="$(conf_val WAN_INTERFACE)"; fi
   _v="$(conf_val WAN_MODE)"; [ -n "$_v" ] && WAN_MODE="$_v"
   _v="$(conf_val WAN_IPV4_ADDRESS)"; [ -n "$_v" ] && WAN_IPV4_ADDRESS="$_v"
   _v="$(conf_val WAN_IPV4_GATEWAY)"; [ -n "$_v" ] && WAN_IPV4_GATEWAY="$_v"
-  _v="$(conf_val LAN_INTERFACE)"; [ -n "$_v" ] && LAN_IF="$_v"
+  if conf_has_key LAN_INTERFACE; then LAN_IF="$(conf_val LAN_INTERFACE)"; fi
   _v="$(conf_val LAN_MODE)"; [ -n "$_v" ] && LAN_MODE="$_v"
   _v="$(conf_val LAN_IPV4_ADDRESS)"; [ -n "$_v" ] && LAN_IPV4_ADDRESS="$_v"
-  _v="$(conf_val OPT1_INTERFACE)"; [ -n "$_v" ] && OPT1_IF="$_v"
+  if conf_has_key OPT1_INTERFACE; then OPT1_IF="$(conf_val OPT1_INTERFACE)"; fi
   _v="$(conf_val OPT1_MODE)"; [ -n "$_v" ] && OPT1_MODE="$_v"
   _v="$(conf_val OPT1_IPV4_ADDRESS)"; [ -n "$_v" ] && OPT1_IPV4_ADDRESS="$_v"
-  _v="$(conf_val OPT2_INTERFACE)"; [ -n "$_v" ] && OPT2_IF="$_v"
+  if conf_has_key OPT2_INTERFACE; then OPT2_IF="$(conf_val OPT2_INTERFACE)"; fi
   _v="$(conf_val OPT2_MODE)"; [ -n "$_v" ] && OPT2_MODE="$_v"
   _v="$(conf_val OPT2_IPV4_ADDRESS)"; [ -n "$_v" ] && OPT2_IPV4_ADDRESS="$_v"
+  # Prevent duplicate interface stanzas if a role was reassigned to another role's default NIC
+  [ "$LAN_IF" = "$WAN_IF" ] && LAN_IF=""
+  { [ "$OPT1_IF" = "$WAN_IF" ] || [ "$OPT1_IF" = "$LAN_IF" ]; } && OPT1_IF=""
+  { [ "$OPT2_IF" = "$WAN_IF" ] || [ "$OPT2_IF" = "$LAN_IF" ] || [ "$OPT2_IF" = "$OPT1_IF" ]; } && OPT2_IF=""
 fi
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
 WAN_MODE="${WAN_MODE:-dhcp}"

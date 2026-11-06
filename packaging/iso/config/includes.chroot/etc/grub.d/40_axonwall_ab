@@ -95,7 +95,7 @@ if [ "${active_slot}" = "A" ]; then
         if [ -z "$ifile" ]; then
             set ifile="/boot/initrd.img"
         fi
-        linux ${kfile} root=LABEL=axon_root_a ro quiet console=tty0 console=ttyS0,115200 slot=A
+        linux ${kfile} root=LABEL=axon_root_a ro quiet net.ifnames=0 console=ttyS0,115200 console=tty0 slot=A
         initrd ${ifile}
     }
 
@@ -135,7 +135,7 @@ if [ "${active_slot}" = "A" ]; then
         if [ -z "$ifile" ]; then
             set ifile="/boot/initrd.img"
         fi
-        linux ${kfile} root=LABEL=axon_root_b ro quiet console=tty0 console=ttyS0,115200 slot=B
+        linux ${kfile} root=LABEL=axon_root_b ro quiet net.ifnames=0 console=ttyS0,115200 console=tty0 slot=B
         initrd ${ifile}
     }
 else
@@ -178,7 +178,7 @@ else
         if [ -z "$ifile" ]; then
             set ifile="/boot/initrd.img"
         fi
-        linux ${kfile} root=LABEL=axon_root_b ro quiet console=tty0 console=ttyS0,115200 slot=B
+        linux ${kfile} root=LABEL=axon_root_b ro quiet net.ifnames=0 console=ttyS0,115200 console=tty0 slot=B
         initrd ${ifile}
     }
 
@@ -218,7 +218,7 @@ else
         if [ -z "$ifile" ]; then
             set ifile="/boot/initrd.img"
         fi
-        linux ${kfile} root=LABEL=axon_root_a ro quiet console=tty0 console=ttyS0,115200 slot=A
+        linux ${kfile} root=LABEL=axon_root_a ro quiet net.ifnames=0 console=ttyS0,115200 console=tty0 slot=A
         initrd ${ifile}
     }
 fi

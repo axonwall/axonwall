@@ -70,7 +70,13 @@ export function useNmapScan(options: UseNmapScanOptions = {}) {
 
   const selectedHost: NmapHost | undefined = useMemo(() => {
     if (!selectedHostId) return undefined;
-    return scan.hosts.find((h) => (h.ipv4 || h.ipv6 || h.id) === selectedHostId);
+    return scan.hosts.find(
+      (h) =>
+        h.id === selectedHostId ||
+        h.ipv4 === selectedHostId ||
+        h.ipv6 === selectedHostId ||
+        (h.ipv4 || h.ipv6 || h.id) === selectedHostId
+    );
   }, [scan.hosts, selectedHostId]);
 
   const graph: TopologyGraph = useMemo(() => {

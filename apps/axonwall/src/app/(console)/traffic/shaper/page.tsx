@@ -8,7 +8,8 @@ import type { DesiredState, TrafficShaperConfig } from '@axonwall/lib/schemas';
 
 export default function TrafficShaperPage() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
-  const [enabled, setEnabled] = useState(true);
+  const [enabled, setEnabled] = useState(false);
+  const [shaperIface, setShaperIface] = useState('eth0');
   const [downloadMbps, setDownloadMbps] = useState(250);
   const [uploadMbps, setUploadMbps] = useState(50);
   const [scheduler, setScheduler] = useState<'cake' | 'fq_codel' | 'htb'>('cake');
@@ -22,10 +23,15 @@ export default function TrafficShaperPage() {
     getCurrentDesiredState()
       .then((state) => {
         setFullState(state);
+        const wanDev = state.interfaces?.find((i) => i.role === 'wan' || i.name === 'wan')?.device;
+        if (wanDev && wanDev !== 'none') {
+          setShaperIface(wanDev);
+        }
         if (state.trafficShaper) {
           setEnabled(state.trafficShaper.enabled);
           const first = state.trafficShaper.interfaces?.[0];
           if (first) {
+            if (first.interface) setShaperIface(first.interface);
             setDownloadMbps(first.downloadBandwidthMbps);
             setUploadMbps(first.uploadBandwidthMbps);
             setScheduler(first.scheduler);
@@ -41,15 +47,16 @@ export default function TrafficShaperPage() {
     enabled,
     interfaces: [
       {
-        interface: 'eth0',
+        interface: shaperIface,
         downloadBandwidthMbps: downloadMbps,
         uploadBandwidthMbps: uploadMbps,
         scheduler,
         cakeDiffserv,
         cakeAckFilter,
         enabled: true,
-        queues: [],
+        queues: fullState?.trafficShaper?.interfaces?.[0]?.queues || [],
       },
+      ...(fullState?.trafficShaper?.interfaces?.slice(1) || []),
     ],
   };
 

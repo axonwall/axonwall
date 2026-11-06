@@ -258,9 +258,11 @@ func (d *CloudInitConfigDataSource) Read(ctx context.Context, req datasource.Rea
 		}
 		if !data.ZTPControllerURL.IsNull() {
 			ztpMap["controller_url"] = data.ZTPControllerURL.ValueString()
+			axonwallMap["hub_url"] = data.ZTPControllerURL.ValueString()
 		}
 		if !data.ZTPEnrollmentToken.IsNull() {
 			ztpMap["enrollment_token"] = data.ZTPEnrollmentToken.ValueString()
+			axonwallMap["ztp_token"] = data.ZTPEnrollmentToken.ValueString()
 		}
 		authMap["ztp"] = ztpMap
 	}

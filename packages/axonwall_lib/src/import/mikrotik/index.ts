@@ -129,14 +129,14 @@ export function importMikrotikConfig(rscContent: string): ImportReport {
         else iface = inIface;
       }
 
-      let rawSrc = kv['src-address'] || (kv['src-address-list'] ? (kv['src-address-list'].startsWith('!') ? `!$${kv['src-address-list'].slice(1)}` : `$${kv['src-address-list']}`) : 'any');
+      let rawSrc = kv['src-address'] || (kv['src-address-list'] ? (kv['src-address-list'].startsWith('!') ? `!$${kv['src-address-list'].slice(1).replace(/[^a-zA-Z0-9_]/g, '_')}` : `$${kv['src-address-list'].replace(/[^a-zA-Z0-9_]/g, '_')}`) : 'any');
       let negatedSrc = false;
       if (rawSrc.startsWith('!')) {
         negatedSrc = true;
         rawSrc = rawSrc.slice(1) || 'any';
       }
 
-      let rawDst = kv['dst-address'] || (kv['dst-address-list'] ? (kv['dst-address-list'].startsWith('!') ? `!$${kv['dst-address-list'].slice(1)}` : `$${kv['dst-address-list']}`) : 'any');
+      let rawDst = kv['dst-address'] || (kv['dst-address-list'] ? (kv['dst-address-list'].startsWith('!') ? `!$${kv['dst-address-list'].slice(1).replace(/[^a-zA-Z0-9_]/g, '_')}` : `$${kv['dst-address-list'].replace(/[^a-zA-Z0-9_]/g, '_')}`) : 'any');
       let negatedDst = false;
       if (rawDst.startsWith('!')) {
         negatedDst = true;

@@ -124,15 +124,26 @@ func ParseKernelCmdline(cmdline string) EdgeBootConfig {
 
 // parseInterfaceBootArg parses "<dev>:<cidr|dhcp>[:<gateway>]" into an EdgeInterfaceSpec.
 func parseInterfaceBootArg(role, arg string) (EdgeInterfaceSpec, bool) {
-	segments := strings.Split(arg, ":")
-	if len(segments) < 2 {
+	firstColon := strings.IndexByte(arg, ':')
+	if firstColon <= 0 || firstColon >= len(arg)-1 {
 		return EdgeInterfaceSpec{}, false
 	}
-	dev := strings.TrimSpace(segments[0])
-	addr := strings.TrimSpace(segments[1])
+	dev := strings.TrimSpace(arg[:firstColon])
+	rest := strings.TrimSpace(arg[firstColon+1:])
+	addr := rest
 	gw := ""
-	if len(segments) >= 3 {
-		gw = strings.TrimSpace(segments[2])
+
+	if !strings.EqualFold(rest, "dhcp") {
+		if slashIdx := strings.IndexByte(rest, '/'); slashIdx > 0 {
+			afterSlash := rest[slashIdx+1:]
+			if gwColon := strings.IndexByte(afterSlash, ':'); gwColon > 0 {
+				addr = strings.TrimSpace(rest[:slashIdx+1+gwColon])
+				gw = strings.TrimSpace(afterSlash[gwColon+1:])
+			}
+		}
+	} else if colonIdx := strings.IndexByte(rest, ':'); colonIdx > 0 {
+		addr = strings.TrimSpace(rest[:colonIdx])
+		gw = strings.TrimSpace(rest[colonIdx+1:])
 	}
 
 	if !validRadioRegex.MatchString(dev) || strings.HasPrefix(dev, "-") || strings.Contains(dev, "..") {

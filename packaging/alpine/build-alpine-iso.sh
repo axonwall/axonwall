@@ -170,6 +170,9 @@ CORE_PKGS=(
   sgdisk
   e2fsprogs
   dosfstools
+  cryptsetup
+  rsync
+  bash
   syslinux
   efibootmgr
   grub
@@ -214,6 +217,7 @@ if [[ "$MINIMAL" -eq 0 ]]; then
     vim
     neovim
     zsh
+    python3
     kubectl
     helm
     starship

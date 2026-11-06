@@ -23,6 +23,7 @@ type EBPFManager struct {
 	links        []link.Link
 	ch           driver.Conn
 	stopChan     chan struct{}
+	doneChan     chan struct{}
 	prevPackets  map[ebpf.FlowTrackerFlowKey]uint64
 	blockedUntil map[uint32]time.Time
 	blockMu      sync.Mutex
@@ -31,6 +32,7 @@ type EBPFManager struct {
 func NewEBPFManager() *EBPFManager {
 	return &EBPFManager{
 		stopChan:     make(chan struct{}),
+		doneChan:     make(chan struct{}),
 		prevPackets:  make(map[ebpf.FlowTrackerFlowKey]uint64),
 		blockedUntil: make(map[uint32]time.Time),
 	}
@@ -119,6 +121,11 @@ func (m *EBPFManager) Start(interfaces []string) error {
 }
 
 func (m *EBPFManager) monitorFlows() {
+	defer func() {
+		if m.doneChan != nil {
+			close(m.doneChan)
+		}
+	}()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -212,8 +219,8 @@ func (m *EBPFManager) monitorFlows() {
 					if _, _, _, err := ValidateTargetSafety(srcIP.String(), "", 0, 24, 64); err == nil {
 						log.Printf("DDoS Mitigation: Volumetric threshold exceeded (%d packets/10s on port %d -> %d). Blocking IP %s via XDP for %v cooldown", deltaPackets, srcPort, dstPort, srcIP.String(), ddosCooldown)
 						if m.objs.BlocklistMap != nil {
-							_ = m.objs.BlocklistMap.Put(key.SrcIp, uint8(1))
 							m.blockMu.Lock()
+							_ = m.objs.BlocklistMap.Put(key.SrcIp, uint8(1))
 							m.blockedUntil[key.SrcIp] = now.Add(ddosCooldown)
 							m.blockMu.Unlock()
 						}
@@ -261,6 +268,9 @@ func (m *EBPFManager) Stop() {
 	if m.stopChan != nil {
 		close(m.stopChan)
 		m.stopChan = nil
+		if m.doneChan != nil {
+			<-m.doneChan
+		}
 	}
 	for _, l := range m.links {
 		l.Close()

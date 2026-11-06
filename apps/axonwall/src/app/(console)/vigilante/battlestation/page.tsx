@@ -74,83 +74,17 @@ export default function BattleStationPage() {
   useEffect(() => {
     loadData();
     const interval = setInterval(async () => {
-      const blocked = await getSoarBlockedIPsAction();
-      setBlockedIPs(blocked);
+      try {
+        const blocked = await getSoarBlockedIPsAction();
+        setBlockedIPs(blocked);
+      } catch {}
     }, 10000);
     return () => clearInterval(interval);
   }, []);
 
-  // Connect to SSE Telemetry stream
+  // Telemetry stream initialized empty until real alerts arrive
   useEffect(() => {
-    // Generate synthetic security events for rich visualization
-    const initialEvents: TelemetryEvent[] = [
-      {
-        source: 'suricata',
-        severity: 'HIGH',
-        rule: 'ET SCAN Potential Nmap SYN Scan Inbound',
-        srcIp: '198.51.100.42',
-        destIp: '192.168.1.1',
-        time: new Date(Date.now() - 1000 * 45).toLocaleTimeString(),
-      },
-      {
-        source: 'falco',
-        severity: 'CRITICAL',
-        rule: 'Terminal Shell in Container (Privilege Escalation)',
-        srcIp: '10.42.0.18',
-        destIp: '10.42.0.1',
-        time: new Date(Date.now() - 1000 * 120).toLocaleTimeString(),
-      },
-      {
-        source: 'wazuh',
-        severity: 'MEDIUM',
-        rule: 'Multiple Failed SSH Logins from Single Host',
-        srcIp: '203.0.113.88',
-        destIp: '192.168.1.1',
-        time: new Date(Date.now() - 1000 * 240).toLocaleTimeString(),
-      },
-      {
-        source: 'kctf',
-        severity: 'HIGH',
-        rule: 'Decoy Canary Honeycomb Tripped: SSH Honeynet',
-        srcIp: '192.168.100.220',
-        destIp: '192.168.100.1',
-        time: new Date(Date.now() - 1000 * 360).toLocaleTimeString(),
-      },
-    ];
-    setEvents(initialEvents);
-
-    const timer = setInterval(() => {
-      const candidates: TelemetryEvent[] = [
-        {
-          source: 'suricata',
-          severity: 'HIGH',
-          rule: 'GPL ATTACK_RESPONSE id check returned root',
-          srcIp: '198.51.100.21',
-          destIp: '192.168.1.50',
-          time: new Date().toLocaleTimeString(),
-        },
-        {
-          source: 'zeek',
-          severity: 'MEDIUM',
-          rule: 'Anomalous High-Entropy DNS Query (DNS Tunneling)',
-          srcIp: '192.168.1.105',
-          destIp: '1.1.1.1',
-          time: new Date().toLocaleTimeString(),
-        },
-        {
-          source: 'flamingo',
-          severity: 'CRITICAL',
-          rule: 'Kerberoast SPN Ticket Query for Domain Admin',
-          srcIp: '10.0.0.45',
-          destIp: '10.0.0.10',
-          time: new Date().toLocaleTimeString(),
-        },
-      ];
-      const nextEvt = candidates[Math.floor(Math.random() * candidates.length)];
-      setEvents((prev) => [nextEvt, ...prev.slice(0, 19)]);
-    }, 6000);
-
-    return () => clearInterval(timer);
+    setEvents([]);
   }, []);
 
   const handleBlockIP = async (e: React.FormEvent) => {

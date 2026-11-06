@@ -15,14 +15,54 @@ export default function NasSharesPage() {
   const [nfsPath, setNfsPath] = useState('/mnt/tank/shares/general');
   const [nfsNet, setNfsNet] = useState('192.168.1.0/24');
   const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   useEffect(() => {
     getCurrentDesiredState().then(setState).catch(() => {});
   }, []);
 
+  const removeSmbShare = async (shareName: string) => {
+    if (!state?.nas) return;
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const next = structuredClone(state);
+      if (next.nas) {
+        next.nas.smbShares = next.nas.smbShares.filter((s) => s.name !== shareName);
+      }
+      await applyDesiredState(next);
+      setState(next);
+      setStatusMsg(`Removed SMB share ${shareName}.`);
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to remove SMB share'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeNfsExport = async (exportPath: string) => {
+    if (!state?.nas) return;
+    setSaving(true);
+    setStatusMsg(null);
+    try {
+      const next = structuredClone(state);
+      if (next.nas) {
+        next.nas.nfsExports = next.nas.nfsExports.filter((e) => e.path !== exportPath);
+      }
+      await applyDesiredState(next);
+      setState(next);
+      setStatusMsg(`Removed NFS export ${exportPath}.`);
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to remove NFS export'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const addSmbShare = async () => {
     if (!state || !smbName.trim()) return;
     setSaving(true);
+    setStatusMsg(null);
     try {
       const next = structuredClone(state);
       next.nas = next.nas || {
@@ -54,6 +94,9 @@ export default function NasSharesPage() {
       ];
       await applyDesiredState(next);
       setState(next);
+      setStatusMsg(`Saved SMB share ${smbName.trim()}.`);
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save SMB share'}`);
     } finally {
       setSaving(false);
     }
@@ -62,6 +105,7 @@ export default function NasSharesPage() {
   const addNfsExport = async () => {
     if (!state || !nfsPath.trim()) return;
     setSaving(true);
+    setStatusMsg(null);
     try {
       const next = structuredClone(state);
       next.nas = next.nas || {
@@ -89,6 +133,9 @@ export default function NasSharesPage() {
       ];
       await applyDesiredState(next);
       setState(next);
+      setStatusMsg(`Saved NFSv4 export ${nfsPath.trim()}.`);
+    } catch (err: any) {
+      setStatusMsg(`Error: ${err?.message || 'Failed to save NFSv4 export'}`);
     } finally {
       setSaving(false);
     }
@@ -159,9 +206,20 @@ export default function NasSharesPage() {
                   <span className="font-bold text-white font-mono">\\axonwall\{s.name}</span>
                   <span className="text-slate-400 ml-2 font-mono">→ {s.path}</span>
                 </div>
-                <span className="text-emerald-400 text-[11px] font-mono">
-                  {s.shadowCopies ? 'VSS ' : ''}{s.timeMachine ? 'TimeMachine' : ''}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-emerald-400 text-[11px] font-mono">
+                    {s.shadowCopies ? 'VSS ' : ''}{s.timeMachine ? 'TimeMachine' : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeSmbShare(s.name)}
+                    disabled={saving}
+                    className="p-1 text-slate-400 hover:text-rose-400 transition-colors"
+                    title="Delete SMB Share"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -204,7 +262,18 @@ export default function NasSharesPage() {
             {(state?.nas?.nfsExports ?? []).map((e) => (
               <div key={e.path} className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs">
                 <span className="font-mono text-white">{e.path}</span>
-                <span className="font-mono text-slate-400">{e.allowedNetworks.join(', ')}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-slate-400">{e.allowedNetworks.join(', ')}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeNfsExport(e.path)}
+                    disabled={saving}
+                    className="p-1 text-slate-400 hover:text-rose-400 transition-colors"
+                    title="Delete NFS Export"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>

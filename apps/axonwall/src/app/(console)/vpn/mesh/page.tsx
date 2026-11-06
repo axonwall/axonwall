@@ -125,7 +125,7 @@ export default function MeshVpnPage() {
       const res = await fetch('/api/v1/vpn/mesh/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newUserName.trim() }),
+        body: JSON.stringify({ action: 'create', name: newUserName.trim() }),
       });
       if (res.ok) {
         setNewUserName('');
@@ -144,6 +144,7 @@ export default function MeshVpnPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
+          action: 'create',
           user: newKeyUser.trim(),
           reusable: true,
           ephemeral: false,

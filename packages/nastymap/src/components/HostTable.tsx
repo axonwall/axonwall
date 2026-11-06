@@ -317,6 +317,8 @@ export function HostTable({
                                   if (onUpdateHost) onUpdateHost(host.id, updater);
                                 },
                                 scan,
+                                notify: () => {},
+                                closeDrawer: () => {},
                               });
                               if (res && onUpdateHost) {
                                 onUpdateHost(host.id, () => res);

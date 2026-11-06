@@ -79,36 +79,55 @@ export function buildPcapBinary(packets: CapturedPacket[]): Buffer {
     ethHeader[6] = 0x02; ethHeader[11] = 0x01;
     ethHeader.writeUInt16BE(0x0800, 12); // EtherType IPv4
 
+    const isTcp = pkt.protocol.includes('TCP') || pkt.protocol.includes('TLS') || pkt.protocol.includes('HTTP') || pkt.protocol.includes('SSH');
+    const transportLen = isTcp ? 20 : 8;
+
     const ipHeader = Buffer.alloc(20);
     ipHeader[0] = 0x45; // IPv4, Header Length 5 (20 bytes)
     ipHeader[1] = 0x00; // DSCP
-    const totalLen = 20 + 8 + payload.length;
+    const totalLen = 20 + transportLen + payload.length;
     ipHeader.writeUInt16BE(totalLen, 2);
-    ipHeader.writeUInt16BE(1000 + i, 4); // ID
+    ipHeader.writeUInt16BE((1000 + i) & 0xffff, 4); // ID
     ipHeader.writeUInt16BE(0x4000, 6);   // Don't fragment
     ipHeader[8] = 64;                    // TTL
-
-    const isTcp = pkt.protocol.includes('TCP') || pkt.protocol.includes('TLS') || pkt.protocol.includes('HTTP');
     ipHeader[9] = isTcp ? 6 : 17;        // Protocol: TCP (6) or UDP (17)
 
     // Parse src and dst IP
     const parseIPv4 = (ipStr: string, offset: number) => {
       const parts = ipStr.split('.').map(n => parseInt(n, 10) || 0);
       for (let p = 0; p < 4; p++) {
-        ipHeader[offset + p] = parts[p] || 0;
+        ipHeader[offset + p] = (parts[p] || 0) & 0xff;
       }
     };
     parseIPv4(pkt.srcIp || '192.168.1.100', 12);
     parseIPv4(pkt.dstIp || '1.1.1.1', 16);
 
-    // Simple transport layer (8 bytes)
-    const transportHeader = Buffer.alloc(8);
-    const srcPort = parseInt(pkt.srcPort, 10) || 12345;
-    const dstPort = parseInt(pkt.dstPort, 10) || 80;
+    // Compute IPv4 header checksum
+    let csum = 0;
+    for (let j = 0; j < 20; j += 2) {
+      csum += ipHeader.readUInt16BE(j);
+    }
+    while (csum > 0xffff) {
+      csum = (csum & 0xffff) + (csum >>> 16);
+    }
+    ipHeader.writeUInt16BE((~csum) & 0xffff, 10);
+
+    // Transport layer (20 bytes for TCP, 8 bytes for UDP)
+    const transportHeader = Buffer.alloc(transportLen);
+    const srcPort = Math.min(65535, Math.max(0, parseInt(pkt.srcPort, 10) || 12345));
+    const dstPort = Math.min(65535, Math.max(0, parseInt(pkt.dstPort, 10) || 80));
     transportHeader.writeUInt16BE(srcPort, 0);
     transportHeader.writeUInt16BE(dstPort, 2);
-    transportHeader.writeUInt16BE(8 + payload.length, 4);
-    transportHeader.writeUInt16BE(0x0000, 6);
+    if (isTcp) {
+      transportHeader.writeUInt32BE(1, 4);   // Seq number
+      transportHeader.writeUInt32BE(1, 8);   // Ack number
+      transportHeader[12] = 0x50;            // Data offset: 5 (20 bytes)
+      transportHeader[13] = 0x18;            // Flags: PSH, ACK
+      transportHeader.writeUInt16BE(64240, 14); // Window size
+    } else {
+      transportHeader.writeUInt16BE(8 + payload.length, 4);
+      transportHeader.writeUInt16BE(0x0000, 6);
+    }
 
     const frame = Buffer.concat([ethHeader, ipHeader, transportHeader, payload]);
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Play, CheckCircle2, XCircle, ArrowRight, Shield, Layers, HelpCircle } from 'lucide-react';
 import { simulatePacket, type SimulationResult } from '@axonwall/lib/sim';
 import type { DesiredState, PacketTracerQuery } from '@axonwall/lib/schemas';
@@ -135,6 +135,8 @@ const SAMPLE_SIM_STATE: DesiredState = {
 };
 
 export default function PacketTracerPage() {
+  const [liveState, setLiveState] = useState<DesiredState | null>(null);
+  const [useSampleState, setUseSampleState] = useState(false);
   const [inInterface, setInInterface] = useState('lan');
   const [srcIp, setSrcIp] = useState('192.168.100.45');
   const [srcPort, setSrcPort] = useState(54321);
@@ -143,6 +145,15 @@ export default function PacketTracerPage() {
   const [protocol, setProtocol] = useState<'tcp' | 'udp' | 'icmp'>('tcp');
 
   const [result, setResult] = useState<SimulationResult | null>(null);
+
+  useEffect(() => {
+    import('@/server/agent')
+      .then(({ getCurrentDesiredState }) => getCurrentDesiredState())
+      .then((s) => {
+        if (s) setLiveState(s);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleSimulate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -154,11 +165,13 @@ export default function PacketTracerPage() {
       srcPort,
       dstPort,
     };
-    const res = simulatePacket(query, SAMPLE_SIM_STATE);
+    const targetState = useSampleState || !liveState ? SAMPLE_SIM_STATE : liveState;
+    const res = simulatePacket(query, targetState);
     setResult(res);
   };
 
   const handleLoadSample = (type: 'allow' | 'block' | 'lockout' | 'dnat') => {
+    setUseSampleState(true);
     if (type === 'allow') {
       setInInterface('lan');
       setSrcIp('192.168.100.45');

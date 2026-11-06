@@ -468,11 +468,19 @@ func (m *McpTrafficManager) ReconcileKernelState() error {
 			}
 
 		case "shape":
+			shapeDir, _ := l.Parameters["direction"].(string)
+			if shapeDir == "" {
+				shapeDir = "both"
+			}
 			if l.FwMark > 0 {
-				mangleRules = append(mangleRules,
-					fmt.Sprintf("    %s saddr %s meta mark set 0x%x counter comment \"%s\"", family, target, l.FwMark, l.ID),
-					fmt.Sprintf("    %s daddr %s meta mark set 0x%x counter comment \"%s\"", family, target, l.FwMark, l.ID),
-				)
+				if shapeDir == "both" || shapeDir == "ingress" || shapeDir == "inbound" {
+					mangleRules = append(mangleRules,
+						fmt.Sprintf("    %s saddr %s meta mark set 0x%x counter comment \"%s\"", family, target, l.FwMark, l.ID))
+				}
+				if shapeDir == "both" || shapeDir == "egress" || shapeDir == "outbound" {
+					mangleRules = append(mangleRules,
+						fmt.Sprintf("    %s daddr %s meta mark set 0x%x counter comment \"%s\"", family, target, l.FwMark, l.ID))
+				}
 			}
 			if dscpVal, ok := l.Parameters["dscpMark"]; ok && dscpVal != nil {
 				var dscp int
@@ -792,8 +800,8 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 	if req.KillActiveConnections {
 		hostOnly := strings.Split(normTarget, "/")[0]
 		if net.ParseIP(hostOnly) != nil {
-			_ = exec.Command("conntrack", "-D", "-s", hostOnly).Run()
-			_ = exec.Command("conntrack", "-D", "-d", hostOnly).Run()
+			_ = exec.Command("conntrack", "-D", "-s", normTarget).Run()
+			_ = exec.Command("conntrack", "-D", "-d", normTarget).Run()
 		}
 	}
 

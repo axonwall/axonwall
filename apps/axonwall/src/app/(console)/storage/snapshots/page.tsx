@@ -33,38 +33,46 @@ export default function ZfsSnapshotsPage() {
   }, []);
 
   const handleManualSnapshot = async () => {
-    const res = await createNasSnapshotAction(dataset, label || undefined);
-    setMsg(res.message);
-    await load();
+    try {
+      const res = await createNasSnapshotAction(dataset, label || undefined);
+      setMsg(res.message);
+      await load();
+    } catch (err: any) {
+      setMsg(`Error: ${err?.message || 'Failed to create snapshot'}`);
+    }
   };
 
   const handleAddPolicy = async () => {
     if (!state) return;
-    const next = structuredClone(state);
-    next.nas = next.nas || {
-      enabled: true,
-      workgroup: 'WORKGROUP',
-      serverString: 'Axonwall Enterprise ZFS NAS',
-      pools: [],
-      datasets: [],
-      snapshotPolicies: [],
-      smbShares: [],
-      nfsExports: [],
-      iscsiTargets: [],
-    };
-    next.nas.snapshotPolicies = [
-      ...next.nas.snapshotPolicies,
-      {
-        dataset,
-        interval,
-        keepCount,
-        replicateToHaPeer: true,
+    try {
+      const next = structuredClone(state);
+      next.nas = next.nas || {
         enabled: true,
-      },
-    ];
-    await applyDesiredState(next);
-    setState(next);
-    setMsg(`Automated ${interval} snapshot & HA replication policy saved for ${dataset}.`);
+        workgroup: 'WORKGROUP',
+        serverString: 'Axonwall Enterprise ZFS NAS',
+        pools: [],
+        datasets: [],
+        snapshotPolicies: [],
+        smbShares: [],
+        nfsExports: [],
+        iscsiTargets: [],
+      };
+      next.nas.snapshotPolicies = [
+        ...next.nas.snapshotPolicies,
+        {
+          dataset,
+          interval,
+          keepCount,
+          replicateToHaPeer: true,
+          enabled: true,
+        },
+      ];
+      await applyDesiredState(next);
+      setState(next);
+      setMsg(`Automated ${interval} snapshot & HA replication policy saved for ${dataset}.`);
+    } catch (err: any) {
+      setMsg(`Error: ${err?.message || 'Failed to save snapshot policy'}`);
+    }
   };
 
   return (

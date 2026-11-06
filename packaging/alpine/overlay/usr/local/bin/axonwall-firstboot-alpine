@@ -24,6 +24,10 @@ sysctl -p /etc/sysctl.d/99-axonwall.conf 2>/dev/null || true
 # 2. Identify Primary WAN, LAN, OPT1 & OPT2 NICs
 mkdir -p /etc/axonwall /var/lib/axonwall /var/log/axonwall /run/axonwall /run/headscale
 PRECONFIGURED_IFACES=0
+if [ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured ] && [ -s /var/lib/axonwall/etc-axonwall/interfaces.conf ]; then
+  cp -a /var/lib/axonwall/etc-axonwall/interfaces.conf /etc/axonwall/interfaces.conf 2>/dev/null || true
+  cp -a /var/lib/axonwall/etc-axonwall/.interfaces_configured /etc/axonwall/.interfaces_configured 2>/dev/null || true
+fi
 if { [ -f /etc/axonwall/.interfaces_configured ] || [ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured ]; } && [ -s /etc/axonwall/interfaces.conf ]; then
   echo "[Axonwall Firstboot] Preserving pre-configured network interfaces from /etc/axonwall/interfaces.conf..."
   PRECONFIGURED_IFACES=1
@@ -234,7 +238,8 @@ mkdir -p /etc/axonwall/certs
 if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
   echo "[Axonwall Firstboot] Provisioning appliance TLS PKI (CA + hub leaf)..."
   axonwall-rotate-hub-cert --ensure || true
-elif [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; then
+fi
+if { [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ]; } && [ ! -s /var/lib/axonwall/tls/ca.crt ]; then
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   HN="$(hostname 2>/dev/null || echo axonwall)"
   SAN="DNS:${HN},DNS:axonwall.local,DNS:localhost,IP:127.0.0.1,IP:192.168.1.1"
@@ -259,7 +264,7 @@ mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki /var/li
 chown -R axonwall:axonwall-api /var/lib/axonwall /run/headscale /run/axonwall 2>/dev/null || true
 chown root:axonwall-api /var/log/axonwall 2>/dev/null || true
 chmod 1770 /var/log/axonwall 2>/dev/null || true
-chmod 0775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall 2>/dev/null || true
+chmod 3775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home /var/lib/axonwall/ldap 2>/dev/null || true
 chmod 0750 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
 chmod 0770 /var/lib/axonwall/headscale /run/headscale /run/axonwall 2>/dev/null || true

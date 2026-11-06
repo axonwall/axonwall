@@ -33,13 +33,33 @@ function validateAiEndpoint(endpoint: string, isLocalExpected: boolean): string 
     throw new Error('Endpoint must use http: or https:');
   }
 
-  const hostname = url.hostname.toLowerCase();
-  if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
-    throw new Error('Access to cloud metadata endpoints is prohibited');
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    hostname === '169.254.169.254' ||
+    hostname.startsWith('169.254.') ||
+    hostname.startsWith('fe80:') ||
+    hostname === 'metadata.google.internal' ||
+    hostname === '0.0.0.0'
+  ) {
+    throw new Error('Access to cloud metadata or link-local endpoints is prohibited');
   }
 
-  if (!isLocalExpected && url.protocol === 'http:' && hostname !== 'localhost' && hostname !== '127.0.0.1') {
-    throw new Error('Remote AI provider endpoints must use HTTPS');
+  if (!isLocalExpected) {
+    if (
+      hostname === 'localhost' ||
+      hostname === '::1' ||
+      hostname.startsWith('127.') ||
+      hostname.startsWith('10.') ||
+      hostname.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) ||
+      hostname.startsWith('fc00:') ||
+      hostname.startsWith('fd00:')
+    ) {
+      throw new Error('Remote AI provider endpoints cannot target loopback or private RFC1918 networks');
+    }
+    if (url.protocol === 'http:') {
+      throw new Error('Remote AI provider endpoints must use HTTPS');
+    }
   }
 
   return clean;

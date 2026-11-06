@@ -1,23 +1,14 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
-/**
- * Acquire an exclusive lockfile with O_CREAT|O_EXCL, returning a
- * release function. Used to serialise the MCP key-file and audit-log
- * read-modify-write sequences across processes (B-S1, B-S2): the HTTP
- * controller and the stdio MCP server both mutate these files, and
- * without a lock a concurrent writer could resurrect a revoked key
- * or fork the audit hash chain.
- *
- * The wait is synchronous (Atomics.wait — available on the Node main
- * thread) because all callers are synchronous file operations. A lock
- * older than 30s is treated as stale (crashed holder) and broken.
- * Throws on timeout so the caller can decide: key mutations fail
- * loudly rather than silently losing an update, while the audit
- * writer skips the append to preserve chain integrity.
- */
 export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => void {
   const deadline = Date.now() + timeoutMs;
+  const staleThresholdMs = Math.min(Math.max(1000, timeoutMs - 500), 10000);
   const waiter = new Int32Array(new SharedArrayBuffer(4));
+  const lockDir = path.dirname(lockPath);
+  if (!fs.existsSync(lockDir)) {
+    fs.mkdirSync(lockDir, { recursive: true, mode: 0o775 });
+  }
   for (;;) {
     try {
       const fd = fs.openSync(lockPath, 'wx', 0o660);
@@ -39,13 +30,26 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
       };
     } catch (err: any) {
       if (err?.code !== 'EEXIST') throw err;
-      // Lock is held. Break it if the holder died holding it.
+      // Lock is held. Break it if the holder died holding it or exceeded staleThresholdMs.
       let stale = false;
       try {
         const stat = fs.statSync(lockPath);
-        stale = Date.now() - stat.mtimeMs > 30000;
+        stale = Date.now() - stat.mtimeMs > staleThresholdMs;
+        if (!stale && stat.size > 0) {
+          const raw = fs.readFileSync(lockPath, 'utf8');
+          const parsed = JSON.parse(raw);
+          if (typeof parsed?.pid === 'number' && parsed.pid > 0 && parsed.pid !== process.pid) {
+            try {
+              process.kill(parsed.pid, 0);
+            } catch (killErr: any) {
+              if (killErr?.code === 'ESRCH') {
+                stale = true;
+              }
+            }
+          }
+        }
       } catch {
-        // Lock vanished between attempts; retry below.
+        // Lock vanished or unreadable between attempts; retry below.
       }
       if (stale) {
         try {

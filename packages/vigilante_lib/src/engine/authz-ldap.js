@@ -275,6 +275,18 @@ export function resolveVigilanteLdapConfig(overrides = {}) {
     overrides.timeoutMs || process.env.VIGILANTE_LDAP_TIMEOUT_MS || yamlLdap?.timeoutMs || 5000
   );
 
+  const tlsRejectUnauthorized =
+    overrides.tlsRejectUnauthorized !== undefined
+      ? Boolean(overrides.tlsRejectUnauthorized)
+      : process.env.VIGILANTE_LDAP_TLS_REJECT_UNAUTHORIZED !== undefined
+      ? process.env.VIGILANTE_LDAP_TLS_REJECT_UNAUTHORIZED !== 'false' &&
+        process.env.VIGILANTE_LDAP_TLS_REJECT_UNAUTHORIZED !== '0'
+      : yamlLdap?.tlsRejectUnauthorized !== undefined
+      ? Boolean(yamlLdap.tlsRejectUnauthorized)
+      : fileBinding?.tlsRejectUnauthorized !== undefined
+      ? Boolean(fileBinding.tlsRejectUnauthorized)
+      : true;
+
   const source = overrides.uri
     ? 'override'
     : envUri || envBaseDN || envEnabled !== undefined
@@ -299,6 +311,7 @@ export function resolveVigilanteLdapConfig(overrides = {}) {
     allowLocalBreakGlass,
     defaultRole,
     timeoutMs,
+    tlsRejectUnauthorized,
     roleMapping: {
       ownerGroups,
       adminGroups,
@@ -469,6 +482,22 @@ function encodeLdapFilterAst(filterStr) {
     return berEncodeElement(0x87, Buffer.from(attr, 'utf8'));
   }
 
+  if (rawVal.includes('*')) {
+    // Substring filter [4] SubstringFilter ::= SEQUENCE { type AttributeDescription, substrings SEQUENCE OF CHOICE { initial [0], any [1], final [2] } }
+    const subParts = rawVal.split('*');
+    const subEls = [];
+    for (let i = 0; i < subParts.length; i++) {
+      if (!subParts[i]) continue;
+      const partBytes = unescapeFilterValueToBuffer(subParts[i]);
+      const choiceTag = i === 0 ? 0x80 : i === subParts.length - 1 ? 0x82 : 0x81;
+      subEls.push(berEncodeElement(choiceTag, partBytes));
+    }
+    return berEncodeElement(
+      0xa4,
+      Buffer.concat([berEncodeOctetString(attr), berEncodeSequence(subEls)])
+    );
+  }
+
   // Equality match [3] AttributeValueAssertion
   const unescapedBytes = unescapeFilterValueToBuffer(rawVal);
   return berEncodeElement(
@@ -553,9 +582,10 @@ function parseLdapTarget(uri) {
 }
 
 class MinimalLdapSession {
-  constructor(uri, timeoutMs = 5000) {
+  constructor(uri, timeoutMs = 5000, tlsRejectUnauthorized = true) {
     this.uri = uri;
     this.timeoutMs = timeoutMs;
+    this.tlsRejectUnauthorized = tlsRejectUnauthorized !== false;
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.nextMsgId = 1;
@@ -595,7 +625,7 @@ class MinimalLdapSession {
       };
 
       this.socket = isTls
-        ? tls.connect({ host, port, rejectUnauthorized: false }, onConnect)
+        ? tls.connect({ host, port, rejectUnauthorized: this.tlsRejectUnauthorized }, onConnect)
         : net.createConnection({ host, port }, onConnect);
 
       this.socket.on('error', onError);
@@ -743,7 +773,7 @@ export async function authenticateLdapUser(username, password, configOverrides =
     };
   }
 
-  const lookupSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs);
+  const lookupSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
   let userDN = '';
   let displayName = cleanUser;
   let email = undefined;
@@ -810,7 +840,7 @@ export async function authenticateLdapUser(username, password, configOverrides =
     }
 
     // Phase 2: Verify user password on a separate LDAP session
-    const userSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs);
+    const userSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
     try {
       await userSession.connect();
       const userBind = await userSession.bind(userDN, cleanPass);

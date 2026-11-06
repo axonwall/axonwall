@@ -55,14 +55,14 @@ export default function BackupPage() {
   const [restoreStatus, setRestoreStatus] = useState<{ success?: boolean; message?: string } | null>(null);
 
   // Cloud S3 states
-  const [s3Enabled, setS3Enabled] = useState(true);
-  const [s3Bucket, setS3Bucket] = useState('enterprise-axonwall-backups');
-  const [s3Endpoint, setS3Endpoint] = useState('https://s3.eu-central-1.amazonaws.com');
+  const [s3Enabled, setS3Enabled] = useState(false);
+  const [s3Bucket, setS3Bucket] = useState('');
+  const [s3Endpoint, setS3Endpoint] = useState('');
   const [s3Schedule, setS3Schedule] = useState('daily');
 
   // GitOps states
-  const [gitOpsEnabled, setGitOpsEnabled] = useState(true);
-  const [gitRepo, setGitRepo] = useState('git@github.com:enterprise/axonwall-fleet-gitops.git');
+  const [gitOpsEnabled, setGitOpsEnabled] = useState(false);
+  const [gitRepo, setGitRepo] = useState('');
   const [gitBranch, setGitBranch] = useState('main');
 
   async function handleExportYaml() {
@@ -791,8 +791,14 @@ export default function BackupPage() {
             </div>
             <div className="p-2.5 bg-slate-950/70 border border-slate-800/80 rounded-lg flex items-center justify-between">
               <span className="text-slate-400">Git Sync Status:</span>
-              <span className="text-emerald-400 font-mono font-medium flex items-center gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Synchronized (commit 0004097)
+              <span className={`${gitOpsEnabled && gitRepo.trim() ? 'text-emerald-400' : 'text-slate-500'} font-mono font-medium flex items-center gap-1.5`}>
+                {gitOpsEnabled && gitRepo.trim() ? (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Enabled ({gitBranch || 'main'})
+                  </>
+                ) : (
+                  'Disabled (No repository configured)'
+                )}
               </span>
             </div>
           </div>

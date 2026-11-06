@@ -3,6 +3,7 @@
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { callAgentApi } from './agent-client';
+import { invalidateDesiredStateCache } from './agent';
 
 export interface ExtensionPluginLiveStatus {
   id: string;
@@ -79,5 +80,6 @@ export async function executePluginAction(
     };
   }
 
+  await invalidateDesiredStateCache();
   return res;
 }

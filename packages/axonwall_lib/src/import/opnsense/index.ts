@@ -115,8 +115,10 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
       let negatedSrc = false;
       if (r.source) {
         if (r.source.any !== undefined) src = 'any';
-        else if (r.source.network) src = `$${String(r.source.network).replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        else if (r.source.address) src = String(r.source.address);
+        else if (r.source.network) {
+          const rawNet = String(r.source.network);
+          src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        } else if (r.source.address) src = String(r.source.address);
         if (r.source.not !== undefined && src !== 'any') negatedSrc = true;
         if (r.source.port) srcPort = String(r.source.port);
       }
@@ -127,8 +129,10 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
       let negatedDst = false;
       if (r.destination) {
         if (r.destination.any !== undefined) dst = 'any';
-        else if (r.destination.network) dst = `$${String(r.destination.network).replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        else if (r.destination.address) dst = String(r.destination.address);
+        else if (r.destination.network) {
+          const rawNet = String(r.destination.network);
+          dst = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        } else if (r.destination.address) dst = String(r.destination.address);
         if (r.destination.not !== undefined && dst !== 'any') negatedDst = true;
         if (r.destination.port) dstPort = String(r.destination.port);
       }

@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ success: false, message }, { status: 500 });
+    const status = message === 'Unauthorized' ? 401 : message.startsWith('Forbidden') ? 403 : 500;
+    return NextResponse.json({ success: false, message }, { status });
   }
 }

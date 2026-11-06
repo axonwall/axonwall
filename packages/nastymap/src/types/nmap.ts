@@ -285,7 +285,7 @@ export interface FilterOptions {
   deviceType?: string;
   subnetFilter?: string;
   hasVulnerability?: boolean;
-  tagFilter?: string;
+  tagFilter?: string | string[];
 }
 
 export interface DetailLevelSettings {

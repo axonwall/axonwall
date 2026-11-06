@@ -1049,25 +1049,31 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	if armErr != "" {
 		// Roll the arming back to the previously read values so a failed
 		// activation leaves bootfs and the watchdog properties consistent.
-		if prevBootfs != "" && prevBootfs != targetDataset {
+		if prevBootfs != "" && prevBootfs != "-" && prevBootfs != targetDataset {
 			if _, rerr := we.runZpoolCmd("set", "bootfs="+prevBootfs, "zroot"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back bootfs to %s after arming failure: %v", prevBootfs, rerr)
 			}
 		}
-		if prevActiveBe != "" {
+		if prevActiveBe != "" && prevActiveBe != "-" {
 			if _, rerr := we.runZfsCmd("set", "org.axonwall:active_be="+prevActiveBe, "zroot/ROOT"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back org.axonwall:active_be to %s after arming failure: %v", prevActiveBe, rerr)
 			}
+		} else {
+			_, _ = we.runZfsCmd("inherit", "org.axonwall:active_be", "zroot/ROOT")
 		}
-		if prevBootcount != "" {
+		if prevBootcount != "" && prevBootcount != "-" {
 			if _, rerr := we.runZfsCmd("set", "org.axonwall:bootcount="+prevBootcount, "zroot/ROOT"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back org.axonwall:bootcount to %s after arming failure: %v", prevBootcount, rerr)
 			}
+		} else {
+			_, _ = we.runZfsCmd("inherit", "org.axonwall:bootcount", "zroot/ROOT")
 		}
-		if prevBootlimit != "" {
+		if prevBootlimit != "" && prevBootlimit != "-" {
 			if _, rerr := we.runZfsCmd("set", "org.axonwall:bootlimit="+prevBootlimit, "zroot/ROOT"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back org.axonwall:bootlimit to %s after arming failure: %v", prevBootlimit, rerr)
 			}
+		} else {
+			_, _ = we.runZfsCmd("inherit", "org.axonwall:bootlimit", "zroot/ROOT")
 		}
 		return fmt.Errorf("boot environment arming failed (%s); arming rolled back to its previous values", armErr)
 	}

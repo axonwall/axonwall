@@ -244,6 +244,14 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 			inRoutesList = false
 		}
 
+		// Exit any active list section when dedented back to or above the list section header
+		if (inInterfacesList || inRoutesList || inWriteFilesList) && !strings.HasPrefix(trimmedLine, "-") && indent == 0 {
+			flushPendingItems()
+			inInterfacesList = false
+			inRoutesList = false
+			inWriteFilesList = false
+		}
+
 		// Top-level or section transitions
 		if !strings.HasPrefix(trimmedLine, "-") && strings.HasSuffix(trimmedLine, ":") {
 			sectionName := strings.ToLower(strings.TrimSuffix(trimmedLine, ":"))
@@ -270,6 +278,11 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 				inWriteFilesList = true
 				inInterfacesList = false
 				inRoutesList = false
+				continue
+			default:
+				inInterfacesList = false
+				inRoutesList = false
+				inWriteFilesList = false
 				continue
 			}
 		}
@@ -892,7 +905,7 @@ func applyScalarConfigKV(cfg *EdgeBootConfig, rawKey, val string) {
 	key = strings.TrimPrefix(key, "axonwall_")
 
 	switch key {
-	case "hub", "hub_url", "huburl", "core", "core_url":
+	case "hub", "hub_url", "huburl", "core", "core_url", "controller_url", "controllerurl", "ztp_controller_url":
 		cfg.HubURL = val
 	case "id", "satellite_id", "satelliteid", "hostname", "fqdn":
 		if key == "hostname" || key == "fqdn" {
@@ -903,7 +916,7 @@ func applyScalarConfigKV(cfg *EdgeBootConfig, rawKey, val string) {
 		} else {
 			cfg.SatelliteID = sanitizeIdentifier(val)
 		}
-	case "token", "ztp_token", "ztptoken":
+	case "token", "ztp_token", "ztptoken", "enrollment_token", "enrollmenttoken", "ztp_enrollment_token":
 		cfg.ZtpToken = val
 	case "sku", "sku_profile", "skuprofile":
 		cfg.SkuProfile = val
@@ -1066,19 +1079,26 @@ func writeCloudInitFile(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir stri
 	return nil
 }
 
+func applyCloudInitJSONMap(cfg *EdgeBootConfig, m map[string]interface{}) {
+	for k, v := range m {
+		switch tv := v.(type) {
+		case string:
+			applyScalarConfigKV(cfg, k, tv)
+		case bool:
+			applyScalarConfigKV(cfg, k, strconv.FormatBool(tv))
+		case map[string]interface{}:
+			applyCloudInitJSONMap(cfg, tv)
+		}
+	}
+}
+
 func applyCloudInitJSON(cfg *EdgeBootConfig, rawJSON, rootDir string) error {
 	var doc map[string]interface{}
 	if err := json.Unmarshal([]byte(rawJSON), &doc); err != nil {
 		return err
 	}
 	if ax, ok := doc["axonwall"].(map[string]interface{}); ok {
-		for k, v := range ax {
-			if s, ok := v.(string); ok {
-				applyScalarConfigKV(cfg, k, s)
-			} else if b, ok := v.(bool); ok {
-				applyScalarConfigKV(cfg, k, strconv.FormatBool(b))
-			}
-		}
+		applyCloudInitJSONMap(cfg, ax)
 	}
 	for k, v := range doc {
 		if s, ok := v.(string); ok {

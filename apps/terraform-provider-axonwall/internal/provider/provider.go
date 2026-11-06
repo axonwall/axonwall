@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -62,6 +63,7 @@ func (p *axonwallProvider) Configure(ctx context.Context, req provider.Configure
 	if endpoint == "" {
 		endpoint = "http://localhost:3000/api/v1"
 	}
+	endpoint = strings.TrimRight(endpoint, "/")
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,

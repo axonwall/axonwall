@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import {
   Boxes,
@@ -34,6 +34,10 @@ export default function LxcContainersPage() {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const showCreateModalRef = useRef(false);
+  useEffect(() => {
+    showCreateModalRef.current = showCreateModal;
+  }, [showCreateModal]);
 
   // Form state
   const [ctid, setCtid] = useState<number>(200);
@@ -57,12 +61,14 @@ export default function LxcContainersPage() {
       ]);
       setContainers(ctList);
 
-      const existingIds = (virtConf.containers || []).map((c) => c.ctid);
-      let nextId = 200;
-      while (existingIds.includes(nextId)) {
-        nextId++;
+      if (!showCreateModalRef.current) {
+        const existingIds = (virtConf.containers || []).map((c) => c.ctid);
+        let nextId = 200;
+        while (existingIds.includes(nextId)) {
+          nextId++;
+        }
+        setCtid(nextId);
       }
-      setCtid(nextId);
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to load LXC containers' });
     } finally {

@@ -45,9 +45,16 @@ export default function DeceptionMeshPage() {
     loadData();
   }, []);
 
-  const handleContain = async (ip: string) => {
+  const handleContain = async (attackerIp?: string) => {
     setStatusBanner(null);
-    const res = await soarBlockIPAction(ip, 86400);
+    if (!attackerIp) {
+      setStatusBanner({
+        type: 'error',
+        message: 'No external attacker source IP recorded for this decoy canary; refusing to quarantine the local decoy address.',
+      });
+      return;
+    }
+    const res = await soarBlockIPAction(attackerIp, 86400);
     if (res.success) {
       setStatusBanner({ type: 'success', message: `Offender contained: ${res.message}` });
       loadData();
@@ -166,7 +173,7 @@ export default function DeceptionMeshPage() {
                 </div>
                 {canary.status === 'triggered' && (
                   <button
-                    onClick={() => handleContain(canary.ipAddress)}
+                    onClick={() => handleContain((canary as any).lastAttackerIp)}
                     className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white font-semibold rounded-lg text-xs transition-colors flex items-center gap-1.5 shadow-lg shadow-rose-900/30"
                   >
                     <Zap className="w-3.5 h-3.5" />

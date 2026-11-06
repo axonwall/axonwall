@@ -202,8 +202,8 @@ export async function vmPowerAction(
   }
 
   return {
-    success: true,
-    message: `VM ${vmid} ${action} command queued (mock mode).`,
+    success: false,
+    message: `Daemon unavailable: failed to execute ${action} on VM ${vmid}.`,
   };
 }
 
@@ -366,11 +366,52 @@ export async function getContainerListAction(): Promise<ContainerStatusItem[]> {
 
 export async function containerPowerAction(
   ctid: number,
-  action: 'start' | 'stop',
+  action: 'start' | 'stop' | 'reboot' | 'reset',
   force = false
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+
+  if (action === 'start' || action === 'reboot' || action === 'reset') {
+    const state = await getCurrentDesiredState();
+    const ct = state.virt?.containers?.find((c) => c.ctid === ctid);
+    if (ct) {
+      const compiled = compileLxcContainer(ct);
+      await callAgentApi('/v1/virt/containers', 'POST', {
+        action: 'register',
+        ctid: ct.ctid,
+        spec: {
+          ctid: ct.ctid,
+          hostname: ct.hostname,
+          cores: ct.cores,
+          memoryMb: ct.memoryMb,
+          configPath: `/var/lib/lxc/${ct.ctid}/config`,
+          rootfsPath: compiled.rootfsPath,
+          features: ct.features,
+        },
+      });
+    }
+  }
+
+  if (action === 'reboot' || action === 'reset') {
+    await callAgentApi('/v1/virt/containers', 'POST', { action: 'stop', ctid, force: true });
+    const startResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+      '/v1/virt/containers',
+      'POST',
+      { action: 'start', ctid, force }
+    );
+    if (startResp) {
+      return {
+        success: startResp.success,
+        upid: startResp.upid,
+        message: startResp.message || `Container ${ctid} restarted.`,
+      };
+    }
+    return {
+      success: false,
+      message: `Daemon unavailable: failed to restart container ${ctid}.`,
+    };
+  }
 
   const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/containers',
@@ -387,8 +428,8 @@ export async function containerPowerAction(
   }
 
   return {
-    success: true,
-    message: `Container ${ctid} ${action} command queued (mock mode).`,
+    success: false,
+    message: `Daemon unavailable: failed to execute ${action} on container ${ctid}.`,
   };
 }
 
@@ -557,9 +598,16 @@ export async function bindPciVfioAction(
     bdf,
   });
 
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: failed to bind ${bdf} to vfio-pci.`,
+    };
+  }
+
   return {
-    success: daemonResp?.success ?? true,
-    message: daemonResp?.message || `Device ${bdf} bound to vfio-pci.`,
+    success: daemonResp.success,
+    message: daemonResp.message || `Device ${bdf} bound to vfio-pci.`,
   };
 }
 
@@ -575,9 +623,16 @@ export async function unbindPciVfioAction(
     bdf,
   });
 
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: failed to release ${bdf} from vfio-pci.`,
+    };
+  }
+
   return {
-    success: daemonResp?.success ?? true,
-    message: daemonResp?.message || `Device ${bdf} released from vfio-pci.`,
+    success: daemonResp.success,
+    message: daemonResp.message || `Device ${bdf} released from vfio-pci.`,
   };
 }
 
@@ -595,9 +650,16 @@ export async function configureSriovAction(
     numVfs,
   });
 
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: failed to configure SR-IOV on ${bdf}.`,
+    };
+  }
+
   return {
-    success: daemonResp?.success ?? true,
-    message: daemonResp?.message || `SR-IOV configured with ${numVfs} VFs on ${bdf}.`,
+    success: daemonResp.success,
+    message: daemonResp.message || `SR-IOV configured with ${numVfs} VFs on ${bdf}.`,
   };
 }
 
@@ -634,10 +696,17 @@ export async function downloadIsoAction(
     { url, filename, pool, sha256 }
   );
 
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: failed to start ISO download for ${filename}.`,
+    };
+  }
+
   return {
-    success: daemonResp?.success ?? true,
-    upid: daemonResp?.upid,
-    message: daemonResp?.message || `ISO download started for ${filename}.`,
+    success: daemonResp.success,
+    upid: daemonResp.upid,
+    message: daemonResp.message || `ISO download started for ${filename}.`,
   };
 }
 
@@ -674,10 +743,17 @@ export async function triggerBackupAction(
     { targetType, targetId, pool: pool || 'tank', destType: destType || 'local-zfs' }
   );
 
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: failed to trigger backup job for ${targetType} ${targetId}.`,
+    };
+  }
+
   return {
-    success: daemonResp?.success ?? true,
-    upid: daemonResp?.upid,
-    message: daemonResp?.message || `Backup job triggered for ${targetType} ${targetId}.`,
+    success: daemonResp.success,
+    upid: daemonResp.upid,
+    message: daemonResp.message || `Backup job triggered for ${targetType} ${targetId}.`,
   };
 }
 

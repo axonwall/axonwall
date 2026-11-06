@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { NmapHost, NmapRun } from 'nastymap';
 import { parseNmapXml, generateNetworkScenario, ENTERPRISE_NETWORK_XML } from 'nastymap';
 
@@ -36,6 +36,19 @@ export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [], readO
   );
   const [streamedHosts, setStreamedHosts] = useState<NmapHost[]>([]);
   const fullScan = React.useMemo(() => parseNmapXml(ENTERPRISE_NETWORK_XML), []);
+  const childRef = useRef<ChildProcess | null>(null);
+  const timersRef = useRef<ReturnType<typeof setInterval>[]>([]);
+
+  useEffect(() => {
+    return () => {
+      for (const t of timersRef.current) clearInterval(t);
+      timersRef.current = [];
+      if (childRef.current) {
+        try { childRef.current.kill(); } catch {}
+        childRef.current = null;
+      }
+    };
+  }, []);
 
   const activeSubnet = subnets[subnetIdx % subnets.length]!;
   const activeProfile = SCAN_PROFILES[profileIdx % SCAN_PROFILES.length]!;
@@ -70,10 +83,12 @@ export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [], readO
       const child = spawn('nmap', [...activeProfile.flags, '-oX', '-', '--', activeSubnet.cidr], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      childRef.current = child;
 
       const progressTimer = setInterval(() => {
         setProgress((prev) => (prev < 90 ? prev + 10 : prev));
       }, 600);
+      timersRef.current.push(progressTimer);
 
       child.stdout.on('data', (chunk: Buffer) => {
         xmlChunks += chunk.toString('utf-8');
@@ -141,6 +156,7 @@ export function LiveSimulatorView({ onScanCompleted, detectedSubnets = [], readO
         onScanCompleted(generated, `${activeSubnet.role}: ${activeSubnet.cidr}`);
       }
     }, 450);
+    timersRef.current.push(timer);
   };
 
   const barFilled = '█'.repeat(Math.round(progress / 4));

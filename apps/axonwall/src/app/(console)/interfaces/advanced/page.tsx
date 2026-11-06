@@ -11,85 +11,21 @@ export default function AdvancedInterfacesPage() {
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  const [vlans, setVlans] = useState<Vlan[]>([
-    {
-      tag: 10,
-      parentInterface: 'eth1',
-      vlanInterface: 'eth1.10',
-      priority: 0,
-      description: 'Management VLAN',
-    },
-    {
-      tag: 20,
-      parentInterface: 'eth1',
-      vlanInterface: 'eth1.20',
-      priority: 2,
-      description: 'IoT Isolated Network',
-    },
-  ]);
-
-  const [bridges, setBridges] = useState<Bridge[]>([
-    {
-      name: 'br0',
-      members: [
-        { interface: 'eth2', stp: true, cost: 100, priority: 32 },
-        { interface: 'eth3', stp: true, cost: 100, priority: 32 },
-      ],
-      vlanFiltering: true,
-      stp: false,
-      description: 'Main LAN Bridge with VLAN Filtering',
-    },
-  ]);
-
-  const [bonds, setBonds] = useState<Bond[]>([
-    {
-      name: 'bond0',
-      members: ['eth4', 'eth5'],
-      mode: '802.3ad',
-      lacpRate: 'fast',
-      xmitHashPolicy: 'layer2+3',
-      miimon: 100,
-      description: 'Dual 10GbE LACP Uplink to Core Switch',
-    },
-  ]);
-
-  const [vips, setVips] = useState<VirtualIp[]>([
-    {
-      interface: 'wan',
-      ip: '198.51.100.10',
-      subnetBits: 32,
-      type: 'alias',
-      description: 'Secondary WAN Public IP for DMZ Mail',
-    },
-    {
-      interface: 'lan',
-      ip: '192.168.100.254',
-      subnetBits: 24,
-      type: 'carp',
-      vhid: 1,
-      password: 'vrrpPassword',
-      description: 'CARP HA Virtual Gateway IP',
-    },
-  ]);
-
-  const [vrfs, setVrfs] = useState<Vrf[]>([
-    {
-      name: 'vrf_mgmt',
-      tableId: 100,
-      interfaces: ['eth0.10'],
-      description: 'Out-of-band Management Isolation Table',
-    },
-  ]);
+  const [vlans, setVlans] = useState<Vlan[]>([]);
+  const [bridges, setBridges] = useState<Bridge[]>([]);
+  const [bonds, setBonds] = useState<Bond[]>([]);
+  const [vips, setVips] = useState<VirtualIp[]>([]);
+  const [vrfs, setVrfs] = useState<Vrf[]>([]);
 
   useEffect(() => {
     getCurrentDesiredState()
       .then((state) => {
         setFullState(state);
-        if (state.vlans?.length) setVlans(state.vlans);
-        if (state.bridges?.length) setBridges(state.bridges);
-        if (state.bonds?.length) setBonds(state.bonds);
-        if (state.virtualIps?.length) setVips(state.virtualIps);
-        if (state.vrfs?.length) setVrfs(state.vrfs);
+        setVlans(state.vlans || []);
+        setBridges(state.bridges || []);
+        setBonds(state.bonds || []);
+        setVips(state.virtualIps || []);
+        setVrfs(state.vrfs || []);
       })
       .catch(() => {});
   }, []);

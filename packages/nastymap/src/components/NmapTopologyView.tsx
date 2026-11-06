@@ -115,6 +115,14 @@ export function NmapTopologyView({
     return generateTopology(scan, { layout, width, height });
   }, [scan]);
 
+  // Keep selectedNode synced when graph regenerates after scan/host updates
+  useEffect(() => {
+    setSelectedNode((prev) => {
+      if (!prev) return null;
+      return graph.nodes.find((n) => n.id === prev.id) || null;
+    });
+  }, [graph]);
+
   // Compute active filters
   const filterOptions: FilterOptions = useMemo(() => {
     return {
@@ -169,13 +177,11 @@ export function NmapTopologyView({
       const node = graph.nodes.find((n) => n.id === draggedNodeId);
       if (node && containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
-        // Convert client mouse coordinates to SVG viewbox coordinates
-        const scaleX = width / (rect.width * zoom);
-        const scaleY = height / (rect.height * zoom);
-        const mouseSvgX = (e.clientX - rect.left - pan.x) * scaleX;
-        const mouseSvgY = (e.clientY - rect.top - pan.y) * scaleY;
-        node.x = mouseSvgX;
-        node.y = mouseSvgY;
+        // Convert client mouse coordinates to SVG viewbox coordinates (accounting for transformOrigin: 'center center')
+        const offsetX = e.clientX - rect.left - rect.width / 2 - pan.x;
+        const offsetY = e.clientY - rect.top - rect.height / 2 - pan.y;
+        node.x = width / 2 + (offsetX / zoom) * (width / (rect.width || width));
+        node.y = height / 2 + (offsetY / zoom) * (height / (rect.height || height));
         node.isPinned = true;
         setTickCount((t) => t + 1);
       }
@@ -228,6 +234,8 @@ export function NmapTopologyView({
             updateHost: (updater) => {
               if (onUpdateHost) onUpdateHost(host.id, updater);
             },
+            notify: () => {},
+            closeDrawer: () => setSelectedNode(null),
             scan,
           });
           break;
@@ -784,17 +792,19 @@ export function NmapTopologyView({
                   />
 
                   {/* Inner Icon / Badge */}
-                  <foreignObject
-                    x={-10}
-                    y={-10}
-                    width={20}
-                    height={20}
-                    className="pointer-events-none"
-                  >
-                    <div className="w-full h-full flex items-center justify-center text-white">
-                      <IconComponent size={14} />
-                    </div>
-                  </foreignObject>
+                  {detailSettings.showOsIcons && (
+                    <foreignObject
+                      x={-10}
+                      y={-10}
+                      width={20}
+                      height={20}
+                      className="pointer-events-none"
+                    >
+                      <div className="w-full h-full flex items-center justify-center text-white">
+                        <IconComponent size={14} />
+                      </div>
+                    </foreignObject>
+                  )}
 
                   {/* Labels */}
                   {detailSettings.showLabels && (
@@ -818,6 +828,17 @@ export function NmapTopologyView({
                       >
                         {node.ip}
                       </text>
+                      {detailSettings.showUptime && node.hostRef?.uptime?.seconds !== undefined && (
+                        <text
+                          y="22"
+                          fill="#64748b"
+                          fontSize="8"
+                          fontFamily="monospace"
+                          textAnchor="middle"
+                        >
+                          up {Math.floor(node.hostRef.uptime.seconds / 86400)}d
+                        </text>
+                      )}
                     </g>
                   )}
 
@@ -894,6 +915,8 @@ export function NmapTopologyView({
                         updateHost: (updater) => {
                           if (onUpdateHost) onUpdateHost(host.id, updater);
                         },
+                        notify: () => {},
+                        closeDrawer: () => setSelectedNode(null),
                         scan,
                       });
                       if (res && onUpdateHost) {
@@ -933,10 +956,16 @@ export function NmapTopologyView({
             if (selectedNode && selectedNode.hostRef) {
               selectedNode.hostRef.comments = comment;
             }
+            if (onUpdateHost) {
+              onUpdateHost(hostId, (prev) => ({ ...prev, comments: comment }));
+            }
           }}
           onUpdateTags={(hostId, tags) => {
             if (selectedNode && selectedNode.hostRef) {
               selectedNode.hostRef.tags = tags;
+            }
+            if (onUpdateHost) {
+              onUpdateHost(hostId, (prev) => ({ ...prev, tags }));
             }
           }}
         />

@@ -144,12 +144,12 @@ export default function HighAvailabilityPage() {
           peerIp,
           peerPort: state.ha?.peerPort ?? 2966,
           vrrpInstances,
-          conntrackSync: state.ha?.conntrackSync ?? {
+          conntrackSync: {
             enabled,
-            interface: syncInterface || 'eth0',
-            protocol: 'unicast',
-            peerAddress: peerIp,
-            port: 3780,
+            interface: syncInterface || state.ha?.conntrackSync?.interface || 'eth0',
+            protocol: state.ha?.conntrackSync?.protocol ?? 'unicast',
+            peerAddress: peerIp || state.ha?.conntrackSync?.peerAddress,
+            port: state.ha?.conntrackSync?.port ?? 3780,
           },
           syncSections: state.ha?.syncSections ?? {
             interfaces: false,

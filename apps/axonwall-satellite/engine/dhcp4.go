@@ -220,9 +220,21 @@ func AcquireDHCPv4Lease(dev string, timeout time.Duration) (DHCPv4Lease, error) 
 	var offer DHCPv4Lease
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			break
+		}
+		remTv := syscall.NsecToTimeval(rem.Nanoseconds())
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &remTv)
 		n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
 		if recvErr != nil {
+			if recvErr == syscall.EINTR {
+				continue
+			}
 			break
+		}
+		if n >= 34 && !bytes.Equal(buf[28:34], iface.HardwareAddr[:6]) {
+			continue
 		}
 		mType, parsed, pErr := ParseDHCPv4Packet(bytes.Clone(buf[:n]), xid)
 		if pErr == nil && mType == dhcpMsgOffer {
@@ -243,8 +255,17 @@ func AcquireDHCPv4Lease(dev string, timeout time.Duration) (DHCPv4Lease, error) 
 	// 4. Wait for DHCPACK
 	ackDeadline := time.Now().Add(timeout)
 	for time.Now().Before(ackDeadline) {
+		rem := time.Until(ackDeadline)
+		if rem <= 0 {
+			break
+		}
+		remTv := syscall.NsecToTimeval(rem.Nanoseconds())
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &remTv)
 		n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
 		if recvErr != nil {
+			if recvErr == syscall.EINTR {
+				continue
+			}
 			break
 		}
 		if n >= 34 && !bytes.Equal(buf[28:34], iface.HardwareAddr[:6]) {

@@ -184,21 +184,40 @@ func (e *NftablesEngine) BlockTarget(target string, isMac bool) error {
 			}
 		} else if _, ipNet, err := net.ParseCIDR(target); err == nil && ipNet != nil {
 			target = ipNet.String()
+			var startBytes []byte
+			var maskBytes []byte
 			if ip4 := ipNet.IP.To4(); ip4 != nil {
 				setName = "blocked_ips"
-				keyBytes = []byte(ip4)
+				startBytes = []byte(ip4)
+				maskBytes = []byte(ipNet.Mask)
 			} else {
 				setName = "blocked_ips6"
-				keyBytes = []byte(ipNet.IP.To16())
+				startBytes = []byte(ipNet.IP.To16())
+				maskBytes = []byte(ipNet.Mask)
 			}
+			if len(startBytes) == len(maskBytes) {
+				bcast := make([]byte, len(startBytes))
+				for i := range startBytes {
+					bcast[i] = startBytes[i] | ^maskBytes[i]
+				}
+				if endBytes, ok := incrementIPBytes(bcast); ok {
+					if err := AddIntervalSetElementNetlink("axonwall", setName, startBytes, endBytes); err == nil {
+						slog.Info("Micro-segmentation active: CIDR target blocked via NETLINK_NETFILTER", "target", target, "set", setName)
+						return nil
+					}
+				}
+			}
+			keyBytes = nil
 		} else {
 			return fmt.Errorf("invalid IP or CIDR target %q", target)
 		}
 	}
 
-	if err := AddSetElementNetlink("axonwall", setName, keyBytes); err == nil {
-		slog.Info("Micro-segmentation active: target blocked via NETLINK_NETFILTER", "target", target, "set", setName)
-		return nil
+	if len(keyBytes) > 0 {
+		if err := AddSetElementNetlink("axonwall", setName, keyBytes); err == nil {
+			slog.Info("Micro-segmentation active: target blocked via NETLINK_NETFILTER", "target", target, "set", setName)
+			return nil
+		}
 	}
 
 	nftBin, lookErr := exec.LookPath("nft")

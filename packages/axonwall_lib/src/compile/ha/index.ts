@@ -30,7 +30,8 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
     const safeInterface = vrrp.interface.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');
     if (!safeName || !safeInterface) continue;
 
-    const isMaster = ha.nodeRole === 'master' && !ha.maintenanceMode;
+    const effectiveRole = ha.role || ha.nodeRole || 'master';
+    const isMaster = effectiveRole === 'master' && !ha.maintenanceMode;
     // In maintenance mode, drop priority to lowest to force peer takeover
     const effectivePriority = ha.maintenanceMode ? 1 : Math.max(1, Math.min(255, Number(vrrp.priority) || 100));
     const safeVrid = Math.max(1, Math.min(255, Number(vrrp.vrid) || 1));
@@ -111,7 +112,8 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
     lines.push('    }');
   } else {
     // Unicast UDP
-    const rawPeer = (sync.peerAddress || ha.peerAddress || '192.168.1.2').split(/[\r\n]/)[0].trim();
+    const effectivePeer = ha.peerIp || ha.peerAddress || '';
+    const rawPeer = (sync.peerAddress || effectivePeer || '192.168.1.2').split(/[\r\n]/)[0].trim();
     const safePeerAddress = rawPeer.replace(/[^a-fA-F0-9:.]/g, '');
     lines.push('    UDP {');
     lines.push(`        IPv4_address ${safeLocalIp}`);
@@ -229,17 +231,19 @@ export function filterHaSyncState(state: DesiredState, sync: HaSyncSections): Pa
 export function compileKeaHaHook(ha: HighAvailabilityConfig, localIp: string): Record<string, any> | null {
   if (!ha.enabled) return null;
 
-  const safePeer = (ha.peerAddress || '').trim();
+  const effectiveRole = ha.role || ha.nodeRole || 'master';
+  const effectivePeer = ha.peerIp || ha.peerAddress || '';
+  const safePeer = effectivePeer.trim();
   const safeLocal = (localIp || '').trim();
   const safeHostRegex = /^[a-zA-Z0-9.:-]+$/;
   if (!safePeer || !safeHostRegex.test(safePeer)) {
-    throw new Error(`Invalid HA peerAddress for Kea HA hook: ${ha.peerAddress}`);
+    throw new Error(`Invalid HA peerAddress for Kea HA hook: ${effectivePeer}`);
   }
   if (!safeLocal || !safeHostRegex.test(safeLocal)) {
     throw new Error(`Invalid localIp for Kea HA hook: ${localIp}`);
   }
 
-  const isPrimary = ha.nodeRole === 'master';
+  const isPrimary = effectiveRole === 'master';
   return {
     library: '/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_ha.so',
     parameters: {
@@ -341,7 +345,9 @@ export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: str
     transport: 'mtls' as const,
     requireSignedPayloads: false,
   };
-  const isMaster = ha.nodeRole === 'master' && !ha.maintenanceMode;
+  const effectiveRole = ha.role || ha.nodeRole || 'master';
+  const effectivePeer = ha.peerIp || ha.peerAddress || '';
+  const isMaster = effectiveRole === 'master' && !ha.maintenanceMode;
 
   return {
     enabled: Boolean(sync.enabled && ha.enabled),
@@ -352,7 +358,7 @@ export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: str
     listenPort: sync.listenPort,
     transport: sync.transport,
     requireSignedPayloads: sync.requireSignedPayloads,
-    peerAddress: sync.peerAddress || ha.peerAddress,
+    peerAddress: sync.peerAddress || effectivePeer,
     peerPort: sync.peerPort || sync.listenPort,
     authToken: sync.authToken || ha.vrrpInstances?.[0]?.authPassword || '',
     localAddress: localIp,

@@ -8,12 +8,12 @@ import type { DesiredState, FrrConfig } from '@axonwall/lib/schemas';
 
 export default function DynamicRoutingPage() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
-  const [bgpEnabled, setBgpEnabled] = useState(true);
+  const [bgpEnabled, setBgpEnabled] = useState(false);
   const [bgpAs, setBgpAs] = useState(64512);
   const [bgpRouterId, setBgpRouterId] = useState('1.1.1.1');
-  const [bgpNetworks, setBgpNetworks] = useState(['10.0.0.0/16', '192.168.100.0/24']);
+  const [bgpNetworks, setBgpNetworks] = useState<string[]>([]);
 
-  const [ospfEnabled, setOspfEnabled] = useState(true);
+  const [ospfEnabled, setOspfEnabled] = useState(false);
   const [ospfRouterId, setOspfRouterId] = useState('1.1.1.1');
   const [ospfRedistribute, setOspfRedistribute] = useState(true);
 
@@ -30,9 +30,7 @@ export default function DynamicRoutingPage() {
             setBgpEnabled(state.frr.bgp.enabled);
             setBgpAs(state.frr.bgp.asNumber || 64512);
             setBgpRouterId(state.frr.bgp.routerId || '1.1.1.1');
-            if (state.frr.bgp.networks?.length) {
-              setBgpNetworks(state.frr.bgp.networks);
-            }
+            setBgpNetworks(state.frr.bgp.networks || []);
           }
           if (state.frr.ospf) {
             setOspfEnabled(state.frr.ospf.enabled);
@@ -51,34 +49,14 @@ export default function DynamicRoutingPage() {
       asNumber: bgpAs,
       routerId: bgpRouterId,
       networks: bgpNetworks,
-      neighbors: fullState?.frr?.bgp?.neighbors?.length
-        ? fullState.frr.bgp.neighbors
-        : [
-            {
-              peerIp: '198.51.100.254',
-              remoteAs: 65000,
-              description: 'Tier-1 ISP Uplink',
-              password: 'BgpSecretPassword',
-              bfd: true,
-              nextHopSelf: true,
-              softReconfiguration: true,
-            },
-          ],
+      neighbors: fullState?.frr?.bgp?.neighbors || [],
     },
     ospf: {
       enabled: ospfEnabled,
       routerId: ospfRouterId,
       redistributeConnected: ospfRedistribute,
-      redistributeDefault: false,
-      areas: fullState?.frr?.ospf?.areas?.length
-        ? fullState.frr.ospf.areas
-        : [
-            {
-              areaId: '0.0.0.0',
-              interfaces: ['eth1'],
-              networks: ['192.168.100.0/24'],
-            },
-          ],
+      redistributeDefault: fullState?.frr?.ospf?.redistributeDefault ?? false,
+      areas: fullState?.frr?.ospf?.areas || [],
     },
   };
 

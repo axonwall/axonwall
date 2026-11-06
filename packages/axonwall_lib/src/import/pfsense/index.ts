@@ -177,7 +177,8 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
         if (r.source.any !== undefined) {
           src = 'any';
         } else if (r.source.network) {
-          src = `$${r.source.network}`;
+          const rawNet = String(r.source.network);
+          src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
         } else if (r.source.address) {
           src = String(r.source.address);
         }
@@ -197,7 +198,8 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
         if (r.destination.any !== undefined) {
           dst = 'any';
         } else if (r.destination.network) {
-          dst = `$${r.destination.network}`;
+          const rawNet = String(r.destination.network);
+          dst = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
         } else if (r.destination.address) {
           dst = String(r.destination.address);
         }

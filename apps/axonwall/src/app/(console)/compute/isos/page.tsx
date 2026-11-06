@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   HardDrive,
   Download,
@@ -22,6 +22,7 @@ import {
 export default function IsoManagementPage() {
   const [isos, setIsos] = useState<IsoItem[]>([]);
   const [pool, setPool] = useState('tank');
+  const poolInitializedRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showDownloadModal, setShowDownloadModal] = useState(false);
@@ -40,7 +41,8 @@ export default function IsoManagementPage() {
         getVirtConfigAction(),
       ]);
       setIsos(list);
-      if (virtConf.isoPool) {
+      if (!poolInitializedRef.current && virtConf.isoPool) {
+        poolInitializedRef.current = true;
         setPool(virtConf.isoPool);
       }
     } catch (err: any) {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { NmapRun, NmapScanDiff } from '../types/nmap';
 import { compareNmapScans } from '../diff/scan-diff';
 import { SAMPLE_SCANS } from '../data/sample-scans';
@@ -32,6 +32,14 @@ export function NmapDiffView({ scanA: propScanA, scanB: propScanB, className = '
     propScanB || parseNmapXml(SAMPLE_SCANS.breachDiff.xmlB)
   );
   const [filterMode, setFilterMode] = useState<'all' | 'added' | 'removed' | 'modified'>('all');
+
+  useEffect(() => {
+    if (propScanA) setScanA(propScanA);
+  }, [propScanA]);
+
+  useEffect(() => {
+    if (propScanB) setScanB(propScanB);
+  }, [propScanB]);
 
   const diffResult: NmapScanDiff = compareNmapScans(scanA, scanB);
   const { summary, addedHosts, removedHosts, modifiedHosts, unchangedHosts } = diffResult;
@@ -289,6 +297,17 @@ export function NmapDiffView({ scanA: propScanA, scanB: propScanB, className = '
                   MODIFIED
                 </span>
               </div>
+
+              {host.oldStatus && host.newStatus && host.oldStatus !== host.newStatus && (
+                <p className="text-xs text-zinc-400 font-mono">
+                  Status: <span className="text-zinc-300">{host.oldStatus}</span> → <span className="text-amber-300 font-semibold">{host.newStatus}</span>
+                </p>
+              )}
+              {host.oldOs !== host.newOs && (host.oldOs || host.newOs) && (
+                <p className="text-xs text-zinc-400 font-sans">
+                  OS change: <span className="text-zinc-300">{host.oldOs || 'Unknown'}</span> → <span className="text-amber-300 font-medium">{host.newOs || 'Unknown'}</span>
+                </p>
+              )}
 
               {/* Port Changes */}
               <div className="space-y-1.5 pt-1">

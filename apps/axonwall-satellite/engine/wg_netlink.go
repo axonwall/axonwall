@@ -293,6 +293,8 @@ func resolveGenlFamilyID(familyName string) (uint16, error) {
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return 0, err
 	}
+	tv := syscall.Timeval{Sec: 2, Usec: 0}
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 
 	attr := nlAttrStr(ctrlAttrFamilyName, familyName)
 	// nlmsghdr (16) + genlmsghdr (4: cmd, version, reserved) + attr
@@ -311,7 +313,14 @@ func resolveGenlFamilyID(familyName string) (uint16, error) {
 	}
 
 	buf := make([]byte, 4096)
-	n, _, err := syscall.Recvfrom(fd, buf, 0)
+	var n int
+	for {
+		n, _, err = syscall.Recvfrom(fd, buf, 0)
+		if err == syscall.EINTR {
+			continue
+		}
+		break
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -378,8 +387,18 @@ func sendGenlMsg(familyID uint16, cmd, version uint8, attrs []byte) error {
 }
 
 func readNetlinkAck(fd int) error {
+	tv := syscall.Timeval{Sec: 2, Usec: 0}
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 	reply := make([]byte, 4096)
-	n, _, err := syscall.Recvfrom(fd, reply, 0)
+	var n int
+	var err error
+	for {
+		n, _, err = syscall.Recvfrom(fd, reply, 0)
+		if err == syscall.EINTR {
+			continue
+		}
+		break
+	}
 	if err != nil {
 		return err
 	}

@@ -443,6 +443,13 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
       for (const [filename, content] of Object.entries(yamlFiles)) {
         writeConfigFileSafe(path.join(dir, filename), content, 0o660);
       }
+      // Remove legacy monolithic axonwall.yaml so it cannot shadow split YAML files on reload
+      const legacyMonolithic = path.join(dir, 'axonwall.yaml');
+      if (fs.existsSync(legacyMonolithic)) {
+        try {
+          fs.unlinkSync(legacyMonolithic);
+        } catch {}
+      }
     } catch {}
   }
 
@@ -816,7 +823,7 @@ async function getDesiredStateInternal(): Promise<DesiredState> {
 }
 
 function redactDesiredStateForSession(state: DesiredState, session: UserSession): DesiredState {
-  if (session.roles?.includes('admin') || session.privileges?.includes('*')) {
+  if (!session.passwordChangeRequired && (session.roles?.includes('admin') || session.privileges?.includes('*'))) {
     return state;
   }
   const redacted: any = structuredClone(state);
@@ -1421,7 +1428,7 @@ function restoreDesiredStateSnapshot(snapshot: OnDiskConfigSnapshotEntry[]): boo
   return ok;
 }
 
-function invalidateDesiredStateCache(): void {
+export async function invalidateDesiredStateCache(): Promise<void> {
   cachedDesiredState = null;
   lastLoadedFingerprint = '';
 }
@@ -2146,7 +2153,7 @@ export async function testOidcDiscoveryAction(
   issuerUrl: string
 ): Promise<{ ok: boolean; message: string }> {
   const session = await getSession();
-  assertActionPermitted(session);
+  assertActionPermitted(session, 'admin');
 
   const issuer = (issuerUrl || '').trim().replace(/\/+$/, '');
   if (!issuer) {
@@ -2161,6 +2168,18 @@ export async function testOidcDiscoveryAction(
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     return { ok: false, message: 'Issuer URL must use http(s).' };
   }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host.startsWith('127.') ||
+    host.startsWith('169.254.') ||
+    host.startsWith('fe80:') ||
+    host === 'metadata.google.internal'
+  ) {
+    return { ok: false, message: 'OIDC issuer URL cannot target loopback or link-local/metadata addresses.' };
+  }
 
   try {
     const controller = new AbortController();
@@ -2170,6 +2189,7 @@ export async function testOidcDiscoveryAction(
       res = await fetch(`${issuer}/.well-known/openid-configuration`, {
         headers: { accept: 'application/json' },
         signal: controller.signal,
+        redirect: 'error',
       });
     } finally {
       clearTimeout(timeoutId);
@@ -2682,7 +2702,8 @@ export async function saveInterfaceAssignment(data: {
   const cleanName = (data.name || '')
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '');
+    .replace(/-/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
   if (!cleanName) {
     throw new Error('Interface name is required (e.g. wan, wan2, lan, lan2, mgmt)');
   }

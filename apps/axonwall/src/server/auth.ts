@@ -341,6 +341,8 @@ export async function logoutAction() {
   redirect('/login');
 }
 
+let pendingMfaEnrollment: { secret: string; expiresAt: number } | null = null;
+
 export async function generateMfaSetup() {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -351,6 +353,7 @@ export async function generateMfaSetup() {
   const { generateSecret, generateURI } = require('otplib');
   const plugins = totpPlugins();
   const secret = generateSecret(plugins);
+  pendingMfaEnrollment = { secret, expiresAt: Date.now() + 10 * 60 * 1000 };
   const otpauth = generateURI({ issuer: 'Axonwall', label: session.username, secret, ...plugins });
 
   const QRCode = require('qrcode');
@@ -366,12 +369,22 @@ export async function verifyMfaSetup(secret: string, token: string) {
     throw new Error('Forbidden: Only the local break-glass administrator can configure local MFA');
   }
 
+  const enrolledSecret =
+    pendingMfaEnrollment && pendingMfaEnrollment.expiresAt > Date.now()
+      ? pendingMfaEnrollment.secret
+      : secret;
+  if (!enrolledSecret || (pendingMfaEnrollment && pendingMfaEnrollment.secret !== secret)) {
+    return { success: false, error: 'MFA setup session expired or secret mismatch. Please generate a new QR code.' };
+  }
+
   const { verify } = require('otplib');
-  const result = await verify({ secret, token, ...totpPlugins(), epochTolerance: 30 });
+  const result = await verify({ secret: enrolledSecret, token, ...totpPlugins(), epochTolerance: 30 });
 
   if (!result.valid) {
     return { success: false, error: 'Invalid TOTP code.' };
   }
+
+  pendingMfaEnrollment = null;
 
   // Persist the enrollment (audit B-08): the secret is written to
   // /etc/axonwall/mfa.env -- the same file the console's MFA reset
@@ -380,10 +393,10 @@ export async function verifyMfaSetup(secret: string, token: string) {
   // saved nothing anywhere and the advertised MFA was inert.
   try {
     writeMfaEnv({
-      LOCAL_ADMIN_MFA_SECRET: secret,
+      LOCAL_ADMIN_MFA_SECRET: enrolledSecret,
       LOCAL_ADMIN_MFA_LAST_STEP: String(result.timeStep ?? 0),
     });
-    process.env.LOCAL_ADMIN_MFA_SECRET = secret;
+    process.env.LOCAL_ADMIN_MFA_SECRET = enrolledSecret;
   } catch {
     return { success: false, error: 'Could not save the MFA configuration on this appliance.' };
   }
@@ -491,12 +504,22 @@ export async function changeAdminPasswordAction(formData: FormData) {
 
   try {
     const envContent = `LOCAL_ADMIN_USER=${localAdminUser}\nLOCAL_ADMIN_PASSWORD=${hashedSecret}\n`;
-    writeAuthFileSafe('/etc/axonwall/admin.env', envContent, 0o600);
+    let savedAdminEnv = false;
+    try {
+      writeAuthFileSafe('/etc/axonwall/admin.env', envContent, 0o600);
+      savedAdminEnv = true;
+    } catch {}
 
     // Mirror to /var/lib/axonwall/etc-axonwall/admin.env for A/B rootfs persistence
     try {
       writeAuthFileSafe('/var/lib/axonwall/etc-axonwall/admin.env', envContent, 0o600);
+      savedAdminEnv = true;
     } catch {}
+
+    if (!savedAdminEnv) {
+      throw new Error('Unable to write admin.env to /etc/axonwall or /var/lib/axonwall/etc-axonwall');
+    }
+    process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
 
     const now = new Date().toISOString();
     try { writeAuthFileSafe('/etc/axonwall/.password_changed', now, 0o664); } catch {}

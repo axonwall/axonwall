@@ -85,7 +85,7 @@ export function generateTopology(scan: NmapRun, options: TopologyOptions = {}): 
       ip,
       hostname: host.primaryHostname,
       nodeType: host.deviceType === 'router' ? 'router' : 'host',
-      status: host.status.state === 'up' ? 'up' : 'down',
+      status: host.status.state,
       osFamily: host.osFamily || 'Unknown',
       osName: host.primaryOs || 'Unknown OS',
       deviceType: host.deviceType || 'general purpose',
@@ -96,6 +96,9 @@ export function generateTopology(scan: NmapRun, options: TopologyOptions = {}): 
       subnet,
       hostRef: host,
       geolocation: host.geolocation,
+      isFlagged: host.isFlagged,
+      isQuarantined: host.isQuarantined,
+      customData: host.customData,
       x: width / 2,
       y: height / 2,
       radius: Math.min(32, Math.max(16, 16 + openPorts.length * 1.5)),
@@ -284,12 +287,60 @@ export function filterTopology(graph: TopologyGraph, filter?: FilterOptions): {
       }
     }
 
+    // Tag filter
+    if (matches && filter.tagFilter && filter.tagFilter.length > 0) {
+      const hostTags = node.hostRef?.tags || [];
+      const requiredTags = Array.isArray(filter.tagFilter) ? filter.tagFilter : [filter.tagFilter];
+      const hasRequiredTag = requiredTags.some((t: string) => t === 'all' || hostTags.includes(t));
+      if (!hasRequiredTag) {
+        matches = false;
+      }
+    }
+
+    // Vulnerability filter
+    if (matches && filter.hasVulnerability) {
+      const hasVulnScript =
+        node.openPortDetails.some((p) =>
+          (p.scripts || []).some(
+            (s) =>
+              s.id.toLowerCase().includes('vuln') ||
+              s.output.toLowerCase().includes('vulnerable') ||
+              s.output.toLowerCase().includes('cve-')
+          )
+        ) ||
+        (node.hostRef?.hostscripts || []).some(
+          (s) =>
+            s.id.toLowerCase().includes('vuln') ||
+            s.output.toLowerCase().includes('vulnerable') ||
+            s.output.toLowerCase().includes('cve-')
+        );
+      if (!hasVulnScript) {
+        matches = false;
+      }
+    }
+
     if (matches) {
       visibleNodeIds.add(node.id);
     }
   }
 
   // Include intermediate hops that lead to visible target nodes so the route isn't severed
+  let addedAncestor = true;
+  while (addedAncestor) {
+    addedAncestor = false;
+    for (const link of graph.links) {
+      const sId = typeof link.source === 'string' ? link.source : (link.source as TopologyNode).id;
+      const tId = typeof link.target === 'string' ? link.target : (link.target as TopologyNode).id;
+      if (visibleNodeIds.has(tId) && !visibleNodeIds.has(sId)) {
+        const srcNode = graph.nodes.find((n) => n.id === sId);
+        if (srcNode && srcNode.nodeType === 'intermediate_hop') {
+          visibleNodeIds.add(sId);
+          addedAncestor = true;
+        }
+      }
+    }
+  }
+
   for (const link of graph.links) {
     const sId = typeof link.source === 'string' ? link.source : (link.source as TopologyNode).id;
     const tId = typeof link.target === 'string' ? link.target : (link.target as TopologyNode).id;

@@ -596,11 +596,31 @@ export function findPluginById(id: string): PluginManifest | undefined {
   return BUILTIN_PLUGINS.find((p) => p.id === id);
 }
 
+const PLUGIN_PRIVILEGE_ALIASES: Record<string, string[]> = {
+  'network.routing': ['routing.read', 'routing.write'],
+  'network.interfaces': ['interfaces.read', 'interfaces.write'],
+  'vpn.admin': ['vpn.wireguard.read', 'vpn.wireguard.write'],
+  'vpn.tailscale': ['vpn.wireguard.read', 'vpn.wireguard.write'],
+  'system.monitoring': ['system.status.read'],
+  'system.power': ['system.reboot'],
+  'system.hardware': ['system.status.read', 'system.config.write'],
+  'system.certificates': ['system.config.read', 'system.config.write'],
+  'reporting.flows': ['diagnostics.read', 'system.status.read'],
+  'services.haproxy': ['system.config.read', 'system.config.write'],
+  'services.freeradius': ['system.config.read', 'system.config.write'],
+};
+
 export function isPluginAllowed(manifest: PluginManifest, grantedPrivileges: string[]): boolean {
   if (grantedPrivileges.includes('system.superuser') || grantedPrivileges.includes('*')) {
     return true;
   }
-  return manifest.privileges.every((priv) => grantedPrivileges.includes(priv));
+  return manifest.privileges.every((priv) => {
+    if (grantedPrivileges.includes(priv)) return true;
+    if (grantedPrivileges.some((g) => g.startsWith(`${priv}.`))) return true;
+    const mapped = PLUGIN_PRIVILEGE_ALIASES[priv];
+    if (mapped && mapped.some((m) => grantedPrivileges.includes(m))) return true;
+    return false;
+  });
 }
 
 export function getPluginDependencies(pluginId: string): string[] {

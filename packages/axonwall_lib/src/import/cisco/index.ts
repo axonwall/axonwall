@@ -83,7 +83,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
       if (currentObjNetwork) {
         if (currentObjNetwork.ip) {
           aliases.push({
-            name: currentObjNetwork.name,
+            name: currentObjNetwork.name.replace(/[^a-zA-Z0-9_]/g, '_'),
             type: 'host',
             entries: [currentObjNetwork.ip],
             description: currentObjNetwork.descr || '',
@@ -115,7 +115,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
       currentIface = null;
       if (currentObjGroup && currentObjGroup.entries.length > 0) {
         aliases.push({
-          name: currentObjGroup.name,
+          name: currentObjGroup.name.replace(/[^a-zA-Z0-9_]/g, '_'),
           type: 'network',
           entries: currentObjGroup.entries,
           description: currentObjGroup.descr || '',
@@ -158,7 +158,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
         src = tokens[idx + 1];
         idx += 2;
       } else if ((tokens[idx] === 'object-group' || tokens[idx] === 'object') && tokens[idx + 1]) {
-        src = `$${tokens[idx + 1]}`;
+        src = `$${tokens[idx + 1].replace(/[^a-zA-Z0-9_]/g, '_')}`;
         idx += 2;
       } else if (tokens[idx] && tokens[idx + 1]) {
         src = `${tokens[idx]}/${maskToPrefix(tokens[idx + 1])}`;
@@ -175,7 +175,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
         dst = tokens[idx + 1];
         idx += 2;
       } else if ((tokens[idx] === 'object-group' || tokens[idx] === 'object') && tokens[idx + 1]) {
-        dst = `$${tokens[idx + 1]}`;
+        dst = `$${tokens[idx + 1].replace(/[^a-zA-Z0-9_]/g, '_')}`;
         idx += 2;
       } else if (tokens[idx] && tokens[idx + 1] && !tokens[idx].startsWith('eq')) {
         dst = `${tokens[idx]}/${maskToPrefix(tokens[idx + 1])}`;
@@ -239,6 +239,15 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
           description: `Cisco dynamic PAT (${inIface} -> ${outIface})`,
         });
       } else if (line.includes('static')) {
+        const staticIdx = tokens.indexOf('static');
+        const localObjOrIp = staticIdx !== -1 ? tokens[staticIdx + 1] : undefined;
+        const resolvedLocalIp =
+          (localObjOrIp &&
+            (currentObjNetwork?.name === localObjOrIp
+              ? currentObjNetwork.ip
+              : aliases.find((a) => a.name === localObjOrIp.replace(/[^a-zA-Z0-9_]/g, '_'))?.entries[0])) ||
+          localObjOrIp ||
+          '';
         nat.push({
           type: 'dnat',
           interface: inIface === 'outside' ? 'wan' : inIface,
@@ -247,6 +256,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
           sourcePort: '',
           destination: 'wan_ip',
           destinationPort: '',
+          targetIp: resolvedLocalIp,
           log: false,
           sortOrder: nat.length + 1,
           enabled: true,
@@ -282,7 +292,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
   // Flush trailing objects
   if (currentObjNetwork && currentObjNetwork.ip) {
     aliases.push({
-      name: currentObjNetwork.name,
+      name: currentObjNetwork.name.replace(/[^a-zA-Z0-9_]/g, '_'),
       type: 'host',
       entries: [currentObjNetwork.ip],
       description: currentObjNetwork.descr || '',
@@ -291,7 +301,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
   }
   if (currentObjGroup && currentObjGroup.entries.length > 0) {
     aliases.push({
-      name: currentObjGroup.name,
+      name: currentObjGroup.name.replace(/[^a-zA-Z0-9_]/g, '_'),
       type: 'network',
       entries: currentObjGroup.entries,
       description: currentObjGroup.descr || '',

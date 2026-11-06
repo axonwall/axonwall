@@ -50,17 +50,9 @@ export default function DnsBlocklistPage() {
     },
   ]);
 
-  const [whitelist, setWhitelist] = useState<string[]>([
-    'gateway.discord.gg',
-    'app.datadoghq.com',
-    'github.com',
-  ]);
+  const [whitelist, setWhitelist] = useState<string[]>([]);
 
-  const [blacklist, setBlacklist] = useState<string[]>([
-    'telemetry.device-manufacturer.com',
-    'adservice.evil-tracker.org',
-    'beacon.analytics-tracker.net',
-  ]);
+  const [blacklist, setBlacklist] = useState<string[]>([]);
 
   const [newWhiteDomain, setNewWhiteDomain] = useState('');
   const [newBlackDomain, setNewBlackDomain] = useState('');
@@ -83,8 +75,8 @@ export default function DnsBlocklistPage() {
               }))
             );
           }
-          if (state.dns.blocklist.whitelist) setWhitelist(state.dns.blocklist.whitelist);
-          if (state.dns.blocklist.blacklist) setBlacklist(state.dns.blocklist.blacklist);
+          setWhitelist(state.dns.blocklist.whitelist || []);
+          setBlacklist(state.dns.blocklist.blacklist || []);
         }
       })
       .catch(() => {});
@@ -121,6 +113,7 @@ export default function DnsBlocklistPage() {
           blocklist: {
             enabled,
             feeds: feeds.map((f) => ({
+              id: f.id,
               name: f.name,
               url: f.url,
               entriesCount: f.entriesCount,

@@ -348,11 +348,16 @@ func ensureOvmfNvram(vmid int, args []string) {
 	}
 }
 
+func sanitizeCloudInitScalar(s string) string {
+	cleaned := strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(strings.TrimSpace(s))
+	return strconv.Quote(cleaned)
+}
+
 func writeFwCfgFiles(fwCfg map[string]string) error {
 	for rawPath, content := range fwCfg {
 		cleanPath := filepath.Clean(strings.TrimSpace(rawPath))
 		if !strings.HasPrefix(cleanPath, "/run/axonwall/") && !strings.HasPrefix(cleanPath, "/var/lib/axonwall/cloudinit/") {
-			cleanPath = filepath.Join("/run/axonwall/fwcfg", filepath.Base(cleanPath))
+			return fmt.Errorf("fw_cfg file path %q is outside permitted directories (/run/axonwall/, /var/lib/axonwall/cloudinit/)", cleanPath)
 		}
 		if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
 			return fmt.Errorf("failed to create fw_cfg directory for %s: %w", cleanPath, err)
@@ -538,7 +543,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 
 			metaYaml := spec.CloudInit.MetaData
 			if metaYaml == "" {
-				metaYaml = fmt.Sprintf("instance-id: vm-%d\nlocal-hostname: %s\n", vmid, spec.Name)
+				metaYaml = fmt.Sprintf("instance-id: vm-%d\nlocal-hostname: %s\n", vmid, sanitizeCloudInitScalar(spec.Name))
 			}
 			_ = os.WriteFile(filepath.Join(ciDir, "meta-data"), []byte(metaYaml), 0644)
 
@@ -546,15 +551,21 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			if spec.CloudInit.UserData != "" {
 				userYaml = spec.CloudInit.UserData
 			} else {
+				ciUser := spec.CloudInit.User
+				if strings.TrimSpace(ciUser) == "" {
+					ciUser = "axonwall"
+				}
 				userYaml = fmt.Sprintf("#cloud-config\nhostname: %s\nmanage_etc_hosts: true\nusers:\n  - name: %s\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n",
-					spec.Name, spec.CloudInit.User)
+					sanitizeCloudInitScalar(spec.Name), sanitizeCloudInitScalar(ciUser))
 				if spec.CloudInit.Password != "" {
-					userYaml += fmt.Sprintf("    plain_text_passwd: %s\n    lock_passwd: false\n", spec.CloudInit.Password)
+					userYaml += fmt.Sprintf("    plain_text_passwd: %s\n    lock_passwd: false\n", sanitizeCloudInitScalar(spec.CloudInit.Password))
 				}
 				if len(spec.CloudInit.SshKeys) > 0 {
 					userYaml += "    ssh_authorized_keys:\n"
 					for _, k := range spec.CloudInit.SshKeys {
-						userYaml += fmt.Sprintf("      - %s\n", strings.TrimSpace(k))
+						if trimmedKey := strings.TrimSpace(k); trimmedKey != "" {
+							userYaml += fmt.Sprintf("      - %s\n", sanitizeCloudInitScalar(trimmedKey))
+						}
 					}
 				}
 				if spec.CloudInit.CustomPayload != "" {
@@ -567,9 +578,9 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			if netYaml == "" {
 				netYaml = "version: 2\nethernets:\n  eth0:\n    dhcp4: true\n"
 				if spec.CloudInit.IpConfig != "dhcp" && spec.CloudInit.IpConfig != "" {
-					netYaml = fmt.Sprintf("version: 2\nethernets:\n  eth0:\n    dhcp4: false\n    addresses: [%s]\n", spec.CloudInit.IpConfig)
+					netYaml = fmt.Sprintf("version: 2\nethernets:\n  eth0:\n    dhcp4: false\n    addresses: [%s]\n", sanitizeCloudInitScalar(spec.CloudInit.IpConfig))
 					if spec.CloudInit.Gateway != "" {
-						netYaml += fmt.Sprintf("    gateway4: %s\n", spec.CloudInit.Gateway)
+						netYaml += fmt.Sprintf("    gateway4: %s\n", sanitizeCloudInitScalar(spec.CloudInit.Gateway))
 					}
 				}
 			}

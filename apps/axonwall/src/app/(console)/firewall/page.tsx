@@ -61,7 +61,10 @@ export default function FirewallPage() {
     getCurrentDesiredState()
       .then((s) => {
         if (s) {
-          setState(s);
+          setState({
+            ...s,
+            rules: (s.rules || []).map((r, idx) => (r.id ? r : { ...r, id: `rule-${idx + 1}` })),
+          });
         } else {
           setLoadError('No firewall configuration was returned by the server.');
         }

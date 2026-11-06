@@ -1,9 +1,9 @@
-import { type DesiredState, type FirewallRule, type NatRule, type Alias, normalizeAntiLockoutInterfaces, inferInterfaceRole, isValidFirewallEndpoint } from '../../schemas/index.js';
-import { sanitizeIdentifier, isValidDevice } from '../../util/index.js';
+import { type DesiredState, type FirewallRule, type NatRule, type Alias, type Interface, normalizeAntiLockoutInterfaces, inferInterfaceRole, isValidFirewallEndpoint } from '../../schemas/index.js';
+import { sanitizeIdentifier, isValidDevice, isValidIPv4, isValidIPv6, isValidCIDR, isValidMAC, isValidPortRange } from '../../util/index.js';
 import { resolveCapabilities } from '../../plugins/index.js';
 import { compileSuricata } from '../suricata/index.js';
 import { compileCrowdSec } from '../crowdsec/index.js';
-import { compileGeoIp } from '../geoip/index.js';
+import { compileGeoIp, COUNTRY_CIDR_TABLE } from '../geoip/index.js';
 import { compileNas } from '../nas/index.js';
 import { compileK3s } from '../k3s/index.js';
 import { compileKeaDhcp4 } from '../kea/index.js';
@@ -150,7 +150,7 @@ export function compileNftables(state: DesiredState): CompileResult {
           haRole: effectiveRole,
           peerIp: effectivePeer,
           haPeerAddress: effectivePeer,
-          syncPort: 8443,
+          syncPort: state.ha?.sqliteSync?.listenPort ?? state.ha?.peerPort ?? 9876,
           authToken: effectiveSecret,
           haSharedSecret: effectiveSecret,
           autoJoinHaPeer: state.k3s?.autoJoinHaPeer !== false,
@@ -546,29 +546,62 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('');
   }
 
+  const emittedSets = new Map<string, { setType: string; isV6: boolean }>();
+
   if (state.aliases.length > 0) {
     lines.push('  # Aliases & Dynamic Sets');
     for (const alias of state.aliases) {
       if (!alias.enabled || alias.entries.length === 0) continue;
       const setName = `set_${sanitizeIdentifier(alias.name)}`;
 
-      let setType = 'ipv4_addr';
-      if (alias.type === 'port') {
-        setType = 'inet_service';
-      } else if (alias.type === 'mac') {
-        setType = 'ether_addr';
-      } else if (alias.type === 'network' || alias.type === 'host') {
-        setType = alias.entries.some((e) => e.includes(':')) ? 'ipv6_addr' : 'ipv4_addr';
+      // Expand geoip country codes before validating set elements
+      const rawExpanded: string[] = [];
+      for (const rawEntry of alias.entries) {
+        const trimmed = rawEntry.trim();
+        if (!trimmed) continue;
+        if (alias.type === 'geoip' && COUNTRY_CIDR_TABLE[trimmed.toUpperCase()]) {
+          rawExpanded.push(...COUNTRY_CIDR_TABLE[trimmed.toUpperCase()]);
+        } else {
+          rawExpanded.push(trimmed);
+        }
       }
 
-      const elements = alias.entries.join(', ');
+      let setType = 'ipv4_addr';
+      let validEntries: string[] = [];
+      if (alias.type === 'port') {
+        setType = 'inet_service';
+        validEntries = rawExpanded.filter((e) => isValidPortRange(e));
+      } else if (alias.type === 'mac') {
+        setType = 'ether_addr';
+        validEntries = rawExpanded.filter((e) => isValidMAC(e));
+      } else {
+        const hasV6 = rawExpanded.some((e) => e.includes(':') && (isValidIPv6(e) || isValidCIDR(e)));
+        setType = hasV6 ? 'ipv6_addr' : 'ipv4_addr';
+        if (hasV6) {
+          validEntries = rawExpanded.filter((e) => e.includes(':') && (isValidIPv6(e) || isValidCIDR(e)));
+        } else {
+          validEntries = rawExpanded.filter((e) => !e.includes(':') && (isValidIPv4(e) || isValidCIDR(e)));
+        }
+      }
+
+      if (validEntries.length === 0) continue;
+
+      const elements = validEntries.join(', ');
       lines.push(`  set ${setName} {`);
       lines.push(`    type ${setType};`);
-      if (alias.type === 'network' || alias.type === 'host' || alias.type === 'port' || alias.type === 'urltable') {
+      if (
+        alias.type === 'network' ||
+        alias.type === 'host' ||
+        alias.type === 'port' ||
+        alias.type === 'urltable' ||
+        alias.type === 'geoip' ||
+        alias.type === 'asn'
+      ) {
         lines.push('    flags interval;');
       }
       lines.push(`    elements = { ${elements} };`);
       lines.push('  }');
+      emittedSets.set(setName, { setType, isV6: setType === 'ipv6_addr' });
     }
     lines.push('');
   }
@@ -588,13 +621,15 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   // 4. Chains definition
+  const sortedNat = [...state.nat].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
   // Prerouting (DNAT)
   lines.push('  chain prerouting {');
   lines.push('    type nat hook prerouting priority dstnat - 10; policy accept;');
-  
-  if (state.suricata?.tlsDecryption?.enabled) {
-    const tlsConfig = state.suricata.tlsDecryption;
+
+  const tlsDecryption = state.tlsDecryption?.enabled ? state.tlsDecryption : state.suricata?.tlsDecryption;
+  if (tlsDecryption?.enabled) {
+    const tlsConfig = tlsDecryption;
     lines.push(`    # TLS Decryption Interception`);
     for (const iface of state.interfaces) {
       if (iface.enabled && inferInterfaceRole(iface) !== 'wan' && isValidDevice(iface.device)) {
@@ -604,11 +639,26 @@ export function compileNftables(state: DesiredState): CompileResult {
     }
   }
 
-  for (const nat of state.nat) {
+  for (const nat of sortedNat) {
     if (!nat.enabled || nat.type !== 'dnat' || !nat.targetIp) continue;
     if (/[;\r\n#{}'"]/.test(nat.targetIp)) continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
     if (!isValidDevice(ifaceDev)) continue;
+    if (nat.sourcePort?.startsWith('$') && !emittedSets.has(`set_${sanitizeIdentifier(nat.sourcePort.slice(1))}`)) continue;
+    if (nat.destinationPort?.startsWith('$') && !emittedSets.has(`set_${sanitizeIdentifier(nat.destinationPort.slice(1))}`)) continue;
+
+    const addrClauses: string[] = [];
+    if (nat.source && nat.source !== 'any') {
+      const srcClause = resolveEndpointClause(nat.source, 'saddr', state.interfaces, state.aliases, emittedSets);
+      if (srcClause === null) continue;
+      if (srcClause) addrClauses.push(srcClause);
+    }
+    if (nat.destination && nat.destination !== 'any' && nat.destination !== 'wan_ip') {
+      const dstClause = resolveEndpointClause(nat.destination, 'daddr', state.interfaces, state.aliases, emittedSets);
+      if (dstClause === null) continue;
+      if (dstClause) addrClauses.push(dstClause);
+    }
+
     const hasDport = Boolean(nat.destinationPort && nat.destinationPort !== 'any');
     const hasSport = Boolean(nat.sourcePort && nat.sourcePort !== 'any');
     let protoMatch = '';
@@ -634,7 +684,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     const family = isV6 ? 'ip6' : 'ip';
     const formattedIp = isV6 && hasTargetPort ? `[${nat.targetIp}]` : nat.targetIp;
     const dnatTarget = hasTargetPort ? `${formattedIp}:${nat.targetPort}` : formattedIp;
-    lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat ${family} to ${dnatTarget}`);
+    const prefixMatch = [`iifname "${ifaceDev}"`, ...addrClauses, protoMatch].filter(Boolean).join(' ');
+    lines.push(`    ${prefixMatch} dnat ${family} to ${dnatTarget}`);
   }
   lines.push('  }');
   lines.push('');
@@ -761,19 +812,41 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Postrouting chain (SNAT & Masquerade)
   lines.push('  chain postrouting {');
   lines.push('    type nat hook postrouting priority srcnat; policy accept;');
-  for (const nat of state.nat) {
+  for (const nat of sortedNat) {
     if (!nat.enabled) continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
     if (!isValidDevice(ifaceDev)) continue;
+    if (nat.type !== 'masquerade' && !(nat.type === 'snat' && nat.targetIp)) continue;
+
+    const matchClauses: string[] = [`oifname "${ifaceDev}"`];
+    if (nat.source && nat.source !== 'any') {
+      const srcClause = resolveEndpointClause(nat.source, 'saddr', state.interfaces, state.aliases, emittedSets);
+      if (srcClause === null) continue;
+      if (srcClause) matchClauses.push(srcClause);
+    }
+    if (nat.destination && nat.destination !== 'any' && nat.destination !== 'wan_ip') {
+      const dstClause = resolveEndpointClause(nat.destination, 'daddr', state.interfaces, state.aliases, emittedSets);
+      if (dstClause === null) continue;
+      if (dstClause) matchClauses.push(dstClause);
+    }
+
     if (nat.type === 'masquerade') {
-      lines.push(`    oifname "${ifaceDev}" masquerade comment "outbound-nat"`);
+      lines.push(`    ${matchClauses.join(' ')} masquerade comment "outbound-nat"`);
     } else if (nat.type === 'snat' && nat.targetIp) {
-      const family = nat.targetIp.includes(':') ? 'ip6' : 'ip';
-      lines.push(`    oifname "${ifaceDev}" snat ${family} to ${nat.targetIp} comment "outbound-snat"`);
+      let resolvedTarget = nat.targetIp;
+      if (resolvedTarget === 'wan_ip') {
+        const wanIface = state.interfaces.find(
+          (i) => i.enabled && (i.name === nat.interface || inferInterfaceRole(i) === 'wan') && i.ipv4Address,
+        );
+        resolvedTarget = wanIface?.ipv4Address?.split('/')[0] || '';
+      }
+      if (!resolvedTarget || /[;\r\n#{}'"]/.test(resolvedTarget)) continue;
+      const family = resolvedTarget.includes(':') ? 'ip6' : 'ip';
+      lines.push(`    ${matchClauses.join(' ')} snat ${family} to ${resolvedTarget} comment "outbound-snat"`);
     }
   }
   // Default WAN/Gateway masquerade if no outbound rules configured
-  if (!state.nat.some((n) => n.type === 'masquerade' || n.type === 'snat')) {
+  if (!state.nat.some((n) => n.enabled && (n.type === 'masquerade' || n.type === 'snat'))) {
     const gatewayIfaces = new Set((state.gateways || []).filter((g) => g.enabled).map((g) => g.interface));
     for (const iface of state.interfaces) {
       if (iface.enabled && inferInterfaceRole(iface) === 'wan') {
@@ -816,7 +889,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push(`  chain input_${safeChainName} {`);
     for (const rule of inputRules) {
       if (rule.direction === 'in') {
-        const stmt = formatRuleStatement(rule, state.aliases);
+        const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
         if (stmt) lines.push(`    ${stmt}`);
       }
     }
@@ -826,7 +899,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     // Forward chain for interface
     lines.push(`  chain forward_${safeChainName} {`);
     for (const rule of forwardRules) {
-      const stmt = formatRuleStatement(rule, state.aliases);
+      const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
       if (stmt) lines.push(`    ${stmt}`);
     }
     lines.push('  }');
@@ -842,7 +915,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push(`  chain input_tailscale {`);
     for (const rule of tsRules) {
       if (rule.direction === 'in') {
-        const stmt = formatRuleStatement(rule, state.aliases);
+        const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
         if (stmt) lines.push(`    ${stmt}`);
       }
     }
@@ -851,7 +924,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
     lines.push(`  chain forward_tailscale {`);
     for (const rule of tsRules) {
-      const stmt = formatRuleStatement(rule, state.aliases);
+      const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
       if (stmt) lines.push(`    ${stmt}`);
     }
     lines.push('  }');
@@ -1125,13 +1198,91 @@ export function compileSatelliteNftables(node: any): CompileResult {
   };
 }
 
+function ipv4ToNetworkCidr(addrOrCidr: string): string {
+  const parts = addrOrCidr.trim().split('/');
+  const ip = parts[0];
+  const parsedPrefix = Number.parseInt(parts[1] ?? '', 10);
+  const prefix = Number.isNaN(parsedPrefix) ? 24 : Math.max(0, Math.min(32, parsedPrefix));
+  if (!isValidIPv4(ip)) return '192.168.1.0/24';
+  const octets = ip.split('.').map((o) => Number.parseInt(o, 10));
+  const num = ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const net = (num & mask) >>> 0;
+  const netIp = `${(net >>> 24) & 255}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}`;
+  return `${netIp}/${prefix}`;
+}
+
+function resolveEndpointClause(
+  endpoint: string,
+  dir: 'saddr' | 'daddr',
+  interfaces: Interface[],
+  aliases: Alias[],
+  emittedSets?: Map<string, { setType: string; isV6: boolean }>,
+): string | null {
+  if (!endpoint || endpoint === 'any') return '';
+  if (endpoint.startsWith('$')) {
+    const rawName = endpoint.slice(1);
+    const aliasName = sanitizeIdentifier(rawName);
+    const setName = `set_${aliasName}`;
+    if (emittedSets) {
+      const setInfo = emittedSets.get(setName);
+      if (!setInfo) return null;
+      if (setInfo.setType === 'ether_addr') {
+        return `ether ${dir} @${setName}`;
+      }
+      return `${setInfo.isV6 ? 'ip6' : 'ip'} ${dir} @${setName}`;
+    }
+    const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
+    if (!matchedAlias || !matchedAlias.enabled || matchedAlias.entries.length === 0) return null;
+    if (matchedAlias.type === 'mac') {
+      return `ether ${dir} @${setName}`;
+    }
+    const isV6 = matchedAlias.entries.some((e) => e.includes(':'));
+    return `${isV6 ? 'ip6' : 'ip'} ${dir} @${setName}`;
+  }
+
+  if (endpoint === 'wan_ip') {
+    const wanIface =
+      interfaces.find((i) => i.enabled && inferInterfaceRole(i) === 'wan' && i.ipv4Address) ||
+      interfaces.find((i) => inferInterfaceRole(i) === 'wan' && i.ipv4Address);
+    const wanIp = wanIface?.ipv4Address?.split('/')[0]?.trim();
+    if (wanIp && isValidIPv4(wanIp)) {
+      return `ip ${dir} ${wanIp}`;
+    }
+    return `fib ${dir} type local`;
+  }
+
+  if (endpoint === 'self') {
+    return `fib ${dir} type local`;
+  }
+
+  if (endpoint === 'lan_net') {
+    const lanIface =
+      interfaces.find((i) => i.enabled && i.name === 'lan' && i.ipv4Address) ||
+      interfaces.find((i) => i.enabled && inferInterfaceRole(i) === 'lan' && i.ipv4Address) ||
+      interfaces.find((i) => inferInterfaceRole(i) === 'lan' && i.ipv4Address);
+    const lanCidr = lanIface?.ipv4Address ? ipv4ToNetworkCidr(lanIface.ipv4Address) : '192.168.1.0/24';
+    return `ip ${dir} ${lanCidr}`;
+  }
+
+  if (endpoint.includes(':')) {
+    return `ip6 ${dir} ${endpoint}`;
+  }
+  return `ip ${dir} ${endpoint}`;
+}
+
 function formatPort(val: string): string {
   if (val.startsWith('$')) return `@set_${sanitizeIdentifier(val.slice(1))}`;
   if (val.includes(',') && !val.trim().startsWith('{')) return `{ ${val} }`;
   return val;
 }
 
-function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
+function formatRuleStatement(
+  rule: FirewallRule,
+  aliases: Alias[],
+  interfaces: Interface[] = [],
+  emittedSets?: Map<string, { setType: string; isV6: boolean }>,
+): string {
   const parts: string[] = [];
 
   if (
@@ -1143,42 +1294,28 @@ function formatRuleStatement(rule: FirewallRule, aliases: Alias[]): string {
     return '';
   }
 
+  // Verify port aliases exist in emittedSets before emitting rule
+  if (rule.sourcePort?.startsWith('$')) {
+    const setName = `set_${sanitizeIdentifier(rule.sourcePort.slice(1))}`;
+    if (emittedSets && !emittedSets.has(setName)) return '';
+  }
+  if (rule.destinationPort?.startsWith('$')) {
+    const setName = `set_${sanitizeIdentifier(rule.destinationPort.slice(1))}`;
+    if (emittedSets && !emittedSets.has(setName)) return '';
+  }
+
   // Source Address
   if (rule.source && rule.source !== 'any') {
-    if (rule.source.startsWith('$')) {
-      const rawName = rule.source.slice(1);
-      const aliasName = sanitizeIdentifier(rawName);
-      const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      if (matchedAlias?.type === 'mac') {
-        parts.push(`ether saddr @set_${aliasName}`);
-      } else {
-        const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
-        parts.push(`${isV6 ? 'ip6' : 'ip'} saddr @set_${aliasName}`);
-      }
-    } else if (rule.source.includes(':')) {
-      parts.push(`ip6 saddr ${rule.source}`);
-    } else {
-      parts.push(`ip saddr ${rule.source}`);
-    }
+    const srcClause = resolveEndpointClause(rule.source, 'saddr', interfaces, aliases, emittedSets);
+    if (srcClause === null) return '';
+    if (srcClause) parts.push(srcClause);
   }
 
   // Destination Address
   if (rule.destination && rule.destination !== 'any') {
-    if (rule.destination.startsWith('$')) {
-      const rawName = rule.destination.slice(1);
-      const aliasName = sanitizeIdentifier(rawName);
-      const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      if (matchedAlias?.type === 'mac') {
-        parts.push(`ether daddr @set_${aliasName}`);
-      } else {
-        const isV6 = matchedAlias?.entries.some((e) => e.includes(':'));
-        parts.push(`${isV6 ? 'ip6' : 'ip'} daddr @set_${aliasName}`);
-      }
-    } else if (rule.destination.includes(':')) {
-      parts.push(`ip6 daddr ${rule.destination}`);
-    } else {
-      parts.push(`ip daddr ${rule.destination}`);
-    }
+    const dstClause = resolveEndpointClause(rule.destination, 'daddr', interfaces, aliases, emittedSets);
+    if (dstClause === null) return '';
+    if (dstClause) parts.push(dstClause);
   }
 
   // Protocol & Ports

@@ -138,7 +138,13 @@ export default function AiCopilotPage() {
       });
       setStagedNotification({ type: 'success', text: 'Saved AI Provider configuration to /etc/axonwall/system.yaml' });
       setTimeout(() => setStagedNotification(null), 4000);
-    } catch {}
+    } catch (err: any) {
+      setStagedNotification({
+        type: 'error',
+        text: `Failed to save AI Provider configuration: ${err?.message || 'Unknown error'}`,
+      });
+      setTimeout(() => setStagedNotification(null), 4000);
+    }
     setIsSavingConfig(false);
   };
 

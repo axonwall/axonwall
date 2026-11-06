@@ -77,7 +77,7 @@ case "$1" in
             chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
         fi
         chown root:root /var/lib/axonwall/home
-        chmod 1775 /var/lib/axonwall
+        chmod 3775 /var/lib/axonwall
         chmod 0755 /var/lib/axonwall/home
         chmod 1770 /var/log/axonwall
         chmod 0755 /opt/axonwall

@@ -125,7 +125,7 @@ export async function deleteUser(name) {
 // -----------------------------------------------------------------------------
 export async function createPreAuthKey(user, reusable, ephemeral, expiration) {
     let userId = user;
-    if (typeof user === 'string' && isNaN(Number(user))) {
+    if (typeof user === 'string' && !/^\d+$/.test(user.trim())) {
         const safeUserName = assertSafeIdentifier(user, 'User name');
         const users = await listUsers();
         const found = users.find((u) => u.name === safeUserName);
@@ -143,12 +143,17 @@ export async function createPreAuthKey(user, reusable, ephemeral, expiration) {
         args.push('--reusable');
     if (ephemeral)
         args.push('--ephemeral');
-    if (expiration) {
-        const ms = new Date(expiration).getTime() - Date.now();
-        if (ms > 0) {
-            const hours = Math.max(1, Math.round(ms / (1000 * 60 * 60)));
-            args.push('--expiration', `${hours}h`);
+    if (expiration !== undefined && expiration !== '') {
+        const parsedTime = new Date(expiration).getTime();
+        if (Number.isNaN(parsedTime)) {
+            throw new Error('Invalid expiration timestamp');
         }
+        const ms = parsedTime - Date.now();
+        if (ms <= 0) {
+            throw new Error('Expiration timestamp must be in the future');
+        }
+        const hours = Math.max(1, Math.round(ms / (1000 * 60 * 60)));
+        args.push('--expiration', `${hours}h`);
     }
     const data = await runHeadscale(args);
     return {
@@ -182,7 +187,12 @@ export async function listPreAuthKeys(user) {
 }
 export async function expirePreAuthKey(user, key) {
     const safeKey = assertSafeIdentifier(key, 'Preauth key');
-    return runHeadscale(['preauthkeys', 'expire', safeKey]);
+    const args = ['preauthkeys', 'expire', safeKey];
+    if (user && String(user).trim()) {
+        const safeUser = assertSafeIdentifier(user, 'User');
+        args.push('--user', safeUser);
+    }
+    return runHeadscale(args);
 }
 // -----------------------------------------------------------------------------
 // Machines / Nodes

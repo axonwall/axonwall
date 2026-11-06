@@ -346,13 +346,22 @@ func reconcileStaticRoutesLocked() error {
 	// never this reconciler's to delete, and a config that failed to
 	// load never reaches this point (LoadRoutingConfig errors above).
 	ownedRoutes := loadOwnedStaticRoutes()
-	prunedCount := pruneObsoleteRoutes("-4", desiredRoutes, ownedRoutes)
-	prunedCount += pruneObsoleteRoutes("-6", desiredRoutes, ownedRoutes)
-	// Record this run's installed destinations as the owned set for
-	// the next reconcile. On the first run after this change the set
-	// is empty, so pre-existing stale routes linger rather than being
-	// deleted — the fail-closed direction — and converge from then on.
-	saveOwnedStaticRoutes(desiredRoutes)
+	pruned4, retained4 := pruneObsoleteRoutes("-4", desiredRoutes, ownedRoutes)
+	pruned6, retained6 := pruneObsoleteRoutes("-6", desiredRoutes, ownedRoutes)
+	prunedCount := pruned4 + pruned6
+	// Record this run's installed destinations (plus any owned routes whose
+	// deletion failed this cycle) as the owned set for the next reconcile.
+	mergedOwned := make(map[string]StaticRouteConfig, len(desiredRoutes)+len(retained4)+len(retained6))
+	for k, v := range desiredRoutes {
+		mergedOwned[k] = v
+	}
+	for _, r := range retained4 {
+		mergedOwned[r] = StaticRouteConfig{Network: r}
+	}
+	for _, r := range retained6 {
+		mergedOwned[r] = StaticRouteConfig{Network: r}
+	}
+	saveOwnedStaticRoutes(mergedOwned)
 
 	log.Printf("[Agent] Static routes reconciliation complete: %d active, %d pruned", appliedCount, prunedCount)
 	return nil
@@ -430,13 +439,21 @@ func shouldPruneStaticRoute(dest string, desired map[string]StaticRouteConfig, o
 	return false
 }
 
-func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig, owned map[string]bool) int {
+func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig, owned map[string]bool) (int, []string) {
 	out, err := exec.Command("ip", family, "route", "show", "proto", "static").CombinedOutput()
 	if err != nil {
-		return 0
+		var retained []string
+		for d := range owned {
+			isV6 := strings.Contains(d, ":")
+			if (family == "-6" && isV6) || (family == "-4" && !isV6) {
+				retained = append(retained, d)
+			}
+		}
+		return 0, retained
 	}
 
 	pruned := 0
+	var retained []string
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -457,7 +474,9 @@ func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig, ow
 		delCmd := exec.Command("ip", family, "route", "del", dest, "proto", "static")
 		if err := delCmd.Run(); err == nil {
 			pruned++
+		} else {
+			retained = append(retained, dest)
 		}
 	}
-	return pruned
+	return pruned, retained
 }

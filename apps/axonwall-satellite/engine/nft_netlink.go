@@ -579,11 +579,16 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			}
 			protoTok := tokens[i+2]
 			if protoTok == "{" {
-				// Skip until closing "}"
+				if !strings.Contains(work, "flow add ") && !strings.Contains(work, "flow offload ") {
+					return spec, fmt.Errorf("unsupported meta l4proto set in native netlink compiler (requires nft binary fallback)")
+				}
+				// Skip until closing "}" for flowtable offload rules
 				for i < len(tokens) && tokens[i] != "}" {
 					i++
 				}
-				i++
+				if i < len(tokens) {
+					i++
+				}
 				continue
 			}
 			var protoNum byte = 58 // ipv6-icmp default
@@ -596,6 +601,8 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 				protoNum = syscall.IPPROTO_ICMP
 			case "ipv6-icmp":
 				protoNum = syscall.IPPROTO_ICMPV6
+			default:
+				return spec, fmt.Errorf("unsupported meta l4proto %q", protoTok)
 			}
 			exprs = append(exprs,
 				buildExprMetaLoad(nftMetaL4Proto, nftReg1),
@@ -612,6 +619,9 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			if i < len(tokens) && tokens[i] == "type" {
 				i++
 				if i < len(tokens) && tokens[i] == "{" {
+					if strings.Contains(work, " drop") || strings.Contains(work, " reject") {
+						return spec, fmt.Errorf("icmpv6 type set with drop/reject requires nft binary fallback")
+					}
 					for i < len(tokens) && tokens[i] != "}" {
 						i++
 					}
@@ -619,6 +629,14 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 						i++
 					}
 				} else if i < len(tokens) {
+					icmpv6TypeByte, ok := parseICMPv6TypeByte(tokens[i])
+					if !ok {
+						return spec, fmt.Errorf("unsupported icmpv6 type %q (requires nft binary fallback)", tokens[i])
+					}
+					exprs = append(exprs,
+						buildExprPayloadLoad(nftPayloadTransportHeader, 0, 1, nftReg1),
+						buildExprCmpEq(nftReg1, []byte{icmpv6TypeByte}),
+					)
 					i++
 				}
 			}
@@ -737,8 +755,11 @@ func compileRuleLine(chainName, line string) (NftRuleSpec, error) {
 			exprs = append(exprs, buildExprVerdict(nfDrop))
 			i++
 
-		default:
+		case "counter":
 			i++
+
+		default:
+			return spec, fmt.Errorf("unsupported nftables token %q in native netlink compiler", tok)
 		}
 	}
 
@@ -760,6 +781,47 @@ func encodeIfnameBytes(dev string) []byte {
 	b := make([]byte, len(dev)+1)
 	copy(b, dev)
 	return b
+}
+
+func parseICMPv6TypeByte(name string) (byte, bool) {
+	name = strings.TrimSuffix(strings.TrimSpace(name), ",")
+	if n, err := strconv.Atoi(name); err == nil && n >= 0 && n <= 255 {
+		return byte(n), true
+	}
+	switch name {
+	case "destination-unreachable":
+		return 1, true
+	case "packet-too-big":
+		return 2, true
+	case "time-exceeded":
+		return 3, true
+	case "parameter-problem":
+		return 4, true
+	case "echo-request":
+		return 128, true
+	case "echo-reply":
+		return 129, true
+	case "mld-listener-query":
+		return 130, true
+	case "mld-listener-report":
+		return 131, true
+	case "mld-listener-done":
+		return 132, true
+	case "nd-router-solicit", "router-solicitation":
+		return 133, true
+	case "nd-router-advert", "router-advertisement":
+		return 134, true
+	case "nd-neighbor-solicit", "neighbour-solicitation":
+		return 135, true
+	case "nd-neighbor-advert", "neighbour-advertisement":
+		return 136, true
+	case "nd-redirect":
+		return 137, true
+	case "mld2-listener-report":
+		return 143, true
+	default:
+		return 0, false
+	}
 }
 
 // =============================================================================
@@ -1111,8 +1173,26 @@ func DeleteTableNetlink(tableName string) error {
 	return sendNetfilterNetlinkBatch(wire.Bytes())
 }
 
+func incrementIPBytes(ip []byte) ([]byte, bool) {
+	out := bytes.Clone(ip)
+	for i := len(out) - 1; i >= 0; i-- {
+		out[i]++
+		if out[i] != 0 {
+			return out, true
+		}
+	}
+	return nil, false
+}
+
 // AddSetElementNetlink adds an IPv4, IPv6, or MAC address to `table inet <tableName> <setName>` via Netlink.
 func AddSetElementNetlink(tableName, setName string, keyBytes []byte) error {
+	if setName == "blocked_ips" || setName == "blocked_ips6" {
+		endBytes, ok := incrementIPBytes(keyBytes)
+		if !ok {
+			return fmt.Errorf("cannot encode interval end for max address in %s", setName)
+		}
+		return AddIntervalSetElementNetlink(tableName, setName, keyBytes, endBytes)
+	}
 	if tableName == "" {
 		tableName = "axonwall"
 	}
@@ -1130,6 +1210,38 @@ func AddSetElementNetlink(tableName, setName string, keyBytes []byte) error {
 		nlAttrStr(nftaSetElemListTable, tableName),
 		nlAttrStr(nftaSetElemListSet, setName),
 		nlAttrNested(nftaSetElemListElements, elem),
+	))
+	wire.Write(buildNfgenMsg(nfnlMsgBatchEnd, syscall.NLM_F_REQUEST, 3, nfprotoUnspec, nfnlSubsysNftables))
+	return sendNetfilterNetlinkBatch(wire.Bytes())
+}
+
+// AddIntervalSetElementNetlink adds a half-open [startBytes, endBytes) interval to an NFT_SET_INTERVAL set via Netlink.
+func AddIntervalSetElementNetlink(tableName, setName string, startBytes, endBytes []byte) error {
+	if tableName == "" {
+		tableName = "axonwall"
+	}
+	startElem := nlAttrNested(nftaListElem,
+		nlAttrNested(nftaSetElemKey, nlAttr(nftaDataValue, startBytes)),
+	)
+	endElem := nlAttrNested(nftaListElem,
+		nlAttrU32BE(nftaSetElemFlags, 1), // NFT_SET_ELEM_INTERVAL_END = 1
+		nlAttrNested(nftaSetElemKey, nlAttr(nftaDataValue, endBytes)),
+	)
+	var elems bytes.Buffer
+	elems.Write(startElem)
+	elems.Write(endElem)
+
+	var wire bytes.Buffer
+	wire.Write(buildNfgenMsg(nfnlMsgBatchBegin, syscall.NLM_F_REQUEST, 1, nfprotoUnspec, nfnlSubsysNftables))
+	wire.Write(buildNfgenMsg(
+		nftMsgType(nftMsgNewSetElem),
+		syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_ACK,
+		2,
+		nfprotoInet,
+		0,
+		nlAttrStr(nftaSetElemListTable, tableName),
+		nlAttrStr(nftaSetElemListSet, setName),
+		nlAttrNested(nftaSetElemListElements, elems.Bytes()),
 	))
 	wire.Write(buildNfgenMsg(nfnlMsgBatchEnd, syscall.NLM_F_REQUEST, 3, nfprotoUnspec, nfnlSubsysNftables))
 	return sendNetfilterNetlinkBatch(wire.Bytes())

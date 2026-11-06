@@ -286,6 +286,7 @@ export async function saveAuthzStore(store, filePath = getVigilanteAuthzFile()) 
   const stats = await fs.stat(filePath);
   cachedStore = validated;
   cachedMtimeMs = stats.mtimeMs;
+  cachedSize = stats.size;
   cachedFilePath = filePath;
 }
 
@@ -841,15 +842,17 @@ export function decide(loadedStore, principal, permission, target = {}, opts = {
   // 10. Explicit grants
   if (Array.isArray(principal.grants)) {
     const matchingGrants = principal.grants.filter(g => g.permission === permission);
+    let sawContextMismatch = false;
     for (const grant of matchingGrants) {
       if (!matchesGrantContext(grant.context, reqContext)) {
-        return { allowed: false, reason: 'deny_context', principalId: principal.id };
+        sawContextMismatch = true;
+        continue;
       }
 
       if (grant.scope && Object.keys(grant.scope).length > 0) {
         let scopeMatches = true;
         for (const [k, v] of Object.entries(grant.scope)) {
-          if (target[k] !== undefined && target[k] !== v) {
+          if (target[k] !== v) {
             scopeMatches = false;
             break;
           }
@@ -860,6 +863,9 @@ export function decide(loadedStore, principal, permission, target = {}, opts = {
       } else {
         return { allowed: true, reason: 'allow_explicit_grant', principalId: principal.id };
       }
+    }
+    if (sawContextMismatch) {
+      return { allowed: false, reason: 'deny_context', principalId: principal.id };
     }
   }
 

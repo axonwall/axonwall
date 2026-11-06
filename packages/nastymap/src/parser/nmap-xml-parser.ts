@@ -401,8 +401,8 @@ export function parseNmapXml(xmlString: string): NmapRun {
     throw new Error(`Failed to parse Nmap XML: ${err.message}`);
   }
 
-  const nmaprun = parsed.nmaprun || parsed;
-  if (!nmaprun) {
+  const nmaprun = parsed?.nmaprun;
+  if (!nmaprun || typeof nmaprun !== 'object') {
     throw new Error('Invalid Nmap XML: Missing <nmaprun> root tag.');
   }
 

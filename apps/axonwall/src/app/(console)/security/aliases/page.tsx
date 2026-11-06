@@ -19,33 +19,7 @@ import { COMMUNITY_THREAT_FEEDS, compileThreatFeedNft } from '@axonwall/lib/alia
 
 export default function DynamicAliasesPage() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
-  const [aliases, setAliases] = useState<Alias[]>([
-    {
-      name: 'Spamhaus_DROP_List',
-      type: 'urltable',
-      url: 'https://www.spamhaus.org/drop/drop.txt',
-      refreshIntervalHours: 24,
-      entries: ['198.51.100.0/24', '203.0.113.0/24', '192.0.2.0/24'],
-      description: "Spamhaus Don't Route Or Peer (DROP) List",
-      enabled: true,
-    },
-    {
-      name: 'Blocked_Countries_GeoIP',
-      type: 'geoip',
-      entries: ['RU', 'KP'],
-      refreshIntervalHours: 168,
-      description: 'Geographic IP block for high-risk inbound regions',
-      enabled: true,
-    },
-    {
-      name: 'Amazon_AWS_Cloud_Prefixes',
-      type: 'asn',
-      entries: ['16509'],
-      refreshIntervalHours: 48,
-      description: 'Autonomous System Number prefixes for Amazon AWS',
-      enabled: true,
-    },
-  ]);
+  const [aliases, setAliases] = useState<Alias[]>([]);
 
   const [refreshing, setRefreshing] = useState(false);
   const [refreshSuccess, setRefreshSuccess] = useState(false);
@@ -55,9 +29,7 @@ export default function DynamicAliasesPage() {
     getCurrentDesiredState()
       .then((state) => {
         setFullState(state);
-        if (state.aliases?.length) {
-          setAliases(state.aliases);
-        }
+        setAliases(state.aliases || []);
       })
       .catch(() => {});
   }, []);

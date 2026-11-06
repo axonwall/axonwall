@@ -128,11 +128,36 @@ export function generateUnifiedDiff(original, patched, fileName = 'manifest.yaml
   diff.push(`+++ b/${fileName}`);
   diff.push(`@@ -1,${origLines.length} +1,${patchLines.length} @@`);
 
-  for (const line of patchLines) {
-    if (!origLines.includes(line)) {
-      diff.push(`+ ${line}`);
+  let i = 0;
+  let j = 0;
+  while (i < origLines.length || j < patchLines.length) {
+    if (i < origLines.length && j < patchLines.length && origLines[i] === patchLines[j]) {
+      diff.push(`  ${origLines[i]}`);
+      i++;
+      j++;
+    } else if (
+      j + 1 < patchLines.length &&
+      i < origLines.length &&
+      origLines[i] === patchLines[j + 1]
+    ) {
+      diff.push(`+ ${patchLines[j]}`);
+      j++;
+    } else if (
+      i + 1 < origLines.length &&
+      j < patchLines.length &&
+      origLines[i + 1] === patchLines[j]
+    ) {
+      diff.push(`- ${origLines[i]}`);
+      i++;
     } else {
-      diff.push(`  ${line}`);
+      if (i < origLines.length) {
+        diff.push(`- ${origLines[i]}`);
+        i++;
+      }
+      if (j < patchLines.length) {
+        diff.push(`+ ${patchLines[j]}`);
+        j++;
+      }
     }
   }
 

@@ -204,6 +204,11 @@ fi
 INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' || true))
 
 PRECONFIGURED_IFACES=0
+if [[ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured && -s /var/lib/axonwall/etc-axonwall/interfaces.conf ]]; then
+  mkdir -p /etc/axonwall
+  cp -a /var/lib/axonwall/etc-axonwall/interfaces.conf /etc/axonwall/interfaces.conf 2>/dev/null || true
+  cp -a /var/lib/axonwall/etc-axonwall/.interfaces_configured /etc/axonwall/.interfaces_configured 2>/dev/null || true
+fi
 if [[ ( -f /etc/axonwall/.interfaces_configured || -f /var/lib/axonwall/etc-axonwall/.interfaces_configured ) && -s /etc/axonwall/interfaces.conf ]]; then
   echo "[Axonwall Firstboot] Preserving pre-configured network interfaces from /etc/axonwall/interfaces.conf..."
   PRECONFIGURED_IFACES=1
@@ -427,18 +432,27 @@ if [[ -f /usr/share/axonwall/lockdown.nft ]]; then
   INTERNAL_HAS_LINK=0
   if [[ "$HOST_MODE" != "1" ]]; then
     for _attempt in 1 2 3; do
-      for (( idx=1; idx<${#INTERFACES[@]}; idx++ )); do
-        _int_if="${INTERFACES[$idx]}"
-        if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
-          INTERNAL_HAS_LINK=1
-          break 2
-        fi
-      done
+      if [[ "$PRECONFIGURED_IFACES" == "1" ]]; then
+        for _int_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF"; do
+          if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
+            INTERNAL_HAS_LINK=1
+            break 2
+          fi
+        done
+      else
+        for (( idx=1; idx<${#INTERFACES[@]}; idx++ )); do
+          _int_if="${INTERFACES[$idx]}"
+          if [[ -n "$_int_if" ]] && [[ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" == "1" ]]; then
+            INTERNAL_HAS_LINK=1
+            break 2
+          fi
+        done
+      fi
       [[ ${#INTERFACES[@]} -le 1 ]] && break
       sleep 1
     done
   fi
-  if [[ "$HOST_MODE" != "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
+  if [[ "$HOST_MODE" != "1" && "$INTERNAL_HAS_LINK" == "1" && -n "$WAN_IF" && "$WAN_IF" != "wan0" ]]; then
     if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
       sed -i "s/elements = { [^}]* }/elements = { \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
     fi

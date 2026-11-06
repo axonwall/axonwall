@@ -278,7 +278,11 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 	slog.Info("SD-WAN Prober: Re-calculating multi-path default routes...")
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	activeSnapshot := make(map[string]bool, len(p.active))
+	for k, v := range p.active {
+		activeSnapshot[k] = v
+	}
+	p.mu.Unlock()
 
 	devMap := loadInterfaceDeviceMap()
 
@@ -293,7 +297,7 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 
 		// Find the best tier that has at least one active gateway
 		for _, member := range group.Members {
-			if p.active[member.GatewayName] {
+			if activeSnapshot[member.GatewayName] {
 				if member.Tier < bestTier {
 					bestTier = member.Tier
 				}
@@ -307,7 +311,7 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 
 		// Collect all active gateways in the best tier
 		for _, member := range group.Members {
-			if member.Tier == bestTier && p.active[member.GatewayName] {
+			if member.Tier == bestTier && activeSnapshot[member.GatewayName] {
 				for _, gw := range gateways {
 					if gw.Name == member.GatewayName {
 						gwCopy := gw
@@ -322,7 +326,7 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 	} else {
 		// Fallback to gateways marked as default
 		for _, gw := range gateways {
-			if gw.IsDefault && p.active[gw.Name] {
+			if gw.IsDefault && activeSnapshot[gw.Name] {
 				activeTargets = append(activeTargets, gw)
 			}
 		}
@@ -354,7 +358,9 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 		return
 	}
 
-	cmd := exec.Command("ip", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ip", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		slog.Error("SD-WAN Prober: Failed to update default route", "error", err, "output", string(out))
 	} else {

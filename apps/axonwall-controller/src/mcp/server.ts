@@ -128,7 +128,6 @@ function loadLocalDesiredState(): DesiredState | null {
         const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
         const parsed = DesiredStateSchema.safeParse(raw);
         if (parsed.success) return parsed.data;
-        return null;
       }
     } catch {
       // continue
@@ -870,7 +869,7 @@ export async function handleMcpCallTool(
         keyName: env.key.name,
       });
 
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny('mcp:traffic:blackhole', daemonRes.data?.error || 'Daemon rejected blackhole request', req.audit);
       }
 
@@ -961,7 +960,7 @@ export async function handleMcpCallTool(
         keyName: env.key.name,
       });
 
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny('mcp:traffic:shape', daemonRes.data?.error || 'Daemon rejected traffic shaping request', req.audit);
       }
 
@@ -1020,12 +1019,24 @@ export async function handleMcpCallTool(
         return deny('mcp:traffic:redirect', sourceCheck.reason || 'Source rejected by safety guard', req.audit);
       }
 
+      if (req.originalDstIp) {
+        const origDstCheck = validateMcpTarget(req.originalDstIp, ctx, { port: req.originalDstPort });
+        if (!origDstCheck.valid) {
+          return deny('mcp:traffic:redirect', origDstCheck.reason || 'originalDstIp rejected by safety guard', req.audit);
+        }
+      }
+
       const destCheck = validateRedirectTargetAllowlist(
         req.targetDestination,
         env.key.policyLimits.allowedRedirectTargets
       );
       if (!destCheck.valid) {
         return deny('mcp:traffic:redirect', destCheck.reason || 'Redirect destination not in allowlist', req.audit);
+      }
+      const rawRedirectHost = (destCheck.normalizedTarget || req.targetDestination).replace(/^\[([^\]]+)\](?::\d+)?$/, '$1').replace(/:\d+$/, '');
+      const redirectSafetyCheck = validateMcpTarget(rawRedirectHost, ctx);
+      if (!redirectSafetyCheck.valid) {
+        return deny('mcp:traffic:redirect', redirectSafetyCheck.reason || 'Redirect target rejected by safety guard', req.audit);
       }
 
       const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
@@ -1042,7 +1053,7 @@ export async function handleMcpCallTool(
         keyName: env.key.name,
       });
 
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny('mcp:traffic:redirect', daemonRes.data?.error || 'Daemon rejected redirect request', req.audit);
       }
 
@@ -1141,7 +1152,7 @@ export async function handleMcpCallTool(
         keyName: env.key.name,
       });
 
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny('mcp:traffic:redirect', daemonRes.data?.error || 'Daemon rejected DNS sinkhole request', req.audit);
       }
 
@@ -1188,6 +1199,24 @@ export async function handleMcpCallTool(
       const reason = typeof args.reason === 'string' ? args.reason.trim() : 'Reverted via MCP';
       if (!leaseId) {
         return deny('mcp:traffic:*', 'leaseId is required');
+      }
+
+      const leasesRes = await callAxonwalldApi<{ leases?: Array<{ id?: string; kind?: string }> }>('GET', '/v1/mcp/leases');
+      if (leasesRes.ok && Array.isArray(leasesRes.data?.leases)) {
+        const targetLease = leasesRes.data.leases.find((l) => l.id === leaseId);
+        if (targetLease?.kind && !hasMcpScope(env.key, 'mcp:firewall:write')) {
+          const requiredForKind =
+            targetLease.kind === 'blackhole'
+              ? 'mcp:traffic:blackhole'
+              : targetLease.kind === 'shape'
+                ? 'mcp:traffic:shape'
+                : targetLease.kind === 'redirect' || targetLease.kind === 'dns_sinkhole'
+                  ? 'mcp:traffic:redirect'
+                  : null;
+          if (requiredForKind && !hasMcpScope(env.key, requiredForKind)) {
+            return deny(requiredForKind, `MCP key lacks required scope '${requiredForKind}' to revert ${targetLease.kind} lease '${leaseId}'`);
+          }
+        }
       }
 
       const daemonRes = await callAxonwalldApi('POST', '/v1/mcp/revert', { leaseId });
@@ -1286,42 +1315,78 @@ export async function handleMcpCallTool(
       }
 
       const { ctx } = await buildGuardContext(env.key, env.clientIp);
-      if (req.rule.action === 'block' || req.rule.action === 'reject') {
-        const checkEndpoint = (endpointVal: string | undefined, label: 'source' | 'destination'): string | null => {
-          if (!endpointVal || endpointVal === 'any') {
+      const checkEndpoint = (endpointVal: string | undefined, label: 'source' | 'destination', disallowWildcard: boolean): string | null => {
+        if (!endpointVal || endpointVal === 'any') {
+          if (disallowWildcard) {
             return `Wildcard '${endpointVal || 'any'}' ${label} on ${req.rule.action} rule exceeds blast-radius policy and is prohibited via MCP`;
           }
-          if (endpointVal === 'self' || endpointVal === 'wan_ip') {
+          return null;
+        }
+        if (endpointVal === 'self' || endpointVal === 'wan_ip') {
+          if (req.rule.action === 'block' || req.rule.action === 'reject') {
             return `Targeting appliance endpoint '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
           }
-          if (endpointVal === 'lan_net') {
+          return null;
+        }
+        if (endpointVal === 'lan_net') {
+          if (req.rule.action === 'block' || req.rule.action === 'reject') {
             return `Targeting entire '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
           }
-          if (endpointVal.startsWith('$')) {
-            const aliasName = endpointVal.slice(1);
-            const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
-            if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
-              return `Referenced alias '${endpointVal}' in ${label} does not exist or has no entries`;
-            }
-            for (const entry of aliasObj.entries) {
+          return null;
+        }
+        if (endpointVal.startsWith('$')) {
+          const aliasName = endpointVal.slice(1);
+          const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
+          if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+            return `Referenced alias '${endpointVal}' in ${label} does not exist or has no entries`;
+          }
+          for (const entry of aliasObj.entries) {
+            if (req.rule.action === 'block' || req.rule.action === 'reject') {
               const entryCheck = validateMcpTarget(entry, ctx);
               if (!entryCheck.valid) {
                 return `Alias '${endpointVal}' entry '${entry}' in ${label} rejected by guard: ${entryCheck.reason}`;
               }
             }
-            return null;
           }
+          return null;
+        }
+        if (req.rule.action === 'block' || req.rule.action === 'reject') {
           const directCheck = validateMcpTarget(endpointVal, ctx);
           if (!directCheck.valid) {
             return `Rule ${label} rejected by guard: ${directCheck.reason}`;
           }
-          return null;
-        };
+        }
+        return null;
+      };
 
-        const srcErr = checkEndpoint(req.rule.source, 'source');
+      const isBlockOrReject = req.rule.action === 'block' || req.rule.action === 'reject';
+      if (!isBlockOrReject) {
+        const srcErr = checkEndpoint(req.rule.source, 'source', false);
+        if (srcErr) return deny('mcp:firewall:write', srcErr, req.audit);
+        const dstErr = checkEndpoint(req.rule.destination, 'destination', false);
+        if (dstErr) return deny('mcp:firewall:write', dstErr, req.audit);
+        const ruleIface = (req.rule.interface || 'any').toLowerCase();
+        const isWanOrAny = ruleIface === 'wan' || ruleIface === 'any';
+        const rawPassDport = (req.rule.destinationPort || '').trim();
+        if (
+          isWanOrAny &&
+          (!req.rule.source || req.rule.source === 'any') &&
+          (!req.rule.destination || req.rule.destination === 'any' || req.rule.destination === 'self' || req.rule.destination === 'wan_ip') &&
+          (!rawPassDport || rawPassDport === 'any')
+        ) {
+          return deny(
+            'mcp:firewall:write',
+            `Unscoped wildcard pass rule on '${ruleIface}' is prohibited via MCP`,
+            req.audit,
+          );
+        }
+      }
+
+      if (isBlockOrReject) {
+        const srcErr = checkEndpoint(req.rule.source, 'source', true);
         if (srcErr) return deny('mcp:firewall:write', srcErr, req.audit);
         if (req.rule.destination && req.rule.destination !== 'any') {
-          const dstErr = checkEndpoint(req.rule.destination, 'destination');
+          const dstErr = checkEndpoint(req.rule.destination, 'destination', false);
           if (dstErr) return deny('mcp:firewall:write', dstErr, req.audit);
         }
 
@@ -1346,72 +1411,121 @@ export async function handleMcpCallTool(
             req.audit,
           );
         }
+        const validatePortToken = (part: string): string | null => {
+          if (/^\d+$/.test(part)) {
+            const portNum = Number(part);
+            if (portNum < 1 || portNum > 65535) {
+              return `Invalid destinationPort '${part}'`;
+            }
+            if (protectedPorts.includes(portNum)) {
+              return `Blocking protected port ${portNum} is prohibited`;
+            }
+            return null;
+          }
+          const rangeMatch = part.match(/^(\d+)\s*[-:]\s*(\d+)$/);
+          if (rangeMatch) {
+            const start = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
+            const end = Math.max(Number(rangeMatch[1]), Number(rangeMatch[2]));
+            if (start < 1 || end > 65535) {
+              return `Invalid port range '${part}'`;
+            }
+            const hit = protectedPorts.find((p) => p >= start && p <= end);
+            if (hit !== undefined) {
+              return `Port range ${part} overlaps protected port ${hit}`;
+            }
+            return null;
+          }
+          return `Invalid or unresolvable destinationPort token '${part}'`;
+        };
         if (rawDport && rawDport !== 'any') {
-          for (const part of rawDport.split(',').map((s) => s.trim()).filter(Boolean)) {
-            if (/^\d+$/.test(part)) {
-              const portNum = Number(part);
-              if (protectedPorts.includes(portNum)) {
-                return deny(
-                  'mcp:firewall:write',
-                  `Blocking protected port ${portNum} is prohibited`,
-                  req.audit,
-                );
-              }
-            } else {
-              const rangeMatch = part.match(/^(\d+)\s*[-:]\s*(\d+)$/);
-              if (rangeMatch) {
-                const start = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
-                const end = Math.max(Number(rangeMatch[1]), Number(rangeMatch[2]));
-                const hit = protectedPorts.find((p) => p >= start && p <= end);
-                if (hit !== undefined) {
-                  return deny(
-                    'mcp:firewall:write',
-                    `Port range ${part} overlaps protected port ${hit}`,
-                    req.audit,
-                  );
-                }
-              }
+          if (rawDport.startsWith('$')) {
+            const aliasName = rawDport.slice(1);
+            const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName && a.type === 'port');
+            if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+              return deny(
+                'mcp:firewall:write',
+                `Referenced port alias '${rawDport}' in destinationPort does not exist or has no entries`,
+                req.audit,
+              );
+            }
+            for (const entry of aliasObj.entries) {
+              const portErr = validatePortToken(entry.trim());
+              if (portErr) return deny('mcp:firewall:write', portErr, req.audit);
+            }
+          } else {
+            for (const part of rawDport.split(',').map((s) => s.trim()).filter(Boolean)) {
+              const portErr = validatePortToken(part);
+              if (portErr) return deny('mcp:firewall:write', portErr, req.audit);
             }
           }
         }
       }
 
-      state.rules.push(req.rule);
-      try {
-        fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
-      } catch {
-        // Fallback if /etc/axonwall not writable in dev
+      const previousRules = [...state.rules];
+      if (isBlockOrReject) {
+        const firstPassIdx = state.rules.findIndex((r) => r.action === 'pass');
+        if (firstPassIdx !== -1) {
+          state.rules.splice(firstPassIdx, 0, req.rule);
+        } else {
+          state.rules.push(req.rule);
+        }
+      } else {
+        state.rules.push(req.rule);
       }
-      try {
-        fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(state, null, 2), { mode: 0o600 });
-      } catch {}
-      try {
-        const yamlFiles = serializeDesiredStateToYamlFiles(state);
-        for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
-          if (fs.existsSync(dir)) {
-            for (const [fn, content] of Object.entries(yamlFiles)) {
-              fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
+
+      const persistDesiredState = (targetState: DesiredState) => {
+        try {
+          fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+        } catch {
+          // Fallback if /etc/axonwall not writable in dev
+        }
+        try {
+          fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+        } catch {}
+        try {
+          const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
+          for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+            if (fs.existsSync(dir)) {
+              for (const [fn, content] of Object.entries(yamlFiles)) {
+                fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
+              }
             }
           }
-        }
-      } catch {}
+        } catch {}
+      };
+
+      persistDesiredState(state);
 
       let applyStatus = 'staged_only';
       if (req.applyImmediately) {
         const compiled = compileNftables(state);
+        const hashInput = JSON.stringify({
+          nftScript: compiled.nftScript,
+          files: [...compiled.files]
+            .sort((a, b) => a.path.localeCompare(b.path))
+            .map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
+          reloadServices: [...compiled.reloadServices].sort(),
+        });
         const applyRes = await callAxonwalldApi('POST', '/v1/apply', {
           nftScript: compiled.nftScript,
           confirmTimeoutSeconds: req.confirmTimeoutSeconds,
           files: compiled.files,
           jobId: `mcp_apply_${Date.now()}`,
-          bundleHash: crypto.createHash('sha256').update(compiled.nftScript).digest('hex'),
+          bundleHash: crypto.createHash('sha256').update(hashInput).digest('hex'),
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds,
         });
-        applyStatus = applyRes.ok
-          ? `applied_with_commit_confirm_${req.confirmTimeoutSeconds}s`
-          : `apply_error: ${applyRes.data?.error}`;
+        if (!applyRes.ok) {
+          state.rules = previousRules;
+          persistDesiredState(state);
+          return deny(
+            'mcp:firewall:apply',
+            applyRes.data?.error || 'Daemon rejected ruleset apply; rolled back staged rule',
+            req.audit,
+          );
+        }
+        applyStatus = `applied_with_commit_confirm_${req.confirmTimeoutSeconds}s`;
       }
 
       const auditEntry = recordMcpAuditEntry({

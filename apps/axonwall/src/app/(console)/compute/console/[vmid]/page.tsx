@@ -13,7 +13,7 @@ import {
   CheckCircle2,
   RefreshCw,
 } from 'lucide-react';
-import { vmPowerAction } from '@/server/virt';
+import { vmPowerAction, containerPowerAction } from '@/server/virt';
 
 export default function WorkloadConsolePage() {
   const params = useParams();
@@ -21,6 +21,7 @@ export default function WorkloadConsolePage() {
 
   const vmid = Number(params?.vmid || 100);
   const initialType = (searchParams?.get('type') || 'vnc') as 'vnc' | 'serial';
+  const workloadKind = (searchParams?.get('kind') || (initialType === 'serial' && vmid >= 200 ? 'lxc' : 'vm')) as 'vm' | 'lxc';
 
   const [consoleType, setConsoleType] = useState<'vnc' | 'serial'>(initialType);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
@@ -107,8 +108,13 @@ export default function WorkloadConsolePage() {
 
   const handlePower = async (action: 'stop' | 'reset', force = false) => {
     try {
-      await vmPowerAction(vmid, action, force);
-      setLogMessages((prev) => [...prev, `[Action] VM ${vmid} ${action} command sent.`]);
+      if (workloadKind === 'lxc') {
+        const res = await containerPowerAction(vmid, action === 'reset' ? 'reboot' : 'stop', force);
+        setLogMessages((prev) => [...prev, `[Action] ${res.message}`]);
+      } else {
+        const res = await vmPowerAction(vmid, action, force);
+        setLogMessages((prev) => [...prev, `[Action] ${res.message}`]);
+      }
     } catch (err: any) {
       setLogMessages((prev) => [...prev, `[Error] ${err?.message || 'Power action failed'}`]);
     }

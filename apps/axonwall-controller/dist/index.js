@@ -2043,8 +2043,8 @@ var require_pushgateway = __commonJS({
       const gatewayUrlParsed = url2.parse(this.gatewayUrl);
       const gatewayUrlPath = gatewayUrlParsed.pathname && gatewayUrlParsed.pathname !== "/" ? gatewayUrlParsed.pathname : "";
       const jobPath = job ? `/job/${encodeURIComponent(job)}${generateGroupings(groupings)}` : "";
-      const path5 = `${gatewayUrlPath}/metrics${jobPath}`;
-      const target = url2.resolve(this.gatewayUrl, path5);
+      const path6 = `${gatewayUrlPath}/metrics${jobPath}`;
+      const target = url2.resolve(this.gatewayUrl, path6);
       const requestParams = url2.parse(target);
       const httpModule = isHttps(requestParams.href) ? https2 : http3;
       const options = Object.assign(requestParams, this.requestOptions, {
@@ -4865,17 +4865,17 @@ var require_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    function visit_(key, node2, visitor, path5) {
-      const ctrl = callVisitor(key, node2, visitor, path5);
+    function visit_(key, node2, visitor, path6) {
+      const ctrl = callVisitor(key, node2, visitor, path6);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path5, ctrl);
-        return visit_(key, ctrl, visitor, path5);
+        replaceNode(key, path6, ctrl);
+        return visit_(key, ctrl, visitor, path6);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path5 = Object.freeze(path5.concat(node2));
+          path6 = Object.freeze(path6.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = visit_(i, node2.items[i], visitor, path5);
+            const ci = visit_(i, node2.items[i], visitor, path6);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -4886,13 +4886,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path5 = Object.freeze(path5.concat(node2));
-          const ck = visit_("key", node2.key, visitor, path5);
+          path6 = Object.freeze(path6.concat(node2));
+          const ck = visit_("key", node2.key, visitor, path6);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = visit_("value", node2.value, visitor, path5);
+          const cv = visit_("value", node2.value, visitor, path6);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -4913,17 +4913,17 @@ var require_visit = __commonJS({
     visitAsync.BREAK = BREAK;
     visitAsync.SKIP = SKIP;
     visitAsync.REMOVE = REMOVE;
-    async function visitAsync_(key, node2, visitor, path5) {
-      const ctrl = await callVisitor(key, node2, visitor, path5);
+    async function visitAsync_(key, node2, visitor, path6) {
+      const ctrl = await callVisitor(key, node2, visitor, path6);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path5, ctrl);
-        return visitAsync_(key, ctrl, visitor, path5);
+        replaceNode(key, path6, ctrl);
+        return visitAsync_(key, ctrl, visitor, path6);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path5 = Object.freeze(path5.concat(node2));
+          path6 = Object.freeze(path6.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = await visitAsync_(i, node2.items[i], visitor, path5);
+            const ci = await visitAsync_(i, node2.items[i], visitor, path6);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -4934,13 +4934,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path5 = Object.freeze(path5.concat(node2));
-          const ck = await visitAsync_("key", node2.key, visitor, path5);
+          path6 = Object.freeze(path6.concat(node2));
+          const ck = await visitAsync_("key", node2.key, visitor, path6);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = await visitAsync_("value", node2.value, visitor, path5);
+          const cv = await visitAsync_("value", node2.value, visitor, path6);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -4967,23 +4967,23 @@ var require_visit = __commonJS({
       }
       return visitor;
     }
-    function callVisitor(key, node2, visitor, path5) {
+    function callVisitor(key, node2, visitor, path6) {
       if (typeof visitor === "function")
-        return visitor(key, node2, path5);
+        return visitor(key, node2, path6);
       if (identity.isMap(node2))
-        return visitor.Map?.(key, node2, path5);
+        return visitor.Map?.(key, node2, path6);
       if (identity.isSeq(node2))
-        return visitor.Seq?.(key, node2, path5);
+        return visitor.Seq?.(key, node2, path6);
       if (identity.isPair(node2))
-        return visitor.Pair?.(key, node2, path5);
+        return visitor.Pair?.(key, node2, path6);
       if (identity.isScalar(node2))
-        return visitor.Scalar?.(key, node2, path5);
+        return visitor.Scalar?.(key, node2, path6);
       if (identity.isAlias(node2))
-        return visitor.Alias?.(key, node2, path5);
+        return visitor.Alias?.(key, node2, path6);
       return void 0;
     }
-    function replaceNode(key, path5, node2) {
-      const parent = path5[path5.length - 1];
+    function replaceNode(key, path6, node2) {
+      const parent = path6[path6.length - 1];
       if (identity.isCollection(parent)) {
         parent.items[key] = node2;
       } else if (identity.isPair(parent)) {
@@ -5595,10 +5595,10 @@ var require_Collection = __commonJS({
     var createNode = require_createNode();
     var identity = require_identity();
     var Node = require_Node();
-    function collectionFromPath(schema, path5, value) {
+    function collectionFromPath(schema, path6, value) {
       let v = value;
-      for (let i = path5.length - 1; i >= 0; --i) {
-        const k = path5[i];
+      for (let i = path6.length - 1; i >= 0; --i) {
+        const k = path6[i];
         if (typeof k === "number" && Number.isInteger(k) && k >= 0) {
           const a = [];
           a[k] = v;
@@ -5617,7 +5617,7 @@ var require_Collection = __commonJS({
         sourceObjects: /* @__PURE__ */ new Map()
       });
     }
-    var isEmptyPath = (path5) => path5 == null || typeof path5 === "object" && !!path5[Symbol.iterator]().next().done;
+    var isEmptyPath = (path6) => path6 == null || typeof path6 === "object" && !!path6[Symbol.iterator]().next().done;
     var Collection = class extends Node.NodeBase {
       constructor(type, schema) {
         super(type);
@@ -5647,11 +5647,11 @@ var require_Collection = __commonJS({
        * be a Pair instance or a `{ key, value }` object, which may not have a key
        * that already exists in the map.
        */
-      addIn(path5, value) {
-        if (isEmptyPath(path5))
+      addIn(path6, value) {
+        if (isEmptyPath(path6))
           this.add(value);
         else {
-          const [key, ...rest] = path5;
+          const [key, ...rest] = path6;
           const node2 = this.get(key, true);
           if (identity.isCollection(node2))
             node2.addIn(rest, value);
@@ -5665,8 +5665,8 @@ var require_Collection = __commonJS({
        * Removes a value from the collection.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path5) {
-        const [key, ...rest] = path5;
+      deleteIn(path6) {
+        const [key, ...rest] = path6;
         if (rest.length === 0)
           return this.delete(key);
         const node2 = this.get(key, true);
@@ -5680,8 +5680,8 @@ var require_Collection = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path5, keepScalar) {
-        const [key, ...rest] = path5;
+      getIn(path6, keepScalar) {
+        const [key, ...rest] = path6;
         const node2 = this.get(key, true);
         if (rest.length === 0)
           return !keepScalar && identity.isScalar(node2) ? node2.value : node2;
@@ -5699,8 +5699,8 @@ var require_Collection = __commonJS({
       /**
        * Checks if the collection includes a value with the key `key`.
        */
-      hasIn(path5) {
-        const [key, ...rest] = path5;
+      hasIn(path6) {
+        const [key, ...rest] = path6;
         if (rest.length === 0)
           return this.has(key);
         const node2 = this.get(key, true);
@@ -5710,8 +5710,8 @@ var require_Collection = __commonJS({
        * Sets a value in this collection. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path5, value) {
-        const [key, ...rest] = path5;
+      setIn(path6, value) {
+        const [key, ...rest] = path6;
         if (rest.length === 0) {
           this.set(key, value);
         } else {
@@ -8226,9 +8226,9 @@ var require_Document = __commonJS({
           this.contents.add(value);
       }
       /** Adds a value to the document. */
-      addIn(path5, value) {
+      addIn(path6, value) {
         if (assertCollection(this.contents))
-          this.contents.addIn(path5, value);
+          this.contents.addIn(path6, value);
       }
       /**
        * Create a new `Alias` node, ensuring that the target `node` has the required anchor.
@@ -8303,14 +8303,14 @@ var require_Document = __commonJS({
        * Removes a value from the document.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path5) {
-        if (Collection.isEmptyPath(path5)) {
+      deleteIn(path6) {
+        if (Collection.isEmptyPath(path6)) {
           if (this.contents == null)
             return false;
           this.contents = null;
           return true;
         }
-        return assertCollection(this.contents) ? this.contents.deleteIn(path5) : false;
+        return assertCollection(this.contents) ? this.contents.deleteIn(path6) : false;
       }
       /**
        * Returns item at `key`, or `undefined` if not found. By default unwraps
@@ -8325,10 +8325,10 @@ var require_Document = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path5, keepScalar) {
-        if (Collection.isEmptyPath(path5))
+      getIn(path6, keepScalar) {
+        if (Collection.isEmptyPath(path6))
           return !keepScalar && identity.isScalar(this.contents) ? this.contents.value : this.contents;
-        return identity.isCollection(this.contents) ? this.contents.getIn(path5, keepScalar) : void 0;
+        return identity.isCollection(this.contents) ? this.contents.getIn(path6, keepScalar) : void 0;
       }
       /**
        * Checks if the document includes a value with the key `key`.
@@ -8339,10 +8339,10 @@ var require_Document = __commonJS({
       /**
        * Checks if the document includes a value at `path`.
        */
-      hasIn(path5) {
-        if (Collection.isEmptyPath(path5))
+      hasIn(path6) {
+        if (Collection.isEmptyPath(path6))
           return this.contents !== void 0;
-        return identity.isCollection(this.contents) ? this.contents.hasIn(path5) : false;
+        return identity.isCollection(this.contents) ? this.contents.hasIn(path6) : false;
       }
       /**
        * Sets a value in this document. For `!!set`, `value` needs to be a
@@ -8359,13 +8359,13 @@ var require_Document = __commonJS({
        * Sets a value in this document. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path5, value) {
-        if (Collection.isEmptyPath(path5)) {
+      setIn(path6, value) {
+        if (Collection.isEmptyPath(path6)) {
           this.contents = value;
         } else if (this.contents == null) {
-          this.contents = Collection.collectionFromPath(this.schema, Array.from(path5), value);
+          this.contents = Collection.collectionFromPath(this.schema, Array.from(path6), value);
         } else if (assertCollection(this.contents)) {
-          this.contents.setIn(path5, value);
+          this.contents.setIn(path6, value);
         }
       }
       /**
@@ -10326,9 +10326,9 @@ var require_cst_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    visit2.itemAtPath = (cst, path5) => {
+    visit2.itemAtPath = (cst, path6) => {
       let item = cst;
-      for (const [field, index] of path5) {
+      for (const [field, index] of path6) {
         const tok = item?.[field];
         if (tok && "items" in tok) {
           item = tok.items[index];
@@ -10337,23 +10337,23 @@ var require_cst_visit = __commonJS({
       }
       return item;
     };
-    visit2.parentCollection = (cst, path5) => {
-      const parent = visit2.itemAtPath(cst, path5.slice(0, -1));
-      const field = path5[path5.length - 1][0];
+    visit2.parentCollection = (cst, path6) => {
+      const parent = visit2.itemAtPath(cst, path6.slice(0, -1));
+      const field = path6[path6.length - 1][0];
       const coll = parent?.[field];
       if (coll && "items" in coll)
         return coll;
       throw new Error("Parent collection not found");
     };
-    function _visit(path5, item, visitor) {
-      let ctrl = visitor(item, path5);
+    function _visit(path6, item, visitor) {
+      let ctrl = visitor(item, path6);
       if (typeof ctrl === "symbol")
         return ctrl;
       for (const field of ["key", "value"]) {
         const token = item[field];
         if (token && "items" in token) {
           for (let i = 0; i < token.items.length; ++i) {
-            const ci = _visit(Object.freeze(path5.concat([[field, i]])), token.items[i], visitor);
+            const ci = _visit(Object.freeze(path6.concat([[field, i]])), token.items[i], visitor);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -10364,10 +10364,10 @@ var require_cst_visit = __commonJS({
             }
           }
           if (typeof ctrl === "function" && field === "key")
-            ctrl = ctrl(item, path5);
+            ctrl = ctrl(item, path6);
         }
       }
-      return typeof ctrl === "function" ? ctrl(item, path5) : ctrl;
+      return typeof ctrl === "function" ? ctrl(item, path6) : ctrl;
     }
     exports.visit = visit2;
   }
@@ -16621,10 +16621,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path5) {
-  if (!path5)
+function getElementAtPath(obj, path6) {
+  if (!path6)
     return obj;
-  return path5.reduce((acc, key) => acc?.[key], obj);
+  return path6.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16964,11 +16964,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path5, issues) {
+function prefixIssues(path6, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path5);
+    iss.path.unshift(path6);
     return iss;
   });
 }
@@ -17430,16 +17430,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path5 = []) => {
+  const processError = (error63, path6 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path5, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path6, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path6, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path6, ...issue2.path]);
       } else {
-        const fullpath = [...path5, ...issue2.path];
+        const fullpath = [...path6, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -17478,17 +17478,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path5 = []) => {
+  const processError = (error63, path6 = []) => {
     var _a3;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path5, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path6, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path6, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path5, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path6, ...issue2.path]);
       } else {
-        const fullpath = [...path5, ...issue2.path];
+        const fullpath = [...path6, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -17527,8 +17527,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path5 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path5) {
+  const path6 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path6) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -34666,13 +34666,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path5 = ref.slice(1).split("/").filter(Boolean);
-  if (path5.length === 0) {
+  const path6 = ref.slice(1).split("/").filter(Boolean);
+  if (path6.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path5[0] === defsKey) {
-    const key = path5[1] === void 0 ? void 0 : decodeJSONPointerSegment(path5[1]);
+  if (path6[0] === defsKey) {
+    const key = path6[1] === void 0 ? void 0 : decodeJSONPointerSegment(path6[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -41015,7 +41015,7 @@ function compileNftables(state) {
         haRole: effectiveRole,
         peerIp: effectivePeer,
         haPeerAddress: effectivePeer,
-        syncPort: 8443,
+        syncPort: state.ha?.sqliteSync?.listenPort ?? state.ha?.peerPort ?? 9876,
         authToken: effectiveSecret,
         haSharedSecret: effectiveSecret,
         autoJoinHaPeer: state.k3s?.autoJoinHaPeer !== false,
@@ -41328,28 +41328,52 @@ function compileNftables(state) {
     lines.push(...geoipCompiled.nftSetDefinitions);
     lines.push("");
   }
+  const emittedSets = /* @__PURE__ */ new Map();
   if (state.aliases.length > 0) {
     lines.push("  # Aliases & Dynamic Sets");
     for (const alias of state.aliases) {
       if (!alias.enabled || alias.entries.length === 0)
         continue;
       const setName = `set_${sanitizeIdentifier(alias.name)}`;
+      const rawExpanded = [];
+      for (const rawEntry of alias.entries) {
+        const trimmed = rawEntry.trim();
+        if (!trimmed)
+          continue;
+        if (alias.type === "geoip" && COUNTRY_CIDR_TABLE[trimmed.toUpperCase()]) {
+          rawExpanded.push(...COUNTRY_CIDR_TABLE[trimmed.toUpperCase()]);
+        } else {
+          rawExpanded.push(trimmed);
+        }
+      }
       let setType = "ipv4_addr";
+      let validEntries = [];
       if (alias.type === "port") {
         setType = "inet_service";
+        validEntries = rawExpanded.filter((e) => isValidPortRange(e));
       } else if (alias.type === "mac") {
         setType = "ether_addr";
-      } else if (alias.type === "network" || alias.type === "host") {
-        setType = alias.entries.some((e) => e.includes(":")) ? "ipv6_addr" : "ipv4_addr";
+        validEntries = rawExpanded.filter((e) => isValidMAC(e));
+      } else {
+        const hasV6 = rawExpanded.some((e) => e.includes(":") && (isValidIPv62(e) || isValidCIDR(e)));
+        setType = hasV6 ? "ipv6_addr" : "ipv4_addr";
+        if (hasV6) {
+          validEntries = rawExpanded.filter((e) => e.includes(":") && (isValidIPv62(e) || isValidCIDR(e)));
+        } else {
+          validEntries = rawExpanded.filter((e) => !e.includes(":") && (isValidIPv4(e) || isValidCIDR(e)));
+        }
       }
-      const elements = alias.entries.join(", ");
+      if (validEntries.length === 0)
+        continue;
+      const elements = validEntries.join(", ");
       lines.push(`  set ${setName} {`);
       lines.push(`    type ${setType};`);
-      if (alias.type === "network" || alias.type === "host" || alias.type === "port" || alias.type === "urltable") {
+      if (alias.type === "network" || alias.type === "host" || alias.type === "port" || alias.type === "urltable" || alias.type === "geoip" || alias.type === "asn") {
         lines.push("    flags interval;");
       }
       lines.push(`    elements = { ${elements} };`);
       lines.push("  }");
+      emittedSets.set(setName, { setType, isV6: setType === "ipv6_addr" });
     }
     lines.push("");
   }
@@ -41362,10 +41386,12 @@ function compileNftables(state) {
     lines.push("  }");
     lines.push("");
   }
+  const sortedNat = [...state.nat].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
   lines.push("  chain prerouting {");
   lines.push("    type nat hook prerouting priority dstnat - 10; policy accept;");
-  if (state.suricata?.tlsDecryption?.enabled) {
-    const tlsConfig = state.suricata.tlsDecryption;
+  const tlsDecryption = state.tlsDecryption?.enabled ? state.tlsDecryption : state.suricata?.tlsDecryption;
+  if (tlsDecryption?.enabled) {
+    const tlsConfig = tlsDecryption;
     lines.push(`    # TLS Decryption Interception`);
     for (const iface of state.interfaces) {
       if (iface.enabled && inferInterfaceRole(iface) !== "wan" && isValidDevice(iface.device)) {
@@ -41374,7 +41400,7 @@ function compileNftables(state) {
       }
     }
   }
-  for (const nat of state.nat) {
+  for (const nat of sortedNat) {
     if (!nat.enabled || nat.type !== "dnat" || !nat.targetIp)
       continue;
     if (/[;\r\n#{}'"]/.test(nat.targetIp))
@@ -41382,6 +41408,25 @@ function compileNftables(state) {
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
     if (!isValidDevice(ifaceDev))
       continue;
+    if (nat.sourcePort?.startsWith("$") && !emittedSets.has(`set_${sanitizeIdentifier(nat.sourcePort.slice(1))}`))
+      continue;
+    if (nat.destinationPort?.startsWith("$") && !emittedSets.has(`set_${sanitizeIdentifier(nat.destinationPort.slice(1))}`))
+      continue;
+    const addrClauses = [];
+    if (nat.source && nat.source !== "any") {
+      const srcClause = resolveEndpointClause(nat.source, "saddr", state.interfaces, state.aliases, emittedSets);
+      if (srcClause === null)
+        continue;
+      if (srcClause)
+        addrClauses.push(srcClause);
+    }
+    if (nat.destination && nat.destination !== "any" && nat.destination !== "wan_ip") {
+      const dstClause = resolveEndpointClause(nat.destination, "daddr", state.interfaces, state.aliases, emittedSets);
+      if (dstClause === null)
+        continue;
+      if (dstClause)
+        addrClauses.push(dstClause);
+    }
     const hasDport = Boolean(nat.destinationPort && nat.destinationPort !== "any");
     const hasSport = Boolean(nat.sourcePort && nat.sourcePort !== "any");
     let protoMatch = "";
@@ -41407,7 +41452,8 @@ function compileNftables(state) {
     const family = isV6 ? "ip6" : "ip";
     const formattedIp = isV6 && hasTargetPort ? `[${nat.targetIp}]` : nat.targetIp;
     const dnatTarget = hasTargetPort ? `${formattedIp}:${nat.targetPort}` : formattedIp;
-    lines.push(`    iifname "${ifaceDev}" ${protoMatch} dnat ${family} to ${dnatTarget}`);
+    const prefixMatch = [`iifname "${ifaceDev}"`, ...addrClauses, protoMatch].filter(Boolean).join(" ");
+    lines.push(`    ${prefixMatch} dnat ${family} to ${dnatTarget}`);
   }
   lines.push("  }");
   lines.push("");
@@ -41504,20 +41550,44 @@ function compileNftables(state) {
   lines.push("");
   lines.push("  chain postrouting {");
   lines.push("    type nat hook postrouting priority srcnat; policy accept;");
-  for (const nat of state.nat) {
+  for (const nat of sortedNat) {
     if (!nat.enabled)
       continue;
     const ifaceDev = ifDeviceMap.get(nat.interface) || nat.interface;
     if (!isValidDevice(ifaceDev))
       continue;
+    if (nat.type !== "masquerade" && !(nat.type === "snat" && nat.targetIp))
+      continue;
+    const matchClauses = [`oifname "${ifaceDev}"`];
+    if (nat.source && nat.source !== "any") {
+      const srcClause = resolveEndpointClause(nat.source, "saddr", state.interfaces, state.aliases, emittedSets);
+      if (srcClause === null)
+        continue;
+      if (srcClause)
+        matchClauses.push(srcClause);
+    }
+    if (nat.destination && nat.destination !== "any" && nat.destination !== "wan_ip") {
+      const dstClause = resolveEndpointClause(nat.destination, "daddr", state.interfaces, state.aliases, emittedSets);
+      if (dstClause === null)
+        continue;
+      if (dstClause)
+        matchClauses.push(dstClause);
+    }
     if (nat.type === "masquerade") {
-      lines.push(`    oifname "${ifaceDev}" masquerade comment "outbound-nat"`);
+      lines.push(`    ${matchClauses.join(" ")} masquerade comment "outbound-nat"`);
     } else if (nat.type === "snat" && nat.targetIp) {
-      const family = nat.targetIp.includes(":") ? "ip6" : "ip";
-      lines.push(`    oifname "${ifaceDev}" snat ${family} to ${nat.targetIp} comment "outbound-snat"`);
+      let resolvedTarget = nat.targetIp;
+      if (resolvedTarget === "wan_ip") {
+        const wanIface = state.interfaces.find((i) => i.enabled && (i.name === nat.interface || inferInterfaceRole(i) === "wan") && i.ipv4Address);
+        resolvedTarget = wanIface?.ipv4Address?.split("/")[0] || "";
+      }
+      if (!resolvedTarget || /[;\r\n#{}'"]/.test(resolvedTarget))
+        continue;
+      const family = resolvedTarget.includes(":") ? "ip6" : "ip";
+      lines.push(`    ${matchClauses.join(" ")} snat ${family} to ${resolvedTarget} comment "outbound-snat"`);
     }
   }
-  if (!state.nat.some((n) => n.type === "masquerade" || n.type === "snat")) {
+  if (!state.nat.some((n) => n.enabled && (n.type === "masquerade" || n.type === "snat"))) {
     const gatewayIfaces = new Set((state.gateways || []).filter((g) => g.enabled).map((g) => g.interface));
     for (const iface of state.interfaces) {
       if (iface.enabled && inferInterfaceRole(iface) === "wan") {
@@ -41547,7 +41617,7 @@ function compileNftables(state) {
     lines.push(`  chain input_${safeChainName} {`);
     for (const rule of inputRules) {
       if (rule.direction === "in") {
-        const stmt = formatRuleStatement(rule, state.aliases);
+        const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
         if (stmt)
           lines.push(`    ${stmt}`);
       }
@@ -41556,7 +41626,7 @@ function compileNftables(state) {
     lines.push("");
     lines.push(`  chain forward_${safeChainName} {`);
     for (const rule of forwardRules) {
-      const stmt = formatRuleStatement(rule, state.aliases);
+      const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
       if (stmt)
         lines.push(`    ${stmt}`);
     }
@@ -41568,7 +41638,7 @@ function compileNftables(state) {
     lines.push(`  chain input_tailscale {`);
     for (const rule of tsRules) {
       if (rule.direction === "in") {
-        const stmt = formatRuleStatement(rule, state.aliases);
+        const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
         if (stmt)
           lines.push(`    ${stmt}`);
       }
@@ -41577,7 +41647,7 @@ function compileNftables(state) {
     lines.push("");
     lines.push(`  chain forward_tailscale {`);
     for (const rule of tsRules) {
-      const stmt = formatRuleStatement(rule, state.aliases);
+      const stmt = formatRuleStatement(rule, state.aliases, state.interfaces, emittedSets);
       if (stmt)
         lines.push(`    ${stmt}`);
     }
@@ -41788,6 +41858,66 @@ function compileSatelliteNftables(node2) {
     warnings
   };
 }
+function ipv4ToNetworkCidr(addrOrCidr) {
+  const parts = addrOrCidr.trim().split("/");
+  const ip = parts[0];
+  const parsedPrefix = Number.parseInt(parts[1] ?? "", 10);
+  const prefix = Number.isNaN(parsedPrefix) ? 24 : Math.max(0, Math.min(32, parsedPrefix));
+  if (!isValidIPv4(ip))
+    return "192.168.1.0/24";
+  const octets = ip.split(".").map((o) => Number.parseInt(o, 10));
+  const num = (octets[0] << 24 | octets[1] << 16 | octets[2] << 8 | octets[3]) >>> 0;
+  const mask = prefix === 0 ? 0 : ~0 << 32 - prefix >>> 0;
+  const net2 = (num & mask) >>> 0;
+  const netIp = `${net2 >>> 24 & 255}.${net2 >>> 16 & 255}.${net2 >>> 8 & 255}.${net2 & 255}`;
+  return `${netIp}/${prefix}`;
+}
+function resolveEndpointClause(endpoint, dir, interfaces, aliases, emittedSets) {
+  if (!endpoint || endpoint === "any")
+    return "";
+  if (endpoint.startsWith("$")) {
+    const rawName = endpoint.slice(1);
+    const aliasName = sanitizeIdentifier(rawName);
+    const setName = `set_${aliasName}`;
+    if (emittedSets) {
+      const setInfo = emittedSets.get(setName);
+      if (!setInfo)
+        return null;
+      if (setInfo.setType === "ether_addr") {
+        return `ether ${dir} @${setName}`;
+      }
+      return `${setInfo.isV6 ? "ip6" : "ip"} ${dir} @${setName}`;
+    }
+    const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
+    if (!matchedAlias || !matchedAlias.enabled || matchedAlias.entries.length === 0)
+      return null;
+    if (matchedAlias.type === "mac") {
+      return `ether ${dir} @${setName}`;
+    }
+    const isV6 = matchedAlias.entries.some((e) => e.includes(":"));
+    return `${isV6 ? "ip6" : "ip"} ${dir} @${setName}`;
+  }
+  if (endpoint === "wan_ip") {
+    const wanIface = interfaces.find((i) => i.enabled && inferInterfaceRole(i) === "wan" && i.ipv4Address) || interfaces.find((i) => inferInterfaceRole(i) === "wan" && i.ipv4Address);
+    const wanIp = wanIface?.ipv4Address?.split("/")[0]?.trim();
+    if (wanIp && isValidIPv4(wanIp)) {
+      return `ip ${dir} ${wanIp}`;
+    }
+    return `fib ${dir} type local`;
+  }
+  if (endpoint === "self") {
+    return `fib ${dir} type local`;
+  }
+  if (endpoint === "lan_net") {
+    const lanIface = interfaces.find((i) => i.enabled && i.name === "lan" && i.ipv4Address) || interfaces.find((i) => i.enabled && inferInterfaceRole(i) === "lan" && i.ipv4Address) || interfaces.find((i) => inferInterfaceRole(i) === "lan" && i.ipv4Address);
+    const lanCidr = lanIface?.ipv4Address ? ipv4ToNetworkCidr(lanIface.ipv4Address) : "192.168.1.0/24";
+    return `ip ${dir} ${lanCidr}`;
+  }
+  if (endpoint.includes(":")) {
+    return `ip6 ${dir} ${endpoint}`;
+  }
+  return `ip ${dir} ${endpoint}`;
+}
 function formatPort(val) {
   if (val.startsWith("$"))
     return `@set_${sanitizeIdentifier(val.slice(1))}`;
@@ -41795,44 +41925,34 @@ function formatPort(val) {
     return `{ ${val} }`;
   return val;
 }
-function formatRuleStatement(rule, aliases) {
+function formatRuleStatement(rule, aliases, interfaces = [], emittedSets) {
   const parts = [];
   if (rule.source && (!isValidFirewallEndpoint(rule.source) || /[;\r\n#{}'"]/.test(rule.source)) || rule.destination && (!isValidFirewallEndpoint(rule.destination) || /[;\r\n#{}'"]/.test(rule.destination)) || rule.sourcePort && /[;\r\n#{}'"]/.test(rule.sourcePort) || rule.destinationPort && /[;\r\n#{}'"]/.test(rule.destinationPort)) {
     return "";
   }
+  if (rule.sourcePort?.startsWith("$")) {
+    const setName = `set_${sanitizeIdentifier(rule.sourcePort.slice(1))}`;
+    if (emittedSets && !emittedSets.has(setName))
+      return "";
+  }
+  if (rule.destinationPort?.startsWith("$")) {
+    const setName = `set_${sanitizeIdentifier(rule.destinationPort.slice(1))}`;
+    if (emittedSets && !emittedSets.has(setName))
+      return "";
+  }
   if (rule.source && rule.source !== "any") {
-    if (rule.source.startsWith("$")) {
-      const rawName = rule.source.slice(1);
-      const aliasName = sanitizeIdentifier(rawName);
-      const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      if (matchedAlias?.type === "mac") {
-        parts.push(`ether saddr @set_${aliasName}`);
-      } else {
-        const isV6 = matchedAlias?.entries.some((e) => e.includes(":"));
-        parts.push(`${isV6 ? "ip6" : "ip"} saddr @set_${aliasName}`);
-      }
-    } else if (rule.source.includes(":")) {
-      parts.push(`ip6 saddr ${rule.source}`);
-    } else {
-      parts.push(`ip saddr ${rule.source}`);
-    }
+    const srcClause = resolveEndpointClause(rule.source, "saddr", interfaces, aliases, emittedSets);
+    if (srcClause === null)
+      return "";
+    if (srcClause)
+      parts.push(srcClause);
   }
   if (rule.destination && rule.destination !== "any") {
-    if (rule.destination.startsWith("$")) {
-      const rawName = rule.destination.slice(1);
-      const aliasName = sanitizeIdentifier(rawName);
-      const matchedAlias = aliases.find((a) => a.name.toLowerCase() === rawName.toLowerCase());
-      if (matchedAlias?.type === "mac") {
-        parts.push(`ether daddr @set_${aliasName}`);
-      } else {
-        const isV6 = matchedAlias?.entries.some((e) => e.includes(":"));
-        parts.push(`${isV6 ? "ip6" : "ip"} daddr @set_${aliasName}`);
-      }
-    } else if (rule.destination.includes(":")) {
-      parts.push(`ip6 daddr ${rule.destination}`);
-    } else {
-      parts.push(`ip daddr ${rule.destination}`);
-    }
+    const dstClause = resolveEndpointClause(rule.destination, "daddr", interfaces, aliases, emittedSets);
+    if (dstClause === null)
+      return "";
+    if (dstClause)
+      parts.push(dstClause);
   }
   const hasSport = Boolean(rule.sourcePort && rule.sourcePort !== "any");
   const hasDport = Boolean(rule.destinationPort && rule.destinationPort !== "any");
@@ -42056,7 +42176,7 @@ import * as http2 from "node:http";
 import * as https from "node:https";
 import * as fs7 from "node:fs";
 import * as net from "node:net";
-import * as path4 from "node:path";
+import * as path5 from "node:path";
 import * as os from "node:os";
 import * as child_process from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -43120,7 +43240,7 @@ async function createUser(name) {
 }
 async function createPreAuthKey(user, reusable, ephemeral, expiration) {
   let userId = user;
-  if (typeof user === "string" && isNaN(Number(user))) {
+  if (typeof user === "string" && !/^\d+$/.test(user.trim())) {
     const safeUserName = assertSafeIdentifier(user, "User name");
     const users = await listUsers();
     const found = users.find((u) => u.name === safeUserName);
@@ -43135,12 +43255,17 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
   const args = ["preauthkeys", "create", "--user", String(safeUserId), "-o", "json"];
   if (reusable) args.push("--reusable");
   if (ephemeral) args.push("--ephemeral");
-  if (expiration) {
-    const ms = new Date(expiration).getTime() - Date.now();
-    if (ms > 0) {
-      const hours = Math.max(1, Math.round(ms / (1e3 * 60 * 60)));
-      args.push("--expiration", `${hours}h`);
+  if (expiration !== void 0 && expiration !== "") {
+    const parsedTime = new Date(expiration).getTime();
+    if (Number.isNaN(parsedTime)) {
+      throw new Error("Invalid expiration timestamp");
     }
+    const ms = parsedTime - Date.now();
+    if (ms <= 0) {
+      throw new Error("Expiration timestamp must be in the future");
+    }
+    const hours = Math.max(1, Math.round(ms / (1e3 * 60 * 60)));
+    args.push("--expiration", `${hours}h`);
   }
   const data = await runHeadscale(args);
   return {
@@ -43156,13 +43281,19 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
 // src/mcp/authz.ts
 import * as crypto2 from "node:crypto";
 import * as fs4 from "node:fs";
-import * as path2 from "node:path";
+import * as path3 from "node:path";
 
 // src/mcp/lockfile.ts
 import * as fs3 from "node:fs";
+import * as path2 from "node:path";
 function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
   const deadline = Date.now() + timeoutMs;
+  const staleThresholdMs = Math.min(Math.max(1e3, timeoutMs - 500), 1e4);
   const waiter = new Int32Array(new SharedArrayBuffer(4));
+  const lockDir = path2.dirname(lockPath);
+  if (!fs3.existsSync(lockDir)) {
+    fs3.mkdirSync(lockDir, { recursive: true, mode: 509 });
+  }
   for (; ; ) {
     try {
       const fd = fs3.openSync(lockPath, "wx", 432);
@@ -43188,7 +43319,20 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
       let stale = false;
       try {
         const stat = fs3.statSync(lockPath);
-        stale = Date.now() - stat.mtimeMs > 3e4;
+        stale = Date.now() - stat.mtimeMs > staleThresholdMs;
+        if (!stale && stat.size > 0) {
+          const raw = fs3.readFileSync(lockPath, "utf8");
+          const parsed = JSON.parse(raw);
+          if (typeof parsed?.pid === "number" && parsed.pid > 0 && parsed.pid !== process.pid) {
+            try {
+              process.kill(parsed.pid, 0);
+            } catch (killErr) {
+              if (killErr?.code === "ESRCH") {
+                stale = true;
+              }
+            }
+          }
+        }
       } catch {
       }
       if (stale) {
@@ -43213,7 +43357,7 @@ function resolveMcpKeysPath() {
     return process.env.AXONWALL_MCP_KEYS_PATH;
   }
   const primaryDir = "/var/lib/axonwall";
-  const primaryFile = path2.join(primaryDir, "mcp-keys.json");
+  const primaryFile = path3.join(primaryDir, "mcp-keys.json");
   try {
     if (fs4.existsSync(primaryFile)) {
       fs4.accessSync(primaryFile, fs4.constants.R_OK);
@@ -43268,7 +43412,7 @@ function saveMcpKeysInternal(keys) {
   ];
   for (const keysPath of Array.from(new Set(targetPaths))) {
     try {
-      fs4.mkdirSync(path2.dirname(keysPath), { recursive: true, mode: 509 });
+      fs4.mkdirSync(path3.dirname(keysPath), { recursive: true, mode: 509 });
       const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
       fs4.writeFileSync(tmpPath, serialized, { mode: 432 });
       try {
@@ -43304,7 +43448,7 @@ function writeLastUsedSidecar(keysPath, keyId, entry) {
     const sidecarPath = `${keysPath}.lastused.json`;
     const all = readLastUsedSidecar(keysPath);
     all[keyId] = entry;
-    fs4.mkdirSync(path2.dirname(sidecarPath), { recursive: true, mode: 509 });
+    fs4.mkdirSync(path3.dirname(sidecarPath), { recursive: true, mode: 509 });
     const tmpPath = `${sidecarPath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
     fs4.writeFileSync(tmpPath, JSON.stringify(all, null, 2), { mode: 432 });
     fs4.renameSync(tmpPath, sidecarPath);
@@ -43524,14 +43668,14 @@ import * as crypto4 from "node:crypto";
 // src/mcp/audit.ts
 import * as crypto3 from "node:crypto";
 import * as fs5 from "node:fs";
-import * as path3 from "node:path";
+import * as path4 from "node:path";
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 function resolveMcpAuditPath() {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) {
     return process.env.AXONWALL_MCP_AUDIT_PATH;
   }
   for (const dir of ["/var/lib/axonwall", "/var/log/axonwall"]) {
-    const file2 = path3.join(dir, "mcp-audit.jsonl");
+    const file2 = path4.join(dir, "mcp-audit.jsonl");
     try {
       if (fs5.existsSync(file2)) {
         fs5.accessSync(file2, fs5.constants.W_OK);
@@ -43545,7 +43689,7 @@ function resolveMcpAuditPath() {
   }
   const fallbackDir = "/tmp/axonwall";
   fs5.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
-  return path3.join(fallbackDir, "mcp-audit.jsonl");
+  return path4.join(fallbackDir, "mcp-audit.jsonl");
 }
 function computeEntryHash(entryWithoutHash) {
   const canonical = JSON.stringify({
@@ -43617,7 +43761,7 @@ function recordMcpAuditEntry(input2) {
   try {
     const fullEntry = buildAuditEntry(input2, getLastHash(auditPath));
     try {
-      fs5.mkdirSync(path3.dirname(auditPath), { recursive: true, mode: 509 });
+      fs5.mkdirSync(path4.dirname(auditPath), { recursive: true, mode: 509 });
       fs5.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 432 });
       try {
         fs5.chmodSync(auditPath, 432);
@@ -43796,7 +43940,6 @@ function loadLocalDesiredState() {
         const raw = JSON.parse(fs6.readFileSync(p, "utf8"));
         const parsed = DesiredStateSchema.safeParse(raw);
         if (parsed.success) return parsed.data;
-        return null;
       }
     } catch {
     }
@@ -44447,7 +44590,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny("mcp:traffic:blackhole", daemonRes.data?.error || "Daemon rejected blackhole request", req.audit);
       }
       const lease = daemonRes.data.lease;
@@ -44527,7 +44670,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny("mcp:traffic:shape", daemonRes.data?.error || "Daemon rejected traffic shaping request", req.audit);
       }
       const lease = daemonRes.data.lease;
@@ -44578,12 +44721,23 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       if (!sourceCheck.valid) {
         return deny("mcp:traffic:redirect", sourceCheck.reason || "Source rejected by safety guard", req.audit);
       }
+      if (req.originalDstIp) {
+        const origDstCheck = validateMcpTarget(req.originalDstIp, ctx, { port: req.originalDstPort });
+        if (!origDstCheck.valid) {
+          return deny("mcp:traffic:redirect", origDstCheck.reason || "originalDstIp rejected by safety guard", req.audit);
+        }
+      }
       const destCheck = validateRedirectTargetAllowlist(
         req.targetDestination,
         env.key.policyLimits.allowedRedirectTargets
       );
       if (!destCheck.valid) {
         return deny("mcp:traffic:redirect", destCheck.reason || "Redirect destination not in allowlist", req.audit);
+      }
+      const rawRedirectHost = (destCheck.normalizedTarget || req.targetDestination).replace(/^\[([^\]]+)\](?::\d+)?$/, "$1").replace(/:\d+$/, "");
+      const redirectSafetyCheck = validateMcpTarget(rawRedirectHost, ctx);
+      if (!redirectSafetyCheck.valid) {
+        return deny("mcp:traffic:redirect", redirectSafetyCheck.reason || "Redirect target rejected by safety guard", req.audit);
       }
       const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/redirect", {
@@ -44597,7 +44751,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny("mcp:traffic:redirect", daemonRes.data?.error || "Daemon rejected redirect request", req.audit);
       }
       const lease = daemonRes.data.lease;
@@ -44677,7 +44831,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         keyId: env.key.id,
         keyName: env.key.name
       });
-      if (!daemonRes.ok) {
+      if (!daemonRes.ok || !daemonRes.data?.lease?.id) {
         return deny("mcp:traffic:redirect", daemonRes.data?.error || "Daemon rejected DNS sinkhole request", req.audit);
       }
       const lease = daemonRes.data.lease;
@@ -44715,6 +44869,16 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       const reason = typeof args.reason === "string" ? args.reason.trim() : "Reverted via MCP";
       if (!leaseId) {
         return deny("mcp:traffic:*", "leaseId is required");
+      }
+      const leasesRes = await callAxonwalldApi("GET", "/v1/mcp/leases");
+      if (leasesRes.ok && Array.isArray(leasesRes.data?.leases)) {
+        const targetLease = leasesRes.data.leases.find((l) => l.id === leaseId);
+        if (targetLease?.kind && !hasMcpScope(env.key, "mcp:firewall:write")) {
+          const requiredForKind = targetLease.kind === "blackhole" ? "mcp:traffic:blackhole" : targetLease.kind === "shape" ? "mcp:traffic:shape" : targetLease.kind === "redirect" || targetLease.kind === "dns_sinkhole" ? "mcp:traffic:redirect" : null;
+          if (requiredForKind && !hasMcpScope(env.key, requiredForKind)) {
+            return deny(requiredForKind, `MCP key lacks required scope '${requiredForKind}' to revert ${targetLease.kind} lease '${leaseId}'`);
+          }
+        }
       }
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/revert", { leaseId });
       if (!daemonRes.ok) {
@@ -44800,41 +44964,71 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
       }
       const { ctx } = await buildGuardContext(env.key, env.clientIp);
-      if (req.rule.action === "block" || req.rule.action === "reject") {
-        const checkEndpoint = (endpointVal, label) => {
-          if (!endpointVal || endpointVal === "any") {
+      const checkEndpoint = (endpointVal, label, disallowWildcard) => {
+        if (!endpointVal || endpointVal === "any") {
+          if (disallowWildcard) {
             return `Wildcard '${endpointVal || "any"}' ${label} on ${req.rule.action} rule exceeds blast-radius policy and is prohibited via MCP`;
           }
-          if (endpointVal === "self" || endpointVal === "wan_ip") {
+          return null;
+        }
+        if (endpointVal === "self" || endpointVal === "wan_ip") {
+          if (req.rule.action === "block" || req.rule.action === "reject") {
             return `Targeting appliance endpoint '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
           }
-          if (endpointVal === "lan_net") {
+          return null;
+        }
+        if (endpointVal === "lan_net") {
+          if (req.rule.action === "block" || req.rule.action === "reject") {
             return `Targeting entire '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
           }
-          if (endpointVal.startsWith("$")) {
-            const aliasName = endpointVal.slice(1);
-            const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
-            if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
-              return `Referenced alias '${endpointVal}' in ${label} does not exist or has no entries`;
-            }
-            for (const entry of aliasObj.entries) {
+          return null;
+        }
+        if (endpointVal.startsWith("$")) {
+          const aliasName = endpointVal.slice(1);
+          const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
+          if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+            return `Referenced alias '${endpointVal}' in ${label} does not exist or has no entries`;
+          }
+          for (const entry of aliasObj.entries) {
+            if (req.rule.action === "block" || req.rule.action === "reject") {
               const entryCheck = validateMcpTarget(entry, ctx);
               if (!entryCheck.valid) {
                 return `Alias '${endpointVal}' entry '${entry}' in ${label} rejected by guard: ${entryCheck.reason}`;
               }
             }
-            return null;
           }
+          return null;
+        }
+        if (req.rule.action === "block" || req.rule.action === "reject") {
           const directCheck = validateMcpTarget(endpointVal, ctx);
           if (!directCheck.valid) {
             return `Rule ${label} rejected by guard: ${directCheck.reason}`;
           }
-          return null;
-        };
-        const srcErr = checkEndpoint(req.rule.source, "source");
+        }
+        return null;
+      };
+      const isBlockOrReject = req.rule.action === "block" || req.rule.action === "reject";
+      if (!isBlockOrReject) {
+        const srcErr = checkEndpoint(req.rule.source, "source", false);
+        if (srcErr) return deny("mcp:firewall:write", srcErr, req.audit);
+        const dstErr = checkEndpoint(req.rule.destination, "destination", false);
+        if (dstErr) return deny("mcp:firewall:write", dstErr, req.audit);
+        const ruleIface = (req.rule.interface || "any").toLowerCase();
+        const isWanOrAny = ruleIface === "wan" || ruleIface === "any";
+        const rawPassDport = (req.rule.destinationPort || "").trim();
+        if (isWanOrAny && (!req.rule.source || req.rule.source === "any") && (!req.rule.destination || req.rule.destination === "any" || req.rule.destination === "self" || req.rule.destination === "wan_ip") && (!rawPassDport || rawPassDport === "any")) {
+          return deny(
+            "mcp:firewall:write",
+            `Unscoped wildcard pass rule on '${ruleIface}' is prohibited via MCP`,
+            req.audit
+          );
+        }
+      }
+      if (isBlockOrReject) {
+        const srcErr = checkEndpoint(req.rule.source, "source", true);
         if (srcErr) return deny("mcp:firewall:write", srcErr, req.audit);
         if (req.rule.destination && req.rule.destination !== "any") {
-          const dstErr = checkEndpoint(req.rule.destination, "destination");
+          const dstErr = checkEndpoint(req.rule.destination, "destination", false);
           if (dstErr) return deny("mcp:firewall:write", dstErr, req.audit);
         }
         const protectedTcpPorts = ctx.antiLockoutPorts ?? [2966, 22, 9876];
@@ -44855,69 +45049,116 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
             req.audit
           );
         }
+        const validatePortToken = (part) => {
+          if (/^\d+$/.test(part)) {
+            const portNum = Number(part);
+            if (portNum < 1 || portNum > 65535) {
+              return `Invalid destinationPort '${part}'`;
+            }
+            if (protectedPorts.includes(portNum)) {
+              return `Blocking protected port ${portNum} is prohibited`;
+            }
+            return null;
+          }
+          const rangeMatch = part.match(/^(\d+)\s*[-:]\s*(\d+)$/);
+          if (rangeMatch) {
+            const start = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
+            const end = Math.max(Number(rangeMatch[1]), Number(rangeMatch[2]));
+            if (start < 1 || end > 65535) {
+              return `Invalid port range '${part}'`;
+            }
+            const hit = protectedPorts.find((p) => p >= start && p <= end);
+            if (hit !== void 0) {
+              return `Port range ${part} overlaps protected port ${hit}`;
+            }
+            return null;
+          }
+          return `Invalid or unresolvable destinationPort token '${part}'`;
+        };
         if (rawDport && rawDport !== "any") {
-          for (const part of rawDport.split(",").map((s) => s.trim()).filter(Boolean)) {
-            if (/^\d+$/.test(part)) {
-              const portNum = Number(part);
-              if (protectedPorts.includes(portNum)) {
-                return deny(
-                  "mcp:firewall:write",
-                  `Blocking protected port ${portNum} is prohibited`,
-                  req.audit
-                );
-              }
-            } else {
-              const rangeMatch = part.match(/^(\d+)\s*[-:]\s*(\d+)$/);
-              if (rangeMatch) {
-                const start = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
-                const end = Math.max(Number(rangeMatch[1]), Number(rangeMatch[2]));
-                const hit = protectedPorts.find((p) => p >= start && p <= end);
-                if (hit !== void 0) {
-                  return deny(
-                    "mcp:firewall:write",
-                    `Port range ${part} overlaps protected port ${hit}`,
-                    req.audit
-                  );
-                }
-              }
+          if (rawDport.startsWith("$")) {
+            const aliasName = rawDport.slice(1);
+            const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName && a.type === "port");
+            if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+              return deny(
+                "mcp:firewall:write",
+                `Referenced port alias '${rawDport}' in destinationPort does not exist or has no entries`,
+                req.audit
+              );
+            }
+            for (const entry of aliasObj.entries) {
+              const portErr = validatePortToken(entry.trim());
+              if (portErr) return deny("mcp:firewall:write", portErr, req.audit);
+            }
+          } else {
+            for (const part of rawDport.split(",").map((s) => s.trim()).filter(Boolean)) {
+              const portErr = validatePortToken(part);
+              if (portErr) return deny("mcp:firewall:write", portErr, req.audit);
             }
           }
         }
       }
-      state.rules.push(req.rule);
-      try {
-        fs6.writeFileSync("/etc/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
-      } catch {
+      const previousRules = [...state.rules];
+      if (isBlockOrReject) {
+        const firstPassIdx = state.rules.findIndex((r) => r.action === "pass");
+        if (firstPassIdx !== -1) {
+          state.rules.splice(firstPassIdx, 0, req.rule);
+        } else {
+          state.rules.push(req.rule);
+        }
+      } else {
+        state.rules.push(req.rule);
       }
-      try {
-        fs6.writeFileSync("/var/lib/axonwall/state.json", JSON.stringify(state, null, 2), { mode: 384 });
-      } catch {
-      }
-      try {
-        const yamlFiles = serializeDesiredStateToYamlFiles(state);
-        for (const dir of ["/etc/axonwall", "/var/lib/axonwall/etc-axonwall"]) {
-          if (fs6.existsSync(dir)) {
-            for (const [fn, content] of Object.entries(yamlFiles)) {
-              fs6.writeFileSync(`${dir}/${fn}`, content, { mode: 432 });
+      const persistDesiredState = (targetState) => {
+        try {
+          fs6.writeFileSync("/etc/axonwall/state.json", JSON.stringify(targetState, null, 2), { mode: 384 });
+        } catch {
+        }
+        try {
+          fs6.writeFileSync("/var/lib/axonwall/state.json", JSON.stringify(targetState, null, 2), { mode: 384 });
+        } catch {
+        }
+        try {
+          const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
+          for (const dir of ["/etc/axonwall", "/var/lib/axonwall/etc-axonwall"]) {
+            if (fs6.existsSync(dir)) {
+              for (const [fn, content] of Object.entries(yamlFiles)) {
+                fs6.writeFileSync(`${dir}/${fn}`, content, { mode: 432 });
+              }
             }
           }
+        } catch {
         }
-      } catch {
-      }
+      };
+      persistDesiredState(state);
       let applyStatus = "staged_only";
       if (req.applyImmediately) {
         const compiled = compileNftables(state);
+        const hashInput = JSON.stringify({
+          nftScript: compiled.nftScript,
+          files: [...compiled.files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
+          reloadServices: [...compiled.reloadServices].sort()
+        });
         const applyRes = await callAxonwalldApi("POST", "/v1/apply", {
           nftScript: compiled.nftScript,
           confirmTimeoutSeconds: req.confirmTimeoutSeconds,
           files: compiled.files,
           jobId: `mcp_apply_${Date.now()}`,
-          bundleHash: crypto4.createHash("sha256").update(compiled.nftScript).digest("hex"),
+          bundleHash: crypto4.createHash("sha256").update(hashInput).digest("hex"),
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds
         });
-        applyStatus = applyRes.ok ? `applied_with_commit_confirm_${req.confirmTimeoutSeconds}s` : `apply_error: ${applyRes.data?.error}`;
+        if (!applyRes.ok) {
+          state.rules = previousRules;
+          persistDesiredState(state);
+          return deny(
+            "mcp:firewall:apply",
+            applyRes.data?.error || "Daemon rejected ruleset apply; rolled back staged rule",
+            req.audit
+          );
+        }
+        applyStatus = `applied_with_commit_confirm_${req.confirmTimeoutSeconds}s`;
       }
       const auditEntry = recordMcpAuditEntry({
         keyId: env.key.id,
@@ -45067,7 +45308,12 @@ function buildArtifactBundle(jobId, state) {
   const issues = lintRuleset(state);
   const warnings = issues.map((i) => `[${i.severity.toUpperCase()}] ${i.message}`);
   const { nftScript, files, reloadServices } = compileNftables(state);
-  const hash2 = crypto5.createHash("sha256").update(nftScript).digest("hex");
+  const hashInput = JSON.stringify({
+    nftScript,
+    files: [...files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
+    reloadServices: [...reloadServices].sort()
+  });
+  const hash2 = crypto5.createHash("sha256").update(hashInput).digest("hex");
   return {
     jobId,
     bundleHash: hash2,
@@ -45094,7 +45340,7 @@ function assertNotOperatorCaWithoutKey(caPath, caKeyPath) {
     );
   }
 }
-function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath = "/etc/axonwall/certs/hub.key", caPath = "/etc/axonwall/certs/ca.crt", caKeyPath = path4.join(path4.dirname(caPath), "ca.key")) {
+function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath = "/etc/axonwall/certs/hub.key", caPath = "/etc/axonwall/certs/ca.crt", caKeyPath = path5.join(path5.dirname(caPath), "ca.key")) {
   if (process.env.AXONWALL_INSECURE_HTTP === "1") {
     console.warn("[Axonwall Controller] AXONWALL_INSECURE_HTTP=1 is set: running in plaintext mode (DEV/TEST ONLY)");
     return null;
@@ -45140,33 +45386,99 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
     }
   }
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
+  const generateSignedOrSelfSignedCert = (targetKeyPath, targetCertPath, days) => {
+    const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
+    if (fs7.existsSync(caPath) && fs7.existsSync(caKeyPath)) {
+      const csrPath = `${targetCertPath}.csr`;
+      const extPath = `${targetCertPath}.ext`;
+      try {
+        child_process.execFileSync(
+          "openssl",
+          [
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            targetKeyPath,
+            "-out",
+            csrPath,
+            "-subj",
+            "/O=Axonwall/OU=Appliance/CN=axonwall"
+          ],
+          { timeout: 15e3, stdio: "ignore" }
+        );
+        fs7.writeFileSync(
+          extPath,
+          `basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=${san}
+`,
+          { mode: 384 }
+        );
+        child_process.execFileSync(
+          "openssl",
+          [
+            "x509",
+            "-req",
+            "-in",
+            csrPath,
+            "-CA",
+            caPath,
+            "-CAkey",
+            caKeyPath,
+            "-CAcreateserial",
+            "-out",
+            targetCertPath,
+            "-days",
+            days,
+            "-sha256",
+            "-extfile",
+            extPath
+          ],
+          { timeout: 15e3, stdio: "ignore" }
+        );
+      } finally {
+        try {
+          fs7.unlinkSync(csrPath);
+        } catch {
+        }
+        try {
+          fs7.unlinkSync(extPath);
+        } catch {
+        }
+      }
+    } else {
+      child_process.execFileSync(
+        "openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-keyout",
+          targetKeyPath,
+          "-out",
+          targetCertPath,
+          "-days",
+          days,
+          "-subj",
+          "/O=Axonwall/OU=Appliance/CN=axonwall",
+          "-addext",
+          `subjectAltName=${san}`
+        ],
+        { timeout: 15e3, stdio: "ignore" }
+      );
+    }
+  };
   try {
-    const certDir = path4.dirname(certPath);
+    const certDir = path5.dirname(certPath);
     if (!fs7.existsSync(certDir)) {
       fs7.mkdirSync(certDir, { recursive: true, mode: 488 });
     }
-    const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
-    child_process.execFileSync(
-      "openssl",
-      [
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-keyout",
-        keyPath,
-        "-out",
-        certPath,
-        "-days",
-        "3650",
-        "-subj",
-        "/O=Axonwall/OU=Appliance/CN=axonwall",
-        "-addext",
-        `subjectAltName=${san}`
-      ],
-      { timeout: 15e3, stdio: "ignore" }
-    );
+    generateSignedOrSelfSignedCert(keyPath, certPath, "3650");
     if (fs7.existsSync(certPath) && fs7.existsSync(keyPath)) {
       const cert = fs7.readFileSync(certPath);
       const key = fs7.readFileSync(keyPath);
@@ -45186,31 +45498,10 @@ function ensureControllerTls(certPath = "/etc/axonwall/certs/hub.crt", keyPath =
   }
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
   try {
-    const tmpDir = fs7.mkdtempSync(path4.join(os.tmpdir(), "axonwall-tls-"));
-    const tmpKey = path4.join(tmpDir, "hub.key");
-    const tmpCert = path4.join(tmpDir, "hub.crt");
-    const san = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
-    child_process.execFileSync(
-      "openssl",
-      [
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-keyout",
-        tmpKey,
-        "-out",
-        tmpCert,
-        "-days",
-        "30",
-        "-subj",
-        "/O=Axonwall/OU=Appliance/CN=axonwall",
-        "-addext",
-        `subjectAltName=${san}`
-      ],
-      { timeout: 15e3, stdio: "ignore" }
-    );
+    const tmpDir = fs7.mkdtempSync(path5.join(os.tmpdir(), "axonwall-tls-"));
+    const tmpKey = path5.join(tmpDir, "hub.key");
+    const tmpCert = path5.join(tmpDir, "hub.crt");
+    generateSignedOrSelfSignedCert(tmpKey, tmpCert, "30");
     const cert = fs7.readFileSync(tmpCert);
     const key = fs7.readFileSync(tmpKey);
     try {
@@ -45436,12 +45727,15 @@ function createPortMultiplexer(httpsServer, redirectServer, opts) {
   const pendingTls = /* @__PURE__ */ new Map();
   const pendingRedirect = /* @__PURE__ */ new Map();
   const tlsKey = (socket) => `${socket.remoteAddress}:${socket.remotePort}`;
-  const clearTlsDeadline = (socket) => {
-    const timer = pendingTls.get(tlsKey(socket));
+  const clearTlsDeadlineByKey = (key) => {
+    const timer = pendingTls.get(key);
     if (timer) {
       clearTimeout(timer);
-      pendingTls.delete(tlsKey(socket));
+      pendingTls.delete(key);
     }
+  };
+  const clearTlsDeadline = (socket) => {
+    clearTlsDeadlineByKey(tlsKey(socket));
   };
   const clearRedirectDeadline = (socket) => {
     const timer = pendingRedirect.get(socket);
@@ -45458,6 +45752,7 @@ function createPortMultiplexer(httpsServer, redirectServer, opts) {
   });
   const tcpMultiplexer = net.createServer((socket) => {
     let handled = false;
+    const connKey = tlsKey(socket);
     socket.setTimeout(5e3, () => {
       if (!handled) {
         handled = true;
@@ -45475,12 +45770,12 @@ function createPortMultiplexer(httpsServer, redirectServer, opts) {
       socket.unshift(buf);
       if (buf[0] === 22) {
         const timer = setTimeout(() => {
-          pendingTls.delete(tlsKey(socket));
+          pendingTls.delete(connKey);
           socket.destroy();
         }, handshakeTimeoutMs);
-        pendingTls.set(tlsKey(socket), timer);
-        socket.once("close", () => clearTlsDeadline(socket));
-        socket.once("error", () => clearTlsDeadline(socket));
+        pendingTls.set(connKey, timer);
+        socket.once("close", () => clearTlsDeadlineByKey(connKey));
+        socket.once("error", () => clearTlsDeadlineByKey(connKey));
         httpsServer.emit("connection", socket);
       } else {
         const timer = setTimeout(() => {
@@ -45547,19 +45842,23 @@ async function main() {
     const hostedEdge = localState?.hostedEdge;
     sat.role = deriveSatelliteRole({ configuredRole: fleetNode?.role, currentRole: sat.role, satelliteId: sat.id });
     const isEdge = sat.role === "edge-ngfw";
+    const resolvedWanInterface = fleetNode?.wanInterface || sat.wanInterface || "eth0";
+    const resolvedLanInterface = fleetNode?.lanInterface || sat.lanInterface || "eth1";
+    const wanIpv6Mode = hostedEdge?.wan?.ipv6Mode || fleetNode?.ipv6Mode || "auto";
+    const lanIpv6Mode = hostedEdge?.lan?.ipv6Mode || fleetNode?.ipv6Mode || "delegated";
     const mergedNode = {
       ...fleetNode,
       ...sat,
       role: sat.role,
       skuProfile: fleetNode?.skuProfile || sat.skuProfile || hostedEdge?.skuProfile || "sku-vm-virtio",
-      wanInterface: fleetNode?.wanInterface || sat.wanInterface || "eth0",
-      lanInterface: fleetNode?.lanInterface || sat.lanInterface || "eth1",
+      wanInterface: resolvedWanInterface,
+      lanInterface: resolvedLanInterface,
       portForwards: fleetNode?.portForwards || hostedEdge?.portForwards || [],
       ipv6Allow: fleetNode?.ipv6Allow || hostedEdge?.ipv6Allow || [],
       zones: fleetNode?.zones || [],
       disabledIpv6Interfaces: fleetNode?.disabledIpv6Interfaces || [
-        ...hostedEdge?.wan?.ipv6Mode === "disabled" ? ["eth0"] : [],
-        ...hostedEdge?.lan?.ipv6Mode === "disabled" ? ["eth1"] : []
+        ...wanIpv6Mode === "disabled" ? [resolvedWanInterface] : [],
+        ...lanIpv6Mode === "disabled" ? [resolvedLanInterface] : []
       ]
     };
     const { nftScript } = compileSatelliteNftables(mergedNode);
@@ -45572,13 +45871,11 @@ async function main() {
       })
     );
     if (isEdge) {
-      const wanDev = mergedNode.wanInterface || "eth0";
-      const lanDev = mergedNode.lanInterface || "eth1";
+      const wanDev = resolvedWanInterface;
+      const lanDev = resolvedLanInterface;
       const wanAddress = fleetNode?.wanAddress || (hostedEdge?.wan?.ipv4Mode === "static" && hostedEdge.wan.ipv4Address ? hostedEdge.wan.ipv4Address : "dhcp");
       const wanGateway = hostedEdge?.wan?.ipv4Mode === "static" ? hostedEdge.wan.ipv4Gateway : void 0;
       const lanAddress = fleetNode?.lanAddress || hostedEdge?.lan?.edgeAddress || "10.0.0.1/24";
-      const wanIpv6Mode = hostedEdge?.wan?.ipv6Mode || fleetNode?.ipv6Mode || "auto";
-      const lanIpv6Mode = hostedEdge?.lan?.ipv6Mode || fleetNode?.ipv6Mode || "delegated";
       const interfaces = [
         {
           name: "wan",
@@ -45618,21 +45915,17 @@ async function main() {
           payload: { interfaces }
         })
       );
-      if (localState?.routes && localState.routes.length > 0) {
-        const enabledRoutes = localState.routes.filter((r) => r.enabled).map((r) => ({
-          destination: r.network,
-          gateway: r.gateway,
-          ...r.interface ? { device: r.interface } : {}
-        }));
-        if (enabledRoutes.length > 0) {
-          sat.ws.send(
-            JSON.stringify({
-              type: "SYNC_ROUTES",
-              payload: { routes: enabledRoutes }
-            })
-          );
-        }
-      }
+      const enabledRoutes = (localState?.routes ?? []).filter((r) => r.enabled).map((r) => ({
+        destination: r.network,
+        gateway: r.gateway,
+        ...r.interface ? { device: r.interface } : {}
+      }));
+      sat.ws.send(
+        JSON.stringify({
+          type: "SYNC_ROUTES",
+          payload: { routes: enabledRoutes }
+        })
+      );
     }
   }
   const prometheusRegistry = new import_prom_client.default.Registry();
@@ -46161,11 +46454,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       cert: tlsConfig.cert,
       key: tlsConfig.key,
       ca: tlsConfig.ca ? tlsConfig.ca : void 0,
-      requestCert: Boolean(tlsConfig.ca),
+      requestCert: true,
       // Client certificates are enforced per-path, not at the TLS layer:
       // this listener is shared by the web console (browsers have no
       // client cert) and by satellites that only receive their cert
-      // during ZTP provisioning. Fleet paths verify instead: /ws/satellite
+      // during ZTP provisioning, as well as MCP clients using mTLS
+      // fingerprint pinning. Fleet paths verify instead: /ws/satellite
       // requires socket.authorized when a CA exists, and the fleet HTTP
       // API rejects presented-but-invalid certificates (verifyFleetAuth).
       rejectUnauthorized: false
@@ -46348,6 +46642,7 @@ ${headerLines.join("\r\n")}\r
         existing.ws.terminate();
       } catch {
       }
+      lastRxTxBytes.delete(satId);
     }
     let wgPrivateKey = existing?.wgPrivateKey;
     let wgPublicKey = existing?.wgPublicKey;
@@ -46410,6 +46705,9 @@ ${headerLines.join("\r\n")}\r
           } else {
             report = parsed.payload;
           }
+          if (!report || typeof report !== "object") {
+            return;
+          }
           if (report.metrics) {
             state.metrics = report.metrics;
             const fleetNode = loadLocalDesiredState2()?.fleet?.nodes?.find((n) => n.id === satId);
@@ -46422,16 +46720,20 @@ ${headerLines.join("\r\n")}\r
             if (report.metrics?.skuProfile) {
               state.skuProfile = report.metrics.skuProfile;
             }
-            console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics?.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics?.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`);
-            satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
-            satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
-            satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
-            satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
-            const currentRx = report.metrics.rxBytesTotal || 0;
-            const currentTx = report.metrics.txBytesTotal || 0;
+            console.log(
+              `[Fleet Manager] Telemetry from ${satId}: CPU ${Number(report.metrics?.cpuUsagePercent ?? 0).toFixed(1)}% | RAM ${Number(report.metrics?.memUsagePercent ?? 0).toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`
+            );
+            satUptimeGauge.set({ satellite_id: satId }, Number(report.metrics.uptimeSeconds) || 0);
+            satCpuGauge.set({ satellite_id: satId }, Number(report.metrics.cpuUsagePercent) || 0);
+            satMemGauge.set({ satellite_id: satId }, Number(report.metrics.memUsagePercent) || 0);
+            satConnsGauge.set({ satellite_id: satId }, Number(report.metrics.activeConns) || 0);
+            const currentRx = Number(report.metrics.rxBytesTotal) || 0;
+            const currentTx = Number(report.metrics.txBytesTotal) || 0;
             const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
-            if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
-            if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
+            const rxDelta = currentRx >= last.rx ? currentRx - last.rx : currentRx;
+            const txDelta = currentTx >= last.tx ? currentTx - last.tx : currentTx;
+            if (rxDelta > 0) satRxBytesGauge.inc({ satellite_id: satId }, rxDelta);
+            if (txDelta > 0) satTxBytesGauge.inc({ satellite_id: satId }, txDelta);
             lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
           } else {
             console.log(`[Fleet Manager] Telemetry from ${satId} without metrics; keeping last-known metrics.`);
@@ -46510,7 +46812,7 @@ ${headerLines.join("\r\n")}\r
 var isDirectExecution = () => {
   if (process.env.NODE_ENV === "test") return false;
   try {
-    return !!process.argv[1] && fileURLToPath(import.meta.url) === path4.resolve(process.argv[1]);
+    return !!process.argv[1] && fileURLToPath(import.meta.url) === path5.resolve(process.argv[1]);
   } catch {
     return false;
   }

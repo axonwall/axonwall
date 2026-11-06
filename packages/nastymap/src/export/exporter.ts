@@ -55,10 +55,16 @@ export async function exportToPng(
   const bgColor = options.backgroundColor || '#090d16';
 
   if (sourceElement instanceof HTMLCanvasElement) {
-    sourceElement.toBlob((blob) => {
-      if (blob) downloadBlob(blob, filename);
-    }, 'image/png', options.quality || 0.95);
-    return;
+    return new Promise((resolve, reject) => {
+      sourceElement.toBlob((blob) => {
+        if (blob) {
+          downloadBlob(blob, filename);
+          resolve();
+        } else {
+          reject(new Error('Canvas toBlob failed'));
+        }
+      }, 'image/png', options.quality || 0.95);
+    });
   }
 
   // If SVG element, render onto a canvas
@@ -77,7 +83,13 @@ export async function exportToPng(
   ctx.fillRect(0, 0, width, height);
 
   const serializer = new XMLSerializer();
-  const svgString = serializer.serializeToString(sourceElement);
+  let svgString = serializer.serializeToString(sourceElement);
+  if (!svgString.match(/^<svg[^>]+xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) {
+    svgString = svgString.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  if (!svgString.match(/^<svg[^>]+xmlns:xlink="http:\/\/www\.w3\.org\/1999\/xlink"/)) {
+    svgString = svgString.replace(/^<svg/, '<svg xmlns:xlink="http://www.w3.org/1999/xlink"');
+  }
   const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(svgBlob);
 

@@ -210,8 +210,8 @@ export function NmapGeoMap({ scan, onSelectHost, className = '' }: NmapGeoMapPro
             </pattern>
             {/* Scanner Pulse Animation */}
             <radialGradient id="scannerGlow" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.8" />
-              <stop offset="100%" stop-color="#0284c7" stop-opacity="0" />
+              <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.8" />
+              <stop offset="100%" stopColor="#0284c7" stopOpacity="0" />
             </radialGradient>
             {/* Arc Gradient */}
             <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -353,33 +353,36 @@ export function NmapGeoMap({ scan, onSelectHost, className = '' }: NmapGeoMapPro
       </div>
 
       {/* Floating Hover Info Popup */}
-      {hoveredHost && (
-        <div className="absolute bottom-4 left-4 z-20 p-4 rounded-xl bg-zinc-900/95 backdrop-blur-xl border border-zinc-800 shadow-2xl text-xs space-y-1.5 pointer-events-none max-w-sm">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-mono font-bold text-sky-400 text-sm">{hoveredHost.ipv4 || hoveredHost.id}</span>
-            <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 font-semibold uppercase text-[10px] border border-emerald-800">
-              {hoveredHost.status.state}
-            </span>
-          </div>
-          {hoveredHost.primaryHostname && (
-            <p className="text-white font-medium">{hoveredHost.primaryHostname}</p>
-          )}
-          <div className="text-zinc-400 space-y-0.5 font-mono text-[11px] pt-1 border-t border-zinc-800">
-            <div>
-              Location: <span className="text-zinc-200">{hoveredHost.geolocation?.city}, {hoveredHost.geolocation?.country}</span>
+      {hoveredHost && (() => {
+        const hoveredGeo = hoveredHost.geolocation || geocodeIp(hoveredHost.ipv4 || hoveredHost.id);
+        return (
+          <div className="absolute bottom-4 left-4 z-20 p-4 rounded-xl bg-zinc-900/95 backdrop-blur-xl border border-zinc-800 shadow-2xl text-xs space-y-1.5 pointer-events-none max-w-sm">
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-mono font-bold text-sky-400 text-sm">{hoveredHost.ipv4 || hoveredHost.id}</span>
+              <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 font-semibold uppercase text-[10px] border border-emerald-800">
+                {hoveredHost.status.state}
+              </span>
             </div>
-            {hoveredHost.geolocation?.org && (
-              <div>Org: <span className="text-zinc-200">{hoveredHost.geolocation.org}</span></div>
+            {hoveredHost.primaryHostname && (
+              <p className="text-white font-medium">{hoveredHost.primaryHostname}</p>
             )}
-            <div>
-              Open Ports: <span className="text-emerald-400 font-bold">{hoveredHost.ports.filter((p) => p.state === 'open').length}</span>
+            <div className="text-zinc-400 space-y-0.5 font-mono text-[11px] pt-1 border-t border-zinc-800">
+              <div>
+                Location: <span className="text-zinc-200">{hoveredGeo.city}, {hoveredGeo.country}</span>
+              </div>
+              {hoveredGeo.org && (
+                <div>Org: <span className="text-zinc-200">{hoveredGeo.org}</span></div>
+              )}
+              <div>
+                Open Ports: <span className="text-emerald-400 font-bold">{hoveredHost.ports.filter((p) => p.state === 'open').length}</span>
+              </div>
+              {hoveredHost.latencyMs !== undefined && (
+                <div>Latency: <span className="text-amber-400">{hoveredHost.latencyMs} ms</span></div>
+              )}
             </div>
-            {hoveredHost.latencyMs !== undefined && (
-              <div>Latency: <span className="text-amber-400">{hoveredHost.latencyMs} ms</span></div>
-            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

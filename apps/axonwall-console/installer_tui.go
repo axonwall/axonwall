@@ -130,14 +130,37 @@ func DefaultInstallerConfig() InstallerConfig {
 	}
 }
 
+func isPartitionOfDisk(partPath, diskPath string) bool {
+	if diskPath == "" || !strings.HasPrefix(partPath, diskPath) {
+		return false
+	}
+	rem := partPath[len(diskPath):]
+	if rem == "" {
+		return false
+	}
+	lastChar := diskPath[len(diskPath)-1]
+	if lastChar >= '0' && lastChar <= '9' {
+		if rem[0] != 'p' || len(rem) < 2 {
+			return false
+		}
+		rem = rem[1:]
+	}
+	for i := 0; i < len(rem); i++ {
+		if rem[i] < '0' || rem[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func diskHasPrecreatedAxonwallPartitions(diskPath string) bool {
 	if diskPath == "" {
 		return false
 	}
 	for _, dir := range []string{"/dev/disk/by-label", "/dev/disk/by-partlabel"} {
-		for _, lbl := range []string{"axon_root_a", "axon_root"} {
+		for _, lbl := range []string{"axon_root_a", "axon_root", "AXON_EFI", "axon_data", "axon_zfs_1", "axon_zfs"} {
 			if target, err := filepath.EvalSymlinks(filepath.Join(dir, lbl)); err == nil {
-				if strings.HasPrefix(target, diskPath) {
+				if target == diskPath || isPartitionOfDisk(target, diskPath) {
 					return true
 				}
 			}
@@ -146,7 +169,20 @@ func diskHasPrecreatedAxonwallPartitions(diskPath string) bool {
 	return false
 }
 
+func isNetworkExplicitlyConfigured() bool {
+	if _, err := os.Stat("/etc/axonwall/.interfaces_configured"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/var/lib/axonwall/etc-axonwall/.interfaces_configured"); err == nil {
+		return true
+	}
+	return false
+}
+
 func formatPreInstallNetworkSummary() string {
+	if !isNetworkExplicitlyConfigured() {
+		return "Auto-Detect on Firstboot (Use CLI [2]/[3] to customize)"
+	}
 	cfg := readCurrentNetworkConfig()
 	var parts []string
 	if cfg.WanDevice != "" {
@@ -268,16 +304,9 @@ func DiscoverDisks() []DiskDevice {
 			fields := strings.Fields(line)
 			if len(fields) > 0 {
 				mDev := fields[0]
-				if mDev == devPath {
+				if mDev == devPath || isPartitionOfDisk(mDev, devPath) {
 					mounted = true
 					break
-				}
-				if strings.HasPrefix(mDev, devPath) {
-					rem := mDev[len(devPath):]
-					if len(rem) > 0 && ((rem[0] >= '0' && rem[0] <= '9') || (rem[0] == 'p' && len(rem) > 1 && rem[1] >= '0' && rem[1] <= '9')) {
-						mounted = true
-						break
-					}
 				}
 			}
 		}
@@ -504,11 +533,47 @@ func AutoAssignDiskRoles(disks []DiskDevice) []DiskDevice {
 	return out
 }
 
-// EvaluateHardwareProfile inspects candidate disks, RAM, UEFI/BIOS, and TPM 2.0,
-// applies optimal defaults to cfg, and returns a human-readable HardwareEvaluation summary.
-func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDevice, HardwareEvaluation) {
-	evaluatedDisks := AutoAssignDiskRoles(disks)
-	primaryMB := syncDiskRolesAndConfig(evaluatedDisks, cfg)
+type HardwareEvalResult = HardwareEvaluation
+
+func recommendedSlotGBForDiskMB(primaryMB int) int {
+	switch {
+	case primaryMB < 24576: // < 24 GB
+		return 2
+	case primaryMB < 65536: // 24 - 64 GB
+		return 4
+	case primaryMB < 204800: // 64 - 200 GB
+		return 8
+	default: // >= 200 GB
+		return 16
+	}
+}
+
+func normalizeSlotMBForMode(cfg *InstallerConfig, recommendedSlotGB int) {
+	if cfg == nil {
+		return
+	}
+	switch cfg.InstallMode {
+	case "zbm":
+		cfg.SlotMB = 0
+	case "rolling":
+		if cfg.SlotMB < 8192 {
+			cfg.SlotMB = 8192
+		}
+	default: // "ab"
+		if cfg.SlotMB < 2048 {
+			slotMB := recommendedSlotGB * 1024
+			if slotMB < 2048 {
+				slotMB = 4096
+			}
+			cfg.SlotMB = slotMB
+		}
+	}
+}
+
+// RefreshHardwareEval updates the HardwareEvaluation summary from the current disks and cfg
+// without overwriting user-configured disk roles, SlotMB, LuksTPM2, or ZfsAllocMode.
+func RefreshHardwareEval(disks []DiskDevice, cfg *InstallerConfig) HardwareEvaluation {
+	primaryMB := syncDiskRolesAndConfig(disks, cfg)
 
 	ramMB := detectTotalRAMMB()
 	fwMode := "Legacy BIOS"
@@ -516,49 +581,33 @@ func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDe
 		fwMode = "UEFI"
 	}
 	tpm := hasTPM2Device()
-	cfg.LuksTPM2 = tpm
 
-	// Evaluate optimal SlotMB based on primary system disk capacity
-	if cfg.InstallMode == "zbm" {
-		cfg.SlotMB = 0
-	} else {
-		switch {
-		case primaryMB < 24576: // < 24 GB
-			cfg.SlotMB = 2048
-		case primaryMB < 65536: // 24 - 64 GB
-			cfg.SlotMB = 4096
-		case primaryMB < 204800: // 64 - 200 GB
-			cfg.SlotMB = 8192
-		default: // >= 200 GB
-			cfg.SlotMB = 16384
-		}
-		if cfg.InstallMode == "rolling" && cfg.SlotMB < 8192 {
-			cfg.SlotMB = 8192
+	if cfg.ZfsAllocMode == "" {
+		if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+			cfg.ZfsAllocMode = "none"
+		} else {
+			cfg.ZfsAllocMode = "remainder"
 		}
 	}
-
-	// Evaluate ZFS allocation and topology
-	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
-		cfg.ZfsAllocMode = "none"
-	} else if cfg.ZfsAllocMode == "" {
-		cfg.ZfsAllocMode = "remainder"
-	}
-
-	vdevCount := len(cfg.ZfsExtraDisks)
-	if vdevCount == 0 {
-		vdevCount = len(cfg.SystemDisks)
-	}
-	resolvedTopo := "stripe"
-	switch {
-	case vdevCount == 2:
-		resolvedTopo = "mirror"
-	case vdevCount >= 3 && vdevCount <= 4:
-		resolvedTopo = "raidz1"
-	case vdevCount >= 5:
-		resolvedTopo = "raidz2"
-	}
-	if cfg.ZfsTopology == "" || cfg.ZfsTopology == "auto" {
+	if cfg.ZfsTopology == "" {
 		cfg.ZfsTopology = "auto"
+	}
+
+	resolvedTopo := cfg.ZfsTopology
+	if resolvedTopo == "" || resolvedTopo == "auto" {
+		vdevCount := len(cfg.ZfsExtraDisks)
+		if vdevCount == 0 {
+			vdevCount = len(cfg.SystemDisks)
+		}
+		resolvedTopo = "stripe"
+		switch {
+		case vdevCount == 2:
+			resolvedTopo = "mirror"
+		case vdevCount >= 3 && vdevCount <= 4:
+			resolvedTopo = "raidz1"
+		case vdevCount >= 5:
+			resolvedTopo = "raidz2"
+		}
 	}
 
 	sysSummary := "No target disk detected"
@@ -602,7 +651,7 @@ func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDe
 	}
 
 	var notes []string
-	notes = append(notes, fmt.Sprintf("Evaluated %d storage device(s), %d MB RAM, %s firmware", len(evaluatedDisks), ramMB, fwMode))
+	notes = append(notes, fmt.Sprintf("Evaluated %d storage device(s), %d MB RAM, %s firmware", len(disks), ramMB, fwMode))
 	if len(cfg.SystemDisks) >= 2 {
 		notes = append(notes, fmt.Sprintf("Auto-configured %d-disk OS redundancy (%s)", len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, " + ")))
 	}
@@ -616,16 +665,45 @@ func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDe
 		notes = append(notes, fmt.Sprintf("Pre-partitioned Axonwall layout detected on %s (press [X] to preserve existing partitions)", cfg.SystemDisks[0]))
 	}
 
-	return evaluatedDisks, HardwareEvaluation{
+	return HardwareEvaluation{
 		TotalRAMMB:        ramMB,
 		FirmwareMode:      fwMode,
 		HasTPM2:           tpm,
-		DiskCount:         len(evaluatedDisks),
+		DiskCount:         len(disks),
 		SystemDiskSummary: sysSummary,
 		ZfsPoolSummary:    zfsSummary,
 		SlotSizingNote:    slotNote,
 		EvaluationNotes:   notes,
 	}
+}
+
+// EvaluateHardwareProfile inspects candidate disks, RAM, UEFI/BIOS, and TPM 2.0,
+// applies optimal defaults to cfg, and returns a human-readable HardwareEvaluation summary.
+func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDevice, HardwareEvaluation) {
+	evaluatedDisks := AutoAssignDiskRoles(disks)
+	primaryMB := syncDiskRolesAndConfig(evaluatedDisks, cfg)
+
+	cfg.LuksTPM2 = hasTPM2Device()
+
+	recGB := recommendedSlotGBForDiskMB(primaryMB)
+	if cfg.InstallMode == "zbm" {
+		cfg.SlotMB = 0
+	} else {
+		cfg.SlotMB = recGB * 1024
+		normalizeSlotMBForMode(cfg, recGB)
+	}
+
+	// Evaluate ZFS allocation and topology
+	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+		cfg.ZfsAllocMode = "none"
+	} else if cfg.ZfsAllocMode == "" {
+		cfg.ZfsAllocMode = "remainder"
+	}
+	if cfg.ZfsTopology == "" || cfg.ZfsTopology == "auto" {
+		cfg.ZfsTopology = "auto"
+	}
+
+	return evaluatedDisks, RefreshHardwareEval(evaluatedDisks, cfg)
 }
 
 // syncDiskRolesAndConfig synchronizes DiskDevice roles into InstallerConfig disk slices.
@@ -1129,6 +1207,9 @@ func ShipInstallerDiagnosticsBundle(endpoint string, cfg InstallerConfig, eval H
 	if endpoint == "" {
 		return "", fmt.Errorf("no shipping destination specified")
 	}
+	if strings.HasPrefix(endpoint, "-") {
+		return "", fmt.Errorf("invalid shipping destination: %s", endpoint)
+	}
 	bundle := FormatInstallerDiagnosticsBundle(cfg, eval, rawLines)
 
 	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
@@ -1161,6 +1242,9 @@ func ShipInstallerDiagnosticsBundle(endpoint string, cfg InstallerConfig, eval H
 			host = strings.Trim(addr, "[]")
 			port = "514"
 		}
+		if host == "" || strings.HasPrefix(host, "-") || strings.HasPrefix(port, "-") {
+			return "", fmt.Errorf("invalid syslog destination: %s", endpoint)
+		}
 		cmd := exec.Command("logger", "-n", host, "-P", port, "-t", "axonwall-installer")
 		if proto == "tcp" {
 			cmd.Args = append(cmd.Args, "-T")
@@ -1177,7 +1261,7 @@ func ShipInstallerDiagnosticsBundle(endpoint string, cfg InstallerConfig, eval H
 	if err != nil || len(saved) == 0 {
 		return "", fmt.Errorf("failed to stage local bundle for SCP: %v", err)
 	}
-	scpCmd := exec.Command("scp", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8", saved[0], endpoint)
+	scpCmd := exec.Command("scp", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8", "--", saved[0], endpoint)
 	if out, err := scpCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("scp failed: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -1461,8 +1545,8 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 
 		for i := scrollOffset; i < endIdx; i++ {
 			line := lines[i]
-			if len(line) > 78 {
-				line = line[:78]
+			if runes := []rune(line); len(runes) > 78 {
+				line = string(runes[:78])
 			}
 			lineColor := ""
 			lower := strings.ToLower(line)
@@ -1672,8 +1756,9 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 		switch step {
 		case 0:
 			renderInstallerBanner(cfg, 0)
-			_, eval = EvaluateHardwareProfile(disks, &cfg)
 			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
+			normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+			eval = RefreshHardwareEval(disks, &cfg)
 			layout := ComputePartitionLayout(primaryMB, cfg)
 
 			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
@@ -1774,18 +1859,22 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				if archCursor > 0 {
 					archCursor--
 					cfg.InstallMode = archOptions[archCursor].mode
+					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 				}
 			case "DOWN":
 				if archCursor < len(archOptions)-1 {
 					archCursor++
 					cfg.InstallMode = archOptions[archCursor].mode
+					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 				}
 			case "1", "2", "3":
 				idx, _ := strconv.Atoi(key)
 				archCursor = idx - 1
 				cfg.InstallMode = archOptions[archCursor].mode
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 			case "SPACE":
 				cfg.InstallMode = archOptions[archCursor].mode
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 			case "E":
 				if cfg.Edition == "vault" {
 					cfg.Edition = "axonwall"
@@ -1850,6 +1939,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 
 		case 1:
 			renderInstallerBanner(cfg, 1)
+			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
+			normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
 			vaultBadge := colorDim + "( ) Axonwall Vault S3 Storage" + colorReset
 			editionDesc := "Full NGFW, SD-WAN, WireGuard/Headscale, IDS/IPS, BGP/OSPF, Web UI & Controller"
@@ -1945,8 +2036,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				idx, _ := strconv.Atoi(key)
 				archCursor = idx - 1
 				cfg.InstallMode = archOptions[archCursor].mode
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 			case "SPACE":
 				cfg.InstallMode = archOptions[archCursor].mode
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 			case "S":
 				if cfg.InstallMode == "rolling" {
 					if cfg.SlotMB == 8192 {
@@ -1980,9 +2073,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				step = 0
 			case "ENTER", "RIGHT":
 				cfg.InstallMode = archOptions[archCursor].mode
-				if cfg.InstallMode != "ab" && cfg.SlotMB < 8192 {
-					cfg.SlotMB = 8192
-				}
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
 				step = 2
 			case "Q", "ESC":
 				return
@@ -2534,8 +2625,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			allTargetDisks = append(allTargetDisks, cfg.ZfsSpareDisks...)
 
 			fmt.Println("\n────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %s⚠️  WARNING: ALL EXISTING DATA ON [%s] WILL BE PERMANENTLY ERASED!%s\n",
-				colorRed+colorBold, strings.Join(allTargetDisks, ", "), colorReset)
+			if cfg.KeepPartitions {
+				fmt.Printf(" %sNOTE: Existing partition table on [%s] will be PRESERVED (formatting target filesystems only).%s\n",
+					colorYellow+colorBold, strings.Join(allTargetDisks, ", "), colorReset)
+			} else {
+				fmt.Printf(" %s⚠️  WARNING: ALL EXISTING DATA ON [%s] WILL BE PERMANENTLY ERASED!%s\n",
+					colorRed+colorBold, strings.Join(allTargetDisks, ", "), colorReset)
+			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %sControls:%s [I / Enter] Begin Installation Now   [V] Logs & Diagnostics   [B] Back   [W] Shell Wizard   [Q] Cancel\n", colorDim, colorReset)
 

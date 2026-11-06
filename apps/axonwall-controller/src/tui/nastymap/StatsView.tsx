@@ -76,7 +76,7 @@ export function StatsView({ scan }: StatsViewProps) {
           Operating System Distribution:
         </Text>
         {topOs.map(([osName, count]) => {
-          const barLength = Math.max(1, Math.round((count / totalHosts) * 20));
+          const barLength = Math.max(1, Math.round((count / (totalHosts || 1)) * 20));
           const bar = '█'.repeat(barLength);
           return (
             <Box key={osName} paddingLeft={2} gap={1}>

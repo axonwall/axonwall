@@ -291,12 +291,19 @@ func (vm *VigilanteManager) ApplyConfig(rawJSON []byte) error {
 			}
 		}
 		if (bundle.K3sEnabled || bundle.CompiledBundle.K3sDependencyMet) && bundle.CompiledBundle.K3sManifests != "" {
+			if err := validateK3sManifest(bundle.CompiledBundle.K3sManifests); err != nil {
+				return fmt.Errorf("vigilante K3s manifest failed security validation: %w", err)
+			}
 			_ = os.MkdirAll("/var/lib/rancher/k3s/server/manifests", 0755)
 			if f, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644); err == nil {
 				_, _ = f.WriteString(bundle.CompiledBundle.K3sManifests)
 				_ = f.Close()
 			}
+		} else {
+			_ = os.Remove(manifestPath)
 		}
+	} else {
+		_ = os.Remove(manifestPath)
 	}
 
 	log.Printf("[VigilanteManager] Reconciled Vigilante runtime configuration and in-house K3s manifests")
@@ -345,18 +352,20 @@ func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.R
 	// Seek to end of file to stream only new alerts
 	_, _ = logFile.Seek(0, os.SEEK_END)
 	reader := bufio.NewReader(logFile)
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	var pendingLine string
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		default:
-			line, err := reader.ReadString('\n')
+			chunk, err := reader.ReadString('\n')
+			if len(chunk) > 0 {
+				pendingLine += chunk
+			}
 			if err == nil {
-				line = strings.TrimSpace(line)
+				line := strings.TrimSpace(pendingLine)
+				pendingLine = ""
 				if line != "" {
 					var raw map[string]any
 					if jsonErr := json.Unmarshal([]byte(line), &raw); jsonErr == nil {

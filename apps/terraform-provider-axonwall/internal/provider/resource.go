@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -72,7 +74,7 @@ func (r *DesiredStateResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
-	err := r.applyState(data.StateJSON.ValueString())
+	err := r.applyState(ctx, data.StateJSON.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error applying state", err.Error())
 		return
@@ -92,7 +94,7 @@ func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadReques
 		return
 	}
 
-	url := r.client.Endpoint + "/state"
+	url := strings.TrimRight(r.client.Endpoint, "/") + "/state"
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create HTTP request to /state", err.Error())
@@ -131,8 +133,11 @@ func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadReques
 	if len(bodyBytes) > 0 {
 		var jsonObj interface{}
 		if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
-			if normBytes, err := json.Marshal(jsonObj); err == nil {
-				data.StateJSON = types.StringValue(string(normBytes))
+			var existingObj interface{}
+			if json.Unmarshal([]byte(data.StateJSON.ValueString()), &existingObj) != nil || !reflect.DeepEqual(jsonObj, existingObj) {
+				if normBytes, err := json.Marshal(jsonObj); err == nil {
+					data.StateJSON = types.StringValue(string(normBytes))
+				}
 			}
 		}
 	}
@@ -147,7 +152,7 @@ func (r *DesiredStateResource) Update(ctx context.Context, req resource.UpdateRe
 		return
 	}
 
-	err := r.applyState(data.StateJSON.ValueString())
+	err := r.applyState(ctx, data.StateJSON.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating state", err.Error())
 		return
@@ -160,7 +165,10 @@ func (r *DesiredStateResource) Delete(ctx context.Context, req resource.DeleteRe
 	// Do nothing on delete, or apply an empty state.
 }
 
-func (r *DesiredStateResource) applyState(stateJson string) error {
+func (r *DesiredStateResource) applyState(ctx context.Context, stateJson string) error {
+	if r.client == nil || r.client.Endpoint == "" {
+		return fmt.Errorf("axonwall provider client is not configured")
+	}
 	var parsedState map[string]interface{}
 	if err := json.Unmarshal([]byte(stateJson), &parsedState); err != nil {
 		return fmt.Errorf("invalid json payload: %w", err)
@@ -177,8 +185,9 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 		return err
 	}
 
-	url := r.client.Endpoint + "/apply"
-	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	baseEndpoint := strings.TrimRight(r.client.Endpoint, "/")
+	url := baseEndpoint + "/apply"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return err
 	}
@@ -199,9 +208,9 @@ func (r *DesiredStateResource) applyState(stateJson string) error {
 	}
 
 	// Confirm the configuration so it does not auto-rollback after the timeout
-	confirmUrl := r.client.Endpoint + "/confirm"
+	confirmUrl := baseEndpoint + "/confirm"
 	confirmPayload, _ := json.Marshal(map[string]string{"jobId": jobID})
-	confirmReq, err := http.NewRequest("POST", confirmUrl, bytes.NewReader(confirmPayload))
+	confirmReq, err := http.NewRequestWithContext(ctx, "POST", confirmUrl, bytes.NewReader(confirmPayload))
 	if err != nil {
 		return fmt.Errorf("failed to create confirm request: %w", err)
 	}

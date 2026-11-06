@@ -27,22 +27,7 @@ export default function RoutingPage() {
     try {
       const state = await getCurrentDesiredState();
       setFullState(state);
-      setGateways(
-        state.gateways?.length
-          ? state.gateways
-          : [
-              {
-                name: 'WAN_DHCP',
-                interface: 'wan',
-                gatewayIp: '192.168.1.1',
-                monitorIp: '1.1.1.1',
-                weight: 1,
-                isDefault: true,
-                enabled: true,
-                description: 'Primary WAN Gateway',
-              },
-            ]
-      );
+      setGateways(state.gateways || []);
       setRoutes(state.routes || []);
       if (isManual) {
         setStatusMsg(`Successfully loaded ${state.routes?.length || 0} static route(s) from /etc/axonwall/routing.yaml`);

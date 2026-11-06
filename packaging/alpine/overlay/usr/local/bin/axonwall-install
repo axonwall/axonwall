@@ -77,9 +77,21 @@ cleanup_secrets() {
 on_install_exit() {
   _rc=$?
   cleanup_secrets
-  if [ "$_rc" -ne 0 ] && [ -s "${INSTALL_LOG:-/var/log/axonwall-install.log}" ]; then
-    echo "[!] Installation command failed (exit code ${_rc}). Last log lines from ${INSTALL_LOG:-/var/log/axonwall-install.log}:" >&3 2>/dev/null || true
-    tail -n 15 "${INSTALL_LOG:-/var/log/axonwall-install.log}" >&3 2>/dev/null || true
+  if [ "$_rc" -ne 0 ]; then
+    for _m in /mnt/slot_a/boot/efi /mnt/slot_a/dev /mnt/slot_a/proc /mnt/slot_a/sys /mnt/slot_a/run /mnt/slot_a/var/log /mnt/slot_a /mnt/slot_b /mnt/data /mnt/squash_ro; do
+      umount "$_m" 2>/dev/null || true
+    done
+    if command -v zpool >/dev/null 2>&1; then
+      zpool export -f tank 2>/dev/null || true
+      zpool export -f zroot 2>/dev/null || true
+    fi
+    if command -v cryptsetup >/dev/null 2>&1; then
+      cryptsetup close axon_crypt_data 2>/dev/null || true
+    fi
+    if [ -s "${INSTALL_LOG:-/var/log/axonwall-install.log}" ]; then
+      echo "[!] Installation command failed (exit code ${_rc}). Last log lines from ${INSTALL_LOG:-/var/log/axonwall-install.log}:" >&3 2>/dev/null || true
+      tail -n 15 "${INSTALL_LOG:-/var/log/axonwall-install.log}" >&3 2>/dev/null || true
+    fi
   fi
 }
 trap on_install_exit EXIT INT TERM
@@ -698,13 +710,23 @@ find_part_num_on_disk() {
     for _dir in /dev/disk/by-label /dev/disk/by-partlabel; do
       if [ -e "${_dir}/${_lbl}" ]; then
         _resolved="$(readlink -f "${_dir}/${_lbl}" 2>/dev/null || true)"
-        case "$_resolved" in
-          "${_f_disk}p"*)
-            echo "${_resolved#"${_f_disk}p"}"
-            return 0
+        _cand_num=""
+        case "$_f_disk" in
+          *[0-9])
+            case "$_resolved" in
+              "${_f_disk}p"*) _cand_num="${_resolved#"${_f_disk}p"}" ;;
+            esac
             ;;
-          "${_f_disk}"*)
-            echo "${_resolved#"${_f_disk}"}"
+          *)
+            case "$_resolved" in
+              "${_f_disk}"*) _cand_num="${_resolved#"${_f_disk}"}" ;;
+            esac
+            ;;
+        esac
+        case "$_cand_num" in
+          ''|*[!0-9]*) ;;
+          *)
+            echo "$_cand_num"
             return 0
             ;;
         esac
@@ -716,7 +738,14 @@ find_part_num_on_disk() {
 
 if [ "${KEEP_PARTITIONS:-0}" = "1" ]; then
   ui_echo "[+] Preserving pre-partitioned disk layout on ${SYSTEM_DISKS} (KEEP_PARTITIONS=1)..."
+  partprobe "$PRIMARY_DISK" 2>/dev/null || true
+  udevadm settle 2>/dev/null || true
   EFI_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" AXON_EFI ESP EFI efi || true)"
+  if [ -z "$EFI_PART_NUM" ] && command -v lsblk >/dev/null 2>&1; then
+    EFI_PART_NUM="$(lsblk -ln -o PARTN,PARTTYPE,FSTYPE "$PRIMARY_DISK" 2>/dev/null | awk '
+      tolower($0) ~ /c12a7328-f81f-11d2-ba4b-00a0c93ec93b|vfat/ && $1 ~ /^[0-9]+$/ { print $1; exit }
+    ' || true)"
+  fi
   if [ -z "$EFI_PART_NUM" ]; then
     if [ "$INSTALL_MODE" = "zbm" ]; then
       EFI_PART_NUM=1
@@ -728,7 +757,15 @@ if [ "${KEEP_PARTITIONS:-0}" = "1" ]; then
   fi
   if [ "$INSTALL_MODE" != "zbm" ]; then
     ROOT_A_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" axon_root_a axon_root || true)"
-    [ -z "$ROOT_A_PART_NUM" ] && ROOT_A_PART_NUM=3
+    if [ -z "$ROOT_A_PART_NUM" ]; then
+      if [ -b "$(part_dev "$PRIMARY_DISK" 3)" ] && [ "${EFI_PART_NUM:-}" != "3" ]; then
+        ROOT_A_PART_NUM=3
+      elif [ -b "$(part_dev "$PRIMARY_DISK" 2)" ] && [ "${EFI_PART_NUM:-}" != "2" ]; then
+        ROOT_A_PART_NUM=2
+      else
+        ROOT_A_PART_NUM=3
+      fi
+    fi
     if [ "$INSTALL_MODE" = "ab" ]; then
       ROOT_B_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" axon_root_b || true)"
       if [ -z "$ROOT_B_PART_NUM" ] && [ -b "$(part_dev "$PRIMARY_DISK" 4)" ]; then
@@ -739,12 +776,16 @@ if [ "${KEEP_PARTITIONS:-0}" = "1" ]; then
   fi
   DATA_PART_NUM="$(find_part_num_on_disk "$PRIMARY_DISK" axon_data || true)"
   if [ -z "$DATA_PART_NUM" ] && [ "$INSTALL_MODE" != "zbm" ]; then
-    for _cand_p in 6 5 4; do
-      if [ "$_cand_p" != "${ROOT_A_PART_NUM:-}" ] && [ "$_cand_p" != "${ROOT_B_PART_NUM:-}" ] && [ "$_cand_p" != "${LOGS_PART_NUM:-}" ] && [ -b "$(part_dev "$PRIMARY_DISK" "$_cand_p")" ]; then
+    for _cand_p in 6 5 4 3; do
+      if [ "$_cand_p" != "${EFI_PART_NUM:-}" ] && [ "$_cand_p" != "${ROOT_A_PART_NUM:-}" ] && [ "$_cand_p" != "${ROOT_B_PART_NUM:-}" ] && [ "$_cand_p" != "${LOGS_PART_NUM:-}" ] && [ -b "$(part_dev "$PRIMARY_DISK" "$_cand_p")" ]; then
         DATA_PART_NUM="$_cand_p"
         break
       fi
     done
+  fi
+  if [ "$INSTALL_MODE" = "ab" ] && [ -z "$DATA_PART_NUM" ]; then
+    echo "ERROR: KEEP_PARTITIONS=1 in Dual-Slot (ab) mode requires an axon_data partition." >&2
+    exit 1
   fi
   for sys_disk in $SYSTEM_DISKS; do
     DISK_IDX=$(( DISK_IDX + 1 ))
@@ -929,7 +970,11 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
       if [ -n "$LOGS_PART_NUM" ]; then
         RAID_LOGS_MEMBERS="${RAID_LOGS_MEMBERS} $(part_dev "$sys_disk" "$LOGS_PART_NUM")"
       fi
-      RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" "$DATA_PART_NUM")"
+      if [ "$INSTALL_MODE" = "ab" ] && [ -n "$DATA_PART_NUM" ]; then
+        RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" "$DATA_PART_NUM")"
+      elif [ -n "$DATA_PART_NUM" ]; then
+        RAID_DATA_MEMBERS="${RAID_DATA_MEMBERS} $(part_dev "$sys_disk" "$DATA_PART_NUM")"
+      fi
     done
 
     # Zero superblocks before creation
@@ -945,9 +990,15 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && command -v mdadm >/dev/null 2>&1; then
       mdadm --create /dev/md1 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_B_MEMBERS
       ROOT_B_DEV="/dev/md1"
     fi
-    # shellcheck disable=SC2086
-    mdadm --create /dev/md2 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_DATA_MEMBERS
-    DATA_DEV="/dev/md2"
+    if [ "$INSTALL_MODE" = "ab" ] && [ -n "$DATA_PART_NUM" ]; then
+      # shellcheck disable=SC2086
+      mdadm --create /dev/md2 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_DATA_MEMBERS
+      DATA_DEV="/dev/md2"
+    elif [ -n "$DATA_PART_NUM" ]; then
+      # shellcheck disable=SC2086
+      mdadm --create /dev/md2 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_DATA_MEMBERS
+      DATA_DEV="/dev/md2"
+    fi
     if [ -n "$LOGS_PART_NUM" ]; then
       # shellcheck disable=SC2086
       mdadm --create /dev/md3 --level=1 --raid-devices="$SYS_DISK_COUNT" --metadata=1.2 --run $RAID_LOGS_MEMBERS
@@ -1160,9 +1211,16 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   fi
 else
   mount "$ROOT_A_DEV" /mnt/slot_a
+  if [ "${LOGS_ENABLED:-0}" = "1" ] && [ -n "${LOGS_DEV:-}" ] && [ -b "$LOGS_DEV" ]; then
+    mkdir -p /mnt/slot_a/var/log && mount "$LOGS_DEV" /mnt/slot_a/var/log
+  fi
   mkdir -p /mnt/slot_a/boot/efi /mnt/slot_a/var/lib/axonwall
   mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi
-  mount "$TARGET_DATA_MAPPER" /mnt/data
+  if [ -n "$TARGET_DATA_MAPPER" ]; then
+    mount "$TARGET_DATA_MAPPER" /mnt/data
+  else
+    mount --bind /mnt/slot_a/var/lib/axonwall /mnt/data
+  fi
 fi
 
 SQUASH_MOUNT=""
@@ -1314,43 +1372,45 @@ fi
 rm -rf /mnt/slot_a/usr/share/axonwall/vault
 
 # Preserve any live-configured network interfaces, state.json, and YAML configs modified during Live session
-if [ -s /etc/axonwall/interfaces.conf ]; then
-  cp -a /etc/axonwall/interfaces.conf /mnt/slot_a/etc/axonwall/interfaces.conf 2>/dev/null || true
-  cp -a /etc/axonwall/interfaces.conf /mnt/data/etc-axonwall/interfaces.conf 2>/dev/null || true
-fi
-if [ -f /etc/axonwall/.interfaces_configured ]; then
-  cp -a /etc/axonwall/.interfaces_configured /mnt/slot_a/etc/axonwall/.interfaces_configured 2>/dev/null || true
-  cp -a /etc/axonwall/.interfaces_configured /mnt/data/etc-axonwall/.interfaces_configured 2>/dev/null || true
-fi
-if [ -s /etc/network/interfaces ]; then
-  mkdir -p /mnt/slot_a/etc/network
-  cp -a /etc/network/interfaces /mnt/slot_a/etc/network/interfaces 2>/dev/null || true
-fi
-if [ -s /etc/resolv.conf ]; then
-  rm -f /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
-  cp -L /etc/resolv.conf /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
-fi
-for _yfile in /etc/axonwall/*.yaml; do
-  if [ -s "$_yfile" ]; then
-    cp -a "$_yfile" "/mnt/slot_a/etc/axonwall/$(basename "$_yfile")" 2>/dev/null || true
-    cp -a "$_yfile" "/mnt/data/etc-axonwall/$(basename "$_yfile")" 2>/dev/null || true
+if [ -f /etc/axonwall/.interfaces_configured ] || [ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured ]; then
+  if [ -s /etc/axonwall/interfaces.conf ]; then
+    cp -a /etc/axonwall/interfaces.conf /mnt/slot_a/etc/axonwall/interfaces.conf 2>/dev/null || true
+    cp -a /etc/axonwall/interfaces.conf /mnt/data/etc-axonwall/interfaces.conf 2>/dev/null || true
+  elif [ -s /var/lib/axonwall/etc-axonwall/interfaces.conf ]; then
+    cp -a /var/lib/axonwall/etc-axonwall/interfaces.conf /mnt/slot_a/etc/axonwall/interfaces.conf 2>/dev/null || true
+    cp -a /var/lib/axonwall/etc-axonwall/interfaces.conf /mnt/data/etc-axonwall/interfaces.conf 2>/dev/null || true
   fi
-done
-if [ -d /etc/axonwall/conf.d ]; then
-  mkdir -p /mnt/slot_a/etc/axonwall/conf.d /mnt/data/etc-axonwall/conf.d
-  cp -a /etc/axonwall/conf.d/. /mnt/slot_a/etc/axonwall/conf.d/ 2>/dev/null || true
-  cp -a /etc/axonwall/conf.d/. /mnt/data/etc-axonwall/conf.d/ 2>/dev/null || true
-fi
-for _sfile in /var/lib/axonwall/state.json /etc/axonwall/state.json; do
-  if [ -s "$_sfile" ]; then
-    cp -a "$_sfile" /mnt/slot_a/etc/axonwall/state.json 2>/dev/null || true
-    cp -a "$_sfile" /mnt/data/state.json 2>/dev/null || true
-    cp -a "$_sfile" /mnt/data/etc-axonwall/state.json 2>/dev/null || true
-    break
+  touch /mnt/slot_a/etc/axonwall/.interfaces_configured /mnt/data/etc-axonwall/.interfaces_configured 2>/dev/null || true
+  if [ -s /etc/network/interfaces ]; then
+    mkdir -p /mnt/slot_a/etc/network
+    cp -a /etc/network/interfaces /mnt/slot_a/etc/network/interfaces 2>/dev/null || true
   fi
-done
-if [ -s /usr/share/axonwall/lockdown.nft ] && [ -d /mnt/slot_a/usr/share/axonwall ]; then
-  cp -a /usr/share/axonwall/lockdown.nft /mnt/slot_a/usr/share/axonwall/lockdown.nft 2>/dev/null || true
+  if [ -s /etc/resolv.conf ]; then
+    rm -f /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
+    cp -L /etc/resolv.conf /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
+  fi
+  for _yfile in /etc/axonwall/*.yaml; do
+    if [ -s "$_yfile" ]; then
+      cp -a "$_yfile" "/mnt/slot_a/etc/axonwall/$(basename "$_yfile")" 2>/dev/null || true
+      cp -a "$_yfile" "/mnt/data/etc-axonwall/$(basename "$_yfile")" 2>/dev/null || true
+    fi
+  done
+  if [ -d /etc/axonwall/conf.d ]; then
+    mkdir -p /mnt/slot_a/etc/axonwall/conf.d /mnt/data/etc-axonwall/conf.d
+    cp -a /etc/axonwall/conf.d/. /mnt/slot_a/etc/axonwall/conf.d/ 2>/dev/null || true
+    cp -a /etc/axonwall/conf.d/. /mnt/data/etc-axonwall/conf.d/ 2>/dev/null || true
+  fi
+  for _sfile in /var/lib/axonwall/state.json /etc/axonwall/state.json; do
+    if [ -s "$_sfile" ]; then
+      cp -a "$_sfile" /mnt/slot_a/etc/axonwall/state.json 2>/dev/null || true
+      cp -a "$_sfile" /mnt/data/state.json 2>/dev/null || true
+      cp -a "$_sfile" /mnt/data/etc-axonwall/state.json 2>/dev/null || true
+      break
+    fi
+  done
+  if [ -s /usr/share/axonwall/lockdown.nft ] && [ -d /mnt/slot_a/usr/share/axonwall ]; then
+    cp -a /usr/share/axonwall/lockdown.nft /mnt/slot_a/usr/share/axonwall/lockdown.nft 2>/dev/null || true
+  fi
 fi
 
 if [ -n "${HOSTNAME_OVERRIDE:-}" ]; then
@@ -1377,13 +1437,30 @@ if [ "${LUKS_ENABLED:-0}" = "1" ] && [ -n "$TEMP_LUKS_KEY" ] && [ -f "$TEMP_LUKS
     echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard,tpm2-device=auto" > /mnt/slot_a/etc/crypttab
   elif [ -z "$LUKS_PASSPHRASE" ]; then
     ui_echo "[+] Persisting root-only LUKS keyfile (/etc/axonwall/luks-data.key) since no passphrase was specified and TPM 2.0 is unavailable..."
-    mkdir -p /mnt/slot_a/etc/axonwall
+    mkdir -p /mnt/slot_a/etc/axonwall /mnt/slot_a/etc/axonwall/luks
     ( umask 077 && cp "$TEMP_LUKS_KEY" /mnt/slot_a/etc/axonwall/luks-data.key )
-    chown root:root /mnt/slot_a/etc/axonwall/luks-data.key 2>/dev/null || true
-    chmod 0400 /mnt/slot_a/etc/axonwall/luks-data.key
+    ( umask 077 && cp "$TEMP_LUKS_KEY" /mnt/slot_a/etc/axonwall/luks/data.key )
+    chown root:root /mnt/slot_a/etc/axonwall/luks-data.key /mnt/slot_a/etc/axonwall/luks/data.key 2>/dev/null || true
+    chmod 0400 /mnt/slot_a/etc/axonwall/luks-data.key /mnt/slot_a/etc/axonwall/luks/data.key
     echo "axon_crypt_data UUID=${DATA_UUID} /etc/axonwall/luks-data.key luks,discard" > /mnt/slot_a/etc/crypttab
   else
     echo "axon_crypt_data UUID=${DATA_UUID} none luks,discard" > /mnt/slot_a/etc/crypttab
+  fi
+  if [ "$OS_FAMILY" = "alpine" ]; then
+    LUKS_PART_UUID="${DATA_UUID}"
+    mkdir -p /mnt/slot_a/etc/conf.d /mnt/slot_a/etc/runlevels/boot
+    cat << DMCRYPT_EOF > /mnt/slot_a/etc/conf.d/dmcrypt
+target='axon_crypt_data'
+source="UUID=${LUKS_PART_UUID}"
+key='/etc/axonwall/luks/data.key'
+DMCRYPT_EOF
+    if [ -n "$LUKS_PASSPHRASE" ]; then
+      sed -i '/^key=/d' /mnt/slot_a/etc/conf.d/dmcrypt
+    fi
+    chmod 0600 /mnt/slot_a/etc/conf.d/dmcrypt 2>/dev/null || true
+    if [ -e /mnt/slot_a/etc/init.d/dmcrypt ]; then
+      ln -sf /etc/init.d/dmcrypt /mnt/slot_a/etc/runlevels/boot/dmcrypt
+    fi
   fi
   DATA_FSTAB_SRC="/dev/mapper/axon_crypt_data"
   shred -u "$TEMP_LUKS_KEY" 2>/dev/null || rm -f "$TEMP_LUKS_KEY" 2>/dev/null || true
@@ -1509,9 +1586,26 @@ if [ -n "$ADMIN_PASSWORD" ]; then
   fi
 
   case "$ADMIN_PASSWORD" in
-    scrypt\$*) ;;
+    scrypt\$*)
+      if [ -f /etc/axonwall/.password_changed ] && [ -f /etc/shadow ] && [ -f /mnt/slot_a/etc/shadow ]; then
+        for _u in root admin axonwall; do
+          _live_hash="$(awk -F: -v u="$_u" '$1 == u {print $2; exit}' /etc/shadow 2>/dev/null || true)"
+          case "$_live_hash" in
+            ''|'!'|'*'|'!*'|'!!') continue ;;
+          esac
+          if grep -q "^${_u}:" /mnt/slot_a/etc/shadow 2>/dev/null; then
+            LIVE_HASH="$_live_hash" awk -F: -v OFS=: -v u="$_u" '$1 == u {$2 = ENVIRON["LIVE_HASH"]} {print}' /mnt/slot_a/etc/shadow > /mnt/slot_a/etc/shadow.tmp && \
+              chmod 0640 /mnt/slot_a/etc/shadow.tmp 2>/dev/null && \
+              mv /mnt/slot_a/etc/shadow.tmp /mnt/slot_a/etc/shadow
+          fi
+        done
+      fi
+      ;;
     *)
       printf 'root:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+      if grep -q '^admin:' /mnt/slot_a/etc/passwd 2>/dev/null; then
+        printf 'admin:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+      fi
       if grep -q '^axonwall:' /mnt/slot_a/etc/passwd 2>/dev/null; then
         printf 'axonwall:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
       fi
@@ -1562,6 +1656,7 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
     rsync -aAX --delete \
       --exclude='/boot/efi/*' \
       --exclude='/var/lib/axonwall/*' \
+      --exclude='/var/log/*' \
       --exclude='/proc/*' \
       --exclude='/sys/*' \
       --exclude='/dev/*' \
@@ -2086,16 +2181,7 @@ else
 fi
 GRUB_EOF
 
-  if [ "${INSTALL_MODE}" = "ab" ] && [ -n "${ROOT_B_DEV:-}" ] && [ -b "$ROOT_B_DEV" ]; then
-    mkdir -p /mnt/slot_b
-    if mount "$ROOT_B_DEV" /mnt/slot_b 2>/dev/null; then
-      mkdir -p /mnt/slot_b/boot
-      cp -a /mnt/slot_a/boot/grub /mnt/slot_b/boot/ 2>/dev/null || true
-      umount /mnt/slot_b 2>/dev/null || true
-    fi
-  fi
-
-  # On Debian, if update-initramfs is needed for mdadm RAID-1 or LUKS2, refresh initramfs inside chroot
+  # On Debian or Alpine, if initramfs refresh is needed for mdadm RAID-1 or LUKS2, rebuild inside chroot
   if [ "$OS_FAMILY" = "debian" ] && { [ "$SYSTEM_RAID_MODE" = "mirror" ] || [ "${LUKS_ENABLED:-0}" = "1" ]; }; then
     for m in dev proc sys run; do
       mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
@@ -2104,6 +2190,38 @@ GRUB_EOF
     for m in run sys proc dev; do
       umount "/mnt/slot_a/$m" 2>/dev/null || true
     done
+  elif [ "$OS_FAMILY" = "alpine" ] && { [ "$SYSTEM_RAID_MODE" = "mirror" ] || [ "${LUKS_ENABLED:-0}" = "1" ]; }; then
+    mkdir -p /mnt/slot_a/etc/mkinitfs
+    if [ ! -f /mnt/slot_a/etc/mkinitfs/mkinitfs.conf ]; then
+      echo 'features="ata base ide scsi usb virtio ext4 xfs nvme"' > /mnt/slot_a/etc/mkinitfs/mkinitfs.conf
+    fi
+    if [ "$SYSTEM_RAID_MODE" = "mirror" ] && ! grep -qw 'raid' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null; then
+      sed -i 's/features="/features="raid /' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null || true
+    fi
+    if [ "${LUKS_ENABLED:-0}" = "1" ] && ! grep -qw 'cryptsetup' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null; then
+      sed -i 's/features="/features="cryptsetup /' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null || true
+    fi
+    K_FLAVOR="${KERNEL_FLAVOR:-virt}"
+    K_VER=$(ls /mnt/slot_a/lib/modules 2>/dev/null | head -n1 || true)
+    if [ -n "$K_VER" ]; then
+      for m in dev proc sys run; do
+        mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
+      done
+      chroot /mnt/slot_a mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o "/boot/initramfs-${K_FLAVOR}" "${K_VER}" 2>/dev/null || true
+      for m in run sys proc dev; do
+        umount "/mnt/slot_a/$m" 2>/dev/null || true
+      done
+    fi
+  fi
+
+  if [ "${INSTALL_MODE}" = "ab" ] && [ -n "${ROOT_B_DEV:-}" ] && [ -b "$ROOT_B_DEV" ]; then
+    mkdir -p /mnt/slot_b
+    if mount "$ROOT_B_DEV" /mnt/slot_b 2>/dev/null; then
+      mkdir -p /mnt/slot_b/boot
+      cp -a /mnt/slot_a/boot/grub /mnt/slot_b/boot/ 2>/dev/null || true
+      cp -a /mnt/slot_a/boot/initramfs-* /mnt/slot_a/boot/initrd.img* /mnt/slot_b/boot/ 2>/dev/null || true
+      umount /mnt/slot_b 2>/dev/null || true
+    fi
   fi
 fi
 

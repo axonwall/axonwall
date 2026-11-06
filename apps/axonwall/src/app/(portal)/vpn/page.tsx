@@ -23,7 +23,12 @@ export default function VPNPortal() {
       setMfaSecret(res.secret);
       setMfaQr(res.qrDataUrl);
     } catch (err: any) {
-      setError(err.message);
+      if (err.message?.includes('local break-glass administrator')) {
+        // SSO / Directory users authenticate via IdP MFA and can provision directly
+        setMfaVerified(true);
+      } else {
+        setError(err.message);
+      }
     } finally {
       setLoading(false);
     }

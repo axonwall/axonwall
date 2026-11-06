@@ -22,8 +22,15 @@ export function buildArtifactBundle(jobId: string, state: DesiredState): Compile
   // 2. Compile to atomic nftables ruleset
   const { nftScript, files, reloadServices } = compileNftables(state);
 
-  // 3. Compute deterministic bundle hash
-  const hash = crypto.createHash('sha256').update(nftScript).digest('hex');
+  // 3. Compute deterministic bundle hash over nftScript, files, and reloadServices
+  const hashInput = JSON.stringify({
+    nftScript,
+    files: [...files]
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
+    reloadServices: [...reloadServices].sort(),
+  });
+  const hash = crypto.createHash('sha256').update(hashInput).digest('hex');
 
   return {
     jobId,
@@ -152,33 +159,89 @@ export function ensureControllerTls(
   // B-H3: never self-generate when an operator CA exists without a
   // matching on-box CA key — fail startup loudly instead.
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
+  const generateSignedOrSelfSignedCert = (targetKeyPath: string, targetCertPath: string, days: string) => {
+    const san = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
+    if (fs.existsSync(caPath) && fs.existsSync(caKeyPath)) {
+      const csrPath = `${targetCertPath}.csr`;
+      const extPath = `${targetCertPath}.ext`;
+      try {
+        child_process.execFileSync(
+          'openssl',
+          [
+            'req',
+            '-newkey',
+            'rsa:2048',
+            '-nodes',
+            '-keyout',
+            targetKeyPath,
+            '-out',
+            csrPath,
+            '-subj',
+            '/O=Axonwall/OU=Appliance/CN=axonwall',
+          ],
+          { timeout: 15000, stdio: 'ignore' }
+        );
+        fs.writeFileSync(
+          extPath,
+          `basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${san}\n`,
+          { mode: 0o600 }
+        );
+        child_process.execFileSync(
+          'openssl',
+          [
+            'x509',
+            '-req',
+            '-in',
+            csrPath,
+            '-CA',
+            caPath,
+            '-CAkey',
+            caKeyPath,
+            '-CAcreateserial',
+            '-out',
+            targetCertPath,
+            '-days',
+            days,
+            '-sha256',
+            '-extfile',
+            extPath,
+          ],
+          { timeout: 15000, stdio: 'ignore' }
+        );
+      } finally {
+        try { fs.unlinkSync(csrPath); } catch {}
+        try { fs.unlinkSync(extPath); } catch {}
+      }
+    } else {
+      child_process.execFileSync(
+        'openssl',
+        [
+          'req',
+          '-x509',
+          '-newkey',
+          'rsa:2048',
+          '-nodes',
+          '-keyout',
+          targetKeyPath,
+          '-out',
+          targetCertPath,
+          '-days',
+          days,
+          '-subj',
+          '/O=Axonwall/OU=Appliance/CN=axonwall',
+          '-addext',
+          `subjectAltName=${san}`,
+        ],
+        { timeout: 15000, stdio: 'ignore' }
+      );
+    }
+  };
   try {
     const certDir = path.dirname(certPath);
     if (!fs.existsSync(certDir)) {
       fs.mkdirSync(certDir, { recursive: true, mode: 0o750 });
     }
-    const san = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
-    child_process.execFileSync(
-      'openssl',
-      [
-        'req',
-        '-x509',
-        '-newkey',
-        'rsa:2048',
-        '-nodes',
-        '-keyout',
-        keyPath,
-        '-out',
-        certPath,
-        '-days',
-        '3650',
-        '-subj',
-        '/O=Axonwall/OU=Appliance/CN=axonwall',
-        '-addext',
-        `subjectAltName=${san}`,
-      ],
-      { timeout: 15000, stdio: 'ignore' }
-    );
+    generateSignedOrSelfSignedCert(keyPath, certPath, '3650');
 
     if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
       const cert = fs.readFileSync(certPath);
@@ -206,28 +269,7 @@ export function ensureControllerTls(
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-tls-'));
     const tmpKey = path.join(tmpDir, 'hub.key');
     const tmpCert = path.join(tmpDir, 'hub.crt');
-    const san = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
-    child_process.execFileSync(
-      'openssl',
-      [
-        'req',
-        '-x509',
-        '-newkey',
-        'rsa:2048',
-        '-nodes',
-        '-keyout',
-        tmpKey,
-        '-out',
-        tmpCert,
-        '-days',
-        '30',
-        '-subj',
-        '/O=Axonwall/OU=Appliance/CN=axonwall',
-        '-addext',
-        `subjectAltName=${san}`,
-      ],
-      { timeout: 15000, stdio: 'ignore' }
-    );
+    generateSignedOrSelfSignedCert(tmpKey, tmpCert, '30');
 
     const cert = fs.readFileSync(tmpCert);
     const key = fs.readFileSync(tmpKey);
@@ -607,12 +649,15 @@ export function createPortMultiplexer(
   const pendingTls = new Map<string, NodeJS.Timeout>();
   const pendingRedirect = new Map<net.Socket, NodeJS.Timeout>();
   const tlsKey = (socket: net.Socket) => `${socket.remoteAddress}:${socket.remotePort}`;
-  const clearTlsDeadline = (socket: net.Socket) => {
-    const timer = pendingTls.get(tlsKey(socket));
+  const clearTlsDeadlineByKey = (key: string) => {
+    const timer = pendingTls.get(key);
     if (timer) {
       clearTimeout(timer);
-      pendingTls.delete(tlsKey(socket));
+      pendingTls.delete(key);
     }
+  };
+  const clearTlsDeadline = (socket: net.Socket) => {
+    clearTlsDeadlineByKey(tlsKey(socket));
   };
   const clearRedirectDeadline = (socket: net.Socket) => {
     const timer = pendingRedirect.get(socket);
@@ -630,6 +675,7 @@ export function createPortMultiplexer(
 
   const tcpMultiplexer = net.createServer((socket) => {
     let handled = false;
+    const connKey = tlsKey(socket);
 
     // Mitigate slowloris / connection exhaustion prior to TLS handshake:
     // destroy unauthenticated connections that send 0 bytes within 5 seconds.
@@ -651,12 +697,12 @@ export function createPortMultiplexer(
       socket.unshift(buf);
       if (buf[0] === 0x16) {
         const timer = setTimeout(() => {
-          pendingTls.delete(tlsKey(socket));
+          pendingTls.delete(connKey);
           socket.destroy();
         }, handshakeTimeoutMs);
-        pendingTls.set(tlsKey(socket), timer);
-        socket.once('close', () => clearTlsDeadline(socket));
-        socket.once('error', () => clearTlsDeadline(socket));
+        pendingTls.set(connKey, timer);
+        socket.once('close', () => clearTlsDeadlineByKey(connKey));
+        socket.once('error', () => clearTlsDeadlineByKey(connKey));
         httpsServer.emit('connection', socket);
       } else {
         const timer = setTimeout(() => {
@@ -787,21 +833,28 @@ async function main() {
     sat.role = deriveSatelliteRole({ configuredRole: fleetNode?.role, currentRole: sat.role, satelliteId: sat.id });
     const isEdge = sat.role === 'edge-ngfw';
 
+    const resolvedWanInterface = fleetNode?.wanInterface || sat.wanInterface || 'eth0';
+    const resolvedLanInterface = fleetNode?.lanInterface || sat.lanInterface || 'eth1';
+    const wanIpv6Mode =
+      hostedEdge?.wan?.ipv6Mode || fleetNode?.ipv6Mode || 'auto';
+    const lanIpv6Mode =
+      hostedEdge?.lan?.ipv6Mode || fleetNode?.ipv6Mode || 'delegated';
+
     const mergedNode = {
       ...fleetNode,
       ...sat,
       role: sat.role,
       skuProfile: fleetNode?.skuProfile || sat.skuProfile || hostedEdge?.skuProfile || 'sku-vm-virtio',
-      wanInterface: fleetNode?.wanInterface || sat.wanInterface || 'eth0',
-      lanInterface: fleetNode?.lanInterface || sat.lanInterface || 'eth1',
+      wanInterface: resolvedWanInterface,
+      lanInterface: resolvedLanInterface,
       portForwards: fleetNode?.portForwards || hostedEdge?.portForwards || [],
       ipv6Allow: fleetNode?.ipv6Allow || hostedEdge?.ipv6Allow || [],
       zones: fleetNode?.zones || [],
       disabledIpv6Interfaces:
         fleetNode?.disabledIpv6Interfaces ||
         [
-          ...(hostedEdge?.wan?.ipv6Mode === 'disabled' ? ['eth0'] : []),
-          ...(hostedEdge?.lan?.ipv6Mode === 'disabled' ? ['eth1'] : []),
+          ...(wanIpv6Mode === 'disabled' ? [resolvedWanInterface] : []),
+          ...(lanIpv6Mode === 'disabled' ? [resolvedLanInterface] : []),
         ],
     };
 
@@ -816,8 +869,8 @@ async function main() {
     );
 
     if (isEdge) {
-      const wanDev = mergedNode.wanInterface || 'eth0';
-      const lanDev = mergedNode.lanInterface || 'eth1';
+      const wanDev = resolvedWanInterface;
+      const lanDev = resolvedLanInterface;
       const wanAddress =
         fleetNode?.wanAddress ||
         (hostedEdge?.wan?.ipv4Mode === 'static' && hostedEdge.wan.ipv4Address
@@ -827,10 +880,6 @@ async function main() {
         hostedEdge?.wan?.ipv4Mode === 'static' ? hostedEdge.wan.ipv4Gateway : undefined;
       const lanAddress =
         fleetNode?.lanAddress || hostedEdge?.lan?.edgeAddress || '10.0.0.1/24';
-      const wanIpv6Mode =
-        hostedEdge?.wan?.ipv6Mode || fleetNode?.ipv6Mode || 'auto';
-      const lanIpv6Mode =
-        hostedEdge?.lan?.ipv6Mode || fleetNode?.ipv6Mode || 'delegated';
 
       const interfaces: Array<{
         name: string;
@@ -882,23 +931,19 @@ async function main() {
         }),
       );
 
-      if (localState?.routes && localState.routes.length > 0) {
-        const enabledRoutes = localState.routes
-          .filter((r) => r.enabled)
-          .map((r) => ({
-            destination: r.network,
-            gateway: r.gateway,
-            ...(r.interface ? { device: r.interface } : {}),
-          }));
-        if (enabledRoutes.length > 0) {
-          sat.ws.send(
-            JSON.stringify({
-              type: 'SYNC_ROUTES',
-              payload: { routes: enabledRoutes },
-            }),
-          );
-        }
-      }
+      const enabledRoutes = (localState?.routes ?? [])
+        .filter((r) => r.enabled)
+        .map((r) => ({
+          destination: r.network,
+          gateway: r.gateway,
+          ...(r.interface ? { device: r.interface } : {}),
+        }));
+      sat.ws.send(
+        JSON.stringify({
+          type: 'SYNC_ROUTES',
+          payload: { routes: enabledRoutes },
+        }),
+      );
     }
   }
 
@@ -1500,11 +1545,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       cert: tlsConfig.cert,
       key: tlsConfig.key,
       ca: tlsConfig.ca ? tlsConfig.ca : undefined,
-      requestCert: Boolean(tlsConfig.ca),
+      requestCert: true,
       // Client certificates are enforced per-path, not at the TLS layer:
       // this listener is shared by the web console (browsers have no
       // client cert) and by satellites that only receive their cert
-      // during ZTP provisioning. Fleet paths verify instead: /ws/satellite
+      // during ZTP provisioning, as well as MCP clients using mTLS
+      // fingerprint pinning. Fleet paths verify instead: /ws/satellite
       // requires socket.authorized when a CA exists, and the fleet HTTP
       // API rejects presented-but-invalid certificates (verifyFleetAuth).
       rejectUnauthorized: false
@@ -1733,6 +1779,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       } catch {
         // Ignore termination errors
       }
+      lastRxTxBytes.delete(satId);
     }
 
     let wgPrivateKey = existing?.wgPrivateKey;
@@ -1810,6 +1857,9 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           // the last-known metrics, and suppressing the PING reply.
           // Skip the metrics block with a warning instead, and always
           // send PING for a well-formed report.
+          if (!report || typeof report !== 'object') {
+            return;
+          }
           if (report.metrics) {
             state.metrics = report.metrics;
             // B-M5: telemetry is only a fallback signal for nodes with
@@ -1827,21 +1877,25 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             if (report.metrics?.skuProfile) {
               state.skuProfile = report.metrics.skuProfile;
             }
-            console.log(`[Fleet Manager] Telemetry from ${satId}: CPU ${report.metrics?.cpuUsagePercent?.toFixed(1)}% | RAM ${report.metrics?.memUsagePercent?.toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`);
+            console.log(
+              `[Fleet Manager] Telemetry from ${satId}: CPU ${Number(report.metrics?.cpuUsagePercent ?? 0).toFixed(1)}% | RAM ${Number(report.metrics?.memUsagePercent ?? 0).toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`
+            );
 
             // Update Prometheus metrics
-            satUptimeGauge.set({ satellite_id: satId }, report.metrics.uptimeSeconds || 0);
-            satCpuGauge.set({ satellite_id: satId }, report.metrics.cpuUsagePercent || 0);
-            satMemGauge.set({ satellite_id: satId }, report.metrics.memUsagePercent || 0);
-            satConnsGauge.set({ satellite_id: satId }, report.metrics.activeConns || 0);
+            satUptimeGauge.set({ satellite_id: satId }, Number(report.metrics.uptimeSeconds) || 0);
+            satCpuGauge.set({ satellite_id: satId }, Number(report.metrics.cpuUsagePercent) || 0);
+            satMemGauge.set({ satellite_id: satId }, Number(report.metrics.memUsagePercent) || 0);
+            satConnsGauge.set({ satellite_id: satId }, Number(report.metrics.activeConns) || 0);
 
-            // Handle counter increments safely
-            const currentRx = report.metrics.rxBytesTotal || 0;
-            const currentTx = report.metrics.txBytesTotal || 0;
+            // Handle counter increments safely (including counter reset across satellite reboot)
+            const currentRx = Number(report.metrics.rxBytesTotal) || 0;
+            const currentTx = Number(report.metrics.txBytesTotal) || 0;
             const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
 
-            if (currentRx >= last.rx) satRxBytesGauge.inc({ satellite_id: satId }, currentRx - last.rx);
-            if (currentTx >= last.tx) satTxBytesGauge.inc({ satellite_id: satId }, currentTx - last.tx);
+            const rxDelta = currentRx >= last.rx ? currentRx - last.rx : currentRx;
+            const txDelta = currentTx >= last.tx ? currentTx - last.tx : currentTx;
+            if (rxDelta > 0) satRxBytesGauge.inc({ satellite_id: satId }, rxDelta);
+            if (txDelta > 0) satTxBytesGauge.inc({ satellite_id: satId }, txDelta);
 
             lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
           } else {

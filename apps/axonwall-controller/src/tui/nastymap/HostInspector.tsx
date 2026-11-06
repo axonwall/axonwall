@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { NmapHost } from 'nastymap';
 
@@ -11,6 +11,13 @@ export interface HostInspectorProps {
 
 export function HostInspector({ host, onBack, onUpdateHost, readOnly = false }: HostInspectorProps) {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   useInput((input, key) => {
     if (key.escape || key.backspace || input === 'b' || input === 'q') {
@@ -20,7 +27,8 @@ export function HostInspector({ host, onBack, onUpdateHost, readOnly = false }: 
     } else if (input === 'd') {
       // Trigger deep re-scan
       setStatusMsg('Running deep scan (nmap -sV -sC -A -p-)...');
-      setTimeout(() => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
         if (onUpdateHost) {
           onUpdateHost(host.id, (prev) => {
             const hasPort = prev.ports.some((p) => p.portid === 8443);

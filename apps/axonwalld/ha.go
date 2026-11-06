@@ -238,8 +238,21 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		cfg.ConntrackSync.Interface = cfg.SyncInterface
 	}
 
+	devMap := loadInterfaceDeviceMap()
+	if cfg.SyncInterface != "" {
+		cfg.SyncInterface = resolveInterfaceDevice(cfg.SyncInterface, devMap)
+	}
+	if cfg.ConntrackSync.Interface != "" {
+		cfg.ConntrackSync.Interface = resolveInterfaceDevice(cfg.ConntrackSync.Interface, devMap)
+	}
+	for i := range cfg.VRRPInstances {
+		if cfg.VRRPInstances[i].Interface != "" {
+			cfg.VRRPInstances[i].Interface = resolveInterfaceDevice(cfg.VRRPInstances[i].Interface, devMap)
+		}
+	}
+
 	for _, field := range []string{cfg.SyncInterface, cfg.PeerIp, cfg.SyncPassword, cfg.ConntrackSync.Interface, cfg.ConntrackSync.PeerAddress} {
-		if strings.ContainsAny(field, "\n\r\"'{};#") {
+		if strings.ContainsAny(field, "\n\r\"'{};#! \t") {
 			return fmt.Errorf("invalid characters in HA configuration: %q", field)
 		}
 	}
@@ -423,7 +436,7 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 		if pass == "" {
 			pass = cfg.SyncPassword
 		}
-		if strings.ContainsAny(iface+pass, "\n\r\"'{};#") {
+		if strings.ContainsAny(iface+pass, "\n\r\"'{};#! \t") {
 			return fmt.Errorf("invalid characters in VRRP instance %s", instName)
 		}
 
@@ -520,14 +533,15 @@ func (e *HAEngine) generateConntrackd(cfg HAConfig) error {
 	}
 
 	for _, field := range []string{syncIface, peerIp} {
-		if strings.ContainsAny(field, "\n\r\"'{};# \t") {
+		if strings.ContainsAny(field, "\n\r\"'{};#! \t") {
 			return fmt.Errorf("invalid characters in conntrackd configuration: %q", field)
 		}
 	}
 
 	localIP := resolveInterfaceIPv4(syncIface)
-	if localIP == "" {
-		localIP = peerIp
+	ipv4IfaceLine := ""
+	if localIP != "" {
+		ipv4IfaceLine = fmt.Sprintf("        IPv4_interface %s\n", localIP)
 	}
 
 	conf := fmt.Sprintf(`Sync {
@@ -539,8 +553,7 @@ func (e *HAEngine) generateConntrackd(cfg HAConfig) error {
     
     Multicast {
         IPv4_address 225.0.0.50
-        IPv4_interface %s
-        Interface %s
+%s        Interface %s
         SndSocketBuffer 1249280
         RcvSocketBuffer 1249280
         Checksum on
@@ -570,7 +583,7 @@ General {
         }
     }
 }
-`, localIP, syncIface)
+`, ipv4IfaceLine, syncIface)
 
 	if err := os.MkdirAll("/etc/conntrackd", 0755); err != nil {
 		return err

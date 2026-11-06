@@ -33,8 +33,10 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
   const safeName = server.name.replace(/[^a-zA-Z0-9_-]/g, '_');
   const safeCommentName = server.name.replace(/[\r\n]+/g, ' ').trim();
   const safeDevName = (server.devName || 'ovpn-dco0').replace(/[^a-zA-Z0-9_-]/g, '');
-  const [networkIp, cidrStr] = server.tunnelNetwork.split('/');
-  const prefix = Number.parseInt(cidrStr || '24', 10);
+  const tunnelParts = server.tunnelNetwork.split('/');
+  const networkIp = tunnelParts[0];
+  const parsedTunnelPrefix = Number.parseInt(tunnelParts[1] ?? '', 10);
+  const prefix = Number.isNaN(parsedTunnelPrefix) ? 24 : Math.max(0, Math.min(32, parsedTunnelPrefix));
   const netmask = cidrToNetmask(prefix);
 
   const lines: string[] = [
@@ -67,8 +69,11 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
   }
 
   if (server.localNetwork) {
-    const [localIp, localCidr] = server.localNetwork.split('/');
-    const localMask = cidrToNetmask(Number.parseInt(localCidr || '24', 10));
+    const localParts = server.localNetwork.split('/');
+    const localIp = localParts[0];
+    const parsedLocalPrefix = Number.parseInt(localParts[1] ?? '', 10);
+    const localPrefix = Number.isNaN(parsedLocalPrefix) ? 24 : Math.max(0, Math.min(32, parsedLocalPrefix));
+    const localMask = cidrToNetmask(localPrefix);
     lines.push(`push "route ${localIp} ${localMask}"`);
   }
 
@@ -101,8 +106,11 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
         csoLines.push(`ifconfig-push ${cso.assignedIp} ${netmask}`);
       }
       for (const route of cso.pushRoutes) {
-        const [rIp, rCidr] = route.split('/');
-        const rMask = cidrToNetmask(Number.parseInt(rCidr || '24', 10));
+        const routeParts = route.split('/');
+        const rIp = routeParts[0];
+        const parsedRoutePrefix = Number.parseInt(routeParts[1] ?? '', 10);
+        const rPrefix = Number.isNaN(parsedRoutePrefix) ? 24 : Math.max(0, Math.min(32, parsedRoutePrefix));
+        const rMask = cidrToNetmask(rPrefix);
         csoLines.push(`push "route ${rIp} ${rMask}"`);
       }
       ccdFiles[safeCn] = csoLines.join('\n') + '\n';
@@ -159,11 +167,12 @@ export function generateClientOvpnProfile(params: {
 }
 
 function cidrToNetmask(prefix: number): string {
+  let rem = Number.isNaN(prefix) ? 24 : Math.max(0, Math.min(32, prefix));
   const mask = [];
   for (let i = 0; i < 4; i++) {
-    const n = Math.min(prefix, 8);
+    const n = Math.max(0, Math.min(rem, 8));
     mask.push(256 - Math.pow(2, 8 - n));
-    prefix -= n;
+    rem -= n;
   }
   return mask.join('.');
 }

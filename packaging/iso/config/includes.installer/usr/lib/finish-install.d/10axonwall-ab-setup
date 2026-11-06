@@ -609,17 +609,23 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && [ -n "$SYSTEM_RAID_DISKS" ]; then
     in-target grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram 2>/dev/null || true
 
     # Replicate Slot A & Slot B onto secondary disk or assemble mdadm mirror
-    SEC_ROOT_A=$(part_dev "$sec_disk" "$ROOT_A_NUM")
-    SEC_ROOT_B=$(part_dev "$sec_disk" "$ROOT_B_NUM")
-    SEC_DATA=$(part_dev "$sec_disk" "$DATA_NUM")
-    if [ -b "$SEC_ROOT_A" ]; then
+    SEC_ROOT_A=""
+    SEC_ROOT_B=""
+    SEC_DATA=""
+    [ -n "${ROOT_A_NUM:-}" ] && SEC_ROOT_A=$(part_dev "$sec_disk" "$ROOT_A_NUM")
+    [ -n "${ROOT_B_NUM:-}" ] && SEC_ROOT_B=$(part_dev "$sec_disk" "$ROOT_B_NUM")
+    [ -n "${DATA_NUM:-}" ] && SEC_DATA=$(part_dev "$sec_disk" "$DATA_NUM")
+    if [ -n "$SEC_ROOT_A" ] && [ -b "$SEC_ROOT_A" ]; then
       dd if="$ROOT_A_DEV" of="$SEC_ROOT_A" bs=4M conv=fsync 2>/dev/null || true
+      e2label "$SEC_ROOT_A" "axon_root_a_m${DISK_IDX}" 2>/dev/null || xfs_admin -L "axon_root_a_m${DISK_IDX}" "$SEC_ROOT_A" 2>/dev/null || true
     fi
-    if [ -b "$SEC_ROOT_B" ]; then
+    if [ -n "$SEC_ROOT_B" ] && [ -b "$SEC_ROOT_B" ]; then
       dd if="$ROOT_B_DEV" of="$SEC_ROOT_B" bs=4M conv=fsync 2>/dev/null || true
+      e2label "$SEC_ROOT_B" "axon_root_b_m${DISK_IDX}" 2>/dev/null || xfs_admin -L "axon_root_b_m${DISK_IDX}" "$SEC_ROOT_B" 2>/dev/null || true
     fi
-    if [ -b "$SEC_DATA" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ]; then
+    if [ -n "$SEC_DATA" ] && [ -b "$SEC_DATA" ] && [ "$DATA_DEV" != "$ROOT_A_DEV" ]; then
       dd if="$DATA_DEV" of="$SEC_DATA" bs=4M conv=fsync 2>/dev/null || true
+      e2label "$SEC_DATA" "axon_data_m${DISK_IDX}" 2>/dev/null || xfs_admin -L "axon_data_m${DISK_IDX}" "$SEC_DATA" 2>/dev/null || true
     fi
 
     # Label ZFS partition on secondary system disk if ZFS allocation is active
@@ -752,6 +758,15 @@ ZFS_JSON_EOF
       in-target zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:bootlimit=3" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:topology=${RESOLVED_TOPOLOGY}" zroot/ROOT 2>/dev/null || true
+      mkdir -p /mnt/zbm_root 2>/dev/null || true
+      if mount -t zfs "$INIT_BE" /mnt/zbm_root 2>/dev/null; then
+        if command -v rsync >/dev/null 2>&1; then
+          rsync -aAX --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/boot/efi/*' /target/ /mnt/zbm_root/ 2>/dev/null || true
+        else
+          cp -a /target/. /mnt/zbm_root/ 2>/dev/null || true
+        fi
+        umount /mnt/zbm_root 2>/dev/null || true
+      fi
       in-target zfs snapshot "${INIT_BE}@factory-initial" 2>/dev/null || true
     fi
   else

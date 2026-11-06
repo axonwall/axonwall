@@ -564,17 +564,15 @@ function cmdDiff() {
   const { nftScript } = compileNftables(state);
 
   if (fs.existsSync(path.join(GITOPS_DIR, '.git'))) {
+    let tmpDir = '';
     try {
       const yamlFiles = serializeDesiredStateToYamlFiles(state);
-      const tmpDir = fs.mkdtempSync('/tmp/axonwall-diff-');
+      tmpDir = fs.mkdtempSync('/tmp/axonwall-diff-');
       let hasDiff = false;
       for (const [filename, content] of Object.entries(yamlFiles)) {
         const committedPath = path.join(GITOPS_DIR, filename);
-        const diskContent = fs.existsSync(path.join(ETC_DIR, filename))
-          ? fs.readFileSync(path.join(ETC_DIR, filename), 'utf-8')
-          : content;
         const candidatePath = path.join(tmpDir, filename);
-        fs.writeFileSync(candidatePath, diskContent, 'utf-8');
+        fs.writeFileSync(candidatePath, content, 'utf-8');
         if (fs.existsSync(committedPath)) {
           const res = spawnSync(
             'diff',
@@ -587,11 +585,14 @@ function cmdDiff() {
           }
         }
       }
-      fs.rmSync(tmpDir, { recursive: true, force: true });
       if (!hasDiff) {
         console.log(`${cGreen}[✓] No uncommitted differences between /etc/axonwall/*.yaml and active GitOps HEAD.${cReset}`);
       }
-    } catch {}
+    } catch {} finally {
+      if (tmpDir) {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      }
+    }
   }
 
   console.log(`\n${cCyan}${cBold}--- Compiled nftables Ruleset Preview (first 35 lines) ---${cReset}`);
@@ -613,6 +614,10 @@ async function cmdApply(autoConfirm = true) {
         fs.writeFileSync(target, content, { mode: 0o660 });
         try { fs.chmodSync(target, 0o660); } catch {}
       }
+      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+      if (fs.existsSync(ciOverride)) {
+        fs.rmSync(ciOverride, { force: true });
+      }
     } catch {}
   }
 
@@ -627,7 +632,14 @@ async function cmdApply(autoConfirm = true) {
 
   // Compile artifacts via compileNftables(state)
   const { nftScript, files, reloadServices } = compileNftables(state);
-  const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
+  const hashInput = JSON.stringify({
+    nftScript,
+    files: [...files]
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
+    reloadServices: [...reloadServices].sort(),
+  });
+  const bundleHash = crypto.createHash('sha256').update(hashInput).digest('hex');
   const jobId = `cli-${Date.now()}`;
 
   const filesPayload = [
@@ -841,6 +853,7 @@ function cmdSaveJson(fileArg?: string) {
 
   const state = validation.data;
   const serialized = serializeDesiredStateToYamlFiles(state);
+  const serializedJson = JSON.stringify(state, null, 2);
   for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
     try {
       fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
@@ -849,13 +862,19 @@ function cmdSaveJson(fileArg?: string) {
         fs.writeFileSync(fp, content, { encoding: 'utf-8', mode: 0o660 });
         try { fs.chmodSync(fp, 0o660); } catch {}
       }
+      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+      if (fs.existsSync(ciOverride)) {
+        fs.rmSync(ciOverride, { force: true });
+      }
     } catch {}
   }
-  try {
-    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o775 });
-    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o660 });
-    try { fs.chmodSync(STATE_JSON_PATH, 0o660); } catch {}
-  } catch {}
+  for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
+    try {
+      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
+      try { fs.chmodSync(jsonTarget, 0o660); } catch {}
+    } catch {}
+  }
   fixSharedConfigOwnership();
 
   process.stdout.write(
@@ -898,8 +917,16 @@ async function cmdConfirm() {
     });
     if (resp.success) {
       console.log(`${cGreen}${cBold}[✓] Active ruleset and configuration successfully confirmed. Auto-rollback disarmed.${cReset}`);
+      try {
+        const state = cmdValidate(true);
+        const commitHash = commitToGitOps(state, `CLI confirm via axonwallctl (${pendingJobId})`);
+        if (commitHash) {
+          console.log(`${cGreen}[✓] Committed configuration revision ${commitHash} to GitOps repository.${cReset}`);
+        }
+      } catch {}
     } else {
       console.warn(`${cYellow}[!] Daemon response: ${resp.message}${cReset}`);
+      process.exit(1);
     }
   } catch (err: any) {
     console.error(`${cRed}[✗] Failed to confirm ruleset: ${err?.message || err}${cReset}`);
@@ -1311,32 +1338,30 @@ async function cmdCloudInit(userArgs: string[]) {
           const hash = crypto.scryptSync(rawAdminPass, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
           finalAdminPass = `scrypt$${salt}$${hash}`;
         }
-        if (!/^\$(1|5|6|y|2a|2b|2y)\$/.test(finalAdminPass)) {
-          if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(rawAdminUser)) {
-            throw new Error(`Invalid administrator username: ${rawAdminUser}`);
-          }
-          const cleanAdminPass = finalAdminPass.replace(/[\r\n]/g, '');
-          fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
-          const adminEnvPath = path.join(ETC_DIR, 'admin.env');
-          const envContent = `LOCAL_ADMIN_USER=${rawAdminUser}\nLOCAL_ADMIN_PASSWORD=${cleanAdminPass}\n`;
-          fs.writeFileSync(adminEnvPath, envContent, { mode: 0o660 });
-          try { fs.chmodSync(adminEnvPath, 0o660); } catch {}
-
-          const nowIso = new Date().toISOString();
-          try {
-            fs.writeFileSync(path.join(ETC_DIR, '.password_changed'), `${nowIso}\n`, { mode: 0o644 });
-          } catch {}
-
-          // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
-          try {
-            const persistDir = '/var/lib/axonwall/etc-axonwall';
-            fs.mkdirSync(persistDir, { recursive: true, mode: 0o775 });
-            fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o660 });
-            fs.chmodSync(path.join(persistDir, 'admin.env'), 0o660);
-            fs.writeFileSync('/var/lib/axonwall/.password_changed', `${nowIso}\n`, { mode: 0o644 });
-          } catch {}
-          fixSharedConfigOwnership();
+        if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(rawAdminUser)) {
+          throw new Error(`Invalid administrator username: ${rawAdminUser}`);
         }
+        const cleanAdminPass = finalAdminPass.replace(/[\r\n]/g, '');
+        fs.mkdirSync(ETC_DIR, { recursive: true, mode: 0o775 });
+        const adminEnvPath = path.join(ETC_DIR, 'admin.env');
+        const envContent = `LOCAL_ADMIN_USER=${rawAdminUser}\nLOCAL_ADMIN_PASSWORD=${cleanAdminPass}\n`;
+        fs.writeFileSync(adminEnvPath, envContent, { mode: 0o660 });
+        try { fs.chmodSync(adminEnvPath, 0o660); } catch {}
+
+        const nowIso = new Date().toISOString();
+        try {
+          fs.writeFileSync(path.join(ETC_DIR, '.password_changed'), `${nowIso}\n`, { mode: 0o644 });
+        } catch {}
+
+        // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
+        try {
+          const persistDir = '/var/lib/axonwall/etc-axonwall';
+          fs.mkdirSync(persistDir, { recursive: true, mode: 0o775 });
+          fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o660 });
+          fs.chmodSync(path.join(persistDir, 'admin.env'), 0o660);
+          fs.writeFileSync('/var/lib/axonwall/.password_changed', `${nowIso}\n`, { mode: 0o644 });
+        } catch {}
+        fixSharedConfigOwnership();
       } catch (err: any) {
         console.warn(`[!] Unable to write admin.env: ${err.message}`);
       }
@@ -2332,7 +2357,9 @@ async function cmdMcp(args: string[]) {
       persistMcpSettings(false, 'Disabled via axonwallctl');
       try {
         await sendAgentSocketRequest<any>('/v1/mcp/flush', 'POST', {});
-      } catch {}
+      } catch (err: any) {
+        console.warn(`${cYellow}[!] Warning: Could not flush active kernel MCP leases on daemon (${err?.message || 'offline'}).${cReset}`);
+      }
       const status = getMcpServerStatus();
       console.log(
         `${cGreen}[✓] MCP Master Switch is now ${status.enabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
@@ -2343,8 +2370,11 @@ async function cmdMcp(args: string[]) {
       console.log(`[+] Flushing all active MCP session leases...`);
       try {
         await sendAgentSocketRequest<any>('/v1/mcp/flush', 'POST', {});
-      } catch {}
-      console.log(`${cGreen}[✓] All MCP leases revoked.${cReset}`);
+        console.log(`${cGreen}[✓] All MCP leases revoked.${cReset}`);
+      } catch (err: any) {
+        console.error(`${cRed}[✗] Failed to flush MCP leases: ${err?.message || err}${cReset}`);
+        process.exit(1);
+      }
       break;
     }
     default:

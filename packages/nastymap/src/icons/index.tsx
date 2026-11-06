@@ -156,12 +156,14 @@ export function getHostIcon(
   if (nodeType === 'scanner') return ScannerOriginIcon;
 
   const dev = (deviceType || '').toLowerCase();
-  if (DEVICE_ICON_REGISTRY[dev]) return DEVICE_ICON_REGISTRY[dev];
+  if (dev && dev !== 'general purpose' && dev !== 'server' && DEVICE_ICON_REGISTRY[dev]) {
+    return DEVICE_ICON_REGISTRY[dev];
+  }
 
   const os = (osFamily || '').toLowerCase();
   for (const [key, icon] of Object.entries(OS_ICON_REGISTRY)) {
     if (os.includes(key)) return icon;
   }
 
-  return ServerDefaultIcon;
+  return DEVICE_ICON_REGISTRY[dev] || ServerDefaultIcon;
 }

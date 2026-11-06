@@ -130,9 +130,19 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
  * Adds a new host to an Nmap scan
  */
 export function addHostToScan(scan: NmapRun, host: NmapHost): NmapRun {
+  const nextHosts = [...scan.hosts, host];
   return {
     ...scan,
-    hosts: [...scan.hosts, host],
+    hosts: nextHosts,
+    runstats: {
+      ...scan.runstats,
+      hosts: {
+        ...scan.runstats?.hosts,
+        up: nextHosts.filter((h) => h.status.state === 'up').length,
+        down: nextHosts.filter((h) => h.status.state === 'down').length,
+        total: nextHosts.length,
+      },
+    },
   };
 }
 
@@ -151,5 +161,14 @@ export function removeHostFromScan(scan: NmapRun, hostIdOrIp: string): NmapRun {
   return {
     ...scan,
     hosts: filtered,
+    runstats: {
+      ...scan.runstats,
+      hosts: {
+        ...scan.runstats?.hosts,
+        up: filtered.filter((h) => h.status.state === 'up').length,
+        down: filtered.filter((h) => h.status.state === 'down').length,
+        total: filtered.length,
+      },
+    },
   };
 }

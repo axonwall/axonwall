@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import {
   Power,
@@ -28,6 +28,13 @@ export default function PowerManagementPage() {
   const [executionMessage, setExecutionMessage] = useState<string | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [pingAttempts, setPingAttempts] = useState(0);
+  const probeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (probeTimerRef.current) clearInterval(probeTimerRef.current);
+    };
+  }, []);
 
   const fetchTelemetry = async () => {
     try {
@@ -98,14 +105,24 @@ export default function PowerManagementPage() {
   };
 
   const startReconnectionProbe = () => {
+    if (probeTimerRef.current) clearInterval(probeTimerRef.current);
     let attempts = 0;
     const interval = setInterval(async () => {
       attempts++;
       setPingAttempts(attempts);
+      if (attempts > 60) {
+        clearInterval(interval);
+        probeTimerRef.current = null;
+        setIsReconnecting(false);
+        setIsExecuting(false);
+        setExecutionMessage('Reconnection probe timed out after 3 minutes. Check appliance console or network status.');
+        return;
+      }
       try {
         const res = await fetch('/api/system/update', { cache: 'no-store' });
         if (res.ok) {
           clearInterval(interval);
+          probeTimerRef.current = null;
           setIsReconnecting(false);
           setIsExecuting(false);
           alert('Axonwall Appliance is back online! Reloading system state...');
@@ -115,6 +132,7 @@ export default function PowerManagementPage() {
         // Appliance still rebooting
       }
     }, 3000);
+    probeTimerRef.current = interval;
   };
 
   return (

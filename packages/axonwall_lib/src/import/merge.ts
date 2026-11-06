@@ -78,30 +78,21 @@ export function mergeFirewallConfigs(
     }
   }
 
+  const remapAliasRef = (val?: string): string | undefined => {
+    if (!val || !val.startsWith('$')) return val;
+    const rawAlias = val.slice(1);
+    return aliasNameMap.has(rawAlias) ? `$${aliasNameMap.get(rawAlias)}` : val;
+  };
+
   // 4. Firewall Rules
   if (includeRules && imported.rules) {
-    const rewrittenRules: FirewallRule[] = imported.rules.map((rule) => {
-      let src = rule.source;
-      let dst = rule.destination;
-      // Remap alias references if renamed
-      if (src.startsWith('$')) {
-        const rawAlias = src.slice(1);
-        if (aliasNameMap.has(rawAlias)) {
-          src = `$${aliasNameMap.get(rawAlias)}`;
-        }
-      }
-      if (dst.startsWith('$')) {
-        const rawAlias = dst.slice(1);
-        if (aliasNameMap.has(rawAlias)) {
-          dst = `$${aliasNameMap.get(rawAlias)}`;
-        }
-      }
-      return {
-        ...rule,
-        source: src,
-        destination: dst,
-      };
-    });
+    const rewrittenRules: FirewallRule[] = imported.rules.map((rule) => ({
+      ...rule,
+      source: remapAliasRef(rule.source) ?? rule.source,
+      destination: remapAliasRef(rule.destination) ?? rule.destination,
+      sourcePort: remapAliasRef(rule.sourcePort) ?? rule.sourcePort,
+      destinationPort: remapAliasRef(rule.destinationPort) ?? rule.destinationPort,
+    }));
 
     if (rulePlacement === 'prepend') {
       merged.rules = [...rewrittenRules, ...(merged.rules || [])];
@@ -112,7 +103,15 @@ export function mergeFirewallConfigs(
 
   // 5. NAT Rules
   if (includeNat && imported.nat) {
-    merged.nat = [...(merged.nat || []), ...imported.nat];
+    const rewrittenNat = imported.nat.map((rule) => ({
+      ...rule,
+      source: remapAliasRef(rule.source) ?? rule.source,
+      destination: remapAliasRef(rule.destination) ?? rule.destination,
+      sourcePort: remapAliasRef(rule.sourcePort) ?? rule.sourcePort,
+      destinationPort: remapAliasRef(rule.destinationPort) ?? rule.destinationPort,
+      targetPort: remapAliasRef(rule.targetPort) ?? rule.targetPort,
+    }));
+    merged.nat = [...(merged.nat || []), ...rewrittenNat];
   }
 
   // 6. DHCP Static Mappings

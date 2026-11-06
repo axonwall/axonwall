@@ -522,7 +522,18 @@ if [ "$ZBM_MODE" = "1" ]; then
 
     if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
       echo "[+] Extracting firmware payload into ${TARGET_BE_DS}..."
-      extract_deb "${DEB_TMP}" "${ZBM_STAGE_MNT}"
+      PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+      rm -rf "${PKG_STAGE}"
+      mkdir -p "${PKG_STAGE}"
+      if ! extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
+        echo "[-] ERROR: Failed to extract firmware archive ${DEB_TMP}." >&2
+        rm -rf "${PKG_STAGE}"
+        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        exit 1
+      fi
+      apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"
+      rm -rf "${PKG_STAGE}"
       if [ -d "${ZBM_STAGE_MNT}/etc/axonwall" ] && [ -d /var/lib/axonwall/etc-axonwall ]; then
         sync_static_etc_axonwall "${ZBM_STAGE_MNT}/etc/axonwall" /var/lib/axonwall/etc-axonwall
       fi
@@ -541,6 +552,13 @@ if [ "$ZBM_MODE" = "1" ]; then
         done
       fi
       ensure_cli_symlinks "/"
+    elif [ -d /opt/axonwall ]; then
+      mkdir -p "${ZBM_STAGE_MNT}/opt/axonwall" 2>/dev/null || true
+      if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete /opt/axonwall/ "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || true
+      else
+        cp -a /opt/axonwall/. "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || true
+      fi
     fi
 
     mkdir -p "${ZBM_STAGE_MNT}/etc/axonwall" "${ZBM_STAGE_MNT}/var/lib/axonwall"
@@ -895,5 +913,5 @@ else
   fi
 fi
 
-rm -f "${DEB_TMP:-}" "${DEB_TMP:-}.sha256" 2>/dev/null || true
+rm -f "${DEB_TMP:-}" "${DEB_TMP:-}.sha256" "${DEB_TMP:-}.sha256.sig" 2>/dev/null || true
 echo "[+] Firmware update process completed successfully."

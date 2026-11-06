@@ -196,15 +196,22 @@ function saveStateToDisk(state: DesiredState): Record<string, string> {
           fs.chmodSync(filePath, 0o660);
         } catch {}
       }
+      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+      if (fs.existsSync(ciOverride)) {
+        fs.rmSync(ciOverride, { force: true });
+      }
     } catch {}
   }
-  try {
-    fs.mkdirSync(path.dirname(STATE_JSON_PATH), { recursive: true, mode: 0o775 });
-    fs.writeFileSync(STATE_JSON_PATH, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o660 });
+  const serializedJson = JSON.stringify(state, null, 2);
+  for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
     try {
-      fs.chmodSync(STATE_JSON_PATH, 0o660);
+      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
+      fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
+      try {
+        fs.chmodSync(jsonTarget, 0o660);
+      } catch {}
     } catch {}
-  } catch {}
+  }
   return daemonFiles;
 }
 
@@ -394,6 +401,7 @@ export function AxonwallTuiApp({
   const [haTrustStatus, setHaTrustStatus] = useState<any>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [promptState, setPromptState] = useState<InlinePrompt | null>(null);
+  const [lastJobId, setLastJobId] = useState<string | null>(null);
 
   const [statusMessage, setStatusMessage] = useState<string>(
     readOnly
@@ -484,7 +492,14 @@ export function AxonwallTuiApp({
     setStatusMessage('Compiling nftables & subsystem configurations and applying with 120s commit-confirm...');
     const yamlDaemonFiles = saveStateToDisk(state);
     const { nftScript, files, reloadServices } = compileNftables(state);
-    const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
+    const hashInput = JSON.stringify({
+      nftScript,
+      files: [...files]
+        .sort((a, b) => a.path.localeCompare(b.path))
+        .map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
+      reloadServices: [...reloadServices].sort(),
+    });
+    const bundleHash = crypto.createHash('sha256').update(hashInput).digest('hex');
 
     const allFiles = [
       ...files.map((f: any) => ({
@@ -501,6 +516,7 @@ export function AxonwallTuiApp({
     ];
 
     const jobId = `tui-${Date.now()}`;
+    setLastJobId(jobId);
     const resp = await callDaemon(
       '/v1/apply',
       'POST',
@@ -533,7 +549,11 @@ export function AxonwallTuiApp({
   };
 
   const handleConfirm = async () => {
-    const activeJobId = daemonStatus?.pending_job_id || daemonStatus?.pendingJobId || 'confirm';
+    const activeJobId = daemonStatus?.pending_job_id || daemonStatus?.pendingJobId || lastJobId;
+    if (!activeJobId) {
+      setStatusMessage('No pending commit-confirm job ID found.');
+      return;
+    }
     const resp = await callDaemon('/v1/confirm', 'POST', { jobId: activeJobId, job_id: activeJobId });
     if (resp && (resp.success || resp.status === 'confirmed')) {
       setStatusMessage('✔ Configuration confirmed and persisted as last-known-good!');
