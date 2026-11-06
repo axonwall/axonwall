@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { FolderKanban, Plus, Trash2 } from 'lucide-react';
+import { FolderKanban, Plus, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { getCurrentDesiredState, applyDesiredState } from '@/server/agent';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
@@ -154,6 +154,25 @@ export default function NasSharesPage() {
           </p>
         </div>
       </div>
+
+      {/* C-B12: statusMsg was set by all four handlers but never
+          rendered anywhere, so a failed add/remove was invisible. */}
+      {statusMsg && (
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
+            statusMsg.startsWith('Error:')
+              ? 'bg-red-500/10 border border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.startsWith('Error:') ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* SMB Share Builder */}
