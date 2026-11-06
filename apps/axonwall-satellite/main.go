@@ -89,6 +89,62 @@ type TelemetryReportPayload struct {
 	// hubs that do not consume COMMAND_ACK yet (A-M9 fallback). It is
 	// empty when the last command succeeded.
 	LastApplyError string `json:"lastApplyError,omitempty"`
+	// HeadscaleEnrolled is the node's live tailscale login state
+	// (B-H4 residual): the hub must not trust its latched
+	// headscaleEnrolled flag alone, because a wiped/reimaged
+	// satellite reconnects with the same ID and is never
+	// re-provisioned. Nil when the state cannot be determined, so
+	// the hub ignores the field instead of acting on a guess.
+	HeadscaleEnrolled *bool `json:"headscaleEnrolled,omitempty"`
+}
+
+// parseTailscaleBackendState maps `tailscale status --json`
+// BackendState to a Headscale enrollment verdict: Running means
+// logged in; NeedsLogin/NoState/Stopped/NeedsMachineAuth mean
+// not enrolled; anything else (Starting, unparsable output, an
+// unknown state) is indeterminate and returns nil.
+func parseTailscaleBackendState(data []byte) *bool {
+	var status struct {
+		BackendState string `json:"BackendState"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return nil
+	}
+	switch status.BackendState {
+	case "Running":
+		enrolled := true
+		return &enrolled
+	case "NeedsLogin", "NoState", "Stopped", "NeedsMachineAuth":
+		enrolled := false
+		return &enrolled
+	default:
+		return nil
+	}
+}
+
+// headscaleEnrolledStatus asks tailscaled whether this node is
+// logged in, via `tailscale status --json`. The result is cached
+// for a minute: the check runs from the 15 s telemetry loop, and
+// forking the tailscale CLI on every tick would be wasteful.
+var (
+	headscaleStatusCache     *bool
+	headscaleStatusCheckedAt time.Time
+)
+
+func headscaleEnrolledStatus() *bool {
+	if !headscaleStatusCheckedAt.IsZero() && time.Since(headscaleStatusCheckedAt) < time.Minute {
+		return headscaleStatusCache
+	}
+	headscaleStatusCheckedAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
+	if err != nil {
+		headscaleStatusCache = nil
+		return nil
+	}
+	headscaleStatusCache = parseTailscaleBackendState(out)
+	return headscaleStatusCache
 }
 
 // exitOrHalt exits normally, except as PID 1 where exiting would panic the kernel.
@@ -652,9 +708,10 @@ func main() {
 				lastErr := lastApplyError
 				lastApplyErrMu.Unlock()
 				report := TelemetryReportPayload{
-					SatelliteID:    *satID,
-					Metrics:        metrics,
-					LastApplyError: lastErr,
+					SatelliteID:       *satID,
+					Metrics:           metrics,
+					LastApplyError:    lastErr,
+					HeadscaleEnrolled: headscaleEnrolledStatus(),
 				}
 
 				payloadBytes, err := json.Marshal(report)

@@ -576,6 +576,13 @@ export function headscaleRetryDelaysMs(): number[] {
   return [0, 5000, 15000, 30000, 60000];
 }
 
+// B-H4 residual: the slow re-check interval after the bounded
+// backoff above exhausts (~110 s). Without it, nothing retried on
+// a socket that stayed open after Headscale recovered. Five
+// minutes is deliberately far above one backoff run so a
+// recovering Headscale is not hammered.
+export const HEADSCALE_RECHECK_MS = 5 * 60 * 1000;
+
 export interface HeadscaleProvisionDeps {
   listUsers: () => Promise<any[]>;
   createUser: (name: string) => Promise<any>;
@@ -2024,6 +2031,11 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     };
     activeSatellites.set(satId, state);
 
+    // B-H4 residual: the slow re-check timer for this socket (see
+    // the provisioning section below). Declared here so the close
+    // handler can clear it.
+    let headscaleRecheckTimer: NodeJS.Timeout | null = null;
+
     // B2-H2: liveness probes for this socket. TCP keepalive catches
     // a dead peer at the transport layer; the ws ping/pong pair (the
     // heartbeat timer above) catches a peer that holds the socket
@@ -2096,6 +2108,25 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             if (report.lastApplyError) state.lastApplyError = report.lastApplyError;
             else if (state.lastApplyError) delete state.lastApplyError;
           }
+          // B-H4 residual: do not trust the latched enrolled flag
+          // alone. The satellite reports its live Headscale
+          // enrollment in every telemetry report (absent on old
+          // satellites, which is ignored): a reconnected satellite
+          // that was wiped/reimaged reports false here, which
+          // clears the latched true and re-provisions it, and a
+          // true report is positive evidence the node is enrolled.
+          // The in-flight/timer guards keep a 15 s telemetry
+          // cadence from restarting the bounded backoff run on
+          // every report while a retry is already scheduled.
+          if (typeof report.headscaleEnrolled === 'boolean') {
+            if (report.headscaleEnrolled === false && state.headscaleEnrolled) {
+              console.log(`[Fleet Manager] Satellite ${satId} reports no Headscale identity; re-provisioning despite the latched enrolled flag`);
+              state.headscaleEnrolled = false;
+              if (!headscaleProvisioning && !headscaleRecheckTimer) void requestHeadscaleProvision();
+            } else if (report.headscaleEnrolled === true) {
+              state.headscaleEnrolled = true;
+            }
+          }
           if (report.metrics) {
             state.metrics = report.metrics;
             // B-M5: telemetry is only a fallback signal for nodes with
@@ -2160,6 +2191,13 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
     ws.on('close', () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
+      // B-H4 residual: a disconnect cancels the slow re-check for
+      // this socket; the next connect starts a fresh provisioning
+      // run instead.
+      if (headscaleRecheckTimer) {
+        clearTimeout(headscaleRecheckTimer);
+        headscaleRecheckTimer = null;
+      }
       const current = activeSatellites.get(satId);
       if (current?.ws === ws) {
         satUptimeGauge.remove({ satellite_id: satId });
@@ -2210,6 +2248,20 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       isOpen: () => ws.readyState === WebSocket.OPEN,
     });
     let headscaleProvisioning: Promise<boolean> | null = null;
+    const scheduleHeadscaleRecheck = (): void => {
+      // B-H4 residual: the bounded backoff above exhausts after
+      // ~110 s, and then nothing retried on this socket even after
+      // Headscale recovered. Keep a slow re-check until the
+      // satellite is enrolled or the socket closes.
+      if (headscaleRecheckTimer) return;
+      headscaleRecheckTimer = setTimeout(() => {
+        headscaleRecheckTimer = null;
+        if (ws.readyState === WebSocket.OPEN && !state.headscaleEnrolled) {
+          void requestHeadscaleProvision();
+        }
+      }, HEADSCALE_RECHECK_MS);
+      headscaleRecheckTimer.unref?.();
+    };
     const requestHeadscaleProvision = (): Promise<boolean> => {
       if (headscaleProvisioning) return headscaleProvisioning;
       headscaleProvisioning = provisionHeadscale().then((ok) => {
@@ -2218,7 +2270,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         state.headscaleEnrolled = ok;
         headscaleProvisioning = null;
         if (ok) console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
-        else console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect or on a REQUEST_HEADSCALE message`);
+        else {
+          console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect, on a REQUEST_HEADSCALE message, or on the slow re-check`);
+          scheduleHeadscaleRecheck();
+        }
         return ok;
       });
       return headscaleProvisioning;

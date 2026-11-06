@@ -45664,6 +45664,7 @@ function recordCommandAck(state, ack) {
 function headscaleRetryDelaysMs() {
   return [0, 5e3, 15e3, 3e4, 6e4];
 }
+var HEADSCALE_RECHECK_MS = 5 * 60 * 1e3;
 async function provisionHeadscaleWithRetry(deps) {
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
   const delays = deps.delaysMs ?? headscaleRetryDelaysMs();
@@ -46786,6 +46787,7 @@ ${headerLines.join("\r\n")}\r
       headscaleEnrolled: existing?.headscaleEnrolled || false
     };
     activeSatellites.set(satId, state);
+    let headscaleRecheckTimer = null;
     try {
       ws._socket?.setKeepAlive?.(true, 3e4);
     } catch {
@@ -46838,6 +46840,15 @@ ${headerLines.join("\r\n")}\r
             if (report.lastApplyError) state.lastApplyError = report.lastApplyError;
             else if (state.lastApplyError) delete state.lastApplyError;
           }
+          if (typeof report.headscaleEnrolled === "boolean") {
+            if (report.headscaleEnrolled === false && state.headscaleEnrolled) {
+              console.log(`[Fleet Manager] Satellite ${satId} reports no Headscale identity; re-provisioning despite the latched enrolled flag`);
+              state.headscaleEnrolled = false;
+              if (!headscaleProvisioning && !headscaleRecheckTimer) void requestHeadscaleProvision();
+            } else if (report.headscaleEnrolled === true) {
+              state.headscaleEnrolled = true;
+            }
+          }
           if (report.metrics) {
             state.metrics = report.metrics;
             const fleetNode = loadLocalDesiredState2()?.fleet?.nodes?.find((n) => n.id === satId);
@@ -46888,6 +46899,10 @@ ${headerLines.join("\r\n")}\r
     });
     ws.on("close", () => {
       console.log(`[Fleet Manager] Satellite Disconnected: ${satId}`);
+      if (headscaleRecheckTimer) {
+        clearTimeout(headscaleRecheckTimer);
+        headscaleRecheckTimer = null;
+      }
       const current = activeSatellites.get(satId);
       if (current?.ws === ws) {
         satUptimeGauge.remove({ satellite_id: satId });
@@ -46917,13 +46932,26 @@ ${headerLines.join("\r\n")}\r
       isOpen: () => ws.readyState === import_websocket.default.OPEN
     });
     let headscaleProvisioning = null;
+    const scheduleHeadscaleRecheck = () => {
+      if (headscaleRecheckTimer) return;
+      headscaleRecheckTimer = setTimeout(() => {
+        headscaleRecheckTimer = null;
+        if (ws.readyState === import_websocket.default.OPEN && !state.headscaleEnrolled) {
+          void requestHeadscaleProvision();
+        }
+      }, HEADSCALE_RECHECK_MS);
+      headscaleRecheckTimer.unref?.();
+    };
     const requestHeadscaleProvision = () => {
       if (headscaleProvisioning) return headscaleProvisioning;
       headscaleProvisioning = provisionHeadscale().then((ok) => {
         state.headscaleEnrolled = ok;
         headscaleProvisioning = null;
         if (ok) console.log(`[Fleet Manager] Dispatched Headscale ZTP credentials to ${satId}`);
-        else console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect or on a REQUEST_HEADSCALE message`);
+        else {
+          console.error(`[Fleet Manager] Headscale provisioning for ${satId} exhausted its retries; it will retry on reconnect, on a REQUEST_HEADSCALE message, or on the slow re-check`);
+          scheduleHeadscaleRecheck();
+        }
         return ok;
       });
       return headscaleProvisioning;
@@ -46965,6 +46993,7 @@ if (isDirectExecution()) {
   });
 }
 export {
+  HEADSCALE_RECHECK_MS,
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
   MESH_DISCONNECTED_GRACE_MS,

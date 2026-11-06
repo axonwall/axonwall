@@ -7,6 +7,8 @@ import {
   SATELLITE_HEARTBEAT_MS,
   SATELLITE_LAST_SEEN_GRACE_MS,
   PENDING_COMMAND_STALE_MS,
+  HEADSCALE_RECHECK_MS,
+  headscaleRetryDelaysMs,
   buildSatelliteCommandEnvelope,
   isPendingCommandStale,
   recordCommandAck,
@@ -110,4 +112,20 @@ test('B2-M1: pending commands go stale after the grace period, not before', () =
   const sentAt = 1_000_000;
   assert.equal(isPendingCommandStale(sentAt, sentAt + PENDING_COMMAND_STALE_MS), false);
   assert.equal(isPendingCommandStale(sentAt, sentAt + PENDING_COMMAND_STALE_MS + 1), true);
+});
+
+// B-H4 residual: the bounded Headscale backoff exhausts after
+// ~110 s and then nothing retried on a socket that stayed open
+// after Headscale recovered. The slow re-check must be far above
+// one backoff run so a recovering Headscale is not hammered, and
+// the satellite-side half (telemetry headscaleEnrolled) is what
+// lets the hub distrust its latched flag for a wiped satellite.
+
+test('B-H4 residual: slow Headscale re-check is far above one bounded backoff run', () => {
+  const backoffTotalMs = headscaleRetryDelaysMs().reduce((a, b) => a + b, 0);
+  assert.ok(backoffTotalMs > 0, 'backoff schedule must be non-empty');
+  assert.ok(
+    HEADSCALE_RECHECK_MS >= 2 * backoffTotalMs,
+    `re-check (${HEADSCALE_RECHECK_MS}ms) must be far above one backoff run (${backoffTotalMs}ms)`,
+  );
 });
