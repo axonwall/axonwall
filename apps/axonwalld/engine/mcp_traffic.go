@@ -1492,8 +1492,20 @@ func (m *McpTrafficManager) CapturePacketSample(iface, srcIP, dstIP, proto strin
 		args = append(args, strings.Join(bpfParts, " and "))
 	}
 
-	cmd := exec.CommandContext(ctx, "tcpdump", args...)
-	out, _ := cmd.Output()
+	// L11: a failed tcpdump run used to return "success, 0 packets"
+	// — the same lie A-M15 fixed in RunCapture. There is deliberately
+	// no mock fallback here: a box without tcpdump gets an error, not
+	// a plausible-looking empty sample.
+	tcpdumpPath, err := exec.LookPath("tcpdump")
+	if err != nil {
+		return nil, fmt.Errorf("packet capture unavailable: tcpdump is not installed on this system")
+	}
+
+	cmd := exec.CommandContext(ctx, tcpdumpPath, args...)
+	// Capture stderr so a failed run can be reported, not swallowed.
+	var tcpdumpStderr strings.Builder
+	cmd.Stderr = &tcpdumpStderr
+	out, runErr := cmd.Output()
 
 	ipPortRegex := regexp.MustCompile(`^(\d+\.\d+)\s+IP6?\s+([0-9a-fA-F.:]+)\.([0-9]+)\s+>\s+([0-9a-fA-F.:]+)\.([0-9]+):\s+(.*)$`)
 	packets := []CapturedPacket{}
@@ -1534,6 +1546,18 @@ func (m *McpTrafficManager) CapturePacketSample(iface, srcIP, dstIP, proto strin
 		}
 		packets = append(packets, pkt)
 		idx++
+	}
+
+	if len(packets) == 0 && runErr != nil {
+		// A failed tcpdump run (down/nonexistent interface, bad
+		// BPF) used to return "success, 0 packets". Return the
+		// error instead, as RunCapture does.
+		return nil, fmt.Errorf("tcpdump failed on interface %s: %w (stderr: %s)", dev, runErr, strings.TrimSpace(tcpdumpStderr.String()))
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		// The duration cap cut the sample short: say so instead
+		// of presenting the partial output as a complete sample.
+		log.Printf("[McpTraffic] CapturePacketSample on %s truncated by the %ds duration cap (%d packets)", dev, durationSec, len(packets))
 	}
 
 	return packets, nil

@@ -1,0 +1,65 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// Batch 9 (round-2 daemon lows) regression tests.
+
+// batch9FakeTcpdump installs a fake tcpdump on PATH that prints
+// stdoutText and exits with exitCode.
+func batch9FakeTcpdump(t *testing.T, stdoutText, exitCode string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' '" + stdoutText + "'\nexit " + exitCode + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "tcpdump"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake tcpdump: %v", err)
+	}
+	orig := os.Getenv("PATH")
+	if err := os.Setenv("PATH", dir+":"+orig); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("PATH", orig) })
+}
+
+// L11: a failed tcpdump run must return an error, not "success, 0
+// packets". Pre-fix, CapturePacketSample discarded tcpdump's error
+// and stderr — the same lie A-M15 fixed in RunCapture.
+func TestBatch9CapturePacketSampleReturnsErrorOnFailedTcpdump(t *testing.T) {
+	batch9FakeTcpdump(t, "", "1")
+	mgr := &McpTrafficManager{}
+	if _, err := mgr.CapturePacketSample("eth0", "", "", "", 0, 20, 5); err == nil {
+		t.Fatal("expected an error from a failed tcpdump run")
+	}
+}
+
+// L11: a successful tcpdump run still parses packets.
+func TestBatch9CapturePacketSampleParsesPackets(t *testing.T) {
+	batch9FakeTcpdump(t, "1700000000.123456 IP 10.0.0.1.1234 > 10.0.0.2.80: Flags [S], seq 1\n", "0")
+	mgr := &McpTrafficManager{}
+	packets, err := mgr.CapturePacketSample("eth0", "", "", "", 0, 20, 5)
+	if err != nil {
+		t.Fatalf("CapturePacketSample failed: %v", err)
+	}
+	if len(packets) != 1 {
+		t.Fatalf("expected 1 packet, got %d", len(packets))
+	}
+	if packets[0].SrcIP != "10.0.0.1" || packets[0].DstIP != "10.0.0.2" {
+		t.Fatalf("unexpected packet: %+v", packets[0])
+	}
+}
+
+// L11: tcpdump missing entirely is an error, not an empty sample.
+func TestBatch9CapturePacketSampleErrorsWithoutTcpdump(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	mgr := &McpTrafficManager{}
+	if _, err := mgr.CapturePacketSample("eth0", "", "", "", 0, 20, 5); err == nil {
+		t.Fatal("expected an error without tcpdump")
+	} else if !strings.Contains(err.Error(), "tcpdump") {
+		t.Fatalf("expected a tcpdump error, got: %v", err)
+	}
+}
