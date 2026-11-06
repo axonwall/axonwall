@@ -165,10 +165,13 @@ export default function DiagnosticsPage() {
             }
           } catch {}
         }
-        context.updateHost((prev) => ({
-          tags: Array.from(new Set([...(prev.tags || []), 'deep-scanned', 'verified'])),
-        }));
-        context.notify?.(`Completed verification scan for ${hostIp}.`, 'success');
+        // No scan data was produced (simulated mode, nmap missing, or the
+        // live scan errored): do not tag the host — there is no evidence it
+        // was probed, let alone verified.
+        context.notify?.(
+          `Deep scan produced no data for ${hostIp} — host not verified.`,
+          'error'
+        );
       },
     },
   ];
@@ -202,13 +205,23 @@ export default function DiagnosticsPage() {
         }
       }
 
-      // Generate topology scenario tailored to the target subnet when simulated or no live hosts responded
+      // A live scan that found no hosts must say so explicitly — never
+      // render an invented topology as if it were scanned.
+      if (res.mode === 'live') {
+        setActiveScanLabel(`No hosts found: ${scanTarget}`);
+        setScanStatusMsg(
+          `Live Nmap scan of ${scanTarget} completed in ${(res.durationMs / 1000).toFixed(1)}s — no responding hosts found.`
+        );
+        return;
+      }
+
+      // Generate topology scenario tailored to the target subnet when simulated
       const { scan: generated } = generateNetworkScenario({
         subnet: scanTarget.includes('/') ? scanTarget : `${scanTarget}/24`,
       });
       setCurrentScan(generated);
       setActiveScanLabel(
-        `${res.mode === 'live' ? 'Scanned' : 'Simulated'}: ${scanTarget} (${generated.hosts.length} hosts)`
+        `Simulated: ${scanTarget} (${generated.hosts.length} hosts)`
       );
       setScanStatusMsg(
         `Rendered topology for ${scanTarget} via '${res.command}' (${res.durationMs}ms).`
