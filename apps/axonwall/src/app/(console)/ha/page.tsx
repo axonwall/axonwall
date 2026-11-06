@@ -30,6 +30,14 @@ export default function HighAvailabilityPage() {
   // them as real config. Fields start empty; nothing is persisted
   // until the operator enters it explicitly (see handleSaveHa).
   const [syncInterface, setSyncInterface] = useState('');
+  // C-A5: the first VRRP instance used to be created on the sync
+  // interface — the dedicated point-to-point conntrackd link — so a
+  // LAN gateway VIP ended up unreachable from the LAN. The VRRP
+  // interface is now asked for separately and must be entered
+  // explicitly when no instance exists yet; it is never defaulted
+  // from the sync interface.
+  const [vrrpInterface, setVrrpInterface] = useState('');
+  const [hasExistingVrrp, setHasExistingVrrp] = useState(false);
   const [peerIp, setPeerIp] = useState('');
   const [syncPassword, setSyncPassword] = useState('');
   const [virtualIp, setVirtualIp] = useState('');
@@ -58,8 +66,10 @@ export default function HighAvailabilityPage() {
           const haRole = state.ha.role || state.ha.nodeRole || 'master';
           setRole(haRole === 'backup' ? 'secondary' : 'primary');
           const firstVrrp = state.ha.vrrpInstances?.[0];
+          setHasExistingVrrp(Boolean(firstVrrp));
           if (firstVrrp) {
             setVrid(firstVrrp.vrid);
+            if (firstVrrp.interface) setVrrpInterface(firstVrrp.interface);
             if (firstVrrp.authPassword) setSyncPassword(firstVrrp.authPassword);
             if (firstVrrp.virtualIps?.[0]) setVirtualIp(firstVrrp.virtualIps[0]);
           }
@@ -155,6 +165,10 @@ export default function HighAvailabilityPage() {
           setSyncErrorMsg('Enter a virtual IP in CIDR form (e.g. 192.168.1.254/24) for the first VRRP instance.');
           return;
         }
+        if (existingVrrp.length === 0 && !vrrpInterface.trim()) {
+          setSyncErrorMsg('Enter the VRRP interface that carries the virtual IP (usually the LAN interface) — not the sync interface, which is the dedicated point-to-point link.');
+          return;
+        }
       }
       const vrrpInstances =
         existingVrrp.length > 0
@@ -166,7 +180,7 @@ export default function HighAvailabilityPage() {
                 {
                   name: 'VI_WAN',
                   vrid,
-                  interface: syncInterface,
+                  interface: vrrpInterface.trim(),
                   priority: mappedRole === 'master' ? 150 : 100,
                   virtualIps: [virtualIp.trim()],
                   authPassword: syncPassword,
@@ -213,6 +227,7 @@ export default function HighAvailabilityPage() {
         },
       });
       setSyncStatusMsg('Saved High Availability state to /etc/axonwall/ha.yaml');
+      if (vrrpInstances.length > 0) setHasExistingVrrp(true);
       setTimeout(() => setSyncStatusMsg(null), 4000);
     } catch {
       setSyncStatusMsg('Error saving High Availability configuration');
@@ -441,6 +456,26 @@ export default function HighAvailabilityPage() {
                     VIP could collide with the real LAN gateway.
                   </p>
                 </div>
+
+                {!hasExistingVrrp && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                      VRRP Interface (carries the virtual IP)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="eth1"
+                      value={vrrpInterface}
+                      onChange={(e) => setVrrpInterface(e.target.value)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-200 px-3.5 py-2.5 focus:outline-none focus:border-emerald-500 transition font-mono"
+                    />
+                    <p className="text-xs text-slate-500 mt-1.5">
+                      Required when no VRRP instance exists yet. Usually the LAN interface — never
+                      the sync interface above, which is the dedicated point-to-point link and is
+                      unreachable from the LAN.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>
