@@ -535,6 +535,40 @@ export function shouldPruneDisconnectedSatellite(
   return nowMs - t >= graceMs;
 }
 
+// B2-M1: satellite command acknowledgements. The satellite acks
+// every acted-on hub command (SYNC_*, PROMOTE, DEMOTE,
+// BLOCK_TARGET, SYNC_HEADSCALE) with success or failure, echoing
+// the commandId the hub stamped on the outbound envelope. The
+// controller used to send without ids and never read the acks, so
+// a ws.send counted as success while the satellite had failed the
+// apply. These helpers are the testable core: the envelope format,
+// the staleness rule for acks that never arrive, and the
+// last-failure bookkeeping surfaced in /fleet/satellites.
+export const PENDING_COMMAND_STALE_MS = 5 * 60 * 1000;
+
+export interface SatelliteCommandAck {
+  command: string;
+  commandId?: string;
+  success: boolean;
+  error?: string;
+}
+
+export function buildSatelliteCommandEnvelope(type: string, payload: unknown, commandId: string): string {
+  return JSON.stringify({ type, commandId, payload });
+}
+
+export function isPendingCommandStale(sentAtMs: number, nowMs: number, staleMs: number = PENDING_COMMAND_STALE_MS): boolean {
+  return nowMs - sentAtMs > staleMs;
+}
+
+export function recordCommandAck(state: { lastApplyError?: string }, ack: SatelliteCommandAck): void {
+  if (ack.success) {
+    if (ack.command && state.lastApplyError?.startsWith(`${ack.command}:`)) delete state.lastApplyError;
+    return;
+  }
+  state.lastApplyError = `${ack.command}: ${ack.error || 'failed'}`;
+}
+
 // B-H4: Headscale provisioning retries on bounded backoff while the
 // socket is open, instead of a single attempt per controller lifetime.
 // Delays are the waits before each attempt (first attempt immediate).
@@ -854,6 +888,12 @@ async function main() {
     wireguard?: { tunnelIp: string };
     ws?: WebSocket;
     headscaleEnrolled?: boolean;
+    // B2-M1: the last hub-command failure this satellite reported,
+    // via COMMAND_ACK or the telemetry lastApplyError fallback.
+    // Surfaced in /fleet/satellites (the endpoint returns the rest
+    // of this state) so a failed apply is visible instead of
+    // counted as a successful sync.
+    lastApplyError?: string;
     // B-M2: set when the socket closes; the entry is pruned after the
     // grace period instead of being retained until the fleet cap.
     disconnectedAt?: string;
@@ -873,6 +913,19 @@ async function main() {
   }
 
   const activeSatellites = new Map<string, SatelliteState>();
+
+  // B2-M1: outbound hub commands awaiting their satellite
+  // COMMAND_ACK, keyed by commandId. Acks correlate sends to
+  // results; entries that never ack are swept by the heartbeat
+  // timer instead of leaking forever.
+  const pendingCommands = new Map<string, { satId: string; command: string; sentAt: number }>();
+  const sendToSatellite = (sat: SatelliteState, type: string, payload: unknown): string | null => {
+    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return null;
+    const commandId = `cmd_${crypto.randomUUID()}`;
+    pendingCommands.set(commandId, { satId: sat.id, command: type, sentAt: Date.now() });
+    sat.ws.send(buildSatelliteCommandEnvelope(type, payload, commandId));
+    return commandId;
+  };
 
   // B-H2b residual: the edge last promoted to active via
   // /fleet/ha-transition, reloaded from disk (see
@@ -897,22 +950,15 @@ async function main() {
   // only until the B2-H2 heartbeat terminates it, so a buffered
   // send into a dead socket no longer counts as notified).
   const sendHaTransition = (sat: SatelliteState, type: 'PROMOTE' | 'DEMOTE', role: 'active' | 'standby', sharedWanMac?: string, lanVip?: string): boolean => {
-    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return false;
     // The satellite's EdgeHATransitionPayload reads lanVipV4
     // (lanVip is kept for backward compatibility with any
     // consumer that still reads the old field name).
-    sat.ws.send(
-      JSON.stringify({
-        type,
-        payload: {
-          role,
-          sharedWanMac,
-          lanVip,
-          lanVipV4: lanVip,
-        },
-      }),
-    );
-    return true;
+    return sendToSatellite(sat, type, {
+      role,
+      sharedWanMac,
+      lanVip,
+      lanVipV4: lanVip,
+    }) !== null;
   };
 
   function loadLocalDesiredState(): DesiredState | null {
@@ -978,14 +1024,9 @@ async function main() {
     };
 
     const { nftScript } = compileSatelliteNftables(mergedNode);
-    sat.ws.send(
-      JSON.stringify({
-        type: 'SYNC_NFTABLES',
-        payload: {
-          script: nftScript,
-        },
-      }),
-    );
+    // B2-M1: every outbound command carries a commandId so the
+    // satellite's COMMAND_ACK correlates to this send.
+    sendToSatellite(sat, 'SYNC_NFTABLES', { script: nftScript });
 
     if (isEdge) {
       const wanDev = resolvedWanInterface;
@@ -1043,12 +1084,7 @@ async function main() {
         }
       }
 
-      sat.ws.send(
-        JSON.stringify({
-          type: 'SYNC_INTERFACES',
-          payload: { interfaces },
-        }),
-      );
+      sendToSatellite(sat, 'SYNC_INTERFACES', { interfaces });
 
       const enabledRoutes = (localState?.routes ?? [])
         .filter((r) => r.enabled)
@@ -1057,12 +1093,7 @@ async function main() {
           gateway: r.gateway,
           ...(r.interface ? { device: r.interface } : {}),
         }));
-      sat.ws.send(
-        JSON.stringify({
-          type: 'SYNC_ROUTES',
-          payload: { routes: enabledRoutes },
-        }),
-      );
+      sendToSatellite(sat, 'SYNC_ROUTES', { routes: enabledRoutes });
     }
   }
 
@@ -1519,11 +1550,9 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
               onFleetBroadcastBlock: (targetIp: string) => {
                 let notified = 0;
                 for (const sat of activeSatellites.values()) {
-                  if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
-                    sat.ws.send(JSON.stringify({
-                      type: 'BLOCK_TARGET',
-                      payload: { target: targetIp, isMac: false },
-                    }));
+                  // B2-M1: stamp a commandId so the satellite's
+                  // COMMAND_ACK correlates to this block send.
+                  if (sendToSatellite(sat, 'BLOCK_TARGET', { target: targetIp, isMac: false }) !== null) {
                     notified++;
                   }
                 }
@@ -1894,6 +1923,15 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
   // socket is never killed for one slow interval.
   const heartbeatTimer = setInterval(() => {
     const now = Date.now();
+    // B2-M1: drop outbound commands whose COMMAND_ACK never
+    // arrived (a satellite too old to ack, or an ack lost with a
+    // dead socket) instead of leaking the entry forever.
+    for (const [commandId, pending] of pendingCommands.entries()) {
+      if (isPendingCommandStale(pending.sentAt, now)) {
+        pendingCommands.delete(commandId);
+        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1000)}s ago`);
+      }
+    }
     for (const [id, sat] of activeSatellites.entries()) {
       const socket = sat.ws;
       if (!socket) continue;
@@ -2011,6 +2049,29 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           // headscaleEnrolled flag would otherwise never re-send
           // credentials). Runs even when the flag is latched.
           void requestHeadscaleProvision();
+        } else if (parsed.type === 'COMMAND_ACK') {
+          // B2-M1: the satellite acks every acted-on command
+          // (success or failure). These used to fall through the
+          // handler unexamined, so /fleet/sync, the HA endpoint
+          // and /fleet/block counted a ws.send as success while
+          // the satellite had failed the apply and said so.
+          // Correlate by commandId, record the outcome, and
+          // surface the last failure in /fleet/satellites.
+          let ack: any = parsed.payload;
+          if (typeof ack === 'string') {
+            try { ack = JSON.parse(ack); } catch { ack = null; }
+          }
+          if (ack && typeof ack === 'object') {
+            const commandId = typeof ack.commandId === 'string' ? ack.commandId : undefined;
+            if (commandId) pendingCommands.delete(commandId);
+            const command = typeof ack.command === 'string' ? ack.command : 'unknown';
+            const success = ack.success === true;
+            const error = typeof ack.error === 'string' ? ack.error : undefined;
+            recordCommandAck(state, { command, commandId, success, error });
+            if (!success) {
+              console.error(`[Fleet Manager] Satellite ${satId} failed ${command}${commandId ? ` (${commandId})` : ''}: ${error || 'failed'}`);
+            }
+          }
         } else if (parsed.type === 'TELEMETRY_REPORT') {
           let report: any;
           if (typeof parsed.payload === 'string') {
@@ -2026,6 +2087,14 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           // send PING for a well-formed report.
           if (!report || typeof report !== 'object') {
             return;
+          }
+          // B2-M1: the telemetry fallback for the last hub-command
+          // failure (A-M9): the satellite reports it every 15 s,
+          // so a COMMAND_ACK lost with a dead socket still surfaces
+          // here instead of the failure staying local to the edge.
+          if (typeof report.lastApplyError === 'string') {
+            if (report.lastApplyError) state.lastApplyError = report.lastApplyError;
+            else if (state.lastApplyError) delete state.lastApplyError;
           }
           if (report.metrics) {
             state.metrics = report.metrics;
@@ -2131,8 +2200,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       createPreAuthKey,
       serverUrl: process.env.HEADSCALE_EXTERNAL_URL || 'https://hub.axonwall.local',
       send: (msg) => {
-        if (ws.readyState !== WebSocket.OPEN) throw new Error('satellite socket closed before SYNC_HEADSCALE could be sent');
-        ws.send(JSON.stringify(msg));
+        // B2-M1: stamp a commandId so the satellite's COMMAND_ACK
+        // for the SYNC_HEADSCALE correlates to this send.
+        const m = msg as { type: string; payload: unknown };
+        if (!sendToSatellite(state, m.type, m.payload)) {
+          throw new Error('satellite socket closed before SYNC_HEADSCALE could be sent');
+        }
       },
       isOpen: () => ws.readyState === WebSocket.OPEN,
     });

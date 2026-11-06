@@ -6,6 +6,10 @@ import * as path from 'node:path';
 import {
   SATELLITE_HEARTBEAT_MS,
   SATELLITE_LAST_SEEN_GRACE_MS,
+  PENDING_COMMAND_STALE_MS,
+  buildSatelliteCommandEnvelope,
+  isPendingCommandStale,
+  recordCommandAck,
   loadPersistedHaState,
   persistHaState,
 } from '../dist/index.js';
@@ -71,4 +75,39 @@ test('B-H2b residual: corrupt persisted HA state is ignored, not fatal', (t) => 
   assert.equal(loadPersistedHaState(), null);
   fs.writeFileSync(statePath, JSON.stringify({ activeHaEdgeId: 42 }));
   assert.equal(loadPersistedHaState(), null);
+});
+
+// B2-M1: the controller ignored satellite COMMAND_ACKs, so
+// sync/HA/block reported success on ws.send alone while the
+// satellite may have failed the apply. Every outbound command now
+// carries a commandId the satellite echoes in its ack, failures
+// are recorded per satellite, and acks that never arrive are
+// swept instead of leaking.
+
+test('B2-M1: outbound envelope carries the commandId the satellite echoes', () => {
+  const raw = buildSatelliteCommandEnvelope('SYNC_ROUTES', { routes: [] }, 'cmd_abc123');
+  const env = JSON.parse(raw);
+  assert.equal(env.type, 'SYNC_ROUTES');
+  assert.equal(env.commandId, 'cmd_abc123');
+  assert.deepEqual(env.payload, { routes: [] });
+});
+
+test('B2-M1: a failed ack records the last apply error; a later success clears it', () => {
+  const state = {};
+  recordCommandAck(state, { command: 'SYNC_INTERFACES', success: false, error: 'device eth1 missing' });
+  assert.equal(state.lastApplyError, 'SYNC_INTERFACES: device eth1 missing');
+
+  // Success of a different command leaves the failure recorded.
+  recordCommandAck(state, { command: 'PROMOTE', success: true });
+  assert.equal(state.lastApplyError, 'SYNC_INTERFACES: device eth1 missing');
+
+  // Success of the same command clears it.
+  recordCommandAck(state, { command: 'SYNC_INTERFACES', success: true });
+  assert.equal(state.lastApplyError, undefined);
+});
+
+test('B2-M1: pending commands go stale after the grace period, not before', () => {
+  const sentAt = 1_000_000;
+  assert.equal(isPendingCommandStale(sentAt, sentAt + PENDING_COMMAND_STALE_MS), false);
+  assert.equal(isPendingCommandStale(sentAt, sentAt + PENDING_COMMAND_STALE_MS + 1), true);
 });

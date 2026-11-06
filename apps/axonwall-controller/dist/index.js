@@ -45647,6 +45647,20 @@ function shouldPruneDisconnectedSatellite(disconnectedAt, nowMs, graceMs = MESH_
   if (Number.isNaN(t)) return false;
   return nowMs - t >= graceMs;
 }
+var PENDING_COMMAND_STALE_MS = 5 * 60 * 1e3;
+function buildSatelliteCommandEnvelope(type, payload, commandId) {
+  return JSON.stringify({ type, commandId, payload });
+}
+function isPendingCommandStale(sentAtMs, nowMs, staleMs = PENDING_COMMAND_STALE_MS) {
+  return nowMs - sentAtMs > staleMs;
+}
+function recordCommandAck(state, ack) {
+  if (ack.success) {
+    if (ack.command && state.lastApplyError?.startsWith(`${ack.command}:`)) delete state.lastApplyError;
+    return;
+  }
+  state.lastApplyError = `${ack.command}: ${ack.error || "failed"}`;
+}
 function headscaleRetryDelaysMs() {
   return [0, 5e3, 15e3, 3e4, 6e4];
 }
@@ -45859,6 +45873,14 @@ async function main() {
   console.log("[Axonwall Controller] Starting Axonwall Control Plane Worker...");
   console.log("[Axonwall Controller] Monitoring config changes and apply pipeline.");
   const activeSatellites = /* @__PURE__ */ new Map();
+  const pendingCommands = /* @__PURE__ */ new Map();
+  const sendToSatellite = (sat, type, payload) => {
+    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return null;
+    const commandId = `cmd_${crypto5.randomUUID()}`;
+    pendingCommands.set(commandId, { satId: sat.id, command: type, sentAt: Date.now() });
+    sat.ws.send(buildSatelliteCommandEnvelope(type, payload, commandId));
+    return commandId;
+  };
   const persistedHa = loadPersistedHaState();
   let activeHaEdgeId = persistedHa?.activeHaEdgeId ?? null;
   let activeHaSharedWanMac = persistedHa?.sharedWanMac;
@@ -45870,19 +45892,12 @@ async function main() {
     persistHaState({ activeHaEdgeId: id, sharedWanMac, lanVip });
   };
   const sendHaTransition = (sat, type, role, sharedWanMac, lanVip) => {
-    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return false;
-    sat.ws.send(
-      JSON.stringify({
-        type,
-        payload: {
-          role,
-          sharedWanMac,
-          lanVip,
-          lanVipV4: lanVip
-        }
-      })
-    );
-    return true;
+    return sendToSatellite(sat, type, {
+      role,
+      sharedWanMac,
+      lanVip,
+      lanVipV4: lanVip
+    }) !== null;
   };
   function loadLocalDesiredState2() {
     const candidates = ["/etc/axonwall/state.json", "/var/lib/axonwall/state.json"];
@@ -45925,14 +45940,7 @@ async function main() {
       ]
     };
     const { nftScript } = compileSatelliteNftables(mergedNode);
-    sat.ws.send(
-      JSON.stringify({
-        type: "SYNC_NFTABLES",
-        payload: {
-          script: nftScript
-        }
-      })
-    );
+    sendToSatellite(sat, "SYNC_NFTABLES", { script: nftScript });
     if (isEdge) {
       const wanDev = resolvedWanInterface;
       const lanDev = resolvedLanInterface;
@@ -45972,23 +45980,13 @@ async function main() {
           }
         }
       }
-      sat.ws.send(
-        JSON.stringify({
-          type: "SYNC_INTERFACES",
-          payload: { interfaces }
-        })
-      );
+      sendToSatellite(sat, "SYNC_INTERFACES", { interfaces });
       const enabledRoutes = (localState?.routes ?? []).filter((r) => r.enabled).map((r) => ({
         destination: r.network,
         gateway: r.gateway,
         ...r.interface ? { device: r.interface } : {}
       }));
-      sat.ws.send(
-        JSON.stringify({
-          type: "SYNC_ROUTES",
-          payload: { routes: enabledRoutes }
-        })
-      );
+      sendToSatellite(sat, "SYNC_ROUTES", { routes: enabledRoutes });
     }
   }
   const prometheusRegistry = new import_prom_client.default.Registry();
@@ -46386,11 +46384,7 @@ data: /api/v1/mcp
               onFleetBroadcastBlock: (targetIp) => {
                 let notified = 0;
                 for (const sat of activeSatellites.values()) {
-                  if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-                    sat.ws.send(JSON.stringify({
-                      type: "BLOCK_TARGET",
-                      payload: { target: targetIp, isMac: false }
-                    }));
+                  if (sendToSatellite(sat, "BLOCK_TARGET", { target: targetIp, isMac: false }) !== null) {
                     notified++;
                   }
                 }
@@ -46689,6 +46683,12 @@ ${headerLines.join("\r\n")}\r
   meshPruneTimer.unref?.();
   const heartbeatTimer = setInterval(() => {
     const now = Date.now();
+    for (const [commandId, pending] of pendingCommands.entries()) {
+      if (isPendingCommandStale(pending.sentAt, now)) {
+        pendingCommands.delete(commandId);
+        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1e3)}s ago`);
+      }
+    }
     for (const [id, sat] of activeSatellites.entries()) {
       const socket = sat.ws;
       if (!socket) continue;
@@ -46804,6 +46804,26 @@ ${headerLines.join("\r\n")}\r
         const parsed = JSON.parse(text);
         if (parsed.type === "REQUEST_HEADSCALE") {
           void requestHeadscaleProvision();
+        } else if (parsed.type === "COMMAND_ACK") {
+          let ack = parsed.payload;
+          if (typeof ack === "string") {
+            try {
+              ack = JSON.parse(ack);
+            } catch {
+              ack = null;
+            }
+          }
+          if (ack && typeof ack === "object") {
+            const commandId = typeof ack.commandId === "string" ? ack.commandId : void 0;
+            if (commandId) pendingCommands.delete(commandId);
+            const command = typeof ack.command === "string" ? ack.command : "unknown";
+            const success2 = ack.success === true;
+            const error62 = typeof ack.error === "string" ? ack.error : void 0;
+            recordCommandAck(state, { command, commandId, success: success2, error: error62 });
+            if (!success2) {
+              console.error(`[Fleet Manager] Satellite ${satId} failed ${command}${commandId ? ` (${commandId})` : ""}: ${error62 || "failed"}`);
+            }
+          }
         } else if (parsed.type === "TELEMETRY_REPORT") {
           let report;
           if (typeof parsed.payload === "string") {
@@ -46813,6 +46833,10 @@ ${headerLines.join("\r\n")}\r
           }
           if (!report || typeof report !== "object") {
             return;
+          }
+          if (typeof report.lastApplyError === "string") {
+            if (report.lastApplyError) state.lastApplyError = report.lastApplyError;
+            else if (state.lastApplyError) delete state.lastApplyError;
           }
           if (report.metrics) {
             state.metrics = report.metrics;
@@ -46885,8 +46909,10 @@ ${headerLines.join("\r\n")}\r
       createPreAuthKey,
       serverUrl: process.env.HEADSCALE_EXTERNAL_URL || "https://hub.axonwall.local",
       send: (msg) => {
-        if (ws.readyState !== import_websocket.default.OPEN) throw new Error("satellite socket closed before SYNC_HEADSCALE could be sent");
-        ws.send(JSON.stringify(msg));
+        const m = msg;
+        if (!sendToSatellite(state, m.type, m.payload)) {
+          throw new Error("satellite socket closed before SYNC_HEADSCALE could be sent");
+        }
       },
       isOpen: () => ws.readyState === import_websocket.default.OPEN
     });
@@ -46942,10 +46968,12 @@ export {
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
   MESH_DISCONNECTED_GRACE_MS,
+  PENDING_COMMAND_STALE_MS,
   SATELLITE_HEARTBEAT_MS,
   SATELLITE_LAST_SEEN_GRACE_MS,
   authenticateMcpToken,
   buildArtifactBundle,
+  buildSatelliteCommandEnvelope,
   createHttpRedirectServer,
   createMcpApiKeyRecord,
   createPortMultiplexer,
@@ -46954,6 +46982,7 @@ export {
   getMcpServerStatus,
   headscaleRetryDelaysMs,
   isMcpServerEnabled,
+  isPendingCommandStale,
   isValidCidr,
   isValidMacAddress,
   listMcpApiKeys,
@@ -46964,6 +46993,7 @@ export {
   processMcpJsonRpcMessage,
   provisionHeadscaleWithRetry,
   queryMcpAuditEntries,
+  recordCommandAck,
   recordMcpAuditEntry,
   revokeMcpApiKeyRecord,
   secureTokenEquals,
