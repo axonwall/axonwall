@@ -975,13 +975,30 @@ loginShell: %s
 	for _, g := range RoleToGroups(role) {
 		groupSet[g] = true
 	}
+	// Attach POSIX groups
+	// A-M27: group-attach failures used to be discarded, so a user could
+	// be created "successfully" without its role groups (e.g. sudo) and
+	// the admin could not sudo. Attempt every group, then report the
+	// failures instead of returning success.
+	var groupErrs []string
 	for g := range groupSet {
-		_, _ = d.EnsureLDAPGroupExists(g, 0)
-		_ = d.setGroupMembership(g, username, true)
+		if _, err := d.EnsureLDAPGroupExists(g, 0); err != nil {
+			groupErrs = append(groupErrs, fmt.Sprintf("group %s: ensure failed: %v", g, err))
+			continue
+		}
+		if err := d.setGroupMembership(g, username, true); err != nil {
+			groupErrs = append(groupErrs, fmt.Sprintf("group %s: attach failed: %v", g, err))
+			continue
+		}
 		// Also mirror membership in /etc/group for local groups like sudo/adm so OS tools work even if nsswitch caches
 		if g == "sudo" || g == "adm" {
-			_ = exec.Command("usermod", "-a", "-G", g, username).Run()
+			if err := exec.Command("usermod", "-a", "-G", g, username).Run(); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: local mirror failed: %v", g, err))
+			}
 		}
+	}
+	if len(groupErrs) > 0 {
+		return fmt.Errorf("created LDAP user %s, but failed to attach groups: %s", username, strings.Join(groupErrs, "; "))
 	}
 
 	// Pre-create home directory on persistent /var/lib/axonwall/home (bind-mounted at /home) and seed .zshrc
@@ -1126,16 +1143,33 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 			}
 		}
 
-		allGroups, _, _, _ := d.listLDAPGroupsInternal()
+		// A-M27: a list failure used to be discarded, silently skipping
+		// the whole membership sync, and every group add/remove failure
+		// was discarded too. Attempt every group, then report failures.
+		allGroups, _, _, err := d.listLDAPGroupsInternal()
+		if err != nil {
+			return fmt.Errorf("failed to list LDAP groups for membership sync of %s: %w", username, err)
+		}
+		var groupErrs []string
 		for _, g := range allGroups {
 			if g.Name == username {
 				continue
 			}
-			_ = d.setGroupMembership(g.Name, username, desired[g.Name])
+			if err := d.setGroupMembership(g.Name, username, desired[g.Name]); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: sync failed: %v", g.Name, err))
+			}
 		}
 		for g := range desired {
-			_, _ = d.EnsureLDAPGroupExists(g, 0)
-			_ = d.setGroupMembership(g, username, true)
+			if _, err := d.EnsureLDAPGroupExists(g, 0); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: ensure failed: %v", g, err))
+				continue
+			}
+			if err := d.setGroupMembership(g, username, true); err != nil {
+				groupErrs = append(groupErrs, fmt.Sprintf("group %s: attach failed: %v", g, err))
+			}
+		}
+		if len(groupErrs) > 0 {
+			return fmt.Errorf("updated LDAP user %s, but failed to sync groups: %s", username, strings.Join(groupErrs, "; "))
 		}
 	}
 
