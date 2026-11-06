@@ -418,6 +418,18 @@ func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
 var nftValidateTimeout = 60 * time.Second
 var nftApplyTimeout = 120 * time.Second
 
+// subsystemApplyTimeout bounds each subsystem apply inside ApplyBundle
+// (A-M14). The applies shell out to ZFS/kubectl-class tooling and to
+// LDAP/SQLite setup, none of which carries its own timeout; without a
+// bound here a hung subsystem wedged the agent API and the
+// auto-rollback timer behind s.mu. A variable so tests can shrink it.
+// On timeout the bundle fails and rolls back; the timed-out apply
+// keeps running in the background and its late result is logged and
+// discarded — it can no longer wedge the API, but it may still land
+// its own side effects after the rollback, which only restores the
+// nft script and the LKG config files.
+var subsystemApplyTimeout = 120 * time.Second
+
 // autoRollbackDeferDelay is how long a commit-confirm timer callback
 // waits before retrying when it fires while an apply is in progress
 // (M2). A variable so tests can shrink it.
@@ -558,6 +570,56 @@ func reloadBundleServices(services []string) {
 	}
 }
 
+// pendingSubsystemApply is one subsystem apply queued while the
+// bundle files are written (A-M14). The applies run after the write
+// loop, without holding s.mu, so a hung subsystem no longer wedges
+// GetStatus, Confirm, Rollback, or the auto-rollback timer behind the
+// agent lock. The manager pointers and file contents are captured
+// while s.mu is held, so the applies themselves touch no AgentServer
+// state.
+type pendingSubsystemApply struct {
+	name  string
+	apply func() error
+}
+
+// runSubsystemApplies runs each queued subsystem apply in file order,
+// stopping at the first failure, with each apply bounded by
+// subsystemApplyTimeout (A-M14).
+func runSubsystemApplies(applies []pendingSubsystemApply) error {
+	for _, a := range applies {
+		log.Printf("[Agent] Applying %s", a.name)
+		if err := runWithTimeout(a.apply, subsystemApplyTimeout); err != nil {
+			return fmt.Errorf("%s: %w", a.name, err)
+		}
+	}
+	return nil
+}
+
+// runWithTimeout runs fn and returns its error, or a timeout error if
+// fn does not return within timeout. Go has no way to cancel an
+// arbitrary function, so a timed-out call keeps running in the
+// background: its late result is only logged, never applied to the
+// already-failed bundle.
+func runWithTimeout(fn func() error, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- fn()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		go func() {
+			if err := <-done; err != nil {
+				log.Printf("[Agent] WARNING: timed-out subsystem apply finished late with error: %v", err)
+			} else {
+				log.Printf("[Agent] WARNING: timed-out subsystem apply finished late (success) after the bundle already failed and rolled back; its side effects stand")
+			}
+		}()
+		return fmt.Errorf("timed out after %s", timeout)
+	}
+}
+
 func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
 	// M1: serialise whole applies. A second ApplyBundle waits here
 	// instead of interleaving with the first across the lock-release
@@ -626,7 +688,17 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// a failure here can only come from the writes themselves — and
 	// any such failure rolls back instead of leaving a half-applied
 	// bundle behind (A-H2).
+	//
+	// A-M14: the subsystem applies for each config file are only
+	// QUEUED here; they run after the write loop, without holding
+	// s.mu (see runSubsystemApplies). Running them inline used to
+	// hold the agent lock across unbounded subsystem work — HA
+	// Apply runs keepalived/conntrackd reloads plus LDAP syncrepl
+	// setup, NAS/K3s/Vigilante applies shell out to ZFS/kubectl-class
+	// tooling — so a hung subsystem wedged GetStatus, Confirm,
+	// Rollback, and the auto-rollback timer behind s.mu.
 	var subsystemErr error
+	var pendingApplies []pendingSubsystemApply
 	for _, vf := range validatedFiles {
 		f := vf.file
 		cleanPath := vf.cleanPath
@@ -700,63 +772,77 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 
 		// A-M3: a subsystem apply failure fails the bundle instead of
 		// being logged and then confirmed into last-known-good. The
-		// first failure stops the loop (fewer half-applied side
-		// effects) and the bundle is rolled back below.
+		// applies are queued in file order and run after the write
+		// loop (A-M14); the first failure stops the run and the
+		// bundle is rolled back below.
 		if filepath.Base(cleanPath) == "zero_trust_apps.json" {
-			log.Printf("[Agent] Applying Zero Trust IAP configuration")
-			if err := s.iapManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("IAP config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "IAP config",
+				apply: func() error { return s.iapManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "sdwan_config.json" {
-			log.Printf("[Agent] Applying SD-WAN Gateway routing configuration")
-			if err := s.sdwanProber.ReloadConfig(cleanPath); err != nil {
-				subsystemErr = fmt.Errorf("SD-WAN config: %w", err)
-				break
-			}
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "SD-WAN config",
+				apply: func() error { return s.sdwanProber.ReloadConfig(cleanPath) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "ha_config.json" {
-			log.Printf("[Agent] Applying High Availability & SQLite Sync configuration")
-			if err := s.haEngine.ApplyFromJSON([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("HA config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "HA config",
+				apply: func() error { return s.haEngine.ApplyFromJSON(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "nas_config.json" && s.nasManager != nil {
-			log.Printf("[Agent] Applying OpenZFS Storage & NAS Share configuration")
-			if err := s.nasManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("NAS config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "NAS config",
+				apply: func() error { return s.nasManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "k3s_config.json" && s.k3sManager != nil {
-			log.Printf("[Agent] Applying K3s & OpenEBS cluster configuration")
-			if err := s.k3sManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("K3s config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "K3s config",
+				apply: func() error { return s.k3sManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "vigilante_config.json" && s.vigilanteManager != nil {
-			log.Printf("[Agent] Applying Vigilante Cyber Defense configuration & K3s manifests")
-			if err := s.vigilanteManager.ApplyConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("Vigilante config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Vigilante config",
+				apply: func() error { return s.vigilanteManager.ApplyConfig(content) },
+			})
 		}
 
 		if filepath.Base(cleanPath) == "vow_config.json" && s.k3sManager != nil {
-			log.Printf("[Agent] Applying Vigilant Octo Waffle (VOW) K3s GitOps configuration")
-			if err := s.k3sManager.ApplyVowConfig([]byte(f.Content)); err != nil {
-				subsystemErr = fmt.Errorf("VOW config: %w", err)
-				break
-			}
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "VOW config",
+				apply: func() error { return s.k3sManager.ApplyVowConfig(content) },
+			})
 		}
+	}
+
+	// A-M14: run the queued subsystem applies without holding s.mu —
+	// the same pattern as reloadBundleServices below. The applyMu
+	// serialisation and the applyInProgress flag still protect
+	// Confirm/Rollback (they fail fast while an apply is in flight,
+	// M1), and the auto-rollback timer defers while an apply is in
+	// progress (M2) instead of rolling back underneath it. The
+	// deferred s.mu.Unlock at the top of ApplyBundle releases the
+	// lock re-acquired here.
+	if len(pendingApplies) > 0 {
+		s.mu.Unlock()
+		subsystemErr = runSubsystemApplies(pendingApplies)
+		s.mu.Lock()
 	}
 
 	// A-M3: report the subsystem failure and roll back instead of

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/axonwall/axonwall/apps/axonwalld/engine"
 	pb "github.com/axonwall/axonwall/apps/axonwalld/gen/agent/v1"
 )
 
@@ -768,5 +769,218 @@ func TestR2Batch6StaticDefaultRouteFailsWhenNoneWork(t *testing.T) {
 	}
 	if err := installStaticDefaultRoute(nil); err != nil {
 		t.Fatalf("installStaticDefaultRoute with no gateways failed: %v", err)
+	}
+}
+
+// r2Batch6FakePathWithSysctl installs fake nft/ip/systemctl/sysctl
+// binaries; systemctl runs the given script, the others exit 0. K3s
+// ApplyConfig shells out to sysctl and systemctl, so both must be
+// faked for the subsystem-apply tests to touch no real system state.
+func r2Batch6FakePathWithSysctl(t *testing.T, systemctlScript string) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"nft":       "#!/bin/sh\nexit 0\n",
+		"ip":        "#!/bin/sh\nexit 0\n",
+		"sysctl":    "#!/bin/sh\nexit 0\n",
+		"systemctl": systemctlScript,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
+			t.Fatalf("failed to write fake %s: %v", name, err)
+		}
+	}
+	orig := os.Getenv("PATH")
+	if err := os.Setenv("PATH", dir+":"+orig); err != nil {
+		t.Fatalf("failed to set PATH: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("PATH", orig) })
+}
+
+// r2Batch6K3sFootprint records the pre-existing K3s file state and
+// registers a cleanup that restores it. K3s ApplyConfig writes the
+// real /etc/rancher/k3s/config.yaml (the engine package's path vars
+// are not visible from package main), so the test removes what it
+// created and restores any pre-existing file.
+func r2Batch6K3sFootprint(t *testing.T) {
+	t.Helper()
+	cfgPath := "/etc/rancher/k3s/config.yaml"
+	origData, origErr := os.ReadFile(cfgPath)
+	dirs := []string{"/etc/rancher/k3s", "/var/lib/rancher/k3s/server/manifests", "/var/lib/axonwall"}
+	existed := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		_, err := os.Stat(d)
+		existed[d] = err == nil
+	}
+	t.Cleanup(func() {
+		if origErr == nil {
+			_ = os.MkdirAll(filepath.Dir(cfgPath), 0755)
+			_ = os.WriteFile(cfgPath, origData, 0600)
+		} else {
+			_ = os.Remove(cfgPath)
+		}
+		for _, d := range dirs {
+			if !existed[d] {
+				_ = os.Remove(d)
+			}
+		}
+	})
+}
+
+func r2Batch6K3sApplyRequest(t *testing.T) *pb.ApplyBundleRequest {
+	t.Helper()
+	k3sPath := filepath.Join(t.TempDir(), "k3s_config.json")
+	return &pb.ApplyBundleRequest{
+		JobId:                 "r2-m14-subsystem",
+		NftScript:             batch4NftScript,
+		ConfirmTimeoutSeconds: 60,
+		Files: []*pb.BundleFile{
+			{Path: k3sPath, Content: `{"enabled": true, "k3sConfigYaml": "node-name: test-node\n"}`},
+		},
+	}
+}
+
+// M14: GetStatus (and Confirm's fail-fast path) must stay responsive
+// while ApplyBundle is parked inside a subsystem apply. Pre-fix the
+// subsystem loop ran under s.mu, so a hung subsystem wedged the whole
+// API; the K3s apply parks on `systemctl reload-or-restart k3s` here.
+func TestR2Batch6GetStatusAnswersDuringSubsystemApply(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "systemctl-started")
+	release := filepath.Join(dir, "systemctl-release")
+	r2Batch6FakePathWithSysctl(t, r2BlockingSystemctl(t, started, release))
+	r2Batch6K3sFootprint(t)
+	s := batch4TestServer(t)
+	s.k3sManager = engine.NewK3sManager()
+	batch4StopTimer(t, s)
+	// Never leave the apply goroutine parked if the test fails early.
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("go"), 0644) })
+
+	applyDone := make(chan *pb.ApplyBundleResponse, 1)
+	applyErr := make(chan error, 1)
+	go func() {
+		resp, err := s.ApplyBundle(context.Background(), r2Batch6K3sApplyRequest(t))
+		if err != nil {
+			applyErr <- err
+			return
+		}
+		applyDone <- resp
+	}()
+
+	// The fake systemctl is only invoked by the K3s subsystem apply.
+	r2WaitForFile(t, started, 10*time.Second)
+
+	// GetStatus takes only s.mu, which the subsystem window releases:
+	// it must answer while the apply is still parked.
+	statusDone := make(chan error, 1)
+	go func() {
+		_, err := s.GetStatus(context.Background(), &pb.GetStatusRequest{})
+		statusDone <- err
+	}()
+	select {
+	case err := <-statusDone:
+		if err != nil {
+			t.Fatalf("GetStatus failed during an in-flight subsystem apply: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetStatus did not return while an apply was parked in its subsystem phase")
+	}
+
+	// Confirm during the park fails fast (apply in progress) instead
+	// of blocking behind the hung subsystem.
+	resp, err := s.Confirm(context.Background(), &pb.ConfirmRequest{JobId: "r2-m14-subsystem"})
+	if err != nil {
+		t.Fatalf("Confirm failed: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("Confirm during an in-flight subsystem apply succeeded; expected a fail-fast 'apply in progress' failure")
+	}
+	if !strings.Contains(resp.Message, "apply in progress") {
+		t.Fatalf("Confirm failure did not name the in-flight apply, got: %s", resp.Message)
+	}
+
+	if err := os.WriteFile(release, []byte("go"), 0644); err != nil {
+		t.Fatalf("failed to release the fake systemctl: %v", err)
+	}
+	select {
+	case err := <-applyErr:
+		t.Fatalf("ApplyBundle failed: %v", err)
+	case applyResp := <-applyDone:
+		if !applyResp.Success {
+			t.Fatalf("ApplyBundle reported failure: %s", applyResp.Message)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ApplyBundle did not return after the fake systemctl was released")
+	}
+
+	resp, err = s.Confirm(context.Background(), &pb.ConfirmRequest{JobId: "r2-m14-subsystem"})
+	if err != nil {
+		t.Fatalf("Confirm failed: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("Confirm after the apply completed failed: %s", resp.Message)
+	}
+}
+
+// M14: a subsystem apply that never returns must fail the bundle
+// after subsystemApplyTimeout (and roll back) instead of wedging the
+// apply — and the API — forever.
+func TestR2Batch6SubsystemApplyTimeoutFailsBundle(t *testing.T) {
+	origTimeout := subsystemApplyTimeout
+	subsystemApplyTimeout = 300 * time.Millisecond
+	defer func() { subsystemApplyTimeout = origTimeout }()
+
+	dir := t.TempDir()
+	started := filepath.Join(dir, "systemctl-started")
+	release := filepath.Join(dir, "systemctl-release")
+	r2Batch6FakePathWithSysctl(t, r2BlockingSystemctl(t, started, release))
+	r2Batch6K3sFootprint(t)
+	s := batch4TestServer(t)
+	s.k3sManager = engine.NewK3sManager()
+	batch4StopTimer(t, s)
+	// Release the parked orphan once the test is done, so its late
+	// completion is logged and the goroutine exits.
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("go"), 0644) })
+
+	applyDone := make(chan *pb.ApplyBundleResponse, 1)
+	applyErr := make(chan error, 1)
+	go func() {
+		resp, err := s.ApplyBundle(context.Background(), r2Batch6K3sApplyRequest(t))
+		if err != nil {
+			applyErr <- err
+			return
+		}
+		applyDone <- resp
+	}()
+
+	// The fake systemctl is only invoked by the K3s subsystem apply.
+	r2WaitForFile(t, started, 10*time.Second)
+
+	select {
+	case err := <-applyErr:
+		t.Fatalf("ApplyBundle returned a transport error instead of a timeout failure: %v", err)
+	case applyResp := <-applyDone:
+		if applyResp.Success {
+			t.Fatal("ApplyBundle succeeded despite the subsystem apply hanging past its timeout")
+		}
+		if !strings.Contains(applyResp.Message, "timed out") {
+			t.Fatalf("ApplyBundle failure did not name the timeout, got: %s", applyResp.Message)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("ApplyBundle did not return after the subsystem apply timeout")
+	}
+
+	// The API is responsive again once the timed-out apply returns.
+	statusDone := make(chan error, 1)
+	go func() {
+		_, err := s.GetStatus(context.Background(), &pb.GetStatusRequest{})
+		statusDone <- err
+	}()
+	select {
+	case err := <-statusDone:
+		if err != nil {
+			t.Fatalf("GetStatus failed after the timed-out apply: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetStatus did not return after the subsystem apply timeout")
 	}
 }
