@@ -698,6 +698,23 @@ func (m *McpTrafficManager) cleanupKernelArtifactsForLease(l *McpTacticalLease) 
 	}
 }
 
+// runEnforcementCmd runs one tc/ip enforcement command and returns a
+// descriptive error on failure. "File exists" is tolerated: the
+// enforcement the command would install is already in place (idempotent
+// re-apply after a restart, e.g. a root qdisc or an ip rule that survived
+// a daemon crash), so it is not a failure.
+func runEnforcementCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "File exists") {
+			return nil
+		}
+		return fmt.Errorf("%s %s failed: %v (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func resolveKernelDevice(logicalOrDev string) string {
 	cleaned := strings.TrimSpace(logicalOrDev)
 	if cleaned == "" {
@@ -860,8 +877,30 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	if req.LatencyMs < 0 || req.LatencyMs > 5000 {
 		return nil, fmt.Errorf("latencyMs must be between 0 and 5000 ms")
 	}
+	if req.PacketLossPercent < 0 || req.PacketLossPercent > 100 {
+		return nil, fmt.Errorf("packetLossPercent must be between 0 and 100")
+	}
+	if req.JitterMs < 0 {
+		return nil, fmt.Errorf("jitterMs must not be negative")
+	}
+	if req.JitterMs > req.LatencyMs {
+		return nil, fmt.Errorf("jitterMs (%d) must not exceed latencyMs (%d)", req.JitterMs, req.LatencyMs)
+	}
 	if req.TTLSeconds < 10 {
 		req.TTLSeconds = 3600
+	}
+
+	// A-H3 (round 2): the tc class is the only enforcement for a shape
+	// lease (the nft mangle rule just sets a mark nothing consumes), so
+	// the interface must resolve to a live kernel device before a class
+	// ID is allocated — a typo'd or renamed interface used to produce
+	// a lease that shaped nothing.
+	dev := resolveKernelDevice(req.Interface)
+	if dev == "" {
+		return nil, fmt.Errorf("interface %q does not resolve to a device", req.Interface)
+	}
+	if _, err := net.InterfaceByName(dev); err != nil {
+		return nil, fmt.Errorf("interface %q does not resolve to a live device: %v", req.Interface, err)
 	}
 
 	m.mu.Lock()
@@ -873,17 +912,24 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 	fwMark := 0x2000 + classID
 	m.mu.Unlock()
 
-	dev := resolveKernelDevice(req.Interface)
-	if dev != "" {
-		// Ensure a root HTB qdisc exists on dev if none is active, then attach the tactical class + netem leaf
-		_ = exec.Command("tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb", "default", "99").Run()
-		_ = exec.Command("tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb", "rate", "10000mbit", "ceil", "10000mbit").Run()
-
-		classStr := fmt.Sprintf("1:%d", classID)
-		rateStr := fmt.Sprintf("%dkbit", req.RateKbps)
-		ceilStr := fmt.Sprintf("%dkbit", req.CeilKbps)
-		_ = exec.Command("tc", "class", "replace", "dev", dev, "parent", "1:1", "classid", classStr, "htb", "rate", rateStr, "ceil", ceilStr, "prio", "7").Run()
-
+	// A-H3 (round 2): every tc failure used to be discarded (`_ =`),
+	// so the lease was stored and reported active while no shaping
+	// existed. Fail the creation instead, cleaning up any partial tc
+	// state first. "File exists" is tolerated by runEnforcementCmd
+	// (idempotent re-apply of the shared root qdisc / class).
+	classStr := fmt.Sprintf("1:%d", classID)
+	rateStr := fmt.Sprintf("%dkbit", req.RateKbps)
+	ceilStr := fmt.Sprintf("%dkbit", req.CeilKbps)
+	tcErr := func() error {
+		if err := runEnforcementCmd("tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "htb", "default", "99"); err != nil {
+			return err
+		}
+		if err := runEnforcementCmd("tc", "class", "add", "dev", dev, "parent", "1:", "classid", "1:1", "htb", "rate", "10000mbit", "ceil", "10000mbit"); err != nil {
+			return err
+		}
+		if err := runEnforcementCmd("tc", "class", "replace", "dev", dev, "parent", "1:1", "classid", classStr, "htb", "rate", rateStr, "ceil", ceilStr, "prio", "7"); err != nil {
+			return err
+		}
 		if req.LatencyMs > 0 || req.PacketLossPercent > 0 {
 			netemArgs := []string{"qdisc", "replace", "dev", dev, "parent", classStr, "handle", fmt.Sprintf("%d:", classID), "netem"}
 			if req.LatencyMs > 0 {
@@ -895,16 +941,32 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 			if req.PacketLossPercent > 0 {
 				netemArgs = append(netemArgs, "loss", fmt.Sprintf("%.1f%%", req.PacketLossPercent))
 			}
-			_ = exec.Command("tc", netemArgs...).Run()
+			if err := runEnforcementCmd("tc", netemArgs...); err != nil {
+				return err
+			}
 		} else {
-			_ = exec.Command("tc", "qdisc", "replace", "dev", dev, "parent", classStr, "handle", fmt.Sprintf("%d:", classID), "fq_codel").Run()
+			if err := runEnforcementCmd("tc", "qdisc", "replace", "dev", dev, "parent", classStr, "handle", fmt.Sprintf("%d:", classID), "fq_codel"); err != nil {
+				return err
+			}
 		}
-
 		proto := "ip"
 		if isV6 {
 			proto = "ipv6"
 		}
-		_ = exec.Command("tc", "filter", "add", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", fmt.Sprintf("0x%x", fwMark), "fw", "flowid", classStr).Run()
+		return runEnforcementCmd("tc", "filter", "add", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", fmt.Sprintf("0x%x", fwMark), "fw", "flowid", classStr)
+	}()
+	if tcErr != nil {
+		m.cleanupKernelArtifactsForLease(&McpTacticalLease{
+			Kind:       "shape",
+			ClassID:    classID,
+			FwMark:     fwMark,
+			IsIPv6:     isV6,
+			Parameters: map[string]interface{}{"interface": req.Interface},
+		})
+		m.mu.Lock()
+		m.releaseClassIDLocked(classID)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("tc enforcement failed for shape lease: %w", tcErr)
 	}
 
 	now := time.Now().UTC()
@@ -1014,14 +1076,44 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 	m.mu.Unlock()
 
 	if req.RedirectType == "policy_route" {
+		// A-H3 (round 2): the ip route/rule pair is the only
+		// enforcement for a policy_route lease, and both failures used
+		// to be discarded (`_ =`). Fail the creation instead, cleaning
+		// up the half-installed route/rule first.
 		tableStr := strconv.Itoa(tableID)
 		markHex := fmt.Sprintf("0x%x", fwMark)
+		var cmdErr error
 		if isV6 {
-			_ = exec.Command("ip", "-6", "route", "replace", "default", "via", destHostIP, "table", tableStr).Run()
-			_ = exec.Command("ip", "-6", "rule", "add", "fwmark", markHex, "table", tableStr).Run()
+			cmdErr = runEnforcementCmd("ip", "-6", "route", "replace", "default", "via", destHostIP, "table", tableStr)
+			if cmdErr == nil {
+				cmdErr = runEnforcementCmd("ip", "-6", "rule", "add", "fwmark", markHex, "table", tableStr)
+			}
 		} else {
-			_ = exec.Command("ip", "route", "replace", "default", "via", destHostIP, "table", tableStr).Run()
-			_ = exec.Command("ip", "rule", "add", "fwmark", markHex, "table", tableStr).Run()
+			cmdErr = runEnforcementCmd("ip", "route", "replace", "default", "via", destHostIP, "table", tableStr)
+			if cmdErr == nil {
+				cmdErr = runEnforcementCmd("ip", "rule", "add", "fwmark", markHex, "table", tableStr)
+			}
+		}
+		if cmdErr != nil {
+			m.cleanupKernelArtifactsForLease(&McpTacticalLease{
+				Kind:       "redirect",
+				ClassID:    tableID,
+				FwMark:     fwMark,
+				IsIPv6:     isV6,
+				Parameters: map[string]interface{}{"redirectType": "policy_route"},
+			})
+			// cleanupKernelArtifactsForLease removes the rule but not
+			// the route; drop the inert default route in the custom
+			// table too.
+			if isV6 {
+				_ = exec.Command("ip", "-6", "route", "del", "default", "table", tableStr).Run()
+			} else {
+				_ = exec.Command("ip", "route", "del", "default", "table", tableStr).Run()
+			}
+			m.mu.Lock()
+			m.releaseClassIDLocked(tableID)
+			m.mu.Unlock()
+			return nil, fmt.Errorf("ip policy-route enforcement failed for redirect lease: %w", cmdErr)
 		}
 	}
 

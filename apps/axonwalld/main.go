@@ -59,6 +59,12 @@ type AgentServer struct {
 	directoryManager *engine.DirectoryManager
 }
 
+// isSnapshotEligibleName reports whether a config file name is covered
+// by the last-known-good snapshot (and therefore by rollback restore).
+func isSnapshotEligibleName(name string) bool {
+	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".json") || name == "interfaces.conf"
+}
+
 func snapshotLkgConfig(bundleDir string) {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
 	if err := os.MkdirAll(lkgConfigDir, 0700); err != nil {
@@ -77,7 +83,7 @@ func snapshotLkgConfig(bundleDir string) {
 				continue
 			}
 			name := e.Name()
-			if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".json") || name == "interfaces.conf" {
+			if isSnapshotEligibleName(name) {
 				srcPath := filepath.Join(srcDir, name)
 				dstPath := filepath.Join(lkgConfigDir, name)
 				if data, err := os.ReadFile(srcPath); err == nil && len(data) > 0 {
@@ -225,6 +231,42 @@ func restoreLkgConfig(bundleDir string) {
 			if fi, lerr := os.Lstat("/var/lib/axonwall/state.json"); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
 				_ = os.WriteFile("/var/lib/axonwall/state.json", data, 0660)
 				ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+			}
+		}
+	}
+
+	// A-H1 (round 2): delete files the failed bundle added — snapshot-
+	// eligible files present on disk but absent from the snapshot.
+	// Without this, a bundle that introduced e.g. a new subsystem
+	// config file leaves it live after rollback, and the subsystem
+	// keeps running config that never existed in last-known-good.
+	// state.json is excluded: it is runtime appliance state maintained
+	// by the HA sync (engine/sqlite_sync.go), not bundle config, so
+	// its presence on disk is not evidence a bundle added it.
+	snapshotNames := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		snapshotNames[e.Name()] = true
+	}
+	targetDirs := []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
+	for _, dir := range targetDirs {
+		live, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range live {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if name == "state.json" || !isSnapshotEligibleName(name) || snapshotNames[name] {
+				continue
+			}
+			p := filepath.Join(dir, name)
+			if fi, lerr := os.Lstat(p); lerr != nil || (fi.Mode()&os.ModeSymlink) != 0 {
+				continue
+			}
+			if err := os.Remove(p); err == nil {
+				log.Printf("[Agent] Rollback: removed config file added by failed bundle: %s", p)
 			}
 		}
 	}
@@ -789,8 +831,108 @@ func (s *AgentServer) executeRollback(reason string) error {
 		log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
 	}
 
+	// A-H1 (round 2): restoring the files is not a rollback — re-apply
+	// the restored subsystem configs so live state matches the files,
+	// and restart the NGFW daemons the failed bundle stopped. A
+	// failure here is loud and degrades the rollback response instead
+	// of reporting a clean success while subsystems still run the
+	// failed bundle's live state.
+	var rollbackErrs []string
+	if err := s.reapplyRestoredSubsystems(); err != nil {
+		rollbackErrs = append(rollbackErrs, err.Error())
+	}
+	if err := s.restartNgfwDaemonsIfEnabled(); err != nil {
+		log.Printf("[Agent] Rollback: %v", err)
+		rollbackErrs = append(rollbackErrs, err.Error())
+	}
+
 	s.clearPendingLocked()
+	if len(rollbackErrs) > 0 {
+		return fmt.Errorf("rolled back files and ruleset but subsystem re-apply failed: %s", strings.Join(rollbackErrs, "; "))
+	}
 	log.Printf("[Agent] Successfully rolled back to last known good configuration (reason: %s).", reason)
+	return nil
+}
+
+// reapplyRestoredSubsystems re-applies the subsystem configs that
+// restoreLkgConfig just put back, from the restored files on disk,
+// mirroring the subsystem applies in ApplyBundle. Each apply is
+// best-effort — one failing subsystem must not prevent the others from
+// being restored — but failures are aggregated into the returned error
+// so the rollback response reports degraded instead of clean success.
+// A config file absent after restore means it never existed in
+// last-known-good; for SD-WAN that stops the prober (its ReloadConfig
+// stops on a missing file), for the others there is nothing to apply.
+func (s *AgentServer) reapplyRestoredSubsystems() error {
+	var errs []string
+	apply := func(name string, fn func([]byte) error) {
+		data, err := os.ReadFile(filepath.Join("/etc/axonwall", name))
+		if err != nil {
+			return
+		}
+		if err := fn(data); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			log.Printf("[Agent] Rollback: re-applying %s failed: %v", name, err)
+		} else {
+			log.Printf("[Agent] Rollback: re-applied %s", name)
+		}
+	}
+	if s.iapManager != nil {
+		apply("zero_trust_apps.json", func(b []byte) error { return s.iapManager.ApplyConfig(b) })
+	}
+	if s.sdwanProber != nil {
+		// ReloadConfig reads the file from the path and stops the
+		// prober when it is missing (correct: no config, no prober).
+		if err := s.sdwanProber.ReloadConfig("/etc/axonwall/sdwan_config.json"); err != nil {
+			errs = append(errs, fmt.Sprintf("sdwan_config.json: %v", err))
+			log.Printf("[Agent] Rollback: re-applying sdwan_config.json failed: %v", err)
+		} else {
+			log.Printf("[Agent] Rollback: re-applied sdwan_config.json")
+		}
+	}
+	if s.haEngine != nil {
+		apply("ha_config.json", func(b []byte) error { return s.haEngine.ApplyFromJSON(b) })
+	}
+	if s.nasManager != nil {
+		apply("nas_config.json", func(b []byte) error { return s.nasManager.ApplyConfig(b) })
+	}
+	if s.k3sManager != nil {
+		apply("k3s_config.json", func(b []byte) error { return s.k3sManager.ApplyConfig(b) })
+		apply("vow_config.json", func(b []byte) error { return s.k3sManager.ApplyVowConfig(b) })
+	}
+	if s.vigilanteManager != nil {
+		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("subsystem re-apply failures: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// restartNgfwDaemonsIfEnabled restarts the NGFW-only daemons when the
+// restored firewall config has the core firewall enabled. The failed
+// bundle's apply loop stops these daemons when the bundle disables the
+// firewall; a rollback to an enabled config must bring them back.
+// No restored config, or one that disables the firewall, leaves the
+// daemons as they are. `systemctl start` on an already-running unit is
+// a no-op, so this is safe when the bundle never stopped them.
+func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
+	data, err := os.ReadFile("/etc/axonwall/firewall_config.json")
+	if err != nil {
+		return nil
+	}
+	var fwCfg struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(data, &fwCfg); err != nil || !fwCfg.Enabled {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "systemctl", "start", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run(); err != nil {
+		return fmt.Errorf("restarting NGFW daemons after rollback: %w", err)
+	}
+	log.Printf("[Agent] Rollback: restarted NGFW daemons (restored firewall config is enabled)")
 	return nil
 }
 

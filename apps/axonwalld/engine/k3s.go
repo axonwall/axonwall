@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -328,70 +330,229 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 	lastMsg := m.lastMessage
 	m.mu.Unlock()
 
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "axonwall-node1"
+	// A-H2 (round 2): this used to fabricate a healthy 2-node cluster
+	// with bound volumes out of constants, even with k3s stopped or
+	// never installed. Probe reality instead and report unknown/down
+	// when the probes fail: a peer IP in config is not evidence of a
+	// joined cluster, and no probe means no nodes and no volumes.
+	serviceActive := isSystemdServiceActive("k3s")
+	var nodes []K3sNodeInfo
+	var volumes []OpenEbsVolumeInfo
+	running := false
+	openEbsReady := false
+	openEbsHealthy := false
+	if serviceActive {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if probed, err := probeK3sNodes(ctx); err == nil {
+			nodes = probed
+			running = true
+			volumes = probeK3sPVCs(ctx)
+			openEbsReady, openEbsHealthy = probeOpenEBSHealth(ctx)
+		} else {
+			// The service is up but the API does not answer: the
+			// cluster is not running as far as anyone can tell.
+			lastMsg = fmt.Sprintf("k3s service is active but kubectl get nodes failed: %v", err)
+		}
 	}
 
-	nodes := []K3sNodeInfo{
-		{
-			Name:       hostname,
-			Role:       "control-plane,etcd,master",
-			Roles:      "control-plane,etcd,master",
-			Status:     "Ready",
-			Version:    "v1.31.2+k3s1",
-			IpAddress:  "192.168.1.1",
-			InternalIp: "192.168.1.1",
-		},
-	}
-	if cfg.PeerIp != "" {
-		nodes = append(nodes, K3sNodeInfo{
-			Name:       hostname + "-ha-peer",
-			Role:       "control-plane,etcd,master",
-			Roles:      "control-plane,etcd,master",
-			Status:     "Ready",
-			Version:    "v1.31.2+k3s1",
-			IpAddress:  cfg.PeerIp,
-			InternalIp: cfg.PeerIp,
-		})
-	}
-
-	volumes := []OpenEbsVolumeInfo{
-		{
-			Name:         "pvc-openebs-zfs-system",
-			Namespace:    "openebs",
-			StorageClass: "axonwall-zfs-local",
-			Capacity:     "20Gi",
-			ReplicaState: "ONLINE (ZFS-LocalPV)",
-			Status:       "Bound",
-		},
-		{
-			Name:         "pvc-ha-replicated-store",
-			Namespace:    "default",
-			StorageClass: "axonwall-replicated-ha",
-			Capacity:     "50Gi",
-			ReplicaState: "2/2 Synchronous Replicas Healthy",
-			Status:       "Bound",
-		},
-	}
-
+	// ClusterJoined is the latched join only: a peer IP in config never
+	// proves a join (the token fetch may have failed, and ApplyConfig
+	// only warns about that).
 	role := "primary-server"
-	if joined || cfg.PeerIp != "" {
+	if joined {
 		role = "secondary-ha-server"
 	}
 
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
-		Running:         cfg.Enabled,
-		ServiceActive:   cfg.Enabled,
-		ClusterJoined:   joined || cfg.PeerIp != "",
+		Running:         running,
+		ServiceActive:   serviceActive,
+		ClusterJoined:   joined,
 		Role:            role,
-		HaAutoJoined:    joined || cfg.PeerIp != "",
-		OpenEbsReady:    true,
-		OpenEbsHealthy:  true,
+		HaAutoJoined:    joined,
+		OpenEbsReady:    openEbsReady,
+		OpenEbsHealthy:  openEbsHealthy,
 		ZfsLocalPvPool:  "tank",
 		Nodes:           nodes,
 		Volumes:         volumes,
 		LastSyncMessage: lastMsg,
 	}
+}
+
+// isSystemdServiceActive reports whether a systemd unit is active.
+// A missing systemctl binary or any error means "not active".
+func isSystemdServiceActive(unit string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil
+}
+
+// runKubectlJSON runs `kubectl get <args...> -o json`, preferring plain
+// kubectl (with the k3s kubeconfig when present) and falling back to
+// `k3s kubectl`, which finds its own config.
+func runKubectlJSON(ctx context.Context, args ...string) ([]byte, error) {
+	fullArgs := append([]string{"get"}, args...)
+	fullArgs = append(fullArgs, "-o", "json")
+	if out, err := runKubectlCmd(ctx, "kubectl", fullArgs); err == nil {
+		return out, nil
+	}
+	return runKubectlCmd(ctx, "k3s", append([]string{"kubectl"}, fullArgs...))
+}
+
+func runKubectlCmd(ctx context.Context, name string, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if name == "kubectl" {
+		if _, err := os.Stat("/etc/rancher/k3s/k3s.yaml"); err == nil {
+			cmd.Env = append(os.Environ(), "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+		}
+	}
+	return cmd.Output()
+}
+
+type kubectlNodeList struct {
+	Items []struct {
+		Metadata struct {
+			Name   string            `json:"name"`
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+		Status struct {
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+			NodeInfo struct {
+				KubeletVersion string `json:"kubeletVersion"`
+			} `json:"nodeInfo"`
+			Addresses []struct {
+				Type    string `json:"type"`
+				Address string `json:"address"`
+			} `json:"addresses"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+// probeK3sNodes returns the nodes the Kubernetes API actually reports.
+func probeK3sNodes(ctx context.Context) ([]K3sNodeInfo, error) {
+	out, err := runKubectlJSON(ctx, "nodes")
+	if err != nil {
+		return nil, err
+	}
+	var list kubectlNodeList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parsing kubectl get nodes output: %w", err)
+	}
+	nodes := make([]K3sNodeInfo, 0, len(list.Items))
+	for _, item := range list.Items {
+		status := "NotReady"
+		for _, c := range item.Status.Conditions {
+			if c.Type == "Ready" && c.Status == "True" {
+				status = "Ready"
+			}
+		}
+		var roles []string
+		for label := range item.Metadata.Labels {
+			if strings.HasPrefix(label, "node-role.kubernetes.io/") {
+				roles = append(roles, strings.TrimPrefix(label, "node-role.kubernetes.io/"))
+			}
+		}
+		role := "worker"
+		if len(roles) > 0 {
+			sort.Strings(roles)
+			role = strings.Join(roles, ",")
+		}
+		var internalIP string
+		for _, a := range item.Status.Addresses {
+			if a.Type == "InternalIP" {
+				internalIP = a.Address
+			}
+		}
+		nodes = append(nodes, K3sNodeInfo{
+			Name:       item.Metadata.Name,
+			Role:       role,
+			Roles:      role,
+			Status:     status,
+			Version:    item.Status.NodeInfo.KubeletVersion,
+			IpAddress:  internalIP,
+			InternalIp: internalIP,
+		})
+	}
+	return nodes, nil
+}
+
+type kubectlPVCList struct {
+	Items []struct {
+		Metadata struct {
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"metadata"`
+		Spec struct {
+			StorageClassName string `json:"storageClassName"`
+		} `json:"spec"`
+		Status struct {
+			Phase    string `json:"phase"`
+			Capacity struct {
+				Storage string `json:"storage"`
+			} `json:"capacity"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+// probeK3sPVCs returns the persistent volume claims the API reports, or
+// nil when the probe fails — never invented volumes.
+func probeK3sPVCs(ctx context.Context) []OpenEbsVolumeInfo {
+	out, err := runKubectlJSON(ctx, "pvc", "-A")
+	if err != nil {
+		return nil
+	}
+	var list kubectlPVCList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil
+	}
+	volumes := make([]OpenEbsVolumeInfo, 0, len(list.Items))
+	for _, item := range list.Items {
+		volumes = append(volumes, OpenEbsVolumeInfo{
+			Name:         item.Metadata.Name,
+			Namespace:    item.Metadata.Namespace,
+			StorageClass: item.Spec.StorageClassName,
+			Capacity:     item.Status.Capacity.Storage,
+			Status:       item.Status.Phase,
+		})
+	}
+	return volumes
+}
+
+type kubectlPodList struct {
+	Items []struct {
+		Status struct {
+			Phase string `json:"phase"`
+			ContainerStatuses []struct {
+				Ready bool `json:"ready"`
+			} `json:"containerStatuses"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+// probeOpenEBSHealth reports whether the OpenEBS pods are all running
+// with ready containers. No pods, or a failed probe, means not ready.
+func probeOpenEBSHealth(ctx context.Context) (ready, healthy bool) {
+	out, err := runKubectlJSON(ctx, "pods", "-n", "openebs")
+	if err != nil {
+		return false, false
+	}
+	var list kubectlPodList
+	if err := json.Unmarshal(out, &list); err != nil || len(list.Items) == 0 {
+		return false, false
+	}
+	for _, item := range list.Items {
+		if item.Status.Phase != "Running" {
+			return false, false
+		}
+		for _, c := range item.Status.ContainerStatuses {
+			if !c.Ready {
+				return false, false
+			}
+		}
+	}
+	return true, true
 }

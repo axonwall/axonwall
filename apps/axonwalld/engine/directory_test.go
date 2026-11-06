@@ -131,6 +131,202 @@ func TestHAPKICertGeneration(t *testing.T) {
 	}
 }
 
+func TestHAPKICorruptCAMaterialRefusesToReRoot(t *testing.T) {
+	// A-H4 (round 2): a corrupt CA cert/key, or a CSR-enrolled node
+	// missing its key, used to silently mint a brand-new CA and
+	// overwrite the old one — orphaning every peer cert in the cluster.
+	setup := func(t *testing.T) (dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath string) {
+		t.Helper()
+		dir = t.TempDir()
+		caPath = filepath.Join(dir, "ca.crt")
+		caKeyPath = filepath.Join(dir, "ca.key")
+		nodeCertPath = filepath.Join(dir, "node.crt")
+		nodeKeyPath = filepath.Join(dir, "node.key")
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err != nil {
+			t.Fatalf("setup EnsureHAPKICertsInDir failed: %v", err)
+		}
+		return dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath
+	}
+
+	t.Run("corrupt CA cert", func(t *testing.T) {
+		_, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		corrupt := []byte("-----BEGIN CERTIFICATE-----\ncorrupt\n-----END CERTIFICATE-----\n")
+		if err := os.WriteFile(caPath, corrupt, 0644); err != nil {
+			t.Fatalf("failed to corrupt ca.crt: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(filepath.Dir(caPath), caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for corrupt CA certificate, got nil")
+		}
+		after, _ := os.ReadFile(caPath)
+		if string(after) != string(corrupt) {
+			t.Fatalf("corrupt CA certificate was overwritten instead of refused")
+		}
+	})
+
+	t.Run("corrupt CA key", func(t *testing.T) {
+		_, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		if err := os.WriteFile(caKeyPath, []byte("not a pem key"), 0600); err != nil {
+			t.Fatalf("failed to corrupt ca.key: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(filepath.Dir(caPath), caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for corrupt CA key, got nil")
+		}
+	})
+
+	t.Run("CA key without certificate", func(t *testing.T) {
+		_, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		if err := os.Remove(caPath); err != nil {
+			t.Fatalf("failed to remove ca.crt: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(filepath.Dir(caPath), caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for CA key without certificate, got nil")
+		}
+	})
+
+	t.Run("CSR-enrolled node keeps working, missing node key fails", func(t *testing.T) {
+		dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		// Simulate CSR enrollment: CA cert without the CA key.
+		if err := os.Remove(caKeyPath); err != nil {
+			t.Fatalf("failed to remove ca.key: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err != nil {
+			t.Fatalf("CSR-enrolled node with intact key/cert should be preserved, got: %v", err)
+		}
+		// Now lose the node key: must fail, not mint a new CA.
+		if err := os.Remove(nodeKeyPath); err != nil {
+			t.Fatalf("failed to remove node.key: %v", err)
+		}
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err == nil {
+			t.Fatalf("expected error for CSR-enrolled node missing its key, got nil")
+		}
+	})
+}
+
+func TestLDAPDeleteEntry(t *testing.T) {
+	// A-H5 (round 2): DeleteUser discarded both ldapdelete errors and
+	// reported success while the user still existed.
+	installFakeLDAPDelete := func(t *testing.T, script string) {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "ldapdelete"), []byte(script), 0755); err != nil {
+			t.Fatalf("Failed to write fake ldapdelete: %v", err)
+		}
+		t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	}
+
+	t.Run("success", func(t *testing.T) {
+		installFakeLDAPDelete(t, "#!/bin/sh\nexit 0\n")
+		if err := ldapDeleteEntry("uid=test,ou=users,dc=example,dc=com"); err != nil {
+			t.Errorf("expected nil for successful delete, got %v", err)
+		}
+	})
+
+	t.Run("no such object is tolerated", func(t *testing.T) {
+		installFakeLDAPDelete(t, "#!/bin/sh\necho 'ldap_delete: No such object' >&2\nexit 32\n")
+		if err := ldapDeleteEntry("uid=test,ou=users,dc=example,dc=com"); err != nil {
+			t.Errorf("expected nil for missing entry, got %v", err)
+		}
+	})
+
+	t.Run("other failures are errors", func(t *testing.T) {
+		installFakeLDAPDelete(t, "#!/bin/sh\necho 'ldap_sasl_bind: connection refused' >&2\nexit 1\n")
+		if err := ldapDeleteEntry("uid=test,ou=users,dc=example,dc=com"); err == nil {
+			t.Errorf("expected error when ldapdelete fails, got nil")
+		}
+	})
+}
+
+func TestRunLDAPModifyAddFallback(t *testing.T) {
+	// A-H6 (round 2): every ldapmodify failure containing "No such
+	// attribute" was treated as success — but replace: in LDAP requires
+	// the attribute to exist, so a first-time lock and a first SSH key
+	// were silently dropped. Only delete: may swallow it; replace: on
+	// pwdAccountLockedTime / sshPublicKey must retry as add:.
+	installFakeLDAPModify := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "ldapmodify.log")
+		script := "#!/bin/sh\n" +
+			"body=$(cat)\n" +
+			"printf '%s\\n---CALL---\\n' \"$body\" >> \"$LDAPMODIFY_LOG\"\n" +
+			"case \"$body\" in\n" +
+			"  *\"replace: sshPublicKey\"*|*\"replace: pwdAccountLockedTime\"*|*\"replace: gecos\"*|*\"delete: pwdAccountLockedTime\"*)\n" +
+			"    echo 'ldap_modify: No such attribute' >&2\n" +
+			"    exit 1\n" +
+			"    ;;\n" +
+			"esac\n" +
+			"exit 0\n"
+		if err := os.WriteFile(filepath.Join(dir, "ldapmodify"), []byte(script), 0755); err != nil {
+			t.Fatalf("Failed to write fake ldapmodify: %v", err)
+		}
+		t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+		t.Setenv("LDAPMODIFY_LOG", logPath)
+		return logPath
+	}
+	readLog := func(t *testing.T, p string) string {
+		t.Helper()
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("Failed to read ldapmodify log: %v", err)
+		}
+		return string(b)
+	}
+	d := &DirectoryManager{}
+
+	t.Run("first lock retries as add", func(t *testing.T) {
+		logPath := installFakeLDAPModify(t)
+		err := d.runLDAPModify("alice", "dc=example,dc=com", "replace: pwdAccountLockedTime\npwdAccountLockedTime: 000001010000Z")
+		if err != nil {
+			t.Fatalf("expected first lock to succeed via add: retry, got %v", err)
+		}
+		log := readLog(t, logPath)
+		if !strings.Contains(log, "replace: pwdAccountLockedTime") || !strings.Contains(log, "add: pwdAccountLockedTime") {
+			t.Fatalf("expected a replace attempt followed by an add attempt, got log:\n%s", log)
+		}
+	})
+
+	t.Run("first ssh key retries as add", func(t *testing.T) {
+		logPath := installFakeLDAPModify(t)
+		err := d.runLDAPModify("alice", "dc=example,dc=com", "replace: sshPublicKey\nsshPublicKey: ssh-ed25519 AAAAC3test")
+		if err != nil {
+			t.Fatalf("expected first SSH key to succeed via add: retry, got %v", err)
+		}
+		if log := readLog(t, logPath); !strings.Contains(log, "add: sshPublicKey") {
+			t.Fatalf("expected an add: retry for the first SSH key, got log:\n%s", log)
+		}
+	})
+
+	t.Run("unlock of never-locked user is a no-op success", func(t *testing.T) {
+		logPath := installFakeLDAPModify(t)
+		err := d.runLDAPModify("alice", "dc=example,dc=com", "delete: pwdAccountLockedTime")
+		if err != nil {
+			t.Fatalf("expected delete of absent attribute to succeed, got %v", err)
+		}
+		if log := readLog(t, logPath); strings.Count(log, "---CALL---") != 1 {
+			t.Fatalf("expected exactly one ldapmodify call for a delete, got log:\n%s", log)
+		}
+	})
+
+	t.Run("bare replace of absent attribute is a no-op success", func(t *testing.T) {
+		logPath := installFakeLDAPModify(t)
+		err := d.runLDAPModify("alice", "dc=example,dc=com", "replace: sshPublicKey")
+		if err != nil {
+			t.Fatalf("expected bare replace of absent sshPublicKey to succeed, got %v", err)
+		}
+		if log := readLog(t, logPath); strings.Count(log, "---CALL---") != 1 {
+			t.Fatalf("expected exactly one ldapmodify call for a bare replace, got log:\n%s", log)
+		}
+	})
+
+	t.Run("other replace failures are real errors", func(t *testing.T) {
+		installFakeLDAPModify(t)
+		err := d.runLDAPModify("alice", "dc=example,dc=com", "replace: gecos\ngecos: Alice")
+		if err == nil {
+			t.Fatalf("expected error for a failing replace: gecos, got nil")
+		}
+	})
+}
+
 func TestVowPluginLDAPIntegrationSpec(t *testing.T) {
 	plugins := GetExtensionPluginDefinitions()
 	var vowFound bool

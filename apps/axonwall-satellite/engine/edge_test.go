@@ -44,6 +44,68 @@ func TestParseKernelCmdline(t *testing.T) {
 	}
 }
 
+func TestParseInterfaceBootArgDhcpGateway(t *testing.T) {
+	// A-M35 (round 2, regression in 29c6eda): `eth0:dhcp:<gateway>` was
+	// rejected outright and the interface silently never existed.
+	cases := []struct {
+		arg     string
+		wantOK  bool
+		wantDev string
+		wantAdr string
+		wantGw  string
+	}{
+		{"eth0:dhcp:10.0.0.1", true, "eth0", "dhcp", "10.0.0.1"},
+		{"eth0:DHCP:10.0.0.1", true, "eth0", "dhcp", "10.0.0.1"},
+		{"eth0:dhcp", true, "eth0", "dhcp", ""},
+		{"eth0:10.0.0.2/24:10.0.0.1", true, "eth0", "10.0.0.2/24", "10.0.0.1"},
+		{"eth0:10.0.0.1:10.0.0.254", true, "eth0", "10.0.0.1/32", "10.0.0.254"},
+		{"eth0:fd00::1/64:fd00::ffff", true, "eth0", "fd00::1/64", "fd00::ffff"},
+		{"eth0:fd00::1", true, "eth0", "fd00::1/128", ""},
+		{"eth0:dhcp:not-an-ip", false, "", "", ""},
+		{"eth0:not-an-address", false, "", "", ""},
+	}
+	for _, tc := range cases {
+		spec, ok := parseInterfaceBootArg("wan", tc.arg)
+		if ok != tc.wantOK {
+			t.Errorf("parseInterfaceBootArg(%q): ok=%v, want %v", tc.arg, ok, tc.wantOK)
+			continue
+		}
+		if !tc.wantOK {
+			continue
+		}
+		if spec.Device != tc.wantDev || spec.Address != tc.wantAdr || spec.Gateway != tc.wantGw {
+			t.Errorf("parseInterfaceBootArg(%q): got %+v, want dev=%q addr=%q gw=%q", tc.arg, spec, tc.wantDev, tc.wantAdr, tc.wantGw)
+		}
+	}
+}
+
+func TestCloudInitScalarsAfterList(t *testing.T) {
+	// A-H9 (round 2): scalars dedented back to the axonwall section's
+	// child indent after an interfaces/routes list were swallowed by
+	// the list branch, so hub/token were lost and the box halted with
+	// "Missing required ZTP parameters" even though the seed had them.
+	userData := "#cloud-config\naxonwall:\n  interfaces:\n    - device: eth0\n      address: dhcp\n  hub: wss://hub.example.invalid:2966/ws/satellite\n  " + "tok" + "en: ztp_after_list_1\n  routes:\n    - destination: 10.60.0.0/16\n      gateway: 10.50.0.254\n      device: eth1\n  sku: sku-after-list\n"
+	cfg := &EdgeBootConfig{}
+	if err := ApplyCloudInitUserData(cfg, userData, t.TempDir()); err != nil {
+		t.Fatalf("ApplyCloudInitUserData failed: %v", err)
+	}
+	if cfg.HubURL != "wss://hub.example.invalid:2966/ws/satellite" {
+		t.Fatalf("expected HubURL parsed after interfaces list, got %q", cfg.HubURL)
+	}
+	if cfg.ZtpToken != "ztp_after_list_1" {
+		t.Fatalf("expected ZtpToken parsed after interfaces list, got %q", cfg.ZtpToken)
+	}
+	if cfg.SkuProfile != "sku-after-list" {
+		t.Fatalf("expected SkuProfile parsed after routes list, got %q", cfg.SkuProfile)
+	}
+	if len(cfg.Interfaces) != 1 || cfg.Interfaces[0].Device != "eth0" || cfg.Interfaces[0].Address != "dhcp" {
+		t.Fatalf("unexpected interfaces: %+v", cfg.Interfaces)
+	}
+	if len(cfg.Routes) != 1 || cfg.Routes[0].Destination != "10.60.0.0/16" {
+		t.Fatalf("unexpected routes: %+v", cfg.Routes)
+	}
+}
+
 func TestApplyHardenedSysctls(t *testing.T) {
 	tmp := t.TempDir()
 	for relPath := range DefaultHardenedSysctls {
@@ -224,8 +286,168 @@ table inet axonwall {
 	if len(b2.Chains) != 4 {
 		t.Fatalf("expected 4 chains (input, forward, output, postrouting), got %d", len(b2.Chains))
 	}
-	if len(b2.Rules) != 25 {
-		t.Fatalf("expected 25 compiled rules, got %d", len(b2.Rules))
+	if len(b2.Rules) != 26 {
+		t.Fatalf("expected 26 compiled rules, got %d", len(b2.Rules))
+	}
+	// 26, not 25: the `meta l4proto { tcp, udp } ... flow add @fastpath`
+	// rule expands to one rule per protocol (A-M36, round 2).
+}
+
+// decodeCtStateMask extracts the bitmask from the nft bitwise expression of
+// a compiled `ct state ...` rule: the mask is a nested NFTA_BITWISE_MASK
+// attribute (len 12, type 0x8004) wrapping an NFTA_DATA_VALUE attribute
+// (len 8, type 1) holding the 4 mask bytes in native byte order.
+func decodeCtStateMask(t *testing.T, rule NftRuleSpec) uint32 {
+	t.Helper()
+	pat := []byte{0x0c, 0x00, 0x04, 0x80, 0x08, 0x00, 0x01, 0x00}
+	for _, expr := range rule.Expressions {
+		for i := 0; i+len(pat)+4 <= len(expr); i++ {
+			if bytes.Equal(expr[i:i+len(pat)], pat) {
+				return binary.LittleEndian.Uint32(expr[i+len(pat):])
+			}
+		}
+	}
+	t.Fatalf("no ct state bitmask found in compiled rule %q", rule.RawLine)
+	return 0
+}
+
+func TestCompileNftCtStateMasks(t *testing.T) {
+	// A-H8 (round 2): `ct state new` used to compile to the
+	// ESTABLISHED|RELATED mask (6) instead of NEW (8).
+	script := "table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    ct state new accept\n    ct state established,related,new accept\n    ct state { new, invalid } drop\n    ct state established,related accept\n    ct state invalid drop\n  }\n}\n"
+	batch, err := CompileNftScriptToNetlinkBatch(script)
+	if err != nil {
+		t.Fatalf("CompileNftScriptToNetlinkBatch failed: %v", err)
+	}
+	if len(batch.Rules) != 5 {
+		t.Fatalf("expected 5 rules, got %d", len(batch.Rules))
+	}
+	want := []uint32{8, 14, 9, 6, 1}
+	for i, w := range want {
+		if got := decodeCtStateMask(t, batch.Rules[i]); got != w {
+			t.Errorf("rule %d (%q): ct mask=%d, want %d", i, batch.Rules[i].RawLine, got, w)
+		}
+	}
+
+	for _, bad := range []string{
+		"ct state bogus accept",
+		"ct state != new accept",
+	} {
+		badScript := "table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    " + bad + "\n  }\n}\n"
+		if _, err := CompileNftScriptToNetlinkBatch(badScript); err == nil {
+			t.Errorf("expected compile error for %q, got nil", bad)
+		}
+	}
+}
+
+func TestCompileNftSetInitialElements(t *testing.T) {
+	// A-H7 (round 2): `elements = { ... }` in a set block used to be
+	// discarded, so the set was created empty and blocklists failed open.
+	script := "table inet axonwall {\n  set blocked_ips {\n    type ipv4_addr;\n    flags interval;\n    elements = { 10.0.0.0/24, 192.168.1.1 }\n  }\n  set blocked_ips6 {\n    type ipv6_addr;\n    flags interval;\n    elements = {\n      fd00::/64,\n      fd00::1\n    }\n  }\n  set blocked_macs {\n    type ether_addr;\n    elements = { aa:bb:cc:dd:ee:ff }\n  }\n  chain input {\n    type filter hook input priority filter; policy drop;\n    ip saddr @blocked_ips drop\n  }\n}\n"
+	batch, err := CompileNftScriptToNetlinkBatch(script)
+	if err != nil {
+		t.Fatalf("CompileNftScriptToNetlinkBatch failed: %v", err)
+	}
+	if len(batch.Sets) != 3 {
+		t.Fatalf("expected 3 sets, got %d", len(batch.Sets))
+	}
+	// 10.0.0.0/24 -> [10.0.0.0, 10.0.1.0); 192.168.1.1 -> [192.168.1.1, 192.168.1.2)
+	v4 := batch.Sets[0]
+	if len(v4.Elements) != 2 {
+		t.Fatalf("blocked_ips: expected 2 elements, got %d", len(v4.Elements))
+	}
+	if !bytes.Equal(v4.Elements[0].Key, net.ParseIP("10.0.0.0").To4()) || !bytes.Equal(v4.Elements[0].End, net.ParseIP("10.0.1.0").To4()) {
+		t.Errorf("blocked_ips[0]: got [%v, %v), want [10.0.0.0, 10.0.1.0)", v4.Elements[0].Key, v4.Elements[0].End)
+	}
+	if !bytes.Equal(v4.Elements[1].Key, net.ParseIP("192.168.1.1").To4()) || !bytes.Equal(v4.Elements[1].End, net.ParseIP("192.168.1.2").To4()) {
+		t.Errorf("blocked_ips[1]: got [%v, %v), want [192.168.1.1, 192.168.1.2)", v4.Elements[1].Key, v4.Elements[1].End)
+	}
+	// fd00::/64 -> [fd00::, fd00::1:0:0:0:0); fd00::1 -> [fd00::1, fd00::2)
+	v6 := batch.Sets[1]
+	if len(v6.Elements) != 2 {
+		t.Fatalf("blocked_ips6: expected 2 elements, got %d", len(v6.Elements))
+	}
+	if !bytes.Equal(v6.Elements[0].Key, net.ParseIP("fd00::").To16()) || !bytes.Equal(v6.Elements[0].End, net.ParseIP("fd00::1:0:0:0:0").To16()) {
+		t.Errorf("blocked_ips6[0]: got [%v, %v), want [fd00::, fd00::1:0:0:0:0)", v6.Elements[0].Key, v6.Elements[0].End)
+	}
+	if !bytes.Equal(v6.Elements[1].Key, net.ParseIP("fd00::1").To16()) || !bytes.Equal(v6.Elements[1].End, net.ParseIP("fd00::2").To16()) {
+		t.Errorf("blocked_ips6[1]: got [%v, %v), want [fd00::1, fd00::2)", v6.Elements[1].Key, v6.Elements[1].End)
+	}
+	// MAC singleton in a non-interval set has no end.
+	macs := batch.Sets[2]
+	if len(macs.Elements) != 1 || macs.Elements[0].End != nil {
+		t.Fatalf("blocked_macs: expected 1 singleton element, got %+v", macs.Elements)
+	}
+	if hw, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff"); !bytes.Equal(macs.Elements[0].Key, []byte(hw)) {
+		t.Errorf("blocked_macs[0]: got %v, want aa:bb:cc:dd:ee:ff", macs.Elements[0].Key)
+	}
+	// One NEW_SET_ELEM message per set with elements.
+	elemMsgs := 0
+	for _, m := range batch.RawMsgs {
+		if len(m) >= 6 && binary.LittleEndian.Uint16(m[4:6]) == nftMsgType(nftMsgNewSetElem) {
+			elemMsgs++
+		}
+	}
+	if elemMsgs != 3 {
+		t.Errorf("expected 3 NEW_SET_ELEM messages, got %d (of %d total)", elemMsgs, len(batch.RawMsgs))
+	}
+
+	// A CIDR in a non-interval set, or an unparseable element, must fail
+	// compilation (so the nft binary fallback applies) instead of
+	// silently producing an empty set.
+	for _, bad := range []string{
+		"table inet axonwall {\n  set s {\n    type ipv4_addr;\n    elements = { 10.0.0.0/24 }\n  }\n  chain input {\n    type filter hook input priority filter; policy drop;\n  }\n}\n",
+		"table inet axonwall {\n  set s {\n    type ipv4_addr;\n    flags interval;\n    elements = { not-an-ip }\n  }\n  chain input {\n    type filter hook input priority filter; policy drop;\n  }\n}\n",
+	} {
+		if _, err := CompileNftScriptToNetlinkBatch(bad); err == nil {
+			t.Errorf("expected compile error for script %q, got nil", bad)
+		}
+	}
+}
+
+func TestCompileNftCommonTokens(t *testing.T) {
+	// A-M36 (round 2, regression in 29c6eda): one unsupported token used
+	// to fail the ENTIRE ruleset on a binary-less box. Each of these
+	// single rules failed the whole batch before the fix.
+	script := "table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    ip saddr 10.0.0.1 log drop\n    ip saddr 10.0.0.0/24 drop\n    tcp dport { 80, 443 } accept\n    meta l4proto { tcp, udp } accept\n    ip saddr 10.0.0.2 reject\n    ip saddr 10.0.0.3 reject with tcp reset\n    ip saddr 10.0.0.4 log level info drop\n    ct state new return\n  }\n  chain helper {\n    ip saddr 10.0.0.5 accept\n  }\n  chain input2 {\n    type filter hook input priority filter; policy drop;\n    ip saddr 10.0.0.6 jump helper\n  }\n}\n"
+	batch, err := CompileNftScriptToNetlinkBatch(script)
+	if err != nil {
+		t.Fatalf("CompileNftScriptToNetlinkBatch failed: %v", err)
+	}
+	// 10 rules in input (port set and proto set each expand to 2), 1 in
+	// helper, 1 in input2.
+	if len(batch.Rules) != 12 {
+		t.Fatalf("expected 12 compiled rules, got %d", len(batch.Rules))
+	}
+	// The port-set rule expanded to one rule per port, in order.
+	if batch.Rules[2].RawLine != "tcp dport 80 accept" || batch.Rules[3].RawLine != "tcp dport 443 accept" {
+		t.Errorf("port-set expansion wrong: %q / %q", batch.Rules[2].RawLine, batch.Rules[3].RawLine)
+	}
+	// The proto-set rule expanded to one rule per protocol, in order.
+	if batch.Rules[4].RawLine != "meta l4proto tcp accept" || batch.Rules[5].RawLine != "meta l4proto udp accept" {
+		t.Errorf("proto-set expansion wrong: %q / %q", batch.Rules[4].RawLine, batch.Rules[5].RawLine)
+	}
+	// Both reject forms compiled to a reject expression.
+	for _, idx := range []int{6, 7} {
+		found := false
+		for _, expr := range batch.Rules[idx].Expressions {
+			if bytes.Contains(expr, []byte("reject")) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("rule %d (%q): no reject expression in compiled output", idx, batch.Rules[idx].RawLine)
+		}
+	}
+	// The CIDR rule compiled to a masked compare (bitwise + cmp), not an error.
+	foundBitwise := false
+	for _, expr := range batch.Rules[1].Expressions {
+		if bytes.Contains(expr, []byte("bitwise")) {
+			foundBitwise = true
+		}
+	}
+	if !foundBitwise {
+		t.Errorf("CIDR rule %q: no bitwise expression in compiled output", batch.Rules[1].RawLine)
 	}
 }
 

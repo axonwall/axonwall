@@ -80,15 +80,34 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 
 	caCertBytes, errCert := os.ReadFile(caCertPath)
 	caKeyBytes, errKey := os.ReadFile(caKeyPath)
+	// A-H4 (round 2): never silently re-root the cluster. Existing CA
+	// material that fails to parse must fail loudly instead of being
+	// overwritten with a brand-new CA (which would orphan every peer
+	// certificate chained to the old CA).
 	if errCert == nil {
-		if certBlock, _ := pem.Decode(caCertBytes); certBlock != nil {
-			caCert, _ = x509.ParseCertificate(certBlock.Bytes)
+		certBlock, _ := pem.Decode(caCertBytes)
+		if certBlock == nil {
+			return fmt.Errorf("existing HA CA certificate %s is present but not valid PEM; refusing to overwrite it", caCertPath)
 		}
+		cert, err := x509.ParseCertificate(certBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("existing HA CA certificate %s is present but unparseable (%v); refusing to overwrite it", caCertPath, err)
+		}
+		if time.Now().After(cert.NotAfter) {
+			return fmt.Errorf("existing HA CA certificate %s expired on %s; refusing to issue from it", caCertPath, cert.NotAfter.Format(time.RFC3339))
+		}
+		caCert = cert
 	}
 	if errKey == nil {
-		if keyBlock, _ := pem.Decode(caKeyBytes); keyBlock != nil {
-			caKey, _ = x509.ParseECPrivateKey(keyBlock.Bytes)
+		keyBlock, _ := pem.Decode(caKeyBytes)
+		if keyBlock == nil {
+			return fmt.Errorf("existing HA CA key %s is present but not valid PEM; refusing to overwrite it", caKeyPath)
 		}
+		key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("existing HA CA key %s is present but unparseable (%v); refusing to overwrite it", caKeyPath, err)
+		}
+		caKey = key
 	}
 
 	// If this node was enrolled via CSR (has ca.crt, node.crt, and node.key, but no ca.key),
@@ -103,6 +122,16 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 				}
 			}
 		}
+		// A-H4: the enrolled node's key/certificate is missing or
+		// unparseable. Minting a new CA here would silently re-root
+		// the cluster; re-enroll via CSR (or rotate explicitly).
+		return fmt.Errorf("node is CSR-enrolled (CA certificate present without CA key) but its node key/certificate is missing or unparseable; re-enroll via CSR instead of minting a new CA")
+	}
+	if caCert == nil && caKey != nil {
+		// A-H4: the CA key survived but the certificate did not.
+		// Overwriting the good key with a fresh CA would orphan it;
+		// fail loudly instead of minting a replacement.
+		return fmt.Errorf("HA CA key %s is present but the CA certificate %s is missing or unparseable; refusing to overwrite the key", caKeyPath, caCertPath)
 	}
 
 	if caCert == nil || caKey == nil {
@@ -272,9 +301,18 @@ func GenerateHAPKICSR(extraIPs []string) ([]byte, error) {
 	}
 	var nodeKey *ecdsa.PrivateKey
 	if keyBytes, err := os.ReadFile(HAPKINodeKeyPath); err == nil {
-		if block, _ := pem.Decode(keyBytes); block != nil {
-			nodeKey, _ = x509.ParseECPrivateKey(block.Bytes)
+		// A-H4 (round 2): a corrupt/unparseable existing node key used
+		// to be silently replaced with a fresh key, orphaning the
+		// enrolled node certificate. Refuse instead.
+		block, _ := pem.Decode(keyBytes)
+		if block == nil {
+			return nil, fmt.Errorf("existing HA node key %s is present but not valid PEM; refusing to replace it without an explicit rotation", HAPKINodeKeyPath)
 		}
+		key, err := x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("existing HA node key %s is present but unparseable (%v); refusing to replace it without an explicit rotation", HAPKINodeKeyPath, err)
+		}
+		nodeKey = key
 	}
 	if nodeKey == nil {
 		var err error
