@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -24,6 +25,11 @@ type EBPFManager struct {
 	ch           driver.Conn
 	stopChan     chan struct{}
 	doneChan     chan struct{}
+	// monitorStarted records whether monitorFlows() was actually launched.
+	// Start() returns early on object-load failure before `go
+	// m.monitorFlows()`, so doneChan is never closed; Stop() must not
+	// wait on it in that case (A-M23).
+	monitorStarted atomic.Bool
 	prevPackets  map[ebpf.FlowTrackerFlowKey]uint64
 	blockedUntil map[uint32]time.Time
 	blockMu      sync.Mutex
@@ -115,6 +121,9 @@ func (m *EBPFManager) Start(interfaces []string) error {
 		m.links = append(m.links, l)
 	}
 
+	// A-M23: mark the monitor as started before launching it, so Stop()
+	// only waits on doneChan when a goroutine will actually close it.
+	m.monitorStarted.Store(true)
 	go m.monitorFlows()
 
 	return nil
@@ -268,7 +277,12 @@ func (m *EBPFManager) Stop() {
 	if m.stopChan != nil {
 		close(m.stopChan)
 		m.stopChan = nil
-		if m.doneChan != nil {
+		// A-M23: only wait for the monitor goroutine when one actually
+		// started. Start() returns early on object-load failure before
+		// `go m.monitorFlows()`, so doneChan is never closed and an
+		// unconditional wait deadlocks daemon shutdown (systemd must
+		// SIGKILL it). Same when Start() was never called at all.
+		if m.monitorStarted.Load() && m.doneChan != nil {
 			<-m.doneChan
 		}
 	}
