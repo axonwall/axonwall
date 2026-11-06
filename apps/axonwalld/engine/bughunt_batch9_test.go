@@ -124,3 +124,53 @@ func TestBatch9ParseTcpdumpLineIPv6AndARP(t *testing.T) {
 		t.Fatal("tcpdump banner lines must not parse as packets")
 	}
 }
+
+// L14 (E3 residual): activation with an unreadable previous bootfs
+// must refuse to arm. Pre-fix, the bootfs set already succeeded and
+// a later arming failure left bootfs pointed at the new target while
+// the other properties rolled back.
+func TestBatch9ActivateRefusesWithUnreadableBootfs(t *testing.T) {
+	zfsFake := &fakeZxCommands{
+		props: map[string]string{
+			"org.axonwall:active_be": "zroot/ROOT/axonwall-0.11.30",
+			"org.axonwall:bootcount": "2",
+			"org.axonwall:bootlimit": "5",
+		},
+	}
+	// No "bootfs" prop: the zpool get fails.
+	zpoolFake := &fakeZxCommands{props: map[string]string{}}
+	engine := newZbmActivateTestEngine(t, zfsFake, zpoolFake)
+
+	if err := engine.ActivateBootEnvironment("axonwall-0.11.31"); err == nil {
+		t.Fatal("expected activation to fail with an unreadable bootfs")
+	} else if !strings.Contains(err.Error(), "bootfs") {
+		t.Fatalf("expected the error to name bootfs, got: %v", err)
+	}
+	if zpoolFake.hasSet("set bootfs=zroot/ROOT/axonwall-0.11.31 zroot") {
+		t.Fatal("bootfs must never be set when the previous value is unknown")
+	}
+}
+
+// L14: when the previous bootfs was "-" (none set), a failed arming
+// must clear bootfs again instead of leaving it on the failed target.
+func TestBatch9ActivateClearsBootfsWhenPreviousWasNone(t *testing.T) {
+	zfsFake := &fakeZxCommands{
+		props: map[string]string{
+			"org.axonwall:active_be": "zroot/ROOT/axonwall-0.11.30",
+			"org.axonwall:bootcount": "2",
+			"org.axonwall:bootlimit": "5",
+		},
+		failSets: map[string]bool{"org.axonwall:active_be=zroot/ROOT/axonwall-0.11.31": true},
+	}
+	zpoolFake := &fakeZxCommands{
+		props: map[string]string{"bootfs": "-"},
+	}
+	engine := newZbmActivateTestEngine(t, zfsFake, zpoolFake)
+
+	if err := engine.ActivateBootEnvironment("axonwall-0.11.31"); err == nil {
+		t.Fatal("expected activation to fail when the active_be set fails")
+	}
+	if !zpoolFake.hasSet("set bootfs= zroot") {
+		t.Fatalf("expected bootfs to be cleared on rollback when the previous value was none; sets: %v", zpoolFake.sets)
+	}
+}

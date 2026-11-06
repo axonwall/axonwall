@@ -1013,8 +1013,10 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	}
 	targetDataset := "zroot/ROOT/" + beName
 	prevBootfs := ""
+	prevBootfsKnown := false
 	if out, err := we.runZpoolCmd("get", "-H", "-o", "value", "bootfs", "zroot"); err == nil {
 		prevBootfs = strings.TrimSpace(string(out))
+		prevBootfsKnown = prevBootfs != ""
 	}
 	prevActiveBe := ""
 	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:active_be", "zroot/ROOT"); err == nil {
@@ -1028,6 +1030,17 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 	if out, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:bootlimit", "zroot/ROOT"); err == nil {
 		prevBootlimit = strings.TrimSpace(string(out))
 	}
+	// L14 (E3 residual): if the current bootfs cannot be read, the
+	// rollback below cannot restore it — a later arming failure
+	// would leave bootfs pointed at the new target while
+	// active_be/bootcount/bootlimit roll back to their previous
+	// values, and the watchdog's view of the staged BE would
+	// disagree with bootfs. Refuse to arm rather than create that
+	// split state.
+	if !prevBootfsKnown {
+		return fmt.Errorf("cannot determine current bootfs; refusing to activate %q: zpool get bootfs failed", beName)
+	}
+
 	out, err := we.runZpoolCmd("set", "bootfs="+targetDataset, "zroot")
 	if err != nil {
 		return fmt.Errorf("zpool set bootfs failed: %v (%s)", err, strings.TrimSpace(string(out)))
@@ -1052,6 +1065,12 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 		if prevBootfs != "" && prevBootfs != "-" && prevBootfs != targetDataset {
 			if _, rerr := we.runZpoolCmd("set", "bootfs="+prevBootfs, "zroot"); rerr != nil {
 				log.Printf("[Watchdog/ZBM] Warning: Failed to roll back bootfs to %s after arming failure: %v", prevBootfs, rerr)
+			}
+		} else if prevBootfs == "-" {
+			// L14: no bootfs was set before, so clear it again
+			// instead of leaving it pointed at the failed target.
+			if _, rerr := we.runZpoolCmd("set", "bootfs=", "zroot"); rerr != nil {
+				log.Printf("[Watchdog/ZBM] Warning: Failed to clear bootfs after arming failure: %v", rerr)
 			}
 		}
 		if prevActiveBe != "" && prevActiveBe != "-" {
