@@ -547,16 +547,15 @@ if [ "$ZBM_MODE" = "1" ]; then
     echo "[+] Cloning ${PRE_SNAP} -> ${TARGET_BE_TMP_DS}..."
     zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_TMP_DS"
 
-    if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
-      echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Replacing it with the new clone..."
-      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
-    fi
-    zfs rename "$TARGET_BE_TMP_DS" "$TARGET_BE_DS"
-
     ZBM_STAGE_MNT="/tmp/axonwall-zbm-stage-${CLEAN_VER}"
     rm -rf "${ZBM_STAGE_MNT}"
     mkdir -p "${ZBM_STAGE_MNT}"
-    mount -t zfs "$TARGET_BE_DS" "${ZBM_STAGE_MNT}"
+    if ! mount -t zfs -o zfsutil "$TARGET_BE_TMP_DS" "${ZBM_STAGE_MNT}"; then
+      echo "[-] ERROR: Failed to mount ${TARGET_BE_TMP_DS} at ${ZBM_STAGE_MNT} (mount -t zfs -o zfsutil failed); the Boot Environment is NOT armed." >&2
+      rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+      zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+      exit 1
+    fi
 
     if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
       echo "[+] Extracting firmware payload into ${TARGET_BE_DS}..."
@@ -568,6 +567,7 @@ if [ "$ZBM_MODE" = "1" ]; then
         rm -rf "${PKG_STAGE}"
         umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
         rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
         exit 1
       fi
       if ! apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"; then
@@ -575,6 +575,7 @@ if [ "$ZBM_MODE" = "1" ]; then
         rm -rf "${PKG_STAGE}"
         umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
         rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
         exit 1
       fi
       rm -rf "${PKG_STAGE}"
@@ -638,6 +639,12 @@ if [ "$ZBM_MODE" = "1" ]; then
 
     umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
     rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+
+    if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
+      echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Replacing it with the new clone..."
+      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
+    fi
+    zfs rename "$TARGET_BE_TMP_DS" "$TARGET_BE_DS"
 
     echo "[+] Arming ZFSBootMenu bootfs and autonomous watchdog..."
     # E2: every arming step is checked. On any failure, restore the

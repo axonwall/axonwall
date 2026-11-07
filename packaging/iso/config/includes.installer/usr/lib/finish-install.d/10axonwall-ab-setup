@@ -802,7 +802,7 @@ ZFS_JSON_EOF
       # UKI with no bootable BE behind it.
       mkdir -p /mnt/zbm_root 2>/dev/null || true
       BE_COPY_OK=0
-      if mount -t zfs "$INIT_BE" /mnt/zbm_root 2>/dev/null; then
+      if mount -t zfs -o zfsutil "$INIT_BE" /mnt/zbm_root 2>/dev/null; then
         if command -v rsync >/dev/null 2>&1; then
           if rsync -aAX --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/boot/efi/*' /target/ /mnt/zbm_root/ 2>/dev/null; then
             BE_COPY_OK=1

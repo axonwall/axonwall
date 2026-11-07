@@ -36284,7 +36284,24 @@ var ObservabilityConfigSchema = external_exports.object({
     database: external_exports.string().default("axonwall"),
     username: external_exports.string().default("admin"),
     password: external_exports.string().optional()
-  }).default({ enabled: false, url: "http://127.0.0.1:8123", database: "axonwall", username: "admin" })
+  }).default({ enabled: false, url: "http://127.0.0.1:8123", database: "axonwall", username: "admin" }),
+  ebpfApm: external_exports.object({
+    enabled: external_exports.boolean().default(true),
+    serviceMapEnabled: external_exports.boolean().default(true),
+    l7ProtocolDissection: external_exports.boolean().default(true),
+    tlsUprobesEnabled: external_exports.boolean().default(false),
+    continuousProfilingEnabled: external_exports.boolean().default(false),
+    profilingSampleHz: external_exports.number().int().min(19).max(999).default(99),
+    automatedRcaInspections: external_exports.boolean().default(true)
+  }).default({
+    enabled: true,
+    serviceMapEnabled: true,
+    l7ProtocolDissection: true,
+    tlsUprobesEnabled: false,
+    continuousProfilingEnabled: false,
+    profilingSampleHz: 99,
+    automatedRcaInspections: true
+  })
 });
 var NutUpsConfigSchema = external_exports.object({
   enabled: external_exports.boolean().default(false),
@@ -37928,6 +37945,27 @@ var BUILTIN_PLUGINS = [
       alpine: ["nodejs", "git", "curl", "jq", "sqlite"]
     },
     cliBinaries: ["eluvix", "opencode", "agy"]
+  },
+  {
+    id: "coroot-ebpf-apm",
+    name: "Coroot eBPF APM, L7 RED Dissector, Continuous Profiler & Automated RCA",
+    version: "1.14.0",
+    category: "extension",
+    defaultEnabled: true,
+    description: "Zero-instrumentation eBPF APM & Root-Cause Analysis engine (inspired by coroot/coroot & coroot-node-agent): automatic Service Dependency Map, L7 protocol RED metrics (HTTP, gRPC, PostgreSQL, MySQL, Redis, Kafka, ClickHouse, DNS), optional OpenSSL/Go TLS uprobes, 99 Hz perf_event continuous CPU & Disk I/O FlameGraph profiling, and 35+ deterministic SLO/RCA health inspections.",
+    author: "Coroot / Axonwall Core",
+    systemdUnits: ["coroot-node-agent.service"],
+    privileges: ["system.monitoring", "reporting.flows", "system.hardware"],
+    packages: {
+      debian: ["bpftool", "linux-perf"],
+      alpine: ["bpftool", "perf"]
+    },
+    cliBinaries: ["coroot-node-agent", "bpftool", "perf"],
+    menuEntry: {
+      title: "eBPF & K3s Observability",
+      path: "/reporting/ebpf",
+      icon: "Cpu"
+    }
   }
 ];
 function resolveCapabilities(state) {
@@ -39911,6 +39949,21 @@ var VOW_APP_CATALOG = [
   },
   // Observability & Monitoring
   {
+    id: "coroot",
+    name: "Coroot eBPF APM & RCA",
+    category: "Observability & Monitoring",
+    description: "Zero-instrumentation eBPF service map, L7 RED metrics, continuous profiling, and automated root-cause analysis",
+    enablerVar: "COROOT_ENABLED",
+    argoPath: "argo/coroot",
+    subdomain: "coroot",
+    port: 8080,
+    docsUrl: "https://docs.coroot.com/",
+    icon: "Cpu",
+    estimatedMemoryMb: 512,
+    namespace: "coroot",
+    isHelm: true
+  },
+  {
     id: "kube-prometheus-stack",
     name: "Prometheus & Grafana",
     category: "Observability & Monitoring",
@@ -40262,9 +40315,9 @@ var VOW_DEPLOYMENT_PRESETS = [
   {
     id: "observability",
     name: "Observability Stack",
-    description: "Core + Prometheus, Grafana, OpenSearch & Dashboards, Sloth, Vigil",
-    estimatedMemoryMb: 6144,
-    apps: ["argocd", "certmanager", "kube-prometheus-stack", "opensearch", "sloth", "vigil"]
+    description: "Core + Coroot eBPF APM, Prometheus, Grafana, OpenSearch & Dashboards, Sloth, Vigil",
+    estimatedMemoryMb: 6656,
+    apps: ["argocd", "certmanager", "coroot", "kube-prometheus-stack", "opensearch", "sloth", "vigil"]
   },
   {
     id: "ai",

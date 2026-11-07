@@ -278,10 +278,83 @@ kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout 
         />
       </section>
 
+      {/* Section 4: Coroot-Grade eBPF APM, Automated RCA & Continuous Profiling */}
+      <section id="coroot-apm" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <GitBranch className="w-6 h-6 text-emerald-400" /> 4. Coroot-Grade eBPF APM, Automated RCA &amp; Continuous Profiling
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Axonwall integrates <strong className="text-white">Coroot-inspired eBPF Application Performance Monitoring (APM)</strong>{' '}
+          both natively inside <Link href="/reporting/ebpf" className="text-emerald-400 hover:underline">/reporting/ebpf</Link>{' '}
+          and as a toggleable plugin (<code className="text-slate-200 font-mono">coroot-ebpf-apm</code> / VOW catalog{' '}
+          <code className="text-slate-200 font-mono">coroot</code>). Using guardrailed{' '}
+          <code className="text-emerald-400 font-mono">observability.ebpfApm</code> toggles, operators can enable or disable
+          higher-overhead probes on demand without restarting workloads:
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-emerald-400">1. Auto-Discovered Service Dependency Map</span>
+            <p className="text-slate-400">
+              Hooks <code className="text-slate-200 font-mono">tcp_connect</code>,{' '}
+              <code className="text-slate-200 font-mono">inet_csk_accept</code>, and{' '}
+              <code className="text-slate-200 font-mono">sock_sendmsg</code> to construct a real-time topology graph of
+              every host daemon and K3s pod alongside live connection states, RTT, and TCP retransmission rates.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-sky-400">2. L7 Protocol RED Dissection + TLS Uprobes</span>
+            <p className="text-slate-400">
+              Automatically parses <strong className="text-slate-200">HTTP/1.1, HTTP/2, gRPC, PostgreSQL, Redis, ClickHouse, DNS, and Kafka</strong>{' '}
+              payloads at socket boundaries to compute per-endpoint Rate, Errors, and Duration (`p50`/`p95`/`p99`). Optional{' '}
+              <code className="text-slate-200 font-mono">uprobe/SSL_read</code>,{' '}
+              <code className="text-slate-200 font-mono">uprobe/SSL_write</code>, and Go{' '}
+              <code className="text-slate-200 font-mono">crypto/tls</code> hooks inspect TLS-encrypted traffic before
+              ciphertext leaves user space—without MITM certificates.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-purple-400">3. Automated Root-Cause Analysis (RCA) Engine</span>
+            <p className="text-slate-400">
+              Deterministic inspection rules evaluate SLO availability, cgroup CFS CPU throttling, OOM kills / memory
+              pressure, TCP retransmit spikes, OpenEBS ZFS-LocalPV <code className="text-slate-200 font-mono">vfs_fsync</code>{' '}
+              latency, and BPF-LSM security blocks—pinpointing the exact root cause of latency anomalies.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-amber-400">4. 99 Hz Continuous Stack-Trace FlameGraphs</span>
+            <p className="text-slate-400">
+              Samples kernel + user-space stack traces via{' '}
+              <code className="text-slate-200 font-mono">perf_event</code> and{' '}
+              <code className="text-slate-200 font-mono">BPF_MAP_TYPE_STACK_TRACE</code> across On-CPU cycles, Disk/ZFS I/O
+              wait, Heap/ARC memory allocations, and Off-CPU mutex contention.
+            </p>
+          </div>
+        </div>
+
+        <CodeBlock
+          title="Declarative DesiredState Configuration (observability.ebpfApm)"
+          language="json"
+          code={`{
+  "observability": {
+    "ebpfApm": {
+      "enabled": true,
+      "serviceMapEnabled": true,
+      "l7ProtocolDissection": true,
+      "tlsUprobesEnabled": false,
+      "continuousProfilingEnabled": true,
+      "profilingSampleHz": 99,
+      "automatedRcaInspections": true
+    }
+  }
+}`}
+        />
+      </section>
+
       {/* Kernel Packet Tap */}
       <section id="kernel-tap" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Cpu className="w-6 h-6 text-emerald-400" /> 4. Kernel Packet Stream Architecture (NFLOG &amp; XDP)
+          <Cpu className="w-6 h-6 text-emerald-400" /> 5. Kernel Packet Stream Architecture (NFLOG &amp; XDP)
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           Traditional BSD firewalls require administrators to start a packet capture, wait for an incident to occur,
@@ -321,7 +394,7 @@ kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout 
       {/* Protocol Dissectors */}
       <section id="dissectors" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Binary className="w-6 h-6 text-emerald-400" /> 5. Deep Protocol Dissector
+          <Binary className="w-6 h-6 text-emerald-400" /> 6. Deep Protocol Dissector
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           The embedded Go daemon dissector analyzes raw Ethernet frames at wire-speed and parses packet headers without
@@ -353,7 +426,7 @@ kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout 
       {/* SSE Streaming Endpoint */}
       <section id="sse-streaming" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Radio className="w-6 h-6 text-emerald-400" /> 6. Server-Sent Events (SSE) API
+          <Radio className="w-6 h-6 text-emerald-400" /> 7. Server-Sent Events (SSE) API
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           Clients stream live packet telemetry over HTTP/2 using Server-Sent Events. The stream supports server-side
@@ -404,7 +477,7 @@ curl -N "https://192.168.1.1:2966/api/v1/events/packets?iface=eth0&proto=tcp"`}
       {/* VictoriaMetrics */}
       <section id="victoriametrics" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Activity className="w-6 h-6 text-emerald-400" /> 7. VictoriaMetrics, ClickHouse &amp; Insight Flow Analytics
+          <Activity className="w-6 h-6 text-emerald-400" /> 8. VictoriaMetrics, ClickHouse &amp; Insight Flow Analytics
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           In addition to real-time eBPF and NFLOG streaming, historical time-series metrics are stored in an embedded,

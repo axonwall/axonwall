@@ -508,7 +508,7 @@ export default function PowerManagementPage() {
               {modalAction === 'reboot_current' && (
                 <button
                   type="button"
-                  onClick={() => handleExecutePower('reboot', activeSlot?.slot)}
+                  onClick={() => handleExecutePower('reboot')}
                   disabled={isExecuting}
                   className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-amber-950 text-xs font-semibold transition-colors flex items-center gap-1.5"
                 >

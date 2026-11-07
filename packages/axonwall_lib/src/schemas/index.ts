@@ -822,6 +822,23 @@ export const ObservabilityConfigSchema = z.object({
     username: z.string().default('admin'),
     password: z.string().optional(),
   }).default({ enabled: false, url: 'http://127.0.0.1:8123', database: 'axonwall', username: 'admin' }),
+  ebpfApm: z.object({
+    enabled: z.boolean().default(true),
+    serviceMapEnabled: z.boolean().default(true),
+    l7ProtocolDissection: z.boolean().default(true),
+    tlsUprobesEnabled: z.boolean().default(false),
+    continuousProfilingEnabled: z.boolean().default(false),
+    profilingSampleHz: z.number().int().min(19).max(999).default(99),
+    automatedRcaInspections: z.boolean().default(true),
+  }).default({
+    enabled: true,
+    serviceMapEnabled: true,
+    l7ProtocolDissection: true,
+    tlsUprobesEnabled: false,
+    continuousProfilingEnabled: false,
+    profilingSampleHz: 99,
+    automatedRcaInspections: true,
+  }),
 });
 export type ObservabilityConfig = z.infer<typeof ObservabilityConfigSchema>;
 

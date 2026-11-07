@@ -2958,11 +2958,15 @@ func main() {
 				})
 				return
 			}
+			effectiveSlot := strings.ToUpper(strings.TrimSpace(req.Slot))
+			if watchdog.GetStatus().InstallMode == "zbm" {
+				effectiveSlot = "B"
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success":    true,
 				"message":    msg,
-				"targetSlot": strings.ToUpper(strings.TrimSpace(req.Slot)),
+				"targetSlot": effectiveSlot,
 				"newVersion": strings.TrimSpace(strings.TrimPrefix(req.Version, "v")),
 			})
 		})

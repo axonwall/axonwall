@@ -398,3 +398,64 @@ func TestBatch16ReadGrubEnvAtPath(t *testing.T) {
 		t.Errorf("readGrubEnvAtPath of a missing file should return an empty map, got %v", env)
 	}
 }
+
+func TestZbmInitialVerificationSyncsBootfsWithoutClobberingSubsequentStage(t *testing.T) {
+	tempDir := t.TempDir()
+	cmdlinePath := filepath.Join(tempDir, "cmdline")
+	if err := os.WriteFile(cmdlinePath, []byte("BOOT_IMAGE=/vmlinuz zfs=zroot/ROOT/axonwall-0.11.62 root=zfs:zroot/ROOT/axonwall-0.11.62 ro quiet"), 0644); err != nil {
+		t.Fatalf("Failed to write mock cmdline: %v", err)
+	}
+	engine := NewWatchdogEngineCustom(filepath.Join(tempDir, "grubenv"), cmdlinePath)
+	engine.readInstalledVer = func() string { return "0.11.62" }
+
+	zx := &batch16ListZfs{
+		props: map[string]string{
+			"org.axonwall:active_be": "zroot/ROOT/axonwall-0.11.57",
+			"org.axonwall:bootcount": "1",
+			"org.axonwall:bootlimit": "3",
+			"origin":                 "zroot/ROOT/axonwall-0.11.57@pre-update-v0.11.62",
+		},
+		bootfs: "zroot/ROOT/axonwall-0.11.57",
+		listOutput: "zroot/ROOT/axonwall-0.11.57\t1.4G\tTue Nov  3 09:16 2026\n" +
+			"zroot/ROOT/axonwall-0.11.62\t1.7G\tSat Nov  7 21:43 2026\n" +
+			"zroot/ROOT/axonwall-0.11.63.tmp\t10M\tSat Nov  7 21:44 2026\n",
+	}
+	engine.runZfsCmd = zx.runZfs
+	engine.runZpoolCmd = zx.runZpool
+	engine.checkInterfaces = func() HealthCheckResult {
+		return HealthCheckResult{Name: "ifaces", Status: CheckStatusPass}
+	}
+	engine.checkNftables = func() HealthCheckResult {
+		return HealthCheckResult{Name: "nft", Status: CheckStatusPass}
+	}
+	engine.checkControlPlane = func() HealthCheckResult {
+		return HealthCheckResult{Name: "cp", Status: CheckStatusPass}
+	}
+
+	// Ensure .tmp dataset is filtered out from BE listing
+	bes := engine.listBootEnvironmentsLocked()
+	for _, be := range bes {
+		if strings.HasSuffix(be.Name, ".tmp") {
+			t.Errorf("Expected .tmp dataset to be excluded from BootEnvironments, got %s", be.Name)
+		}
+	}
+
+	engine.status.InstallMode = "zbm"
+	engine.status.ActiveRootDevice = "zroot/ROOT/axonwall-0.11.62"
+	engine.runVerificationSequence()
+
+	if !zx.hasSet("zpool set bootfs=zroot/ROOT/axonwall-0.11.62 zroot") {
+		t.Errorf("Expected initial boot verification to sync bootfs to active BE; sets: %v", zx.sets)
+	}
+	if !zx.hasSet("set org.axonwall:active_be=zroot/ROOT/axonwall-0.11.62 zroot/ROOT") {
+		t.Errorf("Expected initial boot verification to sync org.axonwall:active_be to active BE; sets: %v", zx.sets)
+	}
+
+	// Now simulate staging a new BE and running on-demand verification before reboot:
+	// bootSyncDone must prevent clobbering the newly staged bootfs.
+	zx.sets = nil
+	engine.runVerificationSequence()
+	if zx.hasSet("zpool set bootfs=zroot/ROOT/axonwall-0.11.62 zroot") {
+		t.Errorf("Subsequent on-demand verification must not clobber bootfs; sets: %v", zx.sets)
+	}
+}

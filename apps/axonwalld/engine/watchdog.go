@@ -93,6 +93,7 @@ type WatchdogEngine struct {
 	slotVersionsPath string
 	status           PartitionStatus
 	stopChan         chan struct{}
+	bootSyncDone     bool
 
 	// Injectable for tests; production values are set by the constructor.
 	updaterPaths        []string
@@ -856,6 +857,9 @@ func (we *WatchdogEngine) listBootEnvironmentsLocked() []ZfsBootEnvironment {
 			continue
 		}
 		beName := strings.TrimPrefix(dsName, "zroot/ROOT/")
+		if strings.HasSuffix(beName, ".tmp") {
+			continue
+		}
 		usedSize := strings.TrimSpace(fields[1])
 		createdAt := strings.TrimSpace(strings.Join(fields[2:], " "))
 
@@ -1315,6 +1319,11 @@ func (we *WatchdogEngine) runVerificationSequence() {
 					}
 				}
 				_, _ = we.runZfsCmd("set", "org.axonwall:fallback_be="+activeBe, "zroot/ROOT")
+				if commitOK && !we.bootSyncDone {
+					_, _ = we.runZpoolCmd("set", "bootfs="+activeBe, "zroot")
+					_, _ = we.runZfsCmd("set", "org.axonwall:active_be="+activeBe, "zroot/ROOT")
+					we.bootSyncDone = true
+				}
 			}
 		} else {
 			// Reset bootcount in GRUB environment

@@ -417,6 +417,21 @@ export const VOW_APP_CATALOG: VowAppDefinition[] = [
 
   // Observability & Monitoring
   {
+    id: 'coroot',
+    name: 'Coroot eBPF APM & RCA',
+    category: 'Observability & Monitoring',
+    description: 'Zero-instrumentation eBPF service map, L7 RED metrics, continuous profiling, and automated root-cause analysis',
+    enablerVar: 'COROOT_ENABLED',
+    argoPath: 'argo/coroot',
+    subdomain: 'coroot',
+    port: 8080,
+    docsUrl: 'https://docs.coroot.com/',
+    icon: 'Cpu',
+    estimatedMemoryMb: 512,
+    namespace: 'coroot',
+    isHelm: true,
+  },
+  {
     id: 'kube-prometheus-stack',
     name: 'Prometheus & Grafana',
     category: 'Observability & Monitoring',
@@ -772,9 +787,9 @@ export const VOW_DEPLOYMENT_PRESETS: VowDeploymentPreset[] = [
   {
     id: 'observability',
     name: 'Observability Stack',
-    description: 'Core + Prometheus, Grafana, OpenSearch & Dashboards, Sloth, Vigil',
-    estimatedMemoryMb: 6144,
-    apps: ['argocd', 'certmanager', 'kube-prometheus-stack', 'opensearch', 'sloth', 'vigil'],
+    description: 'Core + Coroot eBPF APM, Prometheus, Grafana, OpenSearch & Dashboards, Sloth, Vigil',
+    estimatedMemoryMb: 6656,
+    apps: ['argocd', 'certmanager', 'coroot', 'kube-prometheus-stack', 'opensearch', 'sloth', 'vigil'],
   },
   {
     id: 'ai',

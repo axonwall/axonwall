@@ -534,6 +534,28 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
     cliBinaries: ['eluvix', 'opencode', 'agy'],
   },
+  {
+    id: 'coroot-ebpf-apm',
+    name: 'Coroot eBPF APM, L7 RED Dissector, Continuous Profiler & Automated RCA',
+    version: '1.14.0',
+    category: 'extension',
+    defaultEnabled: true,
+    description:
+      'Zero-instrumentation eBPF APM & Root-Cause Analysis engine (inspired by coroot/coroot & coroot-node-agent): automatic Service Dependency Map, L7 protocol RED metrics (HTTP, gRPC, PostgreSQL, MySQL, Redis, Kafka, ClickHouse, DNS), optional OpenSSL/Go TLS uprobes, 99 Hz perf_event continuous CPU & Disk I/O FlameGraph profiling, and 35+ deterministic SLO/RCA health inspections.',
+    author: 'Coroot / Axonwall Core',
+    systemdUnits: ['coroot-node-agent.service'],
+    privileges: ['system.monitoring', 'reporting.flows', 'system.hardware'],
+    packages: {
+      debian: ['bpftool', 'linux-perf'],
+      alpine: ['bpftool', 'perf'],
+    },
+    cliBinaries: ['coroot-node-agent', 'bpftool', 'perf'],
+    menuEntry: {
+      title: 'eBPF & K3s Observability',
+      path: '/reporting/ebpf',
+      icon: 'Cpu',
+    },
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
