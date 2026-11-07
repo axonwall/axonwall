@@ -285,12 +285,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Activity className="w-4 h-4 text-emerald-400" />
-                <span>Live Observability &amp; eBPF</span>
+                <span>eBPF &amp; Kubernetes Observability</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Real-time NFLOG/eBPF kernel packet tracing, SSE live protocol dissector, VictoriaMetrics time-series, and Insight Flow.
+              Zero-instrumentation Ring-0 metrics, logs, and traces: container network &amp; VFS/ZFS filesystem tracking, K3s cluster troubleshooting, and live NFLOG/SSE packet streams.
             </p>
           </Link>
 

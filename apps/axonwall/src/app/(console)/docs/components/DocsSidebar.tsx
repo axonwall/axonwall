@@ -157,7 +157,10 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     title: 'Live Observability',
     icon: Activity,
     items: [
-      { title: 'Observability & Tracing', href: '/docs/observability' },
+      { title: 'Observability & Tracing', href: '/docs/observability', badge: 'eBPF' },
+      { title: 'Metrics, Logs & Traces', href: '/docs/observability#metrics-logs-traces' },
+      { title: 'Container Network & FS I/O', href: '/docs/observability#container-tracking' },
+      { title: 'K3s Cluster Troubleshooting', href: '/docs/observability#kubernetes-troubleshooting' },
       { title: 'eBPF & NFLOG Kernel Tap', href: '/docs/observability#kernel-tap' },
       { title: 'Real-Time Protocol Dissectors', href: '/docs/observability#dissectors' },
       { title: 'SSE Packet Stream Endpoint', href: '/docs/observability#sse-streaming' },
