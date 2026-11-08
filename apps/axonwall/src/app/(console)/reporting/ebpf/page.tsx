@@ -566,7 +566,7 @@ export default function EbpfObservabilityConsolePage() {
   const [profileMode, setProfileMode] = useState<'cpu' | 'io' | 'memory' | 'lock'>('cpu');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // Coroot eBPF APM configuration toggles (backed by DesiredState.observability.ebpfApm)
+  // eBPF APM configuration toggles (backed by DesiredState.observability.ebpfApm)
   const [apmConfig, setApmConfig] = useState({
     enabled: true,
     serviceMapEnabled: true,
@@ -662,7 +662,7 @@ export default function EbpfObservabilityConsolePage() {
       };
       const res = await applyDesiredState(nextState);
       setDesiredState(nextState);
-      setSaveBanner(res.message || 'Saved Coroot eBPF APM & probe configuration to DesiredState.');
+      setSaveBanner(res.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.');
     } catch (err: any) {
       setSaveBanner(err?.message || 'Failed to save eBPF APM configuration.');
     } finally {
@@ -751,7 +751,7 @@ export default function EbpfObservabilityConsolePage() {
   const lsmDenials = rootkitStatus?.bpfLsmDenialEvents ?? [];
   const flows = insight?.flows ?? [];
 
-  // Coroot-style Automated RCA Inspections derived from live host + K3s state
+  // Automated RCA Inspections derived from live host + K3s state
   const rcaChecks: RcaInspectionCheck[] = [
     {
       id: 'slo-availability',
@@ -825,15 +825,15 @@ export default function EbpfObservabilityConsolePage() {
         <div className="space-y-2">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/70 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            Ring-0 CO-RE eBPF + Coroot APM &amp; Automated RCA Engine
+            Ring-0 CO-RE eBPF + Axonwall APM &amp; Automated RCA Engine
           </div>
           <h1 className="text-3xl font-extrabold text-white tracking-tight flex items-center gap-3">
             <Cpu className="w-8 h-8 text-emerald-400" />
-            eBPF Observability, Coroot APM &amp; K3s Diagnostics
+            eBPF Observability, Axonwall APM &amp; K3s Diagnostics
           </h1>
           <p className="text-sm text-slate-400 max-w-3xl leading-relaxed">
             Unified zero-instrumentation observability combining Axonwall&apos;s XDP/BPF-LSM kernel telemetry with{' '}
-            <span className="text-emerald-300 font-medium">Coroot eBPF APM</span>: automatic Service Dependency Maps,
+            <span className="text-emerald-300 font-medium">Axonwall eBPF APM</span>: automatic Service Dependency Maps,
             L7 protocol RED dissectors (HTTP, gRPC, Postgres, Redis, Kafka, ClickHouse, DNS), optional TLS uprobes, 99 Hz
             continuous FlameGraph profiling, and 35+ deterministic Root-Cause Analysis (RCA) inspections.
           </p>
@@ -863,13 +863,13 @@ export default function EbpfObservabilityConsolePage() {
         </div>
       </div>
 
-      {/* Coroot eBPF Probe Guardrails & Feature Toggle Bar */}
+      {/* eBPF Probe Guardrails & Feature Toggle Bar */}
       <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div>
             <div className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5" />
-              Coroot eBPF Sensor &amp; Overhead Guardrails (<code className="font-mono">observability.ebpfApm</code>)
+              Axonwall eBPF Sensor &amp; Overhead Guardrails (<code className="font-mono">observability.ebpfApm</code>)
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
               Core socket/VFS probes run continuously at &lt;0.8% CPU. Higher-overhead TLS uprobes and 99 Hz stack-trace
@@ -978,7 +978,7 @@ export default function EbpfObservabilityConsolePage() {
 
         <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-1.5">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Coroot Automated RCA Status</span>
+            <span>Axonwall Automated RCA Status</span>
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
@@ -1043,7 +1043,7 @@ export default function EbpfObservabilityConsolePage() {
           }`}
         >
           <GitBranch className="w-4 h-4" />
-          2. Coroot Service Map &amp; L7 RED Protocols
+          2. Axonwall Service Map &amp; L7 RED Protocols
         </button>
         <button
           onClick={() => setActiveTab('rca-inspections')}
@@ -1112,7 +1112,7 @@ export default function EbpfObservabilityConsolePage() {
               </p>
               <div className="pt-2 border-t border-slate-800/80 space-y-1 text-[11px] font-mono text-slate-300">
                 <div>• XDP L3/L4 packet &amp; byte counters (`flow_map`)</div>
-                <div>• Coroot L7 RED metrics (HTTP/gRPC/SQL/Redis/Kafka)</div>
+                <div>• Axonwall L7 RED metrics (HTTP/gRPC/SQL/Redis/Kafka)</div>
                 <div>• VFS / OpenEBS ZFS read/write/fsync histograms</div>
               </div>
             </div>
@@ -1384,7 +1384,7 @@ export default function EbpfObservabilityConsolePage() {
         </div>
       )}
 
-      {/* TAB 2: COROOT SERVICE DEPENDENCY MAP & L7 RED PROTOCOLS */}
+      {/* TAB 2: AXONWALL SERVICE DEPENDENCY MAP & L7 RED PROTOCOLS */}
       {activeTab === 'service-map-l7' && (
         <div className="space-y-6">
           {/* Auto-Discovered eBPF Service Topology Map */}
@@ -1393,7 +1393,7 @@ export default function EbpfObservabilityConsolePage() {
               <div>
                 <h2 className="text-lg font-bold text-white flex items-center gap-2">
                   <GitBranch className="w-5 h-5 text-emerald-400" />
-                  Coroot Auto-Discovered eBPF Service Dependency Map
+                  Axonwall Auto-Discovered eBPF Service Dependency Map
                 </h2>
                 <p className="text-xs text-slate-400">
                   Constructed automatically from <code className="text-emerald-300">tcp_v4_connect</code>,{' '}
@@ -1506,7 +1506,7 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-[10px] font-mono text-sky-400">p99 11.8ms</span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
-                    OTLP Traces, Coroot Profiles &amp; Flow Time-Series
+                    OTLP Traces, Axonwall Profiles &amp; Flow Time-Series
                   </div>
                 </div>
 
@@ -1525,7 +1525,7 @@ export default function EbpfObservabilityConsolePage() {
             </div>
           </div>
 
-          {/* Coroot L7 Protocol Dissector Table */}
+          {/* Axonwall L7 Protocol Dissector Table */}
           <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -1597,7 +1597,7 @@ export default function EbpfObservabilityConsolePage() {
               <div>
                 <h2 className="text-lg font-bold text-white flex items-center gap-2">
                   <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                  Coroot Automated Root-Cause Analysis (RCA) &amp; SLO Audit Engine
+                  Axonwall Automated Root-Cause Analysis (RCA) &amp; SLO Audit Engine
                 </h2>
                 <p className="text-xs text-slate-400">
                   Evaluates 35+ deterministic kernel and container telemetry rules across SLO availability, CPU CFS
@@ -1727,7 +1727,7 @@ export default function EbpfObservabilityConsolePage() {
               <p className="text-xs text-slate-300 leading-relaxed">
                 When a container inside a K3s pod or LXC instance makes a network call, it executes inside a dedicated
                 Linux <code className="text-emerald-300">cgroup v2</code> hierarchy and network namespace (
-                <code className="text-emerald-300">netns</code>). Axonwall + Coroot eBPF hooks call{' '}
+                <code className="text-emerald-300">netns</code>). Axonwall + Axonwall eBPF hooks call{' '}
                 <code className="text-white font-mono">bpf_get_current_cgroup_id()</code> at socket creation, connect,
                 and L7 read/write:
               </p>
