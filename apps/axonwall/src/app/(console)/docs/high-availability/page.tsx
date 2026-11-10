@@ -31,10 +31,10 @@ export default function HighAvailabilityDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Clustering, State Replication & Step-by-Step Two-Host Walkthrough
+          Clustering, State Replication &amp; Step-by-Step Two-Host Walkthrough
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          High Availability & Two-Host Cluster Setup
+          High Availability &amp; Two-Host Cluster Setup
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
           Achieve 99.999% uptime with zero connection drops. Axonwall pairs industry-standard{' '}
@@ -151,7 +151,7 @@ export default function HighAvailabilityDocPage() {
                 <td className="p-3 font-semibold text-white">Keepalived VRRP</td>
                 <td className="p-3 font-mono text-emerald-400">IP Proto 112</td>
                 <td className="p-3">VRRP sync group (<code className="font-mono">VG1</code>) tracks WAN + LAN VIPs together</td>
-                <td className="p-3">Promotes VIPs in &lt;1s and invokes <code className="font-mono">axonwall-ha-notify</code></td>
+                <td className="p-3">Promotes VIPs in &lt;1s and invokes <code className="font-mono">axonwall-ha-notify</code> via <code className="font-mono">/run/axonwall/ha.sock</code></td>
               </tr>
               <tr className="hover:bg-slate-900/30">
                 <td className="p-3 font-semibold text-white">conntrackd FTFW</td>
@@ -162,8 +162,8 @@ export default function HighAvailabilityDocPage() {
               <tr className="hover:bg-slate-900/30">
                 <td className="p-3 font-semibold text-white">Axonwall HA Engine</td>
                 <td className="p-3 font-mono text-emerald-400">TCP 9876 (mTLS)</td>
-                <td className="p-3">Signed desired-state YAML (<code className="font-mono">/sync/state</code>) &amp; SQLite (<code className="font-mono">/sync/db</code>)</td>
-                <td className="p-3">Applies firewall/NAT/DNS/VPN configs &amp; promotes SQLite DBs</td>
+                <td className="p-3">Signed desired-state (<code className="font-mono">/api/v1/sync/state</code>), SQLite (<code className="font-mono">/api/v1/sync/db</code>) &amp; PKI (<code className="font-mono">/api/v1/sync/pki-enroll</code>)</td>
+                <td className="p-3">Atomically promotes <code className="font-mono">state.json.ha-replica</code> &amp; verified SQLite DBs, then starts <code className="font-mono">headscale</code></td>
               </tr>
               <tr className="hover:bg-slate-900/30">
                 <td className="p-3 font-semibold text-white">Chrony NTP Peer</td>
@@ -186,7 +186,7 @@ export default function HighAvailabilityDocPage() {
               <tr className="hover:bg-slate-900/30">
                 <td className="p-3 font-semibold text-white">OpenZFS Storage</td>
                 <td className="p-3 font-mono text-emerald-400">TCP 9876 (mTLS)</td>
-                <td className="p-3">Incremental <code className="font-mono">zfs send -I</code> snapshot stream (<code className="font-mono">/sync/zfs</code>)</td>
+                <td className="p-3">Incremental <code className="font-mono">zfs send -w -I</code> snapshot stream (<code className="font-mono">/api/v1/sync/zfs</code>)</td>
                 <td className="p-3">Flips target pool <code className="font-mono">readonly=off</code> and starts SMB/NFS/iSCSI</td>
               </tr>
             </tbody>
@@ -222,17 +222,17 @@ export default function HighAvailabilityDocPage() {
             </h3>
           </div>
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-            Both hosts must have identical interface mappings (<code className="text-white font-mono">eth0</code> for WAN,{' '}
+            Both hosts must have identical Linux network device mappings (<code className="text-white font-mono">eth0</code> for WAN,{' '}
             <code className="text-white font-mono">eth1</code> for LAN, and <code className="text-white font-mono">eth3</code>{' '}
             for the dedicated HA sync interconnect) so that synchronized nftables rulesets and VRRP definitions reference
-            the exact same Linux interface names on both machines.
+            the exact same logical and physical interface names on both machines.
           </p>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border border-slate-800 rounded-xl overflow-hidden">
               <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
                 <tr>
-                  <th className="p-3">Interface / Role</th>
+                  <th className="p-3">Logical / Device (Role)</th>
                   <th className="p-3">Host 1 (axonwall-fw01)</th>
                   <th className="p-3">Host 2 (axonwall-fw02)</th>
                   <th className="p-3">Floating VRRP VIP (Shared)</th>
@@ -240,19 +240,19 @@ export default function HighAvailabilityDocPage() {
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-slate-300 font-mono">
                 <tr>
-                  <td className="p-3 font-sans font-semibold text-white">eth0 (WAN Uplink)</td>
+                  <td className="p-3 font-sans font-semibold text-white">wan / eth0 (WAN Uplink)</td>
                   <td className="p-3">198.51.100.2/24</td>
                   <td className="p-3">198.51.100.3/24</td>
                   <td className="p-3 text-emerald-400">198.51.100.1/24 (VRID 51)</td>
                 </tr>
                 <tr>
-                  <td className="p-3 font-sans font-semibold text-white">eth1 (LAN Core)</td>
+                  <td className="p-3 font-sans font-semibold text-white">lan / eth1 (LAN Core)</td>
                   <td className="p-3">10.0.10.2/24</td>
                   <td className="p-3">10.0.10.3/24</td>
                   <td className="p-3 text-emerald-400">10.0.10.1/24 (VRID 52)</td>
                 </tr>
                 <tr>
-                  <td className="p-3 font-sans font-semibold text-white">eth3 (Dedicated HA Sync)</td>
+                  <td className="p-3 font-sans font-semibold text-white">ha-sync / eth3 (Dedicated HA Sync)</td>
                   <td className="p-3 text-cyan-400">10.0.99.1/30</td>
                   <td className="p-3 text-cyan-400">10.0.99.2/30</td>
                   <td className="p-3 text-slate-500">None (Point-to-Point Direct)</td>
@@ -285,7 +285,8 @@ export default function HighAvailabilityDocPage() {
             <code className="text-emerald-400 font-mono">/etc/axonwall/interfaces.yaml</code>. By design,{' '}
             <code className="text-white font-mono">syncSections.interfaces</code> defaults to{' '}
             <code className="text-amber-400 font-mono">false</code> so Host 1 never overwrites Host 2&apos;s unique physical
-            management IPs during state synchronization.
+            management IPs during state synchronization. Note that each interface entry requires both a logical{' '}
+            <code className="text-white font-mono">name</code> and a kernel <code className="text-white font-mono">device</code>:
           </p>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -293,23 +294,31 @@ export default function HighAvailabilityDocPage() {
               title="Host 1 (axonwall-fw01): /etc/axonwall/interfaces.yaml"
               language="yaml"
               code={`interfaces:
-  - name: eth0
+  - name: wan
+    device: eth0
     role: wan
+    type: static
     enabled: true
-    address: 198.51.100.2/24
-    gateway: 198.51.100.254
+    ipv4Address: 198.51.100.2/24
+    ipv4Gateway: 198.51.100.254
+    mtu: 1500
     description: Primary WAN Uplink (Host 1)
 
-  - name: eth1
+  - name: lan
+    device: eth1
     role: lan
+    type: static
     enabled: true
-    address: 10.0.10.2/24
+    ipv4Address: 10.0.10.2/24
+    mtu: 1500
     description: Core LAN Interface (Host 1)
 
-  - name: eth3
-    role: opt
+  - name: ha-sync
+    device: eth3
+    role: ha-sync
+    type: static
     enabled: true
-    address: 10.0.99.1/30
+    ipv4Address: 10.0.99.1/30
     mtu: 9000
     description: Dedicated HA Sync Link (to fw02)`}
             />
@@ -318,23 +327,31 @@ export default function HighAvailabilityDocPage() {
               title="Host 2 (axonwall-fw02): /etc/axonwall/interfaces.yaml"
               language="yaml"
               code={`interfaces:
-  - name: eth0
+  - name: wan
+    device: eth0
     role: wan
+    type: static
     enabled: true
-    address: 198.51.100.3/24
-    gateway: 198.51.100.254
+    ipv4Address: 198.51.100.3/24
+    ipv4Gateway: 198.51.100.254
+    mtu: 1500
     description: Secondary WAN Uplink (Host 2)
 
-  - name: eth1
+  - name: lan
+    device: eth1
     role: lan
+    type: static
     enabled: true
-    address: 10.0.10.3/24
+    ipv4Address: 10.0.10.3/24
+    mtu: 1500
     description: Core LAN Interface (Host 2)
 
-  - name: eth3
-    role: opt
+  - name: ha-sync
+    device: eth3
+    role: ha-sync
+    type: static
     enabled: true
-    address: 10.0.99.2/30
+    ipv4Address: 10.0.99.2/30
     mtu: 9000
     description: Dedicated HA Sync Link (to fw01)`}
             />
@@ -360,7 +377,8 @@ export default function HighAvailabilityDocPage() {
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
             Generate a shared secret on Host 1 (<code className="text-emerald-400 font-mono">openssl rand -hex 24</code>)
             for the initial PKI bootstrap and VRRP authentication, then populate{' '}
-            <code className="text-emerald-400 font-mono">/etc/axonwall/ha.yaml</code> on{' '}
+            <code className="text-emerald-400 font-mono">/etc/axonwall/ha.yaml</code> under the top-level{' '}
+            <code className="text-white font-mono">ha:</code> key on{' '}
             <code className="text-white font-mono">axonwall-fw01</code> with{' '}
             <code className="text-emerald-400 font-mono">nodeRole: master</code> and priority{' '}
             <code className="text-emerald-400 font-mono">150</code>:
@@ -369,57 +387,64 @@ export default function HighAvailabilityDocPage() {
           <CodeBlock
             title="Host 1 (axonwall-fw01): /etc/axonwall/ha.yaml"
             language="yaml"
-            code={`enabled: true
-nodeRole: master
-syncInterface: eth3
-peerAddress: 10.0.99.2
-virtualRouterId: 51
-priority: 150
-preempt: true
-advertInterval: 1
-authPassword: "replace-with-shared-secret"
-maintenanceMode: false
-
-virtualIps:
-  - interface: eth0
-    address: 198.51.100.1/24
-    vrid: 51
-    description: Floating WAN VIP
-  - interface: eth1
-    address: 10.0.10.1/24
-    vrid: 52
-    description: Floating LAN Default Gateway VIP
-
-conntrackSync:
+            code={`ha:
   enabled: true
-  mode: ftfw
-  protocol: multicast
-  multicastAddress: 225.0.0.50
-  port: 3780
+  nodeRole: master
+  role: master
+  syncInterface: eth3
+  peerAddress: 10.0.99.2
+  peerIp: 10.0.99.2
+  peerPort: 2966
+  maintenanceMode: false
 
-sqliteSync:
-  enabled: true
-  engine: direct_stream
-  peerEndpoint: "https://10.0.99.2:9876/api/v1/sync"
-  syncIntervalSec: 5
-  authToken: "replace-with-shared-secret"
-  transport: mtls
-  requireSignedPayloads: true
-  databases:
-    - /var/lib/axonwall/state.db
-    - /var/lib/headscale/db.sqlite
-    - /var/lib/crowdsec/data/crowdsec.db
+  vrrpInstances:
+    - name: VI_WAN
+      vrid: 51
+      interface: eth0
+      priority: 150
+      virtualIps:
+        - 198.51.100.1/24
+      authPassword: "replace-with-shared-secret"
+    - name: VI_LAN
+      vrid: 52
+      interface: eth1
+      priority: 150
+      virtualIps:
+        - 10.0.10.1/24
+      authPassword: "replace-with-shared-secret"
 
-syncSections:
-  firewall: true
-  dhcp: true
-  dns: true
-  aliases: true
-  vpn: true
-  interfaces: false
-  sqlite: true
-  nas: true
-  k3s: true`}
+  conntrackSync:
+    enabled: true
+    interface: eth3
+    mode: FTFW
+    protocol: multicast
+    multicastGroup: 225.0.0.50
+    peerAddress: 10.0.99.2
+    port: 3780
+
+  sqliteSync:
+    enabled: true
+    mode: direct_stream
+    syncIntervalSeconds: 5
+    listenPort: 9876
+    peerAddress: 10.0.99.2
+    peerPort: 9876
+    authToken: "replace-with-shared-secret"
+    transport: mtls
+    requireSignedPayloads: true
+    databases:
+      - /var/lib/axonwall/headscale/db.sqlite
+
+  syncSections:
+    interfaces: false
+    firewall: true
+    dhcp: true
+    dns: true
+    aliases: true
+    vpn: true
+    sqlite: true
+    nas: true
+    k3s: true`}
           />
         </div>
 
@@ -440,63 +465,70 @@ syncSections:
             <code className="text-amber-400 font-mono">100</code>),{' '}
             <code className="text-cyan-400 font-mono">peerAddress: 10.0.99.1</code> pointing back to Host 1, and the exact
             same <code className="text-white font-mono">authPassword</code> / <code className="text-white font-mono">authToken</code>{' '}
-            and <code className="text-white font-mono">virtualIps</code>:
+            and <code className="text-white font-mono">vrrpInstances</code>:
           </p>
 
           <CodeBlock
             title="Host 2 (axonwall-fw02): /etc/axonwall/ha.yaml"
             language="yaml"
-            code={`enabled: true
-nodeRole: backup
-syncInterface: eth3
-peerAddress: 10.0.99.1
-virtualRouterId: 51
-priority: 100
-preempt: true
-advertInterval: 1
-authPassword: "replace-with-shared-secret"
-maintenanceMode: false
-
-virtualIps:
-  - interface: eth0
-    address: 198.51.100.1/24
-    vrid: 51
-    description: Floating WAN VIP
-  - interface: eth1
-    address: 10.0.10.1/24
-    vrid: 52
-    description: Floating LAN Default Gateway VIP
-
-conntrackSync:
+            code={`ha:
   enabled: true
-  mode: ftfw
-  protocol: multicast
-  multicastAddress: 225.0.0.50
-  port: 3780
+  nodeRole: backup
+  role: backup
+  syncInterface: eth3
+  peerAddress: 10.0.99.1
+  peerIp: 10.0.99.1
+  peerPort: 2966
+  maintenanceMode: false
 
-sqliteSync:
-  enabled: true
-  engine: direct_stream
-  peerEndpoint: "https://10.0.99.1:9876/api/v1/sync"
-  syncIntervalSec: 5
-  authToken: "replace-with-shared-secret"
-  transport: mtls
-  requireSignedPayloads: true
-  databases:
-    - /var/lib/axonwall/state.db
-    - /var/lib/headscale/db.sqlite
-    - /var/lib/crowdsec/data/crowdsec.db
+  vrrpInstances:
+    - name: VI_WAN
+      vrid: 51
+      interface: eth0
+      priority: 100
+      virtualIps:
+        - 198.51.100.1/24
+      authPassword: "replace-with-shared-secret"
+    - name: VI_LAN
+      vrid: 52
+      interface: eth1
+      priority: 100
+      virtualIps:
+        - 10.0.10.1/24
+      authPassword: "replace-with-shared-secret"
 
-syncSections:
-  firewall: true
-  dhcp: true
-  dns: true
-  aliases: true
-  vpn: true
-  interfaces: false
-  sqlite: true
-  nas: true
-  k3s: true`}
+  conntrackSync:
+    enabled: true
+    interface: eth3
+    mode: FTFW
+    protocol: multicast
+    multicastGroup: 225.0.0.50
+    peerAddress: 10.0.99.1
+    port: 3780
+
+  sqliteSync:
+    enabled: true
+    mode: direct_stream
+    syncIntervalSeconds: 5
+    listenPort: 9876
+    peerAddress: 10.0.99.1
+    peerPort: 9876
+    authToken: "replace-with-shared-secret"
+    transport: mtls
+    requireSignedPayloads: true
+    databases:
+      - /var/lib/axonwall/headscale/db.sqlite
+
+  syncSections:
+    interfaces: false
+    firewall: true
+    dhcp: true
+    dns: true
+    aliases: true
+    vpn: true
+    sqlite: true
+    nas: true
+    k3s: true`}
           />
         </div>
 
@@ -523,8 +555,10 @@ syncSections:
               </div>
               <p className="text-slate-400 leading-relaxed">
                 Navigate to <Link href="/ha" className="text-emerald-400 underline hover:text-emerald-300">/ha</Link> on
-                Host 1 and Host 2, toggle <strong>Enable High Availability</strong>, configure Node Role, Peer Sync IP,
-                Floating VIPs, and click <strong>Save to ha.yaml</strong>.
+                Host 1 and Host 2, toggle <strong>Failover Configuration</strong>, enter the Node Role, VRID, Sync
+                Interface (<code className="font-mono">eth3</code>), Peer Sync IP, Sync Password, Virtual IP (CIDR), and
+                VRRP Interface (<code className="font-mono">eth1</code>), enable <strong>Distributed SQLite &amp; Mesh State Sync</strong>,
+                and click <strong>Save to ha.yaml</strong>.
               </p>
             </div>
 
@@ -533,14 +567,14 @@ syncSections:
                 <Terminal className="w-4 h-4 text-emerald-400" /> 2. Neovim Super Configurator
               </div>
               <p className="text-slate-400 leading-relaxed">
-                Over SSH or serial console, launch the form-driven TUI directly onto the High Availability card:
+                Over SSH or serial console, launch the form-driven TUI directly onto the High Availability domain:
               </p>
               <code className="block p-2 rounded bg-slate-900 text-emerald-300 font-mono">
-                axonwall-config ha
+                axonwallctl config ha
               </code>
               <p className="text-slate-500">
                 Press <kbd className="px-1 py-0.5 rounded bg-slate-800 text-slate-300">Ctrl+s</kbd> to validate &amp;
-                apply with Commit-Confirm safety.
+                apply with 120s Commit-Confirm safety.
               </p>
             </div>
 
@@ -549,10 +583,10 @@ syncSections:
                 <FileCode2 className="w-4 h-4 text-emerald-400" /> 3. axonwallctl CLI
               </div>
               <p className="text-slate-400 leading-relaxed">
-                Validate and apply <code className="text-slate-200">/etc/axonwall/</code> on Host 1 first, then Host 2:
+                Validate and apply <code className="text-slate-200">/etc/axonwall/*.yaml</code> on Host 1 first, then Host 2:
               </p>
               <code className="block p-2 rounded bg-slate-900 text-emerald-300 font-mono">
-                axonwallctl validate /etc/axonwall &amp;&amp; axonwallctl apply /etc/axonwall --confirm-timeout 60 &amp;&amp; axonwallctl confirm
+                axonwallctl validate &amp;&amp; axonwallctl apply --no-confirm &amp;&amp; axonwallctl confirm
               </code>
             </div>
           </div>
@@ -563,7 +597,7 @@ syncSections:
             <ul className="list-disc list-inside mt-1 space-y-0.5">
               <li>
                 <code className="font-mono">/etc/keepalived/keepalived.conf</code> +{' '}
-                <code className="font-mono">/usr/local/bin/axonwall-ha-notify</code> transition script
+                <code className="font-mono">/usr/local/bin/axonwall-ha-notify</code> transition hook (delivering state transitions over <code className="font-mono">/run/axonwall/ha.sock</code>)
               </li>
               <li>
                 <code className="font-mono">/etc/conntrackd/conntrackd.conf</code> (FTFW state replication over{' '}
@@ -596,40 +630,50 @@ syncSections:
           </div>
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
             Within 5–15 seconds of enabling HA on both hosts, Host 2 (<code className="text-white font-mono">backup</code>)
-            contacts Host 1 (<code className="text-white font-mono">master</code>) on{' '}
-            <code className="text-emerald-400 font-mono">10.0.99.1:9876</code> using the bootstrap{' '}
-            <code className="text-white font-mono">authPassword</code>, enrolls in the cluster ECDSA P-256 Root CA (
-            <code className="text-emerald-400 font-mono">/var/lib/axonwall/secrets/ha-pki/</code>), and upgrades the
-            replication transport to mutual TLS (<code className="text-emerald-400 font-mono">mtls</code>) with signed
-            payload enforcement. Run the following checks to confirm healthy cluster convergence:
+            polls Host 1 (<code className="text-white font-mono">master</code>) on{' '}
+            <code className="text-emerald-400 font-mono">10.0.99.1:9876</code> using the shared{' '}
+            <code className="text-white font-mono">authToken</code>, submits a CSR to{' '}
+            <code className="text-emerald-400 font-mono">/api/v1/sync/pki-enroll</code> to enroll in the cluster ECDSA
+            P-256 Root CA (<code className="text-emerald-400 font-mono">/var/lib/axonwall/secrets/ha-pki/</code>), and
+            upgrades the replication transport to mutual TLS (<code className="text-emerald-400 font-mono">mtls</code>)
+            with ECDSA-signed payload verification. Run the following checks on both hosts to confirm healthy cluster
+            convergence:
           </p>
 
           <CodeBlock
             title="Cluster Verification Checklist (Run on Host 1 & Host 2)"
             language="bash"
-            code={`# 1. Verify HA status, peer reachability, and matching SHA-256 PKI fingerprints:
-curl -s --unix-socket /run/axonwalld/agent.sock http://localhost/v1/ha/status | jq .
+            code={`# 1. Verify live HA Sync Trust state, effective transport, and SHA-256 PKI fingerprints:
+sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
+  -H "X-Axonwall-Agent-Token: $(sudo cat /etc/axonwall/agent.token)" \\
+  http://localhost/v1/ha/sync-trust | jq .
 
 # 2. Confirm Host 1 (MASTER) holds the Floating WAN & LAN VIPs (198.51.100.1 & 10.0.10.1):
 ip -br addr show dev eth0
 ip -br addr show dev eth1
 
 # 3. Verify Keepalived VRRP sync group (VG1) and conntrackd FTFW state cache:
-systemctl status keepalived conntrackd
-conntrackd -s
+sudo systemctl status keepalived conntrackd
+sudo conntrackd -s
 
 # 4. Verify symmetric Chrony NTP peering across eth3:
 chronyc sources -v
 
-# 5. Trigger an immediate manual state + SQLite sync from the Master node:
-curl -s -X POST --unix-socket /run/axonwalld/agent.sock http://localhost/v1/ha/sync | jq .`}
+# 5. Query the Master HA Sync Server status endpoint directly over mTLS (port 9876):
+sudo curl -sk --cacert /var/lib/axonwall/secrets/ha-pki/ca.crt \\
+  --cert /var/lib/axonwall/secrets/ha-pki/node.crt \\
+  --key /var/lib/axonwall/secrets/ha-pki/node.key \\
+  -H "X-Axonwall-Sync-Token: replace-with-shared-secret" \\
+  https://10.0.99.1:9876/api/v1/sync/status | jq .`}
           />
 
           <p className="text-xs text-slate-400">
             In the Web Console under <Link href="/ha" className="text-emerald-400 underline">/ha</Link>, check the{' '}
-            <strong>Cluster PKI &amp; Transport Security</strong> card: both the <em>CA Fingerprint</em> and{' '}
-            <em>Peer CA Fingerprint</em> badges will turn emerald green (<code className="text-emerald-400 font-mono">Match</code>)
-            once PKI enrollment completes.
+            <strong>Sync Trust (live from this node&apos;s daemon)</strong> panel inside the SQLite sync card: once PKI
+            enrollment completes, <code className="text-emerald-400 font-mono">PKI enrollment: enrolled</code> and{' '}
+            <code className="text-indigo-300 font-mono">Transport in effect: mtls</code> will appear, and both nodes will
+            display identical <code className="text-slate-200 font-mono">Node certificate SHA-256</code> and{' '}
+            <code className="text-slate-200 font-mono">HA CA SHA-256</code> fingerprints.
           </p>
         </div>
 
@@ -644,43 +688,58 @@ curl -s -X POST --unix-socket /run/axonwalld/agent.sock http://localhost/v1/ha/s
             </h3>
           </div>
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-            If your two hosts also run the optional <strong>OpenZFS Storage</strong> or{' '}
-            <strong>K3s Kubernetes</strong> workloads, enable their HA peer integration so storage pools and container
-            volumes fail over alongside the firewall:
+            If your two hosts also run the optional <strong>OpenZFS Storage</strong> (
+            <code className="text-emerald-400 font-mono">/etc/axonwall/storage.yaml</code>) or{' '}
+            <strong>K3s Kubernetes</strong> (<code className="text-emerald-400 font-mono">/etc/axonwall/k3s.yaml</code>)
+            workloads, enable their HA peer integration so storage pools and container volumes fail over alongside the
+            firewall:
           </p>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <CodeBlock
-              title="ZFS HA Replication (/etc/axonwall/nas.yaml)"
+              title="ZFS HA Replication (/etc/axonwall/storage.yaml)"
               language="yaml"
-              code={`enabled: true
-pools:
-  - name: tank
-    topology: mirror
-    disks: ["/dev/nvme0n1", "/dev/nvme1n1"]
-    compression: zstd
-    replicateToHaPeer: true
-datasets:
-  - name: tank/shares
-    mountpoint: /srv/tank/shares
-    quota: 2T
-    replicateToHaPeer: true`}
+              code={`nas:
+  enabled: true
+  pools:
+    - name: tank
+      topology: mirror
+      dataDisks:
+        - /dev/nvme0n1
+        - /dev/nvme1n1
+      compression: zstd
+  datasets:
+    - name: shares
+      pool: tank
+      type: filesystem
+      compression: zstd
+      quotaGb: 2048
+      replicateToHaPeer: true
+  snapshotPolicies:
+    - dataset: tank/shares
+      interval: hourly
+      keepCount: 24
+      replicateToHaPeer: true
+      enabled: true`}
             />
 
             <CodeBlock
               title="2-Node K3s + OpenEBS HA (/etc/axonwall/k3s.yaml)"
               language="yaml"
-              code={`enabled: true
-role: server
-clusterCidr: 10.42.0.0/16
-serviceCidr: 10.43.0.0/16
-flannelBackend: wireguard-native
-autoJoinHaPeer: true
-openebs:
+              code={`k3s:
   enabled: true
-  engine: mayastor
-  defaultStorageClass: openebs-mayastor
-  zfsPoolName: tank`}
+  clusterCidr: 10.42.0.0/16
+  serviceCidr: 10.43.0.0/16
+  nodeIpInterface: lan
+  flannelBackend: wireguard-native
+  autoJoinHaPeer: true
+  openEbs:
+    enabled: true
+    zfsLocalPvEnabled: true
+    zfsLocalPvPool: tank
+    replicatedStorageEnabled: true
+    defaultReplicaCount: 2
+    replicatedBackingPool: tank/openebs-replicated`}
             />
           </div>
         </div>
@@ -708,8 +767,9 @@ openebs:
             code={`# From a LAN client routed through VIP 10.0.10.1, start an active SSH & ping test:
 ping -i 0.2 1.1.1.1
 
-# TEST A — Graceful Maintenance Mode (on Host 1 / axonwall-fw01):
-# Toggle "Maintenance Mode" in /ha (or set maintenanceMode: true in ha.yaml).
+# TEST A — Graceful Maintenance / Planned Failover (on Host 1 / axonwall-fw01):
+# Set "maintenanceMode: true" under ha: in /etc/axonwall/ha.yaml and run "axonwallctl apply"
+# (or click "Force Failover to Peer" -> "Save to ha.yaml" in the /ha Web Console).
 # Keepalived lowers effective priority and shifts VIPs + conntrack state to Host 2 with 0 packet loss.
 
 # Verify Host 2 (axonwall-fw02) now owns 198.51.100.1 and 10.0.10.1:
@@ -720,7 +780,7 @@ ssh admin@10.0.10.3 "ip -br addr show dev eth0; ip -br addr show dev eth1"
 sudo ip link set eth0 down
 # Host 2 transitions to MASTER within 1000ms, commits conntrackd cache, and active TCP/SSH stays up.
 
-# Restore Host 1 WAN link (with preempt: true, Host 1 smoothly reclaims MASTER):
+# Restore Host 1 WAN link:
 sudo ip link set eth0 up`}
           />
         </div>
@@ -732,7 +792,7 @@ sudo ip link set eth0 up`}
           <Lock className="w-6 h-6 text-emerald-400" /> Cluster PKI, Mutual TLS &amp; Signed State Payloads
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Axonwall never transmits configuration state or SQLite WAL frames in cleartext. The Go daemon (
+          Axonwall never transmits configuration state or SQLite WAL frames in cleartext once enrolled. The Go daemon (
           <code className="text-emerald-400 font-mono">axonwalld</code>) maintains a dedicated ECDSA P-256 High
           Availability PKI hierarchy stored in{' '}
           <code className="text-emerald-400 font-mono">/var/lib/axonwall/secrets/ha-pki/</code>:
@@ -740,25 +800,29 @@ sudo ip link set eth0 up`}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-            <h3 className="font-bold text-white text-sm">Automated PKI Bootstrap &amp; Rotation</h3>
+            <h3 className="font-bold text-white text-sm">Automated CSR Enrollment &amp; Shared Identity</h3>
             <p className="text-slate-400 leading-relaxed">
               The Primary node generates a 10-year ECDSA P-256 Root CA (<code className="text-slate-200">ca.crt</code>)
               and node certificate (<code className="text-slate-200">node.crt</code>) bound to the cluster&apos;s sync IP
-              Subject Alternative Names (SANs). When the Backup node joins using the shared{' '}
-              <code className="text-slate-200">authPassword</code>, it automatically pulls the cluster CA bundle via{' '}
-              <code className="text-emerald-400 font-mono">/api/v1/sync/pki</code>. Operators can rotate certificates at
-              any time from the <Link href="/ha" className="text-emerald-400 underline">/ha</Link> console.
+              Subject Alternative Names (SANs). On its first poll, the Backup node submits a CSR over the
+              token-authenticated bootstrap channel to{' '}
+              <code className="text-emerald-400 font-mono">/api/v1/sync/pki-enroll</code>, installs the signed bundle
+              and OpenLDAP <code className="text-slate-200">syncrepl</code> credentials, and switches to mutual TLS (
+              <code className="text-emerald-400 font-mono">mtls</code>).
             </p>
           </div>
 
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm">Cryptographic Payload Signing</h3>
             <p className="text-slate-400 leading-relaxed">
-              With <code className="text-emerald-400 font-mono">requireSignedPayloads: true</code>, every{' '}
-              <code className="text-slate-200">/api/v1/sync/state</code> and{' '}
-              <code className="text-slate-200">/api/v1/sync/db</code> payload is signed with the sender&apos;s ECDSA
-              private key and verified against the pinned HA Root CA before being written to disk or applied to the
-              Backup node.
+              Every <code className="text-slate-200">/api/v1/sync/state</code> and{' '}
+              <code className="text-slate-200">/api/v1/sync/db</code> response carries both an{' '}
+              <code className="text-slate-200">X-Checksum-SHA256</code> digest and an ECDSA{' '}
+              <code className="text-slate-200">X-Axonwall-Payload-Signature</code> header. When{' '}
+              <code className="text-emerald-400 font-mono">requireSignedPayloads: true</code> is set (or when the peer
+              advertises <code className="text-slate-200">signsPayloads: true</code> in{' '}
+              <code className="text-slate-200">/api/v1/sync/status</code>), unsigned or tampered payloads are strictly
+              rejected before touching disk.
             </p>
           </div>
         </div>
@@ -770,9 +834,9 @@ sudo ip link set eth0 up`}
           <ArrowRightLeft className="w-6 h-6 text-emerald-400" /> Keepalived VRRP v2/v3 Clustering
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Keepalived manages virtual IP address failover according to RFC 5798 (VRRPv3). Axonwall groups all floating
-          VIPs into a unified <code className="text-emerald-400 font-mono">vrrp_sync_group VG1</code> so that if either
-          the WAN uplink (<code className="text-white font-mono">eth0</code>) or LAN trunk (
+          Keepalived manages virtual IP address failover according to RFC 5798. Axonwall groups all configured VRRP
+          instances into a unified <code className="text-emerald-400 font-mono">vrrp_sync_group VG1</code> so that if
+          either the WAN uplink (<code className="text-white font-mono">eth0</code>) or LAN trunk (
           <code className="text-white font-mono">eth1</code>) loses carrier, all virtual IPs fail over together—preventing
           asymmetric blackhole routing.
         </p>
@@ -781,9 +845,9 @@ sudo ip link set eth0 up`}
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm">VRRP Failover Triggers</h3>
             <ul className="space-y-1.5 text-slate-300 list-disc list-inside">
-              <li>Loss of physical link carrier on WAN or LAN ports (<code className="font-mono">track_interface</code>)</li>
-              <li>Unresponsive <code className="font-mono">axonwalld</code> health probe (<code className="font-mono">chk_axonwalld</code> weight -50)</li>
-              <li>Manual maintenance failover initiated from Web Console (<code className="font-mono">maintenanceMode: true</code>)</li>
+              <li>Loss of physical link carrier on WAN or LAN VRRP interfaces</li>
+              <li>Unresponsive <code className="font-mono">axonwalld</code> health probe (<code className="font-mono">chk_axonwalld</code>)</li>
+              <li>Manual maintenance failover (<code className="font-mono">maintenanceMode: true</code> or Role switch in <code className="font-mono">/ha</code>)</li>
               <li>Power loss or kernel watchdog reset on the active Master</li>
             </ul>
           </div>
@@ -791,10 +855,12 @@ sudo ip link set eth0 up`}
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm">Transition Orchestration Hook</h3>
             <p className="text-slate-400 leading-relaxed">
-              On state change, Keepalived executes <code className="text-slate-200">/usr/local/bin/axonwall-ha-notify</code>{' '}
-              to commit the <code className="text-slate-200">conntrackd</code> external cache, flip OpenZFS pool{' '}
-              <code className="text-slate-200">readonly</code> flags, and start or stop <code className="text-slate-200">headscale</code>{' '}
-              to prevent dual-active split-brain.
+              On state change, Keepalived runs <code className="text-slate-200">conntrackd -c/-f/-t</code> and invokes{' '}
+              <code className="text-slate-200">/usr/local/bin/axonwall-ha-notify</code>, which notifies{' '}
+              <code className="text-slate-200">axonwalld</code> over the root-authenticated Unix socket{' '}
+              <code className="text-emerald-400 font-mono">/run/axonwall/ha.sock</code> to promote verified state
+              replicas, flip OpenZFS pool <code className="text-slate-200">readonly</code> flags, and start or stop{' '}
+              <code className="text-slate-200">headscale</code> to prevent dual-active split-brain.
             </p>
           </div>
         </div>
@@ -822,50 +888,47 @@ sudo ip link set eth0 up`}
           </p>
 
           <CodeBlock
-            title="/etc/conntrackd/conntrackd.conf (Compiled by Axonwall)"
+            title="/etc/conntrackd/conntrackd.conf (Generated by axonwalld)"
             language="text"
             code={`Sync {
-  Mode FTFW {
-    ResendQueueSize 131072
-    CommitTimeout 180
-    PurgeTimeout 60
-    ACKWindowSize 300
-    DisableExternalCache Off
-  }
-
-  # Dedicated synchronization interface (eth3)
-  Multicast {
-    IPv4_address 225.0.0.50
-    Group 3780
-    IPv4_interface 10.0.99.1
-    Interface eth3
-    SndSocketBuffer 12582912
-    RcvSocketBuffer 12582912
-    Checksum on
-  }
+    Mode FTFW {
+        DisableExternalCache Off
+        CommitTimeout 1800
+        PurgeTimeout 5
+    }
+    
+    Multicast {
+        IPv4_address 225.0.0.50
+        IPv4_interface 10.0.99.1
+        Interface eth3
+        SndSocketBuffer 1249280
+        RcvSocketBuffer 1249280
+        Checksum on
+    }
 }
 
 General {
-  Systemd on
-  HashSize 32768
-  HashLimit 131072
-  SocketFile /var/run/conntrackd.ctl
-  LockFile /var/lock/conntrack.lock
-  LogFile off
-  Syslog on
-
-  Filter From Userspace {
-    Protocol Accept {
-      TCP
-      UDP
-      ICMP
+    HashSize 32768
+    HashLimit 131072
+    LogFile on
+    Syslog on
+    LockFile /var/lock/conntrack.lock
+    UNIX {
+        Path /var/run/conntrackd.ctl
+        Backlog 20
     }
-    Address Ignore {
-      IPv4_address 127.0.0.1
-      IPv4_address 10.0.99.1
-      IPv4_address 10.0.99.2
+    NetlinkBufferSize 2097152
+    NetlinkBufferSizeMaxGrowth 8388608
+    Filter From Userspace {
+        Protocol Accept {
+            TCP
+            UDP
+            ICMP
+        }
+        Address Ignore {
+            IPv4_address 127.0.0.1
+        }
     }
-  }
 }`}
           />
         </div>
@@ -884,15 +947,16 @@ General {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm flex items-center gap-1.5">
-              <Database className="w-4 h-4 text-emerald-400" /> SQLite Atomic Snapshot &amp; WAL Stream
+              <Database className="w-4 h-4 text-emerald-400" /> SQLite Online Backup &amp; State Replica Promotion
             </h3>
             <p className="text-slate-400 leading-relaxed">
-              The Primary node creates consistent atomic snapshots (<code className="text-slate-200">VACUUM INTO</code> /
-              WAL checkpoint) of <code className="text-slate-200">/var/lib/axonwall/state.db</code>,{' '}
-              <code className="text-slate-200">/var/lib/headscale/db.sqlite</code>, and{' '}
-              <code className="text-slate-200">/var/lib/crowdsec/data/crowdsec.db</code> and streams them over mTLS to
-              the Backup node every <code className="text-slate-200">syncIntervalSec</code> seconds (or continuously via
-              Litestream).
+              The Primary node creates consistent online snapshots (<code className="text-slate-200">sqlite3 .backup</code> /
+              WAL checkpoint) of allowed databases under <code className="text-slate-200">/var/lib/axonwall/</code> (such
+              as <code className="text-slate-200">/var/lib/axonwall/headscale/db.sqlite</code>) and streams them with
+              SHA-256 and ECDSA signature verification every <code className="text-slate-200">syncIntervalSeconds</code>{' '}
+              seconds. Before replacing a live file, the Backup node validates <code className="text-slate-200">PRAGMA integrity_check</code>,
+              preserves service UID/GID ownership, and stages <code className="text-slate-200">state.json.ha-replica</code>{' '}
+              for atomic promotion upon <code className="text-emerald-400 font-mono">MASTER</code> takeover.
             </p>
           </div>
 
@@ -902,8 +966,9 @@ General {
             </h3>
             <p className="text-slate-400 leading-relaxed">
               OpenLDAP multi-provider <code className="text-slate-200">syncrepl</code> relies on Change Sequence Numbers
-              (CSNs) with microsecond timestamps. Axonwall automatically configures Chrony symmetric peering (
-              <code className="text-slate-200">peer &lt;peerAddress&gt; iburst</code>) on <code className="text-slate-200">eth3</code>{' '}
+              (CSNs) with microsecond timestamps. Axonwall automatically writes{' '}
+              <code className="text-slate-200">/etc/chrony/conf.d/axonwall-ha.conf</code> with symmetric peering (
+              <code className="text-slate-200">peer &lt;peerIp&gt; iburst</code>) on <code className="text-slate-200">eth3</code>{' '}
               so both nodes maintain sub-millisecond clock alignment even if upstream internet NTP servers are unreachable.
             </p>
           </div>
@@ -913,11 +978,12 @@ General {
               <Server className="w-4 h-4 text-emerald-400" /> Incremental OpenZFS Send/Recv
             </h3>
             <p className="text-slate-400 leading-relaxed">
-              Pools and datasets marked with <code className="text-emerald-400 font-mono">replicateToHaPeer: true</code>{' '}
-              are snapshotted (<code className="text-slate-200">@axonwall_ha_&lt;epoch&gt;</code>) and streamed via{' '}
-              <code className="text-slate-200">zfs send -I | zfs recv -F -u</code> to the Backup node. On the Backup node,
-              replicated pools stay <code className="text-slate-200">readonly=on</code> until Keepalived promotes the node
-              to <code className="text-emerald-400 font-mono">MASTER</code>.
+              Datasets and snapshot policies marked with <code className="text-emerald-400 font-mono">replicateToHaPeer: true</code>{' '}
+              in <code className="text-slate-200">/etc/axonwall/storage.yaml</code> are snapshotted (
+              <code className="text-slate-200">@ha-sync-&lt;ns&gt;</code>) and streamed via{' '}
+              <code className="text-slate-200">zfs send -w -I</code> over <code className="text-slate-200">/api/v1/sync/zfs</code>{' '}
+              to the Backup node. On the Backup node, replicated pools stay <code className="text-slate-200">readonly=on</code>{' '}
+              until Keepalived promotes the node to <code className="text-emerald-400 font-mono">MASTER</code>.
             </p>
           </div>
 
@@ -927,9 +993,10 @@ General {
             </h3>
             <p className="text-slate-400 leading-relaxed">
               When <code className="text-emerald-400 font-mono">autoJoinHaPeer: true</code> is set in{' '}
-              <code className="text-slate-200">k3s.yaml</code>, the Backup node securely fetches the K3s node join token
-              from <code className="text-slate-200">/api/v1/sync/k3s-token</code> over mTLS and joins the cluster over the
-              WireGuard Flannel mesh, pairing with OpenEBS Mayastor NVMe-oF synchronous volume replication.
+              <code className="text-slate-200">/etc/axonwall/k3s.yaml</code>, the Backup node securely fetches the K3s
+              node join token from <code className="text-slate-200">/api/v1/sync/k3s-token</code> over mTLS, persists{' '}
+              <code className="text-slate-200">/var/lib/axonwall/k3s-join.token</code>, and joins the cluster over the
+              WireGuard Flannel mesh with <code className="text-slate-200">axonwall-replicated-ha</code> OpenEBS volumes.
             </p>
           </div>
         </div>

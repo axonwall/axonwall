@@ -132,23 +132,41 @@ export default function ApiReferenceDocPage() {
       {/* Privileged Unix Socket IPC */}
       <section id="agent-socket" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Server className="w-6 h-6 text-emerald-400" /> Privileged Agent Socket IPC
+          <Server className="w-6 h-6 text-emerald-400" /> Privileged Agent Socket IPC (<code className="font-mono text-emerald-400">axonwalld</code>)
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Internal controllers communicate with <code className="text-emerald-400 font-mono">axonwalld</code> over the Unix domain socket <code className="text-slate-200 font-mono">/run/axonwall/agent.sock</code> using length-prefixed JSON-RPC:
+          Internal controllers and CLI tools communicate with <code className="text-emerald-400 font-mono">axonwalld</code>{' '}
+          over three specialized Unix domain sockets in <code className="text-slate-200 font-mono">/run/axonwall/</code>,
+          authenticated with the local token at <code className="text-slate-200 font-mono">/etc/axonwall/agent.token</code>:
         </p>
 
         <CodeBlock
-          title="IPC Methods"
+          title="Agent HTTP API Socket (/run/axonwall/agent-api.sock)"
+          language="bash"
+          code={`# Query daemon status & Commit-Confirm watchdog timer:
+sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
+  -H "X-Axonwall-Agent-Token: $(sudo cat /etc/axonwall/agent.token)" \\
+  http://localhost/v1/status | jq .
+
+# Query HA Sync Trust & ECDSA P-256 PKI enrollment state:
+sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
+  -H "X-Axonwall-Agent-Token: $(sudo cat /etc/axonwall/agent.token)" \\
+  http://localhost/v1/ha/sync-trust | jq .`}
+        />
+
+        <CodeBlock
+          title="IPC Sockets & Endpoints Summary"
           language="typescript"
-          code={`interface AgentRpcMethods {
-  'compile_ruleset'(req: { config: FirewallConfig }): Promise<{ nftPath: string }>;
-  'apply_ruleset'(req: { nftPath: string; timeoutSeconds: number }): Promise<{ status: string }>;
-  'confirm_ruleset'(): Promise<{ committed: boolean }>;
-  'rollback_ruleset'(): Promise<{ activeBundle: string }>;
-  'get_hardware_telemetry'(): Promise<HardwareTelemetryReport>;
-  'read_optical_dom'(req: { interface: string }): Promise<OpticalDomReport>;
-}`}
+          code={`// 1. /run/axonwall/agent-api.sock (HTTP/1.1 + X-Axonwall-Agent-Token header)
+//    GET  /v1/status          -> Daemon health, active bundle hash, pending Commit-Confirm job
+//    POST /v1/apply           -> Compile & apply nftables + daemon configs with Commit-Confirm
+//    POST /v1/confirm         -> Confirm pending jobId and disarm rollback timer
+//    POST /v1/rollback        -> Immediately revert to last-known-good bundle
+//    GET  /v1/ha/sync-trust   -> HA PKI enrollment, effective transport (mtls/token-http), SHA-256 fingerprints
+//    GET  /v1/telemetry       -> HWMON thermal/fan/voltage sensors & SFP+/QSFP optical DOM
+
+// 2. /run/axonwall/agent.sock (Newline-delimited JSON-RPC)
+// 3. /run/axonwall/ha.sock    (Root SO_PEERCRED UID-0 verified Keepalived MASTER/BACKUP/FAULT transitions)`}
         />
       </section>
     </div>

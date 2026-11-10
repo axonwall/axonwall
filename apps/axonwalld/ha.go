@@ -354,6 +354,16 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 				cfg.SqliteSync.NodeRole = "backup"
 			}
 		}
+		if cfg.SqliteSync.PeerAddress == "" && cfg.PeerIp != "" {
+			cfg.SqliteSync.PeerAddress = cfg.PeerIp
+		}
+		if cfg.SqliteSync.AuthToken == "" {
+			if cfg.SyncPassword != "" {
+				cfg.SqliteSync.AuthToken = cfg.SyncPassword
+			} else if len(cfg.VRRPInstances) > 0 && cfg.VRRPInstances[0].AuthPassword != "" {
+				cfg.SqliteSync.AuthToken = cfg.VRRPInstances[0].AuthPassword
+			}
+		}
 		if err := e.sqliteSync.ApplyConfig(cfg.SqliteSync); err != nil {
 			slog.Error("Failed to apply SQLite sync config", "error", err)
 			applyErrs = append(applyErrs, fmt.Errorf("sqlite sync: %w", err))

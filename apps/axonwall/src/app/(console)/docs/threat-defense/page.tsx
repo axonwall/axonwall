@@ -36,8 +36,8 @@ export default function ThreatDefenseDocPage() {
           Traditional firewalls update aliases by reloading thousands of individual packet filter rules, exhausting CPU and causing micro-outages. Axonwall aggregates intelligence feeds (Spamhaus DROP, AbuseIPDB, FireHOL, Emerging Threats) into high-performance Linux kernel <code className="text-emerald-400 font-mono">interval sets</code>.
         </p>
 
-        <div className="space-y-4">
-          <h3 className="text-base font-semibold text-white">CIDR Normalization & Interval Minimization</h3>
+        <div id="cidr-optimization" className="space-y-4">
+          <h3 className="text-base font-semibold text-white">CIDR Normalization &amp; Interval Minimization</h3>
           <p className="text-xs text-slate-300 leading-relaxed">
             Raw threat feeds frequently contain redundant, overlapping, or fragmented IP allocations. Axonwall&apos;s feed compiler runs an intelligent normalization algorithm:
           </p>
@@ -83,7 +83,7 @@ export default function ThreatDefenseDocPage() {
           Malware, phishing, and ad-tracking domains are neutralized at the DNS query resolution stage before any TCP/UDP connection can be initialized. Axonwall compiles domain blocklists into native <strong>Response Policy Zone (RPZ)</strong> format according to RFC 7766.
         </p>
 
-        <div className="space-y-4">
+        <div id="subdomain-pruning" className="space-y-4">
           <h3 className="text-base font-semibold text-white">Subdomain Pruning Optimization</h3>
           <p className="text-xs text-slate-300 leading-relaxed">
             Public blocklists often contain hundreds of thousands of redundant subdomains (e.g. <code className="text-slate-200">tracker.ads.evil.com</code> alongside <code className="text-slate-200">evil.com</code>). Axonwall&apos;s RPZ compiler prunes these redundant entries, reducing memory consumption by over 65%:

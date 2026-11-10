@@ -39,8 +39,8 @@ export default function CliSuperConfiguratorDocPage() {
         <p className="text-sm text-slate-300 leading-relaxed">
           Editing raw YAML files under pressure can lead to indentation errors, while traditional <code className="text-white font-mono">whiptail</code>{' '}
           or <code className="text-white font-mono">dialog</code> menus strip away keyboard speed.{' '}
-          <code className="text-emerald-400 font-mono">axonwall-config</code> uses a custom Neovim Lua runtime (
-          <code className="text-white font-mono">/usr/share/axonwall/nvim/init.lua</code>) that renders a clean,
+          <code className="text-emerald-400 font-mono">axonwallctl config</code> / <code className="text-emerald-400 font-mono">axonwall-config</code> uses a custom Neovim Lua runtime (
+          <code className="text-white font-mono">/etc/axonwall/nvim/init.lua</code>) that renders a clean,
           two-pane form interface with virtual-text badges while keeping full native Vim motions (
           <code className="text-emerald-300 font-mono">hjkl</code>, <code className="text-emerald-300 font-mono">w</code>/
           <code className="text-emerald-300 font-mono">b</code>, <code className="text-emerald-300 font-mono">ciw</code>,{' '}
@@ -48,7 +48,7 @@ export default function CliSuperConfiguratorDocPage() {
         </p>
 
         <CodeBlock
-          title="Neovim Super Configurator TUI Layout (axonwall-config)"
+          title="Neovim Super Configurator TUI Layout (axonwallctl config)"
           language="text"
           code={`+--------------------------+----------------------------------------------------------+
 |  AXONWALL DOMAINS        |  [6] High Availability (Keepalived VRRP & conntrackd)    |
@@ -64,7 +64,7 @@ export default function CliSuperConfiguratorDocPage() {
 |  9. Vigilant Octo Waffle |    Require Signed Payloads  : [x] true      ( toggle )   |
 | 10. Rootkit & Ring-0     |                                                          |
 | 11. System Plugins       |  [Tab/S-Tab] Field  [Space] Toggle  [ge] Enum  [gy] YAML |
-|                          |  [Ctrl+s] Validate & Apply (60s Commit-Confirm)  [q] Quit|
+|                          |  [Ctrl+s] Validate & Apply (120s Commit-Confirm) [q] Quit|
 +--------------------------+----------------------------------------------------------+`}
         />
 

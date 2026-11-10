@@ -309,11 +309,11 @@ axonwall:
         </div>
 
         <CodeBlock
-          title="Download & Boot the Official v0.11.32 Edge UKI in QEMU/KVM"
+          title="Download & Boot the Official v0.11.63 Edge UKI in QEMU/KVM"
           language="bash"
           code={`# 1. Download the signed Edge UKI and initramfs from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-edge-sku-vm-virtio.efi
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-edge-sku-vm-virtio.efi.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall-edge-sku-vm-virtio.efi
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall-edge-sku-vm-virtio.efi.sha256
 sha256sum -c axonwall-edge-sku-vm-virtio.efi.sha256
 
 # 2. Boot directly into RAM (< 1.2s boot time, zero disk required)

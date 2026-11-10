@@ -1,6 +1,6 @@
 {
   "name": "@axonwall/lib",
-  "version": "0.11.63",
+  "version": "0.11.64",
   "private": true,
   "license": "GPL-2.0-or-later",
   "type": "module",

@@ -17,13 +17,16 @@ export default function K3sKubernetesDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Container Orchestration & Cloud-Native Storage
+          Container Orchestration &amp; Cloud-Native Storage
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          Kubernetes (K3s) & OpenEBS Distributed Storage
+          Kubernetes (K3s) &amp; OpenEBS Distributed Storage
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall provides modern, lightweight K3s alongside enterprise grade NAS storage. Run containerized services directly on your appliance with encrypted WireGuard flannel networking, automated 2-node HA cluster join, and OpenEBS replicated persistent volumes.
+          Axonwall provides modern, lightweight K3s alongside enterprise-grade NAS storage configured via{' '}
+          <code className="text-emerald-400 font-mono">/etc/axonwall/k3s.yaml</code>. Run containerized services
+          directly on your appliance with encrypted WireGuard flannel networking, automated 2-node HA cluster join, and
+          OpenEBS replicated persistent volumes.
         </p>
       </div>
 
@@ -33,31 +36,61 @@ export default function K3sKubernetesDocPage() {
           <Cpu className="w-6 h-6 text-emerald-400" /> Embedded K3s Architecture
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          K3s is packaged as a single binary with zero external dependencies, embedded SQLite/etcd consensus, and native Containerd. Axonwall manages K3s through the privileged Go daemon (<code className="text-emerald-400 font-mono">axonwalld</code>), which generates declarative control plane manifests and reconciles cluster state.
+          K3s is packaged as a single binary with zero external dependencies, embedded SQLite/etcd consensus, and
+          native Containerd. Axonwall manages K3s through the privileged Go daemon (
+          <code className="text-emerald-400 font-mono">axonwalld</code>), which generates declarative control plane
+          manifests and reconciles cluster state.
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+          <div id="wireguard" className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
             <h3 className="font-bold text-white text-base">WireGuard Native Flannel</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Pod-to-pod cross-node traffic is automatically encrypted using Linux kernel WireGuard (<code className="text-slate-200">flannel-backend: "wireguard-native"</code>), requiring zero overlay CPU overhead.
+              Pod-to-pod cross-node traffic is automatically encrypted using Linux kernel WireGuard (
+              <code className="text-slate-200">flannelBackend: &quot;wireguard-native&quot;</code>), requiring zero
+              overlay CPU overhead.
             </p>
           </div>
 
-          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+          <div id="ha-join" className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
             <h3 className="font-bold text-white text-base">Automatic 2-Node HA Join</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              When a secondary HA node is brought online, it connects to the primary node over mTLS, reads the cluster join token via <code className="text-slate-200">/api/v1/sync/k3s-token</code>, and joins the cluster as a redundant control-plane server without manual token copying.
+              When <code className="text-emerald-400 font-mono">autoJoinHaPeer: true</code> is enabled, the secondary HA
+              node connects to the primary node over mTLS, fetches the cluster join token via{' '}
+              <code className="text-slate-200">/api/v1/sync/k3s-token</code> into{' '}
+              <code className="text-slate-200">/var/lib/axonwall/k3s-join.token</code>, and joins the cluster
+              automatically.
             </p>
           </div>
 
           <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
             <h3 className="font-bold text-white text-base">VIP Ingress Integration</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              K3s workloads bind directly to Axonwall VRRP Virtual IPs, ensuring that if a physical node experiences hardware failure, traffic routes to the surviving node in under one second.
+              K3s workloads bind directly to Axonwall VRRP Virtual IPs, ensuring that if a physical node experiences
+              hardware failure, traffic routes to the surviving node in under one second.
             </p>
           </div>
         </div>
+
+        <CodeBlock
+          title="Declarative K3s & OpenEBS Configuration (/etc/axonwall/k3s.yaml)"
+          language="yaml"
+          code={`k3s:
+  enabled: true
+  clusterCidr: 10.42.0.0/16
+  serviceCidr: 10.43.0.0/16
+  nodeIpInterface: lan
+  flannelBackend: wireguard-native
+  disableTraefik: false
+  autoJoinHaPeer: true
+  openEbs:
+    enabled: true
+    zfsLocalPvEnabled: true
+    zfsLocalPvPool: tank
+    replicatedStorageEnabled: true
+    defaultReplicaCount: 2
+    replicatedBackingPool: tank/openebs-replicated`}
+        />
       </section>
 
       {/* OpenEBS Storage */}
@@ -70,23 +103,26 @@ export default function K3sKubernetesDocPage() {
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+          <div id="zfs-localpv" className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
             <div className="flex items-center justify-between">
               <span className="font-mono text-sm font-bold text-white">axonwall-zfs-local</span>
               <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-xs font-mono">Local PV</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Provisions dynamic volumes directly on your host ZFS pool (<code className="text-slate-200">zfs.csi.openebs.io</code>). Delivers bare-metal NVMe throughput with native ZFS compression, snapshots, and quota enforcement.
+              Provisions dynamic volumes directly on your host ZFS pool (<code className="text-slate-200">zfs.csi.openebs.io</code>).
+              Delivers bare-metal NVMe throughput with native ZFS compression, snapshots, and quota enforcement.
             </p>
           </div>
 
-          <div className="p-6 rounded-2xl bg-slate-900 border border-emerald-500/30 space-y-3">
+          <div id="mayastor" className="p-6 rounded-2xl bg-slate-900 border border-emerald-500/30 space-y-3">
             <div className="flex items-center justify-between">
               <span className="font-mono text-sm font-bold text-white">axonwall-replicated-ha</span>
               <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-400 text-xs font-mono">Default CSI</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Synchronous 2-node block replication over NVMe-oF (<code className="text-slate-200">io.openebs.csi-mayastor</code>). Every write is mirrored across both HA Axonwall appliances in real time. If node 1 drops, stateful workloads restart on node 2 instantly with zero data loss.
+              Synchronous 2-node block replication over NVMe-oF (<code className="text-slate-200">io.openebs.csi-mayastor</code>).
+              Every write is mirrored across both HA Axonwall appliances in real time. If node 1 drops, stateful
+              workloads restart on node 2 instantly with zero data loss.
             </p>
           </div>
         </div>

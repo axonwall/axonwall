@@ -103,6 +103,9 @@ export default function HighAvailabilityPage() {
           setSyncInterval(state.ha.sqliteSync.syncIntervalSeconds);
           setSyncTransport(state.ha.sqliteSync.transport || 'mtls');
           setRequireSigned(Boolean(state.ha.sqliteSync.requireSignedPayloads));
+          if (!firstVrrp?.authPassword && state.ha.sqliteSync.authToken) {
+            setSyncPassword(state.ha.sqliteSync.authToken);
+          }
         }
       }
       setHaLoaded(true);
@@ -280,10 +283,14 @@ export default function HighAvailabilityPage() {
             sqlite: true,
           },
           sqliteSync: {
+            ...state.ha?.sqliteSync,
             enabled: sqliteSyncEnabled,
             mode: sqliteSyncMode,
             syncIntervalSeconds: syncInterval,
             listenPort: state.ha?.sqliteSync?.listenPort || 9876,
+            peerAddress: peerIp || state.ha?.sqliteSync?.peerAddress,
+            peerPort: state.ha?.sqliteSync?.peerPort || state.ha?.sqliteSync?.listenPort || 9876,
+            authToken: syncPassword || state.ha?.sqliteSync?.authToken,
             transport: syncTransport,
             requireSignedPayloads: requireSigned,
             databases: state.ha?.sqliteSync?.databases || ['/var/lib/axonwall/headscale/db.sqlite'],

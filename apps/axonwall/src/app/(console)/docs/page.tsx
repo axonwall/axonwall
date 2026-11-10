@@ -26,7 +26,7 @@ import { CodeBlock } from './components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Documentation | Overview & Quickstart',
   description:
-    'Comprehensive documentation for Axonwall v0.11.32: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, ZFSBootMenu Root-on-ZFS, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
+    'Comprehensive documentation for Axonwall v0.11.63: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, ZFSBootMenu Root-on-ZFS, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
 };
 
 export default function DocsOverviewPage() {
@@ -36,7 +36,7 @@ export default function DocsOverviewPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Documentation Portal • v0.11.32
+          Documentation Portal • v0.11.63
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Axonwall Documentation
@@ -333,9 +333,9 @@ export default function DocsOverviewPage() {
           <CodeBlock
             title="Flash ISO to USB Drive & Verify SHA-256"
             language="bash"
-            code={`# Download and verify the v0.11.32 Debian 13 Appliance ISO
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-debian13-amd64.iso.sha256
+            code={`# Download and verify the v0.11.63 Debian 13 Appliance ISO
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Replace /dev/sdX with your destination USB drive
@@ -373,7 +373,7 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
           <CodeBlock
             title="Proxmox VE Cloud-Init QCOW2 Import"
             language="bash"
-            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall-debian13-amd64-cloud.qcow2
+            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall-debian13-amd64-cloud.qcow2
 qm create 9000 --name axonwall-ngfw --memory 4096 --cores 4 --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1
 qm importdisk 9000 axonwall-debian13-amd64-cloud.qcow2 local-zfs
 qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard=on --ide2 local-zfs:cloudinit --boot c --bootdisk scsi0`}
@@ -388,13 +388,13 @@ qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard
             title="Install Debian Package"
             language="bash"
             code={`# Download the latest .deb release artifact from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall_0.11.32_amd64.deb
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.32/axonwall_0.11.32_amd64.deb.sha256
-sha256sum -c axonwall_0.11.32_amd64.deb.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall_0.11.63_amd64.deb
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall_0.11.63_amd64.deb.sha256
+sha256sum -c axonwall_0.11.63_amd64.deb.sha256
 
 # Install package with dependencies
 sudo apt-get update
-sudo apt-get install -y ./axonwall_0.11.32_amd64.deb
+sudo apt-get install -y ./axonwall_0.11.63_amd64.deb
 
 # Verify running services
 sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
@@ -406,7 +406,7 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
             language="yaml"
             code={`services:
   axonwall:
-    image: ghcr.io/axonwall/axonwall:v0.11.32
+    image: ghcr.io/axonwall/axonwall:v0.11.63
     cap_add:
       - NET_ADMIN
       - NET_RAW

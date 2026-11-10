@@ -32,7 +32,7 @@ export default function MigrationDocPage() {
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
           <UploadCloud className="w-6 h-6 text-emerald-400" /> Supported Firewall Platforms
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+        <div id="pfsense-opnsense" className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
           <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2.5">
             <h3 className="font-bold text-white text-sm">pfSense® (config.xml)</h3>
             <p className="text-slate-400 leading-relaxed">
@@ -47,10 +47,10 @@ export default function MigrationDocPage() {
             </p>
           </div>
 
-          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2.5">
-            <h3 className="font-bold text-white text-sm">Cisco ASA / FTD (CLI)</h3>
+          <div id="cisco-asa" className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2.5">
+            <h3 className="font-bold text-white text-sm">Cisco ASA / FTD, VyOS, MikroTik &amp; Linux</h3>
             <p className="text-slate-400 leading-relaxed">
-              Parses raw Cisco CLI <code className="text-slate-300">running-config</code> exports, translating <code className="text-slate-300">object-group</code>, <code className="text-slate-300">access-list extended</code>, and NAT statements.
+              Parses Cisco CLI <code className="text-slate-300">running-config</code>, VyOS config trees, MikroTik RouterOS <code className="text-slate-300">.rsc</code> exports, <code className="text-slate-300">iptables-save</code>, and <code className="text-slate-300">firewalld</code> zones.
             </p>
           </div>
         </div>
@@ -101,7 +101,7 @@ access-list OUTSIDE_IN extended permit object-group DMZ_SERVERS any object-group
             </p>
           </div>
 
-          <h3 className="text-base font-semibold text-white pt-2">Subnet Collision Detection</h3>
+          <h3 id="subnet-collisions" className="text-base font-semibold text-white pt-2">Subnet Collision Detection</h3>
           <p className="text-xs text-slate-300 leading-relaxed">
             The analyzer verifies that imported network prefixes do not collide with active physical interfaces, preventing routing loops or accidental network severance.
           </p>
