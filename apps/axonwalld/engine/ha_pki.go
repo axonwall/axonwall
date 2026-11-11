@@ -173,14 +173,22 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 
 	// 2. Generate or regenerate node leaf certificate if missing or missing required IP SAN
 	needNodeCert := false
+	var existingIPs []string
 	if nodeBytes, err := os.ReadFile(nodeCertPath); err != nil {
 		needNodeCert = true
 	} else if block, _ := pem.Decode(nodeBytes); block != nil {
 		if parsed, err := x509.ParseCertificate(block.Bytes); err == nil {
-			if localSyncIP != "" {
+			for _, ip := range parsed.IPAddresses {
+				existingIPs = append(existingIPs, ip.String())
+			}
+			for _, reqIP := range []string{localSyncIP, peerSyncIP} {
+				clean := strings.Split(strings.TrimSpace(reqIP), "/")[0]
+				if clean == "" || net.ParseIP(clean) == nil {
+					continue
+				}
 				hasIP := false
 				for _, ip := range parsed.IPAddresses {
-					if ip.String() == localSyncIP {
+					if ip.String() == clean {
 						hasIP = true
 						break
 					}
@@ -197,7 +205,8 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 	}
 
 	if needNodeCert {
-		if err := issueNodeCert(caCert, caKey, hostname, localSyncIP, peerSyncIP, nodeCertPath, nodeKeyPath); err != nil {
+		allIPs := append([]string{localSyncIP, peerSyncIP}, existingIPs...)
+		if err := issueNodeCertWithIPs(caCert, caKey, hostname, allIPs, nodeCertPath, nodeKeyPath); err != nil {
 			return err
 		}
 	}
@@ -206,18 +215,46 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 }
 
 func issueNodeCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname, ip1, ip2, certOut, keyOut string) error {
-	nodeKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return err
+	return issueNodeCertWithIPs(caCert, caKey, hostname, []string{ip1, ip2}, certOut, keyOut)
+}
+
+func issueNodeCertWithIPs(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname string, rawIPs []string, certOut, keyOut string) error {
+	var nodeKey *ecdsa.PrivateKey
+	if keyBytes, err := os.ReadFile(keyOut); err == nil {
+		if block, _ := pem.Decode(keyBytes); block != nil {
+			if parsedKey, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+				nodeKey = parsedKey
+			}
+		}
+	}
+	if nodeKey == nil {
+		var err error
+		nodeKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return err
+		}
 	}
 	if hostname == "" {
 		hostname = "axonwall-ha-node"
 	}
-	ips := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
-	for _, rawIP := range []string{ip1, ip2} {
+	seenIPs := make(map[string]bool)
+	var ips []net.IP
+	addIP := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		s := ip.String()
+		if !seenIPs[s] {
+			seenIPs[s] = true
+			ips = append(ips, ip)
+		}
+	}
+	addIP(net.ParseIP("127.0.0.1"))
+	addIP(net.ParseIP("::1"))
+	for _, rawIP := range rawIPs {
 		clean := strings.Split(strings.TrimSpace(rawIP), "/")[0]
 		if parsed := net.ParseIP(clean); parsed != nil {
-			ips = append(ips, parsed)
+			addIP(parsed)
 		}
 	}
 
@@ -364,10 +401,14 @@ func GenerateHAPKICSR(extraIPs []string) ([]byte, error) {
 // persists the peer's leaf certificate to peer-node.crt, and returns the public certs and LDAP repl secret.
 func SignHAPKICSR(csrPEM []byte, extraIPs []string) (*HAPKICSRResponse, error) {
 	peerIP := ""
+	localIP := ""
 	if len(extraIPs) > 0 {
 		peerIP = extraIPs[0]
 	}
-	if err := EnsureHAPKICerts("axonwall-primary", "", peerIP); err != nil {
+	if len(extraIPs) > 1 {
+		localIP = extraIPs[1]
+	}
+	if err := EnsureHAPKICerts("axonwall-primary", localIP, peerIP); err != nil {
 		return nil, err
 	}
 
@@ -550,6 +591,9 @@ func InstallHAPKICSRResponse(resp *HAPKICSRResponse) error {
 	if err := os.WriteFile(HAPKICACertPath, []byte(resp.CACertPEM), 0644); err != nil {
 		return err
 	}
+	// A CSR-enrolled peer does not hold the cluster CA private key; remove any
+	// stale self-minted ca.key so EnsureHAPKICertsInDir treats this node as CSR-enrolled.
+	_ = os.Remove(HAPKICAKeyPath)
 	if err := os.WriteFile(HAPKINodeCertPath, []byte(resp.SignedCertPEM), 0644); err != nil {
 		return err
 	}

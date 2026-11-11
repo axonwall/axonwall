@@ -26,7 +26,7 @@ export default function EdgeUkiNgfwDocPage() {
       {/* Header */}
       <div className="space-y-4 border-b border-slate-800 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-          <Cpu className="w-3.5 h-3.5" /> Zero-Surface Perimeter • Single-File UEFI UKI
+          <Cpu className="w-3.5 h-3.5" /> Zero-Surface Perimeter • Single-File UEFI UKI • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
           Super-Slim Edge NGFW (Single-File UEFI UKI)
@@ -254,19 +254,54 @@ axonwall:
           <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <div className="font-bold text-white text-sm">Mode B: Hosted Edge VM Inside Axonwall Host</div>
             <p className="text-slate-400 leading-relaxed">
-              An Axonwall host binds the physical WAN port into an isolated <code className="text-slate-200 font-mono">br-wan</code>{' '}
-              bridge with host netfilter bypass and zero host IP addresses, then boots the Edge UKI directly inside a
+              Configured under <code className="text-emerald-400 font-mono">hostedEdge:</code> in{' '}
+              <code className="text-emerald-400 font-mono">/etc/axonwall/virt.yaml</code>. An Axonwall host binds the physical WAN port into an isolated{' '}
+              <code className="text-slate-200 font-mono">br-wan</code> bridge with host netfilter bypass and zero host IP addresses, then boots the Edge UKI directly inside a
               pinned QEMU/KVM micro-VM (<code className="text-slate-200 font-mono">-kernel axonwall-edge-sku-vm-virtio.efi</code>). Untrusted WAN
               packets terminate inside the zero-shell micro-VM before ever reaching the host OS.
             </p>
           </div>
         </div>
+
+        <CodeBlock
+          title="/etc/axonwall/virt.yaml — Hosted Virtual Edge NGFW Schema"
+          language="yaml"
+          code={`hostedEdge:
+  enabled: true
+  placement: hosted-vm
+  ukiSlot: A
+  skuProfile: sku-vm-virtio
+  vcpus: 2
+  memoryMiB: 512
+  wan:
+    device: eth0
+    address: dhcp
+    ipv6Mode: auto
+  lan:
+    device: br-edge-lan
+    address: 10.254.0.1/30
+    ipv6Mode: delegated
+  ha:
+    enabled: true
+    role: master
+    syncInterface: br-edge-lan
+    peerIp: 10.254.0.2
+  portForwards:
+    - protocol: tcp
+      wanPort: 443
+      targetIp: 10.254.0.2
+      targetPort: 443
+  ipv6Allow:
+    - destCidr: 2001:db8:10::10/128
+      protocol: tcp
+      port: 443`}
+        />
       </section>
 
       {/* 5. Hardware SKU Profiles */}
       <section id="sku-profiles" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Server className="w-6 h-6 text-emerald-400" /> 5. Manufacturing Hardware SKU Profiles
+          <Server className="w-6 h-6 text-emerald-400" /> 5. Manufacturing Hardware SKU Profiles (5 Profiles)
         </h2>
 
         <div className="overflow-x-auto rounded-xl border border-slate-800">
@@ -304,19 +339,26 @@ axonwall:
                 <td className="py-3 px-4 font-mono">mt7530_dsa, mtk_eth_soc, mvpp2</td>
                 <td className="py-3 px-4 font-mono">-mcpu=cortex-a73+crypto, GOARCH=arm64</td>
               </tr>
+              <tr>
+                <td className="py-3 px-4 font-mono text-slate-200 font-semibold">base-hardened-ngfw</td>
+                <td className="py-3 px-4">Baseline Hardened x86_64 Reference Kernel</td>
+                <td className="py-3 px-4 font-mono">CONFIG_MODULES=n, nft_flow_table_inet, wireguard, efistub</td>
+                <td className="py-3 px-4 font-mono">KSPP Hardened Baseline</td>
+              </tr>
             </tbody>
           </table>
         </div>
 
         <CodeBlock
-          title="Download & Boot the Official v0.11.63 Edge UKI in QEMU/KVM"
+          title="Download & Boot the Official v0.11.64 Edge UKI & Companion Initramfs in QEMU/KVM"
           language="bash"
-          code={`# 1. Download the signed Edge UKI and initramfs from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall-edge-sku-vm-virtio.efi
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.63/axonwall-edge-sku-vm-virtio.efi.sha256
+          code={`# 1. Download the signed Edge UKI and companion initramfs cpio from GitHub Releases
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-edge-sku-vm-virtio.efi
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-edge-sku-vm-virtio.efi.sha256
 sha256sum -c axonwall-edge-sku-vm-virtio.efi.sha256
 
-# 2. Boot directly into RAM (< 1.2s boot time, zero disk required)
+# 2. Boot the single-file UKI directly into RAM (< 1.2s boot time, zero disk required)
 qemu-system-x86_64 -enable-kvm -m 512M -smp 2 \\
   -kernel axonwall-edge-sku-vm-virtio.efi \\
   -device i6300esb -watchdog-action reset \\
@@ -324,11 +366,12 @@ qemu-system-x86_64 -enable-kvm -m 512M -smp 2 \\
   -nographic`}
         />
 
-        <Callout type="tip" title="Manage from Fleet Console, Neovim TUI, or CLI">
-          Orchestrate Hosted and Dedicated Edge NGFW nodes from the Web Console under{' '}
-          <code className="font-mono text-emerald-300">/fleet</code>, in the Neovim Super Configurator via{' '}
-          <code className="font-mono text-emerald-300">axonwall-config</code>, or declaratively via{' '}
-          <code className="font-mono text-emerald-300">/etc/axonwall/edge.yaml</code>.
+        <Callout type="tip" title="Manage from Fleet Console, Neovim TUI, or Canonical YAML">
+          Orchestrate Hosted Virtual Edge NGFWs via <code className="font-mono text-emerald-300">hostedEdge:</code> in{' '}
+          <code className="font-mono text-emerald-300">/etc/axonwall/virt.yaml</code> (<code className="font-mono text-emerald-300">axonwall-config virt</code>),
+          and manage remote/dedicated Edge UKI satellites under <code className="font-mono text-emerald-300">fleet.nodes</code> in{' '}
+          <code className="font-mono text-emerald-300">/etc/axonwall/ha.yaml</code> or the Web Console at{' '}
+          <code className="font-mono text-emerald-300">/fleet</code>.
         </Callout>
       </section>
     </div>

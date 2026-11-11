@@ -22,6 +22,7 @@ import {
   disablePluginWithDependents,
 } from '@axonwall/lib/plugins';
 import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
+import { importFirewallConfig, mergeFirewallConfigs, type FirewallVendor } from '@axonwall/lib/import';
 import { isValidDevice } from '@axonwall/lib/util';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import {
@@ -315,7 +316,12 @@ function getAgentToken(): string | undefined {
   }
 }
 
-function sendAgentSocketRequest<T>(reqPath: string, method: 'GET' | 'POST', body?: unknown, timeoutMs = 15000): Promise<T> {
+function sendAgentSocketRequest<T>(
+  reqPath: string,
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  body?: unknown,
+  timeoutMs = 15000,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(AGENT_API_SOCK)) {
       reject(new Error(`Socket not found at ${AGENT_API_SOCK}`));
@@ -835,7 +841,13 @@ async function cmdApply(autoConfirm = true) {
 
   if (autoConfirm) {
     try {
-      await sendAgentSocketRequest('/v1/confirm', 'POST', { jobId });
+      const confirmResp = await sendAgentSocketRequest<{ success?: boolean; message?: string }>('/v1/confirm', 'POST', {
+        jobId,
+        job_id: jobId,
+      });
+      if (confirmResp && confirmResp.success === false) {
+        throw new Error(confirmResp.message || `Daemon refused to confirm job ${jobId}`);
+      }
       confirmed = true;
     } catch (err: any) {
       console.error(
@@ -1727,6 +1739,8 @@ async function setCoreRolePlugin(pluginId: string, enable: boolean) {
       flannelBackend: 'wireguard-native',
       disableTraefik: false,
       autoJoinHaPeer: true,
+      enableUserNamespaces: false,
+      bpfTokenProfiles: [],
       openEbs: {
         enabled: true,
         zfsLocalPvEnabled: true,
@@ -2546,6 +2560,522 @@ async function cmdMcp(args: string[]) {
   }
 }
 
+async function cmdEbpf(args: string[]) {
+  const sub = (args[0] || 'overview').toLowerCase();
+  const asJson = args.includes('--json');
+
+  switch (sub) {
+    case 'overview':
+    case 'status': {
+      const overview = await sendAgentSocketRequest<any>('/v1/ebpf/overview?limit=25', 'GET');
+      if (asJson) {
+        console.log(JSON.stringify(overview, null, 2));
+        return;
+      }
+      const dp = overview?.dataplane || {};
+      const stats = dp?.stats || {};
+      const lsm = overview?.lsm || {};
+      const tok = overview?.bpfTokens || {};
+      const caps = tok?.capabilities || {};
+      console.log(`${cCyan}${cBold}Axonwall Ring-0 eBPF Dataplane, BPF-LSM & Linux 6.9+ BPF_TOKEN Posture${cReset}`);
+      console.log(`  Kernel Release:     ${cBold}${caps.kernelRelease || os.release()}${cReset}`);
+      console.log(
+        `  BPF_TOKEN_CREATE:   ${
+          caps.supportsBpfTokenCreate ? `${cGreen}${cBold}SUPPORTED${cReset}` : `${cYellow}UNAVAILABLE (< 6.9)${cReset}`
+        } (lsm/bpf_token_create: ${Boolean(caps.supportsLsmBpfTokenCreate)}, lsm/bpf_token_cmd: ${Boolean(caps.supportsLsmBpfTokenCmd)})`,
+      );
+      console.log(
+        `  XDP Attached Devs:  ${
+          Array.isArray(dp.attachedIfaces) && dp.attachedIfaces.length > 0 ? dp.attachedIfaces.join(', ') : '(standalone/unattached)'
+        }`,
+      );
+      console.log(
+        `  XDP Verdicts:       RX=${stats.rxPackets ?? 0} pkts | PASS=${stats.xdpPass ?? 0} | DROP=${stats.xdpDrop ?? 0} | IPv4=${stats.ipv4Packets ?? 0} | IPv6=${stats.ipv6Packets ?? 0} | VLAN=${stats.vlanPackets ?? 0}`,
+      );
+      console.log(
+        `  BPF-LSM Guard:      ${lsm.attached ? `${cGreen}ENFORCING${cReset}` : `${cYellow}UNATTACHED${cReset}`} (hooks: ${(lsm.attachedHooks || []).join(', ') || 'none'})`,
+      );
+      console.log(
+        `  BPF_TOKEN Profiles: ${(tok.profiles || []).length} configured | ${(tok.activeMounts || []).length} delegated bpffs mounts active`,
+      );
+      if (overview?.nas?.arc) {
+        const arc = overview.nas.arc;
+        const zil = overview.nas.zil || {};
+        console.log(
+          `  OpenZFS ARC/ZIL:    ARC Hit Ratio=${Number(arc.hitRatioPercent ?? 0).toFixed(2)}% | Size=${Math.round((arc.sizeBytes ?? 0) / (1024 * 1024))} MiB | ZIL Commits=${zil.zilCommitCount ?? 0}`,
+        );
+      }
+      return;
+    }
+
+    case 'tokens': {
+      const tok = await sendAgentSocketRequest<any>('/v1/ebpf/tokens', 'GET');
+      console.log(JSON.stringify(tok, null, 2));
+      return;
+    }
+
+    case 'xdp-blocks':
+    case 'blocks': {
+      const blocks = await sendAgentSocketRequest<any>('/v1/ebpf/xdp/block', 'GET');
+      console.log(JSON.stringify(blocks, null, 2));
+      return;
+    }
+
+    case 'xdp-drop': {
+      const ip = args[1];
+      const ttl = args[2] ? Number(args[2]) : 900;
+      const reason = args.slice(3).join(' ') || 'CLI XDP fast-drop via axonwallctl';
+      if (!ip) {
+        console.error(`${cRed}Usage: axonwallctl ebpf xdp-drop <ip> [ttlSeconds] [reason]${cReset}`);
+        process.exit(1);
+      }
+      const res = await sendAgentSocketRequest<any>('/v1/ebpf/xdp/block', 'POST', {
+        ip,
+        ttlSeconds: ttl,
+        reasonCode: 1,
+        reason,
+      });
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    case 'xdp-unblock': {
+      const ip = args[1];
+      if (!ip) {
+        console.error(`${cRed}Usage: axonwallctl ebpf xdp-unblock <ip|cidr>${cReset}`);
+        process.exit(1);
+      }
+      const res = await sendAgentSocketRequest<any>(`/v1/ebpf/xdp/block?ip=${encodeURIComponent(ip)}`, 'DELETE');
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    case 'syn-limit': {
+      const pps = args[1] !== undefined ? Number(args[1]) : NaN;
+      if (Number.isNaN(pps) || pps < 0) {
+        const current = await sendAgentSocketRequest<any>('/v1/ebpf/xdp/syn-limit', 'GET');
+        console.log(JSON.stringify(current, null, 2));
+        return;
+      }
+      const res = await sendAgentSocketRequest<any>('/v1/ebpf/xdp/syn-limit', 'POST', { maxSynPps: pps });
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    case 'render-k3s': {
+      const preset = args[1] || 'network-dataplane';
+      const workloadName = args[2] || 'ebpf-packet-inspector';
+      const kind = args.includes('--daemonset') ? 'DaemonSet' : 'Pod';
+      const res = await sendAgentSocketRequest<{ success: boolean; manifestYaml?: string; error?: string }>(
+        '/v1/ebpf/tokens/render-k3s',
+        'POST',
+        {
+          profileId: `k3s-${preset}`,
+          profile: {
+            id: `k3s-${preset}`,
+            targetKind: 'k3s-pod',
+            preset,
+            enabled: true,
+            auditViaBpfLsm: true,
+          },
+          workloadName,
+          namespace: 'default',
+          image: 'ghcr.io/cilium/cilium:v1.16.4',
+          kind,
+        },
+      );
+      if (res.manifestYaml) {
+        process.stdout.write(res.manifestYaml);
+      } else {
+        console.error(`${cRed}Failed to render K3s BPF_TOKEN manifest: ${res.error || 'unknown error'}${cReset}`);
+        process.exit(1);
+      }
+      return;
+    }
+
+    default:
+      console.log(
+        `Usage: axonwallctl ebpf <overview|tokens|xdp-blocks|xdp-drop <ip|cidr> [ttl]|xdp-unblock <ip|cidr>|syn-limit [pps]|render-k3s [preset] [name] [--daemonset]> [--json]`,
+      );
+      process.exit(1);
+  }
+}
+
+async function cmdNas(args: string[]) {
+  const sub = (args[0] || 'pools').toLowerCase();
+  switch (sub) {
+    case 'pools':
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/pools', 'GET'), null, 2));
+      return;
+    case 'disks':
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/disks', 'GET'), null, 2));
+      return;
+    case 'snapshots':
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/snapshots', 'GET'), null, 2));
+      return;
+    case 'snapshot': {
+      const dataset = args[1];
+      const label = args[2] || '';
+      if (!dataset) {
+        console.error(`${cRed}Usage: axonwallctl nas snapshot <dataset> [label]${cReset}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/snapshots', 'POST', { dataset, label }), null, 2));
+      return;
+    }
+    case 'rollback': {
+      const snapshot = args[1];
+      if (!snapshot) {
+        console.error(`${cRed}Usage: axonwallctl nas rollback <dataset@label> [--destroy-newer]${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(
+          await sendAgentSocketRequest<any>('/v1/nas/snapshots/rollback', 'POST', {
+            snapshot,
+            destroyNewer: args.includes('--destroy-newer'),
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    case 'scrub':
+    case 'trim': {
+      const pool = args[1];
+      if (!pool) {
+        console.error(`${cRed}Usage: axonwallctl nas ${sub} <pool>${cReset}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>(`/v1/nas/${sub}`, 'POST', { pool }), null, 2));
+      return;
+    }
+    case 'checkpoint': {
+      const pool = args[1];
+      if (!pool) {
+        console.error(`${cRed}Usage: axonwallctl nas checkpoint <pool> [--discard]${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(
+          await sendAgentSocketRequest<any>('/v1/nas/checkpoint', 'POST', {
+            pool,
+            discard: args.includes('--discard'),
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    case 'unlock':
+    case 'lock': {
+      const dataset = args[1];
+      const keyMaterial = args[2] || '';
+      if (!dataset) {
+        console.error(`${cRed}Usage: axonwallctl nas ${sub} <dataset> [passphrase]${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(
+          await sendAgentSocketRequest<any>('/v1/nas/encryption', 'POST', {
+            dataset,
+            action: sub === 'unlock' ? 'load-key' : 'unload-key',
+            keyMaterial,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    case 'smart': {
+      const device = args[1];
+      const testType = args[2] || 'short';
+      if (!device) {
+        console.error(`${cRed}Usage: axonwallctl nas smart </dev/sdX|/dev/nvmeXnY> [short|long]${cReset}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/smart-test', 'POST', { device, testType }), null, 2));
+      return;
+    }
+    case 'cloudsync': {
+      const taskName = args[1];
+      if (!taskName) {
+        console.error(`${cRed}Usage: axonwallctl nas cloudsync <taskName>${cReset}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/cloudsync', 'POST', { taskName }), null, 2));
+      return;
+    }
+    default:
+      console.log(
+        `Usage: axonwallctl nas <pools|disks|snapshots|snapshot <ds> [label]|rollback <snap>|scrub <pool>|trim <pool>|checkpoint <pool> [--discard]|unlock <ds> [key]|lock <ds>|smart <dev> [short|long]|cloudsync <task>>`,
+      );
+      process.exit(1);
+  }
+}
+
+async function cmdVirt(args: string[]) {
+  const sub = (args[0] || 'list').toLowerCase();
+  switch (sub) {
+    case 'list': {
+      const [vms, cts] = await Promise.all([
+        sendAgentSocketRequest<any>('/v1/virt/vms', 'GET'),
+        sendAgentSocketRequest<any>('/v1/virt/containers', 'GET'),
+      ]);
+      console.log(JSON.stringify({ vms: vms?.vms || [], containers: cts?.containers || [] }, null, 2));
+      return;
+    }
+    case 'start':
+    case 'stop':
+    case 'reset':
+    case 'pause':
+    case 'resume': {
+      const vmid = Number(args[1]);
+      if (!vmid) {
+        console.error(`${cRed}Usage: axonwallctl virt ${sub} <vmid> [--force]${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(
+          await sendAgentSocketRequest<any>('/v1/virt/vms', 'POST', {
+            action: sub,
+            vmid,
+            force: args.includes('--force'),
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    case 'clone': {
+      const sourceVmid = Number(args[1]);
+      const newVmid = Number(args[2]);
+      const newName = args[3] && !args[3].startsWith('-') ? args[3] : '';
+      if (!sourceVmid || !newVmid) {
+        console.error(`${cRed}Usage: axonwallctl virt clone <sourceVmid> <newVmid> [newName] [--full]${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(
+          await sendAgentSocketRequest<any>('/v1/virt/clone', 'POST', {
+            sourceVmid,
+            newVmid,
+            newName,
+            linked: !args.includes('--full'),
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    case 'snapshot':
+    case 'rollback': {
+      const targetType = args[1] === 'lxc' ? 'lxc' : 'vm';
+      const targetId = Number(args[2]);
+      const label = args[3] || '';
+      if (!targetId || (sub === 'rollback' && !label)) {
+        console.error(`${cRed}Usage: axonwallctl virt ${sub} <vm|lxc> <id> <label>${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(
+          await sendAgentSocketRequest<any>('/v1/virt/snapshots', 'POST', {
+            action: sub === 'snapshot' ? 'create' : 'rollback',
+            targetType,
+            targetId,
+            label,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    case 'migrate': {
+      const vmid = Number(args[1]);
+      const targetPeerIp = args[2] || '';
+      if (!vmid || !targetPeerIp) {
+        console.error(`${cRed}Usage: axonwallctl virt migrate <vmid> <targetPeerIp>${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(await sendAgentSocketRequest<any>('/v1/virt/migrate', 'POST', { vmid, targetPeerIp }), null, 2),
+      );
+      return;
+    }
+    case 'qga': {
+      const vmid = Number(args[1]);
+      if (!vmid) {
+        console.error(`${cRed}Usage: axonwallctl virt qga <vmid>${cReset}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>(`/v1/virt/qga?vmid=${vmid}`, 'GET'), null, 2));
+      return;
+    }
+    case 'libvirt-xml': {
+      const vmid = Number(args[1] || '0');
+      const url = vmid > 0 ? `/v1/virt/libvirt-xml?vmid=${vmid}` : '/v1/virt/libvirt-xml';
+      const res = await sendAgentSocketRequest<any>(url, 'GET');
+      if (typeof res?.libvirtXml === 'string') {
+        process.stdout.write(res.libvirtXml);
+      } else {
+        console.log(JSON.stringify(res, null, 2));
+      }
+      return;
+    }
+    case 'backups':
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/virt/backups', 'GET'), null, 2));
+      return;
+    case 'restore': {
+      const archiveName = args[1] || '';
+      const targetType = args[2] === 'lxc' ? 'lxc' : 'vm';
+      const targetId = Number(args[3]);
+      if (!archiveName || !targetId) {
+        console.error(`${cRed}Usage: axonwallctl virt restore <archive.vma.zst> <vm|lxc> <id>${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(
+          await sendAgentSocketRequest<any>('/v1/virt/backups', 'POST', {
+            action: 'restore',
+            archiveName,
+            targetType,
+            targetId,
+          }),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    default:
+      console.log(
+        `Usage: axonwallctl virt <list|start <vmid>|stop <vmid>|clone <src> <dst> [name] [--full]|snapshot <vm|lxc> <id> [label]|rollback <vm|lxc> <id> <label>|migrate <vmid> <peerIp>|qga <vmid>|libvirt-xml [vmid]|backups|restore <archive> <vm|lxc> <id>>`,
+      );
+      process.exit(1);
+  }
+}
+
+async function cmdK3s(args: string[]) {
+  const sub = (args[0] || 'status').toLowerCase();
+  switch (sub) {
+    case 'status':
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/status', 'GET'), null, 2));
+      return;
+    case 'etcd-snapshots':
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/etcd-snapshots', 'GET'), null, 2));
+      return;
+    case 'etcd-save': {
+      const name = args[1] || '';
+      console.log(
+        JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/etcd-snapshots', 'POST', { action: 'save', name }), null, 2),
+      );
+      return;
+    }
+    case 'etcd-restore': {
+      const name = args[1] || '';
+      if (!name) {
+        console.error(`${cRed}Usage: axonwallctl k3s etcd-restore <snapshotName>${cReset}`);
+        process.exit(1);
+      }
+      console.log(
+        JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/etcd-snapshots', 'POST', { action: 'restore', name }), null, 2),
+      );
+      return;
+    }
+    default:
+      console.log(`Usage: axonwallctl k3s <status|etcd-snapshots|etcd-save [name]|etcd-restore <name>>`);
+      process.exit(1);
+  }
+}
+
+async function cmdImport(args: string[]) {
+  const filePath = args.find((a) => !a.startsWith('-'));
+  if (!filePath || !fs.existsSync(filePath)) {
+    console.error(
+      `${cRed}Usage: axonwallctl import <config-file> [--vendor <proxmox|truenas|opnsense|pfsense|vyos|mikrotik|cisco|iptables|firewalld>] [--stage] [--apply]${cReset}`,
+    );
+    process.exit(1);
+  }
+  const vendorIdx = args.indexOf('--vendor');
+  const forcedVendor = vendorIdx >= 0 && args[vendorIdx + 1] ? (args[vendorIdx + 1] as FirewallVendor) : undefined;
+  const doStage = args.includes('--stage') || args.includes('--apply');
+  const doApply = args.includes('--apply');
+
+  const rawContent = fs.readFileSync(filePath, 'utf8');
+  const report = importFirewallConfig(rawContent, forcedVendor);
+
+  console.log(`${cCyan}${cBold}=== Axonwall Competitor Configuration Import (${report.vendor.toUpperCase()}) ===${cReset}`);
+  console.log(
+    `  Interfaces: ${report.interfacesCount} | VLANs: ${report.vlansCount} | Aliases: ${report.aliasesCount} | Rules: ${report.rulesCount} | NAT: ${report.natRulesCount}`,
+  );
+  console.log(
+    `  KVM VMs:    ${report.vmsCount ?? 0} | LXC Containers: ${report.containersCount ?? 0} | ZFS Pools: ${report.zfsPoolsCount ?? 0} | Datasets: ${report.datasetsCount ?? 0} | Shares: ${report.sharesCount ?? 0}`,
+  );
+  if (report.warnings.length > 0) {
+    console.log(`  ${cYellow}Warnings (${report.warnings.length}):${cReset}`);
+    for (const w of report.warnings.slice(0, 8)) {
+      console.log(`    - ${w}`);
+    }
+  }
+  if ((report.reviewItems?.length ?? 0) > 0) {
+    console.log(`  ${cCyan}Review Items:${cReset} ${report.reviewItems!.length}`);
+  }
+
+  if (doStage) {
+    let releaseLock: (() => void) | null = null;
+    try {
+      releaseLock = acquireMcpLockFile(desiredStateLockPath());
+      const active = cmdValidate(true);
+      const merged = mergeFirewallConfigs(active, report.state);
+      const yamlFiles = serializeDesiredStateToYamlFiles(merged);
+      const serializedJson = JSON.stringify(merged, null, 2);
+      for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+        try {
+          fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
+          for (const [fn, content] of Object.entries(yamlFiles)) {
+            fs.writeFileSync(path.join(dir, fn), content, { mode: 0o660 });
+          }
+          fs.writeFileSync(path.join(dir, 'state.json'), serializedJson, { mode: 0o660 });
+        } catch {}
+      }
+      try {
+        fs.writeFileSync(STATE_JSON_PATH, serializedJson, { mode: 0o660 });
+      } catch {}
+      fixSharedConfigOwnership();
+      console.log(`${cGreen}[✓] Staged imported ${report.vendor} configuration into /etc/axonwall/*.yaml.${cReset}`);
+    } finally {
+      releaseLock?.();
+    }
+    if (doApply) {
+      await cmdApply(true);
+    }
+  } else {
+    console.log(`\n${cDim}Dry-run complete. Re-run with --stage to write to /etc/axonwall/*.yaml or --apply to compile and apply live.${cReset}`);
+  }
+}
+
+async function cmdKubeconfig(args: string[]) {
+  const scriptCandidates = [
+    '/usr/local/bin/axonwall-kubeconfig',
+    '/opt/axonwall/scripts/update-kubeconfig.sh',
+    path.join(process.cwd(), 'scripts/update-kubeconfig.sh'),
+    '/home/djehauti/git/axonwall/scripts/update-kubeconfig.sh',
+  ];
+  const scriptPath = scriptCandidates.find((p) => fs.existsSync(p));
+  if (scriptPath) {
+    const res = spawnSync(scriptPath, args, { stdio: 'inherit' });
+    process.exit(res.status ?? 0);
+  }
+  console.error(`${cRed}Error: axonwall-kubeconfig script not found on system.${cReset}`);
+  process.exit(1);
+}
+
 function cmdCompletion(args: string[]) {
   const shell = (args[0] || 'zsh').toLowerCase();
   const pluginIds = BUILTIN_PLUGINS.map((p) => p.id).join(' ');
@@ -2572,6 +3102,7 @@ _axonwallctl() {
     'be:Alias for zbm — manage ZFS Boot Environments'
     'update:Update Axonwall packages in-place or flash standby A/B slot'
     'plugin:Manage core appliance roles and extension plugins'
+    'ebpf:Inspect Ring-0 XDP dataplane, BPF-LSM guard, and Linux 6.9+ BPF_TOKEN delegations'
     'mcp:Manage Axonwall MCP server master switch and leases'
     'cloudinit:Reconcile or export cloud-init (#cloud-config) user-data'
     'edit:Open /etc/axonwall/<section>.yaml in \$EDITOR, validate, and apply'
@@ -2590,7 +3121,11 @@ _axonwallctl_completions() {
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
   case "\${prev}" in
     axonwallctl|ctl)
-      COMPREPLY=( $(compgen -W "status validate diff apply confirm rollback reload zbm be update plugin mcp cloudinit edit export completion help" -- "\${cur}") )
+      COMPREPLY=( $(compgen -W "status validate diff apply confirm rollback reload zbm be update plugin ebpf mcp cloudinit edit export completion help" -- "\${cur}") )
+      return 0
+      ;;
+    ebpf)
+      COMPREPLY=( $(compgen -W "overview tokens xdp-blocks xdp-drop xdp-unblock render-k3s" -- "\${cur}") )
       return 0
       ;;
     edit)
@@ -2640,6 +3175,12 @@ ${cBold}COMMANDS:${cReset}
   update [options]    Update Axonwall packages in-place (ZBM / Rolling) or flash standby slot (A/B mode)
                       Options: [--apt] [--version <ver>] [--slot <A|B>]
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
+  ebpf <cmd> [args]   Inspect Ring-0 XDP dataplane, LPM CIDR blocks, SYN-flood PPS & Linux 6.9+ BPF_TOKEN delegation
+  nas <cmd> [args]    Manage OpenZFS pools, Special VDEVs, snapshots, rollback, scrub, TRIM, checkpoints, AES-256-GCM keys & SMART
+  virt <cmd> [args]   Manage KVM VMs, LXC containers, ZFS clones, snapshots, QGA IPs, live migration & Libvirt XML export
+  k3s <cmd> [args]    Inspect K3s HA cluster status & manage embedded etcd disaster-recovery snapshots
+  import <file>       Import & audit OPNsense, pfSense, Proxmox VE 8.x, TrueNAS SCALE, VyOS, MikroTik, Cisco, iptables or firewalld configs
+  kubeconfig [args]   Synchronize K3s cluster credentials into ~/.kube/config (local or remote)
   mcp <cmd>           Manage MCP server (status, enable, disable, flush) — disabled by default
   cloudinit [path]    Reconcile cloud-init (#cloud-config) user-data into /etc/axonwall config and state
   cloudinit export    Export running appliance into #cloud-config YAML or bootable NoCloud cidata.iso
@@ -2693,6 +3234,30 @@ async function main() {
     case 'plugin':
     case 'plugins':
       await cmdPlugin(args.slice(1));
+      break;
+    case 'ebpf':
+    case 'bpf':
+      await cmdEbpf(args.slice(1));
+      break;
+    case 'nas':
+    case 'zfs':
+      await cmdNas(args.slice(1));
+      break;
+    case 'virt':
+    case 'vm':
+      await cmdVirt(args.slice(1));
+      break;
+    case 'k3s':
+      await cmdK3s(args.slice(1));
+      break;
+    case 'import':
+    case 'migrate-config':
+      await cmdImport(args.slice(1));
+      break;
+    case 'kubeconfig':
+    case 'k8s-config':
+    case 'k3s-config':
+      await cmdKubeconfig(args.slice(1));
       break;
     case 'mcp':
       await cmdMcp(args.slice(1));

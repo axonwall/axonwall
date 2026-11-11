@@ -35,13 +35,15 @@ type LsmGuardLsmExeId struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	LsmGuardMapAllowlist         = "allowlist"
-	LsmGuardMapEvents            = "events"
-	LsmGuardMapPolicyConfig      = "policy_config"
-	LsmGuardProgBlockUringSqpoll = "block_uring_sqpoll"
-	LsmGuardProgCopyfailGuard    = "copyfail_guard"
-	LsmGuardProgRestrictBpfLoad  = "restrict_bpf_load"
-	LsmGuardVarUnusedLsmEvent    = "unused_lsm_event"
+	LsmGuardMapAllowlist            = "allowlist"
+	LsmGuardMapEvents               = "events"
+	LsmGuardMapPolicyConfig         = "policy_config"
+	LsmGuardProgAuditBpfTokenCmd    = "audit_bpf_token_cmd"
+	LsmGuardProgBlockUringSqpoll    = "block_uring_sqpoll"
+	LsmGuardProgCopyfailGuard       = "copyfail_guard"
+	LsmGuardProgGuardBpfTokenCreate = "guard_bpf_token_create"
+	LsmGuardProgRestrictBpfLoad     = "restrict_bpf_load"
+	LsmGuardVarUnusedLsmEvent       = "unused_lsm_event"
 )
 
 // LoadLsmGuard returns the embedded CollectionSpec for LsmGuard.
@@ -86,9 +88,11 @@ type LsmGuardSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type LsmGuardProgramSpecs struct {
-	BlockUringSqpoll *ebpf.ProgramSpec `ebpf:"block_uring_sqpoll"`
-	CopyfailGuard    *ebpf.ProgramSpec `ebpf:"copyfail_guard"`
-	RestrictBpfLoad  *ebpf.ProgramSpec `ebpf:"restrict_bpf_load"`
+	AuditBpfTokenCmd    *ebpf.ProgramSpec `ebpf:"audit_bpf_token_cmd"`
+	BlockUringSqpoll    *ebpf.ProgramSpec `ebpf:"block_uring_sqpoll"`
+	CopyfailGuard       *ebpf.ProgramSpec `ebpf:"copyfail_guard"`
+	GuardBpfTokenCreate *ebpf.ProgramSpec `ebpf:"guard_bpf_token_create"`
+	RestrictBpfLoad     *ebpf.ProgramSpec `ebpf:"restrict_bpf_load"`
 }
 
 // LsmGuardMapSpecs contains maps before they are loaded into the kernel.
@@ -151,15 +155,19 @@ type LsmGuardVariables struct {
 //
 // It can be passed to LoadLsmGuardObjects or ebpf.CollectionSpec.LoadAndAssign.
 type LsmGuardPrograms struct {
-	BlockUringSqpoll *ebpf.Program `ebpf:"block_uring_sqpoll"`
-	CopyfailGuard    *ebpf.Program `ebpf:"copyfail_guard"`
-	RestrictBpfLoad  *ebpf.Program `ebpf:"restrict_bpf_load"`
+	AuditBpfTokenCmd    *ebpf.Program `ebpf:"audit_bpf_token_cmd"`
+	BlockUringSqpoll    *ebpf.Program `ebpf:"block_uring_sqpoll"`
+	CopyfailGuard       *ebpf.Program `ebpf:"copyfail_guard"`
+	GuardBpfTokenCreate *ebpf.Program `ebpf:"guard_bpf_token_create"`
+	RestrictBpfLoad     *ebpf.Program `ebpf:"restrict_bpf_load"`
 }
 
 func (p *LsmGuardPrograms) Close() error {
 	return _LsmGuardClose(
+		p.AuditBpfTokenCmd,
 		p.BlockUringSqpoll,
 		p.CopyfailGuard,
+		p.GuardBpfTokenCreate,
 		p.RestrictBpfLoad,
 	)
 }

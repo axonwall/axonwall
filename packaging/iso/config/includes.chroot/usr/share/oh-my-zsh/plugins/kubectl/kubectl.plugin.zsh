@@ -4,8 +4,12 @@
 # ==============================================================================
 
 # Auto-detect K3s kubeconfig on Axonwall appliances if KUBECONFIG is not explicitly set
-if [[ -z "${KUBECONFIG:-}" ]] && [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
-  export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+if [[ -z "${KUBECONFIG:-}" ]]; then
+  if [[ -r "${HOME}/.kube/config" ]]; then
+    export KUBECONFIG="${HOME}/.kube/config"
+  elif [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
+    export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+  fi
 fi
 
 # If k3s is installed without standalone kubectl symlink, provide seamless wrapper

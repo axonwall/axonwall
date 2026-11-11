@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { HardDrive, ShieldCheck, Thermometer, Cpu, RefreshCw, CheckCircle2, Layers } from 'lucide-react';
-import { getNasDisksInventory, type NasDiskItem } from '@/server/agent';
+import { HardDrive, ShieldCheck, Thermometer, Cpu, RefreshCw, CheckCircle2, Layers, AlertCircle } from 'lucide-react';
+import { getNasDisksInventory, runNasSmartTestAction, type NasDiskItem } from '@/server/agent';
 import Link from 'next/link';
 
 function formatBytes(bytes: number): string {
@@ -16,6 +16,21 @@ export default function StorageDisksPage() {
   const [disks, setDisks] = useState<NasDiskItem[]>([]);
   const [installSpec, setInstallSpec] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [smartBanner, setSmartBanner] = useState<{ ok: boolean; text: string } | null>(null);
+  const [runningDevice, setRunningDevice] = useState<string | null>(null);
+
+  const handleRunSmartTest = async (device: string, testType: 'short' | 'long') => {
+    setRunningDevice(`${device}:${testType}`);
+    setSmartBanner(null);
+    try {
+      const res = await runNasSmartTestAction(device, testType);
+      setSmartBanner({ ok: res.success, text: res.message });
+    } catch (err: any) {
+      setSmartBanner({ ok: false, text: err?.message || `Failed to run S.M.A.R.T. ${testType} test` });
+    } finally {
+      setRunningDevice(null);
+    }
+  };
 
   const loadDisks = async () => {
     setLoading(true);
@@ -62,6 +77,22 @@ export default function StorageDisksPage() {
           </Link>
         </div>
       </div>
+
+      {smartBanner && (
+        <div
+          className={`p-4 rounded-xl text-xs flex items-center justify-between gap-2 ${
+            smartBanner.ok
+              ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+              : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+          }`}
+        >
+          <span className="flex items-center gap-2">
+            {smartBanner.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+            {smartBanner.text}
+          </span>
+          <button onClick={() => setSmartBanner(null)}>✕</button>
+        </div>
+      )}
 
       {installSpec && (
         <div className="p-5 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -139,9 +170,27 @@ export default function StorageDisksPage() {
                   </span>
                 </td>
                 <td className="py-3.5 px-4">
-                  <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> PASSED
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> PASSED
+                    </span>
+                    <button
+                      type="button"
+                      disabled={runningDevice !== null}
+                      onClick={() => handleRunSmartTest(d.path, 'short')}
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-200 border border-slate-700"
+                    >
+                      {runningDevice === `${d.path}:short` ? 'Running...' : 'Short Test'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={runningDevice !== null}
+                      onClick={() => handleRunSmartTest(d.path, 'long')}
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-cyan-300 border border-slate-700"
+                    >
+                      {runningDevice === `${d.path}:long` ? 'Running...' : 'Long Test'}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

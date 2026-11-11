@@ -358,13 +358,17 @@ func RunHostRootkitAudit() HostRootkitAuditStatus {
 	lsmAttached, lsmHooks, lsmAllowlist, lsmEvents := GetDefaultLsmGuardManager().Snapshot()
 	for _, ev := range lsmEvents {
 		action := "Audited"
+		sev := "CRITICAL"
 		if ev.Blocked {
 			action = "Blocked"
+		} else if ev.HookID == HookIDBpfTokenDelegated {
+			action = "Delegated BPF_TOKEN Authorized"
+			sev = "INFO"
 		}
 		findings = append(findings, HostRootkitFinding{
 			Detector:       "bpf-lsm-lockdown",
 			Category:       "lsm_enforcement",
-			Severity:       "CRITICAL",
+			Severity:       sev,
 			Target:         ev.Comm + " (PID " + strconv.FormatUint(uint64(ev.PID), 10) + ")",
 			Description:    action + " via " + ev.Hook + " — detail=" + ev.Detail + " (dev=" + strconv.FormatUint(ev.Dev, 10) + " ino=" + strconv.FormatUint(ev.Ino, 10) + ")",
 			MitreTechnique: ev.MitreTechnique,

@@ -16,8 +16,12 @@ export PAGER="less -FRX"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Auto-detect K3s kubeconfig if present so kubectl / helm / k9s work immediately
-if [[ -z "${KUBECONFIG:-}" ]] && [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
-  export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+if [[ -z "${KUBECONFIG:-}" ]]; then
+  if [[ -r "${HOME}/.kube/config" ]]; then
+    export KUBECONFIG="${HOME}/.kube/config"
+  elif [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
+    export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
+  fi
 fi
 
 # Respect explicit workstation plugin disablement (attack-surface reduction mode)

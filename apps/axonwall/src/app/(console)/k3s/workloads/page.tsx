@@ -1,10 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Boxes, Plus, Trash2 } from 'lucide-react';
+import { Boxes, Plus, Trash2, Globe } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
-import type { DesiredState } from '@axonwall/lib/schemas';
+import type { DesiredState, K3sWorkloadSpec } from '@axonwall/lib/schemas';
 
 export default function K3sWorkloadsPage() {
   const { applyState } = useDesiredStateApply();
@@ -12,6 +12,9 @@ export default function K3sWorkloadsPage() {
   const [name, setName] = useState('minio-s3');
   const [image, setImage] = useState('quay.io/minio/minio:latest');
   const [port, setPort] = useState(9000);
+  const [serviceType, setServiceType] = useState<NonNullable<K3sWorkloadSpec['serviceType']>>('ClusterIP');
+  const [ingressHostname, setIngressHostname] = useState('');
+  const [exposeViaHaproxy, setExposeViaHaproxy] = useState(true);
   const [storageClass, setStorageClass] = useState<'axonwall-replicated-ha' | 'axonwall-zfs-local' | 'none'>('axonwall-replicated-ha');
   const [storageSizeGb, setStorageSizeGb] = useState(50);
 
@@ -38,8 +41,11 @@ export default function K3sWorkloadsPage() {
         defaultReplicaCount: 2,
         replicatedBackingPool: 'tank/openebs-replicated',
       },
+      enableUserNamespaces: false,
+      bpfTokenProfiles: [],
       workloads: [],
     };
+    const trimmedIngress = ingressHostname.trim();
     next.k3s.workloads = [
       ...next.k3s.workloads.filter((w) => w.name !== name.trim()),
       {
@@ -48,19 +54,18 @@ export default function K3sWorkloadsPage() {
         image: image.trim(),
         replicas: 1,
         port,
+        serviceType,
+        ...(trimmedIngress ? { ingressHostname: trimmedIngress, exposeViaHaproxy } : {}),
         storageClass,
         storageSizeGb,
         mountPath: '/data',
         enabled: true,
       },
     ];
-    // C2: a fingerprint mismatch (or any apply failure) must be visible,
-    // not an unhandled rejection — the workload was not added. This page
-    // has no banner state, so the failure is alerted like the fleet page
-    // does for its errors.
     try {
       await applyState(next);
       setState(next);
+      setIngressHostname('');
     } catch (err: any) {
       alert(err?.message || 'Failed to add workload.');
     }
@@ -72,7 +77,6 @@ export default function K3sWorkloadsPage() {
     if (next.k3s) {
       next.k3s.workloads = next.k3s.workloads.filter((w) => w.name !== wlName);
     }
-    // C2: see addWorkload above — a refused apply must be visible.
     try {
       await applyState(next);
       setState(next);
@@ -88,9 +92,9 @@ export default function K3sWorkloadsPage() {
           <Boxes className="w-5 h-5" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">K3s Workloads & Stateful Applications</h1>
+          <h1 className="text-2xl font-bold text-white tracking-tight">K3s Workloads &amp; Converged Ingress</h1>
           <p className="text-sm text-slate-400">
-            Deploy stateful applications backed by OpenEBS replicated PVCs for automatic failover across HA nodes.
+            Deploy stateful apps backed by OpenEBS ZFS PVCs with automatic Unbound split-DNS &amp; HAProxy TLS SNI/Host routing.
           </p>
         </div>
       </div>
@@ -149,6 +153,42 @@ export default function K3sWorkloadsPage() {
             />
           </div>
         </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Kubernetes Service Type</label>
+            <select
+              value={serviceType}
+              onChange={(e) => setServiceType(e.target.value as NonNullable<K3sWorkloadSpec['serviceType']>)}
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+            >
+              <option value="ClusterIP">ClusterIP (Internal / Ingress)</option>
+              <option value="LoadBalancer">LoadBalancer (Cilium LB-IPAM + FRR BGP)</option>
+              <option value="NodePort">NodePort</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Converged Ingress Hostname (optional)</label>
+            <input
+              type="text"
+              value={ingressHostname}
+              onChange={(e) => setIngressHostname(e.target.value)}
+              placeholder="s3.axonwall.local"
+              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+            />
+          </div>
+          <div className="flex items-end pb-2">
+            <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={exposeViaHaproxy}
+                onChange={(e) => setExposeViaHaproxy(e.target.checked)}
+              />
+              Auto-register Unbound DNS + HAProxy TLS Backend
+            </label>
+          </div>
+        </div>
+
         <button
           onClick={addWorkload}
           className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white"
@@ -164,10 +204,20 @@ export default function K3sWorkloadsPage() {
         ) : (
           <div className="space-y-2">
             {(state?.k3s?.workloads ?? []).map((w) => (
-              <div key={w.name} className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs">
-                <div>
+              <div key={w.name} className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-mono font-bold text-white">{w.name}</span>
-                  <span className="text-slate-400 font-mono ml-2">({w.image})</span>
+                  <span className="text-slate-400 font-mono">({w.image})</span>
+                  {w.serviceType && w.serviceType !== 'ClusterIP' && (
+                    <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 font-mono text-[10px]">
+                      {w.serviceType}
+                    </span>
+                  )}
+                  {w.ingressHostname && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono text-[10px]">
+                      <Globe className="w-3 h-3" /> {w.ingressHostname}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-4">
                   <span className="font-mono text-emerald-400">

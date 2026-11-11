@@ -313,7 +313,7 @@ ENV_EOF
         fi
 
         # 5c. Sync any regular systemd unit files in /etc/systemd/system/ so ISO-placed copies do not shadow updated /lib/systemd/system/ units
-        for unit in axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service; do
+        for unit in axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service; do
             if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then
                 cp "/lib/systemd/system/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null || true
             fi
@@ -322,7 +322,7 @@ ENV_EOF
         # 6. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
+            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
             systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
         fi
         ;;

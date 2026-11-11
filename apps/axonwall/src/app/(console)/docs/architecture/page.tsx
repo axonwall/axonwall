@@ -1,13 +1,12 @@
 import React from 'react';
-import Link from 'next/link';
-import { Cpu, Layers, ShieldCheck, RefreshCw, Terminal, CheckCircle2, ArrowRight } from 'lucide-react';
+import { Cpu, Layers, ShieldCheck, RefreshCw, Terminal } from 'lucide-react';
 import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Axonwall Architecture | Linux nftables Engine & A/B Dual-Root',
+  title: 'Axonwall Architecture | Linux nftables, 12-Domain YAML & Boot Engines',
   description:
-    'Deep-dive into the Axonwall architectural foundation: Linux nftables multi-core scaling, Junos-style commit-confirm state machine, A/B dual-root OS updates, and Go daemon IPC.',
+    'Deep-dive into Axonwall v0.11.64 architecture: Linux nftables + eBPF XDP multi-core scaling, 12 declarative /etc/axonwall/*.yaml domains, Junos-style commit-confirm, A/B Dual-Root & ZFSBootMenu updates, and Go daemon IPC.',
 };
 
 export default function ArchitectureDocPage() {
@@ -17,13 +16,13 @@ export default function ArchitectureDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Core Subsystems
+          Core Subsystems • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          System Architecture & Engine
+          System Architecture &amp; Engine
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall replaces the 20-year-old FreeBSD <code className="text-slate-200 font-mono">pf</code> model with the modern Linux networking stack, pure <code className="text-emerald-400 font-mono">nftables</code> packet filtering, unbrickable A/B dual-root updates, and Junos-style transactional commit-confirm.
+          Axonwall replaces the 20-year-old FreeBSD <code className="text-slate-200 font-mono">pf</code> model with the modern Linux 6.12 LTS networking stack, pure <code className="text-emerald-400 font-mono">nftables</code> + Ring-0 eBPF XDP packet processing, 12 declarative YAML domain manifests, unbrickable A/B Dual-Root &amp; ZFSBootMenu updates, and Junos-style transactional commit-confirm.
         </p>
       </div>
 
@@ -62,9 +61,10 @@ export default function ArchitectureDocPage() {
           </div>
         </div>
 
-        <h3 className="text-base font-semibold text-white pt-2">Isolated nftables Table Architecture</h3>
-        <p className="text-xs text-slate-400">
-          Axonwall encapsulates all routing, NAT, and filtering policies within its own dedicated kernel table, ensuring full compatibility with co-located container workloads:
+        <h3 className="text-base font-semibold text-white pt-2">Isolated nftables Table &amp; Full Enterprise NAT/NGFW Parity</h3>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          Axonwall encapsulates all routing, NAT, and filtering policies within <code className="text-emerald-400 font-mono">table inet axonwall</code>{' '}
+          without disturbing co-located K3s or LXC workloads—compiling stateful filter rules (inbound/outbound/both directionality, source/destination negation, floating multi-interface rules, DSCP marking, per-rule PPS rate limits, and Multi-WAN <code className="text-slate-200 font-mono">fwmark</code> gateway groups), a complete NAT engine (<strong>DNAT + Hairpin NAT Reflection</strong>, <strong>SNAT</strong>, <strong>Masquerade</strong>, <strong>1:1 Bi-Directional BINAT</strong>, and <strong>Stateless IPv6 NPTv6</strong> prefix translation), Kea DHCPv4/DHCPv6 IA_NA/IA_PD + <code className="text-slate-200 font-mono">radvd</code> SLAAC, OpenVPN <code className="text-slate-200 font-mono">ovpn-dco</code> kernel TLS offload, Avahi mDNS reflection, and <code className="text-slate-200 font-mono">miniupnpd</code> UPnP/NAT-PMP:
         </p>
         <CodeBlock
           title="/etc/nftables/axonwall.nft"
@@ -106,6 +106,47 @@ export default function ArchitectureDocPage() {
         />
       </section>
 
+      {/* Declarative 12-Domain YAML Configuration */}
+      <section id="declarative-yaml" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Layers className="w-6 h-6 text-emerald-400" /> 12-Domain Declarative YAML Configuration
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Axonwall decomposes its entire appliance state into <strong>12 canonical YAML domain files</strong> inside{' '}
+          <code className="text-emerald-400 font-mono">/etc/axonwall/</code>, merged deterministically with optional lexical drop-in overrides in{' '}
+          <code className="text-emerald-400 font-mono">/etc/axonwall/conf.d/*.yaml</code> and compiled into a validated runtime snapshot at{' '}
+          <code className="text-slate-200 font-mono">/etc/axonwall/state.json</code>. On A/B Dual-Root appliances,{' '}
+          <code className="text-slate-200 font-mono">/etc/axonwall/</code> is bidirectionally synchronized to persistent storage at{' '}
+          <code className="text-emerald-400 font-mono">/mnt/axonwall-data/etc-axonwall/</code> so configurations survive slot switches seamlessly.
+        </p>
+
+        <div className="overflow-x-auto rounded-xl border border-slate-800">
+          <table className="w-full text-left text-xs border-collapse">
+            <thead className="bg-slate-900/90 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+              <tr>
+                <th className="p-3">#</th>
+                <th className="p-3">Canonical File</th>
+                <th className="p-3">Top-Level DesiredState Keys</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60 text-slate-300 font-mono">
+              <tr><td className="p-2.5 text-slate-500">1</td><td className="p-2.5 text-emerald-400">/etc/axonwall/system.yaml</td><td className="p-2.5 text-slate-300">version, capabilities, system, plugins, ai, eluvix, observability, snmp, ups, acme</td></tr>
+              <tr><td className="p-2.5 text-slate-500">2</td><td className="p-2.5 text-emerald-400">/etc/axonwall/interfaces.yaml</td><td className="p-2.5 text-slate-300">interfaces, vlans, bridges, bonds, virtualIps, vrfs</td></tr>
+              <tr><td className="p-2.5 text-slate-500">3</td><td className="p-2.5 text-emerald-400">/etc/axonwall/firewall.yaml</td><td className="p-2.5 text-slate-300">aliases, rules, nat, trafficShaper</td></tr>
+              <tr><td className="p-2.5 text-slate-500">4</td><td className="p-2.5 text-emerald-400">/etc/axonwall/routing.yaml</td><td className="p-2.5 text-slate-300">gateways, gatewayGroups, routes, frr</td></tr>
+              <tr><td className="p-2.5 text-slate-500">5</td><td className="p-2.5 text-emerald-400">/etc/axonwall/services.yaml</td><td className="p-2.5 text-slate-300">dhcp, dns, captivePortal, haproxy, freeradius</td></tr>
+              <tr><td className="p-2.5 text-slate-500">6</td><td className="p-2.5 text-emerald-400">/etc/axonwall/vpn.yaml</td><td className="p-2.5 text-slate-300">wireguard, rosenpass, ipsec, openvpn, headscale</td></tr>
+              <tr><td className="p-2.5 text-slate-500">7</td><td className="p-2.5 text-emerald-400">/etc/axonwall/security.yaml</td><td className="p-2.5 text-slate-300">suricata, crowdsec, geoip, zeroTrust, sso, tlsDecryption, hostDefense</td></tr>
+              <tr><td className="p-2.5 text-slate-500">8</td><td className="p-2.5 text-emerald-400">/etc/axonwall/ha.yaml</td><td className="p-2.5 text-slate-300">ha, fleet</td></tr>
+              <tr><td className="p-2.5 text-slate-500">9</td><td className="p-2.5 text-emerald-400">/etc/axonwall/storage.yaml</td><td className="p-2.5 text-slate-300">nas</td></tr>
+              <tr><td className="p-2.5 text-slate-500">10</td><td className="p-2.5 text-emerald-400">/etc/axonwall/k3s.yaml</td><td className="p-2.5 text-slate-300">k3s, vow</td></tr>
+              <tr><td className="p-2.5 text-slate-500">11</td><td className="p-2.5 text-emerald-400">/etc/axonwall/virt.yaml</td><td className="p-2.5 text-slate-300">virt, hostedEdge</td></tr>
+              <tr><td className="p-2.5 text-slate-500">12</td><td className="p-2.5 text-emerald-400">/etc/axonwall/vigilante.yaml</td><td className="p-2.5 text-slate-300">vigilante</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       {/* Junos Commit-Confirm */}
       <section id="commit-confirm" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
@@ -118,30 +159,53 @@ export default function ArchitectureDocPage() {
         <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4 font-mono text-xs">
           <div className="text-emerald-400 font-bold">COMMIT-CONFIRM LIFECYCLE:</div>
           <div className="space-y-2 text-slate-300">
-            <p>1. [INTENT] User or API generates proposed changes (JSON state bundle).</p>
+            <p>1. [INTENT] User, TUI, or API generates proposed DesiredState bundle from <code className="text-slate-100">/etc/axonwall/*.yaml</code>.</p>
             <p>2. [LINT] Privileged agent executes pre-flight syntax validation: <code className="text-slate-100">nft -c -f /tmp/proposed.nft</code></p>
-            <p>3. [APPLY & ARM] Rules applied to kernel; watchdog timer armed (default: 60s).</p>
-            <p>4. [QUORUM CHECK] Browser client sends periodic heartbeat confirmations.</p>
-            <p>5. [COMMIT OR REVERT] If confirmed, rule becomes permanent; if session drops, daemon reverts to <code className="text-emerald-400">last-known-good.nft</code> within 60s.</p>
+            <p>3. [APPLY &amp; ARM] Rules applied atomically to kernel; watchdog timer armed (default: 60–120s; <code className="text-slate-100">axonwallctl apply</code> defaults to 120s).</p>
+            <p>4. [QUORUM CHECK] Browser client or <code className="text-slate-100">axonwallctl confirm</code> sends explicit confirmation.</p>
+            <p>5. [COMMIT OR REVERT] If confirmed, bundle is persisted &amp; committed to GitOps; if session drops, daemon reverts to <code className="text-emerald-400">last-known-good.nft</code> automatically.</p>
           </div>
         </div>
 
         <Callout type="tip" title="Fail-Safe Verification">
-          Even if an administrator makes a mistake that drops all WAN/LAN connections, simply waiting 60 seconds guarantees that the firewall will cleanly roll back to the previously functioning ruleset without needing physical console access.
+          Even if an administrator makes a mistake that drops all WAN/LAN connections, simply waiting 60–120 seconds guarantees that the firewall will cleanly roll back to the previously functioning ruleset without needing physical console access.
         </Callout>
       </section>
 
-      {/* A/B Dual-Root System */}
+      {/* Boot & Partition Architectures */}
       <section id="ab-dual-root" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <RefreshCw className="w-6 h-6 text-emerald-400" /> A/B Dual-Root Partitioning & Watchdog
+          <RefreshCw className="w-6 h-6 text-emerald-400" /> Three Boot &amp; Update Architectures: A/B Dual-Root, ZFSBootMenu &amp; Rolling
         </h2>
         <p className="text-xs text-slate-400 leading-relaxed">
-          <strong>Why Two Identical Slots?</strong> In traditional firewalls, updates are applied directly to the running rootfs. If a kernel panic occurs or drivers break, the device is bricked. Axonwall stages updates onto the alternate inactive slot in the background. Because either slot can run the complete operating system and serve as active or fallback, both partitions must be identical in size and capabilities.
+          Axonwall supports three installation and firmware lifecycle architectures selectable in <code className="text-emerald-400 font-mono">axonwall-console --install</code>:
         </p>
 
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-emerald-400">1. A/B Dual-Root Slots (Default)</div>
+            <p className="text-slate-400 leading-relaxed">
+              Two identical ext4 partitions (<code className="text-slate-200 font-mono">axon_root_a</code> and{' '}
+              <code className="text-slate-200 font-mono">axon_root_b</code>, optionally mirrored via <code className="text-slate-200 font-mono">mdadm</code> RAID-1)
+              with background OTA staging (<code className="text-slate-200 font-mono">axonwallctl update</code>) and GRUB bootcount fallback.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-cyan-400">2. ZFSBootMenu Root-on-ZFS</div>
+            <p className="text-slate-400 leading-relaxed">
+              Boots directly from <code className="text-slate-200 font-mono">zroot/ROOT/*</code> OpenZFS Boot Environments across Stripe, Mirror, RAID-Z, or dRAID topologies with zero-copy snapshot clones (<code className="text-slate-200 font-mono">axonwallctl zbm</code>) and pre-boot watchdog revert.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-sky-400">3. Rolling Single-Root</div>
+            <p className="text-slate-400 leading-relaxed">
+              Traditional single-partition Debian/Ubuntu Linux layout (<code className="text-slate-200 font-mono">axonwallctl update --apt</code>) for operators managing standard VM templates or package-driven fleets.
+            </p>
+          </div>
+        </div>
+
         <CodeBlock
-          title="Disk Partition Scheme"
+          title="A/B Dual-Root Disk Partition Scheme"
           language="text"
           code={`+-----------------------------------------------------------------------------------------+
 | Partition 1: EFI System Partition (ESP)  | /boot/efi       | FAT32 | 512 MB             |
@@ -170,15 +234,15 @@ export default function ArchitectureDocPage() {
         <div className="space-y-3 text-xs sm:text-sm text-slate-300">
           <h3 className="text-base font-semibold text-white">Three-Step Autonomous Health Quorum</h3>
           <p>
-            Upon booting an upgraded rootfs slot, the privileged daemon <code className="text-emerald-400 font-mono">axonwalld</code> validates three critical subsystem health checks before committing the slot:
+            Upon booting an upgraded rootfs slot or ZFS Boot Environment, the privileged daemon <code className="text-emerald-400 font-mono">axonwalld</code> validates three critical subsystem health checks before committing the boot slot:
           </p>
           <ol className="list-decimal list-inside space-y-1.5 ml-2 text-xs text-slate-300">
             <li><strong>Network Carrier Status:</strong> Loopback (<code className="text-slate-100">lo</code>) and physical link carrier states.</li>
             <li><strong>nftables Subsystem:</strong> Kernel netfilter tables and rule compilation health.</li>
-            <li><strong>Control Plane IPC Quorum:</strong> Local Unix socket responsiveness (<code className="text-slate-100">/run/axonwall/agent.sock</code>).</li>
+            <li><strong>Control Plane IPC Quorum:</strong> Local Unix socket responsiveness (<code className="text-slate-100">/run/axonwall/agent.sock</code> and <code className="text-slate-100">/run/axonwall/agent-api.sock</code>).</li>
           </ol>
           <p className="text-xs text-slate-400">
-            If any check fails or the system experiences a kernel panic during boot, GRUB increments <code className="text-slate-200">bootcount</code>. After 3 failed attempts, GRUB automatically falls back to the previous healthy slot.
+            If any check fails or the system experiences a kernel panic during boot, GRUB or ZFSBootMenu increments <code className="text-slate-200">bootcount</code>. After 3 failed attempts, the bootloader automatically falls back to the previous healthy slot or Boot Environment.
           </p>
         </div>
       </section>
@@ -186,17 +250,28 @@ export default function ArchitectureDocPage() {
       {/* Privileged Daemon */}
       <section id="daemon" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Terminal className="w-6 h-6 text-emerald-400" /> Privileged Go Daemon (axonwalld) & IPC
+          <Terminal className="w-6 h-6 text-emerald-400" /> Privileged Go Daemon (axonwalld), IPC Security &amp; Ring-0 eBPF
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Security best practices dictate that web applications should never run as root. The Next.js web console and Node.js controller run with restricted unprivileged credentials and communicate with <code className="text-emerald-400 font-mono">axonwalld</code> exclusively over a local Unix domain socket:
+          Security best practices dictate that web applications should never run as root. The Next.js Web Console and Node.js controller run with restricted unprivileged credentials (<code className="text-slate-200 font-mono">axonwall-api</code> group) and communicate with <code className="text-emerald-400 font-mono">axonwalld</code> exclusively over isolated Unix domain sockets:
         </p>
 
-        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 font-mono text-xs text-slate-300">
-          <span className="text-slate-500">Socket Path:</span> <code className="text-emerald-400">/run/axonwall/agent.sock</code> (mode 0660, owned by axonwall:axonwall)
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 font-mono text-xs text-slate-300 space-y-2">
+          <div>
+            <span className="text-slate-500">HTTP/SSE REST Socket:</span>{' '}
+            <code className="text-emerald-400">/run/axonwall/agent-api.sock</code> (mode <code className="text-slate-200">0660 root:axonwall-api</code>, authenticated via 32-byte <code className="text-amber-300">/etc/axonwall/agent.token</code> in <code className="text-slate-200">X-Axonwall-Agent-Token</code>)
+          </div>
+          <div>
+            <span className="text-slate-500">Internal gRPC Socket:</span>{' '}
+            <code className="text-emerald-400">/run/axonwall/agent.sock</code> (high-throughput local control-plane RPC &amp; CLI bridge)
+          </div>
+          <div>
+            <span className="text-slate-500">Root-Only HA Control Socket:</span>{' '}
+            <code className="text-emerald-400">/run/axonwall/ha.sock</code> (mode <code className="text-slate-200">0600 root:root</code>, isolated for Keepalived/VRRP state transitions)
+          </div>
         </div>
-        <p className="text-xs text-slate-400">
-          The daemon handles all privileged OS interactions: atomic nftables compilation, conntrack table inspection, Keepalived reload signals, HWMON sensor queries, ethtool optical transceiver reads, and PTY web shell multiplexing.
+        <p className="text-xs text-slate-400 leading-relaxed">
+          In addition to atomic <code className="text-slate-200 font-mono">nftables</code> compilation, HWMON sensor polling, optical DOM reads, OpenZFS <code className="text-slate-200 font-mono">/proc/spl/kstat/zfs</code> ARC/L2ARC/ZIL telemetry, and Etckeeper GitOps commits, <code className="text-emerald-400 font-mono">axonwalld</code> attaches native <strong>Dual-Stack IPv4/IPv6 + 802.1Q/802.1ad QinQ VLAN XDP programs</strong> (<code className="text-slate-200 font-mono">BPF_MAP_TYPE_LRU_HASH</code> flow tables, <code className="text-slate-200 font-mono">BPF_MAP_TYPE_LPM_TRIE</code> CIDR subnet + exact-host monotonic TTL <code className="text-slate-200 font-mono">XDP_DROP</code> blocklists, and per-source Ring-0 TCP SYN-flood PPS rate limiting before <code className="text-slate-200 font-mono">sk_buff</code> allocation), alongside <strong>5 CO-RE BPF-LSM kernel hooks</strong> (<code className="text-slate-200 font-mono">lsm/socket_bind</code>, <code className="text-slate-200 font-mono">lsm/bpf</code>, <code className="text-slate-200 font-mono">lsm/uring_sqpoll</code>, <code className="text-slate-200 font-mono">lsm/bpf_token_create</code>, <code className="text-slate-200 font-mono">lsm/bpf_token_cmd</code>) guarding <code className="text-slate-200 font-mono">AF_ALG</code>, <code className="text-slate-200 font-mono">BPF_PROG_LOAD</code>, <code className="text-slate-200 font-mono">io_uring</code> SQPOLL, and Linux 6.9+ unprivileged <code className="text-slate-200 font-mono">BPF_TOKEN_CREATE</code> UserNS delegation.
         </p>
       </section>
     </div>

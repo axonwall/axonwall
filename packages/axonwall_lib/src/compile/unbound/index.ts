@@ -5,7 +5,17 @@ export interface UnboundCompileResult {
   unboundConfig: string;
 }
 
-export function compileUnbound(dns: DnsConfig, headscale?: HeadscaleConfig): UnboundCompileResult {
+export interface UnboundConvergedRecord {
+  fqdn: string;
+  ip: string;
+  comment?: string;
+}
+
+export function compileUnbound(
+  dns: DnsConfig,
+  headscale?: HeadscaleConfig,
+  convergedRecords?: UnboundConvergedRecord[],
+): UnboundCompileResult {
   const lines: string[] = [];
 
   lines.push('# Axonwall Unbound DNS Configuration');
@@ -45,6 +55,21 @@ export function compileUnbound(dns: DnsConfig, headscale?: HeadscaleConfig): Unb
       lines.push(`  local-data: "${fqdn} ${recordType} ${safeIp}"`);
       // Also generate PTR reverse record if needed
       lines.push(`  local-data-ptr: "${safeIp} ${fqdn}"`);
+    }
+    lines.push('');
+  }
+
+  // Converged Workload Auto-DNS (KVM VMs, LXC Containers, K3s Ingresses)
+  if (convergedRecords && convergedRecords.length > 0) {
+    lines.push('  # Converged Compute & K3s Auto-Registered Split-Horizon DNS');
+    const seenFqdn = new Set<string>();
+    for (const rec of convergedRecords) {
+      const safeFqdn = rec.fqdn.split(/[\r\n]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '').replace(/\.+$/, '');
+      const safeIp = rec.ip.split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:.]/g, '');
+      if (!safeFqdn || !safeIp || seenFqdn.has(`${safeFqdn}:${safeIp}`)) continue;
+      seenFqdn.add(`${safeFqdn}:${safeIp}`);
+      const recordType = safeIp.includes(':') ? 'IN AAAA' : 'IN A';
+      lines.push(`  local-data: "${safeFqdn}. ${recordType} ${safeIp}"`);
     }
     lines.push('');
   }

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -2173,6 +2174,24 @@ userPassword: %s
 		}
 	}
 
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	jsonPath := filepath.Join(ldapPluginClientsDir, pluginID+".json")
+	if existingData, err := os.ReadFile(jsonPath); err == nil {
+		var existing PluginLDAPBinding
+		if json.Unmarshal(existingData, &existing) == nil &&
+			existing.PluginID == pluginID &&
+			existing.Enabled &&
+			existing.URL == "ldap://127.0.0.1:389" &&
+			existing.BaseDN == baseDN &&
+			existing.BindDN == svcDN &&
+			existing.BindPassword == secret &&
+			existing.UserSearchBase == "ou=users,"+baseDN &&
+			existing.GroupSearchBase == "ou=groups,"+baseDN &&
+			existing.UpdatedAt != "" {
+			updatedAt = existing.UpdatedAt
+		}
+	}
+
 	binding := &PluginLDAPBinding{
 		PluginID:          pluginID,
 		Enabled:           true,
@@ -2185,7 +2204,7 @@ userPassword: %s
 		GroupSearchBase:   "ou=groups," + baseDN,
 		GroupSearchFilter: "(|(memberUid={username})(member={userDn}))",
 		RoleGroups:        roleGroups,
-		UpdatedAt:         time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:         updatedAt,
 	}
 
 	// Write /etc/axonwall/ldap-plugins/<pluginId>.json
@@ -2194,9 +2213,20 @@ userPassword: %s
 	// not exist (disk full, read-only dir). The primary files are
 	// errors; the per-plugin mirrors below are best-effort copies
 	// of the same data and only warn on failure.
-	jsonPath := filepath.Join(ldapPluginClientsDir, pluginID+".json")
 	jsonData, _ := json.MarshalIndent(binding, "", "  ")
-	if err := os.WriteFile(jsonPath, append(jsonData, '\n'), 0640); err != nil {
+	jsonBytes := append(jsonData, '\n')
+	wroteAny := false
+	writeIfChanged := func(path string, data []byte, perm os.FileMode) error {
+		if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+			return nil
+		}
+		if err := os.WriteFile(path, data, perm); err != nil {
+			return err
+		}
+		wroteAny = true
+		return nil
+	}
+	if err := writeIfChanged(jsonPath, jsonBytes, 0640); err != nil {
 		return nil, fmt.Errorf("failed to write plugin LDAP binding %s: %w", jsonPath, err)
 	}
 
@@ -2220,7 +2250,7 @@ userPassword: %s
 	envBuf.WriteString(fmt.Sprintf("%sREADONLY_GROUPS=%s\n", envPrefix, strings.Join(roleGroups["readonly"], ",")))
 
 	envPath := filepath.Join(ldapPluginClientsDir, pluginID+".env")
-	if err := os.WriteFile(envPath, []byte(envBuf.String()), 0640); err != nil {
+	if err := writeIfChanged(envPath, []byte(envBuf.String()), 0640); err != nil {
 		return nil, fmt.Errorf("failed to write plugin LDAP binding %s: %w", envPath, err)
 	}
 
@@ -2229,30 +2259,33 @@ userPassword: %s
 	// failed mirror is logged, not fatal.
 	var mirrorErrs []string
 	mirrorWrite := func(path string, data []byte) {
-		if err := os.WriteFile(path, data, 0640); err != nil {
+		if err := writeIfChanged(path, data, 0640); err != nil {
 			mirrorErrs = append(mirrorErrs, fmt.Sprintf("%s: %v", path, err))
 		}
 	}
 	if pluginID == "eluvix" {
 		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
-		mirrorWrite("/etc/axonwall/eluvix/ldap.json", append(jsonData, '\n'))
+		mirrorWrite("/etc/axonwall/eluvix/ldap.json", jsonBytes)
 	}
 	if pluginID == "vigilant-octo-waffle" {
 		_ = os.MkdirAll("/etc/axonwall/vow", 0755)
-		mirrorWrite("/etc/axonwall/vow/ldap.json", append(jsonData, '\n'))
+		mirrorWrite("/etc/axonwall/vow/ldap.json", jsonBytes)
 	}
 	if pluginID == "core-vigilante" || pluginID == "vigilante" {
-		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.json"), append(jsonData, '\n'))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.json"), jsonBytes)
 		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.env"), []byte(envBuf.String()))
-		mirrorWrite(filepath.Join(ldapPluginClientsDir, "core-vigilante.json"), append(jsonData, '\n'))
+		mirrorWrite(filepath.Join(ldapPluginClientsDir, "core-vigilante.json"), jsonBytes)
 		mirrorWrite(filepath.Join(ldapPluginClientsDir, "core-vigilante.env"), []byte(envBuf.String()))
 		_ = os.MkdirAll("/etc/axonwall/vigilante", 0755)
-		mirrorWrite("/etc/axonwall/vigilante/ldap.json", append(jsonData, '\n'))
+		mirrorWrite("/etc/axonwall/vigilante/ldap.json", jsonBytes)
 		_ = os.MkdirAll("/var/lib/axonwall/vigilante", 0755)
-		mirrorWrite("/var/lib/axonwall/vigilante/ldap.json", append(jsonData, '\n'))
+		mirrorWrite("/var/lib/axonwall/vigilante/ldap.json", jsonBytes)
 	}
 	if len(mirrorErrs) > 0 {
 		log.Printf("[Directory] Warning: failed to write plugin LDAP binding mirrors for %s: %s", pluginID, strings.Join(mirrorErrs, "; "))
+	}
+	if wroteAny && d.etckeeper != nil {
+		d.etckeeper.ScheduleCommit(fmt.Sprintf("Provisioned LDAP integration binding for %s", pluginID), "axonwalld")
 	}
 
 	return binding, nil

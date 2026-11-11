@@ -9,6 +9,15 @@ STATE="${1:-FAULT}"
 
 logger -t axonwall-ha "VRRP transition received: ${STATE}" 2>/dev/null || true
 
+# Commit/flush conntrackd external cache on VRRP transition
+if [ -x /usr/sbin/conntrackd ] && [ -f /etc/conntrackd/conntrackd.conf ]; then
+  case "${STATE}" in
+    MASTER) /usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c 2>/dev/null || true ;;
+    BACKUP) /usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f 2>/dev/null || true ;;
+    FAULT)  /usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t 2>/dev/null || true ;;
+  esac
+fi
+
 # Notify running axonwalld daemon
 if command -v axonwalld >/dev/null 2>&1; then
   axonwalld -notify "${STATE}" || true

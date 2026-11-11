@@ -29,13 +29,13 @@ export default function ThemesDocumentationPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Theming & Ecosystem
+          Theming &amp; Ecosystem • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          Theme Customization & Repository Ecosystem
+          Theme Customization &amp; Repository Ecosystem
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall features an extensible, token-driven theming architecture supporting over 20 curated palettes—including canonical Solarized, Gruvbox, Catppuccin, and pure OLED black. Learn how to create custom palettes, publish multi-theme Git repositories, and import community themes with 1-click.
+          Axonwall features an extensible, token-driven theming architecture supporting over 20 curated Web Console palettes—including canonical Solarized, Gruvbox, Catppuccin, and pure OLED black—plus hardware-level ZFSBootMenu UEFI splash and ANSI boot-console theming via <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code>. Learn how to create custom palettes, publish multi-theme Git repositories, import community themes with 1-click, and brand your appliance boot environment.
         </p>
       </div>
 
@@ -301,6 +301,59 @@ export default function ThemesDocumentationPage() {
 
         <Callout type="tip" title="Access All 19 Winnegans Palettes">
           All 19 official Winnegans themes—including <strong>Ethan Schoonover&apos;s Solarized Dark and Light</strong>, <strong>Pavel Pertsev&apos;s Gruvbox</strong>, <strong>Catppuccin (Mocha, Macchiato, Frappé, Latte)</strong>, <strong>Obsidian OLED</strong>, and <strong>Crimson Midnight</strong>—are built directly into Axonwall out-of-the-box.
+        </Callout>
+      </section>
+
+      {/* ZFSBootMenu Boot-Screen Theming */}
+      <section id="zbm-boot-theming" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Layers className="w-6 h-6 text-emerald-400" /> ZFSBootMenu UEFI Splash &amp; Boot-Screen Theming
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Beyond the browser-based Web Console, Axonwall v0.11.64 ships <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code> to customize the physical/KVM early-boot environment on ZFS installations. It renders a branded 24-bit UEFI <code className="text-slate-200 font-mono">.splash</code> BMP image into the ZFSBootMenu v3.1.0 Unified Kernel Image (UKI), configures high-DPI Linux framebuffer console fonts (Terminus / Lat15), applies tactical 16-color ANSI kernel VT palettes, and automatically synchronizes the rebuilt EFI binary across mirrored EFI System Partitions (<code className="text-slate-200 font-mono">/boot/efi</code> and <code className="text-slate-200 font-mono">/boot/efi-mirror</code>).
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-cyan-500/30 space-y-1">
+            <span className="font-mono font-bold text-cyan-400">cyber-cyan</span>
+            <p className="text-slate-400">Default Axonwall deep-navy &amp; electric cyan tactical HUD</p>
+          </div>
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-emerald-500/30 space-y-1">
+            <span className="font-mono font-bold text-emerald-400">emerald-ops</span>
+            <p className="text-slate-400">Phosphor emerald NOC/SOC high-contrast terminal</p>
+          </div>
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-amber-500/30 space-y-1">
+            <span className="font-mono font-bold text-amber-400">amber-tactical</span>
+            <p className="text-slate-400">Warm amber CRT night-vision rack console palette</p>
+          </div>
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-rose-500/30 space-y-1">
+            <span className="font-mono font-bold text-rose-400">crimson-soc</span>
+            <p className="text-slate-400">Obsidian black &amp; crimson red-team / Vault alert styling</p>
+          </div>
+          <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-700 space-y-1">
+            <span className="font-mono font-bold text-slate-200">mono-stealth</span>
+            <p className="text-slate-400">Minimalist monochrome grayscale for low-light colocation cages</p>
+          </div>
+        </div>
+
+        <CodeBlock
+          code={`# List built-in ZFSBootMenu boot-screen palettes and active font/splash status
+sudo axonwall-zbm-theme list
+
+# Apply a tactical boot palette, embed UEFI .splash BMP, rebuild ZBM UKI, and sync mirrored ESPs
+sudo axonwall-zbm-theme apply emerald-ops --font ter-v24b
+
+# Inspect ZFSBootMenu boot environments & snapshot rollback integration
+sudo axonwallctl zbm status`}
+          language="bash"
+        />
+
+        <Callout type="info" title="ZFSBootMenu Boot Environments & Rollback">
+          For full details on ZFSBootMenu v3.1.0 boot environment cloning, pre-update ZFS snapshot rollback, and mirrored EFI System Partition redundancy, see the{' '}
+          <Link href="/docs/installer-raid-zfs" className="text-emerald-400 hover:underline font-semibold">
+            Hardware Installer, RAID &amp; ZFS Boot Environments
+          </Link>{' '}
+          documentation.
         </Callout>
       </section>
     </div>

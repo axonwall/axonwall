@@ -209,6 +209,8 @@ if [[ "${FLAVOR}" == "axonwall" ]]; then
   ln -sf /etc/systemd/system/axonwall-ui.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-ui.service
   cp "${SCRIPT_DIR}/../debian/headscale.service" config/includes.chroot/etc/systemd/system/ || true
   ln -sf /etc/systemd/system/headscale.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/headscale.service
+  cp "${SCRIPT_DIR}/../debian/k3s.service" config/includes.chroot/etc/systemd/system/ || true
+  ln -sf /etc/systemd/system/k3s.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/k3s.service
 
   mkdir -p config/includes.chroot/etc/headscale
   cp "${SCRIPT_DIR}/../debian/headscale-config.yaml" config/includes.chroot/etc/headscale/config.yaml || true
@@ -381,6 +383,17 @@ if [[ ! -f config/includes.chroot/usr/local/bin/kubectl ]]; then
   curl -fsSL -o config/includes.chroot/usr/local/bin/kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
   echo "${KUBECTL_SHA256}  config/includes.chroot/usr/local/bin/kubectl" | sha256sum -c -
   chmod 0755 config/includes.chroot/usr/local/bin/kubectl
+fi
+
+# Fetch K3s binary for in-house Kubernetes control plane & worker engine (core-k3s plugin)
+K3S_VERSION="v1.32.3+k3s1"
+K3S_URL_VERSION="v1.32.3%2Bk3s1"
+K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
+if [[ ! -f config/includes.chroot/usr/local/bin/k3s ]]; then
+  echo "[+] Fetching K3s ${K3S_VERSION}..."
+  curl -fsSL -o config/includes.chroot/usr/local/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  echo "${K3S_SHA256}  config/includes.chroot/usr/local/bin/k3s" | sha256sum -c -
+  chmod 0755 config/includes.chroot/usr/local/bin/k3s
 fi
 
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified

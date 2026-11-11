@@ -28,9 +28,22 @@ type K3sRuntimeBundle struct {
 	AuthToken             string `json:"authToken"`
 	HaSharedSecret        string `json:"haSharedSecret"` // alias emitted by compiler
 	AutoJoinHaPeer        bool   `json:"autoJoinHaPeer"`
+	CniPlugin             string `json:"cniPlugin,omitempty"`
+	HaTopology            string `json:"haTopology,omitempty"`
+	ZfsLocalPvPool        string `json:"zfsLocalPvPool"`
+	ReplicatedPool        string `json:"replicatedPool"`
 	K3sConfigYaml         string `json:"k3sConfigYaml"`
 	OpenEbsManifestYaml   string `json:"openEbsManifestYaml"`
 	WorkloadsManifestYaml string `json:"workloadsManifestYaml"`
+	CiliumManifestYaml    string `json:"ciliumManifestYaml,omitempty"`
+	ServiceLbManifestYaml string `json:"serviceLbManifestYaml,omitempty"`
+}
+
+type K3sEtcdSnapshotInfo struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"sizeBytes"`
+	CreatedAt string `json:"createdAt"`
 }
 
 type K3sNodeInfo struct {
@@ -58,6 +71,8 @@ type K3sClusterStatus struct {
 	ServiceActive   bool                `json:"serviceActive"`
 	ClusterJoined   bool                `json:"clusterJoined"`
 	Role            string              `json:"role"`
+	CniPlugin       string              `json:"cniPlugin,omitempty"`
+	HaTopology      string              `json:"haTopology,omitempty"`
 	HaAutoJoined    bool                `json:"haAutoJoined"`
 	OpenEbsReady    bool                `json:"openEbsReady"`
 	OpenEbsHealthy  bool                `json:"openEbsHealthy"`
@@ -213,6 +228,16 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 			return fmt.Errorf("k3s bundle rejected: %w", err)
 		}
 	}
+	if bundle.CiliumManifestYaml != "" {
+		if err := validateK3sManifest(bundle.CiliumManifestYaml); err != nil {
+			return fmt.Errorf("k3s cilium manifest rejected: %w", err)
+		}
+	}
+	if bundle.ServiceLbManifestYaml != "" {
+		if err := validateK3sManifest(bundle.ServiceLbManifestYaml); err != nil {
+			return fmt.Errorf("k3s servicelb manifest rejected: %w", err)
+		}
+	}
 
 	m.mu.Lock()
 	m.cfg = bundle
@@ -220,8 +245,17 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 
 	if !bundle.Enabled {
 		slog.Info("K3s plugin is disabled; stopping k3s service")
+		_ = removeFileIfExists(filepath.Join(k3sEtcDir, "config.yaml"))
 		_ = exec.Command("systemctl", "stop", "k3s").Run()
 		return nil
+	}
+
+	// On real appliances (when not redirected by SetK3sPathsForTest),
+	// ensure /etc/systemd/system/k3s.service exists if /lib/systemd/system/k3s.service
+	// was not yet installed by the .deb package, and ensure the OpenEBS backing ZFS dataset exists.
+	if k3sEtcDir == "/etc/rancher/k3s" {
+		ensureK3sServiceUnit()
+		ensureOpenEbsZfsDataset(bundle.ReplicatedPool)
 	}
 
 	// Ensure IP forwarding and loose reverse-path filtering (rp_filter=2) are active for K3s CNI overlay pod traffic
@@ -248,7 +282,14 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 			m.mu.Unlock()
 			slog.Info("Fetched K3s join token from HA primary peer", "peerIp", bundle.PeerIp)
 		} else {
-			slog.Warn("Could not fetch K3s join token from HA peer yet; will retry on HA sync cycle", "peerIp", bundle.PeerIp, "error", err)
+			if existingTok, rErr := os.ReadFile(filepath.Join(k3sStateDir, "k3s-join.token")); rErr == nil && strings.TrimSpace(string(existingTok)) != "" {
+				m.mu.Lock()
+				m.haAutoJoined = true
+				m.lastMessage = fmt.Sprintf("Using cached K3s join token for HA primary https://%s", net.JoinHostPort(bundle.PeerIp, "6443"))
+				m.mu.Unlock()
+			} else {
+				slog.Warn("Could not fetch K3s join token from HA peer yet; will retry on HA sync cycle", "peerIp", bundle.PeerIp, "error", err)
+			}
 		}
 	}
 
@@ -281,6 +322,24 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 			perm:    0644,
 		})
 	}
+	if bundle.CiliumManifestYaml != "" {
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sServerManifestDir, "axonwall-cilium.yaml"),
+			content: bundle.CiliumManifestYaml,
+			perm:    0644,
+		})
+	} else {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-cilium.yaml"))
+	}
+	if bundle.ServiceLbManifestYaml != "" {
+		writes = append(writes, atomicFileWrite{
+			path:    filepath.Join(k3sServerManifestDir, "axonwall-servicelb.yaml"),
+			content: bundle.ServiceLbManifestYaml,
+			perm:    0644,
+		})
+	} else {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-servicelb.yaml"))
+	}
 	if err := writeFilesAtomic(writes); err != nil {
 		return err
 	}
@@ -291,7 +350,19 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	if out, err := exec.Command("systemctl", "reload-or-restart", "k3s").CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to reload-or-restart k3s: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
+
+	// Ensure /etc/rancher/k3s/k3s.yaml is accessible by admin operators in group axonwall-api
+	ensureKubeconfigPermissions()
+
 	return nil
+}
+
+func ensureKubeconfigPermissions() {
+	kubeconfigPath := filepath.Join(k3sEtcDir, "k3s.yaml")
+	if _, err := os.Stat(kubeconfigPath); err == nil {
+		_ = exec.Command("chown", ":axonwall-api", kubeconfigPath).Run()
+		_ = os.Chmod(kubeconfigPath, 0640)
+	}
 }
 
 type VowRuntimeBundle struct {
@@ -433,12 +504,23 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		role = "secondary-ha-server"
 	}
 
+	cniPlugin := cfg.CniPlugin
+	if cniPlugin == "" {
+		cniPlugin = "flannel"
+	}
+	haTopo := cfg.HaTopology
+	if haTopo == "" {
+		haTopo = "embedded-etcd"
+	}
+
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
 		Running:         running,
 		ServiceActive:   serviceActive,
 		ClusterJoined:   joined,
 		Role:            role,
+		CniPlugin:       cniPlugin,
+		HaTopology:      haTopo,
 		HaAutoJoined:    joined,
 		OpenEbsReady:    openEbsReady,
 		OpenEbsHealthy:  openEbsHealthy,
@@ -447,6 +529,194 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		Volumes:         volumes,
 		LastSyncMessage: lastMsg,
 	}
+}
+
+var k3sEtcdSnapshotDir = "/var/lib/rancher/k3s/server/db/snapshots"
+
+// ListEtcdSnapshots inspects local K3s embedded etcd snapshots on disk.
+func (m *K3sManager) ListEtcdSnapshots() []K3sEtcdSnapshotInfo {
+	entries, err := os.ReadDir(k3sEtcdSnapshotDir)
+	if err != nil {
+		return []K3sEtcdSnapshotInfo{}
+	}
+	var out []K3sEtcdSnapshotInfo
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, K3sEtcdSnapshotInfo{
+			Name:      entry.Name(),
+			Path:      filepath.Join(k3sEtcdSnapshotDir, entry.Name()),
+			SizeBytes: info.Size(),
+			CreatedAt: info.ModTime().UTC().Format(time.RFC3339),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	return out
+}
+
+// SaveEtcdSnapshot triggers an immediate K3s embedded etcd snapshot via `k3s etcd-snapshot save`.
+func (m *K3sManager) SaveEtcdSnapshot(name string) (string, error) {
+	safeName := strings.TrimSpace(name)
+	if safeName == "" {
+		safeName = fmt.Sprintf("axonwall-etcd-%s", time.Now().UTC().Format("20060102-150405"))
+	}
+	for _, r := range safeName {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return "", fmt.Errorf("invalid etcd snapshot name %q", name)
+		}
+	}
+	if strings.HasPrefix(safeName, "-") || strings.HasPrefix(safeName, ".") {
+		return "", fmt.Errorf("invalid etcd snapshot name %q", name)
+	}
+	k3sBin, err := exec.LookPath("k3s")
+	if err != nil {
+		return "", fmt.Errorf("k3s binary not found on system")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, k3sBin, "etcd-snapshot", "save", "--name", safeName).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("k3s etcd-snapshot save failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return safeName, nil
+}
+
+// RestoreEtcdSnapshot restores the embedded etcd cluster from a local snapshot inside k3sEtcdSnapshotDir.
+func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
+	base := filepath.Base(strings.TrimSpace(snapshotName))
+	if base == "" || base == "." || base == ".." || strings.HasPrefix(base, "-") {
+		return fmt.Errorf("invalid etcd snapshot filename %q", snapshotName)
+	}
+	fullPath := filepath.Join(k3sEtcdSnapshotDir, base)
+	info, err := os.Lstat(fullPath)
+	if err != nil || info.IsDir() || (info.Mode()&os.ModeSymlink) != 0 {
+		return fmt.Errorf("etcd snapshot %q not found or invalid", base)
+	}
+	k3sBin, err := exec.LookPath("k3s")
+	if err != nil {
+		return fmt.Errorf("k3s binary not found on system")
+	}
+	_ = exec.Command("systemctl", "stop", "k3s").Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, k3sBin, "server", "--cluster-reset", "--cluster-reset-restore-path="+fullPath).CombinedOutput()
+	if err != nil {
+		_ = exec.Command("systemctl", "start", "k3s").Run()
+		return fmt.Errorf("k3s cluster-reset restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	if startOut, startErr := exec.Command("systemctl", "start", "k3s").CombinedOutput(); startErr != nil {
+		return fmt.Errorf("etcd restored, but failed to restart k3s: %s (%w)", strings.TrimSpace(string(startOut)), startErr)
+	}
+	return nil
+}
+
+const defaultK3sServiceUnit = `[Unit]
+Description=Lightweight Kubernetes (Axonwall In-House K3s Engine)
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/rancher/k3s/config.yaml
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/default/%N
+EnvironmentFile=-/etc/sysconfig/%N
+EnvironmentFile=-/etc/systemd/system/k3s.service.env
+KillMode=process
+Delegate=yes
+User=root
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=-/usr/sbin/modprobe br_netfilter
+ExecStartPre=-/usr/sbin/modprobe overlay
+ExecStart=/usr/local/bin/k3s server --prefer-bundled-bin
+`
+
+func ensureK3sServiceUnit() {
+	if _, err := os.Stat("/etc/systemd/system/k3s.service"); err == nil {
+		return
+	}
+	if _, err := os.Stat("/lib/systemd/system/k3s.service"); err == nil {
+		return
+	}
+	if err := os.WriteFile("/etc/systemd/system/k3s.service", []byte(defaultK3sServiceUnit), 0644); err != nil {
+		slog.Warn("Could not write /etc/systemd/system/k3s.service", "error", err)
+		return
+	}
+	_ = exec.Command("systemctl", "daemon-reload").Run()
+	_ = exec.Command("systemctl", "enable", "k3s.service").Run()
+}
+
+func ensureOpenEbsZfsDataset(replicatedPool string) {
+	ds := strings.TrimSpace(replicatedPool)
+	if ds == "" || !validZfsPath(ds, true) || !strings.Contains(ds, "/") {
+		return
+	}
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return
+	}
+	poolName := strings.SplitN(ds, "/", 2)[0]
+	if err := exec.Command("zpool", "list", "-H", poolName).Run(); err != nil {
+		return
+	}
+	if err := exec.Command("zfs", "list", "-H", ds).Run(); err != nil {
+		_ = exec.Command("zfs", "create", "-p", "-o", "compression=lz4", ds).Run()
+	}
+	_ = exec.Command("zfs", "mount", "-O", ds).Run()
+}
+
+// LoadSavedConfig restores the in-memory K3sRuntimeBundle and HA auto-join latch at daemon startup.
+func (m *K3sManager) LoadSavedConfig(rawJSON []byte) {
+	var bundle K3sRuntimeBundle
+	if err := json.Unmarshal(rawJSON, &bundle); err != nil {
+		return
+	}
+	if bundle.Role == "" && bundle.HaRole != "" {
+		bundle.Role = bundle.HaRole
+	}
+	if bundle.PeerIp == "" && bundle.HaPeerAddress != "" {
+		bundle.PeerIp = bundle.HaPeerAddress
+	}
+	if bundle.AuthToken == "" && bundle.HaSharedSecret != "" {
+		bundle.AuthToken = bundle.HaSharedSecret
+	}
+	m.mu.Lock()
+	m.cfg = bundle
+	if (bundle.Role == "backup" || bundle.Role == "secondary") && bundle.AutoJoinHaPeer {
+		if existingTok, err := os.ReadFile(filepath.Join(k3sStateDir, "k3s-join.token")); err == nil && strings.TrimSpace(string(existingTok)) != "" {
+			m.haAutoJoined = true
+			m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(bundle.PeerIp, "6443"))
+		}
+	}
+	m.mu.Unlock()
+}
+
+// IsEnabled reports whether the K3s plugin is currently enabled in configuration.
+func (m *K3sManager) IsEnabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.Enabled
+}
+
+// MarkHaAutoJoined records that the HA backup poller retrieved the peer token and joined the cluster.
+func (m *K3sManager) MarkHaAutoJoined(peerIp string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.haAutoJoined = true
+	m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(peerIp, "6443"))
 }
 
 // isSystemdServiceActive reports whether a systemd unit is active.
@@ -603,25 +873,53 @@ type kubectlPodList struct {
 }
 
 // probeOpenEBSHealth reports whether the OpenEBS pods are all running
-// with ready containers. No pods, or a failed probe, means not ready.
+// with ready containers, or when using the embedded ZFS/Replicated StorageClasses
+// without separate pods in -n openebs, whether both axonwall-zfs-local and
+// axonwall-replicated-ha StorageClasses are provisioned in the cluster.
 func probeOpenEBSHealth(ctx context.Context) (ready, healthy bool) {
 	out, err := runKubectlJSON(ctx, "pods", "-n", "openebs")
-	if err != nil {
-		return false, false
-	}
-	var list kubectlPodList
-	if err := json.Unmarshal(out, &list); err != nil || len(list.Items) == 0 {
-		return false, false
-	}
-	for _, item := range list.Items {
-		if item.Status.Phase != "Running" {
-			return false, false
-		}
-		for _, c := range item.Status.ContainerStatuses {
-			if !c.Ready {
-				return false, false
+	if err == nil {
+		var list kubectlPodList
+		if err := json.Unmarshal(out, &list); err == nil && len(list.Items) > 0 {
+			for _, item := range list.Items {
+				if item.Status.Phase != "Running" {
+					return false, false
+				}
+				for _, c := range item.Status.ContainerStatuses {
+					if !c.Ready {
+						return false, false
+					}
+				}
 			}
+			return true, true
 		}
 	}
-	return true, true
+	scOut, scErr := runKubectlJSON(ctx, "storageclass")
+	if scErr != nil {
+		return false, false
+	}
+	var scList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(scOut, &scList); err != nil || len(scList.Items) == 0 {
+		return false, false
+	}
+	hasZfsLocal := false
+	hasReplicated := false
+	for _, sc := range scList.Items {
+		if sc.Metadata.Name == "axonwall-zfs-local" {
+			hasZfsLocal = true
+		}
+		if sc.Metadata.Name == "axonwall-replicated-ha" {
+			hasReplicated = true
+		}
+	}
+	if hasZfsLocal && hasReplicated {
+		return true, true
+	}
+	return false, false
 }

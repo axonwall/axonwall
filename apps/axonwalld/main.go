@@ -77,9 +77,17 @@ type AgentServer struct {
 	watchdog         *engine.WatchdogEngine
 	nasManager       *engine.NasManager
 	k3sManager       *engine.K3sManager
+	virtManager      *engine.VirtManager
 	vigilanteManager *engine.VigilanteManager
 	etckeeperManager *engine.EtckeeperManager
 	directoryManager *engine.DirectoryManager
+	ddnsManager      *engine.DdnsManager
+}
+
+func (s *AgentServer) SetVirtManager(vm *engine.VirtManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.virtManager = vm
 }
 
 // isSnapshotEligibleName reports whether a config file name is covered
@@ -366,6 +374,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		vigilanteManager: vigilanteManager,
 		etckeeperManager: etckeeperManager,
 		directoryManager: directoryManager,
+		ddnsManager:      engine.NewDdnsManager(),
 	}
 
 	if pendingExists {
@@ -509,15 +518,25 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 		"/etc/freeradius/",
 		"/etc/snmp/",
 		"/etc/nut/",
+		"/etc/openvpn/",
+		"/etc/avahi/",
+		"/etc/miniupnpd/",
+		"/etc/rtslib-fb-target/",
+	}
+	allowedExactFiles := map[string]bool{
+		"/etc/radvd.conf":    true,
+		"/etc/default/minio": true,
 	}
 	out := make([]validatedBundleFile, 0, len(files))
 	for _, f := range files {
 		cleanPath := filepath.Clean(f.Path)
-		allowed := false
-		for _, prefix := range allowedPrefixes {
-			if strings.HasPrefix(cleanPath, prefix) {
-				allowed = true
-				break
+		allowed := allowedExactFiles[cleanPath]
+		if !allowed {
+			for _, prefix := range allowedPrefixes {
+				if strings.HasPrefix(cleanPath, prefix) {
+					allowed = true
+					break
+				}
 			}
 		}
 		if !allowed {
@@ -559,6 +578,12 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 				}
 			}
 		}
+		if allowedExactFiles[cleanPath] {
+			dir := filepath.Dir(cleanPath)
+			if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				return nil, status.Errorf(codes.PermissionDenied, "destination path traverses a symlink: %s", cleanPath)
+			}
+		}
 		// Sanitize the caller-chosen mode (audit D-S02): plain permission
 		// bits only (drops setuid/setgid/sticky), and never world-writable.
 		// Shared config files under /etc/axonwall (*.yaml, *.yml, state.json, interfaces.conf)
@@ -576,7 +601,7 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 			mode &^= 0o002
 		} else {
 			if mode == 0 {
-				if strings.HasPrefix(cleanPath, "/etc/axonwall/") && strings.HasSuffix(cleanPath, ".json") {
+				if (strings.HasPrefix(cleanPath, "/etc/axonwall/") && strings.HasSuffix(cleanPath, ".json")) || cleanPath == "/etc/default/minio" {
 					mode = 0600
 				} else {
 					mode = 0644
@@ -925,6 +950,32 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
 				name:  "VOW config",
 				apply: func() error { return s.k3sManager.ApplyVowConfig(content) },
+			})
+		}
+
+		if filepath.Base(cleanPath) == "netdev_config.json" {
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Netdev topology config",
+				apply: func() error { return engine.ApplyNetdevBundleJSON(content, json.Unmarshal) },
+			})
+		}
+
+		if filepath.Base(cleanPath) == "virt_config.json" && s.virtManager != nil {
+			content := []byte(f.Content)
+			vm := s.virtManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Virt hypervisor config",
+				apply: func() error { return vm.ApplyVirtBundleJSON(content) },
+			})
+		}
+
+		if filepath.Base(cleanPath) == "ddns_config.json" && s.ddnsManager != nil {
+			content := []byte(f.Content)
+			dm := s.ddnsManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Dynamic DNS config",
+				apply: func() error { return dm.ApplyConfigJSON(content) },
 			})
 		}
 	}
@@ -1312,6 +1363,9 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 	}
 	if s.vigilanteManager != nil {
 		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
+	}
+	if s.ddnsManager != nil {
+		apply("managed/ddns_config.json", func(b []byte) error { return s.ddnsManager.ApplyConfigJSON(b) })
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("subsystem re-apply failures: %s", strings.Join(errs, "; "))
@@ -2614,7 +2668,40 @@ func main() {
 	}()
 
 	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager, directoryManager)
+	agentServer.SetVirtManager(virtManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
+
+	go func() {
+		readManagedOrRoot := func(name string) ([]byte, error) {
+			if data, err := os.ReadFile(filepath.Join("/etc/axonwall/managed", name)); err == nil && len(data) > 0 {
+				return data, nil
+			}
+			return os.ReadFile(filepath.Join("/etc/axonwall", name))
+		}
+		if data, err := readManagedOrRoot("netdev_config.json"); err == nil {
+			if err := engine.ApplyNetdevBundleJSON(data, json.Unmarshal); err != nil {
+				log.Printf("[Agent] Startup netdev config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRoot("nas_config.json"); err == nil {
+			if err := nasManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup NAS config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRoot("virt_config.json"); err == nil {
+			if err := virtManager.ApplyVirtBundleJSON(data); err != nil {
+				log.Printf("[Agent] Startup virt config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRoot("k3s_config.json"); err == nil {
+			k3sManager.LoadSavedConfig(data)
+		}
+		if data, err := readManagedOrRoot("ha_config.json"); err == nil {
+			if err := haEngine.ApplyFromJSON(data); err != nil {
+				log.Printf("[Agent] Startup HA config load warning: %v", err)
+			}
+		}
+	}()
 
 	// Start eBPF Manager
 	ebpfManager := engine.NewEBPFManager()
@@ -2719,8 +2806,14 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
+			bodyBytes, _ := io.ReadAll(r.Body)
 			var req pb.ConfirmRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if len(bodyBytes) > 0 {
+				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+				if err := unmarshaler.Unmarshal(bodyBytes, &req); err != nil {
+					_ = json.Unmarshal(bodyBytes, &req)
+				}
+			}
 			resp, err := agentServer.Confirm(r.Context(), &req)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2734,8 +2827,14 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
+			bodyBytes, _ := io.ReadAll(r.Body)
 			var req pb.RollbackRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if len(bodyBytes) > 0 {
+				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+				if err := unmarshaler.Unmarshal(bodyBytes, &req); err != nil {
+					_ = json.Unmarshal(bodyBytes, &req)
+				}
+			}
 			resp, err := agentServer.Rollback(r.Context(), &req)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3131,9 +3230,52 @@ func main() {
 				})
 				return
 			}
+			if r.Method == http.MethodDelete {
+				snap := strings.TrimSpace(r.URL.Query().Get("snapshot"))
+				if snap == "" {
+					var req struct {
+						Snapshot string `json:"snapshot"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&req)
+					snap = strings.TrimSpace(req.Snapshot)
+				}
+				if err := nasManager.DeleteSnapshot(snap); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":  true,
+					"snapshot": snap,
+				})
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"snapshots": nasManager.ListSnapshots(),
+			})
+		})
+		mux.HandleFunc("/v1/nas/snapshots/rollback", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Snapshot     string `json:"snapshot"`
+				DestroyNewer bool   `json:"destroyNewer"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := nasManager.RollbackSnapshot(req.Snapshot, req.DestroyNewer); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Rolled back ZFS snapshot %s", req.Snapshot),
 			})
 		})
 		mux.HandleFunc("/v1/nas/scrub", func(w http.ResponseWriter, r *http.Request) {
@@ -3158,9 +3300,182 @@ func main() {
 				"message": fmt.Sprintf("Started ZFS scrub on pool %s", req.Pool),
 			})
 		})
+		mux.HandleFunc("/v1/nas/trim", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Pool string `json:"pool"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := nasManager.TrimPool(req.Pool); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Started ZFS TRIM on pool %s", req.Pool),
+			})
+		})
+		mux.HandleFunc("/v1/nas/checkpoint", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Pool    string `json:"pool"`
+				Discard bool   `json:"discard"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := nasManager.CheckpointPool(req.Pool, req.Discard); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			msg := fmt.Sprintf("Created ZFS pool checkpoint on %s", req.Pool)
+			if req.Discard {
+				msg = fmt.Sprintf("Discarded ZFS pool checkpoint on %s", req.Pool)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": msg,
+			})
+		})
+		mux.HandleFunc("/v1/nas/encryption", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Dataset     string `json:"dataset"`
+				Action      string `json:"action"`
+				KeyMaterial string `json:"keyMaterial"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := nasManager.DatasetKeyAction(req.Dataset, req.Action, req.KeyMaterial); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Completed ZFS encryption key action %q on %s", req.Action, req.Dataset),
+			})
+		})
+		mux.HandleFunc("/v1/nas/smart-test", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Device   string `json:"device"`
+				TestType string `json:"testType"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			output, err := nasManager.RunSmartTest(req.Device, req.TestType)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"output":  output,
+			})
+		})
+		handleCloudSync := func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				TaskName string `json:"taskName"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			output, err := nasManager.RunCloudSyncTask(req.TaskName)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"output":  output,
+			})
+		}
+		mux.HandleFunc("/v1/nas/cloudsync", handleCloudSync)
+		mux.HandleFunc("/v1/nas/cloud-sync", handleCloudSync)
+		mux.HandleFunc("/v1/ddns/status", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodPost {
+				_ = json.NewEncoder(w).Encode(agentServer.ddnsManager.TriggerSyncNow())
+				return
+			}
+			_ = json.NewEncoder(w).Encode(agentServer.ddnsManager.GetStatus())
+		})
 		mux.HandleFunc("/v1/k3s/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(k3sManager.GetStatus())
+		})
+		mux.HandleFunc("/v1/k3s/etcd-snapshots", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					Action string `json:"action"` // "save" or "restore"
+					Name   string `json:"name"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				switch strings.ToLower(strings.TrimSpace(req.Action)) {
+				case "save", "":
+					saved, err := k3sManager.SaveEtcdSnapshot(req.Name)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"success":   true,
+						"snapshot":  saved,
+						"snapshots": k3sManager.ListEtcdSnapshots(),
+					})
+				case "restore":
+					if err := k3sManager.RestoreEtcdSnapshot(req.Name); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"success": true,
+						"message": fmt.Sprintf("Restored K3s embedded etcd from %s", req.Name),
+					})
+				default:
+					http.Error(w, "unknown action: expected save or restore", http.StatusBadRequest)
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"snapshots": k3sManager.ListEtcdSnapshots(),
+			})
 		})
 		mux.HandleFunc("/v1/ha/sync-trust", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -3423,23 +3738,45 @@ func main() {
 		mux.HandleFunc("/v1/virt/backups", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost {
 				var req struct {
-					TargetType string `json:"targetType"` // "vm" or "lxc"
-					TargetID   int    `json:"targetId"`
-					Pool       string `json:"pool"`
-					DestType   string `json:"destType"`
+					Action      string `json:"action"` // "", "run", "restore", "prune"
+					ArchiveName string `json:"archiveName"`
+					KeepLast    int    `json:"keepLast"`
+					TargetType  string `json:"targetType"` // "vm" or "lxc"
+					TargetID    int    `json:"targetId"`
+					Pool        string `json:"pool"`
+					DestType    string `json:"destType"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				user := "root@axonwall"
-				upid, err := virtManager.RunBackup(req.TargetType, req.TargetID, req.Pool, req.DestType, user)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
+				switch strings.ToLower(strings.TrimSpace(req.Action)) {
+				case "restore":
+					upid, err := virtManager.RestoreBackup(req.ArchiveName, req.TargetType, req.TargetID, req.Pool, user)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+				case "prune":
+					deleted, err := virtManager.PruneBackupsGFS(req.Pool, req.KeepLast)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "deleted": deleted})
+				default:
+					upid, err := virtManager.RunBackup(req.TargetType, req.TargetID, req.Pool, req.DestType, user)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
 				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
 				return
 			}
 			pool := r.URL.Query().Get("pool")
@@ -3447,6 +3784,158 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"backups": virtManager.ListBackups(pool),
 			})
+		})
+
+		mux.HandleFunc("/v1/virt/qga", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					VMID   int    `json:"vmid"`
+					Action string `json:"action"` // "freeze" or "thaw"
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				var err error
+				switch strings.ToLower(strings.TrimSpace(req.Action)) {
+				case "freeze":
+					err = virtManager.QgaFsFreeze(req.VMID)
+				case "thaw":
+					err = virtManager.QgaFsThaw(req.VMID)
+				default:
+					http.Error(w, "unknown QGA action: expected freeze or thaw", http.StatusBadRequest)
+					return
+				}
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+				return
+			}
+			vmid, _ := strconv.Atoi(r.URL.Query().Get("vmid"))
+			ifaces, err := virtManager.QueryQgaInterfaces(vmid)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": err.Error(), "interfaces": []any{}})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"available": true, "interfaces": ifaces})
+		})
+
+		mux.HandleFunc("/v1/virt/snapshots", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				var req struct {
+					Action     string `json:"action"` // "create" or "rollback"
+					TargetType string `json:"targetType"`
+					TargetID   int    `json:"targetId"`
+					Label      string `json:"label"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				switch strings.ToLower(strings.TrimSpace(req.Action)) {
+				case "rollback":
+					if err := virtManager.RollbackWorkloadSnapshot(req.TargetType, req.TargetID, req.Label); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "rolledBackTo": req.Label})
+				default:
+					snaps, err := virtManager.CreateWorkloadSnapshot(req.TargetType, req.TargetID, req.Label)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "snapshots": snaps})
+				}
+				return
+			}
+			tType := r.URL.Query().Get("targetType")
+			if tType == "" {
+				tType = "vm"
+			}
+			tID, _ := strconv.Atoi(r.URL.Query().Get("targetId"))
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"snapshots": virtManager.ListWorkloadSnapshots(tType, tID),
+			})
+		})
+
+		mux.HandleFunc("/v1/virt/clone", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				SourceVMID int    `json:"sourceVmid"`
+				NewVMID    int    `json:"newVmid"`
+				NewName    string `json:"newName"`
+				Linked     bool   `json:"linked"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			spec, err := virtManager.CloneVM(req.SourceVMID, req.NewVMID, req.NewName, req.Linked)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "vm": spec})
+		})
+
+		mux.HandleFunc("/v1/virt/migrate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				VMID         int    `json:"vmid"`
+				TargetPeerIP string `json:"targetPeerIp"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			upid, err := virtManager.LiveMigrateVM(req.VMID, req.TargetPeerIP, "root@axonwall")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "upid": upid})
+		})
+
+		mux.HandleFunc("/v1/virt/libvirt-xml", func(w http.ResponseWriter, r *http.Request) {
+			vmid, _ := strconv.Atoi(r.URL.Query().Get("vmid"))
+			if vmid <= 0 {
+				var all []map[string]any
+				for _, vm := range virtManager.ListVMs() {
+					xmlStr, _ := virtManager.ExportLibvirtXML(vm.VMID)
+					all = append(all, map[string]any{
+						"vmid":       vm.VMID,
+						"name":       vm.Name,
+						"libvirtXml": xmlStr,
+					})
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"domains": all})
+				return
+			}
+			xmlStr, err := virtManager.ExportLibvirtXML(vmid)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"vmid": vmid, "libvirtXml": xmlStr})
 		})
 
 		mux.HandleFunc("/v1/virt/console/ws", consoleProxy.ServeHTTP)
@@ -3567,10 +4056,55 @@ func main() {
 
 		mux.HandleFunc("/v1/vigilante/telemetry/stream", vigilanteManager.StreamLiveTelemetry)
 
-		// Etckeeper /etc change tracking APIs
+		// Etckeeper /etc change tracking & configuration APIs
 		mux.HandleFunc("/v1/system/etckeeper/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(etckeeperManager.GetStatus())
+		})
+
+		mux.HandleFunc("/v1/system/etckeeper/init", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if err := etckeeperManager.Init(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = etckeeperManager.Commit("Initial /etc baseline commit via Axonwall", "admin")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": "Initialized etckeeper repository in /etc",
+				"status":  etckeeperManager.GetStatus(),
+			})
+		})
+
+		mux.HandleFunc("/v1/system/etckeeper/config", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(etckeeperManager.GetConfig())
+			case http.MethodPost, http.MethodPut:
+				var req engine.EtckeeperConfig
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+					return
+				}
+				updated, err := etckeeperManager.UpdateConfig(req)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": true,
+					"message": "Saved /etc/etckeeper/etckeeper.conf and updated ignore rules",
+					"config":  updated,
+				})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
 		})
 
 		mux.HandleFunc("/v1/system/etckeeper/commit", func(w http.ResponseWriter, r *http.Request) {
@@ -3598,7 +4132,14 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/system/etckeeper/history", func(w http.ResponseWriter, r *http.Request) {
-			history, err := etckeeperManager.GetHistory(25)
+			limit := 50
+			if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+				if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 && parsed <= 200 {
+					limit = parsed
+				}
+			}
+			pathFilter := strings.TrimSpace(r.URL.Query().Get("path"))
+			history, err := etckeeperManager.GetHistoryFiltered(limit, pathFilter)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -4237,6 +4778,247 @@ func main() {
 			audit := engine.RunHostRootkitAudit()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(audit)
+		})
+
+		// =====================================================================
+		// Unified eBPF Dataplane, Linux 6.9+ BPF_TOKEN Delegation & Cross-Duty Telemetry
+		// =====================================================================
+		mux.HandleFunc("/v1/ebpf/overview", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			if limit <= 0 {
+				limit = 50
+			}
+			lsmAttached, lsmHooks, lsmAllowlist, lsmEvents := lsmGuardManager.Snapshot()
+			tokMgr := engine.GetDefaultBpfTokenManager()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"dataplane": ebpfManager.GetDataplaneSnapshot(limit),
+				"lsm": map[string]any{
+					"attached":      lsmAttached,
+					"attachedHooks": lsmHooks,
+					"allowlist":     lsmAllowlist,
+					"recentEvents":  lsmEvents,
+				},
+				"bpfTokens": map[string]any{
+					"capabilities": engine.ProbeBpfTokenCapabilities(),
+					"presets":      engine.GetBpfTokenPresets(),
+					"profiles":     tokMgr.ListProfiles(),
+					"activeMounts": engine.DiscoverDelegatedBpffsMounts(),
+				},
+				"virt": virtManager.GetEbpfTelemetry(),
+				"k3s":  k3sManager.GetEbpfTelemetry(),
+				"nas":  nasManager.GetDeepTelemetry(),
+			})
+		})
+
+		mux.HandleFunc("/v1/ebpf/xdp/block", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				snap := ebpfManager.GetDataplaneSnapshot(50)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"activeBlocks": snap.ActiveBlocks,
+					"stats":        snap.Stats,
+				})
+			case http.MethodPost:
+				var req struct {
+					IP         string `json:"ip"`
+					TTLSeconds int    `json:"ttlSeconds"`
+					ReasonCode uint32 `json:"reasonCode"`
+					Reason     string `json:"reason"`
+				}
+				if err := json.NewDecoder(io.LimitReader(r.Body, 16384)).Decode(&req); err != nil {
+					http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+					return
+				}
+				if err := ebpfManager.AddXdpBlock(req.IP, req.TTLSeconds, req.ReasonCode, req.Reason); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":    true,
+					"ip":         req.IP,
+					"ttlSeconds": req.TTLSeconds,
+					"blocks":     ebpfManager.GetDataplaneSnapshot(10).ActiveBlocks,
+				})
+			case http.MethodDelete:
+				ipParam := strings.TrimSpace(r.URL.Query().Get("ip"))
+				if ipParam == "" {
+					var req struct {
+						IP       string `json:"ip"`
+						ClearAll bool   `json:"clearAll"`
+					}
+					_ = json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req)
+					if req.ClearAll {
+						ebpfManager.ClearBlocklist()
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "clearedAll": true})
+						return
+					}
+					ipParam = strings.TrimSpace(req.IP)
+				}
+				if err := ebpfManager.RemoveXdpBlock(ipParam); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "ip": ipParam})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/v1/ebpf/xdp/syn-limit", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				snap := ebpfManager.GetDataplaneSnapshot(10)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"synFloodLimitPps": snap.SynFloodLimitPps,
+					"stats":            snap.Stats,
+				})
+			case http.MethodPost:
+				var req struct {
+					MaxSynPps uint64 `json:"maxSynPps"`
+				}
+				if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req); err != nil {
+					http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+					return
+				}
+				if err := ebpfManager.SetSynFloodLimitPps(req.MaxSynPps); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":          true,
+					"synFloodLimitPps": req.MaxSynPps,
+				})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/v1/ebpf/tokens", func(w http.ResponseWriter, r *http.Request) {
+			tokMgr := engine.GetDefaultBpfTokenManager()
+			switch r.Method {
+			case http.MethodGet:
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"capabilities": engine.ProbeBpfTokenCapabilities(),
+					"presets":      engine.GetBpfTokenPresets(),
+					"profiles":     tokMgr.ListProfiles(),
+					"activeMounts": engine.DiscoverDelegatedBpffsMounts(),
+				})
+			case http.MethodPost:
+				var req engine.BpfTokenDelegationProfile
+				if err := json.NewDecoder(io.LimitReader(r.Body, 32768)).Decode(&req); err != nil {
+					http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+					return
+				}
+				saved, err := tokMgr.UpsertProfile(req)
+				if err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "profile": saved})
+			case http.MethodDelete:
+				idParam := strings.TrimSpace(r.URL.Query().Get("id"))
+				if idParam == "" {
+					var req struct {
+						ID string `json:"id"`
+					}
+					_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+					idParam = strings.TrimSpace(req.ID)
+				}
+				if err := tokMgr.DeleteProfile(idParam); err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "deletedId": idParam})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/v1/ebpf/tokens/render-k3s", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ProfileID    string                           `json:"profileId"`
+				Profile      engine.BpfTokenDelegationProfile `json:"profile"`
+				WorkloadName string                           `json:"workloadName"`
+				Namespace    string                           `json:"namespace"`
+				Image        string                           `json:"image"`
+				Kind         string                           `json:"kind"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 32768)).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			prof := req.Profile
+			if req.ProfileID != "" {
+				if existing, ok := engine.GetDefaultBpfTokenManager().GetProfile(req.ProfileID); ok {
+					prof = existing
+				} else if prof.ID == "" {
+					prof.ID = req.ProfileID
+				}
+			}
+			manifest, err := engine.RenderK3sUserNsPodManifest(prof, req.WorkloadName, req.Namespace, req.Image, req.Kind)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "manifestYaml": manifest})
+		})
+
+		mux.HandleFunc("/v1/nas/telemetry", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(nasManager.GetDeepTelemetry())
+		})
+
+		mux.HandleFunc("/v1/virt/telemetry", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(virtManager.GetEbpfTelemetry())
+		})
+
+		mux.HandleFunc("/v1/k3s/telemetry", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(k3sManager.GetEbpfTelemetry())
 		})
 
 		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}

@@ -26,7 +26,8 @@ var serviceCommandTimeout = 90 * time.Second
 // unit on the box could be bounced by a socket caller.
 var managedServices = map[string]bool{
 	"suricata": true, "crowdsec": true, "crowdsec-firewall-bouncer": true,
-	"kea-dhcp4-server": true, "kea-dhcp-ddns-server": true,
+	"kea-dhcp4-server": true, "kea-dhcp6-server": true, "kea-dhcp-ddns-server": true,
+	"radvd": true, "avahi-daemon": true, "miniupnpd": true,
 	"unbound": true, "frr": true, "caddy": true, "headscale": true,
 	"keepalived": true, "conntrackd": true, "nftables": true,
 	"ssh": true, "sshd": true,
@@ -35,7 +36,8 @@ var managedServices = map[string]bool{
 	"haproxy": true, "freeradius": true,
 	"openvpn": true, "openvpn@server": true,
 	"strongswan": true, "strongswan-starter": true,
-	"smbd": true, "nmbd": true, "nfs-server": true, "nfs-kernel-server": true, "tgt": true,
+	"smbd": true, "nmbd": true, "wsdd": true, "minio": true,
+	"nfs-server": true, "nfs-kernel-server": true, "tgt": true, "rtslib-fb-targetctl": true,
 	"k3s": true, "libvirtd": true, "nut-server": true, "nut-monitor": true, "nut-client": true, "snmpd": true,
 	"tailscaled": true, "ntopng": true, "eluvix": true,
 	"clamav-freshclam": true, "clamav-daemon": true, "vector": true,
@@ -64,6 +66,9 @@ func validServiceName(svc string) bool {
 	if strings.HasPrefix(unit, "openvpn@") && isSafeInstanceToken(strings.TrimPrefix(unit, "openvpn@")) {
 		return true
 	}
+	if strings.HasPrefix(unit, "openvpn-server@") && isSafeInstanceToken(strings.TrimPrefix(unit, "openvpn-server@")) {
+		return true
+	}
 	return false
 }
 
@@ -85,12 +90,33 @@ func keaHasActiveInterfaces() bool {
 	return len(parsed.Dhcp4.InterfacesConfig.Interfaces) > 0
 }
 
+func keaHasActiveInterfaces6() bool {
+	raw, err := os.ReadFile("/etc/kea/kea-dhcp6.conf")
+	if err != nil {
+		return false
+	}
+	var parsed struct {
+		Dhcp6 struct {
+			InterfacesConfig struct {
+				Interfaces []string `json:"interfaces"`
+			} `json:"interfaces-config"`
+		} `json:"Dhcp6"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return false
+	}
+	return len(parsed.Dhcp6.InterfacesConfig.Interfaces) > 0
+}
+
 func reloadOrRestartService(svc string) ([]byte, error) {
 	if !validServiceName(svc) {
 		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
 	}
 	unit := strings.TrimSuffix(svc, ".service")
 	if unit == "kea-dhcp4-server" && !keaHasActiveInterfaces() {
+		return stopSystemService(svc)
+	}
+	if unit == "kea-dhcp6-server" && !keaHasActiveInterfaces6() {
 		return stopSystemService(svc)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)

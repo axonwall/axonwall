@@ -146,6 +146,8 @@ export default function PluginManagerPage() {
             defaultReplicaCount: 2,
             replicatedBackingPool: 'tank/openebs-replicated',
           },
+          enableUserNamespaces: false,
+          bpfTokenProfiles: [],
           workloads: [],
         };
         next.k3s.enabled = nextCaps.k3sEnabled;

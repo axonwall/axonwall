@@ -66,8 +66,10 @@ type HAEngine struct {
 }
 
 func NewHAEngine(nasMgr *engine.NasManager) *HAEngine {
+	syncMgr := engine.NewSqliteSyncManager()
+	syncMgr.SetNasManager(nasMgr)
 	return &HAEngine{
-		sqliteSync: engine.NewSqliteSyncManager(),
+		sqliteSync: syncMgr,
 		nasManager: nasMgr,
 		sockPath:   "/run/axonwall/ha.sock",
 	}
@@ -338,10 +340,39 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		e.directoryManager.SetHAState(true, haState, serverID, peerURI)
 	}
 	if cfg.PeerIp != "" {
+		localSyncIP := resolveInterfaceIPv4(cfg.SyncInterface)
+		if serverID == 1 {
+			_ = engine.EnsureHAPKICerts("axonwall-ha", localSyncIP, cfg.PeerIp)
+		} else {
+			peerPort := cfg.SqliteSync.PeerPort
+			if peerPort <= 0 {
+				peerPort = cfg.SqliteSync.ListenPort
+			}
+			if peerPort <= 0 {
+				peerPort = 9876
+			}
+			authToken := cfg.SqliteSync.AuthToken
+			if authToken == "" {
+				if cfg.SyncPassword != "" {
+					authToken = cfg.SyncPassword
+				} else if len(cfg.VRRPInstances) > 0 && cfg.VRRPInstances[0].AuthPassword != "" {
+					authToken = cfg.VRRPInstances[0].AuthPassword
+				}
+			}
+			if _, err := os.Stat(engine.HAPKIPeerCertPath); os.IsNotExist(err) {
+				if _, enrollErr := engine.EnrollPKIFromPeer(cfg.PeerIp, peerPort, authToken); enrollErr != nil {
+					slog.Warn("Initial HA PKI enrollment from peer deferred (backup poller will retry)", "peer", cfg.PeerIp, "error", enrollErr)
+				} else {
+					slog.Info("Enrolled HA PKI from primary peer during HA apply", "peer", cfg.PeerIp)
+				}
+			}
+		}
 		baseDN, _, _ := engine.ResolveOrCreateBaseDN("axonwall.local")
-		if err := engine.ConfigureMultiProviderSyncrepl(serverID, cfg.PeerIp, baseDN); err != nil {
-			slog.Warn("Failed to configure OpenLDAP multi-provider syncrepl", "error", err)
-			applyErrs = append(applyErrs, fmt.Errorf("syncrepl: %w", err))
+		if serverID == 1 || engine.HasHAPKI() {
+			if err := engine.ConfigureMultiProviderSyncrepl(serverID, cfg.PeerIp, baseDN); err != nil {
+				slog.Warn("Failed to configure OpenLDAP multi-provider syncrepl", "error", err)
+				applyErrs = append(applyErrs, fmt.Errorf("syncrepl: %w", err))
+			}
 		}
 	}
 
@@ -520,9 +551,9 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 
 		conf.WriteString(fmt.Sprintf(`    }
 
-    notify_master "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER'"
-    notify_backup "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP'"
-    notify_fault  "/bin/sh -c '/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT'"
+    notify_master "/usr/local/bin/axonwall-ha-notify MASTER"
+    notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"
+    notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"
 }
 
 `))

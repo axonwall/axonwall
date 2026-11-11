@@ -1,10 +1,18 @@
 import { NextResponse } from 'next/server';
-import { getK3sRuntimeStatus, triggerK3sHaAutoJoin } from '@/server/agent';
+import {
+  getK3sRuntimeStatus,
+  triggerK3sHaAutoJoin,
+  getK3sEtcdSnapshotsAction,
+  manageK3sEtcdSnapshotAction,
+} from '@/server/agent';
 
 export async function GET() {
   try {
-    const status = await getK3sRuntimeStatus();
-    return NextResponse.json(status);
+    const [status, etcdSnapshots] = await Promise.all([
+      getK3sRuntimeStatus(),
+      getK3sEtcdSnapshotsAction().catch(() => []),
+    ]);
+    return NextResponse.json({ ...status, etcdSnapshots });
   } catch (err: any) {
     const status = err?.message?.includes('Unauthorized')
       ? 401
@@ -20,6 +28,13 @@ export async function POST(req: Request) {
     const body = await req.json();
     if (body.action === 'join') {
       const res = await triggerK3sHaAutoJoin();
+      return NextResponse.json(res);
+    }
+    if (body.action === 'etcd-save' || body.action === 'etcd-restore') {
+      const res = await manageK3sEtcdSnapshotAction(
+        body.action === 'etcd-save' ? 'save' : 'restore',
+        body.name || ''
+      );
       return NextResponse.json(res);
     }
     return NextResponse.json({ error: 'Unknown K3s action' }, { status: 400 });

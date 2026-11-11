@@ -1,6 +1,15 @@
 import type { DesiredState } from '../schemas/index.js';
 
-export type FirewallVendor = 'pfsense' | 'opnsense' | 'vyos' | 'mikrotik' | 'iptables' | 'cisco' | 'firewalld';
+export type FirewallVendor =
+  | 'pfsense'
+  | 'opnsense'
+  | 'vyos'
+  | 'mikrotik'
+  | 'iptables'
+  | 'cisco'
+  | 'firewalld'
+  | 'proxmox'
+  | 'truenas';
 
 export interface ImportReviewItem {
   ruleId: string;
@@ -24,6 +33,11 @@ export interface ImportReport {
   dhcpSubnetsCount: number;
   dnsOverridesCount: number;
   routesCount: number;
+  vmsCount?: number;
+  containersCount?: number;
+  zfsPoolsCount?: number;
+  datasetsCount?: number;
+  sharesCount?: number;
   warnings: string[];
   reviewItems?: ImportReviewItem[];
   state: DesiredState;

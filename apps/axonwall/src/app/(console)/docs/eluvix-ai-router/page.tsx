@@ -15,7 +15,7 @@ import {
 export const metadata = {
   title: 'Eluvix Sovereign AI Router, Tokenomics & DLP Guard | Axonwall Documentation',
   description:
-    'Technical documentation for the Eluvix Sovereign AI Router plugin (ai-eluvix): Switchyard 4-tier model routing, PromptGuard injection defense, PrivacyGuard PII/secret DLP tokenization, 8 agent harnesses, and enterprise tokenomics.',
+    'Technical documentation for the Eluvix Sovereign AI Router plugin (eluvix) in /etc/axonwall/system.yaml: Switchyard 4-tier model routing (:8080), PromptGuard injection defense, PrivacyGuard PII/secret DLP tokenization, 8 agent harnesses, and enterprise tokenomics.',
 };
 
 export default function EluvixAiRouterDocPage() {
@@ -24,14 +24,14 @@ export default function EluvixAiRouterDocPage() {
       {/* Header */}
       <div className="space-y-4 border-b border-slate-800 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-950/60 border border-purple-500/30 text-purple-300 text-xs font-semibold">
-          <Sparkles className="w-3.5 h-3.5" /> Sovereign AI Gateway • DLP &amp; Tokenomics
+          <Sparkles className="w-3.5 h-3.5" /> Sovereign AI Gateway • DLP &amp; Tokenomics • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
           Eluvix Sovereign AI Router &amp; Prompt/PII DLP Guard
         </h1>
         <p className="text-base text-slate-400 leading-relaxed max-w-3xl">
-          The <code className="text-emerald-400 font-mono">ai-eluvix</code> plugin embeds the{' '}
-          <strong className="text-white">Eluvix Sovereign AI Router</strong> directly into your Axonwall perimeter.
+          The <code className="text-emerald-400 font-mono">eluvix</code> plugin (<code className="text-slate-200 font-mono">sudo axonwallctl plugin enable eluvix</code>) embeds the{' '}
+          <strong className="text-white">Eluvix Sovereign AI Router</strong> directly into your Axonwall perimeter (control plane on port <code className="text-emerald-400 font-mono">3588</code> and Switchyard OpenAI/Anthropic-compatible proxy on port <code className="text-emerald-400 font-mono">8080</code>).
           Instead of allowing developer workstations, autonomous coding agents, and internal services to send raw source
           code, API keys, and PII directly to external cloud LLM APIs, Eluvix intercepts, sanitizes, caches, and routes
           every AI request through a zero-trust sovereign gateway.
@@ -160,37 +160,66 @@ export default function EluvixAiRouterDocPage() {
       {/* 4. Declarative Configuration */}
       <section id="configuration" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Database className="w-6 h-6 text-emerald-400" /> 4. Declarative Configuration (/etc/axonwall/eluvix.yaml)
+          <Database className="w-6 h-6 text-emerald-400" /> 4. Declarative Configuration (<code className="font-mono text-emerald-400">eluvix:</code> in <code className="font-mono text-emerald-400">/etc/axonwall/system.yaml</code>)
         </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Enable the built-in <code className="text-emerald-400 font-mono">eluvix</code> plugin via{' '}
+          <code className="text-emerald-400 font-mono">sudo axonwallctl plugin enable eluvix</code>, then configure{' '}
+          <code className="text-emerald-400 font-mono">eluvix:</code> inside{' '}
+          <code className="text-emerald-400 font-mono">/etc/axonwall/system.yaml</code>:
+        </p>
 
         <CodeBlock
-          title="/etc/axonwall/eluvix.yaml"
+          title="/etc/axonwall/system.yaml — EluvixConfigSchema (eluvix:)"
           language="yaml"
-          code={`enabled: true
-listenAddress: "0.0.0.0"
-listenPort: 4080
-routingMode: "hybrid-sovereign"
-localProviderUrl: "http://127.0.0.1:11434"
-localDefaultModel: "qwen2.5-coder:14b"
-frontierProvider: "gemini"
-frontierModel: "gemini-2.5-pro"
-promptGuardEnabled: true
-privacyGuardDlpEnabled: true
-redactSecrets: true
-redactPii: true
-redactInternalIps: true
-semanticCacheEnabled: true
-monthlyBudgetUsd: 250
-activeHarnesses:
-  - opencode
-  - acp
-  - trueforge`}
+          code={`eluvix:
+  enabled: true
+  deploymentMode: systemd          # 'systemd' | 'docker' | 'k3s-helm'
+  listenPort: 3588
+  switchyardPort: 8080
+  domain: eluvix.axonwall.local
+  teePolicy: prefer-sev-snp
+  ldapAuth:
+    enabled: true
+    bindAccountCn: svc-eluvix
+    adminGroup: eluvix-admin
+    operatorGroup: eluvix-operator
+    readonlyGroup: eluvix-readonly
+  tokenomics:
+    strategy: hybrid-sovereign
+    semanticCacheEnabled: true
+    kvArchitecture: deepseek-mla-fp8
+    rdmaConnector: vllm-nixl
+  promptGuard:
+    enabled: true
+    blockIndirectInjection: true
+    inspectMcpToolStdout: true
+  privacyGuard:
+    enabled: true
+    reversibleTokenization: true
+    redactSecrets: true
+    redactPii: true
+    redactInternalIps: true
+  harnessMesh:
+    enabled: true
+    sandboxBackend: gvisor
+    memoryEngine: graphiti
+    injectAxonwallMcp: true
+    enabledHarnesses:
+      - opencode
+      - trueforge
+      - acp
+      - openhands
+      - mastra
+      - letta
+      - a2a
+      - hermes`}
         />
 
         <Callout type="tip" title="Manage via Web Console, Neovim TUI, or CLI">
-          Configure Eluvix routing tiers, inspect live DLP redaction counters, and track tokenomics savings from the Web
+          Configure Eluvix routing tiers, OpenLDAP RBAC bindings, KV-cache/RDMA tokenomics, and DLP redaction policies from the Web
           Console at <code className="font-mono text-emerald-300">/ai/eluvix</code>, in the Neovim Super Configurator via{' '}
-          <code className="font-mono text-emerald-300">axonwall-config eluvix</code>, or via{' '}
+          <code className="font-mono text-emerald-300">axonwall-config system</code>, or verify status via{' '}
           <code className="font-mono text-emerald-300">axonwallctl status</code>.
         </Callout>
       </section>

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -58,7 +59,8 @@ type SyncStatusResponse struct {
 	// node that advertises signing, which lets enforcement distinguish
 	// a current master from a pre-signing one. Absent (false) in
 	// responses from pre-P4b builds.
-	SignsPayloads bool `json:"signsPayloads"`
+	SignsPayloads      bool     `json:"signsPayloads"`
+	ReplicatedDatasets []string `json:"replicatedDatasets,omitempty"`
 }
 
 // masterServerRetryDelay is the pause between bind retries of the HA
@@ -76,6 +78,8 @@ type SqliteSyncManager struct {
 	pollerCancel       context.CancelFunc
 	litestreamCmd      *exec.Cmd
 	k3sManager         *K3sManager
+	nasManager         *NasManager
+	lastZfsSync        time.Time
 	effectiveTransport string // transport the master server is actually serving ("token-http" or "mtls")
 	peerSignsPayloads  bool   // capability from the peer's latest sync status (D-04 P4b); set by the poller each round before any payload fetch
 }
@@ -90,6 +94,12 @@ func (m *SqliteSyncManager) SetK3sManager(km *K3sManager) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.k3sManager = km
+}
+
+func (m *SqliteSyncManager) SetNasManager(nm *NasManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nasManager = nm
 }
 
 func (m *SqliteSyncManager) ApplyConfig(cfg SqliteSyncConfig) error {
@@ -251,15 +261,25 @@ func (m *SqliteSyncManager) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(authToken)) == 1
 }
 
+func (m *SqliteSyncManager) requireMTLSClientCert(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS != nil && len(r.TLS.VerifiedChains) == 0 {
+			http.Error(w, "Client certificate required", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // syncMux builds the sync endpoint set shared by the plain and mTLS
 // listeners (and by tests).
 func (m *SqliteSyncManager) syncMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/sync/status", m.handleStatus)
-	mux.HandleFunc("/api/v1/sync/db", m.handleDownloadDb)
-	mux.HandleFunc("/api/v1/sync/state", m.handleDownloadState)
-	mux.HandleFunc("/api/v1/sync/zfs", m.handleZfsSendStream)
-	mux.HandleFunc("/api/v1/sync/k3s-token", m.handleK3sToken)
+	mux.HandleFunc("/api/v1/sync/status", m.requireMTLSClientCert(m.handleStatus))
+	mux.HandleFunc("/api/v1/sync/db", m.requireMTLSClientCert(m.handleDownloadDb))
+	mux.HandleFunc("/api/v1/sync/state", m.requireMTLSClientCert(m.handleDownloadState))
+	mux.HandleFunc("/api/v1/sync/zfs", m.requireMTLSClientCert(m.handleZfsSendStream))
+	mux.HandleFunc("/api/v1/sync/k3s-token", m.requireMTLSClientCert(m.handleK3sToken))
 	mux.HandleFunc("/api/v1/sync/pki-enroll", m.handlePkiEnroll)
 	return mux
 }
@@ -422,6 +442,10 @@ func (m *SqliteSyncManager) startMasterServer() error {
 	serveTLS := false
 	if resolvedTransport(m.cfg.Transport) == "mtls" {
 		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
+			// Verify client certificates when presented (rejecting foreign CAs at handshake)
+			// while allowing unenrolled backup nodes to reach /api/v1/sync/pki-enroll over HTTPS
+			// with X-Axonwall-Sync-Token; requireMTLSClientCert gates all data endpoints.
+			tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
 			m.server.TLSConfig = tlsCfg
 			serveTLS = true
 		} else {
@@ -482,6 +506,10 @@ func (m *SqliteSyncManager) handlePkiEnroll(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	peerIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	localIP := ""
+	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok && la != nil {
+		localIP, _, _ = net.SplitHostPort(la.String())
+	}
 	if r.Method == http.MethodPost {
 		var csrReq HAPKICSRRequest
 		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&csrReq); err != nil || csrReq.CSRPEM == "" {
@@ -491,6 +519,9 @@ func (m *SqliteSyncManager) handlePkiEnroll(w http.ResponseWriter, r *http.Reque
 		extraIPs := append([]string{}, csrReq.ExtraIPs...)
 		if peerIP != "" {
 			extraIPs = append(extraIPs, peerIP)
+		}
+		if localIP != "" {
+			extraIPs = append(extraIPs, localIP)
 		}
 		csrResp, err := SignHAPKICSR([]byte(csrReq.CSRPEM), extraIPs)
 		if err != nil {
@@ -521,32 +552,50 @@ func EnrollPKIFromPeer(peerAddr string, peerPort int, authToken string) (*HAPKIC
 	if err != nil {
 		return nil, err
 	}
-	enrollUrl := fmt.Sprintf("http://%s/api/v1/sync/pki-enroll", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)))
-	req, err := http.NewRequest(http.MethodPost, enrollUrl, bytes.NewReader(payload))
+	hostPort := net.JoinHostPort(peerAddr, strconv.Itoa(peerPort))
+	tryScheme := func(scheme string, client *http.Client) (*HAPKICSRResponse, error) {
+		enrollUrl := fmt.Sprintf("%s://%s/api/v1/sync/pki-enroll", scheme, hostPort)
+		req, err := http.NewRequest(http.MethodPost, enrollUrl, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if authToken != "" {
+			req.Header.Set("X-Axonwall-Sync-Token", authToken)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("pki-enroll (%s) returned status %d", scheme, resp.StatusCode)
+		}
+		var csrResp HAPKICSRResponse
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&csrResp); err != nil {
+			return nil, err
+		}
+		return &csrResp, nil
+	}
+
+	tlsBootstrapClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	csrResp, err := tryScheme("https", tlsBootstrapClient)
 	if err != nil {
+		plainClient := &http.Client{Timeout: 10 * time.Second}
+		csrResp, err = tryScheme("http", plainClient)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := InstallHAPKICSRResponse(csrResp); err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if authToken != "" {
-		req.Header.Set("X-Axonwall-Sync-Token", authToken)
-	}
-	plainClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := plainClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("pki-enroll returned status %d", resp.StatusCode)
-	}
-	var csrResp HAPKICSRResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&csrResp); err != nil {
-		return nil, err
-	}
-	if err := InstallHAPKICSRResponse(&csrResp); err != nil {
-		return nil, err
-	}
-	return &csrResp, nil
+	return csrResp, nil
 }
 
 func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -554,6 +603,7 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 	nodeRole := m.cfg.NodeRole
 	transport := m.effectiveTransport
 	databases := append([]string(nil), m.cfg.Databases...)
+	nm := m.nasManager
 	m.mu.Unlock()
 
 	if !m.authorized(r) {
@@ -563,6 +613,9 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 
 	var dbStatuses []DatabaseStatus
 	for _, dbPath := range databases {
+		if walInfo, walErr := os.Stat(dbPath + "-wal"); walErr == nil && walInfo.Size() > 0 {
+			_ = exec.Command("sqlite3", dbPath, "PRAGMA wal_checkpoint(PASSIVE);").Run()
+		}
 		info, err := os.Stat(dbPath)
 		if err != nil {
 			continue
@@ -577,12 +630,18 @@ func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request)
 		})
 	}
 
+	var replicatedDatasets []string
+	if nm != nil {
+		replicatedDatasets = nm.GetReplicatedDatasets()
+	}
+
 	resp := SyncStatusResponse{
-		NodeRole:      nodeRole,
-		Timestamp:     time.Now().Unix(),
-		Transport:     transport,
-		Databases:     dbStatuses,
-		SignsPayloads: haPayloadSigningAvailable(),
+		NodeRole:           nodeRole,
+		Timestamp:          time.Now().Unix(),
+		Transport:          transport,
+		Databases:          dbStatuses,
+		SignsPayloads:      haPayloadSigningAvailable(),
+		ReplicatedDatasets: replicatedDatasets,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -623,19 +682,20 @@ func (m *SqliteSyncManager) handleDownloadDb(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Create a safe, point-in-time online backup using SQLite backup API or vacuum into
+	// Create a safe, point-in-time snapshot whose SHA-256 matches handleStatus.
 	tmpBackup := fmt.Sprintf("%s.snap.%d", targetPath, time.Now().UnixNano())
 	defer os.Remove(tmpBackup)
 
-	// Attempt sqlite3 online backup command
-	// The sqlite3 dot-command argument is a single-quoted string literal;
-	// escape embedded quotes by doubling (audit D-S04) so a configured DB
-	// path containing ' cannot break out into further dot-commands.
-	backupCmd := exec.Command("sqlite3", targetPath, fmt.Sprintf(".backup '%s'", strings.ReplaceAll(tmpBackup, "'", "''")))
-	if err := backupCmd.Run(); err != nil {
-		// Fallback: Checkpoint and copy file
+	if walInfo, walErr := os.Stat(targetPath + "-wal"); walErr == nil && walInfo.Size() > 0 {
 		_ = exec.Command("sqlite3", targetPath, "PRAGMA wal_checkpoint(PASSIVE);").Run()
-		if copyErr := copyFile(targetPath, tmpBackup); copyErr != nil {
+	}
+	if copyErr := copyFile(targetPath, tmpBackup); copyErr != nil {
+		// Fallback: sqlite3 online backup command
+		// The sqlite3 dot-command argument is a single-quoted string literal;
+		// escape embedded quotes by doubling (audit D-S04) so a configured DB
+		// path containing ' cannot break out into further dot-commands.
+		backupCmd := exec.Command("sqlite3", targetPath, fmt.Sprintf(".backup '%s'", strings.ReplaceAll(tmpBackup, "'", "''")))
+		if err := backupCmd.Run(); err != nil {
 			http.Error(w, fmt.Sprintf("Failed to generate database snapshot: %v", copyErr), http.StatusInternalServerError)
 			return
 		}
@@ -711,6 +771,26 @@ func (m *SqliteSyncManager) startBackupPoller() error {
 	return nil
 }
 
+func (m *SqliteSyncManager) tryEnrollPKIFromPeer(peerAddress string, peerPort int, authToken string) bool {
+	_, errCA := os.Stat(HAPKICACertPath)
+	_, errPeer := os.Stat(HAPKIPeerCertPath)
+	if !os.IsNotExist(errCA) && !os.IsNotExist(errPeer) {
+		return false
+	}
+	csrResp, err := EnrollPKIFromPeer(peerAddress, peerPort, authToken)
+	if err != nil || csrResp == nil {
+		return false
+	}
+	slog.Info("HA Backup Poller: Enrolled HA PKI via CSR & LDAP replication credentials from primary peer")
+	if _, err := EnsureOpenLDAPBootstrapped(csrResp.LDAPBaseDN, 2, DefaultPasswordPolicyConfig()); err != nil {
+		slog.Error("HA Backup Poller: OpenLDAP bootstrap after PKI enrollment failed", "error", err)
+	}
+	if err := ConfigureMultiProviderSyncrepl(2, peerAddress, csrResp.LDAPBaseDN); err != nil {
+		slog.Error("HA Backup Poller: syncrepl configuration after PKI enrollment failed", "error", err)
+	}
+	return true
+}
+
 func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx context.Context) {
 	m.mu.Lock()
 	cfg := m.cfg
@@ -738,12 +818,14 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 	resp, err := client.Do(req)
 	if err != nil {
 		slog.Debug("Peer sync status check unreachable", "url", statusUrl, "error", err)
+		m.tryEnrollPKIFromPeer(cfg.PeerAddress, peerPort, cfg.AuthToken)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Warn("Peer sync status check non-200", "statusCode", resp.StatusCode)
+		m.tryEnrollPKIFromPeer(cfg.PeerAddress, peerPort, cfg.AuthToken)
 		return
 	}
 
@@ -796,24 +878,7 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 	}
 
 	// Automatically enroll HA PKI + OpenLDAP multi-provider syncrepl secret if not yet enrolled.
-	// Enrollment is the PKI bootstrap and ALWAYS uses plain HTTP + the
-	// shared token, even when the mtls transport is selected: a node that
-	// has no certificate yet cannot present one.
-	if _, err := os.Stat(HAPKICACertPath); os.IsNotExist(err) {
-		if csrResp, err := EnrollPKIFromPeer(cfg.PeerAddress, peerPort, cfg.AuthToken); err == nil && csrResp != nil {
-			slog.Info("HA Backup Poller: Enrolled HA PKI via CSR & LDAP replication credentials from primary peer")
-			// L19: the post-enrollment steps used to discard their
-			// errors while the log line above claimed success, so
-			// syncrepl could silently never be configured. Log
-			// failures loudly instead.
-			if _, err := EnsureOpenLDAPBootstrapped(csrResp.LDAPBaseDN, 2, DefaultPasswordPolicyConfig()); err != nil {
-				slog.Error("HA Backup Poller: OpenLDAP bootstrap after PKI enrollment failed", "error", err)
-			}
-			if err := ConfigureMultiProviderSyncrepl(2, cfg.PeerAddress, csrResp.LDAPBaseDN); err != nil {
-				slog.Error("HA Backup Poller: syncrepl configuration after PKI enrollment failed", "error", err)
-			}
-		}
-	}
+	m.tryEnrollPKIFromPeer(cfg.PeerAddress, peerPort, cfg.AuthToken)
 
 	if pollerStopped(stopCh) {
 		return
@@ -832,12 +897,28 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 				slog.Error("HA Backup Poller: Failed to persist K3s join token", "error", err)
 			} else {
 				slog.Info("HA Backup Poller: Automatically retrieved K3s cluster join token from primary peer")
-				if err := exec.Command("systemctl", "reload-or-restart", "k3s").Run(); err != nil {
-					slog.Error("HA Backup Poller: Failed to reload k3s after retrieving join token", "error", err)
+				m.mu.Lock()
+				km := m.k3sManager
+				m.mu.Unlock()
+				if km != nil {
+					km.MarkHaAutoJoined(cfg.PeerAddress)
+				}
+				_, cfgErr := os.Stat("/etc/rancher/k3s/config.yaml")
+				if (km != nil && km.IsEnabled()) || cfgErr == nil {
+					if err := exec.Command("systemctl", "reload-or-restart", "k3s").Run(); err != nil {
+						slog.Error("HA Backup Poller: Failed to reload k3s after retrieving join token", "error", err)
+					}
 				}
 			}
 		}
 	}
+
+	if pollerStopped(stopCh) {
+		return
+	}
+
+	// Synchronize HA-replicated ZFS datasets over incremental /api/v1/sync/zfs streams
+	m.syncZfsDatasetsFromPeer(peerPort, statusResp.ReplicatedDatasets, scheme, stopCh, pollerCtx)
 }
 
 func (m *SqliteSyncManager) handleDownloadState(w http.ResponseWriter, r *http.Request) {
@@ -917,7 +998,168 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 	cmd.Stdout = w
 	if err := cmd.Run(); err != nil {
 		slog.Warn("zfs send stream finished with error", "dataset", dataset, "error", err)
+		return
 	}
+	pruneHaSyncSnapshots(dataset, 3)
+}
+
+func pruneHaSyncSnapshots(dataset string, keepCount int) {
+	if !validZfsPath(dataset, true) || keepCount <= 0 {
+		return
+	}
+	out, err := exec.Command("zfs", "list", "-H", "-t", "snapshot", "-o", "name", "-s", "creation", dataset).Output()
+	if err != nil {
+		return
+	}
+	var haSnaps []string
+	prefix := dataset + "@ha-sync-"
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		snap := strings.TrimSpace(line)
+		if strings.HasPrefix(snap, prefix) {
+			haSnaps = append(haSnaps, snap)
+		}
+	}
+	if len(haSnaps) <= keepCount {
+		return
+	}
+	for _, oldSnap := range haSnaps[:len(haSnaps)-keepCount] {
+		_ = exec.Command("zfs", "destroy", oldSnap).Run()
+	}
+}
+
+func latestLocalHaSyncSnapshot(dataset string) string {
+	if !validZfsPath(dataset, true) {
+		return ""
+	}
+	out, err := exec.Command("zfs", "list", "-H", "-t", "snapshot", "-o", "name", "-s", "creation", dataset).Output()
+	if err != nil {
+		return ""
+	}
+	prefix := dataset + "@ha-sync-"
+	var latest string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		snap := strings.TrimSpace(line)
+		if strings.HasPrefix(snap, prefix) {
+			latest = snap
+		}
+	}
+	return latest
+}
+
+func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets []string, scheme string, stopCh <-chan struct{}, pollerCtx context.Context) {
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return
+	}
+	m.mu.Lock()
+	peerAddr := m.cfg.PeerAddress
+	authToken := m.cfg.AuthToken
+	nm := m.nasManager
+	lastSync := m.lastZfsSync
+	m.mu.Unlock()
+
+	if peerAddr == "" {
+		return
+	}
+
+	seen := make(map[string]bool)
+	var datasets []string
+	for _, ds := range peerDatasets {
+		if validZfsPath(ds, true) && strings.Contains(ds, "/") && !seen[ds] {
+			seen[ds] = true
+			datasets = append(datasets, ds)
+		}
+	}
+	if nm != nil {
+		for _, ds := range nm.GetReplicatedDatasets() {
+			if validZfsPath(ds, true) && strings.Contains(ds, "/") && !seen[ds] {
+				seen[ds] = true
+				datasets = append(datasets, ds)
+			}
+		}
+	}
+	if len(datasets) == 0 {
+		return
+	}
+
+	// Rate-limit ZFS snapshot streaming to once every 60s unless a dataset has never been synced locally.
+	needsInitialSync := false
+	for _, ds := range datasets {
+		if latestLocalHaSyncSnapshot(ds) == "" {
+			needsInitialSync = true
+			break
+		}
+	}
+	if !needsInitialSync && !lastSync.IsZero() && time.Since(lastSync) < 60*time.Second {
+		return
+	}
+
+	zfsClient, _ := m.peerClient(120 * time.Second)
+	for _, ds := range datasets {
+		if pollerStopped(stopCh) {
+			return
+		}
+		poolName := strings.SplitN(ds, "/", 2)[0]
+		if err := exec.Command("zpool", "list", "-H", poolName).Run(); err != nil {
+			continue
+		}
+		fromSnap := latestLocalHaSyncSnapshot(ds)
+		if err := m.receiveZfsStream(zfsClient, scheme, peerAddr, peerPort, authToken, ds, fromSnap, pollerCtx); err != nil && fromSnap != "" {
+			slog.Warn("Incremental ZFS HA receive failed; falling back to full stream", "dataset", ds, "from", fromSnap, "error", err)
+			if errFull := m.receiveZfsStream(zfsClient, scheme, peerAddr, peerPort, authToken, ds, "", pollerCtx); errFull != nil {
+				slog.Error("Full ZFS HA receive failed", "dataset", ds, "error", errFull)
+				continue
+			}
+		} else if err != nil {
+			slog.Error("ZFS HA receive failed", "dataset", ds, "error", err)
+			continue
+		}
+		pruneHaSyncSnapshots(ds, 3)
+	}
+
+	m.mu.Lock()
+	m.lastZfsSync = time.Now()
+	m.mu.Unlock()
+}
+
+func (m *SqliteSyncManager) receiveZfsStream(client *http.Client, scheme, peerAddr string, peerPort int, authToken, dataset, fromSnap string, pollerCtx context.Context) error {
+	q := url.Values{}
+	q.Set("dataset", dataset)
+	if fromSnap != "" {
+		q.Set("from", fromSnap)
+	}
+	streamUrl := fmt.Sprintf("%s://%s/api/v1/sync/zfs?%s", scheme, net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)), q.Encode())
+	req, err := http.NewRequestWithContext(pollerCtx, http.MethodGet, streamUrl, nil)
+	if err != nil {
+		return err
+	}
+	if authToken != "" {
+		req.Header.Set("X-Axonwall-Sync-Token", authToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("peer returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	poolName := strings.SplitN(dataset, "/", 2)[0]
+	_ = exec.Command("zfs", "mount", poolName).Run()
+
+	recvCmd := exec.CommandContext(pollerCtx, "zfs", "receive", "-F", "-u", dataset)
+	recvCmd.Stdin = resp.Body
+	var stderr bytes.Buffer
+	recvCmd.Stderr = &stderr
+	if err := recvCmd.Run(); err != nil {
+		return fmt.Errorf("zfs receive -F -u %s: %v (%s)", dataset, err, strings.TrimSpace(stderr.String()))
+	}
+	_ = exec.Command("zfs", "set", "readonly=on", dataset).Run()
+	_ = exec.Command("zfs", "mount", dataset).Run()
+	slog.Info("HA Backup Poller: Synchronized ZFS dataset from primary peer", "dataset", dataset, "snapshot", resp.Header.Get("X-Zfs-Snapshot"))
+	return nil
 }
 
 func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Request) {

@@ -53,6 +53,22 @@ var zfsAclModes = map[string]bool{
 	"": true, "discard": true, "groupmask": true, "passthrough": true, "restricted": true,
 }
 
+var zfsEncryptions = map[string]bool{
+	"": true, "off": true, "on": true, "aes-256-gcm": true, "aes-256-ccm": true, "aes-128-gcm": true, "aes-128-ccm": true,
+}
+
+var zfsKeyFormats = map[string]bool{
+	"": true, "passphrase": true, "hex": true, "raw": true,
+}
+
+var zfsAtimeValues = map[string]bool{
+	"": true, "on": true, "off": true,
+}
+
+var zfsSyncValues = map[string]bool{
+	"": true, "standard": true, "always": true, "disabled": true,
+}
+
 func validZfsPoolName(name string) bool {
 	return zfsNameComponentRe.MatchString(name) && !strings.Contains(name, "..")
 }
@@ -91,7 +107,7 @@ func ValidateInstallZfsPoolSpec(pool ZfsPoolSpec) error {
 	if len(pool.DataDisks) == 0 {
 		return fmt.Errorf("pool %q: at least one data disk is required", pool.Name)
 	}
-	for _, list := range [][]string{pool.DataDisks, pool.LogDisks, pool.CacheDisks, pool.SpareDisks} {
+	for _, list := range [][]string{pool.DataDisks, pool.LogDisks, pool.CacheDisks, pool.SpareDisks, pool.SpecialDisks, pool.DedupDisks} {
 		for _, d := range list {
 			if !validInstallZfsDevice(d) {
 				return fmt.Errorf("pool %q: disallowed disk path %q", pool.Name, d)
@@ -111,7 +127,7 @@ func ValidateZfsPoolSpec(pool ZfsPoolSpec) error {
 	if !zfsCompressions[pool.Compression] {
 		return fmt.Errorf("pool %q: compression %q is not permitted", pool.Name, pool.Compression)
 	}
-	for _, group := range [][]string{pool.DataDisks, pool.LogDisks, pool.CacheDisks, pool.SpareDisks} {
+	for _, group := range [][]string{pool.DataDisks, pool.LogDisks, pool.CacheDisks, pool.SpareDisks, pool.SpecialDisks, pool.DedupDisks} {
 		for _, dev := range group {
 			if !validZfsDevice(dev) {
 				return fmt.Errorf("pool %q: device %q is not a whole-disk path", pool.Name, dev)
@@ -148,6 +164,21 @@ func ValidateZfsDatasetSpec(ds ZfsDatasetSpec) error {
 	}
 	if !zfsAclModes[ds.AclMode] {
 		return fmt.Errorf("dataset %q: aclmode %q is not permitted", fullName, ds.AclMode)
+	}
+	if !zfsEncryptions[ds.Encryption] {
+		return fmt.Errorf("dataset %q: encryption %q is not permitted", fullName, ds.Encryption)
+	}
+	if !zfsKeyFormats[ds.KeyFormat] {
+		return fmt.Errorf("dataset %q: keyformat %q is not permitted", fullName, ds.KeyFormat)
+	}
+	if !zfsAtimeValues[ds.Atime] {
+		return fmt.Errorf("dataset %q: atime %q is not permitted", fullName, ds.Atime)
+	}
+	if !zfsSyncValues[ds.Sync] {
+		return fmt.Errorf("dataset %q: sync %q is not permitted", fullName, ds.Sync)
+	}
+	if ds.SpecialSmallBlocks != "" && !zfsRecordSizes[ds.SpecialSmallBlocks] && ds.SpecialSmallBlocks != "0" {
+		return fmt.Errorf("dataset %q: special_small_blocks %q is not permitted", fullName, ds.SpecialSmallBlocks)
 	}
 	if ds.Type != "" && ds.Type != "filesystem" && ds.Type != "zvol" {
 		return fmt.Errorf("dataset %q: type %q is not permitted", fullName, ds.Type)

@@ -38,8 +38,8 @@ For over two decades, open-source firewalls relied on FreeBSD (`m0n0wall`, `pfSe
 Axonwall solves these challenges natively:
 - **Linux 6.12+ LTS Data Plane**: Instant support for any modern NIC, Wi-Fi 7 radio, or ARM/x86 SoC.
 - **Junos-Style Commit-Confirm Rollback**: Eliminates administrator lockouts forever.
-- **Clean Table Ownership**: Axonwall manages only `table inet axonwall`, coexisting seamlessly with Docker and Kubernetes CNI.
-- **Reactive Next.js 16 Web Console**: Blazing fast, authenticated via OpenLDAP and Supabase RLS.
+- **Clean Table Ownership**: Axonwall manages only `table inet axonwall` (plus isolated `table inet axonwall_mcp` for ephemeral AI containment leases), coexisting seamlessly with Docker and Kubernetes CNI.
+- **Reactive Next.js 16 Web Console**: Blazing fast, authenticated via embedded zero-touch OpenLDAP (`slapd` + `sssd`) and Enterprise OIDC SSO (Microsoft Entra ID, Okta, Google Workspace).
 
 ---
 
@@ -195,7 +195,7 @@ Phase 4: Enterprise Expansion & Government Certifications (Months 24–36)
 | Strategic Pillar | Legacy Firewalls (Fortinet, Palo Alto) | BSD Open Source (OPNsense, pfSense) | Axonwall |
 |---|---|---|---|
 | **Kernel Data Plane** | Proprietary ASIC / Linux fork | FreeBSD `pf` (Single-core lock) | **Linux `nftables` + eBPF (Multi-core line rate)** |
-| **Licensing** | Expensive mandatory renewals | 2-Clause BSD (Deciso) / Closed (Netgate) | **Open Source Core (MIT/Apache) + Commercial BE** |
+| **Licensing** | Expensive mandatory renewals | 2-Clause BSD (Deciso) / Closed (Netgate) | **Open Source Core (GPL-2.0-or-later) + Commercial BE** |
 | **Configuration Safety** | Rollback exists on high-end tiers | Dangerous apply (Frequent lockouts) | **Junos-style Commit-Confirm with Auto-Rollback** |
 | **Deployment Modes** | Hardware appliance only | Hardware or VM only | **Bare Metal, VM, Docker, Kubernetes CNF/DaemonSet** |
 | **Modern API & Web UI** | Legacy complex Java/HTML | PHP 8 server-rendered | **Next.js 16 + React 19 + TypeScript + Go daemon** |

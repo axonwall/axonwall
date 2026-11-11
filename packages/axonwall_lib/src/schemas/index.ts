@@ -108,17 +108,27 @@ export const FirewallRuleSchema = z.object({
   source: z.string().refine(isValidFirewallEndpoint, {
     message: 'Invalid source endpoint (must be any, wan_ip, lan_net, self, IP, CIDR, or $alias)',
   }).default('any'), // 'any', IP, CIDR, or '$alias_name'
+  invertSource: z.boolean().default(false).optional(),
   sourcePort: z.string().refine((val) => val === '' || val === 'any' || isValidPortSpec(val), {
     message: 'Invalid source port range or alias',
   }).default(''),
   destination: z.string().refine(isValidFirewallEndpoint, {
     message: 'Invalid destination endpoint (must be any, wan_ip, lan_net, self, IP, CIDR, or $alias)',
   }).default('any'),
+  invertDestination: z.boolean().default(false).optional(),
   destinationPort: z.string().refine((val) => val === '' || val === 'any' || isValidPortSpec(val), {
     message: 'Invalid destination port range or alias',
   }).default(''),
   gateway: z.string().optional(), // for policy routing
   gatewayGroup: z.string().optional(), // for multi-WAN policy routing
+  dscp: z
+    .union([
+      z.number().int().min(0).max(63),
+      z.string().regex(/^(?:[0-9]|[1-5][0-9]|6[0-3]|cs[0-7]|ef|af[1-4][1-3]|va|le)$/i),
+    ])
+    .optional(), // QoS DSCP codepoint or DiffServ class match
+  rateLimitPps: z.number().int().min(0).max(10000000).optional(), // per-rule PPS limit
+  schedule: z.string().max(128).optional(), // time schedule e.g. 08:00-18:00
   log: z.boolean().default(false),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),
@@ -126,7 +136,7 @@ export const FirewallRuleSchema = z.object({
 });
 export type FirewallRule = z.infer<typeof FirewallRuleSchema>;
 
-export const NatTypeSchema = z.enum(['dnat', 'snat', 'masquerade', 'nptv6']);
+export const NatTypeSchema = z.enum(['dnat', 'snat', 'masquerade', 'binat', 'nptv6']);
 
 export const NatRuleSchema = z.object({
   id: z.string().uuid().optional(),
@@ -147,10 +157,11 @@ export const NatRuleSchema = z.object({
   }).default(''),
   targetIp: z.string().refine((v) => !v || isValidIPv4(v) || isValidIPv6(v) || isValidCIDR(v) || v === 'wan_ip', {
     message: 'Invalid NAT target IP',
-  }).optional(), // translated internal IP
+  }).optional(), // translated internal IP or NPTv6 prefix
   targetPort: z.string().refine((v) => !v || isValidPortSpec(v) || v === 'any', {
     message: 'Invalid NAT target port',
   }).optional(), // translated internal port
+  natReflection: z.boolean().optional(), // hairpin NAT reflection override
   log: z.boolean().default(false),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),
@@ -281,9 +292,40 @@ export const DhcpSubnetSchema = z.object({
 });
 export type DhcpSubnet = z.infer<typeof DhcpSubnetSchema>;
 
+export const Dhcp6StaticMappingSchema = z.object({
+  id: z.string().uuid().optional(),
+  duid: z.string().min(4).max(128).regex(/^[0-9a-fA-F:-]+$/, 'Invalid DHCPv6 DUID'),
+  ip6: z.string().refine(isValidIPv6, { message: 'Invalid IPv6 address' }),
+  hostname: z.string().optional(),
+  description: z.string().max(255).default(''),
+});
+export type Dhcp6StaticMapping = z.infer<typeof Dhcp6StaticMappingSchema>;
+
+export const Dhcp6SubnetSchema = z.object({
+  id: z.string().uuid().optional(),
+  interface: z.string().min(1),
+  subnet: z.string().refine((val) => val.includes(':') && isValidCIDR(val), {
+    message: 'Invalid IPv6 subnet CIDR',
+  }),
+  poolStart: z.string().refine(isValidIPv6, { message: 'Invalid IPv6 pool start' }).optional(),
+  poolEnd: z.string().refine(isValidIPv6, { message: 'Invalid IPv6 pool end' }).optional(),
+  delegatedPrefix: z.string().refine((val) => !val || (val.includes(':') && isValidCIDR(val)), {
+    message: 'Invalid IA_PD delegated prefix CIDR',
+  }).optional(),
+  delegatedLen: z.number().int().min(48).max(64).default(60),
+  raMode: z.enum(['slaac', 'managed', 'assisted', 'stateless_dhcp', 'disabled']).default('assisted'),
+  dnsServers: z.array(z.string().refine(isValidIPv6, { message: 'Invalid IPv6 DNS server' })).default([]),
+  domainSearchList: z.array(z.string()).default([]),
+  staticMappings: z.array(Dhcp6StaticMappingSchema).default([]),
+  enabled: z.boolean().default(true),
+});
+export type Dhcp6Subnet = z.infer<typeof Dhcp6SubnetSchema>;
+
 export const DhcpConfigSchema = z.object({
   enabled: z.boolean().default(true),
   subnets: z.array(DhcpSubnetSchema).default([]),
+  dhcp6Enabled: z.boolean().default(false).optional(),
+  subnets6: z.array(Dhcp6SubnetSchema).default([]).optional(),
 });
 export type DhcpConfig = z.infer<typeof DhcpConfigSchema>;
 
@@ -322,8 +364,62 @@ export const DnsConfigSchema = z.object({
   dotUpstreams: z.array(z.string()).default(['1.1.1.1@853#cloudflare-dns.com', '9.9.9.9@853#dns.quad9.net']),
   hostOverrides: z.array(DnsHostOverrideSchema).default([]),
   blocklist: DnsBlocklistConfigSchema.optional(),
+  autoRegisterVirtHosts: z.boolean().default(true).optional(),
+  autoRegisterK3sIngresses: z.boolean().default(true).optional(),
 });
 export type DnsConfig = z.infer<typeof DnsConfigSchema>;
+
+export const MdnsReflectorConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  interfaces: z.array(z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/)).default([]),
+  enableIpv6: z.boolean().default(true),
+  allowSsdpDiscovery: z.boolean().default(false),
+  description: z.string().max(255).default('Cross-VLAN mDNS / Bonjour / Matter Reflector'),
+});
+export type MdnsReflectorConfig = z.infer<typeof MdnsReflectorConfigSchema>;
+
+export const UpnpAclRuleSchema = z.object({
+  id: z.string().optional(),
+  action: z.enum(['allow', 'deny']).default('allow'),
+  externalPorts: z.string().regex(/^\d+(?:-\d+)?$/, 'Port or range e.g. 1024-65535').default('1024-65535'),
+  internalCidr: z.string().refine(isValidCIDR, { message: 'Invalid internal subnet CIDR' }),
+  internalPorts: z.string().regex(/^\d+(?:-\d+)?$/, 'Port or range e.g. 1024-65535').default('1024-65535'),
+  description: z.string().max(128).default(''),
+});
+export type UpnpAclRule = z.infer<typeof UpnpAclRuleSchema>;
+
+export const UpnpConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  externalInterface: z.string().default('wan'),
+  internalInterfaces: z.array(z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/)).default(['lan']),
+  enableUpnp: z.boolean().default(true),
+  enableNatPmp: z.boolean().default(true),
+  secureMode: z.boolean().default(true),
+  stunHost: z.string().optional(),
+  acls: z.array(UpnpAclRuleSchema).default([]),
+});
+export type UpnpConfig = z.infer<typeof UpnpConfigSchema>;
+
+export const DdnsEntrySchema = z.object({
+  id: z.string().optional(),
+  provider: z.enum(['cloudflare', 'route53', 'duckdns', 'desec', 'linode', 'custom']).default('cloudflare'),
+  hostname: z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid DDNS hostname'),
+  zone: z.string().optional(),
+  interface: z.string().default('wan'),
+  ipVersion: z.enum(['ipv4', 'ipv6', 'dual']).default('ipv4'),
+  apiToken: z.string().optional(),
+  customUpdateUrl: z.string().optional(),
+  checkIntervalSeconds: z.number().int().min(60).max(86400).default(300),
+  proxied: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+});
+export type DdnsEntry = z.infer<typeof DdnsEntrySchema>;
+
+export const DdnsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  entries: z.array(DdnsEntrySchema).default([]),
+});
+export type DdnsConfig = z.infer<typeof DdnsConfigSchema>;
 
 export const StaticRouteSchema = z.object({
   id: z.string().uuid().optional(),
@@ -830,6 +926,10 @@ export const ObservabilityConfigSchema = z.object({
     continuousProfilingEnabled: z.boolean().default(false),
     profilingSampleHz: z.number().int().min(19).max(999).default(99),
     automatedRcaInspections: z.boolean().default(true),
+    xdpDualStackVlanEnabled: z.boolean().default(true),
+    xdpLpmCidrDropEnabled: z.boolean().default(true).optional(),
+    xdpSynFloodRateLimitPps: z.number().int().min(0).max(10000000).default(0).optional(),
+    zfsArcZilTelemetryEnabled: z.boolean().default(true),
   }).default({
     enabled: true,
     serviceMapEnabled: true,
@@ -838,6 +938,10 @@ export const ObservabilityConfigSchema = z.object({
     continuousProfilingEnabled: false,
     profilingSampleHz: 99,
     automatedRcaInspections: true,
+    xdpDualStackVlanEnabled: true,
+    xdpLpmCidrDropEnabled: true,
+    xdpSynFloodRateLimitPps: 0,
+    zfsArcZilTelemetryEnabled: true,
   }),
 });
 export type ObservabilityConfig = z.infer<typeof ObservabilityConfigSchema>;
@@ -852,12 +956,19 @@ export const NutUpsConfigSchema = z.object({
 });
 export type NutUpsConfig = z.infer<typeof NutUpsConfigSchema>;
 
+export const HaProxyHostRuleSchema = z.object({
+  hostname: z.string().min(1),
+  backend: z.string().min(1),
+});
+export type HaProxyHostRule = z.infer<typeof HaProxyHostRuleSchema>;
+
 export const HaProxyFrontendSchema = z.object({
   name: z.string().min(1),
   bindPort: z.number().int().min(1).max(65535),
   ssl: z.boolean().default(false),
   defaultBackend: z.string().min(1),
   certName: z.string().optional(),
+  hostRules: z.array(HaProxyHostRuleSchema).default([]).optional(),
 });
 export type HaProxyFrontend = z.infer<typeof HaProxyFrontendSchema>;
 
@@ -1226,6 +1337,17 @@ export type ZfsTopology = z.infer<typeof ZfsTopologySchema>;
 export const ZfsCompressionSchema = z.enum(['lz4', 'zstd', 'gzip', 'off']);
 export type ZfsCompression = z.infer<typeof ZfsCompressionSchema>;
 
+export const ZfsSpecialSmallBlocksSchema = z.enum([
+  '0',
+  '4K',
+  '8K',
+  '16K',
+  '32K',
+  '64K',
+  '128K',
+]);
+export type ZfsSpecialSmallBlocks = z.infer<typeof ZfsSpecialSmallBlocksSchema>;
+
 export const ZfsPoolSchema = z.object({
   name: z.string().min(1).regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/),
   topology: ZfsTopologySchema.default('mirror'),
@@ -1233,8 +1355,12 @@ export const ZfsPoolSchema = z.object({
   cacheDisks: z.array(z.string()).default([]),
   logDisks: z.array(z.string()).default([]),
   spareDisks: z.array(z.string()).default([]),
+  specialDisks: z.array(z.string()).default([]).optional(),
+  dedupDisks: z.array(z.string()).default([]).optional(),
+  specialSmallBlocks: ZfsSpecialSmallBlocksSchema.default('0').optional(),
   ashift: z.number().int().min(9).max(16).default(12),
   autotrim: z.boolean().default(true),
+  trimScheduleCron: z.string().default('0 4 * * 6').optional(),
   compression: ZfsCompressionSchema.default('lz4'),
   scrubScheduleCron: z.string().default('0 2 * * 0'),
   description: z.string().max(255).default(''),
@@ -1249,9 +1375,19 @@ export const ZfsDatasetSchema = z.object({
   compression: ZfsCompressionSchema.default('lz4'),
   dedup: z.enum(['off', 'on']).default('off'),
   quotaGb: z.number().nonnegative().default(0),
+  refQuotaGb: z.number().nonnegative().default(0).optional(),
+  refReservationGb: z.number().nonnegative().default(0).optional(),
   recordSize: z.enum(['4K', '16K', '64K', '128K', '512K', '1M']).default('128K'),
+  specialSmallBlocks: ZfsSpecialSmallBlocksSchema.optional(),
+  atime: z.enum(['on', 'off']).default('off').optional(),
+  sync: z.enum(['standard', 'always', 'disabled']).default('standard').optional(),
   volSizeGb: z.number().nonnegative().default(10),
-  encryption: z.enum(['off', 'aes-256-gcm']).default('off'),
+  encryption: z.enum(['off', 'aes-256-gcm', 'aes-256-ccm']).default('off'),
+  keyFormat: z.enum(['passphrase', 'hex', 'raw']).default('hex').optional(),
+  keyLocation: z
+    .string()
+    .regex(/^(prompt|file:\/\/\/etc\/axonwall\/zfs-keys\/[a-zA-Z0-9._-]+)$/, 'Key location must be prompt or file:///etc/axonwall/zfs-keys/<id>')
+    .optional(),
   aclMode: z.enum(['passthrough', 'restricted']).default('passthrough'),
   replicateToHaPeer: z.boolean().default(true),
   description: z.string().max(255).default(''),
@@ -1278,6 +1414,8 @@ export const SmbShareSchema = z.object({
   browseable: z.boolean().default(true),
   timeMachine: z.boolean().default(false),
   shadowCopies: z.boolean().default(true),
+  recycleBin: z.boolean().default(false).optional(),
+  auditLog: z.boolean().default(false).optional(),
   validUsers: z.array(z.string()).default([]),
   hostsAllow: z.array(z.string()).default([]),
   enabled: z.boolean().default(true),
@@ -1290,11 +1428,38 @@ export const NfsExportSchema = z.object({
   allowedNetworks: z.array(z.string()).default(['192.168.1.0/24']),
   readOnly: z.boolean().default(false),
   mapRootUser: z.enum(['root', 'nobody']).default('root'),
+  secFlavor: z.enum(['sys', 'krb5', 'krb5i', 'krb5p']).default('sys').optional(),
   async: z.boolean().default(false),
   enabled: z.boolean().default(true),
   description: z.string().max(255).default(''),
 });
 export type NfsExport = z.infer<typeof NfsExportSchema>;
+
+export const CloudSyncTaskSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/),
+  provider: z.enum(['s3', 'b2', 'gcs', 'sftp', 'webdav']).default('s3'),
+  direction: z.enum(['push', 'pull']).default('push'),
+  transferMode: z.enum(['sync', 'copy']).default('sync'),
+  localPath: z.string().regex(/^\/mnt\/[a-zA-Z0-9._/-]+$/, 'localPath must reside under /mnt/<pool>'),
+  remoteBucket: z.string().min(1).regex(/^[a-zA-Z0-9._:/-]+$/),
+  endpoint: z.string().optional(),
+  scheduleCron: z.string().default('0 3 * * *'),
+  bandwidthLimitMbps: z.number().int().min(0).default(0),
+  clientSideEncrypt: z.boolean().default(true),
+  enabled: z.boolean().default(true),
+  description: z.string().max(255).default(''),
+});
+export type CloudSyncTask = z.infer<typeof CloudSyncTaskSchema>;
+
+export const SmartScheduleSchema = z.object({
+  enabled: z.boolean().default(true),
+  shortTestCron: z.string().default('0 1 * * *'),
+  longTestCron: z.string().default('0 3 1 * *'),
+  tempWarnCelsius: z.number().int().min(25).max(85).default(45),
+  tempCritCelsius: z.number().int().min(30).max(95).default(55),
+});
+export type SmartSchedule = z.infer<typeof SmartScheduleSchema>;
 
 export const IscsiLunSchema = z.object({
   lunId: z.number().int().min(0).default(0),
@@ -1333,6 +1498,8 @@ export const NasConfigSchema = z.object({
   enabled: z.boolean().default(false),
   workgroup: z.string().default('WORKGROUP'),
   serverString: z.string().default('Axonwall Enterprise ZFS NAS'),
+  smbMultichannel: z.boolean().default(true).optional(),
+  wsddEnabled: z.boolean().default(true).optional(),
   pools: z.array(ZfsPoolSchema).default([]),
   datasets: z.array(ZfsDatasetSchema).default([]),
   snapshotPolicies: z.array(ZfsSnapshotPolicySchema).default([]),
@@ -1340,6 +1507,8 @@ export const NasConfigSchema = z.object({
   nfsExports: z.array(NfsExportSchema).default([]),
   iscsiTargets: z.array(IscsiTargetSchema).default([]),
   s3: S3ServerConfigSchema.optional(),
+  cloudSyncTasks: z.array(CloudSyncTaskSchema).default([]).optional(),
+  smartSchedule: SmartScheduleSchema.optional(),
 });
 export type NasConfig = z.infer<typeof NasConfigSchema>;
 
@@ -1360,6 +1529,10 @@ export const K3sWorkloadSpecSchema = z.object({
   image: z.string().min(1),
   replicas: z.number().int().min(1).max(32).default(1),
   port: z.number().int().min(1).max(65535).default(80),
+  serviceType: z.enum(['ClusterIP', 'NodePort', 'LoadBalancer']).default('ClusterIP').optional(),
+  ingressHostname: z.string().regex(/^[a-zA-Z0-9_.-]+$/).optional(),
+  exposeViaHaproxy: z.boolean().default(false).optional(),
+  bpfTokenProfileId: z.string().regex(/^[a-z0-9][a-z0-9._-]*$/).optional(),
   storageClass: z.enum(['axonwall-replicated-ha', 'axonwall-zfs-local', 'none']).default('axonwall-replicated-ha'),
   storageSizeGb: z.number().int().min(1).default(10),
   mountPath: z.string().default('/data'),
@@ -1367,14 +1540,120 @@ export const K3sWorkloadSpecSchema = z.object({
 });
 export type K3sWorkloadSpec = z.infer<typeof K3sWorkloadSpecSchema>;
 
+// =============================================================================
+// Linux 6.9+ BPF_TOKEN_CREATE & bpffs Delegation Schemas (K3s + LXC UserNS)
+// =============================================================================
+
+export const FORBIDDEN_RING0_BPF_PROGS = [
+  'kprobe',
+  'tracepoint',
+  'perf_event',
+  'raw_tracepoint',
+  'raw_tracepoint_writable',
+  'tracing',
+  'struct_ops',
+  'ext',
+  'lsm',
+  'syscall',
+] as const;
+
+export const BpfTokenPresetSchema = z.enum([
+  'disabled',
+  'socket-observability',
+  'network-dataplane',
+  'cgroup-microsegmentation',
+  'custom',
+]);
+export type BpfTokenPreset = z.infer<typeof BpfTokenPresetSchema>;
+
+export const BpfTokenDelegationSpecSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    preset: BpfTokenPresetSchema.default('network-dataplane'),
+    delegateCmds: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    delegateProgs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    delegateMaps: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    delegateAttachs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    auditViaBpfLsm: z.boolean().default(true),
+  })
+  .superRefine((val, ctx) => {
+    if (!val.enabled || val.preset === 'disabled') return;
+    if (val.delegateProgs) {
+      const progs = val.delegateProgs.split(':').map((s) => s.trim().toLowerCase()).filter(Boolean);
+      for (const p of progs) {
+        if ((FORBIDDEN_RING0_BPF_PROGS as readonly string[]).includes(p) || p === 'any') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['delegateProgs'],
+            message: `BPF_TOKEN delegation rejects Ring-0 program type '${p}' (prevents bpf_probe_read_kernel() arbitrary host memory access)`,
+          });
+        }
+      }
+    }
+    for (const field of ['delegateCmds', 'delegateMaps', 'delegateAttachs'] as const) {
+      const v = val[field];
+      if (v && v.split(':').some((tok) => tok.trim().toLowerCase() === 'any')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} cannot use wildcard 'any'; specify explicit least-privilege bitmasks`,
+        });
+      }
+    }
+  });
+export type BpfTokenDelegationSpec = z.infer<typeof BpfTokenDelegationSpecSchema>;
+
+export const K3sBpfTokenProfileSchema = z.object({
+  id: z.string().min(2).max(63).regex(/^[a-z0-9][a-z0-9._-]*$/),
+  preset: BpfTokenPresetSchema.default('network-dataplane'),
+  enabled: z.boolean().default(true),
+  delegateCmds: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+  delegateProgs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+  delegateMaps: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+  delegateAttachs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+  auditViaBpfLsm: z.boolean().default(true),
+  description: z.string().max(255).optional(),
+});
+export type K3sBpfTokenProfile = z.infer<typeof K3sBpfTokenProfileSchema>;
+
+export const K3sServiceLbPoolSchema = z.object({
+  name: z.string().min(1).regex(/^[a-z0-9][a-z0-9-]*$/),
+  cidr: z.string().refine(isValidCIDR, { message: 'Invalid ServiceLB CIDR pool' }),
+  mode: z.enum(['bgp', 'l2-arp', 'both']).default('both'),
+  autoAssign: z.boolean().default(true),
+});
+export type K3sServiceLbPool = z.infer<typeof K3sServiceLbPoolSchema>;
+
+export const K3sEtcdSnapshotConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  scheduleCron: z.string().default('0 */6 * * *'),
+  retention: z.number().int().min(1).max(365).default(14),
+  snapshotDir: z.string().regex(/^\/[a-zA-Z0-9._/-]+$/).default('/var/lib/rancher/k3s/server/db/snapshots'),
+  s3Enabled: z.boolean().default(false),
+  s3Endpoint: z.string().optional(),
+  s3Bucket: z.string().optional(),
+  s3Region: z.string().default('us-east-1'),
+});
+export type K3sEtcdSnapshotConfig = z.infer<typeof K3sEtcdSnapshotConfigSchema>;
+
 export const K3sConfigSchema = z.object({
   enabled: z.boolean().default(false),
   clusterCidr: z.string().default('10.42.0.0/16'),
   serviceCidr: z.string().default('10.43.0.0/16'),
   nodeIpInterface: z.string().default('lan'),
+  cniPlugin: z.enum(['flannel', 'cilium-ebpf']).default('flannel').optional(),
   flannelBackend: z.enum(['wireguard-native', 'vxlan', 'host-gw']).default('wireguard-native'),
+  ciliumKubeProxyReplacement: z.boolean().default(true).optional(),
+  ciliumHubbleEnabled: z.boolean().default(true).optional(),
+  haTopology: z.enum(['embedded-etcd', 'single-server-ha-agent', 'external-datastore']).default('embedded-etcd').optional(),
+  externalDatastoreEndpoint: z.string().optional(),
   disableTraefik: z.boolean().default(false),
   autoJoinHaPeer: z.boolean().default(true),
+  enableUserNamespaces: z.boolean().default(true),
+  gpuRuntimeEnabled: z.boolean().default(false).optional(),
+  etcdSnapshots: K3sEtcdSnapshotConfigSchema.optional(),
+  serviceLbPools: z.array(K3sServiceLbPoolSchema).default([]).optional(),
+  bpfTokenProfiles: z.array(K3sBpfTokenProfileSchema).default([]),
   openEbs: OpenEbsConfigSchema.optional(),
   workloads: z.array(K3sWorkloadSpecSchema).default([]),
 });
@@ -1475,6 +1754,40 @@ export type VmDisk = z.infer<typeof VmDiskSchema>;
 export const VmNicModelSchema = z.enum(['virtio', 'e1000', 'e1000e', 'vmxnet3']);
 export type VmNicModel = z.infer<typeof VmNicModelSchema>;
 
+export const VirtioFsShareSchema = z.object({
+  id: z.string().optional(),
+  tag: z.string().min(1).max(36).regex(/^[a-zA-Z0-9_-]+$/, 'Invalid VirtioFS mount tag'),
+  hostPath: z
+    .string()
+    .regex(/^\/(?:mnt|tank|rpool|var\/lib\/axonwall)\/[a-zA-Z0-9._/-]+$/, 'VirtioFS hostPath must reside under /mnt, /tank, /rpool, or /var/lib/axonwall'),
+  cacheMode: z.enum(['auto', 'always', 'none']).default('auto'),
+  readOnly: z.boolean().default(false),
+});
+export type VirtioFsShare = z.infer<typeof VirtioFsShareSchema>;
+
+export const VirtSecurityGroupRuleSchema = z.object({
+  id: z.string().optional(),
+  direction: z.enum(['in', 'out']).default('in'),
+  action: z.enum(['accept', 'drop', 'reject']).default('accept'),
+  protocol: z.enum(['any', 'tcp', 'udp', 'icmp', 'ipv6-icmp']).default('tcp'),
+  cidr: z.string().refine((v) => v === 'any' || isValidCIDR(v) || isValidIPv4(v) || isValidIPv6(v), {
+    message: 'Invalid security group CIDR/IP',
+  }).default('any'),
+  port: z.string().refine((v) => !v || v === 'any' || isValidPortSpec(v), {
+    message: 'Invalid security group port specification',
+  }).default(''),
+  description: z.string().max(128).default(''),
+});
+export type VirtSecurityGroupRule = z.infer<typeof VirtSecurityGroupRuleSchema>;
+
+export const VirtSecurityGroupSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1).max(48).regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/, 'Invalid security group name'),
+  description: z.string().max(255).default(''),
+  rules: z.array(VirtSecurityGroupRuleSchema).default([]),
+});
+export type VirtSecurityGroup = z.infer<typeof VirtSecurityGroupSchema>;
+
 export const VmNicSchema = z.object({
   id: z.string().optional(),
   mac: z.string().default(''),
@@ -1483,6 +1796,7 @@ export const VmNicSchema = z.object({
   vnet: z.string().optional(),
   model: VmNicModelSchema.default('virtio'),
   firewall: z.boolean().default(true),
+  securityGroups: z.array(z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/)).default([]).optional(),
   rateLimitMbps: z.number().int().min(0).default(0),
   attachMode: z.enum(['bridge', 'macvtap-passthru', 'vfio']).default('bridge').optional(),
   hostDevice: z.string().optional(),
@@ -1515,9 +1829,13 @@ export const VirtualMachineSchema = z.object({
   sockets: z.number().int().min(1).max(8).default(1),
   cores: z.number().int().min(1).max(128).default(2),
   cpuType: z.enum(['host', 'x86-64-v2-AES', 'kvm64', 'qemu64']).default('host'),
+  cpuPinning: z.string().regex(/^[0-9,-]*$/, 'Invalid CPU affinity list (e.g. 0-3,8-11)').optional(),
+  numaEnabled: z.boolean().default(false).optional(),
   memoryMb: z.number().int().min(128).default(2048),
+  hugepages: z.enum(['off', '2M', '1G']).default('off').optional(),
   balloonMinMb: z.number().int().min(0).default(0),
   disks: z.array(VmDiskSchema).default([]),
+  virtioFsShares: z.array(VirtioFsShareSchema).default([]).optional(),
   diskless: z.boolean().default(false).optional(),
   kernelPath: z.string().optional(),
   initrdPath: z.string().optional(),
@@ -1529,6 +1847,7 @@ export const VirtualMachineSchema = z.object({
   cloudInit: CloudInitConfigSchema.optional(),
   pciPassthrough: z.array(z.string()).default([]),
   usbPassthrough: z.array(z.string()).default([]),
+  isTemplate: z.boolean().default(false).optional(),
   autostart: z.boolean().default(false),
   haManaged: z.boolean().default(false),
   agent: z.boolean().default(true),
@@ -1544,27 +1863,37 @@ export const LxcMountPointSchema = z.object({
 });
 export type LxcMountPoint = z.infer<typeof LxcMountPointSchema>;
 
-export const LxcContainerSchema = z.object({
-  id: z.string().optional(),
-  ctid: z.number().int().min(100).max(99999),
-  hostname: z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/),
-  description: z.string().max(255).default(''),
-  template: z.string().min(1).default('debian-12-standard'),
-  unprivileged: z.boolean().default(true),
-  cores: z.number().int().min(1).max(128).default(1),
-  memoryMb: z.number().int().min(256).default(1024),
-  swapMb: z.number().int().min(0).default(512),
-  rootfsPool: z.string().default('tank'),
-  rootfsSizeGb: z.number().int().min(1).default(8),
-  mountPoints: z.array(LxcMountPointSchema).default([]),
-  nics: z.array(VmNicSchema).default([]),
-  dnsServers: z.array(z.string()).default([]),
-  searchDomain: z.string().optional(),
-  features: z.array(z.enum(['nesting', 'keyctl', 'fuse'])).default(['nesting']),
-  autostart: z.boolean().default(false),
-  haManaged: z.boolean().default(false),
-  enabled: z.boolean().default(true),
-});
+export const LxcContainerSchema = z
+  .object({
+    id: z.string().optional(),
+    ctid: z.number().int().min(100).max(99999),
+    hostname: z.string().min(1).regex(/^[a-zA-Z0-9_.-]+$/),
+    description: z.string().max(255).default(''),
+    template: z.string().min(1).default('debian-12-standard'),
+    unprivileged: z.boolean().default(true),
+    cores: z.number().int().min(1).max(128).default(1),
+    memoryMb: z.number().int().min(256).default(1024),
+    swapMb: z.number().int().min(0).default(512),
+    rootfsPool: z.string().default('tank'),
+    rootfsSizeGb: z.number().int().min(1).default(8),
+    mountPoints: z.array(LxcMountPointSchema).default([]),
+    nics: z.array(VmNicSchema).default([]),
+    dnsServers: z.array(z.string()).default([]),
+    searchDomain: z.string().optional(),
+    features: z.array(z.enum(['nesting', 'keyctl', 'fuse'])).default(['nesting']),
+    bpfToken: BpfTokenDelegationSpecSchema.optional(),
+    autostart: z.boolean().default(false),
+    haManaged: z.boolean().default(false),
+    enabled: z.boolean().default(true),
+  })
+  .refine(
+    (ct) => !(ct.bpfToken?.enabled && ct.bpfToken.preset !== 'disabled' && !ct.unprivileged),
+    {
+      message:
+        'BPF_TOKEN delegation requires an unprivileged User-Namespaced LXC container (unprivileged: true / CLONE_NEWUSER)',
+      path: ['bpfToken'],
+    },
+  );
 export type LxcContainer = z.infer<typeof LxcContainerSchema>;
 
 export const IsoImageSchema = z.object({
@@ -1638,12 +1967,14 @@ export const VirtConfigSchema = z.object({
   enabled: z.boolean().default(false),
   defaultPool: z.string().default('tank'),
   isoPool: z.string().default('tank'),
+  exportLibvirtXml: z.boolean().default(true).optional(),
   vms: z.array(VirtualMachineSchema).default([]),
   containers: z.array(LxcContainerSchema).default([]),
   isos: z.array(IsoImageSchema).default([]),
   pciDevices: z.array(PciPassthroughDeviceSchema).default([]),
   backupJobs: z.array(WorkloadBackupJobSchema).default([]),
   vxlanZones: z.array(VxlanZoneSchema).default([]),
+  securityGroups: z.array(VirtSecurityGroupSchema).default([]).optional(),
 });
 export type VirtConfig = z.infer<typeof VirtConfigSchema>;
 
@@ -1723,6 +2054,8 @@ export const HostMalwareDefenseConfigSchema = z.object({
   bpfJitHardenMode: z.enum(['0', '1', '2']).default('2'),
   kernelLockdownMode: z.enum(['none', 'integrity', 'confidentiality']).default('confidentiality'),
   bpfLsmGuardEnabled: z.boolean().default(true),
+  allowDelegatedBpfTokens: z.boolean().default(true),
+  auditDelegatedBpfTokens: z.boolean().default(true),
   trustedBpfLoaderPaths: z.array(
     z.string().regex(/^\/[a-zA-Z0-9._/-]+$/, 'Trusted BPF loader path must be a safe absolute path'),
   ).default([
@@ -2132,8 +2465,11 @@ export const DesiredStateSchema = z.object({
   nat: z.array(NatRuleSchema).default([]),
   gateways: z.array(GatewaySchema).default([]),
   gatewayGroups: z.array(GatewayGroupSchema).default([]),
-  dhcp: DhcpConfigSchema.default({ enabled: true, subnets: [] }),
+  dhcp: DhcpConfigSchema.prefault({ enabled: true, subnets: [] }),
   dns: DnsConfigSchema.prefault({ enabled: true, hostOverrides: [] }),
+  mdnsReflector: MdnsReflectorConfigSchema.optional(),
+  upnp: UpnpConfigSchema.optional(),
+  ddns: DdnsConfigSchema.optional(),
   routes: z.array(StaticRouteSchema).default([]),
   trafficShaper: TrafficShaperConfigSchema.optional(),
   wireguard: WireGuardConfigSchema.optional(),

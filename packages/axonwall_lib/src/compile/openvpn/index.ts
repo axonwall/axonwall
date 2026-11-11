@@ -64,8 +64,10 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
     `client-config-dir /var/lib/axonwall/openvpn/${safeName}/ccd`,
   ];
 
-  if (server.dcoEnabled) {
-    lines.push('# Kernel DCO optimization enabled');
+  if (server.dcoEnabled !== false) {
+    lines.push('# Kernel DCO optimization enabled (ovpn-dco)');
+  } else {
+    lines.push('disable-dco');
   }
 
   if (server.clientToClient) {

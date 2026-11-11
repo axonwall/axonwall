@@ -5006,6 +5006,265 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
   };
 }
 
+export async function rollbackNasSnapshotAction(
+  snapshot: string
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*@[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(snapshot) || snapshot.includes('..')) {
+    throw new Error('Invalid ZFS snapshot identifier (expected dataset@label)');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/nas/snapshots/rollback', 'POST', {
+    snapshot,
+    destroyNewer: false,
+  });
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: snapshot '${snapshot}' was NOT rolled back.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message: daemonResp.message || daemonResp.error || `Rolled back to ${snapshot}`,
+  };
+}
+
+export async function deleteNasSnapshotAction(
+  snapshot: string
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*@[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(snapshot) || snapshot.includes('..')) {
+    throw new Error('Invalid ZFS snapshot identifier (expected dataset@label)');
+  }
+  const daemonResp = await callAgentApi<any>(
+    `/v1/nas/snapshots?snapshot=${encodeURIComponent(snapshot)}`,
+    'DELETE'
+  );
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: snapshot '${snapshot}' was NOT deleted.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message: daemonResp.message || daemonResp.error || `Deleted snapshot ${snapshot}`,
+  };
+}
+
+export async function trimNasPoolAction(
+  poolName: string
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
+    throw new Error('Invalid ZFS pool name');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/nas/trim', 'POST', { pool: poolName });
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: NVMe/SSD TRIM was not started on '${poolName}'.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message: daemonResp.message || daemonResp.error || `Started TRIM on pool ${poolName}`,
+  };
+}
+
+export async function checkpointNasPoolAction(
+  poolName: string,
+  discard = false
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
+    throw new Error('Invalid ZFS pool name');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/nas/checkpoint', 'POST', {
+    pool: poolName,
+    discard: Boolean(discard),
+  });
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: ZFS pool checkpoint action did not run on '${poolName}'.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message:
+      daemonResp.message ||
+      daemonResp.error ||
+      (discard ? `Discarded checkpoint on pool ${poolName}` : `Created pool-wide checkpoint on ${poolName}`),
+  };
+}
+
+export async function manageNasDatasetEncryptionAction(
+  dataset: string,
+  action: 'load-key' | 'unload-key',
+  keyMaterial = ''
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*$/.test(dataset) || dataset.includes('..')) {
+    throw new Error('Invalid ZFS dataset name');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/nas/encryption', 'POST', {
+    dataset,
+    action,
+    keyMaterial,
+  });
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: ZFS encryption ${action} did not run on '${dataset}'.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message: daemonResp.message || daemonResp.error || `Dataset ${dataset} ${action} completed.`,
+  };
+}
+
+export async function runNasSmartTestAction(
+  device: string,
+  testType: 'short' | 'long' = 'short'
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (!/^\/dev\/[a-zA-Z0-9/_-]+$/.test(device) || device.includes('..')) {
+    throw new Error('Invalid block device path');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/nas/smart-test', 'POST', {
+    device,
+    testType,
+  });
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: S.M.A.R.T. ${testType} test did not start on '${device}'.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message:
+      daemonResp.output ||
+      daemonResp.message ||
+      daemonResp.error ||
+      `Initiated S.M.A.R.T. ${testType} self-test on ${device}`,
+  };
+}
+
+export async function runNasCloudSyncAction(
+  taskName: string
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(taskName)) {
+    throw new Error('Invalid Cloud Sync task name');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/nas/cloud-sync', 'POST', {
+    taskName,
+  });
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: Cloud Sync task '${taskName}' was not executed.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message:
+      daemonResp.output ||
+      daemonResp.message ||
+      daemonResp.error ||
+      `Executed Cloud Sync task '${taskName}'.`,
+  };
+}
+
+export async function syncDdnsNowAction(): Promise<{
+  success: boolean;
+  message: string;
+  entries?: Array<{ hostname: string; provider: string; lastIp?: string; status?: string }>;
+}> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/ddns/status', 'POST', {});
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: 'Daemon unavailable: DDNS sync was not triggered.',
+    };
+  }
+  const count = Array.isArray(daemonResp.entries) ? daemonResp.entries.length : 0;
+  return {
+    success: true,
+    message: `Triggered DDNS sync across ${count} configured record(s).`,
+    entries: daemonResp.entries,
+  };
+}
+
+export interface K3sEtcdSnapshotItem {
+  name: string;
+  location?: string;
+  sizeBytes?: number;
+  createdAt?: string;
+}
+
+export async function getK3sEtcdSnapshotsAction(): Promise<K3sEtcdSnapshotItem[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const daemonResp = await callAgentApi<{ snapshots?: K3sEtcdSnapshotItem[] }>('/v1/k3s/etcd-snapshots');
+  return Array.isArray(daemonResp?.snapshots) ? daemonResp!.snapshots! : [];
+}
+
+export async function manageK3sEtcdSnapshotAction(
+  action: 'save' | 'restore',
+  name = ''
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  if (name && !/^[a-zA-Z0-9_.-]{1,128}$/.test(name)) {
+    throw new Error('Invalid etcd snapshot name');
+  }
+  const daemonResp = await callAgentApi<any>('/v1/k3s/etcd-snapshots', 'POST', {
+    action,
+    name,
+  });
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: K3s etcd snapshot ${action} was not executed.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message: daemonResp.message || daemonResp.error || `K3s etcd snapshot ${action} completed.`,
+  };
+}
+
 export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
   const session = await getSession();
   assertActionPermitted(session);
@@ -6294,6 +6553,541 @@ export async function runHostRootkitScan(): Promise<HostRootkitAuditApiResponse 
   await enforceRateLimit(10, 60000, 'rootkit-scan');
   return callAgentApi<HostRootkitAuditApiResponse>('/v1/security/rootkit/scan', 'POST', {}, 30000);
 }
+
+// ============================================================================
+// Ring-0 eBPF Dataplane, Linux 6.9+ BPF_TOKEN_CREATE & Cross-Duty Telemetry
+// ============================================================================
+
+export interface BpfTokenProfileStatus {
+  name: string;
+  mountPath: string;
+  preset: 'networking-safe' | 'cgroup-observability' | 'firewall-xdp-tc' | 'custom';
+  delegateCmds: string;
+  delegateProgs: string;
+  delegateMaps: string;
+  delegateAttachs: string;
+  mounted: boolean;
+  mountOptions?: string;
+  ring0IsolationVerified: boolean;
+  workloadTarget?: string;
+}
+
+export interface BpfTokenCapabilityReport {
+  kernelRelease: string;
+  major: number;
+  minor: number;
+  patch: number;
+  supportsBpfToken: boolean;
+  supportsUserNsBpf: boolean;
+  bpffsRootMounted: boolean;
+  unprivilegedBpfSysctl: string;
+  bpfLsmActive: boolean;
+  forbiddenRing0ProgTypes: string[];
+  activeProfiles: BpfTokenProfileStatus[];
+  presets: Record<
+    string,
+    {
+      delegateCmds: string;
+      delegateProgs: string;
+      delegateMaps: string;
+      delegateAttachs: string;
+    }
+  >;
+}
+
+export interface XdpVerdictStats {
+  rxPackets: number;
+  rxBytes: number;
+  ipv4Packets: number;
+  ipv6Packets: number;
+  vlanTaggedPackets: number;
+  xdpDropPackets: number;
+  xdpDropBytes: number;
+  xdpPassPackets: number;
+  tcpSynPackets: number;
+}
+
+export interface XdpBlockedEntry {
+  ip: string;
+  family: 'ipv4' | 'ipv6';
+  isCidr?: boolean;
+  expiresInSeconds: number;
+  droppedPackets: number;
+  droppedBytes: number;
+}
+
+export interface ZfsDeepTelemetry {
+  timestamp: string;
+  zfsModuleLoaded: boolean;
+  arc: {
+    sizeBytes: number;
+    maxSizeBytes: number;
+    minSizeBytes: number;
+    hits: number;
+    misses: number;
+    hitRatioPct: number;
+    demandDataHits: number;
+    demandDataMisses: number;
+    l2Hits: number;
+    l2Misses: number;
+    l2SizeBytes: number;
+    memoryThrottleCount: number;
+  };
+  zil: {
+    zilCommitCount: number;
+    zilCommitWriterCount: number;
+    itxCount: number;
+    itxIndirectBytes: number;
+    itxCopiedBytes: number;
+    itxNeedcopyBytes: number;
+  };
+  pools: Array<{
+    pool: string;
+    state: string;
+    nreadBytes: number;
+    nwrittenBytes: number;
+    reads: number;
+    writes: number;
+    wtimeNs: number;
+    rtimeNs: number;
+    syncqReadActive: number;
+    syncqWriteActive: number;
+    asyncqReadActive: number;
+    asyncqWriteActive: number;
+    scrubqReadActive: number;
+  }>;
+}
+
+export interface VirtDutyTelemetry {
+  timestamp: string;
+  kvmAvailable: boolean;
+  iommuGroupsCount: number;
+  lxcInstalled: boolean;
+  qemuInstalled: boolean;
+  vnetInterfaces: Array<{
+    name: string;
+    kind: string;
+    operState: string;
+    mtu: number;
+    rxBytes: number;
+    txBytes: number;
+    rxPackets: number;
+    txPackets: number;
+    rxDropped: number;
+    txDropped: number;
+    xdpAttached: boolean;
+  }>;
+  runningQemuCount: number;
+  runningLxcCount: number;
+  unprivilegedLxcTokenMounts: string[];
+}
+
+export interface K3sDutyTelemetry {
+  timestamp: string;
+  serviceActive: boolean;
+  binaryPresent: boolean;
+  userNamespacesSupported: boolean;
+  cniInterfaces: Array<{
+    name: string;
+    kind: string;
+    operState: string;
+    mtu: number;
+    rxBytes: number;
+    txBytes: number;
+    rxPackets: number;
+    txPackets: number;
+    rxDropped: number;
+    txDropped: number;
+    xdpAttached: boolean;
+  }>;
+  kubepodsCgroupV2: boolean;
+  bpfTokenReady: boolean;
+  openEbsDatasets: string[];
+}
+
+export interface EbpfOverviewTelemetry {
+  daemonDown?: boolean;
+  dataplane: {
+    attachedInterfaces: string[];
+    dualStackEnabled: boolean;
+    vlanPeelingEnabled: boolean;
+    xdpStats: XdpVerdictStats;
+    blockedIps: XdpBlockedEntry[];
+    topFlowsCount: number;
+  };
+  bpfLsm: {
+    attached: boolean;
+    attachedHooks: string[];
+    denialEventsCount: number;
+  };
+  bpfTokens: BpfTokenCapabilityReport;
+  virt: VirtDutyTelemetry;
+  k3s: K3sDutyTelemetry;
+  nas: ZfsDeepTelemetry;
+}
+
+export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  await enforceRateLimit(60, 60000, 'ebpf-overview');
+
+  const res = await callAgentApi<EbpfOverviewTelemetry>('/v1/ebpf/overview?limit=50', 'GET', undefined, 8000);
+  if (res && res.bpfTokens) {
+    return res;
+  }
+
+  const rel = os.release() || '6.12.11+deb13-amd64';
+  const m = rel.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+  const major = m ? parseInt(m[1], 10) : 6;
+  const minor = m ? parseInt(m[2], 10) : 12;
+  const patch = m && m[3] ? parseInt(m[3], 10) : 0;
+  const supportsBpfToken = major > 6 || (major === 6 && minor >= 9);
+
+  return {
+    daemonDown: true,
+    dataplane: {
+      attachedInterfaces: [],
+      dualStackEnabled: true,
+      vlanPeelingEnabled: true,
+      xdpStats: {
+        rxPackets: 0,
+        rxBytes: 0,
+        ipv4Packets: 0,
+        ipv6Packets: 0,
+        vlanTaggedPackets: 0,
+        xdpDropPackets: 0,
+        xdpDropBytes: 0,
+        xdpPassPackets: 0,
+        tcpSynPackets: 0,
+      },
+      blockedIps: [],
+      topFlowsCount: 0,
+    },
+    bpfLsm: {
+      attached: false,
+      attachedHooks: [
+        'lsm/socket_bind',
+        'lsm/bpf',
+        'lsm/uring_sqpoll',
+        'lsm/bpf_token_create',
+        'lsm/bpf_token_cmd',
+      ],
+      denialEventsCount: 0,
+    },
+    bpfTokens: {
+      kernelRelease: rel,
+      major,
+      minor,
+      patch,
+      supportsBpfToken,
+      supportsUserNsBpf: supportsBpfToken,
+      bpffsRootMounted: fs.existsSync('/sys/fs/bpf'),
+      unprivilegedBpfSysctl: '2',
+      bpfLsmActive: true,
+      forbiddenRing0ProgTypes: [
+        'kprobe',
+        'tracepoint',
+        'perf_event',
+        'raw_tracepoint',
+        'raw_tracepoint_writable',
+        'tracing',
+        'lsm',
+        'struct_ops',
+        'ext',
+        'syscall',
+      ],
+      activeProfiles: [],
+      presets: {
+        'networking-safe': {
+          delegateCmds: 'prog_load:map_create:map_lookup_elem:map_update_elem:map_delete_elem:link_create',
+          delegateProgs: 'socket_filter:sched_cls:sched_act:xdp:cgroup_skb:sk_skb:sk_msg:sock_ops',
+          delegateMaps: 'hash:array:percpu_hash:percpu_array:lru_hash:lru_percpu_hash:ringbuf:lpm_trie',
+          delegateAttachs: 'xdp:cgroup_inet_ingress:cgroup_inet_egress:sk_skb_stream_parser:sk_skb_stream_verdict',
+        },
+        'cgroup-observability': {
+          delegateCmds: 'prog_load:map_create:map_lookup_elem:link_create',
+          delegateProgs: 'cgroup_skb:cgroup_sock:cgroup_device:sock_ops',
+          delegateMaps: 'hash:array:percpu_array:ringbuf',
+          delegateAttachs: 'cgroup_inet_ingress:cgroup_inet_egress:cgroup_inet_sock_create:cgroup_sock_ops',
+        },
+        'firewall-xdp-tc': {
+          delegateCmds: 'prog_load:map_create:map_lookup_elem:map_update_elem:map_delete_elem:link_create',
+          delegateProgs: 'xdp:sched_cls:sched_act',
+          delegateMaps: 'hash:array:lru_hash:lpm_trie:ringbuf:devmap',
+          delegateAttachs: 'xdp:tcx_ingress:tcx_egress',
+        },
+      },
+    },
+    virt: {
+      timestamp: new Date().toISOString(),
+      kvmAvailable: fs.existsSync('/dev/kvm'),
+      iommuGroupsCount: 0,
+      lxcInstalled: false,
+      qemuInstalled: false,
+      vnetInterfaces: [],
+      runningQemuCount: 0,
+      runningLxcCount: 0,
+      unprivilegedLxcTokenMounts: [],
+    },
+    k3s: {
+      timestamp: new Date().toISOString(),
+      serviceActive: false,
+      binaryPresent: false,
+      userNamespacesSupported: supportsBpfToken,
+      cniInterfaces: [],
+      kubepodsCgroupV2: fs.existsSync('/sys/fs/cgroup/cgroup.controllers'),
+      bpfTokenReady: supportsBpfToken,
+      openEbsDatasets: [],
+    },
+    nas: {
+      timestamp: new Date().toISOString(),
+      zfsModuleLoaded: fs.existsSync('/proc/spl/kstat/zfs'),
+      arc: {
+        sizeBytes: 0,
+        maxSizeBytes: 0,
+        minSizeBytes: 0,
+        hits: 0,
+        misses: 0,
+        hitRatioPct: 0,
+        demandDataHits: 0,
+        demandDataMisses: 0,
+        l2Hits: 0,
+        l2Misses: 0,
+        l2SizeBytes: 0,
+        memoryThrottleCount: 0,
+      },
+      zil: {
+        zilCommitCount: 0,
+        zilCommitWriterCount: 0,
+        itxCount: 0,
+        itxIndirectBytes: 0,
+        itxCopiedBytes: 0,
+        itxNeedcopyBytes: 0,
+      },
+      pools: [],
+    },
+  };
+}
+
+export async function manageBpfTokenProfileAction(input: {
+  action: 'create' | 'delete';
+  name: string;
+  preset?: 'networking-safe' | 'cgroup-observability' | 'firewall-xdp-tc';
+  workloadTarget?: string;
+}): Promise<{ success: boolean; profile?: BpfTokenProfileStatus; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(20, 60000, 'ebpf-token-manage');
+
+  const cleanName = (input.name || '').trim();
+  if (!/^[a-zA-Z0-9_-]{2,48}$/.test(cleanName)) {
+    return { success: false, error: 'Profile name must be 2–48 alphanumeric, dash, or underscore characters.' };
+  }
+
+  if (input.action === 'delete') {
+    const res = await callAgentApi<any>(`/v1/ebpf/tokens?name=${encodeURIComponent(cleanName)}`, 'DELETE', undefined, 10000);
+    if (!res) {
+      return { success: false, error: 'Daemon unavailable — cannot unmount bpffs delegation profile.' };
+    }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to delete BPF token profile.' };
+    }
+    return { success: true };
+  }
+
+  const res = await callAgentApi<any>(
+    '/v1/ebpf/tokens',
+    'POST',
+    {
+      name: cleanName,
+      preset: input.preset || 'networking-safe',
+      workloadTarget: input.workloadTarget || 'k3s-userns',
+    },
+    10000
+  );
+  if (!res) {
+    return { success: false, error: 'Daemon unavailable — cannot mount delegated bpffs token instance.' };
+  }
+  if (!res.success) {
+    return { success: false, error: res.error || 'Failed to create BPF token profile.' };
+  }
+  return { success: true, profile: res.profile };
+}
+
+export async function manageXdpFastDropAction(input: {
+  action: 'block' | 'unblock';
+  ip: string;
+  ttlSeconds?: number;
+}): Promise<{ success: boolean; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(30, 60000, 'ebpf-xdp-block');
+
+  const cleanIp = (input.ip || '').trim();
+  if (!cleanIp) {
+    return { success: false, error: 'Target IPv4 or IPv6 address is required.' };
+  }
+
+  if (input.action === 'unblock') {
+    const res = await callAgentApi<any>(`/v1/ebpf/xdp/block?ip=${encodeURIComponent(cleanIp)}`, 'DELETE', undefined, 8000);
+    if (!res) {
+      return { success: false, error: 'Daemon unavailable — XDP blocklist map was not modified.' };
+    }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to remove IP from XDP blocklist map.' };
+    }
+    return { success: true };
+  }
+
+  const ttl = Math.max(10, Math.min(604800, Number(input.ttlSeconds) || 3600));
+  const res = await callAgentApi<any>('/v1/ebpf/xdp/block', 'POST', { ip: cleanIp, ttlSeconds: ttl }, 8000);
+  if (!res) {
+    return { success: false, error: 'Daemon unavailable — XDP blocklist map was not updated.' };
+  }
+  if (!res.success) {
+    return { success: false, error: res.error || 'Failed to insert IP into XDP blocklist map.' };
+  }
+  return { success: true };
+}
+
+export async function getXdpSynLimitAction(): Promise<{ maxSynPps: number }> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const res = await callAgentApi<{ maxSynPps?: number }>('/v1/ebpf/xdp/syn-limit', 'GET', undefined, 5000);
+  return { maxSynPps: Number(res?.maxSynPps ?? 0) };
+}
+
+export async function setXdpSynLimitAction(
+  maxSynPps: number
+): Promise<{ success: boolean; maxSynPps: number; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(20, 60000, 'ebpf-xdp-syn-limit');
+
+  const val = Math.floor(Number(maxSynPps));
+  if (!Number.isFinite(val) || val < 0 || (val > 0 && val < 20) || val > 10_000_000) {
+    return {
+      success: false,
+      maxSynPps: 0,
+      error: 'SYN flood rate limit must be 0 (disabled) or between 20 and 10,000,000 PPS.',
+    };
+  }
+  const res = await callAgentApi<any>('/v1/ebpf/xdp/syn-limit', 'POST', { maxSynPps: val }, 8000);
+  if (!res) {
+    return { success: false, maxSynPps: 0, error: 'Daemon unavailable — XDP SYN rate limit was not updated.' };
+  }
+  if (!res.success) {
+    return { success: false, maxSynPps: 0, error: res.error || 'Failed to update XDP SYN-flood rate limit.' };
+  }
+  return { success: true, maxSynPps: Number(res.maxSynPps ?? val) };
+}
+
+export async function renderK3sBpfTokenManifestAction(input: {
+  name: string;
+  namespace?: string;
+  image?: string;
+  profileName?: string;
+  preset?: 'networking-safe' | 'cgroup-observability' | 'firewall-xdp-tc';
+  kind?: 'Pod' | 'DaemonSet';
+}): Promise<{ success: boolean; manifestYaml: string; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  await enforceRateLimit(30, 60000, 'ebpf-render-k3s');
+
+  const cleanName = /^[a-z0-9-]{2,48}$/.test((input.name || '').trim()) ? input.name.trim() : 'ebpf-packet-sensor';
+  const cleanNs = /^[a-z0-9-]{1,48}$/.test((input.namespace || '').trim()) ? input.namespace!.trim() : 'default';
+  const cleanImg = (input.image || 'ghcr.io/cilium/ebpf-sensor:latest').trim();
+  const profileName = /^[a-zA-Z0-9_-]{2,48}$/.test((input.profileName || '').trim())
+    ? input.profileName!.trim()
+    : 'k3s-net-safe';
+  const kind = input.kind === 'DaemonSet' ? 'DaemonSet' : 'Pod';
+
+  const res = await callAgentApi<any>(
+    '/v1/ebpf/tokens/render-k3s',
+    'POST',
+    {
+      name: cleanName,
+      namespace: cleanNs,
+      image: cleanImg,
+      profileName,
+      preset: input.preset || 'networking-safe',
+      kind,
+    },
+    5000
+  );
+  if (res && res.success && typeof res.manifestYaml === 'string') {
+    return { success: true, manifestYaml: res.manifestYaml };
+  }
+
+  const hostPath = `/run/axonwall/bpffs-tokens/${profileName}`;
+  const podSpecLines = [
+    `      hostUsers: false`,
+    `      securityContext:`,
+    `        seccompProfile:`,
+    `          type: RuntimeDefault`,
+    `      containers:`,
+    `        - name: ${cleanName}`,
+    `          image: ${cleanImg}`,
+    `          env:`,
+    `            - name: LIBBPF_BPF_TOKEN_PATH`,
+    `              value: /sys/fs/bpf`,
+    `          securityContext:`,
+    `            allowPrivilegeEscalation: false`,
+    `            capabilities:`,
+    `              drop: ["ALL"]`,
+    `              add: ["BPF", "NET_ADMIN"]`,
+    `          volumeMounts:`,
+    `            - name: delegated-bpffs`,
+    `              mountPath: /sys/fs/bpf`,
+    `              readOnly: false`,
+    `      volumes:`,
+    `        - name: delegated-bpffs`,
+    `          hostPath:`,
+    `            path: ${hostPath}`,
+    `            type: Directory`,
+  ];
+
+  const manifestYaml =
+    kind === 'DaemonSet'
+      ? [
+          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN DaemonSet (K8s 1.33+ UserNamespacesSupport)`,
+          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
+          `apiVersion: apps/v1`,
+          `kind: DaemonSet`,
+          `metadata:`,
+          `  name: ${cleanName}`,
+          `  namespace: ${cleanNs}`,
+          `  labels:`,
+          `    axonwall.io/bpf-token-profile: ${profileName}`,
+          `spec:`,
+          `  selector:`,
+          `    matchLabels:`,
+          `      app: ${cleanName}`,
+          `  template:`,
+          `    metadata:`,
+          `      labels:`,
+          `        app: ${cleanName}`,
+          `        axonwall.io/bpf-token-profile: ${profileName}`,
+          `    spec:`,
+          ...podSpecLines,
+        ].join('\n')
+      : [
+          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN Pod (K8s 1.33+ UserNamespacesSupport)`,
+          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
+          `apiVersion: v1`,
+          `kind: Pod`,
+          `metadata:`,
+          `  name: ${cleanName}`,
+          `  namespace: ${cleanNs}`,
+          `  labels:`,
+          `    axonwall.io/bpf-token-profile: ${profileName}`,
+          `spec:`,
+          ...podSpecLines.map((l) => l.slice(4)),
+        ].join('\n');
+
+  return { success: true, manifestYaml };
+}
+
 
 
 

@@ -46,6 +46,30 @@ const ALL_SCOPES: { scope: McpScope; label: string; desc: string; tier: 'read' |
     tier: 'read',
   },
   {
+    scope: 'mcp:ebpf:read',
+    label: 'Ring-0 eBPF & BPF_TOKEN Posture (Read)',
+    desc: 'Inspect dual-stack XDP verdict counters, BPF-LSM denials, and Linux 6.9+ bpffs delegation mounts',
+    tier: 'read',
+  },
+  {
+    scope: 'mcp:virt:read',
+    label: 'KVM / LXC Hypervisor Telemetry (Read)',
+    desc: 'Read QEMU/KVM VM inventory, unprivileged LXC containers, IOMMU groups, and vnet/TAP XDP telemetry',
+    tier: 'read',
+  },
+  {
+    scope: 'mcp:k3s:read',
+    label: 'K3s Kubernetes Cluster Telemetry (Read)',
+    desc: 'Inspect K3s control plane status, CNI WireGuard interfaces, UserNamespacesSupport, and OpenEBS PVCs',
+    tier: 'read',
+  },
+  {
+    scope: 'mcp:nas:read',
+    label: 'OpenZFS NAS ARC/L2ARC/ZIL Telemetry (Read)',
+    desc: 'Read ZFS pool health, ARC/L2ARC cache hit ratios, ZIL/SLOG sync commits, and per-pool ZIO queue depths',
+    tier: 'read',
+  },
+  {
     scope: 'mcp:traffic:blackhole',
     label: 'Tactical Blackhole & C2 Severing',
     desc: 'Quarantine IPs/CIDRs in table inet axonwall_mcp, add kernel blackhole routes, and kill active conntrack flows',
@@ -64,10 +88,34 @@ const ALL_SCOPES: { scope: McpScope; label: string; desc: string; tier: 'read' |
     tier: 'tactical',
   },
   {
+    scope: 'mcp:ebpf:manage',
+    label: 'XDP Fast-Drop & BPF_TOKEN Delegation',
+    desc: 'Enforce line-rate XDP_DROP IPv4/IPv6 blocks and mount safe networking BPF_TOKEN profiles (kprobe blocked)',
+    tier: 'tactical',
+  },
+  {
     scope: 'mcp:fleet:broadcast',
     label: 'Fleet Satellite Block Broadcast',
     desc: 'Propagate tactical IP quarantines to downstream SD-WAN satellites',
     tier: 'tactical',
+  },
+  {
+    scope: 'mcp:virt:manage',
+    label: 'KVM / LXC Lifecycle & LXC BPF_TOKEN',
+    desc: 'Start/stop/reboot VMs & LXC containers and bind safe BPF_TOKEN delegation to unprivileged LXC workloads',
+    tier: 'critical',
+  },
+  {
+    scope: 'mcp:k3s:manage',
+    label: 'K3s BPF_TOKEN Manifest & Workload Ops',
+    desc: 'Render and stage K3s hostUsers: false Pod/DaemonSet manifests with delegated bpffs tokens',
+    tier: 'critical',
+  },
+  {
+    scope: 'mcp:nas:manage',
+    label: 'OpenZFS Snapshot & Pool Scrub Ops',
+    desc: 'Create immutable point-in-time ZFS dataset snapshots or trigger non-destructive ZFS pool scrubs',
+    tier: 'critical',
   },
   {
     scope: 'mcp:firewall:write',
@@ -95,9 +143,14 @@ export default function McpControlPlanePage() {
   const [selectedScopes, setSelectedScopes] = useState<McpScope[]>([
     'mcp:telemetry:read',
     'mcp:pcap:capture',
+    'mcp:ebpf:read',
+    'mcp:virt:read',
+    'mcp:k3s:read',
+    'mcp:nas:read',
     'mcp:traffic:blackhole',
     'mcp:traffic:shape',
     'mcp:traffic:redirect',
+    'mcp:ebpf:manage',
   ]);
   const [allowedSourceCidrs, setAllowedSourceCidrs] = useState('');
   const [mtlsFingerprint, setMtlsFingerprint] = useState('');
@@ -130,14 +183,26 @@ export default function McpControlPlanePage() {
   const handlePresetChange = (type: 'vigilsoc' | 'soar' | 'custom-ai' | 'readonly-analyst') => {
     setAgentType(type);
     if (type === 'readonly-analyst') {
-      setSelectedScopes(['mcp:telemetry:read', 'mcp:pcap:capture']);
+      setSelectedScopes([
+        'mcp:telemetry:read',
+        'mcp:pcap:capture',
+        'mcp:ebpf:read',
+        'mcp:virt:read',
+        'mcp:k3s:read',
+        'mcp:nas:read',
+      ]);
     } else if (type === 'vigilsoc' || type === 'soar') {
       setSelectedScopes([
         'mcp:telemetry:read',
         'mcp:pcap:capture',
+        'mcp:ebpf:read',
+        'mcp:virt:read',
+        'mcp:k3s:read',
+        'mcp:nas:read',
         'mcp:traffic:blackhole',
         'mcp:traffic:shape',
         'mcp:traffic:redirect',
+        'mcp:ebpf:manage',
       ]);
     }
   };

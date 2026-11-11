@@ -161,6 +161,17 @@ if [[ ! -f "${WORK_DIR}/usr/local/bin/kubectl" ]]; then
   chmod 755 "${WORK_DIR}/usr/local/bin/kubectl"
 fi
 
+# Fetch K3s binary if absent (ensures .deb updates via axonwall-update include k3s)
+K3S_VERSION="v1.32.3+k3s1"
+K3S_URL_VERSION="v1.32.3%2Bk3s1"
+K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
+if [[ ! -f "${WORK_DIR}/usr/local/bin/k3s" ]]; then
+  echo "[+] Downloading K3s ${K3S_VERSION} binary..."
+  curl -fsSL -o "${WORK_DIR}/usr/local/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  echo "${K3S_SHA256}  ${WORK_DIR}/usr/local/bin/k3s" | sha256sum -c -
+  chmod 755 "${WORK_DIR}/usr/local/bin/k3s"
+fi
+
 # 5. Copy System Scripts & Terminal Configs
 CHROOT_SRC="${ROOT_DIR}/packaging/iso/config/includes.chroot"
 for bin_script in \
@@ -293,6 +304,7 @@ cp "${SCRIPT_DIR}/axonwall-ui.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-controller.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-console.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/headscale.service" "${WORK_DIR}/lib/systemd/system/"
+cp "${SCRIPT_DIR}/k3s.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-hub-cert-renew.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-hub-cert-renew.timer" "${WORK_DIR}/lib/systemd/system/"
 

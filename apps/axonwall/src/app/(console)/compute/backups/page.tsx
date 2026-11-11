@@ -19,6 +19,8 @@ import {
 import {
   getBackupListAction,
   triggerBackupAction,
+  restoreBackupAction,
+  pruneBackupsAction,
   getVirtConfigAction,
   getVmListAction,
   getContainerListAction,
@@ -98,6 +100,44 @@ export default function WorkloadBackupsPage() {
     }
   };
 
+  const handleRestore = async (bk: BackupItem) => {
+    const defaultId = bk.vmid || 100;
+    const targetStr = window.prompt(
+      `Restore archive '${bk.name}' into ${bk.type.toUpperCase()} ID:`,
+      String(defaultId)
+    );
+    if (!targetStr) return;
+    setTriggering(true);
+    setStatusBanner(null);
+    try {
+      const archivePath = bk.id.startsWith('/') ? bk.id : `/mnt/${pool}/backups/${bk.name}`;
+      const kind: 'vm' | 'lxc' = bk.type === 'lxc' ? 'lxc' : 'vm';
+      const res = await restoreBackupAction(archivePath, kind, Number(targetStr), pool);
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+      await loadData();
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Backup restore failed' });
+    } finally {
+      setTriggering(false);
+    }
+  };
+
+  const handlePrune = async () => {
+    const keepStr = window.prompt(`Keep how many most-recent archives per workload in /mnt/${pool}/backups?`, '5');
+    if (!keepStr) return;
+    setTriggering(true);
+    setStatusBanner(null);
+    try {
+      const res = await pruneBackupsAction(pool, Number(keepStr));
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+      await loadData();
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Backup prune failed' });
+    } finally {
+      setTriggering(false);
+    }
+  };
+
   const totalBytes = backups.reduce((acc, b) => acc + (b.sizeBytes || 0), 0);
   const totalGb = (totalBytes / (1024 * 1024 * 1024)).toFixed(2);
 
@@ -125,6 +165,14 @@ export default function WorkloadBackupsPage() {
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
+          </button>
+          <button
+            onClick={handlePrune}
+            disabled={triggering}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg text-amber-300 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+            GFS Prune
           </button>
           <button
             onClick={() => setShowBackupModal(true)}
@@ -205,12 +253,13 @@ export default function WorkloadBackupsPage() {
                 <th className="px-6 py-4">Size</th>
                 <th className="px-6 py-4">Format</th>
                 <th className="px-6 py-4">Destination</th>
+                <th className="px-6 py-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
               {backups.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-6 py-12 text-center text-slate-500 font-sans">
+                  <td colSpan={7} className="px-6 py-12 text-center text-slate-500 font-sans">
                     No backup archives found. Click &quot;Backup Now&quot; to perform an instantaneous snapshot backup.
                   </td>
                 </tr>
@@ -235,6 +284,15 @@ export default function WorkloadBackupsPage() {
                       <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300">
                         {bk.destination}
                       </span>
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <button
+                        onClick={() => handleRestore(bk)}
+                        disabled={triggering}
+                        className="px-2.5 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-sans font-medium"
+                      >
+                        Restore
+                      </button>
                     </td>
                   </tr>
                 ))

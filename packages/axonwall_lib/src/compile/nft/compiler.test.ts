@@ -489,6 +489,8 @@ describe('Axonwall nftables Compiler — HA sync rule (audit S-04)', () => {
   it('opens the default HA sync port 9876 on the sync interface, not 8443/9443', () => {
     const res = compileNftables(haState());
     expect(res.nftScript).toContain('iifname "eth1" tcp dport 9876 accept comment "ha-state-and-zfs-sync"');
+    expect(res.nftScript).toContain('iifname "eth1" udp dport 3780 accept comment "ha-conntrackd-sync"');
+    expect(res.nftScript).toContain('iifname "eth1" ip protocol 112 accept comment "ha-vrrp"');
     expect(res.nftScript).not.toContain('8443');
     expect(res.nftScript).not.toContain('9443');
   });

@@ -17,6 +17,9 @@ export function desiredStateLockPath(): string {
   if (process.env.AXONWALL_STATE_FILE) {
     return `${process.env.AXONWALL_STATE_FILE}.lock`;
   }
+  if (process.env.AXONWALL_STATE_JSON_PATH) {
+    return `${process.env.AXONWALL_STATE_JSON_PATH}.lock`;
+  }
   const configDir = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR;
   if (configDir) {
     return path.join(configDir, 'state.json.lock');

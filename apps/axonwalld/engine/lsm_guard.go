@@ -23,13 +23,18 @@ const (
 	AllowFlagBpfLoad   uint8 = 1 << 0
 	AllowFlagAfAlgAead uint8 = 1 << 1
 
-	HookIDSocketBindAead uint32 = 1
-	HookIDBpfProgLoad    uint32 = 2
-	HookIDUringSqpoll    uint32 = 3
+	HookIDSocketBindAead    uint32 = 1
+	HookIDBpfProgLoad       uint32 = 2
+	HookIDUringSqpoll       uint32 = 3
+	HookIDBpfTokenDelegated uint32 = 4
+	HookIDBpfTokenBlocked   uint32 = 5
 
 	PolicyIdxEnforceBpfLoad     uint32 = 0
 	PolicyIdxEnforceUringSqpoll uint32 = 1
 	PolicyIdxEnforceCopyfail    uint32 = 2
+	PolicyIdxAllowBpfTokens     uint32 = 3
+	PolicyIdxAuditBpfTokens     uint32 = 4
+	PolicyIdxTokenSafeProgsLo   uint32 = 5
 
 	maxRecentLsmEvents = 256
 )
@@ -59,15 +64,19 @@ type LsmGuardPolicyConfig struct {
 	EnforceBpfLoad        bool
 	EnforceUringSqpoll    bool
 	EnforceCopyfailAead   bool
+	AllowDelegatedTokens  bool
+	AuditDelegatedTokens  bool
 	TrustedBpfLoaderPaths []string
 	TrustedAfAlgPaths     []string
 }
 
 func DefaultLsmGuardPolicyConfig() LsmGuardPolicyConfig {
 	return LsmGuardPolicyConfig{
-		EnforceBpfLoad:      true,
-		EnforceUringSqpoll:  true,
-		EnforceCopyfailAead: true,
+		EnforceBpfLoad:       true,
+		EnforceUringSqpoll:   true,
+		EnforceCopyfailAead:  true,
+		AllowDelegatedTokens: true,
+		AuditDelegatedTokens: true,
 		TrustedBpfLoaderPaths: []string{
 			"/usr/sbin/bpftool",
 			"/usr/local/bin/bpftool",
@@ -128,6 +137,10 @@ func HookMetaFromID(hookID uint32) (hookName string, mitre string) {
 		return "lsm/bpf (BPF_PROG_LOAD)", "T1014"
 	case HookIDUringSqpoll:
 		return "lsm/uring_sqpoll (IORING_SETUP_SQPOLL)", "T1014"
+	case HookIDBpfTokenDelegated:
+		return "lsm/bpf_token (BPF_TOKEN_CREATE UserNS Delegated)", "T1610"
+	case HookIDBpfTokenBlocked:
+		return "lsm/bpf_token (BPF_TOKEN Ring-0 Violation Denied)", "T1611"
 	default:
 		return "lsm/unknown", "T1014"
 	}
@@ -211,7 +224,22 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		return nil
 	}
 
-	if err := ebpf.LoadLsmGuardObjects(&m.objs, nil); err != nil {
+	spec, err := ebpf.LoadLsmGuard()
+	if err != nil {
+		return fmt.Errorf("loading LsmGuard CollectionSpec: %w", err)
+	}
+
+	// Graceful CO-RE compatibility with pre-6.9 kernels: only load BPF_TOKEN LSM
+	// hooks when the running kernel BTF exposes bpf_lsm_bpf_token_create / cmd.
+	tokenCaps := ProbeBpfTokenCapabilities()
+	if !tokenCaps.BtfHasLsmTokenCreate {
+		delete(spec.Programs, ebpf.LsmGuardProgGuardBpfTokenCreate)
+	}
+	if !tokenCaps.BtfHasLsmTokenCmd {
+		delete(spec.Programs, ebpf.LsmGuardProgAuditBpfTokenCmd)
+	}
+
+	if err := spec.LoadAndAssign(&m.objs, nil); err != nil {
 		return fmt.Errorf("loading LsmGuard eBPF objects: %w", err)
 	}
 
@@ -220,6 +248,8 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		PolicyIdxEnforceBpfLoad:     boolToUint32(cfg.EnforceBpfLoad),
 		PolicyIdxEnforceUringSqpoll: boolToUint32(cfg.EnforceUringSqpoll),
 		PolicyIdxEnforceCopyfail:    boolToUint32(cfg.EnforceCopyfailAead),
+		PolicyIdxAllowBpfTokens:     boolToUint32(cfg.AllowDelegatedTokens),
+		PolicyIdxAuditBpfTokens:     boolToUint32(cfg.AuditDelegatedTokens),
 	}
 	for idx, val := range policies {
 		if m.objs.PolicyConfig != nil {
@@ -228,7 +258,6 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 	}
 
 	// 2. Populate unspoofable (s_dev, i_ino) allowlist before attaching hooks
-	//    Always include our own running executable so axonwalld is never locked out.
 	flagByID := make(map[ebpf.LsmGuardLsmExeId]uint8)
 	pathByID := make(map[ebpf.LsmGuardLsmExeId]string)
 
@@ -269,34 +298,55 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		})
 	}
 
-	// 3. Attach BPF-LSM hooks
-	hookSpecs := []struct {
-		name string
-		prog *ebpf.LsmGuardPrograms
-		fn   func() (link.Link, error)
-	}{
+	// 3. Attach BPF-LSM hooks (3 universal + 2 Linux 6.9+ BPF_TOKEN hooks)
+	type hookSpec struct {
+		name    string
+		enabled bool
+		fn      func() (link.Link, error)
+	}
+	hookSpecs := []hookSpec{
 		{
-			name: "lsm/socket_bind",
+			name:    "lsm/socket_bind",
+			enabled: m.objs.CopyfailGuard != nil,
 			fn: func() (link.Link, error) {
 				return link.AttachLSM(link.LSMOptions{Program: m.objs.CopyfailGuard})
 			},
 		},
 		{
-			name: "lsm/bpf",
+			name:    "lsm/bpf",
+			enabled: m.objs.RestrictBpfLoad != nil,
 			fn: func() (link.Link, error) {
 				return link.AttachLSM(link.LSMOptions{Program: m.objs.RestrictBpfLoad})
 			},
 		},
 		{
-			name: "lsm/uring_sqpoll",
+			name:    "lsm/uring_sqpoll",
+			enabled: m.objs.BlockUringSqpoll != nil,
 			fn: func() (link.Link, error) {
 				return link.AttachLSM(link.LSMOptions{Program: m.objs.BlockUringSqpoll})
+			},
+		},
+		{
+			name:    "lsm/bpf_token_create",
+			enabled: m.objs.GuardBpfTokenCreate != nil,
+			fn: func() (link.Link, error) {
+				return link.AttachLSM(link.LSMOptions{Program: m.objs.GuardBpfTokenCreate})
+			},
+		},
+		{
+			name:    "lsm/bpf_token_cmd",
+			enabled: m.objs.AuditBpfTokenCmd != nil,
+			fn: func() (link.Link, error) {
+				return link.AttachLSM(link.LSMOptions{Program: m.objs.AuditBpfTokenCmd})
 			},
 		},
 	}
 
 	var attachedHooks []string
 	for _, hs := range hookSpecs {
+		if !hs.enabled {
+			continue
+		}
 		l, err := hs.fn()
 		if err != nil {
 			log.Printf("[BPF-LSM] Warning: could not attach %s: %v", hs.name, err)
@@ -332,6 +382,15 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 
 	go m.pollEvents()
 	return nil
+}
+
+// SetBpfTokenPolicy updates live BPF-LSM BPF_TOKEN_CREATE policy flags in-kernel without detaching hooks.
+func (m *LsmGuardManager) SetBpfTokenPolicy(allowDelegated bool, auditDelegated bool) {
+	if m == nil || m.objs.PolicyConfig == nil {
+		return
+	}
+	_ = m.objs.PolicyConfig.Put(PolicyIdxAllowBpfTokens, boolToUint32(allowDelegated))
+	_ = m.objs.PolicyConfig.Put(PolicyIdxAuditBpfTokens, boolToUint32(auditDelegated))
 }
 
 func (m *LsmGuardManager) pollEvents() {

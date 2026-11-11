@@ -50,6 +50,7 @@ export default function LxcContainersPage() {
   const [rootfsSizeGb, setRootfsSizeGb] = useState(8);
   const [unprivileged, setUnprivileged] = useState(true);
   const [nesting, setNesting] = useState(true);
+  const [bpfTokenPreset, setBpfTokenPreset] = useState<'disabled' | 'network-dataplane' | 'socket-observability' | 'cgroup-microsegmentation'>('disabled');
   const [bridge, setBridge] = useState('br0');
 
   const loadData = async () => {
@@ -127,6 +128,15 @@ export default function LxcContainersPage() {
       rootfsPool,
       rootfsSizeGb,
       features: nesting ? ['nesting'] : [],
+      ...(unprivileged && bpfTokenPreset !== 'disabled'
+        ? {
+            bpfToken: {
+              enabled: true,
+              preset: bpfTokenPreset,
+              auditViaBpfLsm: true,
+            },
+          }
+        : {}),
       autostart: false,
       haManaged: false,
       enabled: true,
@@ -497,6 +507,23 @@ export default function LxcContainersPage() {
                     Enable Nesting (Docker / Podman in CT)
                   </label>
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1">
+                  Linux 6.9+ Unprivileged <code className="text-emerald-400 font-mono">BPF_TOKEN</code> Delegation (UserNS Only)
+                </label>
+                <select
+                  value={unprivileged ? bpfTokenPreset : 'disabled'}
+                  disabled={!unprivileged}
+                  onChange={(e) => setBpfTokenPreset(e.target.value as any)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono disabled:opacity-50"
+                >
+                  <option value="disabled">Disabled (No bpffs Token Delegation)</option>
+                  <option value="network-dataplane">network-dataplane (XDP / TC / Socket BPF, Ring-0 kprobe blocked)</option>
+                  <option value="socket-observability">socket-observability (Socket Filter / Sockops)</option>
+                  <option value="cgroup-microsegmentation">cgroup-microsegmentation (cgroup_skb / cgroup_sock)</option>
+                </select>
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">

@@ -20,6 +20,7 @@ export default function OpenVpnPage() {
   const [newPort, setNewPort] = useState(1194);
   const [newProto, setNewProto] = useState<'udp' | 'tcp'>('udp');
   const [newTunnelNet, setNewTunnelNet] = useState('10.8.0.0/24');
+  const [newDcoEnabled, setNewDcoEnabled] = useState(true);
 
   useEffect(() => {
     getCurrentDesiredState()
@@ -70,8 +71,8 @@ export default function OpenVpnPage() {
         protocol: newProto,
         port: Number(newPort) || 1194,
         deviceType: 'tun',
-        devName: `ovpn-dco${servers.length}`,
-        dcoEnabled: true,
+        devName: newDcoEnabled ? `ovpn-dco${servers.length}` : `tun${servers.length}`,
+        dcoEnabled: newDcoEnabled,
         tunnelNetwork: newTunnelNet.trim() || '10.8.0.0/24',
         cipher: 'AES-256-GCM',
         authDigest: 'SHA256',
@@ -192,13 +193,26 @@ export default function OpenVpnPage() {
                       </td>
                       <td className="px-4 py-3 font-mono text-xs">{s.tunnelNetwork}</td>
                       <td className="px-4 py-3">
-                        {s.dcoEnabled ? (
-                          <span className="inline-flex items-center gap-1 text-xs text-emerald-400 font-mono">
-                            <Cpu className="w-3.5 h-3.5" /> Kernel DCO
-                          </span>
-                        ) : (
-                          <span className="text-xs text-slate-500">Userspace tun</span>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            persistServers(
+                              servers.map((x) =>
+                                x.name === s.name ? { ...x, dcoEnabled: !x.dcoEnabled } : x
+                              )
+                            )
+                          }
+                          className="cursor-pointer"
+                          title="Click to toggle Kernel ovpn-dco vs Userspace tun"
+                        >
+                          {s.dcoEnabled ? (
+                            <span className="inline-flex items-center gap-1 text-xs text-emerald-400 font-mono">
+                              <Cpu className="w-3.5 h-3.5" /> Kernel DCO
+                            </span>
+                          ) : (
+                            <span className="text-xs text-slate-500 font-mono">Userspace tun</span>
+                          )}
+                        </button>
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
@@ -216,7 +230,7 @@ export default function OpenVpnPage() {
             )}
 
             {/* Add Server Form */}
-            <form onSubmit={handleAddServer} className="p-4 border-t border-slate-800 grid grid-cols-1 md:grid-cols-5 gap-2">
+            <form onSubmit={handleAddServer} className="p-4 border-t border-slate-800 grid grid-cols-1 md:grid-cols-6 gap-2 items-center">
               <input
                 type="text"
                 value={newName}
@@ -247,6 +261,15 @@ export default function OpenVpnPage() {
                 placeholder="10.8.0.0/24"
                 className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono"
               />
+              <label className="flex items-center gap-1.5 text-xs text-slate-300 font-mono px-2">
+                <input
+                  type="checkbox"
+                  checked={newDcoEnabled}
+                  onChange={(e) => setNewDcoEnabled(e.target.checked)}
+                  className="accent-emerald-500"
+                />
+                ovpn-dco
+              </label>
               <button
                 type="submit"
                 disabled={saving}

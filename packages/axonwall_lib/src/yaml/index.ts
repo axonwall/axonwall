@@ -27,8 +27,8 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     filename: 'system.yaml',
     title: 'Axonwall System & Appliance Configuration',
     description:
-      'Controls appliance hostname, DNS, management ports, hardware capabilities, plugins, AI copilot, Eluvix Sovereign AI Router, observability, SNMP, NUT UPS, and ACME certificates.',
-    keys: ['version', 'capabilities', 'system', 'plugins', 'ai', 'eluvix', 'observability', 'snmp', 'ups', 'acme'],
+      'Controls appliance hostname, DNS, management ports, hardware capabilities, plugins, AI copilot, Eluvix Sovereign AI Router, MCP guardrails, identity, observability, SNMP, NUT UPS, and ACME certificates.',
+    keys: ['version', 'capabilities', 'system', 'identity', 'mcp', 'plugins', 'ai', 'eluvix', 'observability', 'snmp', 'ups', 'acme'],
   },
   {
     filename: 'interfaces.yaml',
@@ -53,10 +53,10 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
   },
   {
     filename: 'services.yaml',
-    title: 'Axonwall Core Network Services (DHCP, DNS, Captive Portal, HAProxy, RADIUS)',
+    title: 'Axonwall Core Network Services (DHCPv4/v6, DNS, mDNS, UPnP, DDNS, Captive Portal, HAProxy, RADIUS)',
     description:
-      'Controls DHCPv4/v6 pools & static reservations, Unbound DNS resolver & DNSBL blocklists, Captive Portal zones, HAProxy load balancer, and FreeRADIUS.',
-    keys: ['dhcp', 'dns', 'captivePortal', 'haproxy', 'freeradius'],
+      'Controls DHCPv4/DHCPv6 + SLAAC RA pools & reservations, Unbound DNS resolver & DNSBL blocklists, mDNS reflector, hardened UPnP/NAT-PMP, Dynamic DNS, Captive Portal zones, HAProxy load balancer, and FreeRADIUS.',
+    keys: ['dhcp', 'dns', 'mdnsReflector', 'upnp', 'ddns', 'captivePortal', 'haproxy', 'freeradius'],
   },
   {
     filename: 'vpn.yaml',

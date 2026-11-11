@@ -31,7 +31,7 @@ export default function HighAvailabilityDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Clustering, State Replication &amp; Step-by-Step Two-Host Walkthrough
+          Clustering, 6-Plane State Replication &amp; Two-Host Walkthrough • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           High Availability &amp; Two-Host Cluster Setup
@@ -742,6 +742,16 @@ sudo curl -sk --cacert /var/lib/axonwall/secrets/ha-pki/ca.crt \\
     replicatedBackingPool: tank/openebs-replicated`}
             />
           </div>
+
+          <CodeBlock
+            title="Export HA-Resilient Kubeconfig Bound to Floating VRRP VIP"
+            language="bash"
+            code={`# Rewrite ~/.kube/config server endpoint to the floating LAN VRRP VIP (e.g. https://10.0.10.1:6443)
+# so kubectl and helm survive control-plane node failover without reconnecting:
+axonwall-kubeconfig --vip
+# Or via axonwallctl:
+axonwallctl kubeconfig --vip`}
+          />
         </div>
 
         {/* Step 8 */}
@@ -813,16 +823,15 @@ sudo ip link set eth0 up`}
           </div>
 
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-            <h3 className="font-bold text-white text-sm">Cryptographic Payload Signing</h3>
+            <h3 className="font-bold text-white text-sm">Ed25519 / ECDSA Payload Signing &amp; Safe Cert Rotation</h3>
             <p className="text-slate-400 leading-relaxed">
-              Every <code className="text-slate-200">/api/v1/sync/state</code> and{' '}
-              <code className="text-slate-200">/api/v1/sync/db</code> response carries both an{' '}
-              <code className="text-slate-200">X-Checksum-SHA256</code> digest and an ECDSA{' '}
+              Every <code className="text-slate-200">/api/v1/sync/state</code>, DHCP lease bundle, and{' '}
+              <code className="text-slate-200">/api/v1/sync/db</code> response on <code className="text-slate-200">:9876</code> carries both an{' '}
+              <code className="text-slate-200">X-Checksum-SHA256</code> digest and a detached Ed25519/ECDSA{' '}
               <code className="text-slate-200">X-Axonwall-Payload-Signature</code> header. When{' '}
-              <code className="text-emerald-400 font-mono">requireSignedPayloads: true</code> is set (or when the peer
-              advertises <code className="text-slate-200">signsPayloads: true</code> in{' '}
-              <code className="text-slate-200">/api/v1/sync/status</code>), unsigned or tampered payloads are strictly
-              rejected before touching disk.
+              <code className="text-emerald-400 font-mono">requireSignedPayloads: true</code> is enabled, unsigned or tampered payloads are strictly
+              rejected before touching disk. Administrators can rotate leaf hub/sync certificates without invalidating Operator-CA trust anchors using{' '}
+              <code className="text-emerald-400 font-mono">sudo axonwall-rotate-hub-cert</code>.
             </p>
           </div>
         </div>
@@ -947,13 +956,13 @@ General {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm flex items-center gap-1.5">
-              <Database className="w-4 h-4 text-emerald-400" /> SQLite Online Backup &amp; State Replica Promotion
+              <Database className="w-4 h-4 text-emerald-400" /> SQLite Hot VACUUM INTO &amp; State Replica Promotion
             </h3>
             <p className="text-slate-400 leading-relaxed">
-              The Primary node creates consistent online snapshots (<code className="text-slate-200">sqlite3 .backup</code> /
-              WAL checkpoint) of allowed databases under <code className="text-slate-200">/var/lib/axonwall/</code> (such
+              The Primary node creates consistent lock-free hot snapshots via <code className="text-slate-200">VACUUM INTO</code>{' '}
+              (and WAL checkpointing) of allowed databases under <code className="text-slate-200">/var/lib/axonwall/</code> (such
               as <code className="text-slate-200">/var/lib/axonwall/headscale/db.sqlite</code>) and streams them with
-              SHA-256 and ECDSA signature verification every <code className="text-slate-200">syncIntervalSeconds</code>{' '}
+              SHA-256 and Ed25519/ECDSA signature verification every <code className="text-slate-200">syncIntervalSeconds</code>{' '}
               seconds. Before replacing a live file, the Backup node validates <code className="text-slate-200">PRAGMA integrity_check</code>,
               preserves service UID/GID ownership, and stages <code className="text-slate-200">state.json.ha-replica</code>{' '}
               for atomic promotion upon <code className="text-emerald-400 font-mono">MASTER</code> takeover.
@@ -962,11 +971,11 @@ General {
 
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm flex items-center gap-1.5">
-              <Clock className="w-4 h-4 text-emerald-400" /> Chrony Symmetric NTP &amp; OpenLDAP syncrepl
+              <Clock className="w-4 h-4 text-emerald-400" /> Chrony Symmetric NTP &amp; OpenLDAP N-Way syncrepl
             </h3>
             <p className="text-slate-400 leading-relaxed">
-              OpenLDAP multi-provider <code className="text-slate-200">syncrepl</code> relies on Change Sequence Numbers
-              (CSNs) with microsecond timestamps. Axonwall automatically writes{' '}
+              OpenLDAP N-Way Multi-Provider <code className="text-slate-200">syncrepl</code> over <code className="text-slate-200">ldaps://:636</code>{' '}
+              relies on Change Sequence Numbers (CSNs) with microsecond timestamps. Axonwall automatically writes{' '}
               <code className="text-slate-200">/etc/chrony/conf.d/axonwall-ha.conf</code> with symmetric peering (
               <code className="text-slate-200">peer &lt;peerIp&gt; iburst</code>) on <code className="text-slate-200">eth3</code>{' '}
               so both nodes maintain sub-millisecond clock alignment even if upstream internet NTP servers are unreachable.
@@ -981,7 +990,7 @@ General {
               Datasets and snapshot policies marked with <code className="text-emerald-400 font-mono">replicateToHaPeer: true</code>{' '}
               in <code className="text-slate-200">/etc/axonwall/storage.yaml</code> are snapshotted (
               <code className="text-slate-200">@ha-sync-&lt;ns&gt;</code>) and streamed via{' '}
-              <code className="text-slate-200">zfs send -w -I</code> over <code className="text-slate-200">/api/v1/sync/zfs</code>{' '}
+              <code className="text-slate-200">zfs send -w -I | zfs recv</code> over <code className="text-slate-200">/api/v1/sync/zfs</code>{' '}
               to the Backup node. On the Backup node, replicated pools stay <code className="text-slate-200">readonly=on</code>{' '}
               until Keepalived promotes the node to <code className="text-emerald-400 font-mono">MASTER</code>.
             </p>
@@ -989,14 +998,13 @@ General {
 
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm flex items-center gap-1.5">
-              <Layers className="w-4 h-4 text-emerald-400" /> Automated 2-Node K3s Token Exchange
+              <Layers className="w-4 h-4 text-emerald-400" /> Embedded-etcd K3s HA Join &amp; Mayastor Volumes
             </h3>
             <p className="text-slate-400 leading-relaxed">
               When <code className="text-emerald-400 font-mono">autoJoinHaPeer: true</code> is set in{' '}
               <code className="text-slate-200">/etc/axonwall/k3s.yaml</code>, the Backup node securely fetches the K3s
-              node join token from <code className="text-slate-200">/api/v1/sync/k3s-token</code> over mTLS, persists{' '}
-              <code className="text-slate-200">/var/lib/axonwall/k3s-join.token</code>, and joins the cluster over the
-              WireGuard Flannel mesh with <code className="text-slate-200">axonwall-replicated-ha</code> OpenEBS volumes.
+              embedded-etcd join token from <code className="text-slate-200">/api/v1/sync/k3s-token</code> over mTLS, joins the cluster over the
+              WireGuard Flannel mesh with <code className="text-slate-200">axonwall-replicated-ha</code> OpenEBS Mayastor NVMe-oF volumes, and exposes an HA-resilient kubeconfig via <code className="text-emerald-400 font-mono">axonwall-kubeconfig --vip</code> (<code className="text-emerald-400 font-mono">axonwallctl kubeconfig --vip</code>).
             </p>
           </div>
         </div>

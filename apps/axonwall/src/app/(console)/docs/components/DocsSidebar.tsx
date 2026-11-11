@@ -17,12 +17,15 @@ import {
   Code2,
   Search,
   X,
-  ChevronRight,
   Palette,
   Database,
   HardDrive,
   KeyRound,
   Bug,
+  Boxes,
+  Crosshair,
+  Users,
+  Sparkles,
 } from 'lucide-react';
 
 export interface DocItem {
@@ -54,8 +57,8 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Cpu,
     items: [
       { title: 'Linux nftables Architecture', href: '/docs/architecture' },
-      { title: 'Super-Slim Edge NGFW (UEFI UKI)', href: '/docs/edge-uki-ngfw', badge: 'NEW' },
-      { title: 'Modular Roles (FW, ZFS, K3s)', href: '/docs/modular-architecture', badge: 'Core' },
+      { title: 'Super-Slim Edge NGFW (UEFI UKI)', href: '/docs/edge-uki-ngfw', badge: 'PID-1' },
+      { title: 'Modular Core Roles (5 Roles)', href: '/docs/modular-architecture', badge: 'Core' },
       { title: 'Multi-Core vs FreeBSD pf', href: '/docs/architecture#comparison' },
       { title: 'Junos Commit-Confirm Rollback', href: '/docs/architecture#commit-confirm' },
       { title: 'A/B Dual-Root & ZFSBootMenu Modes', href: '/docs/architecture#ab-dual-root' },
@@ -66,12 +69,12 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     title: 'High Availability (HA)',
     icon: ArrowRightLeft,
     items: [
-      { title: 'Cluster Overview & Full Sync', href: '/docs/high-availability' },
+      { title: 'Cluster Overview & 6-Plane Sync', href: '/docs/high-availability' },
       { title: '2-Host Setup Walkthrough', href: '/docs/high-availability#two-host-setup', badge: 'Guide' },
       { title: 'HA PKI & mTLS Security', href: '/docs/high-availability#pki-mtls' },
       { title: 'Keepalived VRRP v2/v3', href: '/docs/high-availability#keepalived' },
       { title: 'conntrackd Stateful Sync', href: '/docs/high-availability#conntrackd' },
-      { title: 'ZFS, SQLite, NTP & K3s Sync', href: '/docs/high-availability#zfs-k3s-sync', badge: 'HA' },
+      { title: 'ZFS, OpenLDAP, SQLite & K3s Sync', href: '/docs/high-availability#zfs-k3s-sync', badge: 'HA' },
       { title: 'Zero-Drop TCP & VoIP Failover', href: '/docs/high-availability#failover' },
     ],
   },
@@ -80,10 +83,10 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Bug,
     items: [
       { title: 'Ghost-in-the-Ring & rkhunter', href: '/docs/ghost-in-the-ring-rootkits', badge: 'Ring-0' },
-      { title: '6-Engine Malware Suite', href: '/docs/ghost-in-the-ring-rootkits#host-scanners' },
+      { title: 'Host Malware & Integrity Suite', href: '/docs/ghost-in-the-ring-rootkits#host-scanners' },
       { title: 'io_uring Syscall-Less Implants', href: '/docs/ghost-in-the-ring-rootkits#io-uring' },
-      { title: 'eBPF Rootkits & Silicon PMU LBR', href: '/docs/ghost-in-the-ring-rootkits#ebpf-pmu' },
-      { title: 'Preventive BPF_LSM Lockdown', href: '/docs/ghost-in-the-ring-rootkits#lsm-bpf' },
+      { title: 'eBPF Rootkits & /proc/kcore Audit', href: '/docs/ghost-in-the-ring-rootkits#ebpf-pmu' },
+      { title: 'CO-RE BPF-LSM & CVE-2026-31431', href: '/docs/ghost-in-the-ring-rootkits#lsm-bpf', badge: 'LSM' },
     ],
   },
   {
@@ -91,20 +94,33 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: KeyRound,
     items: [
       { title: 'Rosenpass Dual-KEM VPN', href: '/docs/post-quantum-rosenpass', badge: 'PQ-KEM' },
-      { title: 'McEliece 460896 + Kyber-768', href: '/docs/post-quantum-rosenpass#architecture' },
-      { title: 'Peer & PSK Rotation Setup', href: '/docs/post-quantum-rosenpass#configuration' },
+      { title: 'McEliece 460896 + ML-KEM-512', href: '/docs/post-quantum-rosenpass#architecture' },
+      { title: 'Peer & PSK Rotation (vpn.yaml)', href: '/docs/post-quantum-rosenpass#configuration' },
     ],
   },
   {
-    title: 'ZFS NAS Storage',
+    title: 'Identity, OpenLDAP & SSO',
+    icon: Users,
+    items: [
+      { title: 'Unified Identity Overview', href: '/docs/identity-openldap-sso', badge: 'LDAP' },
+      { title: 'Embedded OpenLDAP & SSSD', href: '/docs/identity-openldap-sso#openldap-sssd' },
+      { title: 'RBAC Roles & axonwall-opshell', href: '/docs/identity-openldap-sso#roles-opshell' },
+      { title: 'Zero-Touch Plugin Federation', href: '/docs/identity-openldap-sso#plugin-federation' },
+      { title: 'Multi-Provider LDAPS HA Sync', href: '/docs/identity-openldap-sso#ha-syncrepl' },
+      { title: 'Enterprise OIDC SSO & IAP', href: '/docs/identity-openldap-sso#enterprise-sso' },
+    ],
+  },
+  {
+    title: 'ZFS NAS & Vault Storage',
     icon: Database,
     items: [
-      { title: 'ZFS Storage Management', href: '/docs/zfs-nas-storage' },
-      { title: 'ZFS Pools & RAID Topologies', href: '/docs/zfs-nas-storage#pools' },
-      { title: 'Datasets, Quotas & Zvols', href: '/docs/zfs-nas-storage#datasets' },
-      { title: 'Samba SMB3 & VSS Shadow Copies', href: '/docs/zfs-nas-storage#smb' },
+      { title: 'ZFS Storage & Vault Overview', href: '/docs/zfs-nas-storage' },
+      { title: 'ZFS Pools, Special VDEV & TRIM', href: '/docs/zfs-nas-storage#pools' },
+      { title: 'Datasets, AES-256 & Zvols', href: '/docs/zfs-nas-storage#datasets', badge: 'AES' },
+      { title: 'SMB3, Time Machine & WSDD2', href: '/docs/zfs-nas-storage#smb' },
       { title: 'NFSv4 Exports & iSCSI Targets', href: '/docs/zfs-nas-storage#nfs-iscsi' },
-      { title: 'Snapshot Retention & HA Send/Recv', href: '/docs/zfs-nas-storage#snapshots' },
+      { title: 'Snapshots, Rollback & Cloud Sync', href: '/docs/zfs-nas-storage#snapshots' },
+      { title: 'ARC/L2ARC/ZIL Kstats & MCP', href: '/docs/zfs-nas-storage#arc-zil-telemetry', badge: 'Kstat' },
     ],
   },
   {
@@ -112,19 +128,51 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Layers,
     items: [
       { title: 'K3s & OpenEBS Overview', href: '/docs/k3s-kubernetes' },
-      { title: 'Vigilant Octo Waffle & SOC', href: '/docs/vigilant-octo-waffle', badge: 'New' },
+      { title: 'Cilium eBPF CNI & Etcd Snapshots', href: '/docs/k3s-kubernetes#cilium-etcd', badge: 'eBPF' },
+      { title: 'Vigilant Octo Waffle GitOps PaaS', href: '/docs/vigilant-octo-waffle', badge: 'GitOps' },
       { title: 'WireGuard Flannel Mesh', href: '/docs/k3s-kubernetes#wireguard' },
       { title: 'Automated 2-Node HA Join', href: '/docs/k3s-kubernetes#ha-join', badge: 'HA' },
+      { title: 'Kubeconfig Sync (axonwall-kubeconfig)', href: '/docs/k3s-kubernetes#kubeconfig', badge: 'CLI' },
+      { title: 'UserNS & BPF_TOKEN Pods (6.9+)', href: '/docs/k3s-kubernetes#userns-bpf-tokens', badge: 'BPF' },
       { title: 'OpenEBS ZFS-LocalPV CSI', href: '/docs/k3s-kubernetes#zfs-localpv' },
       { title: 'OpenEBS Mayastor NVMe-oF HA', href: '/docs/k3s-kubernetes#mayastor' },
     ],
   },
   {
-    title: 'CLI & Sovereign AI',
-    icon: Terminal,
+    title: 'KVM & LXC Hypervisor',
+    icon: Boxes,
     items: [
-      { title: 'Neovim Super Configurator', href: '/docs/cli-super-configurator', badge: 'TUI' },
-      { title: 'Eluvix Sovereign AI Router & DLP', href: '/docs/eluvix-ai-router', badge: 'NEW' },
+      { title: 'Hypervisor Overview (core-virt)', href: '/docs/kvm-lxc-hypervisor', badge: 'KVM' },
+      { title: 'KVM/QEMU VMs, TPM2 & noVNC', href: '/docs/kvm-lxc-hypervisor#kvm-vms' },
+      { title: 'VirtioFS, Clones, Migrate & XML', href: '/docs/kvm-lxc-hypervisor#clones-migration-xml', badge: 'Libvirt' },
+      { title: 'LXC System Containers', href: '/docs/kvm-lxc-hypervisor#lxc-containers' },
+      { title: 'Unprivileged LXC BPF_TOKEN', href: '/docs/kvm-lxc-hypervisor#lxc-bpf-token', badge: '6.9+' },
+      { title: 'PCIe VFIO, SR-IOV & VXLAN SDN', href: '/docs/kvm-lxc-hypervisor#vfio-sriov' },
+      { title: 'Hosted Virtual Edge NGFW UKI', href: '/docs/kvm-lxc-hypervisor#hosted-edge' },
+      { title: 'Cloud-Init Export & ZFS Backups', href: '/docs/kvm-lxc-hypervisor#cloud-init-backups' },
+    ],
+  },
+  {
+    title: 'Vigilante Autonomous SOC',
+    icon: Crosshair,
+    items: [
+      { title: 'Vigilante Cyber Ops (core-vigilante)', href: '/docs/vigilante-cyber-ops', badge: 'SOC' },
+      { title: 'BattleStation & 12 K3s Modules', href: '/docs/vigilante-cyber-ops#battlestation' },
+      { title: 'Kernel SOAR & Ransomware Freeze', href: '/docs/vigilante-cyber-ops#soar-containment' },
+      { title: 'Deception Mesh & Honeytokens', href: '/docs/vigilante-cyber-ops#deception-mesh' },
+      { title: 'Merkle ZFS Evidence Vault & Lake', href: '/docs/vigilante-cyber-ops#evidence-vault' },
+      { title: 'Threat Federation & 106-Tool MCP', href: '/docs/vigilante-cyber-ops#federation-mcp' },
+    ],
+  },
+  {
+    title: 'Sovereign AI, MCP & CLI',
+    icon: Sparkles,
+    items: [
+      { title: 'MCP Security AI Control & Leases', href: '/docs/mcp-ai-control', badge: 'MCP' },
+      { title: 'Kill Switch, Scopes & Blast Radius', href: '/docs/mcp-ai-control#blast-radius' },
+      { title: 'Tactical Leases & Hash Audit Chain', href: '/docs/mcp-ai-control#tactical-leases' },
+      { title: 'Eluvix Sovereign AI Router & DLP', href: '/docs/eluvix-ai-router', badge: 'DLP' },
+      { title: 'Neovim Super Configurator & TUI', href: '/docs/cli-super-configurator', badge: 'TUI' },
       { title: 'NastyMap Topology Simulator', href: '/docs/cli-super-configurator#nastymap-tui' },
       { title: 'ZSH Power-User Workstation', href: '/docs/cli-super-configurator#zsh-workstation' },
     ],
@@ -138,16 +186,17 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'CIDR Minimization & Sets', href: '/docs/threat-defense#cidr-optimization' },
       { title: 'DNS Sinkhole (Unbound RPZ)', href: '/docs/threat-defense#dns-sinkhole' },
       { title: 'Subdomain Pruning & Overrides', href: '/docs/threat-defense#subdomain-pruning' },
-      { title: 'Suricata 7+ & CrowdSec', href: '/docs/threat-defense#suricata-crowdsec' },
+      { title: 'Suricata 7+, XDP & CrowdSec', href: '/docs/threat-defense#suricata-crowdsec' },
     ],
   },
   {
     title: 'Migration Studio',
     icon: FileCode,
     items: [
-      { title: 'Multi-Vendor Importer', href: '/docs/migration' },
+      { title: '9-Vendor Appliance Importer', href: '/docs/migration', badge: '9x' },
+      { title: 'Proxmox VE & TrueNAS SCALE', href: '/docs/migration#proxmox-truenas', badge: 'New' },
       { title: 'pfSense & OPNsense XML', href: '/docs/migration#pfsense-opnsense' },
-      { title: 'Cisco ASA / FTD CLI Parser', href: '/docs/migration#cisco-asa' },
+      { title: 'Cisco, VyOS, MikroTik & Linux', href: '/docs/migration#cisco-asa' },
       { title: 'Rule Shadowing & Dead Rules', href: '/docs/migration#shadowing-algorithm' },
       { title: 'Subnet Collision Detection', href: '/docs/migration#subnet-collisions' },
       { title: 'Cherry-Pick Selective Merge', href: '/docs/migration#selective-merge' },
@@ -162,10 +211,11 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'Container Network & FS I/O', href: '/docs/observability#container-tracking' },
       { title: 'K3s Cluster Troubleshooting', href: '/docs/observability#kubernetes-troubleshooting' },
       { title: 'Coroot eBPF APM & RCA', href: '/docs/observability#coroot-apm', badge: 'APM' },
+      { title: 'Linux 6.9+ BPF_TOKEN & Dual XDP', href: '/docs/observability#bpf-token-delegation', badge: '6.9+' },
       { title: 'eBPF & NFLOG Kernel Tap', href: '/docs/observability#kernel-tap' },
       { title: 'Real-Time Protocol Dissectors', href: '/docs/observability#dissectors' },
       { title: 'SSE Packet Stream Endpoint', href: '/docs/observability#sse-streaming' },
-      { title: 'VictoriaMetrics & Flow Insight', href: '/docs/observability#victoriametrics' },
+      { title: 'VictoriaMetrics & ClickHouse Flows', href: '/docs/observability#victoriametrics' },
     ],
   },
   {
@@ -175,28 +225,29 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'Hardware Monitoring Overview', href: '/docs/hardware-telemetry' },
       { title: 'HWMON Sensors (Temp/Fan/Volt)', href: '/docs/hardware-telemetry#hwmon' },
       { title: 'SFP+/QSFP Optical DOM (ethtool)', href: '/docs/hardware-telemetry#optical-dom' },
-      { title: 'Embedded PTY Web Terminal', href: '/docs/hardware-telemetry#web-terminal' },
+      { title: 'Diagnostic Shell & Serial Console', href: '/docs/hardware-telemetry#web-terminal' },
     ],
   },
   {
-    title: 'GitOps & Audit Trail',
+    title: 'GitOps & /etc Audit',
     icon: GitBranch,
     items: [
       { title: 'GitOps Architecture', href: '/docs/gitops-audit' },
       { title: 'Automated Git Versioning', href: '/docs/gitops-audit#versioning' },
+      { title: 'Etckeeper (/etc Git Audit & Diffs)', href: '/docs/gitops-audit#etckeeper', badge: 'Git' },
       { title: 'Unified Diff Inspection', href: '/docs/gitops-audit#diff-inspection' },
       { title: '1-Click Rollback Lifecycle', href: '/docs/gitops-audit#rollback' },
     ],
   },
   {
-    title: 'API Reference',
+    title: 'API & Terraform',
     icon: Code2,
     items: [
-      { title: 'REST & SSE Endpoints', href: '/docs/api-reference' },
+      { title: 'REST, SSE & IPC Reference', href: '/docs/api-reference' },
       { title: 'Live Packet Stream (/events/packets)', href: '/docs/api-reference#packets' },
-      { title: 'Web PTY Terminal API', href: '/docs/api-reference#terminal' },
-      { title: 'GitOps Revisions API', href: '/docs/api-reference#gitops' },
+      { title: 'Fleet ZTP & MCP Endpoints', href: '/docs/api-reference#fleet-mcp' },
       { title: 'Privileged Agent Socket IPC', href: '/docs/api-reference#agent-socket' },
+      { title: 'Terraform / OpenTofu Provider', href: '/docs/api-reference#terraform', badge: 'IaC' },
     ],
   },
   {
@@ -304,8 +355,8 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.11.63</span>
-        <span className="text-emerald-400 font-medium">Docs 2.0</span>
+        <span className="font-mono">Axonwall v0.11.64</span>
+        <span className="text-emerald-400 font-medium">24 Guides</span>
       </div>
     </aside>
   );

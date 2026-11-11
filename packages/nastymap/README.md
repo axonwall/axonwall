@@ -2,8 +2,10 @@
 
 > High-performance interactive React visualization and parsing library for Nmap XML scan outputs, network topology graphs, GeoIP world mapping, and security scan diffing.
 
-[![npm version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://npmjs.org/package/nastymap)
+[![npm version](https://img.shields.io/badge/version-1.0.2-blue.svg)](https://npmjs.org/package/nastymap)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> **Built-In Axonwall Integration:** `@axonwall/nastymap` (`v1.0.2`) powers both the Web Console **Network Diagnostics & Topology Studio** (`/diagnostics` when `cli-diagnostics-nastymap` is enabled) and the 6-subview interactive terminal topology & live Nmap simulator inside `axonwall-tui --nastymap` (Tab `[9]`).
 
 ## Features
 

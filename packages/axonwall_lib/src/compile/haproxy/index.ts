@@ -51,6 +51,13 @@ export function compileHaProxy(config: HaProxyPluginConfig): string {
     if (safeConfigMode === 'http') {
       lines.push('    option forwardfor');
       lines.push('    http-request set-header X-Forwarded-Proto https if { ssl_fc }');
+      for (const hr of fe.hostRules ?? []) {
+        const cleanHost = hr.hostname.replace(/[^a-zA-Z0-9.-]/g, '').toLowerCase();
+        if (!cleanHost) continue;
+        const aclId = `host_${safeIdentifier(cleanHost)}`;
+        lines.push(`    acl ${aclId} hdr_dom(host) -i ${cleanHost}`);
+        lines.push(`    use_backend ${safeIdentifier(hr.backend)} if ${aclId}`);
+      }
     }
     lines.push(`    default_backend ${safeIdentifier(fe.defaultBackend)}`);
     lines.push('');

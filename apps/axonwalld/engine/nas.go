@@ -50,30 +50,54 @@ type DiskInventoryItem struct {
 }
 
 type ZfsPoolSpec struct {
-	Name              string   `json:"name"`
-	Topology          string   `json:"topology"` // stripe, mirror, raidz1, raidz2, raidz3, draid1, draid2, draid3
-	DataDisks         []string `json:"dataDisks"`
-	CacheDisks        []string `json:"cacheDisks"`
-	LogDisks          []string `json:"logDisks"`
-	SpareDisks        []string `json:"spareDisks"`
-	Ashift            int      `json:"ashift"`
-	Autotrim          bool     `json:"autotrim"`
-	Compression       string   `json:"compression"`
-	ScrubScheduleCron string   `json:"scrubScheduleCron"`
-	Description       string   `json:"description"`
+	Name               string   `json:"name"`
+	Topology           string   `json:"topology"` // stripe, mirror, raidz1, raidz2, raidz3, draid1, draid2, draid3
+	DataDisks          []string `json:"dataDisks"`
+	CacheDisks         []string `json:"cacheDisks"`
+	LogDisks           []string `json:"logDisks"`
+	SpareDisks         []string `json:"spareDisks"`
+	SpecialDisks       []string `json:"specialDisks,omitempty"`
+	DedupDisks         []string `json:"dedupDisks,omitempty"`
+	SpecialSmallBlocks string   `json:"specialSmallBlocks,omitempty"`
+	Ashift             int      `json:"ashift"`
+	Autotrim           bool     `json:"autotrim"`
+	Compression        string   `json:"compression"`
+	ScrubScheduleCron  string   `json:"scrubScheduleCron"`
+	TrimScheduleCron   string   `json:"trimScheduleCron,omitempty"`
+	Description        string   `json:"description"`
 }
 
 type ZfsDatasetSpec struct {
-	Name              string `json:"name"`
-	Pool              string `json:"pool"`
-	Type              string `json:"type"` // filesystem, zvol
-	Compression       string `json:"compression"`
-	Dedup             string `json:"dedup"`
-	QuotaGb           int    `json:"quotaGb"`
-	RecordSize        string `json:"recordSize"`
-	VolSizeGb         int    `json:"volSizeGb"`
-	AclMode           string `json:"aclMode"`
-	ReplicateToHaPeer bool   `json:"replicateToHaPeer"`
+	Name               string `json:"name"`
+	Pool               string `json:"pool"`
+	Type               string `json:"type"` // filesystem, zvol
+	Compression        string `json:"compression"`
+	Dedup              string `json:"dedup"`
+	QuotaGb            int    `json:"quotaGb"`
+	RefQuotaGb         int    `json:"refQuotaGb,omitempty"`
+	RefReservationGb   int    `json:"refReservationGb,omitempty"`
+	RecordSize         string `json:"recordSize"`
+	SpecialSmallBlocks string `json:"specialSmallBlocks,omitempty"`
+	VolSizeGb          int    `json:"volSizeGb"`
+	AclMode            string `json:"aclMode"`
+	Atime              string `json:"atime,omitempty"`
+	Sync               string `json:"sync,omitempty"`
+	Encryption         string `json:"encryption,omitempty"`
+	KeyFormat          string `json:"keyFormat,omitempty"`
+	KeyLocation        string `json:"keyLocation,omitempty"`
+	ReplicateToHaPeer  bool   `json:"replicateToHaPeer"`
+}
+
+type CloudSyncTaskSpec struct {
+	Name               string `json:"name"`
+	Direction          string `json:"direction"` // push, pull
+	Dataset            string `json:"dataset"`
+	RemoteEndpoint     string `json:"remoteEndpoint"`
+	RemoteBucket       string `json:"remoteBucket"`
+	RemotePrefix       string `json:"remotePrefix,omitempty"`
+	ScheduleCron       string `json:"scheduleCron,omitempty"`
+	BandwidthLimitKbps int    `json:"bandwidthLimitKbps,omitempty"`
+	Enabled            bool   `json:"enabled"`
 }
 
 type ZfsSnapshotPolicySpec struct {
@@ -86,13 +110,17 @@ type ZfsSnapshotPolicySpec struct {
 }
 
 type NasRuntimeBundle struct {
-	Enabled          bool                    `json:"enabled"`
-	Pools            []ZfsPoolSpec           `json:"pools"`
-	Datasets         []ZfsDatasetSpec        `json:"datasets"`
-	SnapshotPolicies []ZfsSnapshotPolicySpec `json:"snapshotPolicies"`
-	SmbConf          string                  `json:"smbConf"`
-	NfsExports       string                  `json:"nfsExports"`
-	IscsiConf        string                  `json:"iscsiConf"`
+	Enabled           bool                    `json:"enabled"`
+	Pools             []ZfsPoolSpec           `json:"pools"`
+	Datasets          []ZfsDatasetSpec        `json:"datasets"`
+	SnapshotPolicies  []ZfsSnapshotPolicySpec `json:"snapshotPolicies"`
+	CloudSyncTasks    []CloudSyncTaskSpec     `json:"cloudSyncTasks,omitempty"`
+	CloudSyncCommands []string                `json:"cloudSyncCommands,omitempty"`
+	SmbConf           string                  `json:"smbConf"`
+	NfsExports        string                  `json:"nfsExports"`
+	IscsiConf         string                  `json:"iscsiConf"`
+	LioSaveconfigJson string                  `json:"lioSaveconfigJson,omitempty"`
+	S3EnvConf         string                  `json:"s3EnvConf,omitempty"`
 }
 
 type ZfsPoolStatus struct {
@@ -149,15 +177,34 @@ func BuildZfsPoolCreateArgs(pool ZfsPoolSpec) []string {
 		"-O", "xattr=sa",
 		"-O", "dnodesize=auto",
 		"-O", "normalization=formD",
+	}
+	if pool.SpecialSmallBlocks != "" && pool.SpecialSmallBlocks != "0" {
+		args = append(args, "-O", fmt.Sprintf("special_small_blocks=%s", pool.SpecialSmallBlocks))
+	}
+	args = append(args,
 		"-O", fmt.Sprintf("mountpoint=/mnt/%s", pool.Name),
 		pool.Name,
-	}
+	)
 
 	if pool.Topology != "" && pool.Topology != "stripe" {
 		args = append(args, pool.Topology)
 	}
 	args = append(args, pool.DataDisks...)
 
+	if len(pool.SpecialDisks) > 0 {
+		args = append(args, "special")
+		if len(pool.SpecialDisks) >= 2 {
+			args = append(args, "mirror")
+		}
+		args = append(args, pool.SpecialDisks...)
+	}
+	if len(pool.DedupDisks) > 0 {
+		args = append(args, "dedup")
+		if len(pool.DedupDisks) >= 2 {
+			args = append(args, "mirror")
+		}
+		args = append(args, pool.DedupDisks...)
+	}
 	if len(pool.LogDisks) > 0 {
 		args = append(args, "log")
 		if len(pool.LogDisks) >= 2 {
@@ -191,9 +238,20 @@ func BuildZfsDatasetCreateArgs(ds ZfsDatasetSpec) [][]string {
 		if volGb <= 0 {
 			volGb = 10
 		}
-		return [][]string{
-			{"create", "-p", "-V", fmt.Sprintf("%dG", volGb), "-o", fmt.Sprintf("compression=%s", comp), "-o", "volblocksize=16K", fullName},
+		createArgs := []string{"create", "-p", "-V", fmt.Sprintf("%dG", volGb), "-o", fmt.Sprintf("compression=%s", comp), "-o", "volblocksize=16K"}
+		if ds.Encryption != "" && ds.Encryption != "off" {
+			createArgs = append(createArgs, "-o", fmt.Sprintf("encryption=%s", ds.Encryption))
+			kf := ds.KeyFormat
+			if kf == "" {
+				kf = "hex"
+			}
+			createArgs = append(createArgs, "-o", fmt.Sprintf("keyformat=%s", kf))
+			if ds.KeyLocation != "" && strings.HasPrefix(filepath.Clean(ds.KeyLocation), "/etc/axonwall/keys/") {
+				createArgs = append(createArgs, "-o", fmt.Sprintf("keylocation=file://%s", filepath.Clean(ds.KeyLocation)))
+			}
 		}
+		createArgs = append(createArgs, fullName)
+		return [][]string{createArgs}
 	}
 
 	recSize := ds.RecordSize
@@ -209,18 +267,44 @@ func BuildZfsDatasetCreateArgs(ds ZfsDatasetSpec) [][]string {
 		aclMode = "passthrough"
 	}
 
-	cmds := [][]string{
-		{
-			"create", "-p",
-			"-o", fmt.Sprintf("compression=%s", comp),
-			"-o", fmt.Sprintf("recordsize=%s", recSize),
-			"-o", fmt.Sprintf("dedup=%s", dedup),
-			"-o", fmt.Sprintf("aclmode=%s", aclMode),
-			fullName,
-		},
+	createCmd := []string{
+		"create", "-p",
+		"-o", fmt.Sprintf("compression=%s", comp),
+		"-o", fmt.Sprintf("recordsize=%s", recSize),
+		"-o", fmt.Sprintf("dedup=%s", dedup),
+		"-o", fmt.Sprintf("aclmode=%s", aclMode),
 	}
+	if ds.Atime != "" {
+		createCmd = append(createCmd, "-o", fmt.Sprintf("atime=%s", ds.Atime))
+	}
+	if ds.Sync != "" {
+		createCmd = append(createCmd, "-o", fmt.Sprintf("sync=%s", ds.Sync))
+	}
+	if ds.SpecialSmallBlocks != "" {
+		createCmd = append(createCmd, "-o", fmt.Sprintf("special_small_blocks=%s", ds.SpecialSmallBlocks))
+	}
+	if ds.Encryption != "" && ds.Encryption != "off" {
+		createCmd = append(createCmd, "-o", fmt.Sprintf("encryption=%s", ds.Encryption))
+		kf := ds.KeyFormat
+		if kf == "" {
+			kf = "hex"
+		}
+		createCmd = append(createCmd, "-o", fmt.Sprintf("keyformat=%s", kf))
+		if ds.KeyLocation != "" && strings.HasPrefix(filepath.Clean(ds.KeyLocation), "/etc/axonwall/keys/") {
+			createCmd = append(createCmd, "-o", fmt.Sprintf("keylocation=file://%s", filepath.Clean(ds.KeyLocation)))
+		}
+	}
+	createCmd = append(createCmd, fullName)
+
+	cmds := [][]string{createCmd}
 	if ds.QuotaGb > 0 {
 		cmds = append(cmds, []string{"set", fmt.Sprintf("quota=%dG", ds.QuotaGb), fullName})
+	}
+	if ds.RefQuotaGb > 0 {
+		cmds = append(cmds, []string{"set", fmt.Sprintf("refquota=%dG", ds.RefQuotaGb), fullName})
+	}
+	if ds.RefReservationGb > 0 {
+		cmds = append(cmds, []string{"set", fmt.Sprintf("refreservation=%dG", ds.RefReservationGb), fullName})
 	}
 	return cmds
 }
@@ -282,6 +366,7 @@ func (m *NasManager) BootstrapInstallZfsPool() {
 	// Check if pool is already imported
 	if err := exec.Command("zpool", "list", "-H", spec.PoolName).Run(); err == nil {
 		slog.Info("Install-time ZFS pool already active", "pool", spec.PoolName)
+		_ = exec.Command("zfs", "mount", "-a").Run()
 		ensureZrootDatasets(spec.Topology)
 		return
 	}
@@ -289,6 +374,7 @@ func (m *NasManager) BootstrapInstallZfsPool() {
 	// Try importing first
 	if err := exec.Command("zpool", "import", "-f", spec.PoolName).Run(); err == nil {
 		slog.Info("Imported install-time ZFS pool", "pool", spec.PoolName)
+		_ = exec.Command("zfs", "mount", "-a").Run()
 		ensureZrootDatasets(spec.Topology)
 		return
 	}
@@ -622,6 +708,200 @@ func (m *NasManager) CreateSnapshot(dataset string, label string) (string, error
 	return snapName, nil
 }
 
+func validZfsSnapshotSpec(snap string) bool {
+	parts := strings.Split(strings.TrimSpace(snap), "@")
+	if len(parts) != 2 {
+		return false
+	}
+	return validZfsPath(parts[0], true) && validZfsPath(parts[1], false)
+}
+
+func (m *NasManager) RollbackSnapshot(snapshot string, destroyNewer bool) error {
+	clean := strings.TrimSpace(snapshot)
+	if !validZfsSnapshotSpec(clean) {
+		return fmt.Errorf("invalid ZFS snapshot identifier %q (expected dataset@label)", snapshot)
+	}
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return fmt.Errorf("cannot rollback snapshot: zfs is not installed on this system")
+	}
+	args := []string{"rollback"}
+	if destroyNewer {
+		args = append(args, "-r")
+	}
+	args = append(args, clean)
+	if out, err := exec.Command("zfs", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("zfs rollback failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (m *NasManager) DeleteSnapshot(snapshot string) error {
+	clean := strings.TrimSpace(snapshot)
+	if !validZfsSnapshotSpec(clean) {
+		return fmt.Errorf("invalid ZFS snapshot identifier %q (expected dataset@label)", snapshot)
+	}
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return fmt.Errorf("cannot delete snapshot: zfs is not installed on this system")
+	}
+	if out, err := exec.Command("zfs", "destroy", clean).CombinedOutput(); err != nil {
+		return fmt.Errorf("zfs destroy %s failed: %s (%w)", clean, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (m *NasManager) TrimPool(poolName string) error {
+	if !validZfsPath(poolName, false) {
+		return fmt.Errorf("invalid pool name")
+	}
+	if _, err := exec.LookPath("zpool"); err != nil {
+		return fmt.Errorf("cannot trim pool: zpool is not installed on this system")
+	}
+	if out, err := exec.Command("zpool", "trim", poolName).CombinedOutput(); err != nil {
+		return fmt.Errorf("zpool trim failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (m *NasManager) CheckpointPool(poolName string, discard bool) error {
+	if !validZfsPath(poolName, false) {
+		return fmt.Errorf("invalid pool name")
+	}
+	if _, err := exec.LookPath("zpool"); err != nil {
+		return fmt.Errorf("cannot checkpoint pool: zpool is not installed on this system")
+	}
+	args := []string{"checkpoint"}
+	if discard {
+		args = append(args, "-d")
+	}
+	args = append(args, poolName)
+	if out, err := exec.Command("zpool", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("zpool checkpoint failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (m *NasManager) DatasetKeyAction(dataset, action, keyMaterial string) error {
+	cleanDs := strings.TrimSpace(dataset)
+	if !validZfsPath(cleanDs, true) {
+		return fmt.Errorf("invalid dataset name %q", dataset)
+	}
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return fmt.Errorf("cannot manage dataset key: zfs is not installed on this system")
+	}
+	switch action {
+	case "unload-key", "lock":
+		if out, err := exec.Command("zfs", "unload-key", cleanDs).CombinedOutput(); err != nil {
+			return fmt.Errorf("zfs unload-key failed: %s (%w)", strings.TrimSpace(string(out)), err)
+		}
+		return nil
+	case "load-key", "unlock":
+		cmd := exec.Command("zfs", "load-key", cleanDs)
+		if strings.TrimSpace(keyMaterial) != "" {
+			cmd = exec.Command("zfs", "load-key", "-L", "prompt", cleanDs)
+			cmd.Stdin = strings.NewReader(strings.TrimSpace(keyMaterial) + "\n")
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("zfs load-key failed: %s (%w)", strings.TrimSpace(string(out)), err)
+		}
+		_ = exec.Command("zfs", "mount", cleanDs).Run()
+		return nil
+	case "change-key":
+		if len(strings.TrimSpace(keyMaterial)) < 8 {
+			return fmt.Errorf("keyMaterial must be at least 8 characters for change-key")
+		}
+		cmd := exec.Command("zfs", "change-key", "-o", "keylocation=prompt", "-o", "keyformat=passphrase", cleanDs)
+		cmd.Stdin = strings.NewReader(strings.TrimSpace(keyMaterial) + "\n")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("zfs change-key failed: %s (%w)", strings.TrimSpace(string(out)), err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported dataset key action %q (expected load-key, unload-key, or change-key)", action)
+	}
+}
+
+func (m *NasManager) RunSmartTest(device, testType string) (string, error) {
+	dev := strings.TrimSpace(device)
+	if !validInstallZfsDevice(dev) {
+		return "", fmt.Errorf("disallowed block device path %q", device)
+	}
+	mode := strings.ToLower(strings.TrimSpace(testType))
+	if mode == "" {
+		mode = "short"
+	}
+	if mode != "short" && mode != "long" {
+		return "", fmt.Errorf("invalid SMART test type %q (expected short or long)", testType)
+	}
+	tool, err := exec.LookPath("smartctl")
+	if err != nil {
+		return "", fmt.Errorf("smartctl is not installed on this system")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, tool, "-t", mode, dev).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("smartctl -t %s %s failed: %s (%w)", mode, dev, strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (m *NasManager) RunCloudSyncTask(taskName string) (string, error) {
+	cleanName := strings.TrimSpace(taskName)
+	if cleanName == "" {
+		return "", fmt.Errorf("taskName is required")
+	}
+	m.mu.Lock()
+	tasks := append([]CloudSyncTaskSpec(nil), m.cfg.CloudSyncTasks...)
+	m.mu.Unlock()
+
+	var found *CloudSyncTaskSpec
+	for i := range tasks {
+		if tasks[i].Name == cleanName {
+			found = &tasks[i]
+			break
+		}
+	}
+	if found == nil {
+		return "", fmt.Errorf("cloud sync task %q not found in active NAS configuration", cleanName)
+	}
+	if !validZfsPath(found.Dataset, true) {
+		return "", fmt.Errorf("invalid dataset path in cloud sync task %q", cleanName)
+	}
+	localPath := filepath.Clean("/mnt/" + found.Dataset)
+	if !underMnt(localPath) {
+		return "", fmt.Errorf("cloud sync local path %q is outside /mnt", localPath)
+	}
+	rclonePath, err := exec.LookPath("rclone")
+	if err != nil {
+		return "", fmt.Errorf("rclone is not installed on this system")
+	}
+	bucket := strings.Trim(strings.TrimSpace(found.RemoteBucket), "/")
+	prefix := strings.Trim(strings.TrimSpace(found.RemotePrefix), "/")
+	remoteTarget := fmt.Sprintf(":s3:%s", bucket)
+	if prefix != "" {
+		remoteTarget = fmt.Sprintf(":s3:%s/%s", bucket, prefix)
+	}
+	args := []string{"sync"}
+	if found.Direction == "pull" {
+		args = append(args, remoteTarget, localPath)
+	} else {
+		args = append(args, localPath, remoteTarget)
+	}
+	if strings.TrimSpace(found.RemoteEndpoint) != "" {
+		args = append(args, "--s3-provider=Other", "--s3-env-auth=true", fmt.Sprintf("--s3-endpoint=%s", strings.TrimSpace(found.RemoteEndpoint)))
+	}
+	if found.BandwidthLimitKbps > 0 {
+		args = append(args, fmt.Sprintf("--bwlimit=%dK", found.BandwidthLimitKbps))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, rclonePath, args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("rclone cloud sync %s failed: %s (%w)", cleanName, strings.TrimSpace(string(out)), err)
+	}
+	return fmt.Sprintf("Cloud sync task %s (%s) completed", cleanName, found.Direction), nil
+}
+
 func (m *NasManager) ScrubPool(poolName string) error {
 	if !validZfsPath(poolName, false) {
 		return fmt.Errorf("invalid pool name")
@@ -723,6 +1003,7 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 				}
 			}
 		}
+		_ = exec.Command("zfs", "mount", "-O", "-a").Run()
 	}
 
 	// 2. Write Samba configuration & reload smbd
@@ -764,10 +1045,70 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		}
 	}
 
+	// 4. Write & reconcile LIO kernel iSCSI target configuration if configured and targetctl is installed
+	if bundle.LioSaveconfigJson != "" {
+		_ = os.MkdirAll("/etc/rtslib-fb-target", 0750)
+		if err := os.WriteFile("/etc/rtslib-fb-target/saveconfig.json", []byte(bundle.LioSaveconfigJson), 0600); err == nil {
+			if targetctl, lookErr := exec.LookPath("targetctl"); lookErr == nil {
+				_ = exec.Command(targetctl, "restore", "/etc/rtslib-fb-target/saveconfig.json").Run()
+			}
+		}
+	}
+
+	// 5. Write & reload S3 MinIO gateway environment if configured and minio unit is installed
+	if bundle.S3EnvConf != "" {
+		_ = os.MkdirAll("/etc/default", 0755)
+		if err := os.WriteFile("/etc/default/minio", []byte(bundle.S3EnvConf), 0600); err == nil {
+			if isSystemdServiceActive("minio") {
+				_ = exec.Command("systemctl", "reload-or-restart", "minio").Run()
+			}
+		}
+	}
+
 	m.mu.Lock()
 	m.cfg = bundle
 	m.mu.Unlock()
 	return nil
+}
+
+// GetReplicatedDatasets returns the full ZFS dataset paths configured with ReplicateToHaPeer=true.
+func (m *NasManager) GetReplicatedDatasets() []string {
+	m.mu.Lock()
+	enabled := m.cfg.Enabled
+	datasets := append([]ZfsDatasetSpec(nil), m.cfg.Datasets...)
+	policies := append([]ZfsSnapshotPolicySpec(nil), m.cfg.SnapshotPolicies...)
+	m.mu.Unlock()
+
+	if !enabled {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	addDs := func(raw string) {
+		clean := strings.TrimSpace(raw)
+		if !validZfsPath(clean, true) || !strings.Contains(clean, "/") || seen[clean] {
+			return
+		}
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	for _, ds := range datasets {
+		if !ds.ReplicateToHaPeer {
+			continue
+		}
+		fullName := ds.Name
+		if ds.Pool != "" && !strings.HasPrefix(ds.Name, ds.Pool+"/") {
+			fullName = ds.Pool + "/" + ds.Name
+		}
+		addDs(fullName)
+	}
+	for _, sp := range policies {
+		if !sp.Enabled || !sp.ReplicateToHaPeer {
+			continue
+		}
+		addDs(sp.Dataset)
+	}
+	return out
 }
 
 // PromoteFailoverMaster is triggered by HAEngine when this node transitions to MASTER.
@@ -782,10 +1123,14 @@ func (m *NasManager) PromoteFailoverMaster() {
 		return
 	}
 
+	replicated := m.GetReplicatedDatasets()
 	slog.Info("HA Failover: Promoting ZFS pools and NAS shares to Active MASTER")
 	if _, err := exec.LookPath("zfs"); err == nil {
 		for _, p := range pools {
 			_ = exec.Command("zfs", "set", "readonly=off", p.Name).Run()
+		}
+		for _, ds := range replicated {
+			_ = exec.Command("zfs", "set", "readonly=off", ds).Run()
 		}
 		_ = exec.Command("zfs", "mount", "-a").Run()
 	}
@@ -794,7 +1139,7 @@ func (m *NasManager) PromoteFailoverMaster() {
 }
 
 // DemoteFailoverBackup is triggered by HAEngine when this node transitions to BACKUP or FAULT.
-// It sets replicated ZFS target pools to readonly=on so incoming incremental zfs receive streams succeed cleanly.
+// It sets replicated ZFS target datasets (or pools) to readonly=on so incoming incremental zfs receive streams succeed cleanly.
 func (m *NasManager) DemoteFailoverBackup() {
 	m.mu.Lock()
 	enabled := m.cfg.Enabled
@@ -805,10 +1150,17 @@ func (m *NasManager) DemoteFailoverBackup() {
 		return
 	}
 
+	replicated := m.GetReplicatedDatasets()
 	slog.Info("HA Failover: Demoting NAS node to Standby BACKUP (setting ZFS readonly=on for incoming replication)")
 	if _, err := exec.LookPath("zfs"); err == nil {
-		for _, p := range pools {
-			_ = exec.Command("zfs", "set", "readonly=on", p.Name).Run()
+		if len(replicated) > 0 {
+			for _, ds := range replicated {
+				_ = exec.Command("zfs", "set", "readonly=on", ds).Run()
+			}
+		} else {
+			for _, p := range pools {
+				_ = exec.Command("zfs", "set", "readonly=on", p.Name).Run()
+			}
 		}
 	}
 }

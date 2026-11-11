@@ -4,7 +4,12 @@ import {
   getNasPoolsRuntime,
   getNasSnapshotsRuntime,
   createNasSnapshotAction,
+  rollbackNasSnapshotAction,
+  deleteNasSnapshotAction,
   scrubNasPoolAction,
+  trimNasPoolAction,
+  checkpointNasPoolAction,
+  manageNasDatasetEncryptionAction,
 } from '@/server/agent';
 
 export async function GET() {
@@ -39,6 +44,26 @@ export async function POST(req: Request) {
     }
     if (body.action === 'scrub') {
       const res = await scrubNasPoolAction(body.pool);
+      return NextResponse.json(res);
+    }
+    if (body.action === 'rollback') {
+      const res = await rollbackNasSnapshotAction(body.snapshot);
+      return NextResponse.json(res);
+    }
+    if (body.action === 'delete_snapshot') {
+      const res = await deleteNasSnapshotAction(body.snapshot);
+      return NextResponse.json(res);
+    }
+    if (body.action === 'trim') {
+      const res = await trimNasPoolAction(body.pool);
+      return NextResponse.json(res);
+    }
+    if (body.action === 'checkpoint' || body.action === 'discard_checkpoint') {
+      const res = await checkpointNasPoolAction(body.pool, body.action === 'discard_checkpoint');
+      return NextResponse.json(res);
+    }
+    if (body.action === 'load-key' || body.action === 'unload-key') {
+      const res = await manageNasDatasetEncryptionAction(body.dataset, body.action, body.keyMaterial || '');
       return NextResponse.json(res);
     }
     return NextResponse.json({ error: 'Unknown NAS action' }, { status: 400 });

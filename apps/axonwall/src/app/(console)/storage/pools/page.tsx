@@ -7,6 +7,8 @@ import {
   getNasDisksInventory,
   getNasPoolsRuntime,
   scrubNasPoolAction,
+  trimNasPoolAction,
+  checkpointNasPoolAction,
   type NasDiskItem,
   type NasPoolStatus,
 } from '@/server/agent';
@@ -21,6 +23,8 @@ export default function ZfsPoolsPage() {
   const [poolName, setPoolName] = useState('tank');
   const [topology, setTopology] = useState<ZfsPool['topology']>('mirror');
   const [selectedDisks, setSelectedDisks] = useState<string[]>([]);
+  const [specialDisks, setSpecialDisks] = useState<string[]>([]);
+  const [dedupDisks, setDedupDisks] = useState<string[]>([]);
   const [compression, setCompression] = useState<ZfsPool['compression']>('lz4');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [statusKind, setStatusKind] = useState<'success' | 'error'>('success');
@@ -84,6 +88,8 @@ export default function ZfsPoolsPage() {
           name: poolName.trim(),
           topology,
           dataDisks: selectedDisks,
+          ...(specialDisks.length > 0 ? { specialDisks } : {}),
+          ...(dedupDisks.length > 0 ? { dedupDisks } : {}),
           cacheDisks: [],
           logDisks: [],
           spareDisks: [],
@@ -134,6 +140,21 @@ export default function ZfsPoolsPage() {
 
   const handleScrub = async (name: string) => {
     const res = await scrubNasPoolAction(name);
+    setStatusKind(res.success ? 'success' : 'error');
+    setStatusMsg(res.message);
+  };
+
+  const handleTrim = async (name: string) => {
+    const res = await trimNasPoolAction(name);
+    setStatusKind(res.success ? 'success' : 'error');
+    setStatusMsg(res.message);
+  };
+
+  const handleCheckpoint = async (name: string, discard = false) => {
+    if (!discard && !confirm(`Create pool-wide ZFS checkpoint on '${name}'?`)) return;
+    if (discard && !confirm(`Discard active ZFS checkpoint on '${name}'?`)) return;
+    const res = await checkpointNasPoolAction(name, discard);
+    setStatusKind(res.success ? 'success' : 'error');
     setStatusMsg(res.message);
   };
 
@@ -246,6 +267,70 @@ export default function ZfsPoolsPage() {
           </div>
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs text-slate-400 mb-2">
+              Optional Special Allocation NVMe VDEVs (Metadata &amp; Small-Block Acceleration)
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {disks
+                .filter((d) => !selectedDisks.includes(d.path) && !dedupDisks.includes(d.path))
+                .map((d) => {
+                  const checked = specialDisks.includes(d.path);
+                  return (
+                    <button
+                      type="button"
+                      key={`special-${d.path}`}
+                      onClick={() =>
+                        setSpecialDisks((prev) =>
+                          prev.includes(d.path) ? prev.filter((p) => p !== d.path) : [...prev, d.path]
+                        )
+                      }
+                      className={`px-3 py-1.5 rounded-lg border text-xs font-mono transition ${
+                        checked
+                          ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      {checked ? '★ ' : ''}{d.path}
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-400 mb-2">
+              Optional Dedicated Fast Dedup NVMe VDEVs (OpenZFS 2.3+ DDT Table Pinning)
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {disks
+                .filter((d) => !selectedDisks.includes(d.path) && !specialDisks.includes(d.path))
+                .map((d) => {
+                  const checked = dedupDisks.includes(d.path);
+                  return (
+                    <button
+                      type="button"
+                      key={`dedup-${d.path}`}
+                      onClick={() =>
+                        setDedupDisks((prev) =>
+                          prev.includes(d.path) ? prev.filter((p) => p !== d.path) : [...prev, d.path]
+                        )
+                      }
+                      className={`px-3 py-1.5 rounded-lg border text-xs font-mono transition ${
+                        checked
+                          ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                      }`}
+                    >
+                      {checked ? '◆ ' : ''}{d.path}
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+
         <div className="flex justify-end">
           <button
             disabled={saving || selectedDisks.length === 0}
@@ -278,15 +363,42 @@ export default function ZfsPoolsPage() {
               <div className="text-xs text-slate-400 space-y-1">
                 <div>Mountpoint: <span className="font-mono text-slate-200">/mnt/{pool.name}</span></div>
                 <div>VDEVs: <span className="font-mono text-slate-300">{pool.dataDisks.join(', ')}</span></div>
+                {pool.specialDisks && pool.specialDisks.length > 0 && (
+                  <div>Special NVMe VDEV: <span className="font-mono text-cyan-300">{pool.specialDisks.join(', ')}</span></div>
+                )}
+                {pool.dedupDisks && pool.dedupDisks.length > 0 && (
+                  <div>Fast Dedup NVMe VDEV: <span className="font-mono text-amber-300">{pool.dedupDisks.join(', ')}</span></div>
+                )}
               </div>
 
-              <div className="flex items-center justify-between pt-3 border-t border-slate-800">
-                <button
-                  onClick={() => handleScrub(pool.name)}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1.5"
-                >
-                  <RefreshCw className="w-3.5 h-3.5 text-emerald-400" /> Scrub Pool
-                </button>
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-800">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => handleScrub(pool.name)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1.5"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 text-emerald-400" /> Scrub
+                  </button>
+                  <button
+                    onClick={() => handleTrim(pool.name)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200"
+                  >
+                    NVMe TRIM
+                  </button>
+                  <button
+                    onClick={() => handleCheckpoint(pool.name, false)}
+                    className="px-2.5 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-xs text-cyan-300"
+                  >
+                    Checkpoint
+                  </button>
+                  <button
+                    onClick={() => handleCheckpoint(pool.name, true)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-400"
+                    title="Discard active ZFS pool checkpoint"
+                  >
+                    Discard CP
+                  </button>
+                </div>
                 <button
                   onClick={() => handleDeletePool(pool.name)}
                   className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-xs text-rose-400 flex items-center gap-1.5"

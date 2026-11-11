@@ -77,10 +77,28 @@ export async function GET() {
           },
         },
       },
+      '/state': {
+        get: {
+          summary: 'Read declarative desired state',
+          description: 'Returns the active merged DesiredState JSON representation from /etc/axonwall/*.yaml.',
+          responses: {
+            '200': { description: 'Active DesiredState payload' },
+          },
+        },
+      },
+      '/events/packets': {
+        get: {
+          summary: 'Stream real-time firewall packet events (SSE)',
+          description: 'Server-Sent Events (text/event-stream) stream of kernel NFLOG / eBPF packet verdicts and protocol dissections.',
+          responses: {
+            '200': { description: 'SSE packet stream' },
+          },
+        },
+      },
       '/import': {
         post: {
           summary: 'Import legacy firewall configuration',
-          description: 'Translates pfSense XML, OPNsense XML, VyOS/EdgeOS config.boot, MikroTik RouterOS /export, or Linux iptables directly into Axonwall DesiredState and Linux nftables.',
+          description: 'Translates pfSense XML, OPNsense XML, Cisco IOS/ASA/FTD CLI, VyOS/EdgeOS config.boot, MikroTik RouterOS /export, Linux iptables-save, or firewalld XML/CLI directly into Axonwall DesiredState and Linux nftables.',
           requestBody: {
             required: true,
             content: {
@@ -91,7 +109,7 @@ export async function GET() {
                     config: { type: 'string', description: 'Raw firewall configuration text' },
                     vendor: {
                       type: 'string',
-                      enum: ['auto', 'pfsense', 'opnsense', 'vyos', 'mikrotik', 'iptables'],
+                      enum: ['auto', 'pfsense', 'opnsense', 'cisco', 'vyos', 'mikrotik', 'iptables', 'firewalld'],
                       default: 'auto',
                     },
                     apply: { type: 'boolean', default: false, description: 'Immediately apply to live firewall with safety rollback' },
@@ -105,6 +123,112 @@ export async function GET() {
           responses: {
             '200': { description: 'Configuration parsed and translated successfully' },
             '400': { description: 'Parsing or validation error' },
+          },
+        },
+      },
+      '/ebpf/overview': {
+        get: {
+          summary: 'Get unified Ring-0 eBPF, BPF_TOKEN_CREATE & Cross-Duty telemetry',
+          description:
+            'Returns dual-stack IPv4/IPv6 + 802.1Q/802.1ad VLAN XDP verdict counters, TTL-bounded XDP_DROP blocklist entries, 5-hook CO-RE BPF-LSM status, Linux 6.9+ bpffs delegation mounts, KVM/LXC vnet/TAP telemetry, K3s UserNS readiness, and OpenZFS ARC/L2ARC/ZIL kstats.',
+          responses: {
+            '200': { description: 'Unified Ring-0 eBPF and cross-duty telemetry payload' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/ebpf/xdp/block': {
+        post: {
+          summary: 'Insert IPv4 or IPv6 address into XDP line-rate drop map',
+          description:
+            'Blocks an attacker IPv4 or IPv6 host at the NIC driver ring (XDP_DROP prior to sk_buff allocation) with automatic monotonic TTL expiration.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    ip: { type: 'string', description: 'IPv4 or IPv6 address to drop at XDP line rate' },
+                    ttlSeconds: { type: 'integer', default: 3600, minimum: 10, maximum: 604800 },
+                  },
+                  required: ['ip'],
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'XDP_DROP entry programmed into BPF_MAP_TYPE_LRU_HASH' },
+          },
+        },
+        delete: {
+          summary: 'Remove IPv4 or IPv6 address from XDP drop map',
+          parameters: [
+            {
+              name: 'ip',
+              in: 'query',
+              required: true,
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            '200': { description: 'XDP_DROP entry removed' },
+          },
+        },
+      },
+      '/ebpf/tokens': {
+        post: {
+          summary: 'Create or mount a Linux 6.9+ delegated bpffs BPF_TOKEN profile',
+          description:
+            'Mounts a dedicated bpffs instance under /run/axonwall/bpffs-tokens/<name> with safe networking delegation options while BPF-LSM blocks Ring-0 tracing/memory-read program types (kprobe/tracepoint/lsm).',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string' },
+                    preset: {
+                      type: 'string',
+                      enum: ['networking-safe', 'cgroup-observability', 'firewall-xdp-tc'],
+                      default: 'networking-safe',
+                    },
+                    workloadTarget: { type: 'string', default: 'k3s-userns' },
+                  },
+                  required: ['name'],
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Delegated bpffs token profile mounted' },
+          },
+        },
+        delete: {
+          summary: 'Unmount and remove a delegated bpffs BPF_TOKEN profile',
+          parameters: [
+            {
+              name: 'name',
+              in: 'query',
+              required: true,
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            '200': { description: 'Delegated bpffs token profile unmounted' },
+          },
+        },
+      },
+      '/mcp': {
+        post: {
+          summary: 'Axonwall Model Context Protocol (MCP) JSON-RPC 2.0 Streamable HTTP Endpoint',
+          description:
+            'Authenticated (Bearer axw_mcp_*) JSON-RPC 2.0 endpoint exposing 16 read-only MCP Resources and 25 guardrailed MCP Tools across Firewall, Ring-0 eBPF & BPF_TOKEN_CREATE, KVM/LXC Virtualization, K3s Kubernetes, OpenZFS NAS, and 9-Vendor Migration.',
+          responses: {
+            '200': { description: 'MCP JSON-RPC 2.0 response' },
+            '401': { description: 'Missing or invalid MCP API key' },
+            '403': { description: 'Insufficient MCP scope or subsystem disabled' },
           },
         },
       },

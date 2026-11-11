@@ -13,28 +13,107 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type FlowTrackerFlow6Key struct {
+	_        structs.HostLayout
+	SrcIp6   [16]uint8
+	DstIp6   [16]uint8
+	SrcPort  uint16
+	DstPort  uint16
+	VlanId   uint16
+	Protocol uint8
+	Pad      uint8
+}
+
 type FlowTrackerFlowKey struct {
 	_        structs.HostLayout
 	SrcIp    uint32
 	DstIp    uint32
 	SrcPort  uint16
 	DstPort  uint16
+	VlanId   uint16
 	Protocol uint8
-	_        [3]byte
+	Pad      uint8
 }
 
 type FlowTrackerFlowVal struct {
-	_       structs.HostLayout
-	Packets uint64
-	Bytes   uint64
+	_          structs.HostLayout
+	Packets    uint64
+	Bytes      uint64
+	SynPackets uint64
+	RstPackets uint64
+	LastSeenNs uint64
+	TcpFlags   uint8
+	Pad        [7]uint8
+}
+
+type FlowTrackerIpv6AddrKey struct {
+	_    structs.HostLayout
+	Addr [16]uint8
+}
+
+type FlowTrackerLpmV4Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Addr      uint32
+}
+
+type FlowTrackerLpmV6Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Addr      [16]uint8
+}
+
+type FlowTrackerSynFloodCfg struct {
+	_         structs.HostLayout
+	MaxSynPps uint64
+	Enabled   uint32
+	Pad       uint32
+}
+
+type FlowTrackerSynMeterVal struct {
+	_              structs.HostLayout
+	WindowStartNs  uint64
+	SynCount       uint64
+	DroppedPackets uint64
+}
+
+type FlowTrackerXdpBlockVal struct {
+	_           structs.HostLayout
+	DropPackets uint64
+	DropBytes   uint64
+	ExpiresNs   uint64
+	ReasonCode  uint32
+	Active      uint32
+}
+
+type FlowTrackerXdpDatastats struct {
+	_             structs.HostLayout
+	RxPackets     uint64
+	RxBytes       uint64
+	XdpPass       uint64
+	XdpDrop       uint64
+	Ipv4Packets   uint64
+	Ipv6Packets   uint64
+	VlanPackets   uint64
+	TcpSynPackets uint64
+	LpmCidrDrops  uint64
+	SynFloodDrops uint64
 }
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	FlowTrackerMapBlocklist6Map   = "blocklist6_map"
 	FlowTrackerMapBlocklistMap    = "blocklist_map"
+	FlowTrackerMapCidrBlock4Map   = "cidr_block4_map"
+	FlowTrackerMapCidrBlock6Map   = "cidr_block6_map"
+	FlowTrackerMapFlow6Map        = "flow6_map"
 	FlowTrackerMapFlowMap         = "flow_map"
+	FlowTrackerMapSynFloodCfgMap  = "syn_flood_cfg_map"
+	FlowTrackerMapSynMeter4Map    = "syn_meter4_map"
+	FlowTrackerMapSynMeter6Map    = "syn_meter6_map"
+	FlowTrackerMapXdpStatsMap     = "xdp_stats_map"
 	FlowTrackerProgXdpFlowTracker = "xdp_flow_tracker"
 )
 
@@ -87,8 +166,16 @@ type FlowTrackerProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type FlowTrackerMapSpecs struct {
-	BlocklistMap *ebpf.MapSpec `ebpf:"blocklist_map"`
-	FlowMap      *ebpf.MapSpec `ebpf:"flow_map"`
+	Blocklist6Map  *ebpf.MapSpec `ebpf:"blocklist6_map"`
+	BlocklistMap   *ebpf.MapSpec `ebpf:"blocklist_map"`
+	CidrBlock4Map  *ebpf.MapSpec `ebpf:"cidr_block4_map"`
+	CidrBlock6Map  *ebpf.MapSpec `ebpf:"cidr_block6_map"`
+	Flow6Map       *ebpf.MapSpec `ebpf:"flow6_map"`
+	FlowMap        *ebpf.MapSpec `ebpf:"flow_map"`
+	SynFloodCfgMap *ebpf.MapSpec `ebpf:"syn_flood_cfg_map"`
+	SynMeter4Map   *ebpf.MapSpec `ebpf:"syn_meter4_map"`
+	SynMeter6Map   *ebpf.MapSpec `ebpf:"syn_meter6_map"`
+	XdpStatsMap    *ebpf.MapSpec `ebpf:"xdp_stats_map"`
 }
 
 // FlowTrackerVariableSpecs contains global variables before they are loaded into the kernel.
@@ -117,14 +204,30 @@ func (o *FlowTrackerObjects) Close() error {
 //
 // It can be passed to LoadFlowTrackerObjects or ebpf.CollectionSpec.LoadAndAssign.
 type FlowTrackerMaps struct {
-	BlocklistMap *ebpf.Map `ebpf:"blocklist_map"`
-	FlowMap      *ebpf.Map `ebpf:"flow_map"`
+	Blocklist6Map  *ebpf.Map `ebpf:"blocklist6_map"`
+	BlocklistMap   *ebpf.Map `ebpf:"blocklist_map"`
+	CidrBlock4Map  *ebpf.Map `ebpf:"cidr_block4_map"`
+	CidrBlock6Map  *ebpf.Map `ebpf:"cidr_block6_map"`
+	Flow6Map       *ebpf.Map `ebpf:"flow6_map"`
+	FlowMap        *ebpf.Map `ebpf:"flow_map"`
+	SynFloodCfgMap *ebpf.Map `ebpf:"syn_flood_cfg_map"`
+	SynMeter4Map   *ebpf.Map `ebpf:"syn_meter4_map"`
+	SynMeter6Map   *ebpf.Map `ebpf:"syn_meter6_map"`
+	XdpStatsMap    *ebpf.Map `ebpf:"xdp_stats_map"`
 }
 
 func (m *FlowTrackerMaps) Close() error {
 	return _FlowTrackerClose(
+		m.Blocklist6Map,
 		m.BlocklistMap,
+		m.CidrBlock4Map,
+		m.CidrBlock6Map,
+		m.Flow6Map,
 		m.FlowMap,
+		m.SynFloodCfgMap,
+		m.SynMeter4Map,
+		m.SynMeter6Map,
+		m.XdpStatsMap,
 	)
 }
 

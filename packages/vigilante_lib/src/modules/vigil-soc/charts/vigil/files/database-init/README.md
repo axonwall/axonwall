@@ -38,5 +38,4 @@ The CI check at `.github/workflows/helm-chart.yml` runs
 directory drift between the source and the bundle, but doesn't check
 either against `dbInit.sqlFiles`.
 
-See also: [`infra/database/init/README.md`](../../../../database/init/README.md)
-for the same convention from the source side.
+Note: In the upstream VigilSOC repository, these SQL files mirror `infra/database/init/*.sql` (bundled inside `files/database-init/` here so Helm `ConfigMap` rendering stays self-contained within `@axonwall/vigilante-lib`).

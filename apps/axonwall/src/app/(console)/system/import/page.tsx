@@ -23,11 +23,13 @@ import {
   importFirewallConfig,
   detectFirewallType,
   analyzeRuleShadowing,
+  mergeFirewallConfigs,
   type FirewallVendor,
   type ImportReport,
   type RuleAnalysisReport,
 } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
+import { getCurrentDesiredState } from '@/server/agent';
 
 interface VendorOption {
   id: FirewallVendor | 'auto';
@@ -40,6 +42,8 @@ const VENDOR_OPTIONS: VendorOption[] = [
   { id: 'auto', label: 'Auto-Detect', badge: 'Smart', filename: 'Auto' },
   { id: 'pfsense', label: 'pfSense', badge: 'XML', filename: 'config.xml' },
   { id: 'opnsense', label: 'OPNsense', badge: 'XML', filename: 'config.xml' },
+  { id: 'proxmox', label: 'Proxmox VE 8.x', badge: 'PVE/CONF', filename: 'pve-bundle.conf' },
+  { id: 'truenas', label: 'TrueNAS SCALE', badge: 'JSON/SMB', filename: 'truenas-export.json' },
   { id: 'vyos', label: 'VyOS / EdgeOS', badge: 'boot/json', filename: 'config.boot' },
   { id: 'mikrotik', label: 'MikroTik RouterOS', badge: 'RSC', filename: 'export.rsc' },
   { id: 'cisco', label: 'Cisco ASA / FTD', badge: 'ACL', filename: 'running-config.cfg' },
@@ -403,13 +407,119 @@ route inside 10.0.0.0 255.0.0.0 192.168.10.254 1`,
     <drop/>
   </rule>
 </zone>
-<zone name="internal" target="ACCEPT">
+  <zone name="internal" target="ACCEPT">
   <short>Internal Corporate LAN</short>
   <interface name="eth1"/>
   <service name="dns"/>
   <service name="samba"/>
   <service name="nfs"/>
 </zone>`,
+
+  proxmox: `# /etc/pve/storage.cfg
+zfspool: local-zfs
+  pool rpool/data
+  content images,rootdir
+  sparse 1
+
+# /etc/pve/qemu-server/105.conf
+name: prod-postgres-ha
+cores: 8
+sockets: 1
+memory: 16384
+cpu: host
+bios: ovmf
+machine: q35
+agent: 1
+onboot: 1
+tpmstate0: local-zfs:vm-105-disk-1,size=4M,version=v2.0
+scsi0: local-zfs:vm-105-disk-0,size=128G,discard=on,iothread=1
+virtiofs0: /mnt/rpool/shared,cache=always
+net0: virtio=BC:24:11:44:55:66,bridge=vmbr0,tag=20,firewall=1
+ipconfig0: ip=10.20.0.50/24,gw=10.20.0.1
+ciuser: dbadmin
+
+# /etc/pve/lxc/210.conf
+hostname: vector-log-shipper
+cores: 2
+memory: 2048
+unprivileged: 1
+onboot: 1
+rootfs: local-zfs:subvol-210-disk-0,size=16G
+net0: name=eth0,bridge=vmbr0,ip=dhcp,tag=20
+
+# /etc/pve/firewall/cluster.fw
+[securitygroup db-tier]
+IN ACCEPT -p tcp -dport 5432 -source 10.20.0.0/24 # PostgreSQL East-West
+IN DROP -log nolog`,
+
+  truenas: `{
+  "version": "TrueNAS-SCALE-24.10.2",
+  "smb": {
+    "workgroup": "CORP",
+    "description": "TrueNAS Enterprise Storage Cluster",
+    "enable_smb2_3_multichannel": true
+  },
+  "storage.pool": [
+    {
+      "name": "tank",
+      "topology": {
+        "data": [{ "type": "RAIDZ2", "disks": ["sda", "sdb", "sdc", "sdd"] }],
+        "special": [{ "type": "MIRROR", "disks": ["nvme0n1", "nvme1n1"] }]
+      },
+      "autotrim": true
+    }
+  ],
+  "pool.dataset": [
+    {
+      "id": "tank/engineering",
+      "pool": "tank",
+      "type": "FILESYSTEM",
+      "compression": "ZSTD",
+      "recordsize": "128K",
+      "encrypted": true,
+      "quota": 2199023255552
+    },
+    {
+      "id": "tank/timemachine",
+      "pool": "tank",
+      "type": "FILESYSTEM",
+      "compression": "LZ4",
+      "recordsize": "1M"
+    }
+  ],
+  "sharing.smb": [
+    {
+      "name": "engineering",
+      "path": "/mnt/tank/engineering",
+      "shadowcopy": true,
+      "recyclebin": true,
+      "audit": { "enable": true }
+    },
+    {
+      "name": "mac-backups",
+      "path": "/mnt/tank/timemachine",
+      "timemachine": true,
+      "shadowcopy": true
+    }
+  ],
+  "sharing.nfs": [
+    {
+      "path": "/mnt/tank/engineering",
+      "networks": ["10.20.0.0/24"],
+      "security": ["sys"]
+    }
+  ],
+  "cloudsync_tasks": [
+    {
+      "description": "nightly-b2-offsite",
+      "path": "/mnt/tank/engineering",
+      "provider": "b2",
+      "bucket": "corp-zfs-offsite",
+      "direction": "PUSH",
+      "transfer_mode": "SYNC"
+    }
+  ]
+}`,
 };
 
 interface ReviewRuleItem {
@@ -436,6 +546,7 @@ export default function ImportPage() {
   const [compiledNft, setCompiledNft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isApplying, setIsApplying] = useState(false);
+  const [mergeIntoActive, setMergeIntoActive] = useState(true);
   const [applyResult, setApplyResult] = useState<string | null>(null);
   const [reviewItems, setReviewItems] = useState<ReviewRuleItem[]>([]);
   const [activeReviewIndex, setActiveReviewIndex] = useState(0);
@@ -786,11 +897,20 @@ export default function ImportPage() {
     setIsApplying(true);
     setApplyResult(null);
     try {
+      let stateToApply = report.state;
+      if (mergeIntoActive) {
+        const active = await getCurrentDesiredState();
+        stateToApply = mergeFirewallConfigs(active, report.state, {
+          includeVirt: true,
+          includeNas: true,
+        });
+      }
+
       const res = await fetch('/api/v1/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          state: report.state,
+          state: stateToApply,
           confirmTimeoutSeconds: 120,
         }),
       });
@@ -816,10 +936,10 @@ export default function ImportPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2.5">
           <Layers className="w-6 h-6 text-emerald-400" />
-          <span>Firewall Migration Studio</span>
+          <span>Unified Appliance Migration Studio</span>
         </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Import and translate existing firewall configurations (pfSense, OPNsense, VyOS / EdgeOS, MikroTik RouterOS, Cisco ASA, Linux iptables, and Linux firewalld) directly into Axonwall DesiredState and production Linux nftables.
+          Import and translate firewall, hypervisor, and NAS configurations (pfSense, OPNsense, Proxmox VE 8.x, TrueNAS SCALE, VyOS, MikroTik RouterOS, Cisco ASA, iptables, and firewalld) directly into Axonwall DesiredState, QEMU/LXC specs, ZFS NAS shares, and Linux nftables.
         </p>
       </div>
 
@@ -872,7 +992,7 @@ export default function ImportPage() {
                 ref={fileInputRef}
                 onChange={handleFileUpload}
                 className="hidden"
-                accept=".xml,.boot,.rsc,.v4,.conf,.txt"
+                accept=".xml,.boot,.rsc,.v4,.conf,.cfg,.json,.fw,.txt"
               />
               <button
                 type="button"
@@ -989,7 +1109,37 @@ export default function ImportPage() {
                   <span className="text-slate-400 block font-sans text-[11px]">Static Routes</span>
                   <span className="text-base font-bold text-white">{report.routesCount}</span>
                 </div>
+                <div className="bg-slate-950 p-2.5 rounded-lg border border-cyan-500/25">
+                  <span className="text-slate-400 block font-sans text-[11px]">KVM VMs</span>
+                  <span className="text-base font-bold text-cyan-400">{report.vmsCount ?? 0}</span>
+                </div>
+                <div className="bg-slate-950 p-2.5 rounded-lg border border-cyan-500/25">
+                  <span className="text-slate-400 block font-sans text-[11px]">LXC Containers</span>
+                  <span className="text-base font-bold text-cyan-300">{report.containersCount ?? 0}</span>
+                </div>
+                <div className="bg-slate-950 p-2.5 rounded-lg border border-purple-500/25">
+                  <span className="text-slate-400 block font-sans text-[11px]">ZFS Pools / Datasets</span>
+                  <span className="text-base font-bold text-purple-300">
+                    {report.zfsPoolsCount ?? 0} / {report.datasetsCount ?? 0}
+                  </span>
+                </div>
+                <div className="bg-slate-950 p-2.5 rounded-lg border border-purple-500/25">
+                  <span className="text-slate-400 block font-sans text-[11px]">SMB / NFS / iSCSI</span>
+                  <span className="text-base font-bold text-purple-400">{report.sharesCount ?? 0}</span>
+                </div>
               </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={mergeIntoActive}
+                  onChange={(e) => setMergeIntoActive(e.target.checked)}
+                  className="accent-emerald-500 w-3.5 h-3.5 rounded"
+                />
+                <span>
+                  Non-destructive merge into active DesiredState (preserves active WAN/LAN interfaces while importing VMs, LXC, ZFS pools, shares &amp; rules)
+                </span>
+              </label>
 
               {/* Rule Optimization & Shadowing Analysis */}
               {ruleAnalysis && (

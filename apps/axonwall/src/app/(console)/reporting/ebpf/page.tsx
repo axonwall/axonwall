@@ -35,16 +35,25 @@ import {
   Save,
   Sparkles,
   ArrowRight,
+  KeyRound,
+  Trash2,
 } from 'lucide-react';
 import {
   getNetworkInsightTelemetry,
   getK3sRuntimeStatus,
   getHostRootkitAuditStatus,
+  getEbpfOverviewTelemetry,
+  manageBpfTokenProfileAction,
+  manageXdpFastDropAction,
+  getXdpSynLimitAction,
+  setXdpSynLimitAction,
+  renderK3sBpfTokenManifestAction,
   getCurrentDesiredState,
   applyDesiredState,
   type NetworkInsightTelemetry,
   type K3sRuntimeStatus,
   type HostRootkitAuditApiResponse,
+  type EbpfOverviewTelemetry,
 } from '@/server/agent';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
@@ -77,14 +86,14 @@ const EBPF_PROBE_CATALOG: EbpfProbeSpec[] = [
     id: 'xdp-flow-tracker',
     hook: 'SEC("xdp")',
     domain: 'network',
-    attachType: 'XDP Driver / Generic Hook',
-    kernelSymbol: 'xdp_flow_tracker',
+    attachType: 'Dual-Stack XDP Driver / Generic + 802.1Q/802.1ad VLAN',
+    kernelSymbol: 'xdp_flow_tracker (flow_map + flow6_map + blocklist_map)',
     telemetryPillar: 'Metrics',
     overheadNs: '~18 ns/pkt',
     description:
-      'Parses L2/L3/L4 Ethernet, IPv4, TCP, and UDP headers at the NIC driver ring before sk_buff allocation, updating per-5-tuple packet/byte counters in BPF_MAP_TYPE_HASH.',
+      'Peels up to 2 layers of 802.1Q/802.1ad QinQ VLAN tags and parses dual-stack IPv4/IPv6 + TCP/UDP/ICMP headers at the NIC driver ring before sk_buff allocation, updating LRU 5-tuple flow maps, TCP SYN/RST flags, and enforcing monotonic TTL-bounded XDP_DROP blocklists.',
     k8sUseCase:
-      'Zero-overhead node & pod ingress throughput accounting and line-rate DDoS drop filtering prior to netfilter.',
+      'Zero-overhead dual-stack node & pod ingress accounting, VLAN trunk visibility, and line-rate DDoS XDP_DROP filtering prior to netfilter.',
   },
   {
     id: 'coroot-l7-dissector',
@@ -189,6 +198,19 @@ const EBPF_PROBE_CATALOG: EbpfProbeSpec[] = [
       'Verifies unspoofable task->mm->exe_file (s_dev, i_ino) identity on socket binds and blocks untrusted AF_ALG "aead" sockets (Copy Fail CVE-2026-31431) via 64 KB ring buffer.',
     k8sUseCase:
       'Preventing container kernel crypto socket exploitation and auditing unauthorized port binds inside K3s pods.',
+  },
+  {
+    id: 'lsm-bpf-token-create',
+    hook: 'SEC("lsm/bpf_token_create") / SEC("lsm/bpf_token_cmd")',
+    domain: 'lsm-security',
+    attachType: 'Linux 6.9+ BPF_TOKEN Ring-0 Mediator',
+    kernelSymbol: 'lsm_bpf_token_create / lsm_bpf_token_cmd',
+    telemetryPillar: 'Logs + Enforcement',
+    overheadNs: '~20 ns/cmd',
+    description:
+      'Mediates Linux 6.9+ bpffs delegation inside unprivileged User Namespaces (CLONE_NEWUSER): permits delegated XDP/TC/Socket/Cgroup networking eBPF while unconditionally vetoing kprobe, tracepoint, perf_event, tracing, struct_ops, and lsm program types (-EPERM) so bpf_probe_read_kernel() cannot read host RAM.',
+    k8sUseCase:
+      'Allowing rootless K3s hostUsers: false pods and unprivileged LXC containers to load packet filters without host CAP_BPF or Ring-0 escape risk.',
   },
 ];
 
@@ -556,7 +578,13 @@ kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout 
 
 export default function EbpfObservabilityConsolePage() {
   const [activeTab, setActiveTab] = useState<
-    'pillars' | 'service-map-l7' | 'rca-inspections' | 'profiling' | 'containers' | 'k8s-troubleshooting'
+    | 'pillars'
+    | 'service-map-l7'
+    | 'rca-inspections'
+    | 'profiling'
+    | 'containers'
+    | 'k8s-troubleshooting'
+    | 'bpf-tokens-crossduty'
   >('pillars');
   const [domainFilter, setDomainFilter] = useState<
     'all' | 'network' | 'filesystem' | 'k8s-container' | 'lsm-security' | 'coroot-apm'
@@ -575,6 +603,8 @@ export default function EbpfObservabilityConsolePage() {
     continuousProfilingEnabled: false,
     profilingSampleHz: 99,
     automatedRcaInspections: true,
+    xdpDualStackVlanEnabled: true,
+    zfsArcZilTelemetryEnabled: true,
   });
   const [savingConfig, setSavingConfig] = useState(false);
   const [saveBanner, setSaveBanner] = useState<string | null>(null);
@@ -583,8 +613,24 @@ export default function EbpfObservabilityConsolePage() {
   const [insight, setInsight] = useState<NetworkInsightTelemetry | null>(null);
   const [k3sStatus, setK3sStatus] = useState<K3sRuntimeStatus | null>(null);
   const [rootkitStatus, setRootkitStatus] = useState<HostRootkitAuditApiResponse | null>(null);
+  const [ebpfOverview, setEbpfOverview] = useState<EbpfOverviewTelemetry | null>(null);
   const [desiredState, setDesiredState] = useState<DesiredState | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Interactive Linux 6.9+ BPF_TOKEN, XDP Fast-Drop & K3s Manifest Workbench state
+  const [tokenName, setTokenName] = useState('k3s-net-safe');
+  const [tokenPreset, setTokenPreset] = useState<'networking-safe' | 'cgroup-observability' | 'firewall-xdp-tc'>(
+    'networking-safe'
+  );
+  const [tokenTarget, setTokenTarget] = useState('k3s-userns');
+  const [xdpDropIp, setXdpDropIp] = useState('');
+  const [xdpDropTtl, setXdpDropTtl] = useState(3600);
+  const [synLimitPps, setSynLimitPps] = useState<number>(0);
+  const [k3sPodName, setK3sPodName] = useState('ebpf-packet-sensor');
+  const [k3sKind, setK3sKind] = useState<'Pod' | 'DaemonSet'>('DaemonSet');
+  const [renderedK3sYaml, setRenderedK3sYaml] = useState<string>('');
+  const [actionNotice, setActionNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
 
   // Live SSE packet stream for real-time eBPF/NFLOG trace preview
   const [isStreaming, setIsStreaming] = useState(true);
@@ -598,15 +644,19 @@ export default function EbpfObservabilityConsolePage() {
 
   const fetchAllTelemetry = async () => {
     try {
-      const [netData, k3sData, rkData, stateData] = await Promise.all([
+      const [netData, k3sData, rkData, ovData, stateData, synData] = await Promise.all([
         getNetworkInsightTelemetry().catch(() => null),
         getK3sRuntimeStatus().catch(() => null),
         getHostRootkitAuditStatus().catch(() => null),
+        getEbpfOverviewTelemetry().catch(() => null),
         getCurrentDesiredState().catch(() => null),
+        getXdpSynLimitAction().catch(() => null),
       ]);
       if (netData) setInsight(netData);
       if (k3sData) setK3sStatus(k3sData);
       if (rkData) setRootkitStatus(rkData);
+      if (ovData) setEbpfOverview(ovData);
+      if (synData && typeof synData.maxSynPps === 'number') setSynLimitPps(synData.maxSynPps);
       if (stateData) {
         setDesiredState(stateData);
         if (stateData.observability?.ebpfApm) {
@@ -618,11 +668,131 @@ export default function EbpfObservabilityConsolePage() {
             continuousProfilingEnabled: stateData.observability.ebpfApm.continuousProfilingEnabled ?? false,
             profilingSampleHz: stateData.observability.ebpfApm.profilingSampleHz ?? 99,
             automatedRcaInspections: stateData.observability.ebpfApm.automatedRcaInspections ?? true,
+            xdpDualStackVlanEnabled: stateData.observability.ebpfApm.xdpDualStackVlanEnabled ?? true,
+            zfsArcZilTelemetryEnabled: stateData.observability.ebpfApm.zfsArcZilTelemetryEnabled ?? true,
           });
         }
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreateTokenProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setActionBusy(true);
+    setActionNotice(null);
+    try {
+      const res = await manageBpfTokenProfileAction({
+        action: 'create',
+        name: tokenName,
+        preset: tokenPreset,
+        workloadTarget: tokenTarget,
+      });
+      if (!res.success) {
+        setActionNotice({ type: 'err', text: res.error || 'Failed to mount delegated bpffs token profile.' });
+      } else {
+        setActionNotice({
+          type: 'ok',
+          text: `Mounted Linux 6.9+ bpffs token profile "${tokenName}" (${tokenPreset}) at /run/axonwall/bpffs-tokens/${tokenName}.`,
+        });
+        await fetchAllTelemetry();
+      }
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleDeleteTokenProfile = async (name: string) => {
+    setActionBusy(true);
+    setActionNotice(null);
+    try {
+      const res = await manageBpfTokenProfileAction({ action: 'delete', name });
+      if (!res.success) {
+        setActionNotice({ type: 'err', text: res.error || 'Failed to delete token profile.' });
+      } else {
+        setActionNotice({ type: 'ok', text: `Unmounted and removed bpffs token profile "${name}".` });
+        await fetchAllTelemetry();
+      }
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleXdpDrop = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!xdpDropIp.trim()) return;
+    setActionBusy(true);
+    setActionNotice(null);
+    try {
+      const res = await manageXdpFastDropAction({
+        action: 'block',
+        ip: xdpDropIp.trim(),
+        ttlSeconds: xdpDropTtl,
+      });
+      if (!res.success) {
+        setActionNotice({ type: 'err', text: res.error || 'Failed to program XDP_DROP entry.' });
+      } else {
+        setActionNotice({
+          type: 'ok',
+          text: `Programmed line-rate XDP_DROP for ${xdpDropIp.trim()} (TTL ${xdpDropTtl}s) into LRU BPF map.`,
+        });
+        setXdpDropIp('');
+        await fetchAllTelemetry();
+      }
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleUpdateSynLimit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setActionBusy(true);
+    setActionNotice(null);
+    try {
+      const res = await setXdpSynLimitAction(synLimitPps);
+      if (!res.success) {
+        setActionNotice({ type: 'err', text: res.error || 'Failed to update XDP SYN-flood rate limit.' });
+      } else {
+        setSynLimitPps(res.maxSynPps);
+        setActionNotice({
+          type: 'ok',
+          text:
+            res.maxSynPps === 0
+              ? 'Disabled XDP Ring-0 TCP SYN-flood rate limiter.'
+              : `Configured XDP Ring-0 TCP SYN-flood shield at ${res.maxSynPps.toLocaleString()} PPS.`,
+        });
+      }
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleXdpUnblock = async (ip: string) => {
+    setActionBusy(true);
+    setActionNotice(null);
+    try {
+      const res = await manageXdpFastDropAction({ action: 'unblock', ip });
+      if (!res.success) {
+        setActionNotice({ type: 'err', text: res.error || 'Failed to remove XDP_DROP entry.' });
+      } else {
+        setActionNotice({ type: 'ok', text: `Removed ${ip} from XDP_DROP map.` });
+        await fetchAllTelemetry();
+      }
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleRenderK3sYaml = async () => {
+    const res = await renderK3sBpfTokenManifestAction({
+      name: k3sPodName,
+      profileName: tokenName || 'k3s-net-safe',
+      preset: tokenPreset,
+      kind: k3sKind,
+    });
+    if (res.success) {
+      setRenderedK3sYaml(res.manifestYaml);
     }
   };
 
@@ -747,7 +917,7 @@ export default function EbpfObservabilityConsolePage() {
   );
 
   const activePlaybook = K8S_PLAYBOOKS.find((p) => p.id === selectedPlaybook) || K8S_PLAYBOOKS[0];
-  const lsmHooksCount = rootkitStatus?.bpfLsmAttachedHooks?.length ?? 3;
+  const lsmHooksCount = ebpfOverview?.bpfLsm?.attachedHooks?.length ?? rootkitStatus?.bpfLsmAttachedHooks?.length ?? 5;
   const lsmDenials = rootkitStatus?.bpfLsmDenialEvents ?? [];
   const flows = insight?.flows ?? [];
 
@@ -957,6 +1127,32 @@ export default function EbpfObservabilityConsolePage() {
               className="accent-purple-500 w-4 h-4"
             />
           </label>
+
+          <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-950/80 border border-sky-500/30 cursor-pointer">
+            <div>
+              <div className="text-xs font-semibold text-sky-300">Dual-Stack + VLAN XDP</div>
+              <div className="text-[10px] text-slate-400">IPv4/IPv6 + 802.1Q/802.1ad</div>
+            </div>
+            <input
+              type="checkbox"
+              checked={apmConfig.xdpDualStackVlanEnabled}
+              onChange={(e) => setApmConfig((c) => ({ ...c, xdpDualStackVlanEnabled: e.target.checked }))}
+              className="accent-sky-500 w-4 h-4"
+            />
+          </label>
+
+          <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-950/80 border border-emerald-500/30 cursor-pointer">
+            <div>
+              <div className="text-xs font-semibold text-emerald-300">OpenZFS ARC/ZIL Kstats</div>
+              <div className="text-[10px] text-slate-400">ARC/L2ARC hit % &amp; ZIL sync</div>
+            </div>
+            <input
+              type="checkbox"
+              checked={apmConfig.zfsArcZilTelemetryEnabled}
+              onChange={(e) => setApmConfig((c) => ({ ...c, zfsArcZilTelemetryEnabled: e.target.checked }))}
+              className="accent-emerald-500 w-4 h-4"
+            />
+          </label>
         </div>
       </div>
 
@@ -1002,7 +1198,9 @@ export default function EbpfObservabilityConsolePage() {
             </span>
           </div>
           <p className="text-[11px] text-slate-500">
-            <code className="text-slate-300">socket_bind</code>, <code className="text-slate-300">bpf</code>, <code className="text-slate-300">uring_sqpoll</code> • {lsmDenials.length} denials
+            <code className="text-slate-300">socket_bind</code>, <code className="text-slate-300">bpf</code>,{' '}
+            <code className="text-slate-300">uring_sqpoll</code>, <code className="text-slate-300">bpf_token_*</code> •{' '}
+            {lsmDenials.length} denials
           </p>
         </div>
 
@@ -1088,6 +1286,17 @@ export default function EbpfObservabilityConsolePage() {
         >
           <Boxes className="w-4 h-4" />
           6. K3s Troubleshooting &amp; Bytecode
+        </button>
+        <button
+          onClick={() => setActiveTab('bpf-tokens-crossduty')}
+          className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition ${
+            activeTab === 'bpf-tokens-crossduty'
+              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+              : 'bg-slate-900/60 text-slate-400 hover:text-slate-200 border border-slate-800'
+          }`}
+        >
+          <KeyRound className="w-4 h-4" />
+          7. Linux 6.9+ BPF Tokens &amp; Cross-Duty Ring-0
         </button>
       </div>
 
@@ -1944,6 +2153,477 @@ export default function EbpfObservabilityConsolePage() {
               <div className="p-3.5 rounded-lg bg-sky-950/30 border border-sky-500/30 text-xs text-sky-200">
                 <strong className="text-sky-400">Recommended Remediation: </strong>
                 {activePlaybook.remediation}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 7: LINUX 6.9+ BPF_TOKEN_CREATE DELEGATION & CROSS-DUTY RING-0 */}
+      {activeTab === 'bpf-tokens-crossduty' && (
+        <div className="space-y-6">
+          {actionNotice && (
+            <div
+              className={`p-4 rounded-xl border text-xs flex items-center justify-between ${
+                actionNotice.type === 'ok'
+                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                  : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+              }`}
+            >
+              <span>{actionNotice.text}</span>
+              <button onClick={() => setActionNotice(null)} className="underline opacity-80">
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* Linux 6.9+ BPF_TOKEN_CREATE Capability & Ring-0 Isolation Banner */}
+          <div className="p-6 rounded-xl bg-slate-900/80 border border-sky-500/30 space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                    Linux 6.9+ BPF_TOKEN_CREATE
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                    Kernel: {ebpfOverview?.bpfTokens.kernelRelease || '6.12+'} (
+                    {ebpfOverview?.bpfTokens.supportsBpfToken !== false ? 'Supported' : 'Requires >= 6.9'})
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                    BPF-LSM Ring-0 Veto: ENFORCED
+                  </span>
+                </div>
+                <h2 className="text-lg font-bold text-white">
+                  Unprivileged User Namespace (`CLONE_NEWUSER`) eBPF Delegation Without Host `CAP_BPF`
+                </h2>
+                <p className="text-xs text-slate-300 max-w-4xl leading-relaxed">
+                  Axonwall mounts dedicated <code className="text-sky-300 font-mono">bpffs</code> instances configured
+                  with the four Linux 6.9+ delegation bitmasks (<code className="text-slate-200 font-mono">delegate_cmds</code>,{' '}
+                  <code className="text-slate-200 font-mono">delegate_progs</code>,{' '}
+                  <code className="text-slate-200 font-mono">delegate_maps</code>,{' '}
+                  <code className="text-slate-200 font-mono">delegate_attachs</code>) so rootless K3s{' '}
+                  <code className="text-emerald-300 font-mono">hostUsers: false</code> pods and unprivileged LXC
+                  containers can load XDP, TC, Socket, and Cgroup packet filters via{' '}
+                  <code className="text-emerald-300 font-mono">LIBBPF_BPF_TOKEN_PATH=/sys/fs/bpf</code>. Simultaneously,
+                  Axonwall&apos;s CO-RE BPF-LSM hooks (<code className="text-sky-300 font-mono">lsm/bpf_token_create</code> &amp;{' '}
+                  <code className="text-sky-300 font-mono">lsm/bpf_token_cmd</code>) unconditionally veto{' '}
+                  <code className="text-rose-300 font-mono">kprobe</code>,{' '}
+                  <code className="text-rose-300 font-mono">tracepoint</code>,{' '}
+                  <code className="text-rose-300 font-mono">perf_event</code>,{' '}
+                  <code className="text-rose-300 font-mono">tracing</code>, and{' '}
+                  <code className="text-rose-300 font-mono">lsm</code> so no tenant can invoke{' '}
+                  <code className="text-rose-300 font-mono">bpf_probe_read_kernel()</code> across host RAM.
+                </p>
+              </div>
+              <Link
+                href="/system/mcp"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white shrink-0"
+              >
+                100% Accessible via MCP Server
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </Link>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 pt-1">
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                <div className="text-[10px] font-bold uppercase text-sky-400">1. delegate_cmds</div>
+                <div className="text-[11px] font-mono text-slate-200 mt-1 break-words">
+                  prog_load : map_create : map_update_elem : link_create
+                </div>
+              </div>
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                <div className="text-[10px] font-bold uppercase text-emerald-400">2. delegate_progs (Safe Net)</div>
+                <div className="text-[11px] font-mono text-slate-200 mt-1 break-words">
+                  xdp : sched_cls : socket_filter : cgroup_skb : sock_ops
+                </div>
+              </div>
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                <div className="text-[10px] font-bold uppercase text-purple-400">3. delegate_maps &amp; attachs</div>
+                <div className="text-[11px] font-mono text-slate-200 mt-1 break-words">
+                  lru_hash : ringbuf : lpm_trie • xdp : tcx : cgroup_inet
+                </div>
+              </div>
+              <div className="p-3 rounded-lg bg-rose-950/30 border border-rose-500/30">
+                <div className="text-[10px] font-bold uppercase text-rose-400">4. Forbidden Ring-0 Mask</div>
+                <div className="text-[11px] font-mono text-rose-200 mt-1 break-words">
+                  {(
+                    ebpfOverview?.bpfTokens.forbiddenRing0ProgTypes || [
+                      'kprobe',
+                      'tracepoint',
+                      'perf_event',
+                      'tracing',
+                      'lsm',
+                      'struct_ops',
+                    ]
+                  ).join(' • ')}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Dual-Stack + VLAN XDP Verdict Telemetry & Line-Rate Fast-Drop Workbench */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            <div className="lg:col-span-7 p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <ShieldAlert className="w-4 h-4 text-emerald-400" />
+                    Dual-Stack IPv4/IPv6 + 802.1Q/802.1ad VLAN XDP Fast-Drop Engine
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Drops attacker packets at the NIC DMA ring (<code className="text-rose-300 font-mono">XDP_DROP</code>)
+                    before <code className="text-slate-300 font-mono">sk_buff</code> allocation with monotonic TTL expiry.
+                  </p>
+                </div>
+                <span className="text-xs font-mono text-emerald-400">
+                  {ebpfOverview?.dataplane.attachedInterfaces.length
+                    ? `Attached: ${ebpfOverview.dataplane.attachedInterfaces.join(', ')}`
+                    : 'LRU Maps Ready'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">IPv4 / IPv6 Parsed</div>
+                  <div className="text-sm font-bold font-mono text-white mt-0.5">
+                    {(ebpfOverview?.dataplane.xdpStats.ipv4Packets ?? 0).toLocaleString()} /{' '}
+                    {(ebpfOverview?.dataplane.xdpStats.ipv6Packets ?? 0).toLocaleString()}
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">802.1Q / QinQ VLAN</div>
+                  <div className="text-sm font-bold font-mono text-sky-400 mt-0.5">
+                    {(ebpfOverview?.dataplane.xdpStats.vlanTaggedPackets ?? 0).toLocaleString()} pkts
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">TCP SYN Observed</div>
+                  <div className="text-sm font-bold font-mono text-amber-300 mt-0.5">
+                    {(ebpfOverview?.dataplane.xdpStats.tcpSynPackets ?? 0).toLocaleString()} syns
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-950 border border-rose-500/30">
+                  <div className="text-[10px] text-rose-300">Line-Rate XDP_DROP</div>
+                  <div className="text-sm font-bold font-mono text-rose-400 mt-0.5">
+                    {(ebpfOverview?.dataplane.xdpStats.xdpDropPackets ?? 0).toLocaleString()} dropped
+                  </div>
+                </div>
+              </div>
+
+              <form onSubmit={handleXdpDrop} className="flex flex-col sm:flex-row gap-2.5">
+                <input
+                  type="text"
+                  value={xdpDropIp}
+                  onChange={(e) => setXdpDropIp(e.target.value)}
+                  placeholder="Host IP or LPM CIDR to XDP_DROP (e.g. 198.51.100.0/24 or 2001:db8::/48)"
+                  className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-white"
+                />
+                <input
+                  type="number"
+                  min={10}
+                  max={604800}
+                  value={xdpDropTtl}
+                  onChange={(e) => setXdpDropTtl(Number(e.target.value))}
+                  className="w-28 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-white"
+                  title="TTL Seconds"
+                />
+                <button
+                  type="submit"
+                  disabled={actionBusy}
+                  className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap"
+                >
+                  Enforce XDP_DROP
+                </button>
+              </form>
+
+              <form onSubmit={handleUpdateSynLimit} className="flex flex-col sm:flex-row items-center gap-2.5 p-2.5 rounded-lg bg-slate-950/70 border border-amber-500/20">
+                <span className="text-[11px] text-amber-300 font-semibold whitespace-nowrap">
+                  Ring-0 TCP SYN-Flood Shield (PPS):
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={10000000}
+                  value={synLimitPps}
+                  onChange={(e) => setSynLimitPps(Number(e.target.value))}
+                  placeholder="0 = off, ≥20 PPS active"
+                  className="w-40 px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-xs font-mono text-white"
+                />
+                <button
+                  type="submit"
+                  disabled={actionBusy}
+                  className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap"
+                >
+                  Apply SYN Limit
+                </button>
+                <span className="text-[10px] text-slate-400">
+                  Per-1s atomic window in <code className="text-amber-300">syn_rate_map</code> (0 = off, ≥20 floor prevents SSH/HTTPS self-DoS)
+                </span>
+              </form>
+
+              <div className="overflow-x-auto max-h-44">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-800">
+                    <tr>
+                      <th className="py-2 pr-2">Blocked IP</th>
+                      <th className="py-2 px-2">Family</th>
+                      <th className="py-2 px-2">Dropped Pkts</th>
+                      <th className="py-2 px-2">Expires In</th>
+                      <th className="py-2 pl-2 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70 font-mono text-[11px]">
+                    {!ebpfOverview?.dataplane.blockedIps.length ? (
+                      <tr>
+                        <td colSpan={5} className="py-4 text-center text-slate-500 font-sans">
+                          No active XDP fast-drop entries in blocklist_map / blocklist6_map.
+                        </td>
+                      </tr>
+                    ) : (
+                      ebpfOverview.dataplane.blockedIps.map((entry) => (
+                        <tr key={entry.ip}>
+                          <td className="py-2 pr-2 text-rose-300">{entry.ip}</td>
+                          <td className="py-2 px-2 uppercase text-slate-400">{entry.family}</td>
+                          <td className="py-2 px-2 text-slate-200">{entry.droppedPackets.toLocaleString()}</td>
+                          <td className="py-2 px-2 text-emerald-400">{entry.expiresInSeconds}s</td>
+                          <td className="py-2 pl-2 text-right">
+                            <button
+                              onClick={() => handleXdpUnblock(entry.ip)}
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px]"
+                            >
+                              Unblock
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Delegated bpffs Profile Manager & K3s Manifest Generator */}
+            <div className="lg:col-span-5 p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-4">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-sky-400" />
+                  Delegated `bpffs` Token Profiles &amp; K3s YAML
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Mount `/run/axonwall/bpffs-tokens/&lt;name&gt;` or render a rootless K3s `hostUsers: false` workload.
+                </p>
+              </div>
+
+              <form onSubmit={handleCreateTokenProfile} className="space-y-2.5">
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={tokenName}
+                    onChange={(e) => setTokenName(e.target.value)}
+                    placeholder="Profile name"
+                    className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-white"
+                  />
+                  <select
+                    value={tokenPreset}
+                    onChange={(e) => setTokenPreset(e.target.value as any)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
+                  >
+                    <option value="networking-safe">networking-safe</option>
+                    <option value="cgroup-observability">cgroup-observability</option>
+                    <option value="firewall-xdp-tc">firewall-xdp-tc</option>
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={tokenTarget}
+                    onChange={(e) => setTokenTarget(e.target.value)}
+                    placeholder="Target (e.g. k3s-userns or lxc:net-sensor)"
+                    className="flex-1 px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-slate-200"
+                  />
+                  <button
+                    type="submit"
+                    disabled={actionBusy}
+                    className="px-3.5 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-bold shrink-0"
+                  >
+                    Mount Token
+                  </button>
+                </div>
+              </form>
+
+              {ebpfOverview?.bpfTokens.activeProfiles?.length ? (
+                <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                  {ebpfOverview.bpfTokens.activeProfiles.map((prof) => (
+                    <div
+                      key={prof.name}
+                      className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <div className="font-mono font-semibold text-sky-300">
+                          {prof.name} <span className="text-[10px] text-emerald-400">({prof.preset})</span>
+                        </div>
+                        <div className="font-mono text-[10px] text-slate-500">{prof.mountPath}</div>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteTokenProfile(prof.name)}
+                        className="p-1 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25"
+                        title="Unmount token profile"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={k3sPodName}
+                    onChange={(e) => setK3sPodName(e.target.value)}
+                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-white"
+                  />
+                  <select
+                    value={k3sKind}
+                    onChange={(e) => setK3sKind(e.target.value as any)}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
+                  >
+                    <option value="DaemonSet">DaemonSet</option>
+                    <option value="Pod">Pod</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleRenderK3sYaml}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white shrink-0"
+                  >
+                    Render YAML
+                  </button>
+                </div>
+
+                {renderedK3sYaml && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <span>K3s UserNS + `LIBBPF_BPF_TOKEN_PATH` Manifest</span>
+                      <button
+                        type="button"
+                        onClick={() => copyCode('k3s-token-yaml', renderedK3sYaml)}
+                        className="text-emerald-400 hover:underline inline-flex items-center gap-1"
+                      >
+                        {copiedId === 'k3s-token-yaml' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                        {copiedId === 'k3s-token-yaml' ? 'Copied' : 'Copy YAML'}
+                      </button>
+                    </div>
+                    <pre className="p-3 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[10px] text-emerald-300 max-h-44 overflow-auto">
+                      {renderedK3sYaml}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Cross-Duty Subsystem Ring-0 Telemetry (Virtualization, K3s, OpenZFS NAS) */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {/* Duty 1: KVM / QEMU & Unprivileged LXC */}
+            <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-purple-400">
+                  Virtualization • KVM &amp; LXC
+                </span>
+                <Server className="w-4 h-4 text-purple-400" />
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Hardware KVM / IOMMU</div>
+                  <div className="font-mono font-bold text-white mt-0.5">
+                    {ebpfOverview?.virt.kvmAvailable ? '/dev/kvm OK' : 'No /dev/kvm'} •{' '}
+                    {ebpfOverview?.virt.iommuGroupsCount ?? 0} grp
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">Active Workloads</div>
+                  <div className="font-mono font-bold text-purple-300 mt-0.5">
+                    {ebpfOverview?.virt.runningQemuCount ?? 0} VM • {ebpfOverview?.virt.runningLxcCount ?? 0} LXC
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Unprivileged LXC containers (`lxc.idmap`) receive delegated `bpffs` mounts automatically when{' '}
+                <code className="text-purple-300 font-mono">bpfToken.enabled: true</code> is set in{' '}
+                <code className="text-slate-200 font-mono">/etc/axonwall/virt.yaml</code>.
+              </p>
+              <div className="text-[11px] font-mono text-slate-300">
+                vnet/TAP ports tracked: {ebpfOverview?.virt.vnetInterfaces.length ?? 0} • LXC token mounts:{' '}
+                {ebpfOverview?.virt.unprivilegedLxcTokenMounts.length ?? 0}
+              </div>
+            </div>
+
+            {/* Duty 2: K3s Kubernetes + OpenEBS */}
+            <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-sky-400">
+                  Kubernetes • K3s &amp; CNI
+                </span>
+                <Boxes className="w-4 h-4 text-sky-400" />
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">UserNS + Cgroup v2</div>
+                  <div className="font-mono font-bold text-sky-300 mt-0.5">
+                    {ebpfOverview?.k3s.userNamespacesSupported !== false ? 'UserNS Ready' : 'Legacy'} •{' '}
+                    {ebpfOverview?.k3s.kubepodsCgroupV2 !== false ? 'cgroup2' : 'cgroup1'}
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">CNI / OpenEBS</div>
+                  <div className="font-mono font-bold text-white mt-0.5">
+                    {ebpfOverview?.k3s.cniInterfaces.length ?? 0} CNI •{' '}
+                    {ebpfOverview?.k3s.openEbsDatasets.length ?? 0} ZFS PV
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Compiles <code className="text-sky-300 font-mono">UserNamespacesSupport=true</code> into{' '}
+                <code className="text-slate-200 font-mono">/etc/rancher/k3s/config.yaml</code> and observes Flannel
+                WireGuard / Cilium CNI overlays in Ring-0.
+              </p>
+              <div className="text-[11px] font-mono text-slate-300">
+                K3s service: {ebpfOverview?.k3s.serviceActive ? 'ACTIVE' : 'STANDBY'} • BPF_TOKEN ready:{' '}
+                {ebpfOverview?.k3s.bpfTokenReady !== false ? 'YES' : 'NO'}
+              </div>
+            </div>
+
+            {/* Duty 3: OpenZFS Enterprise NAS */}
+            <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                  Enterprise NAS • OpenZFS Kstats
+                </span>
+                <HardDrive className="w-4 h-4 text-emerald-400" />
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">ARC Cache Hit Ratio</div>
+                  <div className="font-mono font-bold text-emerald-400 mt-0.5">
+                    {(ebpfOverview?.nas.arc.hitRatioPct ?? 0).toFixed(2)}% (
+                    {Math.round((ebpfOverview?.nas.arc.sizeBytes ?? 0) / (1024 * 1024))} MB)
+                  </div>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-[10px] text-slate-400">ZIL / SLOG Commits</div>
+                  <div className="font-mono font-bold text-white mt-0.5">
+                    {(ebpfOverview?.nas.zil.zilCommitCount ?? 0).toLocaleString()} syncs
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Streams `/proc/spl/kstat/zfs/arcstats`, `zil`, and per-pool `io` queue depths alongside VFS{' '}
+                <code className="text-emerald-300 font-mono">fexit/vfs_fsync</code> latency histograms.
+              </p>
+              <div className="text-[11px] font-mono text-slate-300">
+                ZFS module: {ebpfOverview?.nas.zfsModuleLoaded ? 'LOADED' : 'STANDBY'} • Tracked pools:{' '}
+                {ebpfOverview?.nas.pools.length ?? 0}
               </div>
             </div>
           </div>

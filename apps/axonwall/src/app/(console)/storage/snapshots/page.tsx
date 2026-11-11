@@ -1,11 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Camera, Plus, ArrowRightLeft, AlertTriangle } from 'lucide-react';
+import { Camera, Plus, ArrowRightLeft, AlertTriangle, RotateCcw, Trash2 } from 'lucide-react';
 import {
   getCurrentDesiredState,
   getNasSnapshotsRuntime,
   createNasSnapshotAction,
+  rollbackNasSnapshotAction,
+  deleteNasSnapshotAction,
   type NasSnapshotItem,
 } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
@@ -59,6 +61,34 @@ export default function ZfsSnapshotsPage() {
     } catch (err: any) {
       setMsgKind('error');
       setMsg(`Error: ${err?.message || 'Failed to create snapshot'}`);
+    }
+  };
+
+  const handleRollback = async (fullSnap: string) => {
+    if (!confirm(`Roll back dataset to snapshot '${fullSnap}'? Uncommitted changes since this snapshot will be reverted.`)) {
+      return;
+    }
+    try {
+      const res = await rollbackNasSnapshotAction(fullSnap);
+      setMsgKind(res.success ? 'success' : 'error');
+      setMsg(res.message);
+      await load();
+    } catch (err: any) {
+      setMsgKind('error');
+      setMsg(`Error: ${err?.message || 'Failed to roll back snapshot'}`);
+    }
+  };
+
+  const handleDeleteSnapshot = async (fullSnap: string) => {
+    if (!confirm(`Destroy ZFS snapshot '${fullSnap}' permanently?`)) return;
+    try {
+      const res = await deleteNasSnapshotAction(fullSnap);
+      setMsgKind(res.success ? 'success' : 'error');
+      setMsg(res.message);
+      await load();
+    } catch (err: any) {
+      setMsgKind('error');
+      setMsg(`Error: ${err?.message || 'Failed to delete snapshot'}`);
     }
   };
 
@@ -239,18 +269,35 @@ export default function ZfsSnapshotsPage() {
           </p>
         ) : (
           <div className="space-y-2">
-            {snapshots.map((s) => (
-              <div
-                key={`${s.dataset}@${s.name}`}
-                className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-3 text-xs"
-              >
-                <span className="font-mono text-white">{s.dataset}@{s.name}</span>
-                <span className="text-slate-400 font-mono">
-                  {s.createdAt ? new Date(s.createdAt).toLocaleString() : 'unknown date'}
-                </span>
-                <span className="text-slate-400 font-mono">{formatBytes(s.usedBytes)}</span>
-              </div>
-            ))}
+            {snapshots.map((s) => {
+              const fullSnap = `${s.dataset}@${s.name}`;
+              return (
+                <div
+                  key={fullSnap}
+                  className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs"
+                >
+                  <span className="font-mono text-white">{fullSnap}</span>
+                  <span className="text-slate-400 font-mono">
+                    {s.createdAt ? new Date(s.createdAt).toLocaleString() : 'unknown date'}
+                  </span>
+                  <span className="text-slate-400 font-mono">{formatBytes(s.usedBytes)}</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleRollback(fullSnap)}
+                      className="px-2.5 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 inline-flex items-center gap-1"
+                    >
+                      <RotateCcw className="w-3 h-3" /> Rollback
+                    </button>
+                    <button
+                      onClick={() => handleDeleteSnapshot(fullSnap)}
+                      className="px-2.5 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 inline-flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" /> Destroy
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

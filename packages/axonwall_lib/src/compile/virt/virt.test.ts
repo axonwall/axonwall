@@ -9,13 +9,14 @@ import {
   compileHostedEdge,
   generateDeterministicMac,
 } from './index.js';
+import { compileK3s } from '../k3s/index.js';
 import {
   serializeDesiredStateToYamlFiles,
   parseDesiredStateFromYamlFiles,
   validateYamlConfigFiles,
 } from '../../yaml/index.js';
 import type { VirtualMachine, LxcContainer } from '../../schemas/index.js';
-import { DesiredStateSchema } from '../../schemas/index.js';
+import { DesiredStateSchema, LxcContainerSchema } from '../../schemas/index.js';
 
 describe('Virt / Hypervisor Compilers', () => {
   const sampleVm: VirtualMachine = {
@@ -339,5 +340,72 @@ describe('Virt / Hypervisor Compilers', () => {
     expect(compiled.baselineNftScript).toContain('iifname "eth1" oifname "eth0" accept comment "allow-lan-to-wan"');
     expect(compiled.baselineNftScript).toContain('oifname "eth0" masquerade comment "edge-ngfw-wan-masquerade"');
     expect(compiled.baselineNftScript).toContain('iifname "eth0" tcp dport 443 dnat ip to 10.0.0.2:443 comment "k3s-ingress"');
+  });
+
+  it('compiles Linux 6.9+ BPF_TOKEN_CREATE bpffs delegation for unprivileged LXC & K3s UserNS and blocks Ring-0 tracing', () => {
+    const delegatedCt = LxcContainerSchema.parse({
+      ...sampleContainer,
+      ctid: 210,
+      hostname: 'cilium-userns',
+      unprivileged: true,
+      bpfToken: {
+        enabled: true,
+        preset: 'network-dataplane',
+        exposeLibbpfTokenEnv: true,
+        auditViaBpfLsm: true,
+      },
+    });
+
+    const compiled = compileLxcContainer(delegatedCt);
+    expect(compiled.lxcConfig).toContain('lxc.environment = LIBBPF_BPF_TOKEN_PATH=/sys/fs/bpf');
+    expect(compiled.lxcConfig).toContain(
+      'lxc.mount.entry = bpffs sys/fs/bpf bpf rw,nosuid,nodev,noexec,relatime,create=dir,delegate_cmds=',
+    );
+    expect(compiled.lxcConfig).toContain('delegate_progs=xdp:sched_cls:sched_act:socket_filter:cgroup_skb');
+
+    // Reject privileged LXC container with BPF_TOKEN enabled
+    expect(() =>
+      LxcContainerSchema.parse({
+        ...sampleContainer,
+        unprivileged: false,
+        bpfToken: {
+          enabled: true,
+          preset: 'network-dataplane',
+        },
+      }),
+    ).toThrow(/unprivileged: true/);
+
+    // Reject Ring-0 kprobe in LXC BPF_TOKEN compiler
+    expect(() =>
+      compileLxcContainer({
+        ...sampleContainer,
+        unprivileged: true,
+        bpfToken: {
+          enabled: true,
+          preset: 'custom',
+          delegateCmds: 'prog_load:map_create',
+          delegateProgs: 'xdp:kprobe',
+          delegateMaps: 'hash',
+          delegateAttachs: 'xdp',
+          auditViaBpfLsm: true,
+        },
+      }),
+    ).toThrow(/bpf_probe_read_kernel/);
+
+    // Verify K3s compiler emits kubelet UserNamespacesSupport=true feature gate when bpfTokenProfiles are configured
+    const k3sState = DesiredStateSchema.parse({
+      k3s: {
+        enabled: true,
+        enableUserNamespaces: true,
+        bpfTokenProfiles: [
+          {
+            id: 'cilium-dataplane',
+            preset: 'network-dataplane',
+          },
+        ],
+      },
+    });
+    const k3sCompiled = compileK3s(k3sState);
+    expect(k3sCompiled.k3sConfigYaml).toContain('UserNamespacesSupport=true');
   });
 });

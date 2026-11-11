@@ -6,8 +6,11 @@ import type {
   VxlanZone,
   VirtConfig,
   Bridge,
+  VirtioFsShare,
+  VmDisk,
+  VmNic,
 } from '../../schemas/index.js';
-import { HostedEdgeConfigSchema } from '../../schemas/index.js';
+import { HostedEdgeConfigSchema, FORBIDDEN_RING0_BPF_PROGS } from '../../schemas/index.js';
 import { compileSatelliteNftables } from '../nft/index.js';
 
 export interface CompiledVmProcess {
@@ -19,7 +22,25 @@ export interface CompiledVmProcess {
   qmpSocket: string;
   vncSocket: string;
   serialSocket: string;
+  qgaSocket?: string;
   pidFile: string;
+  cores?: number;
+  sockets?: number;
+  memoryMb?: number;
+  bios?: 'ovmf' | 'seabios';
+  secureBoot?: boolean;
+  tpm2?: boolean;
+  cpuPinning?: string;
+  numaEnabled?: boolean;
+  hugepages?: 'off' | '2M' | '1G';
+  isTemplate?: boolean;
+  autostart?: boolean;
+  haManaged?: boolean;
+  virtioFsShares?: VirtioFsShare[];
+  disks?: Array<VmDisk & { resolvedZvol: string }>;
+  nics?: Array<VmNic & { tapName: string; resolvedMac: string }>;
+  fwCfgFiles?: Array<{ path: string; content: string }>;
+  libvirtXml?: string;
 }
 
 export type VmProcessSpec = CompiledVmProcess;
@@ -44,8 +65,18 @@ export interface CompiledCloudInit {
 export interface CompiledLxcContainer {
   ctid: number;
   name: string;
+  hostname?: string;
+  template?: string;
+  unprivileged?: boolean;
+  cores?: number;
+  memoryMb?: number;
+  swapMb?: number;
+  rootfsPool?: string;
+  rootfsSizeGb?: number;
   lxcConfig: string;
   rootfsPath: string;
+  autostart?: boolean;
+  haManaged?: boolean;
 }
 
 export interface CompiledVfio {
@@ -64,6 +95,7 @@ export interface CompiledVirtBundle {
   containers: CompiledLxcContainer[];
   vfio: CompiledVfio;
   vxlanCommands: string[];
+  libvirtDomainsXml: Record<number, string>;
 }
 
 function sanitizeIdentifier(v: string): string {
@@ -104,13 +136,15 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
 
   const totalCpus = (vm.cores || 1) * (vm.sockets || 1);
   const cpuModel = vm.cpuType === 'host' ? 'host' : vm.cpuType || 'host';
+  const useSecBoot = vm.bios === 'ovmf' && Boolean(vm.secureBoot) && !vm.kernelPath;
+  const machineSpec = useSecBoot ? 'q35,accel=kvm,smm=on' : 'q35,accel=kvm';
 
   const args: string[] = [
     '-name',
     `${sanitizeIdentifier(vm.name)},process=axonwall-vm-${vm.vmid}`,
     '-enable-kvm',
     '-machine',
-    'q35,accel=kvm',
+    machineSpec,
     '-cpu',
     cpuModel,
     '-smp',
@@ -132,12 +166,23 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
   ];
 
   if (vm.bios === 'ovmf' && !vm.kernelPath) {
-    args.push(
-      '-drive',
-      'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd',
-      '-drive',
-      `if=pflash,format=raw,file=/var/lib/axonwall/nvram/vm-${vm.vmid}.fd`
-    );
+    if (useSecBoot) {
+      args.push(
+        '-global',
+        'driver=cfi.pflash01,property=secure,value=on',
+        '-drive',
+        'if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd',
+        '-drive',
+        `if=pflash,format=raw,unit=1,file=/var/lib/axonwall/nvram/vm-${vm.vmid}.fd`,
+      );
+    } else {
+      args.push(
+        '-drive',
+        'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd',
+        '-drive',
+        `if=pflash,format=raw,file=/var/lib/axonwall/nvram/vm-${vm.vmid}.fd`,
+      );
+    }
   }
 
   if (vm.kernelPath) {
@@ -243,10 +288,12 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
       const discardOpt = disk.discard ? ',discard=unmap' : '';
       const aioOpt = cache === 'none' ? ',aio=native' : '';
       const roOpt = disk.readOnly ? ',readonly=on' : '';
+      const iopsRdOpt = disk.iopsReadLimit && disk.iopsReadLimit > 0 ? `,iops_rd=${disk.iopsReadLimit}` : '';
+      const iopsWrOpt = disk.iopsWriteLimit && disk.iopsWriteLimit > 0 ? `,iops_wr=${disk.iopsWriteLimit}` : '';
 
       args.push(
         '-drive',
-        `file=${zvolPath},if=none,id=${driveId},format=raw,cache=${cache}${discardOpt}${aioOpt}${roOpt}`
+        `file=${zvolPath},if=none,id=${driveId},format=raw,cache=${cache}${discardOpt}${aioOpt}${roOpt}${iopsRdOpt}${iopsWrOpt}`
       );
 
       const bootIndex = idx + 1;
@@ -353,8 +400,60 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
     args.push('-device', `vfio-pci,host=${pciAddr}`);
   });
 
+  // VirtioFS Zero-Copy Host ZFS Dataset Mounts (vhost-user-fs-pci)
+  if (vm.virtioFsShares && vm.virtioFsShares.length > 0) {
+    args.push(
+      '-object',
+      `memory-backend-memfd,id=mem,size=${vm.memoryMb || 2048}M,share=on`,
+      '-numa',
+      'node,memdev=mem',
+    );
+    vm.virtioFsShares.forEach((share, idx) => {
+      const safeTag = share.tag.replace(/[^a-zA-Z0-9_-]/g, '');
+      args.push(
+        '-chardev',
+        `socket,id=vfs${idx},path=/run/axonwall/virtiofs/vm-${vm.vmid}-${safeTag}.sock`,
+        '-device',
+        `vhost-user-fs-pci,chardev=vfs${idx},tag=${safeTag}`,
+      );
+    });
+  }
+
+  // USB Host Passthrough (vendor:product e.g. 1050:0407 or bus.addr e.g. 1.4)
+  if (vm.usbPassthrough && vm.usbPassthrough.length > 0) {
+    args.push('-device', 'qemu-xhci,id=xhci0');
+    vm.usbPassthrough.forEach((usbSpec, idx) => {
+      const clean = usbSpec.trim();
+      const vpMatch = clean.match(/^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})$/);
+      const busMatch = clean.match(/^(\d+)\.(\d+)$/);
+      if (vpMatch) {
+        args.push(
+          '-device',
+          `usb-host,bus=xhci0.0,vendorid=0x${vpMatch[1]},productid=0x${vpMatch[2]},id=usbhost${idx}`,
+        );
+      } else if (busMatch) {
+        args.push(
+          '-device',
+          `usb-host,bus=xhci0.0,hostbus=${busMatch[1]},hostaddr=${busMatch[2]},id=usbhost${idx}`,
+        );
+      } else {
+        throw new Error(`Invalid USB passthrough identifier (expected VVVV:PPPP or bus.addr): ${usbSpec}`);
+      }
+    });
+  }
+
   // Standard VGA output
   args.push('-vga', 'std');
+
+  const resolvedDisks = (vm.disks ?? []).map((disk, idx) => ({
+    ...disk,
+    resolvedZvol: disk.zvol || `/dev/zvol/${disk.pool || 'tank'}/vms/vm-${vm.vmid}-disk-${idx}`,
+  }));
+  const resolvedNics = (vm.nics ?? []).map((nic, idx) => ({
+    ...nic,
+    tapName: nic.vnet && SAFE_IFACE_REGEX.test(nic.vnet) ? nic.vnet : `tap${vm.vmid}i${idx}`,
+    resolvedMac: nic.mac || generateDeterministicMac(vm.vmid, idx),
+  }));
 
   return {
     ...(vm.id ? { id: vm.id } : {}),
@@ -365,8 +464,124 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
     qmpSocket,
     vncSocket,
     serialSocket,
+    qgaSocket: vm.agent ? `/run/axonwall/qga/vm-${vm.vmid}.sock` : undefined,
     pidFile,
+    cores: vm.cores || 2,
+    sockets: vm.sockets || 1,
+    memoryMb: vm.memoryMb || 2048,
+    bios: vm.bios || 'ovmf',
+    secureBoot: Boolean(vm.secureBoot),
+    tpm2: Boolean(vm.tpm2),
+    cpuPinning: vm.cpuPinning,
+    numaEnabled: Boolean(vm.numaEnabled),
+    hugepages: vm.hugepages || 'off',
+    isTemplate: Boolean(vm.isTemplate),
+    autostart: Boolean(vm.autostart),
+    haManaged: Boolean(vm.haManaged),
+    virtioFsShares: vm.virtioFsShares ?? [],
+    disks: resolvedDisks,
+    nics: resolvedNics,
+    libvirtXml: compileLibvirtDomainXml(vm),
   };
+}
+
+export function compileLibvirtDomainXml(vm: VirtualMachine): string {
+  const safeName = sanitizeIdentifier(vm.name);
+  const vcpus = (vm.cores || 1) * (vm.sockets || 1);
+  const memKib = (vm.memoryMb || 2048) * 1024;
+  const secBoot = vm.bios === 'ovmf' && Boolean(vm.secureBoot);
+  const xml: string[] = [
+    `<domain type='kvm'>`,
+    `  <name>${safeName}</name>`,
+    `  <metadata>`,
+    `    <axonwall:vm xmlns:axonwall='https://axonwall.com/xmlns/libvirt/1.0' vmid='${vm.vmid}' ha='${Boolean(vm.haManaged)}'/>`,
+    `  </metadata>`,
+    `  <memory unit='KiB'>${memKib}</memory>`,
+    `  <vcpu placement='static'>${vcpus}</vcpu>`,
+  ];
+
+  if (vm.cpuPinning) {
+    xml.push(`  <cputune>`);
+    xml.push(`    <vcpupin vcpu='0' cpuset='${vm.cpuPinning.replace(/[^0-9,-]/g, '')}'/>`);
+    xml.push(`  </cputune>`);
+  }
+
+  if (vm.hugepages && vm.hugepages !== 'off') {
+    const pageSize = vm.hugepages === '1G' ? '1048576' : '2048';
+    xml.push(`  <memoryBacking>`);
+    xml.push(`    <hugepages><page size='${pageSize}' unit='KiB'/></hugepages>`);
+    xml.push(`    <source type='memfd'/><access mode='shared'/>`);
+    xml.push(`  </memoryBacking>`);
+  } else if (vm.virtioFsShares && vm.virtioFsShares.length > 0) {
+    xml.push(`  <memoryBacking><source type='memfd'/><access mode='shared'/></memoryBacking>`);
+  }
+
+  xml.push(`  <os>`);
+  xml.push(`    <type arch='x86_64' machine='pc-q35-8.2'>hvm</type>`);
+  if (vm.bios === 'ovmf' && !vm.kernelPath) {
+    const loaderPath = secBoot ? '/usr/share/OVMF/OVMF_CODE_4M.secboot.fd' : '/usr/share/OVMF/OVMF_CODE.fd';
+    xml.push(`    <loader readonly='yes' secure='${secBoot ? 'yes' : 'no'}' type='pflash'>${loaderPath}</loader>`);
+    xml.push(`    <nvram>/var/lib/axonwall/nvram/vm-${vm.vmid}.fd</nvram>`);
+  }
+  xml.push(`  </os>`);
+  xml.push(`  <features><acpi/><apic/>${secBoot ? "<smm state='on'/>" : ''}</features>`);
+  xml.push(`  <cpu mode='${vm.cpuType === 'host' ? 'host-passthrough' : 'custom'}'>`);
+  xml.push(`    <topology sockets='${vm.sockets || 1}' dies='1' cores='${vm.cores || 1}' threads='1'/>`);
+  xml.push(`  </cpu>`);
+  xml.push(`  <devices>`);
+  xml.push(`    <emulator>/usr/bin/qemu-system-x86_64</emulator>`);
+
+  if (!vm.diskless) {
+    vm.disks.forEach((disk, idx) => {
+      const zvolPath = disk.zvol || `/dev/zvol/${disk.pool || 'tank'}/vms/vm-${vm.vmid}-disk-${idx}`;
+      const devPrefix = disk.bus === 'scsi' ? 'sd' : disk.bus === 'nvme' ? 'nvme0n' : 'vd';
+      const targetDev = disk.bus === 'nvme' ? `${devPrefix}${idx + 1}` : `${devPrefix}${String.fromCharCode(97 + idx)}`;
+      const targetBus = disk.bus === 'nvme' ? 'virtio' : disk.bus || 'virtio';
+      xml.push(`    <disk type='block' device='disk'>`);
+      xml.push(`      <driver name='qemu' type='raw' cache='${disk.cache || 'none'}' discard='${disk.discard ? 'unmap' : 'ignore'}'/>`);
+      xml.push(`      <source dev='${zvolPath}'/>`);
+      xml.push(`      <target dev='${targetDev}' bus='${targetBus}'/>`);
+      if (disk.readOnly) xml.push(`      <readonly/>`);
+      xml.push(`    </disk>`);
+    });
+  }
+
+  for (const share of vm.virtioFsShares ?? []) {
+    xml.push(`    <filesystem type='mount' accessmode='passthrough'>`);
+    xml.push(`      <driver type='virtiofs' queue='1024'/>`);
+    xml.push(`      <source dir='${share.hostPath}'/>`);
+    xml.push(`      <target dir='${share.tag}'/>`);
+    if (share.readOnly) xml.push(`      <readonly/>`);
+    xml.push(`    </filesystem>`);
+  }
+
+  vm.nics.forEach((nic, idx) => {
+    const mac = nic.mac || generateDeterministicMac(vm.vmid, idx);
+    const tapName = nic.vnet && SAFE_IFACE_REGEX.test(nic.vnet) ? nic.vnet : `tap${vm.vmid}i${idx}`;
+    xml.push(`    <interface type='bridge'>`);
+    xml.push(`      <mac address='${mac}'/>`);
+    xml.push(`      <source bridge='${nic.bridge || 'br0'}'/>`);
+    xml.push(`      <target dev='${tapName}'/>`);
+    xml.push(`      <model type='${nic.model || 'virtio'}'/>`);
+    if (nic.vlanTag && nic.vlanTag > 0) {
+      xml.push(`      <vlan><tag id='${nic.vlanTag}'/></vlan>`);
+    }
+    xml.push(`    </interface>`);
+  });
+
+  if (vm.tpm2) {
+    xml.push(`    <tpm model='tpm-tis'><backend type='emulator' version='2.0'/></tpm>`);
+  }
+  if (vm.agent) {
+    xml.push(`    <channel type='unix'>`);
+    xml.push(`      <source mode='bind' path='/run/axonwall/qga/vm-${vm.vmid}.sock'/>`);
+    xml.push(`      <target type='virtio' name='org.qemu.guest_agent.0'/>`);
+    xml.push(`    </channel>`);
+  }
+  xml.push(`    <graphics type='vnc' socket='/run/axonwall/vnc/vm-${vm.vmid}.sock'/>`);
+  xml.push(`  </devices>`);
+  xml.push(`</domain>`);
+  return xml.join('\n') + '\n';
 }
 
 export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
@@ -519,6 +734,69 @@ export function compileLxcContainer(ct: LxcContainer): CompiledLxcContainer {
     const flags = mp.readOnly ? 'ro,bind,create=dir' : 'rw,bind,create=dir';
     lines.push(`lxc.mount.entry = ${mp.hostPath} ${mp.mountPath.replace(/^\//, '')} none ${flags} 0 0`);
   });
+
+  // Linux 6.9+ Delegated bpffs & BPF_TOKEN_CREATE (UserNS Container eBPF)
+  if (ct.bpfToken?.enabled && ct.bpfToken.preset !== 'disabled') {
+    if (!ct.unprivileged) {
+      throw new Error(
+        `LXC container ${ct.ctid} (${ct.hostname}) cannot enable BPF_TOKEN delegation while unprivileged=false; CLONE_NEWUSER isolation is mandatory`,
+      );
+    }
+    const presetDefaults: Record<
+      string,
+      { cmds: string; progs: string; maps: string; attachs: string }
+    > = {
+      'socket-observability': {
+        cmds: 'prog_load:map_create:btf_load:map_lookup_elem:map_update_elem:map_delete_elem:map_get_next_key',
+        progs: 'socket_filter:cgroup_skb',
+        maps: 'array:hash:lru_hash:percpu_array:ringbuf',
+        attachs: 'cgroup_inet_ingress:cgroup_inet_egress',
+      },
+      'network-dataplane': {
+        cmds: 'prog_load:map_create:btf_load:link_create:link_update:link_detach:obj_pin:obj_get:map_lookup_elem:map_update_elem:map_delete_elem:map_get_next_key',
+        progs: 'xdp:sched_cls:sched_act:socket_filter:cgroup_skb:cgroup_sock_addr:sk_skb:sk_msg',
+        maps: 'array:percpu_array:hash:percpu_hash:lru_hash:lru_percpu_hash:lpm_trie:ringbuf:devmap:sockmap:sockhash',
+        attachs: 'xdp:tcx_ingress:tcx_egress:cgroup_inet_ingress:cgroup_inet_egress:cgroup_inet4_connect:cgroup_inet6_connect',
+      },
+      'cgroup-microsegmentation': {
+        cmds: 'prog_load:map_create:btf_load:link_create:map_lookup_elem:map_update_elem:map_delete_elem',
+        progs: 'cgroup_skb:cgroup_sock:cgroup_sock_addr',
+        maps: 'array:hash:lru_hash:lpm_trie:ringbuf',
+        attachs: 'cgroup_inet_ingress:cgroup_inet_egress:cgroup_inet4_bind:cgroup_inet6_bind:cgroup_inet4_connect:cgroup_inet6_connect',
+      },
+    };
+
+    const base = presetDefaults[ct.bpfToken.preset];
+    const cmds = (ct.bpfToken.preset === 'custom' ? ct.bpfToken.delegateCmds : base?.cmds) || '';
+    const progs = (ct.bpfToken.preset === 'custom' ? ct.bpfToken.delegateProgs : base?.progs) || '';
+    const maps = (ct.bpfToken.preset === 'custom' ? ct.bpfToken.delegateMaps : base?.maps) || '';
+    const attachs = (ct.bpfToken.preset === 'custom' ? ct.bpfToken.delegateAttachs : base?.attachs) || '';
+
+    const safeOptRegex = /^[a-z0-9_:]+$/;
+    for (const [label, val] of [
+      ['delegate_cmds', cmds],
+      ['delegate_progs', progs],
+      ['delegate_maps', maps],
+      ['delegate_attachs', attachs],
+    ] as const) {
+      if (!val || !safeOptRegex.test(val) || val.split(':').includes('any')) {
+        throw new Error(`Invalid LXC BPF_TOKEN ${label}: '${val}'`);
+      }
+    }
+    for (const p of progs.split(':')) {
+      if ((FORBIDDEN_RING0_BPF_PROGS as readonly string[]).includes(p)) {
+        throw new Error(
+          `LXC BPF_TOKEN rejects Ring-0 program type '${p}' (prevents bpf_probe_read_kernel() host RAM inspection)`,
+        );
+      }
+    }
+
+    lines.push(
+      '# Linux 6.9+ BPF_TOKEN_CREATE Delegation (UserNS Scoped, Zero Host CAP_BPF)',
+      'lxc.environment = LIBBPF_BPF_TOKEN_PATH=/sys/fs/bpf',
+      `lxc.mount.entry = bpffs sys/fs/bpf bpf rw,nosuid,nodev,noexec,relatime,create=dir,delegate_cmds=${cmds},delegate_progs=${progs},delegate_maps=${maps},delegate_attachs=${attachs} 0 0`,
+    );
+  }
 
   lines.push('');
 
@@ -821,10 +1099,15 @@ export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {
   const vms: CompiledVmProcess[] = [];
   const cloudInits: CompiledCloudInit[] = [];
   const containers: CompiledLxcContainer[] = [];
+  const libvirtDomainsXml: Record<number, string> = {};
 
   for (const vm of virt.vms) {
     if (!vm.enabled) continue;
-    vms.push(compileVmProcess(vm));
+    const compiledVm = compileVmProcess(vm);
+    vms.push(compiledVm);
+    if (virt.exportLibvirtXml !== false && compiledVm.libvirtXml) {
+      libvirtDomainsXml[vm.vmid] = compiledVm.libvirtXml;
+    }
     const ci = compileCloudInit(vm);
     if (ci) {
       cloudInits.push(ci);
@@ -833,7 +1116,20 @@ export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {
 
   for (const ct of virt.containers) {
     if (!ct.enabled) continue;
-    containers.push(compileLxcContainer(ct));
+    const compiledCt = compileLxcContainer(ct);
+    containers.push({
+      ...compiledCt,
+      hostname: ct.hostname,
+      template: ct.template,
+      unprivileged: ct.unprivileged,
+      cores: ct.cores,
+      memoryMb: ct.memoryMb,
+      swapMb: ct.swapMb,
+      rootfsPool: ct.rootfsPool,
+      rootfsSizeGb: ct.rootfsSizeGb,
+      autostart: ct.autostart,
+      haManaged: ct.haManaged,
+    });
   }
 
   const vfio = compileVfio(virt.pciDevices);
@@ -845,5 +1141,6 @@ export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {
     containers,
     vfio,
     vxlanCommands: vxlan.ipCommands,
+    libvirtDomainsXml,
   };
 }

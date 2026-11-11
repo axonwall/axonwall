@@ -29,6 +29,11 @@ import {
   deleteVmAction,
   getVirtConfigAction,
   getIsoListAction,
+  manageWorkloadSnapshotAction,
+  cloneVmAction,
+  liveMigrateVmAction,
+  getVmQgaInterfacesAction,
+  exportVmLibvirtXmlAction,
   type VMStatusItem,
   type IsoItem,
 } from '@/server/virt';
@@ -61,7 +66,16 @@ export default function VirtualMachinesPage() {
   const [vlanTag, setVlanTag] = useState<number | undefined>(undefined);
   const [selectedIso, setSelectedIso] = useState<string>('');
   const [bios, setBios] = useState<'ovmf' | 'seabios'>('ovmf');
+  const [secureBoot, setSecureBoot] = useState(false);
   const [tpm2, setTpm2] = useState(false);
+  const [hugepages, setHugepages] = useState<'off' | '2M' | '1G'>('off');
+  const [cpuPinning, setCpuPinning] = useState('');
+  const [usbDevice, setUsbDevice] = useState('');
+  const [nicSecurityGroups, setNicSecurityGroups] = useState('');
+  const [virtioFsTag, setVirtioFsTag] = useState('');
+  const [virtioFsHostPath, setVirtioFsHostPath] = useState('');
+  const [libvirtXmlModal, setLibvirtXmlModal] = useState<{ vmid: number; xml: string } | null>(null);
+  const [qgaIpMap, setQgaIpMap] = useState<Record<number, string>>({});
   const [enableCloudInit, setEnableCloudInit] = useState(true);
   const [ciUser, setCiUser] = useState('axonadmin');
   const [ciPassword, setCiPassword] = useState('');
@@ -118,6 +132,73 @@ export default function VirtualMachinesPage() {
     }
   };
 
+  const handleSnapshotVm = async (targetVmid: number) => {
+    const label = window.prompt(`Snapshot label for VM ${targetVmid}:`, `snap-${Date.now()}`);
+    if (!label) return;
+    try {
+      const res = await manageWorkloadSnapshotAction('create', 'vm', targetVmid, label);
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Snapshot failed' });
+    }
+  };
+
+  const handleCloneVm = async (sourceVmid: number, sourceName: string) => {
+    const nextIdStr = window.prompt(`New VMID for instant ZFS clone of VM ${sourceVmid}:`, String(sourceVmid + 100));
+    if (!nextIdStr) return;
+    const newName = window.prompt('New clone VM name:', `${sourceName}-clone`);
+    if (!newName) return;
+    try {
+      const res = await cloneVmAction(sourceVmid, Number(nextIdStr), newName, true);
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+      await loadData();
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Clone failed' });
+    }
+  };
+
+  const handleMigrateVm = async (targetVmid: number) => {
+    const peer = window.prompt(`Target HA / Fleet Peer IP for QEMU QMP live migration of VM ${targetVmid}:`);
+    if (!peer) return;
+    try {
+      const res = await liveMigrateVmAction(targetVmid, peer);
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Live migration failed' });
+    }
+  };
+
+  const handleInspectQga = async (targetVmid: number) => {
+    try {
+      const res = await getVmQgaInterfacesAction(targetVmid);
+      if (!res.success) {
+        setStatusBanner({ type: 'error', message: res.error || 'QGA query failed' });
+        return;
+      }
+      const ips = res.interfaces
+        .flatMap((i) => (i.ipAddresses || []).map((a) => a.ipAddress))
+        .filter((ip) => ip && ip !== '127.0.0.1' && ip !== '::1');
+      const summary = ips.length ? ips.join(', ') : 'No non-loopback IP';
+      setQgaIpMap((prev) => ({ ...prev, [targetVmid]: summary }));
+      setStatusBanner({ type: 'success', message: `VM ${targetVmid} QGA Guest IPs: ${summary}` });
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'QGA query failed' });
+    }
+  };
+
+  const handleExportLibvirtXml = async (targetVmid: number) => {
+    try {
+      const res = await exportVmLibvirtXmlAction(targetVmid);
+      if (!res.success || !res.xml) {
+        setStatusBanner({ type: 'error', message: res.error || 'Failed to generate Libvirt Domain XML' });
+        return;
+      }
+      setLibvirtXmlModal({ vmid: targetVmid, xml: res.xml });
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to export Libvirt XML' });
+    }
+  };
+
   const handleDelete = async (targetVmid: number) => {
     if (!confirm(`Are you sure you want to delete VM ${targetVmid}? This cannot be undone.`)) return;
     setStatusBanner(null);
@@ -140,17 +221,31 @@ export default function VirtualMachinesPage() {
       description: '',
       osType,
       bios,
-      secureBoot: false,
+      secureBoot,
       tpm2,
       sockets,
       cores,
       cpuType,
+      ...(cpuPinning.trim() ? { cpuPinning: cpuPinning.trim() } : {}),
       memoryMb,
+      ...(hugepages !== 'off' ? { hugepages } : {}),
       balloonMinMb: 0,
       agent: true,
       autostart: false,
       haManaged: false,
       enabled: true,
+      ...(virtioFsTag.trim() && virtioFsHostPath.trim()
+        ? {
+            virtioFsShares: [
+              {
+                tag: virtioFsTag.trim(),
+                hostPath: virtioFsHostPath.trim(),
+                cacheMode: 'auto' as const,
+                readOnly: false,
+              },
+            ],
+          }
+        : {}),
       disks: [
         {
           name: 'disk0',
@@ -172,6 +267,14 @@ export default function VirtualMachinesPage() {
           mac: '',
           vlanTag: vlanTag ? Number(vlanTag) : undefined,
           firewall: true,
+          ...(nicSecurityGroups.trim()
+            ? {
+                securityGroups: nicSecurityGroups
+                  .split(',')
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              }
+            : {}),
           rateLimitMbps: 0,
         },
       ],
@@ -186,7 +289,7 @@ export default function VirtualMachinesPage() {
           }
         : undefined,
       pciPassthrough: [],
-      usbPassthrough: [],
+      usbPassthrough: usbDevice.trim() ? [usbDevice.trim()] : [],
     };
 
     try {
@@ -359,9 +462,19 @@ export default function VirtualMachinesPage() {
                       </td>
                       <td className="px-6 py-4">
                         {vm.agentRunning ? (
-                          <span className="text-emerald-400 font-sans flex items-center gap-1">
-                            <CheckCircle2 className="w-3.5 h-3.5" /> QGA Active
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleInspectQga(vm.vmid)}
+                            className="text-emerald-400 hover:text-emerald-300 font-sans flex flex-col items-start gap-0.5 cursor-pointer"
+                            title="Click to query live guest IPs via QEMU Guest Agent"
+                          >
+                            <span className="flex items-center gap-1">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> QGA Active
+                            </span>
+                            {qgaIpMap[vm.vmid] && (
+                              <span className="text-[10px] font-mono text-cyan-300">{qgaIpMap[vm.vmid]}</span>
+                            )}
+                          </button>
                         ) : (
                           <span className="text-slate-500 font-sans">No Guest Agent</span>
                         )}
@@ -408,6 +521,37 @@ export default function VirtualMachinesPage() {
                         >
                           <Terminal className="w-3.5 h-3.5" /> Console
                         </Link>
+
+                        <button
+                          onClick={() => handleSnapshotVm(vm.vmid)}
+                          className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs"
+                          title="Take atomic ZFS ZVOL + QMP Snapshot"
+                        >
+                          Snap
+                        </button>
+                        <button
+                          onClick={() => handleCloneVm(vm.vmid, vm.name)}
+                          className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded text-xs"
+                          title="Instant Zero-Copy ZFS Linked Clone"
+                        >
+                          Clone
+                        </button>
+                        {isRunning && (
+                          <button
+                            onClick={() => handleMigrateVm(vm.vmid)}
+                            className="px-2 py-1.5 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 rounded text-xs"
+                            title="Zero-downtime QEMU QMP + ZFS Live Migration"
+                          >
+                            Migrate
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleExportLibvirtXml(vm.vmid)}
+                          className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 rounded text-xs"
+                          title="Export virsh / virt-manager Libvirt Domain XML"
+                        >
+                          XML
+                        </button>
 
                         <button
                           onClick={() => handleDelete(vm.vmid)}
@@ -496,7 +640,7 @@ export default function VirtualMachinesPage() {
                     <option value="seabios">SeaBIOS (Legacy)</option>
                   </select>
                 </div>
-                <div className="flex items-center pt-6">
+                <div className="flex flex-col gap-1.5 pt-4">
                   <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-300">
                     <input
                       type="checkbox"
@@ -504,7 +648,16 @@ export default function VirtualMachinesPage() {
                       onChange={(e) => setTpm2(e.target.checked)}
                       className="rounded bg-slate-950 border-slate-800 text-cyan-600 focus:ring-0"
                     />
-                    Enable TPM 2.0 (vTPM)
+                    TPM 2.0 (swtpm v2.0)
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={secureBoot}
+                      onChange={(e) => setSecureBoot(e.target.checked)}
+                      className="rounded bg-slate-950 border-slate-800 text-cyan-600 focus:ring-0"
+                    />
+                    UEFI Secure Boot
                   </label>
                 </div>
               </div>
@@ -619,6 +772,75 @@ export default function VirtualMachinesPage() {
                 </div>
               </div>
 
+              {/* VirtioFS Host ZFS Dataset Passthrough & Hardware Pinning */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">VirtioFS Mount Tag (optional)</label>
+                  <input
+                    type="text"
+                    value={virtioFsTag}
+                    onChange={(e) => setVirtioFsTag(e.target.value)}
+                    placeholder="e.g. zfs-shared"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">VirtioFS Host ZFS Path</label>
+                  <input
+                    type="text"
+                    value={virtioFsHostPath}
+                    onChange={(e) => setVirtioFsHostPath(e.target.value)}
+                    placeholder="/mnt/tank/shared"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">Hugepages</label>
+                  <select
+                    value={hugepages}
+                    onChange={(e) => setHugepages(e.target.value as 'off' | '2M' | '1G')}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono"
+                  >
+                    <option value="off">Standard 4K</option>
+                    <option value="2M">2M Hugepages</option>
+                    <option value="1G">1G Hugepages</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">CPU Pinning</label>
+                  <input
+                    type="text"
+                    value={cpuPinning}
+                    onChange={(e) => setCpuPinning(e.target.value)}
+                    placeholder="e.g. 0-3,8-11"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">USB Passthrough</label>
+                  <input
+                    type="text"
+                    value={usbDevice}
+                    onChange={(e) => setUsbDevice(e.target.value)}
+                    placeholder="1050:0407 (VID:PID)"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">VNIC Security Groups</label>
+                  <input
+                    type="text"
+                    value={nicSecurityGroups}
+                    onChange={(e) => setNicSecurityGroups(e.target.value)}
+                    placeholder="sg-web, sg-db"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
               {/* Cloud Init Section */}
               <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
@@ -687,6 +909,40 @@ export default function VirtualMachinesPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {libvirtXmlModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-base font-bold text-white">
+                Libvirt Domain XML Compatibility Export — VM {libvirtXmlModal.vmid}
+              </h3>
+              <button onClick={() => setLibvirtXmlModal(null)} className="text-slate-400 hover:text-white">
+                &times;
+              </button>
+            </div>
+            <pre className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs font-mono text-cyan-200 overflow-x-auto max-h-96">
+              {libvirtXmlModal.xml}
+            </pre>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  navigator.clipboard?.writeText(libvirtXmlModal.xml);
+                  setStatusBanner({ type: 'success', message: `Copied VM ${libvirtXmlModal.vmid} Libvirt XML to clipboard.` });
+                }}
+                className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white"
+              >
+                Copy XML
+              </button>
+              <button
+                onClick={() => setLibvirtXmlModal(null)}
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

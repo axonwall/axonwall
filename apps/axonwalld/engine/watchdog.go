@@ -167,21 +167,31 @@ func (we *WatchdogEngine) loadSlotVersions() (string, string) {
 }
 
 func (we *WatchdogEngine) saveSlotVersionsLocked() {
-	psv := PersistedSlotVersions{
-		SlotA:     we.status.SlotAVersion,
-		SlotB:     we.status.SlotBVersion,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	data, err := json.MarshalIndent(psv, "", "  ")
-	if err != nil {
-		return
-	}
 	primaryPath := we.getSlotVersionsPath()
 	paths := []string{primaryPath}
 	if primaryPath != "/etc/axonwall/slot_versions.json" {
 		paths = append(paths, "/etc/axonwall/slot_versions.json")
 	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
 	for _, p := range paths {
+		if existingData, err := os.ReadFile(p); err == nil {
+			var existing PersistedSlotVersions
+			if json.Unmarshal(existingData, &existing) == nil &&
+				existing.SlotA == we.status.SlotAVersion &&
+				existing.SlotB == we.status.SlotBVersion &&
+				existing.UpdatedAt != "" {
+				continue
+			}
+		}
+		psv := PersistedSlotVersions{
+			SlotA:     we.status.SlotAVersion,
+			SlotB:     we.status.SlotBVersion,
+			UpdatedAt: nowStr,
+		}
+		data, err := json.MarshalIndent(psv, "", "  ")
+		if err != nil {
+			continue
+		}
 		_ = os.MkdirAll(filepath.Dir(p), 0755)
 		_ = os.WriteFile(p, data, 0644)
 	}

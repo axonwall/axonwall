@@ -88,28 +88,61 @@ type VirtManager struct {
 	startingVMs map[int]bool
 }
 
+type VirtioFsShareSpec struct {
+	Tag      string `json:"tag"`
+	HostPath string `json:"hostPath"`
+	ReadOnly bool   `json:"readOnly,omitempty"`
+}
+
+type QgaInterfaceInfo struct {
+	Name        string   `json:"name"`
+	HardwareMac string   `json:"hardwareMac,omitempty"`
+	IPAddresses []string `json:"ipAddresses"`
+}
+
+type CompiledVmNicSpec struct {
+	Bridge   string `json:"bridge"`
+	VlanTag  int    `json:"vlanTag,omitempty"`
+	TapName  string `json:"tapName"`
+}
+
+type CompiledFwCfgFileSpec struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
 type CompiledVmSpec struct {
-	VMID      int               `json:"vmid"`
-	Name      string            `json:"name"`
-	Binary    string            `json:"binary"`
-	Args      []string          `json:"args"`
-	Disks     []VmDisk          `json:"disks"`
-	Cores     int               `json:"cores"`
-	MemoryMb  int               `json:"memoryMb"`
-	CloudInit *CloudInitSpec    `json:"cloudInit,omitempty"`
-	Autostart bool              `json:"autostart,omitempty"`
-	Bridges   map[string]string `json:"bridges,omitempty"`
-	FwCfg     map[string]string `json:"fwCfg,omitempty"`
+	VMID           int                     `json:"vmid"`
+	Name           string                  `json:"name"`
+	Binary         string                  `json:"binary"`
+	QemuBinary     string                  `json:"qemuBinary,omitempty"`
+	Args           []string                `json:"args"`
+	Disks          []VmDisk                `json:"disks"`
+	Nics           []CompiledVmNicSpec     `json:"nics,omitempty"`
+	FwCfgFiles     []CompiledFwCfgFileSpec `json:"fwCfgFiles,omitempty"`
+	Cores          int                     `json:"cores"`
+	MemoryMb       int                     `json:"memoryMb"`
+	Tpm2           bool                    `json:"tpm2,omitempty"`
+	IsTemplate     bool                    `json:"isTemplate,omitempty"`
+	VirtioFsShares []VirtioFsShareSpec     `json:"virtioFsShares,omitempty"`
+	VlanTags       map[string]int          `json:"vlanTags,omitempty"`
+	LibvirtXml     string                  `json:"libvirtXml,omitempty"`
+	CloudInit      *CloudInitSpec          `json:"cloudInit,omitempty"`
+	Autostart      bool                    `json:"autostart,omitempty"`
+	Bridges        map[string]string       `json:"bridges,omitempty"`
+	FwCfg          map[string]string       `json:"fwCfg,omitempty"`
 }
 
 // VMSpec is an alias for CompiledVmSpec.
 type VMSpec = CompiledVmSpec
 
 type VmDisk struct {
-	Name   string `json:"name"`
-	Pool   string `json:"pool"`
-	SizeGb int    `json:"sizeGb"`
-	Zvol   string `json:"zvol"`
+	Name         string `json:"name"`
+	ID           string `json:"id,omitempty"`
+	Pool         string `json:"pool"`
+	SizeGb       int    `json:"sizeGb"`
+	Zvol         string `json:"zvol"`
+	ResolvedZvol string `json:"resolvedZvol,omitempty"`
 }
 
 type CloudInitSpec struct {
@@ -126,13 +159,17 @@ type CloudInitSpec struct {
 }
 
 type CompiledCtSpec struct {
-	CTID       int      `json:"ctid"`
-	Hostname   string   `json:"hostname"`
-	Cores      int      `json:"cores"`
-	MemoryMb   int      `json:"memoryMb"`
-	ConfigPath string   `json:"configPath"`
-	RootfsPath string   `json:"rootfsPath"`
-	Features   []string `json:"features"`
+	CTID         int      `json:"ctid"`
+	Name         string   `json:"name,omitempty"`
+	Hostname     string   `json:"hostname"`
+	Cores        int      `json:"cores"`
+	MemoryMb     int      `json:"memoryMb"`
+	RootfsPool   string   `json:"rootfsPool,omitempty"`
+	RootfsSizeGb int      `json:"rootfsSizeGb,omitempty"`
+	LxcConfig    string   `json:"lxcConfig,omitempty"`
+	ConfigPath   string   `json:"configPath"`
+	RootfsPath   string   `json:"rootfsPath"`
+	Features     []string `json:"features"`
 }
 
 func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
@@ -203,13 +240,44 @@ func (m *VirtManager) loadPersistedSpecs() {
 func validateSafeQemuArgs(args []string) error {
 	disallowedFlags := map[string]bool{
 		"-gdb": true, "-s": true, "-plugin": true, "-virtfs": true, "-fsdev": true,
-		"-fw_cfg": true, "-D": true, "-pidfile": true, "-loadvm": true, "-incoming": true,
+		"-D": true, "-loadvm": true, "-incoming": true,
 		"-chroot": true, "-run-with": true, "-semihosting-config": true,
 	}
-	for _, arg := range args {
-		trimmed := strings.TrimSpace(arg)
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
 		if disallowedFlags[trimmed] {
 			return fmt.Errorf("disallowed QEMU flag: %s", trimmed)
+		}
+		if trimmed == "-pidfile" {
+			if i+1 >= len(args) {
+				return fmt.Errorf("disallowed bare QEMU -pidfile flag")
+			}
+			pf := filepath.Clean(strings.TrimSpace(args[i+1]))
+			if !strings.HasPrefix(pf, "/run/axonwall/pids/vm-") || !strings.HasSuffix(pf, ".pid") {
+				return fmt.Errorf("disallowed QEMU -pidfile path: %s", pf)
+			}
+			i++
+			continue
+		}
+		if trimmed == "-fw_cfg" {
+			if i+1 >= len(args) {
+				return fmt.Errorf("disallowed bare QEMU -fw_cfg flag")
+			}
+			fwSpec := strings.TrimSpace(args[i+1])
+			hasSafeFile := false
+			for _, part := range strings.Split(fwSpec, ",") {
+				if strings.HasPrefix(part, "file=") {
+					fp := filepath.Clean(strings.TrimPrefix(part, "file="))
+					if (strings.HasPrefix(fp, "/var/lib/axonwall/") || strings.HasPrefix(fp, "/run/axonwall/")) && !strings.Contains(fp, "..") {
+						hasSafeFile = true
+					}
+				}
+			}
+			if !hasSafeFile {
+				return fmt.Errorf("disallowed QEMU -fw_cfg target: %s", fwSpec)
+			}
+			i++
+			continue
 		}
 		for _, part := range strings.Split(trimmed, ",") {
 			if strings.HasPrefix(part, "script=") && part != "script=no" {
@@ -219,6 +287,83 @@ func validateSafeQemuArgs(args []string) error {
 				return fmt.Errorf("disallowed QEMU netdev downscript parameter: %s", part)
 			}
 		}
+	}
+	return nil
+}
+
+// ApplyVirtBundleJSON reconciles `/etc/axonwall/managed/virt_config.json` into VirtManager.
+func (m *VirtManager) ApplyVirtBundleJSON(rawJSON []byte) error {
+	var payload struct {
+		Enabled           bool             `json:"enabled"`
+		DefaultPool       string           `json:"defaultPool"`
+		VMs               []CompiledVmSpec `json:"vms"`
+		Containers        []CompiledCtSpec `json:"containers"`
+		LibvirtDomainsXml map[string]string `json:"libvirtDomainsXml"`
+	}
+	if err := json.Unmarshal(rawJSON, &payload); err != nil {
+		return fmt.Errorf("invalid virt_config.json: %w", err)
+	}
+	if payload.DefaultPool != "" && validZfsPoolName(payload.DefaultPool) {
+		m.mu.Lock()
+		m.defaultPool = payload.DefaultPool
+		m.mu.Unlock()
+	}
+	for _, vm := range payload.VMs {
+		if vm.Binary == "" && vm.QemuBinary != "" {
+			vm.Binary = vm.QemuBinary
+		}
+		for i := range vm.Disks {
+			if vm.Disks[i].Name == "" && vm.Disks[i].ID != "" {
+				vm.Disks[i].Name = vm.Disks[i].ID
+			}
+			if vm.Disks[i].Zvol == "" && vm.Disks[i].ResolvedZvol != "" {
+				vm.Disks[i].Zvol = vm.Disks[i].ResolvedZvol
+			}
+		}
+		if len(vm.Nics) > 0 {
+			if vm.Bridges == nil {
+				vm.Bridges = make(map[string]string)
+			}
+			if vm.VlanTags == nil {
+				vm.VlanTags = make(map[string]int)
+			}
+			for idx, nic := range vm.Nics {
+				tap := nic.TapName
+				if tap == "" {
+					tap = fmt.Sprintf("tap%di%d", vm.VMID, idx)
+				}
+				if nic.Bridge != "" {
+					vm.Bridges[tap] = nic.Bridge
+				}
+				if nic.VlanTag > 0 {
+					vm.VlanTags[tap] = nic.VlanTag
+				}
+			}
+		}
+		if len(vm.FwCfgFiles) > 0 {
+			if vm.FwCfg == nil {
+				vm.FwCfg = make(map[string]string)
+			}
+			for _, f := range vm.FwCfgFiles {
+				if f.Path != "" {
+					vm.FwCfg[f.Path] = f.Content
+				}
+			}
+		}
+		if vm.LibvirtXml == "" && payload.LibvirtDomainsXml != nil {
+			if xmlStr, ok := payload.LibvirtDomainsXml[strconv.Itoa(vm.VMID)]; ok {
+				vm.LibvirtXml = xmlStr
+			}
+		}
+		if err := m.RegisterVMSpec(vm); err != nil {
+			return fmt.Errorf("VM %d spec rejected: %w", vm.VMID, err)
+		}
+	}
+	for _, ct := range payload.Containers {
+		if ct.Hostname == "" && ct.Name != "" {
+			ct.Hostname = ct.Name
+		}
+		m.RegisterCTSpec(ct)
 	}
 	return nil
 }
@@ -663,6 +808,49 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 		// 2c. Initialize OVMF NVRAM if needed
 		ensureOvmfNvram(vmid, spec.Args)
 
+		// 2d. Spawn swtpm emulator daemon if TPM 2.0 is enabled on the VM
+		hasTpmArg := spec.Tpm2
+		for _, a := range spec.Args {
+			if strings.Contains(a, "swtpm/vm-") {
+				hasTpmArg = true
+				break
+			}
+		}
+		if hasTpmArg {
+			if swtpmBin, lookErr := exec.LookPath("swtpm"); lookErr == nil {
+				tpmStateDir := fmt.Sprintf("/var/lib/axonwall/tpm/vm-%d", vmid)
+				tpmSock := fmt.Sprintf("/run/axonwall/swtpm/vm-%d.sock", vmid)
+				_ = os.MkdirAll(tpmStateDir, 0700)
+				_ = os.MkdirAll("/run/axonwall/swtpm", 0755)
+				_ = os.Remove(tpmSock)
+				_ = exec.Command(swtpmBin, "socket", "--tpm2", "--tpmstate", "dir="+tpmStateDir,
+					"--ctrl", "type=unixio,path="+tpmSock, "--daemon").Run()
+			}
+		}
+
+		// 2e. Spawn virtiofsd helper daemons for ZFS host dataset VirtioFS shares
+		if len(spec.VirtioFsShares) > 0 {
+			if vfsBin, lookErr := exec.LookPath("virtiofsd"); lookErr == nil {
+				_ = os.MkdirAll("/run/axonwall/virtiofs", 0755)
+				for _, sh := range spec.VirtioFsShares {
+					cleanHost := filepath.Clean(strings.TrimSpace(sh.HostPath))
+					if !underMnt(cleanHost) {
+						return fmt.Errorf("virtiofs hostPath %q must reside under /mnt", cleanHost)
+					}
+					safeTag := strings.Map(func(r rune) rune {
+						if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+							return r
+						}
+						return '_'
+					}, sh.Tag)
+					vfsSock := fmt.Sprintf("/run/axonwall/virtiofs/vm-%d-%s.sock", vmid, safeTag)
+					_ = os.Remove(vfsSock)
+					vfsCmd := exec.Command(vfsBin, "--socket-path="+vfsSock, "--shared-dir="+cleanHost, "--sandbox=namespace")
+					_ = vfsCmd.Start()
+				}
+			}
+		}
+
 		// 3. Clear stale sockets
 		_ = os.Remove(fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid))
 		_ = os.Remove(fmt.Sprintf("/run/axonwall/vnc/vm-%d.sock", vmid))
@@ -704,15 +892,19 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					bridgeName = "br-lan"
 				}
 			}
-			if err := AttachTapToBridge(tapDev, bridgeName, 0); err != nil {
+			vlanTag := 0
+			if spec.VlanTags != nil {
+				vlanTag = spec.VlanTags[tapDev]
+			}
+			if err := AttachTapToBridge(tapDev, bridgeName, vlanTag); err != nil {
 				// Fallback to br0 if br-lan does not exist yet
 				if bridgeName == "br-lan" {
-					_ = AttachTapToBridge(tapDev, "br0", 0)
+					_ = AttachTapToBridge(tapDev, "br0", vlanTag)
 				} else {
 					logger("Warning: failed to attach tap %s to bridge %s: %v", tapDev, bridgeName, err)
 				}
 			} else {
-				logger("Attached tap %s to bridge %s.", tapDev, bridgeName)
+				logger("Attached tap %s to bridge %s (VLAN %d).", tapDev, bridgeName, vlanTag)
 			}
 		}
 
@@ -858,10 +1050,34 @@ func (m *VirtManager) ListVMs() []VMStatus {
 	return result
 }
 
-// StartContainer launches an LXC system container
+// StartContainer launches an LXC system container (provisioning ZFS rootfs & /var/lib/lxc/<ctid>/config if needed)
 func (m *VirtManager) StartContainer(ctid int, user string) (string, error) {
+	m.mu.RLock()
+	spec, hasSpec := m.ctSpecs[ctid]
+	defaultPool := m.defaultPool
+	m.mu.RUnlock()
+
 	upid := m.taskMgr.StartTask("pctstart", strconv.Itoa(ctid), user, func(logger func(format string, args ...any)) error {
 		logger("Starting LXC Container %d...", ctid)
+		if hasSpec {
+			pool := spec.RootfsPool
+			if pool == "" {
+				pool = defaultPool
+			}
+			if validZfsPoolName(pool) {
+				ds := fmt.Sprintf("%s/lxc/subvol-%d-disk-0", pool, ctid)
+				if _, lookErr := exec.LookPath("zfs"); lookErr == nil {
+					if exec.Command("zfs", "list", "-H", ds).Run() != nil {
+						_ = exec.Command("zfs", "create", "-p", "-o", "compression=lz4", ds).Run()
+					}
+				}
+			}
+			if spec.LxcConfig != "" {
+				ctDir := fmt.Sprintf("/var/lib/lxc/%d", ctid)
+				_ = os.MkdirAll(ctDir, 0750)
+				_ = os.WriteFile(filepath.Join(ctDir, "config"), []byte(spec.LxcConfig), 0640)
+			}
+		}
 		cmd := exec.Command("lxc-start", "-n", strconv.Itoa(ctid), "-d")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			logger("lxc-start error: %s (%v)", string(out), err)
@@ -1345,4 +1561,384 @@ func (m *VirtManager) ListBackups(pool string) []BackupRecord {
 	}
 
 	return result
+}
+
+// SendQGACommand executes a QEMU Guest Agent JSON-RPC command over /run/axonwall/qga/vm-<vmid>.sock.
+func SendQGACommand(vmid int, command string, args map[string]any) (map[string]any, error) {
+	sockPath := fmt.Sprintf("/run/axonwall/qga/vm-%d.sock", vmid)
+	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("qga socket connect failed for VM %d: %w", vmid, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
+
+	reqObj := map[string]any{"execute": command}
+	if args != nil {
+		reqObj["arguments"] = args
+	}
+	reqBytes, _ := json.Marshal(reqObj)
+	reqBytes = append(reqBytes, '\n')
+	if _, err := conn.Write(reqBytes); err != nil {
+		return nil, fmt.Errorf("qga write failed: %w", err)
+	}
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil && len(line) == 0 {
+		return nil, fmt.Errorf("qga read failed: %w", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		return nil, fmt.Errorf("invalid qga JSON response: %w", err)
+	}
+	return resp, nil
+}
+
+// QueryQgaInterfaces queries guest IPv4/IPv6 addresses and MACs via QEMU Guest Agent.
+func (m *VirtManager) QueryQgaInterfaces(vmid int) ([]QgaInterfaceInfo, error) {
+	resp, err := SendQGACommand(vmid, "guest-network-get-interfaces", nil)
+	if err != nil {
+		return nil, err
+	}
+	rawRet, ok := resp["return"].([]any)
+	if !ok {
+		return []QgaInterfaceInfo{}, nil
+	}
+	var out []QgaInterfaceInfo
+	for _, item := range rawRet {
+		ifMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := ifMap["name"].(string)
+		mac, _ := ifMap["hardware-address"].(string)
+		var ips []string
+		if addrList, ok := ifMap["ip-addresses"].([]any); ok {
+			for _, a := range addrList {
+				if am, ok := a.(map[string]any); ok {
+					ipStr, _ := am["ip-address"].(string)
+					if ipStr != "" && ipStr != "127.0.0.1" && ipStr != "::1" {
+						ips = append(ips, ipStr)
+					}
+				}
+			}
+		}
+		out = append(out, QgaInterfaceInfo{
+			Name:        name,
+			HardwareMac: mac,
+			IPAddresses: ips,
+		})
+	}
+	return out, nil
+}
+
+// QgaFsFreeze freezes guest filesystems via QEMU Guest Agent before ZFS snapshotting.
+func (m *VirtManager) QgaFsFreeze(vmid int) error {
+	_, err := SendQGACommand(vmid, "guest-fsfreeze-freeze", nil)
+	return err
+}
+
+// QgaFsThaw thaws guest filesystems via QEMU Guest Agent after ZFS snapshotting.
+func (m *VirtManager) QgaFsThaw(vmid int) error {
+	_, err := SendQGACommand(vmid, "guest-fsfreeze-thaw", nil)
+	return err
+}
+
+// CreateWorkloadSnapshot creates atomic ZFS snapshots across all disks of a VM or LXC container
+// (performing QGA guest-fsfreeze-freeze / thaw automatically if the guest agent socket is live).
+func (m *VirtManager) CreateWorkloadSnapshot(targetType string, targetID int, label string) ([]string, error) {
+	if targetType != "vm" && targetType != "lxc" {
+		return nil, fmt.Errorf("targetType must be vm or lxc")
+	}
+	cleanLabel := strings.TrimSpace(label)
+	if cleanLabel == "" {
+		cleanLabel = fmt.Sprintf("snap-%s", time.Now().UTC().Format("20060102-150405"))
+	}
+	if !validZfsPath(cleanLabel, false) {
+		return nil, fmt.Errorf("invalid snapshot label %q", label)
+	}
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return nil, fmt.Errorf("zfs is not installed on this system")
+	}
+
+	froze := false
+	if targetType == "vm" {
+		if m.QgaFsFreeze(targetID) == nil {
+			froze = true
+		}
+	}
+	defer func() {
+		if froze {
+			_ = m.QgaFsThaw(targetID)
+		}
+	}()
+
+	datasets := m.backupDatasetsForTarget(targetType, targetID, m.defaultPool)
+	var created []string
+	for _, ds := range datasets {
+		snapFull := fmt.Sprintf("%s@%s", ds, cleanLabel)
+		if out, err := exec.Command("zfs", "snapshot", snapFull).CombinedOutput(); err != nil {
+			return created, fmt.Errorf("zfs snapshot %s failed: %s (%w)", snapFull, strings.TrimSpace(string(out)), err)
+		}
+		created = append(created, snapFull)
+	}
+	return created, nil
+}
+
+// RollbackWorkloadSnapshot rolls back all ZFS disks/subvols of a VM or LXC container to a snapshot label.
+func (m *VirtManager) RollbackWorkloadSnapshot(targetType string, targetID int, label string) error {
+	if targetType != "vm" && targetType != "lxc" {
+		return fmt.Errorf("targetType must be vm or lxc")
+	}
+	cleanLabel := strings.TrimSpace(label)
+	if !validZfsPath(cleanLabel, false) {
+		return fmt.Errorf("invalid snapshot label %q", label)
+	}
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return fmt.Errorf("zfs is not installed on this system")
+	}
+	datasets := m.backupDatasetsForTarget(targetType, targetID, m.defaultPool)
+	for _, ds := range datasets {
+		snapFull := fmt.Sprintf("%s@%s", ds, cleanLabel)
+		if out, err := exec.Command("zfs", "rollback", "-r", snapFull).CombinedOutput(); err != nil {
+			return fmt.Errorf("zfs rollback %s failed: %s (%w)", snapFull, strings.TrimSpace(string(out)), err)
+		}
+	}
+	return nil
+}
+
+// ListWorkloadSnapshots returns ZFS snapshots belonging to a specific VM or LXC container.
+func (m *VirtManager) ListWorkloadSnapshots(targetType string, targetID int) []ZfsSnapshotInfo {
+	if m.nasMgr == nil {
+		return []ZfsSnapshotInfo{}
+	}
+	datasets := m.backupDatasetsForTarget(targetType, targetID, m.defaultPool)
+	dsSet := make(map[string]bool, len(datasets))
+	for _, d := range datasets {
+		dsSet[d] = true
+	}
+	all := m.nasMgr.ListSnapshots()
+	var filtered []ZfsSnapshotInfo
+	for _, s := range all {
+		if dsSet[s.Dataset] {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
+}
+
+// CloneVM creates either an instant Zero-Copy ZFS Linked Clone (`zfs clone`) or an independent
+// Full Clone (`zfs send | zfs receive`) from a registered VM or Template.
+func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bool) (CompiledVmSpec, error) {
+	if newVMID < 100 || newVMID > 999999 {
+		return CompiledVmSpec{}, fmt.Errorf("newVMID must be between 100 and 999999")
+	}
+	m.mu.RLock()
+	srcSpec, exists := m.vmSpecs[sourceVMID]
+	_, targetExists := m.vmSpecs[newVMID]
+	defaultPool := m.defaultPool
+	m.mu.RUnlock()
+
+	if !exists {
+		return CompiledVmSpec{}, fmt.Errorf("source VM %d is not registered", sourceVMID)
+	}
+	if targetExists {
+		return CompiledVmSpec{}, fmt.Errorf("target VMID %d already exists", newVMID)
+	}
+	cleanName := strings.TrimSpace(newName)
+	if cleanName == "" {
+		cleanName = fmt.Sprintf("%s-clone-%d", srcSpec.Name, newVMID)
+	}
+
+	clonedDisks := make([]VmDisk, 0, len(srcSpec.Disks))
+	_, hasZfs := exec.LookPath("zfs")
+	stamp := time.Now().UTC().Format("20060102150405")
+
+	for idx, d := range srcSpec.Disks {
+		pool := d.Pool
+		if pool == "" {
+			pool = defaultPool
+		}
+		srcZvol := d.Zvol
+		if srcZvol == "" {
+			srcZvol = fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, sourceVMID, idx)
+		}
+		dstZvol := fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, newVMID, idx)
+		if hasZfs == nil && exec.Command("zfs", "list", "-H", srcZvol).Run() == nil {
+			snap := fmt.Sprintf("%s@clone-%d-%s", srcZvol, newVMID, stamp)
+			if out, err := exec.Command("zfs", "snapshot", snap).CombinedOutput(); err != nil {
+				return CompiledVmSpec{}, fmt.Errorf("snapshot for clone failed: %s (%w)", strings.TrimSpace(string(out)), err)
+			}
+			if linked {
+				if out, err := exec.Command("zfs", "clone", snap, dstZvol).CombinedOutput(); err != nil {
+					return CompiledVmSpec{}, fmt.Errorf("zfs linked clone failed: %s (%w)", strings.TrimSpace(string(out)), err)
+				}
+			} else {
+				cmdFull := exec.Command("/bin/bash", "-c", `set -o pipefail; zfs send "$1" | zfs receive -F "$2"`, "_", snap, dstZvol)
+				if out, err := cmdFull.CombinedOutput(); err != nil {
+					return CompiledVmSpec{}, fmt.Errorf("zfs full clone failed: %s (%w)", strings.TrimSpace(string(out)), err)
+				}
+			}
+		}
+		clonedDisks = append(clonedDisks, VmDisk{
+			Name:   d.Name,
+			Pool:   pool,
+			SizeGb: d.SizeGb,
+			Zvol:   dstZvol,
+		})
+	}
+
+	// Rewrite VMID-specific paths in QEMU args
+	oldPrefix := fmt.Sprintf("vm-%d", sourceVMID)
+	newPrefix := fmt.Sprintf("vm-%d", newVMID)
+	oldTapPrefix := fmt.Sprintf("tap%di", sourceVMID)
+	newTapPrefix := fmt.Sprintf("tap%di", newVMID)
+	newArgs := make([]string, len(srcSpec.Args))
+	for i, a := range srcSpec.Args {
+		replaced := strings.ReplaceAll(a, oldPrefix, newPrefix)
+		replaced = strings.ReplaceAll(replaced, oldTapPrefix, newTapPrefix)
+		newArgs[i] = replaced
+	}
+
+	clonedSpec := srcSpec
+	clonedSpec.VMID = newVMID
+	clonedSpec.Name = cleanName
+	clonedSpec.IsTemplate = false
+	clonedSpec.Args = newArgs
+	clonedSpec.Disks = clonedDisks
+
+	if err := m.RegisterVMSpec(clonedSpec); err != nil {
+		return CompiledVmSpec{}, err
+	}
+	return clonedSpec, nil
+}
+
+// RestoreBackup streams a compressed `.vma.zst` ZFS archive back into the target VM or LXC dataset.
+func (m *VirtManager) RestoreBackup(archiveName string, targetType string, targetID int, pool string, user string) (string, error) {
+	if pool == "" {
+		pool = m.defaultPool
+	}
+	if !validZfsPoolName(pool) {
+		return "", fmt.Errorf("invalid ZFS pool name %q", pool)
+	}
+	if targetType != "vm" && targetType != "lxc" {
+		return "", fmt.Errorf("targetType must be vm or lxc")
+	}
+	safeArchive := filepath.Base(strings.TrimSpace(archiveName))
+	if safeArchive == "" || !strings.HasPrefix(safeArchive, "axonwall-backup-") || !strings.HasSuffix(safeArchive, ".vma.zst") {
+		return "", fmt.Errorf("invalid backup archive filename %q", archiveName)
+	}
+	archivePath := filepath.Join(fmt.Sprintf("/mnt/%s/backups", pool), safeArchive)
+	info, err := os.Lstat(archivePath)
+	if err != nil || info.IsDir() || (info.Mode()&os.ModeSymlink) != 0 {
+		return "", fmt.Errorf("backup archive %q not found in pool %s", safeArchive, pool)
+	}
+
+	targetDataset := fmt.Sprintf("%s/vms/vm-%d-disk-0", pool, targetID)
+	if targetType == "lxc" {
+		targetDataset = fmt.Sprintf("%s/lxc/subvol-%d-disk-0", pool, targetID)
+	}
+
+	upid := m.taskMgr.StartTask("qmrestore", fmt.Sprintf("%s-%d", targetType, targetID), user, func(logger func(format string, args ...any)) error {
+		logger("Restoring %s %d from %s -> %s...", targetType, targetID, archivePath, targetDataset)
+		cmd := exec.Command("/bin/bash", "-c", `set -o pipefail; zstd -dc "$1" | zfs receive -F "$2"`, "_", archivePath, targetDataset)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			logger("Restore failed: %s (%v)", string(out), err)
+			return fmt.Errorf("restore failed: %s", strings.TrimSpace(string(out)))
+		}
+		logger("Restore completed successfully into %s.", targetDataset)
+		return nil
+	})
+	return upid, nil
+}
+
+// PruneBackupsGFS prunes older backup archives in a pool, retaining the newest keepLast archives.
+func (m *VirtManager) PruneBackupsGFS(pool string, keepLast int) ([]string, error) {
+	if keepLast < 1 {
+		return nil, fmt.Errorf("keepLast must be >= 1")
+	}
+	records := m.ListBackups(pool)
+	if len(records) <= keepLast {
+		return []string{}, nil
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Timestamp > records[j].Timestamp })
+	var deleted []string
+	for _, old := range records[keepLast:] {
+		if info, err := os.Lstat(old.Path); err == nil && !info.IsDir() && (info.Mode()&os.ModeSymlink) == 0 {
+			if os.Remove(old.Path) == nil {
+				deleted = append(deleted, old.Name)
+			}
+		}
+	}
+	return deleted, nil
+}
+
+// LiveMigrateVM orchestrates QMP RAM live migration to a peer Axonwall hypervisor node.
+func (m *VirtManager) LiveMigrateVM(vmid int, targetPeerIP string, user string) (string, error) {
+	cleanIP := strings.TrimSpace(targetPeerIP)
+	parsed := net.ParseIP(cleanIP)
+	if parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
+		return "", fmt.Errorf("invalid target peer IP %q for live migration", targetPeerIP)
+	}
+	qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+	if _, err := os.Stat(qmpSock); err != nil {
+		return "", fmt.Errorf("VM %d is not running (QMP socket %s missing)", vmid, qmpSock)
+	}
+
+	migPort := 49152 + (vmid % 1000)
+	migURI := fmt.Sprintf("tcp:%s", net.JoinHostPort(cleanIP, strconv.Itoa(migPort)))
+
+	upid := m.taskMgr.StartTask("qmigrate", strconv.Itoa(vmid), user, func(logger func(format string, args ...any)) error {
+		logger("Initiating live QMP RAM migration for VM %d -> %s...", vmid, migURI)
+		resp, err := SendQMPCommand(qmpSock, "migrate", map[string]any{"uri": migURI})
+		if err != nil {
+			logger("QMP migrate error: %v", err)
+			return err
+		}
+		if qmpErr, hasErr := resp["error"]; hasErr {
+			return fmt.Errorf("QMP migrate rejected: %v", qmpErr)
+		}
+		logger("QMP live migration stream started toward %s.", migURI)
+		return nil
+	})
+	return upid, nil
+}
+
+// ExportLibvirtXML returns standard `<domain type='kvm'>` Libvirt XML for a registered VM.
+func (m *VirtManager) ExportLibvirtXML(vmid int) (string, error) {
+	m.mu.RLock()
+	spec, ok := m.vmSpecs[vmid]
+	defaultPool := m.defaultPool
+	m.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("VM %d is not registered", vmid)
+	}
+	if strings.TrimSpace(spec.LibvirtXml) != "" {
+		return spec.LibvirtXml, nil
+	}
+	memKiB := spec.MemoryMb * 1024
+	if memKiB <= 0 {
+		memKiB = 2097152
+	}
+	cores := spec.Cores
+	if cores <= 0 {
+		cores = 2
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<domain type='kvm'>\n  <name>%s</name>\n  <memory unit='KiB'>%d</memory>\n  <vcpu placement='static'>%d</vcpu>\n  <os>\n    <type arch='x86_64' machine='pc-q35-8.2'>hvm</type>\n  </os>\n  <cpu mode='host-passthrough'/>\n  <devices>\n    <emulator>%s</emulator>\n",
+		spec.Name, memKiB, cores, spec.Binary)
+	for idx, d := range spec.Disks {
+		pool := d.Pool
+		if pool == "" {
+			pool = defaultPool
+		}
+		zvol := d.Zvol
+		if zvol == "" {
+			zvol = fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, vmid, idx)
+		}
+		devLetter := string(rune('a' + (idx % 26)))
+		fmt.Fprintf(&b, "    <disk type='block' device='disk'>\n      <driver name='qemu' type='raw' cache='none'/>\n      <source dev='/dev/zvol/%s'/>\n      <target dev='vd%s' bus='virtio'/>\n    </disk>\n", zvol, devLetter)
+	}
+	fmt.Fprintf(&b, "    <graphics type='vnc' socket='/run/axonwall/vnc/vm-%d.sock'/>\n  </devices>\n</domain>\n", vmid)
+	return b.String(), nil
 }

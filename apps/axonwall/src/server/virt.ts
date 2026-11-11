@@ -943,6 +943,188 @@ export async function triggerBackupAction(
   };
 }
 
+export async function restoreBackupAction(
+  archivePath: string,
+  targetType: 'vm' | 'lxc',
+  targetId: number,
+  pool?: string
+): Promise<{ success: boolean; upid?: string; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  if (pool) validatePoolName(pool);
+  if (!archivePath || archivePath.includes('..')) {
+    throw new Error('Invalid backup archive path');
+  }
+
+  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string; error?: string }>(
+    '/v1/virt/backups',
+    'POST',
+    { action: 'restore', archivePath, targetType, targetId, pool: pool || 'tank' }
+  );
+  if (!daemonResp) {
+    return { success: false, message: `Daemon unavailable: backup restore for ${targetType} ${targetId} did not run.` };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    upid: daemonResp.upid,
+    message: daemonResp.message || daemonResp.error || `Restored ${targetType} ${targetId} from ${archivePath}.`,
+  };
+}
+
+export async function pruneBackupsAction(
+  pool: string,
+  keepLast: number
+): Promise<{ success: boolean; pruned?: number; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  validatePoolName(pool || 'tank');
+  const safeKeep = Math.max(1, Math.min(365, Math.floor(Number(keepLast) || 5)));
+
+  const daemonResp = await callAgentApi<{ success: boolean; pruned?: number; message?: string; error?: string }>(
+    '/v1/virt/backups',
+    'POST',
+    { action: 'prune', pool: pool || 'tank', keepLast: safeKeep }
+  );
+  if (!daemonResp) {
+    return { success: false, message: 'Daemon unavailable: GFS backup retention prune did not run.' };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    pruned: daemonResp.pruned,
+    message:
+      daemonResp.message ||
+      daemonResp.error ||
+      `Pruned old archives in /mnt/${pool || 'tank'}/backups (kept last ${safeKeep}).`,
+  };
+}
+
+export async function manageWorkloadSnapshotAction(
+  action: 'create' | 'rollback',
+  targetType: 'vm' | 'lxc',
+  targetId: number,
+  label: string
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'operator');
+  if (!/^[a-zA-Z0-9_.-]{1,64}$/.test((label || '').trim())) {
+    throw new Error('Snapshot label must be 1–64 alphanumeric, dash, dot, or underscore characters');
+  }
+  const daemonResp = await callAgentApi<{ success: boolean; message?: string; error?: string }>(
+    '/v1/virt/snapshots',
+    'POST',
+    { action, targetType, targetId, label: label.trim() }
+  );
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: ${targetType} ${targetId} snapshot ${action} did not run.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message: daemonResp.message || daemonResp.error || `Workload ${targetType} ${targetId} snapshot ${action} complete.`,
+  };
+}
+
+export async function cloneVmAction(
+  sourceVmid: number,
+  newVmid: number,
+  newName: string,
+  linked = true
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const cleanName = (newName || '').trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '-');
+  if (!cleanName) {
+    throw new Error('Clone name is required');
+  }
+  const daemonResp = await callAgentApi<{ success: boolean; message?: string; error?: string }>(
+    '/v1/virt/clone',
+    'POST',
+    { sourceVmid, newVmid, newName: cleanName, linked }
+  );
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: instant ZFS clone of VM ${sourceVmid} -> ${newVmid} did not run.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message: daemonResp.message || daemonResp.error || `Cloned VM ${sourceVmid} -> VM ${newVmid} (${cleanName}).`,
+  };
+}
+
+export async function liveMigrateVmAction(
+  vmid: number,
+  targetPeerIp: string
+): Promise<{ success: boolean; upid?: string; message: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const peer = (targetPeerIp || '').trim();
+  if (!/^[a-zA-Z0-9.:-]+$/.test(peer)) {
+    throw new Error('Invalid target peer IP/hostname');
+  }
+  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string; error?: string }>(
+    '/v1/virt/migrate',
+    'POST',
+    { vmid, targetPeerIp: peer }
+  );
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: live migration of VM ${vmid} to ${peer} did not start.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    upid: daemonResp.upid,
+    message: daemonResp.message || daemonResp.error || `Started live migration of VM ${vmid} to ${peer}.`,
+  };
+}
+
+export interface QgaGuestInterface {
+  name: string;
+  hardwareAddress?: string;
+  ipAddresses?: Array<{ ipAddress: string; ipAddressType: string; prefix: number }>;
+}
+
+export async function getVmQgaInterfacesAction(
+  vmid: number
+): Promise<{ success: boolean; interfaces: QgaGuestInterface[]; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const daemonResp = await callAgentApi<{ success?: boolean; interfaces?: QgaGuestInterface[]; error?: string }>(
+    `/v1/virt/qga?vmid=${encodeURIComponent(String(vmid))}`
+  );
+  if (!daemonResp) {
+    return { success: false, interfaces: [], error: 'Daemon unavailable' };
+  }
+  return {
+    success: daemonResp.success !== false,
+    interfaces: Array.isArray(daemonResp.interfaces) ? daemonResp.interfaces : [],
+    error: daemonResp.error,
+  };
+}
+
+export async function exportVmLibvirtXmlAction(
+  vmid: number
+): Promise<{ success: boolean; xml?: string; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const daemonResp = await callAgentApi<{ success?: boolean; xml?: string; domainXml?: string; error?: string }>(
+    `/v1/virt/libvirt-xml?vmid=${encodeURIComponent(String(vmid))}`
+  );
+  if (!daemonResp) {
+    return { success: false, error: 'Daemon unavailable' };
+  }
+  const xml = daemonResp.xml || daemonResp.domainXml;
+  if (!xml) {
+    return { success: false, error: daemonResp.error || `No libvirt domain XML returned for VM ${vmid}` };
+  }
+  return { success: true, xml };
+}
+
 export async function getTaskListAction(): Promise<TaskItem[]> {
   const session = await getSession();
   assertActionPermitted(session);

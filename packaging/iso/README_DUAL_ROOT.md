@@ -157,6 +157,14 @@ In addition to traditional ext4 A/B dual-root slots, Axonwall provides first-cla
      ```
 - **ZBM Pre-Boot Watchdog (`20-axonwall-watchdog.sh`):**
   Runs inside the ZFSBootMenu pre-boot hook prior to `kexec`. It checks `org.axonwall:bootcount`. If 3 consecutive boot attempts fail before `axonwalld` marks the system healthy, ZBM automatically reverts `bootfs` to `fallback_be` and boots the previously working environment.
-- **Web Console UI:**
-  Under **System > Updates**, administrators can view pool topology and health, create point-in-time snapshots, clone historical snapshots into new boot environments, switch active boot environments, and safely delete obsolete BEs.
+- **Web Console & CLI Management:**
+  Under **System > Updates** (`/system/updates`), `axonwall-tui` (Tab `[u]` ZBM/Boot), or `axonwallctl`, administrators can inspect pool health, create arbitrary snapshots, clone historical snapshots into new boot environments, switch active boot environments, customize ZFSBootMenu visual palettes (`cyber-cyan`, `emerald-ops`, `amber-tactical`, `crimson-soc`, `mono-stealth`), and stage cryptographically signed updates:
+  ```bash
+  axonwallctl zbm list
+  axonwallctl zbm snapshot axonwall-0.11.64 pre-change
+  axonwallctl zbm clone axonwall-0.11.64@pre-change axonwall-rollback
+  axonwallctl zbm activate axonwall-rollback
+  sudo axonwall-zbm-theme set-palette cyber-cyan && sudo axonwall-zbm-theme apply
+  sudo axonwallctl update --version 0.11.64
+  ```
 

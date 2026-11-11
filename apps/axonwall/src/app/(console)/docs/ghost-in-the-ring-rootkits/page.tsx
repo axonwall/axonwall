@@ -5,9 +5,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Host Malware, rkhunter & Ghost-in-the-Ring Kernel Rootkit Hunter | Axonwall Documentation',
+  title: 'Host Malware, 5-Hook BPF-LSM & Ghost-in-the-Ring Rootkit Hunter | Axonwall Documentation',
   description:
-    'Detecting and preventing user-space malware and Ring-0 io_uring & eBPF kernel rootkits using rkhunter, chkrootkit, ClamAV, AIDE, YARA, Lynis, BPF_LSM, /proc/kcore prog_idr inspection, and Silicon PMU Last Branch Records (LBR).',
+    'Detecting and preventing user-space malware and Ring-0 io_uring, AF_ALG Copy Fail (CVE-2026-31431), & eBPF kernel rootkits using 8 host scanners, 5-hook CO-RE BPF-LSM (s_dev, i_ino) guards, Linux 6.9+ BPF_TOKEN UserNS mediation, /proc/kcore prog_idr inspection, and Silicon PMU LBR.',
 };
 
 export default function GhostInTheRingDocsPage() {
@@ -17,17 +17,17 @@ export default function GhostInTheRingDocsPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Ring-0 Kernel Telemetry &amp; Host Malware Defense Suite
+          Ring-0 Kernel Telemetry &amp; Host Malware Defense Suite • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Host Malware &amp; Ghost-in-the-Ring Kernel Rootkit Hunter
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall pairs six battle-tested host integrity &amp; malware engines (<code className="text-white font-mono">rkhunter</code>,{' '}
+          Enabled by default via the <code className="text-emerald-400 font-mono">host-malware-rootkit</code> plugin, Axonwall pairs eight battle-tested host integrity &amp; malware engines (<code className="text-white font-mono">rkhunter</code>,{' '}
           <code className="text-white font-mono">chkrootkit</code>, <code className="text-white font-mono">ClamAV</code>,{' '}
-          <code className="text-white font-mono">AIDE</code>, <code className="text-white font-mono">YARA</code>, and{' '}
-          <code className="text-white font-mono">Lynis</code>) with our <strong>Ghost-in-the-Ring</strong> Ring-0 telemetry
-          engine—engineered to catch syscall-less <code className="text-amber-300 font-mono">io_uring</code> implants and
+          <code className="text-white font-mono">AIDE</code>, <code className="text-white font-mono">YARA</code>,{' '}
+          <code className="text-white font-mono">Lynis</code>, <code className="text-white font-mono">unhide</code>, and{' '}
+          <code className="text-white font-mono">debsums</code>) with our <strong>Ghost-in-the-Ring</strong> 5-hook Ring-0 CO-RE BPF-LSM guard and Linux 6.9+ <code className="text-sky-300 font-mono">BPF_TOKEN_CREATE</code> mediator—engineered to block <strong>Copy Fail (CVE-2026-31431)</strong>, syscall-less <code className="text-amber-300 font-mono">io_uring</code> implants, cross-tenant UserNS <code className="text-rose-300 font-mono">bpf_probe_read_kernel()</code> escapes, and
           self-hiding <code className="text-cyan-300 font-mono">eBPF</code> rootkits when kprobes and syscall tables lie.
         </p>
       </div>
@@ -35,20 +35,21 @@ export default function GhostInTheRingDocsPage() {
       {/* Multi-Engine Host Malware & Integrity Suite */}
       <section id="host-scanners" className="space-y-6">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Bug className="w-6 h-6 text-emerald-400" /> 1. Six-Engine Host Malware &amp; Integrity Suite (<code className="font-mono text-emerald-400">host-malware-rootkit</code>)
+          <Bug className="w-6 h-6 text-emerald-400" /> 1. Eight-Engine Host Malware &amp; Integrity Suite (<code className="font-mono text-emerald-400">host-malware-rootkit</code>)
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           Network perimeter defense is incomplete if the appliance or hypervisor host itself is compromised. Axonwall
-          orchestrates six complementary host security scanners from a unified declarative configuration (
-          <code className="text-emerald-400 font-mono">/etc/axonwall/rootkit.yaml</code>):
+          orchestrates eight complementary host security scanners from a unified declarative configuration under{' '}
+          <code className="text-emerald-400 font-mono">hostDefense:</code> in{' '}
+          <code className="text-emerald-400 font-mono">/etc/axonwall/security.yaml</code>:
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-            <h3 className="font-bold text-white text-sm">rkhunter &amp; chkrootkit</h3>
+            <h3 className="font-bold text-white text-sm">rkhunter, chkrootkit &amp; unhide</h3>
             <p className="text-slate-400 leading-relaxed">
               Scans kernel symbol tables (<code className="text-slate-200">/proc/kallsyms</code>), LKM module paths,
-              hidden <code className="text-slate-200">/proc</code> PIDs, promiscuous raw sockets, and trojaned system
+              brute-forced hidden PID/TID namespaces (<code className="text-slate-200">unhide</code>), promiscuous raw sockets, and trojaned system
               binaries (<code className="text-slate-200">ps</code>, <code className="text-slate-200">ss</code>,{' '}
               <code className="text-slate-200">ls</code>, <code className="text-slate-200">sshd</code>).
             </p>
@@ -65,11 +66,11 @@ export default function GhostInTheRingDocsPage() {
           </div>
 
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-            <h3 className="font-bold text-white text-sm">AIDE Cryptographic FIM</h3>
+            <h3 className="font-bold text-white text-sm">AIDE Cryptographic FIM &amp; debsums</h3>
             <p className="text-slate-400 leading-relaxed">
-              Verifies SHA-512 + xattr + inode cryptographic baselines across <code className="text-slate-200">/boot</code>,{' '}
+              Verifies SHA-512 + xattr + inode cryptographic baselines (<code className="text-slate-200">AIDE</code>) and Debian package MD5/SHA manifests (<code className="text-slate-200">debsums</code>) across <code className="text-slate-200">/boot</code>,{' '}
               <code className="text-slate-200">/etc/axonwall</code>, <code className="text-slate-200">/usr/bin</code>, and{' '}
-              <code className="text-slate-200">/usr/sbin</code> to detect unauthorized binary tampering.
+              <code className="text-slate-200">/usr/sbin</code>.
             </p>
           </div>
 
@@ -215,58 +216,100 @@ tracepoint:io_uring:io_uring_submit_req {
       <section id="lsm-bpf" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
           <Lock className="w-6 h-6 text-emerald-400" />
-          5. Preventive Ring-0 Architecture: BPF_LSM &amp; Declarative Configuration
+          5. Preventive Ring-0 Architecture: CO-RE BPF-LSM Hooks &amp; Declarative Configuration
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Axonwall compiles and enforces a preventive <code className="text-emerald-400 font-mono">BPF_LSM</code> policy (
-          <code className="text-white font-mono">SEC(&quot;lsm/bpf&quot;)</code>,{' '}
-          <code className="text-white font-mono">SEC(&quot;lsm/uring_sqpoll&quot;)</code>, and{' '}
-          <code className="text-white font-mono">SEC(&quot;lsm/uring_cmd&quot;)</code>) paired with{' '}
-          <code className="text-emerald-400 font-mono">kernel.unprivileged_bpf_disabled = 1</code> and{' '}
-          <code className="text-emerald-400 font-mono">lockdown=confidentiality</code> so that even a compromise of{' '}
-          <code className="text-white font-mono">root</code> cannot load an unauthorized eBPF program or spawn a
-          zero-syscall <code className="text-white font-mono">io_uring</code> worker.
+          Axonwall compiles and enforces a preventive CO-RE <code className="text-emerald-400 font-mono">BPF_LSM</code> guard (<code className="text-slate-200 font-mono">apps/axonwalld/ebpf/lsm_guard.c</code>) keyed by unspoofable kernel <code className="text-emerald-400 font-mono">(s_dev, i_ino)</code> executable inode maps rather than mutable <code className="text-slate-200 font-mono">comm</code> process names:
         </p>
 
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-rose-400 font-mono">1. SEC(&quot;lsm/socket_bind&quot;)</div>
+            <p className="text-slate-400 leading-relaxed">
+              Neutralizes <strong>Copy Fail (CVE-2026-31431)</strong> by blocking unauthorized processes from binding <code className="text-slate-200 font-mono">AF_ALG</code> (<code className="text-slate-200 font-mono">salg_type == &quot;aead&quot;</code>) crypto sockets unless their <code className="text-slate-200 font-mono">(s_dev, i_ino)</code> matches <code className="text-slate-200 font-mono">trustedAfAlgPaths</code>.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-cyan-400 font-mono">2. SEC(&quot;lsm/bpf&quot;)</div>
+            <p className="text-slate-400 leading-relaxed">
+              Intercepts <code className="text-slate-200 font-mono">BPF_PROG_LOAD</code> in Ring-0: in the host namespace (<code className="text-slate-200 font-mono">user_ns-&gt;level == 0</code>), denies loading unless the calling binary&apos;s <code className="text-slate-200 font-mono">(s_dev, i_ino)</code> is in <code className="text-slate-200 font-mono">trustedBpfLoaderPaths</code>; inside User Namespaces (<code className="text-slate-200 font-mono">level &gt; 0</code>), defers safe networking loads to <code className="text-slate-200 font-mono">BPF_TOKEN</code> mediation while blocking Ring-0 tracing types.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-amber-400 font-mono">3. SEC(&quot;lsm/uring_sqpoll&quot;)</div>
+            <p className="text-slate-400 leading-relaxed">
+              Blocks <code className="text-slate-200 font-mono">IORING_SETUP_SQPOLL</code> kernel worker thread creation (<code className="text-slate-200 font-mono">-EPERM</code>), eliminating syscall-less ring implants even if an attacker obtains <code className="text-slate-200 font-mono">CAP_SYS_NICE</code> or <code className="text-slate-200 font-mono">root</code>.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-sky-400 font-mono">4. SEC(&quot;lsm/bpf_token_create&quot;)</div>
+            <p className="text-slate-400 leading-relaxed">
+              Audits every Linux 6.9+ <code className="text-slate-200 font-mono">bpffs</code> token instantiation and vetoes (<code className="text-rose-400 font-mono">-EPERM</code>) any superblock whose <code className="text-slate-200 font-mono">delegate_progs</code> bitmask attempts to delegate <code className="text-rose-300 font-mono">FORBIDDEN_RING0_TOKEN_PROG_MASK</code> (<code className="text-slate-200 font-mono">kprobe</code>, <code className="text-slate-200 font-mono">tracepoint</code>, <code className="text-slate-200 font-mono">perf_event</code>, <code className="text-slate-200 font-mono">raw_tracepoint</code>, <code className="text-slate-200 font-mono">tracing</code>, <code className="text-slate-200 font-mono">struct_ops</code>, <code className="text-slate-200 font-mono">ext</code>, <code className="text-slate-200 font-mono">lsm</code>, <code className="text-slate-200 font-mono">syscall</code>).
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2 md:col-span-2">
+            <div className="font-bold text-purple-400 font-mono">5. SEC(&quot;lsm/bpf_token_cmd&quot;) — Solving the UserNS vs. Ring-0 `bpf_probe_read_kernel()` Catch-22</div>
+            <p className="text-slate-400 leading-relaxed">
+              Validates every <code className="text-slate-200 font-mono">BPF_TOKEN</code>-authorized command inside unprivileged LXC and K3s <code className="text-slate-200 font-mono">hostUsers: false</code> containers, permitting verified packet-networking programs (<code className="text-emerald-300 font-mono">XDP</code>, <code className="text-emerald-300 font-mono">SCHED_CLS</code>, <code className="text-emerald-300 font-mono">SOCKET_FILTER</code>, <code className="text-emerald-300 font-mono">CGROUP_SKB</code>) while guaranteeing no unprivileged tenant can ever load a program capable of calling <code className="text-rose-300 font-mono">bpf_probe_read_kernel()</code> against host kernel memory.
+            </p>
+          </div>
+        </div>
+
         <CodeBlock
-          title="/etc/axonwall/rootkit.yaml (Declarative Host & Ring-0 Hunter Config)"
+          title="/etc/axonwall/security.yaml — HostMalwareDefenseConfigSchema (hostDefense:)"
           language="yaml"
-          code={`enabled: true
-scanScheduleCron: "0 */6 * * *"
-autoQuarantine: false
-quarantineDir: "/var/lib/axonwall/quarantine"
+          code={`hostDefense:
+  rkhunterEnabled: true
+  chkrootkitEnabled: true
+  clamavEnabled: true
+  aideEnabled: true
+  lynisEnabled: true
+  yaraEnabled: true
+  unhideEnabled: true
+  debsumsEnabled: true
+  scheduledScanCron: "0 */6 * * *"
+  ioUringDisabledMode: 2
+  ioUringAllowedGid: 0
+  blockIoUringSqpoll: true
+  unprivilegedBpfDisabled: true
+  bpfJitHardenMode: 2
+  kernelLockdownMode: integrity
+  bpfLsmGuardEnabled: true
+  bpfLsmTokenMediationEnabled: true
+  trustedBpfLoaderPaths:
+    - /usr/local/bin/axonwalld
+    - /usr/sbin/bpftool
+  blockAfAlgAeadCopyfail: true
+  trustedAfAlgPaths: []
+  progIdrKcoreDiffEnabled: true
+  pmuLbrBranchTracingEnabled: true
+  autoQuarantineOnCritical: false`}
+        />
 
-scanners:
-  rkhunter: true
-  chkrootkit: true
-  clamav: true
-  clamavRealtime: true
-  aide: true
-  yara: true
-  lynis: true
+        <CodeBlock
+          title="On-Demand Host Malware & Ring-0 Rootkit Hunting CLI Tools"
+          language="bash"
+          code={`# Run the full multi-engine host malware + Ring-0 rootkit hunt orchestrator
+sudo axonwall-hunt-rootkits
 
-ghostInTheRing:
-  enabled: true
-  lsmBpfLockdown: true
-  blockUnpinnedBpfPrograms: true
-  restrictIoUring: "disabled"       # "allow" | "restricted" | "disabled"
-  bpftoolAuditIntervalSec: 60
-  pmuTelemetryEnabled: true
-  pmuSampleFrequencyHz: 99
-  pmuAnomalyThresholdPct: 18
-  alertOnHelperCalls:
-    - bpf_probe_write_user
-    - bpf_override_return
-    - bpf_send_signal`}
+# Audit io_uring anon_inode descriptors, iou-sqp-* threads, and sysctl lockdown
+sudo hunt-io-uring-implants.sh
+
+# Audit loaded eBPF programs, kprobes/fentry trampolines, and helper calls
+sudo hunt-ebpf-rootkits.sh
+
+# Walk /proc/kcore prog_idr via drgn to expose self-hiding eBPF rootkits
+sudo python3 /usr/local/bin/audit_hidden_bpf_prog_idr.py`}
         />
 
         <Callout type="tip" title="Manage via Web Console, Neovim TUI, or CLI">
-          Configure and trigger deep Ring-0 + Malware scans from the Web Console at{' '}
+          Configure <code className="font-mono text-emerald-300">hostDefense:</code> in{' '}
+          <code className="font-mono text-emerald-300">/etc/axonwall/security.yaml</code> via{' '}
+          <code className="font-mono text-emerald-300">axonwall-config security</code>, inspect live Ring-0 telemetry in the Web Console at{' '}
           <Link href="/security/rootkit-hunter" className="font-mono text-emerald-300 underline">
             /security/rootkit-hunter
           </Link>
-          , in the Neovim Super Configurator via <code className="font-mono text-emerald-300">axonwall-config rootkit</code>,
-          or from the shell with <code className="font-mono text-emerald-300">axonwallctl rootkit-scan</code>.
+          , or run <code className="font-mono text-emerald-300">sudo axonwall-hunt-rootkits</code> from SSH.
         </Callout>
       </section>
     </div>

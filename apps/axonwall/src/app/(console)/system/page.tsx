@@ -18,6 +18,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   getGitOpsHistory,
   getCommitDiff,
@@ -499,9 +500,17 @@ export default function SystemPage() {
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
-          <div className="flex items-center gap-2 text-white font-semibold">
-            <Server className="w-5 h-5 text-purple-400" />
-            <h2>/etc Tracking (etckeeper)</h2>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-white font-semibold">
+              <Server className="w-5 h-5 text-purple-400" />
+              <h2>/etc Tracking (etckeeper)</h2>
+            </div>
+            <Link
+              href="/system/etckeeper"
+              className="px-2.5 py-1 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-300 text-[11px] font-semibold transition"
+            >
+              Configure &amp; Logs &rarr;
+            </Link>
           </div>
           <div className="text-xs text-slate-300 space-y-2">
             <div className="flex justify-between">
@@ -512,19 +521,24 @@ export default function SystemPage() {
             </div>
             <div className="flex justify-between">
               <span className="text-slate-400">Tracked Directory:</span>
-              <span className="font-mono text-cyan-400">{etckeeperStatus?.trackedPath || '/etc'}</span>
+              <span className="font-mono text-cyan-400">{etckeeperStatus?.trackedPath || '/etc'} (etckeeper.timer {etckeeperStatus?.timerActive ? 'Active' : 'Idle'})</span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-400">Tree State:</span>
               <span className={etckeeperStatus?.clean ? 'text-emerald-400' : 'text-amber-400'}>
-                {etckeeperStatus?.clean ? 'Clean (committed)' : 'Modified / Pending'}
+                {etckeeperStatus?.clean
+                  ? 'Clean (committed)'
+                  : `Modified (${etckeeperStatus?.modifiedFiles?.length || 'Pending'})`}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-400">Last /etc Commit:</span>
-              <span className="font-mono text-purple-400">
+              <Link
+                href="/system/etckeeper"
+                className="font-mono text-purple-400 hover:underline"
+              >
                 {etckeeperStatus?.lastCommitHash ? etckeeperStatus.lastCommitHash.slice(0, 8) : 'None'}
-              </span>
+              </Link>
             </div>
           </div>
         </div>
@@ -532,14 +546,23 @@ export default function SystemPage() {
 
       {/* Revision History */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 shadow-sm">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-white font-semibold">
             <History className="w-5 h-5 text-emerald-400" />
             <h2>GitOps Configuration Audit Trail & Version Control</h2>
           </div>
-          <span className="text-xs text-slate-400 font-mono">
-            {commits.length} Committed Revision{commits.length === 1 ? '' : 's'}
-          </span>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/system/etckeeper"
+              className="text-xs text-purple-400 hover:text-purple-300 font-medium flex items-center gap-1 transition"
+            >
+              <FileDiff className="w-3.5 h-3.5" />
+              <span>View /etc Etckeeper Commits &amp; Diffs</span>
+            </Link>
+            <span className="text-xs text-slate-400 font-mono">
+              {commits.length} Committed Revision{commits.length === 1 ? '' : 's'}
+            </span>
+          </div>
         </div>
 
         <div className="overflow-x-auto">

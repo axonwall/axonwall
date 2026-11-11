@@ -32,7 +32,7 @@ export default function ObservabilityDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Zero-Instrumentation Kernel Telemetry • eBPF &amp; K3s
+          Zero-Instrumentation Kernel Telemetry • eBPF &amp; K3s • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           eBPF Infrastructure &amp; Kubernetes Observability
@@ -86,9 +86,10 @@ export default function ObservabilityDocPage() {
             </div>
             <p className="text-slate-400 leading-relaxed">
               Counters and latency histograms are aggregated in-place inside{' '}
-              <code className="text-slate-200 font-mono">BPF_MAP_TYPE_HASH</code> and{' '}
+              <code className="text-slate-200 font-mono">BPF_MAP_TYPE_LRU_HASH</code>,{' '}
+              <code className="text-slate-200 font-mono">BPF_MAP_TYPE_HASH</code>, and{' '}
               <code className="text-slate-200 font-mono">BPF_MAP_TYPE_PERCPU_ARRAY</code> maps. User space scrapes
-              pre-summarized golden signals (throughput, TCP RTT, retransmits, VFS IOPS) without copying raw packets.
+              pre-summarized golden signals (throughput, TCP RTT, retransmits, VFS &amp; OpenZFS ARC/ZIL IOPS) without copying raw packets.
             </p>
           </div>
 
@@ -140,8 +141,8 @@ export default function ObservabilityDocPage() {
             </h3>
             <ul className="space-y-1.5 text-slate-300 leading-relaxed">
               <li>
-                • <strong className="text-emerald-300">XDP Wire-Speed Flow Accounting:</strong>{' '}
-                <code className="font-mono">SEC(&quot;xdp&quot;)</code> parses Ethernet/IPv4/TCP/UDP 5-tuples before{' '}
+                • <strong className="text-emerald-300">Dual-Stack &amp; QinQ VLAN XDP Wire-Speed Accounting:</strong>{' '}
+                <code className="font-mono">SEC(&quot;xdp&quot;)</code> peels 2-layer <code className="font-mono">802.1Q</code> / <code className="font-mono">802.1ad</code> VLAN headers and tracks IPv4 (<code className="font-mono">flow_map</code> 131K LRU) + IPv6 (<code className="font-mono">flow6_map</code> 65K LRU) 5-tuples and monotonic TTL <code className="font-mono">XDP_DROP</code> blocklists before{' '}
                 <code className="font-mono">sk_buff</code> allocation.
               </li>
               <li>
@@ -163,9 +164,9 @@ export default function ObservabilityDocPage() {
             </h3>
             <ul className="space-y-1.5 text-slate-300 leading-relaxed">
               <li>
-                • <strong className="text-sky-300">VFS Read/Write/Fsync Latency:</strong> BTF{' '}
+                • <strong className="text-sky-300">VFS &amp; OpenZFS ARC/L2ARC/ZIL Telemetry:</strong> BTF{' '}
                 <code className="font-mono">fentry/vfs_read</code>, <code className="font-mono">fexit/vfs_write</code>,
-                and <code className="font-mono">vfs_fsync</code> measure per-pod storage latency on OpenEBS ZFS-LocalPV.
+                and <code className="font-mono">vfs_fsync</code> pair with <code className="font-mono">/proc/spl/kstat/zfs</code> ARC/L2ARC hit ratios, ZIL/SLOG sync commits, and per-pool ZIO queues.
               </li>
               <li>
                 • <strong className="text-sky-300">Unspoofable (s_dev, i_ino) Identity:</strong> Resolves{' '}
@@ -255,10 +256,12 @@ static __always_inline bool get_current_exe_id(struct lsm_exe_id *out) {
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
             <span className="font-bold text-amber-400">4. Zero-Syscall &amp; Kernel Crypto Containment</span>
             <p className="text-slate-400">
-              Enforce <code className="text-slate-200 font-mono">SEC(&quot;lsm/socket_bind&quot;)</code> (blocking Copy
+              Enforce all 5 CO-RE BPF-LSM hooks—<code className="text-slate-200 font-mono">SEC(&quot;lsm/socket_bind&quot;)</code> (Copy
               Fail <code className="text-slate-200 font-mono">CVE-2026-31431</code>),{' '}
-              <code className="text-slate-200 font-mono">SEC(&quot;lsm/bpf&quot;)</code>, and{' '}
-              <code className="text-slate-200 font-mono">SEC(&quot;lsm/uring_sqpoll&quot;)</code> across all pods.
+              <code className="text-slate-200 font-mono">SEC(&quot;lsm/bpf&quot;)</code>,{' '}
+              <code className="text-slate-200 font-mono">SEC(&quot;lsm/uring_sqpoll&quot;)</code>,{' '}
+              <code className="text-slate-200 font-mono">SEC(&quot;lsm/bpf_token_create&quot;)</code>, and{' '}
+              <code className="text-slate-200 font-mono">SEC(&quot;lsm/bpf_token_cmd&quot;)</code>—across all pods.
             </p>
           </div>
         </div>
@@ -266,14 +269,18 @@ static __always_inline bool get_current_exe_id(struct lsm_exe_id *out) {
         <CodeBlock
           title="K3s eBPF Troubleshooting CLI Workflow"
           language="bash"
-          code={`# 1. Observe real-time L7 DNS and HTTP errors in K3s via Cilium Hubble
+          code={`# 1. Inspect Dual-Stack XDP counters, 5-hook BPF-LSM & Linux 6.9+ BPF_TOKEN mounts
+axonwallctl ebpf overview
+axonwallctl ebpf tokens
+
+# 2. Observe real-time L7 DNS and HTTP errors in K3s via Cilium Hubble
 hubble observe --namespace vow-system --verdict DROPPED,ERROR --follow
 
-# 2. Inspect Axonwall XDP flow_map and BPF-LSM allowlist/events maps
+# 3. Inspect Axonwall XDP flow_map/flow6_map and BPF-LSM allowlist maps
 bpftool prog show
 bpftool map dump name allowlist
 
-# 3. Stream Tetragon container process & VFS file-access events
+# 4. Stream Tetragon container process & VFS file-access events
 kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout -f`}
         />
       </section>
@@ -333,21 +340,134 @@ kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout 
         </div>
 
         <CodeBlock
-          title="Declarative DesiredState Configuration (observability.ebpfApm)"
-          language="json"
-          code={`{
-  "observability": {
-    "ebpfApm": {
-      "enabled": true,
-      "serviceMapEnabled": true,
-      "l7ProtocolDissection": true,
-      "tlsUprobesEnabled": false,
-      "continuousProfilingEnabled": true,
-      "profilingSampleHz": 99,
-      "automatedRcaInspections": true
-    }
-  }
-}`}
+          title="/etc/axonwall/system.yaml — Complete ObservabilitySchema (observability: & coroot-ebpf-apm)"
+          language="yaml"
+          code={`plugins:
+  - id: coroot-ebpf-apm
+    enabled: true
+
+observability:
+  metrics:
+    enabled: true
+    retentionDays: 30
+    remoteWriteUrl: ""
+  flowExport:
+    enabled: false
+    protocol: ipfix
+    collectorAddress: ""
+  alerting:
+    enabled: true
+    webhookUrl: ""
+  clickhouse:
+    enabled: false
+    endpoint: http://127.0.0.1:8123
+    database: axonwall_telemetry
+  ebpfApm:
+    enabled: true
+    serviceMapEnabled: true
+    l7ProtocolDissection: true
+    tlsUprobesEnabled: false
+    continuousProfilingEnabled: true
+    profilingSampleHz: 99
+    automatedRcaInspections: true
+    xdpDualStackVlanEnabled: true
+    zfsArcZilTelemetryEnabled: true`}
+        />
+      </section>
+
+      {/* Linux 6.9+ BPF_TOKEN_CREATE Delegation & Dual-Stack XDP */}
+      <section id="bpf-token-delegation" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Cpu className="w-6 h-6 text-sky-400" /> Linux 6.9+ `BPF_TOKEN_CREATE` Unprivileged Delegation &amp; Dual-Stack XDP
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Informed by Tekromancy&apos;s kernel engineering research on{' '}
+          <a
+            href="https://tekromancy.com/blog/ebpf-token-unprivileged-bpf-delegation-user-namespaces-linux-6-9-containers/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sky-400 hover:underline"
+          >
+            Linux 6.9+ `BPF_TOKEN_CREATE` &amp; User Namespace eBPF Delegation
+          </a>
+          , Axonwall bridges multi-tenant container isolation (`CLONE_NEWUSER`) with high-speed packet processing—allowing
+          rootless K3s <code className="text-emerald-400 font-mono">hostUsers: false</code> pods and unprivileged LXC
+          containers to load verified networking eBPF programs without granting host <code className="text-rose-400 font-mono">CAP_BPF</code>{' '}
+          or <code className="text-rose-400 font-mono">CAP_SYS_ADMIN</code>:
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-sky-400">1. Four-Pillar `bpffs` Mount Delegation</span>
+            <p className="text-slate-400 leading-relaxed">
+              <code className="text-slate-200 font-mono">axonwalld</code> mounts isolated token instances under{' '}
+              <code className="text-slate-200 font-mono">/run/axonwall/bpffs-tokens/&lt;profile&gt;</code> with explicit{' '}
+              <code className="text-slate-200 font-mono">delegate_cmds</code>,{' '}
+              <code className="text-slate-200 font-mono">delegate_progs</code>,{' '}
+              <code className="text-slate-200 font-mono">delegate_maps</code>, and{' '}
+              <code className="text-slate-200 font-mono">delegate_attachs</code> options. Inside the container, setting{' '}
+              <code className="text-emerald-300 font-mono">LIBBPF_BPF_TOKEN_PATH=/sys/fs/bpf</code> enables{' '}
+              <code className="text-slate-200 font-mono">libbpf</code> and <code className="text-slate-200 font-mono">cilium/ebpf</code>{' '}
+              to mint `BPF_TOKEN_CREATE` file descriptors transparently.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-rose-400">2. Ring-0 `bpf_probe_read_kernel()` Isolation Veto</span>
+            <p className="text-slate-400 leading-relaxed">
+              Even inside a User Namespace, eBPF tracing programs execute in shared Ring-0 address space where{' '}
+              <code className="text-rose-300 font-mono">bpf_probe_read_kernel()</code> could read host credentials or sibling
+              container secrets. Axonwall&apos;s CO-RE BPF-LSM hooks (<code className="text-slate-200 font-mono">SEC(&quot;lsm/bpf_token_create&quot;)</code>{' '}
+              &amp; <code className="text-slate-200 font-mono">SEC(&quot;lsm/bpf_token_cmd&quot;)</code>) unconditionally block{' '}
+              <code className="text-rose-300 font-mono">kprobe</code>, <code className="text-rose-300 font-mono">tracepoint</code>,{' '}
+              <code className="text-rose-300 font-mono">perf_event</code>, <code className="text-rose-300 font-mono">tracing</code>,{' '}
+              <code className="text-rose-300 font-mono">struct_ops</code>, and <code className="text-rose-300 font-mono">lsm</code>{' '}
+              with <code className="text-rose-300 font-mono">-EPERM</code>.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-emerald-400">3. Dual-Stack IPv4/IPv6 + 802.1Q/802.1ad QinQ XDP</span>
+            <p className="text-slate-400 leading-relaxed">
+              <code className="text-slate-200 font-mono">flow_tracker.c</code> peels up to two nested{' '}
+              <code className="text-slate-200 font-mono">802.1Q</code> / <code className="text-slate-200 font-mono">802.1ad</code>{' '}
+              VLAN headers and tracks both IPv4 (<code className="text-slate-200 font-mono">flow_map</code>, 131K LRU) and
+              IPv6 (<code className="text-slate-200 font-mono">flow6_map</code>, 65K LRU) 5-tuples, TCP SYN/RST flags, and
+              per-CPU verdict counters at ~18 ns/packet.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-amber-400">4. LPM CIDR Subnet `XDP_DROP` &amp; Ring-0 TCP SYN-Flood Shield</span>
+            <p className="text-slate-400 leading-relaxed">
+              Dual-stack exact-host maps (<code className="text-slate-200 font-mono">blocklist_map</code> /{' '}
+              <code className="text-slate-200 font-mono">blocklist6_map</code>) and{' '}
+              <code className="text-slate-200 font-mono">BPF_MAP_TYPE_LPM_TRIE</code> prefix maps (<code className="text-slate-200 font-mono">cidr4_blocklist_map</code>{' '}
+              / <code className="text-slate-200 font-mono">cidr6_blocklist_map</code>) store monotonic{' '}
+              <code className="text-slate-200 font-mono">bpf_ktime_get_ns()</code> expiration timestamps in-kernel,
+              paired with a per-source 1-second sliding-window Ring-0 TCP SYN-flood rate limiter (<code className="text-slate-200 font-mono">syn_rate_map</code>{' '}
+              / <code className="text-slate-200 font-mono">syn6_rate_map</code>) that drops volumetric SYN floods before{' '}
+              <code className="text-slate-200 font-mono">sk_buff</code> allocation.
+            </p>
+          </div>
+        </div>
+
+        <CodeBlock
+          title="axonwallctl ebpf — Ring-0 Dataplane, XDP Fast-Drop & BPF_TOKEN CLI"
+          language="bash"
+          code={`# Unified Ring-0 eBPF, BPF_TOKEN_CREATE, KVM/LXC, K3s & OpenZFS ARC/ZIL overview
+axonwallctl ebpf overview
+
+# Inspect Linux 6.9+ BPF_TOKEN kernel support, presets, and active bpffs mounts
+axonwallctl ebpf tokens
+
+# Program a line-rate dual-stack XDP_DROP lease (IPv4 or IPv6) with 1-hour TTL
+axonwallctl ebpf xdp-drop 198.51.100.77 3600
+axonwallctl ebpf xdp-blocks
+axonwallctl ebpf xdp-unblock 198.51.100.77
+
+# Render a K3s UserNS (hostUsers: false) DaemonSet manifest with LIBBPF_BPF_TOKEN_PATH=/sys/fs/bpf
+axonwallctl ebpf render-k3s ebpf-sensor k3s-net-safe networking-safe`}
         />
       </section>
 

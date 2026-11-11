@@ -1,240 +1,177 @@
 <div align="center">
 
-# 🛡️ Axonwall
+# 🛡️ Axonwall (`v0.11.64`)
 
-### The Modern Linux Router & Next-Generation Firewall (NGFW)
+### The Sovereign Linux Next-Generation Firewall, OpenZFS NAS, Hypervisor & Autonomous AI SecOps Platform
 
-*Reimagining open-source perimeter security: from FreeBSD `pf` & legacy PHP to **Linux `nftables`**, **Next.js**, **Go**, and **Autonomous AI**.*
+*Reimagining perimeter & infrastructure security: from legacy FreeBSD `pf` & PHP to **Linux 6.12+ LTS `nftables`**, **Zero-Shell UEFI UKIs**, **Post-Quantum Dual-KEM**, **CO-RE BPF-LSM**, **OpenZFS**, **K3s**, **KVM/LXC**, and **Guardrailed MCP AI**.*
 
-[![License](https://img.shields.io/badge/License-GPLv2-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/Release-v0.11.64-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.11.64)
+[![License](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Linux_6.12+_LTS-orange.svg)](https://www.kernel.org/)
-[![Engine](https://img.shields.io/badge/Firewall-nftables_1.1+-red.svg)](https://netfilter.org/projects/nftables/)
+[![Engine](https://img.shields.io/badge/Firewall-nftables_1.1+%20%26%20eBPF%2FXDP-red.svg)](https://netfilter.org/projects/nftables/)
 [![Frontend](https://img.shields.io/badge/Console-Next.js_16_React_19-black.svg)](https://nextjs.org/)
-[![Controller](https://img.shields.io/badge/Control_Plane-Go_1.24-00ADD8.svg)](https://golang.org/)
-[![Appliance](https://img.shields.io/badge/Appliance-Debian_13_Trixie-A80030.svg)](https://www.debian.org/)
+[![Control Plane](https://img.shields.io/badge/Daemon-Go_1.26+%20%26%20TypeScript-00ADD8.svg)](https://golang.org/)
+[![Appliance](https://img.shields.io/badge/Appliance-Debian_13_Trixie_%7C_ZFSBootMenu_v3.1-A80030.svg)](https://www.debian.org/)
 
-[Website](https://axonwall.com) • [Documentation](https://axonwall.com/docs) • [2-Host HA Setup Guide](docs/HIGH_AVAILABILITY_SETUP.md) • [Business Plan](business-plan.md) • [Architecture](https://axonwall.com/architecture) • [Appliance ISOs](#installation--quickstart)
+[Website](https://axonwall.com) • [Documentation (24 Guides)](https://axonwall.com/docs) • [Releases & Checksums](https://axonwall.com/releases) • [2-Host HA Setup Guide](docs/HIGH_AVAILABILITY_SETUP.md) • [Terraform Provider](apps/terraform-provider-axonwall/README.md) • [Business Plan](business-plan.md)
 
 </div>
 
 ---
 
-## ⚡ The Problem: The FreeBSD Stagnation
+## ⚡ Why Axonwall?
 
-For more than two decades, the open-source firewall ecosystem has relied on FreeBSD foundations (**m0n0wall**, **pfSense®**, and **OPNsense®**). While these platforms pioneered community network security, their historical stack presents compounding architectural liabilities in modern environments:
+For more than two decades, open-source firewalls relied on FreeBSD (`m0n0wall`, `pfSense®`, `OPNsense®`) and server-rendered PHP scripts. In modern 10G/25G/100G, cloud-native, and AI-assisted environments, that legacy stack creates severe bottlenecks: single-core `pf` state-table contention, multi-year NIC/Wi-Fi 7 driver lag, instant-lockout applies, and zero native container or hypervisor coexistence.
 
-* **Single-Threaded Locking:** Under heavy connection state loads and NAT traversal, FreeBSD `pf` exhibits severe CPU core contention.
-* **Driver & Hardware Lag:** Modern Wi-Fi 6E/7 chipsets, 5G cellular modems, and multi-queue 10G/25G/100G NICs (Intel E810, Mellanox ConnectX) receive day-one support in Linux, but often lag by years or remain completely unsupported in BSD.
-* **Legacy PHP Web Tiers:** Traditional firewalls rely on server-side PHP scripts that execute raw system commands, creating state synchronization hazards, sluggish reloads, and administrative lockouts.
-* **Administrator Lockout Panic:** Applying an invalid firewall rule or gateway change can immediately cut off your SSH/web session, requiring serial console intervention.
-* **Zero Container Coexistence:** FreeBSD cannot run natively inside Docker, Kubernetes, or Linux network namespaces.
+**Axonwall** replaces that legacy stack from the kernel up—unifying **5 modular Core Roles** and **14 first-party Extension Plugins** over a strictly validated, declarative **12-file YAML control plane** (`/etc/axonwall/*.yaml`) with Junos-style **Commit-Confirm** automatic rollback.
+
+```
+                   ┌──────────────────────────────────────────────────────────────────┐
+                   │   Web Console (:2966) • Neovim TUI • Ink TUI • Terraform • MCP   │
+                   └────────────────────────────────┬─────────────────────────────────┘
+                                                    │ Declarative /etc/axonwall/*.yaml (Zod + Linter)
+                                                    ▼
+                   ┌──────────────────────────────────────────────────────────────────┐
+                   │         axonwall-controller (TS) + axonwalld (Go Ring-0)         │
+                   │   Commit-Confirm Rollback • Etckeeper Git • OpenLDAP + OIDC SSO  │
+                   └──────────┬─────────────────────┼─────────────────────┬───────────┘
+                              ▼                     ▼                     ▼
+               ┌────────────────────────┐ ┌────────────────────┐ ┌────────────────────────┐
+               │ Networking & Ring-0    │ │ Converged Compute  │ │ Sovereign AI & SecOps  │
+               │ • Atomic nftables      │ │ • OpenZFS NAS/Vault│ │ • Eluvix AI Router/DLP │
+               │ • XDP Flow & DDoS Drop │ │ • K3s + OpenEBS HA │ │ • Guardrailed MCP AI   │
+               │ • CO-RE BPF-LSM Guard  │ │ • KVM/QEMU + LXC   │ │ • Vigilante 12-Mod SOC │
+               │ • Rosenpass PQ-KEM VPN │ │ • Edge UEFI UKI    │ │ • Coroot eBPF APM      │
+               └────────────────────────┘ └────────────────────┘ └────────────────────────┘
+```
 
 ---
 
-## 🚀 The Solution: Axonwall
+## 🧩 Five Modular Core Roles & 19 Built-In Plugins
 
-**Axonwall** is a ground-up modernization of the open-source firewall. It pairs the raw line-rate performance and hardware compatibility of the modern Linux networking subsystem with a cloud-native, transaction-safe control plane.
+Run Axonwall as a dedicated zero-bloat perimeter NGFW, disable `core-firewall` to run a pure Host-Mode ZFS Storage Vault or K3s/KVM hypervisor node, or converge all five roles onto a 2-node High Availability bare-metal cluster:
 
-```
-                           ┌──────────────────────────────────────────────┐
-                           │      Axonwall Modern React/Next.js Console   │
-                           │   (OpenLDAP Auth + Supabase Configuration)   │
-                           └──────────────────────┬───────────────────────┘
-                                                  │ Intent-Driven State (JSON)
-                                                  ▼
-                           ┌──────────────────────────────────────────────┐
-                           │        Privileged Go Control Plane           │
-                           │      (Validation, Linting, & Commit-Confirm) │
-                           └──────────────────────┬───────────────────────┘
-                                                  │
-                ┌─────────────────────────────────┼─────────────────────────────────┐
-                ▼                                 ▼                                 ▼
-   ┌───────────────────────────┐    ┌───────────────────────────┐    ┌───────────────────────────┐
-   │     Linux nftables        │    │    Embedded Observability │    │   Distributed Satellites  │
-   │ Atomic `table inet axonwall`│   │   VictoriaMetrics & Logs  │    │  OpenWrt & Linux SD-Branch│
-   │ WireGuard, Kea, FRR, IDS  │    │   Insight Flow Analytics  │    │  WireGuard Mesh & Edge FW │
-   └───────────────────────────┘    └───────────────────────────┘    └───────────────────────────┘
-```
+| Core Role ID | Default | Capabilities |
+| :--- | :--- | :--- |
+| **`core-firewall`** | **Enabled** | Stateful `table inet axonwall` firewall, Dual-Stack IPv4/IPv6 + `802.1Q`/`802.1ad` QinQ VLAN, LPM CIDR & TCP SYN-Flood eBPF XDP fast-drop, SNAT/DNAT/Hairpin/1:1 BINAT/NPTv6, Multi-WAN SD-WAN health prober, FRR (BGP/OSPF/BFD), CAKE/FQ-CoDel QoS, Kea DHCPv4/v6 IA_PD + `radvd` SLAAC, Unbound DNS/RPZ sinkhole, mDNS reflector, UPnP/NAT-PMP, Suricata 7+ IDS/IPS, CrowdSec, WireGuard, strongSwan IKEv2, OpenVPN `ovpn-dco`, Keepalived + `conntrackd` HA |
+| **`core-nas`** | Opt-in | OpenZFS Stripe/Mirror/RAIDZ1-3/dRAID pools with Special NVMe VDEVs, SLOG/L2ARC/hot-spares, Checkpoints & NVMe TRIM, `/proc/spl/kstat/zfs` ARC/L2ARC/ZIL SPL kstat telemetry, Native AES-256-GCM encrypted datasets & ZVOLs, Samba SMB3 + VSS shadow copies + Time Machine mDNS + WSDD2, NFSv4, iSCSI targets, S.M.A.R.T. tests, `rclone` Cloud Sync, SeaweedFS S3 WORM Vault, and incremental HA `zfs send/recv` |
+| **`core-k3s`** | Opt-in | Embedded single-node or 2-node HA K3s Kubernetes with selectable **Cilium eBPF CNI (`kubeProxyReplacement` + Hubble)** or WireGuard Flannel mesh, Embedded Etcd local & S3 snapshots/restore, Linux 6.9+ `UserNamespacesSupport` (`hostUsers: false`) + `BPF_TOKEN` Pod/DaemonSet profiles, OpenEBS ZFS-LocalPV & replicated Mayastor NVMe-oF storage, bundled `kubectl` & `helm` v3, and non-root `axonwall-kubeconfig --vip` sync |
+| **`core-virt`** | Opt-in | Type-1 KVM/QEMU hypervisor (OVMF UEFI, Secure Boot, `swtpm` TPM 2.0, VirtioFS ZFS directory shares, CPU pinning/NUMA/Hugepages, ZFS zero-copy linked clones, QMP + ZFS live migration, canonical Libvirt Domain XML compiler, per-VM `nftables` security groups, HTML5 `noVNC` console), unprivileged LXC containers with Linux 6.9+ `BPF_TOKEN` delegation, PCIe VFIO & SR-IOV passthrough, VXLAN SDN, Hosted Virtual Edge UKI, and ZFS/S3/PBS backups |
+| **`core-vigilante`** | Opt-in | Autonomous Cyber Defense & SOAR (`vigilante-soc` on K3s): 12 modular security stacks (VigilSOC, OpenSearch, Wazuh, Falco, Zeek, BloodHound, OpenVAS, kCTF, etc.), priority `-10` kernel nftables SOAR auto-containment, ransomware entropy freeze, honeytoken deception mesh, Merkle-chained ZFS forensic vault, and 106-tool Vigilante MCP |
 
-### Key Architectural Pillars
-
-* **🔒 Junos-Style Commit-Confirm Rollback:** Apply changes with an automated rollback timer (e.g. 60 seconds). If you do not confirm connectivity, Axonwall atomically reverts to the previous working ruleset. Zero lockout risk.
-* **⚡ Pure `nftables` Engine:** Compiles high-level firewall policies directly into atomic `table inet axonwall` rulesets. Never wipes or interferes with Docker (`table ip filter`) or Kubernetes CNI (`table ip nat`) chains.
-* **🧠 Built-in AI Security Copilot:** Native multi-provider AI engine supporting **Google Antigravity**, **Ollama**, **Claude Code**, **OpenAI Codex**, and **vLLM**. Drafts complex policies in plain English, analyzes Suricata/VictoriaLogs security events, and executes one-click automated threat containment.
-* **📡 SD-Branch Satellite Architecture:** Manage low-cost branch routers, Wi-Fi access points, and remote IoT gateways (**OpenWrt**, Raspberry Pi, Debian) through lightweight cross-compiled Go agents (`axonwall-satellite`) over encrypted WireGuard mesh.
-* **📊 Modern Observability (VictoriaMetrics + VictoriaLogs):** High-efficiency time-series metrics and log aggregation built right into the platform, replacing slow legacy RRDtool graphs with real-time insight analytics.
+### Built-In Extension Plugins (14)
+- **Default Enabled (3):** `cli-workstation` (Zsh, Neovim `axonwall-config`, Starship, Tmux, `kubectl`, `helm`), `host-malware-rootkit` (8-engine host malware/rootkit hunter + 5-hook CO-RE BPF-LSM & `BPF_TOKEN` Ring-0 mediator), `coroot-ebpf-apm` (zero-instrumentation eBPF L7 service map, TLS uprobes, 99 Hz FlameGraphs & automated RCA).
+- **Opt-In Extensions (11):** `rosenpass` (Hybrid Classic McEliece 460896 + ML-KEM-512 post-quantum WireGuard PSK rotation), `eluvix` (Sovereign AI Model Router, Tokenomics, PromptGuard & reversible PII DLP), `vigilant-octo-waffle` (ArgoCD/Flux K3s GitOps PaaS), `headscale`, `tailscale`, `haproxy`, `freeradius`, `snmp`, `nut-ups`, `ntopng`, `cli-diagnostics-nastymap`.
 
 ---
 
-## 🎯 Feature Parity Matrix
+## 🔒 Signature Security & Engineering Highlights
 
-Axonwall matches OPNsense across all core firewall, networking, and security features while upgrading each to modern Linux standards:
+- **Super-Slim Zero-Shell Edge NGFW (`.efi` UEFI UKI):** 7.1 MB single-file Unified Kernel Image running static `axonwall-satellite` directly as **PID 1 (`/init`)** on Linux 6.12 LTS with **zero `/bin/sh`, zero coreutils, zero SSHD**, and `CONFIG_MODULES=n`.
+- **5-Hook CO-RE BPF-LSM Guard & Linux 6.9+ `BPF_TOKEN_CREATE` Mediator:** Five kernel LSM hooks (`lsm/socket_bind`, `lsm/bpf`, `lsm/uring_sqpoll`, `lsm/bpf_token_create`, `lsm/bpf_token_cmd`) keyed by unspoofable `(s_dev, i_ino)` kernel inodes block **Copy Fail (CVE-2026-31431)** `AF_ALG` heap overflows, unauthorized `BPF_PROG_LOAD`, and `io_uring` `SQPOLL` syscall-less implants ("Ghost in the Ring"), while delegating verified networking eBPF (`XDP`, `SCHED_CLS`, `CGROUP_SKB`) to unprivileged UserNS containers and blocking Ring-0 `bpf_probe_read_kernel()` tracing types (`kprobe`, `tracepoint`, `lsm`).
+- **Guardrailed 25-Tool MCP Security AI Server (`axonwall-mcp`):** **Disabled by default** behind a master kill-switch; enforces SHA-256 `axw_mcp_*` bearer keys, mTLS cert pinning, **16 granular capability scopes, 16 read-only MCP resources, and 25 guardrailed MCP tools** across Firewall, Ring-0 eBPF & `BPF_TOKEN_CREATE`, KVM/Libvirt/LXC, K3s Etcd, OpenZFS NAS, and 9-Vendor Migration—backed by dual TS+Go blast-radius & anti-lockout guards, isolated TTL-bounded tactical leases (`table inet axonwall_mcp`), mandatory Commit-Confirm on DesiredState proposals, and a SHA-256 hash-chained audit trail (`mcp-audit.jsonl`).
+- **Unbrickable Boot Architectures:** Choose at install time between **ZFSBootMenu (`v3.1.0`) Root-on-ZFS** (`axonwallctl zbm` snapshot/clone/activate + 5 boot palettes), **Dual-Root A/B Slots** (`axon_root_a` / `axon_root_b` with hardware watchdog fallback), or **Rolling Single-Root**, with optional **LUKS2 + TPM 2.0 (`PCR 0+2+7`)** auto-unlock.
+- **6-Plane 2-Host High Availability:** Synchronizes Keepalived VRRP VIPs, `conntrackd` FTFW state, mTLS ECDSA P-256 DesiredState & Kea DHCP leases, OpenLDAP multi-provider `syncrepl` (`ldaps:636`) + hot SQLite snapshots, incremental ZFS `send/recv`, and 2-node K3s + OpenEBS replicated volumes.
+- **Unified Identity & Audit:** Zero-touch embedded OpenLDAP (`slapd` + `sssd`) with automatic plugin service-account provisioning, hardened `axonwall-opshell` for operators, Enterprise OIDC/Entra/Okta/Google SSO, GitOps bundle revisions, and **Etckeeper** `/etc` Git history & unified diffs.
+- **9-Vendor Unified Appliance Migration Studio:** Deterministic import, rule-shadowing mathematical analysis, subnet collision detection, and non-destructive multi-appliance merge from **pfSense XML**, **OPNsense XML**, **Proxmox VE 8.x**, **TrueNAS SCALE**, **Cisco IOS/ASA/FTD**, **VyOS**, **MikroTik RouterOS**, **`iptables-save`**, and **`firewalld`**.
 
-| Capability | Legacy OPNsense / pfSense | Axonwall Modern Linux |
-|---|---|---|
-| **Packet Filter** | FreeBSD `pf` (single-threaded state lock) | **Linux `nftables`** (wire-speed multi-core scaling) |
-| **Configuration Safety** | Instant apply (high lockout risk) | **Junos-style Commit-Confirm & Auto-Rollback** |
-| **Web Console** | Legacy PHP 8 server-rendered scripts | **Next.js 16 + React 19 + Tailwind CSS** |
-| **Authentication** | Local DB / PHP PAM scripts | **OpenLDAP, RADIUS, & Supabase Row-Level Security** |
-| **Dynamic Routing** | FRR package on FreeBSD | **Linux FRR (BGP, OSPF, BFD, ECMP)** |
-| **VPN Technologies** | OpenVPN, IPsec (strongSwan), WireGuard (kmod) | **Native Linux WireGuard, strongSwan, OpenVPN (DCO)** |
-| **IDS / IPS** | Suricata via FreeBSD Netmap | **Suricata 7+ via AF_PACKET & eBPF/XDP** |
-| **DDoS Protection** | Basic pf synproxy | **XDP Line-Rate Drop + CrowdSec IPS Bouncer** |
-| **DHCP & DNS** | ISC DHCP (EOL) / Dnsmasq / Unbound | **Kea DHCPv4/v6 + Unbound DNS Sinkhole (RPZ)** |
-| **High Availability** | CARP + pfsync (multicast required) | **Keepalived (VRRP) + conntrackd FTFW + mTLS SQLite/ZFS Sync ([2-Host Setup Guide](docs/HIGH_AVAILABILITY_SETUP.md))** |
-| **Traffic Shaper / QoS** | FreeBSD ALTQ / dummynet | **Linux CAKE, FQ_CoDel, & HTB Traffic Control (tc)** |
-| **Diagnostics** | Packet capture (pcap dump) | **Interactive eBPF Packet Tracer & Live NetFlow** |
-| **AI Copilot** | None | **Native Antigravity, Ollama, Claude, Codex, vLLM** |
-| **Edge Satellites** | None (centralized box only) | **OpenWrt & Linux SD-Branch agent fleet manager** |
+---
+
+## 🗂️ Declarative Configuration (`/etc/axonwall/*.yaml`)
+
+Every subsystem compiles deterministically from 12 human-readable, Git-friendly YAML files (editable via the Web Console, `axonwall-config` 4-pane Neovim IDE, `axonwall-tui`, or `terraform-provider-axonwall`):
+
+| File | Managed Top-Level Keys |
+| :--- | :--- |
+| `system.yaml` | `version`, `capabilities`, `system`, `plugins`, `ai`, `eluvix`, `observability`, `snmp`, `ups`, `acme` |
+| `interfaces.yaml` | `interfaces`, `vlans`, `bridges`, `bonds`, `virtualIps`, `vrfs` |
+| `firewall.yaml` | `aliases`, `rules`, `nat`, `trafficShaper` |
+| `routing.yaml` | `gateways`, `gatewayGroups`, `routes`, `frr` |
+| `services.yaml` | `dhcp`, `dns`, `captivePortal`, `haproxy`, `freeradius` |
+| `vpn.yaml` | `wireguard`, `rosenpass`, `ipsec`, `openvpn`, `headscale` |
+| `security.yaml` | `suricata`, `crowdsec`, `geoip`, `zeroTrust`, `sso`, `tlsDecryption`, `hostDefense` |
+| `ha.yaml` | `ha`, `fleet` |
+| `storage.yaml` | `nas` (pools, datasets, snapshots, SMB, NFS, iSCSI, S3) |
+| `k3s.yaml` | `k3s`, `vow` |
+| `virt.yaml` | `virt`, `hostedEdge` |
+| `vigilante.yaml` | `vigilante` |
 
 ---
 
 ## 📦 Monorepo Structure
 
-Axonwall is engineered as an enterprise-grade Turborepo monorepo:
-
-```
+```text
 axonwall/
 ├── apps/
-│   ├── axonwall/             # Next.js 16 reactive web console & API gateway
-│   ├── axonwall-controller/  # TypeScript/Node control plane & fleet WebSocket hub
-│   ├── axonwalld/            # Privileged Go daemon managing nftables, netlink, & IP routing
-│   └── axonwall-satellite/   # Lightweight Go agent cross-compiled for OpenWrt & edge Linux
+│   ├── axonwall/                     # Next.js 16 + React 19 Web Console & OpenAPI v3.1 gateway (:2966)
+│   ├── axonwall-controller/          # TypeScript control plane, axonwallctl, axonwall-tui (Ink), & axonwall-mcp
+│   ├── axonwalld/                    # Privileged Go 1.26 daemon, eBPF/XDP/BPF-LSM, HA mTLS, ZFS, K3s, KVM/LXC, OpenLDAP
+│   ├── axonwall-console/             # Physical/serial console menu & 5-step BubbleTea bare-metal/Vault installer
+│   ├── axonwall-satellite/           # Cross-compiled Go SD-Branch agent & PID-1 Edge NGFW UKI engine
+│   └── terraform-provider-axonwall/  # Official Terraform / OpenTofu provider (DesiredState & Cloud-Init)
 ├── packages/
-│   └── axonwall_lib/         # Universal TypeScript engine: schemas, compiler, linter, & AI
+│   ├── axonwall_lib/                 # Universal TS schemas (Zod), nftables/service compilers, 7x importers, linter
+│   ├── nastymap/                     # Interactive Nmap XML topology, GeoIP world map & scan diff engine (v1.0.2)
+│   └── vigilante_lib/                # Vigilante Cyber Defense charts, SOAR playbooks, & 106-tool SOC MCP server
 ├── packaging/
-│   ├── debian/               # Debian 13 systemd service units & packaging control
-│   └── iso/                  # Live-build automated appliance ISO generator
-├── axonwall.com/              # Public documentation & marketing site (Next.js static)
-├── business-plan.md          # Commercial go-to-market and appliance sales strategy
-├── LICENSE                   # Apache License, Version 2.0
-└── TRADEMARKS.md             # Axonwall trademark and branding guidelines
+│   ├── iso/                          # Debian 13 Trixie live-build unified NGFW + Vault ISO & ZFSBootMenu pipeline
+│   ├── edge-uki/                     # Linux 6.12 hardened kernel + PID-1 initramfs UEFI UKI (.efi) builder
+│   ├── cloud-image/                  # Cloud-Init QCOW2 image builder with Slot-B first-boot sync
+│   ├── alpine/                       # Lightweight musl/OpenRC Alpine ISO builder
+│   ├── vault/                        # Axonwall Vault Edition immutable SeaweedFS S3 Object-Lock appliance
+│   └── debian/                       # Standalone axonwall_<ver>_amd64.deb packager
+├── scripts/                          # Operational helpers (release-tagger.sh, update-kubeconfig.sh)
+├── docs/                             # Standalone operational guides (HIGH_AVAILABILITY_SETUP.md)
+├── axonwall.com/                     # Public website, releases portal, 24-guide docs & interactive demo
+├── LICENSE                           # GNU General Public License v2.0 (GPL-2.0-or-later)
+└── TRADEMARKS.md                     # Axonwall trademark & branding guidelines
 ```
 
 ---
 
-## 🛠️ Installation & Quickstart
+## 🛠️ Installation & Quickstart (`v0.11.64`)
 
-Axonwall can be deployed on bare metal, inside virtual machines (Proxmox, VMware ESXi, KVM), or run as a standalone developer stack.
-
-### Option 1: Turnkey Debian 13 Appliance ISO
-
-Download our hybrid bootable ISO image (supporting both UEFI and BIOS) for automated zero-touch installation:
+### Option 1: Bare-Metal / VM Unified UEFI ISO (`axonwall` or `vault` Edition)
 
 ```bash
-# Automated build via GitHub Actions or local live-build:
-sudo ./packaging/iso/build-iso.sh
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-debian13-amd64.iso.sha256
+sha256sum -c axonwall-debian13-amd64.iso.sha256
+
+# Flash to USB drive:
+sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-1. Flash the generated `axonwall-debian13-amd64.iso` to a USB drive using BalenaEtcher or `dd`:
-   ```bash
-   sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress
-   ```
-2. Boot your appliance. The automated installer partitions the drive, tunes sysctl forwarding parameters, and installs baseline security services.
-3. Connect your laptop to the designated LAN port (`eth1`) and access the web console:
-   ```
-   https://192.168.1.1:3000
-   Default credentials: admin / axonwall
-   ```
+1. Boot UEFI media and choose **Express 1-Click Install** or the **5-Step Custom Wizard** (`ZFSBootMenu`, `Dual-Root A/B`, or `Rolling`, optional `LUKS2 + TPM 2.0`).
+2. Connect to the LAN interface and open the TLS Web Console:
+   - **URL:** `https://192.168.1.1:2966`
+   - **Default Credentials:** `admin` / `axonwall` (prompted to rotate on first login)
+   - **CLI TUIs:** `axonwall-config` (Neovim 4-pane IDE), `axonwall-tui` (11-tab terminal dashboard), `axonwallctl status`, `axonwallctl ebpf overview`, `axonwallctl kubeconfig --vip`
 
-### Option 2: Local Developer Monorepo Setup
+### Option 2: Cloud QCOW2 Image, Edge UEFI UKI, or `.deb` Package
 
-To run the development console and control plane on an existing Linux workstation:
+- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-debian13-amd64-cloud.qcow2)
+- **Zero-Shell Edge NGFW UKI (`7.1 MB`):** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-edge-sku-vm-virtio.efi)
+- **Debian 12/13 & Ubuntu 24.04 Package:**
+  ```bash
+  wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall_0.11.64_amd64.deb
+  sudo apt-get update && sudo apt-get install -y ./axonwall_0.11.64_amd64.deb
+  ```
+
+### Option 3: Local Developer Setup
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/axonwall/axonwall.git
+git clone --recurse-submodules https://github.com/axonwall/axonwall.git
 cd axonwall
-
-# 2. Install dependencies via pnpm
 pnpm install
-
-# 3. Run the unit test suite
 pnpm test
-
-# 4. Start the development server
 pnpm dev
 ```
-
-The Next.js management console will be available at `http://localhost:3000`.
-
-### Option 3: Compile Axonwall Satellite for Edge Routers
-
-To compile the lightweight satellite companion for OpenWrt or edge Linux devices:
-
-```bash
-cd apps/axonwall-satellite
-
-# Cross-compiles for amd64, arm64 (Raspberry Pi), and mipsle (OpenWrt routers)
-make all
-
-# Deploy binary to remote OpenWrt router:
-scp bin/axonwall-satellite-mipsle root@192.168.8.1:/usr/bin/axonwall-satellite
-```
-
-Start the satellite with Zero-Touch Provisioning (ZTP):
-```bash
-axonwall-satellite \
-  -core wss://firewall.yourcorp.com:2966/ws/satellite \
-  -id sat-branch-01 \
-  -token ztp_sec_token_here
-```
-
----
-
-## 🤖 AI Copilot Capabilities
-
-Axonwall includes an integrated AI Copilot with plug-and-play support for five major engines:
-
-1. **Google Antigravity (Gemini 2.5 Pro):** Cloud-scale reasoning with extended thinking budget for deep security audits and compliance verification.
-2. **Ollama (Llama 3.3):** 100% offline, privacy-guaranteed local inference running directly on your firewall hardware.
-3. **Claude Code (Claude 3.7 Sonnet):** Advanced threat correlation and forensic rule synthesis.
-4. **OpenAI Codex / GPT-4o:** Fast natural language policy drafting.
-5. **vLLM (Self-Hosted):** High-throughput private inference for MSPs and multi-tenant fleets.
-
-### Example Prompts:
-* *"Isolate the IoT VLAN (30) from the Corporate LAN (10) but allow bidirectional streaming to the Apple TV on 10.0.10.50:7000."*
-* *"Explain this Suricata CVE-2024-XXXX alert from VictoriaLogs and generate an atomic drop rule with a 2-hour TTL."*
-* *"Audit my active port forwarding rules against PCI-DSS 4.0 requirement 1.3."*
-
----
-
-## 💼 Business & Commercial Model
-
-Axonwall adapts and scales the proven **Deciso / OPNsense** commercial flywheel:
-
-* **100% Open Source Community Core:** Free forever under the GNU General Public License v2 (GPL-2.0-or-later).
-* **Turnkey Hardware Appliances:** Pre-burned, factory-certified fanless and 1U rackmount appliances with 45–55% hardware gross margins.
-* **Business Edition Subscriptions:** Hardened quarterly release channels, regression test certification, and enterprise SLAs.
-* **Commercial Threat Intelligence:** Turnkey integrations with Proofpoint ET Pro, MaxMind GeoIP2, and CrowdSec Enterprise.
-* **Fleet Central (SaaS):** Multi-tenant cloud controller for MSPs managing hundreds of customer firewalls from a single pane of glass.
-
-For complete commercial details, financial projections, and go-to-market strategy, read the full [Axonwall Business Plan](business-plan.md).
-
----
-
-## 🤝 Contributing
-
-We welcome contributions from network engineers, security researchers, and developers!
-
-1. Fork the repository.
-2. Create your feature branch (`git checkout -b feature/my-new-feature`).
-3. Ensure all tests pass (`pnpm test`).
-4. Commit your changes (`git commit -m 'feat: add support for BBRv3 congestion control'`).
-5. Push to your branch (`git push origin feature/my-new-feature`).
-6. Open a Pull Request.
-
-*Axonwall requires no Contributor License Agreement (CLA); all contributions are licensed under the GNU General Public License v2 (GPL-2.0).*
 
 ---
 
 ## 📄 License & Trademarks
 
-* **Source Code:** Licensed under the [GNU General Public License, Version 2 (GPL-2.0)](LICENSE).
-* **Trademarks:** The name **Axonwall**, logo, and brand assets are protected trademarks. Review our [Trademark Policy](TRADEMARKS.md) for guidelines on acceptable usage, forks, and commercial hardware distribution.
-
----
-
-<div align="center">
-<sub>Engineered with precision for the modern Internet. Powered by Linux, nftables, and Open Source.</sub>
-</div>
+- **Source Code:** Licensed under the [GNU General Public License v2.0 or later (`GPL-2.0-or-later`)](LICENSE). No Contributor License Agreement (CLA) required.
+- **Trademarks:** **Axonwall**, logos, and brand assets are governed by our [Trademark Policy](TRADEMARKS.md).

@@ -278,3 +278,158 @@ func AttachTapToBridge(tapDev, bridgeName string, vlanTag int) error {
 
 	return nil
 }
+
+// NetdevConfigBundle represents `/etc/axonwall/managed/netdev_config.json` emitted by @axonwall/lib.
+type NetdevConfigBundle struct {
+	Vlans []struct {
+		Parent      string `json:"parent"`
+		Tag         int    `json:"tag"`
+		Mtu         int    `json:"mtu,omitempty"`
+		Description string `json:"description,omitempty"`
+	} `json:"vlans"`
+	Bonds []struct {
+		Name   string   `json:"name"`
+		Mode   string   `json:"mode"`
+		Slaves []string `json:"slaves"`
+		Mtu    int      `json:"mtu,omitempty"`
+	} `json:"bonds"`
+	Bridges []struct {
+		Name          string `json:"name"`
+		VlanFiltering bool   `json:"vlanFiltering"`
+		Ipv4Address   string `json:"ipv4Address,omitempty"`
+		Members       []struct {
+			Device string `json:"device"`
+		} `json:"members"`
+	} `json:"bridges"`
+	Vrfs []struct {
+		Name       string   `json:"name"`
+		TableId    int      `json:"tableId"`
+		Interfaces []string `json:"interfaces"`
+	} `json:"vrfs"`
+	VirtualIps []struct {
+		Ip        string `json:"ip"`
+		Interface string `json:"interface"`
+	} `json:"virtualIps"`
+}
+
+// ApplyNetdevBundleJSON reconciles declarative VLANs, LACP/Active-Backup Bonds, Bridges, VRFs, and VIPs.
+func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) error {
+	var cfg NetdevConfigBundle
+	if err := unmarshalFn(rawJSON, &cfg); err != nil {
+		return fmt.Errorf("invalid netdev_config.json: %w", err)
+	}
+
+	// Validate all names up front before running any ip commands
+	for _, b := range cfg.Bonds {
+		if !ValidNetdevName(b.Name) {
+			return fmt.Errorf("invalid bond name %q", b.Name)
+		}
+		for _, sl := range b.Slaves {
+			if !ValidNetdevName(sl) {
+				return fmt.Errorf("invalid bond slave %q", sl)
+			}
+		}
+	}
+	for _, v := range cfg.Vlans {
+		if !ValidNetdevName(v.Parent) || v.Tag < 1 || v.Tag > 4094 {
+			return fmt.Errorf("invalid VLAN %s.%d", v.Parent, v.Tag)
+		}
+	}
+	for _, vrf := range cfg.Vrfs {
+		if !ValidNetdevName(vrf.Name) || vrf.TableId < 1 || vrf.TableId > 65535 {
+			return fmt.Errorf("invalid VRF %q (table %d)", vrf.Name, vrf.TableId)
+		}
+	}
+
+	if _, err := exec.LookPath("ip"); err != nil {
+		return nil
+	}
+
+	// 1. Bonds
+	for _, b := range cfg.Bonds {
+		mode := b.Mode
+		if mode == "" {
+			mode = "802.3ad"
+		}
+		if err := exec.Command("ip", "link", "show", "dev", b.Name).Run(); err != nil {
+			_ = exec.Command("ip", "link", "add", b.Name, "type", "bond", "mode", mode).Run()
+		}
+		for _, sl := range b.Slaves {
+			_ = exec.Command("ip", "link", "set", "dev", sl, "down").Run()
+			_ = exec.Command("ip", "link", "set", "dev", sl, "master", b.Name).Run()
+			_ = exec.Command("ip", "link", "set", "dev", sl, "up").Run()
+		}
+		if b.Mtu >= 576 && b.Mtu <= 9216 {
+			_ = exec.Command("ip", "link", "set", "dev", b.Name, "mtu", strconv.Itoa(b.Mtu)).Run()
+		}
+		_ = exec.Command("ip", "link", "set", "dev", b.Name, "up").Run()
+	}
+
+	// 2. 802.1Q VLAN sub-interfaces
+	for _, v := range cfg.Vlans {
+		vlanDev := fmt.Sprintf("%s.%d", v.Parent, v.Tag)
+		if !ValidNetdevName(vlanDev) {
+			continue
+		}
+		if err := exec.Command("ip", "link", "show", "dev", vlanDev).Run(); err != nil {
+			_ = exec.Command("ip", "link", "add", "link", v.Parent, "name", vlanDev, "type", "vlan", "id", strconv.Itoa(v.Tag)).Run()
+		}
+		if v.Mtu >= 576 && v.Mtu <= 9216 {
+			_ = exec.Command("ip", "link", "set", "dev", vlanDev, "mtu", strconv.Itoa(v.Mtu)).Run()
+		}
+		_ = exec.Command("ip", "link", "set", "dev", vlanDev, "up").Run()
+	}
+
+	// 3. VRFs
+	for _, vrf := range cfg.Vrfs {
+		if err := exec.Command("ip", "link", "show", "dev", vrf.Name).Run(); err != nil {
+			_ = exec.Command("ip", "link", "add", vrf.Name, "type", "vrf", "table", strconv.Itoa(vrf.TableId)).Run()
+		}
+		_ = exec.Command("ip", "link", "set", "dev", vrf.Name, "up").Run()
+		for _, iface := range vrf.Interfaces {
+			if ValidNetdevName(iface) {
+				_ = exec.Command("ip", "link", "set", "dev", iface, "master", vrf.Name).Run()
+			}
+		}
+	}
+
+	// 4. Bridges (best-effort when member interfaces exist on host)
+	for _, br := range cfg.Bridges {
+		var members []string
+		for _, m := range br.Members {
+			if ValidNetdevName(m.Device) {
+				if _, err := net.InterfaceByName(m.Device); err == nil {
+					members = append(members, m.Device)
+				}
+			}
+		}
+		_ = EnsureBridge(BridgeSpec{
+			Name:          br.Name,
+			Members:       members,
+			VlanFiltering: br.VlanFiltering,
+			AddressCIDR:   br.Ipv4Address,
+		})
+	}
+
+	// 5. Virtual IP Aliases
+	for _, vip := range cfg.VirtualIps {
+		if !ValidNetdevName(vip.Interface) || vip.Ip == "" {
+			continue
+		}
+		addrStr := strings.TrimSpace(vip.Ip)
+		if !strings.Contains(addrStr, "/") {
+			if parsed := net.ParseIP(addrStr); parsed != nil {
+				if parsed.To4() != nil {
+					addrStr += "/32"
+				} else {
+					addrStr += "/128"
+				}
+			}
+		}
+		if _, _, err := net.ParseCIDR(addrStr); err == nil {
+			_ = exec.Command("ip", "addr", "replace", addrStr, "dev", vip.Interface).Run()
+		}
+	}
+
+	return nil
+}

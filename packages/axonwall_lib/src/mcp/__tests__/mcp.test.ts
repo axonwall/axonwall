@@ -181,4 +181,56 @@ describe('Axonwall MCP Safety Guard & Blast-Radius Validator', () => {
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  it('validates Linux 6.9+ BPF_TOKEN_CREATE delegation masks and rejects Ring-0 tracing programs', async () => {
+    const {
+      validateBpfTokenDelegationInput,
+      validateVirtWorkloadSafety,
+      validateZfsResourcePath,
+      MCP_SCOPES,
+    } = await import('../index.js');
+
+    expect(MCP_SCOPES).toContain('mcp:ebpf:read');
+    expect(MCP_SCOPES).toContain('mcp:ebpf:manage');
+    expect(MCP_SCOPES).toContain('mcp:virt:manage');
+    expect(MCP_SCOPES).toContain('mcp:k3s:manage');
+    expect(MCP_SCOPES).toContain('mcp:nas:manage');
+
+    expect(
+      validateBpfTokenDelegationInput({
+        preset: 'network-dataplane',
+        delegateProgs: 'xdp:sched_cls:cgroup_skb',
+      }).valid,
+    ).toBe(true);
+
+    for (const forbidden of ['kprobe', 'tracepoint', 'raw_tracepoint', 'perf_event', 'tracing', 'lsm', 'struct_ops']) {
+      const res = validateBpfTokenDelegationInput({
+        preset: 'custom',
+        delegateCmds: 'prog_load:map_create',
+        delegateProgs: `xdp:${forbidden}`,
+        delegateMaps: 'hash:array',
+        delegateAttachs: 'xdp',
+      });
+      expect(res.valid).toBe(false);
+      expect(res.reason).toContain('bpf_probe_read_kernel');
+    }
+
+    expect(
+      validateBpfTokenDelegationInput({
+        preset: 'network-dataplane',
+        delegateProgs: 'any',
+      }).valid,
+    ).toBe(false);
+
+    // Hosted Edge VM anti-lockout safety
+    expect(validateVirtWorkloadSafety('axonwall-edge-ngfw', 'stop', true).valid).toBe(false);
+    expect(validateVirtWorkloadSafety('edge-primary', 'pause', false).valid).toBe(false);
+    expect(validateVirtWorkloadSafety('app-worker-01', 'stop', true).valid).toBe(true);
+
+    // ZFS resource sanitization
+    expect(validateZfsResourcePath('tank/vms', true).valid).toBe(true);
+    expect(validateZfsResourcePath('tank/vms', false).valid).toBe(false);
+    expect(validateZfsResourcePath('-o mountpoint=/root', true).valid).toBe(false);
+    expect(validateZfsResourcePath('tank@snap', true).valid).toBe(false);
+  });
 });

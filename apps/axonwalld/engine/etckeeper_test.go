@@ -79,4 +79,36 @@ func TestEtckeeperManagerExecution(t *testing.T) {
 	if !strings.Contains(diff, "diff --git") {
 		t.Errorf("expected diff to contain 'diff --git', got: %s", diff)
 	}
+
+	// Test GetConfig and UpdateConfig persistence
+	updatedCfg, err := mgr.UpdateConfig(EtckeeperConfig{
+		VCS:                      "git",
+		DailyAutocommit:          false,
+		AvoidSpecialFileWarning:  true,
+		AvoidCommitBeforeInstall: true,
+		HighlevelPackageManager:  "apt",
+		LowlevelPackageManager:   "dpkg",
+		PushRemote:               "origin",
+		GitCommitOptions:         "--quiet",
+		AutoCommitOnApply:        false,
+		CustomIgnorePatterns:     []string{"zfs/zpool.cache", "axonwall/slot_versions.json"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+	if updatedCfg.DailyAutocommit {
+		t.Errorf("expected DailyAutocommit false")
+	}
+	if !updatedCfg.AvoidSpecialFileWarning || !updatedCfg.AvoidCommitBeforeInstall {
+		t.Errorf("expected AvoidSpecialFileWarning and AvoidCommitBeforeInstall true")
+	}
+	if updatedCfg.PushRemote != "origin" {
+		t.Errorf("expected PushRemote 'origin', got %q", updatedCfg.PushRemote)
+	}
+	if updatedCfg.AutoCommitOnApply {
+		t.Errorf("expected AutoCommitOnApply false")
+	}
+	if len(updatedCfg.CustomIgnorePatterns) != 2 {
+		t.Errorf("expected 2 custom ignore patterns, got %v", updatedCfg.CustomIgnorePatterns)
+	}
 }

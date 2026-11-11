@@ -1,13 +1,13 @@
 import React from 'react';
 import Link from 'next/link';
-import { HardDrive, Layers, RefreshCw, CheckCircle2, ShieldAlert, Cpu, Terminal, Palette } from 'lucide-react';
+import { HardDrive, Layers, RefreshCw, CheckCircle2, ShieldAlert, Cpu, Terminal, Palette, Lock } from 'lucide-react';
 import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Multi-Disk RAID & ZFS Partitioning Installer | Axonwall Documentation',
+  title: 'Next-Gen Installer, Multi-Disk RAID, LUKS2+TPM2 & ZFSBootMenu | Axonwall Documentation',
   description:
-    'Documentation for the Axonwall ISO and Alpine installers: mdadm RAID-1 system disk mirroring across Slot A, Slot B, Swap, and Data, plus dedicated ZFS storage partition allocation, and native ZFSBootMenu Root-on-ZFS boot environments.',
+    'Documentation for Axonwall v0.11.64 bare-metal installation: axonwall-console --install Express/Custom TUI, --unattended automation, unified Vault edition, Smart Disk Tiering, LUKS2 + TPM 2.0 PCR 0+2+7 auto-unlock, and ZFSBootMenu v3.1.0 Boot Environments.',
 };
 
 export default function InstallerRaidZfsDocPage() {
@@ -17,15 +17,72 @@ export default function InstallerRaidZfsDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Bare-Metal Installer & Disk Partitioning
+          Bare-Metal Installer &amp; Boot Engines • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          Installer Multi-Disk RAID & ZFS Partitioning
+          Next-Gen Installer, Multi-Disk RAID &amp; ZFSBootMenu
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Deploy unbrickable enterprise bare-metal appliances. The Axonwall installer natively supports multi-disk Linux software RAID-1 (<code className="text-emerald-400 font-mono">mdadm</code>) mirroring for the entire A/B dual-root system disk, and allows reserving dedicated partition slices for OpenZFS pools directly during OS installation.
+          Deploy unbrickable bare-metal appliances via the interactive <code className="text-emerald-400 font-mono">axonwall-console --install</code> TUI or zero-touch <code className="text-emerald-400 font-mono">--unattended</code> manifests. Choose between unified <code className="text-slate-200 font-mono">axonwall</code> vs. <code className="text-slate-200 font-mono">vault</code> editions, Smart NVMe/SSD/HDD disk tiering, LUKS2 encryption with TPM 2.0 auto-unlock, <code className="text-emerald-400 font-mono">mdadm</code> RAID-1 A/B slots, or native ZFSBootMenu v3.1.0 Root-on-ZFS Boot Environments.
         </p>
       </div>
+
+      {/* Next-Gen TUI Installer & Unattended Mode */}
+      <section id="next-gen-installer" className="space-y-6">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Terminal className="w-6 h-6 text-emerald-400" /> Next-Gen Installer TUI, Unified Editions &amp; Smart Tiering
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Booting the unified <code className="text-emerald-400 font-mono">axonwall-debian13-amd64.iso</code> launches{' '}
+          <code className="text-emerald-400 font-mono">axonwall-console --install</code> directly on VGA and serial (<code className="text-slate-200 font-mono">ttyS0</code>) consoles:
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 text-xs">
+          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-emerald-400 text-sm">Express 1-Click vs. 5-Step Custom Wizard</div>
+            <p className="text-slate-400 leading-relaxed">
+              <strong>Express Mode</strong> inspects hardware topology and provisions optimal defaults in a single confirmation.{' '}
+              <strong>5-Step Custom Wizard</strong> walks operators through (1) Edition (<code className="text-slate-200 font-mono">axonwall</code> NGFW/Converged vs. <code className="text-slate-200 font-mono">vault</code> S3 Immutable Backup), (2) Boot Mode (<code className="text-slate-200 font-mono">ab-dual-root</code>, <code className="text-slate-200 font-mono">zbm</code>, or <code className="text-slate-200 font-mono">rolling</code>), (3) Smart Disk Tiering, (4) LUKS2 + TPM 2.0 Encryption, and (5) Initial Management NIC &amp; Credentials.
+            </p>
+          </div>
+
+          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-sky-400 text-sm">Smart Disk Tiering (NVMe / SSD / HDD)</div>
+            <p className="text-slate-400 leading-relaxed">
+              Automatically classifies block devices by rotational media, NVMe namespace speed, and capacity—assigning fast NVMe devices to OS boot mirrors, dedicated ZFS SLOG (<code className="text-slate-200 font-mono">logDisks</code>), and L2ARC (<code className="text-slate-200 font-mono">cacheDisks</code>), while grouping bulk SAS/SATA drives into RAID-Z/dRAID <code className="text-slate-200 font-mono">dataDisks</code> and <code className="text-slate-200 font-mono">spareDisks</code>.
+            </p>
+          </div>
+
+          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-amber-400 text-sm flex items-center gap-1.5">
+              <Lock className="w-4 h-4" /> LUKS2 + TPM 2.0 Auto-Unlock (PCRs 0+2+7)
+            </div>
+            <p className="text-slate-400 leading-relaxed">
+              Optional full-disk/pool at-rest encryption formats backing partitions with AES-256-XTS LUKS2 and seals a hardware recovery key into the onboard TPM 2.0 via <code className="text-slate-200 font-mono">systemd-cryptenroll</code> bound to <strong>PCRs 0 + 2 + 7</strong> (UEFI firmware, Option ROMs, and Secure Boot state), enabling unattended reboots that fail closed if hardware or boot chain is tampered with.
+            </p>
+          </div>
+
+          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-purple-400 text-sm">Unattended YAML &amp; Cloud-Init ISO Export</div>
+            <p className="text-slate-400 leading-relaxed">
+              Automate mass fleet rollouts via <code className="text-slate-200 font-mono">axonwall-console --install --unattended &lt;config.yaml|https://...&gt;</code>, or generate a bootable NoCloud seed image with <code className="text-slate-200 font-mono">axonwallctl cloudinit export --iso -o cidata.iso</code>.
+            </p>
+          </div>
+        </div>
+
+        <CodeBlock
+          title="Interactive, Unattended & Cloud-Init Provisioning Commands"
+          language="bash"
+          code={`# Launch interactive TUI installer (Express 1-Click or 5-Step Custom Wizard)
+sudo axonwall-console --install
+
+# Automated zero-touch installation from local YAML or HTTPS provisioning endpoint
+sudo axonwall-console --install --unattended https://provision.corp.internal/fw-branch-04.yaml
+
+# Export a NoCloud seed ISO (cidata.iso) from an existing or staged configuration
+axonwallctl cloudinit export --iso -o cidata.iso`}
+        />
+      </section>
 
       {/* Overview */}
       <section className="space-y-6">
@@ -158,13 +215,13 @@ Enter ZFS pool name [default: tank]: tank`}
       </section>
 
       {/* ZFSBootMenu (Root-on-ZFS) Mode */}
-      <section className="space-y-6 pt-6 border-t border-slate-800/80">
+      <section id="zbm-boot-environments" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <RefreshCw className="w-6 h-6 text-emerald-400" /> ZFSBootMenu Root-on-ZFS Mode (v3.1.x)
+          <RefreshCw className="w-6 h-6 text-emerald-400" /> ZFSBootMenu Root-on-ZFS Mode (v3.1.0)
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           As an alternative to traditional ext4 A/B dual-root slots, Axonwall provides native{' '}
-          <strong className="text-white">ZFSBootMenu (ZBM)</strong> support (<code className="text-emerald-400 font-mono">installMode: "zbm"</code>). 
+          <strong className="text-white">ZFSBootMenu v3.1.0 (ZBM)</strong> support (<code className="text-emerald-400 font-mono">installMode: "zbm"</code>). 
           Under ZBM, the entire operating system boots directly from an OpenZFS root pool (<code className="text-slate-200 font-mono">zroot</code>) with native support for any zpool topology (<code className="text-slate-200">stripe</code>, <code className="text-slate-200">mirror</code>, <code className="text-slate-200">raidz1/2/3</code>, <code className="text-slate-200">draid1/2/3</code>).
         </p>
 
@@ -175,11 +232,11 @@ Enter ZFS pool name [default: tank]: tank`}
               <span>Native Boot Environments (BEs)</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-1.2.0@pre-update-v1.3.0</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-1.3.0</code>).
+              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.63@pre-update-v0.11.64</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.64</code>).
             </p>
             <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
-              <li>Instantaneous atomic updates and rollbacks</li>
-              <li>Multiple historical versions retained simultaneously</li>
+              <li>Instantaneous atomic updates and rollbacks via <code className="font-mono text-emerald-300">axonwallctl zbm</code></li>
+              <li>Multiple historical Boot Environments retained simultaneously</li>
               <li>Non-root data isolated in <code className="text-slate-200 font-mono">zroot/data</code></li>
             </ul>
           </div>
@@ -195,7 +252,7 @@ Enter ZFS pool name [default: tank]: tank`}
             <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
               <li>Reverts <code className="text-slate-200 font-mono">bootfs</code> to <code className="text-slate-200 font-mono">org.axonwall:fallback_be</code> on 3 failures</li>
               <li>Autonomous promotion (<code className="text-slate-200 font-mono">zfs promote</code>) upon verified daemon quorum</li>
-              <li>Full Web Console UI under <strong>System &gt; Updates</strong> for snapshot, clone, and activation</li>
+              <li>Full Web Console UI under <strong>System &gt; Updates</strong> and TUI tab <code className="font-mono text-emerald-300">[u] ZBM/Boot</code></li>
             </ul>
           </div>
         </div>
@@ -215,20 +272,42 @@ Enter ZFS pool name [default: tank]: tank`}
 Dataset Hierarchy:
 zroot
 ├── ROOT
-│   ├── axonwall-1.2.0          (mountpoint=/, org.zfsbootmenu:commandline="...")
-│   │   └── @pre-update-v1.3.0  (Point-in-time snapshot)
-│   └── axonwall-1.3.0          (mountpoint=/, clone/promoted next-boot BE)
+│   ├── axonwall-0.11.63          (mountpoint=/, org.zfsbootmenu:commandline="...")
+│   │   └── @pre-update-v0.11.64  (Point-in-time snapshot)
+│   └── axonwall-0.11.64          (mountpoint=/, clone/promoted next-boot BE)
 └── data
-    └── axonwall                (mountpoint=/var/lib/axonwall, persistent config & logs)`}
+    └── axonwall                  (mountpoint=/var/lib/axonwall, persistent config & logs)`}
+        />
+
+        <CodeBlock
+          title="ZFSBootMenu & Cryptographically Signed OTA Update CLI Reference"
+          language="bash"
+          code={`# List all ZFSBootMenu Boot Environments, active bootfs, and snapshots
+axonwallctl zbm list
+
+# Create a point-in-time snapshot, clone into a new BE, and activate for next boot
+sudo axonwallctl zbm snapshot axonwall-0.11.64 pre-change
+sudo axonwallctl zbm clone axonwall-0.11.64@pre-change axonwall-canary
+sudo axonwallctl zbm activate axonwall-canary
+
+# Prune obsolete Boot Environments or snapshots
+sudo axonwallctl zbm delete axonwall-0.11.62
+sudo axonwallctl zbm delete-snapshot axonwall-0.11.64@pre-change
+
+# Stage cryptographically verified OTA firmware update (SHA-256 + OpenSSL .sig
+# verified against /etc/axonwall/release-signing.pub before writing standby slot/BE)
+sudo axonwallctl update --version 0.11.64
+sudo axonwallctl update --version 0.11.64 --slot B
+sudo axonwallctl update --apt   # Rolling single-root APT upgrade mode`}
         />
 
         {/* ZFSBootMenu Visual Theming & Styling */}
         <div className="space-y-4 pt-6 border-t border-slate-800/60">
           <h3 className="text-xl font-bold text-white flex items-center gap-2">
-            <Palette className="w-5 h-5 text-emerald-400" /> ZFSBootMenu Visual Theming &amp; Console Styling
+            <Palette className="w-5 h-5 text-emerald-400" /> ZFSBootMenu Visual Theming &amp; Mirrored ESP Sync
           </h3>
           <p className="text-sm text-slate-300 leading-relaxed">
-            Axonwall provides full visual theming for ZFSBootMenu across the UEFI GOP graphics splash screen, console typography, and terminal color palettes.
+            Axonwall provides full visual theming for ZFSBootMenu v3.1.0 across the UEFI GOP graphics splash screen, console typography, and 5 tactical ANSI color palettes—automatically synchronizing the updated UKI across all mirrored EFI System Partitions (<code className="text-slate-200 font-mono">/boot/efi</code>, <code className="text-slate-200 font-mono">/boot/efi2</code>, etc.).
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -245,29 +324,29 @@ zroot
               </p>
             </div>
             <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
-              <span className="text-xs font-semibold text-sky-400 uppercase tracking-wider">3. 16-Color ANSI Palettes</span>
+              <span className="text-xs font-semibold text-sky-400 uppercase tracking-wider">3. 5 Tactical ANSI Palettes</span>
               <p className="text-xs text-slate-400">
-                Early pre-boot hooks (<code className="text-slate-200">15-axonwall-theme.sh</code>) program the hardware console registers to Axonwall Cyber-Slate &amp; Emerald (<code className="text-slate-200">#090e1a / #34d399</code>) or Nord / Dracula.
+                Early pre-boot hooks (<code className="text-slate-200">15-axonwall-theme.sh</code>) program hardware VGA registers with five built-in palettes: <code className="text-emerald-300">cyber-cyan</code>, <code className="text-emerald-300">emerald-ops</code>, <code className="text-emerald-300">amber-tactical</code>, <code className="text-emerald-300">crimson-soc</code>, and <code className="text-emerald-300">mono-stealth</code>.
               </p>
             </div>
           </div>
 
           <CodeBlock
-            title="Managing ZFSBootMenu Theme with axonwall-zbm-theme"
+            title="Managing ZFSBootMenu Theme & Mirrored ESP Sync with axonwall-zbm-theme"
             language="bash"
-            code={`# Check current theme, embedded UKI splash section, and active font
+            code={`# Check current theme, embedded UKI splash section, mirrored ESPs, and active font
 axonwall-zbm-theme status
 
 # Set font for 4K / High-DPI displays (ter-132b, ter-v32b, ter-v28b, ter-v24b, or default)
 sudo axonwall-zbm-theme set-font ter-132b
 
-# Switch 16-color ANSI console palette (axonwall, cyber-cyan, dracula, nord, monokai)
-sudo axonwall-zbm-theme set-palette cyber-cyan
+# Switch 16-color ANSI console palette (cyber-cyan, emerald-ops, amber-tactical, crimson-soc, mono-stealth)
+sudo axonwall-zbm-theme set-palette emerald-ops
 
 # Install custom splash graphic (automatically converts PNG/JPG to uncompressed BMP)
 sudo axonwall-zbm-theme set-splash /root/custom-brand.png
 
-# Re-embed UKI .splash section and sync hooks with EFI partition
+# Re-embed UKI .splash section and sync EFI/ZBM/VMLINUZ.EFI across all mirrored ESP partitions
 sudo axonwall-zbm-theme apply`}
           />
         </div>

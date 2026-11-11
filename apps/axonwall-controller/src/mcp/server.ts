@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import {
   McpBlackholeRequestSchema,
@@ -8,15 +9,29 @@ import {
   McpDnsSinkholeRequestSchema,
   McpPcapSampleRequestSchema,
   McpProposeRuleRequestSchema,
+  McpXdpFastDropRequestSchema,
+  McpManageBpfTokenProfileRequestSchema,
+  McpVirtControlRequestSchema,
+  McpConfigureLxcBpfTokenRequestSchema,
+  McpRenderK3sBpfTokenRequestSchema,
+  McpNasActionRequestSchema,
+  McpK3sManageRequestSchema,
+  McpImportCompetitorRequestSchema,
+  parseIpOrCidr,
   validateMcpTarget,
   validateRedirectTargetAllowlist,
+  validateBpfTokenDelegationInput,
+  validateVirtWorkloadSafety,
+  validateZfsResourcePath,
   getMcpServerStatus,
   type McpApiKey,
   type McpGuardContext,
   type McpScope,
 } from '@axonwall/lib/mcp';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { importFirewallConfig, mergeFirewallConfigs } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
+import { compileLxcContainer } from '@axonwall/lib/compile/virt';
 import { serializeDesiredStateToYamlFiles } from '@axonwall/lib/yaml';
 import { hasMcpScope } from './authz.js';
 import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
@@ -154,7 +169,12 @@ export async function callAxonwalldApi<T = any>(
 }
 
 function loadLocalDesiredState(): DesiredState | null {
-  const candidates = ['/etc/axonwall/state.json', '/var/lib/axonwall/state.json'];
+  const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
+  const candidates = [
+    ...(customState ? [customState] : []),
+    '/etc/axonwall/state.json',
+    '/var/lib/axonwall/state.json',
+  ];
   for (const p of candidates) {
     try {
       if (fs.existsSync(p)) {
@@ -167,6 +187,156 @@ function loadLocalDesiredState(): DesiredState | null {
     }
   }
   return null;
+}
+
+function persistDesiredStateToDisk(targetState: DesiredState): void {
+  const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
+  if (customState) {
+    try {
+      fs.mkdirSync(path.dirname(customState), { recursive: true, mode: 0o770 });
+      fs.writeFileSync(customState, JSON.stringify(targetState, null, 2), { mode: 0o600 });
+      const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
+      const customDir = path.dirname(customState);
+      for (const [fn, content] of Object.entries(yamlFiles)) {
+        fs.writeFileSync(path.join(customDir, fn), content, { mode: 0o660 });
+      }
+    } catch {
+      // ignore custom override errors
+    }
+    return;
+  }
+  try {
+    fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+  } catch {
+    // Fallback if /etc/axonwall not writable in dev
+  }
+  try {
+    fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+  } catch {}
+  try {
+    const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
+    for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+      if (fs.existsSync(dir)) {
+        for (const [fn, content] of Object.entries(yamlFiles)) {
+          fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
+        }
+      }
+    }
+  } catch {}
+}
+
+function resolveBpfTokenPresetMasks(preset: string): {
+  delegateCmds: string;
+  delegateProgs: string;
+  delegateMaps: string;
+  delegateAttachs: string;
+} {
+  switch (preset) {
+    case 'socket-observability':
+      return {
+        delegateCmds: 'prog_load:map_create:map_lookup_elem:map_update_elem:btf_load:link_create',
+        delegateProgs: 'socket_filter:cgroup_skb',
+        delegateMaps: 'hash:array:percpu_array:ringbuf:lru_hash',
+        delegateAttachs: 'cgroup_inet_ingress:cgroup_inet_egress',
+      };
+    case 'cgroup-microsegmentation':
+      return {
+        delegateCmds: 'prog_load:map_create:map_lookup_elem:map_update_elem:map_delete_elem:btf_load:link_create',
+        delegateProgs: 'cgroup_skb:cgroup_sock:cgroup_sock_addr:sk_skb:sk_msg',
+        delegateMaps: 'hash:array:percpu_hash:lru_hash:ringbuf:sockmap:sockhash',
+        delegateAttachs: 'cgroup_inet_ingress:cgroup_inet_egress:cgroup_inet4_connect:cgroup_inet6_connect:sk_skb_stream_verdict',
+      };
+    case 'network-dataplane':
+    default:
+      return {
+        delegateCmds: 'prog_load:map_create:map_lookup_elem:map_update_elem:map_delete_elem:btf_load:link_create:obj_pin',
+        delegateProgs: 'xdp:sched_cls:sched_act:socket_filter:cgroup_skb',
+        delegateMaps: 'hash:array:percpu_hash:percpu_array:lru_hash:lru_percpu_hash:ringbuf:lpm_trie',
+        delegateAttachs: 'xdp:tcx_ingress:tcx_egress:cgroup_inet_ingress:cgroup_inet_egress',
+      };
+  }
+}
+
+function renderOfflineK3sBpfTokenYaml(params: {
+  profileId: string;
+  preset: string;
+  workloadName: string;
+  namespace: string;
+  image: string;
+  kind: 'Pod' | 'DaemonSet';
+}): string {
+  const masks = resolveBpfTokenPresetMasks(params.preset);
+  const hostPinPath = `/run/axonwall/bpf-tokens/${params.profileId}`;
+  const podSpec = [
+    `hostUsers: false`,
+    `automountServiceAccountToken: false`,
+    `securityContext:`,
+    `  seccompProfile:`,
+    `    type: RuntimeDefault`,
+    `containers:`,
+    `  - name: ebpf-agent`,
+    `    image: ${params.image}`,
+    `    env:`,
+    `      - name: LIBBPF_BPF_TOKEN_PATH`,
+    `        value: "/sys/fs/bpf"`,
+    `    securityContext:`,
+    `      allowPrivilegeEscalation: false`,
+    `      capabilities:`,
+    `        drop: ["ALL"]`,
+    `        add: ["BPF", "NET_ADMIN"]`,
+    `    volumeMounts:`,
+    `      - name: delegated-bpffs`,
+    `        mountPath: /sys/fs/bpf`,
+    `volumes:`,
+    `  - name: delegated-bpffs`,
+    `    hostPath:`,
+    `      path: ${hostPinPath}`,
+    `      type: Directory`,
+  ];
+  const header = [
+    `# Generated by Axonwall Linux 6.9+ BPF_TOKEN_CREATE K3s Compiler`,
+    `# Profile: ${params.profileId} (Preset: ${params.preset})`,
+    `# Delegated bpffs options: delegate_cmds=${masks.delegateCmds},delegate_progs=${masks.delegateProgs},delegate_maps=${masks.delegateMaps},delegate_attachs=${masks.delegateAttachs}`,
+    `# Ring-0 Guard: kprobe/tracepoint/lsm/perf_event/tracing blocked by Axonwall BPF-LSM`,
+  ].join('\n');
+
+  if (params.kind === 'DaemonSet') {
+    const indented = podSpec.map((l) => `      ${l}`).join('\n');
+    return `${header}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ${params.workloadName}
+  namespace: ${params.namespace}
+  labels:
+    app.kubernetes.io/name: ${params.workloadName}
+    axonwall.io/bpf-token-profile: ${params.profileId}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ${params.workloadName}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${params.workloadName}
+        axonwall.io/bpf-token-profile: ${params.profileId}
+    spec:
+${indented}
+`;
+  }
+  const indented = podSpec.map((l) => `  ${l}`).join('\n');
+  return `${header}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${params.workloadName}
+  namespace: ${params.namespace}
+  labels:
+    app.kubernetes.io/name: ${params.workloadName}
+    axonwall.io/bpf-token-profile: ${params.profileId}
+spec:
+${indented}
+`;
 }
 
 async function buildGuardContext(key: McpApiKey, clientIp: string): Promise<{
@@ -279,6 +449,62 @@ export const MCP_RESOURCES_CATALOG = [
     uri: 'axonwall://audit/mcp-trail',
     name: 'Tamper-Evident MCP Audit Trail',
     description: 'Recent SHA-256 hash-chained MCP tool invocation records and chain verification status.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://ebpf/dataplane',
+    name: 'Ring-0 eBPF XDP Dataplane & BPF-LSM Posture',
+    description:
+      'Dual-stack IPv4/IPv6 + 802.1Q/802.1ad VLAN XDP LRU flow telemetry, per-CPU XDP PASS/DROP verdicts, active TTL-bounded XDP drops, and 5-hook CO-RE BPF-LSM enforcement events.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://ebpf/bpf-tokens',
+    name: 'Linux 6.9+ BPF_TOKEN_CREATE Unprivileged Delegation Registry',
+    description:
+      'Kernel BTF capabilities (BPF_TOKEN_CREATE, lsm/bpf_token_create, lsm/bpf_token_cmd), curated least-privilege presets, configured delegation profiles, and live /proc/self/mountinfo bpffs delegations.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://virt/workloads',
+    name: 'KVM Virtual Machines, Unprivileged LXC & vnet eBPF Telemetry',
+    description:
+      'KVM/QEMU guests, LXC containers (including CLONE_NEWUSER + BPF_TOKEN status), VFIO/IOMMU PCI inventory, and host TAP/veth XDP/traffic counters.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://k3s/cluster',
+    name: 'K3s Kubernetes Cluster, CNI & UserNS BPF_TOKEN Posture',
+    description:
+      'K3s HA control-plane status, nodes, OpenEBS ZFS PVCs, CNI bridge/vxlan dataplane counters, and K3s UserNS BPF_TOKEN delegation profiles.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://nas/storage-telemetry',
+    name: 'OpenZFS Deep Storage, ARC/L2ARC & ZIL/SLOG Telemetry',
+    description:
+      'ZFS pool health, dataset utilization, /proc/spl/kstat/zfs/arcstats hit/miss ratios, ZIL/SLOG sync commit counters, per-pool ZIO queue depth, snapshots, and SMB/NFS/iSCSI status.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://security/rootkit-posture',
+    name: 'Ghost-in-the-Ring Kernel & io_uring Rootkit Posture',
+    description:
+      'BPF-LSM (s_dev, i_ino) binary allowlist, io_uring ring auditing, hidden LKM/BPF checks, and UserNS BPF_TOKEN Ring-0 isolation verdicts.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://k3s/etcd-snapshots',
+    name: 'K3s Embedded Etcd Disaster Recovery Snapshots',
+    description:
+      'Inventory of embedded etcd cluster snapshots stored on the appliance for single-click K3s HA control-plane recovery.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://virt/libvirt-domains',
+    name: 'Libvirt XML Domain Definitions for KVM Virtual Machines',
+    description:
+      'Standard <domain type=\'kvm\'> Libvirt XML definitions exported for all registered KVM/QEMU virtual machines.',
     mimeType: 'application/json',
   },
 ];
@@ -526,6 +752,362 @@ export const MCP_TOOLS_CATALOG = [
       required: ['jobId'],
     },
   },
+  {
+    name: 'mcp_inspect_ebpf_dataplane',
+    description:
+      'Inspect unified Ring-0 eBPF telemetry: dual-stack IPv4/IPv6 + 802.1Q/802.1ad VLAN XDP LRU flow maps, per-CPU XDP PASS/DROP verdicts, active TTL-bounded XDP drops, 5-hook CO-RE BPF-LSM enforcement events, Linux 6.9+ BPF_TOKEN_CREATE profiles, and cross-duty Virt/K3s/NAS dataplane posture. Requires scope: mcp:ebpf:read or mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', default: 50, description: 'Max XDP flows to return (1-200)' },
+      },
+    },
+  },
+  {
+    name: 'mcp_xdp_fast_drop',
+    description:
+      'Program or remove a wire-speed Ring-0 XDP_DROP entry (pre-sk_buff, pre-conntrack) for an offending IPv4/IPv6 host OR CIDR subnet prefix (via BPF_MAP_TYPE_LPM_TRIE cidr_block4_map / cidr_block6_map), or configure per-source XDP TCP SYN-flood PPS rate limiting. Enforces blast-radius prefix limits and appliance/gateway/HA/caller anti-lockout immunity. Requires scope: mcp:ebpf:manage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['block', 'unblock', 'set_syn_limit'], default: 'block' },
+        ipAddress: {
+          type: 'string',
+          description: 'IPv4/IPv6 host address OR CIDR subnet prefix (e.g. 198.51.100.0/24 or 2001:db8:dead::/48) to drop/unblock at NIC XDP layer',
+        },
+        synFloodLimitPps: {
+          type: 'number',
+          description: 'Per-source TCP SYN packet-per-second cap enforced in XDP ring-0 when action="set_syn_limit" (0 disables)',
+        },
+        ttlSeconds: { type: 'number', default: 900, description: 'Kernel monotonic TTL in seconds before auto-expiry (10-604800)' },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string', description: 'Security justification (min 10 chars)' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['audit'],
+    },
+  },
+  {
+    name: 'mcp_manage_bpf_token_profile',
+    description:
+      'Create, update, or delete a Linux 6.9+ BPF_TOKEN_CREATE least-privilege bpffs delegation profile (delegate_cmds, delegate_progs, delegate_maps, delegate_attachs) for unprivileged user-namespace workloads. Strictly rejects Ring-0 memory/tracing programs (kprobe, tracepoint, raw_tracepoint, perf_event, tracing, lsm, struct_ops, ext, syscall) that expose bpf_probe_read_kernel(). Requires scope: mcp:ebpf:manage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: ['upsert', 'delete'], default: 'upsert' },
+        id: { type: 'string', description: 'Profile identifier (e.g. k3s-cilium-userns or ct-105)' },
+        targetKind: { type: 'string', enum: ['lxc', 'k3s-pod', 'standalone'], default: 'standalone' },
+        targetRef: { type: 'string', description: 'Target LXC CTID or K3s namespace/pod selector' },
+        preset: {
+          type: 'string',
+          enum: ['socket-observability', 'network-dataplane', 'cgroup-microsegmentation', 'custom'],
+          default: 'network-dataplane',
+        },
+        enabled: { type: 'boolean', default: true },
+        delegateCmds: { type: 'string', description: 'Optional colon-delimited bpf_cmd bitmask (e.g. prog_load:map_create:btf_load:link_create)' },
+        delegateProgs: { type: 'string', description: 'Optional colon-delimited safe networking bpf_prog_type bitmask (e.g. xdp:sched_cls:cgroup_skb)' },
+        delegateMaps: { type: 'string', description: 'Optional colon-delimited bpf_map_type bitmask' },
+        delegateAttachs: { type: 'string', description: 'Optional colon-delimited bpf_attach_type bitmask' },
+        auditViaBpfLsm: { type: 'boolean', default: true },
+        description: { type: 'string' },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['id', 'audit'],
+    },
+  },
+  {
+    name: 'mcp_inspect_virt_workloads',
+    description:
+      'Inspect KVM/QEMU virtual machines, unprivileged LXC containers (including CLONE_NEWUSER + BPF_TOKEN status), VFIO/IOMMU PCI devices, backups, and host TAP/veth XDP dataplane stats. Requires scope: mcp:virt:read or mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        includeBackups: { type: 'boolean', default: true },
+        includePci: { type: 'boolean', default: true },
+      },
+    },
+  },
+  {
+    name: 'mcp_control_virt_workload',
+    description:
+      'Execute lifecycle and enterprise hypervisor operations (start, stop, reboot, pause, resume, backup, restore, snapshot, rollback, clone, live_migrate, qga_interfaces, export_libvirt_xml) on a KVM virtual machine or LXC container. Anti-lockout guard prevents stopping or pausing Hosted Edge / transit NGFW VMs. Requires scope: mcp:virt:manage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workloadType: { type: 'string', enum: ['vm', 'lxc'] },
+        id: { type: 'number', description: 'VMID or CTID (100-99999)' },
+        action: {
+          type: 'string',
+          enum: [
+            'start',
+            'stop',
+            'reboot',
+            'pause',
+            'resume',
+            'backup',
+            'restore',
+            'snapshot',
+            'rollback',
+            'clone',
+            'live_migrate',
+            'qga_interfaces',
+            'export_libvirt_xml',
+          ],
+        },
+        force: { type: 'boolean', default: false },
+        storagePool: { type: 'string', description: 'Optional ZFS pool for backup/restore action' },
+        snapshotName: { type: 'string', description: 'Snapshot label for snapshot or rollback actions' },
+        backupArchivePath: { type: 'string', description: 'Backup archive filename (.vma.zst) for restore action' },
+        newId: { type: 'number', description: 'Target VMID for clone action (100-99999)' },
+        newName: { type: 'string', description: 'Target VM name for clone action' },
+        linkedClone: { type: 'boolean', default: true, description: 'Use instant zero-copy ZFS linked clone (true) or independent full clone (false)' },
+        targetHostIp: { type: 'string', description: 'Target peer hypervisor IP for live_migrate action' },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['workloadType', 'id', 'action', 'audit'],
+    },
+  },
+  {
+    name: 'mcp_configure_lxc_bpf_token',
+    description:
+      'Declaratively enable, update, or disable Linux 6.9+ BPF_TOKEN_CREATE bpffs delegation + LIBBPF_BPF_TOKEN_PATH=/sys/fs/bpf on an unprivileged LXC container (CLONE_NEWUSER) in DesiredState (virt.yaml) and register its profile with axonwalld. Rejects privileged containers and Ring-0 tracing programs. Requires scopes: mcp:virt:manage AND mcp:ebpf:manage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ctid: { type: 'number', description: 'Target unprivileged LXC CTID (100-99999)' },
+        enabled: { type: 'boolean', description: 'Enable or disable BPF_TOKEN delegation on this container' },
+        preset: {
+          type: 'string',
+          enum: ['socket-observability', 'network-dataplane', 'cgroup-microsegmentation', 'custom'],
+          default: 'network-dataplane',
+        },
+        delegateCmds: { type: 'string' },
+        delegateProgs: { type: 'string' },
+        delegateMaps: { type: 'string' },
+        delegateAttachs: { type: 'string' },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['ctid', 'enabled', 'audit'],
+    },
+  },
+  {
+    name: 'mcp_inspect_k3s_cluster',
+    description:
+      'Inspect K3s Kubernetes HA cluster health, node inventory, OpenEBS ZFS PVCs, CNI bridge/vxlan traffic & XDP program attachments, and K3s UserNS BPF_TOKEN delegation profiles. Requires scope: mcp:k3s:read or mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'mcp_render_k3s_bpf_token_manifest',
+    description:
+      'Render a hardened Kubernetes Pod or DaemonSet YAML manifest using hostUsers: false (UserNamespacesSupport=true), LIBBPF_BPF_TOKEN_PATH=/sys/fs/bpf, RuntimeDefault seccomp, and a delegated bpffs mount for Linux 6.9+ unprivileged eBPF workloads. Requires scope: mcp:k3s:read, mcp:ebpf:read, or mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        profileId: { type: 'string', default: 'k3s-net-dataplane' },
+        preset: {
+          type: 'string',
+          enum: ['socket-observability', 'network-dataplane', 'cgroup-microsegmentation'],
+          default: 'network-dataplane',
+        },
+        workloadName: { type: 'string', default: 'ebpf-packet-inspector' },
+        namespace: { type: 'string', default: 'default' },
+        image: { type: 'string', default: 'ghcr.io/cilium/cilium:v1.16.4' },
+        kind: { type: 'string', enum: ['Pod', 'DaemonSet'], default: 'Pod' },
+      },
+    },
+  },
+  {
+    name: 'mcp_inspect_nas_storage',
+    description:
+      'Inspect OpenZFS pools, datasets, physical disk SMART/inventory, snapshots, SMB/NFS/iSCSI shares, and deep /proc/spl/kstat/zfs telemetry (ARC/L2ARC hit ratios, ZIL/SLOG sync commits, per-pool ZIO queue depth). Requires scope: mcp:nas:read or mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        includeDisks: { type: 'boolean', default: true },
+        includeSnapshots: { type: 'boolean', default: true },
+      },
+    },
+  },
+  {
+    name: 'mcp_nas_snapshot_or_scrub',
+    description:
+      'Execute enterprise OpenZFS NAS operations (snapshot, rollback, delete_snapshot, scrub, trim, checkpoint, discard_checkpoint, unlock_dataset, lock_dataset, smart_test, cloud_sync) with strict ZFS identifier sanitization and SHA-256 hash-chained audit logging. Requires scope: mcp:nas:manage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'snapshot',
+            'rollback',
+            'delete_snapshot',
+            'scrub',
+            'trim',
+            'checkpoint',
+            'discard_checkpoint',
+            'unlock_dataset',
+            'lock_dataset',
+            'smart_test',
+            'cloud_sync',
+          ],
+        },
+        target: {
+          type: 'string',
+          description: 'ZFS dataset (e.g. tank/vms), snapshot (dataset@label), pool (tank), block device (/dev/nvme0n1), or cloud-sync task name',
+        },
+        snapshotLabel: { type: 'string', description: 'Optional snapshot label (e.g. pre-upgrade)' },
+        keyMaterial: { type: 'string', description: 'Optional passphrase/hex key when unlocking an AES-256-GCM ZFS dataset' },
+        smartTestType: { type: 'string', enum: ['short', 'long'], default: 'short' },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['action', 'target', 'audit'],
+    },
+  },
+  {
+    name: 'mcp_manage_zfs_nas',
+    description:
+      'Unified enterprise OpenZFS NAS/SAN lifecycle tool (paired with mcp_nas_snapshot_or_scrub) supporting snapshot, rollback, delete_snapshot, scrub, trim, checkpoint, discard_checkpoint, unlock_dataset, lock_dataset, smart_test, and cloud_sync with root-pool protection and SHA-256 hash-chained audit logging. Requires scope: mcp:nas:manage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'snapshot',
+            'rollback',
+            'delete_snapshot',
+            'scrub',
+            'trim',
+            'checkpoint',
+            'discard_checkpoint',
+            'unlock_dataset',
+            'lock_dataset',
+            'smart_test',
+            'cloud_sync',
+          ],
+        },
+        target: {
+          type: 'string',
+          description: 'ZFS dataset (e.g. tank/vms), snapshot (dataset@label), pool (tank), block device (/dev/nvme0n1), or cloud-sync task name',
+        },
+        snapshotLabel: { type: 'string', description: 'Optional snapshot label (e.g. pre-upgrade)' },
+        keyMaterial: { type: 'string', description: 'Optional passphrase/hex key when unlocking an AES-256-GCM ZFS dataset' },
+        smartTestType: { type: 'string', enum: ['short', 'long'], default: 'short' },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['action', 'target', 'audit'],
+    },
+  },
+  {
+    name: 'mcp_manage_k3s_cluster',
+    description:
+      'Manage K3s embedded etcd cluster disaster recovery snapshots (etcd_snapshot_list, etcd_snapshot_save, etcd_snapshot_restore) with strict filename sanitization and SHA-256 hash-chained audit logging. Requires scope: mcp:k3s:manage.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['etcd_snapshot_list', 'etcd_snapshot_save', 'etcd_snapshot_restore'] },
+        snapshotName: { type: 'string', description: 'Snapshot name for save or restore' },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['action', 'audit'],
+    },
+  },
+  {
+    name: 'mcp_import_competitor_config',
+    description:
+      'Parse, audit, and optionally stage legacy configurations from OPNsense, pfSense, Proxmox VE 8.x, TrueNAS SCALE, VyOS, MikroTik RouterOS, Cisco ASA, iptables, or firewalld into unified Axonwall DesiredState (translating firewall/NAT rules, KVM VMs, LXC containers, ZFS pools/datasets, and SMB/NFS shares). Requires scope: mcp:firewall:write.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        vendor: {
+          type: 'string',
+          enum: ['pfsense', 'opnsense', 'vyos', 'mikrotik', 'iptables', 'cisco', 'firewalld', 'proxmox', 'truenas'],
+          description: 'Optional explicit vendor format (auto-detected when omitted)',
+        },
+        rawConfig: { type: 'string', description: 'Raw XML, JSON, .conf, .rsc, or CLI export text' },
+        stageToDesiredState: {
+          type: 'boolean',
+          default: false,
+          description: 'When true, merges imported objects into /etc/axonwall/*.yaml DesiredState (dry-run preview when false)',
+        },
+        audit: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            incidentId: { type: 'string' },
+            mitreTechniqueId: { type: 'string' },
+            confidence: { type: 'number' },
+          },
+          required: ['reason'],
+        },
+      },
+      required: ['rawConfig'],
+    },
+  },
 ];
 
 // ============================================================================
@@ -538,23 +1120,45 @@ export interface McpExecutionEnvironment {
   onFleetBroadcastBlock?: (ip: string, reason: string, durationMinutes: number) => number;
 }
 
+function getAllowedScopesForResourceUri(uri: string): McpScope[] {
+  switch (uri) {
+    case 'axonwall://ebpf/dataplane':
+    case 'axonwall://ebpf/bpf-tokens':
+    case 'axonwall://security/rootkit-posture':
+      return ['mcp:ebpf:read', 'mcp:telemetry:read'];
+    case 'axonwall://virt/workloads':
+    case 'axonwall://virt/libvirt-domains':
+      return ['mcp:virt:read', 'mcp:telemetry:read'];
+    case 'axonwall://k3s/cluster':
+    case 'axonwall://k3s/etcd-snapshots':
+      return ['mcp:k3s:read', 'mcp:telemetry:read'];
+    case 'axonwall://nas/storage-telemetry':
+      return ['mcp:nas:read', 'mcp:telemetry:read'];
+    default:
+      return ['mcp:telemetry:read'];
+  }
+}
+
 export async function handleMcpReadResource(
   uri: string,
   env: McpExecutionEnvironment
 ): Promise<{ contents: { uri: string; mimeType: string; text: string }[] }> {
-  if (!hasMcpScope(env.key, 'mcp:telemetry:read')) {
+  const acceptedScopes = getAllowedScopesForResourceUri(uri);
+  const matchedScope = acceptedScopes.find((s) => hasMcpScope(env.key, s));
+  if (!matchedScope) {
+    const scopeDesc = acceptedScopes.join(' or ');
     recordMcpAuditEntry({
       keyId: env.key.id,
       keyName: env.key.name,
       agentType: env.key.agentType,
       clientIp: env.clientIp,
       toolName: `resource:${uri}`,
-      requiredScope: 'mcp:telemetry:read',
+      requiredScope: acceptedScopes[0]!,
       decision: 'denied',
-      denialReason: 'Missing required scope mcp:telemetry:read',
+      denialReason: `Missing required scope (${scopeDesc})`,
       paramsSummary: { uri },
     });
-    throw new Error('Authorization denied: missing required scope mcp:telemetry:read');
+    throw new Error(`Authorization denied: missing required scope ${scopeDesc}`);
   }
 
   let payload: unknown;
@@ -682,6 +1286,125 @@ export async function handleMcpReadResource(
       break;
     }
 
+    case 'axonwall://ebpf/dataplane': {
+      const res = await callAxonwalldApi('GET', '/v1/ebpf/overview?limit=50');
+      payload = res.ok
+        ? {
+            dataplane: res.data?.dataplane ?? {},
+            lsm: res.data?.lsm ?? {},
+            bpfTokensSummary: res.data?.bpfTokens ?? {},
+          }
+        : {
+            dataplane: null,
+            lsm: null,
+            daemonDown: true,
+            error: res.data?.error || 'axonwalld unreachable',
+          };
+      break;
+    }
+
+    case 'axonwall://ebpf/bpf-tokens': {
+      const res = await callAxonwalldApi('GET', '/v1/ebpf/tokens');
+      payload = res.ok
+        ? res.data
+        : {
+            capabilities: null,
+            presets: [],
+            profiles: [],
+            activeMounts: [],
+            daemonDown: true,
+            error: res.data?.error || 'axonwalld unreachable',
+          };
+      break;
+    }
+
+    case 'axonwall://virt/workloads': {
+      const [vmsRes, ctsRes, pciRes, telRes] = await Promise.all([
+        callAxonwalldApi('GET', '/v1/virt/vms'),
+        callAxonwalldApi('GET', '/v1/virt/containers'),
+        callAxonwalldApi('GET', '/v1/virt/pci'),
+        callAxonwalldApi('GET', '/v1/virt/telemetry'),
+      ]);
+      const anyDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
+      payload = {
+        vms: vmsRes.ok ? vmsRes.data?.vms ?? [] : [],
+        containers: ctsRes.ok ? ctsRes.data?.containers ?? [] : [],
+        pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [],
+        ebpfTelemetry: telRes.ok ? telRes.data : null,
+        ...(anyDown
+          ? { daemonDown: true, error: vmsRes.data?.error || 'axonwalld unreachable' }
+          : {}),
+      };
+      break;
+    }
+
+    case 'axonwall://k3s/cluster': {
+      const res = await callAxonwalldApi('GET', '/v1/k3s/telemetry');
+      payload = res.ok
+        ? res.data
+        : {
+            status: null,
+            cniInterfaces: [],
+            bpfTokenProfiles: [],
+            daemonDown: true,
+            error: res.data?.error || 'axonwalld unreachable',
+          };
+      break;
+    }
+
+    case 'axonwall://nas/storage-telemetry': {
+      const [telRes, disksRes, snapsRes] = await Promise.all([
+        callAxonwalldApi('GET', '/v1/nas/telemetry'),
+        callAxonwalldApi('GET', '/v1/nas/disks'),
+        callAxonwalldApi('GET', '/v1/nas/snapshots'),
+      ]);
+      payload = {
+        telemetry: telRes.ok ? telRes.data : null,
+        disks: disksRes.ok ? disksRes.data?.disks ?? [] : [],
+        snapshots: snapsRes.ok ? snapsRes.data?.snapshots ?? [] : [],
+        ...(!telRes.ok
+          ? { daemonDown: true, error: telRes.data?.error || 'axonwalld unreachable' }
+          : {}),
+      };
+      break;
+    }
+
+    case 'axonwall://security/rootkit-posture': {
+      const res = await callAxonwalldApi('GET', '/v1/security/rootkit/status');
+      payload = res.ok
+        ? res.data
+        : {
+            verdict: 'UNKNOWN_DAEMON_DOWN',
+            daemonDown: true,
+            error: res.data?.error || 'axonwalld unreachable',
+          };
+      break;
+    }
+
+    case 'axonwall://k3s/etcd-snapshots': {
+      const res = await callAxonwalldApi('GET', '/v1/k3s/etcd-snapshots');
+      payload = res.ok
+        ? res.data
+        : {
+            snapshots: [],
+            daemonDown: true,
+            error: res.data?.error || 'axonwalld unreachable',
+          };
+      break;
+    }
+
+    case 'axonwall://virt/libvirt-domains': {
+      const res = await callAxonwalldApi('GET', '/v1/virt/libvirt-xml');
+      payload = res.ok
+        ? res.data
+        : {
+            domains: [],
+            daemonDown: true,
+            error: res.data?.error || 'axonwalld unreachable',
+          };
+      break;
+    }
+
     default:
       throw new Error(`Unknown MCP resource URI: ${uri}`);
   }
@@ -692,7 +1415,7 @@ export async function handleMcpReadResource(
     agentType: env.key.agentType,
     clientIp: env.clientIp,
     toolName: `resource:${uri}`,
-    requiredScope: 'mcp:telemetry:read',
+    requiredScope: matchedScope,
     decision: 'allowed',
     paramsSummary: { uri },
   });
@@ -739,6 +1462,20 @@ export async function handleMcpCallTool(
       return deny(scope, `Authorization denied: MCP key '${env.key.name}' lacks required scope '${scope}'`, auditMeta);
     }
     return null;
+  };
+
+  const requireAnyScope = (scopes: McpScope[], auditMeta?: any): { matched?: McpScope; err?: ReturnType<typeof deny> } => {
+    const matched = scopes.find((s) => hasMcpScope(env.key, s));
+    if (!matched) {
+      return {
+        err: deny(
+          scopes[0]!,
+          `Authorization denied: MCP key '${env.key.name}' lacks required scope (${scopes.join(' or ')})`,
+          auditMeta,
+        ),
+      };
+    }
+    return { matched };
   };
 
   switch (toolName) {
@@ -1710,7 +2447,7 @@ export async function handleMcpCallTool(
       // requires an exact job-id match to confirm, and a mismatch
       // (or no pending job) is a 200 with success:false, not an
       // HTTP error — so check the payload, not just the status.
-      const confirmRes = await callAxonwalldApi('POST', '/v1/confirm', { jobId });
+      const confirmRes = await callAxonwalldApi('POST', '/v1/confirm', { jobId, job_id: jobId });
       if (!confirmRes.ok) {
         return deny(
           'mcp:firewall:apply',
@@ -1745,6 +2482,1098 @@ export async function handleMcpCallTool(
               },
               null,
               2
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_inspect_ebpf_dataplane': {
+      const { matched, err } = requireAnyScope(['mcp:ebpf:read', 'mcp:telemetry:read']);
+      if (err) return err;
+
+      const limit = typeof args.limit === 'number' ? Math.min(200, Math.max(1, Math.trunc(args.limit))) : 50;
+      const res = await callAxonwalldApi('GET', `/v1/ebpf/overview?limit=${limit}`);
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: matched!,
+        decision: 'allowed',
+        paramsSummary: { limit },
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              res.ok
+                ? res.data
+                : {
+                    dataplane: null,
+                    lsm: null,
+                    bpfTokens: null,
+                    daemonDown: true,
+                    error: res.data?.error || 'axonwalld unreachable',
+                  },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_xdp_fast_drop': {
+      const parsed = McpXdpFastDropRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny('mcp:ebpf:manage', `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      const scopeErr = requireScope('mcp:ebpf:manage', req.audit);
+      if (scopeErr) return scopeErr;
+
+      if (req.action === 'set_syn_limit') {
+        const maxSynPps = req.synFloodLimitPps ?? 0;
+        if (maxSynPps > 0 && maxSynPps < 20) {
+          return deny('mcp:ebpf:manage', 'synFloodLimitPps must be 0 (disabled) or >= 20 PPS to prevent self-lockout', req.audit);
+        }
+        const daemonRes = await callAxonwalldApi('POST', '/v1/ebpf/xdp/syn-limit', { maxSynPps });
+        if (!daemonRes.ok) {
+          return deny('mcp:ebpf:manage', daemonRes.data?.error || 'Daemon rejected XDP SYN-flood limit update', req.audit);
+        }
+        const auditEntry = recordMcpAuditEntry({
+          keyId: env.key.id,
+          keyName: env.key.name,
+          agentType: env.key.agentType,
+          clientIp: env.clientIp,
+          toolName,
+          requiredScope: 'mcp:ebpf:manage',
+          decision: 'allowed',
+          paramsSummary: { action: 'set_syn_limit', synFloodLimitPps: maxSynPps },
+          auditMetadata: req.audit,
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  action: 'set_syn_limit',
+                  synFloodLimitPps: maxSynPps,
+                  auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      if (!req.ipAddress) {
+        return deny('mcp:ebpf:manage', 'ipAddress (host IP or CIDR subnet) is required for block/unblock', req.audit);
+      }
+
+      const parsedIp = parseIpOrCidr(req.ipAddress);
+      if (!parsedIp) {
+        return deny('mcp:ebpf:manage', `Invalid IPv4/IPv6 address or CIDR prefix '${req.ipAddress}'`, req.audit);
+      }
+
+      const targetValue = parsedIp.isSingleHost ? parsedIp.address : parsedIp.normalizedCidr;
+
+      if (req.action === 'block') {
+        const { ctx } = await buildGuardContext(env.key, env.clientIp);
+        const targetCheck = validateMcpTarget(targetValue, ctx);
+        if (!targetCheck.valid) {
+          return deny('mcp:ebpf:manage', targetCheck.reason || 'Target rejected by anti-lockout / blast-radius guard', req.audit);
+        }
+
+        const boundedTtl = Math.min(req.ttlSeconds, env.key.policyLimits.maxTtlSeconds);
+        const daemonRes = await callAxonwalldApi('POST', '/v1/ebpf/xdp/block', {
+          ip: targetCheck.normalizedTarget || targetValue,
+          ttlSeconds: boundedTtl,
+          reasonCode: parsedIp.isSingleHost ? 1 : 4,
+          reason: req.audit.reason,
+        });
+        if (!daemonRes.ok) {
+          return deny('mcp:ebpf:manage', daemonRes.data?.error || 'Daemon rejected XDP fast-drop block', req.audit);
+        }
+
+        const auditEntry = recordMcpAuditEntry({
+          keyId: env.key.id,
+          keyName: env.key.name,
+          agentType: env.key.agentType,
+          clientIp: env.clientIp,
+          toolName,
+          requiredScope: 'mcp:ebpf:manage',
+          decision: 'allowed',
+          paramsSummary: { action: 'block', ipAddress: targetValue, isCidr: !parsedIp.isSingleHost, ttlSeconds: boundedTtl },
+          auditMetadata: req.audit,
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  action: 'block',
+                  ipAddress: targetValue,
+                  isCidr: !parsedIp.isSingleHost,
+                  ttlSeconds: boundedTtl,
+                  activeBlocks: daemonRes.data?.blocks ?? [],
+                  auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      const daemonRes = await callAxonwalldApi(
+        'DELETE',
+        `/v1/ebpf/xdp/block?ip=${encodeURIComponent(targetValue)}`,
+      );
+      if (!daemonRes.ok) {
+        return deny('mcp:ebpf:manage', daemonRes.data?.error || 'Daemon rejected XDP fast-drop unblock', req.audit);
+      }
+
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:ebpf:manage',
+        decision: 'allowed',
+        paramsSummary: { action: 'unblock', ipAddress: targetValue },
+        auditMetadata: req.audit,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                action: 'unblock',
+                ipAddress: targetValue,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_manage_bpf_token_profile': {
+      const parsed = McpManageBpfTokenProfileRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny('mcp:ebpf:manage', `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      const scopeErr = requireScope('mcp:ebpf:manage', req.audit);
+      if (scopeErr) return scopeErr;
+
+      if (req.operation === 'upsert') {
+        const maskCheck = validateBpfTokenDelegationInput(req);
+        if (!maskCheck.valid) {
+          return deny('mcp:ebpf:manage', maskCheck.reason || 'Rejected unsafe BPF_TOKEN delegation bitmask', req.audit);
+        }
+
+        const daemonRes = await callAxonwalldApi('POST', '/v1/ebpf/tokens', {
+          id: req.id,
+          targetKind: req.targetKind,
+          targetRef: req.targetRef || '',
+          preset: req.preset,
+          enabled: req.enabled,
+          delegateCmds: req.delegateCmds || '',
+          delegateProgs: req.delegateProgs || '',
+          delegateMaps: req.delegateMaps || '',
+          delegateAttachs: req.delegateAttachs || '',
+          auditViaBpfLsm: req.auditViaBpfLsm,
+          description: req.description || '',
+        });
+        if (!daemonRes.ok) {
+          return deny('mcp:ebpf:manage', daemonRes.data?.error || 'Daemon rejected BPF_TOKEN profile upsert', req.audit);
+        }
+
+        const auditEntry = recordMcpAuditEntry({
+          keyId: env.key.id,
+          keyName: env.key.name,
+          agentType: env.key.agentType,
+          clientIp: env.clientIp,
+          toolName,
+          requiredScope: 'mcp:ebpf:manage',
+          decision: 'allowed',
+          paramsSummary: { operation: 'upsert', id: req.id, preset: req.preset, targetKind: req.targetKind },
+          auditMetadata: req.audit,
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  operation: 'upsert',
+                  profile: daemonRes.data?.profile ?? null,
+                  auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      const daemonRes = await callAxonwalldApi('DELETE', `/v1/ebpf/tokens?id=${encodeURIComponent(req.id)}`);
+      if (!daemonRes.ok) {
+        return deny('mcp:ebpf:manage', daemonRes.data?.error || `Daemon rejected BPF_TOKEN profile deletion for '${req.id}'`, req.audit);
+      }
+
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:ebpf:manage',
+        decision: 'allowed',
+        paramsSummary: { operation: 'delete', id: req.id },
+        auditMetadata: req.audit,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                operation: 'delete',
+                deletedId: req.id,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_inspect_virt_workloads': {
+      const { matched, err } = requireAnyScope(['mcp:virt:read', 'mcp:telemetry:read']);
+      if (err) return err;
+
+      const includeBackups = args.includeBackups !== false;
+      const includePci = args.includePci !== false;
+      const [vmsRes, ctsRes, telRes, pciRes, backupsRes] = await Promise.all([
+        callAxonwalldApi('GET', '/v1/virt/vms'),
+        callAxonwalldApi('GET', '/v1/virt/containers'),
+        callAxonwalldApi('GET', '/v1/virt/telemetry'),
+        includePci ? callAxonwalldApi('GET', '/v1/virt/pci') : Promise.resolve({ ok: true, status: 200, data: { devices: [] } }),
+        includeBackups ? callAxonwalldApi('GET', '/v1/virt/backups') : Promise.resolve({ ok: true, status: 200, data: { backups: [] } }),
+      ]);
+
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: matched!,
+        decision: 'allowed',
+        paramsSummary: { includeBackups, includePci },
+      });
+
+      const daemonDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                vms: vmsRes.ok ? vmsRes.data?.vms ?? [] : [],
+                containers: ctsRes.ok ? ctsRes.data?.containers ?? [] : [],
+                ebpfTelemetry: telRes.ok ? telRes.data : null,
+                ...(includePci ? { pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [] } : {}),
+                ...(includeBackups ? { backups: backupsRes.ok ? backupsRes.data?.backups ?? [] : [] } : {}),
+                ...(daemonDown ? { daemonDown: true, error: vmsRes.data?.error || 'axonwalld unreachable' } : {}),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_control_virt_workload': {
+      const parsed = McpVirtControlRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny('mcp:virt:manage', `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      const scopeErr = requireScope('mcp:virt:manage', req.audit);
+      if (scopeErr) return scopeErr;
+
+      const localState = loadLocalDesiredState();
+      let workloadName: string | undefined;
+      if (req.workloadType === 'vm') {
+        workloadName = localState?.virt?.vms?.find((v) => v.vmid === req.id)?.name;
+        if (!workloadName) {
+          const vmsRes = await callAxonwalldApi('GET', '/v1/virt/vms');
+          if (vmsRes.ok && Array.isArray(vmsRes.data?.vms)) {
+            workloadName = vmsRes.data.vms.find((v: any) => Number(v.vmid) === req.id)?.name;
+          }
+        }
+      } else {
+        workloadName = localState?.virt?.containers?.find((c) => c.ctid === req.id)?.hostname;
+        if (!workloadName) {
+          const ctsRes = await callAxonwalldApi('GET', '/v1/virt/containers');
+          if (ctsRes.ok && Array.isArray(ctsRes.data?.containers)) {
+            workloadName = ctsRes.data.containers.find((c: any) => Number(c.ctid) === req.id)?.hostname;
+          }
+        }
+      }
+
+      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled);
+      if (!safetyCheck.valid) {
+        return deny('mcp:virt:manage', safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard', req.audit);
+      }
+
+      let daemonRes: { ok: boolean; status: number; data: any };
+      if (req.action === 'backup') {
+        const poolName = req.storagePool || 'tank';
+        const poolCheck = validateZfsResourcePath(poolName, false);
+        if (!poolCheck.valid) {
+          return deny('mcp:virt:manage', poolCheck.reason || 'Invalid backup storagePool', req.audit);
+        }
+        daemonRes = await callAxonwalldApi('POST', '/v1/virt/backups', {
+          action: 'run',
+          targetType: req.workloadType,
+          targetId: req.id,
+          pool: poolCheck.normalizedTarget,
+          destType: 'local',
+        });
+      } else if (req.action === 'restore') {
+        if (!req.backupArchivePath) {
+          return deny('mcp:virt:manage', 'backupArchivePath (.vma.zst filename) is required for restore action', req.audit);
+        }
+        const poolName = req.storagePool || 'tank';
+        const poolCheck = validateZfsResourcePath(poolName, false);
+        if (!poolCheck.valid) {
+          return deny('mcp:virt:manage', poolCheck.reason || 'Invalid restore storagePool', req.audit);
+        }
+        daemonRes = await callAxonwalldApi('POST', '/v1/virt/backups', {
+          action: 'restore',
+          archiveName: path.basename(req.backupArchivePath),
+          targetType: req.workloadType,
+          targetId: req.id,
+          pool: poolCheck.normalizedTarget,
+        });
+      } else if (req.action === 'snapshot' || req.action === 'rollback') {
+        const label = req.snapshotName || (req.action === 'snapshot' ? `mcp-${Date.now()}` : '');
+        if (!label) {
+          return deny('mcp:virt:manage', 'snapshotName is required for rollback action', req.audit);
+        }
+        daemonRes = await callAxonwalldApi('POST', '/v1/virt/snapshots', {
+          action: req.action === 'snapshot' ? 'create' : 'rollback',
+          targetType: req.workloadType,
+          targetId: req.id,
+          label,
+        });
+      } else if (req.action === 'clone') {
+        if (req.workloadType !== 'vm' || !req.newId) {
+          return deny('mcp:virt:manage', 'clone requires workloadType="vm" and newId (100-99999)', req.audit);
+        }
+        daemonRes = await callAxonwalldApi('POST', '/v1/virt/clone', {
+          sourceVmid: req.id,
+          newVmid: req.newId,
+          newName: req.newName || '',
+          linked: req.linkedClone !== false,
+        });
+      } else if (req.action === 'live_migrate') {
+        if (req.workloadType !== 'vm' || !req.targetHostIp) {
+          return deny('mcp:virt:manage', 'live_migrate requires workloadType="vm" and targetHostIp', req.audit);
+        }
+        daemonRes = await callAxonwalldApi('POST', '/v1/virt/migrate', {
+          vmid: req.id,
+          targetPeerIp: req.targetHostIp,
+        });
+      } else if (req.action === 'qga_interfaces') {
+        daemonRes = await callAxonwalldApi('GET', `/v1/virt/qga?vmid=${encodeURIComponent(String(req.id))}`);
+      } else if (req.action === 'export_libvirt_xml') {
+        daemonRes = await callAxonwalldApi('GET', `/v1/virt/libvirt-xml?vmid=${encodeURIComponent(String(req.id))}`);
+      } else if (req.workloadType === 'vm') {
+        const vmAction = req.action === 'reboot' ? 'reset' : req.action;
+        daemonRes = await callAxonwalldApi('POST', '/v1/virt/vms', {
+          action: vmAction,
+          vmid: req.id,
+          force: req.force,
+        });
+      } else {
+        if (req.action === 'pause' || req.action === 'resume') {
+          return deny('mcp:virt:manage', `Action '${req.action}' is only supported on KVM VMs, not LXC containers`, req.audit);
+        }
+        if (req.action === 'reboot') {
+          const stopRes = await callAxonwalldApi('POST', '/v1/virt/containers', {
+            action: 'stop',
+            ctid: req.id,
+            force: req.force,
+          });
+          if (!stopRes.ok) {
+            return deny('mcp:virt:manage', stopRes.data?.error || `Failed to stop LXC CT ${req.id} during reboot`, req.audit);
+          }
+          daemonRes = await callAxonwalldApi('POST', '/v1/virt/containers', {
+            action: 'start',
+            ctid: req.id,
+            force: false,
+          });
+        } else {
+          daemonRes = await callAxonwalldApi('POST', '/v1/virt/containers', {
+            action: req.action,
+            ctid: req.id,
+            force: req.force,
+          });
+        }
+      }
+
+      if (!daemonRes.ok) {
+        return deny(
+          'mcp:virt:manage',
+          daemonRes.data?.error || daemonRes.data?.raw || `Daemon failed to execute '${req.action}' on ${req.workloadType} ${req.id}`,
+          req.audit,
+        );
+      }
+
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:virt:manage',
+        decision: 'allowed',
+        paramsSummary: { workloadType: req.workloadType, id: req.id, action: req.action, force: req.force },
+        auditMetadata: req.audit,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                workloadType: req.workloadType,
+                id: req.id,
+                action: req.action,
+                result: daemonRes.data,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_configure_lxc_bpf_token': {
+      const parsed = McpConfigureLxcBpfTokenRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny('mcp:virt:manage', `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      const virtErr = requireScope('mcp:virt:manage', req.audit);
+      if (virtErr) return virtErr;
+      const ebpfErr = requireScope('mcp:ebpf:manage', req.audit);
+      if (ebpfErr) return ebpfErr;
+
+      if (req.enabled) {
+        const maskCheck = validateBpfTokenDelegationInput(req);
+        if (!maskCheck.valid) {
+          return deny('mcp:ebpf:manage', maskCheck.reason || 'Unsafe LXC BPF_TOKEN delegation bitmask', req.audit);
+        }
+      }
+
+      let compiledConfig = '';
+      let releaseLock: (() => void) | null = null;
+      try {
+        try {
+          releaseLock = acquireMcpLockFile(desiredStateLockPath());
+        } catch (err: any) {
+          return deny('mcp:virt:manage', `Could not lock DesiredState (${err?.message || err})`, req.audit);
+        }
+        const fresh = loadLocalDesiredState();
+        if (!fresh) {
+          return deny('mcp:virt:manage', 'DesiredState file not found on appliance', req.audit);
+        }
+        const containers = fresh.virt?.containers ?? [];
+        const ct = containers.find((c) => c.ctid === req.ctid);
+        if (!ct) {
+          return deny('mcp:virt:manage', `LXC container CT ${req.ctid} not found in DesiredState`, req.audit);
+        }
+        if (req.enabled && ct.unprivileged === false) {
+          return deny(
+            'mcp:ebpf:manage',
+            `Linux 6.9+ BPF_TOKEN delegation requires an unprivileged LXC container (unprivileged: true with CLONE_NEWUSER), but CT ${req.ctid} ('${ct.hostname}') has unprivileged: false`,
+            req.audit,
+          );
+        }
+
+        ct.bpfToken = req.enabled
+          ? {
+              enabled: true,
+              preset: req.preset,
+              delegateCmds: req.delegateCmds,
+              delegateProgs: req.delegateProgs,
+              delegateMaps: req.delegateMaps,
+              delegateAttachs: req.delegateAttachs,
+              auditViaBpfLsm: true,
+            }
+          : {
+              enabled: false,
+              preset: req.preset,
+              auditViaBpfLsm: true,
+            };
+
+        const compiled = compileLxcContainer(ct);
+        compiledConfig = compiled.lxcConfig;
+        persistDesiredStateToDisk(fresh);
+      } finally {
+        releaseLock?.();
+      }
+
+      const profileId = `ct-${req.ctid}`;
+      const daemonRes = req.enabled
+        ? await callAxonwalldApi('POST', '/v1/ebpf/tokens', {
+            id: profileId,
+            targetKind: 'lxc',
+            targetRef: String(req.ctid),
+            preset: req.preset,
+            enabled: true,
+            delegateCmds: req.delegateCmds || '',
+            delegateProgs: req.delegateProgs || '',
+            delegateMaps: req.delegateMaps || '',
+            delegateAttachs: req.delegateAttachs || '',
+            auditViaBpfLsm: true,
+            description: `Unprivileged LXC CT ${req.ctid} BPF_TOKEN delegation`,
+          })
+        : await callAxonwalldApi('DELETE', `/v1/ebpf/tokens?id=${encodeURIComponent(profileId)}`);
+
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:ebpf:manage',
+        decision: 'allowed',
+        paramsSummary: { ctid: req.ctid, enabled: req.enabled, preset: req.preset },
+        auditMetadata: req.audit,
+      });
+
+      const bpfLines = compiledConfig
+        .split('\n')
+        .filter((l) => l.includes('bpf') || l.includes('LIBBPF_BPF_TOKEN_PATH'));
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                ctid: req.ctid,
+                enabled: req.enabled,
+                preset: req.preset,
+                stagedInDesiredState: true,
+                daemonProfileSync: daemonRes.ok ? 'synced' : 'staged_offline',
+                compiledBpfDirectives: bpfLines,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_inspect_k3s_cluster': {
+      const { matched, err } = requireAnyScope(['mcp:k3s:read', 'mcp:telemetry:read']);
+      if (err) return err;
+
+      const res = await callAxonwalldApi('GET', '/v1/k3s/telemetry');
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: matched!,
+        decision: 'allowed',
+        paramsSummary: {},
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              res.ok
+                ? res.data
+                : {
+                    status: null,
+                    cniInterfaces: [],
+                    bpfTokenProfiles: [],
+                    daemonDown: true,
+                    error: res.data?.error || 'axonwalld unreachable',
+                  },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_render_k3s_bpf_token_manifest': {
+      const { matched, err } = requireAnyScope(['mcp:k3s:read', 'mcp:ebpf:read', 'mcp:telemetry:read']);
+      if (err) return err;
+
+      const parsed = McpRenderK3sBpfTokenRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny(matched!, `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      const daemonRes = await callAxonwalldApi('POST', '/v1/ebpf/tokens/render-k3s', {
+        profileId: req.profileId,
+        profile: {
+          id: req.profileId,
+          targetKind: 'k3s-pod',
+          preset: req.preset,
+          enabled: true,
+          auditViaBpfLsm: true,
+        },
+        workloadName: req.workloadName,
+        namespace: req.namespace,
+        image: req.image,
+        kind: req.kind,
+      });
+
+      const manifestYaml =
+        daemonRes.ok && typeof daemonRes.data?.manifestYaml === 'string'
+          ? daemonRes.data.manifestYaml
+          : renderOfflineK3sBpfTokenYaml(req);
+
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: matched!,
+        decision: 'allowed',
+        paramsSummary: req,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                profileId: req.profileId,
+                preset: req.preset,
+                kind: req.kind,
+                manifestYaml,
+                ...(daemonRes.ok ? {} : { renderedOffline: true }),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_inspect_nas_storage': {
+      const { matched, err } = requireAnyScope(['mcp:nas:read', 'mcp:telemetry:read']);
+      if (err) return err;
+
+      const includeDisks = args.includeDisks !== false;
+      const includeSnapshots = args.includeSnapshots !== false;
+      const [telRes, disksRes, snapsRes] = await Promise.all([
+        callAxonwalldApi('GET', '/v1/nas/telemetry'),
+        includeDisks ? callAxonwalldApi('GET', '/v1/nas/disks') : Promise.resolve({ ok: true, status: 200, data: { disks: [] } }),
+        includeSnapshots ? callAxonwalldApi('GET', '/v1/nas/snapshots') : Promise.resolve({ ok: true, status: 200, data: { snapshots: [] } }),
+      ]);
+
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: matched!,
+        decision: 'allowed',
+        paramsSummary: { includeDisks, includeSnapshots },
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                telemetry: telRes.ok ? telRes.data : null,
+                ...(includeDisks ? { disks: disksRes.ok ? disksRes.data?.disks ?? [] : [] } : {}),
+                ...(includeSnapshots ? { snapshots: snapsRes.ok ? snapsRes.data?.snapshots ?? [] : [] } : {}),
+                ...(!telRes.ok ? { daemonDown: true, error: telRes.data?.error || 'axonwalld unreachable' } : {}),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_nas_snapshot_or_scrub':
+    case 'mcp_manage_zfs_nas': {
+      const parsed = McpNasActionRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny('mcp:nas:manage', `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      const scopeErr = requireScope('mcp:nas:manage', req.audit);
+      if (scopeErr) return scopeErr;
+
+      let daemonRes: { ok: boolean; status: number; data: any };
+      const summaryParams: Record<string, unknown> = { action: req.action, target: req.target };
+
+      switch (req.action) {
+        case 'snapshot': {
+          const targetCheck = validateZfsResourcePath(req.target, true);
+          if (!targetCheck.valid) return deny('mcp:nas:manage', targetCheck.reason || 'Invalid ZFS dataset path', req.audit);
+          const label = req.snapshotLabel ? req.snapshotLabel.trim() : `mcp-${Date.now()}`;
+          const labelCheck = validateZfsResourcePath(label, false);
+          if (!labelCheck.valid) return deny('mcp:nas:manage', labelCheck.reason || 'Invalid ZFS snapshot label', req.audit);
+          summaryParams.dataset = targetCheck.normalizedTarget;
+          summaryParams.label = labelCheck.normalizedTarget;
+          daemonRes = await callAxonwalldApi('POST', '/v1/nas/snapshots', {
+            dataset: targetCheck.normalizedTarget,
+            label: labelCheck.normalizedTarget,
+          });
+          break;
+        }
+        case 'rollback':
+        case 'delete_snapshot': {
+          const snapParts = req.target.trim().split('@');
+          if (snapParts.length !== 2) {
+            return deny('mcp:nas:manage', `Expected snapshot identifier in 'dataset@label' format, got '${req.target}'`, req.audit);
+          }
+          const dsCheck = validateZfsResourcePath(snapParts[0]!, true);
+          const lblCheck = validateZfsResourcePath(snapParts[1]!, false);
+          if (!dsCheck.valid || !lblCheck.valid) {
+            return deny('mcp:nas:manage', dsCheck.reason || lblCheck.reason || 'Invalid ZFS snapshot identifier', req.audit);
+          }
+          const fullSnap = `${dsCheck.normalizedTarget}@${lblCheck.normalizedTarget}`;
+          daemonRes =
+            req.action === 'rollback'
+              ? await callAxonwalldApi('POST', '/v1/nas/snapshots/rollback', { snapshot: fullSnap, destroyNewer: false })
+              : await callAxonwalldApi('DELETE', `/v1/nas/snapshots?snapshot=${encodeURIComponent(fullSnap)}`);
+          break;
+        }
+        case 'scrub':
+        case 'trim':
+        case 'checkpoint':
+        case 'discard_checkpoint': {
+          const poolCheck = validateZfsResourcePath(req.target, false);
+          if (!poolCheck.valid) return deny('mcp:nas:manage', poolCheck.reason || 'Invalid ZFS pool name', req.audit);
+          const pool = poolCheck.normalizedTarget;
+          if (req.action === 'scrub') {
+            daemonRes = await callAxonwalldApi('POST', '/v1/nas/scrub', { pool });
+          } else if (req.action === 'trim') {
+            daemonRes = await callAxonwalldApi('POST', '/v1/nas/trim', { pool });
+          } else {
+            daemonRes = await callAxonwalldApi('POST', '/v1/nas/checkpoint', {
+              pool,
+              discard: req.action === 'discard_checkpoint',
+            });
+          }
+          break;
+        }
+        case 'unlock_dataset':
+        case 'lock_dataset': {
+          const dsCheck = validateZfsResourcePath(req.target, true);
+          if (!dsCheck.valid) return deny('mcp:nas:manage', dsCheck.reason || 'Invalid ZFS dataset name', req.audit);
+          daemonRes = await callAxonwalldApi('POST', '/v1/nas/encryption', {
+            dataset: dsCheck.normalizedTarget,
+            action: req.action === 'unlock_dataset' ? 'load-key' : 'unload-key',
+            keyMaterial: req.keyMaterial || '',
+          });
+          break;
+        }
+        case 'smart_test': {
+          if (!/^\/dev\/(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|disk\/by-id\/[A-Za-z0-9_.-]+)$/.test(req.target.trim())) {
+            return deny('mcp:nas:manage', `Disallowed SMART block device path '${req.target}'`, req.audit);
+          }
+          daemonRes = await callAxonwalldApi('POST', '/v1/nas/smart-test', {
+            device: req.target.trim(),
+            testType: req.smartTestType || 'short',
+          });
+          break;
+        }
+        case 'cloud_sync': {
+          if (!/^[a-zA-Z0-9_.-]+$/.test(req.target.trim())) {
+            return deny('mcp:nas:manage', `Invalid cloud sync task name '${req.target}'`, req.audit);
+          }
+          daemonRes = await callAxonwalldApi('POST', '/v1/nas/cloudsync', {
+            taskName: req.target.trim(),
+          });
+          break;
+        }
+      }
+
+      if (!daemonRes.ok) {
+        return deny('mcp:nas:manage', daemonRes.data?.error || daemonRes.data?.raw || `Daemon rejected NAS action '${req.action}'`, req.audit);
+      }
+
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:nas:manage',
+        decision: 'allowed',
+        paramsSummary: summaryParams,
+        auditMetadata: req.audit,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                action: req.action,
+                target: req.target,
+                ...(daemonRes.data?.snapshot ? { snapshot: daemonRes.data.snapshot } : {}),
+                ...(summaryParams.dataset && summaryParams.label && !daemonRes.data?.snapshot
+                  ? { snapshot: `${summaryParams.dataset}@${summaryParams.label}` }
+                  : {}),
+                result: daemonRes.data,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_manage_k3s_cluster': {
+      const parsed = McpK3sManageRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny('mcp:k3s:manage', `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      if (req.action === 'etcd_snapshot_list') {
+        const { matched, err } = requireAnyScope(['mcp:k3s:read', 'mcp:k3s:manage']);
+        if (err) return err;
+        const daemonRes = await callAxonwalldApi('GET', '/v1/k3s/etcd-snapshots');
+        recordMcpAuditEntry({
+          keyId: env.key.id,
+          keyName: env.key.name,
+          agentType: env.key.agentType,
+          clientIp: env.clientIp,
+          toolName,
+          requiredScope: matched!,
+          decision: 'allowed',
+          paramsSummary: { action: req.action },
+          auditMetadata: req.audit,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(daemonRes.data, null, 2) }],
+          isError: !daemonRes.ok,
+        };
+      }
+
+      const scopeErr = requireScope('mcp:k3s:manage', req.audit);
+      if (scopeErr) return scopeErr;
+
+      if (req.action === 'etcd_snapshot_restore' && !req.snapshotName) {
+        return deny('mcp:k3s:manage', 'snapshotName is required for etcd_snapshot_restore', req.audit);
+      }
+
+      const daemonRes = await callAxonwalldApi('POST', '/v1/k3s/etcd-snapshots', {
+        action: req.action === 'etcd_snapshot_save' ? 'save' : 'restore',
+        name: req.snapshotName || '',
+      });
+      if (!daemonRes.ok) {
+        return deny('mcp:k3s:manage', daemonRes.data?.error || 'Daemon rejected K3s etcd snapshot operation', req.audit);
+      }
+
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:k3s:manage',
+        decision: 'allowed',
+        paramsSummary: { action: req.action, snapshotName: req.snapshotName || null },
+        auditMetadata: req.audit,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                action: req.action,
+                result: daemonRes.data,
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_import_competitor_config': {
+      const parsed = McpImportCompetitorRequestSchema.safeParse(args);
+      if (!parsed.success) {
+        return deny('mcp:firewall:write', `Schema validation failed: ${parsed.error.message}`);
+      }
+      const req = parsed.data;
+
+      const scopeErr = requireScope('mcp:firewall:write', req.audit);
+      if (scopeErr) return scopeErr;
+
+      let report;
+      try {
+        report = importFirewallConfig(req.rawConfig, req.vendor);
+      } catch (err: any) {
+        return deny('mcp:firewall:write', `Failed to parse competitor configuration: ${err?.message || err}`, req.audit);
+      }
+
+      const summary = {
+        interfacesImported: report.interfacesCount,
+        vlansImported: report.vlansCount,
+        aliasesImported: report.aliasesCount,
+        rulesImported: report.rulesCount,
+        natRulesImported: report.natRulesCount,
+        vmsImported: report.vmsCount ?? 0,
+        containersImported: report.containersCount ?? 0,
+        poolsImported: report.zfsPoolsCount ?? 0,
+        datasetsImported: report.datasetsCount ?? 0,
+        sharesImported: report.sharesCount ?? 0,
+      };
+
+      let staged = false;
+      if (req.stageToDesiredState) {
+        const hasVirtObjects =
+          (report.state.virt?.vms?.length || 0) > 0 || (report.state.virt?.containers?.length || 0) > 0;
+        const hasNasObjects =
+          (report.state.nas?.pools?.length || 0) > 0 ||
+          (report.state.nas?.datasets?.length || 0) > 0 ||
+          (report.state.nas?.smbShares?.length || 0) > 0 ||
+          (report.state.nas?.nfsExports?.length || 0) > 0;
+
+        if (hasVirtObjects) {
+          const vErr = requireScope('mcp:virt:manage', req.audit);
+          if (vErr) return vErr;
+        }
+        if (hasNasObjects) {
+          const nErr = requireScope('mcp:nas:manage', req.audit);
+          if (nErr) return nErr;
+        }
+
+        let releaseLock: (() => void) | null = null;
+        try {
+          try {
+            releaseLock = acquireMcpLockFile(desiredStateLockPath());
+          } catch (lockErr: any) {
+            return deny('mcp:firewall:write', `Could not lock DesiredState (${lockErr?.message || lockErr})`, req.audit);
+          }
+          const active = loadLocalDesiredState();
+          const nextState = active ? mergeFirewallConfigs(active, report.state) : report.state;
+          persistDesiredStateToDisk(nextState);
+          staged = true;
+        } finally {
+          releaseLock?.();
+        }
+      }
+
+      const auditEntry = recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:firewall:write',
+        decision: 'allowed',
+        paramsSummary: {
+          vendor: report.vendor,
+          stageToDesiredState: req.stageToDesiredState,
+          summary,
+        },
+        auditMetadata: req.audit,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                vendor: report.vendor,
+                vendorVersion: report.version,
+                stagedInDesiredState: staged,
+                summary,
+                warnings: report.warnings,
+                reviewItemsCount: report.reviewItems?.length ?? 0,
+                reviewItems: (report.reviewItems ?? []).slice(0, 25),
+                auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
+              },
+              null,
+              2,
             ),
           },
         ],
@@ -1818,7 +3647,7 @@ export async function processMcpJsonRpcMessage(
             protocolVersion: '2024-11-05',
             serverInfo: {
               name: 'axonwall-firewall-mcp',
-              version: '0.11.4',
+              version: '0.11.64',
             },
             capabilities: {
               resources: { listChanged: false },

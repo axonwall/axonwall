@@ -5,9 +5,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Hardware Telemetry & Web Shell | Axonwall Documentation',
+  title: 'Hardware Telemetry, Optical DOM & Console Command Runner | Axonwall Documentation',
   description:
-    'Comprehensive hardware telemetry and web terminal documentation for Axonwall: Linux HWMON sensor telemetry, SFP+/QSFP optical DOM transceiver monitoring, and root PTY shell.',
+    'Comprehensive hardware telemetry and shell access documentation for Axonwall v0.11.64: Linux HWMON chassis sensor telemetry, SFP+/QSFP optical DOM transceiver monitoring, RBAC Console Command Runner, KVM noVNC consoles, and SSH/serial TUI.',
 };
 
 export default function HardwareTelemetryDocPage() {
@@ -17,13 +17,13 @@ export default function HardwareTelemetryDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Hardware & Management
+          Hardware &amp; Management • v0.11.64
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          Hardware Telemetry & Web Shell
+          Hardware Telemetry, Optical DOM &amp; Shell Access
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Monitor physical appliance health and diagnose fiber link degradation. Axonwall aggregates Linux <code className="text-emerald-400 font-mono">hwmon</code> chassis sensors, <code className="text-white font-mono">SFP+ DOM</code> optical metrics, and an integrated root web pseudo-terminal (PTY).
+          Monitor physical appliance health and diagnose fiber link degradation. Axonwall aggregates Linux <code className="text-emerald-400 font-mono">hwmon</code> chassis sensors, <code className="text-white font-mono">SFP+/QSFP28 DOM</code> optical transceiver metrics, an RBAC-gated Console Command Runner, KVM HTML5 <code className="text-emerald-400 font-mono">noVNC</code> guest consoles, and full SSH / serial TUI workstations.
         </p>
       </div>
 
@@ -83,34 +83,57 @@ export default function HardwareTelemetryDocPage() {
         </Callout>
       </section>
 
-      {/* Web PTY Shell */}
+      {/* Console Command Runner & Shell Channels */}
       <section id="web-terminal" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Terminal className="w-6 h-6 text-emerald-400" /> Integrated PTY Web Terminal
+          <Terminal className="w-6 h-6 text-emerald-400" /> Console Command Runner, SSH Workstation &amp; Guest Consoles
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          When deep system administration is needed, administrators can open a full-featured pseudo-terminal (PTY) directly inside the web browser without configuring external SSH key pairs or port forwards.
+          Rather than exposing an unbounded persistent root WebSocket PTY to browser XSS/session hijacking risks, Axonwall separates browser diagnostics from interactive shell administration across four purpose-built channels:
         </p>
 
-        <div className="space-y-4">
-          <h3 className="text-base font-semibold text-white">PTY Architecture</h3>
-          <p className="text-xs text-slate-300 leading-relaxed">
-            The privileged Go daemon allocates a Linux pseudo-terminal using <code className="text-slate-200">creack/pty</code>, spawning a dedicated bash shell with full ANSI color support, tab completion, and window resizing (<code className="text-slate-200">TIOCSWINSZ</code>).
-          </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <h3 className="font-bold text-emerald-400 text-sm">1. Web Console Command Runner (/system/terminal)</h3>
+            <p className="text-slate-400 leading-relaxed">
+              Backed by <code className="text-slate-200 font-mono">axonwalld</code> <code className="text-emerald-400 font-mono">/v1/terminal/exec</code> over the authenticated <code className="text-slate-200 font-mono">/run/axonwall/agent-api.sock</code> Unix socket with strict RBAC administrator gating, timeout bounds, and audit logging—ideal for quick browser-based diagnostics.
+            </p>
+          </div>
 
-          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2 text-xs">
-            <span className="font-bold text-white">Common Diagnostic Commands:</span>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-300 font-mono">
-              <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">nft list ruleset</code> - Inspect live kernel filter</div>
-              <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">conntrack -L</code> - Dump active connection states</div>
-              <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">ethtool -m eth2</code> - Raw optical transceiver DOM</div>
-              <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">journalctl -u axonwalld -f</code> - Stream daemon logs</div>
-            </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <h3 className="font-bold text-sky-400 text-sm">2. Full Interactive SSH Workstation (cli-workstation)</h3>
+            <p className="text-slate-400 leading-relaxed">
+              Connect via OpenSSH for persistent Tmux sessions, Oh My Zsh + Starship prompts, the 12-domain Neovim Super Configurator (<code className="text-slate-200 font-mono">axonwall-config</code>), and the 11-tab <code className="text-slate-200 font-mono">axonwall-tui</code> cockpit.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <h3 className="font-bold text-purple-400 text-sm">3. KVM Guest HTML5 noVNC Consoles</h3>
+            <p className="text-slate-400 leading-relaxed">
+              Virtual machines managed by <code className="text-slate-200 font-mono">core-virt</code> stream interactive graphical and serial guest consoles over <code className="text-emerald-400 font-mono">/v1/virt/console/ws</code> directly into the Web Console&apos;s embedded HTML5 <code className="text-slate-200 font-mono">noVNC</code> viewer.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <h3 className="font-bold text-amber-400 text-sm">4. Physical VGA &amp; RS-232 Serial Console</h3>
+            <p className="text-slate-400 leading-relaxed">
+              Out-of-band physical VGA and <code className="text-slate-200 font-mono">ttyS0</code> (115200 8N1) interfaces launch <code className="text-emerald-400 font-mono">axonwall-console</code> for emergency interface assignment, password recovery, and Commit-Confirm inspection.
+            </p>
           </div>
         </div>
 
-        <Callout type="tip" title="Access Web Terminal">
-          Navigate to <code className="text-emerald-300 font-mono">System &gt; Web Shell &amp; Sensors (/system/terminal)</code> in the web console to launch the interactive terminal session.
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2 text-xs">
+          <span className="font-bold text-white">Common Diagnostic Commands:</span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-300 font-mono">
+            <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">nft list table inet axonwall</code> - Inspect live kernel filter</div>
+            <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">conntrack -L</code> - Dump active connection states</div>
+            <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">ethtool -m eth2</code> - Raw optical transceiver DOM</div>
+            <div className="p-2 rounded bg-black/40"><code className="text-emerald-400">journalctl -u axonwalld -f</code> - Stream daemon logs</div>
+          </div>
+        </div>
+
+        <Callout type="tip" title="Access Console Command Runner & Sensors">
+          Navigate to <code className="text-emerald-300 font-mono">System &gt; Web Shell &amp; Sensors (/system/terminal)</code> in the Web Console to inspect HWMON thermals, SFP+ DOM gauges, and execute RBAC-audited diagnostic commands.
         </Callout>
       </section>
     </div>

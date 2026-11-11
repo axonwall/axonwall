@@ -6,6 +6,8 @@ import { importMikrotikConfig } from './mikrotik/index.js';
 import { importIptablesConfig } from './iptables/index.js';
 import { importCiscoAsaConfig } from './cisco/index.js';
 import { importFirewalldConfig } from './firewalld/index.js';
+import { importProxmoxConfig } from './proxmox/index.js';
+import { importTruenasConfig } from './truenas/index.js';
 
 export * from './types.js';
 export * from './pfsense/index.js';
@@ -15,11 +17,39 @@ export * from './mikrotik/index.js';
 export * from './iptables/index.js';
 export * from './cisco/index.js';
 export * from './firewalld/index.js';
+export * from './proxmox/index.js';
+export * from './truenas/index.js';
 export * from './analyzer.js';
 export * from './merge.js';
 
 export function detectFirewallType(content: string): FirewallVendor {
   const trimmed = content.trim();
+
+  // 0a. TrueNAS SCALE / CORE JSON or smb.conf export
+  if (
+    (trimmed.startsWith('{') &&
+      (trimmed.includes('"storage.pool"') ||
+        trimmed.includes('"pool.dataset"') ||
+        trimmed.includes('"sharing.smb"') ||
+        trimmed.includes('"sharing_smb"') ||
+        trimmed.includes('"smb_shares"') ||
+        trimmed.includes('"cloudsync_tasks"') ||
+        trimmed.includes('TrueNAS'))) ||
+    (/\[global\]/i.test(trimmed) && /vfs objects\s*=/i.test(trimmed))
+  ) {
+    return 'truenas';
+  }
+
+  // 0b. Proxmox VE qemu-server / lxc / storage.cfg / pve-firewall
+  if (
+    trimmed.includes('qemu-server/') ||
+    trimmed.includes('/etc/pve/') ||
+    trimmed.includes('[securitygroup ') ||
+    /^(?:scsi0|virtio0|efidisk0|tpmstate0|rootfs|hostpci0|vmgenid)\s*:/m.test(trimmed) ||
+    /^zfspool:\s+\S+/m.test(trimmed)
+  ) {
+    return 'proxmox';
+  }
 
   // 1. pfSense XML
   if (trimmed.includes('<pfsense>') || trimmed.includes('<pfsense ') || trimmed.includes('</pfsense>')) {
@@ -116,6 +146,10 @@ export function importFirewallConfig(content: string, forcedVendor?: FirewallVen
       return importCiscoAsaConfig(content);
     case 'firewalld':
       return importFirewalldConfig(content);
+    case 'proxmox':
+      return importProxmoxConfig(content);
+    case 'truenas':
+      return importTruenasConfig(content);
     default:
       throw new Error(`Unsupported firewall vendor: ${vendor}`);
   }

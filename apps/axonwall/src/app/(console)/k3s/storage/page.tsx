@@ -44,6 +44,8 @@ export default function OpenEbsStoragePage() {
         defaultReplicaCount: replicas,
         replicatedBackingPool: replicatedPool,
       },
+      enableUserNamespaces: false,
+      bpfTokenProfiles: [],
       workloads: [],
     };
     next.k3s.openEbs = {

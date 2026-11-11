@@ -66,7 +66,7 @@ func normalizeSmbKey(raw string) string {
 
 var smbAllowedVfsObjects = map[string]bool{
 	"acl_xattr": true, "shadow_copy2": true, "catia": true,
-	"fruit": true, "streams_xattr": true,
+	"fruit": true, "streams_xattr": true, "recycle": true, "full_audit": true,
 }
 
 // underMnt reports whether a cleaned absolute path is /mnt or below it.
@@ -157,6 +157,15 @@ func validateNfsExports(content string) error {
 				name := opt
 				if eq := strings.Index(opt, "="); eq >= 0 {
 					name = opt[:eq]
+					val := opt[eq+1:]
+					if name == "sec" {
+						for _, flavor := range strings.Split(val, ":") {
+							if flavor != "sys" && flavor != "krb5" && flavor != "krb5i" && flavor != "krb5p" {
+								return fmt.Errorf("exports line %d: sec flavor %q is not permitted in a bundle", lineNo+1, flavor)
+							}
+						}
+						continue
+					}
 					// Only numeric id-mapping options may carry a value.
 					if name != "fsid" && name != "anonuid" && name != "anongid" {
 						return fmt.Errorf("exports line %d: option %q is not permitted in a bundle", lineNo+1, opt)
@@ -176,13 +185,22 @@ func validateNfsExports(content string) error {
 
 var k3sConfigAllowedKeys = map[string]bool{
 	// Emitted by packages/axonwall_lib compile/k3s:
-	"write-kubeconfig-mode": true, "cluster-cidr": true,
+	"write-kubeconfig-mode": true, "write-kubeconfig-group": true, "cluster-cidr": true,
 	"service-cidr": true, "flannel-backend": true, "flannel-iface": true,
 	"server": true, "token": true, "token-file": true,
 	"cluster-init": true, "disable": true, "tls-san": true,
+	"disable-kube-proxy": true, "disable-network-policy": true,
+	"datastore-endpoint": true,
+	"etcd-snapshot-schedule-cron": true, "etcd-snapshot-retention": true,
+	"etcd-snapshot-dir": true, "etcd-s3": true, "etcd-s3-endpoint": true,
+	"etcd-s3-bucket": true, "etcd-s3-region": true,
 	// Basic node addressing an operator may set through the same flow:
 	"node-name": true, "node-ip": true, "advertise-address": true,
 	"cluster-dns": true, "cluster-domain": true,
+}
+
+var k3sAllowedKubeletArgs = map[string]bool{
+	"feature-gates=UserNamespacesSupport=true": true,
 }
 
 func validateK3sConfig(content string) error {
@@ -190,7 +208,20 @@ func validateK3sConfig(content string) error {
 	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
 		return fmt.Errorf("k3s config.yaml does not parse: %w", err)
 	}
-	for key := range doc {
+	for key, rawVal := range doc {
+		if key == "kubelet-arg" {
+			items, ok := rawVal.([]any)
+			if !ok || len(items) == 0 {
+				return fmt.Errorf("k3s config.yaml: kubelet-arg must be a non-empty allowlisted array")
+			}
+			for _, item := range items {
+				s, isStr := item.(string)
+				if !isStr || !k3sAllowedKubeletArgs[strings.TrimSpace(s)] {
+					return fmt.Errorf("k3s config.yaml: kubelet-arg %v is not permitted in a bundle", item)
+				}
+			}
+			continue
+		}
 		if !k3sConfigAllowedKeys[key] {
 			return fmt.Errorf("k3s config.yaml: key %q is not permitted in a bundle", key)
 		}
@@ -237,7 +268,16 @@ func walkManifest(node any) error {
 			switch key {
 			case "kind":
 				if kStr, ok := val.(string); ok {
-					if k3sDeniedManifestKinds[strings.ToLower(strings.TrimSpace(kStr))] {
+					kLower := strings.ToLower(strings.TrimSpace(kStr))
+					if kLower == "helmchart" {
+						// Permit ONLY the Axonwall-compiled Cilium eBPF CNI HelmChart from https://helm.cilium.io/
+						specMap, _ := v["spec"].(map[string]any)
+						repo, _ := specMap["repo"].(string)
+						chart, _ := specMap["chart"].(string)
+						if strings.TrimSpace(repo) != "https://helm.cilium.io/" || strings.TrimSpace(chart) != "cilium" {
+							return fmt.Errorf("k3s manifest: untrusted HelmChart (%s / %s) is not permitted in a bundle", repo, chart)
+						}
+					} else if k3sDeniedManifestKinds[kLower] {
 						return fmt.Errorf("k3s manifest: resource kind %q is not permitted in a bundle", kStr)
 					}
 				}

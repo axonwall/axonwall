@@ -787,6 +787,8 @@ export function enablePluginWithDependencies(
         flannelBackend: 'wireguard-native',
         disableTraefik: false,
         autoJoinHaPeer: true,
+        enableUserNamespaces: false,
+        bpfTokenProfiles: [],
         openEbs: {
           enabled: true,
           zfsLocalPvEnabled: true,

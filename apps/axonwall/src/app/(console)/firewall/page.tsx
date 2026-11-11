@@ -16,7 +16,24 @@ import {
 } from 'lucide-react';
 import { getCurrentDesiredState } from '../../../server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
-import { inferInterfaceRole, type DesiredState, type FirewallRule } from '@axonwall/lib/schemas';
+import { inferInterfaceRole, type DesiredState, type FirewallRule, type NatRule } from '@axonwall/lib/schemas';
+
+const DEFAULT_NAT_RULE: NatRule = {
+  type: 'dnat',
+  interface: 'wan',
+  protocol: 'tcp',
+  source: 'any',
+  sourcePort: '',
+  destination: 'wan_ip',
+  destinationPort: '443',
+  targetIp: '192.168.1.50',
+  targetPort: '443',
+  natReflection: true,
+  log: false,
+  enabled: true,
+  description: '',
+  sortOrder: 100,
+};
 
 const DEFAULT_RULE: FirewallRule = {
   action: 'pass',
@@ -43,6 +60,7 @@ export default function FirewallPage() {
   const [isLoadingState, setIsLoadingState] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedInterface, setSelectedInterface] = useState<string>('lan');
+  const [policyTab, setPolicyTab] = useState<'filter' | 'nat'>('filter');
   const [compiledScript, setCompiledScript] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<{ ok: boolean; message: string; warnings: string[] } | null>(null);
   const [isApplying, setIsApplying] = useState(false);
@@ -52,6 +70,9 @@ export default function FirewallPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [ruleForm, setRuleForm] = useState<FirewallRule>(DEFAULT_RULE);
+  const [isNatModalOpen, setIsNatModalOpen] = useState(false);
+  const [editingNatId, setEditingNatId] = useState<string | null>(null);
+  const [natForm, setNatForm] = useState<NatRule>(DEFAULT_NAT_RULE);
   // C19: toggle/delete/edit of an id-less rule used to silently no-op
   // (and edit-then-save duplicated the rule). Such rules now surface
   // an error instead of pretending to work.
@@ -65,7 +86,8 @@ export default function FirewallPage() {
         if (s) {
           setState({
             ...s,
-            rules: (s.rules || []).map((r, idx) => (r.id ? r : { ...r, id: `rule-${idx + 1}` })),
+            rules: (s.rules || []).map((r, idx) => (r.id ? r : { ...r, id: crypto.randomUUID() || `rule-${idx + 1}` })),
+            nat: (s.nat || []).map((n) => (n.id ? n : { ...n, id: crypto.randomUUID() })),
           });
         } else {
           setLoadError('No firewall configuration was returned by the server.');
@@ -85,8 +107,66 @@ export default function FirewallPage() {
 
   const availableInterfaces = [
     ...(state?.interfaces ?? []).map((i) => i.name),
+    'floating',
     'any',
   ];
+
+  const handleOpenAddNatModal = () => {
+    if (!state) return;
+    setEditingNatId(null);
+    setNatForm({
+      ...DEFAULT_NAT_RULE,
+      sortOrder: ((state.nat?.length ?? 0) + 1) * 10,
+    });
+    setIsNatModalOpen(true);
+  };
+
+  const handleOpenEditNatModal = (natRule: NatRule) => {
+    if (!natRule.id) return;
+    setEditingNatId(natRule.id);
+    setNatForm({ ...natRule });
+    setIsNatModalOpen(true);
+  };
+
+  const handleSaveNat = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (editingNatId) {
+      setState((prev) =>
+        prev
+          ? {
+              ...prev,
+              nat: (prev.nat || []).map((n) => (n.id === editingNatId ? { ...natForm, id: editingNatId } : n)),
+            }
+          : prev
+      );
+    } else {
+      const nextNat: NatRule = { ...natForm, id: crypto.randomUUID() };
+      setState((prev) => (prev ? { ...prev, nat: [...(prev.nat || []), nextNat] } : prev));
+    }
+    setHasUnappliedChanges(true);
+    setIsNatModalOpen(false);
+  };
+
+  const handleDeleteNat = (id?: string) => {
+    if (!id) return;
+    if (confirm('Delete this NAT translation rule?')) {
+      setState((prev) => (prev ? { ...prev, nat: (prev.nat || []).filter((n) => n.id !== id) } : prev));
+      setHasUnappliedChanges(true);
+    }
+  };
+
+  const handleToggleNat = (id?: string) => {
+    if (!id) return;
+    setState((prev) =>
+      prev
+        ? {
+            ...prev,
+            nat: (prev.nat || []).map((n) => (n.id === id ? { ...n, enabled: !n.enabled } : n)),
+          }
+        : prev
+    );
+    setHasUnappliedChanges(true);
+  };
 
   const filteredRules = (state?.rules ?? []).filter(
     (r) => selectedInterface === 'all' || r.interface === selectedInterface
@@ -242,22 +322,33 @@ export default function FirewallPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
             <Shield className="w-6 h-6 text-emerald-400" />
-            <span>Firewall Rules</span>
+            <span>Firewall &amp; NAT Policy Engine</span>
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Declarative packet filtering powered by Linux nftables with atomic transaction safety. Rules are saved to <code className="text-emerald-400 font-mono">/etc/axonwall/firewall.yaml</code>.
+            Declarative packet filtering, Floating rules, PBR, Hairpin DNAT, 1:1 BINAT, and Stateless NPTv6 compiled into atomic Linux nftables (<code className="text-emerald-400 font-mono">/etc/axonwall/firewall.yaml</code>).
           </p>
         </div>
 
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={handleOpenAddModal}
-            className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm flex items-center gap-2 transition cursor-pointer"
-          >
-            <Plus className="w-4 h-4 text-emerald-400" />
-            <span>Add Rule</span>
-          </button>
+          {policyTab === 'filter' ? (
+            <button
+              type="button"
+              onClick={handleOpenAddModal}
+              className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm flex items-center gap-2 transition cursor-pointer"
+            >
+              <Plus className="w-4 h-4 text-emerald-400" />
+              <span>Add Filter Rule</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleOpenAddNatModal}
+              className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg font-medium text-sm flex items-center gap-2 transition cursor-pointer"
+            >
+              <Plus className="w-4 h-4 text-cyan-400" />
+              <span>Add NAT Rule</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -332,6 +423,119 @@ export default function FirewallPage() {
         </div>
       )}
 
+      {/* Policy Mode Switcher */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setPolicyTab('filter')}
+          className={`px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+            policyTab === 'filter'
+              ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Packet Filter &amp; Floating Rules ({state.rules.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setPolicyTab('nat')}
+          className={`px-4 py-2 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+            policyTab === 'nat'
+              ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
+              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          NAT Suite: DNAT / Hairpin / SNAT / 1:1 BINAT / NPTv6 ({state.nat?.length ?? 0})
+        </button>
+      </div>
+
+      {policyTab === 'nat' ? (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-950 text-slate-400 text-xs font-semibold uppercase tracking-wider border-b border-slate-800">
+                <tr>
+                  <th className="px-4 py-3">State</th>
+                  <th className="px-4 py-3">NAT Mode</th>
+                  <th className="px-4 py-3">Iface</th>
+                  <th className="px-4 py-3">Proto</th>
+                  <th className="px-4 py-3">Source</th>
+                  <th className="px-4 py-3">Destination : Port</th>
+                  <th className="px-4 py-3">Translated Target</th>
+                  <th className="px-4 py-3">Hairpin</th>
+                  <th className="px-4 py-3">Description</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
+                {(state.nat || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="px-4 py-8 text-center text-slate-500 font-sans">
+                      No NAT rules configured. Click <strong>Add NAT Rule</strong> to configure Port Forwards (DNAT), Outbound SNAT/Masquerade, 1:1 BINAT, or Stateless NPTv6.
+                    </td>
+                  </tr>
+                ) : (
+                  (state.nat || []).map((nr) => (
+                    <tr key={nr.id} className={`hover:bg-slate-800/40 transition ${!nr.enabled ? 'opacity-50' : ''}`}>
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          checked={nr.enabled ?? true}
+                          onChange={() => handleToggleNat(nr.id)}
+                          className="w-4 h-4 rounded accent-cyan-500 cursor-pointer"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 uppercase text-[11px] font-semibold">
+                          {nr.type}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 uppercase text-slate-300">{nr.interface}</td>
+                      <td className="px-4 py-3 uppercase text-slate-300">{nr.protocol}</td>
+                      <td className="px-4 py-3 text-slate-300">{nr.source}</td>
+                      <td className="px-4 py-3 text-slate-300">
+                        {nr.destination}{nr.destinationPort ? `:${nr.destinationPort}` : ''}
+                      </td>
+                      <td className="px-4 py-3 text-emerald-400">
+                        {nr.type === 'masquerade'
+                          ? 'MASQUERADE'
+                          : `${nr.targetIp || '-'}${nr.targetPort ? `:${nr.targetPort}` : ''}`}
+                      </td>
+                      <td className="px-4 py-3">
+                        {nr.type === 'dnat' && nr.natReflection !== false ? (
+                          <span className="text-emerald-400 text-[11px]">Enabled</span>
+                        ) : (
+                          <span className="text-slate-500 text-[11px]">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 font-sans text-slate-300">{nr.description || '-'}</td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditNatModal(nr)}
+                            className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteNat(nr.id)}
+                            className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-slate-800 transition"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+      <>
       {/* Interface Tabs */}
       <div className="flex flex-wrap border-b border-slate-800">
         {Array.from(
@@ -512,10 +716,175 @@ export default function FirewallPage() {
                   </tr>
                 ))
               )}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      </>
+      )}
+
+      {/* Add / Edit NAT Modal */}
+      {isNatModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full p-6 space-y-4 shadow-2xl my-8">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+              <div>
+                <h3 className="text-lg font-bold text-white">{editingNatId ? 'Edit NAT Rule' : 'Add NAT Policy Rule'}</h3>
+                <p className="text-xs text-slate-400">Configure DNAT Port Forwarding, Hairpin NAT Reflection, Outbound SNAT/Masquerade, 1:1 BINAT, or Stateless NPTv6.</p>
+              </div>
+              <button type="button" onClick={() => setIsNatModalOpen(false)} className="text-slate-400 hover:text-white p-1">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveNat} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">NAT Mode</label>
+                  <select
+                    value={natForm.type}
+                    onChange={(e) => setNatForm({ ...natForm, type: e.target.value as NatRule['type'] })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white uppercase font-semibold"
+                  >
+                    <option value="dnat">DNAT (Port Forward)</option>
+                    <option value="snat">SNAT (Static Outbound)</option>
+                    <option value="masquerade">Masquerade (Dynamic WAN)</option>
+                    <option value="binat">1:1 BINAT (Bidirectional)</option>
+                    <option value="nptv6">NPTv6 (Stateless IPv6 Prefix)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">Interface</label>
+                  <select
+                    value={natForm.interface}
+                    onChange={(e) => setNatForm({ ...natForm, interface: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white uppercase"
+                  >
+                    {availableInterfaces.filter((x) => x !== 'floating').map((iface) => (
+                      <option key={iface} value={iface}>{iface}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">Protocol</label>
+                  <select
+                    value={natForm.protocol}
+                    onChange={(e) => setNatForm({ ...natForm, protocol: e.target.value as NatRule['protocol'] })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white uppercase"
+                  >
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                    <option value="tcp_udp">TCP/UDP</option>
+                    <option value="any">ANY</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">
+                    {natForm.type === 'nptv6' ? 'Internal ULA Prefix (Source)' : 'Source Endpoint'}
+                  </label>
+                  <input
+                    type="text"
+                    value={natForm.source}
+                    onChange={(e) => setNatForm({ ...natForm, source: e.target.value })}
+                    placeholder={natForm.type === 'nptv6' ? 'fd00:10::/48' : 'any or 192.168.1.0/24'}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">Destination / External VIP</label>
+                  <input
+                    type="text"
+                    value={natForm.destination}
+                    onChange={(e) => setNatForm({ ...natForm, destination: e.target.value })}
+                    placeholder="wan_ip or 203.0.113.10"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">External Port</label>
+                  <input
+                    type="text"
+                    value={natForm.destinationPort || ''}
+                    onChange={(e) => setNatForm({ ...natForm, destinationPort: e.target.value })}
+                    placeholder="443 or 8000:8010"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">
+                    {natForm.type === 'nptv6' ? 'External GUA Prefix' : 'Translated Target IP'}
+                  </label>
+                  <input
+                    type="text"
+                    value={natForm.targetIp || ''}
+                    onChange={(e) => setNatForm({ ...natForm, targetIp: e.target.value })}
+                    placeholder={natForm.type === 'nptv6' ? '2001:db8:10::/48' : '192.168.1.50'}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">Target Internal Port</label>
+                  <input
+                    type="text"
+                    value={natForm.targetPort || ''}
+                    onChange={(e) => setNatForm({ ...natForm, targetPort: e.target.value })}
+                    placeholder="8443"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-slate-300 block mb-1">Description</label>
+                <input
+                  type="text"
+                  value={natForm.description}
+                  onChange={(e) => setNatForm({ ...natForm, description: e.target.value })}
+                  placeholder="e.g. Reverse Proxy HTTPS Port Forward"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-5 pt-2 border-t border-slate-800">
+                {natForm.type === 'dnat' && (
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={natForm.natReflection !== false}
+                      onChange={(e) => setNatForm({ ...natForm, natReflection: e.target.checked })}
+                      className="w-4 h-4 rounded accent-cyan-500"
+                    />
+                    <span>Hairpin NAT Reflection (LAN clients can reach WAN VIP)</span>
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={natForm.log ?? false}
+                    onChange={(e) => setNatForm({ ...natForm, log: e.target.checked })}
+                    className="w-4 h-4 rounded accent-cyan-500"
+                  />
+                  <span>Log Translations</span>
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
+                <button type="button" onClick={() => setIsNatModalOpen(false)} className="px-4 py-2 text-xs text-slate-400 hover:text-white">
+                  Cancel
+                </button>
+                <button type="submit" className="px-5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white">
+                  {editingNatId ? 'Update NAT Rule' : 'Add NAT Rule'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Add / Edit Rule Modal */}
       {isModalOpen && (
@@ -655,8 +1024,88 @@ export default function FirewallPage() {
                 />
               </div>
 
+              {/* Advanced OPNsense Parity: Direction, Negated Match, DSCP, Rate Limit & PBR Gateway Group */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">Direction</label>
+                  <select
+                    value={ruleForm.direction || 'in'}
+                    onChange={(e) => setRuleForm({ ...ruleForm, direction: e.target.value as 'in' | 'out' })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white uppercase"
+                  >
+                    <option value="in">IN (Ingress)</option>
+                    <option value="out">OUT (Egress)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">DSCP Class</label>
+                  <input
+                    type="text"
+                    value={ruleForm.dscp ?? ''}
+                    onChange={(e) =>
+                      setRuleForm({
+                        ...ruleForm,
+                        dscp: e.target.value.trim() ? e.target.value.trim() : undefined,
+                      })
+                    }
+                    placeholder="ef, cs6, af41"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">Max PPS Limit</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={ruleForm.rateLimitPps ?? ''}
+                    onChange={(e) =>
+                      setRuleForm({
+                        ...ruleForm,
+                        rateLimitPps: e.target.value ? Number(e.target.value) : undefined,
+                      })
+                    }
+                    placeholder="0 (Unlimited)"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-300 block mb-1">PBR Gateway Group</label>
+                  <input
+                    type="text"
+                    value={ruleForm.gatewayGroup || ''}
+                    onChange={(e) =>
+                      setRuleForm({
+                        ...ruleForm,
+                        gatewayGroup: e.target.value.trim() || undefined,
+                      })
+                    }
+                    placeholder="default routing"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono"
+                  />
+                </div>
+              </div>
+
               {/* Toggles */}
-              <div className="flex flex-wrap items-center gap-6 pt-2 border-t border-slate-800">
+              <div className="flex flex-wrap items-center gap-5 pt-2 border-t border-slate-800">
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(ruleForm.invertSource)}
+                    onChange={(e) => setRuleForm({ ...ruleForm, invertSource: e.target.checked })}
+                    className="w-4 h-4 rounded accent-amber-500"
+                  />
+                  <span>! Invert Source</span>
+                </label>
+
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(ruleForm.invertDestination)}
+                    onChange={(e) => setRuleForm({ ...ruleForm, invertDestination: e.target.checked })}
+                    className="w-4 h-4 rounded accent-amber-500"
+                  />
+                  <span>! Invert Dest</span>
+                </label>
                 <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                   <input
                     type="checkbox"

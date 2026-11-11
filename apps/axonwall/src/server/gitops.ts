@@ -30,18 +30,48 @@ export interface GitOpsHistory {
   currentHash?: string;
 }
 
+export interface EtckeeperFileChange {
+  status: string;
+  path: string;
+}
+
+export interface EtckeeperConfig {
+  vcs: string;
+  dailyAutocommit: boolean;
+  avoidSpecialFileWarning: boolean;
+  avoidCommitBeforeInstall: boolean;
+  highlevelPackageManager: string;
+  lowlevelPackageManager: string;
+  pushRemote: string;
+  gitCommitOptions: string;
+  autoCommitOnApply: boolean;
+  customIgnorePatterns: string[];
+  confPath?: string;
+  rawConfig?: string;
+}
+
 export interface EtckeeperStatus {
   installed: boolean;
   vcs: string;
   clean: boolean;
   lastCommitHash?: string;
   lastCommitMsg?: string;
+  lastCommitAuthor?: string;
   lastCommitTime?: string;
   trackedPath: string;
+  initialized?: boolean;
+  totalCommits?: number;
+  modifiedFiles?: EtckeeperFileChange[];
+  timerActive?: boolean;
+  timerEnabled?: boolean;
+  nextTimerRun?: string;
+  lastTimerRun?: string;
+  config?: EtckeeperConfig;
 }
 
 export interface EtckeeperCommitLog {
   hash: string;
+  shortHash?: string;
   author: string;
   date: string;
   subject: string;
@@ -50,14 +80,87 @@ export interface EtckeeperCommitLog {
 export async function getEtckeeperStatus(): Promise<EtckeeperStatus | null> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
-  return await callAgentApi<EtckeeperStatus>('/v1/system/etckeeper/status', 'GET');
+  const resp = await callAgentApi<EtckeeperStatus & { error?: string }>('/v1/system/etckeeper/status', 'GET');
+  if (!resp || resp.error) {
+    return null;
+  }
+  return resp;
 }
 
-export async function getEtckeeperHistory(limit = 25): Promise<EtckeeperCommitLog[]> {
+export async function getEtckeeperConfig(): Promise<EtckeeperConfig | null> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
-  const resp = await callAgentApi<{ history: EtckeeperCommitLog[] }>(
-    `/v1/system/etckeeper/history`,
+  const resp = await callAgentApi<EtckeeperConfig & { error?: string }>('/v1/system/etckeeper/config', 'GET');
+  if (!resp || resp.error) {
+    return null;
+  }
+  return resp;
+}
+
+export async function saveEtckeeperConfig(
+  config: Partial<EtckeeperConfig>
+): Promise<{ success: boolean; message: string; config?: EtckeeperConfig }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const resp = await callAgentApi<{
+    success?: boolean;
+    message?: string;
+    error?: string;
+    config?: EtckeeperConfig;
+  }>('/v1/system/etckeeper/config', 'POST', config);
+  if (resp && resp.success) {
+    return {
+      success: true,
+      message: resp.message || 'Saved /etc/etckeeper/etckeeper.conf successfully.',
+      config: resp.config,
+    };
+  }
+  return {
+    success: false,
+    message: resp?.message || resp?.error || 'Failed to update etckeeper configuration.',
+  };
+}
+
+export async function initEtckeeper(): Promise<{
+  success: boolean;
+  message: string;
+  status?: EtckeeperStatus;
+}> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const resp = await callAgentApi<{
+    success?: boolean;
+    message?: string;
+    error?: string;
+    status?: EtckeeperStatus;
+  }>('/v1/system/etckeeper/init', 'POST', {});
+  if (resp && resp.success) {
+    return {
+      success: true,
+      message: resp.message || 'Initialized etckeeper in /etc.',
+      status: resp.status,
+    };
+  }
+  return {
+    success: false,
+    message: resp?.message || resp?.error || 'Failed to initialize etckeeper.',
+  };
+}
+
+export async function getEtckeeperHistory(
+  limit = 50,
+  pathFilter?: string
+): Promise<EtckeeperCommitLog[]> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const params = new URLSearchParams();
+  if (limit > 0) params.set('limit', String(limit));
+  if (pathFilter && pathFilter.trim()) {
+    params.set('path', pathFilter.trim());
+  }
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  const resp = await callAgentApi<{ history?: EtckeeperCommitLog[]; error?: string }>(
+    `/v1/system/etckeeper/history${qs}`,
     'GET'
   );
   return resp?.history || [];
@@ -72,18 +175,21 @@ export async function getEtckeeperDiff(commitHash?: string): Promise<string> {
     }
   }
   const q = commitHash ? `?commit=${encodeURIComponent(commitHash)}` : '';
-  const resp = await callAgentApi<{ diff: string }>(
+  const resp = await callAgentApi<{ diff?: string; error?: string }>(
     `/v1/system/etckeeper/diff${q}`,
     'GET'
   );
-  return resp?.diff || 'No diff available or etckeeper not initialized.';
+  if (resp?.error) {
+    return `Error loading diff: ${resp.error}`;
+  }
+  return resp?.diff || 'No uncommitted changes or diff is empty.';
 }
 
 export async function commitEtckeeper(message: string): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
   const author = session.username || 'admin';
-  const resp = await callAgentApi<{ success: boolean; message?: string }>(
+  const resp = await callAgentApi<{ success?: boolean; message?: string; error?: string }>(
     '/v1/system/etckeeper/commit',
     'POST',
     { message, author }
@@ -91,10 +197,20 @@ export async function commitEtckeeper(message: string): Promise<{ success: boole
   if (resp && resp.success) {
     return { success: true, message: resp.message || 'Changes in /etc committed successfully.' };
   }
-  return { success: false, message: 'Failed to record commit via etckeeper.' };
+  return {
+    success: false,
+    message: resp?.message || resp?.error || 'Failed to record commit via etckeeper.',
+  };
 }
 
-const GIT_BASE_ARGS = ['-c', `safe.directory=${GITOPS_DIR}`];
+const GIT_BASE_ARGS = [
+  '-c',
+  `safe.directory=${GITOPS_DIR}`,
+  '-c',
+  'user.name=Axonwall System',
+  '-c',
+  'user.email=gitops@axonwall.internal',
+];
 
 function ensureGitOpsRepo() {
   try {

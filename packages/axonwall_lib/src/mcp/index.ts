@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
-import { FirewallRuleSchema } from '../schemas/index.js';
+import { FirewallRuleSchema, FORBIDDEN_RING0_BPF_PROGS } from '../schemas/index.js';
 
 // ============================================================================
 // 1. MCP Capability Scopes & Policy Limits
@@ -16,6 +16,14 @@ export const MCP_SCOPES = [
   'mcp:fleet:broadcast',
   'mcp:firewall:write',
   'mcp:firewall:apply',
+  'mcp:ebpf:read',
+  'mcp:ebpf:manage',
+  'mcp:virt:read',
+  'mcp:virt:manage',
+  'mcp:k3s:read',
+  'mcp:k3s:manage',
+  'mcp:nas:read',
+  'mcp:nas:manage',
 ] as const;
 
 export const McpScopeSchema = z.enum(MCP_SCOPES);
@@ -196,7 +204,7 @@ export type McpProposeRuleRequest = z.infer<typeof McpProposeRuleRequestSchema>;
 
 export const McpTacticalLeaseSchema = z.object({
   id: z.string(),
-  kind: z.enum(['blackhole', 'shape', 'redirect', 'dns_sinkhole']),
+  kind: z.enum(['blackhole', 'shape', 'redirect', 'dns_sinkhole', 'xdp_drop']),
   createdAt: z.string(),
   expiresAt: z.string(),
   ttlSeconds: z.number().int(),
@@ -207,6 +215,222 @@ export const McpTacticalLeaseSchema = z.object({
   audit: McpAuditMetadataSchema,
 });
 export type McpTacticalLease = z.infer<typeof McpTacticalLeaseSchema>;
+
+// ============================================================================
+// 4b. eBPF, BPF_TOKEN_CREATE, Virtualization, K3s & OpenZFS NAS MCP Schemas
+// ============================================================================
+
+export const McpXdpFastDropRequestSchema = z.object({
+  action: z.enum(['block', 'unblock', 'set_syn_limit']).default('block'),
+  /** Single IPv4/IPv6 host OR CIDR subnet prefix (e.g. 198.51.100.0/24 or 2001:db8:dead::/48) for LPM trie drop */
+  ipAddress: z.string().min(3).max(64).optional(),
+  /** SYN-flood PPS rate limit per source IP enforced in XDP ring-0 when action === 'set_syn_limit' (0 disables) */
+  synFloodLimitPps: z.number().int().min(0).max(10_000_000).optional(),
+  ttlSeconds: z.number().int().min(10).max(604800).default(900),
+  audit: McpAuditMetadataSchema,
+});
+export type McpXdpFastDropRequest = z.infer<typeof McpXdpFastDropRequestSchema>;
+
+export const McpManageBpfTokenProfileRequestSchema = z.object({
+  operation: z.enum(['upsert', 'delete']).default('upsert'),
+  id: z.string().min(2).max(63).regex(/^[a-z0-9][a-z0-9._-]*$/, 'Invalid BPF token profile ID'),
+  targetKind: z.enum(['lxc', 'k3s-pod', 'standalone']).default('standalone'),
+  targetRef: z.string().max(128).optional(),
+  preset: z.enum(['socket-observability', 'network-dataplane', 'cgroup-microsegmentation', 'custom']).default('network-dataplane'),
+  enabled: z.boolean().default(true),
+  delegateCmds: z.string().max(512).optional(),
+  delegateProgs: z.string().max(512).optional(),
+  delegateMaps: z.string().max(512).optional(),
+  delegateAttachs: z.string().max(512).optional(),
+  auditViaBpfLsm: z.boolean().default(true),
+  description: z.string().max(255).optional(),
+  audit: McpAuditMetadataSchema,
+});
+export type McpManageBpfTokenProfileRequest = z.infer<typeof McpManageBpfTokenProfileRequestSchema>;
+
+export const McpVirtControlRequestSchema = z.object({
+  workloadType: z.enum(['vm', 'lxc']),
+  id: z.number().int().min(100).max(99999),
+  action: z.enum([
+    'start',
+    'stop',
+    'reboot',
+    'pause',
+    'resume',
+    'backup',
+    'restore',
+    'snapshot',
+    'rollback',
+    'clone',
+    'live_migrate',
+    'qga_interfaces',
+    'export_libvirt_xml',
+  ]),
+  force: z.boolean().default(false),
+  storagePool: z.string().max(64).optional(),
+  snapshotName: z.string().max(64).regex(/^[a-zA-Z0-9_.-]+$/).optional(),
+  backupArchivePath: z.string().max(255).optional(),
+  newId: z.number().int().min(100).max(99999).optional(),
+  newName: z.string().max(64).regex(/^[a-zA-Z0-9_.-]+$/).optional(),
+  linkedClone: z.boolean().default(true).optional(),
+  targetHostIp: z.string().max(64).optional(),
+  audit: McpAuditMetadataSchema,
+});
+export type McpVirtControlRequest = z.infer<typeof McpVirtControlRequestSchema>;
+
+export const McpConfigureLxcBpfTokenRequestSchema = z.object({
+  ctid: z.number().int().min(100).max(99999),
+  enabled: z.boolean(),
+  preset: z.enum(['socket-observability', 'network-dataplane', 'cgroup-microsegmentation', 'custom']).default('network-dataplane'),
+  delegateCmds: z.string().max(512).optional(),
+  delegateProgs: z.string().max(512).optional(),
+  delegateMaps: z.string().max(512).optional(),
+  delegateAttachs: z.string().max(512).optional(),
+  audit: McpAuditMetadataSchema,
+});
+export type McpConfigureLxcBpfTokenRequest = z.infer<typeof McpConfigureLxcBpfTokenRequestSchema>;
+
+export const McpRenderK3sBpfTokenRequestSchema = z.object({
+  profileId: z.string().min(2).max(63).regex(/^[a-z0-9][a-z0-9._-]*$/).default('k3s-net-dataplane'),
+  preset: z.enum(['socket-observability', 'network-dataplane', 'cgroup-microsegmentation']).default('network-dataplane'),
+  workloadName: z.string().min(2).max(63).default('ebpf-packet-inspector'),
+  namespace: z.string().min(1).max(63).default('default'),
+  image: z.string().min(3).max(255).default('ghcr.io/cilium/cilium:v1.16.4'),
+  kind: z.enum(['Pod', 'DaemonSet']).default('Pod'),
+});
+export type McpRenderK3sBpfTokenRequest = z.infer<typeof McpRenderK3sBpfTokenRequestSchema>;
+
+export const McpNasActionRequestSchema = z.object({
+  action: z.enum([
+    'snapshot',
+    'rollback',
+    'delete_snapshot',
+    'scrub',
+    'trim',
+    'checkpoint',
+    'discard_checkpoint',
+    'unlock_dataset',
+    'lock_dataset',
+    'smart_test',
+    'cloud_sync',
+  ]),
+  target: z.string().min(1).max(128),
+  snapshotLabel: z.string().max(64).optional(),
+  keyMaterial: z.string().max(512).optional(),
+  smartTestType: z.enum(['short', 'long']).default('short').optional(),
+  audit: McpAuditMetadataSchema,
+});
+export type McpNasActionRequest = z.infer<typeof McpNasActionRequestSchema>;
+
+export const McpK3sManageRequestSchema = z.object({
+  action: z.enum(['etcd_snapshot_save', 'etcd_snapshot_list', 'etcd_snapshot_restore']),
+  snapshotName: z.string().max(128).regex(/^[a-zA-Z0-9_.-]+$/).optional(),
+  audit: McpAuditMetadataSchema,
+});
+export type McpK3sManageRequest = z.infer<typeof McpK3sManageRequestSchema>;
+
+export const McpImportCompetitorRequestSchema = z.object({
+  vendor: z
+    .enum(['pfsense', 'opnsense', 'vyos', 'mikrotik', 'iptables', 'cisco', 'firewalld', 'proxmox', 'truenas'])
+    .optional(),
+  rawConfig: z.string().min(5).max(2_000_000),
+  stageToDesiredState: z.boolean().default(false),
+  audit: McpAuditMetadataSchema.optional(),
+});
+export type McpImportCompetitorRequest = z.infer<typeof McpImportCompetitorRequestSchema>;
+
+/**
+ * Validates Linux 6.9+ BPF_TOKEN_CREATE delegation masks against Ring-0 tracing/rootkit
+ * program types (kprobe, tracepoint, raw_tracepoint, perf_event, tracing, lsm, ext, struct_ops)
+ * and wildcards before forwarding to axonwalld or DesiredState.
+ */
+export function validateBpfTokenDelegationInput(input: {
+  preset: string;
+  delegateCmds?: string;
+  delegateProgs?: string;
+  delegateMaps?: string;
+  delegateAttachs?: string;
+}): McpValidationResult {
+  const safeColonList = /^[a-z0-9_:]+$/;
+  for (const [field, rawVal] of [
+    ['delegateCmds', input.delegateCmds],
+    ['delegateProgs', input.delegateProgs],
+    ['delegateMaps', input.delegateMaps],
+    ['delegateAttachs', input.delegateAttachs],
+  ] as const) {
+    if (!rawVal) continue;
+    const trimmed = rawVal.trim().toLowerCase();
+    if (!safeColonList.test(trimmed)) {
+      return { valid: false, reason: `Malformed ${field} value '${rawVal}': must contain only lowercase kernel symbols separated by ':'` };
+    }
+    const tokens = trimmed.split(':').filter(Boolean);
+    if (tokens.includes('any')) {
+      return { valid: false, reason: `Wildcard 'any' in ${field} is prohibited; specify explicit least-privilege BPF_TOKEN bitmasks` };
+    }
+    if (field === 'delegateProgs') {
+      for (const p of tokens) {
+        if ((FORBIDDEN_RING0_BPF_PROGS as readonly string[]).includes(p)) {
+          return {
+            valid: false,
+            reason: `BPF_TOKEN delegation rejects Ring-0 program type '${p}': exposes bpf_probe_read_kernel() arbitrary host memory access or global tracing`,
+          };
+        }
+      }
+    }
+  }
+  if (input.preset === 'custom') {
+    if (!input.delegateCmds || !input.delegateProgs || !input.delegateMaps || !input.delegateAttachs) {
+      return {
+        valid: false,
+        reason: 'Custom BPF_TOKEN preset requires explicit delegateCmds, delegateProgs, delegateMaps, and delegateAttachs',
+      };
+    }
+  }
+  return { valid: true };
+}
+
+/**
+ * Anti-lockout guard for KVM/LXC virtualization actions: refuses to stop, pause,
+ * or force-kill Hosted Edge / management NGFW VMs over MCP.
+ */
+export function validateVirtWorkloadSafety(
+  workloadName: string | undefined,
+  action: string,
+  hostedEdgeEnabled?: boolean,
+): McpValidationResult {
+  const destructiveActions = new Set(['stop', 'pause']);
+  if (!destructiveActions.has(action)) {
+    return { valid: true };
+  }
+  const lower = (workloadName || '').trim().toLowerCase();
+  if (
+    lower === 'edge' ||
+    lower.startsWith('edge-') ||
+    lower.includes('axonwall-edge') ||
+    (hostedEdgeEnabled && lower.includes('ngfw'))
+  ) {
+    return {
+      valid: false,
+      reason: `Anti-lockout guard: refusing to ${action} Hosted Edge / gateway VM '${workloadName}' because it carries appliance WAN/LAN transit`,
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Validates ZFS pool/dataset names and snapshot labels against CLI flag injection.
+ */
+export function validateZfsResourcePath(name: string, allowSlash: boolean): McpValidationResult {
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.startsWith('-') || trimmed.includes('@') || trimmed.includes('..')) {
+    return { valid: false, reason: `Invalid ZFS resource name: '${name}'` };
+  }
+  const re = allowSlash ? /^[a-zA-Z0-9_.:/-]+$/ : /^[a-zA-Z0-9_.:-]+$/;
+  if (!re.test(trimmed)) {
+    return { valid: false, reason: `Disallowed characters in ZFS resource name: '${name}'` };
+  }
+  return { valid: true, normalizedTarget: trimmed };
+}
 
 // ============================================================================
 // 5. Pure IP/CIDR Parsing, Immunity & Blast-Radius Validation
