@@ -12,6 +12,8 @@ export interface CompiledK3s {
 export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s {
   const k3s: K3sConfig = state.k3s ?? {
     enabled: false,
+    profile: 'standard',
+    role: 'server',
     clusterCidr: '10.42.0.0/16',
     serviceCidr: '10.43.0.0/16',
     nodeIpInterface: 'lan',
@@ -21,6 +23,10 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     ciliumHubbleEnabled: true,
     haTopology: 'embedded-etcd',
     disableTraefik: false,
+    disableServiceLb: false,
+    disableLocalStorage: false,
+    disableMetricsServer: false,
+    zfsArcMaxMb: 0,
     autoJoinHaPeer: true,
     enableUserNamespaces: true,
     bpfTokenProfiles: [],
@@ -35,14 +41,93 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     workloads: [],
   };
 
+  const isBarebones = k3s.profile === 'barebones-storage';
+  const nodeRole = k3s.role ?? 'server';
+
   const effectiveRole = state.ha?.role || state.ha?.nodeRole || 'master';
   const effectivePeer = state.ha?.peerIp || state.ha?.peerAddress || '';
+  const hasHaPeer = Boolean(state.ha?.enabled && effectivePeer);
 
   const isSecondaryJoin =
-    Boolean(state.ha?.enabled) &&
+    hasHaPeer &&
     effectiveRole === 'backup' &&
-    Boolean(effectivePeer) &&
     k3s.autoJoinHaPeer !== false;
+
+  const formattedPeer = effectivePeer
+    ? effectivePeer.includes(':') && !effectivePeer.startsWith('[')
+      ? `[${effectivePeer}]`
+      : effectivePeer
+    : '';
+  const haPeerUrl = formattedPeer ? `https://${formattedPeer}:6443` : '';
+  const safeServerUrl = k3s.serverUrl ? String(k3s.serverUrl).replace(/[\r\n"]/g, '').trim() : '';
+  const safeJoinToken = joinToken ? String(joinToken).replace(/[\r\n"]/g, '').trim() : '';
+
+  const useCilium = k3s.cniPlugin === 'cilium-ebpf';
+  const effectiveFlannel = useCilium ? 'none' : k3s.flannelBackend;
+
+  // Resolve flannel-iface / node-ip: prefer the configured nodeIpInterface ('lan' by default),
+  // falling back to the first enabled host interface on 1-NIC or Host-Mode nodes
+  // where only 'wan' (eth0) exists.
+  const ifaceObj =
+    state.interfaces.find((i) => i.enabled && i.name === k3s.nodeIpInterface && isValidDevice(i.device)) ||
+    state.interfaces.find((i) => i.name === k3s.nodeIpInterface && isValidDevice(i.device)) ||
+    state.interfaces.find((i) => i.enabled && isValidDevice(i.device));
+  let primaryNodeIp = '';
+  if (isValidDevice(ifaceObj?.device)) {
+    const nodeIp = (ifaceObj!.ipv4Address || (ifaceObj as { address?: string }).address || '').split('/')[0];
+    if (nodeIp) {
+      primaryNodeIp = nodeIp;
+    }
+  }
+
+  const kubeletArgs: string[] = [];
+  if (k3s.enableUserNamespaces || (k3s.bpfTokenProfiles && k3s.bpfTokenProfiles.some((p) => p.enabled))) {
+    kubeletArgs.push('feature-gates=UserNamespacesSupport=true');
+  }
+  const effectiveEvictionHard =
+    k3s.kubeletEvictionHard ?? (isBarebones ? 'memory.available<200Mi,nodefs.available<5%' : undefined);
+  if (effectiveEvictionHard) {
+    const safeEviction = String(effectiveEvictionHard).replace(/[\r\n"]/g, '').trim();
+    if (safeEviction) {
+      kubeletArgs.push(`eviction-hard=${safeEviction}`);
+    }
+  }
+
+  if (nodeRole === 'agent') {
+    const agentLines: string[] = ['# Axonwall Auto-Generated K3s Agent Configuration'];
+    const targetServerUrl = safeServerUrl || haPeerUrl;
+    if (targetServerUrl) {
+      agentLines.push(`server: "${targetServerUrl}"`);
+    }
+    if (safeJoinToken) {
+      agentLines.push(`token: "${safeJoinToken}"`);
+    } else {
+      agentLines.push(`token-file: "/var/lib/axonwall/k3s-join.token"`);
+    }
+    if (isValidDevice(ifaceObj?.device)) {
+      if (!useCilium) {
+        agentLines.push(`flannel-iface: "${ifaceObj!.device}"`);
+      }
+      if (primaryNodeIp) {
+        agentLines.push(`node-ip: "${primaryNodeIp}"`);
+      }
+    }
+    if (kubeletArgs.length > 0) {
+      agentLines.push('kubelet-arg:');
+      for (const arg of kubeletArgs) {
+        agentLines.push(`  - "${arg}"`);
+      }
+    }
+    agentLines.push('');
+
+    return {
+      k3sConfigYaml: agentLines.join('\n'),
+      openEbsManifestYaml: '',
+      workloadsManifestYaml: '',
+    };
+  }
+
+  const datastore = k3s.datastore ?? (isBarebones && !hasHaPeer ? 'sqlite' : 'etcd');
 
   const tlsSans = new Set<string>(['127.0.0.1', 'localhost']);
   if (effectivePeer) {
@@ -63,9 +148,6 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     }
   }
 
-  const useCilium = k3s.cniPlugin === 'cilium-ebpf';
-  const effectiveFlannel = useCilium ? 'none' : k3s.flannelBackend;
-
   const configLines: string[] = [
     '# Axonwall Auto-Generated K3s Control Plane Configuration',
     `write-kubeconfig-mode: "0640"`,
@@ -82,22 +164,12 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     }
   }
 
-  // Resolve flannel-iface / node-ip: prefer the configured nodeIpInterface ('lan' by default),
-  // falling back to the first enabled host interface on 1-NIC or Host-Mode nodes
-  // where only 'wan' (eth0) exists.
-  const ifaceObj =
-    state.interfaces.find((i) => i.enabled && i.name === k3s.nodeIpInterface && isValidDevice(i.device)) ||
-    state.interfaces.find((i) => i.name === k3s.nodeIpInterface && isValidDevice(i.device)) ||
-    state.interfaces.find((i) => i.enabled && isValidDevice(i.device));
-  let primaryNodeIp = '';
   if (isValidDevice(ifaceObj?.device)) {
     if (!useCilium) {
       configLines.push(`flannel-iface: "${ifaceObj!.device}"`);
     }
-    const nodeIp = (ifaceObj!.ipv4Address || (ifaceObj as { address?: string }).address || '').split('/')[0];
-    if (nodeIp) {
-      primaryNodeIp = nodeIp;
-      configLines.push(`node-ip: "${nodeIp}"`);
+    if (primaryNodeIp) {
+      configLines.push(`node-ip: "${primaryNodeIp}"`);
     }
   }
 
@@ -105,35 +177,38 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
   if (haTopology === 'external-datastore' && k3s.externalDatastoreEndpoint) {
     const safeDs = String(k3s.externalDatastoreEndpoint).replace(/[\r\n"]/g, '').trim();
     configLines.push(`datastore-endpoint: "${safeDs}"`);
-  } else if (isSecondaryJoin && effectivePeer) {
-    const formattedPeer = effectivePeer.includes(':') && !effectivePeer.startsWith('[')
-      ? `[${effectivePeer}]`
-      : effectivePeer;
-    configLines.push(`server: "https://${formattedPeer}:6443"`);
-    if (joinToken) {
-      configLines.push(`token: "${joinToken}"`);
+  } else if (safeServerUrl || (isSecondaryJoin && haPeerUrl)) {
+    configLines.push(`server: "${safeServerUrl || haPeerUrl}"`);
+    if (safeJoinToken) {
+      configLines.push(`token: "${safeJoinToken}"`);
     } else {
       configLines.push(`token-file: "/var/lib/axonwall/k3s-join.token"`);
     }
-  } else if (haTopology !== 'single-server-ha-agent') {
+  } else if (datastore === 'etcd' && haTopology !== 'single-server-ha-agent') {
     configLines.push('cluster-init: true');
   }
 
-  const disabledComponents: string[] = [];
-  if (k3s.disableTraefik) {
-    disabledComponents.push('traefik');
+  const disabledAddons: string[] = [];
+  if (k3s.disableTraefik || isBarebones) {
+    disabledAddons.push('traefik');
   }
-  if ((k3s.serviceLbPools ?? []).length > 0 || useCilium) {
-    disabledComponents.push('servicelb');
+  if (k3s.disableServiceLb || isBarebones || (k3s.serviceLbPools ?? []).length > 0 || useCilium) {
+    disabledAddons.push('servicelb');
   }
-  if (disabledComponents.length > 0) {
+  if (k3s.disableLocalStorage || isBarebones) {
+    disabledAddons.push('local-storage');
+  }
+  if (k3s.disableMetricsServer || isBarebones) {
+    disabledAddons.push('metrics-server');
+  }
+  if (disabledAddons.length > 0) {
     configLines.push('disable:');
-    for (const comp of disabledComponents) {
+    for (const comp of disabledAddons) {
       configLines.push(`  - ${comp}`);
     }
   }
 
-  if (k3s.etcdSnapshots?.enabled && haTopology === 'embedded-etcd') {
+  if (k3s.etcdSnapshots?.enabled && haTopology === 'embedded-etcd' && datastore === 'etcd') {
     const snapCron = String(k3s.etcdSnapshots.scheduleCron || '0 */6 * * *').replace(/[\r\n"]/g, '').trim();
     const snapDir = String(k3s.etcdSnapshots.snapshotDir || '/var/lib/rancher/k3s/server/db/snapshots')
       .replace(/[\r\n"]/g, '')
@@ -151,9 +226,11 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     }
   }
 
-  if (k3s.enableUserNamespaces || (k3s.bpfTokenProfiles && k3s.bpfTokenProfiles.some((p) => p.enabled))) {
+  if (kubeletArgs.length > 0) {
     configLines.push('kubelet-arg:');
-    configLines.push('  - "feature-gates=UserNamespacesSupport=true"');
+    for (const arg of kubeletArgs) {
+      configLines.push(`  - "${arg}"`);
+    }
   }
 
   configLines.push('tls-san:');
@@ -162,50 +239,70 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
   }
   configLines.push('');
 
-  const zfsPool = k3s.openEbs?.zfsLocalPvPool || 'tank';
+  const defaultZfsPool = isBarebones ? 'tank/k8s' : 'tank';
+  const zfsPool = k3s.openEbs?.zfsLocalPvPool || defaultZfsPool;
+  const zfsLocalPvEnabled = k3s.openEbs?.zfsLocalPvEnabled ?? true;
+  const replicatedStorageEnabled = k3s.openEbs?.replicatedStorageEnabled ?? (isBarebones ? false : true);
   const replicaCount = state.ha?.enabled ? (k3s.openEbs?.defaultReplicaCount ?? 2) : 1;
 
-  const openEbsManifestYaml = [
-    '# Axonwall Auto-Generated OpenEBS StorageClasses (ZFS-LocalPV + Replicated HA)',
-    'apiVersion: v1',
-    'kind: Namespace',
-    'metadata:',
-    '  name: openebs',
-    '---',
-    'apiVersion: storage.k8s.io/v1',
-    'kind: StorageClass',
-    'metadata:',
-    '  name: axonwall-zfs-local',
-    '  annotations:',
-    `    storageclass.kubernetes.io/is-default-class: "${k3s.openEbs?.replicatedStorageEnabled ? 'false' : 'true'}"`,
-    'provisioner: zfs.csi.openebs.io',
-    'allowVolumeExpansion: true',
-    'parameters:',
-    '  fstype: "zfs"',
-    '  compression: "lz4"',
-    '  dedup: "off"',
-    '  recordsize: "128k"',
-    `  poolname: "${zfsPool}"`,
-    'reclaimPolicy: Retain',
-    'volumeBindingMode: WaitForFirstConsumer',
-    '---',
-    'apiVersion: storage.k8s.io/v1',
-    'kind: StorageClass',
-    'metadata:',
-    '  name: axonwall-replicated-ha',
-    '  annotations:',
-    `    storageclass.kubernetes.io/is-default-class: "${k3s.openEbs?.replicatedStorageEnabled ? 'true' : 'false'}"`,
-    'provisioner: io.openebs.csi-mayastor',
-    'allowVolumeExpansion: true',
-    'parameters:',
-    '  protocol: "nvmf"',
-    '  ioTimeout: "30"',
-    `  repl: "${replicaCount}"`,
-    `  backingZfsPool: "${k3s.openEbs?.replicatedBackingPool || `${zfsPool}/openebs-replicated`}"`,
-    'reclaimPolicy: Retain',
-    'volumeBindingMode: Immediate',
-    '',
-  ].join('\n');
+  const openEbsDocs: string[] = [
+    [
+      replicatedStorageEnabled
+        ? '# Axonwall Auto-Generated OpenEBS StorageClasses (ZFS-LocalPV + Replicated HA)'
+        : '# Axonwall Auto-Generated OpenEBS StorageClasses (ZFS-LocalPV)',
+      'apiVersion: v1',
+      'kind: Namespace',
+      'metadata:',
+      '  name: openebs',
+    ].join('\n'),
+  ];
+
+  if (zfsLocalPvEnabled) {
+    openEbsDocs.push(
+      [
+        'apiVersion: storage.k8s.io/v1',
+        'kind: StorageClass',
+        'metadata:',
+        '  name: axonwall-zfs-local',
+        '  annotations:',
+        `    storageclass.kubernetes.io/is-default-class: "${replicatedStorageEnabled ? 'false' : 'true'}"`,
+        'provisioner: zfs.csi.openebs.io',
+        'allowVolumeExpansion: true',
+        'parameters:',
+        '  fstype: "zfs"',
+        '  compression: "lz4"',
+        '  dedup: "off"',
+        '  recordsize: "128k"',
+        `  poolname: "${zfsPool}"`,
+        'reclaimPolicy: Retain',
+        'volumeBindingMode: WaitForFirstConsumer',
+      ].join('\n'),
+    );
+  }
+
+  if (replicatedStorageEnabled) {
+    openEbsDocs.push(
+      [
+        'apiVersion: storage.k8s.io/v1',
+        'kind: StorageClass',
+        'metadata:',
+        '  name: axonwall-replicated-ha',
+        '  annotations:',
+        `    storageclass.kubernetes.io/is-default-class: "true"`,
+        'provisioner: io.openebs.csi-mayastor',
+        'allowVolumeExpansion: true',
+        'parameters:',
+        '  protocol: "nvmf"',
+        '  ioTimeout: "30"',
+        `  repl: "${replicaCount}"`,
+        `  backingZfsPool: "${k3s.openEbs?.replicatedBackingPool || `${zfsPool}/openebs-replicated`}"`,
+        'reclaimPolicy: Retain',
+        'volumeBindingMode: Immediate',
+      ].join('\n'),
+    );
+  }
+
+  const openEbsManifestYaml = openEbsDocs.join('\n---\n') + '\n';
 
   const sanitizeK8sId = (v: string) => v.replace(/[^a-z0-9-.]/gi, '-').toLowerCase();
   const sanitizeScalar = (v: string) => v.replace(/[\r\n]/g, '').trim();

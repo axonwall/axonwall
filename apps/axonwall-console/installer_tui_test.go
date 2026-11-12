@@ -261,3 +261,187 @@ func TestSaveInstallerDiagnosticsBundle(t *testing.T) {
 		t.Errorf("expected shipped payload to include cloud-init & console section")
 	}
 }
+
+func TestComputeDefaultZfsArcMaxMB(t *testing.T) {
+	cases := []struct {
+		ramMB int
+		want  int
+	}{
+		{0, 384},
+		{1024, 384},
+		{2048, 384},
+		{2049, 512},
+		{4096, 512},
+		{4097, 1024},
+		{8192, 1024},
+		{16384, 4096},
+		{32768, 8192},
+		{65536, 16384},
+	}
+	for _, tc := range cases {
+		if got := ComputeDefaultZfsArcMaxMB(tc.ramMB); got != tc.want {
+			t.Errorf("ComputeDefaultZfsArcMaxMB(%d) = %d, want %d", tc.ramMB, got, tc.want)
+		}
+	}
+}
+
+func TestEvaluateHardwareProfileK3sStorage(t *testing.T) {
+	// 1. 80 GiB (<100 GiB) disk on k3s-storage -> compact 4096 MiB SlotMB (instead of 8192 MiB)
+	disks80 := []DiskDevice{
+		{Name: "nvme0n1", Path: "/dev/nvme0n1", SizeMB: 81920, SizeGB: 80.0},
+	}
+	cfg := DefaultInstallerConfig()
+	cfg.Edition = "k3s-storage"
+	cfg.K3sRole = "server"
+	cfg.ZfsArcMaxMB = 2048
+	_, eval := EvaluateHardwareProfile(disks80, &cfg)
+
+	if cfg.SlotMB != 4096 {
+		t.Errorf("expected k3s-storage on 80 GiB disk to cap SlotMB=4096, got %d", cfg.SlotMB)
+	}
+	if cfg.ZfsAllocMode != "remainder" {
+		t.Errorf("expected ZfsAllocMode='remainder', got %q", cfg.ZfsAllocMode)
+	}
+	joinedNotes := strings.Join(eval.EvaluationNotes, "\n")
+	if !strings.Contains(joinedNotes, "Standalone SQLite Server + OpenEBS ZFS-LocalPV") {
+		t.Errorf("expected server K3s role in evaluation notes, got:\n%s", joinedNotes)
+	}
+	if !strings.Contains(joinedNotes, "2048 MiB") {
+		t.Errorf("expected ZFS ARC cap 2048 MiB in evaluation notes, got:\n%s", joinedNotes)
+	}
+
+	// 2. Small 24 GiB (<32 GiB) disk in rolling mode on k3s-storage -> compact 4096 MiB SlotMB allowed, agent role
+	disks24 := []DiskDevice{
+		{Name: "sda", Path: "/dev/sda", SizeMB: 24576, SizeGB: 24.0},
+	}
+	cfgAgent := DefaultInstallerConfig()
+	cfgAgent.Edition = "k3s-storage"
+	cfgAgent.InstallMode = "rolling"
+	cfgAgent.K3sRole = "agent"
+	cfgAgent.ZfsArcMaxMB = 0 // auto
+	_, evalAgent := EvaluateHardwareProfile(disks24, &cfgAgent)
+	if cfgAgent.SlotMB != 4096 {
+		t.Errorf("expected rolling k3s-storage on 24 GiB disk to keep compact SlotMB=4096, got %d", cfgAgent.SlotMB)
+	}
+	agentNotes := strings.Join(evalAgent.EvaluationNotes, "\n")
+	if !strings.Contains(agentNotes, "Cluster Storage Worker Agent") {
+		t.Errorf("expected agent K3s role in evaluation notes, got:\n%s", agentNotes)
+	}
+}
+
+func TestComputePartitionLayoutK3sStorageCompactData(t *testing.T) {
+	base := DefaultInstallerConfig()
+	base.InstallMode = "ab"
+	base.SlotMB = 4096
+	base.ZfsAllocMode = "remainder"
+	base.LogsEnabled = false
+
+	ngfwCfg := base
+	ngfwCfg.Edition = "axonwall"
+	ngfwLayout := ComputePartitionLayout(65536, ngfwCfg)
+
+	vaultCfg := base
+	vaultCfg.Edition = "vault"
+	vaultLayout := ComputePartitionLayout(65536, vaultCfg)
+
+	k3sCfg := base
+	k3sCfg.Edition = "k3s-storage"
+	k3sLayout := ComputePartitionLayout(65536, k3sCfg)
+
+	if ngfwLayout.DataMB != 8192 || vaultLayout.DataMB != 8192 {
+		t.Fatalf("expected axonwall/vault DataMB=8192, got %d / %d", ngfwLayout.DataMB, vaultLayout.DataMB)
+	}
+	if k3sLayout.DataMB != 4096 {
+		t.Fatalf("expected k3s-storage compact DataMB=4096, got %d", k3sLayout.DataMB)
+	}
+	if k3sLayout.ZfsMB != ngfwLayout.ZfsMB+4096 {
+		t.Errorf("expected k3s-storage ZfsMB (%d) to gain +4096 MiB over axonwall ZfsMB (%d)", k3sLayout.ZfsMB, ngfwLayout.ZfsMB)
+	}
+}
+
+func TestFormatInstallerConfigK3sFieldsAndCycleEdition(t *testing.T) {
+	cfg := DefaultInstallerConfig()
+	cfg.Edition = "axonwall"
+	cfg.Hostname = "axonwall"
+
+	cycleEdition(&cfg)
+	if cfg.Edition != "vault" || cfg.Hostname != "axonwall-vault" {
+		t.Fatalf("after 1st cycleEdition: got edition=%q hostname=%q", cfg.Edition, cfg.Hostname)
+	}
+	cycleEdition(&cfg)
+	if cfg.Edition != "k3s-storage" || cfg.Hostname != "axonwall-storage" {
+		t.Fatalf("after 2nd cycleEdition: got edition=%q hostname=%q", cfg.Edition, cfg.Hostname)
+	}
+	cycleEdition(&cfg)
+	if cfg.Edition != "axonwall" || cfg.Hostname != "axonwall" {
+		t.Fatalf("after 3rd cycleEdition: got edition=%q hostname=%q", cfg.Edition, cfg.Hostname)
+	}
+
+	// Custom hostname should be preserved across edition cycling
+	cfg.Hostname = "edge-node-01"
+	cycleEdition(&cfg)
+	if cfg.Hostname != "edge-node-01" {
+		t.Errorf("expected custom hostname to be preserved, got %q", cfg.Hostname)
+	}
+
+	// Default empty K3sRole should serialize as 'server'
+	cfg.Edition = "k3s-storage"
+	cfg.K3sRole = ""
+	defaultSerialized := FormatInstallerConfig(cfg)
+	if !strings.Contains(defaultSerialized, "K3S_ROLE='server'") {
+		t.Errorf("expected default K3S_ROLE='server' in:\n%s", defaultSerialized)
+	}
+
+	cfg.K3sRole = "agent"
+	cfg.K3sServerURL = "https://10.0.0.1:6443"
+	cfg.K3sJoinToken = "K10tok'quote::server:abcd"
+	cfg.ZfsArcMaxMB = 1536
+	agentSerialized := FormatInstallerConfig(cfg)
+	for _, want := range []string{
+		"INSTALL_EDITION='k3s-storage'",
+		"K3S_ROLE='agent'",
+		"K3S_SERVER_URL='https://10.0.0.1:6443'",
+		"K3S_JOIN_TOKEN='K10tok'\"'\"'quote::server:abcd'",
+		"ZFS_ARC_MAX_MB=1536",
+	} {
+		if !strings.Contains(agentSerialized, want) {
+			t.Errorf("missing %s in serialized config:\n%s", want, agentSerialized)
+		}
+	}
+}
+
+func TestFormatInstallerDiagnosticsBundleRedactsK3sJoinToken(t *testing.T) {
+	cfg := DefaultInstallerConfig()
+	cfg.Edition = "k3s-storage"
+	cfg.K3sRole = "agent"
+	cfg.K3sServerURL = "https://10.0.0.1:6443"
+	secretToken := "K10998877665544332211secretjointoken::server:deadbeef"
+	secretAdmin := "SuperSecretAdminPw!42"
+	secretLuks := "SuperSecretLuksPw!99"
+	cfg.K3sJoinToken = secretToken
+	cfg.AdminPassword = secretAdmin
+	cfg.LuksEnabled = true
+	cfg.LuksPassphrase = secretLuks
+
+	disks := []DiskDevice{
+		{Name: "nvme0n1", Path: "/dev/nvme0n1", SizeMB: 65536, SizeGB: 64.0},
+	}
+	_, eval := EvaluateHardwareProfile(disks, &cfg)
+	rawLines := []string{
+		"[PHASE:4/8] Configuring K3s agent join with token " + secretToken,
+		"K3S_JOIN_TOKEN='" + secretToken + "'",
+	}
+
+	bundle := FormatInstallerDiagnosticsBundle(cfg, eval, rawLines)
+	for _, secret := range []string{secretToken, secretAdmin, secretLuks} {
+		if strings.Contains(bundle, secret) {
+			t.Fatalf("diagnostics bundle leaked plaintext secret %q:\n%s", secret, bundle)
+		}
+	}
+	if !strings.Contains(bundle, "JoinToken=[REDACTED]") {
+		t.Errorf("expected 'JoinToken=[REDACTED]' in diagnostics bundle:\n%s", bundle)
+	}
+	if !strings.Contains(bundle, "K3S_JOIN_TOKEN='[REDACTED]'") {
+		t.Errorf("expected redacted K3S_JOIN_TOKEN in diagnostics bundle:\n%s", bundle)
+	}
+}

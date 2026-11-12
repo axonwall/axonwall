@@ -6,11 +6,11 @@ description="Axonwall Appliance Firstboot Provisioner"
 depend() {
     need localmount
     after networking
-    before slapd axonwalld axonwall-controller axonwall-ui headscale
+    before slapd axonwalld axonwall-controller axonwall-ui headscale k3s k3s-agent
 }
 
 start() {
-    if [ -f /etc/axonwall/.firstboot ]; then
+    if [ -f /etc/axonwall/.firstboot ] || [ -f /etc/axonwall/.k3s-firstboot ]; then
         ebegin "Running Axonwall Firstboot Provisioner"
         /usr/local/bin/axonwall-firstboot-alpine
         eend $?

@@ -230,3 +230,85 @@ func TestR2Batch6K3sApplyVowWriteFailureReturnsError(t *testing.T) {
 		t.Fatal("VOW manifest was written despite the authz.yaml write failing")
 	}
 }
+
+func TestK3sStorageStagesTrustedZfsOperatorAndSupportsAgentUnit(t *testing.T) {
+	logPath := installFakeK3sPath(t, 0)
+	etcDir, manifestDir, _, _ := redirectK3sPaths(t)
+
+	origOpPaths := k3sTrustedZfsOperatorManifestPaths
+	origEditionPath := k3sEditionMarkerPath
+	origAgentPaths := k3sAgentServicePaths
+	t.Cleanup(func() {
+		k3sTrustedZfsOperatorManifestPaths = origOpPaths
+		k3sEditionMarkerPath = origEditionPath
+		k3sAgentServicePaths = origAgentPaths
+	})
+
+	shareDir := t.TempDir()
+	localOpPath := filepath.Join(shareDir, "zfs-operator.yaml")
+	opYAML := "apiVersion: storage.k8s.io/v1\nkind: CSIDriver\nmetadata:\n  name: zfs.csi.openebs.io\n"
+	if err := os.WriteFile(localOpPath, []byte(opYAML), 0644); err != nil {
+		t.Fatalf("write local zfs-operator.yaml: %v", err)
+	}
+	k3sTrustedZfsOperatorManifestPaths = []string{filepath.Join(shareDir, "missing.yaml"), localOpPath}
+	k3sEditionMarkerPath = filepath.Join(shareDir, "no-edition")
+	k3sAgentServicePaths = []string{filepath.Join(shareDir, "no-k3s-agent.service")}
+
+	mgr := NewK3sManager()
+	serverRaw := r2K3sBundleJSON(t, K3sRuntimeBundle{
+		Enabled:             true,
+		K3sConfigYaml:       "cluster-cidr: \"10.42.0.0/16\"\nkubelet-arg:\n  - \"max-pods=64\"\n",
+		OpenEbsManifestYaml: r2ValidK3sManifest,
+	})
+	if err := mgr.ApplyConfig(serverRaw); err != nil {
+		t.Fatalf("ApplyConfig (server with trusted zfs-operator) failed: %v", err)
+	}
+
+	stagedOpPath := filepath.Join(manifestDir, "00-openebs-zfs-operator.yaml")
+	stagedData, err := os.ReadFile(stagedOpPath)
+	if err != nil {
+		t.Fatalf("expected 00-openebs-zfs-operator.yaml to be staged, got err: %v", err)
+	}
+	if string(stagedData) != opYAML {
+		t.Errorf("unexpected staged operator YAML: %q", string(stagedData))
+	}
+	if info, err := os.Stat(stagedOpPath); err != nil || info.Mode().Perm() != 0600 {
+		t.Errorf("expected staged 00-openebs-zfs-operator.yaml mode 0600, got %v (err %v)", info.Mode().Perm(), err)
+	}
+
+	// Now verify k3s-agent service detection via .k3s-edition K3S_ROLE=agent and via server: without cluster-cidr:
+	editionMarker := filepath.Join(shareDir, ".k3s-edition")
+	if err := os.WriteFile(editionMarker, []byte("INSTALL_EDITION='k3s-storage'\nK3S_ROLE='agent'\n"), 0644); err != nil {
+		t.Fatalf("write .k3s-edition: %v", err)
+	}
+	k3sEditionMarkerPath = editionMarker
+
+	agentRaw := r2K3sBundleJSON(t, K3sRuntimeBundle{
+		Enabled:       true,
+		K3sConfigYaml: "server: \"https://10.0.0.1:6443\"\ntoken-file: \"/var/lib/axonwall/k3s-join.token\"\n",
+	})
+	if err := mgr.ApplyConfig(agentRaw); err != nil {
+		t.Fatalf("ApplyConfig (agent via .k3s-edition) failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(etcDir, "config.yaml")); err != nil {
+		t.Fatalf("expected agent config.yaml to be written: %v", err)
+	}
+	args, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(args), "reload-or-restart k3s-agent") {
+		t.Fatalf("expected systemctl reload-or-restart k3s-agent, got log: %q (err %v)", string(args), err)
+	}
+
+	// Also verify fallback detection via server: without cluster-cidr: when k3s-agent.service exists
+	k3sEditionMarkerPath = filepath.Join(shareDir, "no-edition")
+	fakeAgentUnit := filepath.Join(shareDir, "k3s-agent.service")
+	if err := os.WriteFile(fakeAgentUnit, []byte("[Unit]\nDescription=k3s-agent\n"), 0644); err != nil {
+		t.Fatalf("write fake k3s-agent.service: %v", err)
+	}
+	k3sAgentServicePaths = []string{fakeAgentUnit}
+	if gotUnit := resolveK3sSystemdUnit("server: \"https://10.0.0.1:6443\"\n"); gotUnit != "k3s-agent" {
+		t.Errorf("expected resolveK3sSystemdUnit with server: and no cluster-cidr: to return 'k3s-agent', got %q", gotUnit)
+	}
+	if gotUnit := resolveK3sSystemdUnit("server: \"https://10.0.0.1:6443\"\ncluster-cidr: \"10.42.0.0/16\"\n"); gotUnit != "k3s" {
+		t.Errorf("expected HA server join (with cluster-cidr) to return 'k3s', got %q", gotUnit)
+	}
+}

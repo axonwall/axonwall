@@ -1,0 +1,17 @@
+[Unit]
+Description=Axonwall K3s + ZFS Storage Host Firstboot Provisioner
+After=local-fs.target zfs-import.target zfs-mount.service network-online.target
+Wants=network-online.target zfs-import.target
+Before=k3s.service k3s-agent.service
+ConditionPathExists=/etc/axonwall/.k3s-firstboot
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/axonwall-k3s-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

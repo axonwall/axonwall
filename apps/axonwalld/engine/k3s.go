@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type K3sRuntimeBundle struct {
@@ -98,6 +100,17 @@ var (
 	k3sServerManifestDir = "/var/lib/rancher/k3s/server/manifests"
 	k3sStateDir          = "/var/lib/axonwall"
 	vowEtcDir            = "/etc/axonwall/vow"
+
+	k3sEditionMarkerPath = "/etc/axonwall/.k3s-edition"
+	k3sAgentServicePaths = []string{
+		"/etc/systemd/system/k3s-agent.service",
+		"/lib/systemd/system/k3s-agent.service",
+		"/usr/lib/systemd/system/k3s-agent.service",
+	}
+	k3sTrustedZfsOperatorManifestPaths = []string{
+		"/usr/share/axonwall/k3s/zfs-operator.yaml",
+		"/usr/share/axonwall/k3s-storage/zfs-operator.yaml",
+	}
 )
 
 // SetK3sPathsForTest redirects K3s and VOW filesystem roots for testing.
@@ -247,14 +260,21 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		slog.Info("K3s plugin is disabled; stopping k3s service")
 		_ = removeFileIfExists(filepath.Join(k3sEtcDir, "config.yaml"))
 		_ = exec.Command("systemctl", "stop", "k3s").Run()
+		if hasK3sAgentServiceUnit() || isK3sEditionAgent() {
+			_ = exec.Command("systemctl", "stop", "k3s-agent").Run()
+		}
 		return nil
 	}
+
+	k3sServiceUnit := resolveK3sSystemdUnit(bundle.K3sConfigYaml)
 
 	// On real appliances (when not redirected by SetK3sPathsForTest),
 	// ensure /etc/systemd/system/k3s.service exists if /lib/systemd/system/k3s.service
 	// was not yet installed by the .deb package, and ensure the OpenEBS backing ZFS dataset exists.
 	if k3sEtcDir == "/etc/rancher/k3s" {
-		ensureK3sServiceUnit()
+		if k3sServiceUnit == "k3s" {
+			ensureK3sServiceUnit()
+		}
 		ensureOpenEbsZfsDataset(bundle.ReplicatedPool)
 	}
 
@@ -308,6 +328,13 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	}
 
 	if bundle.OpenEbsManifestYaml != "" {
+		if opContent, ok := readTrustedLocalZfsOperatorManifest(); ok {
+			writes = append(writes, atomicFileWrite{
+				path:    filepath.Join(k3sServerManifestDir, "00-openebs-zfs-operator.yaml"),
+				content: opContent,
+				perm:    0600,
+			})
+		}
 		writes = append(writes, atomicFileWrite{
 			path:    filepath.Join(k3sServerManifestDir, "axonwall-openebs.yaml"),
 			content: bundle.OpenEbsManifestYaml,
@@ -347,8 +374,8 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	// A-M15: a failed k3s restart fails the apply instead of being
 	// discarded while the bundle reports success and the cluster runs
 	// the old manifests or no k3s at all.
-	if out, err := exec.Command("systemctl", "reload-or-restart", "k3s").CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to reload-or-restart k3s: %v (%s)", err, strings.TrimSpace(string(out)))
+	if out, err := exec.Command("systemctl", "reload-or-restart", k3sServiceUnit).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload-or-restart %s: %v (%s)", k3sServiceUnit, err, strings.TrimSpace(string(out)))
 	}
 
 	// Ensure /etc/rancher/k3s/k3s.yaml is accessible by admin operators in group axonwall-api
@@ -453,14 +480,91 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	// A-M15: only record the join AFTER k3s restarts successfully.
 	// The old code set haAutoJoined before the (discarded) restart,
 	// so GetStatus reported the node joined while k3s was still down.
-	if out, err := exec.Command("systemctl", "reload-or-restart", "k3s").CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to reload-or-restart k3s after auto-join: %v (%s)", err, strings.TrimSpace(string(out)))
+	m.mu.Lock()
+	curConfigYaml := m.cfg.K3sConfigYaml
+	m.mu.Unlock()
+	k3sUnit := resolveK3sSystemdUnit(curConfigYaml)
+	if out, err := exec.Command("systemctl", "reload-or-restart", k3sUnit).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload-or-restart %s after auto-join: %v (%s)", k3sUnit, err, strings.TrimSpace(string(out)))
 	}
 	m.mu.Lock()
 	m.haAutoJoined = true
 	m.lastMessage = fmt.Sprintf("Joined K3s HA cluster via https://%s", net.JoinHostPort(peerIp, "6443"))
 	m.mu.Unlock()
 	return nil
+}
+
+func readTrustedLocalZfsOperatorManifest() (string, bool) {
+	for _, candidate := range k3sTrustedZfsOperatorManifestPaths {
+		info, err := os.Lstat(candidate)
+		if err != nil || info.IsDir() || (info.Mode()&os.ModeSymlink) != 0 {
+			continue
+		}
+		data, err := os.ReadFile(candidate)
+		if err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			return string(data), true
+		}
+	}
+	return "", false
+}
+
+func isK3sEditionAgent() bool {
+	data, err := os.ReadFile(k3sEditionMarkerPath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "K3S_ROLE" {
+			val := strings.Trim(strings.TrimSpace(v), `"'`)
+			if val == "agent" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasK3sAgentServiceUnit() bool {
+	for _, p := range k3sAgentServicePaths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func k3sConfigIsAgentJoin(k3sConfigYaml string) bool {
+	if strings.TrimSpace(k3sConfigYaml) == "" {
+		return false
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(k3sConfigYaml), &doc); err != nil {
+		return false
+	}
+	srvVal, hasServer := doc["server"]
+	if !hasServer {
+		return false
+	}
+	srvStr, ok := srvVal.(string)
+	if !ok || strings.TrimSpace(srvStr) == "" {
+		return false
+	}
+	_, hasClusterCIDR := doc["cluster-cidr"]
+	return !hasClusterCIDR
+}
+
+func resolveK3sSystemdUnit(k3sConfigYaml string) string {
+	if isK3sEditionAgent() {
+		return "k3s-agent"
+	}
+	if k3sConfigIsAgentJoin(k3sConfigYaml) && hasK3sAgentServiceUnit() {
+		return "k3s-agent"
+	}
+	return "k3s"
 }
 
 func (m *K3sManager) GetStatus() K3sClusterStatus {
@@ -475,7 +579,8 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 	// never installed. Probe reality instead and report unknown/down
 	// when the probes fail: a peer IP in config is not evidence of a
 	// joined cluster, and no probe means no nodes and no volumes.
-	serviceActive := isSystemdServiceActive("k3s")
+	k3sUnit := resolveK3sSystemdUnit(cfg.K3sConfigYaml)
+	serviceActive := isSystemdServiceActive(k3sUnit)
 	var nodes []K3sNodeInfo
 	var volumes []OpenEbsVolumeInfo
 	running := false

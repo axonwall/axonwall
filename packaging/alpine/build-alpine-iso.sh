@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PROFILE="virt"
 MINIMAL=1
+EDITION="${AXONWALL_EDITION:-axonwall}"
 IN_CONTAINER=0
 
 ARGS=("$@")
@@ -20,6 +21,14 @@ while [[ $# -gt 0 ]]; do
     --profile)
       PROFILE="${2:-virt}"
       shift 2
+      ;;
+    --edition)
+      EDITION="${2:-axonwall}"
+      shift 2
+      ;;
+    --edition=*)
+      EDITION="${1#*=}"
+      shift
       ;;
     --minimal)
       MINIMAL=1
@@ -39,6 +48,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "${EDITION}" in
+  axonwall|k3s-storage) ;;
+  *)
+    echo "[!] Unknown --edition '${EDITION}' (expected axonwall or k3s-storage)" >&2
+    exit 1
+    ;;
+esac
+
 # If not running inside Alpine Linux, automatically delegate to alpine:3.21 Docker container
 if [[ "$IN_CONTAINER" -eq 0 ]] && [[ ! -f /etc/alpine-release ]]; then
   echo "[+] Host is not Alpine Linux. Launching isolated alpine:3.21 build container..."
@@ -53,13 +70,15 @@ ALPINE_BRANCH="v3.21"
 ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}"
 WORK_DIR="/tmp/axonwall-alpine-build"
 OUTPUT_DIR="${REPO_ROOT}/packaging/alpine/output"
-if [[ "$MINIMAL" -eq 1 ]]; then
+if [[ "${EDITION}" == "k3s-storage" ]]; then
+  ISO_NAME="axonwall-k3s-storage-alpine-${PROFILE}-amd64.iso"
+elif [[ "$MINIMAL" -eq 1 ]]; then
   ISO_NAME="axonwall-alpine-${PROFILE}-minimal-amd64.iso"
 else
   ISO_NAME="axonwall-alpine-${PROFILE}-amd64.iso"
 fi
 
-echo "=== Axonwall Alpine Linux ISO Builder (Profile: ${PROFILE}, Minimal: ${MINIMAL}) ==="
+echo "=== Axonwall Alpine Linux ISO Builder (Edition: ${EDITION}, Profile: ${PROFILE}, Minimal: ${MINIMAL}) ==="
 
 # 1. Install ISO build tools inside Alpine
 apk update
@@ -138,6 +157,55 @@ rm -f "${WORK_DIR}/base.iso"
 # Minimal mode strips all extra shells/editors/CLI diagnostics (zsh, vim, starship,
 # tmux, btop, htop, iftop, sysstat, nmap, git, etckeeper, etc.) to keep the ISO
 # as small as possible while retaining 100% OpenLDAP + SSO + HA compatibility.
+if [[ "${EDITION}" == "k3s-storage" ]]; then
+  # Barebones K3s + OpenZFS + OpenEBS Storage Host package set (no NGFW/UI/LDAP stack)
+  CORE_PKGS=(
+    alpine-base
+    alpine-conf
+    openrc
+    busybox
+    busybox-openrc
+    busybox-mdev-openrc
+    kmod
+    nftables
+    nftables-openrc
+    iptables
+    iproute2
+    bridge
+    cni-plugins
+    ifupdown-ng
+    dhcpcd
+    wireguard-tools
+    conntrack-tools
+    ethtool
+    tcpdump
+    curl
+    jq
+    openssl
+    ca-certificates
+    zfs
+    "zfs-${ALPINE_KERNEL_FLAVOR}"
+    zfs-openrc
+    parted
+    mdadm
+    sgdisk
+    e2fsprogs
+    dosfstools
+    cryptsetup
+    rsync
+    bash
+    syslinux
+    efibootmgr
+    grub
+    grub-bios
+    grub-efi
+    openssh
+    sudo
+    shadow
+    chrony
+    chrony-openrc
+  )
+else
 CORE_PKGS=(
   alpine-base
   alpine-conf
@@ -201,6 +269,8 @@ if [[ "$MINIMAL" -eq 0 ]]; then
     openvpn
     suricata
     zfs
+    "zfs-${ALPINE_KERNEL_FLAVOR}"
+    zfs-openrc
     samba
     nfs-utils
     open-iscsi
@@ -229,6 +299,7 @@ if [[ "$MINIMAL" -eq 0 ]]; then
     xz
     unzip
   )
+fi
 fi
 
 if [[ "$PROFILE" == "lts" ]]; then
@@ -377,9 +448,14 @@ fi
 ln -sf /etc/openldap "${OVL}/etc/ldap"
 ln -sf /usr/lib/openldap "${OVL}/usr/lib/ldap"
 
-# Write /etc/hostname & /etc/apk/world
-echo "axonwall" > "${OVL}/etc/hostname"
-touch "${OVL}/etc/axonwall/.firstboot"
+# Write /etc/hostname & firstboot/edition markers
+if [[ "${EDITION}" == "k3s-storage" ]]; then
+  echo "axonwall-storage" > "${OVL}/etc/hostname"
+  touch "${OVL}/etc/axonwall/.k3s-edition" "${OVL}/etc/axonwall/.k3s-firstboot"
+else
+  echo "axonwall" > "${OVL}/etc/hostname"
+  touch "${OVL}/etc/axonwall/.firstboot"
+fi
 
 printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
 
@@ -387,44 +463,85 @@ printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
 cp -a "${SCRIPT_DIR}/overlay/"* "${OVL}/"
 chmod +x "${OVL}/etc/init.d/"* "${OVL}/usr/local/bin/"*
 
-# Copy shared scripts and configs from Debian/ISO packaging
-cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/99-axonwall.conf" "${OVL}/etc/sysctl.d/"
 # Alpine's stock sshd is built without PAM, so strip UsePAM from sshd_config.d/axonwall.conf
 grep -v '^UsePAM ' "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/ssh/sshd_config.d/axonwall.conf" > "${OVL}/etc/ssh/sshd_config.d/axonwall.conf"
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sudoers.d/axonwall" "${OVL}/etc/sudoers.d/axonwall"
 chmod 0440 "${OVL}/etc/sudoers.d/axonwall"
-cp "${REPO_ROOT}/packaging/debian/headscale-config.yaml" "${OVL}/etc/headscale/config.yaml"
-cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
 
-if [[ "$MINIMAL" -eq 0 ]]; then
-  mkdir -p "${OVL}/etc/zsh" "${OVL}/etc/skel" "${OVL}/etc/vim" "${OVL}/usr/share/oh-my-zsh"
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/starship.toml" "${OVL}/etc/axonwall/starship.toml"
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zsh/axonwall.zsh" "${OVL}/etc/zsh/axonwall.zsh"
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zsh/zshenv" "${OVL}/etc/zsh/zshenv"
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/skel/.zshrc" "${OVL}/etc/skel/.zshrc"
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/skel/.zshrc" "${OVL}/root/.zshrc"
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/vim/vimrc.local" "${OVL}/etc/vim/vimrc.local"
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/tmux.conf" "${OVL}/etc/tmux.conf"
-  if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh" ]]; then
-    cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh/." "${OVL}/usr/share/oh-my-zsh/"
-  fi
-  if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim" ]]; then
-    mkdir -p "${OVL}/etc/axonwall/nvim"
-    cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim/." "${OVL}/etc/axonwall/nvim/"
-  fi
-else
-  # On minimal Alpine (no zsh installed), symlink /usr/bin/zsh -> /bin/ash so SSO users
-  # replicated with loginShell=/usr/bin/zsh can SSH into minimal Alpine seamlessly.
+if [[ "${EDITION}" == "k3s-storage" ]]; then
+  # Strip NGFW-only OpenRC init scripts and stage Barebones K3s + OpenZFS Storage Host configs
+  rm -f "${OVL}/etc/init.d/axonwalld" \
+        "${OVL}/etc/init.d/axonwall-controller" \
+        "${OVL}/etc/init.d/axonwall-ui" \
+        "${OVL}/etc/init.d/headscale"
+  rmdir "${OVL}/etc/headscale" 2>/dev/null || true
+  rm -rf "${OVL}/opt/axonwall"
+
+  mkdir -p "${OVL}/etc/modules-load.d" "${OVL}/usr/share/axonwall/k3s"
+  cp "${REPO_ROOT}/packaging/k3s-storage/nftables.conf" "${OVL}/etc/nftables.conf"
+  cp "${REPO_ROOT}/packaging/k3s-storage/90-k3s-storage.conf" "${OVL}/etc/sysctl.d/90-k3s-storage.conf"
+  cp "${REPO_ROOT}/packaging/k3s-storage/k3s-storage.modules.conf" "${OVL}/etc/modules-load.d/k3s-storage.conf"
+  cp "${REPO_ROOT}/packaging/k3s-storage/zfs-operator.yaml" "${OVL}/usr/share/axonwall/k3s/zfs-operator.yaml"
+  for _kmod in zfs overlay br_netfilter wireguard nf_conntrack; do
+    grep -qxF "$_kmod" "${OVL}/etc/modules" 2>/dev/null || echo "$_kmod" >> "${OVL}/etc/modules"
+  done
+  for _kbin in axonwall-k3s-firstboot axonwall-k3s-verify axonwall-k3s-status; do
+    cp "${REPO_ROOT}/packaging/k3s-storage/${_kbin}" "${OVL}/usr/local/bin/${_kbin}"
+    chmod 0755 "${OVL}/usr/local/bin/${_kbin}"
+  done
   ln -sf /bin/ash "${OVL}/usr/bin/zsh"
+else
+  # Copy shared scripts and configs from Debian/ISO packaging
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/99-axonwall.conf" "${OVL}/etc/sysctl.d/"
+  cp "${REPO_ROOT}/packaging/debian/headscale-config.yaml" "${OVL}/etc/headscale/config.yaml"
+  cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
+
+  # Stage k3s-storage configs & OpenEBS manifest so unified Alpine installs can also deploy k3s-storage
+  mkdir -p "${OVL}/usr/share/axonwall/k3s-storage" "${OVL}/usr/share/axonwall/k3s"
+  cp "${REPO_ROOT}/packaging/k3s-storage/nftables.conf" \
+     "${REPO_ROOT}/packaging/k3s-storage/90-k3s-storage.conf" \
+     "${REPO_ROOT}/packaging/k3s-storage/k3s-storage.modules.conf" \
+     "${REPO_ROOT}/packaging/k3s-storage/zfs-operator.yaml" \
+     "${REPO_ROOT}/packaging/k3s-storage/axonwall-k3s-firstboot" \
+     "${REPO_ROOT}/packaging/k3s-storage/axonwall-k3s-verify" \
+     "${REPO_ROOT}/packaging/k3s-storage/axonwall-k3s-status" \
+     "${OVL}/usr/share/axonwall/k3s-storage/"
+  chmod 0755 "${OVL}/usr/share/axonwall/k3s-storage/axonwall-k3s-firstboot" \
+             "${OVL}/usr/share/axonwall/k3s-storage/axonwall-k3s-verify" \
+             "${OVL}/usr/share/axonwall/k3s-storage/axonwall-k3s-status"
+  cp "${REPO_ROOT}/packaging/k3s-storage/zfs-operator.yaml" "${OVL}/usr/share/axonwall/k3s/zfs-operator.yaml"
+
+  if [[ "$MINIMAL" -eq 0 ]]; then
+    mkdir -p "${OVL}/etc/zsh" "${OVL}/etc/skel" "${OVL}/etc/vim" "${OVL}/usr/share/oh-my-zsh"
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/starship.toml" "${OVL}/etc/axonwall/starship.toml"
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zsh/axonwall.zsh" "${OVL}/etc/zsh/axonwall.zsh"
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zsh/zshenv" "${OVL}/etc/zsh/zshenv"
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/skel/.zshrc" "${OVL}/etc/skel/.zshrc"
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/skel/.zshrc" "${OVL}/root/.zshrc"
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/vim/vimrc.local" "${OVL}/etc/vim/vimrc.local"
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/tmux.conf" "${OVL}/etc/tmux.conf"
+    if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh" ]]; then
+      cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/share/oh-my-zsh/." "${OVL}/usr/share/oh-my-zsh/"
+    fi
+    if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim" ]]; then
+      mkdir -p "${OVL}/etc/axonwall/nvim"
+      cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim/." "${OVL}/etc/axonwall/nvim/"
+    fi
+  else
+    # On minimal Alpine (no zsh installed), symlink /usr/bin/zsh -> /bin/ash so SSO users
+    # replicated with loginShell=/usr/bin/zsh can SSH into minimal Alpine seamlessly.
+    ln -sf /bin/ash "${OVL}/usr/bin/zsh"
+  fi
+
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-ha-notify" "${OVL}/usr/local/bin/"
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-import" "${OVL}/usr/local/bin/"
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwallctl" "${OVL}/usr/local/bin/"
+  if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" ]]; then
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" "${OVL}/usr/local/bin/"
+  fi
 fi
 
-cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-ha-notify" "${OVL}/usr/local/bin/"
-cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-import" "${OVL}/usr/local/bin/"
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update" "${OVL}/usr/local/bin/"
-cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwallctl" "${OVL}/usr/local/bin/"
-if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" ]]; then
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" "${OVL}/usr/local/bin/"
-fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" "${OVL}/usr/local/bin/"
 fi
@@ -441,13 +558,15 @@ echo "${VERSION}" > "${OVL}/etc/axonwall/version"
 # Core payloads are fail-closed, mirroring the console-binary guard in
 # build-iso.sh: an image built without its daemon, UI, or controller
 # boots "successfully" and is only discovered broken at service start.
-if [[ -f "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" ]]; then
-  cp "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" "${OVL}/usr/sbin/axonwalld"
-  strip "${OVL}/usr/sbin/axonwalld" 2>/dev/null || true
-  chmod +x "${OVL}/usr/sbin/axonwalld"
-else
-  echo "[!] ERROR: apps/axonwalld/bin/axonwalld is missing; cannot build Alpine ISO without the daemon." >&2
-  exit 1
+if [[ "${EDITION}" == "axonwall" ]]; then
+  if [[ -f "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" ]]; then
+    cp "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" "${OVL}/usr/sbin/axonwalld"
+    strip "${OVL}/usr/sbin/axonwalld" 2>/dev/null || true
+    chmod +x "${OVL}/usr/sbin/axonwalld"
+  else
+    echo "[!] ERROR: apps/axonwalld/bin/axonwalld is missing; cannot build Alpine ISO without the daemon." >&2
+    exit 1
+  fi
 fi
 
 if [[ -f "${REPO_ROOT}/apps/axonwall-console/bin/axonwall-console" ]]; then
@@ -463,28 +582,56 @@ if [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]];
   cp "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" "${OVL}/usr/sbin/axonwall-satellite"
   strip "${OVL}/usr/sbin/axonwall-satellite" 2>/dev/null || true
   chmod +x "${OVL}/usr/sbin/axonwall-satellite"
-  ln -sf /usr/sbin/axonwall-satellite "${OVL}/usr/share/axonwall/satellites/axonwall-satellite-amd64"
-else
+  if [[ "${EDITION}" == "axonwall" ]]; then
+    ln -sf /usr/sbin/axonwall-satellite "${OVL}/usr/share/axonwall/satellites/axonwall-satellite-amd64"
+  else
+    rmdir "${OVL}/usr/share/axonwall/satellites" 2>/dev/null || true
+  fi
+elif [[ "${EDITION}" == "axonwall" ]]; then
   echo "[!] ERROR: apps/axonwall-satellite/bin/axonwall-satellite-amd64 is missing; cannot build Alpine ISO without the satellite binary." >&2
   exit 1
 fi
 
-HEADSCALE_VERSION="0.29.4"
-HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
-if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" ]]; then
-  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" "${OVL}/usr/sbin/headscale"
-  strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
-  # headscale serves as the dedicated axonwall-headscale user, so the
-  # binary must be world-executable: chmod +x alone preserves whatever
-  # mode the source file had (0750 under a restrictive build umask),
-  # which supervise-daemon then cannot exec as that user.
-  chmod 0755 "${OVL}/usr/sbin/headscale"
-elif [[ ! -f "${OVL}/usr/sbin/headscale" ]]; then
-  echo "[+] Fetching Headscale v${HEADSCALE_VERSION} for Alpine overlay..."
-  curl -fsSL -o "${OVL}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
-  echo "${HEADSCALE_SHA256}  ${OVL}/usr/sbin/headscale" | sha256sum -c -
-  strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
-  chmod 0755 "${OVL}/usr/sbin/headscale"
+if [[ "${EDITION}" == "k3s-storage" ]]; then
+  K3S_VERSION="${K3S_VERSION:-v1.31.5+k3s1}"
+  K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
+  case "${K3S_VERSION}" in
+    v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;
+    v1.32.3+k3s1) K3S_SHA256="${K3S_SHA256:-b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83}" ;;
+    *) K3S_SHA256="${K3S_SHA256:-}" ;;
+  esac
+  echo "[+] Fetching K3s ${K3S_VERSION} for Alpine k3s-storage overlay..."
+  curl -fsSL -o "${OVL}/usr/local/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  if [[ -z "${K3S_SHA256}" ]]; then
+    K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
+  fi
+  if [[ -z "${K3S_SHA256}" ]]; then
+    echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
+    exit 1
+  fi
+  echo "${K3S_SHA256}  ${OVL}/usr/local/bin/k3s" | sha256sum -c -
+  chmod 0755 "${OVL}/usr/local/bin/k3s"
+  ln -sf k3s "${OVL}/usr/local/bin/kubectl"
+  ln -sf k3s "${OVL}/usr/local/bin/crictl"
+  ln -sf k3s "${OVL}/usr/local/bin/ctr"
+else
+  HEADSCALE_VERSION="0.29.4"
+  HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
+  if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" ]]; then
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" "${OVL}/usr/sbin/headscale"
+    strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
+    # headscale serves as the dedicated axonwall-headscale user, so the
+    # binary must be world-executable: chmod +x alone preserves whatever
+    # mode the source file had (0750 under a restrictive build umask),
+    # which supervise-daemon then cannot exec as that user.
+    chmod 0755 "${OVL}/usr/sbin/headscale"
+  elif [[ ! -f "${OVL}/usr/sbin/headscale" ]]; then
+    echo "[+] Fetching Headscale v${HEADSCALE_VERSION} for Alpine overlay..."
+    curl -fsSL -o "${OVL}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
+    echo "${HEADSCALE_SHA256}  ${OVL}/usr/sbin/headscale" | sha256sum -c -
+    strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
+    chmod 0755 "${OVL}/usr/sbin/headscale"
+  fi
 fi
 
 # Fetch ZFSBootMenu v3.1.0 Unified Kernel Image (UKI) for Root-on-ZFS installations
@@ -549,60 +696,62 @@ if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hook
   chmod 0755 "${OVL}/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh"
 fi
 
-# Copy Next.js standalone UI & Controller
-if [[ -d "${REPO_ROOT}/apps/axonwall/.next/standalone" ]]; then
-  cp -a "${REPO_ROOT}/apps/axonwall/.next/standalone/"* "${OVL}/opt/axonwall/"
-  # Strip build-only dependencies and unused glibc native binaries from standalone bundle
-  rm -rf \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"@img+sharp* \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"sharp* \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"typescript* \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"caniuse-lite* \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"postcss* \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/@vercel/og \
-    "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/webpack \
-    2>/dev/null || true
-  find "${OVL}/opt/axonwall" \( -name "*.map" -o -name "*.d.ts" -o -name "*.md" -o -name "LICENSE*" \) -delete 2>/dev/null || true
-  # Next's production server loads dist/next-devtools/server/shared.js at
-  # startup (via dist/server/patch-error-inspect.js), and shared.js in
-  # turn requires dist/compiled/babel/code-frame. The strip list above
-  # previously removed both dist/next-devtools and dist/compiled/babel*,
-  # which crashed axonwall-ui on boot with "Cannot find module
-  # '../next-devtools/server/shared'" (and, once that was restored,
-  # "Cannot find module 'next/dist/compiled/babel/code-frame'").
-  # Fail the build if the runtime files are missing from the payload.
-  for next_dir in "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next; do
-    for req in dist/next-devtools/server/shared.js dist/server/patch-error-inspect.js dist/compiled/babel/code-frame.js; do
-      if [[ ! -f "${next_dir}/${req}" ]]; then
-        echo "[!] ERROR: Next.js runtime file missing from UI payload: ${next_dir}/${req}" >&2
-        exit 1
-      fi
+# Copy Next.js standalone UI & Controller (axonwall NGFW edition only)
+if [[ "${EDITION}" == "axonwall" ]]; then
+  if [[ -d "${REPO_ROOT}/apps/axonwall/.next/standalone" ]]; then
+    cp -a "${REPO_ROOT}/apps/axonwall/.next/standalone/"* "${OVL}/opt/axonwall/"
+    # Strip build-only dependencies and unused glibc native binaries from standalone bundle
+    rm -rf \
+      "${OVL}/opt/axonwall/node_modules/.pnpm/"@img+sharp* \
+      "${OVL}/opt/axonwall/node_modules/.pnpm/"sharp* \
+      "${OVL}/opt/axonwall/node_modules/.pnpm/"typescript* \
+      "${OVL}/opt/axonwall/node_modules/.pnpm/"caniuse-lite* \
+      "${OVL}/opt/axonwall/node_modules/.pnpm/"postcss* \
+      "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/@vercel/og \
+      "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next/dist/compiled/webpack \
+      2>/dev/null || true
+    find "${OVL}/opt/axonwall" \( -name "*.map" -o -name "*.d.ts" -o -name "*.md" -o -name "LICENSE*" \) -delete 2>/dev/null || true
+    # Next's production server loads dist/next-devtools/server/shared.js at
+    # startup (via dist/server/patch-error-inspect.js), and shared.js in
+    # turn requires dist/compiled/babel/code-frame. The strip list above
+    # previously removed both dist/next-devtools and dist/compiled/babel*,
+    # which crashed axonwall-ui on boot with "Cannot find module
+    # '../next-devtools/server/shared'" (and, once that was restored,
+    # "Cannot find module 'next/dist/compiled/babel/code-frame'").
+    # Fail the build if the runtime files are missing from the payload.
+    for next_dir in "${OVL}/opt/axonwall/node_modules/.pnpm/"next*/node_modules/next; do
+      for req in dist/next-devtools/server/shared.js dist/server/patch-error-inspect.js dist/compiled/babel/code-frame.js; do
+        if [[ ! -f "${next_dir}/${req}" ]]; then
+          echo "[!] ERROR: Next.js runtime file missing from UI payload: ${next_dir}/${req}" >&2
+          exit 1
+        fi
+      done
     done
-  done
-  mkdir -p "${OVL}/opt/axonwall/apps/axonwall/.next" "${OVL}/opt/axonwall/.next"
-  if [[ -d "${REPO_ROOT}/apps/axonwall/.next/static" ]]; then
-    cp -a "${REPO_ROOT}/apps/axonwall/.next/static" "${OVL}/opt/axonwall/apps/axonwall/.next/"
+    mkdir -p "${OVL}/opt/axonwall/apps/axonwall/.next" "${OVL}/opt/axonwall/.next"
+    if [[ -d "${REPO_ROOT}/apps/axonwall/.next/static" ]]; then
+      cp -a "${REPO_ROOT}/apps/axonwall/.next/static" "${OVL}/opt/axonwall/apps/axonwall/.next/"
+    fi
+    if [[ -d "${REPO_ROOT}/apps/axonwall/public" ]]; then
+      cp -a "${REPO_ROOT}/apps/axonwall/public" "${OVL}/opt/axonwall/apps/axonwall/"
+    fi
+  else
+    echo "[!] ERROR: apps/axonwall/.next/standalone is missing (run the Next.js production build first); cannot build Alpine ISO without the web console." >&2
+    exit 1
   fi
-  if [[ -d "${REPO_ROOT}/apps/axonwall/public" ]]; then
-    cp -a "${REPO_ROOT}/apps/axonwall/public" "${OVL}/opt/axonwall/apps/axonwall/"
-  fi
-else
-  echo "[!] ERROR: apps/axonwall/.next/standalone is missing (run the Next.js production build first); cannot build Alpine ISO without the web console." >&2
-  exit 1
-fi
 
-if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" ]]; then
-  cp "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
-  cp "${REPO_ROOT}/apps/axonwall-controller/package.json" "${OVL}/opt/axonwall/apps/axonwall-controller/"
-else
-  echo "[!] ERROR: apps/axonwall-controller/dist/index.js is missing (run the controller build first); cannot build Alpine ISO without the controller." >&2
-  exit 1
-fi
-if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
-  cp "${REPO_ROOT}/apps/axonwall-controller/dist/axonwallctl.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
-fi
-if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
-  cp "${REPO_ROOT}/apps/axonwall-controller/dist/axonwall-tui.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
+  if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" ]]; then
+    cp "${REPO_ROOT}/apps/axonwall-controller/dist/index.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
+    cp "${REPO_ROOT}/apps/axonwall-controller/package.json" "${OVL}/opt/axonwall/apps/axonwall-controller/"
+  else
+    echo "[!] ERROR: apps/axonwall-controller/dist/index.js is missing (run the controller build first); cannot build Alpine ISO without the controller." >&2
+    exit 1
+  fi
+  if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/axonwallctl.js" ]]; then
+    cp "${REPO_ROOT}/apps/axonwall-controller/dist/axonwallctl.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
+  fi
+  if [[ -f "${REPO_ROOT}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
+    cp "${REPO_ROOT}/apps/axonwall-controller/dist/axonwall-tui.js" "${OVL}/opt/axonwall/apps/axonwall-controller/dist/"
+  fi
 fi
 
 # Configure OpenRC runlevel symlinks
@@ -613,15 +762,27 @@ fi
 # initramfs stage -- notably af_packet, so every DHCPv4 client (dhcpcd and
 # udhcpc alike) fails with "socket(AF_PACKET): Address family not supported
 # by protocol" and the live system never gets an IPv4 lease.
-for svc in devfs dmesg mdev hwdrivers modloop; do
-  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
-done
-for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
-  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
-done
-for svc in chronyd crond sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
-  ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
-done
+if [[ "${EDITION}" == "k3s-storage" ]]; then
+  for svc in devfs dmesg mdev hwdrivers modloop cgroups; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
+  done
+  for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking zfs-import zfs-mount; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
+  done
+  for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent local; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
+  done
+else
+  for svc in devfs dmesg mdev hwdrivers modloop; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
+  done
+  for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
+  done
+  for svc in chronyd crond sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
+  done
+fi
 for svc in mount-ro killprocs savecache; do
   ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/shutdown/${svc}"
 done
@@ -655,6 +816,26 @@ fi
 # 5. Update bootloader configs (SYSLINUX & GRUB EFI) with Axonwall branding, Next-Gen TUI Installer & Live modes
 STORAGE_MODULES="loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci"
 
+if [[ "${EDITION}" == "k3s-storage" ]]; then
+  BOOT_MENU_TITLE="Axonwall K3s + OpenZFS Storage Host Boot Menu (Alpine Linux)"
+  BOOT_INSTALL_LABEL="^Install Axonwall K3s + ZFS Storage Host — TUI Installer (Recommended)"
+  BOOT_GRUB_INSTALL_LABEL="Install Axonwall K3s + ZFS Storage Host — TUI Installer (Recommended)"
+  BOOT_LIVE_LABEL="^Live Storage Host Mode (Evaluate K3s + OpenZFS)"
+  BOOT_GRUB_LIVE_LABEL="Axonwall K3s Storage Host Live Mode"
+  EDITION_KARG="axonwall.edition=k3s-storage "
+  ISO_VOL_ID="AXONWALL_K3S_ALP"
+  ISO_APP_ID="Axonwall Alpine K3s + ZFS Storage Host"
+else
+  BOOT_MENU_TITLE="Axonwall Next-Gen Appliance Boot Menu (Alpine Linux)"
+  BOOT_INSTALL_LABEL="^Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)"
+  BOOT_GRUB_INSTALL_LABEL="Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)"
+  BOOT_LIVE_LABEL="^Live Appliance Mode (Evaluate & Web UI on 192.168.1.1:2966)"
+  BOOT_GRUB_LIVE_LABEL="Axonwall Live Appliance Mode (Evaluate & Web UI)"
+  EDITION_KARG=""
+  ISO_VOL_ID="AXONWALL_ALPINE"
+  ISO_APP_ID="Axonwall Alpine Firewall & Router Appliance"
+fi
+
 mkdir -p "${WORK_DIR}/iso/boot/syslinux" "${WORK_DIR}/iso/boot/grub/themes/axonwall"
 if [[ -f "${REPO_ROOT}/packaging/iso/branding/splash.png" ]]; then
   cp "${REPO_ROOT}/packaging/iso/branding/splash.png" "${WORK_DIR}/iso/boot/syslinux/splash.png"
@@ -682,7 +863,7 @@ PROMPT 0
 DEFAULT install
 
 MENU BACKGROUND splash.png
-MENU TITLE Axonwall Next-Gen Appliance Boot Menu (Alpine Linux)
+MENU TITLE ${BOOT_MENU_TITLE}
 MENU COLOR screen       37;40      #80ffffff #00000000 std
 MENU COLOR border       30;44      #4010b981 #00000000 std
 MENU COLOR title        1;36;44    #ff34d399 #00000000 std
@@ -690,23 +871,23 @@ MENU COLOR sel          7;37;40    #ff06101e #ff10b981 all
 MENU COLOR unsel        37;44      #ffe2e8f0 #00000000 std
 
 LABEL install
-  MENU LABEL ^Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)
+  MENU LABEL ${BOOT_INSTALL_LABEL}
   MENU DEFAULT
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
-  APPEND modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,115200
 
 LABEL live
-  MENU LABEL ^Live Appliance Mode (Evaluate & Web UI on 192.168.1.1:2966)
+  MENU LABEL ${BOOT_LIVE_LABEL}
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
-  APPEND modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
+  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}quiet console=tty0 console=ttyS0,115200
 
 LABEL unattended
   MENU LABEL ^Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
-  APPEND modules=${STORAGE_MODULES} axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
+  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
 SYSLINUX_EOF
 
 cat << GRUB_EOF > "${WORK_DIR}/iso/boot/grub/grub.cfg"
@@ -730,18 +911,18 @@ set color_normal=light-gray/black
 set color_highlight=light-green/dark-gray
 terminal_output gfxterm
 
-menuentry "Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+menuentry "${BOOT_GRUB_INSTALL_LABEL}" {
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 
-menuentry "Axonwall Live Appliance Mode (Evaluate & Web UI)" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} quiet console=tty0 console=ttyS0,115200
+menuentry "${BOOT_GRUB_LIVE_LABEL}" {
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 
 menuentry "Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 GRUB_EOF
@@ -752,8 +933,8 @@ MBR_BIN="/usr/share/syslinux/isohdpfx.bin"
 XORRISO_ARGS=(
   -as mkisofs
   -o "${OUTPUT_DIR}/${ISO_NAME}"
-  -V "AXONWALL_ALPINE"
-  -A "Axonwall Alpine Firewall & Router Appliance"
+  -V "${ISO_VOL_ID}"
+  -A "${ISO_APP_ID}"
   -p "Axonwall Core Team"
   -J -R -l
 )

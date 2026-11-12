@@ -9,6 +9,8 @@ import {
   generateCloudInitMetaData,
   buildNoCloudIso,
   cloudInitStorageToInstallerChoices,
+  formatInstallerChoicesEnv,
+  CloudInitStorageSchema,
   REDACTED_KEY32_PLACEHOLDER,
   REDACTED_SECRET_PLACEHOLDER,
 } from './index.js';
@@ -338,5 +340,77 @@ ethernets:
     });
     expect(net2?.dnsServers).toEqual(['8.8.8.8']);
     expect(net2?.searchDomain).toBe('axonwall.lan');
+  });
+
+  it('parses edition: k3s-storage and k3s_storage bootstrap options and formats shell-escaped installer choices', () => {
+    const yamlText = `#cloud-config
+hostname: k3s-zfs-node-01
+axonwall:
+  edition: k3s-storage
+  k3s_storage:
+    role: agent
+    server_url: https://10.10.20.5:6443
+    join_token: "K10secret'token::server:abcdef"
+    datastore: sqlite
+    zfs_arc_max_mb: 8192
+  storage:
+    layout_mode: single_root
+    target_disks:
+      - /dev/nvme0n1
+    zfs:
+      enabled: true
+      pool_name: tank
+      allocate_system_disk_remainder: true
+      extra_disks:
+        - /dev/nvme1n1
+      topology: mirror
+`;
+    const parsed = parseCloudInitYaml(yamlText);
+    expect(parsed.axonwall?.edition).toBe('k3s-storage');
+    expect(parsed.axonwall?.k3s_storage).toEqual({
+      role: 'agent',
+      server_url: 'https://10.10.20.5:6443',
+      join_token: "K10secret'token::server:abcdef",
+      datastore: 'sqlite',
+      zfs_arc_max_mb: 8192,
+    });
+
+    const storage = parsed.axonwall!.storage ?? CloudInitStorageSchema.parse({});
+    const choices = cloudInitStorageToInstallerChoices(storage, parsed.axonwall);
+    expect(choices.INSTALL_EDITION).toBe('k3s-storage');
+    expect(choices.K3S_ROLE).toBe('agent');
+    expect(choices.K3S_SERVER_URL).toBe('https://10.10.20.5:6443');
+    expect(choices.K3S_JOIN_TOKEN).toBe("K10secret'token::server:abcdef");
+    expect(choices.ZFS_ARC_MAX_MB).toBe(8192);
+    expect(choices.ZFS_ALLOC_MODE).toBe('remainder');
+
+    const envStr = formatInstallerChoicesEnv(choices);
+    expect(envStr).toContain("INSTALL_EDITION='k3s-storage'");
+    expect(envStr).toContain("K3S_ROLE='agent'");
+    expect(envStr).toContain("K3S_SERVER_URL='https://10.10.20.5:6443'");
+    expect(envStr).toContain("K3S_JOIN_TOKEN='K10secret'\\''token::server:abcdef'");
+    expect(envStr).toContain('ZFS_ARC_MAX_MB=8192');
+  });
+
+  it('rejects k3s_storage.join_token containing newlines or null bytes', () => {
+    const badNewlineYaml = `#cloud-config
+axonwall:
+  edition: k3s-storage
+  k3s_storage:
+    role: agent
+    server_url: https://10.0.0.1:6443
+    join_token: "K10bad\\ntoken"
+`;
+    expect(() => parseCloudInitYaml(badNewlineYaml)).toThrow(/Token cannot contain newlines or null bytes/);
+
+    const badNullYaml = {
+      axonwall: {
+        edition: 'k3s-storage',
+        k3s_storage: {
+          join_token: 'K10bad\0token',
+        },
+      },
+    };
+    expect(() => parseCloudInitYaml(JSON.stringify(badNullYaml))).toThrow(/Token cannot contain newlines or null bytes/);
   });
 });

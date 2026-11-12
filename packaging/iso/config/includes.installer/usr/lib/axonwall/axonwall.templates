@@ -13,6 +13,27 @@ Description: Re-enter Axonwall Administrator Password:
  Please enter the administrator password again to verify that you have typed it
  correctly.
 
+Template: axonwall/appliance_edition
+Type: select
+Choices: axonwall, k3s-storage, vault
+Default: axonwall
+Description: Select Axonwall appliance edition:
+ Choose the operating persona to deploy onto the target hardware:
+ .
+  - axonwall: Full NGFW, Router, SD-WAN, Directory & Unified Appliance.
+  - k3s-storage: Barebones K3s + OpenZFS + OpenEBS CSI Storage Host.
+  - vault: Hardened Immutable S3 Object-Lock Backup Appliance (SeaweedFS).
+
+Template: axonwall/k3s_role
+Type: select
+Choices: server, agent
+Default: server
+Description: Select K3s Storage Host node role:
+ Choose how this K3s + OpenZFS storage node participates in Kubernetes:
+ .
+  - server: Single-node or control-plane server with OpenEBS ZFS-LocalPV CSI.
+  - agent: Worker + OpenZFS storage node joining an existing K3s control plane.
+
 Template: axonwall/ab_explanation
 Type: note
 Description: Axonwall A/B Dual-Root & ZFS Storage Partition Architecture:

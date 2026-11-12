@@ -1,0 +1,49 @@
+#!/bin/sh
+# axonwall-k3s-verify -- post-firstboot readiness check for K3s Storage Host.
+#
+# Ordered AFTER `k3s.service` and `k3s-agent.service` and gated by
+# `/etc/axonwall/.k3s-firstboot`. Polls up to 60s for the K3s control plane
+# (`k3s kubectl get nodes`) or worker agent (`systemctl is-active k3s-agent`),
+# logs health, and clears `/etc/axonwall/.k3s-firstboot`.
+set -u
+
+MARKER="/etc/axonwall/.k3s-firstboot"
+AGENT_FLAG="/etc/rancher/k3s/agent-mode"
+
+log() { echo "[axonwall-k3s-verify] $*"; }
+
+if [ -f "$AGENT_FLAG" ]; then
+    log "verifying k3s-agent service liveness (timeout: 60s)..."
+    _elapsed=0
+    while [ "$_elapsed" -lt 60 ]; do
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet k3s-agent; then
+            log "k3s-agent is active and running"
+            rm -f "$MARKER"
+            exit 0
+        elif command -v rc-service >/dev/null 2>&1 && rc-service k3s-agent status >/dev/null 2>&1; then
+            log "k3s-agent (OpenRC) is active and running"
+            rm -f "$MARKER"
+            exit 0
+        fi
+        sleep 2
+        _elapsed=$(( _elapsed + 2 ))
+    done
+    log "ERROR: k3s-agent failed to stay active within 60s (retaining $MARKER for retry)"
+    exit 1
+fi
+
+log "verifying k3s server API readiness (timeout: 60s)..."
+_elapsed=0
+while [ "$_elapsed" -lt 60 ]; do
+    if /usr/local/bin/k3s kubectl get nodes >/dev/null 2>&1; then
+        log "K3s API server is responsive:"
+        /usr/local/bin/k3s kubectl get nodes -o wide 2>/dev/null || true
+        rm -f "$MARKER"
+        exit 0
+    fi
+    sleep 2
+    _elapsed=$(( _elapsed + 2 ))
+done
+
+log "ERROR: K3s API server did not become ready within 60s (retaining $MARKER for retry)"
+exit 1

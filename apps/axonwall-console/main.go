@@ -1585,22 +1585,48 @@ func readPassword(reader *bufio.Reader, prompt string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
+func detectInstalledEdition() string {
+	if _, err := os.Stat("/etc/axonwall/.k3s-edition"); err == nil {
+		return "k3s-storage"
+	}
+	if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {
+		return "vault"
+	}
+	return "axonwall"
+}
+
 func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	clearScreen()
 	hostname, osName, _, _, _, _ := getSystemInfo()
 	primaryIP := getPrimaryManagementIP()
+	edition := detectInstalledEdition()
+
+	loginTitle := "                       Axonwall Appliance Console Login                         "
+	switch edition {
+	case "k3s-storage":
+		loginTitle = "               Axonwall K3s + ZFS Storage Host Console Login                    "
+	case "vault":
+		loginTitle = "                  Axonwall Vault S3 Appliance Console Login                     "
+	}
 
 	fmt.Printf("%s%s", colorCyan, colorBold)
 	fmt.Println("================================================================================")
-	fmt.Println("                       Axonwall Appliance Console Login                         ")
+	fmt.Println(loginTitle)
 	fmt.Println("================================================================================")
 	fmt.Printf("%s", colorReset)
 	fmt.Printf(" Hostname: %s\n", hostname)
 	fmt.Printf(" Platform: %s\n", osName)
-	fmt.Printf(" Web Management Console (LAN): https://%s:2966\n", primaryIP)
-	wanDev, wanIP := getWanIP()
-	if wanIP != "" {
-		fmt.Printf(" WAN Status (%s): %s (Web/SSH Inbound Blocked)\n", wanDev, wanIP)
+	switch edition {
+	case "k3s-storage":
+		fmt.Printf(" K3s API Endpoint (LAN): https://%s:6443  (SSH: port 22)\n", primaryIP)
+	case "vault":
+		fmt.Printf(" S3 Object-Lock Endpoint: https://%s:8333\n", primaryIP)
+	default:
+		fmt.Printf(" Web Management Console (LAN): https://%s:2966\n", primaryIP)
+		wanDev, wanIP := getWanIP()
+		if wanIP != "" {
+			fmt.Printf(" WAN Status (%s): %s (Web/SSH Inbound Blocked)\n", wanDev, wanIP)
+		}
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
@@ -1684,6 +1710,7 @@ func printHeader() {
 	clearScreen()
 	hostname, osName, kernel, uptime, loadAvg, memStr := getSystemInfo()
 	primaryIP := getPrimaryManagementIP()
+	edition := detectInstalledEdition()
 
 	fmt.Printf("%s%s", colorCyan, colorBold)
 	fmt.Println("  █████╗ ██╗  ██╗ ██████╗ ███╗   ██╗██╗    ██╗ █████╗ ██╗     ██╗     ")
@@ -1693,7 +1720,14 @@ func printHeader() {
 	fmt.Println(" ██║  ██║██╔╝ ██╗╚██████╔╝██║ ╚████║╚███╔███╔╝██║  ██║███████╗███████╗")
 	fmt.Println(" ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝")
 	fmt.Printf("%s", colorReset)
-	fmt.Printf("           %sEnterprise Linux Next-Generation Firewall%s\n\n", colorBold, colorReset)
+	switch edition {
+	case "k3s-storage":
+		fmt.Printf("       %sBarebones K3s + OpenZFS + OpenEBS ZFS-LocalPV Storage Host%s\n\n", colorBold, colorReset)
+	case "vault":
+		fmt.Printf("        %sHardened Immutable S3 Object-Lock Backup Appliance (Vault)%s\n\n", colorBold, colorReset)
+	default:
+		fmt.Printf("           %sEnterprise Linux Next-Generation Firewall%s\n\n", colorBold, colorReset)
+	}
 
 	fmt.Printf(" %sHost:%s %-18s %sOS:%s %-25s %sUptime:%s %s\n",
 		colorDim, colorReset, hostname,
@@ -1706,15 +1740,27 @@ func printHeader() {
 		colorDim, colorReset, memStr)
 
 	fmt.Println("--------------------------------------------------------------------------------")
-	fmt.Printf(" %sWeb Console (LAN):%s %shttps://%s:2966%s\n",
-		colorBold, colorReset,
-		colorGreen+colorBold, primaryIP, colorReset)
-	wanDev, wanIP := getWanIP()
-	if wanIP != "" {
-		fmt.Printf(" %sWAN Interface (%s):%s %s  %s[Inbound Web/SSH Blocked]%s\n",
-			colorBold, wanDev, colorReset,
-			wanIP,
-			colorRed+colorBold, colorReset)
+	switch edition {
+	case "k3s-storage":
+		fmt.Printf(" %sK3s API Endpoint :%s %shttps://%s:6443%s  (OpenZFS Pool: %stank%s)\n",
+			colorBold, colorReset,
+			colorGreen+colorBold, primaryIP, colorReset,
+			colorCyan+colorBold, colorReset)
+	case "vault":
+		fmt.Printf(" %sVault S3 Endpoint:%s %shttps://%s:8333%s\n",
+			colorBold, colorReset,
+			colorGreen+colorBold, primaryIP, colorReset)
+	default:
+		fmt.Printf(" %sWeb Console (LAN):%s %shttps://%s:2966%s\n",
+			colorBold, colorReset,
+			colorGreen+colorBold, primaryIP, colorReset)
+		wanDev, wanIP := getWanIP()
+		if wanIP != "" {
+			fmt.Printf(" %sWAN Interface (%s):%s %s  %s[Inbound Web/SSH Blocked]%s\n",
+				colorBold, wanDev, colorReset,
+				wanIP,
+				colorRed+colorBold, colorReset)
+		}
 	}
 	fmt.Printf(" %sConsole User:%s %s%s%s (Authenticated)\n",
 		colorBold, colorReset,
@@ -1771,10 +1817,21 @@ func printHeader() {
 	fmt.Println("  2) Assign Network Interfaces (WAN, LAN, OPT1, OPT2)")
 	fmt.Println("  3) Configure Interface IP & DHCP (WAN, LAN, OPT1, OPT2)")
 	fmt.Println("  4) Reset the Admin Password")
-	fmt.Println("  5) Break-Glass Disable / Reset TOTP MFA")
+	if edition == "axonwall" || isLiveMode() {
+		fmt.Println("  5) Break-Glass Disable / Reset TOTP MFA")
+	}
 	fmt.Println("  6) Network Diagnostics (Ping, DNS Lookup)")
-	fmt.Println("  7) Display Web Console Scannable QR Code")
-	fmt.Println("  8) Restart Axonwall Core Services")
+	if edition == "axonwall" || isLiveMode() {
+		fmt.Println("  7) Display Web Console Scannable QR Code")
+	}
+	switch edition {
+	case "k3s-storage":
+		fmt.Println("  8) Restart K3s & OpenZFS Storage Services")
+	case "vault":
+		fmt.Println("  8) Restart Vault S3 & Storage Services")
+	default:
+		fmt.Println("  8) Restart Axonwall Core Services")
+	}
 	if isLiveMode() {
 		fmt.Println("  9) Drop to Root Shell (Partition Disks & Preparatory Tasks)")
 	} else {
@@ -1787,14 +1844,24 @@ func printHeader() {
 	} else if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
 		fmt.Println(" 12) Run Axonwall Disk Installer Utility")
 	}
-	fmt.Printf("  %sT) Launch Interactive Ink Web-Console & NastyMap TUI (axonwall-tui)%s\n", colorGreen+colorBold, colorReset)
-	fmt.Printf("  %sN) Launch NastyMap Interactive Nmap Scanner & Topology TUI%s\n", colorCyan+colorBold, colorReset)
-	fmt.Printf("  %sA) Manage Anti-Lockout / Allowed Management Interfaces (LAN, OPT1, OPT2)%s\n", colorYellow, colorReset)
+	switch edition {
+	case "k3s-storage":
+		fmt.Printf("  %sS) K3s Cluster, OpenZFS Pool & OpenEBS ZFS-LocalPV Status (axonwall-k3s-status)%s\n", colorGreen+colorBold, colorReset)
+	case "vault":
+		fmt.Printf("  %sS) Vault S3 Object-Lock & Storage Status (axonwall-vault-status)%s\n", colorGreen+colorBold, colorReset)
+	}
+	if edition == "axonwall" || isLiveMode() {
+		fmt.Printf("  %sT) Launch Interactive Ink Web-Console & NastyMap TUI (axonwall-tui)%s\n", colorGreen+colorBold, colorReset)
+		fmt.Printf("  %sN) Launch NastyMap Interactive Nmap Scanner & Topology TUI%s\n", colorCyan+colorBold, colorReset)
+		fmt.Printf("  %sA) Manage Anti-Lockout / Allowed Management Interfaces (LAN, OPT1, OPT2)%s\n", colorYellow, colorReset)
+	}
 	fmt.Printf("  %sE) Edit / Validate / Apply /etc/axonwall/*.yaml Configuration Files%s\n", colorCyan, colorReset)
 	fmt.Println("  0) Logout / Lock Console")
 	fmt.Println("================================================================================")
 	if isLiveMode() {
 		fmt.Print(" Enter option [0-12, T, N, A, E, or I]: ")
+	} else if edition == "k3s-storage" || edition == "vault" {
+		fmt.Print(" Enter option [0-11, S, or E]: ")
 	} else {
 		fmt.Print(" Enter option [0-11, T, N, A, or E]: ")
 	}
@@ -2991,9 +3058,29 @@ func actionDisplayQRCode(reader *bufio.Reader) {
 func actionRestartServices(reader *bufio.Reader) {
 	clearScreen()
 	fmt.Println("=== Restart Core Services ===")
-	fmt.Println("Restarting axonwalld, axonwall-ui, and axonwall-controller...")
+	edition := detectInstalledEdition()
 
-	services := []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables", "slapd", "sssd"}
+	var services []string
+	switch edition {
+	case "k3s-storage":
+		fmt.Println("Restarting K3s + OpenZFS Storage Host services...")
+		k3sUnit := "k3s"
+		if data, err := os.ReadFile("/etc/axonwall/.k3s-edition"); err == nil && strings.Contains(string(data), "K3S_ROLE=agent") ||
+			strings.Contains(func() string { b, _ := os.ReadFile("/etc/axonwall/.k3s-edition"); return string(b) }(), "K3S_ROLE='agent'") {
+			k3sUnit = "k3s-agent"
+		} else if _, err := os.Stat("/etc/systemd/system/k3s-agent.service"); err == nil {
+			if _, srvErr := os.Stat("/etc/systemd/system/k3s.service"); srvErr != nil {
+				k3sUnit = "k3s-agent"
+			}
+		}
+		services = []string{"axonwalld", k3sUnit}
+	case "vault":
+		fmt.Println("Restarting Axonwall Vault S3 Storage services...")
+		services = []string{"axonwalld", "axonwall-vault"}
+	default:
+		fmt.Println("Restarting axonwalld, axonwall-ui, and axonwall-controller...")
+		services = []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables", "slapd", "sssd"}
+	}
 
 	for _, s := range services {
 		fmt.Printf("Restarting %s... ", s)
@@ -3005,6 +3092,50 @@ func actionRestartServices(reader *bufio.Reader) {
 		}
 	}
 
+	pause(reader)
+}
+
+func actionApplianceEditionStatus(reader *bufio.Reader) {
+	clearScreen()
+	edition := detectInstalledEdition()
+	switch edition {
+	case "k3s-storage":
+		fmt.Printf("%s=== K3s + OpenZFS Storage Host Status ===%s\n\n", colorCyan+colorBold, colorReset)
+		statusBin := "/usr/local/bin/axonwall-k3s-status"
+		if _, err := os.Stat(statusBin); err == nil {
+			cmd := exec.Command(statusBin)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			_ = cmd.Run()
+		} else {
+			fmt.Printf("%s[!] %s not found; running direct K3s & ZFS health probes...%s\n\n", colorYellow, statusBin, colorReset)
+			for _, probe := range [][]string{
+				{"zpool", "status"},
+				{"zfs", "list"},
+				{"k3s", "kubectl", "get", "nodes", "-o", "wide"},
+				{"k3s", "kubectl", "get", "sc,pvc", "-A"},
+			} {
+				cmd := exec.Command(probe[0], probe[1:]...)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				_ = cmd.Run()
+				fmt.Println()
+			}
+		}
+	case "vault":
+		fmt.Printf("%s=== Axonwall Vault S3 Storage Status ===%s\n\n", colorCyan+colorBold, colorReset)
+		statusBin := "/usr/local/bin/axonwall-vault-status"
+		cmd := exec.Command(statusBin)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("%s[!] Failed to run %s: %v%s\n", colorYellow, statusBin, err, colorReset)
+		}
+	default:
+		fmt.Println("Appliance edition status shortcut [S] is used on K3s Storage Host and Vault S3 editions.")
+	}
 	pause(reader)
 }
 
@@ -3256,6 +3387,8 @@ func main() {
 				}
 			case "12", "I", "INSTALL":
 				actionInstallToDisk(reader)
+			case "S", "STATUS":
+				actionApplianceEditionStatus(reader)
 			case "T", "TUI":
 				clearScreen()
 				cmd := exec.Command("/usr/local/bin/axonwall-tui")

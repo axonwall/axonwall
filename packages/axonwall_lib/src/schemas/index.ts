@@ -1638,6 +1638,10 @@ export type K3sEtcdSnapshotConfig = z.infer<typeof K3sEtcdSnapshotConfigSchema>;
 
 export const K3sConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  profile: z.enum(['standard', 'barebones-storage']).default('standard').optional(),
+  role: z.enum(['server', 'agent']).default('server').optional(),
+  serverUrl: z.string().optional(),
+  datastore: z.enum(['sqlite', 'etcd']).optional(),
   clusterCidr: z.string().default('10.42.0.0/16'),
   serviceCidr: z.string().default('10.43.0.0/16'),
   nodeIpInterface: z.string().default('lan'),
@@ -1648,6 +1652,11 @@ export const K3sConfigSchema = z.object({
   haTopology: z.enum(['embedded-etcd', 'single-server-ha-agent', 'external-datastore']).default('embedded-etcd').optional(),
   externalDatastoreEndpoint: z.string().optional(),
   disableTraefik: z.boolean().default(false),
+  disableServiceLb: z.boolean().default(false).optional(),
+  disableLocalStorage: z.boolean().default(false).optional(),
+  disableMetricsServer: z.boolean().default(false).optional(),
+  kubeletEvictionHard: z.string().optional(),
+  zfsArcMaxMb: z.number().int().min(0).default(0).optional(),
   autoJoinHaPeer: z.boolean().default(true),
   enableUserNamespaces: z.boolean().default(true),
   gpuRuntimeEnabled: z.boolean().default(false).optional(),

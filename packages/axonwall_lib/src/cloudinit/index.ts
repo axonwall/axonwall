@@ -163,7 +163,24 @@ export type CloudInitAuth = z.infer<typeof CloudInitAuthSchema>;
 // 3. Top-Level Axonwall Cloud-Config Namespace
 // ==============================================================================
 
+export const ApplianceEditionSchema = z.enum(['axonwall', 'vault', 'k3s-storage']).default('axonwall');
+export type ApplianceEdition = z.infer<typeof ApplianceEditionSchema>;
+
+export const CloudInitK3sStorageBootstrapSchema = z.object({
+  role: z.enum(['server', 'agent']).default('server'),
+  server_url: z.string().url().optional(),
+  join_token: z
+    .string()
+    .refine((s) => !/[\r\n\0]/.test(s), 'Token cannot contain newlines or null bytes')
+    .optional(),
+  datastore: z.enum(['sqlite', 'etcd']).default('sqlite'),
+  zfs_arc_max_mb: z.number().int().min(0).default(0),
+});
+export type CloudInitK3sStorageBootstrap = z.infer<typeof CloudInitK3sStorageBootstrapSchema>;
+
 export const AxonwallCloudConfigSchema = z.object({
+  edition: ApplianceEditionSchema.optional(),
+  k3s_storage: CloudInitK3sStorageBootstrapSchema.optional(),
   storage: CloudInitStorageSchema.optional(),
   auth: CloudInitAuthSchema.optional(),
   desired_state: DesiredStateSchema.partial().optional(),
@@ -261,13 +278,21 @@ export interface InstallerChoices {
   ZFS_EXTRA_DISKS: string;
   ZFS_RAID_TOPOLOGY: string;
   CUSTOM_MOUNTS_JSON: string;
+  INSTALL_EDITION?: 'axonwall' | 'vault' | 'k3s-storage';
+  K3S_ROLE?: 'server' | 'agent';
+  K3S_SERVER_URL?: string;
+  K3S_JOIN_TOKEN?: string;
+  ZFS_ARC_MAX_MB?: number;
 }
 
 /**
  * Converts a validated CloudInitStorage configuration into the key-value pairs
  * expected by the Axonwall ISO installer (/var/lib/partman/axonwall-choices).
  */
-export function cloudInitStorageToInstallerChoices(storage: CloudInitStorage): InstallerChoices {
+export function cloudInitStorageToInstallerChoices(
+  storage: CloudInitStorage,
+  axonwallConfig?: AxonwallCloudConfig
+): InstallerChoices {
   const targetDisk = storage.target_disks[0] || '/dev/sda';
   const systemRaidMode = storage.system_raid.enabled && storage.target_disks.length >= 2 ? 'mirror' : 'single';
   const systemRaidDisks = storage.target_disks.join(' ');
@@ -296,11 +321,12 @@ export function cloudInitStorageToInstallerChoices(storage: CloudInitStorage): I
   const luksTpm2 = Boolean(storage.encryption?.tpm2_auto_unlock);
   const luksPassphrase = storage.encryption?.passphrase || '';
 
+  const installEdition = axonwallConfig?.edition ?? 'axonwall';
   const zfsEnabled = Boolean(storage.zfs?.enabled);
   const zfsAllocMode = zfsEnabled
     ? storage.zfs.system_disk_size_gb > 0
       ? 'custom'
-      : storage.zfs.allocate_system_disk_remainder
+      : storage.zfs.allocate_system_disk_remainder !== false
         ? 'remainder'
         : 'none'
     : 'none';
@@ -310,6 +336,13 @@ export function cloudInitStorageToInstallerChoices(storage: CloudInitStorage): I
   const zfsTopology = storage.zfs?.topology || 'auto';
 
   const customMountsJson = JSON.stringify(storage.partitions.custom_mounts || []);
+
+  const k3sBootstrap = axonwallConfig?.k3s_storage;
+  const k3sState = axonwallConfig?.desired_state?.k3s;
+  const k3sRole = k3sBootstrap?.role ?? k3sState?.role ?? 'server';
+  const k3sServerUrl = k3sBootstrap?.server_url ?? k3sState?.serverUrl ?? '';
+  const k3sJoinToken = (k3sBootstrap?.join_token ?? '').replace(/[\r\n\0]/g, '');
+  const zfsArcMaxMb = k3sBootstrap?.zfs_arc_max_mb ?? k3sState?.zfsArcMaxMb ?? 0;
 
   return {
     TARGET_DISK: targetDisk,
@@ -340,6 +373,11 @@ export function cloudInitStorageToInstallerChoices(storage: CloudInitStorage): I
     ZFS_EXTRA_DISKS: zfsExtraDisks,
     ZFS_RAID_TOPOLOGY: zfsTopology,
     CUSTOM_MOUNTS_JSON: customMountsJson,
+    INSTALL_EDITION: installEdition,
+    K3S_ROLE: k3sRole,
+    K3S_SERVER_URL: k3sServerUrl,
+    K3S_JOIN_TOKEN: k3sJoinToken,
+    ZFS_ARC_MAX_MB: zfsArcMaxMb,
   };
 }
 
@@ -354,6 +392,12 @@ function escapeShellSingleQuotes(val: string | number | boolean): string {
  * Formats InstallerChoices as shell variables suitable for sourcing in sh scripts.
  */
 export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
+  const installEdition = choices.INSTALL_EDITION ?? 'axonwall';
+  const k3sRole = choices.K3S_ROLE ?? 'server';
+  const k3sServerUrl = choices.K3S_SERVER_URL ?? '';
+  const k3sJoinToken = choices.K3S_JOIN_TOKEN ?? '';
+  const zfsArcMaxMb = choices.ZFS_ARC_MAX_MB ?? 0;
+
   return [
     `# ==============================================================================`,
     `# Axonwall Installer Automated Choices (generated from cloud-config)`,
@@ -386,6 +430,11 @@ export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
     `ZFS_EXTRA_DISKS=${escapeShellSingleQuotes(choices.ZFS_EXTRA_DISKS)}`,
     `ZFS_RAID_TOPOLOGY=${escapeShellSingleQuotes(choices.ZFS_RAID_TOPOLOGY)}`,
     `CUSTOM_MOUNTS_JSON=${escapeShellSingleQuotes(choices.CUSTOM_MOUNTS_JSON)}`,
+    `INSTALL_EDITION=${escapeShellSingleQuotes(installEdition)}`,
+    `K3S_ROLE=${escapeShellSingleQuotes(k3sRole)}`,
+    `K3S_SERVER_URL=${escapeShellSingleQuotes(k3sServerUrl)}`,
+    `K3S_JOIN_TOKEN=${escapeShellSingleQuotes(k3sJoinToken)}`,
+    `ZFS_ARC_MAX_MB=${zfsArcMaxMb}`,
     ``,
   ].join('\n');
 }

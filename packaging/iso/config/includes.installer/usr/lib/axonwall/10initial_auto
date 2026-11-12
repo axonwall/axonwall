@@ -173,6 +173,55 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	zfs_mb=0
 	zfs_extra_disks=""
 	zfs_raid_topology="auto"
+	install_edition="axonwall"
+	k3s_role="server"
+	k3s_server_url=""
+	k3s_join_token=""
+	zfs_arc_max_mb=0
+
+	# Detect preseeded / kernel cmdline / Cloud-Init appliance edition & K3s role
+	if db_get axonwall/appliance_edition 2>/dev/null && [ -n "$RET" ]; then
+		case "$RET" in
+			vault|k3s-storage|axonwall) install_edition="$RET" ;;
+		esac
+	fi
+	if grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+		install_edition="vault"
+	elif grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+		install_edition="k3s-storage"
+	fi
+	if db_get axonwall/k3s_role 2>/dev/null && [ -n "$RET" ]; then
+		case "$RET" in
+			agent|server) k3s_role="$RET" ;;
+		esac
+	fi
+	_cmd_k3s_role="$(sed -nE 's/.*(^|[[:space:]])(axonwall\.k3s_role|axonwall_k3s_role)=(server|agent)([[:space:]]|$).*/\3/p' /proc/cmdline 2>/dev/null | head -n1 || true)"
+	[ -n "$_cmd_k3s_role" ] && k3s_role="$_cmd_k3s_role"
+
+	if [ -f /var/lib/partman/cloud-config.yaml ]; then
+		_ci_ed="$(grep -E '^[[:space:]]*edition:' /var/lib/partman/cloud-config.yaml 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
+		case "$_ci_ed" in
+			vault|s3) install_edition="vault" ;;
+			k3s-storage|k3s_storage|k3s) install_edition="k3s-storage" ;;
+			axonwall|ngfw|firewall) install_edition="axonwall" ;;
+		esac
+		if grep -qE '^[[:space:]]*k3s_storage:' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
+			_k3s_blk="$(awk '/^[[:space:]]*k3s_storage:[[:space:]]*$/ {in_blk=1; next} in_blk && /^[^[:space:]#]/ {in_blk=0} in_blk {print}' /var/lib/partman/cloud-config.yaml 2>/dev/null || true)"
+			if [ -n "$_k3s_blk" ]; then
+				_ci_role="$(printf '%s\n' "$_k3s_blk" | sed -nE 's/^[[:space:]]*role:[[:space:]]*["'\'']?([^"'\''[:space:]#]+)["'\'']?.*/\1/p' | head -n1)"
+				case "$_ci_role" in
+					agent|worker) k3s_role="agent" ;;
+					server|control-plane) k3s_role="server" ;;
+				esac
+				_ci_url="$(printf '%s\n' "$_k3s_blk" | sed -nE 's/^[[:space:]]*server_url:[[:space:]]*//p' | head -n1 | sed -e 's/[[:space:]]*$//' -e 's/^["'\'']//;s/["'\'']$//' | tr -d '\r')"
+				[ -n "$_ci_url" ] && k3s_server_url="$_ci_url"
+				_ci_tok="$(printf '%s\n' "$_k3s_blk" | sed -nE 's/^[[:space:]]*join_token:[[:space:]]*//p' | head -n1 | sed -e 's/[[:space:]]*$//' -e 's/^["'\'']//;s/["'\'']$//' | tr -d '\r')"
+				[ -n "$_ci_tok" ] && k3s_join_token="$_ci_tok"
+				_ci_arc="$(printf '%s\n' "$_k3s_blk" | sed -nE 's/^[[:space:]]*zfs_arc_max_mb:[[:space:]]*([0-9]+).*/\1/p' | head -n1)"
+				[ -n "$_ci_arc" ] && zfs_arc_max_mb="$_ci_arc"
+			fi
+		fi
+	fi
 
 	# 1. Unattended Cloud-Init Seed Mode vs Interactive Prompts
 	# Only bypass interactive partitioning when unattended zero-touch storage is explicitly requested
@@ -369,6 +418,22 @@ if [ "$method" ] && [ -z "$disks" ]; then
 				install_mode="ab"
 				;;
 		esac
+
+		# In Guided or Custom Storage Wizard mode, let operator choose Appliance Edition & K3s Role if not already preseeded
+		if [ "$partition_mode" = "wizard" ] && ! db_fget axonwall/appliance_edition seen 2>/dev/null; then
+			ask_critical axonwall/appliance_edition
+			db_get axonwall/appliance_edition || true
+			case "$RET" in
+				vault|k3s-storage|axonwall) install_edition="$RET" ;;
+			esac
+		fi
+		if [ "$install_edition" = "k3s-storage" ] && { [ "$partition_mode" = "guided" ] || [ "$partition_mode" = "wizard" ]; }; then
+			ask_critical axonwall/k3s_role
+			db_get axonwall/k3s_role || true
+			case "$RET" in
+				agent|server) k3s_role="$RET" ;;
+			esac
+		fi
 
 		# Offer A/B System RAID-1 mirror across disks only for Guided/Wizard A/B modes when 2+ disks are present
 		if [ "$disk_count" -ge 2 ] && [ "$install_mode" = "ab" ] && { [ "$partition_mode" = "guided" ] || [ "$partition_mode" = "wizard" ]; }; then
@@ -575,12 +640,22 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			swap_mb=$(( swap_gb * 1024 ))
 			remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - 1 ))
 			[ "$remaining_gb" -lt 2 ] && remaining_gb=2
-			data_gb="$remaining_gb"
-			data_mb=$(( data_gb * 1024 ))
-			data_alloc_mode="remainder"
-			zfs_alloc_mode="none"
-			zfs_gb=0
-			zfs_mb=0
+			if [ "$install_edition" = "k3s-storage" ] && [ -z "$zfs_extra_disks" ] && [ "$remaining_gb" -ge 12 ]; then
+				data_gb=4
+				[ "$remaining_gb" -ge 32 ] && data_gb=8
+				data_mb=$(( data_gb * 1024 ))
+				data_alloc_mode="remainder"
+				zfs_alloc_mode="remainder"
+				zfs_gb=$(( remaining_gb - data_gb ))
+				zfs_mb=$(( zfs_gb * 1024 ))
+			else
+				data_gb="$remaining_gb"
+				data_mb=$(( data_gb * 1024 ))
+				data_alloc_mode="remainder"
+				zfs_alloc_mode="none"
+				zfs_gb=0
+				zfs_mb=0
+			fi
 		elif [ "$partition_mode" = "guided" ] || [ "$partition_mode" = "manual" ]; then
 			# Mode 2 & Mode 4: Guided / Manual (Prompt Root Size & Swap Size)
 			if [ "$disk_size_gb" -lt 30 ]; then
@@ -644,12 +719,22 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			swap_mb=$(( swap_gb * 1024 ))
 			remaining_gb=$(( disk_size_gb - (root_gb * 2) - swap_gb - 1 ))
 			[ "$remaining_gb" -lt 2 ] && remaining_gb=2
-			data_gb="$remaining_gb"
-			data_mb=$(( data_gb * 1024 ))
-			data_alloc_mode="remainder"
-			zfs_alloc_mode="none"
-			zfs_gb=0
-			zfs_mb=0
+			if [ "$install_edition" = "k3s-storage" ] && [ -z "$zfs_extra_disks" ] && [ "$remaining_gb" -ge 12 ]; then
+				data_gb=4
+				[ "$remaining_gb" -ge 32 ] && data_gb=8
+				data_mb=$(( data_gb * 1024 ))
+				data_alloc_mode="remainder"
+				zfs_alloc_mode="remainder"
+				zfs_gb=$(( remaining_gb - data_gb ))
+				zfs_mb=$(( zfs_gb * 1024 ))
+			else
+				data_gb="$remaining_gb"
+				data_mb=$(( data_gb * 1024 ))
+				data_alloc_mode="remainder"
+				zfs_alloc_mode="none"
+				zfs_gb=0
+				zfs_mb=0
+			fi
 		elif [ "$partition_mode" = "wizard" ]; then
 			# Mode 3: Custom Storage Wizard
 			ask_critical axonwall/custom_efi_size
@@ -926,10 +1011,15 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	mkdir -p /var/lib/partman
 	chmod 0700 /var/lib/partman
 
-	# Write sensitive passphrase to a dedicated mode-0600 file
+	# Write sensitive passphrase / K3s join token to dedicated mode-0600 files
 	if [ -n "$luks_passphrase" ]; then
 		printf '%s' "$luks_passphrase" > /var/lib/partman/axonwall-luks.pass
 		chmod 0600 /var/lib/partman/axonwall-luks.pass
+	fi
+	if [ -n "$k3s_join_token" ]; then
+		printf '%s' "$k3s_join_token" > /var/lib/partman/axonwall-k3s.token
+		chmod 0600 /var/lib/partman/axonwall-k3s.token
+		k3s_join_token=""
 	fi
 
 	sh_esc() {
@@ -937,6 +1027,10 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	}
 
 	cat << EOF > /var/lib/partman/axonwall-choices
+INSTALL_EDITION=$(sh_esc "${install_edition}")
+K3S_ROLE=$(sh_esc "${k3s_role}")
+K3S_SERVER_URL=$(sh_esc "${k3s_server_url}")
+ZFS_ARC_MAX_MB=${zfs_arc_max_mb:-0}
 PARTITION_MODE=$(sh_esc "${partition_mode}")
 INSTALL_MODE=$(sh_esc "${install_mode}")
 ROOT_GB=${root_gb}

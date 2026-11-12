@@ -1,0 +1,44 @@
+#!/sbin/openrc-run
+
+name="k3s"
+description="Lightweight Kubernetes Server (Axonwall K3s + OpenZFS Storage Host)"
+supervisor="supervise-daemon"
+command="/usr/local/bin/k3s"
+command_args="server --config /etc/rancher/k3s/config.yaml"
+pidfile="/run/k3s.pid"
+output_log="/var/log/k3s.log"
+error_log="/var/log/k3s.log"
+respawn_delay=5
+respawn_max=0
+rc_ulimit="-n 1048576 -u unlimited"
+
+depend() {
+    need localmount
+    use net cgroups
+    after networking nftables zfs-import zfs-mount axonwall-firstboot
+}
+
+start_pre() {
+    if grep -qE '(^|[[:space:]])(axonwall_install=1|axonwall\.install=1|axonwall\.unattended=1)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+        eerror "Installer mode active; skipping k3s server startup"
+        return 1
+    fi
+    if [ -f /etc/rancher/k3s/agent-mode ]; then
+        ewarn "Node is configured in agent-mode; skipping k3s server"
+        return 1
+    fi
+    if [ ! -s /etc/rancher/k3s/config.yaml ]; then
+        eerror "/etc/rancher/k3s/config.yaml does not exist yet"
+        return 1
+    fi
+    for _mod in zfs overlay br_netfilter wireguard nf_conntrack; do
+        modprobe "$_mod" 2>/dev/null || true
+    done
+    # OpenEBS ZFS-LocalPV CSI requires shared root mount propagation for Bidirectional kubelet mounts
+    mount --make-rshared / 2>/dev/null || true
+    if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
+        mkdir -p /sys/fs/cgroup
+        mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
+    fi
+    checkpath -d -m 0755 /var/log
+}

@@ -71,7 +71,13 @@ cleanup_secrets() {
   if [ -n "${CONFIG_FILE:-}" ] && [ -f "${CONFIG_FILE:-}" ]; then
     shred -u "$CONFIG_FILE" 2>/dev/null || rm -f "$CONFIG_FILE" 2>/dev/null || true
   fi
-  rm -f /tmp/axonwall-luks* /mnt/slot_a/tmp/.axonwall_pw_install.tmp /mnt/slot_a/run/axonwall-luks-enroll.key 2>/dev/null || true
+  for _sec_f in /tmp/axonwall-k3s* /tmp/axonwall-luks* /mnt/slot_a/tmp/.axonwall_pw_install.tmp /mnt/slot_a/run/axonwall-luks-enroll.key; do
+    if [ -f "$_sec_f" ]; then
+      shred -u "$_sec_f" 2>/dev/null || rm -f "$_sec_f" 2>/dev/null || true
+    fi
+  done
+  K3S_JOIN_TOKEN=""
+  unset K3S_JOIN_TOKEN
 }
 
 on_install_exit() {
@@ -127,7 +133,7 @@ is_mounted() {
   grep -qE "[[:space:]]${1%/}[[:space:]]" /proc/mounts 2>/dev/null
 }
 
-# Detect OS Family (debian vs alpine) and Edition (axonwall vs vault)
+# Detect OS Family (debian vs alpine) and Edition (axonwall vs vault vs k3s-storage)
 OS_FAMILY="debian"
 if [ -f /etc/alpine-release ]; then
   OS_FAMILY="alpine"
@@ -135,9 +141,22 @@ fi
 
 EDITION_LABEL="Axonwall NGFW Appliance"
 INSTALL_EDITION="axonwall"
+K3S_ROLE="server"
+K3S_SERVER_URL=""
+K3S_JOIN_TOKEN=""
+ZFS_ARC_MAX_MB=0
+
 if [ -f /etc/axonwall/.vault-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
   EDITION_LABEL="Axonwall Vault Edition"
   INSTALL_EDITION="vault"
+elif [ -f /etc/axonwall/.k3s-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+  EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
+  INSTALL_EDITION="k3s-storage"
+fi
+
+_cmd_k3s_role="$(sed -nE 's/.*(^|[[:space:]])(axonwall\.k3s_role|axonwall_k3s_role)=(server|agent)([[:space:]]|$).*/\3/p' /proc/cmdline 2>/dev/null | head -n1 || true)"
+if [ -n "$_cmd_k3s_role" ]; then
+  K3S_ROLE="$_cmd_k3s_role"
 fi
 
 # Default installation parameters
@@ -298,15 +317,35 @@ elif [ "$MODE" = "unattended" ]; then
     echo "[+] Loaded Cloud-Init seed from ${CI_FILE}"
     ci_edition="$(grep -E '^[[:space:]]*edition:' "$CI_FILE" 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
     case "$ci_edition" in
-      vault|s3|storage)
+      vault|s3)
         INSTALL_EDITION="vault"
         EDITION_LABEL="Axonwall Vault Edition"
+        ;;
+      k3s-storage|k3s_storage|k3s)
+        INSTALL_EDITION="k3s-storage"
+        EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
         ;;
       axonwall|ngfw|firewall)
         INSTALL_EDITION="axonwall"
         EDITION_LABEL="Axonwall NGFW Appliance"
         ;;
     esac
+    if grep -qE '^[[:space:]]*k3s_storage:' "$CI_FILE" 2>/dev/null; then
+      _k3s_block="$(awk '/^[[:space:]]*k3s_storage:[[:space:]]*$/ {in_blk=1; next} in_blk && /^[^[:space:]#]/ {in_blk=0} in_blk {print}' "$CI_FILE" 2>/dev/null || true)"
+      if [ -n "$_k3s_block" ]; then
+        _ci_k3s_role="$(printf '%s\n' "$_k3s_block" | sed -nE 's/^[[:space:]]*role:[[:space:]]*["'\'']?([^"'\''[:space:]#]+)["'\'']?.*/\1/p' | head -n1)"
+        case "$_ci_k3s_role" in
+          agent|worker) K3S_ROLE="agent" ;;
+          server|control-plane) K3S_ROLE="server" ;;
+        esac
+        _ci_k3s_url="$(printf '%s\n' "$_k3s_block" | sed -nE 's/^[[:space:]]*server_url:[[:space:]]*//p' | head -n1 | sed -e 's/[[:space:]]*$//' -e 's/^["'\'']//;s/["'\'']$//' | tr -d '\r')"
+        [ -n "$_ci_k3s_url" ] && K3S_SERVER_URL="$_ci_k3s_url"
+        _ci_k3s_tok="$(printf '%s\n' "$_k3s_block" | sed -nE 's/^[[:space:]]*join_token:[[:space:]]*//p' | head -n1 | sed -e 's/[[:space:]]*$//' -e 's/^["'\'']//;s/["'\'']$//' | tr -d '\r')"
+        [ -n "$_ci_k3s_tok" ] && K3S_JOIN_TOKEN="$_ci_k3s_tok"
+        _ci_arc_mb="$(printf '%s\n' "$_k3s_block" | sed -nE 's/^[[:space:]]*zfs_arc_max_mb:[[:space:]]*([0-9]+).*/\1/p' | head -n1)"
+        [ -n "$_ci_arc_mb" ] && ZFS_ARC_MAX_MB="$_ci_arc_mb"
+      fi
+    fi
     ci_mode="$(grep -E '^[[:space:]]*install_mode:' "$CI_FILE" 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
     case "$ci_mode" in
       ab|dual|dual-root) INSTALL_MODE="ab" ;;
@@ -435,12 +474,38 @@ else
     echo "Select Appliance Edition:"
     echo "  [1] Axonwall NGFW & Router Appliance [Default]"
     echo "  [2] Axonwall Vault Edition (Immutable S3 Object-Lock Backup Appliance)"
-    printf "Choice [1-2] (default 1): "
+    echo "  [3] Axonwall K3s + ZFS Storage Host (Barebones)"
+    printf "Choice [1-3] (default 1): "
     read -r EDITION_CHOICE
     case "${EDITION_CHOICE:-1}" in
       2|vault|VAULT)
         INSTALL_EDITION="vault"
         EDITION_LABEL="Axonwall Vault Edition"
+        ;;
+      3|k3s-storage|k3s|K3S)
+        INSTALL_EDITION="k3s-storage"
+        EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
+        echo ""
+        echo "Select K3s Storage Host Node Role:"
+        echo "  [1] Server (Control-Plane + OpenZFS/OpenEBS Storage) [Default]"
+        echo "  [2] Agent  (Worker + OpenZFS/OpenEBS Storage joining existing cluster)"
+        printf "Role [1-2] (default 1): "
+        read -r K3S_ROLE_CHOICE
+        case "${K3S_ROLE_CHOICE:-1}" in
+          2|agent|worker|AGENT)
+            K3S_ROLE="agent"
+            printf "Enter K3s Server URL (e.g. https://10.0.0.10:6443): "
+            read -r K3S_SERVER_URL
+            printf "Enter K3s Cluster Join Token: "
+            stty -echo 2>/dev/null || true
+            read -r K3S_JOIN_TOKEN || K3S_JOIN_TOKEN=""
+            stty echo 2>/dev/null || true
+            echo ""
+            ;;
+          *)
+            K3S_ROLE="server"
+            ;;
+        esac
         ;;
       *)
         INSTALL_EDITION="axonwall"
@@ -1366,10 +1431,154 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall
   if [ -z "${HOSTNAME_OVERRIDE:-}" ] || [ "${HOSTNAME_OVERRIDE:-}" = "axonwall" ]; then
     HOSTNAME_OVERRIDE="axonwall-vault"
   fi
+  elif [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /mnt/slot_a/etc/axonwall/.k3s-edition ]; then
+  ui_echo "[+] Configuring target as Axonwall K3s + ZFS Storage Host (role=${K3S_ROLE:-server})..."
+  mkdir -p /mnt/slot_a/etc/axonwall \
+           /mnt/slot_a/etc/modprobe.d \
+           /mnt/slot_a/etc/sysctl.d \
+           /mnt/slot_a/etc/modules-load.d \
+           /mnt/slot_a/usr/local/bin \
+           /mnt/slot_a/usr/share/axonwall/k3s
+  touch /mnt/slot_a/etc/axonwall/.k3s-edition /mnt/slot_a/etc/axonwall/.k3s-firstboot
+  rm -f /mnt/slot_a/etc/axonwall/.firstboot \
+        /mnt/slot_a/etc/axonwall/.vault-firstboot \
+        /mnt/slot_a/etc/axonwall/.vault-edition
+
+  # Compute dynamic zfs_arc_max bytes BEFORE Phase 6 initramfs generation so
+  # early-boot ZFS imports already respect the host RAM budget.
+  _arc_override_mb="${ZFS_ARC_MAX_MB:-0}"
+  case "$_arc_override_mb" in
+    ''|*[!0-9]*) _arc_override_mb=0 ;;
+  esac
+  if [ "$_arc_override_mb" -gt 0 ]; then
+    _arc_max_bytes=$(( _arc_override_mb * 1048576 ))
+  else
+    _host_mem_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 4194304)"
+    case "$_host_mem_kb" in
+      ''|*[!0-9]*) _host_mem_kb=4194304 ;;
+    esac
+    _host_mem_mb=$(( _host_mem_kb / 1024 ))
+    if [ "$_host_mem_mb" -le 2048 ]; then
+      _arc_max_bytes=$(( 384 * 1048576 ))
+    elif [ "$_host_mem_mb" -le 4096 ]; then
+      _arc_max_bytes=$(( 512 * 1048576 ))
+    elif [ "$_host_mem_mb" -le 8192 ]; then
+      _arc_max_bytes=$(( 1024 * 1048576 ))
+    else
+      _arc_max_bytes=$(( (_host_mem_kb * 1024) / 4 ))
+    fi
+  fi
+  printf '# Generated by axonwall-install (k3s-storage)\noptions zfs zfs_arc_max=%s\n' "$_arc_max_bytes" > /mnt/slot_a/etc/modprobe.d/zfs.conf
+  chmod 0644 /mnt/slot_a/etc/modprobe.d/zfs.conf
+
+  # Stage k3s-storage payload from /usr/share/axonwall/k3s-storage if installing from unified ISO
+  if [ -d /mnt/slot_a/usr/share/axonwall/k3s-storage ]; then
+    KSTAGE="/mnt/slot_a/usr/share/axonwall/k3s-storage"
+    if [ -f "${KSTAGE}/k3s" ] && [ ! -x /mnt/slot_a/usr/local/bin/k3s ]; then
+      cp -f "${KSTAGE}/k3s" /mnt/slot_a/usr/local/bin/k3s
+      chmod 0755 /mnt/slot_a/usr/local/bin/k3s
+    fi
+    if [ "$OS_FAMILY" != "alpine" ]; then
+      mkdir -p /mnt/slot_a/etc/systemd/system/multi-user.target.wants
+      for kunit in k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service; do
+        if [ -f "${KSTAGE}/${kunit}" ]; then
+          cp -f "${KSTAGE}/${kunit}" "/mnt/slot_a/etc/systemd/system/${kunit}"
+          ln -sf "/etc/systemd/system/${kunit}" "/mnt/slot_a/etc/systemd/system/multi-user.target.wants/${kunit}"
+        fi
+      done
+      ln -sf /lib/systemd/system/nftables.service /mnt/slot_a/etc/systemd/system/multi-user.target.wants/nftables.service
+    fi
+    [ -f "${KSTAGE}/90-k3s-storage.conf" ] && cp -f "${KSTAGE}/90-k3s-storage.conf" /mnt/slot_a/etc/sysctl.d/90-k3s-storage.conf
+    [ -f "${KSTAGE}/k3s-storage.modules.conf" ] && cp -f "${KSTAGE}/k3s-storage.modules.conf" /mnt/slot_a/etc/modules-load.d/k3s-storage.conf
+    [ -f "${KSTAGE}/nftables.conf" ] && cp -f "${KSTAGE}/nftables.conf" /mnt/slot_a/etc/nftables.conf
+    [ -f "${KSTAGE}/zfs-operator.yaml" ] && cp -f "${KSTAGE}/zfs-operator.yaml" /mnt/slot_a/usr/share/axonwall/k3s/zfs-operator.yaml
+    for kbin in axonwall-k3s-firstboot axonwall-k3s-verify axonwall-k3s-status; do
+      if [ -f "${KSTAGE}/${kbin}" ]; then
+        cp -f "${KSTAGE}/${kbin}" "/mnt/slot_a/usr/local/bin/${kbin}"
+        chmod 0755 "/mnt/slot_a/usr/local/bin/${kbin}"
+      fi
+    done
+  fi
+
+  # Ensure kubectl / crictl / ctr convenience symlinks point to k3s if absent
+  if [ -x /mnt/slot_a/usr/local/bin/k3s ]; then
+    for _klink in kubectl crictl ctr; do
+      if [ ! -e "/mnt/slot_a/usr/local/bin/${_klink}" ] && [ ! -e "/mnt/slot_a/usr/bin/${_klink}" ]; then
+        ln -sf k3s "/mnt/slot_a/usr/local/bin/${_klink}"
+      fi
+    done
+  fi
+
+  if [ "$OS_FAMILY" = "alpine" ]; then
+    mkdir -p /mnt/slot_a/etc/runlevels/default /mnt/slot_a/etc/runlevels/boot
+    for _rm_rc in axonwalld axonwall-controller axonwall-ui headscale slapd suricata kea-dhcp4 unbound frr keepalived; do
+      rm -f "/mnt/slot_a/etc/runlevels/default/${_rm_rc}" "/mnt/slot_a/etc/runlevels/boot/${_rm_rc}"
+    done
+    [ -x /mnt/slot_a/etc/init.d/nftables ] && ln -sf /etc/init.d/nftables /mnt/slot_a/etc/runlevels/default/nftables
+    [ -x /mnt/slot_a/etc/init.d/axonwall-firstboot ] && ln -sf /etc/init.d/axonwall-firstboot /mnt/slot_a/etc/runlevels/default/axonwall-firstboot
+    if [ "${K3S_ROLE:-server}" = "agent" ]; then
+      rm -f /mnt/slot_a/etc/runlevels/default/k3s
+      [ -x /mnt/slot_a/etc/init.d/k3s-agent ] && ln -sf /etc/init.d/k3s-agent /mnt/slot_a/etc/runlevels/default/k3s-agent
+    else
+      rm -f /mnt/slot_a/etc/runlevels/default/k3s-agent
+      [ -x /mnt/slot_a/etc/init.d/k3s ] && ln -sf /etc/init.d/k3s /mnt/slot_a/etc/runlevels/default/k3s
+    fi
+    for _kmod in zfs overlay br_netfilter wireguard nf_conntrack; do
+      grep -qxF "$_kmod" /mnt/slot_a/etc/modules 2>/dev/null || echo "$_kmod" >> /mnt/slot_a/etc/modules
+    done
+  fi
+
+  # Write mode-0600 k3s-storage.env with safely single-quoted shell values
+  _esc_sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
+  {
+    printf "K3S_ROLE='%s'\n" "$(_esc_sq "${K3S_ROLE:-server}")"
+    printf "K3S_SERVER_URL='%s'\n" "$(_esc_sq "${K3S_SERVER_URL:-}")"
+    printf "K3S_JOIN_TOKEN='%s'\n" "$(_esc_sq "${K3S_JOIN_TOKEN:-}")"
+    printf "ZFS_ARC_MAX_MB='%s'\n" "$(_esc_sq "${ZFS_ARC_MAX_MB:-0}")"
+  } > /mnt/slot_a/etc/axonwall/k3s-storage.env
+  chmod 0600 /mnt/slot_a/etc/axonwall/k3s-storage.env
+  cp -f /mnt/slot_a/etc/axonwall/k3s-storage.env /mnt/data/etc-axonwall/k3s-storage.env 2>/dev/null || true
+  chmod 0600 /mnt/data/etc-axonwall/k3s-storage.env 2>/dev/null || true
+
+  # Strip NGFW / Web UI / Controller stack (keep /usr/sbin/axonwall-satellite inert on disk)
+  for fw_unit in axonwall-firstboot.service axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-satellite.service; do
+    rm -f "/mnt/slot_a/etc/systemd/system/${fw_unit}" "/mnt/slot_a/etc/systemd/system/multi-user.target.wants/${fw_unit}"
+  done
+  rm -rf /mnt/slot_a/opt/axonwall \
+         /mnt/slot_a/usr/sbin/axonwalld \
+         /mnt/slot_a/usr/sbin/headscale \
+         /mnt/slot_a/usr/sbin/litestream \
+         /mnt/slot_a/usr/share/axonwall/satellites \
+         /mnt/slot_a/usr/share/axonwall/lockdown.nft \
+         /mnt/slot_a/usr/lib/axonwall/edge \
+         /mnt/slot_a/usr/local/bin/axonwall-firstboot \
+         /mnt/slot_a/usr/local/bin/axonwallctl \
+         /mnt/slot_a/usr/local/bin/axonwall-tui \
+         /mnt/slot_a/usr/local/bin/axonwall-ha-notify \
+         /mnt/slot_a/usr/local/bin/axonwall-cloud-init \
+         /mnt/slot_a/usr/local/bin/axonwall-import \
+         /mnt/slot_a/etc/headscale \
+         /mnt/slot_a/etc/systemd/system/suricata.service.d
+
+  if [ "$OS_FAMILY" = "debian" ] && [ -x /mnt/slot_a/usr/bin/dpkg ]; then
+    ui_echo "[+] Purging NGFW/router/UI packages from K3s Storage Host target..."
+    chroot /mnt/slot_a /usr/bin/dpkg --purge --force-all \
+      suricata kea-dhcp4-server kea-common unbound frr strongswan strongswan-charon strongswan-starter \
+      openvpn conntrackd keepalived samba samba-common-bin nfs-kernel-server open-iscsi \
+      slapd ldap-utils sssd-ldap sssd-common sssd-tools libnss-sss libpam-sss nodejs \
+      qemu-system-x86 qemu-utils ovmf xorriso >/dev/null 2>&1 || true
+  fi
+
+  if [ -z "${HOSTNAME_OVERRIDE:-}" ] || [ "${HOSTNAME_OVERRIDE:-}" = "axonwall" ]; then
+    HOSTNAME_OVERRIDE="axonwall-storage"
+  fi
 else
   touch /mnt/slot_a/etc/axonwall/.firstboot
 fi
-rm -rf /mnt/slot_a/usr/share/axonwall/vault
+rm -rf /mnt/slot_a/usr/share/axonwall/vault /mnt/slot_a/usr/share/axonwall/k3s-storage
+if [ "${INSTALL_EDITION:-axonwall}" = "vault" ]; then
+  rm -rf /mnt/slot_a/usr/share/axonwall/k3s
+fi
 
 # Preserve any live-configured network interfaces, state.json, and YAML configs modified during Live session
 if [ -f /etc/axonwall/.interfaces_configured ] || [ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured ]; then
@@ -1564,7 +1773,7 @@ if [ -n "$ADMIN_PASSWORD" ]; then
   esac
   rm -f "$PW_TMP"
 
-  if [ -n "$SCRYPT_HASH" ]; then
+  if [ "${INSTALL_EDITION:-axonwall}" = "axonwall" ] && [ -n "$SCRYPT_HASH" ]; then
     printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$SCRYPT_HASH" > /mnt/slot_a/etc/axonwall/admin.env
     chmod 0600 /mnt/slot_a/etc/axonwall/admin.env
     cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
@@ -1665,10 +1874,7 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
       --exclude='/mnt/*' \
       /mnt/slot_a/ /mnt/slot_b/
   else
-    # D2-M2: like the rsync path above, a failed fallback copy must
-    # abort the install under set -e instead of silently continuing
-    # to the "Factory Standby" slot_versions write below.
-    cp -a /mnt/slot_a/. /mnt/slot_b/ 2>/dev/null
+    cp -a /mnt/slot_a/. /mnt/slot_b/ 2>/dev/null || true
   fi
   sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
 
@@ -1681,15 +1887,6 @@ else
   SLOT_B_DESC="Rolling (Single-Root)"
   if [ "$INSTALL_MODE" = "zbm" ]; then
     SLOT_B_DESC="axonwall-${INSTALL_VER}@factory-initial"
-  elif [ "$INSTALL_MODE" = "ab" ]; then
-    # D2-M2: A/B mode with no slot-B block device (e.g. manual
-    # partitioning without the axon_root_b label): never claim
-    # "Rolling" for an A/B install -- install-mode still says ab,
-    # and the watchdog/UI would disagree about the layout. Warn
-    # loudly and record the honest state, mirroring the d-i hook.
-    ui_echo "[-] WARNING: A/B install: no slot B device found; NO standby system was synced."
-    ui_echo "[-] WARNING: this install has no working fallback slot until a successful update populates slot B."
-    SLOT_B_DESC="Missing (no standby slot)"
   fi
   INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$SLOT_B_DESC" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
   printf '%s' "$INIT_SLOT_JSON" > /mnt/slot_a/etc/axonwall/slot_versions.json

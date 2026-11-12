@@ -1,0 +1,33 @@
+[Unit]
+Description=Lightweight Kubernetes Server (Axonwall K3s + ZFS Storage Host)
+Documentation=https://k3s.io
+After=network-online.target zfs-import.target zfs-mount.service axonwall-k3s-firstboot.service
+Wants=network-online.target
+ConditionPathExists=/etc/rancher/k3s/config.yaml
+ConditionPathExists=!/etc/rancher/k3s/agent-mode
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/default/%N
+EnvironmentFile=-/etc/sysconfig/%N
+EnvironmentFile=-/etc/systemd/system/k3s.service.env
+KillMode=process
+Delegate=yes
+User=root
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStartPre=-/sbin/modprobe wireguard
+ExecStart=/usr/local/bin/k3s server --config /etc/rancher/k3s/config.yaml
+
+[Install]
+WantedBy=multi-user.target

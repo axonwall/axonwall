@@ -52,6 +52,15 @@ echo "[Axonwall Network Setup] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF:-<none>}, 
 
 if [ ! -s "$CONF" ]; then
   mkdir -p "${ROOT}/etc/axonwall" || exit 0
+  if [ -f "${ROOT}/etc/axonwall/.k3s-edition" ]; then
+    _def_lan_mode="dhcp"
+    _def_lan_ip=""
+    _def_lan_dhcp="false"
+  else
+    _def_lan_mode="static"
+    _def_lan_ip="192.168.1.1/24"
+    _def_lan_dhcp="true"
+  fi
   cat << CONF_EOF > "$CONF" || exit 0
 WAN_INTERFACE=${WAN_IF}
 WAN_MODE=dhcp
@@ -60,9 +69,9 @@ WAN_IPV4_GATEWAY=
 WAN_DNS1=1.1.1.1
 WAN_DNS2=8.8.8.8
 LAN_INTERFACE=${LAN_IF}
-LAN_MODE=static
-LAN_IPV4_ADDRESS=192.168.1.1/24
-LAN_DHCP_ENABLED=true
+LAN_MODE=${_def_lan_mode}
+LAN_IPV4_ADDRESS=${_def_lan_ip}
+LAN_DHCP_ENABLED=${_def_lan_dhcp}
 OPT1_INTERFACE=${OPT1_IF}
 OPT1_MODE=dhcp
 OPT1_IPV4_ADDRESS=
@@ -104,8 +113,13 @@ if [ -s "$CONF" ]; then
 fi
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
 WAN_MODE="${WAN_MODE:-dhcp}"
-LAN_MODE="${LAN_MODE:-static}"
-LAN_IPV4_ADDRESS="${LAN_IPV4_ADDRESS:-192.168.1.1/24}"
+if [ -f "${ROOT}/etc/axonwall/.k3s-edition" ]; then
+  LAN_MODE="${LAN_MODE:-dhcp}"
+  LAN_IPV4_ADDRESS="${LAN_IPV4_ADDRESS:-}"
+else
+  LAN_MODE="${LAN_MODE:-static}"
+  LAN_IPV4_ADDRESS="${LAN_IPV4_ADDRESS:-192.168.1.1/24}"
+fi
 OPT1_MODE="${OPT1_MODE:-dhcp}"
 OPT2_MODE="${OPT2_MODE:-dhcp}"
 

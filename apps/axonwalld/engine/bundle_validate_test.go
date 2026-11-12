@@ -128,12 +128,47 @@ func TestValidateK3sConfigAcceptsCompilerOutput(t *testing.T) {
 	}
 }
 
+func TestValidateK3sConfigAcceptsSafeKubeletArgs(t *testing.T) {
+	sliceCfg := `write-kubeconfig-mode: "0640"
+cluster-cidr: "10.42.0.0/16"
+kubelet-arg:
+  - "eviction-hard=memory.available<256Mi,nodefs.available<10%"
+  - "eviction-soft=memory.available<512Mi"
+  - "eviction-soft-grace-period=memory.available=1m30s"
+  - "system-reserved=cpu=100m,memory=256Mi"
+  - "kube-reserved=cpu=100m,memory=256Mi"
+  - "max-pods=64"
+  - "image-gc-high-threshold=85"
+  - "image-gc-low-threshold=80"
+  - "feature-gates=UserNamespacesSupport=true"
+`
+	if err := validateK3sConfig(sliceCfg); err != nil {
+		t.Fatalf("expected safe kubelet-arg slice to pass validation, got: %v", err)
+	}
+
+	scalarCfg := "node-name: storage-01\nkubelet-arg: \"max-pods=48\"\n"
+	if err := validateK3sConfig(scalarCfg); err != nil {
+		t.Fatalf("expected safe scalar kubelet-arg to pass validation, got: %v", err)
+	}
+}
+
 func TestValidateK3sConfigRejectsArgInjection(t *testing.T) {
 	for name, cfg := range map[string]string{
-		"apiserver arg": "kube-apiserver-arg:\n  - authorization-mode=AlwaysAllow\n",
-		"kubelet arg":   "kubelet-arg:\n  - serialize-image-pulls=false\n",
-		"etcd arg":      "etcd-arg:\n  - unsafe\n",
-		"unknown key":   "some-random-key: true\n",
+		"apiserver arg":       "kube-apiserver-arg:\n  - authorization-mode=AlwaysAllow\n",
+		"kubelet arg":         "kubelet-arg:\n  - serialize-image-pulls=false\n",
+		"root-dir bare":       "kubelet-arg:\n  - root-dir=/\n",
+		"root-dir dashed":     "kubelet-arg:\n  - --root-dir=/\n",
+		"cred provider bin":   "kubelet-arg:\n  - image-credential-provider-bin-dir=/tmp\n",
+		"cred provider cfg":   "kubelet-arg:\n  - image-credential-provider-config=/etc/shadow\n",
+		"scalar dangerous":    "kubelet-arg: \"root-dir=/\"\n",
+		"empty value":         "kubelet-arg:\n  - max-pods=\n",
+		"metachar semicolon":  "kubelet-arg:\n  - \"eviction-hard=memory.available<256Mi;id\"\n",
+		"metachar dollar":     "kubelet-arg:\n  - \"system-reserved=memory=$(id)\"\n",
+		"newline injection":   "kubelet-arg:\n  - \"max-pods=64\\nroot-dir=/\"\n",
+		"whitespace smuggle":  "kubelet-arg:\n  - \"max-pods=64 --root-dir=/\"\n",
+		"empty kubelet slice": "kubelet-arg: []\n",
+		"etcd arg":            "etcd-arg:\n  - unsafe\n",
+		"unknown key":         "some-random-key: true\n",
 	} {
 		if err := validateK3sConfig(cfg); err == nil {
 			t.Errorf("%s: accepted, want rejection", name)

@@ -8,9 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/build}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/output}"
 
-# Appliance flavor: "axonwall" (the firewall, default) or "vault"
-# (Vault Edition: SeaweedFS immutable-backup appliance; the firewall
-# stack is absent from the image, not merely disabled).
+# Appliance flavor: "axonwall" (the firewall, default), "vault"
+# (Vault Edition: SeaweedFS immutable-backup appliance), or "k3s-storage"
+# (Barebones K3s + OpenZFS + OpenEBS Storage Host; firewall/UI stack absent).
 FLAVOR="${AXONWALL_FLAVOR:-axonwall}"
 case "${FLAVOR}" in
   axonwall)
@@ -25,8 +25,14 @@ case "${FLAVOR}" in
     ISO_VOLUME="AXONWALL_VAULT"
     LIVE_HOSTNAME="axonwall-vault"
     ;;
+  k3s-storage)
+    ISO_NAME="axonwall-k3s-storage-debian13-amd64.iso"
+    ISO_APPLICATION="Axonwall K3s + ZFS Storage Host"
+    ISO_VOLUME="AXONWALL_K3S"
+    LIVE_HOSTNAME="axonwall-storage"
+    ;;
   *)
-    echo "[!] Unknown AXONWALL_FLAVOR '${FLAVOR}' (expected axonwall or vault)" >&2
+    echo "[!] Unknown AXONWALL_FLAVOR '${FLAVOR}' (expected axonwall, vault, or k3s-storage)" >&2
     exit 1
     ;;
 esac
@@ -183,6 +189,30 @@ if [[ "${FLAVOR}" == "vault" ]]; then
   cp "${SCRIPT_DIR}/../vault/nftables.conf" config/includes.chroot/etc/nftables.conf
   cp "${SCRIPT_DIR}/../vault/preseed-vault.cfg" config/includes.installer/preseed.cfg
   cp "${SCRIPT_DIR}/../vault/preseed-vault-binary.cfg" config/includes.binary/preseed.cfg
+elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
+  echo "[+] Applying K3s + ZFS Storage Host overlay (firewall/UI payload removed)..."
+  rm -f config/includes.chroot/etc/systemd/system/axonwall-firstboot.service \
+        config/includes.chroot/usr/local/bin/axonwall-firstboot \
+        config/includes.chroot/usr/local/bin/axonwallctl \
+        config/includes.chroot/usr/local/bin/axonwall-tui \
+        config/includes.chroot/usr/local/bin/axonwall-ha-notify \
+        config/includes.chroot/usr/local/bin/axonwall-cloud-init \
+        config/includes.chroot/usr/local/bin/axonwall-import \
+        config/includes.chroot/etc/headscale/config.yaml
+  rm -rf config/includes.chroot/etc/systemd/system/suricata.service.d
+  rmdir config/includes.chroot/etc/headscale 2>/dev/null || true
+  mkdir -p config/includes.chroot/etc/axonwall/ \
+           config/includes.chroot/etc/sysctl.d/ \
+           config/includes.chroot/etc/modules-load.d/ \
+           config/includes.chroot/usr/share/axonwall/k3s/
+  touch config/includes.chroot/etc/axonwall/.k3s-firstboot
+  touch config/includes.chroot/etc/axonwall/.k3s-edition
+  cp "${SCRIPT_DIR}/../k3s-storage/nftables.conf" config/includes.chroot/etc/nftables.conf
+  cp "${SCRIPT_DIR}/../k3s-storage/90-k3s-storage.conf" config/includes.chroot/etc/sysctl.d/90-k3s-storage.conf
+  cp "${SCRIPT_DIR}/../k3s-storage/k3s-storage.modules.conf" config/includes.chroot/etc/modules-load.d/k3s-storage.conf
+  cp "${SCRIPT_DIR}/../k3s-storage/zfs-operator.yaml" config/includes.chroot/usr/share/axonwall/k3s/zfs-operator.yaml
+  cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage.cfg" config/includes.installer/preseed.cfg
+  cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage-binary.cfg" config/includes.binary/preseed.cfg
 fi
 
 # Ensure firstboot marker directory and service enable symlink exist
@@ -218,6 +248,18 @@ if [[ "${FLAVOR}" == "axonwall" ]]; then
   # Copy default baseline lockdown ruleset
   mkdir -p config/includes.chroot/usr/share/axonwall/
   cp "${SCRIPT_DIR}/../debian/lockdown.nft" config/includes.chroot/usr/share/axonwall/ || true
+elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
+  # K3s + OpenZFS Storage Host units & CLI helpers
+  for kunit in k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service; do
+    cp "${SCRIPT_DIR}/../k3s-storage/${kunit}" "config/includes.chroot/etc/systemd/system/${kunit}"
+    ln -sf "/etc/systemd/system/${kunit}" "config/includes.chroot/etc/systemd/system/multi-user.target.wants/${kunit}"
+  done
+  ln -sf /lib/systemd/system/nftables.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/nftables.service
+  mkdir -p config/includes.chroot/usr/local/bin
+  for kbin in axonwall-k3s-firstboot axonwall-k3s-verify axonwall-k3s-status; do
+    cp "${SCRIPT_DIR}/../k3s-storage/${kbin}" "config/includes.chroot/usr/local/bin/${kbin}"
+    chmod +x "config/includes.chroot/usr/local/bin/${kbin}"
+  done
 else
   # Vault Edition units, tools and identity files.
   cp "${SCRIPT_DIR}/../vault/seaweedfs.service" config/includes.chroot/etc/systemd/system/
@@ -423,9 +465,56 @@ cp "${SCRIPT_DIR}/../vault/seaweedfs.service" \
 chmod +x config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-provision \
          config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-status \
          config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-firstboot
-if [[ -f "${SCRIPT_DIR}/branding/splash-vault.png" ]]; then
-  cp "${SCRIPT_DIR}/branding/splash-vault.png" config/includes.chroot/usr/share/axonwall/vault/splash-vault.png
-fi
+  if [[ -f "${SCRIPT_DIR}/branding/splash-vault.png" ]]; then
+    cp "${SCRIPT_DIR}/branding/splash-vault.png" config/includes.chroot/usr/share/axonwall/vault/splash-vault.png
+  fi
+
+  # Stage K3s + ZFS Storage Host payload into /usr/share/axonwall/k3s-storage/
+  # and OpenEBS manifest into /usr/share/axonwall/k3s/zfs-operator.yaml so the
+  # unified ISO can install axonwall, vault, OR k3s-storage offline.
+  mkdir -p config/includes.chroot/usr/share/axonwall/k3s-storage \
+           config/includes.chroot/usr/share/axonwall/k3s
+  cp "${SCRIPT_DIR}/../k3s-storage/nftables.conf" \
+     "${SCRIPT_DIR}/../k3s-storage/90-k3s-storage.conf" \
+     "${SCRIPT_DIR}/../k3s-storage/k3s-storage.modules.conf" \
+     "${SCRIPT_DIR}/../k3s-storage/k3s.service" \
+     "${SCRIPT_DIR}/../k3s-storage/k3s-agent.service" \
+     "${SCRIPT_DIR}/../k3s-storage/axonwall-k3s-firstboot.service" \
+     "${SCRIPT_DIR}/../k3s-storage/axonwall-k3s-verify.service" \
+     "${SCRIPT_DIR}/../k3s-storage/zfs-operator.yaml" \
+     "${SCRIPT_DIR}/../k3s-storage/axonwall-k3s-firstboot" \
+     "${SCRIPT_DIR}/../k3s-storage/axonwall-k3s-verify" \
+     "${SCRIPT_DIR}/../k3s-storage/axonwall-k3s-status" \
+     config/includes.chroot/usr/share/axonwall/k3s-storage/
+  chmod +x config/includes.chroot/usr/share/axonwall/k3s-storage/axonwall-k3s-firstboot \
+           config/includes.chroot/usr/share/axonwall/k3s-storage/axonwall-k3s-verify \
+           config/includes.chroot/usr/share/axonwall/k3s-storage/axonwall-k3s-status
+  cp "${SCRIPT_DIR}/../k3s-storage/zfs-operator.yaml" config/includes.chroot/usr/share/axonwall/k3s/zfs-operator.yaml
+elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
+  # Fetch K3s binary for Barebones K3s + OpenZFS Storage Host
+  K3S_VERSION="${K3S_VERSION:-v1.31.5+k3s1}"
+  K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
+  case "${K3S_VERSION}" in
+    v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;
+    v1.32.3+k3s1) K3S_SHA256="${K3S_SHA256:-b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83}" ;;
+    *) K3S_SHA256="${K3S_SHA256:-}" ;;
+  esac
+  mkdir -p config/includes.chroot/usr/local/bin
+  if [[ ! -f config/includes.chroot/usr/local/bin/k3s ]]; then
+    echo "[+] Fetching K3s ${K3S_VERSION}..."
+    curl -fsSL -o config/includes.chroot/usr/local/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+    if [[ -z "${K3S_SHA256}" ]]; then
+      K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
+    fi
+    if [[ -z "${K3S_SHA256}" ]]; then
+      echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
+      exit 1
+    fi
+    echo "${K3S_SHA256}  config/includes.chroot/usr/local/bin/k3s" | sha256sum -c -
+    chmod 0755 config/includes.chroot/usr/local/bin/k3s
+  fi
+  ln -sf k3s config/includes.chroot/usr/local/bin/crictl
+  ln -sf k3s config/includes.chroot/usr/local/bin/ctr
 else
 # Fetch SeaweedFS binary (Vault Edition storage engine)
 WEED_VERSION="4.48"
@@ -476,6 +565,12 @@ if [[ "${FLAVOR}" == "axonwall" ]]; then
   else
     echo "[!] ERROR: apps/axonwall-satellite/bin/axonwall-satellite-amd64 is missing; cannot build ISO without the satellite binary." >&2
     exit 1
+  fi
+elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
+  # Ship axonwall-satellite binary inert on disk for optional future fleet enrollment (no service enabled)
+  if [[ -f "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
+    cp "${SCRIPT_DIR}/../../apps/axonwall-satellite/bin/axonwall-satellite-amd64" config/includes.chroot/usr/sbin/axonwall-satellite
+    chmod +x config/includes.chroot/usr/sbin/axonwall-satellite
   fi
 fi
 
@@ -667,6 +762,122 @@ linux-headers-amd64
 zfs-dkms
 zfsutils-linux
 zfs-initramfs
+cryptsetup
+systemd-cryptsetup
+tpm2-tools
+xfsprogs
+etckeeper
+git
+openssh-server
+openssh-client
+libpam-modules
+chrony
+rkhunter
+chkrootkit
+yara
+unhide
+lynis
+debsums
+bpftool
+python3-drgn
+linux-perf
+EOF
+elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
+# K3s + OpenZFS Storage Host package set: lean Vault base OS + OpenZFS +
+# wireguard-tools + bridge-utils + iptables for K3s Flannel WireGuard & CNI.
+cat << 'EOF' > config/package-lists/axonwall.list.chroot
+linux-image-amd64
+live-boot
+live-boot-initramfs-tools
+live-config
+live-config-systemd
+user-setup
+sudo
+firmware-linux-free
+firmware-realtek
+firmware-atheros
+firmware-bnx2
+firmware-bnx2x
+firmware-iwlwifi
+intel-microcode
+amd64-microcode
+systemd
+systemd-sysv
+grub-pc
+grub-pc-bin
+grub-efi-amd64-bin
+efibootmgr
+dosfstools
+mtools
+e2fsprogs
+squashfs-tools
+ucf
+os-prober
+isolinux
+syslinux
+syslinux-common
+extlinux
+nftables
+iptables
+wireguard-tools
+bridge-utils
+iproute2
+ethtool
+pciutils
+tcpdump
+curl
+wget
+jq
+ca-certificates
+net-tools
+dnsutils
+bind9-host
+nmap
+kubectl
+mkcert
+zsh
+vim
+neovim
+less
+binutils
+zstd
+xz-utils
+bzip2
+unzip
+btop
+htop
+sysstat
+iotop
+iftop
+slurm
+starship
+zoxide
+zsh-autosuggestions
+zsh-syntax-highlighting
+tmux
+fzf
+ripgrep
+fd-find
+bat
+mtr-tiny
+openssl
+kmod
+procps
+iputils-ping
+nano
+locales
+rsync
+python3
+mdadm
+gdisk
+parted
+smartmontools
+linux-headers-amd64
+zfs-dkms
+zfsutils-linux
+zfs-initramfs
+cloud-init
+cloud-guest-utils
 cryptsetup
 systemd-cryptsetup
 tpm2-tools

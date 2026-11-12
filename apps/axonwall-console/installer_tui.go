@@ -46,7 +46,7 @@ type DiskDevice struct {
 
 // InstallerConfig holds all user choices for the Next-Gen Appliance Installer.
 type InstallerConfig struct {
-	Edition        string   // "axonwall" or "vault"
+	Edition        string   // "axonwall", "vault", or "k3s-storage"
 	OSFamily       string   // "debian" or "alpine"
 	InstallMode    string   // "ab", "zbm", "rolling"
 	SlotMB         int      // 2048, 4096, 8192, 16384
@@ -70,6 +70,24 @@ type InstallerConfig struct {
 	AdminUser      string   // default "admin"
 	AdminPassword  string   // plaintext or scrypt hash for installed appliance
 	KeepPartitions bool     // preserve pre-partitioned disk layout created in root shell
+	K3sRole        string   // "server" (default) or "agent"
+	K3sServerURL   string   // control plane URL (e.g. https://10.0.0.1:6443) when K3sRole == "agent" or HA join
+	K3sJoinToken   string   // cluster join token
+	ZfsArcMaxMB    int      // 0 = auto-tuned from host RAM
+}
+
+// ComputeDefaultZfsArcMaxMB returns the recommended OpenZFS ARC memory cap in MiB for the given total host RAM.
+func ComputeDefaultZfsArcMaxMB(ramMB int) int {
+	switch {
+	case ramMB <= 2048:
+		return 384
+	case ramMB <= 4096:
+		return 512
+	case ramMB <= 8192:
+		return 1024
+	default:
+		return ramMB / 4
+	}
 }
 
 // PartitionLayout represents the computed MiB sizes for visual preview and execution.
@@ -87,14 +105,27 @@ type PartitionLayout struct {
 func DefaultInstallerConfig() InstallerConfig {
 	edition := "axonwall"
 	hostname := "axonwall"
-	if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {
+	k3sRole := "server"
+	if _, err := os.Stat("/etc/axonwall/.k3s-edition"); err == nil {
+		edition = "k3s-storage"
+		hostname = "axonwall-storage"
+	} else if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {
 		edition = "vault"
 		hostname = "axonwall-vault"
-	} else if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+	}
+	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
 		cmd := string(data)
-		if strings.Contains(cmd, "axonwall_edition=vault") || strings.Contains(cmd, "axonwall.edition=vault") {
-			edition = "vault"
-			hostname = "axonwall-vault"
+		if edition == "axonwall" {
+			if strings.Contains(cmd, "axonwall_edition=k3s-storage") || strings.Contains(cmd, "axonwall.edition=k3s-storage") {
+				edition = "k3s-storage"
+				hostname = "axonwall-storage"
+			} else if strings.Contains(cmd, "axonwall_edition=vault") || strings.Contains(cmd, "axonwall.edition=vault") {
+				edition = "vault"
+				hostname = "axonwall-vault"
+			}
+		}
+		if strings.Contains(cmd, "axonwall.k3s_role=agent") || strings.Contains(cmd, "axonwall_k3s_role=agent") {
+			k3sRole = "agent"
 		}
 	}
 	osFamily := "debian"
@@ -127,6 +158,40 @@ func DefaultInstallerConfig() InstallerConfig {
 		Hostname:      hostname,
 		AdminUser:     "admin",
 		AdminPassword: adminPass,
+		K3sRole:       k3sRole,
+		ZfsArcMaxMB:   0,
+	}
+}
+
+// cycleEdition cycles cfg.Edition through "axonwall" -> "vault" -> "k3s-storage" -> "axonwall",
+// updating cfg.Hostname when empty or matching one of the factory default hostnames.
+func cycleEdition(cfg *InstallerConfig) {
+	if cfg == nil {
+		return
+	}
+	isDefaultHostname := cfg.Hostname == "" ||
+		cfg.Hostname == "axonwall" ||
+		cfg.Hostname == "axonwall-vault" ||
+		cfg.Hostname == "axonwall-storage"
+	switch cfg.Edition {
+	case "vault":
+		cfg.Edition = "k3s-storage"
+		if isDefaultHostname {
+			cfg.Hostname = "axonwall-storage"
+		}
+		if cfg.K3sRole == "" {
+			cfg.K3sRole = "server"
+		}
+	case "k3s-storage":
+		cfg.Edition = "axonwall"
+		if isDefaultHostname {
+			cfg.Hostname = "axonwall"
+		}
+	default:
+		cfg.Edition = "vault"
+		if isDefaultHostname {
+			cfg.Hostname = "axonwall-vault"
+		}
 	}
 }
 
@@ -548,16 +613,24 @@ func recommendedSlotGBForDiskMB(primaryMB int) int {
 	}
 }
 
-func normalizeSlotMBForMode(cfg *InstallerConfig, recommendedSlotGB int) {
+func normalizeSlotMBForMode(cfg *InstallerConfig, recommendedSlotGB int, primaryMB ...int) {
 	if cfg == nil {
 		return
+	}
+	diskMB := 65536
+	if len(primaryMB) > 0 && primaryMB[0] > 0 {
+		diskMB = primaryMB[0]
 	}
 	switch cfg.InstallMode {
 	case "zbm":
 		cfg.SlotMB = 0
 	case "rolling":
-		if cfg.SlotMB < 8192 {
-			cfg.SlotMB = 8192
+		minRollingMB := 8192
+		if cfg.Edition == "k3s-storage" && diskMB < 32768 {
+			minRollingMB = 4096
+		}
+		if cfg.SlotMB < minRollingMB {
+			cfg.SlotMB = minRollingMB
 		}
 	default: // "ab"
 		if cfg.SlotMB < 2048 {
@@ -664,6 +737,17 @@ func RefreshHardwareEval(disks []DiskDevice, cfg *InstallerConfig) HardwareEvalu
 	if len(cfg.SystemDisks) > 0 && diskHasPrecreatedAxonwallPartitions(cfg.SystemDisks[0]) {
 		notes = append(notes, fmt.Sprintf("Pre-partitioned Axonwall layout detected on %s (press [X] to preserve existing partitions)", cfg.SystemDisks[0]))
 	}
+	if cfg.Edition == "k3s-storage" {
+		effArc := cfg.ZfsArcMaxMB
+		if effArc <= 0 {
+			effArc = ComputeDefaultZfsArcMaxMB(ramMB)
+		}
+		roleDesc := "Standalone SQLite Server + OpenEBS ZFS-LocalPV"
+		if cfg.K3sRole == "agent" {
+			roleDesc = "Cluster Storage Worker Agent"
+		}
+		notes = append(notes, fmt.Sprintf("K3s Storage Host: %s | OpenZFS ARC Cap: %d MiB", roleDesc, effArc))
+	}
 
 	return HardwareEvaluation{
 		TotalRAMMB:        ramMB,
@@ -686,21 +770,32 @@ func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDe
 	cfg.LuksTPM2 = hasTPM2Device()
 
 	recGB := recommendedSlotGBForDiskMB(primaryMB)
+	if cfg.Edition == "k3s-storage" && primaryMB < 102400 && recGB > 4 {
+		recGB = 4
+	}
 	if cfg.InstallMode == "zbm" {
 		cfg.SlotMB = 0
 	} else {
 		cfg.SlotMB = recGB * 1024
-		normalizeSlotMBForMode(cfg, recGB)
+		normalizeSlotMBForMode(cfg, recGB, primaryMB)
+		if cfg.Edition == "k3s-storage" && primaryMB < 102400 && cfg.InstallMode != "rolling" && cfg.SlotMB > 4096 {
+			cfg.SlotMB = 4096
+		}
 	}
 
 	// Evaluate ZFS allocation and topology
 	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
 		cfg.ZfsAllocMode = "none"
+	} else if cfg.Edition == "k3s-storage" && len(cfg.ZfsExtraDisks) == 0 && cfg.InstallMode != "zbm" {
+		cfg.ZfsAllocMode = "remainder"
 	} else if cfg.ZfsAllocMode == "" {
 		cfg.ZfsAllocMode = "remainder"
 	}
 	if cfg.ZfsTopology == "" || cfg.ZfsTopology == "auto" {
 		cfg.ZfsTopology = "auto"
+	}
+	if cfg.Edition == "k3s-storage" && cfg.K3sRole == "" {
+		cfg.K3sRole = "server"
 	}
 
 	return evaluatedDisks, RefreshHardwareEval(evaluatedDisks, cfg)
@@ -828,7 +923,11 @@ func ComputePartitionLayout(diskMB int, cfg InstallerConfig) PartitionLayout {
 		dataMB = remMB
 	default: // "remainder"
 		if remMB > 10240 {
-			dataMB = 8192
+			if cfg.Edition == "k3s-storage" {
+				dataMB = 4096
+			} else {
+				dataMB = 8192
+			}
 			zfsMB = remMB - dataMB
 		} else if remMB > 4096 {
 			dataMB = 2048
@@ -989,6 +1088,10 @@ func FormatInstallerConfig(cfg InstallerConfig) string {
 	if edition == "" {
 		edition = "axonwall"
 	}
+	k3sRole := cfg.K3sRole
+	if k3sRole == "" {
+		k3sRole = "server"
+	}
 
 	lines := []string{
 		"# Axonwall Next-Gen Installer Configuration",
@@ -1015,8 +1118,24 @@ func FormatInstallerConfig(cfg InstallerConfig) string {
 		fmt.Sprintf("HOSTNAME_OVERRIDE=%s", shellQuote(cfg.Hostname)),
 		fmt.Sprintf("ADMIN_USER=%s", shellQuote(cfg.AdminUser)),
 		fmt.Sprintf("ADMIN_PASSWORD=%s", shellQuote(cfg.AdminPassword)),
+		fmt.Sprintf("K3S_ROLE=%s", shellQuote(k3sRole)),
+		fmt.Sprintf("K3S_SERVER_URL=%s", shellQuote(cfg.K3sServerURL)),
+		fmt.Sprintf("K3S_JOIN_TOKEN=%s", shellQuote(cfg.K3sJoinToken)),
+		fmt.Sprintf("ZFS_ARC_MAX_MB=%d", cfg.ZfsArcMaxMB),
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// redactDiagnosticsSecrets ensures plaintext passphrases, passwords, and cluster join tokens
+// never leak into exported or HTTP-shipped installer diagnostics bundles.
+func redactDiagnosticsSecrets(s string, cfg InstallerConfig) string {
+	for _, secret := range []string{cfg.AdminPassword, cfg.LuksPassphrase, cfg.K3sJoinToken} {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "[REDACTED]")
+			s = strings.ReplaceAll(s, shellQuote(secret), "'[REDACTED]'")
+		}
+	}
+	return s
 }
 
 // readRawKey reads a single keypress or ANSI arrow escape sequence using non-canonical stty mode.
@@ -1037,9 +1156,9 @@ func readRawKey() string {
 	}
 	s := string(buf[:n])
 	switch {
-	case s == "\x1b[A" || s == "\x1bOA" || s == "k" || s == "K":
+	case s == "\x1b[A" || s == "\x1bOA":
 		return "UP"
-	case s == "\x1b[B" || s == "\x1bOB" || s == "j" || s == "J":
+	case s == "\x1b[B" || s == "\x1bOB":
 		return "DOWN"
 	case s == "\x1b[C" || s == "\x1bOC":
 		return "RIGHT"
@@ -1362,6 +1481,30 @@ func collectHardwareAndStorageProbeLines(cfg InstallerConfig, eval HardwareEvalu
 	lines = append(lines, fmt.Sprintf("  System OS Disks   : %s", eval.SystemDiskSummary))
 	lines = append(lines, fmt.Sprintf("  OpenZFS Pool      : %s", eval.ZfsPoolSummary))
 	lines = append(lines, fmt.Sprintf("  Slot Sizing       : %s", eval.SlotSizingNote))
+	adminPassDiag := "(factory default)"
+	if cfg.AdminPassword != "" {
+		adminPassDiag = "[REDACTED]"
+	}
+	luksPassDiag := "(none)"
+	if cfg.LuksPassphrase != "" {
+		luksPassDiag = "[REDACTED]"
+	}
+	lines = append(lines, fmt.Sprintf("  Auth & LUKS2      : AdminPass=%s | LUKS2=%v (Passphrase=%s)", adminPassDiag, cfg.LuksEnabled, luksPassDiag))
+	if cfg.Edition == "k3s-storage" || cfg.K3sJoinToken != "" || cfg.K3sServerURL != "" {
+		role := cfg.K3sRole
+		if role == "" {
+			role = "server"
+		}
+		tokDiag := "(none)"
+		if cfg.K3sJoinToken != "" {
+			tokDiag = "[REDACTED]"
+		}
+		effArc := cfg.ZfsArcMaxMB
+		if effArc <= 0 {
+			effArc = ComputeDefaultZfsArcMaxMB(eval.TotalRAMMB)
+		}
+		lines = append(lines, fmt.Sprintf("  K3s Storage Config: Role=%s | ServerURL=%s | JoinToken=%s | ZfsArcMaxMB=%d", role, cfg.K3sServerURL, tokDiag, effArc))
+	}
 	for _, note := range eval.EvaluationNotes {
 		lines = append(lines, "  • "+note)
 	}
@@ -1420,7 +1563,7 @@ func FormatInstallerDiagnosticsBundle(cfg InstallerConfig, eval HardwareEvaluati
 	for _, l := range collectInstallerLogLines(rawLines) {
 		sb.WriteString(l + "\n")
 	}
-	return sb.String()
+	return redactDiagnosticsSecrets(sb.String(), cfg)
 }
 
 // SaveInstallerDiagnosticsBundle writes the diagnostics bundle to the requested path (and standard fallback paths).
@@ -1491,7 +1634,7 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 	for {
 		clearScreen()
 		accent := colorEmerald
-		if cfg.Edition == "vault" {
+		if cfg.Edition == "vault" || cfg.Edition == "k3s-storage" {
 			accent = colorBrightCya
 		}
 		fmt.Printf("%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", accent, colorBold, colorReset)
@@ -1605,11 +1748,11 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 				activeTab++
 				scrollOffset = 0
 			}
-		case "UP":
+		case "UP", "K":
 			if scrollOffset > 0 {
 				scrollOffset--
 			}
-		case "DOWN":
+		case "DOWN", "J":
 			if scrollOffset < maxScroll {
 				scrollOffset++
 			}
@@ -1669,10 +1812,15 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 	title := "AXONWALL NEXT-GEN APPLIANCE INSTALLER"
 	subtitle := "Enterprise Linux Next-Generation Firewall & SD-WAN Platform"
 	accent := colorEmerald
-	if cfg.Edition == "vault" {
+	switch cfg.Edition {
+	case "vault":
 		title = "AXONWALL VAULT EDITION INSTALLER"
 		subtitle = "Hardened Immutable S3 Object-Lock Backup Appliance (SeaweedFS)"
 		accent = colorBrightCya
+	case "k3s-storage":
+		title = "K3S + ZFS STORAGE HOST INSTALLER"
+		subtitle = "Barebones K3s + OpenZFS + OpenEBS ZFS-LocalPV Host (NGFW/UI bloat stripped)"
+		accent = colorCyan
 	}
 
 	versionStr := "v0.11.41"
@@ -1757,18 +1905,22 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 		case 0:
 			renderInstallerBanner(cfg, 0)
 			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
-			normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+			normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 			eval = RefreshHardwareEval(disks, &cfg)
 			layout := ComputePartitionLayout(primaryMB, cfg)
 
 			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
-			vaultBadge := colorDim + "( ) Axonwall Vault S3 Storage" + colorReset
-			if cfg.Edition == "vault" {
-				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3 Storage" + colorReset
-			} else {
+			vaultBadge := colorDim + "( ) Axonwall Vault S3" + colorReset
+			k3sBadge := colorDim + "( ) K3s + ZFS Storage Host" + colorReset
+			switch cfg.Edition {
+			case "vault":
+				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3" + colorReset
+			case "k3s-storage":
+				k3sBadge = colorCyan + colorBold + "(●) K3s + ZFS Storage Host" + colorReset
+			default:
 				ngfwBadge = colorEmerald + colorBold + "(●) Axonwall NGFW & Router" + colorReset
 			}
-			fmt.Printf(" %s[E] Appliance Edition:%s  %s    %s\n\n", colorBold, colorReset, ngfwBadge, vaultBadge)
+			fmt.Printf(" %s[E] Edition:%s %s  %s  %s\n\n", colorBold, colorReset, ngfwBadge, vaultBadge, k3sBadge)
 
 			fmt.Printf(" %sSelect Installation Architecture (Hardware-Evaluated):%s\n", colorBold, colorReset)
 			archOptions := []struct {
@@ -1832,6 +1984,20 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					fmt.Printf("   • %-22s : %s%s%s\n", "Boot & Root Layout", colorCyan+colorBold, eval.SlotSizingNote, colorReset)
 				}
 				fmt.Printf("   • %-22s : %s%s%s\n", "Network Setup [Q->2/3]", colorCyan, formatPreInstallNetworkSummary(), colorReset)
+				if cfg.Edition == "k3s-storage" {
+					effArc := cfg.ZfsArcMaxMB
+					if effArc <= 0 {
+						effArc = ComputeDefaultZfsArcMaxMB(eval.TotalRAMMB)
+					}
+					roleDesc := "Standalone SQLite Server + OpenEBS ZFS-LocalPV"
+					if cfg.K3sRole == "agent" {
+						roleDesc = "Cluster Storage Worker Agent"
+						if cfg.K3sServerURL != "" {
+							roleDesc += " (" + cfg.K3sServerURL + ")"
+						}
+					}
+					fmt.Printf("   • %-22s : %s%s | ARC Cap: %d MiB%s\n", "K3s Role & ARC [K]", colorCyan+colorBold, roleDesc, effArc, colorReset)
+				}
 				fmt.Printf("   • %-22s : %s\n", "Data Encryption [L]", luksSummary)
 				fmt.Printf("   • %-22s : %s\n\n", "Admin Password  [P]", pwSummary)
 				fmt.Println(RenderPartitionBar(layout, cfg, 64))
@@ -1850,8 +2016,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 						colorYellow, strings.Join(allTargetDisks, ", "), colorReset)
 				}
 			}
-			fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI Menu\n",
-				colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
+			if cfg.Edition == "k3s-storage" {
+				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [K] K3s Role  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
+					colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
+			} else {
+				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI Menu\n",
+					colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
+			}
 
 			key := readRawKey()
 			switch key {
@@ -1859,33 +2030,47 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				if archCursor > 0 {
 					archCursor--
 					cfg.InstallMode = archOptions[archCursor].mode
-					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				}
-			case "DOWN":
+			case "DOWN", "J":
 				if archCursor < len(archOptions)-1 {
 					archCursor++
 					cfg.InstallMode = archOptions[archCursor].mode
-					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				}
 			case "1", "2", "3":
 				idx, _ := strconv.Atoi(key)
 				archCursor = idx - 1
 				cfg.InstallMode = archOptions[archCursor].mode
-				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 			case "SPACE":
 				cfg.InstallMode = archOptions[archCursor].mode
-				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 			case "E":
-				if cfg.Edition == "vault" {
-					cfg.Edition = "axonwall"
-					if cfg.Hostname == "" || cfg.Hostname == "axonwall-vault" {
-						cfg.Hostname = "axonwall"
+				cycleEdition(&cfg)
+				disks, eval = EvaluateHardwareProfile(disks, &cfg)
+			case "K":
+				if cfg.Edition == "k3s-storage" {
+					if cfg.K3sRole == "agent" {
+						cfg.K3sRole = "server"
+					} else {
+						cfg.K3sRole = "agent"
+						if cfg.K3sServerURL == "" {
+							fmt.Print("\n Enter K3s Control-Plane URL (e.g. https://10.0.0.1:6443): ")
+							urlLine, _ := reader.ReadString('\n')
+							urlLine = strings.TrimSpace(urlLine)
+							if urlLine != "" && !strings.ContainsAny(urlLine, " \t\n\r\"'") {
+								cfg.K3sServerURL = urlLine
+							}
+							if tok, err := readPassword(reader, " Enter K3s Cluster Join Token (masked): "); err == nil && tok != "" {
+								cfg.K3sJoinToken = tok
+							}
+						}
 					}
-				} else {
-					cfg.Edition = "vault"
-					if cfg.Hostname == "" || cfg.Hostname == "axonwall" {
-						cfg.Hostname = "axonwall-vault"
-					}
+				} else if archCursor > 0 {
+					archCursor--
+					cfg.InstallMode = archOptions[archCursor].mode
+					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				}
 			case "X":
 				cfg.KeepPartitions = !cfg.KeepPartitions
@@ -1940,17 +2125,22 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 		case 1:
 			renderInstallerBanner(cfg, 1)
 			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
-			normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+			normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
-			vaultBadge := colorDim + "( ) Axonwall Vault S3 Storage" + colorReset
+			vaultBadge := colorDim + "( ) Axonwall Vault S3" + colorReset
+			k3sBadge := colorDim + "( ) K3s + ZFS Storage Host" + colorReset
 			editionDesc := "Full NGFW, SD-WAN, WireGuard/Headscale, IDS/IPS, BGP/OSPF, Web UI & Controller"
-			if cfg.Edition == "vault" {
-				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3 Storage" + colorReset
+			switch cfg.Edition {
+			case "vault":
+				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3" + colorReset
 				editionDesc = "Immutable S3 Object-Lock Backup Appliance (SeaweedFS; firewall stack stripped)"
-			} else {
+			case "k3s-storage":
+				k3sBadge = colorCyan + colorBold + "(●) K3s + ZFS Storage Host" + colorReset
+				editionDesc = "Barebones K3s + OpenZFS + OpenEBS ZFS-LocalPV Host (NGFW/UI bloat stripped)"
+			default:
 				ngfwBadge = colorEmerald + colorBold + "(●) Axonwall NGFW & Router" + colorReset
 			}
-			fmt.Printf(" %s[E] Appliance Edition:%s  %s    %s\n", colorBold, colorReset, ngfwBadge, vaultBadge)
+			fmt.Printf(" %s[E] Edition:%s %s  %s  %s\n", colorBold, colorReset, ngfwBadge, vaultBadge, k3sBadge)
 			fmt.Printf("     %s%s%s\n", colorDim, editionDesc, colorReset)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %sSelect Appliance Storage & Boot Architecture:%s\n\n", colorBold, colorReset)
@@ -2013,22 +2203,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "V":
 				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "E":
-				if cfg.Edition == "vault" {
-					cfg.Edition = "axonwall"
-					if cfg.Hostname == "" || cfg.Hostname == "axonwall-vault" {
-						cfg.Hostname = "axonwall"
-					}
-				} else {
-					cfg.Edition = "vault"
-					if cfg.Hostname == "" || cfg.Hostname == "axonwall" {
-						cfg.Hostname = "axonwall-vault"
-					}
-				}
-			case "UP":
+				cycleEdition(&cfg)
+				disks, eval = EvaluateHardwareProfile(disks, &cfg)
+			case "UP", "K":
 				if archCursor > 0 {
 					archCursor--
 				}
-			case "DOWN":
+			case "DOWN", "J":
 				if archCursor < len(archOptions)-1 {
 					archCursor++
 				}
@@ -2036,13 +2217,22 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				idx, _ := strconv.Atoi(key)
 				archCursor = idx - 1
 				cfg.InstallMode = archOptions[archCursor].mode
-				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 			case "SPACE":
 				cfg.InstallMode = archOptions[archCursor].mode
-				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 			case "S":
 				if cfg.InstallMode == "rolling" {
-					if cfg.SlotMB == 8192 {
+					if cfg.Edition == "k3s-storage" && primaryMB < 32768 {
+						switch cfg.SlotMB {
+						case 4096:
+							cfg.SlotMB = 8192
+						case 8192:
+							cfg.SlotMB = 16384
+						default:
+							cfg.SlotMB = 4096
+						}
+					} else if cfg.SlotMB == 8192 {
 						cfg.SlotMB = 16384
 					} else {
 						cfg.SlotMB = 8192
@@ -2073,7 +2263,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				step = 0
 			case "ENTER", "RIGHT":
 				cfg.InstallMode = archOptions[archCursor].mode
-				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB))
+				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				step = 2
 			case "Q", "ESC":
 				return
@@ -2163,11 +2353,11 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "X":
 				cfg.KeepPartitions = !cfg.KeepPartitions
-			case "UP":
+			case "UP", "K":
 				if diskCursor > 0 {
 					diskCursor--
 				}
-			case "DOWN":
+			case "DOWN", "J":
 				if diskCursor < len(disks)-1 {
 					diskCursor++
 				}
@@ -2366,11 +2556,15 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					noneTitle = fmt.Sprintf("Dedicated ZFS Disks Only — Keep System Disk 100%% OS & Data (Pool 'tank' on %s)", strings.Join(cfg.ZfsExtraDisks, ", "))
 				}
 
+				remDataGB := 8
+				if cfg.Edition == "k3s-storage" {
+					remDataGB = 4
+				}
 				zfsModes := []struct {
 					mode  string
 					title string
 				}{
-					{"remainder", "Reserve Remaining System Disk Space for OpenZFS (8 GB System Data + Remainder ZFS)"},
+					{"remainder", fmt.Sprintf("Reserve Remaining System Disk Space for OpenZFS (%d GB System Data + Remainder ZFS)", remDataGB)},
 					{"split", "Split Remaining System Disk Space 50/50 between System Data & OpenZFS"},
 					{"custom", fmt.Sprintf("Custom OpenZFS Partition Size on System Disk (%d GB)", cfg.CustomZfsGB)},
 					{"none", noneTitle},
@@ -2414,11 +2608,11 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				switch key {
 				case "V":
 					runInstallerLogsScreen(cfg, eval, nil, reader)
-				case "UP":
+				case "UP", "K":
 					if zfsCursor > 0 {
 						zfsCursor--
 					}
-				case "DOWN":
+				case "DOWN", "J":
 					if zfsCursor < len(zfsModes)-1 {
 						zfsCursor++
 					}
@@ -2478,42 +2672,82 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				pwStatus = colorEmerald + colorBold + "Custom Administrator Password Configured (scrypt)" + colorReset
 			}
 
-			secItems := []struct {
+			type secMenuItem struct {
 				title string
 				val   string
-			}{
+			}
+			secItems := []secMenuItem{
 				{"[1] LUKS2 Persistent Data Encryption", luksBadge},
 				{"[2] Hardware TPM 2.0 PCR Binding", tpmBadge},
 				{"[3] Appliance Hostname", colorCyan + colorBold + cfg.Hostname + colorReset},
 				{"[4] Administrator & Root Password", pwStatus},
 			}
+			if cfg.Edition == "k3s-storage" {
+				roleBadge := colorEmerald + colorBold + "server (Standalone SQLite + OpenEBS ZFS-LocalPV)" + colorReset
+				if cfg.K3sRole == "agent" {
+					roleBadge = colorBrightCya + colorBold + "agent (Cluster Storage Worker Node)" + colorReset
+				}
+				srvURLBadge := colorDim + "(none — standalone server)" + colorReset
+				if cfg.K3sServerURL != "" {
+					srvURLBadge = colorCyan + colorBold + cfg.K3sServerURL + colorReset
+				}
+				tokBadge := colorDim + "(not set — auto-generated on server)" + colorReset
+				if cfg.K3sJoinToken != "" {
+					tokBadge = colorEmerald + colorBold + "Configured [REDACTED]" + colorReset
+				}
+				autoArc := ComputeDefaultZfsArcMaxMB(eval.TotalRAMMB)
+				arcBadge := fmt.Sprintf("%sAuto (%d MiB)%s", colorCyan+colorBold, autoArc, colorReset)
+				if cfg.ZfsArcMaxMB > 0 {
+					arcBadge = fmt.Sprintf("%s%d MiB (Custom)%s", colorEmerald+colorBold, cfg.ZfsArcMaxMB, colorReset)
+				}
+				secItems = append(secItems,
+					secMenuItem{"[5] K3s Node Role", roleBadge},
+					secMenuItem{"[6] K3s Control-Plane URL", srvURLBadge},
+					secMenuItem{"[7] K3s Cluster Join Token", tokBadge},
+					secMenuItem{"[8] ZFS ARC Memory Cap", arcBadge},
+				)
+			}
+			if secCursor >= len(secItems) {
+				secCursor = len(secItems) - 1
+			}
 
+			spacing := "\n"
+			if len(secItems) > 4 {
+				spacing = ""
+			}
 			for i, item := range secItems {
 				cursor := "  "
 				if i == secCursor {
 					cursor = colorEmerald + colorBold + "➜ " + colorReset
 				}
-				fmt.Printf(" %s%-38s : %s\n\n", cursor, colorBold+item.title+colorReset, item.val)
+				fmt.Printf(" %s%-38s : %s\n%s", cursor, colorBold+item.title+colorReset, item.val, spacing)
 			}
 
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/1-4] Toggle/Edit  [V] Logs & Diagnostics  [B] Back  [Enter] Review & Install\n", colorDim, colorReset)
+			maxKeyHint := "1-4"
+			if len(secItems) > 4 {
+				maxKeyHint = "1-8"
+			}
+			fmt.Printf(" %sControls:%s [↑/↓] Move  [Space/%s] Toggle/Edit  [V] Logs & Diagnostics  [B] Back  [Enter] Review & Install\n", colorDim, colorReset, maxKeyHint)
 
 			key := readRawKey()
 			switch key {
 			case "V":
 				runInstallerLogsScreen(cfg, eval, nil, reader)
-			case "UP":
+			case "UP", "K":
 				if secCursor > 0 {
 					secCursor--
 				}
-			case "DOWN":
+			case "DOWN", "J":
 				if secCursor < len(secItems)-1 {
 					secCursor++
 				}
-			case "1", "2", "3", "4", "SPACE":
+			case "1", "2", "3", "4", "5", "6", "7", "8", "SPACE":
 				if key != "SPACE" {
 					idx, _ := strconv.Atoi(key)
+					if idx < 1 || idx > len(secItems) {
+						continue
+					}
 					secCursor = idx - 1
 				}
 				switch secCursor {
@@ -2557,6 +2791,34 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 						} else {
 							fmt.Printf(" %s[!] Passwords did not match.%s\n", colorRed, colorReset)
 							time.Sleep(1200 * time.Millisecond)
+						}
+					}
+				case 4:
+					if cfg.K3sRole == "agent" {
+						cfg.K3sRole = "server"
+					} else {
+						cfg.K3sRole = "agent"
+					}
+				case 5:
+					fmt.Printf("\n Enter K3s Control-Plane URL (e.g. https://10.0.0.1:6443, empty to clear) [%s]: ", cfg.K3sServerURL)
+					line, _ := reader.ReadString('\n')
+					line = strings.TrimSpace(line)
+					if line == "" {
+						cfg.K3sServerURL = ""
+					} else if !strings.ContainsAny(line, " \t\n\r\"'") {
+						cfg.K3sServerURL = line
+					}
+				case 6:
+					tok, _ := readPassword(reader, "\n Enter K3s Cluster Join Token (empty to clear): ")
+					cfg.K3sJoinToken = tok
+				case 7:
+					autoArc := ComputeDefaultZfsArcMaxMB(eval.TotalRAMMB)
+					fmt.Printf("\n Enter OpenZFS ARC Memory Cap in MiB (0 for Auto = %d MiB) [%d]: ", autoArc, cfg.ZfsArcMaxMB)
+					line, _ := reader.ReadString('\n')
+					line = strings.TrimSpace(line)
+					if line != "" {
+						if val, err := strconv.Atoi(line); err == nil && val >= 0 {
+							cfg.ZfsArcMaxMB = val
 						}
 					}
 				}
@@ -2608,6 +2870,27 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			fmt.Printf("   • %-24s : %s%s%s\n", "OpenZFS Storage Pool", colorGreen+colorBold, zfsSummary, colorReset)
 			if len(cfg.ZfsSlogDisks) > 0 || len(cfg.ZfsL2arcDisks) > 0 || len(cfg.ZfsSpareDisks) > 0 {
 				fmt.Printf("   • %-24s : %sSLOG=%v  L2ARC=%v  Spare=%v%s\n", "OpenZFS Accelerators", colorYellow+colorBold, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks, colorReset)
+			}
+			if cfg.Edition == "k3s-storage" {
+				k3sRole := cfg.K3sRole
+				if k3sRole == "" {
+					k3sRole = "server"
+				}
+				roleDisp := "server (Standalone SQLite + OpenEBS ZFS-LocalPV)"
+				if k3sRole == "agent" {
+					roleDisp = "agent (Cluster Storage Worker Node)"
+				}
+				fmt.Printf("   • %-24s : %s%s%s\n", "K3s Node Role", colorCyan+colorBold, roleDisp, colorReset)
+				if cfg.K3sServerURL != "" {
+					fmt.Printf("   • %-24s : %s%s%s\n", "K3s Control-Plane URL", colorCyan+colorBold, cfg.K3sServerURL, colorReset)
+				}
+				effArc := cfg.ZfsArcMaxMB
+				arcNote := fmt.Sprintf("%d MiB (Custom)", effArc)
+				if effArc <= 0 {
+					effArc = ComputeDefaultZfsArcMaxMB(eval.TotalRAMMB)
+					arcNote = fmt.Sprintf("Auto (%d MiB)", effArc)
+				}
+				fmt.Printf("   • %-24s : %s%s%s\n", "OpenZFS ARC Memory Cap", colorGreen+colorBold, arcNote, colorReset)
 			}
 			fmt.Printf("   • %-24s : %s%s%s\n", "Data Volume Encryption", colorMagenta+colorBold, luksSummary, colorReset)
 			fmt.Printf("   • %-24s : %s%s%s\n", "Network Interfaces", colorCyan+colorBold, formatPreInstallNetworkSummary(), colorReset)

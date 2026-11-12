@@ -1,0 +1,93 @@
+#!/bin/sh
+# axonwall-k3s-status -- read-only operator status summary for an Axonwall
+# Barebones K3s + OpenZFS + OpenEBS Storage Host (`k3s-storage`).
+set -u
+
+VERSION="$(cat /etc/axonwall/version 2>/dev/null || echo "unknown")"
+if [ -f /etc/rancher/k3s/agent-mode ]; then
+    ROLE="agent (worker + storage)"
+    SVC_NAME="k3s-agent"
+else
+    ROLE="server (control-plane + storage)"
+    SVC_NAME="k3s"
+fi
+
+echo "== Axonwall K3s + OpenZFS Storage Host Status =="
+echo "time (UTC):   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "edition:      k3s-storage (v${VERSION})"
+echo "hostname:     $(hostname 2>/dev/null || echo unknown)"
+echo "k3s role:     ${ROLE}"
+
+if [ -f /etc/axonwall/.k3s-firstboot ]; then
+    echo "firstboot:    PENDING (/etc/axonwall/.k3s-firstboot still present)"
+else
+    echo "firstboot:    complete"
+fi
+
+echo ""
+echo "--- Memory & OpenZFS ARC ---"
+if [ -r /proc/meminfo ]; then
+    awk '
+        /^MemTotal:/     { total = $2 / 1024 }
+        /^MemAvailable:/ { avail = $2 / 1024 }
+        END {
+            used = total - avail
+            printf "host RAM:     %.0f MiB used / %.0f MiB total (%.0f MiB available)\n", used, total, avail
+        }
+    ' /proc/meminfo
+fi
+
+_sys_arc_max="$(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null || echo 0)"
+if [ -r /proc/spl/kstat/zfs/arcstats ]; then
+    awk -v sysmax="$_sys_arc_max" '
+        $1 == "size"  { cur = $3 / 1048576 }
+        $1 == "c_max" { cmax = $3 / 1048576 }
+        END {
+            smax = (sysmax + 0) / 1048576
+            printf "zfs ARC:      %.1f MiB current / %.1f MiB c_max (zfs_arc_max param: %.1f MiB)\n", cur, cmax, smax
+        }
+    ' /proc/spl/kstat/zfs/arcstats
+else
+    echo "zfs ARC:      (zfs module kstats unavailable; zfs_arc_max param: ${_sys_arc_max} bytes)"
+fi
+
+echo ""
+echo "--- OpenZFS Pools & Datasets ---"
+if command -v zpool >/dev/null 2>&1; then
+    zpool list 2>/dev/null || echo "(no OpenZFS pools imported)"
+else
+    echo "(zpool utility not found)"
+fi
+if command -v zfs >/dev/null 2>&1; then
+    echo ""
+    zfs list -o name,used,avail,refer,compressratio,recordsize,mountpoint 2>/dev/null || true
+fi
+
+echo ""
+echo "--- Service State (${SVC_NAME}) ---"
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    _state="$(systemctl is-active "$SVC_NAME" 2>/dev/null || echo inactive)"
+    echo "systemd:      ${SVC_NAME}.service is ${_state}"
+elif command -v rc-service >/dev/null 2>&1; then
+    _state="$(rc-service "$SVC_NAME" status 2>&1 || true)"
+    echo "openrc:       ${_state}"
+else
+    echo "init:         (neither systemd nor openrc detected)"
+fi
+
+if [ ! -f /etc/rancher/k3s/agent-mode ] && [ -x /usr/local/bin/k3s ]; then
+    echo ""
+    echo "--- Kubernetes Nodes ---"
+    /usr/local/bin/k3s kubectl get nodes -o wide 2>/dev/null || echo "(K3s API server unreachable)"
+
+    echo ""
+    echo "--- StorageClass (axonwall-zfs-local) ---"
+    /usr/local/bin/k3s kubectl get storageclass axonwall-zfs-local 2>/dev/null \
+        || /usr/local/bin/k3s kubectl get storageclass 2>/dev/null \
+        || echo "(unable to query StorageClasses)"
+
+    echo ""
+    echo "--- OpenEBS ZFS-LocalPV CSI Pods ---"
+    /usr/local/bin/k3s kubectl get pods -n kube-system -l role=openebs-zfs -o wide 2>/dev/null \
+        || echo "(unable to query OpenEBS CSI pods)"
+fi

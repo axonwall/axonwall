@@ -10,6 +10,14 @@ func TestK3sGetStatusReportsDownWhenProbesFail(t *testing.T) {
 	// A-H2 (round 2): GetStatus fabricated a healthy 2-node cluster with
 	// bound volumes out of constants, even with k3s stopped or never
 	// installed — and a peer IP alone reported a joined cluster.
+	// Isolate PATH so a running k3s.service on the developer workstation
+	// cannot cause host systemctl to report ServiceActive=true.
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "systemctl"), []byte("#!/bin/sh\nexit 3\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
 	mgr := NewK3sManager()
 	mgr.cfg = K3sRuntimeBundle{Enabled: true, PeerIp: "10.0.0.2"}
 

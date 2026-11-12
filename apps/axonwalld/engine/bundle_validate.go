@@ -194,13 +194,59 @@ var k3sConfigAllowedKeys = map[string]bool{
 	"etcd-snapshot-schedule-cron": true, "etcd-snapshot-retention": true,
 	"etcd-snapshot-dir": true, "etcd-s3": true, "etcd-s3-endpoint": true,
 	"etcd-s3-bucket": true, "etcd-s3-region": true,
+	"kubelet-arg": true,
 	// Basic node addressing an operator may set through the same flow:
 	"node-name": true, "node-ip": true, "advertise-address": true,
 	"cluster-dns": true, "cluster-domain": true,
 }
 
-var k3sAllowedKubeletArgs = map[string]bool{
+var k3sAllowedExactKubeletArgs = map[string]bool{
 	"feature-gates=UserNamespacesSupport=true": true,
+}
+
+var k3sAllowedKubeletArgPrefixes = []string{
+	"eviction-hard=",
+	"eviction-soft=",
+	"eviction-soft-grace-period=",
+	"system-reserved=",
+	"kube-reserved=",
+	"max-pods=",
+	"image-gc-high-threshold=",
+	"image-gc-low-threshold=",
+}
+
+func validateSingleKubeletArg(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("k3s config.yaml: kubelet-arg entry cannot be empty")
+	}
+	if strings.ContainsAny(raw, "\n\r\x00;&|`$()\\\"'") {
+		return fmt.Errorf("k3s config.yaml: kubelet-arg %q contains disallowed control or shell metacharacters", raw)
+	}
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("k3s config.yaml: kubelet-arg %q contains disallowed control characters", raw)
+		}
+	}
+	if strings.TrimSpace(raw) != raw {
+		return fmt.Errorf("k3s config.yaml: kubelet-arg %q must not contain leading or trailing whitespace", raw)
+	}
+	if k3sAllowedExactKubeletArgs[raw] {
+		return nil
+	}
+	for _, prefix := range k3sAllowedKubeletArgPrefixes {
+		if strings.HasPrefix(raw, prefix) {
+			val := raw[len(prefix):]
+			if val == "" {
+				return fmt.Errorf("k3s config.yaml: kubelet-arg %q requires a non-empty value", raw)
+			}
+			// Reject whitespace inside flag values so additional flags cannot be smuggled
+			if strings.ContainsAny(val, " \t") {
+				return fmt.Errorf("k3s config.yaml: kubelet-arg %q contains disallowed whitespace", raw)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("k3s config.yaml: kubelet-arg %q is not permitted in a bundle (only safe resource/eviction flags are allowed)", raw)
 }
 
 func validateK3sConfig(content string) error {
@@ -209,21 +255,31 @@ func validateK3sConfig(content string) error {
 		return fmt.Errorf("k3s config.yaml does not parse: %w", err)
 	}
 	for key, rawVal := range doc {
-		if key == "kubelet-arg" {
-			items, ok := rawVal.([]any)
-			if !ok || len(items) == 0 {
-				return fmt.Errorf("k3s config.yaml: kubelet-arg must be a non-empty allowlisted array")
-			}
-			for _, item := range items {
-				s, isStr := item.(string)
-				if !isStr || !k3sAllowedKubeletArgs[strings.TrimSpace(s)] {
-					return fmt.Errorf("k3s config.yaml: kubelet-arg %v is not permitted in a bundle", item)
-				}
-			}
-			continue
-		}
 		if !k3sConfigAllowedKeys[key] {
 			return fmt.Errorf("k3s config.yaml: key %q is not permitted in a bundle", key)
+		}
+		if key == "kubelet-arg" {
+			switch v := rawVal.(type) {
+			case string:
+				if err := validateSingleKubeletArg(v); err != nil {
+					return err
+				}
+			case []any:
+				if len(v) == 0 {
+					return fmt.Errorf("k3s config.yaml: kubelet-arg must be a non-empty string or array of strings")
+				}
+				for _, item := range v {
+					s, isStr := item.(string)
+					if !isStr {
+						return fmt.Errorf("k3s config.yaml: kubelet-arg entry %v must be a string", item)
+					}
+					if err := validateSingleKubeletArg(s); err != nil {
+						return err
+					}
+				}
+			default:
+				return fmt.Errorf("k3s config.yaml: kubelet-arg must be a string or array of strings")
+			}
 		}
 	}
 	return nil
