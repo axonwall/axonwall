@@ -12,7 +12,8 @@ export default function OpenEbsStoragePage() {
   const [zfsPool, setZfsPool] = useState('tank');
   const [replicatedPool, setReplicatedPool] = useState('tank/openebs-replicated');
   const [replicas, setReplicas] = useState(2);
-  const [msg, setMsg] = useState<string | null>(null);
+  // C-L5: typed banner — errors render red, not emerald.
+  const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
     getCurrentDesiredState().then((st) => {
@@ -28,26 +29,17 @@ export default function OpenEbsStoragePage() {
   const handleSave = async () => {
     if (!state) return;
     const next = structuredClone(state);
-    next.k3s = next.k3s || {
-      enabled: true,
-      clusterCidr: '10.42.0.0/16',
-      serviceCidr: '10.43.0.0/16',
-      nodeIpInterface: 'lan',
-      flannelBackend: 'wireguard-native',
-      disableTraefik: false,
-      autoJoinHaPeer: true,
-      openEbs: {
-        enabled: true,
-        zfsLocalPvEnabled: true,
-        zfsLocalPvPool: zfsPool,
-        replicatedStorageEnabled: true,
-        defaultReplicaCount: replicas,
-        replicatedBackingPool: replicatedPool,
-      },
-      enableUserNamespaces: false,
-      bpfTokenProfiles: [],
-      workloads: [],
-    };
+    // C-M3: storage cannot invent a whole K3s cluster config (CIDRs, CNI,
+    // pools) on a box with no K3s configuration. Enable K3s from the
+    // Cluster page first, then return here — the pool/replica values below
+    // are the ones shown in this form, chosen by the operator.
+    if (!next.k3s) {
+      setMsg({
+        type: 'error',
+        text: 'K3s is not configured yet — enable it from the Cluster page first. Storage settings cannot create a cluster configuration on their own.',
+      });
+      return;
+    }
     next.k3s.openEbs = {
       enabled: true,
       zfsLocalPvEnabled: true,
@@ -61,9 +53,9 @@ export default function OpenEbsStoragePage() {
     try {
       const res = await applyState(next);
       setState(next);
-      setMsg(`OpenEBS ZFS-LocalPV & Replicated HA StorageClasses reconciled (${res.message})`);
+      setMsg({ type: 'success', text: `OpenEBS ZFS-LocalPV & Replicated HA StorageClasses reconciled (${res.message})` });
     } catch (err: any) {
-      setMsg(err?.message || 'Failed to save OpenEBS storage configuration.');
+      setMsg({ type: 'error', text: err?.message || 'Failed to save OpenEBS storage configuration.' });
     }
   };
 
@@ -82,8 +74,14 @@ export default function OpenEbsStoragePage() {
       </div>
 
       {msg && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
-          {msg}
+        <div
+          className={`p-4 rounded-xl border text-xs ${
+            msg.type === 'success'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+          }`}
+        >
+          {msg.text}
         </div>
       )}
 
