@@ -470,8 +470,16 @@ if [ -d /usr/share/axonwall/k3s/images ]; then
     for _img in /usr/share/axonwall/k3s/images/*.tar*; do
         [ -f "$_img" ] || continue
         mkdir -p "${K3S_DATA_DIR}/agent/images"
-        cp -f "$_img" "${K3S_DATA_DIR}/agent/images/"
-        log "staged airgap image bundle: $(basename "$_img")"
+        # D-L8: a failed copy used to be followed by an unconditional
+        # "staged" log line (this script is set -u only, so the failure
+        # did not abort). Log success only on success; warn and continue
+        # on failure — a missing bundle must not block firstboot (k3s can
+        # still pull images), but the log must not claim it staged.
+        if cp -f "$_img" "${K3S_DATA_DIR}/agent/images/"; then
+            log "staged airgap image bundle: $(basename "$_img")"
+        else
+            log "WARNING: failed to stage airgap image bundle: $(basename "$_img")"
+        fi
     done
 fi
 

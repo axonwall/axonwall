@@ -239,7 +239,12 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
     for _img in /usr/share/axonwall/k3s/images/*.tar*; do
       [ -f "$_img" ] || continue
       mkdir -p /var/lib/rancher/k3s/agent/images
-      cp -f "$_img" /var/lib/rancher/k3s/agent/images/
+      # D-L8: under set -eu a failed copy already aborts the script; log
+      # the failure explicitly so the boot log says which bundle failed.
+      if ! cp -f "$_img" /var/lib/rancher/k3s/agent/images/; then
+        echo "WARNING: failed to stage airgap image bundle: $(basename "$_img")" >&2
+        exit 1
+      fi
     done
   fi
 
