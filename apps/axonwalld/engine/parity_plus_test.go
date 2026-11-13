@@ -11,13 +11,15 @@ import (
 func TestXdpLpmCidrAndSynFloodProtection(t *testing.T) {
 	mgr := NewEBPFManager()
 
-	// Valid public IPv4 /24 CIDR block
-	if err := mgr.AddXdpBlock("198.51.100.0/24", 600, 1, "Threat feed ASN prefix"); err != nil {
-		t.Fatalf("expected valid IPv4 CIDR block to succeed, got: %v", err)
-	}
-	// Valid public IPv6 /48 CIDR block
-	if err := mgr.AddXdpBlock("2001:db8:c0de::/48", 600, 2, "IPv6 botnet prefix"); err != nil {
-		t.Fatalf("expected valid IPv6 CIDR block to succeed, got: %v", err)
+	// A-H3 (round 3): the manager is unstarted, so no CIDR block can
+	// be enforced in the kernel — valid CIDRs must FAIL LOUDLY
+	// instead of succeeding and being listed as active. (The old
+	// test asserted the lie; the accept path needs a host with eBPF
+	// loaded and is not exercisable in this sandbox.)
+	for _, cidr := range []string{"198.51.100.0/24", "2001:db8:c0de::/48"} {
+		if err := mgr.AddXdpBlock(cidr, 600, 1, "Threat feed prefix"); err == nil {
+			t.Fatalf("expected CIDR block %s on an unstarted manager to fail loudly, got nil", cidr)
+		}
 	}
 
 	// Overly broad IPv4 CIDR (/4 < /8) must be rejected
@@ -40,15 +42,15 @@ func TestXdpLpmCidrAndSynFloodProtection(t *testing.T) {
 	if snap.SynFloodLimitPps != 5000 {
 		t.Fatalf("expected SynFloodLimitPps=5000, got %d", snap.SynFloodLimitPps)
 	}
-	if len(snap.ActiveBlocks) != 2 {
-		t.Fatalf("expected 2 active CIDR blocks, got %d", len(snap.ActiveBlocks))
+	if len(snap.ActiveBlocks) != 0 {
+		t.Fatalf("expected 0 active CIDR blocks on an unstarted manager, got %d", len(snap.ActiveBlocks))
 	}
 
 	if err := mgr.RemoveXdpBlock("198.51.100.0/24"); err != nil {
 		t.Fatalf("RemoveXdpBlock CIDR failed: %v", err)
 	}
-	if len(mgr.GetDataplaneSnapshot(10).ActiveBlocks) != 1 {
-		t.Fatalf("expected 1 active block remaining")
+	if len(mgr.GetDataplaneSnapshot(10).ActiveBlocks) != 0 {
+		t.Fatalf("expected 0 active blocks remaining")
 	}
 }
 

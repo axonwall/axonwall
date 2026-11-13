@@ -333,6 +333,21 @@ func (m *EBPFManager) Start(interfaces []string) error {
 	}
 	m.mu.Unlock()
 
+	// A-H3 (round 3): Start used to return nil with zero interfaces
+	// attached, leaving running=true while the kernel enforced
+	// nothing — and AddXdpBlock then recorded blocks as active.
+	// A manager with no XDP program attached enforces nothing, so
+	// fail loudly instead of reporting a live dataplane.
+	if len(attached) == 0 {
+		for _, l := range m.links {
+			l.Close()
+		}
+		m.links = nil
+		m.objs.Close()
+		clearRunning()
+		return fmt.Errorf("eBPF XDP attach failed on all %d interface(s): no XDP program attached, dataplane not enforced", len(interfaces))
+	}
+
 	m.monitorStarted.Store(true)
 	go m.monitorFlows()
 
@@ -592,6 +607,23 @@ func (m *EBPFManager) monitorFlows() {
 	}
 }
 
+// requireXdpEnforcing reports whether a block added right now would
+// actually be dropped by the kernel: the manager must be started with
+// at least one XDP program attached. Callers check this BEFORE taking
+// blockMu: GetDataplaneSnapshot takes mu then blockMu, so taking them
+// in the opposite order here could deadlock against a concurrent
+// snapshot.
+func (m *EBPFManager) requireXdpEnforcing() error {
+	m.mu.Lock()
+	running := m.running
+	attached := len(m.attachedIfaces) > 0
+	m.mu.Unlock()
+	if !running || !attached {
+		return errors.New("XDP dataplane is not enforcing: eBPF manager is not running with an attached interface; refusing to record a block the kernel would not drop")
+	}
+	return nil
+}
+
 // AddXdpBlock inserts a single IPv4/IPv6 host address OR an IPv4 (/8../32) / IPv6 (/16../128) CIDR
 // subnet into the Ring-0 NIC driver XDP blocklist / LPM Trie map with blast-radius validation.
 func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode uint32, reasonText string) error {
@@ -639,6 +671,14 @@ func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode ui
 				ReasonCode: reasonCode,
 				Active:     1,
 			}
+			// A-H3 (round 3): a nil map used to mean "record the
+			// userspace metadata and return nil", so the block was
+			// listed as active while the kernel dropped nothing.
+			// A block that cannot be written to the kernel map is
+			// not a block: fail loudly and record nothing.
+			if err := m.requireXdpEnforcing(); err != nil {
+				return err
+			}
 			m.blockMu.Lock()
 			defer m.blockMu.Unlock()
 
@@ -647,10 +687,11 @@ func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode ui
 					Prefixlen: uint32(ones),
 					Addr:      ipv4Uint32FromBytes(ip4),
 				}
-				if m.objs.CidrBlock4Map != nil {
-					if err := m.objs.CidrBlock4Map.Put(lpmKey, blkVal); err != nil {
-						return fmt.Errorf("failed to insert IPv4 CIDR into XDP cidr_block4_map: %w", err)
-					}
+				if m.objs.CidrBlock4Map == nil {
+					return fmt.Errorf("XDP cidr_block4_map is not loaded: eBPF dataplane not enforcing; block %q not recorded", raw)
+				}
+				if err := m.objs.CidrBlock4Map.Put(lpmKey, blkVal); err != nil {
+					return fmt.Errorf("failed to insert IPv4 CIDR into XDP cidr_block4_map: %w", err)
 				}
 				m.cidrMetaV4[lpmKey] = xdpBlockMeta{expiresAt: expAt, reason: reasonText}
 				return nil
@@ -666,10 +707,11 @@ func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode ui
 				Prefixlen: uint32(ones),
 				Addr:      addrArr,
 			}
-			if m.objs.CidrBlock6Map != nil {
-				if err := m.objs.CidrBlock6Map.Put(lpmKey6, blkVal); err != nil {
-					return fmt.Errorf("failed to insert IPv6 CIDR into XDP cidr_block6_map: %w", err)
-				}
+			if m.objs.CidrBlock6Map == nil {
+				return fmt.Errorf("XDP cidr_block6_map is not loaded: eBPF dataplane not enforcing; block %q not recorded", raw)
+			}
+			if err := m.objs.CidrBlock6Map.Put(lpmKey6, blkVal); err != nil {
+				return fmt.Errorf("failed to insert IPv6 CIDR into XDP cidr_block6_map: %w", err)
 			}
 			m.cidrMetaV6[lpmKey6] = xdpBlockMeta{expiresAt: expAt, reason: reasonText}
 			return nil
@@ -693,15 +735,21 @@ func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode ui
 		Active:     1,
 	}
 
+	// A-H3 (round 3): see the CIDR branches above — never record
+	// userspace metadata for a block the kernel map did not accept.
+	if err := m.requireXdpEnforcing(); err != nil {
+		return err
+	}
 	m.blockMu.Lock()
 	defer m.blockMu.Unlock()
 
 	if ip4 := parsed.To4(); ip4 != nil {
 		k := ipv4Uint32FromBytes(ip4)
-		if m.objs.BlocklistMap != nil {
-			if err := m.objs.BlocklistMap.Put(k, blkVal); err != nil {
-				return fmt.Errorf("failed to insert IPv4 into XDP blocklist_map: %w", err)
-			}
+		if m.objs.BlocklistMap == nil {
+			return fmt.Errorf("XDP blocklist_map is not loaded: eBPF dataplane not enforcing; block %q not recorded", raw)
+		}
+		if err := m.objs.BlocklistMap.Put(k, blkVal); err != nil {
+			return fmt.Errorf("failed to insert IPv4 into XDP blocklist_map: %w", err)
 		}
 		m.blockedUntil[k] = expAt
 		m.blockMetaV4[k] = xdpBlockMeta{expiresAt: expAt, reason: reasonText}
@@ -714,10 +762,11 @@ func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode ui
 	}
 	var addrArr [16]uint8
 	copy(addrArr[:], ip6)
-	if m.objs.Blocklist6Map != nil {
-		if err := m.objs.Blocklist6Map.Put(ebpf.FlowTrackerIpv6AddrKey{Addr: addrArr}, blkVal); err != nil {
-			return fmt.Errorf("failed to insert IPv6 into XDP blocklist6_map: %w", err)
-		}
+	if m.objs.Blocklist6Map == nil {
+		return fmt.Errorf("XDP blocklist6_map is not loaded: eBPF dataplane not enforcing; block %q not recorded", raw)
+	}
+	if err := m.objs.Blocklist6Map.Put(ebpf.FlowTrackerIpv6AddrKey{Addr: addrArr}, blkVal); err != nil {
+		return fmt.Errorf("failed to insert IPv6 into XDP blocklist6_map: %w", err)
 	}
 	m.blockMetaV6[addrArr] = xdpBlockMeta{expiresAt: expAt, reason: reasonText}
 	return nil
@@ -932,8 +981,13 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 			})
 		}
 	}
+	// A-H3: the metadata-only fallbacks below list a block as active
+	// even when its kernel map is not loaded, i.e. when nothing is
+	// enforced. Each fallback is gated on its map being loaded; with
+	// the AddXdpBlock fix no such metadata can be created, and this
+	// keeps a stale entry from ever being reported as active again.
 	for ipUint, exp := range m.blockedUntil {
-		if seenV4[ipUint] || time.Now().After(exp) {
+		if m.objs.BlocklistMap == nil || seenV4[ipUint] || time.Now().After(exp) {
 			continue
 		}
 		meta := m.blockMetaV4[ipUint]
@@ -972,7 +1026,7 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 		}
 	}
 	for addrArr, meta := range m.blockMetaV6 {
-		if seenV6[addrArr] || (!meta.expiresAt.IsZero() && time.Now().After(meta.expiresAt)) {
+		if m.objs.Blocklist6Map == nil || seenV6[addrArr] || (!meta.expiresAt.IsZero() && time.Now().After(meta.expiresAt)) {
 			continue
 		}
 		snap.ActiveBlocks = append(snap.ActiveBlocks, XdpBlockSnapshotEntry{
@@ -986,7 +1040,7 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 
 	// LPM CIDR entries (IPv4 & IPv6)
 	for lpm4, meta := range m.cidrMetaV4 {
-		if !meta.expiresAt.IsZero() && time.Now().After(meta.expiresAt) {
+		if m.objs.CidrBlock4Map == nil || (!meta.expiresAt.IsZero() && time.Now().After(meta.expiresAt)) {
 			continue
 		}
 		var dropPkts, dropBytes uint64
@@ -1013,7 +1067,7 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 		})
 	}
 	for lpm6, meta := range m.cidrMetaV6 {
-		if !meta.expiresAt.IsZero() && time.Now().After(meta.expiresAt) {
+		if m.objs.CidrBlock6Map == nil || (!meta.expiresAt.IsZero() && time.Now().After(meta.expiresAt)) {
 			continue
 		}
 		var dropPkts, dropBytes uint64
