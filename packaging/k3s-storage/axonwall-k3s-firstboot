@@ -450,6 +450,12 @@ chmod 0700 "$K3S_CONF_DIR"
 
 if [ "$K3S_ROLE" = "agent" ]; then
     log "configuring node in K3s AGENT (worker + ZFS storage) mode"
+    # D-M7: an agent with an empty server URL or join token can never join
+    # the cluster. Fail closed (the marker stays, so the next boot retries)
+    # instead of writing `server: ""` into config.yaml.
+    if [ -z "${K3S_SERVER_URL:-}" ] || [ -z "${K3S_JOIN_TOKEN:-}" ]; then
+        die "K3s agent role requires K3S_SERVER_URL and K3S_JOIN_TOKEN in ${ENV_FILE}; refusing to write an unjoinable agent config"
+    fi
     touch "${K3S_CONF_DIR}/agent-mode"
     chmod 0600 "${K3S_CONF_DIR}/agent-mode"
     printf '%s\n' "${K3S_JOIN_TOKEN:-}" > "${K3S_CONF_DIR}/agent-token"

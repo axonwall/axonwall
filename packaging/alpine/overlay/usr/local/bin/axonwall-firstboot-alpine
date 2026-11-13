@@ -225,6 +225,13 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
   [ -x /etc/init.d/zfs-mount ] && ln -sf /etc/init.d/zfs-mount /etc/runlevels/boot/zfs-mount
 
   if [ "$K3S_ROLE" = "agent" ]; then
+    # D-M7: an agent with an empty server URL or join token can never join
+    # the cluster. Fail closed (the marker stays, so the next boot retries)
+    # instead of writing `server: ""` into config.yaml.
+    if [ -z "${K3S_SERVER_URL:-}" ] || [ -z "${K3S_JOIN_TOKEN:-}" ]; then
+      echo "[Axonwall K3s Firstboot] ERROR: K3s agent role requires K3S_SERVER_URL and K3S_JOIN_TOKEN in /etc/axonwall/k3s-storage.env; refusing to write an unjoinable agent config." >&2
+      exit 1
+    fi
     touch /etc/rancher/k3s/agent-mode
     chmod 0600 /etc/rancher/k3s/agent-mode
     printf '%s\n' "${K3S_JOIN_TOKEN:-}" > /etc/rancher/k3s/agent-token
