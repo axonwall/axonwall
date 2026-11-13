@@ -1496,8 +1496,27 @@ export function AxonwallTuiApp({
       const bes = partitionStatus?.bootEnvironments || [];
       if (input === 'h') {
         setStatusMessage('Running partition & ZBM boot health verification...');
+        // B-H3 (round 3): /v1/system/health/verify returns a
+        // PartitionStatus, which has NO `success` field — only
+        // `healthVerified`, `bootCount`, and `checks[]`. The old
+        // `res?.success !== false` test was therefore always true
+        // and printed "verified and bootcount cleared" even when
+        // every check failed and the bootcount commit failed. The
+        // daemon sets healthVerified only after all checks pass AND
+        // the bootcount=0 commit lands on disk, so it is the only
+        // honest signal; name the failed checks otherwise.
         callDaemon('/v1/system/health/verify', 'POST', {}, 15000).then((res) => {
-          setStatusMessage(res?.success !== false ? '✔ System boot health verified and bootcount cleared!' : `✖ Health check: ${res?.message}`);
+          if (res?.success === false) {
+            setStatusMessage(`✖ Health check failed (${res?.errorKind || 'daemon-error'}): ${res?.message || res?.error || 'daemon did not answer'} — boot health unknown, bootcount NOT cleared.`);
+          } else if (res?.healthVerified === true) {
+            setStatusMessage('✔ System boot health verified and bootcount cleared!');
+          } else {
+            const failed = Array.isArray(res?.checks)
+              ? res.checks.filter((c: any) => c?.status === 'FAIL').map((c: any) => c?.name || 'unnamed check')
+              : [];
+            const detail = failed.length > 0 ? `failed checks: ${failed.join(', ')}` : 'verification did not pass';
+            setStatusMessage(`✖ Boot health verification FAILED (${detail}); bootcount NOT cleared (bootCount ${res?.bootCount ?? '?'}). Do not trust this slot.`);
+          }
           refreshAll();
         });
         return;
