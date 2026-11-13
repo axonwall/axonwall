@@ -22,6 +22,9 @@ SPLASH_SRC=""
 if [ -f "${CHROOT_DIR}/etc/axonwall/.vault-edition" ] || grep -qi "Vault" "${BIN_DIR}/.disk/info" 2>/dev/null; then
   FLAVOR_TITLE="Axonwall Vault OS"
   LIVE_HOST="axonwall-vault"
+elif [ -f "${CHROOT_DIR}/etc/axonwall/.k3s-edition" ] || grep -qi "K3s" "${BIN_DIR}/.disk/info" 2>/dev/null; then
+  FLAVOR_TITLE="Axonwall K3s Storage Host"
+  LIVE_HOST="axonwall-storage"
 fi
 
 for cand in \
@@ -178,6 +181,10 @@ menuentry "Install Axonwall Vault Edition (Immutable S3 Storage)" --hotkey=m {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=vault findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
 }
+menuentry "Install Axonwall K3s + ZFS Storage Host (Minimal)" --hotkey=k {
+	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=k3s-storage findiso=\${iso_path}
+	initrd	${LIVE_INITRD}
+}
 menuentry "Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)" --hotkey=z {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall.unattended=1 findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
@@ -274,6 +281,12 @@ label install-vault
 	linux ${LIVE_KERN}
 	initrd ${LIVE_INITRD}
 	append ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=vault
+
+label install-k3s-storage
+	menu label Install Axonwall ^K3s + ZFS Storage Host (Minimal)
+	linux ${LIVE_KERN}
+	initrd ${LIVE_INITRD}
+	append ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=k3s-storage
 
 label install-unattended
 	menu label ^Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)

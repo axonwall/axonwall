@@ -876,6 +876,27 @@ LABEL install
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
   APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+SYSLINUX_EOF
+
+if [[ "${EDITION}" == "axonwall" ]]; then
+cat << 'SYSLINUX_EDITIONS_EOF' >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+
+LABEL install-vault
+  MENU LABEL Install Axonwall ^Vault Edition (Immutable S3 Storage)
+  KERNEL /boot/vmlinuz-virt
+  INITRD /boot/initramfs-virt
+  APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+
+LABEL install-k3s-storage
+  MENU LABEL Install Axonwall ^K3s + ZFS Storage Host (Minimal)
+  KERNEL /boot/vmlinuz-virt
+  INITRD /boot/initramfs-virt
+  APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+SYSLINUX_EDITIONS_EOF
+sed -i "s|/boot/vmlinuz-virt|/boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}|g; s|/boot/initramfs-virt|/boot/initramfs-${ALPINE_KERNEL_FLAVOR}|g; s|modules=loop,[^ ]*|modules=${STORAGE_MODULES}|g" "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+fi
+
+cat << SYSLINUX_REST_EOF >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 
 LABEL live
   MENU LABEL ${BOOT_LIVE_LABEL}
@@ -888,7 +909,7 @@ LABEL unattended
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
   APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
-SYSLINUX_EOF
+SYSLINUX_REST_EOF
 
 cat << GRUB_EOF > "${WORK_DIR}/iso/boot/grub/grub.cfg"
 set default=0
@@ -915,6 +936,24 @@ menuentry "${BOOT_GRUB_INSTALL_LABEL}" {
   linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
+GRUB_EOF
+
+if [[ "${EDITION}" == "axonwall" ]]; then
+cat << GRUB_EDITIONS_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
+
+menuentry "Install Axonwall Vault Edition (Immutable S3 Storage)" {
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
+}
+
+menuentry "Install Axonwall K3s + ZFS Storage Host (Minimal)" {
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
+}
+GRUB_EDITIONS_EOF
+fi
+
+cat << GRUB_REST_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
 
 menuentry "${BOOT_GRUB_LIVE_LABEL}" {
   linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}quiet console=tty0 console=ttyS0,115200
@@ -925,7 +964,7 @@ menuentry "Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)" {
   linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
-GRUB_EOF
+GRUB_REST_EOF
 
 # 6. Assemble bootable BIOS + UEFI Hybrid ISO
 echo "[+] Generating hybrid BIOS/UEFI ISO image: ${ISO_NAME}..."

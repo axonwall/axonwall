@@ -2020,7 +2020,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [K] K3s Role  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
 					colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 			} else {
-				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI Menu\n",
+				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
 					colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 			}
 

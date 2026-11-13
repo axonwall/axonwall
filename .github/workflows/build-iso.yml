@@ -239,9 +239,17 @@ jobs:
             echo "::error::vault preseed enabled-service lists differ"
             fail=1
           fi
+          if ! diff -u <(extract_pkgs packaging/k3s-storage/preseed-k3s-storage.cfg) <(extract_pkgs packaging/k3s-storage/preseed-k3s-storage-binary.cfg); then
+            echo "::error::k3s-storage preseed package lists differ"
+            fail=1
+          fi
+          if ! diff -u <(extract_services packaging/k3s-storage/preseed-k3s-storage.cfg) <(extract_services packaging/k3s-storage/preseed-k3s-storage-binary.cfg); then
+            echo "::error::k3s-storage preseed enabled-service lists differ"
+            fail=1
+          fi
           exit $fail
 
-      - name: Build Hybrid Appliance ISO (Unified NGFW + Vault Edition)
+      - name: Build Hybrid Appliance ISO (Unified NGFW, Vault & K3s Storage Editions)
         run: |
           sudo ./packaging/iso/build-iso.sh
 
@@ -402,10 +410,10 @@ jobs:
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
             - **Distribution**:
-              - Debian 13 (Trixie) amd64 (Unified Hybrid ISO for NGFW & Vault Editions + Cloud QCOW2 + .deb Package)
+              - Debian 13 (Trixie) amd64 (Unified Hybrid ISO for NGFW, Vault & K3s Storage Editions + Cloud QCOW2 + .deb Package)
               - Super-Slim Edge NGFW UEFI Unified Kernel Image (`sku-vm-virtio` default virtual appliance)
             - **Artifacts**:
-              - `axonwall-debian13-amd64.iso` (Unified Next-Gen Installer: Axonwall NGFW + Vault S3 Storage Edition)
+              - `axonwall-debian13-amd64.iso` (Unified Next-Gen Installer: Axonwall NGFW + Vault S3 + K3s Storage Editions)
               - `axonwall-debian13-amd64-cloud.qcow2`
               - `axonwall-edge-sku-vm-virtio.efi` (Single-File EFI UKI with embedded Go PID 1)
               - `axonwall-edge-sku-vm-virtio-initramfs.cpio.gz`
