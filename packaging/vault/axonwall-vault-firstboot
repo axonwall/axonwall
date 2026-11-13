@@ -44,6 +44,15 @@ die() { echo "vault-firstboot: ERROR: $*" >&2; exit 1; }
 
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
+# D-M9 (marker): this IS the vault firstboot, so its edition is known by
+# construction. Stamp the canonical edition file (creating it if the
+# installer/builder didn't, correcting it if it disagrees) and log it.
+_edition_now="$(tr -d ' \t\r\n' < "$CONF_DIR/edition" 2>/dev/null || true)"
+if [ "$_edition_now" != "vault" ]; then
+  printf '%s\n' "vault" > "$CONF_DIR/edition"
+  log "edition file set to 'vault' (was '${_edition_now:-<missing>}')"
+fi
+
 # --- 1. TLS certificate ----------------------------------------------------
 mkdir -p "$CERT_DIR"
 if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then

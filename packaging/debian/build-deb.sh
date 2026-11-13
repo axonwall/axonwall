@@ -481,6 +481,12 @@ if [[ -f "${CHROOT_SRC}/etc/ssh/sshd_config.d/axonwall.conf" ]]; then
 fi
 
 echo "${VERSION}" > "${WORK_DIR}/etc/axonwall/version"
+# D-M9 (marker): the canonical edition file. Every package ships its
+# own edition, so the installed system always carries the record the
+# updater trusts first. (A regular payload file like `version`, not a
+# conffile: the package's edition is authoritative, so an upgrade
+# overwrites a hand-edit — same as `version`.)
+printf '%s\n' "${EDITION}" > "${WORK_DIR}/etc/axonwall/edition"
 # D-M9: the flavor .deb carries its own edition marker, so the package
 # is self-describing on the dpkg path (the updater reads the marker
 # from the installed root, which the rootfs clone carries).
@@ -665,6 +671,15 @@ if [[ "${EDITION}" != "axonwall" ]]; then
     [[ -f "${WORK_DIR}/lib/systemd/system/k3s-agent.service" ]] || { echo "[!] ERROR: k3s-storage package is missing k3s-agent.service." >&2; exit 1; }
     [[ -f "${WORK_DIR}/usr/share/axonwall/k3s/zfs-operator.yaml" ]] || { echo "[!] ERROR: k3s-storage package is missing zfs-operator.yaml." >&2; exit 1; }
   fi
+fi
+
+# D-M9 (marker): every package must ship its canonical edition file
+# with exactly its own edition — the updater trusts this file first,
+# so a package without it (or with the wrong value) would leave the
+# installed box's edition in question.
+if [[ "$(tr -d ' \t\r\n' < "${WORK_DIR}/etc/axonwall/edition" 2>/dev/null || true)" != "${EDITION}" ]]; then
+  echo "[!] ERROR: package '${PKG_NAME}' is missing /etc/axonwall/edition or it does not contain '${EDITION}'." >&2
+  exit 1
 fi
 
 # 8. Build Debian Archive via dpkg-deb (or docker fallback if dpkg-deb is absent)

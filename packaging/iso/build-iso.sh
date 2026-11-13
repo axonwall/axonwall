@@ -215,6 +215,12 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage-binary.cfg" config/includes.binary/preseed.cfg
 fi
 
+# D-M9 (marker): the canonical edition file for the live installer
+# environment (and, via this chroot, for the cloud image and every
+# install the TUI/d-i paths perform from this ISO). FLAVOR is the
+# builder's edition axis, validated to axonwall|vault|k3s-storage.
+printf '%s\n' "${FLAVOR}" > config/includes.chroot/etc/axonwall/edition
+
 # Ensure firstboot marker directory and service enable symlink exist
 mkdir -p config/includes.chroot/etc/axonwall/
 if [[ "${FLAVOR}" == "axonwall" ]]; then

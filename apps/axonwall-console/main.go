@@ -1586,6 +1586,11 @@ func readPassword(reader *bufio.Reader, prompt string) (string, error) {
 }
 
 func detectInstalledEdition() string {
+	// D-M9 (marker): the canonical edition file first, then the legacy
+	// markers — same order as axonwall-update.
+	if edition := readEditionFile(); edition != "" {
+		return edition
+	}
 	if _, err := os.Stat("/etc/axonwall/.k3s-edition"); err == nil {
 		return "k3s-storage"
 	}
