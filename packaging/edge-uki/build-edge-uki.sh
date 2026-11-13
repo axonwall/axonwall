@@ -94,6 +94,31 @@ SKU_GOAMD64="$(sed -n 's/^# AXONWALL_GOAMD64=//p' "${SKU_CONFIG}" | head -n 1 | 
 SKU_KCFLAGS="$(sed -n 's/^# AXONWALL_KCFLAGS=//p' "${SKU_CONFIG}" | head -n 1)"
 SKU_ARCH="${SKU_ARCH:-amd64}"
 
+# D-M10: the kernel build is arch-aware. SKU_ARCH=amd64 builds a native
+# x86_64 kernel (bzImage); SKU_ARCH=arm64 cross-compiles with
+# aarch64-linux-gnu- (Image). Before this, every full-uki build ran
+# host-arch make, required the x86 CONFIG_64BIT symbol, and copied
+# arch/x86/boot/bzImage — so the arm64 SKU could never build (the x86
+# compiler rejects its -mcpu=cortex-a73 KCFLAGS outright).
+case "${SKU_ARCH}" in
+  amd64)
+    KERNEL_ARCH="x86_64"
+    CROSS_COMPILE=""
+    KERNEL_IMAGE="bzImage"
+    KERNEL_IMAGE_PATH="arch/x86/boot/bzImage"
+    ;;
+  arm64)
+    KERNEL_ARCH="arm64"
+    CROSS_COMPILE="aarch64-linux-gnu-"
+    KERNEL_IMAGE="Image"
+    KERNEL_IMAGE_PATH="arch/arm64/boot/Image"
+    ;;
+  *)
+    echo "[!] ERROR: Unsupported SKU arch '${SKU_ARCH}' (expected amd64 or arm64)" >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "${OUTPUT_DIR}"
 WORK_DIR="$(mktemp -d /tmp/axonwall-edge-uki.XXXXXX)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
@@ -201,6 +226,12 @@ fi
 
 # 5. Optional Full Linux Kernel + Single-File EFI UKI compilation
 if [[ "${MODE}" == "full-uki" ]]; then
+  # D-M10: fail fast when the cross toolchain is absent, before spending
+  # time downloading the kernel tarball.
+  if [[ -n "${CROSS_COMPILE}" ]] && ! command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then
+    echo "[!] ERROR: SKU '${SKU}' needs the ${CROSS_COMPILE} cross toolchain (${CROSS_COMPILE}gcc not found in PATH). On Debian: apt install gcc-aarch64-linux-gnu." >&2
+    exit 1
+  fi
   CACHE_DIR="${SCRIPT_DIR}/.cache"
   mkdir -p "${CACHE_DIR}"
   TARBALL="${CACHE_DIR}/linux-${KERNEL_VERSION}.tar.xz"
@@ -214,22 +245,35 @@ if [[ "${MODE}" == "full-uki" ]]; then
   KSRC="${WORK_DIR}/linux-${KERNEL_VERSION}"
 
   echo "[+] Configuring minimalist monolithic kernel for ${SKU} (tinyconfig + SKU fragment)..."
-  make -C "${KSRC}" tinyconfig >/dev/null
-  KCONFIG_CONFIG="${KSRC}/.config" "${KSRC}/scripts/kconfig/merge_config.sh" -m "${KSRC}/.config" "${MERGED_KCONFIG}" >/dev/null
-  make -C "${KSRC}" olddefconfig >/dev/null
+  # D-M10: make is always invoked with the target ARCH (and CROSS_COMPILE
+  # when cross-building); merge_config.sh picks them up from the
+  # environment.
+  _kmake=(make -C "${KSRC}" "ARCH=${KERNEL_ARCH}")
+  [[ -n "${CROSS_COMPILE}" ]] && _kmake+=("CROSS_COMPILE=${CROSS_COMPILE}")
+  "${_kmake[@]}" tinyconfig >/dev/null
+  ARCH="${KERNEL_ARCH}" CROSS_COMPILE="${CROSS_COMPILE}" KCONFIG_CONFIG="${KSRC}/.config" "${KSRC}/scripts/kconfig/merge_config.sh" -m "${KSRC}/.config" "${MERGED_KCONFIG}" >/dev/null
+  "${_kmake[@]}" olddefconfig >/dev/null
 
-  for sym in CONFIG_64BIT=y CONFIG_EFI_STUB=y CONFIG_BLK_DEV_INITRD=y CONFIG_NF_TABLES=y CONFIG_WIREGUARD=y; do
+  # D-M10: the 64-bit symbol is arch-specific (CONFIG_64BIT on x86_64,
+  # CONFIG_ARM64 on arm64); the rest are arch-neutral.
+  _required_syms=(CONFIG_EFI_STUB=y CONFIG_BLK_DEV_INITRD=y CONFIG_NF_TABLES=y CONFIG_WIREGUARD=y)
+  if [[ "${KERNEL_ARCH}" == "arm64" ]]; then
+    _required_syms+=(CONFIG_ARM64=y)
+  else
+    _required_syms+=(CONFIG_64BIT=y)
+  fi
+  for sym in "${_required_syms[@]}"; do
     if ! grep -q "^${sym}$" "${KSRC}/.config"; then
       echo "[!] ERROR: Required kernel symbol ${sym} was dropped after olddefconfig!" >&2
       exit 1
     fi
   done
 
-  echo "[+] Compiling Single-File EFI UKI (bzImage with embedded PID 1 /init) using $(nproc) cores..."
-  make -C "${KSRC}" -j"$(nproc)" KCFLAGS="${SKU_KCFLAGS}" bzImage
+  echo "[+] Compiling Single-File EFI UKI (${KERNEL_IMAGE} with embedded PID 1 /init) using $(nproc) cores..."
+  "${_kmake[@]}" -j"$(nproc)" KCFLAGS="${SKU_KCFLAGS}" "${KERNEL_IMAGE}"
 
   UKI_OUT="${OUTPUT_DIR}/axonwall-edge-${SKU}.efi"
-  cp "${KSRC}/arch/x86/boot/bzImage" "${UKI_OUT}"
+  cp "${KSRC}/${KERNEL_IMAGE_PATH}" "${UKI_OUT}"
   (cd "${OUTPUT_DIR}" && sha256sum "$(basename "${UKI_OUT}")" > "$(basename "${UKI_OUT}").sha256")
   (cd "${OUTPUT_DIR}" && sha256sum "$(basename "${INITRAMFS_OUT}")" > "$(basename "${INITRAMFS_OUT}").sha256")
   echo "[✓] Built Single-File UEFI Unified Kernel Image: ${UKI_OUT} ($(du -sh "${UKI_OUT}" | awk '{print $1}'))"

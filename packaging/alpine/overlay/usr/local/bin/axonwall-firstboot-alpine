@@ -70,6 +70,22 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
 
   # 2. Host Mode DHCP networking (never router NAT / never static 192.168.1.1)
   _phys_nics="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|cni.*|flannel.*|virbr.*|dummy.*|bond.*|pimreg)$' || true)"
+  # D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+  # ports) — a bond slave must never be DHCP'd; only the master carries
+  # an address. NOTE: keep the list newline-separated (see the
+  # _primary_nic pick below, which takes the first word either way, and
+  # the D-M6 note in axonwall-k3s-firstboot).
+  _nics_filtered=""
+  for _nic in $_phys_nics; do
+    [ -e "/sys/class/net/${_nic}/master" ] && continue
+    _nics_filtered="${_nics_filtered:+$_nics_filtered
+}$_nic"
+  done
+  _phys_nics="$_nics_filtered"
+  # D-M5: exactly one NIC carries the default route — the first detected
+  # NIC. Every other NIC is DHCP'd without a gateway (see below).
+  _primary_nic=""
+  for _nic in $_phys_nics; do _primary_nic="$_nic"; break; done
   if [ ! -s /etc/network/interfaces ] && [ ! -f /etc/axonwall/.interfaces_configured ]; then
     mkdir -p /etc/network /etc/network/interfaces.d
     {
@@ -80,6 +96,11 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
       for _nic in $_phys_nics; do
         echo "auto ${_nic}"
         echo "iface ${_nic} inet dhcp"
+        # D-M5: udhcpc (ifupdown's client here) has no nogateway flag —
+        # delete any default route the lease installs via a non-primary NIC.
+        if [ -n "$_primary_nic" ] && [ "$_nic" != "$_primary_nic" ]; then
+          echo "    post-up ip route del default dev ${_nic} || true"
+        fi
         echo ""
       done
     } > /etc/network/interfaces
@@ -88,9 +109,22 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
     ip link set up dev "$_nic" 2>/dev/null || true
     if ! ip -4 addr show dev "$_nic" 2>/dev/null | grep -q 'inet '; then
       if command -v dhcpcd >/dev/null 2>&1; then
-        dhcpcd -4 -t 10 "$_nic" >/dev/null 2>&1 || true
+        if [ -n "$_primary_nic" ] && [ "$_nic" != "$_primary_nic" ]; then
+          # D-M5: -G installs no default route (and -C keeps this lease
+          # from clobbering resolv.conf), as in the NGFW firstboot.
+          dhcpcd -4 -G -C resolv.conf -t 10 "$_nic" >/dev/null 2>&1 || true
+        else
+          dhcpcd -4 -t 10 "$_nic" >/dev/null 2>&1 || true
+        fi
       else
         /sbin/udhcpc -b -i "$_nic" -p "/var/run/udhcpc.${_nic}.pid" >/dev/null 2>&1 || true
+        # D-M5: udhcpc has no nogateway flag — remove any default route
+        # it just installed via this non-primary NIC. A backgrounded
+        # udhcpc can reinstall the route on a later renewal; the
+        # persistent config above is the durable guard.
+        if [ -n "$_primary_nic" ] && [ "$_nic" != "$_primary_nic" ]; then
+          ip route del default dev "$_nic" 2>/dev/null || true
+        fi
       fi
     fi
   done
@@ -146,10 +180,16 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
         case "$_ztopo" in stripe|auto|"") _targ="" ;; *) _targ="$_ztopo" ;; esac
         if [ "$_zpool" = "zroot" ]; then
           # shellcheck disable=SC2086
-          zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O canmount=off -O mountpoint=none zroot $_targ $_zvdevs $_accel 2>/dev/null || true
+          if ! zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O canmount=off -O mountpoint=none zroot $_targ $_zvdevs $_accel; then
+            echo "[Axonwall K3s Firstboot] ERROR: failed to create OpenZFS pool 'zroot'; retaining firstboot marker for retry." >&2
+            exit 1
+          fi
         else
           # shellcheck disable=SC2086
-          zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O mountpoint=/mnt/tank "$_zpool" $_targ $_zvdevs $_accel 2>/dev/null || true
+          if ! zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O mountpoint=/mnt/tank "$_zpool" $_targ $_zvdevs $_accel; then
+            echo "[Axonwall K3s Firstboot] ERROR: failed to create OpenZFS pool '${_zpool}'; retaining firstboot marker for retry." >&2
+            exit 1
+          fi
         fi
       fi
     fi
@@ -159,18 +199,37 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
   mkdir -p /var/lib/rancher/k3s
   if command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1; then
     if zpool list -H tank >/dev/null 2>&1; then
-      zfs list -H tank/k8s >/dev/null 2>&1 || zfs create -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k8s 2>/dev/null || true
+      # D-M3: a failed dataset create used to be swallowed (|| true) and
+      # the branch still declared firstboot complete. Fail loudly instead
+      # — the marker stays, so the next boot retries.
+      if ! zfs list -H tank/k8s >/dev/null 2>&1; then
+        if ! zfs create -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k8s; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create tank/k8s dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
+      fi
       if ! zfs list -H tank/k3s-runtime >/dev/null 2>&1; then
-        zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k3s-runtime 2>/dev/null || true
+        if ! zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k3s-runtime; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create tank/k3s-runtime dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
       else
         zfs mount tank/k3s-runtime 2>/dev/null || true
       fi
       K8S_ZFS_POOL="tank/k8s"
     elif zpool list -H zroot >/dev/null 2>&1; then
       mkdir -p /var/lib/axonwall/k8s-zfs
-      zfs list -H zroot/k8s >/dev/null 2>&1 || zfs create -o mountpoint=/var/lib/axonwall/k8s-zfs -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k8s 2>/dev/null || true
+      if ! zfs list -H zroot/k8s >/dev/null 2>&1; then
+        if ! zfs create -o mountpoint=/var/lib/axonwall/k8s-zfs -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k8s; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create zroot/k8s dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
+      fi
       if ! zfs list -H zroot/k3s-runtime >/dev/null 2>&1; then
-        zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k3s-runtime 2>/dev/null || true
+        if ! zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k3s-runtime; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create zroot/k3s-runtime dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
       else
         zfs mount zroot/k3s-runtime 2>/dev/null || true
       fi
@@ -182,7 +241,12 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
     for _img in /usr/share/axonwall/k3s/images/*.tar*; do
       [ -f "$_img" ] || continue
       mkdir -p /var/lib/rancher/k3s/agent/images
-      cp -f "$_img" /var/lib/rancher/k3s/agent/images/
+      # D-L8: under set -eu a failed copy already aborts the script; log
+      # the failure explicitly so the boot log says which bundle failed.
+      if ! cp -f "$_img" /var/lib/rancher/k3s/agent/images/; then
+        echo "WARNING: failed to stage airgap image bundle: $(basename "$_img")" >&2
+        exit 1
+      fi
     done
   fi
 
@@ -193,6 +257,13 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
   [ -x /etc/init.d/zfs-mount ] && ln -sf /etc/init.d/zfs-mount /etc/runlevels/boot/zfs-mount
 
   if [ "$K3S_ROLE" = "agent" ]; then
+    # D-M7: an agent with an empty server URL or join token can never join
+    # the cluster. Fail closed (the marker stays, so the next boot retries)
+    # instead of writing `server: ""` into config.yaml.
+    if [ -z "${K3S_SERVER_URL:-}" ] || [ -z "${K3S_JOIN_TOKEN:-}" ]; then
+      echo "[Axonwall K3s Firstboot] ERROR: K3s agent role requires K3S_SERVER_URL and K3S_JOIN_TOKEN in /etc/axonwall/k3s-storage.env; refusing to write an unjoinable agent config." >&2
+      exit 1
+    fi
     touch /etc/rancher/k3s/agent-mode
     chmod 0600 /etc/rancher/k3s/agent-mode
     printf '%s\n' "${K3S_JOIN_TOKEN:-}" > /etc/rancher/k3s/agent-token
@@ -267,6 +338,12 @@ SC_EOF
     [ -x /etc/init.d/k3s ] && ln -sf /etc/init.d/k3s /etc/runlevels/default/k3s
   fi
 
+  # D-M3: enable the readiness gate. axonwall-k3s-verify runs in the
+  # default runlevel after k3s/k3s-agent and clears the K3S_MARKER only
+  # once K3s proves ready (mirroring Debian's verify service). Before
+  # this, nothing on Alpine ever invoked the verify binary.
+  [ -x /etc/init.d/axonwall-k3s-verify ] && ln -sf /etc/init.d/axonwall-k3s-verify /etc/runlevels/default/axonwall-k3s-verify
+
   _pip="$(ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print a[1]}' || true)"
   cat << ISSUE_EOF > /etc/issue
 ======================================================================
@@ -277,8 +354,13 @@ SC_EOF
 
 ISSUE_EOF
 
-  rm -f "$K3S_MARKER" "$MARKER"
-  echo "[Axonwall K3s Firstboot] Complete."
+  # D-M3: the K3s marker is owned by axonwall-k3s-verify (OpenRC service,
+  # ordered after k3s/k3s-agent), which clears it only once K3s proves
+  # ready — mirroring the Debian axonwall-k3s-verify.service. Firstboot
+  # used to remove it unconditionally, so a failed bring-up was declared
+  # done and never retried. Only the NGFW marker is cleared here.
+  rm -f "$MARKER"
+  echo "[Axonwall K3s Firstboot] Complete; handing off to axonwall-k3s-verify."
   exit 0
 fi
 
@@ -322,6 +404,18 @@ if { [ -f /etc/axonwall/.interfaces_configured ] || [ -f /var/lib/axonwall/etc-a
   OPT2_IPV4_ADDRESS="$(grep '^OPT2_IPV4_ADDRESS=' /etc/axonwall/interfaces.conf | head -n1 | cut -d= -f2- || true)"
 else
   IFACES="$(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' | head -n 4 || true)"
+  # D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+  # ports) — a bond slave must never be picked as WAN/LAN; only the
+  # master carries an address. NOTE: keep the list newline-separated —
+  # the role picks below consume it with `sed -n 'Np'`, which would take
+  # a space-joined list as one NIC.
+  _ifaces_filtered=""
+  for _iface in $IFACES; do
+    [ -e "/sys/class/net/${_iface}/master" ] && continue
+    _ifaces_filtered="${_ifaces_filtered:+$_ifaces_filtered
+}$_iface"
+  done
+  IFACES="$_ifaces_filtered"
   WAN_IF="$(echo "$IFACES" | sed -n '1p')"
   LAN_IF="$(echo "$IFACES" | sed -n '2p')"
   OPT1_IF="$(echo "$IFACES" | sed -n '3p')"

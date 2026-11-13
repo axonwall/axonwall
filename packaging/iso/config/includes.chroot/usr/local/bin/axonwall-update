@@ -113,9 +113,34 @@ if command -v slapcat >/dev/null 2>&1 && [ -d /var/lib/axonwall/ldap/config/cn=c
   BACKUP_TS="$(date -u +"%Y%m%dT%H%M%SZ" 2>/dev/null || echo "latest")"
   mkdir -p /var/lib/axonwall/ldap/backups 2>/dev/null || true
   echo "[+] Creating pre-update OpenLDAP LDIF snapshot in /var/lib/axonwall/ldap/backups/..."
-  slapcat -F /var/lib/axonwall/ldap/config -n 0 -l "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-config-${BACKUP_TS}.ldif" 2>/dev/null || true
-  slapcat -F /var/lib/axonwall/ldap/config -n 1 -l "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-data-${BACKUP_TS}.ldif" 2>/dev/null || true
-  chmod 0600 "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-"*.ldif 2>/dev/null || true
+  # D-M8: this snapshot is what makes rollback possible after an
+  # LDAP-breaking update. A failed slapcat used to be swallowed (|| true)
+  # and the update proceeded with no snapshot at all. Fail closed: abort
+  # the update when either database cannot be dumped or its LDIF is
+  # missing afterwards. (An empty data LDIF is a valid backup of an empty
+  # directory, so existence — not size — is the check.)
+  _ldap_backup_failed=0
+  _ldap_config_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-config-${BACKUP_TS}.ldif"
+  _ldap_data_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-data-${BACKUP_TS}.ldif"
+  if ! slapcat -F /var/lib/axonwall/ldap/config -n 0 -l "$_ldap_config_ldif"; then
+    echo "[-] ERROR: slapcat failed to dump the OpenLDAP config database (cn=config)." >&2
+    _ldap_backup_failed=1
+  fi
+  if ! slapcat -F /var/lib/axonwall/ldap/config -n 1 -l "$_ldap_data_ldif"; then
+    echo "[-] ERROR: slapcat failed to dump the OpenLDAP data database." >&2
+    _ldap_backup_failed=1
+  fi
+  if [ "$_ldap_backup_failed" -eq 0 ]; then
+    chmod 0600 "$_ldap_config_ldif" "$_ldap_data_ldif" 2>/dev/null || true
+    if [ ! -f "$_ldap_config_ldif" ] || [ ! -f "$_ldap_data_ldif" ]; then
+      echo "[-] ERROR: pre-update OpenLDAP LDIF snapshot is incomplete (missing LDIF file)." >&2
+      _ldap_backup_failed=1
+    fi
+  fi
+  if [ "$_ldap_backup_failed" -eq 1 ]; then
+    echo "[-] ERROR: refusing to update without a pre-update LDAP snapshot; rollback after an LDAP-breaking update would have nothing to restore. Fix slapcat/LDAP and re-run the updater." >&2
+    exit 1
+  fi
 fi
 
 # Helper: Extract .deb payload to a destination directory on Debian

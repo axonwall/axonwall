@@ -494,13 +494,30 @@ else
         case "${K3S_ROLE_CHOICE:-1}" in
           2|agent|worker|AGENT)
             K3S_ROLE="agent"
-            printf "Enter K3s Server URL (e.g. https://10.0.0.10:6443): "
-            read -r K3S_SERVER_URL
-            printf "Enter K3s Cluster Join Token: "
-            stty -echo 2>/dev/null || true
-            read -r K3S_JOIN_TOKEN || K3S_JOIN_TOKEN=""
-            stty echo 2>/dev/null || true
-            echo ""
+            # D-M7: an agent with an empty server URL or join token can
+            # never join the cluster, so refuse to record one. Values
+            # already set (kernel cmdline, cloud-init seed, --apply-config)
+            # skip the prompt; without a tty there is nobody to ask, so
+            # fail closed instead of writing an unjoinable agent config.
+            while [ -z "$K3S_SERVER_URL" ]; do
+              if [ ! -t 0 ]; then
+                echo "[!] Error: K3s agent role requires a server URL (provide server_url in the cloud-init seed or --apply-config file)." >&2
+                exit 1
+              fi
+              printf "Enter K3s Server URL (e.g. https://10.0.0.10:6443): "
+              read -r K3S_SERVER_URL || K3S_SERVER_URL=""
+            done
+            while [ -z "$K3S_JOIN_TOKEN" ]; do
+              if [ ! -t 0 ]; then
+                echo "[!] Error: K3s agent role requires a cluster join token (provide join_token in the cloud-init seed or --apply-config file)." >&2
+                exit 1
+              fi
+              printf "Enter K3s Cluster Join Token: "
+              stty -echo 2>/dev/null || true
+              read -r K3S_JOIN_TOKEN || K3S_JOIN_TOKEN=""
+              stty echo 2>/dev/null || true
+              echo ""
+            done
             ;;
           *)
             K3S_ROLE="server"
