@@ -72,13 +72,20 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
   _phys_nics="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|cni.*|flannel.*|virbr.*|dummy.*|bond.*|pimreg)$' || true)"
   # D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
   # ports) — a bond slave must never be DHCP'd; only the master carries
-  # an address.
+  # an address. NOTE: keep the list newline-separated (see the
+  # _primary_nic pick below, which takes the first word either way, and
+  # the D-M6 note in axonwall-k3s-firstboot).
   _nics_filtered=""
   for _nic in $_phys_nics; do
     [ -e "/sys/class/net/${_nic}/master" ] && continue
-    _nics_filtered="${_nics_filtered:+$_nics_filtered }${_nic}"
+    _nics_filtered="${_nics_filtered:+$_nics_filtered
+}$_nic"
   done
   _phys_nics="$_nics_filtered"
+  # D-M5: exactly one NIC carries the default route — the first detected
+  # NIC. Every other NIC is DHCP'd without a gateway (see below).
+  _primary_nic=""
+  for _nic in $_phys_nics; do _primary_nic="$_nic"; break; done
   if [ ! -s /etc/network/interfaces ] && [ ! -f /etc/axonwall/.interfaces_configured ]; then
     mkdir -p /etc/network /etc/network/interfaces.d
     {
@@ -89,6 +96,11 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
       for _nic in $_phys_nics; do
         echo "auto ${_nic}"
         echo "iface ${_nic} inet dhcp"
+        # D-M5: udhcpc (ifupdown's client here) has no nogateway flag —
+        # delete any default route the lease installs via a non-primary NIC.
+        if [ -n "$_primary_nic" ] && [ "$_nic" != "$_primary_nic" ]; then
+          echo "    post-up ip route del default dev ${_nic} || true"
+        fi
         echo ""
       done
     } > /etc/network/interfaces
@@ -97,9 +109,22 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
     ip link set up dev "$_nic" 2>/dev/null || true
     if ! ip -4 addr show dev "$_nic" 2>/dev/null | grep -q 'inet '; then
       if command -v dhcpcd >/dev/null 2>&1; then
-        dhcpcd -4 -t 10 "$_nic" >/dev/null 2>&1 || true
+        if [ -n "$_primary_nic" ] && [ "$_nic" != "$_primary_nic" ]; then
+          # D-M5: -G installs no default route (and -C keeps this lease
+          # from clobbering resolv.conf), as in the NGFW firstboot.
+          dhcpcd -4 -G -C resolv.conf -t 10 "$_nic" >/dev/null 2>&1 || true
+        else
+          dhcpcd -4 -t 10 "$_nic" >/dev/null 2>&1 || true
+        fi
       else
         /sbin/udhcpc -b -i "$_nic" -p "/var/run/udhcpc.${_nic}.pid" >/dev/null 2>&1 || true
+        # D-M5: udhcpc has no nogateway flag — remove any default route
+        # it just installed via this non-primary NIC. A backgrounded
+        # udhcpc can reinstall the route on a later renewal; the
+        # persistent config above is the durable guard.
+        if [ -n "$_primary_nic" ] && [ "$_nic" != "$_primary_nic" ]; then
+          ip route del default dev "$_nic" 2>/dev/null || true
+        fi
       fi
     fi
   done
@@ -331,11 +356,14 @@ else
   IFACES="$(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' | head -n 4 || true)"
   # D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
   # ports) — a bond slave must never be picked as WAN/LAN; only the
-  # master carries an address.
+  # master carries an address. NOTE: keep the list newline-separated —
+  # the role picks below consume it with `sed -n 'Np'`, which would take
+  # a space-joined list as one NIC.
   _ifaces_filtered=""
   for _iface in $IFACES; do
     [ -e "/sys/class/net/${_iface}/master" ] && continue
-    _ifaces_filtered="${_ifaces_filtered:+$_ifaces_filtered }${_iface}"
+    _ifaces_filtered="${_ifaces_filtered:+$_ifaces_filtered
+}$_iface"
   done
   IFACES="$_ifaces_filtered"
   WAN_IF="$(echo "$IFACES" | sed -n '1p')"
