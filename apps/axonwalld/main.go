@@ -765,6 +765,24 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		return nil, status.Error(codes.InvalidArgument, "nft_script cannot be empty")
 	}
 
+	// B-M1 (round 3): refuse an overlapping apply. applyMu above
+	// serialises the ApplyBundle RPC itself, but the pending-confirm
+	// window lives AFTER ApplyBundle returns — so a second apply
+	// used to silently stop the first bundle's rollback timer,
+	// overwrite pendingJobID, and arm its own timer. The first
+	// caller's confirm was then refused with a job mismatch, and if
+	// neither confirmed in time the stale timer rolled the kernel
+	// back to last-known-good while disk held both rules. The second
+	// caller must confirm or roll back the pending job first (or
+	// wait for its deadline, after which the auto-rollback clears
+	// the slot); the rejection names the pending job so the caller
+	// knows exactly what to confirm. A re-apply of the SAME job id
+	// is rejected too — that job is already pending and confirmable
+	// under its own id, so there is nothing to re-apply.
+	if s.pendingConfirm {
+		return nil, status.Errorf(codes.FailedPrecondition, "another configuration apply (job %s) is still pending confirmation; confirm that job or roll it back (or wait for its deadline at %s) before applying a new bundle", s.pendingJobID, s.confirmDeadline.Format(time.RFC3339))
+	}
+
 	// 1. Dry run syntax check using `nft -c -f`
 	tmpFile, err := os.CreateTemp("", "axonwall-candidate-*.nft")
 	if err != nil {
