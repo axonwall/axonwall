@@ -2584,7 +2584,18 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       } else {
         console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
       }
-    } else if (activeHaEdgeId && (state.role === 'edge-ngfw' || satId.startsWith('edge-') || satId === 'edge')) {
+    } else if (activeHaEdgeId && state.role === 'edge-ngfw') {
+      // B-H4 (round 3): match on the derived role only, exactly
+      // like the untargeted DEMOTE in /fleet/ha-transition (B2-L1).
+      // The id prefix is a fallback inside deriveSatelliteRole, not
+      // a role: syncSatelliteDesiredState above already set
+      // state.role from the fleet node's CONFIGURED role, so a node
+      // configured as 'satellite' but named 'edge-*' has
+      // state.role === 'satellite' here, and the old
+      // `satId.startsWith('edge-')` clause demoted it anyway — and
+      // the satellite's Demote admin-downs its WAN, which for a
+      // plain satellite is its uplink (remotely bricked until local
+      // intervention). Only a derived edge-ngfw is demoted.
       sendHaTransition(state, 'DEMOTE', 'standby');
     }
 
