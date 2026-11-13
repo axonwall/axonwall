@@ -11,11 +11,26 @@ import {
   XCircle,
 } from 'lucide-react';
 import { getAgentStatus, getSystemServicesStatus } from '../../../server/agent';
+import { readFileSync } from 'node:fs';
+
+// C-M12: the OS label used to be the literal "Debian 13 Linux", which is
+// wrong on an Alpine-profile box. Read the real OS from the host the UI
+// runs on; fall back to the unadorned "Linux" when os-release is absent.
+function getOsPrettyName(): string {
+  try {
+    const text = readFileSync('/etc/os-release', 'utf8');
+    const line = text.split('\n').find((l) => l.startsWith('PRETTY_NAME='));
+    const value = line?.slice('PRETTY_NAME='.length).trim().replace(/^"|"$/g, '');
+    if (value) return value;
+  } catch {}
+  return 'Linux';
+}
 
 export default async function LobbyPage() {
   const status = await getAgentStatus();
   const services = await getSystemServicesStatus();
   const arch = process.arch === 'x64' ? 'amd64' : process.arch;
+  const osName = getOsPrettyName();
 
   const runningServicesCount = services.filter((s) => s.status === 'active').length;
   const slapdRunning = services.some((s) => s.unit === 'slapd.service' && s.status === 'active');
@@ -35,9 +50,10 @@ export default async function LobbyPage() {
           <div>
             <span className="text-xs text-slate-400 block font-medium">Data Plane Engine</span>
             <span className="text-lg font-bold text-white mt-1 block">nftables</span>
-            <span className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1">
-              <CheckCircle2 className="w-3.5 h-3.5" /> Fastpath Active
-            </span>
+            {/* C-M12: no nftables/dataplane check backs this card — the
+                old "Fastpath Active" checkmark asserted a measurement that
+                was never made. */}
+            <span className="text-[11px] text-slate-400 mt-1 block">Fastpath state not measured</span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
             <ShieldCheck className="w-5 h-5" />
@@ -50,7 +66,7 @@ export default async function LobbyPage() {
             <span className="text-lg font-bold text-white mt-1 block">
               {Math.floor(status.uptimeSeconds / 3600)}h {Math.floor((status.uptimeSeconds % 3600) / 60)}m
             </span>
-            <span className="text-[11px] text-slate-400 mt-1 block font-mono">Debian 13 Linux ({arch})</span>
+            <span className="text-[11px] text-slate-400 mt-1 block font-mono">{osName} ({arch})</span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
             <Activity className="w-5 h-5" />
@@ -69,7 +85,10 @@ export default async function LobbyPage() {
               }`}
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
-              {slapdRunning ? 'Directory Synced' : 'Unix Shadow DB'}
+              {/* C-M12: slapd being active proves the directory service is
+                  running, not that it is synced (syncrepl state is never
+                  checked). */}
+              {slapdRunning ? 'Directory Service Running' : 'Unix Shadow DB'}
             </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
@@ -83,7 +102,11 @@ export default async function LobbyPage() {
             <span className="text-lg font-bold text-white mt-1 block">
               {status.pendingConfirm ? 'Pending' : 'Healthy'}
             </span>
-            <span className="text-[11px] text-slate-400 mt-1 block">Signed LKG Enforced</span>
+            {/* C-M12: the pending-confirm state is measured; signed-LKG
+                enforcement is not. Render the state itself. */}
+            <span className="text-[11px] text-slate-400 mt-1 block">
+              {status.pendingConfirm ? 'Confirmation pending' : 'No pending confirm'}
+            </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
             <Cpu className="w-5 h-5" />

@@ -355,8 +355,17 @@ export default function ZfsPoolsPage() {
                     Topology: {pool.topology} • Compression: {pool.compression}
                   </span>
                 </div>
-                <span className="px-2.5 py-1 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 text-xs font-mono font-bold">
-                  {live?.health || 'ONLINE'}
+                <span
+                  className={`px-2.5 py-1 rounded-md border text-xs font-mono font-bold ${
+                    live?.health === 'ONLINE'
+                      ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                      : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  }`}
+                >
+                  {/* C-M9: a pool with no live runtime is UNKNOWN, not
+                      ONLINE — the old fallback asserted health the daemon
+                      never reported. */}
+                  {live?.health || 'UNKNOWN'}
                 </span>
               </div>
 
