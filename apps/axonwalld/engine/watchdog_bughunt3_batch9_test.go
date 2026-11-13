@@ -213,9 +213,9 @@ func TestBatch9RollbackArmsStandbyNotRunningFallback(t *testing.T) {
 			// The running BE already passed verification once, so the
 			// fallback pointer names the running (bad) BE.
 			"org.axonwall:fallback_be": "zroot/ROOT/axonwall-0.11.62",
-			"org.axonwall:active_be":  "zroot/ROOT/axonwall-0.11.62",
-			"org.axonwall:bootcount":  "0",
-			"org.axonwall:bootlimit":  "3",
+			"org.axonwall:active_be":   "zroot/ROOT/axonwall-0.11.62",
+			"org.axonwall:bootcount":   "0",
+			"org.axonwall:bootlimit":   "3",
 		},
 		// 0.11.61 is armed for next boot in this mock list (the
 		// standby); the running BE is 0.11.62. Note the sandbox's
@@ -242,9 +242,9 @@ func TestBatch9RollbackFailsWhenNoOtherBEExists(t *testing.T) {
 	zx := &batch9Zfs{
 		props: map[string]string{
 			"org.axonwall:fallback_be": "zroot/ROOT/axonwall-0.11.62",
-			"org.axonwall:active_be":  "zroot/ROOT/axonwall-0.11.62",
-			"org.axonwall:bootcount":  "0",
-			"org.axonwall:bootlimit":  "3",
+			"org.axonwall:active_be":   "zroot/ROOT/axonwall-0.11.62",
+			"org.axonwall:bootcount":   "0",
+			"org.axonwall:bootlimit":   "3",
 		},
 		bootfs:     "zroot/ROOT/axonwall-0.11.62",
 		listOutput: "",
@@ -266,9 +266,9 @@ func TestBatch9RollbackIgnoresDanglingFallbackPointer(t *testing.T) {
 			// fallback_be names a BE that was deleted since it was
 			// recorded; the standby 0.11.61 must win over it.
 			"org.axonwall:fallback_be": "zroot/ROOT/axonwall-0.11.60",
-			"org.axonwall:active_be":  "zroot/ROOT/axonwall-0.11.62",
-			"org.axonwall:bootcount":  "0",
-			"org.axonwall:bootlimit":  "3",
+			"org.axonwall:active_be":   "zroot/ROOT/axonwall-0.11.62",
+			"org.axonwall:bootcount":   "0",
+			"org.axonwall:bootlimit":   "3",
 		},
 		bootfs:     "zroot/ROOT/axonwall-0.11.61",
 		listOutput: batch9ListTwoBEs,
