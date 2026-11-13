@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as http from 'node:http';
+import { fileURLToPath } from 'node:url';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-mcp-ebpf-crossduty-'));
 process.env.AXONWALL_MCP_KEYS_PATH = path.join(tmpDir, 'mcp-keys.json');
@@ -98,6 +99,9 @@ const {
 } = await import('../dist/index.js');
 
 const daemonRequests = [];
+// Round-3 B-L6: flipped by the partial-failure test below so the fake
+// daemon 500s the VMs endpoint while the other virt sources stay up.
+let failVirtVmsEndpoint = false;
 const fakeDaemon = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => {
@@ -105,6 +109,15 @@ const fakeDaemon = http.createServer((req, res) => {
   });
   req.on('end', () => {
     daemonRequests.push({ method: req.method, url: req.url, body });
+    // Round-3 B-L6: fail the VMs endpoint with a real 500 while the
+    // other virt sources stay up. This must come before the
+    // unconditional writeHead(200) below — a second writeHead throws
+    // ERR_HTTP_HEADERS_SENT and hangs the client until timeout.
+    if (failVirtVmsEndpoint && req.url === '/v1/virt/vms' && req.method === 'GET') {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'boom' }));
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
 
     if (req.url?.startsWith('/v1/ebpf/overview')) {
@@ -770,4 +783,98 @@ test('MCP eBPF, BPF_TOKEN_CREATE, Virtualization, K3s & NAS resources and tools 
   const chain = verifyMcpAuditChain();
   assert.equal(chain.valid, true);
   assert.ok(chain.totalEntries >= 16);
+});
+
+// ------------------------------------------------------------------
+// Round-3 regressions (B-M5, B-L6, B-L3).
+// ------------------------------------------------------------------
+test('B-M5 (round 3): stopping a VM whose name cannot be resolved is refused, not attempted', async () => {
+  const { rawToken } = createMcpApiKeyRecord({
+    name: 'Round-3 B-M5 Agent',
+    agentType: 'vigilsoc',
+    scopes: ['mcp:virt:manage'],
+  });
+  const auth = authenticateMcpToken(rawToken, '10.80.0.50');
+  assert.equal(auth.authenticated, true);
+  const env = { key: auth.key, clientIp: '10.80.0.50' };
+
+  // VM 999 is in neither local state nor the daemon list, so its name
+  // cannot be resolved. Pre-fix, the guard returned valid for an
+  // unknown name and the stop was posted to the daemon blind.
+  const stopUnknown = await processMcpJsonRpcMessage(
+    {
+      jsonrpc: '2.0',
+      id: 100,
+      method: 'tools/call',
+      params: {
+        name: 'mcp_control_virt_workload',
+        arguments: {
+          workloadType: 'vm',
+          id: 999,
+          action: 'stop',
+          audit: { reason: 'Attempt to stop a VM that cannot be resolved' },
+        },
+      },
+    },
+    env,
+  );
+  assert.equal(stopUnknown?.result?.isError, true);
+  assert.ok(stopUnknown.result.content[0].text.includes('could not be resolved'));
+  // The daemon must never have been asked: no POST to /v1/virt/vms
+  // for vmid 999.
+  assert.ok(
+    !daemonRequests.some((r) => r.method === 'POST' && r.url === '/v1/virt/vms' && r.body.includes('"vmid":999')),
+    'no stop for the unresolvable VM may reach the daemon',
+  );
+});
+
+test('B-L6 (round 3): a single failing virt source is flagged, not collapsed to an empty list', async () => {
+  const { rawToken } = createMcpApiKeyRecord({
+    name: 'Round-3 B-L6 Agent',
+    agentType: 'vigilsoc',
+    scopes: ['mcp:virt:read', 'mcp:telemetry:read'],
+  });
+  const auth = authenticateMcpToken(rawToken, '10.80.0.50');
+  assert.equal(auth.authenticated, true);
+  const env = { key: auth.key, clientIp: '10.80.0.50' };
+
+  failVirtVmsEndpoint = true;
+  try {
+    const res = await processMcpJsonRpcMessage(
+      { jsonrpc: '2.0', id: 101, method: 'resources/read', params: { uri: 'axonwall://virt/workloads' } },
+      env,
+    );
+    assert.ok(!res?.error, `resource read must succeed; got ${JSON.stringify(res?.error)}`);
+    const payload = JSON.parse(res.result.contents[0].text);
+    // Pre-fix, the VMs endpoint failing alone produced `vms: []`
+    // with no flag at all — "no VMs" reported as a fact.
+    assert.deepEqual(payload.vms, []);
+    assert.equal(payload.daemonDown, undefined, 'a partial failure is not a total daemon outage');
+    assert.equal(payload.partialDaemonFailure, true);
+    assert.ok(payload.failedSources.includes('vms'), `failedSources must name vms, got ${JSON.stringify(payload.failedSources)}`);
+    assert.equal(payload.containers.length, 1, 'the healthy containers source must still be reported');
+  } finally {
+    failVirtVmsEndpoint = false;
+  }
+});
+
+test('B-L3 (round 3): initialize reports the package version, not a hardcoded stale one', async () => {
+  const { rawToken } = createMcpApiKeyRecord({
+    name: 'Round-3 B-L3 Agent',
+    agentType: 'vigilsoc',
+    scopes: ['mcp:telemetry:read'],
+  });
+  const auth = authenticateMcpToken(rawToken, '10.80.0.50');
+  assert.equal(auth.authenticated, true);
+  const env = { key: auth.key, clientIp: '10.80.0.50' };
+
+  const res = await processMcpJsonRpcMessage(
+    { jsonrpc: '2.0', id: 102, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '0' } } },
+    env,
+  );
+  const expected = JSON.parse(
+    fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+  ).version;
+  assert.equal(res?.result?.serverInfo?.name, 'axonwall-firewall-mcp');
+  assert.equal(res?.result?.serverInfo?.version, expected, `initialize must report the running version ${expected}`);
 });
