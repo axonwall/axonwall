@@ -219,7 +219,7 @@ interface RcaInspectionCheck {
   category: 'SLO & Availability' | 'CPU & Cgroup' | 'Memory & GC' | 'Network & CNI' | 'Storage & ZFS' | 'Security & LSM';
   title: string;
   target: string;
-  status: 'OK' | 'WARNING' | 'CRITICAL';
+  status: 'OK' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
   metricReading: string;
   threshold: string;
   finding: string;
@@ -836,50 +836,50 @@ export default function EbpfObservabilityConsolePage() {
       category: 'SLO & Availability',
       title: 'L7 Service Endpoint Error Budget (HTTP / gRPC 5xx)',
       target: 'All K3s & Appliance Services',
-      status: 'OK',
-      metricReading: '99.98% success (0.02% 5xx)',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: '< 1.0% error rate',
-      finding: 'Zero SLO burn-rate alerts across HTTP/1.1, HTTP/2, and gRPC socket dissectors.',
+      finding: 'No L7 error-rate telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'cpu-cgroup-throttle',
       category: 'CPU & Cgroup',
       title: 'Container Cgroup CFS Quota Throttling Audit',
       target: k3sStatus?.enabled ? `K3s Pods (${k3sStatus.podsRunning} active)` : 'Host SystemdSlices',
-      status: 'OK',
-      metricReading: '0.12% throttled periods',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: '< 5.0% nr_throttled',
-      finding: 'No container cgroups are mengalami artificial CFS quota starvation causing tail latency.',
+      finding: 'No cgroup throttling telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'mem-oom-gc',
       category: 'Memory & GC',
       title: 'Kernel OOMKiller & Go/JVM Allocation Pressure',
       target: 'mm_vmscan / oom_kill_process',
-      status: 'OK',
-      metricReading: '0 OOMKills (24h)',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: '0 OOM events',
-      finding: 'Zero out-of-memory kills or direct reclaim stalls observed via tracepoint/oom/mark_victim.',
+      finding: 'No OOM-kill telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'net-retrans-dns',
       category: 'Network & CNI',
       title: 'TCP Retransmissions & CoreDNS/Unbound Lookup Latency',
       target: 'tcp_retransmit_skb & UDP:53',
-      status: 'OK',
-      metricReading: 'p99 DNS 1.9ms • 0.04% retrans',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: 'p99 < 25ms • retrans < 1%',
-      finding: 'WireGuard CNI and WAN/LAN socket handshakes are operating within sub-2ms RTT bounds.',
+      finding: 'No TCP retransmit or DNS latency telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'storage-vfs-zfs',
       category: 'Storage & ZFS',
       title: 'VFS / OpenEBS ZFS-LocalPV fsync Tail Latency',
       target: 'fexit/vfs_fsync & zio_execute',
-      status: 'OK',
-      metricReading: 'p99 fsync 1.4ms',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: 'p99 < 15ms',
-      finding: 'ZFS Intent Log (ZIL) and NVMe block queues show zero synchronous commit bottlenecks.',
+      finding: 'No VFS fsync latency telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'sec-bpf-lsm',
@@ -895,6 +895,12 @@ export default function EbpfObservabilityConsolePage() {
           : 'All BPF_PROG_LOAD, io_uring, and AF_ALG socket binds match allowlisted (s_dev, i_ino) binaries.',
     },
   ];
+
+  // Only the BPF-LSM RCA check is backed by live telemetry; the rest are
+  // UNKNOWN and must not count toward a "passed" total.
+  const rcaMeasuredChecks = rcaChecks.filter((c) => c.status !== 'UNKNOWN');
+  const rcaPassedChecks = rcaMeasuredChecks.filter((c) => c.status === 'OK').length;
+  const rcaUnmeasuredCount = rcaChecks.length - rcaMeasuredChecks.length;
 
   return (
     <div className="space-y-6">
@@ -913,7 +919,7 @@ export default function EbpfObservabilityConsolePage() {
             Unified zero-instrumentation observability combining Axonwall&apos;s XDP/BPF-LSM kernel telemetry with{' '}
             <span className="text-emerald-300 font-medium">Axonwall eBPF APM</span>: automatic Service Dependency Maps,
             L7 protocol RED dissectors (HTTP, gRPC, Postgres, Redis, Kafka, ClickHouse, DNS), optional TLS uprobes, 99 Hz
-            continuous FlameGraph profiling, and 35+ deterministic Root-Cause Analysis (RCA) inspections.
+            continuous FlameGraph profiling, and 6 automated Root-Cause Analysis (RCA) checks.
           </p>
         </div>
 
@@ -1000,7 +1006,7 @@ export default function EbpfObservabilityConsolePage() {
           <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 cursor-pointer">
             <div>
               <div className="text-xs font-semibold text-white">Automated RCA Audits</div>
-              <div className="text-[10px] text-slate-400">35+ SLO &amp; bottleneck checks</div>
+              <div className="text-[10px] text-slate-400">6 SLO &amp; bottleneck checks</div>
             </div>
             <input
               type="checkbox"
@@ -1086,11 +1092,13 @@ export default function EbpfObservabilityConsolePage() {
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
-            {rcaChecks.filter((c) => c.status === 'OK').length}/{rcaChecks.length} Passed
-            <span className="text-xs font-normal text-emerald-400 ml-2">SLO Healthy</span>
+            {rcaPassedChecks}/{rcaMeasuredChecks.length} measured checks passed
+            <span className="text-xs font-normal text-amber-400 ml-2">
+              {rcaUnmeasuredCount} not measured
+            </span>
           </div>
           <p className="text-[11px] text-slate-500">
-            Auditing CPU throttling, OOMs, DNS RTT, TCP retransmits &amp; ZFS fsync
+            Only the BPF-LSM check is measured; the other checks have no telemetry source
           </p>
         </div>
 
@@ -1670,8 +1678,10 @@ export default function EbpfObservabilityConsolePage() {
                   Axonwall Automated Root-Cause Analysis (RCA) &amp; SLO Audit Engine
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Evaluates 35+ deterministic kernel and container telemetry rules across SLO availability, CPU CFS
+                  Evaluates 6 deterministic kernel and container telemetry checks across SLO availability, CPU CFS
                   throttling, OOM/GC pressure, network retransmissions, ZFS storage latency, and Ring-0 BPF-LSM security.
+                  Only the BPF-LSM check is backed by live telemetry; the other five have no measurement source and are
+                  shown as not measured.
                 </p>
               </div>
               <Link
@@ -1690,7 +1700,9 @@ export default function EbpfObservabilityConsolePage() {
                   className={`p-4 rounded-xl border space-y-2 ${
                     chk.status === 'OK'
                       ? 'bg-slate-950/70 border-slate-800'
-                      : 'bg-amber-950/20 border-amber-500/40'
+                      : chk.status === 'UNKNOWN'
+                        ? 'bg-slate-950/70 border-slate-700'
+                        : 'bg-amber-950/20 border-amber-500/40'
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -1701,7 +1713,9 @@ export default function EbpfObservabilityConsolePage() {
                       className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
                         chk.status === 'OK'
                           ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : chk.status === 'UNKNOWN'
+                            ? 'bg-slate-800 text-slate-400 border border-slate-700'
+                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                       }`}
                     >
                       {chk.status}
@@ -1709,7 +1723,10 @@ export default function EbpfObservabilityConsolePage() {
                   </div>
                   <div className="text-sm font-bold text-white">{chk.title}</div>
                   <div className="flex items-center justify-between text-xs font-mono bg-slate-900/90 px-3 py-1.5 rounded border border-slate-800">
-                    <span className="text-emerald-300">Measured: {chk.metricReading}</span>
+                    <span className={chk.status === 'UNKNOWN' ? 'text-slate-400' : 'text-emerald-300'}>
+                      {chk.status === 'UNKNOWN' ? 'Not measured: ' : 'Measured: '}
+                      {chk.metricReading}
+                    </span>
                     <span className="text-slate-400">SLO Target: {chk.threshold}</span>
                   </div>
                   <p className="text-xs text-slate-300 leading-relaxed">{chk.finding}</p>
