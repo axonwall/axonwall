@@ -28,7 +28,7 @@ import {
   type McpGuardContext,
   type McpScope,
 } from '@axonwall/lib/mcp';
-import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, type BpfTokenDelegationSpec, type DesiredState } from '@axonwall/lib/schemas';
 import { importFirewallConfig, mergeFirewallConfigs } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { compileLxcContainer } from '@axonwall/lib/compile/virt';
@@ -3075,6 +3075,9 @@ export async function handleMcpCallTool(
 
       let compiledConfig = '';
       let releaseLock: (() => void) | null = null;
+      // B-H5 (round 3): hoisted so the daemon-failure branch below
+      // can restore it (see the comment at the assignment).
+      let prevBpfToken: BpfTokenDelegationSpec | undefined;
       try {
         try {
           releaseLock = acquireMcpLockFile(desiredStateLockPath());
@@ -3098,6 +3101,13 @@ export async function handleMcpCallTool(
           );
         }
 
+        // B-H5 (round 3): remember the previous delegation so a
+        // failed daemon sync below can roll the DesiredState change
+        // back out. The old code persisted first and reported
+        // success either way, so DesiredState claimed a delegation
+        // the kernel never got (enable) — or claimed it revoked
+        // while the profile was still live (disable).
+        prevBpfToken = ct.bpfToken;
         ct.bpfToken = req.enabled
           ? {
               enabled: true,
@@ -3138,6 +3148,43 @@ export async function handleMcpCallTool(
           })
         : await callAxonwalldApi('DELETE', `/v1/ebpf/tokens?id=${encodeURIComponent(profileId)}`);
 
+      // B-H5 (round 3): the daemon sync is the point of this tool —
+      // DesiredState alone grants nothing. When the daemon rejects
+      // the profile (or is down), roll the DesiredState change back
+      // out under the lock and deny, mirroring the sibling
+      // mcp_manage_bpf_token_profile. The old code returned
+      // success:true with daemonProfileSync 'staged_offline' and an
+      // audit decision of 'allowed' either way.
+      if (!daemonRes.ok) {
+        let releaseRollbackLock: (() => void) | null = null;
+        try {
+          try {
+            releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+          } catch {
+            console.error('[MCP] Could not lock DesiredState to roll back a BPF_TOKEN delegation whose daemon sync failed; DesiredState still claims the change');
+            releaseRollbackLock = null;
+          }
+          if (releaseRollbackLock) {
+            const rollbackState = loadLocalDesiredState();
+            if (rollbackState) {
+              const rollbackCt = rollbackState.virt?.containers?.find((c) => c.ctid === req.ctid);
+              if (rollbackCt) {
+                rollbackCt.bpfToken = prevBpfToken;
+                persistDesiredStateToDisk(rollbackState);
+              }
+            }
+          }
+        } finally {
+          releaseRollbackLock?.();
+        }
+        return deny(
+          'mcp:ebpf:manage',
+          daemonRes.data?.error ||
+            `Daemon ${req.enabled ? 'rejected' : 'failed to delete'} the BPF_TOKEN profile for CT ${req.ctid}; DesiredState change rolled back`,
+          req.audit,
+        );
+      }
+
       const auditEntry = recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -3165,7 +3212,10 @@ export async function handleMcpCallTool(
                 enabled: req.enabled,
                 preset: req.preset,
                 stagedInDesiredState: true,
-                daemonProfileSync: daemonRes.ok ? 'synced' : 'staged_offline',
+                // B-H5 (round 3): 'staged_offline' is gone — a failed
+                // daemon sync denies above, so reaching here means
+                // the profile is synced.
+                daemonProfileSync: 'synced',
                 compiledBpfDirectives: bpfLines,
                 auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
               },
