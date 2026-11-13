@@ -257,3 +257,15 @@ func TestBatch5ResolveIfaceMtuDefaultsForNewEntries(t *testing.T) {
 		t.Errorf("expected new-entry MTU default 1500, got %v", got)
 	}
 }
+
+func TestGetAdminCredentialsDefaultFallback(t *testing.T) {
+	// When running in test environment where /etc/axonwall/.password_changed does not exist,
+	// getAdminCredentials should return adminUser "admin" and fallback adminPass "axonwall"
+	u, p := getAdminCredentials()
+	if u == "" {
+		t.Errorf("expected non-empty adminUser, got empty string")
+	}
+	if p == "" {
+		t.Errorf("expected non-empty adminPass fallback, got empty string")
+	}
+}

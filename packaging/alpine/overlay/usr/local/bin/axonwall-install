@@ -1768,30 +1768,47 @@ if [ -n "$ADMIN_PASSWORD" ]; then
             console.log("scrypt$" + salt + "$" + hash);
           } catch (e) { process.exit(1); }
         ' "$PW_TMP" 2>/dev/null || true)"
+      elif command -v python3 >/dev/null 2>&1; then
+        SCRYPT_HASH="$(python3 -c '
+import hashlib, os, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        pw = f.read().rstrip("\r\n")
+    salt = os.urandom(16)
+    h = hashlib.scrypt(pw.encode("utf-8"), salt=salt, n=16384, r=8, p=1, maxmem=0, dklen=64)
+    print("scrypt$" + salt.hex() + "$" + h.hex())
+except Exception:
+    sys.exit(1)
+' "$PW_TMP" 2>/dev/null || true)"
       fi
       ;;
   esac
   rm -f "$PW_TMP"
 
-  if [ "${INSTALL_EDITION:-axonwall}" = "axonwall" ] && [ -n "$SCRYPT_HASH" ]; then
+  # Provision admin credentials for ALL editions (axonwall, k3s-storage, vault)
+  mkdir -p /mnt/slot_a/etc/axonwall /mnt/data/etc-axonwall 2>/dev/null || true
+  if [ -n "$SCRYPT_HASH" ]; then
     printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$SCRYPT_HASH" > /mnt/slot_a/etc/axonwall/admin.env
-    chmod 0600 /mnt/slot_a/etc/axonwall/admin.env
-    cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
-    chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
-    if [ "$CUSTOM_PW_SET" -eq 1 ]; then
-      rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
-      NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "installed")"
-      printf '%s\n' "$NOW_TS" > /mnt/slot_a/etc/axonwall/.password_changed
-      printf '%s\n' "$NOW_TS" > /mnt/data/.password_changed
-      ui_echo "[+] Provisioned custom scrypt administrator credentials for '${ADMIN_USER:-admin}'."
-    else
-      rm -f /mnt/slot_a/etc/axonwall/.password_changed /mnt/data/.password_changed
-      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
-      chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
-      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
-      chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
-      ui_echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first web login)."
-    fi
+  else
+    printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/admin.env
+  fi
+  chmod 0600 /mnt/slot_a/etc/axonwall/admin.env 2>/dev/null || true
+  cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+  chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+
+  if [ "$CUSTOM_PW_SET" -eq 1 ]; then
+    rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
+    NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "installed")"
+    printf '%s\n' "$NOW_TS" > /mnt/slot_a/etc/axonwall/.password_changed
+    printf '%s\n' "$NOW_TS" > /mnt/data/.password_changed
+    ui_echo "[+] Provisioned custom administrator credentials for '${ADMIN_USER:-admin}'."
+  else
+    rm -f /mnt/slot_a/etc/axonwall/.password_changed /mnt/data/.password_changed
+    printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
+    chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
+    printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+    chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+    ui_echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first login)."
   fi
 
   case "$ADMIN_PASSWORD" in
@@ -1811,12 +1828,14 @@ if [ -n "$ADMIN_PASSWORD" ]; then
       fi
       ;;
     *)
-      printf 'root:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+      _chpw_bin="$(chroot /mnt/slot_a which chpasswd 2>/dev/null || true)"
+      [ -z "$_chpw_bin" ] && _chpw_bin="/usr/sbin/chpasswd"
+      printf 'root:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       if grep -q '^admin:' /mnt/slot_a/etc/passwd 2>/dev/null; then
-        printf 'admin:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+        printf 'admin:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       fi
       if grep -q '^axonwall:' /mnt/slot_a/etc/passwd 2>/dev/null; then
-        printf 'axonwall:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+        printf 'axonwall:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       fi
       ;;
   esac

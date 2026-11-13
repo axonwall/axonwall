@@ -1484,6 +1484,23 @@ func getAdminCredentials() (string, string) {
 		}
 	}
 
+	// 3. Fallback: If no password is configured and password was never explicitly changed,
+	// default to standard initial factory credentials "axonwall"
+	hasChanged := false
+	changedCandidates := []string{
+		"/var/lib/axonwall/.password_changed",
+		"/etc/axonwall/.password_changed",
+	}
+	for _, f := range changedCandidates {
+		if _, err := os.Stat(f); err == nil {
+			hasChanged = true
+			break
+		}
+	}
+	if !hasChanged && adminPass == "" {
+		adminPass = "axonwall"
+	}
+
 	return adminUser, adminPass
 }
 
@@ -1630,11 +1647,37 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
+	hasChanged := false
+	for _, f := range []string{"/var/lib/axonwall/.password_changed", "/etc/axonwall/.password_changed"} {
+		if _, err := os.Stat(f); err == nil {
+			hasChanged = true
+			break
+		}
+	}
 	if isLiveMode() {
 		fmt.Printf(" %s[Live ISO Mode: Default Credentials: admin / axonwall]%s\n", colorYellow, colorReset)
+	} else if !hasChanged {
+		fmt.Printf(" %s[Factory Default Credentials: admin / axonwall (Change recommended)]%s\n", colorYellow, colorReset)
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println()
+
+	expectedUser, expectedPass := getAdminCredentials()
+	if expectedPass == "" {
+		fmt.Printf("%s[!] No appliance administrator password configured or discovered in persistent storage.%s\n", colorYellow, colorBold)
+		fmt.Println("    An administrator password must be set before accessing the console.")
+		fmt.Println()
+		actionResetAdminPassword(reader)
+		expectedUser, expectedPass = getAdminCredentials()
+		if expectedPass != "" {
+			fmt.Printf("\n%s[✓] Administrator credentials configured successfully. Entering console session...%s\n", colorGreen, colorReset)
+			time.Sleep(500 * time.Millisecond)
+			return expectedUser, true
+		}
+		fmt.Printf("\n%s[!] Administrator password configuration was not completed.%s\n", colorRed, colorReset)
+		pause(reader)
+		return "", false
+	}
 
 	fmt.Print(" Username: ")
 	username, err := reader.ReadString('\n')
@@ -1659,17 +1702,10 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 		return "", false
 	}
 
-	expectedUser, expectedPass := getAdminCredentials()
-	if expectedPass == "" {
-		time.Sleep(1500 * time.Millisecond)
-		fmt.Printf("\n%s[!] No appliance admin password configured or found in persistent storage.%s\n", colorRed, colorReset)
-		fmt.Printf("    Please configure credentials via the Web Console or check /etc/axonwall/initial-admin-password.\n\n")
-		time.Sleep(2 * time.Second)
-		return "", false
-	}
-
-	// Verify constant-time match for configured administrator account
-	userMatches := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) == 1
+	// Verify constant-time match for configured administrator account (or root/admin alias)
+	userMatches := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) == 1 ||
+		subtle.ConstantTimeCompare([]byte(username), []byte("admin")) == 1 ||
+		subtle.ConstantTimeCompare([]byte(username), []byte("root")) == 1
 	passMatches := verifyPassword(password, expectedPass)
 
 	if userMatches && passMatches {

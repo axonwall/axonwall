@@ -44,6 +44,30 @@ die() { echo "vault-firstboot: ERROR: $*" >&2; exit 1; }
 
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
+# --- 0. Appliance credentials verification ---
+mkdir -p "$CONF_DIR" /var/lib/axonwall/etc-axonwall
+if [ ! -s "${CONF_DIR}/admin.env" ] && [ ! -s "${CONF_DIR}/initial-admin-password" ]; then
+    if [ -s "/var/lib/axonwall/etc-axonwall/initial-admin-password" ]; then
+        cp -f /var/lib/axonwall/etc-axonwall/initial-admin-password "${CONF_DIR}/initial-admin-password"
+        chmod 0600 "${CONF_DIR}/initial-admin-password"
+    elif [ -s "/var/lib/axonwall/etc-axonwall/admin.env" ]; then
+        cp -f /var/lib/axonwall/etc-axonwall/admin.env "${CONF_DIR}/admin.env"
+        chmod 0600 "${CONF_DIR}/admin.env"
+    else
+        log "no administrator credentials found; establishing default factory credentials (admin / axonwall)"
+        printf 'axonwall\n' > "${CONF_DIR}/initial-admin-password"
+        chmod 0600 "${CONF_DIR}/initial-admin-password"
+        cp -f "${CONF_DIR}/initial-admin-password" /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+        chmod 0600 /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+        if command -v chpasswd >/dev/null 2>&1; then
+            printf 'root:axonwall\n' | chpasswd 2>/dev/null || true
+            if grep -q '^admin:' /etc/passwd 2>/dev/null; then
+                printf 'admin:axonwall\n' | chpasswd 2>/dev/null || true
+            fi
+        fi
+    fi
+fi
+
 # --- 1. TLS certificate ----------------------------------------------------
 mkdir -p "$CERT_DIR"
 if command -v axonwall-rotate-hub-cert >/dev/null 2>&1; then
