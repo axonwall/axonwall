@@ -30,17 +30,20 @@ const sockPath = path.join(tmpDir, 'headscale.sock');
 fs.writeFileSync(sockPath, '');
 process.env.HEADSCALE_SOCKET_PATH = sockPath;
 const fakeBin = path.join(tmpDir, 'headscale');
+const preauthArgsLog = path.join(tmpDir, 'preauth-args.log');
 fs.writeFileSync(
   fakeBin,
   `#!/usr/bin/env node
+const fs = require('fs');
 const args = process.argv.slice(2);
 let i = 0;
 if (args[0] === '--config') i = 2;
 const rest = args.slice(i);
 const out = (o) => process.stdout.write(JSON.stringify(o));
 if (rest[0] === 'users' && rest[1] === 'list') {
-  out([{ id: 1, name: 'alice', createdAt: '2026-01-02T03:04:05Z' }]);
+  out([{ id: 1, name: 'alice', createdAt: '2026-01-02T03:04:05Z' }, { id: 2, name: 'bob' }]);
 } else if (rest[0] === 'preauthkeys' && rest[1] === 'create') {
+  fs.appendFileSync(${JSON.stringify(preauthArgsLog)}, JSON.stringify(rest) + '\\n');
   out({ id: 'k1', key: 'hskey-test', reusable: false, ephemeral: false, expiration: '2026-12-31T23:59:59Z', user: { id: 1, name: 'alice' } });
 } else if (rest[0] === 'preauthkeys' && rest[1] === 'list') {
   out([{ id: 'k1', key: 'hskey-test', reusable: false, ephemeral: false, used: false, expiration: '2026-12-31T23:59:59Z', createdAt: '2026-01-02T03:04:05Z', user: { id: 1 } }]);
@@ -219,4 +222,83 @@ test('B-L4: headscale list functions use the camelCase RFC3339 timestamps the CL
   assert.equal(listed[0].createdAt, '2026-01-02T03:04:05.000Z');
   const machines = await listMachines();
   assert.equal(machines[0].lastSeen, '2026-02-03T04:05:06.000Z');
+});
+
+// ------------------------------------------------------------------
+// Round-3 B-L2: the lastUsedAt sidecar lost-update race.
+// (Round-2 B-L2 above is the TLS handshake deadline — same ID,
+// different round.) Pre-fix, writeLastUsedSidecar was an unlocked
+// read-modify-write, so two concurrent authentications for different
+// keys both read, both added their entry, and the last writer
+// silently dropped the other's entry.
+// ------------------------------------------------------------------
+test('B-L2 (round 3): parallel authentications for different keys all survive in the last-used sidecar', async () => {
+  const distIndex = fileURLToPath(new URL('../dist/index.js', import.meta.url));
+  const workerPath = path.join(tmpDir, 'sidecar-worker.mjs');
+  fs.writeFileSync(
+    workerPath,
+    `const { authenticateMcpToken } = await import(${JSON.stringify(distIndex)});
+const [token, ip, rounds] = process.argv.slice(2);
+for (let i = 0; i < Number(rounds); i++) {
+  const r = authenticateMcpToken(token, ip);
+  if (!r.authenticated) { console.error('auth failed', JSON.stringify(r)); process.exit(1); }
+}
+`
+  );
+  const workers = 8;
+  const keys = Array.from({ length: workers }, (_, w) =>
+    createMcpApiKeyRecord({
+      name: `Batch6 round-3 B-L2 worker ${w}`,
+      agentType: 'vigilsoc',
+      scopes: ['mcp:telemetry:read'],
+      allowedSourceCidrs: ['10.42.0.0/16'],
+    })
+  );
+  await Promise.all(
+    keys.map(({ rawToken }, w) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [workerPath, rawToken, `10.42.0.${w + 1}`, '3'], {
+          env: { ...process.env, AXONWALL_MCP_KEYS_PATH: keysPath },
+          stdio: 'inherit',
+        });
+        child.on('error', reject);
+        child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`worker ${w} exited ${code}`))));
+      })
+    )
+  );
+  const sidecar = JSON.parse(fs.readFileSync(`${keysPath}.lastused.json`, 'utf8'));
+  for (const [w, { key }] of keys.entries()) {
+    assert.ok(sidecar[key.id], `sidecar must carry an entry for worker ${w}'s key`);
+    assert.equal(sidecar[key.id].lastUsedIp, `10.42.0.${w + 1}`, `worker ${w}'s lastUsedIp must survive`);
+    assert.ok(sidecar[key.id].lastUsedAt, `worker ${w}'s lastUsedAt must survive`);
+  }
+});
+
+// ------------------------------------------------------------------
+// Round-3 B-L5: no invented creation time.
+// ------------------------------------------------------------------
+test('B-L5 (round 3): users without a parseable creation timestamp get undefined, not "now"', async () => {
+  const users = await listUsers();
+  assert.equal(users[0].name, 'alice');
+  assert.equal(users[0].createdAt, '2026-01-02T03:04:05.000Z');
+  assert.equal(users[1].name, 'bob');
+  // Pre-fix, bob (no createdAt from the CLI) was stamped with the
+  // moment of listing — a user created months ago looked just created.
+  assert.equal(users[1].createdAt, undefined);
+});
+
+// ------------------------------------------------------------------
+// Round-3 B-L8: pre-auth key expiration is exact, not rounded hours.
+// ------------------------------------------------------------------
+test('B-L8 (round 3): createPreAuthKey passes the exact expiry in seconds, not whole hours', async () => {
+  const expiry89 = new Date(Date.now() + 89 * 60 * 1000).toISOString();
+  await createPreAuthKey(1, false, false, expiry89);
+  const expiry30 = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  await createPreAuthKey(1, false, false, expiry30);
+  const lines = fs.readFileSync(preauthArgsLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const expirations = lines.map((args) => args[args.indexOf('--expiration') + 1]);
+  // Pre-fix, 89 minutes became '1h' (29 minutes early) and 30
+  // minutes became '1h' (30 minutes late).
+  assert.ok(expirations.includes('5340s'), `89-minute expiry must be passed as 5340s, got ${JSON.stringify(expirations)}`);
+  assert.ok(expirations.includes('1800s'), `30-minute expiry must be passed as 1800s, got ${JSON.stringify(expirations)}`);
 });

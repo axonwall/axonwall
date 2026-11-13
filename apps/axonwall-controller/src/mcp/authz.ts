@@ -132,7 +132,20 @@ function readLastUsedSidecar(keysPath: string): Record<string, LastUsedEntry> {
 }
 
 function writeLastUsedSidecar(keysPath: string, keyId: string, entry: LastUsedEntry): void {
+  // B-L2: this used to be an unlocked read-modify-write of a shared
+  // file, so two concurrent authentications for different keys both
+  // read, both added their entry, and the last writer silently
+  // dropped the other's lastUsedAt/lastUsedIp. Hold a dedicated lock
+  // across the read + rename. The timeout is short on purpose: this
+  // is best-effort metadata updated on every authentication, so a
+  // lock that cannot be taken quickly is skipped, not waited on.
+  let release: (() => void) | null = null;
   try {
+    try {
+      release = acquireMcpLockFile(`${keysPath}.lastused.json.lock`, 2000);
+    } catch {
+      return;
+    }
     const sidecarPath = `${keysPath}.lastused.json`;
     const all = readLastUsedSidecar(keysPath);
     all[keyId] = entry;
@@ -142,6 +155,8 @@ function writeLastUsedSidecar(keysPath: string, keyId: string, entry: LastUsedEn
     fs.renameSync(tmpPath, sidecarPath);
   } catch {
     // Non-fatal metadata update.
+  } finally {
+    release?.();
   }
 }
 

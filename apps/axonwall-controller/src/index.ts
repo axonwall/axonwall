@@ -99,33 +99,60 @@ function assertNotOperatorCaWithoutKey(caPath: string, caKeyPath: string): void 
 
 const HUB_CERT_SAN = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
 
+// B-M8: true when the cert at certPath is signed for the key at keyPath,
+// false when they are a mismatched pair, null when either file cannot be
+// parsed. Compared via the SPKI form of the public key (no openssl
+// subprocess). Callers treat anything but `true` as unusable: a pair the
+// server cannot parse would crash https.createServer just as surely as a
+// mismatched one, so both fall through to re-provisioning.
+export function certKeyPairMatches(certPath: string, keyPath: string): boolean | null {
+  try {
+    const cert = new crypto.X509Certificate(fs.readFileSync(certPath));
+    const key = crypto.createPrivateKey(fs.readFileSync(keyPath));
+    const certPub = cert.publicKey.export({ type: 'spki', format: 'der' });
+    const keyPub = crypto.createPublicKey(key).export({ type: 'spki', format: 'der' });
+    return Buffer.compare(certPub as Buffer, keyPub as Buffer) === 0;
+  } catch {
+    return null;
+  }
+}
+
 // B2-M9: mint a pure self-signed hub certificate. Split out of
 // generateSignedOrSelfSignedCert so the emergency fallback can
 // reach it directly when the CA-signed path throws (unusable
 // ca.key) instead of letting the throw kill the whole fallback
 // and the controller start in plaintext HTTP.
+// B-M8: the key is written to a temp path and renamed into place only
+// after the cert is written — a mint interrupted between the key and
+// the cert used to leave the new key next to the old cert.
 function generateSelfSignedCert(targetKeyPath: string, targetCertPath: string, days: string): void {
-  child_process.execFileSync(
-    'openssl',
-    [
-      'req',
-      '-x509',
-      '-newkey',
-      'rsa:2048',
-      '-nodes',
-      '-keyout',
-      targetKeyPath,
-      '-out',
-      targetCertPath,
-      '-days',
-      days,
-      '-subj',
-      '/O=Axonwall/OU=Appliance/CN=axonwall',
-      '-addext',
-      `subjectAltName=${HUB_CERT_SAN}`,
-    ],
-    { timeout: 15000, stdio: 'ignore' }
-  );
+  const tmpKeyPath = `${targetKeyPath}.tmp-${process.pid}`;
+  try {
+    child_process.execFileSync(
+      'openssl',
+      [
+        'req',
+        '-x509',
+        '-newkey',
+        'rsa:2048',
+        '-nodes',
+        '-keyout',
+        tmpKeyPath,
+        '-out',
+        targetCertPath,
+        '-days',
+        days,
+        '-subj',
+        '/O=Axonwall/OU=Appliance/CN=axonwall',
+        '-addext',
+        `subjectAltName=${HUB_CERT_SAN}`,
+      ],
+      { timeout: 15000, stdio: 'ignore' }
+    );
+    fs.renameSync(tmpKeyPath, targetKeyPath);
+  } finally {
+    try { fs.unlinkSync(tmpKeyPath); } catch {}
+  }
 }
 
 // Mint a hub certificate signed by the on-box CA when a CA key
@@ -143,6 +170,14 @@ function generateSignedOrSelfSignedCert(
   if (fs.existsSync(caPath) && fs.existsSync(caKeyPath)) {
     const csrPath = `${targetCertPath}.csr`;
     const extPath = `${targetCertPath}.ext`;
+    // B-M8: the new key goes to a temp path and is renamed into place
+    // only after the cert is signed. The old code wrote the new key
+    // straight to targetKeyPath first, so an interruption between the
+    // two openssl calls (timeout, disk-full extfile write) left the
+    // new key next to the OLD cert — a poisoned pair that crash-loops
+    // the controller on the next restart. On any failure the temp key
+    // is removed and the previous key stays intact.
+    const tmpKeyPath = `${targetKeyPath}.tmp-${process.pid}`;
     try {
       child_process.execFileSync(
         'openssl',
@@ -152,7 +187,7 @@ function generateSignedOrSelfSignedCert(
           'rsa:2048',
           '-nodes',
           '-keyout',
-          targetKeyPath,
+          tmpKeyPath,
           '-out',
           csrPath,
           '-subj',
@@ -187,9 +222,11 @@ function generateSignedOrSelfSignedCert(
         ],
         { timeout: 15000, stdio: 'ignore' }
       );
+      fs.renameSync(tmpKeyPath, targetKeyPath);
     } finally {
       try { fs.unlinkSync(csrPath); } catch {}
       try { fs.unlinkSync(extPath); } catch {}
+      try { fs.unlinkSync(tmpKeyPath); } catch {}
     }
   } else {
     generateSelfSignedCert(targetKeyPath, targetCertPath, days);
@@ -280,6 +317,13 @@ export function ensureControllerTls(
           // unusable for CA-pinned satellites; do not serve it. Fall
           // through to re-provisioning (or the operator-CA refusal).
           console.warn('[Axonwall Controller] Existing hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.');
+        } else if (certKeyPairMatches(certPath, keyPath) !== true) {
+          // B-M8: a cert whose key does not match (the poisoned pair
+          // an interrupted mint leaves behind) makes
+          // https.createServer throw synchronously in main() — a
+          // crash loop until someone deletes the certs by hand.
+          // Ignore the pair so it is re-provisioned instead of served.
+          console.warn('[Axonwall Controller] Existing hub certificate and key do not match (or could not be parsed); ignoring the pair so it can be re-provisioned instead of served.');
         } else {
           return { cert, key, ca };
         }
@@ -303,6 +347,10 @@ export function ensureControllerTls(
           const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
           if (ca && leafChainsToCa(certPath, caPath) === false) {
             console.warn('[Axonwall Controller] Rotated hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.');
+          } else if (certKeyPairMatches(certPath, keyPath) !== true) {
+            // B-M8: same poisoned-pair guard as step 1, for a pair
+            // the rotate tool just wrote.
+            console.warn('[Axonwall Controller] Rotated hub certificate and key do not match; ignoring the pair so it can be re-provisioned instead of served.');
           } else {
             return { cert, key, ca };
           }
@@ -340,8 +388,14 @@ export function ensureControllerTls(
         fs.chmodSync(keyPath, 0o600);
         fs.chmodSync(certPath, 0o644);
       } catch {}
-      if (cert.length > 0 && key.length > 0) {
+      // B-M8: never serve a freshly minted pair whose key does not
+      // match its cert — a mint that somehow produced a mismatch is
+      // a provisioning bug, and serving it would crash the server.
+      // Leaving `minted` null falls through to the emergency fallback.
+      if (cert.length > 0 && key.length > 0 && certKeyPairMatches(certPath, keyPath) === true) {
         minted = { cert, key };
+      } else if (cert.length > 0 && key.length > 0) {
+        console.warn('[Axonwall Controller] Freshly minted hub certificate and key do not match; ignoring the pair so the emergency fallback is used instead of serving it.');
       }
     }
   } catch (err) {

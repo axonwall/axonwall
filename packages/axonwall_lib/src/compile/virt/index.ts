@@ -13,6 +13,14 @@ import type {
 import { HostedEdgeConfigSchema, FORBIDDEN_RING0_BPF_PROGS } from '../../schemas/index.js';
 import { compileSatelliteNftables } from '../nft/index.js';
 
+// Hosted Edge VM identity (B-M5): compileHostedEdge always provisions the
+// edge gateway as this one VM. The anti-lockout guard in mcp/index.ts
+// matches on these constants so a hosted-edge VM renamed to a plain name
+// (e.g. 'fw-01') is still recognised by vmid/id, not only by name pattern.
+export const HOSTED_EDGE_VM_ID = 'edge';
+export const HOSTED_EDGE_VMID = 100;
+export const HOSTED_EDGE_VM_NAME = 'axonwall-edge-ngfw';
+
 export interface CompiledVmProcess {
   id?: string;
   vmid: number;
@@ -922,9 +930,9 @@ export function compileHostedEdge(
   });
 
   const edgeVm: VirtualMachine = {
-    id: 'edge',
-    vmid: 100,
-    name: 'axonwall-edge-ngfw',
+    id: HOSTED_EDGE_VM_ID,
+    vmid: HOSTED_EDGE_VMID,
+    name: HOSTED_EDGE_VM_NAME,
     description: 'Hosted Super-Slim Edge NGFW (UKI PID 1)',
     osType: 'linux',
     bios: 'ovmf',

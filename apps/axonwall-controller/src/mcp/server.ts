@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   McpBlackholeRequestSchema,
   McpShapeRequestSchema,
@@ -72,6 +73,33 @@ function readAgentToken(): string {
 // random suffix.
 export function newMcpApplyJobId(): string {
   return `mcp_apply_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+}
+
+// B-L3: the initialize handshake used to report a hardcoded '0.11.64',
+// three releases behind the running code. Read the controller's own
+// package.json at runtime instead — `../package.json` from the bundled
+// dist/ output, `../../package.json` when run from src/mcp/. Returns
+// 'unknown' when neither resolves; it never invents a version.
+export function resolveMcpServerVersion(): string {
+  try {
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    for (const candidate of [
+      path.join(moduleDir, '..', 'package.json'),
+      path.join(moduleDir, '..', '..', 'package.json'),
+    ]) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8')) as { version?: unknown };
+        if (typeof parsed.version === 'string' && parsed.version.trim()) {
+          return parsed.version.trim();
+        }
+      } catch {
+        // Try the next candidate.
+      }
+    }
+  } catch {
+    // Fall through to 'unknown' below.
+  }
+  return 'unknown';
 }
 
 // B2-M4: insert a proposed rule into a DesiredState, preserving
@@ -189,7 +217,19 @@ function loadLocalDesiredState(): DesiredState | null {
   return null;
 }
 
-function persistDesiredStateToDisk(targetState: DesiredState): void {
+// B-M4: returns true only when the state actually landed on disk.
+// It used to swallow every write error (`catch {}`) and return void,
+// so callers reported staged/saved success while disk held the old
+// state — and an MCP propose could apply a rule to the kernel from the
+// in-memory state while disk never recorded it. Contract: success
+// requires at least one state.json copy to land (the loadable source
+// of truth — loadLocalDesiredState reads /etc first, then /var/lib,
+// so one surviving copy is enough for reload, which is also what
+// keeps this usable in dev where /etc/axonwall is not writable) AND
+// every YAML mirror write attempted (dirs that already exist) to
+// succeed. The custom-state path has a single target, so any failure
+// there is a failure. Callers must fail closed on false.
+function persistDesiredStateToDisk(targetState: DesiredState): boolean {
   const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
   if (customState) {
     try {
@@ -200,19 +240,24 @@ function persistDesiredStateToDisk(targetState: DesiredState): void {
       for (const [fn, content] of Object.entries(yamlFiles)) {
         fs.writeFileSync(path.join(customDir, fn), content, { mode: 0o660 });
       }
+      return true;
     } catch {
-      // ignore custom override errors
+      // A failed custom-state write must not report staged success.
+      return false;
     }
-    return;
   }
+  let stateJsonLanded = false;
   try {
     fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+    stateJsonLanded = true;
   } catch {
     // Fallback if /etc/axonwall not writable in dev
   }
   try {
     fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+    stateJsonLanded = true;
   } catch {}
+  if (!stateJsonLanded) return false;
   try {
     const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
     for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
@@ -222,7 +267,10 @@ function persistDesiredStateToDisk(targetState: DesiredState): void {
         }
       }
     }
-  } catch {}
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 function resolveBpfTokenPresetMasks(preset: string): {
@@ -1336,6 +1384,17 @@ export async function handleMcpReadResource(
         callAxonwalldApi('GET', '/v1/virt/pci'),
         callAxonwalldApi('GET', '/v1/virt/telemetry'),
       ]);
+      // B-L6: daemonDown used to be set only when ALL THREE core
+      // sources failed, so a single failing source collapsed to an
+      // empty list presented as fact ("no VMs"). Report partial
+      // failures per source; daemonDown keeps its total-failure
+      // meaning for existing consumers.
+      const failedSources: string[] = [
+        ...(!vmsRes.ok ? ['vms'] : []),
+        ...(!ctsRes.ok ? ['containers'] : []),
+        ...(!pciRes.ok ? ['pciDevices'] : []),
+        ...(!telRes.ok ? ['telemetry'] : []),
+      ];
       const anyDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
       payload = {
         vms: vmsRes.ok ? vmsRes.data?.vms ?? [] : [],
@@ -1344,6 +1403,9 @@ export async function handleMcpReadResource(
         ebpfTelemetry: telRes.ok ? telRes.data : null,
         ...(anyDown
           ? { daemonDown: true, error: vmsRes.data?.error || 'axonwalld unreachable' }
+          : {}),
+        ...(failedSources.length > 0 && !anyDown
+          ? { partialDaemonFailure: true, failedSources, error: 'One or more virt sources failed; the empty lists below are unknown, not empty' }
           : {}),
       };
       break;
@@ -2344,15 +2406,24 @@ export async function handleMcpCallTool(
         }
       }
 
-      const persistDesiredState = (targetState: DesiredState) => {
+      // B-M4: same contract as persistDesiredStateToDisk — returns true
+      // only when the state actually landed (at least one state.json
+      // copy plus every attempted YAML mirror write). The caller fails
+      // closed on false instead of applying the rule to the kernel
+      // while disk never recorded it.
+      const persistDesiredState = (targetState: DesiredState): boolean => {
+        let stateJsonLanded = false;
         try {
           fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+          stateJsonLanded = true;
         } catch {
           // Fallback if /etc/axonwall not writable in dev
         }
         try {
           fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
+          stateJsonLanded = true;
         } catch {}
+        if (!stateJsonLanded) return false;
         try {
           const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
           for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
@@ -2362,7 +2433,10 @@ export async function handleMcpCallTool(
               }
             }
           }
-        } catch {}
+        } catch {
+          return false;
+        }
+        return true;
       };
 
       // B2-M4: serialize the load -> mutate -> persist window with
@@ -2392,7 +2466,12 @@ export async function handleMcpCallTool(
           return deny('mcp:firewall:write', 'DesiredState file (/etc/axonwall/state.json) not found on appliance', req.audit);
         }
         insertMcpRuleIntoState(fresh, req.rule);
-        persistDesiredState(fresh);
+        // B-M4: fail closed when the rule cannot be persisted — applying
+        // it to the kernel below while disk never recorded it would
+        // leave kernel and disk diverged with a success report.
+        if (!persistDesiredState(fresh)) {
+          return deny('mcp:firewall:write', 'Could not persist the proposed rule to disk (DesiredState write failed); nothing was staged or applied', req.audit);
+        }
         liveState = fresh;
       } finally {
         releaseStateLock?.();
@@ -2875,7 +2954,18 @@ export async function handleMcpCallTool(
         paramsSummary: { includeBackups, includePci },
       });
 
+      // B-L6: as in the axonwall://virt/workloads resource above, a
+      // single failing source used to collapse to an empty list with
+      // no flag. Report partial failures per source; daemonDown keeps
+      // its total-failure meaning.
       const daemonDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
+      const failedSources: string[] = [
+        ...(!vmsRes.ok ? ['vms'] : []),
+        ...(!ctsRes.ok ? ['containers'] : []),
+        ...(!telRes.ok ? ['telemetry'] : []),
+        ...(includePci && !pciRes.ok ? ['pciDevices'] : []),
+        ...(includeBackups && !backupsRes.ok ? ['backups'] : []),
+      ];
       return {
         content: [
           {
@@ -2888,6 +2978,9 @@ export async function handleMcpCallTool(
                 ...(includePci ? { pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [] } : {}),
                 ...(includeBackups ? { backups: backupsRes.ok ? backupsRes.data?.backups ?? [] : [] } : {}),
                 ...(daemonDown ? { daemonDown: true, error: vmsRes.data?.error || 'axonwalld unreachable' } : {}),
+                ...(failedSources.length > 0 && !daemonDown
+                  ? { partialDaemonFailure: true, failedSources, error: 'One or more virt sources failed; the empty lists above are unknown, not empty' }
+                  : {}),
               },
               null,
               2,
@@ -2927,7 +3020,11 @@ export async function handleMcpCallTool(
         }
       }
 
-      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled);
+      // B-M5: pass the workload id as well as the name — the guard
+      // matches the compiled hosted-edge VM identity (vmid 100, id
+      // 'edge') so a renamed edge VM is still recognised, and refuses
+      // outright when the name could not be resolved at all.
+      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled, req.id);
       if (!safetyCheck.valid) {
         return deny('mcp:virt:manage', safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard', req.audit);
       }
@@ -3142,7 +3239,12 @@ export async function handleMcpCallTool(
 
         const compiled = compileLxcContainer(ct);
         compiledConfig = compiled.lxcConfig;
-        persistDesiredStateToDisk(fresh);
+        // B-M4: fail closed when the delegation cannot be persisted —
+        // the daemon sync below must not run for a delegation disk
+        // never recorded, and success must not be reported for it.
+        if (!persistDesiredStateToDisk(fresh)) {
+          return deny('mcp:virt:manage', 'Could not persist the BPF_TOKEN delegation to disk (DesiredState write failed); nothing was staged or synced', req.audit);
+        }
       } finally {
         releaseLock?.();
       }
@@ -3655,7 +3757,11 @@ export async function handleMcpCallTool(
           }
           const active = loadLocalDesiredState();
           const nextState = active ? mergeFirewallConfigs(active, report.state) : report.state;
-          persistDesiredStateToDisk(nextState);
+          // B-M4: fail closed when the import cannot be persisted —
+          // staging must not be reported for a merge disk never recorded.
+          if (!persistDesiredStateToDisk(nextState)) {
+            return deny('mcp:firewall:write', 'Could not persist the imported configuration to disk (DesiredState write failed); nothing was staged', req.audit);
+          }
           staged = true;
         } finally {
           releaseLock?.();
@@ -3769,7 +3875,7 @@ export async function processMcpJsonRpcMessage(
             protocolVersion: '2024-11-05',
             serverInfo: {
               name: 'axonwall-firewall-mcp',
-              version: '0.11.64',
+              version: resolveMcpServerVersion(),
             },
             capabilities: {
               resources: { listChanged: false },
