@@ -1661,6 +1661,22 @@ export async function handleMcpCallTool(
       if (req.propagateToFleet) {
         const fleetErr = requireScope('mcp:fleet:broadcast', req.audit);
         if (fleetErr) return fleetErr;
+        // B-M3 (round 3): the stdio server runs in a different
+        // process from the satellite sockets, so it has no
+        // onFleetBroadcastBlock and propagation is impossible — but
+        // the old code created the hub lease and returned
+        // success:true with fleetPropagatedSatellites: 0, so a SOAR
+        // agent believed the fleet was blocked. Deny BEFORE the
+        // daemon call (no local lease is created) and say plainly
+        // that the caller must use the HTTP MCP endpoint for fleet
+        // propagation, or retry hub-only.
+        if (!env.onFleetBroadcastBlock) {
+          return deny(
+            'mcp:fleet:broadcast',
+            'Fleet propagation is unavailable over this transport: the stdio MCP server runs in a separate process from the satellite sockets and cannot broadcast blocks. No block was created. Reconnect over the HTTP MCP endpoint to propagate a block to the fleet, or retry with propagateToFleet: false for a hub-only block.',
+            req.audit,
+          );
+        }
       }
 
       const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
