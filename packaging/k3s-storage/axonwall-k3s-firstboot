@@ -102,6 +102,17 @@ has_ifupdown_dropins() {
     return 1
 }
 
+# D-L5: the main interfaces file counts as "configured" only when it has
+# a non-loopback iface stanza. Shipped d-i installs leave it loopback-only
+# (preseed disables netcfg), and that must NOT count as managed, or the
+# box would lose DHCP. A hand-populated main file, however, means ifupdown
+# already owns an interface — writing a networkd unit on top would
+# double-manage the same NIC.
+has_main_interfaces_config() {
+    [ -f /etc/network/interfaces ] || return 1
+    awk '$1 == "iface" && $2 != "lo" {found=1; exit} END {exit !found}' /etc/network/interfaces
+}
+
 has_networkd_units() {
     for _f in /etc/systemd/network/*.network; do
         [ -s "$_f" ] && return 0
@@ -134,7 +145,7 @@ PHYS_NICS="$_k3s_nics_filtered"
 _PRIMARY_NIC=""
 for _nic in $PHYS_NICS; do _PRIMARY_NIC="$_nic"; break; done
 
-if ! has_ifupdown_dropins && ! has_networkd_units && [ ! -f "${CONF_DIR}/.interfaces_configured" ]; then
+if ! has_ifupdown_dropins && ! has_main_interfaces_config && ! has_networkd_units && [ ! -f "${CONF_DIR}/.interfaces_configured" ]; then
     log "configuring Host Mode DHCP client networking on physical NICs"
     if [ -d /run/systemd/system ] && [ -d /lib/systemd ] && command -v networkctl >/dev/null 2>&1; then
         mkdir -p /etc/systemd/network
