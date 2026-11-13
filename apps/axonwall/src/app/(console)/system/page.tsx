@@ -36,7 +36,7 @@ import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { AXONWALL_YAML_DOMAINS, type AxonwallYamlDomainFile } from '@axonwall/lib/yaml';
 
 export default function SystemPage() {
-  const { applyState } = useDesiredStateApply();
+  const { applyState, getFingerprint } = useDesiredStateApply();
   const [activeTab, setActiveTab] = useState<'yaml' | 'general' | 'gitops'>('yaml');
 
   // General System Settings
@@ -112,7 +112,15 @@ export default function SystemPage() {
     setYamlErrors([]);
     setActionMessage(null);
     try {
-      const res = await saveYamlDomainFile(selectedFilename, editorContent);
+      // C-M8: pass the fingerprint this page loaded with so a concurrent
+      // save cannot be silently reverted by this apply.
+      const fingerprint = getFingerprint();
+      const res = await saveYamlDomainFile(
+        selectedFilename,
+        editorContent,
+        true,
+        fingerprint ? { expectedFingerprint: fingerprint } : undefined
+      );
       if (!res.success) {
         setYamlErrors([{ file: selectedFilename, path: '', message: res.message || 'Validation failed' }]);
       } else {

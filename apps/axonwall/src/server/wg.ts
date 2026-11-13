@@ -50,7 +50,7 @@ export async function getWireGuardServerPublicKey(): Promise<string | null> {
   return deriveWireGuardPublicKey(wgCfg.privateKey);
 }
 
-export async function generateWireGuardProfile() {
+export async function generateWireGuardProfile(options?: { expectedFingerprint?: string }) {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
 
@@ -146,16 +146,22 @@ export async function generateWireGuardProfile() {
     enabled: true,
   };
   try {
-    await applyDesiredState({
-      ...state,
-      wireguard: {
-        enabled: true,
-        address: wgCfg.address || '10.99.0.1/24',
-        listenPort: wgCfg.listenPort || 51820,
-        privateKey: wgCfg.privateKey,
-        peers: [...(wgCfg?.peers ?? []), newPeer],
+    // C-M8: thread the caller's fingerprint through so two concurrent
+    // profile generations cannot both read S0 and drop each other's peer.
+    await applyDesiredState(
+      {
+        ...state,
+        wireguard: {
+          enabled: true,
+          address: wgCfg.address || '10.99.0.1/24',
+          listenPort: wgCfg.listenPort || 51820,
+          privateKey: wgCfg.privateKey,
+          peers: [...(wgCfg?.peers ?? []), newPeer],
+        },
       },
-    });
+      120,
+      options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+    );
   } catch (err: any) {
     throw new Error(`WireGuard peer could not be registered: ${err?.message || 'unknown error'}. No profile was issued — an admin must add this peer before it can connect.`);
   }

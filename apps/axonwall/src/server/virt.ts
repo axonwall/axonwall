@@ -12,10 +12,35 @@ import {
   LxcContainerSchema,
 } from '@axonwall/lib/schemas';
 import { compileVmProcess, compileLxcContainer } from '@axonwall/lib';
-import { getCurrentDesiredState, applyDesiredState } from './agent';
+import { getCurrentDesiredState, applyDesiredState, getDesiredStateFingerprint } from './agent';
 import { callAgentApi } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+
+// C-M8: these server actions used to apply with no expectedFingerprint, so
+// two concurrent VM/container creates both read S0, both appended, and the
+// last writer silently dropped the first item while both callers reported
+// success. Callers pass the fingerprint their page loaded with; the apply
+// is refused on mismatch instead of overwriting newer on-disk state.
+export type FingerprintOptions = { expectedFingerprint?: string };
+
+function fingerprintArg(options?: FingerprintOptions) {
+  return options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined;
+}
+
+// Fail fast before any daemon side effect (stop/unregister in the delete
+// paths runs before the apply). The in-apply check remains the
+// authoritative guard against a writer landing between this check and the
+// apply.
+async function assertFingerprintCurrent(options?: FingerprintOptions): Promise<void> {
+  if (!options?.expectedFingerprint) return;
+  const { fingerprint } = await getDesiredStateFingerprint();
+  if (fingerprint !== options.expectedFingerprint) {
+    throw new Error(
+      'Configuration changed since it was loaded; reload the latest configuration and retry instead of overwriting it.'
+    );
+  }
+}
 
 export interface VMStatusItem {
   vmid: number;
@@ -238,7 +263,8 @@ export async function vmPowerAction(
 }
 
 export async function saveVmAction(
-  vm: VirtualMachine
+  vm: VirtualMachine,
+  options?: FingerprintOptions
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -293,7 +319,7 @@ export async function saveVmAction(
     },
   };
 
-  await applyDesiredState(updatedState);
+  await applyDesiredState(updatedState, 120, fingerprintArg(options));
 
   // Register with daemon engine
   const compiled = compileVmProcess(vm);
@@ -336,7 +362,8 @@ export async function saveVmAction(
 }
 
 export async function deleteVmAction(
-  vmid: number
+  vmid: number,
+  options?: FingerprintOptions
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -348,6 +375,11 @@ export async function deleteVmAction(
   if (!state.virt.vms.some((v) => v.vmid === vmid)) {
     return { success: false, message: `VM ${vmid} is not configured — nothing deleted.` };
   }
+
+  // C-M8: refuse a stale fingerprint before the daemon unregister below —
+  // otherwise the VM is unregistered and then the apply is refused, which
+  // leaves the config and the daemon disagreeing.
+  await assertFingerprintCurrent(options);
 
   // D2: deregister with the daemon BEFORE removing the config, and refuse
   // to pretend the delete happened when the daemon cannot be reached —
@@ -375,7 +407,7 @@ export async function deleteVmAction(
     },
   };
 
-  await applyDesiredState(updatedState);
+  await applyDesiredState(updatedState, 120, fingerprintArg(options));
   return {
     success: true,
     message: `VM ${vmid} removed from configuration and unregistered from the daemon. NOTE: the ZVOL disk was NOT deleted and storage was not freed — re-creating VM ${vmid} will reuse the old disk.`,
@@ -566,7 +598,8 @@ export async function containerPowerAction(
 }
 
 export async function saveContainerAction(
-  container: LxcContainer
+  container: LxcContainer,
+  options?: FingerprintOptions
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -620,7 +653,7 @@ export async function saveContainerAction(
     },
   };
 
-  await applyDesiredState(updatedState);
+  await applyDesiredState(updatedState, 120, fingerprintArg(options));
 
   // Register with daemon engine
   const compiled = compileLxcContainer(container);
@@ -651,7 +684,8 @@ export async function saveContainerAction(
 }
 
 export async function deleteContainerAction(
-  ctid: number
+  ctid: number,
+  options?: FingerprintOptions
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -663,6 +697,9 @@ export async function deleteContainerAction(
   if (!state.virt.containers.some((c) => c.ctid === ctid)) {
     return { success: false, message: `Container ${ctid} is not configured — nothing deleted.` };
   }
+
+  // C-M8: refuse a stale fingerprint before the daemon stop below.
+  await assertFingerprintCurrent(options);
 
   // D2: best-effort stop so a running container is not left orphaned.
   // There is no daemon container-unregister action (the daemon handler only
@@ -679,7 +716,7 @@ export async function deleteContainerAction(
     },
   };
 
-  await applyDesiredState(updatedState);
+  await applyDesiredState(updatedState, 120, fingerprintArg(options));
   return {
     success: true,
     message: `Container ${ctid} removed from configuration. NOTE: the daemon registration and rootfs were NOT removed (no container unregister action exists) and storage was not freed — re-creating CTID ${ctid} will reuse the old rootfs.`,
