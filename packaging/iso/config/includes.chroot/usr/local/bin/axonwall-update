@@ -37,8 +37,24 @@ while [ $# -gt 0 ]; do
       APT_UPGRADE=1
       shift
       ;;
+    --help|-h)
+      cat << 'USAGE_EOF'
+Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--apt|--apt-upgrade]
+  --slot A|B          Target dual-root slot (default B)
+  --version <ver>     Release version to stage (required for ZBM updates)
+  --channel <name>    Release channel (default stable)
+  --rolling           In-place rolling update (single-root)
+  --zbm               ZFSBootMenu Boot Environment update
+  --apt               Also run an APT upgrade
+USAGE_EOF
+      exit 0
+      ;;
     *)
-      shift
+      # D-L1: unknown options used to be silently swallowed, so a typo
+      # like `--versoin 0.11.68 --slo C` ran a version-less update of
+      # the default slot B and exited 0. Fail loudly instead.
+      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --apt, --help." >&2
+      exit 1
       ;;
   esac
 done
