@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -86,7 +87,25 @@ type VirtManager struct {
 	// finishes, covering provisioning, socket cleanup, and launch.
 	startMu     sync.Mutex
 	startingVMs map[int]bool
+	// migMu guards migPorts: the set of migration ports reserved by
+	// in-flight LiveMigrateVM tasks. The old port formula
+	// (49152 + vmid%1000) collided for VMIDs differing by 1000 and
+	// nothing checked the port was free (round-3 A-M4).
+	migMu    sync.Mutex
+	migPorts map[int]bool
 }
+
+// liveMigratePollInterval / liveMigrateTimeout bound how long
+// LiveMigrateVM watches query-migrate after the stream starts.
+// liveMigrateDialTarget is the dial used for the target-listening
+// check. Vars (not consts) so tests can shrink them / stub the dial.
+var (
+	liveMigratePollInterval = 2 * time.Second
+	liveMigrateTimeout      = 10 * time.Minute
+	liveMigrateDialTarget   = func(network, address string, timeout time.Duration) (net.Conn, error) {
+		return net.DialTimeout(network, address, timeout)
+	}
+)
 
 type VirtioFsShareSpec struct {
 	Tag      string `json:"tag"`
@@ -193,6 +212,7 @@ func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
 		vmStartTimes: make(map[int]int64),
 		defaultPool:  "tank",
 		startingVMs:  make(map[int]bool),
+		migPorts:     make(map[int]bool),
 	}
 	m.loadPersistedSpecs()
 	return m
@@ -1563,6 +1583,35 @@ func (m *VirtManager) ListBackups(pool string) []BackupRecord {
 	return result
 }
 
+// QgaGuestError is a QEMU Guest Agent reply that carries an "error"
+// member: the agent is reachable but refused the command (unsupported,
+// disabled, agent too old). It is distinct from a transport failure
+// (socket missing, read timeout), where the agent may simply not be
+// running — callers such as CreateWorkloadSnapshot treat the two
+// differently, because a refused fsfreeze means the snapshot would
+// run unquiesced while the operator believes it is frozen.
+type QgaGuestError struct {
+	Class string
+	Desc  string
+}
+
+func (e *QgaGuestError) Error() string {
+	if e.Class != "" && e.Desc != "" {
+		return fmt.Sprintf("qga guest error (%s): %s", e.Class, e.Desc)
+	}
+	if e.Desc != "" {
+		return fmt.Sprintf("qga guest error: %s", e.Desc)
+	}
+	return "qga guest error"
+}
+
+// IsQgaGuestError reports whether err is (or wraps) a QGA guest
+// rejection, as opposed to a transport failure.
+func IsQgaGuestError(err error) bool {
+	var ge *QgaGuestError
+	return errors.As(err, &ge)
+}
+
 // SendQGACommand executes a QEMU Guest Agent JSON-RPC command over /run/axonwall/qga/vm-<vmid>.sock.
 func SendQGACommand(vmid int, command string, args map[string]any) (map[string]any, error) {
 	sockPath := fmt.Sprintf("/run/axonwall/qga/vm-%d.sock", vmid)
@@ -1591,6 +1640,23 @@ func SendQGACommand(vmid int, command string, args map[string]any) (map[string]a
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
 		return nil, fmt.Errorf("invalid qga JSON response: %w", err)
 	}
+	// A-M1 (round 3): the "error" member used to be ignored, so a
+	// guest rejection (fsfreeze unsupported, command disabled) came
+	// back as (resp, nil) and QgaFsFreeze "succeeded" while the guest
+	// never froze. Surface the rejection as an error.
+	if rawErr, ok := resp["error"]; ok && rawErr != nil {
+		ge := &QgaGuestError{}
+		if errMap, ok := rawErr.(map[string]any); ok {
+			ge.Class, _ = errMap["class"].(string)
+			ge.Desc, _ = errMap["desc"].(string)
+			if ge.Desc == "" {
+				ge.Desc, _ = errMap["message"].(string)
+			}
+		} else {
+			ge.Desc = fmt.Sprintf("%v", rawErr)
+		}
+		return nil, ge
+	}
 	return resp, nil
 }
 
@@ -1602,7 +1668,12 @@ func (m *VirtManager) QueryQgaInterfaces(vmid int) ([]QgaInterfaceInfo, error) {
 	}
 	rawRet, ok := resp["return"].([]any)
 	if !ok {
-		return []QgaInterfaceInfo{}, nil
+		// A-M1 (round 3): a reply with no "return" member and no
+		// "error" member (SendQGACommand now rejects error replies
+		// above) is not an empty interface list — it is a malformed
+		// reply. Returning ([], nil) used to make the API report
+		// available:true with zero interfaces for an erroring agent.
+		return nil, fmt.Errorf("qga guest-network-get-interfaces reply has no return value: %v", resp)
 	}
 	var out []QgaInterfaceInfo
 	for _, item := range rawRet {
@@ -1663,7 +1734,17 @@ func (m *VirtManager) CreateWorkloadSnapshot(targetType string, targetID int, la
 
 	froze := false
 	if targetType == "vm" {
-		if m.QgaFsFreeze(targetID) == nil {
+		// A-M1 (round 3): a guest that REJECTS the freeze must fail
+		// the snapshot — snapshotting a live filesystem while
+		// believing it quiesced voids the consistency guarantee.
+		// A transport failure (no agent socket) keeps the old
+		// behaviour: proceed unfrozen, since many guests run
+		// without an agent at all.
+		if err := m.QgaFsFreeze(targetID); err != nil {
+			if IsQgaGuestError(err) {
+				return nil, fmt.Errorf("guest refused fsfreeze, refusing to snapshot unquiesced VM %d: %w", targetID, err)
+			}
+		} else {
 			froze = true
 		}
 	}
@@ -1678,7 +1759,21 @@ func (m *VirtManager) CreateWorkloadSnapshot(targetType string, targetID int, la
 	for _, ds := range datasets {
 		snapFull := fmt.Sprintf("%s@%s", ds, cleanLabel)
 		if out, err := exec.Command("zfs", "snapshot", snapFull).CombinedOutput(); err != nil {
-			return created, fmt.Errorf("zfs snapshot %s failed: %s (%w)", snapFull, strings.TrimSpace(string(out)), err)
+			// A-M3 (round 3): a half-created snapshot set poisons a
+			// later rollback of the same label (disk-0 rewound,
+			// disk-1 not). Destroy what was already created so the
+			// label either exists on every disk or on none; the
+			// original failure is still the reported error.
+			cleanupErrs := make([]string, 0)
+			for _, done := range created {
+				if out, dErr := exec.Command("zfs", "destroy", done).CombinedOutput(); dErr != nil {
+					cleanupErrs = append(cleanupErrs, fmt.Sprintf("failed to destroy partial snapshot %s: %s (%v)", done, strings.TrimSpace(string(out)), dErr))
+				}
+			}
+			if len(cleanupErrs) > 0 {
+				return created, fmt.Errorf("zfs snapshot %s failed: %s (%w); partial-snapshot cleanup also failed, leftovers remain: %s", snapFull, strings.TrimSpace(string(out)), err, strings.Join(cleanupErrs, "; "))
+			}
+			return nil, fmt.Errorf("zfs snapshot %s failed: %s (%w)", snapFull, strings.TrimSpace(string(out)), err)
 		}
 		created = append(created, snapFull)
 	}
@@ -1751,8 +1846,16 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 	}
 
 	clonedDisks := make([]VmDisk, 0, len(srcSpec.Disks))
-	_, hasZfs := exec.LookPath("zfs")
-	stamp := time.Now().UTC().Format("20060102150405")
+	if _, err := exec.LookPath("zfs"); err != nil {
+		// A-M2 (round 3): without zfs no disk can be copied at all.
+		// The old code silently skipped every disk and still
+		// registered the "clone", which then booted with fresh
+		// empty disks provisioned by StartVM.
+		return CompiledVmSpec{}, fmt.Errorf("cannot clone VM %d: zfs is not installed on this system (%v)", sourceVMID, err)
+	}
+	// Nanosecond stamp: the old second-resolution stamp collided
+	// when two clones of one source ran in the same second.
+	stamp := time.Now().UTC().Format("20060102150405.000000000")
 
 	for idx, d := range srcSpec.Disks {
 		pool := d.Pool
@@ -1764,7 +1867,14 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 			srcZvol = fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, sourceVMID, idx)
 		}
 		dstZvol := fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, newVMID, idx)
-		if hasZfs == nil && exec.Command("zfs", "list", "-H", srcZvol).Run() == nil {
+		if err := exec.Command("zfs", "list", "-H", srcZvol).Run(); err != nil {
+			// A-M2 (round 3): a missing source zvol (pool not
+			// imported, disk never provisioned) used to be skipped
+			// silently while the clone still registered a disk
+			// pointing at the never-created destination.
+			return CompiledVmSpec{}, fmt.Errorf("cannot clone VM %d: source disk %s not found (%v)", sourceVMID, srcZvol, err)
+		}
+		{
 			snap := fmt.Sprintf("%s@clone-%d-%s", srcZvol, newVMID, stamp)
 			if out, err := exec.Command("zfs", "snapshot", snap).CombinedOutput(); err != nil {
 				return CompiledVmSpec{}, fmt.Errorf("snapshot for clone failed: %s (%w)", strings.TrimSpace(string(out)), err)
@@ -1873,6 +1983,84 @@ func (m *VirtManager) PruneBackupsGFS(pool string, keepLast int) ([]string, erro
 	return deleted, nil
 }
 
+// allocateMigrationPort reserves a free TCP port in the QEMU
+// migration range (49152-65535), starting from the VMID-derived
+// hint and scanning upward. The reservation is held until
+// releaseMigrationPort, so two concurrent migrations can never share
+// a port; the listen probe also refuses a port something else on
+// this host already holds.
+func (m *VirtManager) allocateMigrationPort(vmid int) (int, error) {
+	m.migMu.Lock()
+	defer m.migMu.Unlock()
+	if m.migPorts == nil {
+		m.migPorts = make(map[int]bool)
+	}
+	hint := 49152 + (vmid % 16384)
+	for i := 0; i < 16384; i++ {
+		port := 49152 + ((hint - 49152 + i) % 16384)
+		if m.migPorts[port] {
+			continue
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		m.migPorts[port] = true
+		return port, nil
+	}
+	return 0, fmt.Errorf("no free migration port available in range 49152-65535")
+}
+
+func (m *VirtManager) releaseMigrationPort(port int) {
+	m.migMu.Lock()
+	defer m.migMu.Unlock()
+	delete(m.migPorts, port)
+}
+
+// pollMigrationCompletion watches QMP query-migrate until the
+// migration reaches a terminal state. It returns nil only when QEMU
+// reports status "completed".
+func pollMigrationCompletion(qmpSock string, logger func(format string, args ...any)) error {
+	deadline := time.Now().Add(liveMigrateTimeout)
+	consecutiveErrs := 0
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("live migration did not complete within %s; VM state on target is unknown, verify before assuming the migration finished", liveMigrateTimeout)
+		}
+		resp, err := SendQMPCommand(qmpSock, "query-migrate", nil)
+		if err != nil {
+			consecutiveErrs++
+			if consecutiveErrs >= 3 {
+				return fmt.Errorf("live migration status unknown: query-migrate failed %d times in a row: %w", consecutiveErrs, err)
+			}
+			logger("query-migrate failed (%v); retrying...", err)
+			time.Sleep(liveMigratePollInterval)
+			continue
+		}
+		consecutiveErrs = 0
+		status := ""
+		if ret, ok := resp["return"].(map[string]any); ok {
+			status, _ = ret["status"].(string)
+		}
+		switch status {
+		case "completed":
+			logger("QMP live migration completed.")
+			return nil
+		case "failed":
+			return fmt.Errorf("live migration failed (query-migrate status=failed); VM is still running on the source")
+		case "cancelled", "canceled":
+			return fmt.Errorf("live migration was cancelled (query-migrate status=%s); VM is still running on the source", status)
+		case "":
+			return fmt.Errorf("live migration status unknown: query-migrate returned no status: %v", resp)
+		default:
+			// "setup", "active", "pre-switchover", etc: still going.
+			logger("QMP live migration status=%s; waiting...", status)
+			time.Sleep(liveMigratePollInterval)
+		}
+	}
+}
+
 // LiveMigrateVM orchestrates QMP RAM live migration to a peer Axonwall hypervisor node.
 func (m *VirtManager) LiveMigrateVM(vmid int, targetPeerIP string, user string) (string, error) {
 	cleanIP := strings.TrimSpace(targetPeerIP)
@@ -1885,10 +2073,23 @@ func (m *VirtManager) LiveMigrateVM(vmid int, targetPeerIP string, user string) 
 		return "", fmt.Errorf("VM %d is not running (QMP socket %s missing)", vmid, qmpSock)
 	}
 
-	migPort := 49152 + (vmid % 1000)
+	// A-M4 (round 3): the old 49152+(vmid%1000) formula collided for
+	// VMIDs differing by 1000, and nothing checked that the target
+	// was listening before starting the stream.
+	migPort, err := m.allocateMigrationPort(vmid)
+	if err != nil {
+		return "", err
+	}
 	migURI := fmt.Sprintf("tcp:%s", net.JoinHostPort(cleanIP, strconv.Itoa(migPort)))
+	if conn, err := liveMigrateDialTarget("tcp", net.JoinHostPort(cleanIP, strconv.Itoa(migPort)), 2*time.Second); err != nil {
+		m.releaseMigrationPort(migPort)
+		return "", fmt.Errorf("live migration target %s is not listening for migration on port %d (start the target with -incoming %s first): %w", cleanIP, migPort, migURI, err)
+	} else {
+		_ = conn.Close()
+	}
 
 	upid := m.taskMgr.StartTask("qmigrate", strconv.Itoa(vmid), user, func(logger func(format string, args ...any)) error {
+		defer m.releaseMigrationPort(migPort)
 		logger("Initiating live QMP RAM migration for VM %d -> %s...", vmid, migURI)
 		resp, err := SendQMPCommand(qmpSock, "migrate", map[string]any{"uri": migURI})
 		if err != nil {
@@ -1898,8 +2099,13 @@ func (m *VirtManager) LiveMigrateVM(vmid int, targetPeerIP string, user string) 
 		if qmpErr, hasErr := resp["error"]; hasErr {
 			return fmt.Errorf("QMP migrate rejected: %v", qmpErr)
 		}
-		logger("QMP live migration stream started toward %s.", migURI)
-		return nil
+		logger("QMP live migration stream started toward %s; waiting for completion...", migURI)
+		// A-M4 (round 3): returning nil here used to report the
+		// migration complete as soon as the stream started, while
+		// a mid-transfer failure left the VM on the source and
+		// the task showing success. Poll query-migrate to a
+		// terminal state instead.
+		return pollMigrationCompletion(qmpSock, logger)
 	})
 	return upid, nil
 }
