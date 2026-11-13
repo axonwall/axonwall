@@ -787,12 +787,16 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && [ -n "$SYSTEM_RAID_DISKS" ]; then
     sleep 1
 
     # Clone EFI System Partition & install redundant GRUB bootloader on secondary disk
+    # D-M12: a failed secondary-disk install used to be swallowed, silently
+    # losing boot redundancy (the box still boots from disk 1 until disk 1
+    # fails). Fail the install loudly instead -- this hook runs under
+    # `set -e`, so a failure aborts here with the error visible.
     SEC_EFI=$(part_dev "$sec_disk" 2)
     if [ -b "$EFI_DEV" ] && [ -b "$SEC_EFI" ]; then
-      dd if="$EFI_DEV" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+      dd if="$EFI_DEV" of="$SEC_EFI" bs=1M conv=fsync
     fi
-    in-target grub-install --target=i386-pc "$sec_disk" 2>/dev/null || true
-    in-target grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram 2>/dev/null || true
+    in-target grub-install --target=i386-pc "$sec_disk"
+    in-target grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram
 
     # Replicate Slot A & Slot B onto secondary disk or assemble mdadm mirror
     SEC_ROOT_A=""
