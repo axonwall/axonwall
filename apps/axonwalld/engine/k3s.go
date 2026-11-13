@@ -618,6 +618,14 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		haTopo = "embedded-etcd"
 	}
 
+	// A-L4: GetStatus hardcoded the ZFS local PV pool to "tank" even
+	// though the bundle carries a configurable ZfsLocalPvPool. Report
+	// the configured value; "tank" remains only the default when
+	// nothing is configured.
+	pvPool := cfg.ZfsLocalPvPool
+	if pvPool == "" {
+		pvPool = "tank"
+	}
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
 		Running:         running,
@@ -629,7 +637,7 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		HaAutoJoined:    joined,
 		OpenEbsReady:    openEbsReady,
 		OpenEbsHealthy:  openEbsHealthy,
-		ZfsLocalPvPool:  "tank",
+		ZfsLocalPvPool:  pvPool,
 		Nodes:           nodes,
 		Volumes:         volumes,
 		LastSyncMessage: lastMsg,
@@ -706,15 +714,26 @@ func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
 	if err != nil {
 		return fmt.Errorf("k3s binary not found on system")
 	}
-	_ = exec.Command("systemctl", "stop", "k3s").Run()
+	// A-M9: the stop used to be discarded (`_ =`), so the cluster
+	// reset ran against a possibly still-running etcd when the stop
+	// failed (stuck/masked unit, systemctl error). Fail before the
+	// reset instead. The unit is resolved the same way as the rest
+	// of this file, so k3s-agent editions stop the right unit.
+	m.mu.Lock()
+	configYaml := m.cfg.K3sConfigYaml
+	m.mu.Unlock()
+	k3sUnit := resolveK3sSystemdUnit(configYaml)
+	if out, err := exec.Command("systemctl", "stop", k3sUnit).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to stop %s before etcd cluster reset: %s (%w)", k3sUnit, strings.TrimSpace(string(out)), err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, k3sBin, "server", "--cluster-reset", "--cluster-reset-restore-path="+fullPath).CombinedOutput()
 	if err != nil {
-		_ = exec.Command("systemctl", "start", "k3s").Run()
+		_ = exec.Command("systemctl", "start", k3sUnit).Run()
 		return fmt.Errorf("k3s cluster-reset restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
-	if startOut, startErr := exec.Command("systemctl", "start", "k3s").CombinedOutput(); startErr != nil {
+	if startOut, startErr := exec.Command("systemctl", "start", k3sUnit).CombinedOutput(); startErr != nil {
 		return fmt.Errorf("etcd restored, but failed to restart k3s: %s (%w)", strings.TrimSpace(string(startOut)), startErr)
 	}
 	return nil
