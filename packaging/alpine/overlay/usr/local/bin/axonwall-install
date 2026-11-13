@@ -1872,10 +1872,23 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
       --exclude='/run/*' \
       --exclude='/tmp/*' \
       --exclude='/mnt/*' \
+      --exclude='/etc/machine-id' \
+      --exclude='/etc/ssh/ssh_host_*' \
+      --exclude='/var/lib/dbus/machine-id' \
+      --exclude='/var/lib/cloud/data' \
+      --exclude='/var/lib/cloud/instance' \
+      --exclude='/var/lib/cloud/instances' \
       /mnt/slot_a/ /mnt/slot_b/
   else
     cp -a /mnt/slot_a/. /mnt/slot_b/ 2>/dev/null || true
   fi
+  # D-M1: sanitize machine identity on the standby copy, exactly as the
+  # firstboot clone does, so slot B generates its own machine-id, SSH
+  # host keys and cloud-init state on its first boot (the cp fallback
+  # above copies them verbatim; the rsync branch now excludes them).
+  : > /mnt/slot_b/etc/machine-id 2>/dev/null || true
+  rm -f /mnt/slot_b/var/lib/dbus/machine-id /mnt/slot_b/etc/ssh/ssh_host_* 2>/dev/null || true
+  rm -rf /mnt/slot_b/var/lib/cloud/data /mnt/slot_b/var/lib/cloud/instance /mnt/slot_b/var/lib/cloud/instances 2>/dev/null || true
   sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
 
   INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"

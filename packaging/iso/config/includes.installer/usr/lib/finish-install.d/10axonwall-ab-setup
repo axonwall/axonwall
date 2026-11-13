@@ -608,14 +608,29 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
         --exclude=/dev/* \
         --exclude=/run/* \
         --exclude=/tmp/* \
+        --exclude=/etc/machine-id \
+        --exclude=/etc/ssh/ssh_host_* \
+        --exclude=/var/lib/dbus/machine-id \
+        --exclude=/var/lib/cloud/data \
+        --exclude=/var/lib/cloud/instance \
+        --exclude=/var/lib/cloud/instances \
         /target/ "$STAGE_B/" 2>/dev/null; then
         SYNC_OK=1
       fi
     else
-      if tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' --exclude='./boot/efi/*' -cf - . | tar -C "$STAGE_B" -xf -; then
+      if tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' --exclude='./boot/efi/*' --exclude='./etc/machine-id' --exclude='./etc/ssh/ssh_host_*' --exclude='./var/lib/dbus/machine-id' --exclude='./var/lib/cloud/data' --exclude='./var/lib/cloud/instance' --exclude='./var/lib/cloud/instances' -cf - . | tar -C "$STAGE_B" -xf -; then
         SYNC_OK=1
       fi
     fi
+    # D-M1: sanitize machine identity on the standby copy, exactly as
+    # the firstboot clone does, so slot B generates its own machine-id,
+    # SSH host keys and cloud-init state on its first boot. (At install
+    # time these are usually still empty/absent, so this is normally a
+    # no-op safety net.) The cloud-init *seed* is copied separately
+    # below and is deliberately not removed here.
+    : > "$STAGE_B/etc/machine-id" 2>/dev/null || true
+    rm -f "$STAGE_B/var/lib/dbus/machine-id" "$STAGE_B"/etc/ssh/ssh_host_* 2>/dev/null || true
+    rm -rf "$STAGE_B/var/lib/cloud/data" "$STAGE_B/var/lib/cloud/instance" "$STAGE_B/var/lib/cloud/instances" 2>/dev/null || true
 
     # Configure Slot B's /etc/fstab for independent booting
     if [ -f "$STAGE_B/etc/fstab" ]; then
