@@ -117,7 +117,14 @@ mkdir -p \
   "${INITRAMFS_ROOT}/etc/ssl/certs" \
   "${INITRAMFS_ROOT}/etc/wireguard"
 
-VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.11.30")"
+VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -z "$VERSION" ]; then
+  VERSION="$(grep -m1 '"version"' "${REPO_ROOT}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)"
+fi
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (VERSION file and package.json both missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 echo "[+] Compiling static Go PID 1 binary (/init) for ${SKU}..."
 (
   cd "${REPO_ROOT}/apps/axonwall-satellite"

@@ -337,7 +337,11 @@ fi
 
 chmod +x config/includes.chroot/usr/local/bin/axonwall-import || true
 
-VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || grep -m1 '"version"' "${SCRIPT_DIR}/../../package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || echo "0.9.2")
+VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || grep -m1 '"version"' "${SCRIPT_DIR}/../../package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (package.json missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 echo "${VERSION}" > config/includes.chroot/etc/axonwall/version
 
 # Copy compiled daemon binaries if present

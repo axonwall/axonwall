@@ -16,7 +16,11 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 WORK_DIR="${SCRIPT_DIR}/build"
 
-VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.9.9")
+VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || grep -m1 '"version"' "${ROOT_DIR}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (package.json missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 IMAGE_BASE="axonwall-debian13-amd64-cloud"
 RAW_IMAGE="${WORK_DIR}/${IMAGE_BASE}.raw"
 QCOW2_IMAGE="${OUTPUT_DIR}/${IMAGE_BASE}.qcow2"
@@ -205,10 +209,13 @@ mount --bind /proc "${TARGET}/proc"
 mount --bind /sys "${TARGET}/sys"
 
 # Install GRUB for EFI (removable media target ensures boot on all UEFI firmware)
-chroot "${TARGET}" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=axonwall --recheck --no-nvram --removable 2>/dev/null || true
+# D-H1: a failed bootloader install must fail the build, never ship an
+# unbootable image stamped as success. No `|| true`, no silenced stderr:
+# under `set -euo pipefail` a failure aborts here and the EXIT trap cleans up.
+chroot "${TARGET}" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=axonwall --recheck --no-nvram --removable
 
 # Install GRUB for Legacy BIOS
-chroot "${TARGET}" grub-install --target=i386-pc --recheck "${LOOP_DEV}" 2>/dev/null || true
+chroot "${TARGET}" grub-install --target=i386-pc --recheck "${LOOP_DEV}"
 
 # Configure GRUB theme & fonts
 mkdir -p "${TARGET}/boot/grub/themes/axonwall"
@@ -217,8 +224,8 @@ if [[ -f "${TARGET}/usr/share/grub/unicode.pf2" ]]; then
   cp -n "${TARGET}/usr/share/grub/unicode.pf2" "${TARGET}/boot/grub/themes/axonwall/unicode.pf2" 2>/dev/null || true
 fi
 
-# Update GRUB configuration
-chroot "${TARGET}" update-grub 2>/dev/null || true
+# Update GRUB configuration (D-H1: fail the build if this fails, as above)
+chroot "${TARGET}" update-grub
 
 # Sanitize image before unmounting: ensure unique machine-id and SSH host keys on VM instantiation
 echo "[+] Sanitizing appliance image (machine-id, host keys, cloud-init state)..."

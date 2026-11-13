@@ -53,6 +53,12 @@ sysctl --system || true
 # (refuse to clone B onto itself, and refuse when the booted slot cannot
 # be determined); the standby slot must be empty (never clobber a slot
 # that already holds an OS); rsync must be present.
+# D-M2: the pending marker is left in place so the next firstboot run
+# retries -- but ONLY for transient failures (unknown booted slot,
+# missing standby device, rsync/mount failure). A booted-from-B refusal
+# is not transient: the clone can only ever run A->B, so keeping the
+# marker would re-run full firstboot on every B boot forever. That
+# branch consumes the pending marker itself, below.
 if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
   (
     set +e
@@ -76,6 +82,15 @@ if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
     fi
     if [[ "$_ab_boot_label" == "axon_root_b" ]]; then
       echo "[Axonwall Firstboot] WARNING: booted from standby slot B; refusing to clone B onto itself. Standby slot A will be populated by the next update." >&2
+      # D-M2: this refusal is permanent for this boot direction -- the
+      # clone can only ever run A->B -- so keeping the pending marker
+      # would re-run full firstboot on *every* B boot forever (the
+      # firstboot service is gated on the .firstboot marker, which the
+      # tail of this script keeps while the pending marker exists),
+      # with the clone never able to complete. Consume the pending
+      # marker here: slot B is populated by definition (it is the
+      # running root), and slot A will be populated by the next update.
+      rm -f /etc/axonwall/.ab-clone-pending
     elif [[ "$_ab_boot_label" != "axon_root_a" ]]; then
       echo "[Axonwall Firstboot] WARNING: could not determine the booted root slot (label='${_ab_boot_label:-<none>}'); skipping standby population rather than risk cloning the wrong direction." >&2
     else
@@ -524,12 +539,16 @@ if [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; t
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
   for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
+  # D-L4: a failed generation used to be swallowed (`|| true`) and the
+  # firstboot marker consumed anyway, leaving the box with no hub pair
+  # and no retry. Fail loudly instead; the marker survives and the
+  # next boot retries, exactly like the k3s firstboot (`|| die`).
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout /etc/axonwall/certs/hub.key \
     -out /etc/axonwall/certs/hub.crt \
     -days 3650 \
     -subj "/O=Axonwall/OU=Appliance/CN=$(hostname)" \
-    -addext "subjectAltName=${SAN}" || true
+    -addext "subjectAltName=${SAN}" || { echo "[Axonwall Firstboot] ERROR: TLS certificate generation failed; keeping the firstboot marker so the next boot retries." >&2; exit 1; }
 fi
 # Always fix ownership: the controller (its own user since B-12) reads the key
 chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
@@ -879,6 +898,10 @@ echo "==========================================================================
 # with no consumer until the next update populated B. Keeping the
 # marker makes the next boot re-run firstboot (its steps are written
 # to be re-runnable; see step 6) and retry the clone.
+# D-M2: a pending marker that survives to this point is a transient
+# failure (unknown booted slot, missing standby device, rsync/mount
+# failure). A booted-from-B refusal already consumed it in step 1.1,
+# so this keep-marker path no longer fires forever on B boots.
 if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
   echo "[Axonwall Firstboot] WARNING: standby slot clone is still pending; keeping the firstboot marker so the next boot retries the clone." >&2
 else

@@ -37,8 +37,24 @@ while [ $# -gt 0 ]; do
       APT_UPGRADE=1
       shift
       ;;
+    --help|-h)
+      cat << 'USAGE_EOF'
+Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--apt|--apt-upgrade]
+  --slot A|B          Target dual-root slot (default B)
+  --version <ver>     Release version to stage (required for ZBM updates)
+  --channel <name>    Release channel (default stable)
+  --rolling           In-place rolling update (single-root)
+  --zbm               ZFSBootMenu Boot Environment update
+  --apt               Also run an APT upgrade
+USAGE_EOF
+      exit 0
+      ;;
     *)
-      shift
+      # D-L1: unknown options used to be silently swallowed, so a typo
+      # like `--versoin 0.11.68 --slo C` ran a version-less update of
+      # the default slot B and exited 0. Fail loudly instead.
+      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --apt, --help." >&2
+      exit 1
       ;;
   esac
 done
@@ -464,7 +480,10 @@ RUNNING_ACTIVE_SLOT="A"
 if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
   RUNNING_ACTIVE_SLOT="B"
 fi
-RUNNING_VER="0.8.13"
+# D-L3: "unknown" when the version file is absent -- the running
+# version is genuinely unknown then; a stale literal (0.8.13) fed
+# slot_versions.json and the download-abort comparison a wrong value.
+RUNNING_VER="unknown"
 if [ -f /etc/axonwall/version ]; then
   RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
 fi
@@ -744,14 +763,33 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           --exclude=/var/lib/axonwall/* \
           --exclude=/home/* \
           --exclude=/boot/efi/* \
+          --exclude=/etc/machine-id \
+          --exclude=/etc/ssh/ssh_host_* \
+          --exclude=/var/lib/dbus/machine-id \
+          --exclude=/var/lib/cloud/data \
+          --exclude=/var/lib/cloud/instance \
+          --exclude=/var/lib/cloud/instances \
           / "${STAGE_DIR}/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       else
-        for sys_dir in bin etc home lib lib64 opt root sbin usr var; do
+        # D-M1: mirror the rsync excludes -- the old loop copied /home
+        # and /var (including live /var/lib/axonwall state) verbatim.
+        for sys_dir in bin etc lib lib64 opt root sbin usr var; do
           if [ -d "/${sys_dir}" ]; then
             cp -a "/${sys_dir}" "${STAGE_DIR}/" 2>/dev/null || true
           fi
         done
       fi
+      # D-M1: sanitize machine identity on the staged copy, exactly as
+      # the firstboot clone does, so the standby generates its own
+      # machine-id, SSH host keys and cloud-init state on its first
+      # boot. Also drops any live /var/lib/axonwall state the cp
+      # fallback carried over (the rsync branch already excludes it,
+      # and a pre-existing partial staged tree may still hold it).
+      : > "${STAGE_DIR}/etc/machine-id" 2>/dev/null || true
+      rm -f "${STAGE_DIR}/var/lib/dbus/machine-id" "${STAGE_DIR}"/etc/ssh/ssh_host_* 2>/dev/null || true
+      rm -rf "${STAGE_DIR}/var/lib/cloud/data" "${STAGE_DIR}/var/lib/cloud/instance" "${STAGE_DIR}/var/lib/cloud/instances" 2>/dev/null || true
+      rm -rf "${STAGE_DIR}/var/lib/axonwall" 2>/dev/null || true
+      rm -rf "${STAGE_DIR}/home" 2>/dev/null || true
       mkdir -p "${STAGE_DIR}/dev" "${STAGE_DIR}/proc" "${STAGE_DIR}/sys" "${STAGE_DIR}/run" "${STAGE_DIR}/tmp" "${STAGE_DIR}/boot" "${STAGE_DIR}/home" "${STAGE_DIR}/var/lib/axonwall" 2>/dev/null || true
     fi
 
