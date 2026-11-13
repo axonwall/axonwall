@@ -59,6 +59,70 @@ USAGE_EOF
   esac
 done
 
+# D-M9 (round-3): flavor-specific update channel. The updater used to
+# download the NGFW `axonwall_${VER}_amd64.deb` on every box, so a vault
+# or k3s-storage update reintroduced exactly the daemon/UI/controller
+# payload those flavors deliberately strip ("ABSENT, not disabled").
+# Josh's decision (2026-11-12): flavor-specific package/channel — the
+# updater requests `axonwall-<edition>_${VER}_amd64.deb` for vault and
+# k3s-storage, and the NGFW package for the axonwall edition. It never
+# falls back to the NGFW package: a failed flavor download leaves
+# DEB_TMP empty and the E-M1 guard below aborts the update.
+# Detection uses the same signals the installers use: the edition
+# marker the TUI installer writes into the installed slot and the ISO
+# builders write into the image (/etc/axonwall/.vault-edition,
+# /etc/axonwall/.k3s-edition), falling back to the `axonwall.edition=`
+# / `axonwall_edition=` kernel cmdline the installers also read. The
+# NGFW edition writes no marker, so no marker + no cmdline means
+# axonwall — preserving the behaviour of every NGFW box in the field.
+detect_edition() {
+  _vault_marker=0
+  _k3s_marker=0
+  [ -f /etc/axonwall/.vault-edition ] && _vault_marker=1
+  [ -f /etc/axonwall/.k3s-edition ] && _k3s_marker=1
+  if [ "$_vault_marker" = "1" ] && [ "$_k3s_marker" = "1" ]; then
+    echo "[-] ERROR: both /etc/axonwall/.vault-edition and /etc/axonwall/.k3s-edition exist; the installed edition is ambiguous. Remove the wrong marker and re-run the updater." >&2
+    exit 1
+  fi
+  if [ "$_vault_marker" = "1" ]; then
+    echo "vault"
+    return 0
+  fi
+  if [ "$_k3s_marker" = "1" ]; then
+    echo "k3s-storage"
+    return 0
+  fi
+  # No marker: fall back to the kernel cmdline, the same source the
+  # TUI installer reads when no marker is present.
+  if grep -qsE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    echo "vault"
+    return 0
+  fi
+  if grep -qsE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    echo "k3s-storage"
+    return 0
+  fi
+  if grep -qsE '(^|[[:space:]])(axonwall_edition=axonwall|axonwall\.edition=axonwall)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    echo "axonwall"
+    return 0
+  fi
+  # An edition the updater does not know (e.g. `edge`, which lives
+  # only on the vault branch) must fail closed: guessing axonwall
+  # would stage the NGFW payload onto a box that deliberately strips
+  # it. The operator fixes the cmdline/markers and re-runs.
+  _cmdline_edition="$(grep -oE '(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | tail -n 1 | sed -E 's/^[^=]+=//')"
+  if [ -n "$_cmdline_edition" ]; then
+    echo "[-] ERROR: unknown edition '${_cmdline_edition}' in kernel cmdline (expected axonwall, vault, or k3s-storage); refusing to guess which package to fetch." >&2
+    exit 1
+  fi
+  echo "axonwall"
+}
+
+# Note: command substitution runs in a subshell, so a bare call would
+# swallow detect_edition's exit 1 — the `|| exit 1` makes the failure
+# propagate to this script.
+EDITION="$(detect_edition)" || exit 1
+
 ZBM_MODE=0
 if [ "$FORCE_ZBM" = "1" ]; then
   ZBM_MODE=1
@@ -106,6 +170,7 @@ else
 fi
 echo "  Target Version: ${TARGET_VERSION:-latest}"
 echo "  Channel       : ${UPDATE_CHANNEL}"
+echo "  Edition       : ${EDITION}"
 echo "================================================================================"
 
 # Pre-Update OpenLDAP Directory Backup (protects against MDB version skew on rollback)
@@ -459,11 +524,22 @@ fi
 CLEAN_VER="${TARGET_VERSION#v}"
 DEB_TMP=""
 if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
-  DEB_URL="https://github.com/axonwall/axonwall/releases/download/v${CLEAN_VER}/axonwall_${CLEAN_VER}_amd64.deb"
+  # D-M9: flavor-specific package name. The axonwall edition keeps the
+  # historic NGFW artifact name; vault and k3s-storage request their
+  # own package. There is deliberately no fallback to the NGFW package
+  # anywhere below — a failed flavor download leaves DEB_TMP empty and
+  # the E-M1 guard aborts the update instead of staging the wrong
+  # edition's payload.
+  case "$EDITION" in
+    vault) DEB_BASE="axonwall-vault" ;;
+    k3s-storage) DEB_BASE="axonwall-k3s-storage" ;;
+    *) DEB_BASE="axonwall" ;;
+  esac
+  DEB_URL="https://github.com/axonwall/axonwall/releases/download/v${CLEAN_VER}/${DEB_BASE}_${CLEAN_VER}_amd64.deb"
   SHA_URL="${DEB_URL}.sha256"
   SIG_URL="${SHA_URL}.sig"
   RELEASE_PUBKEY="/etc/axonwall/release-signing.pub"
-  CANDIDATE_DEB="/tmp/axonwall_${CLEAN_VER}_amd64.deb"
+  CANDIDATE_DEB="/tmp/${DEB_BASE}_${CLEAN_VER}_amd64.deb"
   echo "[+] Checking release artifact: ${DEB_URL}"
   if curl -fsSL --connect-timeout 10 --max-time 180 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
     # Fail closed: the .deb is only ever used after verification. A
