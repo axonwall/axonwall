@@ -31,7 +31,6 @@ import {
   GitBranch,
   Flame,
   Database,
-  Lock,
   Save,
   Sparkles,
   ArrowRight,
@@ -214,97 +213,6 @@ const EBPF_PROBE_CATALOG: EbpfProbeSpec[] = [
   },
 ];
 
-interface L7ProtocolTelemetryRow {
-  protocol: string;
-  wireFormat: string;
-  hookSource: string;
-  reqPerSec: string;
-  errorRate: string;
-  p50Latency: string;
-  p99Latency: string;
-  tlsInspected: boolean;
-  sampleSummary: string;
-}
-
-const L7_PROTOCOL_TELEMETRY: L7ProtocolTelemetryRow[] = [
-  {
-    protocol: 'HTTP/1.1 & HTTP/2',
-    wireFormat: 'REST / JSON / SSE',
-    hookSource: 'sock_ops + uprobe/SSL_write',
-    reqPerSec: '342.4 req/s',
-    errorRate: '0.02% (5xx)',
-    p50Latency: '1.8 ms',
-    p99Latency: '14.2 ms',
-    tlsInspected: true,
-    sampleSummary: 'GET /api/v1/status -> 200 OK • POST /v1/chat/completions -> 200 OK',
-  },
-  {
-    protocol: 'gRPC (HTTP/2)',
-    wireFormat: 'Protobuf / h2c & mTLS',
-    hookSource: 'sys_enter_write + crypto/tls',
-    reqPerSec: '128.0 rpc/s',
-    errorRate: '0.00% (OK)',
-    p50Latency: '0.9 ms',
-    p99Latency: '4.6 ms',
-    tlsInspected: true,
-    sampleSummary: '/axonwall.agent.v1.AgentService/GetStatus -> grpc-status: 0 (OK)',
-  },
-  {
-    protocol: 'PostgreSQL (PGWire)',
-    wireFormat: 'Frontend/Backend v3.0',
-    hookSource: 'sys_enter_sendto (port 5432)',
-    reqPerSec: '89.5 qps',
-    errorRate: '0.00%',
-    p50Latency: '0.6 ms',
-    p99Latency: '3.1 ms',
-    tlsInspected: true,
-    sampleSummary: 'SELECT * FROM pg_stat_replication • COMMIT (Kubegres HA primary)',
-  },
-  {
-    protocol: 'Redis / Valkey (RESP)',
-    wireFormat: 'RESP2 / RESP3',
-    hookSource: 'sys_enter_write (port 6379)',
-    reqPerSec: '614.2 ops/s',
-    errorRate: '0.00%',
-    p50Latency: '0.18 ms',
-    p99Latency: '0.75 ms',
-    tlsInspected: false,
-    sampleSummary: 'HGETALL session:token • EVALSHA rate_limit_bucket',
-  },
-  {
-    protocol: 'ClickHouse Native / HTTP',
-    wireFormat: 'Columnar Block Stream',
-    hookSource: 'sys_enter_write (port 8123/9000)',
-    reqPerSec: '24.8 ins/s',
-    errorRate: '0.00%',
-    p50Latency: '2.4 ms',
-    p99Latency: '11.8 ms',
-    tlsInspected: false,
-    sampleSummary: 'INSERT INTO axonwall.otel_traces FORMAT Native (batch 4,096 rows)',
-  },
-  {
-    protocol: 'DNS (CoreDNS / Unbound)',
-    wireFormat: 'UDP/TCP 53 & DoT 853',
-    hookSource: 'cgroup_skb/egress',
-    reqPerSec: '215.0 qps',
-    errorRate: '0.14% (NXDOMAIN)',
-    p50Latency: '0.35 ms',
-    p99Latency: '1.9 ms',
-    tlsInspected: true,
-    sampleSummary: 'A vow.axonwall.lan -> NOERROR (0.3ms) • RPZ sinkhole block: 0.02%',
-  },
-  {
-    protocol: 'Kafka / NATS JetStream',
-    wireFormat: 'Binary Broker Framing',
-    hookSource: 'sys_enter_write (port 9092/4222)',
-    reqPerSec: '190.4 msg/s',
-    errorRate: '0.00%',
-    p50Latency: '0.8 ms',
-    p99Latency: '3.4 ms',
-    tlsInspected: false,
-    sampleSummary: 'ProduceRequest topic="vigilante-telemetry" partition=0 acks=1',
-  },
-];
 
 interface RcaInspectionCheck {
   id: string;
@@ -1168,7 +1076,7 @@ export default function EbpfObservabilityConsolePage() {
             <span className="text-xs font-normal text-emerald-400 ml-2">active flows</span>
           </div>
           <p className="text-[11px] text-slate-500">
-            7 L7 protocols dissected (HTTP, gRPC, PG, Redis, ClickHouse, Kafka, DNS)
+            L7 rates not measured — the daemon exposes no per-protocol telemetry
           </p>
         </div>
 
@@ -1605,9 +1513,9 @@ export default function EbpfObservabilityConsolePage() {
                   Axonwall Auto-Discovered eBPF Service Dependency Map
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Constructed automatically from <code className="text-emerald-300">tcp_v4_connect</code>,{' '}
-                  <code className="text-emerald-300">inet_csk_accept</code>, and container{' '}
-                  <code className="text-emerald-300">cgroup_id</code> socket telemetry—zero service-mesh sidecars required.
+                  No live service telemetry is available: the daemon exposes no per-service flow
+                  data, so the tiers below list the expected topology with no measured rates or
+                  health states.
                 </p>
               </div>
               <span className="px-2.5 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono">
@@ -1624,15 +1532,12 @@ export default function EbpfObservabilityConsolePage() {
                 <div className="p-4 rounded-xl bg-slate-950 border border-emerald-500/40 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-white">wan0 / nftables + XDP</span>
-                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono">
-                      HEALTHY
-                    </span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     SEC(&quot;xdp&quot;) -&gt; HAProxy / Caddy IAP (:443 / :2966)
                   </div>
-                  <div className="text-[11px] text-emerald-400 flex items-center gap-1 pt-1">
-                    <span>342.4 req/s • p99 1.8ms</span>
+                  <div className="text-[11px] text-slate-400 flex items-center gap-1 pt-1">
+                    <span>Ingress rates not measured — no daemon telemetry</span>
                     <ArrowRight className="w-3 h-3" />
                   </div>
                 </div>
@@ -1640,15 +1545,12 @@ export default function EbpfObservabilityConsolePage() {
                 <div className="p-4 rounded-xl bg-slate-950 border border-sky-500/40 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-white">WireGuard + Rosenpass PQ-KEM</span>
-                    <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px] font-mono">
-                      PQ-ACTIVE
-                    </span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     wg0 / flannel.1 CNI Mesh (MTU 1420)
                   </div>
-                  <div className="text-[11px] text-sky-400 flex items-center gap-1 pt-1">
-                    <span>0.04% TCP retrans • RTT 0.4ms</span>
+                  <div className="text-[11px] text-slate-400 flex items-center gap-1 pt-1">
+                    <span>Retransmits / RTT not measured</span>
                     <ArrowRight className="w-3 h-3" />
                   </div>
                 </div>
@@ -1665,7 +1567,7 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-[10px] font-mono text-emerald-400">gRPC / UDS</span>
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    128.0 rpc/s • 0.00% errors • p99 4.6ms
+                    gRPC rates not measured — no daemon telemetry
                   </div>
                 </div>
 
@@ -1681,8 +1583,7 @@ export default function EbpfObservabilityConsolePage() {
 
                 <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">K3s VOW Workloads ({k3sStatus?.podsRunning ?? 8} pods)</span>
-                    <span className="text-[10px] font-mono text-sky-300">CoreDNS: 0.35ms</span>
+                    <span className="text-xs font-bold text-white">K3s VOW Workloads ({k3sStatus?.podsRunning != null ? `${k3sStatus.podsRunning} pods` : 'pod count unknown'})</span>
                   </div>
                   <div className="text-[11px] text-slate-400">
                     Gitea • Tekton • Harbor • Keycloak • Vigilante SOC
@@ -1700,10 +1601,10 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-xs font-bold text-white flex items-center gap-1.5">
                       <Database className="w-3.5 h-3.5 text-emerald-400" /> PostgreSQL (Kubegres) &amp; Redis
                     </span>
-                    <span className="text-[10px] font-mono text-emerald-400">p99 3.1ms</span>
+                    <span className="text-[10px] font-mono text-slate-400">p99 not measured</span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
-                    PGWire: 89.5 qps • RESP: 614.2 ops/s (0 errors)
+                    PGWire / RESP rates not measured
                   </div>
                 </div>
 
@@ -1712,7 +1613,7 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-xs font-bold text-white flex items-center gap-1.5">
                       <Activity className="w-3.5 h-3.5 text-sky-400" /> VictoriaMetrics &amp; ClickHouse
                     </span>
-                    <span className="text-[10px] font-mono text-sky-400">p99 11.8ms</span>
+                    <span className="text-[10px] font-mono text-slate-400">p99 not measured</span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     OTLP Traces, Axonwall Profiles &amp; Flow Time-Series
@@ -1724,7 +1625,7 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-xs font-bold text-white flex items-center gap-1.5">
                       <HardDrive className="w-3.5 h-3.5 text-emerald-400" /> OpenEBS ZFS-LocalPV / Mayastor
                     </span>
-                    <span className="text-[10px] font-mono text-emerald-400">fsync 1.4ms</span>
+                    <span className="text-[10px] font-mono text-slate-400">fsync not measured</span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     fexit/vfs_fsync -&gt; ZFS ZIL + LZ4 ARC
@@ -1749,50 +1650,10 @@ export default function EbpfObservabilityConsolePage() {
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="text-[11px] text-slate-400 uppercase border-b border-slate-800">
-                  <tr>
-                    <th className="py-2.5 pr-3">L7 Protocol</th>
-                    <th className="py-2.5 px-3">eBPF Hook / Uprobe</th>
-                    <th className="py-2.5 px-3">Throughput (Rate)</th>
-                    <th className="py-2.5 px-3">Errors</th>
-                    <th className="py-2.5 px-3">Duration (p50 / p99)</th>
-                    <th className="py-2.5 px-3">TLS Uprobe</th>
-                    <th className="py-2.5 pl-3">Dissected Wire Summary</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/70">
-                  {L7_PROTOCOL_TELEMETRY.map((row) => (
-                    <tr key={row.protocol} className="hover:bg-slate-800/30">
-                      <td className="py-3 pr-3 font-bold text-white whitespace-nowrap">
-                        <div>{row.protocol}</div>
-                        <div className="text-[10px] text-slate-500 font-normal">{row.wireFormat}</div>
-                      </td>
-                      <td className="py-3 px-3 font-mono text-[11px] text-emerald-400 whitespace-nowrap">
-                        {row.hookSource}
-                      </td>
-                      <td className="py-3 px-3 font-mono text-slate-200 whitespace-nowrap">{row.reqPerSec}</td>
-                      <td className="py-3 px-3 font-mono text-emerald-400 whitespace-nowrap">{row.errorRate}</td>
-                      <td className="py-3 px-3 font-mono text-sky-300 whitespace-nowrap">
-                        {row.p50Latency} / <span className="text-white font-semibold">{row.p99Latency}</span>
-                      </td>
-                      <td className="py-3 px-3 whitespace-nowrap">
-                        {row.tlsInspected ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-mono">
-                            <Lock className="w-2.5 h-2.5" /> SSL/Go TLS
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px] font-mono">
-                            Socket Raw
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 pl-3 font-mono text-[11px] text-slate-300">{row.sampleSummary}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="p-4 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
+              No L7 RED telemetry is available: the daemon exposes no per-protocol rate, error, or
+              latency metrics, so this table cannot show measured values. The L7 dissectors listed
+              above describe the probe capability, not observed traffic.
             </div>
           </div>
         </div>
