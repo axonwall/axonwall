@@ -250,12 +250,22 @@ fi
 # Release-signing trust anchor: axonwall-update enforces detached
 # signatures on downloaded release checksums when this file is
 # present (packaging source: includes.chroot/etc/axonwall). Shipping
-# it in the .deb as well means .deb-maintained systems enforce too,
-# and a future key rotation can deliver the new anchor inside a
-# release whose download was verified against the old one.
+# it in the .deb as well means .deb-maintained systems enforce too.
+# E-M2 (round-3): rotation works through the keyring — a transition
+# release signed by the OLD key delivers the NEW anchor (below), and
+# the following release can be signed by the new key. See
+# release-signing.d/README.md for the full procedure.
 if [[ -f "${CHROOT_SRC}/etc/axonwall/release-signing.pub" ]]; then
   cp "${CHROOT_SRC}/etc/axonwall/release-signing.pub" "${WORK_DIR}/etc/axonwall/release-signing.pub"
   chmod 0644 "${WORK_DIR}/etc/axonwall/release-signing.pub"
+fi
+if [[ -d "${CHROOT_SRC}/etc/axonwall/release-signing.d" ]]; then
+  mkdir -p "${WORK_DIR}/etc/axonwall/release-signing.d"
+  for _keyring_pub in "${CHROOT_SRC}"/etc/axonwall/release-signing.d/*.pub; do
+    [[ -f "$_keyring_pub" ]] || continue
+    cp "$_keyring_pub" "${WORK_DIR}/etc/axonwall/release-signing.d/"
+    chmod 0644 "${WORK_DIR}/etc/axonwall/release-signing.d/$(basename "$_keyring_pub")"
+  done
 fi
 if [[ -f "${CHROOT_SRC}/etc/zsh/axonwall.zsh" ]]; then
   cp "${CHROOT_SRC}/etc/zsh/axonwall.zsh" "${WORK_DIR}/etc/zsh/axonwall.zsh"
