@@ -7015,73 +7015,14 @@ export async function renderK3sBpfTokenManifestAction(input: {
     return { success: true, manifestYaml: res.manifestYaml };
   }
 
-  const hostPath = `/run/axonwall/bpffs-tokens/${profileName}`;
-  const podSpecLines = [
-    `      hostUsers: false`,
-    `      securityContext:`,
-    `        seccompProfile:`,
-    `          type: RuntimeDefault`,
-    `      containers:`,
-    `        - name: ${cleanName}`,
-    `          image: ${cleanImg}`,
-    `          env:`,
-    `            - name: LIBBPF_BPF_TOKEN_PATH`,
-    `              value: /sys/fs/bpf`,
-    `          securityContext:`,
-    `            allowPrivilegeEscalation: false`,
-    `            capabilities:`,
-    `              drop: ["ALL"]`,
-    `              add: ["BPF", "NET_ADMIN"]`,
-    `          volumeMounts:`,
-    `            - name: delegated-bpffs`,
-    `              mountPath: /sys/fs/bpf`,
-    `              readOnly: false`,
-    `      volumes:`,
-    `        - name: delegated-bpffs`,
-    `          hostPath:`,
-    `            path: ${hostPath}`,
-    `            type: Directory`,
-  ];
-
-  const manifestYaml =
-    kind === 'DaemonSet'
-      ? [
-          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN DaemonSet (K8s 1.33+ UserNamespacesSupport)`,
-          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
-          `apiVersion: apps/v1`,
-          `kind: DaemonSet`,
-          `metadata:`,
-          `  name: ${cleanName}`,
-          `  namespace: ${cleanNs}`,
-          `  labels:`,
-          `    axonwall.io/bpf-token-profile: ${profileName}`,
-          `spec:`,
-          `  selector:`,
-          `    matchLabels:`,
-          `      app: ${cleanName}`,
-          `  template:`,
-          `    metadata:`,
-          `      labels:`,
-          `        app: ${cleanName}`,
-          `        axonwall.io/bpf-token-profile: ${profileName}`,
-          `    spec:`,
-          ...podSpecLines,
-        ].join('\n')
-      : [
-          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN Pod (K8s 1.33+ UserNamespacesSupport)`,
-          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
-          `apiVersion: v1`,
-          `kind: Pod`,
-          `metadata:`,
-          `  name: ${cleanName}`,
-          `  namespace: ${cleanNs}`,
-          `  labels:`,
-          `    axonwall.io/bpf-token-profile: ${profileName}`,
-          `spec:`,
-          ...podSpecLines.map((l) => l.slice(4)),
-        ].join('\n');
-
-  return { success: true, manifestYaml };
+  if (!res) {
+    return { success: false, manifestYaml: '', error: 'Daemon unavailable — K3s manifest was not rendered.' };
+  }
+  return {
+    success: false,
+    manifestYaml: '',
+    error: res.error || 'Failed to render K3s manifest on the daemon.',
+  };
 }
 
 

@@ -225,170 +225,6 @@ interface RcaInspectionCheck {
   finding: string;
 }
 
-interface FlameFrame {
-  id: string;
-  label: string;
-  module: string;
-  pct: number;
-  samples: number;
-  color: string;
-  detail: string;
-}
-
-const FLAMEGRAPH_PROFILES: Record<'cpu' | 'io' | 'memory' | 'lock', FlameFrame[]> = {
-  cpu: [
-    {
-      id: 'cpu-root',
-      label: 'all_workloads_cpu_cycles (99 Hz perf_event • 10,000 samples)',
-      module: 'kernel + userspace',
-      pct: 100,
-      samples: 10000,
-      color: 'bg-emerald-600/80 border-emerald-400/50',
-      detail: 'Aggregate node CPU stack samples collected via BPF_MAP_TYPE_STACK_TRACE.',
-    },
-    {
-      id: 'cpu-netfilter',
-      label: 'nft_do_chain -> nf_conntrack_in -> xdp_flow_tracker',
-      module: 'vmlinux / eBPF JIT',
-      pct: 31.4,
-      samples: 3140,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Line-rate packet forwarding, XDP 5-tuple hash lookup, and stateful conntrack inspection.',
-    },
-    {
-      id: 'cpu-k3s',
-      label: 'k3s-server -> etcdserver.(*RaftNode).run -> grpc.(*Server).serveStreams',
-      module: 'k3s (Go runtime)',
-      pct: 24.8,
-      samples: 2480,
-      color: 'bg-sky-500/75 border-sky-400/40',
-      detail: 'Kubernetes control-plane API server watch streams and embedded Raft consensus.',
-    },
-    {
-      id: 'cpu-zfs',
-      label: 'zio_execute -> lz4_compress_zfs -> arc_read',
-      module: 'zfs.ko',
-      pct: 19.2,
-      samples: 1920,
-      color: 'bg-purple-500/75 border-purple-400/40',
-      detail: 'OpenZFS LZ4 block compression and Adaptive Replacement Cache (ARC) lookups.',
-    },
-    {
-      id: 'cpu-axonwalld',
-      label: 'axonwalld -> engine.(*LsmGuardManager).readLoop -> ringbuf.(*Reader).Read',
-      module: 'axonwalld (Go)',
-      pct: 12.6,
-      samples: 1260,
-      color: 'bg-amber-500/75 border-amber-400/40',
-      detail: 'Privileged daemon telemetry polling, SSE packet dissector, and BPF-LSM ring-buffer reader.',
-    },
-  ],
-  io: [
-    {
-      id: 'io-root',
-      label: 'vfs_fsync & blk_mq_start_request latency stacks (100% I/O wait time)',
-      module: 'VFS / ZFS / NVMe',
-      pct: 100,
-      samples: 4200,
-      color: 'bg-sky-600/80 border-sky-400/50',
-      detail: 'Block & VFS latency attributed to originating process call stacks between request issue and completion.',
-    },
-    {
-      id: 'io-pg',
-      label: 'postgres -> XLogFlush -> pg_fsync -> vfs_fsync -> zil_commit',
-      module: 'kubegres-postgres (PVC)',
-      pct: 46.5,
-      samples: 1953,
-      color: 'bg-sky-500/75 border-sky-400/40',
-      detail: 'PostgreSQL WAL commit synchronous flush onto OpenEBS ZFS-LocalPV ZIL (p99: 1.4ms).',
-    },
-    {
-      id: 'io-etcd',
-      label: 'k3s-server -> wal.(*WAL).Save -> os.(*File).Sync -> vfs_fsync',
-      module: 'k3s etcd WAL',
-      pct: 32.0,
-      samples: 1344,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Embedded K3s etcd raft log fsync commits (p99: 0.9ms).',
-    },
-    {
-      id: 'io-ch',
-      label: 'clickhouse-server -> DB::MergeTreeDataPartWriter -> vfs_write',
-      module: 'clickhouse',
-      pct: 21.5,
-      samples: 903,
-      color: 'bg-purple-500/75 border-purple-400/40',
-      detail: 'Background columnar part merges for OTel traces and flow analytics.',
-    },
-  ],
-  memory: [
-    {
-      id: 'mem-root',
-      label: 'in-use heap & page-cache allocations (uprobe/malloc + Go runtime.mallocgc)',
-      module: 'all containers',
-      pct: 100,
-      samples: 8192,
-      color: 'bg-purple-600/80 border-purple-400/50',
-      detail: 'Tracks unreleased heap allocations and page faults per container cgroup.',
-    },
-    {
-      id: 'mem-arc',
-      label: 'zfs_arc_meta + abd_alloc_pages (OpenZFS ARC Cache)',
-      module: 'zfs.ko',
-      pct: 48.0,
-      samples: 3932,
-      color: 'bg-purple-500/75 border-purple-400/40',
-      detail: 'Self-tuning ZFS ARC memory cache (automatically shrinks under K3s pod memory pressure).',
-    },
-    {
-      id: 'mem-vow',
-      label: 'opensearch -> org.opensearch.indices.breaker.HierarchyCircuitBreakerService',
-      module: 'JVM Heap',
-      pct: 31.0,
-      samples: 2539,
-      color: 'bg-amber-500/75 border-amber-400/40',
-      detail: 'Bounded JVM heap allocation inside VOW OpenSearch StatefulSet (zero OOMKills).',
-    },
-    {
-      id: 'mem-ctrl',
-      label: 'node (axonwall-controller) -> v8::internal::Heap::AllocateRaw',
-      module: 'Node.js V8',
-      pct: 21.0,
-      samples: 1721,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Controller WebSocket hub, MCP server, and Prometheus metrics registry.',
-    },
-  ],
-  lock: [
-    {
-      id: 'lock-root',
-      label: 'off-cpu futex & kernel mutex contention wait time',
-      module: 'scheduler / futex',
-      pct: 100,
-      samples: 1250,
-      color: 'bg-amber-600/80 border-amber-400/50',
-      detail: 'Traces sched_switch events when threads block on futexes or kernel rw_semaphores.',
-    },
-    {
-      id: 'lock-runtime',
-      label: 'runtime.futex -> sync.(*Mutex).Lock (worker pool idle park)',
-      module: 'Go runtime',
-      pct: 74.2,
-      samples: 927,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Normal goroutine park sleep awaiting epoll/ringbuf wakeup.',
-    },
-    {
-      id: 'lock-conntrack',
-      label: 'nf_conntrack_lock ->emps (per-CPU bucket lock contention)',
-      module: 'vmlinux netfilter',
-      pct: 25.8,
-      samples: 323,
-      color: 'bg-sky-500/75 border-sky-400/40',
-      detail: 'Sub-microsecond spinlock acquisition across multi-queue NIC RSS cores.',
-    },
-  ],
-};
 
 interface K8sTroubleshootingPlaybook {
   id: string;
@@ -399,7 +235,6 @@ interface K8sTroubleshootingPlaybook {
   traditionalBlindSpot: string;
   ebpfAdvantage: string;
   diagnosticCommand: string;
-  sampleOutput: string;
   remediation: string;
 }
 
@@ -417,10 +252,6 @@ const K8S_PLAYBOOKS: K8sTroubleshootingPlaybook[] = [
     diagnosticCommand: `# Trace K3s pod DNS queries, response codes, and kernel skb drop reasons via Hubble & bpftool
 hubble observe --protocol dns --verdict DROPPED,ERROR --last 25
 bpftool map dump name flow_map | grep -B1 -A4 "dst_port: 53"`,
-    sampleOutput: `TIMESTAMP             SOURCE                         DESTINATION                    TYPE          VERDICT     SUMMARY
-Nov 07 14:19:04.112   default/checkout-api-7c9f8     kube-system/coredns-6799fbcd   L7/DNS        FORWARDED   DNS Query api.payments.svc.cluster.local. AAAA
-Nov 07 14:19:04.113   kube-system/coredns-6799fbcd   default/checkout-api-7c9f8     L7/DNS        FORWARDED   DNS Answer RCode: NoError TTL: 30 (1.1ms)
-Nov 07 14:19:08.402   default/worker-job-49b21       169.254.20.10:53               L3/L4         DROPPED     UDP 53 (SKB_DROP_REASON_SOCKET_RCVBUFFULL)`,
     remediation:
       'Enable NodeLocal DNSCache or tune net.core.rmem_max via Axonwall System Tunables, and verify Cilium socket-level LB bypasses per-packet UDP conntrack races.',
   },
@@ -437,9 +268,6 @@ Nov 07 14:19:08.402   default/worker-job-49b21       169.254.20.10:53           
     diagnosticCommand: `# Inspect live TCP flows, retransmission counters, and XDP flow_map entries
 axonwallctl diag flows --proto tcp --sort retrans
 hubble observe --type trace:sock --protocol tcp --from-namespace vow-system`,
-    sampleOutput: `CGROUP_ID    POD_NAME                        SRC_IP:PORT         DST_IP:PORT         SRTT_US   CWND   RETRANS   STATE
-0x000018a4   vow-system/opensearch-0         10.42.0.19:48210    10.42.1.24:9300     412us     42     0         ESTABLISHED
-0x000019f2   vow-system/tekton-pipelines     10.42.0.31:51902    10.42.1.12:443      18420us   3      7         ESTABLISHED (PMTU=1420)`,
     remediation:
       'Ensure K3s flannel-wireguard or Cilium WireGuard MTU is clamped to 1420 bytes (or 1360 bytes when nested over Rosenpass PQ-KEM WAN links) via MSS clamping.',
   },
@@ -456,10 +284,6 @@ hubble observe --type trace:sock --protocol tcp --from-namespace vow-system`,
     diagnosticCommand: `# Attribute VFS write & fsync latency to K3s pods and OpenEBS ZFS-LocalPV datasets
 axonwallctl storage iolatency --by-cgroup --top 10
 zfs get sync,logbias,recordsize,compression tank/openebs`,
-    sampleOutput: `POD / CGROUP                       COMM         FS_OP       DEV (s_dev)   INO       LATENCY_P99   BYTES/S     TARGET_PATH
-vow-system/kubegres-postgres-1     postgres     vfs_fsync   0x0000002f    140928    3.8 ms        14.2 MB/s   /var/lib/postgresql/data/pg_wal/0000000100000002
-kube-system/k3s-server (etcd)      k3s-server   vfs_fsync   0x0000002b    88214     1.2 ms        2.1 MB/s    /var/lib/rancher/k3s/server/db/etcd/member/wal
-default/noisy-logger-84b9d         python3      vfs_write   0x0000002f    991042    0.4 ms        182.0 MB/s  /tmp/unbuffered-debug.log`,
     remediation:
       'Isolate high-churn temp logs onto emptyDir (tmpfs) or apply per-PVC ZFS dataset IOPS/bandwidth quotas in Storage > Datasets & Zvols.',
   },
@@ -476,9 +300,6 @@ default/noisy-logger-84b9d         python3      vfs_write   0x0000002f    991042
     diagnosticCommand: `# Stream real-time BPF-LSM ring-buffer denials and Tetragon process events
 axonwallctl security lsm-events --follow
 kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout --tail=20`,
-    sampleOutput: `[BPF-LSM DENIAL] hook=lsm/socket_bind pid=41892 uid=1000 comm="kworker-fake" dev=271581185 ino=948120 detail="af_alg:aead" verdict=-EPERM (CVE-2026-31431)
-[BPF-LSM DENIAL] hook=lsm/uring_sqpoll pid=41905 uid=0 comm="implant" dev=271581185 ino=948199 detail="io_uring_sqpoll" verdict=-EPERM (T1014)
-[BPF-LSM DENIAL] hook=lsm/bpf pid=41910 uid=0 comm="bpfloader" dev=271581185 ino=948210 detail="bpf_prog_load" verdict=-EPERM (T1562.001)`,
     remediation:
       'Enforce BPF-LSM guards in Threat Defense > Rootkit & Kernel Hunter and apply a Tetragon TracingPolicy to SIGKILL pods executing binaries outside immutable image layers.',
   },
@@ -499,7 +320,6 @@ export default function EbpfObservabilityConsolePage() {
   >('all');
   const [probeSearch, setProbeSearch] = useState('');
   const [selectedPlaybook, setSelectedPlaybook] = useState<string>(K8S_PLAYBOOKS[0].id);
-  const [profileMode, setProfileMode] = useState<'cpu' | 'io' | 'memory' | 'lock'>('cpu');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // eBPF APM configuration toggles (backed by DesiredState.observability.ebpfApm)
@@ -702,6 +522,10 @@ export default function EbpfObservabilityConsolePage() {
     });
     if (res.success) {
       setRenderedK3sYaml(res.manifestYaml);
+    } else {
+      // A failed render must not leave a stale manifest on screen.
+      setRenderedK3sYaml('');
+      setActionNotice({ type: 'err', text: res.error || 'Failed to render K3s manifest.' });
     }
   };
 
@@ -1122,15 +946,16 @@ export default function EbpfObservabilityConsolePage() {
 
         <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-1.5">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Total eBPF Agent Footprint</span>
+            <span>Estimated eBPF Agent Footprint</span>
             <Gauge className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-emerald-400">
-            {ebpfRamMb} MB
-            <span className="text-xs font-normal text-slate-400 ml-2">0 Sidecars</span>
+            ~{ebpfRamMb} MB
+            <span className="text-xs font-normal text-slate-400 ml-2">0 Sidecars (estimate)</span>
           </div>
           <p className="text-[11px] text-slate-500">
-            Replaces ~{(sidecarRamMb / 1024).toFixed(1)} GB of per-pod Envoy/OTel sidecars across {clusterPodCount} pods
+            Estimated to replace ~{(sidecarRamMb / 1024).toFixed(1)} GB of per-pod Envoy/OTel sidecars across{' '}
+            {clusterPodCount} pods (model estimate, not measured)
           </p>
         </div>
       </div>
@@ -1298,6 +1123,10 @@ export default function EbpfObservabilityConsolePage() {
                   Conventional Kubernetes observability injects proxy/logging sidecars into every pod and requires
                   per-language SDK instrumentation. Adjust the pod slider to compare cluster resource consumption.
                 </p>
+                <p className="text-xs text-amber-300/80 mt-1">
+                  All figures below are model estimates (assumed ~180 MB RAM and ~110 millicores per pod), not
+                  measurements from this host.
+                </p>
               </div>
               <div className="flex items-center gap-3 bg-slate-950/80 px-4 py-2.5 rounded-lg border border-slate-800">
                 <label htmlFor="pod-slider" className="text-xs font-semibold text-slate-300 whitespace-nowrap">
@@ -1326,16 +1155,16 @@ export default function EbpfObservabilityConsolePage() {
                 </div>
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">Memory Tax ({clusterPodCount} pods)</div>
+                    <div className="text-[11px] text-slate-400">Memory Tax — estimated ({clusterPodCount} pods)</div>
                     <div className="text-xl font-bold font-mono text-red-400">
-                      {(sidecarRamMb / 1024).toFixed(1)} GB RAM
+                      ~{(sidecarRamMb / 1024).toFixed(1)} GB RAM
                     </div>
                     <div className="text-[10px] text-slate-500">~180 MB per pod (proxy + agent)</div>
                   </div>
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">CPU Serialization Tax</div>
+                    <div className="text-[11px] text-slate-400">CPU Serialization Tax (estimated)</div>
                     <div className="text-xl font-bold font-mono text-red-400">
-                      {(sidecarCpuMillicores / 1000).toFixed(1)} vCPU
+                      ~{(sidecarCpuMillicores / 1000).toFixed(1)} vCPU
                     </div>
                     <div className="text-[10px] text-slate-500">4x user/kernel context switches</div>
                   </div>
@@ -1353,19 +1182,19 @@ export default function EbpfObservabilityConsolePage() {
                     Axonwall CO-RE eBPF + Coroot Node Agent
                   </span>
                   <span className="text-xs font-mono text-emerald-300">
-                    Saves {((sidecarRamMb - ebpfRamMb) / 1024).toFixed(1)} GB RAM
+                    Estimated saving: {((sidecarRamMb - ebpfRamMb) / 1024).toFixed(1)} GB RAM
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">Node BPF Map Footprint</div>
-                    <div className="text-xl font-bold font-mono text-emerald-400">{ebpfRamMb} MB RAM</div>
+                    <div className="text-[11px] text-slate-400">Estimated Node BPF Map Footprint</div>
+                    <div className="text-xl font-bold font-mono text-emerald-400">~{ebpfRamMb} MB RAM (estimated)</div>
                     <div className="text-[10px] text-slate-500">Shared per-node kernel maps &amp; ringbuf</div>
                   </div>
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">In-Kernel JIT Execution</div>
+                    <div className="text-[11px] text-slate-400">In-Kernel JIT Execution (estimated)</div>
                     <div className="text-xl font-bold font-mono text-emerald-400">
-                      {(ebpfCpuMillicores / 1000).toFixed(2)} vCPU
+                      ~{(ebpfCpuMillicores / 1000).toFixed(2)} vCPU
                     </div>
                     <div className="text-[10px] text-slate-500">Zero context switches on fast path</div>
                   </div>
@@ -1754,49 +1583,12 @@ export default function EbpfObservabilityConsolePage() {
                   ELF DWARF, and JIT perf maps).
                 </p>
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {(
-                  [
-                    { id: 'cpu', label: 'CPU Cycles (99 Hz)' },
-                    { id: 'io', label: 'Disk / ZFS I/O Wait' },
-                    { id: 'memory', label: 'Heap & ARC Memory' },
-                    { id: 'lock', label: 'Off-CPU Lock Wait' },
-                  ] as const
-                ).map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => setProfileMode(m.id)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                      profileMode === m.id
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                        : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
             </div>
 
-            {/* FlameGraph Stack Visualization */}
-            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
-              {FLAMEGRAPH_PROFILES[profileMode].map((frame) => (
-                <div key={frame.id} className="space-y-1">
-                  <div
-                    style={{ width: `${Math.max(frame.pct, 18)}%` }}
-                    className={`px-3 py-2 rounded border ${frame.color} text-xs font-mono text-white flex items-center justify-between transition-all`}
-                  >
-                    <span className="truncate font-semibold">{frame.label}</span>
-                    <span className="ml-2 shrink-0 text-[11px] bg-black/30 px-1.5 py-0.5 rounded">
-                      {frame.pct}% ({frame.samples.toLocaleString()} samples)
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 pl-1 flex items-center justify-between">
-                    <span>{frame.detail}</span>
-                    <span className="font-mono text-slate-500">{frame.module}</span>
-                  </div>
-                </div>
-              ))}
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
+              No profiling data is available: the daemon exposes no stack-trace profiles, so no
+              FlameGraph can be rendered. Enable continuous profiling above and re-check once the
+              daemon reports profile data.
             </div>
           </div>
         </div>
@@ -2023,9 +1815,10 @@ export default function EbpfObservabilityConsolePage() {
                 <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                   Captured eBPF Ring-Buffer / Hubble Output
                 </span>
-                <pre className="p-3.5 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[11px] text-slate-300 overflow-x-auto leading-relaxed">
-                  {activePlaybook.sampleOutput}
-                </pre>
+                <p className="p-3.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
+                  No captured output is available — run the diagnostic command above to capture live
+                  ring-buffer / Hubble output for this scenario.
+                </p>
               </div>
 
               <div className="p-3.5 rounded-lg bg-sky-950/30 border border-sky-500/30 text-xs text-sky-200">
