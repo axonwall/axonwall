@@ -1117,7 +1117,18 @@ export const MCP_TOOLS_CATALOG = [
 export interface McpExecutionEnvironment {
   key: McpApiKey;
   clientIp: string;
-  onFleetBroadcastBlock?: (ip: string, reason: string, durationMinutes: number) => number;
+  // B-H1 (round 3): the broadcast callback takes the lease TTL in
+  // SECONDS (not minutes — the old durationMinutes rounded a 10 s
+  // lease up to a 60 s satellite block). The satellite applies the
+  // same TTL as its own block expiry, so hub and fleet blocks end
+  // together instead of the satellite block living forever.
+  onFleetBroadcastBlock?: (ip: string, reason: string, ttlSeconds: number) => number;
+  // B-H1 (round 3): unblock path for the fleet. Called when a
+  // blackhole lease is reverted or all leases are flushed, so the
+  // hub-side revert/clear reaches the satellites that received the
+  // block. Absent over stdio (no satellite sockets in that
+  // process), in which case fleet unblocking is unavailable.
+  onFleetBroadcastUnblock?: (ip: string, reason: string) => number;
 }
 
 function getAllowedScopesForResourceUri(uri: string): McpScope[] {
@@ -1687,10 +1698,13 @@ export async function handleMcpCallTool(
 
       let fleetPropagatedCount = 0;
       if (req.propagateToFleet && env.onFleetBroadcastBlock && targetCheck.normalizedTarget) {
+        // B-H1 (round 3): pass the bounded TTL in seconds, not
+        // minutes — the satellite expires its block on the same
+        // lease boundary as the hub instead of blocking forever.
         fleetPropagatedCount = env.onFleetBroadcastBlock(
           targetCheck.normalizedTarget,
           req.audit.reason,
-          Math.ceil(boundedTtl / 60)
+          boundedTtl
         );
       }
 
@@ -2012,9 +2026,11 @@ export async function handleMcpCallTool(
         return deny('mcp:traffic:*', 'leaseId is required');
       }
 
-      const leasesRes = await callAxonwalldApi<{ leases?: Array<{ id?: string; kind?: string }> }>('GET', '/v1/mcp/leases');
-      if (leasesRes.ok && Array.isArray(leasesRes.data?.leases)) {
-        const targetLease = leasesRes.data.leases.find((l) => l.id === leaseId);
+      const leasesRes = await callAxonwalldApi<{ leases?: Array<{ id?: string; kind?: string; normalizedTarget?: string }> }>('GET', '/v1/mcp/leases');
+      const targetLease = leasesRes.ok && Array.isArray(leasesRes.data?.leases)
+        ? leasesRes.data.leases.find((l) => l.id === leaseId)
+        : undefined;
+      if (targetLease) {
         if (targetLease?.kind && !hasMcpScope(env.key, 'mcp:firewall:write')) {
           const requiredForKind =
             targetLease.kind === 'blackhole'
@@ -2035,6 +2051,19 @@ export async function handleMcpCallTool(
         return deny('mcp:traffic:*', daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
       }
 
+      // B-H1 (round 3): a reverted blackhole lease must also be
+      // lifted from every satellite it was propagated to — the old
+      // code only called the hub daemon, so a reverted block lived
+      // on in the fleet forever. The lease's normalizedTarget is
+      // the bare target the satellites blocked (TargetSummary is a
+      // human sentence, not a target). When there is no fleet
+      // transport (stdio) the count stays 0 and the response says
+      // so; the hub lease is still reverted.
+      let fleetUnblockedSatellites = 0;
+      if (targetLease?.kind === 'blackhole' && targetLease.normalizedTarget && env.onFleetBroadcastUnblock) {
+        fleetUnblockedSatellites = env.onFleetBroadcastUnblock(targetLease.normalizedTarget, reason);
+      }
+
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -2043,7 +2072,7 @@ export async function handleMcpCallTool(
         toolName,
         requiredScope: 'mcp:traffic:*',
         decision: 'allowed',
-        paramsSummary: { leaseId, reason },
+        paramsSummary: { leaseId, reason, fleetUnblockedSatellites },
         leaseId,
       });
 
@@ -2052,7 +2081,10 @@ export async function handleMcpCallTool(
           {
             type: 'text',
             text: JSON.stringify(
-              daemonRes.data,
+              {
+                ...(daemonRes.data && typeof daemonRes.data === 'object' ? daemonRes.data : {}),
+                fleetUnblockedSatellites,
+              },
               null,
               2
             ),
@@ -2067,6 +2099,15 @@ export async function handleMcpCallTool(
       }
 
       const reason = typeof args.reason === 'string' ? args.reason.trim() : 'Emergency flush via MCP';
+      // B-H1 (round 3): snapshot the blackhole targets BEFORE the
+      // flush — after it the daemon no longer lists them, and the
+      // fleet unblock below needs the targets. A failed snapshot
+      // does not block the flush itself, but it is logged: without
+      // it the fleet blocks cannot be lifted from here.
+      const leasesBeforeFlush = await callAxonwalldApi<{ leases?: Array<{ id?: string; kind?: string; normalizedTarget?: string }> }>('GET', '/v1/mcp/leases');
+      if (!leasesBeforeFlush.ok) {
+        console.error('[MCP] Could not list leases before emergency clear-all; fleet blackhole blocks may survive the flush');
+      }
       const daemonRes = await callAxonwalldApi('POST', '/v1/mcp/flush', {});
       // B-H5: a daemon failure here must deny, not report success with
       // clearedCount 0 while every tactical lease is still active.
@@ -2075,6 +2116,20 @@ export async function handleMcpCallTool(
           'mcp:firewall:apply',
           daemonRes.data?.error || 'Daemon unavailable: emergency clear-all was not applied; tactical leases are still active'
         );
+      }
+      // B-H1 (round 3): the flush cleared the hub leases; lift the
+      // matching blocks from the fleet too, or every propagated
+      // blackhole outlives the emergency clear. Only blackhole
+      // leases propagate to the fleet, so only their targets are
+      // unblocked. The count is reported, not assumed.
+      let fleetUnblockedSatellites = 0;
+      if (env.onFleetBroadcastUnblock && leasesBeforeFlush.ok && Array.isArray(leasesBeforeFlush.data?.leases)) {
+        const seenTargets = new Set<string>();
+        for (const lease of leasesBeforeFlush.data.leases) {
+          if (lease.kind !== 'blackhole' || !lease.normalizedTarget || seenTargets.has(lease.normalizedTarget)) continue;
+          seenTargets.add(lease.normalizedTarget);
+          fleetUnblockedSatellites += env.onFleetBroadcastUnblock(lease.normalizedTarget, reason);
+        }
       }
       recordMcpAuditEntry({
         keyId: env.key.id,
@@ -2095,6 +2150,7 @@ export async function handleMcpCallTool(
               {
                 success: true,
                 clearedCount: daemonRes.data?.clearedCount ?? 0,
+                fleetUnblockedSatellites,
                 reason,
               },
               null,
