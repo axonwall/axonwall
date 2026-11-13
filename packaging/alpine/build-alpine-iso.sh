@@ -551,7 +551,14 @@ fi
 chmod +x "${OVL}/usr/local/bin/axonwall"*
 
 # Version stamp
-VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.2.2")"
+VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -z "$VERSION" ]; then
+  VERSION="$(grep -m1 '"version"' "${REPO_ROOT}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)"
+fi
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (VERSION file and package.json both missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 echo "${VERSION}" > "${OVL}/etc/axonwall/version"
 
 # Copy compiled Go daemons (axonwalld, axonwall-console, axonwall-satellite)

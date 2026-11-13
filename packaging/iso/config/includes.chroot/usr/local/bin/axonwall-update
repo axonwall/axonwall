@@ -480,7 +480,10 @@ RUNNING_ACTIVE_SLOT="A"
 if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
   RUNNING_ACTIVE_SLOT="B"
 fi
-RUNNING_VER="0.8.13"
+# D-L3: "unknown" when the version file is absent -- the running
+# version is genuinely unknown then; a stale literal (0.8.13) fed
+# slot_versions.json and the download-abort comparison a wrong value.
+RUNNING_VER="unknown"
 if [ -f /etc/axonwall/version ]; then
   RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
 fi

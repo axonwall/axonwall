@@ -1137,7 +1137,9 @@ emit_phase 3 8 "Imaging ${EDITION_LABEL} root filesystem..."
 PRIMARY_EFI=$(part_dev "$PRIMARY_DISK" "$EFI_PART_NUM")
 mkdir -p /mnt/slot_a /mnt/slot_b /mnt/data
 
-INSTALL_VER="0.11.41"
+# D-L3: "unknown" when /etc/axonwall/version is absent -- the version
+# is genuinely unknown then; a stale literal mis-stamps slot data.
+INSTALL_VER="unknown"
 if [ -f /etc/axonwall/version ]; then
   INSTALL_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
 fi
@@ -1853,7 +1855,9 @@ fi
 # ==============================================================================
 emit_phase 5 8 "Synchronizing Standby Slot B & recording slot metadata..."
 
-INSTALL_VER="0.11.32"
+# D-L3: "unknown" when /mnt/slot_a/etc/axonwall/version is absent;
+# see the PHASE 3 default above.
+INSTALL_VER="unknown"
 if [ -f /mnt/slot_a/etc/axonwall/version ]; then
   INSTALL_VER="$(head -n1 /mnt/slot_a/etc/axonwall/version | tr -d '\r\n ')"
 fi

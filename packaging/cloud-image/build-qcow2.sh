@@ -16,7 +16,11 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 WORK_DIR="${SCRIPT_DIR}/build"
 
-VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.9.9")
+VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || grep -m1 '"version"' "${ROOT_DIR}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (package.json missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 IMAGE_BASE="axonwall-debian13-amd64-cloud"
 RAW_IMAGE="${WORK_DIR}/${IMAGE_BASE}.raw"
 QCOW2_IMAGE="${OUTPUT_DIR}/${IMAGE_BASE}.qcow2"
