@@ -549,6 +549,69 @@ export function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?:
   };
 }
 
+export type FleetBlockTargetValidation =
+  | { ok: true; target: string; isMac: boolean }
+  | { ok: false; status: 400; error: string };
+
+// B-H1 (round 3): strict validation of a fleet block/unblock
+// target, shared by /fleet/block and /fleet/unblock so the two
+// cannot drift apart. Extracted verbatim from the old inline
+// /fleet/block validation: a MAC must match the MAC regex, an IP
+// must be a valid IP/CIDR, so no nft syntax can be injected.
+export function validateFleetBlockTarget(payload: any): FleetBlockTargetValidation {
+  const rawTarget = typeof payload?.target === 'string' ? payload.target.trim() : '';
+  const isMac = Boolean(payload?.isMac);
+
+  if (!rawTarget) {
+    return { ok: false, status: 400, error: 'Missing target' };
+  }
+
+  let target = rawTarget;
+  if (isMac) {
+    const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
+    if (!macRegex.test(rawTarget)) {
+      return { ok: false, status: 400, error: 'Invalid MAC address target' };
+    }
+    target = rawTarget.toLowerCase().replace(/-/g, ':');
+  } else {
+    const slashParts = rawTarget.split('/');
+    if (slashParts.length > 2) {
+      return { ok: false, status: 400, error: 'Invalid IP address or CIDR target' };
+    }
+    const ipPart = slashParts[0] || '';
+    const prefixStr = slashParts[1];
+    const ipFamily = net.isIP(ipPart);
+    if (ipFamily !== 4 && ipFamily !== 6) {
+      return { ok: false, status: 400, error: 'Invalid IP address or CIDR target' };
+    }
+    if (prefixStr !== undefined) {
+      if (!/^\d{1,3}$/.test(prefixStr)) {
+        return { ok: false, status: 400, error: 'Invalid CIDR prefix length' };
+      }
+      const prefixNum = Number(prefixStr);
+      const maxPrefix = ipFamily === 4 ? 32 : 128;
+      if (prefixNum < 0 || prefixNum > maxPrefix) {
+        return { ok: false, status: 400, error: 'Invalid CIDR prefix length' };
+      }
+    }
+  }
+  return { ok: true, target, isMac };
+}
+
+// B-H1 (round 3): TTL for a fleet block, in seconds. Absent or 0
+// means no expiry (the historical permanent block — callers that
+// want one must ask for it explicitly); otherwise clamped to the
+// same 10–604800 s bounds the MCP blackhole schema enforces, so a
+// fleet block can never outlive the longest hub lease by more than
+// the caller's own choice.
+export function parseFleetBlockTtl(payload: any): number {
+  const raw = payload?.ttlSeconds;
+  if (raw === undefined || raw === null || raw === '') return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(Math.floor(n), 604800);
+}
+
 // B-H2b residual: the last-promoted HA edge, persisted. The id
 // used to live only in controller RAM, and the close handler
 // cleared it whenever the active edge disconnected, so after a
@@ -1195,8 +1258,13 @@ async function main() {
   // config (WAN DHCP, LAN 10.0.0.1/24) to every connected edge.
   // B2-L2: null is treated like undefined (load from disk), so a
   // future caller passing null cannot reopen that trap.
-  function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null) {
-    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return;
+  // B-M2 (round 3): returns true only when the SYNC_NFTABLES
+  // command was actually dispatched through sendToSatellite (which
+  // stamps a commandId and tracks the pending ack). /fleet/sync
+  // used to count every OPEN socket as synced even when the send
+  // never went out.
+  function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null): boolean {
+    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return false;
 
     const localState = desiredState !== undefined && desiredState !== null ? desiredState : loadLocalDesiredState();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
@@ -1236,7 +1304,7 @@ async function main() {
     const { nftScript } = compileSatelliteNftables(mergedNode);
     // B2-M1: every outbound command carries a commandId so the
     // satellite's COMMAND_ACK correlates to this send.
-    sendToSatellite(sat, 'SYNC_NFTABLES', { script: nftScript });
+    const nftSent = sendToSatellite(sat, 'SYNC_NFTABLES', { script: nftScript }) !== null;
 
     // B2-M8 (SUSPECT, confirmed): with no DesiredState on disk
     // there is nothing real to push for interfaces/routes — the
@@ -1247,7 +1315,7 @@ async function main() {
     // invented addressing.
     if (isEdge && localState === null) {
       console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
-      return;
+      return nftSent;
     }
 
     if (isEdge) {
@@ -1331,6 +1399,7 @@ async function main() {
         persistSyncedRoutes(persistedSyncedRoutes);
       }
     }
+    return nftSent;
   }
 
 // Prometheus Metrics Definition
@@ -1497,59 +1566,86 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         if (aborted) return;
         try {
           const payload = JSON.parse(body);
-          const rawTarget = typeof payload.target === 'string' ? payload.target.trim() : '';
-          const isMac = Boolean(payload.isMac);
-          
-          if (!rawTarget) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ error: 'Missing target' }));
+          const validation = validateFleetBlockTarget(payload);
+          if (!validation.ok) {
+            res.writeHead(validation.status, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: validation.error }));
           }
+          const { target, isMac } = validation;
+          // B-H1 (round 3): the TTL travels in the BLOCK_TARGET
+          // envelope so the satellite expires its block on the same
+          // boundary as the hub lease. 0 means no expiry (explicit
+          // permanent block, as before).
+          const ttlSeconds = parseFleetBlockTtl(payload);
 
-          // Strict validation of block target to prevent nft syntax injection
-          let target = rawTarget;
-          if (isMac) {
-            const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
-            if (!macRegex.test(rawTarget)) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              return res.end(JSON.stringify({ error: 'Invalid MAC address target' }));
-            }
-            target = rawTarget.toLowerCase().replace(/-/g, ':');
-          } else {
-            const slashParts = rawTarget.split('/');
-            if (slashParts.length > 2) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              return res.end(JSON.stringify({ error: 'Invalid IP address or CIDR target' }));
-            }
-            const ipPart = slashParts[0] || '';
-            const prefixStr = slashParts[1];
-            const ipFamily = net.isIP(ipPart);
-            if (ipFamily !== 4 && ipFamily !== 6) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              return res.end(JSON.stringify({ error: 'Invalid IP address or CIDR target' }));
-            }
-            if (prefixStr !== undefined) {
-              if (!/^\d{1,3}$/.test(prefixStr)) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ error: 'Invalid CIDR prefix length' }));
-              }
-              const prefixNum = Number(prefixStr);
-              const maxPrefix = ipFamily === 4 ? 32 : 128;
-              if (prefixNum < 0 || prefixNum > maxPrefix) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ error: 'Invalid CIDR prefix length' }));
-              }
+          console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac}, ttlSeconds: ${ttlSeconds})`);
+
+          // B-M2 (round 3): route through sendToSatellite so the
+          // BLOCK_TARGET carries a commandId and the satellite's
+          // COMMAND_ACK correlates to this send (the pending-command
+          // sweep flags a missing ack). The old raw ws.send counted
+          // bytes buffered into the socket as "notified" with no
+          // correlation at all. Counted only when dispatched.
+          let count = 0;
+          for (const sat of activeSatellites.values()) {
+            if (sendToSatellite(sat, 'BLOCK_TARGET', { target, isMac, ttlSeconds }) !== null) {
+              count++;
             }
           }
 
-          console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            notifiedSatellites: count,
+            ttlSeconds,
+            ...(ttlSeconds > 0 ? { expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString() } : {}),
+          }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        }
+      });
+      return;
+    }
+
+    // B-H1 (round 3): the unblock half of /fleet/block. Before this
+    // endpoint there was no UNBLOCK_TARGET message, no fleet-unblock
+    // call, and no TTL anywhere in the fleet-block path, so a
+    // hub lease that expired (or was reverted/flushed) left every
+    // satellite blocking the target forever. Same target
+    // validation as /fleet/block; the satellite removes the set
+    // element and cancels any pending expiry for it.
+    if (pathname === '/api/v1/fleet/unblock' && req.method === 'POST') {
+      if (!verifyFleetAuth(req, res)) return;
+      let body = '';
+      let aborted = false;
+      req.on('data', (chunk: any) => {
+        if (aborted) return;
+        body += chunk.toString();
+        if (body.length > 65536) {
+          aborted = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Payload too large' }));
+          req.destroy();
+          return;
+        }
+      });
+      req.on('end', () => {
+        if (aborted) return;
+        try {
+          const payload = JSON.parse(body);
+          const validation = validateFleetBlockTarget(payload);
+          if (!validation.ok) {
+            res.writeHead(validation.status, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: validation.error }));
+          }
+          const { target, isMac } = validation;
+
+          console.log(`[Fleet Manager] AI Copilot requested global unblock for: ${target} (isMac: ${isMac})`);
 
           let count = 0;
           for (const sat of activeSatellites.values()) {
-            if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
-              sat.ws.send(JSON.stringify({
-                type: 'BLOCK_TARGET',
-                payload: { target, isMac }
-              }));
+            if (sendToSatellite(sat, 'UNBLOCK_TARGET', { target, isMac }) !== null) {
               count++;
             }
           }
@@ -1702,8 +1798,12 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
-          if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
-            syncSatelliteDesiredState(sat, desired);
+          // B-M2 (round 3): count only satellites the sync was
+          // actually dispatched to. syncSatelliteDesiredState
+          // returns false when the socket is not OPEN (its
+          // SYNC_NFTABLES send never went out); the old code
+          // counted every OPEN socket as synced on readyState alone.
+          if (syncSatelliteDesiredState(sat, desired)) {
             synced++;
           }
         }
@@ -1797,12 +1897,28 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
             const rpcResp = await processMcpJsonRpcMessage(rpcPayload, {
               key: authenticatedKey,
               clientIp,
-              onFleetBroadcastBlock: (targetIp: string) => {
+              // B-H1 (round 3): carry the lease TTL (seconds) into
+              // the BLOCK_TARGET envelope so the satellite expires
+              // its block with the hub lease instead of forever.
+              // The old callback dropped the third argument entirely.
+              onFleetBroadcastBlock: (targetIp: string, _reason: string, ttlSeconds: number) => {
                 let notified = 0;
                 for (const sat of activeSatellites.values()) {
                   // B2-M1: stamp a commandId so the satellite's
                   // COMMAND_ACK correlates to this block send.
-                  if (sendToSatellite(sat, 'BLOCK_TARGET', { target: targetIp, isMac: false }) !== null) {
+                  if (sendToSatellite(sat, 'BLOCK_TARGET', { target: targetIp, isMac: false, ttlSeconds }) !== null) {
+                    notified++;
+                  }
+                }
+                return notified;
+              },
+              // B-H1 (round 3): the unblock half — mcp_revert_lease
+              // and mcp_emergency_clear_all call this so a reverted
+              // or flushed hub lease is lifted from the fleet too.
+              onFleetBroadcastUnblock: (targetIp: string) => {
+                let notified = 0;
+                for (const sat of activeSatellites.values()) {
+                  if (sendToSatellite(sat, 'UNBLOCK_TARGET', { target: targetIp, isMac: false }) !== null) {
                     notified++;
                   }
                 }
@@ -2153,16 +2269,18 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           };
         });
 
-      sat.ws.send(JSON.stringify({
-        type: 'SYNC_WIREGUARD',
-        payload: {
-          interfaceName: 'wg-axon0',
-          tunnelIp: sat.tunnelIp,
-          listenPort: 51820,
-          privateKey: sat.wgPrivateKey,
-          peers: peers,
-        }
-      }));
+      // B-M2 (round 3): route through sendToSatellite so the
+      // SYNC_WIREGUARD carries a commandId and the satellite's
+      // COMMAND_ACK correlates to this send. The old raw ws.send
+      // left the ack uncorrelatable and the pending-command sweep
+      // unable to notice a missing ack.
+      sendToSatellite(sat, 'SYNC_WIREGUARD', {
+        interfaceName: 'wg-axon0',
+        tunnelIp: sat.tunnelIp,
+        listenPort: 51820,
+        privateKey: sat.wgPrivateKey,
+        peers: peers,
+      });
     }
   }
 
@@ -2570,7 +2688,18 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       } else {
         console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
       }
-    } else if (activeHaEdgeId && (state.role === 'edge-ngfw' || satId.startsWith('edge-') || satId === 'edge')) {
+    } else if (activeHaEdgeId && state.role === 'edge-ngfw') {
+      // B-H4 (round 3): match on the derived role only, exactly
+      // like the untargeted DEMOTE in /fleet/ha-transition (B2-L1).
+      // The id prefix is a fallback inside deriveSatelliteRole, not
+      // a role: syncSatelliteDesiredState above already set
+      // state.role from the fleet node's CONFIGURED role, so a node
+      // configured as 'satellite' but named 'edge-*' has
+      // state.role === 'satellite' here, and the old
+      // `satId.startsWith('edge-')` clause demoted it anyway — and
+      // the satellite's Demote admin-downs its WAN, which for a
+      // plain satellite is its uplink (remotely bricked until local
+      // intervention). Only a derived edge-ngfw is demoted.
       sendHaTransition(state, 'DEMOTE', 'standby');
     }
 
