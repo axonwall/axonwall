@@ -111,6 +111,17 @@ has_networkd_units() {
 
 PHYS_NICS="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|cni.*|flannel.*|virbr.*|dummy.*|bond.*|pimreg)$' || true)"
 
+# D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+# ports). The name filter above drops the bond master itself, but a bond
+# slave (eth0 enslaved to bond0) still passed and was DHCP'd while the
+# master got no address. Only the master carries an address.
+_k3s_nics_filtered=""
+for _nic in $PHYS_NICS; do
+    [ -e "/sys/class/net/${_nic}/master" ] && continue
+    _k3s_nics_filtered="${_k3s_nics_filtered:+$_k3s_nics_filtered }${_nic}"
+done
+PHYS_NICS="$_k3s_nics_filtered"
+
 if ! has_ifupdown_dropins && ! has_networkd_units && [ ! -f "${CONF_DIR}/.interfaces_configured" ]; then
     log "configuring Host Mode DHCP client networking on physical NICs"
     if [ -d /run/systemd/system ] && [ -d /lib/systemd ] && command -v networkctl >/dev/null 2>&1; then

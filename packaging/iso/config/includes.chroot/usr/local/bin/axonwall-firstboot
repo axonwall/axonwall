@@ -215,6 +215,17 @@ fi
 # 2. Identify physical NICs (excluding loopback and virtual/tunnel netdevs)
 INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' || true))
 
+# D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+# ports). The name filter above drops the bond master itself, but a bond
+# slave (eth0 enslaved to bond0) still passed and was picked as WAN/LAN
+# while the master got no address. Only the master carries an address.
+_INTERFACES_FILTERED=()
+for _iface in "${INTERFACES[@]}"; do
+  [ -e "/sys/class/net/${_iface}/master" ] && continue
+  _INTERFACES_FILTERED+=("$_iface")
+done
+INTERFACES=("${_INTERFACES_FILTERED[@]}")
+
 PRECONFIGURED_IFACES=0
 if [[ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured && -s /var/lib/axonwall/etc-axonwall/interfaces.conf ]]; then
   mkdir -p /etc/axonwall

@@ -70,6 +70,15 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
 
   # 2. Host Mode DHCP networking (never router NAT / never static 192.168.1.1)
   _phys_nics="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|cni.*|flannel.*|virbr.*|dummy.*|bond.*|pimreg)$' || true)"
+  # D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+  # ports) — a bond slave must never be DHCP'd; only the master carries
+  # an address.
+  _nics_filtered=""
+  for _nic in $_phys_nics; do
+    [ -e "/sys/class/net/${_nic}/master" ] && continue
+    _nics_filtered="${_nics_filtered:+$_nics_filtered }${_nic}"
+  done
+  _phys_nics="$_nics_filtered"
   if [ ! -s /etc/network/interfaces ] && [ ! -f /etc/axonwall/.interfaces_configured ]; then
     mkdir -p /etc/network /etc/network/interfaces.d
     {
@@ -320,6 +329,15 @@ if { [ -f /etc/axonwall/.interfaces_configured ] || [ -f /var/lib/axonwall/etc-a
   OPT2_IPV4_ADDRESS="$(grep '^OPT2_IPV4_ADDRESS=' /etc/axonwall/interfaces.conf | head -n1 | cut -d= -f2- || true)"
 else
   IFACES="$(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' | head -n 4 || true)"
+  # D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+  # ports) — a bond slave must never be picked as WAN/LAN; only the
+  # master carries an address.
+  _ifaces_filtered=""
+  for _iface in $IFACES; do
+    [ -e "/sys/class/net/${_iface}/master" ] && continue
+    _ifaces_filtered="${_ifaces_filtered:+$_ifaces_filtered }${_iface}"
+  done
+  IFACES="$_ifaces_filtered"
   WAN_IF="$(echo "$IFACES" | sed -n '1p')"
   LAN_IF="$(echo "$IFACES" | sed -n '2p')"
   OPT1_IF="$(echo "$IFACES" | sed -n '3p')"
