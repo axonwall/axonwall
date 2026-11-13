@@ -355,8 +355,23 @@ if command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1; then
     _k3s_stash=""
     if [ -d "$K3S_DATA_DIR" ] && [ -n "$(ls -A "$K3S_DATA_DIR" 2>/dev/null || true)" ]; then
         if ! awk -v mp="$K3S_DATA_DIR" '$2 == mp {found=1} END {exit !found}' /proc/mounts 2>/dev/null; then
+            # D-M11: the stash lives on tmpfs (/run). A runtime dir larger
+            # than the free tmpfs space used to be truncated mid-copy, the
+            # failure swallowed, and the partial stash restored over the
+            # fresh dataset. Measure first and fail closed (the marker
+            # stays, so the next boot retries) instead of corrupting state.
+            _stash_bytes="$(du -sb "$K3S_DATA_DIR" 2>/dev/null | cut -f1 || echo "")"
+            _run_avail_kb="$(df -k /run 2>/dev/null | awk 'NR==2 {print $4}' || echo "")"
+            case "$_stash_bytes" in ''|*[!0-9]*) die "cannot measure size of ${K3S_DATA_DIR} for the runtime stash; refusing to proceed" ;; esac
+            case "$_run_avail_kb" in ''|*[!0-9]*) die "cannot measure free space on /run for the runtime stash; refusing to proceed" ;; esac
+            if [ "$_stash_bytes" -gt $(( _run_avail_kb * 1024 )) ]; then
+                die "K3s runtime dir (${_stash_bytes} bytes) exceeds free tmpfs space on /run (${_run_avail_kb} KiB); refusing to stash (free space on /run or move the runtime data first)"
+            fi
             _k3s_stash="$(mktemp -d /run/k3s-runtime-stash.XXXXXX)"
-            cp -a "${K3S_DATA_DIR}/." "${_k3s_stash}/" 2>/dev/null || true
+            if ! cp -a "${K3S_DATA_DIR}/." "${_k3s_stash}/" 2>/dev/null; then
+                rm -rf "$_k3s_stash"
+                die "failed to stash ${K3S_DATA_DIR}; refusing to mount over unstashed runtime data"
+            fi
         fi
     fi
 
@@ -427,7 +442,12 @@ if command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1; then
     fi
 
     if [ -n "$_k3s_stash" ] && [ -d "$_k3s_stash" ]; then
-        cp -a "${_k3s_stash}/." "${K3S_DATA_DIR}/" 2>/dev/null || true
+        # D-M11: a failed restore used to be swallowed, leaving a partial
+        # runtime on the fresh dataset with no error. Fail closed; the
+        # stash is left under /run for inspection until reboot.
+        if ! cp -a "${_k3s_stash}/." "${K3S_DATA_DIR}/" 2>/dev/null; then
+            die "failed to restore the stashed K3s runtime from ${_k3s_stash} to ${K3S_DATA_DIR}"
+        fi
         rm -rf "$_k3s_stash"
     fi
 else
