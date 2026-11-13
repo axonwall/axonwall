@@ -186,9 +186,16 @@ jobs:
         run: |
           ./packaging/edge-uki/build-edge-uki.sh --sku sku-vm-virtio --mode full-uki
 
-      - name: Build Debian (.deb) Package
+      - name: Build Debian (.deb) Packages
         run: |
-          ./packaging/debian/build-deb.sh
+          # D-M9: one package per edition. The flavor packages carry
+          # the edition's own payload (no NGFW daemon/UI/controller)
+          # so a flavor update never reintroduces the stripped
+          # payload. The sign/upload/size-guard/release steps below
+          # are glob-based and pick up all three automatically.
+          ./packaging/debian/build-deb.sh --edition axonwall
+          ./packaging/debian/build-deb.sh --edition vault
+          ./packaging/debian/build-deb.sh --edition k3s-storage
 
       - name: Sign Debian Package Checksum (if signing key configured)
         env:
@@ -447,7 +454,9 @@ jobs:
               - `axonwall-debian13-amd64-cloud.qcow2`
               - `axonwall-edge-sku-vm-virtio.efi` (Single-File EFI UKI with embedded Go PID 1)
               - `axonwall-edge-sku-vm-virtio-initramfs.cpio.gz`
-              - `axonwall_*.deb`
+              - `axonwall_*.deb` (NGFW edition)
+              - `axonwall-vault_*.deb` (Vault S3 Storage edition)
+              - `axonwall-k3s-storage_*.deb` (K3s-Storage edition)
           prerelease: true
           files: |
             packaging/iso/output/axonwall-debian13-amd64.iso
