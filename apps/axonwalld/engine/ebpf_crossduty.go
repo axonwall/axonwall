@@ -119,13 +119,23 @@ func (m *VirtManager) GetEbpfTelemetry() VirtEbpfTelemetry {
 				bridgeSeen[br] = true
 			}
 		}
+		// A-L3: the VM loop used to build the summary without ever
+		// consulting profileByTarget, so every VM row reported
+		// bpfTokenEnabled=false regardless of configured profiles.
+		// A profile targeting a VM uses TargetRef "vm-<id>",
+		// mirroring "ct-<id>" for LXC below.
+		vmTargetKey := fmt.Sprintf("vm-%d", vm.VMID)
+		vmProf, vmHasProf := profileByTarget[vmTargetKey]
 		workloads = append(workloads, VirtWorkloadEbpfSummary{
-			Kind:    "vm",
-			ID:      vm.VMID,
-			Name:    vm.Name,
-			Status:  vm.Status,
-			PID:     vm.PID,
-			Netdevs: netdevs,
+			Kind:              "vm",
+			ID:                vm.VMID,
+			Name:              vm.Name,
+			Status:            vm.Status,
+			PID:               vm.PID,
+			BpfTokenEnabled:   vmHasProf && vmProf.Enabled,
+			BpfTokenProfileID: vmProf.ID,
+			BpfTokenPreset:    vmProf.Preset,
+			Netdevs:           netdevs,
 		})
 	}
 

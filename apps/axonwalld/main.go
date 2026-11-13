@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -4543,6 +4544,13 @@ func main() {
 			}
 			lease, err := mcpTrafficManager.RevertLease(req.LeaseID)
 			if err != nil {
+				// A-M6: a revert whose record was removed but whose
+				// tc/ip cleanup failed is a 500, not a 404 — the
+				// lease existed and was reverted.
+				if errors.Is(err, engine.ErrMcpKernelCleanupFailed) {
+					writeMcpJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+					return
+				}
 				writeMcpJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": err.Error()})
 				return
 			}

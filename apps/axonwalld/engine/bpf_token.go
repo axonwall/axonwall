@@ -536,8 +536,19 @@ func (m *BpfTokenManager) UpsertProfile(in BpfTokenDelegationProfile) (BpfTokenD
 	compiled.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
 	m.mu.Lock()
+	prev, hadPrev := m.profiles[compiled.ID]
 	m.profiles[compiled.ID] = compiled
 	saveErr := m.saveProfilesLocked()
+	if saveErr != nil {
+		// A-L1: a failed save must not leave the new profile live in
+		// memory while disk still holds the old state. Roll the
+		// in-memory mutation back so memory and disk agree.
+		if hadPrev {
+			m.profiles[compiled.ID] = prev
+		} else {
+			delete(m.profiles, compiled.ID)
+		}
+	}
 	m.mu.Unlock()
 	if saveErr != nil {
 		return BpfTokenDelegationProfile{}, saveErr
@@ -548,12 +559,20 @@ func (m *BpfTokenManager) UpsertProfile(in BpfTokenDelegationProfile) (BpfTokenD
 func (m *BpfTokenManager) DeleteProfile(id string) error {
 	cleanID := strings.ToLower(strings.TrimSpace(id))
 	m.mu.Lock()
-	if _, exists := m.profiles[cleanID]; !exists {
+	removed, exists := m.profiles[cleanID]
+	if !exists {
 		m.mu.Unlock()
 		return errors.New("BPF token delegation profile not found")
 	}
 	delete(m.profiles, cleanID)
 	err := m.saveProfilesLocked()
+	if err != nil {
+		// A-L1: a failed save must not leave the profile deleted from
+		// memory while disk still holds it (it would resurrect on
+		// restart after the operator was told the delete failed).
+		// Restore the in-memory entry so memory and disk agree.
+		m.profiles[cleanID] = removed
+	}
 	m.mu.Unlock()
 	return err
 }
