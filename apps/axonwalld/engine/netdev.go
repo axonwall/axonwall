@@ -312,6 +312,27 @@ type NetdevConfigBundle struct {
 	} `json:"virtualIps"`
 }
 
+var validBondModes = map[string]bool{
+	"balance-rr":    true,
+	"active-backup": true,
+	"balance-xor":   true,
+	"broadcast":     true,
+	"802.3ad":       true,
+	"balance-tlb":   true,
+	"balance-alb":   true,
+}
+
+// runIpCmd runs one `ip` invocation and returns a wrapped error with
+// the command's output. A-H4 (round 3): ApplyNetdevBundleJSON used to
+// discard every ip failure with `_ =` and return nil, so a bundle
+// could be recorded as applied while its topology did not exist.
+func runIpCmd(args ...string) error {
+	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ip %s failed: %s (%w)", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // ApplyNetdevBundleJSON reconciles declarative VLANs, LACP/Active-Backup Bonds, Bridges, VRFs, and VIPs.
 func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) error {
 	var cfg NetdevConfigBundle
@@ -323,6 +344,13 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 	for _, b := range cfg.Bonds {
 		if !ValidNetdevName(b.Name) {
 			return fmt.Errorf("invalid bond name %q", b.Name)
+		}
+		mode := b.Mode
+		if mode == "" {
+			mode = "802.3ad"
+		}
+		if !validBondModes[mode] {
+			return fmt.Errorf("invalid bond mode %q for bond %q (valid: balance-rr, active-backup, balance-xor, broadcast, 802.3ad, balance-tlb, balance-alb)", b.Mode, b.Name)
 		}
 		for _, sl := range b.Slaves {
 			if !ValidNetdevName(sl) {
@@ -339,10 +367,22 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 		if !ValidNetdevName(vrf.Name) || vrf.TableId < 1 || vrf.TableId > 65535 {
 			return fmt.Errorf("invalid VRF %q (table %d)", vrf.Name, vrf.TableId)
 		}
+		for _, iface := range vrf.Interfaces {
+			if !ValidNetdevName(iface) {
+				return fmt.Errorf("invalid VRF member interface %q", iface)
+			}
+		}
+	}
+	for _, vip := range cfg.VirtualIps {
+		if !ValidNetdevName(vip.Interface) || strings.TrimSpace(vip.Ip) == "" {
+			return fmt.Errorf("invalid virtual IP %q on interface %q", vip.Ip, vip.Interface)
+		}
 	}
 
 	if _, err := exec.LookPath("ip"); err != nil {
-		return nil
+		// A-H4 (round 3): with no `ip` binary the whole bundle used
+		// to "apply" with nothing done and return nil.
+		return fmt.Errorf("cannot apply netdev bundle: ip command not found (%v)", err)
 	}
 
 	// 1. Bonds
@@ -352,43 +392,72 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 			mode = "802.3ad"
 		}
 		if err := exec.Command("ip", "link", "show", "dev", b.Name).Run(); err != nil {
-			_ = exec.Command("ip", "link", "add", b.Name, "type", "bond", "mode", mode).Run()
+			if out, err := exec.Command("ip", "link", "add", b.Name, "type", "bond", "mode", mode).CombinedOutput(); err != nil {
+				if !strings.Contains(string(out), "File exists") {
+					return fmt.Errorf("failed to create bond %s (mode %s): %s (%w)", b.Name, mode, strings.TrimSpace(string(out)), err)
+				}
+			}
 		}
 		for _, sl := range b.Slaves {
-			_ = exec.Command("ip", "link", "set", "dev", sl, "down").Run()
-			_ = exec.Command("ip", "link", "set", "dev", sl, "master", b.Name).Run()
-			_ = exec.Command("ip", "link", "set", "dev", sl, "up").Run()
+			if err := runIpCmd("link", "set", "dev", sl, "down"); err != nil {
+				return fmt.Errorf("failed to enslave %s into bond %s: %w", sl, b.Name, err)
+			}
+			if err := runIpCmd("link", "set", "dev", sl, "master", b.Name); err != nil {
+				return fmt.Errorf("failed to enslave %s into bond %s: %w", sl, b.Name, err)
+			}
+			if err := runIpCmd("link", "set", "dev", sl, "up"); err != nil {
+				return fmt.Errorf("failed to bring up bond slave %s: %w", sl, err)
+			}
 		}
 		if b.Mtu >= 576 && b.Mtu <= 9216 {
-			_ = exec.Command("ip", "link", "set", "dev", b.Name, "mtu", strconv.Itoa(b.Mtu)).Run()
+			if err := runIpCmd("link", "set", "dev", b.Name, "mtu", strconv.Itoa(b.Mtu)); err != nil {
+				return fmt.Errorf("failed to set MTU on bond %s: %w", b.Name, err)
+			}
 		}
-		_ = exec.Command("ip", "link", "set", "dev", b.Name, "up").Run()
+		if err := runIpCmd("link", "set", "dev", b.Name, "up"); err != nil {
+			return fmt.Errorf("failed to bring up bond %s: %w", b.Name, err)
+		}
 	}
 
 	// 2. 802.1Q VLAN sub-interfaces
 	for _, v := range cfg.Vlans {
 		vlanDev := fmt.Sprintf("%s.%d", v.Parent, v.Tag)
 		if !ValidNetdevName(vlanDev) {
-			continue
+			return fmt.Errorf("invalid VLAN device name %q", vlanDev)
+		}
+		// A-H4: the parent was never existence-checked, so a VLAN
+		// on a renamed/missing parent failed silently.
+		if err := exec.Command("ip", "link", "show", "dev", v.Parent).Run(); err != nil {
+			return fmt.Errorf("cannot create VLAN %s: parent interface %s does not exist (%v)", vlanDev, v.Parent, err)
 		}
 		if err := exec.Command("ip", "link", "show", "dev", vlanDev).Run(); err != nil {
-			_ = exec.Command("ip", "link", "add", "link", v.Parent, "name", vlanDev, "type", "vlan", "id", strconv.Itoa(v.Tag)).Run()
+			if err := runIpCmd("link", "add", "link", v.Parent, "name", vlanDev, "type", "vlan", "id", strconv.Itoa(v.Tag)); err != nil {
+				return fmt.Errorf("failed to create VLAN %s: %w", vlanDev, err)
+			}
 		}
 		if v.Mtu >= 576 && v.Mtu <= 9216 {
-			_ = exec.Command("ip", "link", "set", "dev", vlanDev, "mtu", strconv.Itoa(v.Mtu)).Run()
+			if err := runIpCmd("link", "set", "dev", vlanDev, "mtu", strconv.Itoa(v.Mtu)); err != nil {
+				return fmt.Errorf("failed to set MTU on VLAN %s: %w", vlanDev, err)
+			}
 		}
-		_ = exec.Command("ip", "link", "set", "dev", vlanDev, "up").Run()
+		if err := runIpCmd("link", "set", "dev", vlanDev, "up"); err != nil {
+			return fmt.Errorf("failed to bring up VLAN %s: %w", vlanDev, err)
+		}
 	}
 
 	// 3. VRFs
 	for _, vrf := range cfg.Vrfs {
 		if err := exec.Command("ip", "link", "show", "dev", vrf.Name).Run(); err != nil {
-			_ = exec.Command("ip", "link", "add", vrf.Name, "type", "vrf", "table", strconv.Itoa(vrf.TableId)).Run()
+			if err := runIpCmd("link", "add", vrf.Name, "type", "vrf", "table", strconv.Itoa(vrf.TableId)); err != nil {
+				return fmt.Errorf("failed to create VRF %s: %w", vrf.Name, err)
+			}
 		}
-		_ = exec.Command("ip", "link", "set", "dev", vrf.Name, "up").Run()
+		if err := runIpCmd("link", "set", "dev", vrf.Name, "up"); err != nil {
+			return fmt.Errorf("failed to bring up VRF %s: %w", vrf.Name, err)
+		}
 		for _, iface := range vrf.Interfaces {
-			if ValidNetdevName(iface) {
-				_ = exec.Command("ip", "link", "set", "dev", iface, "master", vrf.Name).Run()
+			if err := runIpCmd("link", "set", "dev", iface, "master", vrf.Name); err != nil {
+				return fmt.Errorf("failed to assign %s to VRF %s: %w", iface, vrf.Name, err)
 			}
 		}
 	}
@@ -403,19 +472,20 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 				}
 			}
 		}
-		_ = EnsureBridge(BridgeSpec{
+		// A-H4: the hardened EnsureBridge error used to be
+		// discarded here, throwing away the round-2 A-M30 fix.
+		if err := EnsureBridge(BridgeSpec{
 			Name:          br.Name,
 			Members:       members,
 			VlanFiltering: br.VlanFiltering,
 			AddressCIDR:   br.Ipv4Address,
-		})
+		}); err != nil {
+			return fmt.Errorf("failed to reconcile bridge %s: %w", br.Name, err)
+		}
 	}
 
 	// 5. Virtual IP Aliases
 	for _, vip := range cfg.VirtualIps {
-		if !ValidNetdevName(vip.Interface) || vip.Ip == "" {
-			continue
-		}
 		addrStr := strings.TrimSpace(vip.Ip)
 		if !strings.Contains(addrStr, "/") {
 			if parsed := net.ParseIP(addrStr); parsed != nil {
@@ -426,8 +496,11 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 				}
 			}
 		}
-		if _, _, err := net.ParseCIDR(addrStr); err == nil {
-			_ = exec.Command("ip", "addr", "replace", addrStr, "dev", vip.Interface).Run()
+		if _, _, err := net.ParseCIDR(addrStr); err != nil {
+			return fmt.Errorf("invalid virtual IP %q on interface %s: %w", vip.Ip, vip.Interface, err)
+		}
+		if err := runIpCmd("addr", "replace", addrStr, "dev", vip.Interface); err != nil {
+			return fmt.Errorf("failed to assign VIP %s to %s: %w", addrStr, vip.Interface, err)
 		}
 	}
 
