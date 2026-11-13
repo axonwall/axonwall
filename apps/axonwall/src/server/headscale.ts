@@ -66,7 +66,7 @@ export async function listUsers() {
   return data.map((u: any) => ({
     id: u.id,
     name: u.name,
-    createdAt: u.created_at ? new Date((u.created_at.seconds || 0) * 1000).toISOString() : new Date().toISOString(),
+    createdAt: u.created_at ? new Date((u.created_at.seconds || 0) * 1000).toISOString() : undefined,
   }));
 }
 
@@ -76,7 +76,7 @@ export async function createUser(name: string) {
   return {
     id: data?.id,
     name: data?.name || safeName,
-    createdAt: data?.created_at ? new Date((data.created_at.seconds || 0) * 1000).toISOString() : new Date().toISOString(),
+    createdAt: data?.created_at ? new Date((data.created_at.seconds || 0) * 1000).toISOString() : undefined,
   };
 }
 
