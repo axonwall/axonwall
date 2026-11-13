@@ -4,8 +4,13 @@ set -e
 case "$1" in
     remove|deconfigure)
         if [ -d /run/systemd/system ]; then
-            systemctl stop axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service || true
-            systemctl disable axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service || true
+            # D-L6: k3s.service and the cert-renew timer were missing here,
+            # so `apt remove axonwall` left K3s running (and the timer
+            # firing) while the .deb's binary/unit files were deleted.
+            # k3s-agent.service is included too: it exists on ISO installs
+            # and is harmlessly absent elsewhere (systemctl fails -> || true).
+            systemctl stop axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service k3s.service k3s-agent.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer || true
+            systemctl disable axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service k3s.service k3s-agent.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer || true
         fi
         ;;
     upgrade|failed-upgrade)
