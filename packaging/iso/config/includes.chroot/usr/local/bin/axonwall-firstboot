@@ -12,6 +12,15 @@ fi
 
 echo "[Axonwall Firstboot] Initializing network appliance..."
 
+# D-M9 (marker): this IS the axonwall firstboot, so its edition is known
+# by construction. Stamp the canonical edition file (creating it if the
+# installer/builder didn't, correcting it if it disagrees) and log it.
+_edition_now="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+if [[ "$_edition_now" != "axonwall" ]]; then
+  printf '%s\n' "axonwall" > /etc/axonwall/edition
+  echo "[Axonwall Firstboot] edition file set to 'axonwall' (was '${_edition_now:-<missing>}')"
+fi
+
 # Suppress kernel printk and systemd console status broadcasts so background
 # provisioning on Live media or firstboot never corrupts the TUI on /dev/tty1.
 dmesg -n 1 2>/dev/null || true

@@ -52,11 +52,30 @@ fi
 if [ -f /var/lib/partman/axonwall-k3s.token ]; then
   K3S_JOIN_TOKEN="$(cat /var/lib/partman/axonwall-k3s.token 2>/dev/null || true)"
 fi
-if [ -f /target/etc/axonwall/.k3s-edition ]; then
-  INSTALL_EDITION="k3s-storage"
-elif [ -f /target/etc/axonwall/.vault-edition ]; then
-  INSTALL_EDITION="vault"
-fi
+# D-M9 (marker): the canonical edition file is read first, then the
+# legacy markers — same order as axonwall-update. A non-empty value
+# that is not a known edition fails the install loudly. INSTALL_EDITION
+# is final after this block (nothing below reassigns it); the file is
+# written here so every d-i install carries it.
+_target_edition="$(tr -d ' \t\r\n' < /target/etc/axonwall/edition 2>/dev/null || true)"
+case "$_target_edition" in
+  axonwall|vault|k3s-storage)
+    INSTALL_EDITION="$_target_edition"
+    ;;
+  "")
+    if [ -f /target/etc/axonwall/.k3s-edition ]; then
+      INSTALL_EDITION="k3s-storage"
+    elif [ -f /target/etc/axonwall/.vault-edition ]; then
+      INSTALL_EDITION="vault"
+    fi
+    ;;
+  *)
+    echo "[!] ERROR: /target/etc/axonwall/edition contains '${_target_edition}' (expected axonwall, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
+    exit 1
+    ;;
+esac
+mkdir -p /target/etc/axonwall
+printf '%s\n' "${INSTALL_EDITION}" > /target/etc/axonwall/edition
 
 if [ "$PARTITION_MODE" = "rolling" ]; then
   INSTALL_MODE="rolling"

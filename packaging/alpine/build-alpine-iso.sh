@@ -456,6 +456,9 @@ else
   echo "axonwall" > "${OVL}/etc/hostname"
   touch "${OVL}/etc/axonwall/.firstboot"
 fi
+# D-M9 (marker): the canonical edition file for the live installer
+# environment. EDITION is validated to axonwall|k3s-storage above.
+printf '%s\n' "${EDITION}" > "${OVL}/etc/axonwall/edition"
 
 printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
 

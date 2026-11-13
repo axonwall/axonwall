@@ -146,13 +146,40 @@ K3S_SERVER_URL=""
 K3S_JOIN_TOKEN=""
 ZFS_ARC_MAX_MB=0
 
-if [ -f /etc/axonwall/.vault-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-  EDITION_LABEL="Axonwall Vault Edition"
-  INSTALL_EDITION="vault"
-elif [ -f /etc/axonwall/.k3s-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-  EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
-  INSTALL_EDITION="k3s-storage"
-fi
+# D-M9 (marker): the live ISO carries /etc/axonwall/edition (written by
+# the image builder) — trust it first for the default edition, then the
+# legacy markers and the kernel cmdline, in the same order as
+# axonwall-update. A non-empty value that is not a known edition fails
+# the install loudly: the live environment is corrupt, and installing
+# the wrong edition would be worse. (An interactive edition choice
+# later can still override this default.)
+_edition_file="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+case "$_edition_file" in
+  vault)
+    EDITION_LABEL="Axonwall Vault Edition"
+    INSTALL_EDITION="vault"
+    ;;
+  k3s-storage)
+    EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
+    INSTALL_EDITION="k3s-storage"
+    ;;
+  axonwall)
+    INSTALL_EDITION="axonwall"
+    ;;
+  "")
+    if [ -f /etc/axonwall/.vault-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+      EDITION_LABEL="Axonwall Vault Edition"
+      INSTALL_EDITION="vault"
+    elif [ -f /etc/axonwall/.k3s-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+      EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
+      INSTALL_EDITION="k3s-storage"
+    fi
+    ;;
+  *)
+    echo "[!] ERROR: /etc/axonwall/edition contains '${_edition_file}' (expected axonwall, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
+    exit 1
+    ;;
+esac
 
 _cmd_k3s_role="$(sed -nE 's/.*(^|[[:space:]])(axonwall\.k3s_role|axonwall_k3s_role)=(server|agent)([[:space:]]|$).*/\3/p' /proc/cmdline 2>/dev/null | head -n1 || true)"
 if [ -n "$_cmd_k3s_role" ]; then
@@ -1378,6 +1405,10 @@ emit_phase 4 8 "Configuring fstab, LUKS2/TPM2, Cloud-Init & administrator creden
 mkdir -p /mnt/data/home /mnt/data/ldap /mnt/data/secrets /mnt/data/etc-axonwall /mnt/slot_a/home /mnt/slot_a/etc/axonwall
 echo "${INSTALL_MODE}" > /mnt/slot_a/etc/axonwall/install-mode
 echo "${INSTALL_MODE}" > /mnt/data/install-mode
+# D-M9 (marker): the canonical edition file for the installed slot.
+# INSTALL_EDITION is final here (detection + any interactive choice
+# are done); the updater trusts this file first at update time.
+printf '%s\n' "${INSTALL_EDITION:-axonwall}" > /mnt/slot_a/etc/axonwall/edition
 
 if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
   ui_echo "[+] Configuring target as Axonwall Vault Edition (hardened immutable S3 storage appliance)..."

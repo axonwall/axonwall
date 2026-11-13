@@ -25,6 +25,16 @@ die() { echo "[axonwall-k3s-firstboot] ERROR: $*" >&2; exit 1; }
 
 mkdir -p "$CONF_DIR" /var/lib/axonwall/etc-axonwall
 
+# D-M9 (marker): this IS the k3s-storage firstboot, so its edition is
+# known by construction. Stamp the canonical edition file (creating it
+# if the installer/builder didn't, correcting it if it disagrees) and
+# log it.
+_edition_now="$(tr -d ' \t\r\n' < "$CONF_DIR/edition" 2>/dev/null || true)"
+if [ "$_edition_now" != "k3s-storage" ]; then
+  printf '%s\n' "k3s-storage" > "$CONF_DIR/edition"
+  log "edition file set to 'k3s-storage' (was '${_edition_now:-<missing>}')"
+fi
+
 # Restore persistent k3s-storage.env across A/B root slot switches if needed
 if [ ! -s "$ENV_FILE" ] && [ -s "$PERSIST_ENV" ]; then
     cp -f "$PERSIST_ENV" "$ENV_FILE"
