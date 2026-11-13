@@ -178,10 +178,16 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
         case "$_ztopo" in stripe|auto|"") _targ="" ;; *) _targ="$_ztopo" ;; esac
         if [ "$_zpool" = "zroot" ]; then
           # shellcheck disable=SC2086
-          zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O canmount=off -O mountpoint=none zroot $_targ $_zvdevs $_accel 2>/dev/null || true
+          if ! zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O canmount=off -O mountpoint=none zroot $_targ $_zvdevs $_accel; then
+            echo "[Axonwall K3s Firstboot] ERROR: failed to create OpenZFS pool 'zroot'; retaining firstboot marker for retry." >&2
+            exit 1
+          fi
         else
           # shellcheck disable=SC2086
-          zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O mountpoint=/mnt/tank "$_zpool" $_targ $_zvdevs $_accel 2>/dev/null || true
+          if ! zpool create -f -o ashift=12 -o autotrim=on -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O normalization=formD -O mountpoint=/mnt/tank "$_zpool" $_targ $_zvdevs $_accel; then
+            echo "[Axonwall K3s Firstboot] ERROR: failed to create OpenZFS pool '${_zpool}'; retaining firstboot marker for retry." >&2
+            exit 1
+          fi
         fi
       fi
     fi
@@ -191,18 +197,37 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
   mkdir -p /var/lib/rancher/k3s
   if command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1; then
     if zpool list -H tank >/dev/null 2>&1; then
-      zfs list -H tank/k8s >/dev/null 2>&1 || zfs create -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k8s 2>/dev/null || true
+      # D-M3: a failed dataset create used to be swallowed (|| true) and
+      # the branch still declared firstboot complete. Fail loudly instead
+      # — the marker stays, so the next boot retries.
+      if ! zfs list -H tank/k8s >/dev/null 2>&1; then
+        if ! zfs create -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k8s; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create tank/k8s dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
+      fi
       if ! zfs list -H tank/k3s-runtime >/dev/null 2>&1; then
-        zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k3s-runtime 2>/dev/null || true
+        if ! zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl tank/k3s-runtime; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create tank/k3s-runtime dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
       else
         zfs mount tank/k3s-runtime 2>/dev/null || true
       fi
       K8S_ZFS_POOL="tank/k8s"
     elif zpool list -H zroot >/dev/null 2>&1; then
       mkdir -p /var/lib/axonwall/k8s-zfs
-      zfs list -H zroot/k8s >/dev/null 2>&1 || zfs create -o mountpoint=/var/lib/axonwall/k8s-zfs -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k8s 2>/dev/null || true
+      if ! zfs list -H zroot/k8s >/dev/null 2>&1; then
+        if ! zfs create -o mountpoint=/var/lib/axonwall/k8s-zfs -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k8s; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create zroot/k8s dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
+      fi
       if ! zfs list -H zroot/k3s-runtime >/dev/null 2>&1; then
-        zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k3s-runtime 2>/dev/null || true
+        if ! zfs create -o mountpoint=/var/lib/rancher/k3s -o canmount=on -o compression=lz4 -o atime=off -o recordsize=128k -o xattr=sa -o acltype=posixacl zroot/k3s-runtime; then
+          echo "[Axonwall K3s Firstboot] ERROR: failed to create zroot/k3s-runtime dataset; retaining firstboot marker for retry." >&2
+          exit 1
+        fi
       else
         zfs mount zroot/k3s-runtime 2>/dev/null || true
       fi
@@ -306,6 +331,12 @@ SC_EOF
     [ -x /etc/init.d/k3s ] && ln -sf /etc/init.d/k3s /etc/runlevels/default/k3s
   fi
 
+  # D-M3: enable the readiness gate. axonwall-k3s-verify runs in the
+  # default runlevel after k3s/k3s-agent and clears the K3S_MARKER only
+  # once K3s proves ready (mirroring Debian's verify service). Before
+  # this, nothing on Alpine ever invoked the verify binary.
+  [ -x /etc/init.d/axonwall-k3s-verify ] && ln -sf /etc/init.d/axonwall-k3s-verify /etc/runlevels/default/axonwall-k3s-verify
+
   _pip="$(ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print a[1]}' || true)"
   cat << ISSUE_EOF > /etc/issue
 ======================================================================
@@ -316,8 +347,13 @@ SC_EOF
 
 ISSUE_EOF
 
-  rm -f "$K3S_MARKER" "$MARKER"
-  echo "[Axonwall K3s Firstboot] Complete."
+  # D-M3: the K3s marker is owned by axonwall-k3s-verify (OpenRC service,
+  # ordered after k3s/k3s-agent), which clears it only once K3s proves
+  # ready — mirroring the Debian axonwall-k3s-verify.service. Firstboot
+  # used to remove it unconditionally, so a failed bring-up was declared
+  # done and never retried. Only the NGFW marker is cleared here.
+  rm -f "$MARKER"
+  echo "[Axonwall K3s Firstboot] Complete; handing off to axonwall-k3s-verify."
   exit 0
 fi
 

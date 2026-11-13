@@ -769,7 +769,7 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
   for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking zfs-import zfs-mount; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
   done
-  for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent local; do
+  for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent axonwall-k3s-verify local; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
   done
 else
