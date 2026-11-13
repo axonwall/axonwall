@@ -6743,12 +6743,14 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
   const patch = m && m[3] ? parseInt(m[3], 10) : 0;
   const supportsBpfToken = major > 6 || (major === 6 && minor >= 9);
 
+  // Daemon-down fallback: report unknown, never assert capabilities the
+  // daemon never reported (C-M1). The page renders these as unknown.
   return {
     daemonDown: true,
     dataplane: {
       attachedInterfaces: [],
-      dualStackEnabled: true,
-      vlanPeelingEnabled: true,
+      dualStackEnabled: false,
+      vlanPeelingEnabled: false,
       xdpStats: {
         rxPackets: 0,
         rxBytes: 0,
@@ -6765,13 +6767,7 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
     },
     bpfLsm: {
       attached: false,
-      attachedHooks: [
-        'lsm/socket_bind',
-        'lsm/bpf',
-        'lsm/uring_sqpoll',
-        'lsm/bpf_token_create',
-        'lsm/bpf_token_cmd',
-      ],
+      attachedHooks: [],
       denialEventsCount: 0,
     },
     bpfTokens: {
@@ -6782,8 +6778,8 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
       supportsBpfToken,
       supportsUserNsBpf: supportsBpfToken,
       bpffsRootMounted: fs.existsSync('/sys/fs/bpf'),
-      unprivilegedBpfSysctl: '2',
-      bpfLsmActive: true,
+      unprivilegedBpfSysctl: '',
+      bpfLsmActive: false,
       forbiddenRing0ProgTypes: [
         'kprobe',
         'tracepoint',
@@ -7019,73 +7015,14 @@ export async function renderK3sBpfTokenManifestAction(input: {
     return { success: true, manifestYaml: res.manifestYaml };
   }
 
-  const hostPath = `/run/axonwall/bpffs-tokens/${profileName}`;
-  const podSpecLines = [
-    `      hostUsers: false`,
-    `      securityContext:`,
-    `        seccompProfile:`,
-    `          type: RuntimeDefault`,
-    `      containers:`,
-    `        - name: ${cleanName}`,
-    `          image: ${cleanImg}`,
-    `          env:`,
-    `            - name: LIBBPF_BPF_TOKEN_PATH`,
-    `              value: /sys/fs/bpf`,
-    `          securityContext:`,
-    `            allowPrivilegeEscalation: false`,
-    `            capabilities:`,
-    `              drop: ["ALL"]`,
-    `              add: ["BPF", "NET_ADMIN"]`,
-    `          volumeMounts:`,
-    `            - name: delegated-bpffs`,
-    `              mountPath: /sys/fs/bpf`,
-    `              readOnly: false`,
-    `      volumes:`,
-    `        - name: delegated-bpffs`,
-    `          hostPath:`,
-    `            path: ${hostPath}`,
-    `            type: Directory`,
-  ];
-
-  const manifestYaml =
-    kind === 'DaemonSet'
-      ? [
-          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN DaemonSet (K8s 1.33+ UserNamespacesSupport)`,
-          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
-          `apiVersion: apps/v1`,
-          `kind: DaemonSet`,
-          `metadata:`,
-          `  name: ${cleanName}`,
-          `  namespace: ${cleanNs}`,
-          `  labels:`,
-          `    axonwall.io/bpf-token-profile: ${profileName}`,
-          `spec:`,
-          `  selector:`,
-          `    matchLabels:`,
-          `      app: ${cleanName}`,
-          `  template:`,
-          `    metadata:`,
-          `      labels:`,
-          `        app: ${cleanName}`,
-          `        axonwall.io/bpf-token-profile: ${profileName}`,
-          `    spec:`,
-          ...podSpecLines,
-        ].join('\n')
-      : [
-          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN Pod (K8s 1.33+ UserNamespacesSupport)`,
-          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
-          `apiVersion: v1`,
-          `kind: Pod`,
-          `metadata:`,
-          `  name: ${cleanName}`,
-          `  namespace: ${cleanNs}`,
-          `  labels:`,
-          `    axonwall.io/bpf-token-profile: ${profileName}`,
-          `spec:`,
-          ...podSpecLines.map((l) => l.slice(4)),
-        ].join('\n');
-
-  return { success: true, manifestYaml };
+  if (!res) {
+    return { success: false, manifestYaml: '', error: 'Daemon unavailable — K3s manifest was not rendered.' };
+  }
+  return {
+    success: false,
+    manifestYaml: '',
+    error: res.error || 'Failed to render K3s manifest on the daemon.',
+  };
 }
 
 

@@ -31,7 +31,6 @@ import {
   GitBranch,
   Flame,
   Database,
-  Lock,
   Save,
   Sparkles,
   ArrowRight,
@@ -49,13 +48,13 @@ import {
   setXdpSynLimitAction,
   renderK3sBpfTokenManifestAction,
   getCurrentDesiredState,
-  applyDesiredState,
   type NetworkInsightTelemetry,
   type K3sRuntimeStatus,
   type HostRootkitAuditApiResponse,
   type EbpfOverviewTelemetry,
 } from '@/server/agent';
-import type { DesiredState } from '@axonwall/lib/schemas';
+import { ObservabilityConfigSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 interface StreamPacket {
   index: number;
@@ -214,273 +213,18 @@ const EBPF_PROBE_CATALOG: EbpfProbeSpec[] = [
   },
 ];
 
-interface L7ProtocolTelemetryRow {
-  protocol: string;
-  wireFormat: string;
-  hookSource: string;
-  reqPerSec: string;
-  errorRate: string;
-  p50Latency: string;
-  p99Latency: string;
-  tlsInspected: boolean;
-  sampleSummary: string;
-}
-
-const L7_PROTOCOL_TELEMETRY: L7ProtocolTelemetryRow[] = [
-  {
-    protocol: 'HTTP/1.1 & HTTP/2',
-    wireFormat: 'REST / JSON / SSE',
-    hookSource: 'sock_ops + uprobe/SSL_write',
-    reqPerSec: '342.4 req/s',
-    errorRate: '0.02% (5xx)',
-    p50Latency: '1.8 ms',
-    p99Latency: '14.2 ms',
-    tlsInspected: true,
-    sampleSummary: 'GET /api/v1/status -> 200 OK • POST /v1/chat/completions -> 200 OK',
-  },
-  {
-    protocol: 'gRPC (HTTP/2)',
-    wireFormat: 'Protobuf / h2c & mTLS',
-    hookSource: 'sys_enter_write + crypto/tls',
-    reqPerSec: '128.0 rpc/s',
-    errorRate: '0.00% (OK)',
-    p50Latency: '0.9 ms',
-    p99Latency: '4.6 ms',
-    tlsInspected: true,
-    sampleSummary: '/axonwall.agent.v1.AgentService/GetStatus -> grpc-status: 0 (OK)',
-  },
-  {
-    protocol: 'PostgreSQL (PGWire)',
-    wireFormat: 'Frontend/Backend v3.0',
-    hookSource: 'sys_enter_sendto (port 5432)',
-    reqPerSec: '89.5 qps',
-    errorRate: '0.00%',
-    p50Latency: '0.6 ms',
-    p99Latency: '3.1 ms',
-    tlsInspected: true,
-    sampleSummary: 'SELECT * FROM pg_stat_replication • COMMIT (Kubegres HA primary)',
-  },
-  {
-    protocol: 'Redis / Valkey (RESP)',
-    wireFormat: 'RESP2 / RESP3',
-    hookSource: 'sys_enter_write (port 6379)',
-    reqPerSec: '614.2 ops/s',
-    errorRate: '0.00%',
-    p50Latency: '0.18 ms',
-    p99Latency: '0.75 ms',
-    tlsInspected: false,
-    sampleSummary: 'HGETALL session:token • EVALSHA rate_limit_bucket',
-  },
-  {
-    protocol: 'ClickHouse Native / HTTP',
-    wireFormat: 'Columnar Block Stream',
-    hookSource: 'sys_enter_write (port 8123/9000)',
-    reqPerSec: '24.8 ins/s',
-    errorRate: '0.00%',
-    p50Latency: '2.4 ms',
-    p99Latency: '11.8 ms',
-    tlsInspected: false,
-    sampleSummary: 'INSERT INTO axonwall.otel_traces FORMAT Native (batch 4,096 rows)',
-  },
-  {
-    protocol: 'DNS (CoreDNS / Unbound)',
-    wireFormat: 'UDP/TCP 53 & DoT 853',
-    hookSource: 'cgroup_skb/egress',
-    reqPerSec: '215.0 qps',
-    errorRate: '0.14% (NXDOMAIN)',
-    p50Latency: '0.35 ms',
-    p99Latency: '1.9 ms',
-    tlsInspected: true,
-    sampleSummary: 'A vow.axonwall.lan -> NOERROR (0.3ms) • RPZ sinkhole block: 0.02%',
-  },
-  {
-    protocol: 'Kafka / NATS JetStream',
-    wireFormat: 'Binary Broker Framing',
-    hookSource: 'sys_enter_write (port 9092/4222)',
-    reqPerSec: '190.4 msg/s',
-    errorRate: '0.00%',
-    p50Latency: '0.8 ms',
-    p99Latency: '3.4 ms',
-    tlsInspected: false,
-    sampleSummary: 'ProduceRequest topic="vigilante-telemetry" partition=0 acks=1',
-  },
-];
 
 interface RcaInspectionCheck {
   id: string;
   category: 'SLO & Availability' | 'CPU & Cgroup' | 'Memory & GC' | 'Network & CNI' | 'Storage & ZFS' | 'Security & LSM';
   title: string;
   target: string;
-  status: 'OK' | 'WARNING' | 'CRITICAL';
+  status: 'OK' | 'WARNING' | 'CRITICAL' | 'UNKNOWN';
   metricReading: string;
   threshold: string;
   finding: string;
 }
 
-interface FlameFrame {
-  id: string;
-  label: string;
-  module: string;
-  pct: number;
-  samples: number;
-  color: string;
-  detail: string;
-}
-
-const FLAMEGRAPH_PROFILES: Record<'cpu' | 'io' | 'memory' | 'lock', FlameFrame[]> = {
-  cpu: [
-    {
-      id: 'cpu-root',
-      label: 'all_workloads_cpu_cycles (99 Hz perf_event • 10,000 samples)',
-      module: 'kernel + userspace',
-      pct: 100,
-      samples: 10000,
-      color: 'bg-emerald-600/80 border-emerald-400/50',
-      detail: 'Aggregate node CPU stack samples collected via BPF_MAP_TYPE_STACK_TRACE.',
-    },
-    {
-      id: 'cpu-netfilter',
-      label: 'nft_do_chain -> nf_conntrack_in -> xdp_flow_tracker',
-      module: 'vmlinux / eBPF JIT',
-      pct: 31.4,
-      samples: 3140,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Line-rate packet forwarding, XDP 5-tuple hash lookup, and stateful conntrack inspection.',
-    },
-    {
-      id: 'cpu-k3s',
-      label: 'k3s-server -> etcdserver.(*RaftNode).run -> grpc.(*Server).serveStreams',
-      module: 'k3s (Go runtime)',
-      pct: 24.8,
-      samples: 2480,
-      color: 'bg-sky-500/75 border-sky-400/40',
-      detail: 'Kubernetes control-plane API server watch streams and embedded Raft consensus.',
-    },
-    {
-      id: 'cpu-zfs',
-      label: 'zio_execute -> lz4_compress_zfs -> arc_read',
-      module: 'zfs.ko',
-      pct: 19.2,
-      samples: 1920,
-      color: 'bg-purple-500/75 border-purple-400/40',
-      detail: 'OpenZFS LZ4 block compression and Adaptive Replacement Cache (ARC) lookups.',
-    },
-    {
-      id: 'cpu-axonwalld',
-      label: 'axonwalld -> engine.(*LsmGuardManager).readLoop -> ringbuf.(*Reader).Read',
-      module: 'axonwalld (Go)',
-      pct: 12.6,
-      samples: 1260,
-      color: 'bg-amber-500/75 border-amber-400/40',
-      detail: 'Privileged daemon telemetry polling, SSE packet dissector, and BPF-LSM ring-buffer reader.',
-    },
-  ],
-  io: [
-    {
-      id: 'io-root',
-      label: 'vfs_fsync & blk_mq_start_request latency stacks (100% I/O wait time)',
-      module: 'VFS / ZFS / NVMe',
-      pct: 100,
-      samples: 4200,
-      color: 'bg-sky-600/80 border-sky-400/50',
-      detail: 'Block & VFS latency attributed to originating process call stacks between request issue and completion.',
-    },
-    {
-      id: 'io-pg',
-      label: 'postgres -> XLogFlush -> pg_fsync -> vfs_fsync -> zil_commit',
-      module: 'kubegres-postgres (PVC)',
-      pct: 46.5,
-      samples: 1953,
-      color: 'bg-sky-500/75 border-sky-400/40',
-      detail: 'PostgreSQL WAL commit synchronous flush onto OpenEBS ZFS-LocalPV ZIL (p99: 1.4ms).',
-    },
-    {
-      id: 'io-etcd',
-      label: 'k3s-server -> wal.(*WAL).Save -> os.(*File).Sync -> vfs_fsync',
-      module: 'k3s etcd WAL',
-      pct: 32.0,
-      samples: 1344,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Embedded K3s etcd raft log fsync commits (p99: 0.9ms).',
-    },
-    {
-      id: 'io-ch',
-      label: 'clickhouse-server -> DB::MergeTreeDataPartWriter -> vfs_write',
-      module: 'clickhouse',
-      pct: 21.5,
-      samples: 903,
-      color: 'bg-purple-500/75 border-purple-400/40',
-      detail: 'Background columnar part merges for OTel traces and flow analytics.',
-    },
-  ],
-  memory: [
-    {
-      id: 'mem-root',
-      label: 'in-use heap & page-cache allocations (uprobe/malloc + Go runtime.mallocgc)',
-      module: 'all containers',
-      pct: 100,
-      samples: 8192,
-      color: 'bg-purple-600/80 border-purple-400/50',
-      detail: 'Tracks unreleased heap allocations and page faults per container cgroup.',
-    },
-    {
-      id: 'mem-arc',
-      label: 'zfs_arc_meta + abd_alloc_pages (OpenZFS ARC Cache)',
-      module: 'zfs.ko',
-      pct: 48.0,
-      samples: 3932,
-      color: 'bg-purple-500/75 border-purple-400/40',
-      detail: 'Self-tuning ZFS ARC memory cache (automatically shrinks under K3s pod memory pressure).',
-    },
-    {
-      id: 'mem-vow',
-      label: 'opensearch -> org.opensearch.indices.breaker.HierarchyCircuitBreakerService',
-      module: 'JVM Heap',
-      pct: 31.0,
-      samples: 2539,
-      color: 'bg-amber-500/75 border-amber-400/40',
-      detail: 'Bounded JVM heap allocation inside VOW OpenSearch StatefulSet (zero OOMKills).',
-    },
-    {
-      id: 'mem-ctrl',
-      label: 'node (axonwall-controller) -> v8::internal::Heap::AllocateRaw',
-      module: 'Node.js V8',
-      pct: 21.0,
-      samples: 1721,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Controller WebSocket hub, MCP server, and Prometheus metrics registry.',
-    },
-  ],
-  lock: [
-    {
-      id: 'lock-root',
-      label: 'off-cpu futex & kernel mutex contention wait time',
-      module: 'scheduler / futex',
-      pct: 100,
-      samples: 1250,
-      color: 'bg-amber-600/80 border-amber-400/50',
-      detail: 'Traces sched_switch events when threads block on futexes or kernel rw_semaphores.',
-    },
-    {
-      id: 'lock-runtime',
-      label: 'runtime.futex -> sync.(*Mutex).Lock (worker pool idle park)',
-      module: 'Go runtime',
-      pct: 74.2,
-      samples: 927,
-      color: 'bg-emerald-500/75 border-emerald-400/40',
-      detail: 'Normal goroutine park sleep awaiting epoll/ringbuf wakeup.',
-    },
-    {
-      id: 'lock-conntrack',
-      label: 'nf_conntrack_lock ->emps (per-CPU bucket lock contention)',
-      module: 'vmlinux netfilter',
-      pct: 25.8,
-      samples: 323,
-      color: 'bg-sky-500/75 border-sky-400/40',
-      detail: 'Sub-microsecond spinlock acquisition across multi-queue NIC RSS cores.',
-    },
-  ],
-};
 
 interface K8sTroubleshootingPlaybook {
   id: string;
@@ -491,7 +235,6 @@ interface K8sTroubleshootingPlaybook {
   traditionalBlindSpot: string;
   ebpfAdvantage: string;
   diagnosticCommand: string;
-  sampleOutput: string;
   remediation: string;
 }
 
@@ -509,10 +252,6 @@ const K8S_PLAYBOOKS: K8sTroubleshootingPlaybook[] = [
     diagnosticCommand: `# Trace K3s pod DNS queries, response codes, and kernel skb drop reasons via Hubble & bpftool
 hubble observe --protocol dns --verdict DROPPED,ERROR --last 25
 bpftool map dump name flow_map | grep -B1 -A4 "dst_port: 53"`,
-    sampleOutput: `TIMESTAMP             SOURCE                         DESTINATION                    TYPE          VERDICT     SUMMARY
-Nov 07 14:19:04.112   default/checkout-api-7c9f8     kube-system/coredns-6799fbcd   L7/DNS        FORWARDED   DNS Query api.payments.svc.cluster.local. AAAA
-Nov 07 14:19:04.113   kube-system/coredns-6799fbcd   default/checkout-api-7c9f8     L7/DNS        FORWARDED   DNS Answer RCode: NoError TTL: 30 (1.1ms)
-Nov 07 14:19:08.402   default/worker-job-49b21       169.254.20.10:53               L3/L4         DROPPED     UDP 53 (SKB_DROP_REASON_SOCKET_RCVBUFFULL)`,
     remediation:
       'Enable NodeLocal DNSCache or tune net.core.rmem_max via Axonwall System Tunables, and verify Cilium socket-level LB bypasses per-packet UDP conntrack races.',
   },
@@ -529,9 +268,6 @@ Nov 07 14:19:08.402   default/worker-job-49b21       169.254.20.10:53           
     diagnosticCommand: `# Inspect live TCP flows, retransmission counters, and XDP flow_map entries
 axonwallctl diag flows --proto tcp --sort retrans
 hubble observe --type trace:sock --protocol tcp --from-namespace vow-system`,
-    sampleOutput: `CGROUP_ID    POD_NAME                        SRC_IP:PORT         DST_IP:PORT         SRTT_US   CWND   RETRANS   STATE
-0x000018a4   vow-system/opensearch-0         10.42.0.19:48210    10.42.1.24:9300     412us     42     0         ESTABLISHED
-0x000019f2   vow-system/tekton-pipelines     10.42.0.31:51902    10.42.1.12:443      18420us   3      7         ESTABLISHED (PMTU=1420)`,
     remediation:
       'Ensure K3s flannel-wireguard or Cilium WireGuard MTU is clamped to 1420 bytes (or 1360 bytes when nested over Rosenpass PQ-KEM WAN links) via MSS clamping.',
   },
@@ -548,10 +284,6 @@ hubble observe --type trace:sock --protocol tcp --from-namespace vow-system`,
     diagnosticCommand: `# Attribute VFS write & fsync latency to K3s pods and OpenEBS ZFS-LocalPV datasets
 axonwallctl storage iolatency --by-cgroup --top 10
 zfs get sync,logbias,recordsize,compression tank/openebs`,
-    sampleOutput: `POD / CGROUP                       COMM         FS_OP       DEV (s_dev)   INO       LATENCY_P99   BYTES/S     TARGET_PATH
-vow-system/kubegres-postgres-1     postgres     vfs_fsync   0x0000002f    140928    3.8 ms        14.2 MB/s   /var/lib/postgresql/data/pg_wal/0000000100000002
-kube-system/k3s-server (etcd)      k3s-server   vfs_fsync   0x0000002b    88214     1.2 ms        2.1 MB/s    /var/lib/rancher/k3s/server/db/etcd/member/wal
-default/noisy-logger-84b9d         python3      vfs_write   0x0000002f    991042    0.4 ms        182.0 MB/s  /tmp/unbuffered-debug.log`,
     remediation:
       'Isolate high-churn temp logs onto emptyDir (tmpfs) or apply per-PVC ZFS dataset IOPS/bandwidth quotas in Storage > Datasets & Zvols.',
   },
@@ -568,9 +300,6 @@ default/noisy-logger-84b9d         python3      vfs_write   0x0000002f    991042
     diagnosticCommand: `# Stream real-time BPF-LSM ring-buffer denials and Tetragon process events
 axonwallctl security lsm-events --follow
 kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout --tail=20`,
-    sampleOutput: `[BPF-LSM DENIAL] hook=lsm/socket_bind pid=41892 uid=1000 comm="kworker-fake" dev=271581185 ino=948120 detail="af_alg:aead" verdict=-EPERM (CVE-2026-31431)
-[BPF-LSM DENIAL] hook=lsm/uring_sqpoll pid=41905 uid=0 comm="implant" dev=271581185 ino=948199 detail="io_uring_sqpoll" verdict=-EPERM (T1014)
-[BPF-LSM DENIAL] hook=lsm/bpf pid=41910 uid=0 comm="bpfloader" dev=271581185 ino=948210 detail="bpf_prog_load" verdict=-EPERM (T1562.001)`,
     remediation:
       'Enforce BPF-LSM guards in Threat Defense > Rootkit & Kernel Hunter and apply a Tetragon TracingPolicy to SIGKILL pods executing binaries outside immutable image layers.',
   },
@@ -591,7 +320,6 @@ export default function EbpfObservabilityConsolePage() {
   >('all');
   const [probeSearch, setProbeSearch] = useState('');
   const [selectedPlaybook, setSelectedPlaybook] = useState<string>(K8S_PLAYBOOKS[0].id);
-  const [profileMode, setProfileMode] = useState<'cpu' | 'io' | 'memory' | 'lock'>('cpu');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // eBPF APM configuration toggles (backed by DesiredState.observability.ebpfApm)
@@ -607,7 +335,8 @@ export default function EbpfObservabilityConsolePage() {
     zfsArcZilTelemetryEnabled: true,
   });
   const [savingConfig, setSavingConfig] = useState(false);
-  const [saveBanner, setSaveBanner] = useState<string | null>(null);
+  const [saveBanner, setSaveBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const { applyState } = useDesiredStateApply();
 
   // Live telemetry states
   const [insight, setInsight] = useState<NetworkInsightTelemetry | null>(null);
@@ -793,6 +522,10 @@ export default function EbpfObservabilityConsolePage() {
     });
     if (res.success) {
       setRenderedK3sYaml(res.manifestYaml);
+    } else {
+      // A failed render must not leave a stale manifest on screen.
+      setRenderedK3sYaml('');
+      setActionNotice({ type: 'err', text: res.error || 'Failed to render K3s manifest.' });
     }
   };
 
@@ -801,40 +534,29 @@ export default function EbpfObservabilityConsolePage() {
     setSavingConfig(true);
     setSaveBanner(null);
     try {
+      // Only the APM toggles are being saved: preserve every loaded
+      // observability sub-object exactly as loaded instead of inventing
+      // defaults for absent ones. When no observability section was loaded,
+      // the schema — the single source of truth for defaults — fills the
+      // rest on parse (the server applies the same schema on save).
       const nextState: DesiredState = {
         ...desiredState,
-        observability: {
-          metrics: desiredState.observability?.metrics ?? {
-            enabled: true,
-            port: 9090,
-            retentionDays: 30,
-            scrapeIntervalSeconds: 10,
-          },
-          flowExport: desiredState.observability?.flowExport ?? {
-            enabled: false,
-            version: 'ipfix',
-            collectorPort: 2055,
-            interfaces: [],
-          },
-          alerting: desiredState.observability?.alerting ?? {
-            enabled: false,
-            notifyOnFailover: true,
-            notifyOnThreshold: true,
-          },
-          clickhouse: desiredState.observability?.clickhouse ?? {
-            enabled: false,
-            url: 'http://127.0.0.1:8123',
-            database: 'axonwall',
-            username: 'admin',
-          },
-          ebpfApm: apmConfig,
-        },
+        observability: desiredState.observability
+          ? { ...desiredState.observability, ebpfApm: apmConfig }
+          : ObservabilityConfigSchema.parse({ ebpfApm: apmConfig }),
       };
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
+      if (!res.success) {
+        setSaveBanner({ type: 'err', text: res.message || 'Failed to save eBPF APM configuration.' });
+        return;
+      }
       setDesiredState(nextState);
-      setSaveBanner(res.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.');
+      setSaveBanner({
+        type: 'ok',
+        text: res.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.',
+      });
     } catch (err: any) {
-      setSaveBanner(err?.message || 'Failed to save eBPF APM configuration.');
+      setSaveBanner({ type: 'err', text: err?.message || 'Failed to save eBPF APM configuration.' });
     } finally {
       setSavingConfig(false);
     }
@@ -917,7 +639,7 @@ export default function EbpfObservabilityConsolePage() {
   );
 
   const activePlaybook = K8S_PLAYBOOKS.find((p) => p.id === selectedPlaybook) || K8S_PLAYBOOKS[0];
-  const lsmHooksCount = ebpfOverview?.bpfLsm?.attachedHooks?.length ?? rootkitStatus?.bpfLsmAttachedHooks?.length ?? 5;
+  const lsmHooksCount = ebpfOverview?.bpfLsm?.attachedHooks?.length ?? rootkitStatus?.bpfLsmAttachedHooks?.length;
   const lsmDenials = rootkitStatus?.bpfLsmDenialEvents ?? [];
   const flows = insight?.flows ?? [];
 
@@ -928,50 +650,50 @@ export default function EbpfObservabilityConsolePage() {
       category: 'SLO & Availability',
       title: 'L7 Service Endpoint Error Budget (HTTP / gRPC 5xx)',
       target: 'All K3s & Appliance Services',
-      status: 'OK',
-      metricReading: '99.98% success (0.02% 5xx)',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: '< 1.0% error rate',
-      finding: 'Zero SLO burn-rate alerts across HTTP/1.1, HTTP/2, and gRPC socket dissectors.',
+      finding: 'No L7 error-rate telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'cpu-cgroup-throttle',
       category: 'CPU & Cgroup',
       title: 'Container Cgroup CFS Quota Throttling Audit',
       target: k3sStatus?.enabled ? `K3s Pods (${k3sStatus.podsRunning} active)` : 'Host SystemdSlices',
-      status: 'OK',
-      metricReading: '0.12% throttled periods',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: '< 5.0% nr_throttled',
-      finding: 'No container cgroups are mengalami artificial CFS quota starvation causing tail latency.',
+      finding: 'No cgroup throttling telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'mem-oom-gc',
       category: 'Memory & GC',
       title: 'Kernel OOMKiller & Go/JVM Allocation Pressure',
       target: 'mm_vmscan / oom_kill_process',
-      status: 'OK',
-      metricReading: '0 OOMKills (24h)',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: '0 OOM events',
-      finding: 'Zero out-of-memory kills or direct reclaim stalls observed via tracepoint/oom/mark_victim.',
+      finding: 'No OOM-kill telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'net-retrans-dns',
       category: 'Network & CNI',
       title: 'TCP Retransmissions & CoreDNS/Unbound Lookup Latency',
       target: 'tcp_retransmit_skb & UDP:53',
-      status: 'OK',
-      metricReading: 'p99 DNS 1.9ms • 0.04% retrans',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: 'p99 < 25ms • retrans < 1%',
-      finding: 'WireGuard CNI and WAN/LAN socket handshakes are operating within sub-2ms RTT bounds.',
+      finding: 'No TCP retransmit or DNS latency telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'storage-vfs-zfs',
       category: 'Storage & ZFS',
       title: 'VFS / OpenEBS ZFS-LocalPV fsync Tail Latency',
       target: 'fexit/vfs_fsync & zio_execute',
-      status: 'OK',
-      metricReading: 'p99 fsync 1.4ms',
+      status: 'UNKNOWN',
+      metricReading: 'No daemon telemetry',
       threshold: 'p99 < 15ms',
-      finding: 'ZFS Intent Log (ZIL) and NVMe block queues show zero synchronous commit bottlenecks.',
+      finding: 'No VFS fsync latency telemetry is exposed by the daemon, so this check cannot be evaluated.',
     },
     {
       id: 'sec-bpf-lsm',
@@ -987,6 +709,12 @@ export default function EbpfObservabilityConsolePage() {
           : 'All BPF_PROG_LOAD, io_uring, and AF_ALG socket binds match allowlisted (s_dev, i_ino) binaries.',
     },
   ];
+
+  // Only the BPF-LSM RCA check is backed by live telemetry; the rest are
+  // UNKNOWN and must not count toward a "passed" total.
+  const rcaMeasuredChecks = rcaChecks.filter((c) => c.status !== 'UNKNOWN');
+  const rcaPassedChecks = rcaMeasuredChecks.filter((c) => c.status === 'OK').length;
+  const rcaUnmeasuredCount = rcaChecks.length - rcaMeasuredChecks.length;
 
   return (
     <div className="space-y-6">
@@ -1005,7 +733,7 @@ export default function EbpfObservabilityConsolePage() {
             Unified zero-instrumentation observability combining Axonwall&apos;s XDP/BPF-LSM kernel telemetry with{' '}
             <span className="text-emerald-300 font-medium">Axonwall eBPF APM</span>: automatic Service Dependency Maps,
             L7 protocol RED dissectors (HTTP, gRPC, Postgres, Redis, Kafka, ClickHouse, DNS), optional TLS uprobes, 99 Hz
-            continuous FlameGraph profiling, and 35+ deterministic Root-Cause Analysis (RCA) inspections.
+            continuous FlameGraph profiling, and 6 automated Root-Cause Analysis (RCA) checks.
           </p>
         </div>
 
@@ -1057,8 +785,14 @@ export default function EbpfObservabilityConsolePage() {
         </div>
 
         {saveBanner && (
-          <div className="px-3 py-2 rounded-lg bg-emerald-950/50 border border-emerald-500/30 text-xs text-emerald-300">
-            {saveBanner}
+          <div
+            className={`px-3 py-2 rounded-lg border text-xs ${
+              saveBanner.type === 'ok'
+                ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300'
+                : 'bg-rose-950/50 border-rose-500/30 text-rose-300'
+            }`}
+          >
+            {saveBanner.text}
           </div>
         )}
 
@@ -1092,7 +826,7 @@ export default function EbpfObservabilityConsolePage() {
           <label className="flex items-center justify-between p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 cursor-pointer">
             <div>
               <div className="text-xs font-semibold text-white">Automated RCA Audits</div>
-              <div className="text-[10px] text-slate-400">35+ SLO &amp; bottleneck checks</div>
+              <div className="text-[10px] text-slate-400">6 SLO &amp; bottleneck checks</div>
             </div>
             <input
               type="checkbox"
@@ -1168,7 +902,7 @@ export default function EbpfObservabilityConsolePage() {
             <span className="text-xs font-normal text-emerald-400 ml-2">active flows</span>
           </div>
           <p className="text-[11px] text-slate-500">
-            7 L7 protocols dissected (HTTP, gRPC, PG, Redis, ClickHouse, Kafka, DNS)
+            L7 rates not measured — the daemon exposes no per-protocol telemetry
           </p>
         </div>
 
@@ -1178,11 +912,13 @@ export default function EbpfObservabilityConsolePage() {
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
-            {rcaChecks.filter((c) => c.status === 'OK').length}/{rcaChecks.length} Passed
-            <span className="text-xs font-normal text-emerald-400 ml-2">SLO Healthy</span>
+            {rcaPassedChecks}/{rcaMeasuredChecks.length} measured checks passed
+            <span className="text-xs font-normal text-amber-400 ml-2">
+              {rcaUnmeasuredCount} not measured
+            </span>
           </div>
           <p className="text-[11px] text-slate-500">
-            Auditing CPU throttling, OOMs, DNS RTT, TCP retransmits &amp; ZFS fsync
+            Only the BPF-LSM check is measured; the other checks have no telemetry source
           </p>
         </div>
 
@@ -1192,9 +928,13 @@ export default function EbpfObservabilityConsolePage() {
             <ShieldCheck className="w-4 h-4 text-sky-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
-            {lsmHooksCount} Hooks
+            {lsmHooksCount ?? '—'} Hooks
             <span className="text-xs font-normal text-sky-400 ml-2">
-              {rootkitStatus?.bpfLsmGuardAttached ? 'Attached (CO-RE)' : 'Compiled (64 KB Ring)'}
+              {rootkitStatus?.bpfLsmGuardAttached
+                ? 'Attached (CO-RE)'
+                : ebpfOverview || rootkitStatus
+                  ? 'Not confirmed attached'
+                  : 'Unknown — no telemetry'}
             </span>
           </div>
           <p className="text-[11px] text-slate-500">
@@ -1206,15 +946,16 @@ export default function EbpfObservabilityConsolePage() {
 
         <div className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-1.5">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Total eBPF Agent Footprint</span>
+            <span>Estimated eBPF Agent Footprint</span>
             <Gauge className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-emerald-400">
-            {ebpfRamMb} MB
-            <span className="text-xs font-normal text-slate-400 ml-2">0 Sidecars</span>
+            ~{ebpfRamMb} MB
+            <span className="text-xs font-normal text-slate-400 ml-2">0 Sidecars (estimate)</span>
           </div>
           <p className="text-[11px] text-slate-500">
-            Replaces ~{(sidecarRamMb / 1024).toFixed(1)} GB of per-pod Envoy/OTel sidecars across {clusterPodCount} pods
+            Estimated to replace ~{(sidecarRamMb / 1024).toFixed(1)} GB of per-pod Envoy/OTel sidecars across{' '}
+            {clusterPodCount} pods (model estimate, not measured)
           </p>
         </div>
       </div>
@@ -1382,6 +1123,10 @@ export default function EbpfObservabilityConsolePage() {
                   Conventional Kubernetes observability injects proxy/logging sidecars into every pod and requires
                   per-language SDK instrumentation. Adjust the pod slider to compare cluster resource consumption.
                 </p>
+                <p className="text-xs text-amber-300/80 mt-1">
+                  All figures below are model estimates (assumed ~180 MB RAM and ~110 millicores per pod), not
+                  measurements from this host.
+                </p>
               </div>
               <div className="flex items-center gap-3 bg-slate-950/80 px-4 py-2.5 rounded-lg border border-slate-800">
                 <label htmlFor="pod-slider" className="text-xs font-semibold text-slate-300 whitespace-nowrap">
@@ -1410,16 +1155,16 @@ export default function EbpfObservabilityConsolePage() {
                 </div>
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">Memory Tax ({clusterPodCount} pods)</div>
+                    <div className="text-[11px] text-slate-400">Memory Tax — estimated ({clusterPodCount} pods)</div>
                     <div className="text-xl font-bold font-mono text-red-400">
-                      {(sidecarRamMb / 1024).toFixed(1)} GB RAM
+                      ~{(sidecarRamMb / 1024).toFixed(1)} GB RAM
                     </div>
                     <div className="text-[10px] text-slate-500">~180 MB per pod (proxy + agent)</div>
                   </div>
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">CPU Serialization Tax</div>
+                    <div className="text-[11px] text-slate-400">CPU Serialization Tax (estimated)</div>
                     <div className="text-xl font-bold font-mono text-red-400">
-                      {(sidecarCpuMillicores / 1000).toFixed(1)} vCPU
+                      ~{(sidecarCpuMillicores / 1000).toFixed(1)} vCPU
                     </div>
                     <div className="text-[10px] text-slate-500">4x user/kernel context switches</div>
                   </div>
@@ -1437,19 +1182,19 @@ export default function EbpfObservabilityConsolePage() {
                     Axonwall CO-RE eBPF + Coroot Node Agent
                   </span>
                   <span className="text-xs font-mono text-emerald-300">
-                    Saves {((sidecarRamMb - ebpfRamMb) / 1024).toFixed(1)} GB RAM
+                    Estimated saving: {((sidecarRamMb - ebpfRamMb) / 1024).toFixed(1)} GB RAM
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">Node BPF Map Footprint</div>
-                    <div className="text-xl font-bold font-mono text-emerald-400">{ebpfRamMb} MB RAM</div>
+                    <div className="text-[11px] text-slate-400">Estimated Node BPF Map Footprint</div>
+                    <div className="text-xl font-bold font-mono text-emerald-400">~{ebpfRamMb} MB RAM (estimated)</div>
                     <div className="text-[10px] text-slate-500">Shared per-node kernel maps &amp; ringbuf</div>
                   </div>
                   <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800/80">
-                    <div className="text-[11px] text-slate-400">In-Kernel JIT Execution</div>
+                    <div className="text-[11px] text-slate-400">In-Kernel JIT Execution (estimated)</div>
                     <div className="text-xl font-bold font-mono text-emerald-400">
-                      {(ebpfCpuMillicores / 1000).toFixed(2)} vCPU
+                      ~{(ebpfCpuMillicores / 1000).toFixed(2)} vCPU
                     </div>
                     <div className="text-[10px] text-slate-500">Zero context switches on fast path</div>
                   </div>
@@ -1605,9 +1350,9 @@ export default function EbpfObservabilityConsolePage() {
                   Axonwall Auto-Discovered eBPF Service Dependency Map
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Constructed automatically from <code className="text-emerald-300">tcp_v4_connect</code>,{' '}
-                  <code className="text-emerald-300">inet_csk_accept</code>, and container{' '}
-                  <code className="text-emerald-300">cgroup_id</code> socket telemetry—zero service-mesh sidecars required.
+                  No live service telemetry is available: the daemon exposes no per-service flow
+                  data, so the tiers below list the expected topology with no measured rates or
+                  health states.
                 </p>
               </div>
               <span className="px-2.5 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono">
@@ -1624,15 +1369,12 @@ export default function EbpfObservabilityConsolePage() {
                 <div className="p-4 rounded-xl bg-slate-950 border border-emerald-500/40 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-white">wan0 / nftables + XDP</span>
-                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono">
-                      HEALTHY
-                    </span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     SEC(&quot;xdp&quot;) -&gt; HAProxy / Caddy IAP (:443 / :2966)
                   </div>
-                  <div className="text-[11px] text-emerald-400 flex items-center gap-1 pt-1">
-                    <span>342.4 req/s • p99 1.8ms</span>
+                  <div className="text-[11px] text-slate-400 flex items-center gap-1 pt-1">
+                    <span>Ingress rates not measured — no daemon telemetry</span>
                     <ArrowRight className="w-3 h-3" />
                   </div>
                 </div>
@@ -1640,15 +1382,12 @@ export default function EbpfObservabilityConsolePage() {
                 <div className="p-4 rounded-xl bg-slate-950 border border-sky-500/40 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-white">WireGuard + Rosenpass PQ-KEM</span>
-                    <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px] font-mono">
-                      PQ-ACTIVE
-                    </span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     wg0 / flannel.1 CNI Mesh (MTU 1420)
                   </div>
-                  <div className="text-[11px] text-sky-400 flex items-center gap-1 pt-1">
-                    <span>0.04% TCP retrans • RTT 0.4ms</span>
+                  <div className="text-[11px] text-slate-400 flex items-center gap-1 pt-1">
+                    <span>Retransmits / RTT not measured</span>
                     <ArrowRight className="w-3 h-3" />
                   </div>
                 </div>
@@ -1665,7 +1404,7 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-[10px] font-mono text-emerald-400">gRPC / UDS</span>
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    128.0 rpc/s • 0.00% errors • p99 4.6ms
+                    gRPC rates not measured — no daemon telemetry
                   </div>
                 </div>
 
@@ -1681,8 +1420,7 @@ export default function EbpfObservabilityConsolePage() {
 
                 <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">K3s VOW Workloads ({k3sStatus?.podsRunning ?? 8} pods)</span>
-                    <span className="text-[10px] font-mono text-sky-300">CoreDNS: 0.35ms</span>
+                    <span className="text-xs font-bold text-white">K3s VOW Workloads ({k3sStatus?.podsRunning != null ? `${k3sStatus.podsRunning} pods` : 'pod count unknown'})</span>
                   </div>
                   <div className="text-[11px] text-slate-400">
                     Gitea • Tekton • Harbor • Keycloak • Vigilante SOC
@@ -1700,10 +1438,10 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-xs font-bold text-white flex items-center gap-1.5">
                       <Database className="w-3.5 h-3.5 text-emerald-400" /> PostgreSQL (Kubegres) &amp; Redis
                     </span>
-                    <span className="text-[10px] font-mono text-emerald-400">p99 3.1ms</span>
+                    <span className="text-[10px] font-mono text-slate-400">p99 not measured</span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
-                    PGWire: 89.5 qps • RESP: 614.2 ops/s (0 errors)
+                    PGWire / RESP rates not measured
                   </div>
                 </div>
 
@@ -1712,7 +1450,7 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-xs font-bold text-white flex items-center gap-1.5">
                       <Activity className="w-3.5 h-3.5 text-sky-400" /> VictoriaMetrics &amp; ClickHouse
                     </span>
-                    <span className="text-[10px] font-mono text-sky-400">p99 11.8ms</span>
+                    <span className="text-[10px] font-mono text-slate-400">p99 not measured</span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     OTLP Traces, Axonwall Profiles &amp; Flow Time-Series
@@ -1724,7 +1462,7 @@ export default function EbpfObservabilityConsolePage() {
                     <span className="text-xs font-bold text-white flex items-center gap-1.5">
                       <HardDrive className="w-3.5 h-3.5 text-emerald-400" /> OpenEBS ZFS-LocalPV / Mayastor
                     </span>
-                    <span className="text-[10px] font-mono text-emerald-400">fsync 1.4ms</span>
+                    <span className="text-[10px] font-mono text-slate-400">fsync not measured</span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
                     fexit/vfs_fsync -&gt; ZFS ZIL + LZ4 ARC
@@ -1749,50 +1487,10 @@ export default function EbpfObservabilityConsolePage() {
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="text-[11px] text-slate-400 uppercase border-b border-slate-800">
-                  <tr>
-                    <th className="py-2.5 pr-3">L7 Protocol</th>
-                    <th className="py-2.5 px-3">eBPF Hook / Uprobe</th>
-                    <th className="py-2.5 px-3">Throughput (Rate)</th>
-                    <th className="py-2.5 px-3">Errors</th>
-                    <th className="py-2.5 px-3">Duration (p50 / p99)</th>
-                    <th className="py-2.5 px-3">TLS Uprobe</th>
-                    <th className="py-2.5 pl-3">Dissected Wire Summary</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/70">
-                  {L7_PROTOCOL_TELEMETRY.map((row) => (
-                    <tr key={row.protocol} className="hover:bg-slate-800/30">
-                      <td className="py-3 pr-3 font-bold text-white whitespace-nowrap">
-                        <div>{row.protocol}</div>
-                        <div className="text-[10px] text-slate-500 font-normal">{row.wireFormat}</div>
-                      </td>
-                      <td className="py-3 px-3 font-mono text-[11px] text-emerald-400 whitespace-nowrap">
-                        {row.hookSource}
-                      </td>
-                      <td className="py-3 px-3 font-mono text-slate-200 whitespace-nowrap">{row.reqPerSec}</td>
-                      <td className="py-3 px-3 font-mono text-emerald-400 whitespace-nowrap">{row.errorRate}</td>
-                      <td className="py-3 px-3 font-mono text-sky-300 whitespace-nowrap">
-                        {row.p50Latency} / <span className="text-white font-semibold">{row.p99Latency}</span>
-                      </td>
-                      <td className="py-3 px-3 whitespace-nowrap">
-                        {row.tlsInspected ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-mono">
-                            <Lock className="w-2.5 h-2.5" /> SSL/Go TLS
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px] font-mono">
-                            Socket Raw
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 pl-3 font-mono text-[11px] text-slate-300">{row.sampleSummary}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="p-4 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
+              No L7 RED telemetry is available: the daemon exposes no per-protocol rate, error, or
+              latency metrics, so this table cannot show measured values. The L7 dissectors listed
+              above describe the probe capability, not observed traffic.
             </div>
           </div>
         </div>
@@ -1809,8 +1507,10 @@ export default function EbpfObservabilityConsolePage() {
                   Axonwall Automated Root-Cause Analysis (RCA) &amp; SLO Audit Engine
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Evaluates 35+ deterministic kernel and container telemetry rules across SLO availability, CPU CFS
+                  Evaluates 6 deterministic kernel and container telemetry checks across SLO availability, CPU CFS
                   throttling, OOM/GC pressure, network retransmissions, ZFS storage latency, and Ring-0 BPF-LSM security.
+                  Only the BPF-LSM check is backed by live telemetry; the other five have no measurement source and are
+                  shown as not measured.
                 </p>
               </div>
               <Link
@@ -1829,7 +1529,9 @@ export default function EbpfObservabilityConsolePage() {
                   className={`p-4 rounded-xl border space-y-2 ${
                     chk.status === 'OK'
                       ? 'bg-slate-950/70 border-slate-800'
-                      : 'bg-amber-950/20 border-amber-500/40'
+                      : chk.status === 'UNKNOWN'
+                        ? 'bg-slate-950/70 border-slate-700'
+                        : 'bg-amber-950/20 border-amber-500/40'
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -1840,7 +1542,9 @@ export default function EbpfObservabilityConsolePage() {
                       className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
                         chk.status === 'OK'
                           ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                          : chk.status === 'UNKNOWN'
+                            ? 'bg-slate-800 text-slate-400 border border-slate-700'
+                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
                       }`}
                     >
                       {chk.status}
@@ -1848,7 +1552,10 @@ export default function EbpfObservabilityConsolePage() {
                   </div>
                   <div className="text-sm font-bold text-white">{chk.title}</div>
                   <div className="flex items-center justify-between text-xs font-mono bg-slate-900/90 px-3 py-1.5 rounded border border-slate-800">
-                    <span className="text-emerald-300">Measured: {chk.metricReading}</span>
+                    <span className={chk.status === 'UNKNOWN' ? 'text-slate-400' : 'text-emerald-300'}>
+                      {chk.status === 'UNKNOWN' ? 'Not measured: ' : 'Measured: '}
+                      {chk.metricReading}
+                    </span>
                     <span className="text-slate-400">SLO Target: {chk.threshold}</span>
                   </div>
                   <p className="text-xs text-slate-300 leading-relaxed">{chk.finding}</p>
@@ -1876,49 +1583,12 @@ export default function EbpfObservabilityConsolePage() {
                   ELF DWARF, and JIT perf maps).
                 </p>
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {(
-                  [
-                    { id: 'cpu', label: 'CPU Cycles (99 Hz)' },
-                    { id: 'io', label: 'Disk / ZFS I/O Wait' },
-                    { id: 'memory', label: 'Heap & ARC Memory' },
-                    { id: 'lock', label: 'Off-CPU Lock Wait' },
-                  ] as const
-                ).map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => setProfileMode(m.id)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                      profileMode === m.id
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                        : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
             </div>
 
-            {/* FlameGraph Stack Visualization */}
-            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
-              {FLAMEGRAPH_PROFILES[profileMode].map((frame) => (
-                <div key={frame.id} className="space-y-1">
-                  <div
-                    style={{ width: `${Math.max(frame.pct, 18)}%` }}
-                    className={`px-3 py-2 rounded border ${frame.color} text-xs font-mono text-white flex items-center justify-between transition-all`}
-                  >
-                    <span className="truncate font-semibold">{frame.label}</span>
-                    <span className="ml-2 shrink-0 text-[11px] bg-black/30 px-1.5 py-0.5 rounded">
-                      {frame.pct}% ({frame.samples.toLocaleString()} samples)
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 pl-1 flex items-center justify-between">
-                    <span>{frame.detail}</span>
-                    <span className="font-mono text-slate-500">{frame.module}</span>
-                  </div>
-                </div>
-              ))}
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
+              No profiling data is available: the daemon exposes no stack-trace profiles, so no
+              FlameGraph can be rendered. Enable continuous profiling above and re-check once the
+              daemon reports profile data.
             </div>
           </div>
         </div>
@@ -2145,9 +1815,10 @@ export default function EbpfObservabilityConsolePage() {
                 <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                   Captured eBPF Ring-Buffer / Hubble Output
                 </span>
-                <pre className="p-3.5 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[11px] text-slate-300 overflow-x-auto leading-relaxed">
-                  {activePlaybook.sampleOutput}
-                </pre>
+                <p className="p-3.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
+                  No captured output is available — run the diagnostic command above to capture live
+                  ring-buffer / Hubble output for this scenario.
+                </p>
               </div>
 
               <div className="p-3.5 rounded-lg bg-sky-950/30 border border-sky-500/30 text-xs text-sky-200">
@@ -2186,11 +1857,15 @@ export default function EbpfObservabilityConsolePage() {
                     Linux 6.9+ BPF_TOKEN_CREATE
                   </span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                    Kernel: {ebpfOverview?.bpfTokens.kernelRelease || '6.12+'} (
-                    {ebpfOverview?.bpfTokens.supportsBpfToken !== false ? 'Supported' : 'Requires >= 6.9'})
+                    Kernel: {ebpfOverview?.bpfTokens.kernelRelease || 'Unknown'} (
+                    {ebpfOverview?.bpfTokens.supportsBpfToken === true
+                      ? 'Supported'
+                      : ebpfOverview?.bpfTokens.supportsBpfToken === false
+                        ? 'Requires >= 6.9'
+                        : 'Unknown'})
                   </span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-purple-500/15 text-purple-300 border border-purple-500/30">
-                    BPF-LSM Ring-0 Veto: ENFORCED
+                    BPF-LSM Ring-0 Veto: {ebpfOverview?.bpfLsm.attached === true ? 'ENFORCED' : 'Not confirmed'}
                   </span>
                 </div>
                 <h2 className="text-lg font-bold text-white">
@@ -2571,8 +2246,16 @@ export default function EbpfObservabilityConsolePage() {
                 <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
                   <div className="text-[10px] text-slate-400">UserNS + Cgroup v2</div>
                   <div className="font-mono font-bold text-sky-300 mt-0.5">
-                    {ebpfOverview?.k3s.userNamespacesSupported !== false ? 'UserNS Ready' : 'Legacy'} •{' '}
-                    {ebpfOverview?.k3s.kubepodsCgroupV2 !== false ? 'cgroup2' : 'cgroup1'}
+                    {ebpfOverview?.k3s.userNamespacesSupported === true
+                      ? 'UserNS Ready'
+                      : ebpfOverview?.k3s.userNamespacesSupported === false
+                        ? 'Legacy'
+                        : 'UserNS Unknown'} •{' '}
+                    {ebpfOverview?.k3s.kubepodsCgroupV2 === true
+                      ? 'cgroup2'
+                      : ebpfOverview?.k3s.kubepodsCgroupV2 === false
+                        ? 'cgroup1'
+                        : 'cgroup unknown'}
                   </div>
                 </div>
                 <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
@@ -2590,7 +2273,11 @@ export default function EbpfObservabilityConsolePage() {
               </p>
               <div className="text-[11px] font-mono text-slate-300">
                 K3s service: {ebpfOverview?.k3s.serviceActive ? 'ACTIVE' : 'STANDBY'} • BPF_TOKEN ready:{' '}
-                {ebpfOverview?.k3s.bpfTokenReady !== false ? 'YES' : 'NO'}
+                {ebpfOverview?.k3s.bpfTokenReady === true
+                  ? 'YES'
+                  : ebpfOverview?.k3s.bpfTokenReady === false
+                    ? 'NO'
+                    : 'Unknown'}
               </div>
             </div>
 
