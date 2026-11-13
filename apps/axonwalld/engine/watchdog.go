@@ -1691,11 +1691,20 @@ func (we *WatchdogEngine) TriggerRollback() error {
 		}
 		runningName := strings.TrimPrefix(runningBe, "zroot/ROOT/")
 		target := ""
-		// selectStandbyBE skips the ActiveNow entry, but if the list
-		// carries no ActiveNow flag (e.g. /proc/mounts unreadable)
-		// it can return the running BE itself — never accept that as
-		// a rollback target; fall through to the fallback pointer.
-		if be := selectStandbyBE(we.status.BootEnvironments); be != nil && be.Dataset != runningBe && be.Name != runningName {
+		// Prefer the newest non-running standby (the selectStandbyBE
+		// path). selectStandbyBE skips the ActiveNow entry, but the
+		// list can carry no ActiveNow flag (e.g. /proc/mounts
+		// unreadable) — and then it would return the running BE
+		// itself when the running BE is the armed one. Filter the
+		// running BE out first, so the choice never depends on the
+		// ActiveNow flags being right.
+		nonRunning := make([]ZfsBootEnvironment, 0, len(we.status.BootEnvironments))
+		for _, be := range we.status.BootEnvironments {
+			if be.Dataset != runningBe && be.Name != runningName {
+				nonRunning = append(nonRunning, be)
+			}
+		}
+		if be := selectStandbyBE(nonRunning); be != nil {
 			target = be.Dataset
 		} else if fallbackBe != "" && fallbackBe != "-" && fallbackBe != runningBe && fallbackBe != runningName {
 			// No usable standby: trust the fallback pointer only if
