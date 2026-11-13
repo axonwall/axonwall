@@ -1081,7 +1081,8 @@ export async function getYamlConfigFilesSnapshot(): Promise<{
 export async function saveYamlDomainFile(
   filename: string,
   yamlContent: string,
-  applyImmediately = true
+  applyImmediately = true,
+  options?: { expectedFingerprint?: string }
 ): Promise<{ success: boolean; message: string; warnings: string[] }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -1111,7 +1112,13 @@ export async function saveYamlDomainFile(
     // was applied. Same for a fingerprint conflict, if one is ever
     // threaded through this path.
     try {
-      const res = await applyDesiredState(validation.state);
+      // C-M8: thread the caller's fingerprint through so a concurrent
+      // save in another tab cannot be silently reverted by this apply.
+      const res = await applyDesiredState(
+        validation.state,
+        120,
+        options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+      );
       return {
         success: res.success,
         message: `Saved /etc/axonwall/${filename} and applied configuration.`,
@@ -4824,6 +4831,9 @@ export interface K3sRuntimeStatus {
   podsRunning: number;
   podsTotal: number;
   openEbsHealthy: boolean;
+  // C-H3: true when the daemon did not answer, so the page can say the
+  // cluster state is unknown instead of rendering a healthy cluster.
+  daemonDown: boolean;
 }
 
 export async function getNasDisksInventory(): Promise<{
@@ -4837,6 +4847,9 @@ export async function getNasDisksInventory(): Promise<{
     systemRaidDisks: string;
     autoCreatePool: boolean;
   } | null;
+  // C-M9: true when the daemon did not answer, so callers can say the
+  // inventory is unknown instead of rendering an empty (or invented) list.
+  daemonDown: boolean;
 }> {
   const session = await getSession();
   assertActionPermitted(session);
@@ -4846,6 +4859,7 @@ export async function getNasDisksInventory(): Promise<{
     return {
       disks: daemonResp.disks,
       installSpec: daemonResp.installSpec || null,
+      daemonDown: false,
     };
   }
 
@@ -4856,58 +4870,14 @@ export async function getNasDisksInventory(): Promise<{
     }
   } catch {}
 
+  // C-M9: the daemon did not answer, so no disk inventory is known.
+  // Returning invented disks with serial numbers and passing SMART
+  // results told the operator a failing (or absent) disk set was healthy.
+  // The install spec above is real local file data, so it is kept.
   return {
-    disks: [
-      {
-        name: 'sda6',
-        path: '/dev/disk/by-partlabel/axon_zfs_1',
-        sizeBytes: 214748364800,
-        model: 'Samsung PM9A3 NVMe (Boot ZFS Partition)',
-        serial: 'S64ENX0T801921',
-        type: 'part',
-        fsType: 'zfs_member',
-        mountpoint: '',
-        partLabel: 'axon_zfs_1',
-        rotational: false,
-        smartPassed: true,
-        temperatureC: 37,
-        eligibleForZfs: true,
-        role: 'boot_zfs_partition',
-      },
-      {
-        name: 'sdb',
-        path: '/dev/sdb',
-        sizeBytes: 4000787030016,
-        model: 'WDC WD40EFPX-68C6CN0',
-        serial: 'WD-WX42D91A8321',
-        type: 'disk',
-        fsType: '',
-        mountpoint: '',
-        partLabel: '',
-        rotational: true,
-        smartPassed: true,
-        temperatureC: 34,
-        eligibleForZfs: true,
-        role: 'available',
-      },
-      {
-        name: 'sdc',
-        path: '/dev/sdc',
-        sizeBytes: 4000787030016,
-        model: 'WDC WD40EFPX-68C6CN0',
-        serial: 'WD-WX42D91A8322',
-        type: 'disk',
-        fsType: '',
-        mountpoint: '',
-        partLabel: '',
-        rotational: true,
-        smartPassed: true,
-        temperatureC: 35,
-        eligibleForZfs: true,
-        role: 'available',
-      },
-    ],
+    disks: [],
     installSpec,
+    daemonDown: true,
   };
 }
 
@@ -4921,15 +4891,18 @@ export async function getNasPoolsRuntime(): Promise<NasPoolStatus[]> {
   }
 
   const state = await getCurrentDesiredState();
+  // C-M9: the daemon did not answer, so no pool runtime is known. Report
+  // each configured pool as UNKNOWN with zeroed counters (sizes are
+  // unknown, not zero) instead of inventing a 4 TB ONLINE pool.
   return (state.nas?.pools ?? []).map((p) => ({
     name: p.name,
     topology: p.topology,
-    sizeBytes: 4000787030016,
-    allocBytes: 185899345920,
-    freeBytes: 3814887684096,
-    fragmentation: 2,
-    capacityPct: 4,
-    health: 'ONLINE',
+    sizeBytes: 0,
+    allocBytes: 0,
+    freeBytes: 0,
+    fragmentation: 0,
+    capacityPct: 0,
+    health: 'UNKNOWN',
     dataDisks: p.dataDisks,
   }));
 }
@@ -5273,13 +5246,13 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
   if (daemonResp) {
     return {
       enabled: Boolean(daemonResp.enabled ?? daemonResp.service_active ?? daemonResp.serviceActive),
-      installed: Boolean(daemonResp.installed ?? true),
+      installed: Boolean(daemonResp.installed ?? false),
       serviceActive: Boolean(daemonResp.service_active ?? daemonResp.serviceActive),
       clusterJoined: Boolean(daemonResp.cluster_joined ?? daemonResp.clusterJoined),
       role: daemonResp.role || (daemonResp.is_server || daemonResp.isServer ? 'primary-server' : 'agent-worker'),
       nodes: (daemonResp.nodes || []).map((n: any) => ({
         name: n.name || '',
-        status: n.status || 'Ready',
+        status: n.status || 'Unknown',
         roles: n.roles || n.role || '',
         version: n.version || '',
         internalIp: n.internal_ip || n.internalIp || '',
@@ -5288,36 +5261,29 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
       podsRunning: Number(daemonResp.pods_running ?? daemonResp.podsRunning ?? 0),
       podsTotal: Number(daemonResp.pods_total ?? daemonResp.podsTotal ?? 0),
       openEbsHealthy: Boolean(daemonResp.openebs_healthy ?? daemonResp.openEbsHealthy),
+      daemonDown: false,
     };
   }
 
   const state = await getCurrentDesiredState();
   const k3sEnabled = Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled);
-  const role = state.ha?.enabled && (state.ha.role === 'backup' || state.ha.nodeRole === 'backup')
-    ? 'secondary-ha-server'
-    : 'primary-server';
 
+  // C-H3: the daemon did not answer, so the live cluster state is
+  // unknown. Report that (plus the configured enabled flag, which is real
+  // desired-state data) instead of fabricating a healthy Ready cluster
+  // with an invented node, version, storage classes and pod counts.
   return {
     enabled: k3sEnabled,
-    installed: true,
-    serviceActive: k3sEnabled,
-    clusterJoined: k3sEnabled,
-    role,
-    nodes: k3sEnabled
-      ? [
-          {
-            name: state.system.hostname || 'axonwall-core',
-            status: 'Ready',
-            roles: 'control-plane,etcd,master',
-            version: 'v1.31.2+k3s1',
-            internalIp: state.interfaces.find((i) => i.name === 'lan')?.ipv4Address?.split('/')[0] || '192.168.1.1',
-          },
-        ]
-      : [],
-    storageClasses: k3sEnabled ? ['axonwall-zfs-local', 'axonwall-replicated-ha (default)'] : [],
-    podsRunning: k3sEnabled ? 8 + (state.k3s?.workloads?.filter((w) => w.enabled).length ?? 0) : 0,
-    podsTotal: k3sEnabled ? 8 + (state.k3s?.workloads?.filter((w) => w.enabled).length ?? 0) : 0,
-    openEbsHealthy: k3sEnabled,
+    installed: false,
+    serviceActive: false,
+    clusterJoined: false,
+    role: 'unknown',
+    nodes: [],
+    storageClasses: [],
+    podsRunning: 0,
+    podsTotal: 0,
+    openEbsHealthy: false,
+    daemonDown: true,
   };
 }
 
@@ -5347,9 +5313,11 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
     };
   }
 
+  // C-H4: a null response means the daemon never ran the join — it is a
+  // failure, not a success. No token was fetched and no join happened.
   return {
-    success: true,
-    message: 'Fetched K3s join token from HA primary node over mTLS and joined cluster with OpenEBS storage classes.',
+    success: false,
+    message: 'Daemon unavailable: K3s HA auto-join was not executed — no join token was fetched and the node did not join the cluster.',
   };
 }
 
@@ -6051,6 +6019,10 @@ export interface McpDashboardData {
     brokenAtIndex?: number;
     headHash: string;
   };
+  // C-M7: true when the daemon did not answer the posture call, so the
+  // page can say lease/posture state is unknown instead of rendering an
+  // empty lease list and invented anti-lockout data as fact.
+  daemonDown: boolean;
 }
 
 export async function getMcpDashboardData(): Promise<McpDashboardData> {
@@ -6061,11 +6033,16 @@ export async function getMcpDashboardData(): Promise<McpDashboardData> {
   const { entries, integrity } = readAndVerifyMcpAuditLog(100);
 
   let leases: McpTacticalLease[] = [];
+  // C-M7: no invented posture. When the daemon does not answer, the
+  // anti-lockout posture is unknown — the daemon owns the kernel leases
+  // and the protected IPs/ports, so empty arrays plus daemonDown: true is
+  // the honest answer, not a plausible-looking default.
   let protectedPosture = {
-    applianceIps: ['192.168.1.1'],
+    applianceIps: [] as string[],
     gatewayAndHaIps: [] as string[],
-    antiLockoutPorts: [2966, 22, 9876],
+    antiLockoutPorts: [] as number[],
   };
+  let daemonDown = false;
 
   const postureRes = await callAgentApi<any>('/v1/mcp/posture');
   if (postureRes && postureRes.success) {
@@ -6079,6 +6056,8 @@ export async function getMcpDashboardData(): Promise<McpDashboardData> {
         antiLockoutPorts: postureRes.posture.antiLockoutPorts || [2966, 22, 9876],
       };
     }
+  } else {
+    daemonDown = true;
   }
 
   const serverStatus = getMcpServerStatus();
@@ -6090,6 +6069,7 @@ export async function getMcpDashboardData(): Promise<McpDashboardData> {
     protectedPosture,
     auditEntries: entries,
     auditIntegrity: integrity,
+    daemonDown,
   };
 }
 
@@ -6124,7 +6104,15 @@ export async function createMcpApiKeyAction(input: {
       ? new Date(now.getTime() + input.expiresInDays * 86400 * 1000).toISOString()
       : undefined;
 
-  const parsedLimits = McpPolicyLimitsSchema.parse(input.policyLimits || {});
+  // C-L8: a Zod throw here used to surface as an unhandled rejection in
+  // the page (modal stuck open, no key, no message). Return it as a
+  // structured failure like the sibling key actions do.
+  let parsedLimits: McpPolicyLimits;
+  try {
+    parsedLimits = McpPolicyLimitsSchema.parse(input.policyLimits || {});
+  } catch (err: any) {
+    return { success: false, error: `Invalid policy limits: ${err?.message || 'out-of-range value'}` };
+  }
 
   const record = McpApiKeySchema.parse({
     id: `mcp_key_${shortId}`,
