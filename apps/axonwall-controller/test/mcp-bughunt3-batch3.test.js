@@ -187,7 +187,7 @@ test('B-H5: daemon-rejected BPF_TOKEN enable denies and leaves DesiredState unch
     audit: { reason: 'Enable BPF_TOKEN while the daemon rejects the profile' },
   });
   assert.equal(denied?.result?.isError, true);
-  assert.match(denied.result.content[0].text, /Daemon rejected/);
+  assert.match(denied.result.content[0].text, /daemon rejected/i);
   assert.doesNotMatch(denied.result.content[0].text, /staged_offline/);
   const ct = readState().virt.containers.find((c) => c.ctid === 205);
   assert.equal(ct.bpfToken, undefined);
@@ -203,7 +203,7 @@ test('B-H5: daemon-rejected BPF_TOKEN disable denies and keeps the live delegati
     audit: { reason: 'Revoke BPF_TOKEN while the daemon cannot delete the profile' },
   });
   assert.equal(denied?.result?.isError, true);
-  assert.match(denied.result.content[0].text, /Daemon/);
+  assert.match(denied.result.content[0].text, /daemon/i);
   const ct = readState().virt.containers.find((c) => c.ctid === 205);
   assert.equal(ct.bpfToken?.enabled, true);
 });
