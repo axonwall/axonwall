@@ -128,7 +128,19 @@ func NewEBPFManager() *EBPFManager {
 	}
 	if rawSyn := strings.TrimSpace(os.Getenv("AXONWALL_XDP_SYN_FLOOD_PPS")); rawSyn != "" {
 		if parsed, err := strconv.ParseUint(rawSyn, 10, 64); err == nil && parsed > 0 {
-			mgr.synFloodLimitPps.Store(parsed)
+			// A-L2: the env value used to be stored with no range
+			// check, while SetSynFloodLimitPps rejects anything
+			// below 20 pps — so Start's (discarded) call left the
+			// atomic holding a limit the kernel never got, and the
+			// snapshot reported it as enforced. Validate here, at
+			// the same bounds the setter enforces, and ignore an
+			// out-of-range value (limiter stays disabled) instead
+			// of recording a phantom limit.
+			if parsed < 20 || parsed > 10_000_000 {
+				log.Printf("Warning: AXONWALL_XDP_SYN_FLOOD_PPS=%d is outside the supported range (20-10000000 pps); ignoring it, SYN-flood limiter disabled", parsed)
+			} else {
+				mgr.synFloodLimitPps.Store(parsed)
+			}
 		}
 	}
 	defaultEbpfMgrMu.Lock()
@@ -294,7 +306,14 @@ func (m *EBPFManager) Start(interfaces []string) error {
 	}
 
 	if initSyn := m.synFloodLimitPps.Load(); initSyn > 0 {
-		_ = m.SetSynFloodLimitPps(initSyn)
+		// A-L2: this error used to be discarded, which is what let
+		// an unapplied limit linger in the atomic and be reported
+		// as enforced. The constructor now validates the env value
+		// against the same bounds, so this should not fire on range
+		// — but a kernel-map failure here must still be visible.
+		if err := m.SetSynFloodLimitPps(initSyn); err != nil {
+			log.Printf("Warning: could not apply initial SYN-flood limit %d pps: %v", initSyn, err)
+		}
 	}
 
 	var attached []string

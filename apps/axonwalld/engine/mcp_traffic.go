@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -159,6 +160,11 @@ type McpTrafficManager struct {
 	// The janitor retries the rebuild on every tick until it lands
 	// instead of forgetting the failure. Guarded by mu.
 	reconcileDirty bool
+	// pendingCleanup holds leases whose record is already gone but
+	// whose tc/ip kernel artifacts may have survived a failed delete
+	// (A-M6). The janitor retries them on every tick until the
+	// cleanup lands instead of forgetting the failure. Guarded by mu.
+	pendingCleanup []*McpTacticalLease
 }
 
 // mcpClassIDRange is the shared pool for tc classes (shape) and
@@ -311,6 +317,8 @@ func (m *McpTrafficManager) janitorLoop() {
 }
 
 func (m *McpTrafficManager) purgeExpiredLeases() {
+	// A-M6: retry tc/ip cleanups orphaned by earlier failed deletes.
+	m.retryPendingCleanups()
 	m.mu.Lock()
 	now := time.Now().UTC()
 	expired := []*McpTacticalLease{}
@@ -336,7 +344,13 @@ func (m *McpTrafficManager) purgeExpiredLeases() {
 
 	for _, l := range expired {
 		log.Printf("[MCP Janitor] Expiring tactical lease %s (%s: %s)", l.ID, l.Kind, l.TargetSummary)
-		m.cleanupKernelArtifactsForLease(l)
+		// A-M6: a failed tc/ip delete used to be discarded while the
+		// record was already gone. Queue the lease so the janitor
+		// retries the cleanup instead of orphaning the enforcement.
+		if cerr := m.cleanupKernelArtifactsForLease(l); cerr != nil {
+			log.Printf("[MCP Traffic] Janitor tc/ip cleanup for expired lease %s failed (enforcement may persist): %v", l.ID, cerr)
+			m.queuePendingCleanup(l)
+		}
 	}
 	m.mu.Lock()
 	for _, l := range expired {
@@ -784,38 +798,128 @@ func (m *McpTrafficManager) reconcileDnsSinkholes(leases []*McpTacticalLease) er
 	return nil
 }
 
-func (m *McpTrafficManager) cleanupKernelArtifactsForLease(l *McpTacticalLease) {
+// ErrMcpKernelCleanupFailed marks a RevertLease/FlushAllLeases error where
+// the lease record was removed but a tc/ip kernel cleanup failed, so the
+// enforcement may still be live (A-M6). The handler maps it to 500,
+// not 404: the lease existed and was reverted; only the cleanup failed.
+var ErrMcpKernelCleanupFailed = errors.New("tc/ip kernel cleanup failed; enforcement may persist")
+
+// runKernelCleanupCmd runs one tc/ip delete and reports a real failure.
+// A delete that fails because the object is already gone ("Cannot find
+// device", "No such process", "No such file or directory") is not a
+// failure: there is nothing left to clean up.
+func runKernelCleanupCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	for _, gone := range []string{"Cannot find device", "No such process", "No such file or directory"} {
+		if strings.Contains(msg, gone) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s %s failed: %v (%s)", name, strings.Join(args, " "), err, msg)
+}
+
+func (m *McpTrafficManager) cleanupKernelArtifactsForLease(l *McpTacticalLease) error {
+	var failures []string
+	runCleanupCmd := func(name string, args ...string) {
+		if err := runKernelCleanupCmd(name, args...); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
 	if l.Kind == "blackhole" {
 		if mode, _ := l.Parameters["mode"].(string); mode == "route_blackhole" && l.NormalizedTarget != "" {
 			if l.IsIPv6 {
-				_ = exec.Command("ip", "-6", "route", "del", "blackhole", l.NormalizedTarget).Run()
+				runCleanupCmd("ip", "-6", "route", "del", "blackhole", l.NormalizedTarget)
 			} else {
-				_ = exec.Command("ip", "route", "del", "blackhole", l.NormalizedTarget).Run()
+				runCleanupCmd("ip", "route", "del", "blackhole", l.NormalizedTarget)
 			}
 		}
 	} else if l.Kind == "shape" && l.ClassID > 0 {
 		iface, _ := l.Parameters["interface"].(string)
 		dev := resolveKernelDevice(iface)
 		if dev != "" {
-			classMinor := strconv.Itoa(l.ClassID)
-			markStr := fmt.Sprintf("0x%x", l.FwMark)
-			proto := "ip"
-			if l.IsIPv6 {
-				proto = "ipv6"
+			// A-M6: resolveKernelDevice used to return any
+			// regex-valid name verbatim even when the interface
+			// no longer existed, so the tc delete failed on a
+			// stale name and was discarded while the shaping
+			// stayed. A qdisc lives on its device: if the device
+			// is gone, its tc state went with it and there is
+			// nothing left to delete.
+			if _, err := net.InterfaceByName(dev); err != nil {
+				log.Printf("[MCP Traffic] Skipping tc cleanup for lease %s: interface %q no longer exists (its qdisc state is gone with it)", l.ID, dev)
+			} else {
+				classMinor := strconv.Itoa(l.ClassID)
+				markStr := fmt.Sprintf("0x%x", l.FwMark)
+				proto := "ip"
+				if l.IsIPv6 {
+					proto = "ipv6"
+				}
+				runCleanupCmd("tc", "filter", "del", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", markStr, "fw", "flowid", "1:"+classMinor)
+				runCleanupCmd("tc", "qdisc", "del", "dev", dev, "parent", "1:"+classMinor)
+				runCleanupCmd("tc", "class", "del", "dev", dev, "classid", "1:"+classMinor)
 			}
-			_ = exec.Command("tc", "filter", "del", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", markStr, "fw", "flowid", "1:"+classMinor).Run()
-			_ = exec.Command("tc", "qdisc", "del", "dev", dev, "parent", "1:"+classMinor).Run()
-			_ = exec.Command("tc", "class", "del", "dev", dev, "classid", "1:"+classMinor).Run()
 		}
 	} else if l.Kind == "redirect" {
 		if rType, _ := l.Parameters["redirectType"].(string); rType == "policy_route" && l.FwMark > 0 {
 			markHex := fmt.Sprintf("0x%x", l.FwMark)
 			if l.IsIPv6 {
-				_ = exec.Command("ip", "-6", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID)).Run()
+				runCleanupCmd("ip", "-6", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID))
 			} else {
-				_ = exec.Command("ip", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID)).Run()
+				runCleanupCmd("ip", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID))
 			}
 		}
+	}
+	// A-M6: every delete in this function used to be `_ =`, and the
+	// callers ran it *after* deleting the lease record — so a failed
+	// delete left enforcement in the kernel with no record and no way
+	// to address it. Failures are now returned so the caller can
+	// report them and queue the lease for janitor retry.
+	if len(failures) > 0 {
+		return fmt.Errorf("kernel cleanup for lease %s failed: %s", l.ID, strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// queuePendingCleanup records a lease whose record is already gone but
+// whose kernel artifacts may have survived a failed delete, so the
+// janitor retries the cleanup instead of forgetting it (A-M6).
+// Callers hold no lock; the lease's ClassID stays reserved by the
+// caller's reserve/release dance.
+func (m *McpTrafficManager) queuePendingCleanup(l *McpTacticalLease) {
+	m.mu.Lock()
+	m.pendingCleanup = append(m.pendingCleanup, l)
+	m.reconcileDirty = true
+	m.mu.Unlock()
+}
+
+// retryPendingCleanups retries tc/ip artifact cleanup for leases whose
+// record is already gone (A-M6). It runs on every janitor tick; leases
+// whose cleanup still fails stay queued.
+func (m *McpTrafficManager) retryPendingCleanups() {
+	m.mu.Lock()
+	pending := m.pendingCleanup
+	m.pendingCleanup = nil
+	m.mu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	var stillPending []*McpTacticalLease
+	for _, l := range pending {
+		if err := m.cleanupKernelArtifactsForLease(l); err != nil {
+			log.Printf("[MCP Traffic] Retrying tc/ip cleanup for lease %s still failed: %v", l.ID, err)
+			stillPending = append(stillPending, l)
+		} else {
+			log.Printf("[MCP Traffic] Previously failed tc/ip cleanup for lease %s succeeded on retry", l.ID)
+		}
+	}
+	if len(stillPending) > 0 {
+		m.mu.Lock()
+		m.pendingCleanup = append(m.pendingCleanup, stillPending...)
+		m.mu.Unlock()
 	}
 }
 
@@ -969,7 +1073,9 @@ func (m *McpTrafficManager) BlackholeTraffic(req McpBlackholeReq) (*McpTacticalL
 		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
-		m.cleanupKernelArtifactsForLease(lease)
+		if cerr := m.cleanupKernelArtifactsForLease(lease); cerr != nil {
+			log.Printf("[MCP Traffic] Warning: cleanup of kernel artifacts for failed lease %s failed (orphaned enforcement may persist): %v", lease.ID, cerr)
+		}
 		m.mu.Lock()
 		m.releaseClassIDLocked(lease.ClassID)
 		m.mu.Unlock()
@@ -1140,13 +1246,15 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 		return runEnforcementCmd("tc", "filter", "add", "dev", dev, "parent", "1:", "protocol", proto, "prio", "10", "handle", fmt.Sprintf("0x%x", fwMark), "fw", "flowid", classStr)
 	}()
 	if tcErr != nil {
-		m.cleanupKernelArtifactsForLease(&McpTacticalLease{
+		if cerr := m.cleanupKernelArtifactsForLease(&McpTacticalLease{
 			Kind:       "shape",
 			ClassID:    classID,
 			FwMark:     fwMark,
 			IsIPv6:     isV6,
 			Parameters: map[string]interface{}{"interface": req.Interface},
-		})
+		}); cerr != nil {
+			log.Printf("[MCP Traffic] Warning: cleanup of tc artifacts for failed shape lease (class %d) failed: %v", classID, cerr)
+		}
 		m.mu.Lock()
 		m.releaseClassIDLocked(classID)
 		m.mu.Unlock()
@@ -1207,7 +1315,9 @@ func (m *McpTrafficManager) ShapeTraffic(req McpShapeReq) (*McpTacticalLease, er
 		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
-		m.cleanupKernelArtifactsForLease(lease)
+		if cerr := m.cleanupKernelArtifactsForLease(lease); cerr != nil {
+			log.Printf("[MCP Traffic] Warning: cleanup of kernel artifacts for failed lease %s failed (orphaned enforcement may persist): %v", lease.ID, cerr)
+		}
 		m.mu.Lock()
 		m.releaseClassIDLocked(lease.ClassID)
 		m.mu.Unlock()
@@ -1279,20 +1389,27 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 			}
 		}
 		if cmdErr != nil {
-			m.cleanupKernelArtifactsForLease(&McpTacticalLease{
+			if cerr := m.cleanupKernelArtifactsForLease(&McpTacticalLease{
 				Kind:       "redirect",
 				ClassID:    tableID,
 				FwMark:     fwMark,
 				IsIPv6:     isV6,
 				Parameters: map[string]interface{}{"redirectType": "policy_route"},
-			})
+			}); cerr != nil {
+				log.Printf("[MCP Traffic] Warning: cleanup of ip-rule artifacts for failed redirect lease (table %s) failed: %v", tableStr, cerr)
+			}
 			// cleanupKernelArtifactsForLease removes the rule but not
 			// the route; drop the inert default route in the custom
-			// table too.
+			// table too. A-M6: this delete used to be discarded as
+			// well; a real failure is now logged.
 			if isV6 {
-				_ = exec.Command("ip", "-6", "route", "del", "default", "table", tableStr).Run()
+				if cerr := runKernelCleanupCmd("ip", "-6", "route", "del", "default", "table", tableStr); cerr != nil {
+					log.Printf("[MCP Traffic] Warning: cleanup of default route in table %s after failed redirect lease failed: %v", tableStr, cerr)
+				}
 			} else {
-				_ = exec.Command("ip", "route", "del", "default", "table", tableStr).Run()
+				if cerr := runKernelCleanupCmd("ip", "route", "del", "default", "table", tableStr); cerr != nil {
+					log.Printf("[MCP Traffic] Warning: cleanup of default route in table %s after failed redirect lease failed: %v", tableStr, cerr)
+				}
 			}
 			m.mu.Lock()
 			m.releaseClassIDLocked(tableID)
@@ -1348,7 +1465,9 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
-		m.cleanupKernelArtifactsForLease(lease)
+		if cerr := m.cleanupKernelArtifactsForLease(lease); cerr != nil {
+			log.Printf("[MCP Traffic] Warning: cleanup of kernel artifacts for failed lease %s failed (orphaned enforcement may persist): %v", lease.ID, cerr)
+		}
 		m.mu.Lock()
 		m.releaseClassIDLocked(lease.ClassID)
 		m.mu.Unlock()
@@ -1424,7 +1543,9 @@ func (m *McpTrafficManager) SinkholeDNS(req McpDnsSinkholeReq) (*McpTacticalLeas
 		m.reserveClassIDLocked(lease.ClassID)
 		m.saveStateLocked()
 		m.mu.Unlock()
-		m.cleanupKernelArtifactsForLease(lease)
+		if cerr := m.cleanupKernelArtifactsForLease(lease); cerr != nil {
+			log.Printf("[MCP Traffic] Warning: cleanup of kernel artifacts for failed lease %s failed (orphaned enforcement may persist): %v", lease.ID, cerr)
+		}
 		m.mu.Lock()
 		m.releaseClassIDLocked(lease.ClassID)
 		m.mu.Unlock()
@@ -1477,7 +1598,21 @@ func (m *McpTrafficManager) RevertLease(leaseID string) (*McpTacticalLease, erro
 	m.saveStateLocked()
 	m.mu.Unlock()
 
-	m.cleanupKernelArtifactsForLease(lease)
+	// A-M6: the tc/ip cleanup used to be discarded here, after the
+	// record was already deleted — a failed delete left enforcement
+	// in the kernel with no record. The failure is now returned (so
+	// the API caller is told enforcement may persist) and the lease
+	// is queued for janitor retry. The record stays deleted: the nft
+	// rebuild above already removed the lease from the kernel table,
+	// so restoring it would re-enforce it.
+	if cerr := m.cleanupKernelArtifactsForLease(lease); cerr != nil {
+		log.Printf("[MCP Traffic] tc/ip cleanup for reverted lease %s failed (enforcement may persist): %v", lease.ID, cerr)
+		m.queuePendingCleanup(lease)
+		m.mu.Lock()
+		m.releaseClassIDLocked(lease.ClassID)
+		m.mu.Unlock()
+		return lease, fmt.Errorf("lease %s removed from records but %w: %w", lease.ID, ErrMcpKernelCleanupFailed, cerr)
+	}
 	m.mu.Lock()
 	m.releaseClassIDLocked(lease.ClassID)
 	m.mu.Unlock()
@@ -1517,14 +1652,27 @@ func (m *McpTrafficManager) FlushAllLeases() (int, error) {
 	m.saveStateLocked()
 	m.mu.Unlock()
 
+	// A-M6: the tc/ip cleanup used to be discarded here, after all
+	// records were cleared — a failed delete left enforcement in the
+	// kernel with no record. Failures are now returned (so the API
+	// caller is told enforcement may persist) and the affected leases
+	// are queued for janitor retry.
+	var cleanupErrs []string
 	for _, l := range all {
-		m.cleanupKernelArtifactsForLease(l)
+		if cerr := m.cleanupKernelArtifactsForLease(l); cerr != nil {
+			log.Printf("[MCP Traffic] tc/ip cleanup for flushed lease %s failed (enforcement may persist): %v", l.ID, cerr)
+			m.queuePendingCleanup(l)
+			cleanupErrs = append(cleanupErrs, cerr.Error())
+		}
 	}
 	m.mu.Lock()
 	for _, l := range all {
 		m.releaseClassIDLocked(l.ClassID)
 	}
 	m.mu.Unlock()
+	if len(cleanupErrs) > 0 {
+		return len(all), fmt.Errorf("flushed %d leases from records but %w for %d: %s", len(all), ErrMcpKernelCleanupFailed, len(cleanupErrs), strings.Join(cleanupErrs, "; "))
+	}
 	return len(all), nil
 }
 
