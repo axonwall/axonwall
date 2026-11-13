@@ -1195,8 +1195,13 @@ async function main() {
   // config (WAN DHCP, LAN 10.0.0.1/24) to every connected edge.
   // B2-L2: null is treated like undefined (load from disk), so a
   // future caller passing null cannot reopen that trap.
-  function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null) {
-    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return;
+  // B-M2 (round 3): returns true only when the SYNC_NFTABLES
+  // command was actually dispatched through sendToSatellite (which
+  // stamps a commandId and tracks the pending ack). /fleet/sync
+  // used to count every OPEN socket as synced even when the send
+  // never went out.
+  function syncSatelliteDesiredState(sat: SatelliteState, desiredState?: DesiredState | null): boolean {
+    if (!sat.ws || sat.ws.readyState !== WebSocket.OPEN) return false;
 
     const localState = desiredState !== undefined && desiredState !== null ? desiredState : loadLocalDesiredState();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
@@ -1236,7 +1241,7 @@ async function main() {
     const { nftScript } = compileSatelliteNftables(mergedNode);
     // B2-M1: every outbound command carries a commandId so the
     // satellite's COMMAND_ACK correlates to this send.
-    sendToSatellite(sat, 'SYNC_NFTABLES', { script: nftScript });
+    const nftSent = sendToSatellite(sat, 'SYNC_NFTABLES', { script: nftScript }) !== null;
 
     // B2-M8 (SUSPECT, confirmed): with no DesiredState on disk
     // there is nothing real to push for interfaces/routes — the
@@ -1247,7 +1252,7 @@ async function main() {
     // invented addressing.
     if (isEdge && localState === null) {
       console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
-      return;
+      return nftSent;
     }
 
     if (isEdge) {
@@ -1331,6 +1336,7 @@ async function main() {
         persistSyncedRoutes(persistedSyncedRoutes);
       }
     }
+    return nftSent;
   }
 
 // Prometheus Metrics Definition
@@ -1543,13 +1549,15 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
 
           console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
 
+          // B-M2 (round 3): route through sendToSatellite so the
+          // BLOCK_TARGET carries a commandId and the satellite's
+          // COMMAND_ACK correlates to this send (the pending-command
+          // sweep flags a missing ack). The old raw ws.send counted
+          // bytes buffered into the socket as "notified" with no
+          // correlation at all. Counted only when dispatched.
           let count = 0;
           for (const sat of activeSatellites.values()) {
-            if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
-              sat.ws.send(JSON.stringify({
-                type: 'BLOCK_TARGET',
-                payload: { target, isMac }
-              }));
+            if (sendToSatellite(sat, 'BLOCK_TARGET', { target, isMac }) !== null) {
               count++;
             }
           }
@@ -1702,8 +1710,12 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
-          if (sat.ws && sat.ws.readyState === WebSocket.OPEN) {
-            syncSatelliteDesiredState(sat, desired);
+          // B-M2 (round 3): count only satellites the sync was
+          // actually dispatched to. syncSatelliteDesiredState
+          // returns false when the socket is not OPEN (its
+          // SYNC_NFTABLES send never went out); the old code
+          // counted every OPEN socket as synced on readyState alone.
+          if (syncSatelliteDesiredState(sat, desired)) {
             synced++;
           }
         }
@@ -2153,16 +2165,18 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           };
         });
 
-      sat.ws.send(JSON.stringify({
-        type: 'SYNC_WIREGUARD',
-        payload: {
-          interfaceName: 'wg-axon0',
-          tunnelIp: sat.tunnelIp,
-          listenPort: 51820,
-          privateKey: sat.wgPrivateKey,
-          peers: peers,
-        }
-      }));
+      // B-M2 (round 3): route through sendToSatellite so the
+      // SYNC_WIREGUARD carries a commandId and the satellite's
+      // COMMAND_ACK correlates to this send. The old raw ws.send
+      // left the ack uncorrelatable and the pending-command sweep
+      // unable to notice a missing ack.
+      sendToSatellite(sat, 'SYNC_WIREGUARD', {
+        interfaceName: 'wg-axon0',
+        tunnelIp: sat.tunnelIp,
+        listenPort: 51820,
+        privateKey: sat.wgPrivateKey,
+        peers: peers,
+      });
     }
   }
 
