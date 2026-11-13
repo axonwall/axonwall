@@ -6743,12 +6743,14 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
   const patch = m && m[3] ? parseInt(m[3], 10) : 0;
   const supportsBpfToken = major > 6 || (major === 6 && minor >= 9);
 
+  // Daemon-down fallback: report unknown, never assert capabilities the
+  // daemon never reported (C-M1). The page renders these as unknown.
   return {
     daemonDown: true,
     dataplane: {
       attachedInterfaces: [],
-      dualStackEnabled: true,
-      vlanPeelingEnabled: true,
+      dualStackEnabled: false,
+      vlanPeelingEnabled: false,
       xdpStats: {
         rxPackets: 0,
         rxBytes: 0,
@@ -6765,13 +6767,7 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
     },
     bpfLsm: {
       attached: false,
-      attachedHooks: [
-        'lsm/socket_bind',
-        'lsm/bpf',
-        'lsm/uring_sqpoll',
-        'lsm/bpf_token_create',
-        'lsm/bpf_token_cmd',
-      ],
+      attachedHooks: [],
       denialEventsCount: 0,
     },
     bpfTokens: {
@@ -6782,8 +6778,8 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
       supportsBpfToken,
       supportsUserNsBpf: supportsBpfToken,
       bpffsRootMounted: fs.existsSync('/sys/fs/bpf'),
-      unprivilegedBpfSysctl: '2',
-      bpfLsmActive: true,
+      unprivilegedBpfSysctl: '',
+      bpfLsmActive: false,
       forbiddenRing0ProgTypes: [
         'kprobe',
         'tracepoint',

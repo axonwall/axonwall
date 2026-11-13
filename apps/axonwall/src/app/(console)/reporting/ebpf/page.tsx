@@ -48,13 +48,13 @@ import {
   setXdpSynLimitAction,
   renderK3sBpfTokenManifestAction,
   getCurrentDesiredState,
-  applyDesiredState,
   type NetworkInsightTelemetry,
   type K3sRuntimeStatus,
   type HostRootkitAuditApiResponse,
   type EbpfOverviewTelemetry,
 } from '@/server/agent';
-import type { DesiredState } from '@axonwall/lib/schemas';
+import { ObservabilityConfigSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 interface StreamPacket {
   index: number;
@@ -515,7 +515,8 @@ export default function EbpfObservabilityConsolePage() {
     zfsArcZilTelemetryEnabled: true,
   });
   const [savingConfig, setSavingConfig] = useState(false);
-  const [saveBanner, setSaveBanner] = useState<string | null>(null);
+  const [saveBanner, setSaveBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const { applyState } = useDesiredStateApply();
 
   // Live telemetry states
   const [insight, setInsight] = useState<NetworkInsightTelemetry | null>(null);
@@ -709,40 +710,29 @@ export default function EbpfObservabilityConsolePage() {
     setSavingConfig(true);
     setSaveBanner(null);
     try {
+      // Only the APM toggles are being saved: preserve every loaded
+      // observability sub-object exactly as loaded instead of inventing
+      // defaults for absent ones. When no observability section was loaded,
+      // the schema — the single source of truth for defaults — fills the
+      // rest on parse (the server applies the same schema on save).
       const nextState: DesiredState = {
         ...desiredState,
-        observability: {
-          metrics: desiredState.observability?.metrics ?? {
-            enabled: true,
-            port: 9090,
-            retentionDays: 30,
-            scrapeIntervalSeconds: 10,
-          },
-          flowExport: desiredState.observability?.flowExport ?? {
-            enabled: false,
-            version: 'ipfix',
-            collectorPort: 2055,
-            interfaces: [],
-          },
-          alerting: desiredState.observability?.alerting ?? {
-            enabled: false,
-            notifyOnFailover: true,
-            notifyOnThreshold: true,
-          },
-          clickhouse: desiredState.observability?.clickhouse ?? {
-            enabled: false,
-            url: 'http://127.0.0.1:8123',
-            database: 'axonwall',
-            username: 'admin',
-          },
-          ebpfApm: apmConfig,
-        },
+        observability: desiredState.observability
+          ? { ...desiredState.observability, ebpfApm: apmConfig }
+          : ObservabilityConfigSchema.parse({ ebpfApm: apmConfig }),
       };
-      const res = await applyDesiredState(nextState);
+      const res = await applyState(nextState);
+      if (!res.success) {
+        setSaveBanner({ type: 'err', text: res.message || 'Failed to save eBPF APM configuration.' });
+        return;
+      }
       setDesiredState(nextState);
-      setSaveBanner(res.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.');
+      setSaveBanner({
+        type: 'ok',
+        text: res.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.',
+      });
     } catch (err: any) {
-      setSaveBanner(err?.message || 'Failed to save eBPF APM configuration.');
+      setSaveBanner({ type: 'err', text: err?.message || 'Failed to save eBPF APM configuration.' });
     } finally {
       setSavingConfig(false);
     }
@@ -825,7 +815,7 @@ export default function EbpfObservabilityConsolePage() {
   );
 
   const activePlaybook = K8S_PLAYBOOKS.find((p) => p.id === selectedPlaybook) || K8S_PLAYBOOKS[0];
-  const lsmHooksCount = ebpfOverview?.bpfLsm?.attachedHooks?.length ?? rootkitStatus?.bpfLsmAttachedHooks?.length ?? 5;
+  const lsmHooksCount = ebpfOverview?.bpfLsm?.attachedHooks?.length ?? rootkitStatus?.bpfLsmAttachedHooks?.length;
   const lsmDenials = rootkitStatus?.bpfLsmDenialEvents ?? [];
   const flows = insight?.flows ?? [];
 
@@ -971,8 +961,14 @@ export default function EbpfObservabilityConsolePage() {
         </div>
 
         {saveBanner && (
-          <div className="px-3 py-2 rounded-lg bg-emerald-950/50 border border-emerald-500/30 text-xs text-emerald-300">
-            {saveBanner}
+          <div
+            className={`px-3 py-2 rounded-lg border text-xs ${
+              saveBanner.type === 'ok'
+                ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300'
+                : 'bg-rose-950/50 border-rose-500/30 text-rose-300'
+            }`}
+          >
+            {saveBanner.text}
           </div>
         )}
 
@@ -1108,9 +1104,13 @@ export default function EbpfObservabilityConsolePage() {
             <ShieldCheck className="w-4 h-4 text-sky-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
-            {lsmHooksCount} Hooks
+            {lsmHooksCount ?? '—'} Hooks
             <span className="text-xs font-normal text-sky-400 ml-2">
-              {rootkitStatus?.bpfLsmGuardAttached ? 'Attached (CO-RE)' : 'Compiled (64 KB Ring)'}
+              {rootkitStatus?.bpfLsmGuardAttached
+                ? 'Attached (CO-RE)'
+                : ebpfOverview || rootkitStatus
+                  ? 'Not confirmed attached'
+                  : 'Unknown — no telemetry'}
             </span>
           </div>
           <p className="text-[11px] text-slate-500">
@@ -2064,11 +2064,15 @@ export default function EbpfObservabilityConsolePage() {
                     Linux 6.9+ BPF_TOKEN_CREATE
                   </span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                    Kernel: {ebpfOverview?.bpfTokens.kernelRelease || '6.12+'} (
-                    {ebpfOverview?.bpfTokens.supportsBpfToken !== false ? 'Supported' : 'Requires >= 6.9'})
+                    Kernel: {ebpfOverview?.bpfTokens.kernelRelease || 'Unknown'} (
+                    {ebpfOverview?.bpfTokens.supportsBpfToken === true
+                      ? 'Supported'
+                      : ebpfOverview?.bpfTokens.supportsBpfToken === false
+                        ? 'Requires >= 6.9'
+                        : 'Unknown'})
                   </span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs font-mono bg-purple-500/15 text-purple-300 border border-purple-500/30">
-                    BPF-LSM Ring-0 Veto: ENFORCED
+                    BPF-LSM Ring-0 Veto: {ebpfOverview?.bpfLsm.attached === true ? 'ENFORCED' : 'Not confirmed'}
                   </span>
                 </div>
                 <h2 className="text-lg font-bold text-white">
@@ -2449,8 +2453,16 @@ export default function EbpfObservabilityConsolePage() {
                 <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
                   <div className="text-[10px] text-slate-400">UserNS + Cgroup v2</div>
                   <div className="font-mono font-bold text-sky-300 mt-0.5">
-                    {ebpfOverview?.k3s.userNamespacesSupported !== false ? 'UserNS Ready' : 'Legacy'} •{' '}
-                    {ebpfOverview?.k3s.kubepodsCgroupV2 !== false ? 'cgroup2' : 'cgroup1'}
+                    {ebpfOverview?.k3s.userNamespacesSupported === true
+                      ? 'UserNS Ready'
+                      : ebpfOverview?.k3s.userNamespacesSupported === false
+                        ? 'Legacy'
+                        : 'UserNS Unknown'} •{' '}
+                    {ebpfOverview?.k3s.kubepodsCgroupV2 === true
+                      ? 'cgroup2'
+                      : ebpfOverview?.k3s.kubepodsCgroupV2 === false
+                        ? 'cgroup1'
+                        : 'cgroup unknown'}
                   </div>
                 </div>
                 <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
@@ -2468,7 +2480,11 @@ export default function EbpfObservabilityConsolePage() {
               </p>
               <div className="text-[11px] font-mono text-slate-300">
                 K3s service: {ebpfOverview?.k3s.serviceActive ? 'ACTIVE' : 'STANDBY'} • BPF_TOKEN ready:{' '}
-                {ebpfOverview?.k3s.bpfTokenReady !== false ? 'YES' : 'NO'}
+                {ebpfOverview?.k3s.bpfTokenReady === true
+                  ? 'YES'
+                  : ebpfOverview?.k3s.bpfTokenReady === false
+                    ? 'NO'
+                    : 'Unknown'}
               </div>
             </div>
 
