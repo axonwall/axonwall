@@ -1348,8 +1348,19 @@ export function AxonwallTuiApp({
       }
       if (input === 'f') {
         setStatusMessage('Flushing all active MCP tactical leases...');
-        callDaemon('/v1/mcp/flush', 'POST', { reason: 'TUI operator flush' }).then(() => {
-          setStatusMessage('✔ All active MCP leases flushed and revoked.');
+        // B-H2 (round 3): the old handler printed success without
+        // ever looking at the daemon's answer — callDaemon resolves
+        // {success:false} on daemon-down/timeout/refusal, and the
+        // operator was told every blackhole/shaper/redirect/DNS
+        // sinkhole was revoked while all of them were still
+        // enforced. Check res.success (and report the cleared
+        // count) before claiming anything.
+        callDaemon('/v1/mcp/flush', 'POST', { reason: 'TUI operator flush' }).then((res) => {
+          setStatusMessage(
+            res?.success
+              ? `✔ All active MCP leases flushed and revoked (${res?.clearedCount ?? 0} cleared).`
+              : `✖ MCP flush failed (${res?.errorKind || 'daemon-error'}): ${res?.message || res?.error || 'leases NOT flushed — tactical leases are still active'}.`,
+          );
           refreshAll();
         });
         return;
