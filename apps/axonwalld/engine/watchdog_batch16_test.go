@@ -444,15 +444,22 @@ func TestZbmInitialVerificationSyncsBootfsWithoutClobberingSubsequentStage(t *te
 	engine.status.ActiveRootDevice = "zroot/ROOT/axonwall-0.11.62"
 	engine.runVerificationSequence()
 
-	if !zx.hasSet("zpool set bootfs=zroot/ROOT/axonwall-0.11.62 zroot") {
-		t.Errorf("Expected initial boot verification to sync bootfs to active BE; sets: %v", zx.sets)
+	// E-H1 (round-3): bootfs names a different, existing BE — that is
+	// a staged update (or a deliberate manual arming), not a stale
+	// pointer. A passing verification — in this fresh process or any
+	// later one — must NOT overwrite it with the running BE. The old
+	// behaviour (sync on first verification per process, guarded only
+	// by the RAM-only bootSyncDone flag) disarmed a staged update on
+	// every daemon restart.
+	if zx.hasSet("zpool set bootfs=zroot/ROOT/axonwall-0.11.62 zroot") {
+		t.Errorf("Verification must not clobber a bootfs naming an existing BE; sets: %v", zx.sets)
 	}
-	if !zx.hasSet("set org.axonwall:active_be=zroot/ROOT/axonwall-0.11.62 zroot/ROOT") {
-		t.Errorf("Expected initial boot verification to sync org.axonwall:active_be to active BE; sets: %v", zx.sets)
+	if zx.hasSet("set org.axonwall:active_be=zroot/ROOT/axonwall-0.11.62 zroot/ROOT") {
+		t.Errorf("Verification must not clobber org.axonwall:active_be naming an existing BE; sets: %v", zx.sets)
 	}
 
-	// Now simulate staging a new BE and running on-demand verification before reboot:
-	// bootSyncDone must prevent clobbering the newly staged bootfs.
+	// A second on-demand verification in the same process must not
+	// clobber it either.
 	zx.sets = nil
 	engine.runVerificationSequence()
 	if zx.hasSet("zpool set bootfs=zroot/ROOT/axonwall-0.11.62 zroot") {
