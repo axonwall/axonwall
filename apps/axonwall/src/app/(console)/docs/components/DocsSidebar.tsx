@@ -48,6 +48,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'Overview & Introduction', href: '/docs' },
       { title: 'Installation Guide (ISO, UKI, Cloud)', href: '/docs#installation' },
       { title: 'Multi-Disk RAID & ZFSBootMenu', href: '/docs/installer-raid-zfs', badge: 'ZBM' },
+      { title: 'Barebones K3s + Storage Edition', href: '/docs/installer-raid-zfs#k3s-storage-edition', badge: 'K3s' },
       { title: 'Quickstart & First Boot', href: '/docs#quickstart' },
       { title: 'Hardware Compatibility List', href: '/docs#hardware' },
     ],
@@ -58,6 +59,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     items: [
       { title: 'Linux nftables Architecture', href: '/docs/architecture' },
       { title: 'Super-Slim Edge NGFW (UEFI UKI)', href: '/docs/edge-uki-ngfw', badge: 'PID-1' },
+      { title: 'Custom Hardened Kernels & Studio', href: '/docs/custom-kernel', badge: 'KSPP' },
       { title: 'Modular Core Roles (5 Roles)', href: '/docs/modular-architecture', badge: 'Core' },
       { title: 'Multi-Core vs FreeBSD pf', href: '/docs/architecture#comparison' },
       { title: 'Junos Commit-Confirm Rollback', href: '/docs/architecture#commit-confirm' },
@@ -355,8 +357,8 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.11.64</span>
-        <span className="text-emerald-400 font-medium">24 Guides</span>
+        <span className="font-mono">Axonwall v0.11.68</span>
+        <span className="text-emerald-400 font-medium">25 Guides</span>
       </div>
     </aside>
   );

@@ -1041,6 +1041,28 @@ linux-perf
 EOF
 fi
 
+# Stage Axonwall Custom Hardened Kernel Builder onto deployed hosts
+if [[ "${FLAVOR}" == "axonwall" || "${FLAVOR}" == "k3s-storage" ]]; then
+  if [[ -d "${SCRIPT_DIR}/../kernel/fragments" && -f "${SCRIPT_DIR}/../kernel/build-kernel.sh" ]]; then
+    echo "[+] Staging Axonwall Hardened Kernel Builder (/usr/share/axonwall/kernel-builder)..."
+    mkdir -p config/includes.chroot/usr/share/axonwall/kernel-builder/fragments
+    cp "${SCRIPT_DIR}/../kernel/build-kernel.sh" config/includes.chroot/usr/share/axonwall/kernel-builder/build-kernel.sh
+    cp "${SCRIPT_DIR}/../kernel/README.md" config/includes.chroot/usr/share/axonwall/kernel-builder/README.md || true
+    cp "${SCRIPT_DIR}/../kernel/fragments/"* config/includes.chroot/usr/share/axonwall/kernel-builder/fragments/
+    chmod 0755 config/includes.chroot/usr/share/axonwall/kernel-builder/build-kernel.sh
+  fi
+fi
+
+# Include prebuilt Axonwall custom hardened kernel .deb packages when available
+if compgen -G "${SCRIPT_DIR}/../kernel/output/linux-image-*axonwall*.deb" >/dev/null; then
+  echo "[+] Installing prebuilt Axonwall custom hardened kernel .deb packages into chroot..."
+  mkdir -p config/packages.chroot
+  cp "${SCRIPT_DIR}/../kernel/output/linux-image-"*axonwall*.deb config/packages.chroot/
+  if compgen -G "${SCRIPT_DIR}/../kernel/output/linux-headers-*axonwall*.deb" >/dev/null; then
+    cp "${SCRIPT_DIR}/../kernel/output/linux-headers-"*axonwall*.deb config/packages.chroot/
+  fi
+fi
+
 # 5. Build ISO
 echo "[+] Executing lb build..."
 lb build

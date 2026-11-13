@@ -54416,6 +54416,137 @@ function isMcpServerEnabled(settingsPath) {
   return getMcpServerStatus(settingsPath).enabled;
 }
 
+// ../../packages/axonwall_lib/dist/kernel/schemas.js
+var KernelBuildModeSchema = external_exports.enum(["universal", "stripped"]);
+var KernelCapabilityPackSchema = external_exports.enum([
+  "k3s",
+  "zfs",
+  "nftables",
+  "ebpf",
+  "kvm",
+  "ipsec",
+  "usb",
+  "iscsi_nfs"
+]);
+var KernelLockdownTierSchema = external_exports.enum(["integrity", "confidentiality"]);
+var CpuMicroarchTargetSchema = external_exports.enum([
+  "x86-64",
+  "x86-64-v2",
+  "x86-64-v3",
+  "x86-64-v4",
+  "native",
+  "armv8-a"
+]);
+var DetectedPciDeviceSchema = external_exports.object({
+  bdf: external_exports.string(),
+  vendorId: external_exports.string(),
+  deviceId: external_exports.string(),
+  deviceClass: external_exports.string(),
+  deviceName: external_exports.string(),
+  driver: external_exports.string(),
+  module: external_exports.string().optional(),
+  iommuGroup: external_exports.number().int().optional(),
+  subsystemVendorId: external_exports.string().optional(),
+  subsystemDeviceId: external_exports.string().optional()
+});
+var DetectedStorageControllerSchema = external_exports.object({
+  name: external_exports.string(),
+  kind: external_exports.string(),
+  driver: external_exports.string(),
+  model: external_exports.string().optional(),
+  transport: external_exports.string().optional(),
+  sizeBytes: external_exports.number().nonnegative().optional()
+});
+var DetectedNetworkInterfaceSchema = external_exports.object({
+  name: external_exports.string(),
+  driver: external_exports.string(),
+  mac: external_exports.string().optional(),
+  operstate: external_exports.string().optional(),
+  speedMbps: external_exports.number().int().optional(),
+  busPath: external_exports.string().optional()
+});
+var LoadedKernelModuleSchema = external_exports.object({
+  name: external_exports.string(),
+  sizeBytes: external_exports.number().nonnegative(),
+  refCount: external_exports.number().int().nonnegative(),
+  usedBy: external_exports.array(external_exports.string()).default([])
+});
+var HostBuildToolchainSchema = external_exports.object({
+  ready: external_exports.boolean(),
+  missingTools: external_exports.array(external_exports.string()),
+  availableTools: external_exports.array(external_exports.string()),
+  builderScriptPath: external_exports.string().optional(),
+  freeBytes: external_exports.number().nonnegative()
+});
+var BuiltKernelArtifactSchema = external_exports.object({
+  name: external_exports.string(),
+  kind: external_exports.enum(["image-deb", "headers-deb", "config", "manifest"]),
+  sizeBytes: external_exports.number().nonnegative(),
+  sha256: external_exports.string().optional(),
+  createdAt: external_exports.string()
+});
+var DetectedHardwareProfileSchema = external_exports.object({
+  hostname: external_exports.string(),
+  kernelRelease: external_exports.string(),
+  arch: external_exports.string(),
+  cpuVendor: external_exports.string(),
+  cpuModel: external_exports.string(),
+  cpuCores: external_exports.number().int().nonnegative(),
+  cpuFlags: external_exports.array(external_exports.string()).default([]),
+  suggestedMarch: CpuMicroarchTargetSchema,
+  virtVendor: external_exports.string().optional(),
+  efiBooted: external_exports.boolean(),
+  secureBootEnabled: external_exports.boolean(),
+  iommuActive: external_exports.boolean(),
+  iommuGroupsCount: external_exports.number().int().nonnegative().default(0),
+  tpmDevices: external_exports.array(external_exports.string()).default([]),
+  watchdogDrivers: external_exports.array(external_exports.string()).default([]),
+  pciDevices: external_exports.array(DetectedPciDeviceSchema).default([]),
+  storageControllers: external_exports.array(DetectedStorageControllerSchema).default([]),
+  networkInterfaces: external_exports.array(DetectedNetworkInterfaceSchema).default([]),
+  loadedModules: external_exports.array(LoadedKernelModuleSchema).default([]),
+  hostAvailableModules: external_exports.number().int().nonnegative().default(0)
+});
+var CustomKernelBuildSpecSchema = external_exports.object({
+  mode: KernelBuildModeSchema.default("universal"),
+  kernelVersion: external_exports.string().regex(/^6\.\d+\.\d+$/, "Kernel version must match 6.x.y").default("6.12.15"),
+  arch: external_exports.enum(["amd64", "arm64"]).default("amd64"),
+  marchTarget: CpuMicroarchTargetSchema.default("x86-64"),
+  capabilities: external_exports.array(KernelCapabilityPackSchema).min(1).default(["k3s", "zfs", "nftables", "ebpf", "kvm", "ipsec", "usb", "iscsi_nfs"]),
+  lockdownTier: KernelLockdownTierSchema.default("integrity"),
+  enableRootlessUserNs: external_exports.boolean().default(true),
+  disableIa32Emulation: external_exports.boolean().default(true),
+  enforceModuleSig: external_exports.boolean().default(false),
+  enableProcKcore: external_exports.boolean().default(true),
+  extraDriverSymbols: external_exports.array(external_exports.string().regex(/^CONFIG_[A-Z0-9_]{2,64}$/, "Invalid Kconfig symbol")).default([])
+});
+var KernelAuditPillarSchema = external_exports.enum([
+  "kspp_memory",
+  "attack_surface",
+  "k3s_containers",
+  "storage_zfs",
+  "nftables_ebpf"
+]);
+var KernelAuditCheckResultSchema = external_exports.object({
+  id: external_exports.string(),
+  pillar: KernelAuditPillarSchema,
+  label: external_exports.string(),
+  symbol: external_exports.string(),
+  expected: external_exports.string(),
+  actual: external_exports.string(),
+  status: external_exports.enum(["PASS", "WARN", "FAIL"]),
+  rationale: external_exports.string()
+});
+var KernelHardeningAuditReportSchema = external_exports.object({
+  score: external_exports.number().int().min(0).max(100),
+  passedCount: external_exports.number().int().nonnegative(),
+  warnCount: external_exports.number().int().nonnegative(),
+  failCount: external_exports.number().int().nonnegative(),
+  totalCount: external_exports.number().int().nonnegative(),
+  configSource: external_exports.string(),
+  checks: external_exports.array(KernelAuditCheckResultSchema)
+});
+
 // src/headscale.ts
 function assertSafeIdentifier(val, paramName) {
   const str = String(val).trim();

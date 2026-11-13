@@ -37,6 +37,15 @@ import {
   type FullCloudInit,
   type CloudInitExportOptions,
 } from '@axonwall/lib/cloudinit';
+import {
+  CustomKernelBuildSpecSchema,
+  auditKernelPostureAndConfig,
+  compileCustomKernelArtifacts,
+  resolveHardwareKconfigSymbols,
+  type DetectedHardwareProfile,
+  type KernelCapabilityPack,
+  type LiveAuditPosture,
+} from '@axonwall/lib/kernel';
 
 const ETC_DIR = process.env.AXONWALL_ETC_DIR || process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
 const PERSIST_YAML_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
@@ -3157,6 +3166,235 @@ complete -F _axonwallctl_completions axonwallctl ctl`);
   }
 }
 
+function parseKernelConfigLines(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rawLine of raw.split('\n')) {
+    const line = rawLine.trim();
+    if (line.startsWith('# CONFIG_') && line.endsWith(' is not set')) {
+      const sym = line.slice(2, line.length - ' is not set'.length).trim();
+      out[sym] = 'n';
+    } else if (line.startsWith('CONFIG_')) {
+      const eq = line.indexOf('=');
+      if (eq > 0) {
+        out[line.slice(0, eq)] = line.slice(eq + 1).replace(/^"|"$/g, '');
+      }
+    }
+  }
+  return out;
+}
+
+function collectLocalKernelStudioFallback(): {
+  hardware: DetectedHardwareProfile;
+  runningConfig: Record<string, string>;
+  configSource: string;
+  posture?: LiveAuditPosture;
+} {
+  const release = os.release();
+  const rawArch = os.arch();
+  const cpuRaw = fs.existsSync('/proc/cpuinfo') ? fs.readFileSync('/proc/cpuinfo', 'utf-8') : '';
+  let cpuVendor = 'Unknown';
+  let cpuModel = os.cpus()[0]?.model || 'Unknown CPU';
+  let cpuFlags: string[] = [];
+  for (const line of cpuRaw.split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx < 0) continue;
+    const k = line.slice(0, idx).trim();
+    const v = line.slice(idx + 1).trim();
+    if (k === 'vendor_id' && cpuVendor === 'Unknown') cpuVendor = v;
+    if ((k === 'model name' || k === 'Model') && v) cpuModel = v;
+    if ((k === 'flags' || k === 'Features') && cpuFlags.length === 0) cpuFlags = v.split(/\s+/).filter(Boolean);
+  }
+  const flagSet = new Set(cpuFlags);
+  const suggestedMarch: DetectedHardwareProfile['suggestedMarch'] =
+    rawArch === 'arm64'
+      ? 'armv8-a'
+      : flagSet.has('avx512f') && flagSet.has('avx512bw')
+        ? 'x86-64-v4'
+        : flagSet.has('avx2') && flagSet.has('bmi1') && flagSet.has('bmi2')
+          ? 'x86-64-v3'
+          : flagSet.has('sse4_2')
+            ? 'x86-64-v2'
+            : 'x86-64';
+
+  const loadedModules: DetectedHardwareProfile['loadedModules'] = [];
+  if (fs.existsSync('/proc/modules')) {
+    for (const line of fs.readFileSync('/proc/modules', 'utf-8').split('\n')) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 3 || !fields[0]) continue;
+      loadedModules.push({
+        name: fields[0],
+        sizeBytes: Number(fields[1]) || 0,
+        refCount: Number(fields[2]) || 0,
+        usedBy: fields[3] && fields[3] !== '-' ? fields[3].split(',').filter(Boolean) : [],
+      });
+    }
+  }
+
+  const pciDevices: DetectedHardwareProfile['pciDevices'] = [];
+  if (fs.existsSync('/sys/bus/pci/devices')) {
+    for (const bdf of fs.readdirSync('/sys/bus/pci/devices').sort()) {
+      const devDir = path.join('/sys/bus/pci/devices', bdf);
+      const readTrim = (f: string) => {
+        try {
+          return fs.readFileSync(path.join(devDir, f), 'utf-8').trim().replace(/^0x/, '');
+        } catch {
+          return '';
+        }
+      };
+      let driver = 'none';
+      try {
+        driver = path.basename(fs.readlinkSync(path.join(devDir, 'driver')));
+      } catch {}
+      pciDevices.push({
+        bdf,
+        vendorId: readTrim('vendor'),
+        deviceId: readTrim('device'),
+        deviceClass: readTrim('class'),
+        deviceName: `PCI [${readTrim('vendor')}:${readTrim('device')}]`,
+        driver,
+      });
+    }
+  }
+
+  let runningConfig: Record<string, string> = {};
+  let configSource = '';
+  const bootCfg = `/boot/config-${release}`;
+  if (fs.existsSync(bootCfg)) {
+    try {
+      runningConfig = parseKernelConfigLines(fs.readFileSync(bootCfg, 'utf-8'));
+      configSource = bootCfg;
+    } catch {}
+  }
+
+  const iommuGroups = fs.existsSync('/sys/kernel/iommu_groups') ? fs.readdirSync('/sys/kernel/iommu_groups').length : 0;
+  const tpmDevices = fs.existsSync('/sys/class/tpm') ? fs.readdirSync('/sys/class/tpm') : [];
+
+  return {
+    hardware: {
+      hostname: os.hostname(),
+      kernelRelease: release,
+      arch: rawArch,
+      cpuVendor,
+      cpuModel,
+      cpuCores: os.cpus().length,
+      cpuFlags,
+      suggestedMarch,
+      efiBooted: fs.existsSync('/sys/firmware/efi'),
+      secureBootEnabled: false,
+      iommuActive: iommuGroups > 0,
+      iommuGroupsCount: iommuGroups,
+      tpmDevices,
+      watchdogDrivers: [],
+      pciDevices,
+      storageControllers: [],
+      networkInterfaces: [],
+      loadedModules,
+      hostAvailableModules: 0,
+    },
+    runningConfig,
+    configSource,
+  };
+}
+
+async function fetchKernelStudioForCli() {
+  try {
+    return await sendAgentSocketRequest<{
+      hardware: DetectedHardwareProfile;
+      runningConfig: Record<string, string>;
+      configSource: string;
+      posture?: {
+        lockdownMode?: string;
+        activeLsms?: string[];
+        unprivilegedBpfDisabled?: string;
+        bpfJitHarden?: string;
+        userNsCloneAllowed?: boolean;
+      };
+    }>('/v1/system/kernel/studio', 'GET');
+  } catch {
+    return collectLocalKernelStudioFallback();
+  }
+}
+
+async function cmdKernel(subArgs: string[]) {
+  const sub = (subArgs[0] || 'detect').toLowerCase();
+  const rest = subArgs.slice(1);
+  const asJson = rest.includes('--json');
+
+  const studio = await fetchKernelStudioForCli();
+  const resolved = resolveHardwareKconfigSymbols(studio.hardware);
+
+  if (sub === 'detect') {
+    if (asJson) {
+      console.log(JSON.stringify({ hardware: studio.hardware, resolvedSymbols: resolved }, null, 2));
+      return;
+    }
+    console.log(`${cCyan}${cBold}Axonwall Hardware & Kernel Module Detection${cReset}`);
+    console.log(`  Hostname       : ${studio.hardware.hostname}`);
+    console.log(`  Running Kernel : ${studio.hardware.kernelRelease} (${studio.hardware.arch})`);
+    console.log(`  CPU            : ${studio.hardware.cpuModel} (${studio.hardware.cpuCores} cores, suggested --march ${studio.hardware.suggestedMarch})`);
+    console.log(`  Firmware/TPM   : EFI=${studio.hardware.efiBooted ? 'yes' : 'no'} SecureBoot=${studio.hardware.secureBootEnabled ? 'yes' : 'no'} IOMMU=${studio.hardware.iommuActive ? `yes (${studio.hardware.iommuGroupsCount} groups)` : 'no'} TPM=${studio.hardware.tpmDevices.join(',') || 'none'}`);
+    console.log(`  Loaded Modules : ${studio.hardware.loadedModules.length} active (host /lib/modules count: ${studio.hardware.hostAvailableModules || 'unknown'})`);
+    console.log(`  Mapped Drivers : ${resolved.retainedDrivers.length} driver bundles -> ${Object.keys(resolved.symbols).length} CONFIG_* symbols`);
+    for (const d of resolved.retainedDrivers.slice(0, 20)) {
+      console.log(`    - [${d.category}] ${d.driver}: ${d.symbols.join(', ')}`);
+    }
+    return;
+  }
+
+  if (sub === 'audit') {
+    const report = auditKernelPostureAndConfig(studio.runningConfig || {}, studio.posture, studio.configSource);
+    if (asJson) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+    const color = report.score >= 85 ? cGreen : report.score >= 60 ? cYellow : cRed;
+    console.log(`${cCyan}${cBold}Axonwall Running Kernel Hardening Audit${cReset}`);
+    console.log(`  Score  : ${color}${report.score}/100${cReset} (${report.passedCount} PASS, ${report.warnCount} WARN, ${report.failCount} FAIL)`);
+    console.log(`  Source : ${report.configSource || 'unavailable (/proc/config.gz and /boot/config-* unreadable)'}`);
+    for (const chk of report.checks) {
+      const badge = chk.status === 'PASS' ? `${cGreen}[PASS]${cReset}` : chk.status === 'WARN' ? `${cYellow}[WARN]${cReset}` : `${cRed}[FAIL]${cReset}`;
+      console.log(`  ${badge} ${chk.label} (${chk.symbol}): actual=${chk.actual} | expected=${chk.expected}`);
+    }
+    return;
+  }
+
+  if (sub === 'config') {
+    const getArg = (flag: string): string | undefined => {
+      const idx = rest.indexOf(flag);
+      return idx >= 0 ? rest[idx + 1] : undefined;
+    };
+    const mode = (getArg('--mode') || 'stripped') as 'universal' | 'stripped';
+    const capsRaw = getArg('--capabilities');
+    const capabilities = (capsRaw ? capsRaw.split(',').map((s) => s.trim()).filter(Boolean) : ['k3s', 'zfs', 'nftables', 'ebpf', 'kvm', 'ipsec']) as KernelCapabilityPack[];
+    const lockdownTier = (getArg('--lockdown') || 'integrity') as 'integrity' | 'confidentiality';
+    const marchTarget = (getArg('--march') || studio.hardware.suggestedMarch) as DetectedHardwareProfile['suggestedMarch'];
+    const outFile = getArg('--out');
+
+    const spec = CustomKernelBuildSpecSchema.parse({
+      mode,
+      capabilities,
+      lockdownTier,
+      marchTarget,
+    });
+    const compiled = compileCustomKernelArtifacts(spec, studio.hardware);
+    if (outFile) {
+      fs.writeFileSync(outFile, compiled.kconfigFragment, 'utf-8');
+      console.log(`${cGreen}Wrote custom kernel Kconfig fragment to ${outFile}${cReset}`);
+      console.log(`Reproducible build command:\n  ${compiled.cliCommand}`);
+      return;
+    }
+    if (asJson) {
+      console.log(JSON.stringify(compiled, null, 2));
+      return;
+    }
+    console.log(compiled.kconfigFragment);
+    return;
+  }
+
+  console.error(`${cRed}Unknown kernel subcommand '${sub}'. Expected: detect | audit | config${cReset}`);
+  process.exit(1);
+}
+
 function showHelp() {
   console.log(`${cCyan}${cBold}axonwallctl — Axonwall Declarative YAML CLI (/etc/axonwall/*.yaml)${cReset}
 
@@ -3174,6 +3412,7 @@ ${cBold}COMMANDS:${cReset}
   zbm <cmd> [args]    Manage ZFSBootMenu Boot Environments & Snapshots (list, snapshot, clone, activate, delete, delete-snapshot)
   update [options]    Update Axonwall packages in-place (ZBM / Rolling) or flash standby slot (A/B mode)
                       Options: [--apt] [--version <ver>] [--slot <A|B>]
+  kernel <cmd> [args] Detect hardware/modules, audit running kernel KSPP posture, or export stripped .config (detect, audit, config)
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
   ebpf <cmd> [args]   Inspect Ring-0 XDP dataplane, LPM CIDR blocks, SYN-flood PPS & Linux 6.9+ BPF_TOKEN delegation
   nas <cmd> [args]    Manage OpenZFS pools, Special VDEVs, snapshots, rollback, scrub, TRIM, checkpoints, AES-256-GCM keys & SMART
@@ -3230,6 +3469,9 @@ async function main() {
     case 'update':
     case 'upgrade':
       await cmdUpdate(args.slice(1));
+      break;
+    case 'kernel':
+      await cmdKernel(args.slice(1));
       break;
     case 'plugin':
     case 'plugins':

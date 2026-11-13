@@ -29,7 +29,7 @@ export default function ThemesDocumentationPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Theming &amp; Ecosystem • v0.11.64
+          Theming &amp; Ecosystem • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Theme Customization &amp; Repository Ecosystem
@@ -310,7 +310,7 @@ export default function ThemesDocumentationPage() {
           <Layers className="w-6 h-6 text-emerald-400" /> ZFSBootMenu UEFI Splash &amp; Boot-Screen Theming
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Beyond the browser-based Web Console, Axonwall v0.11.64 ships <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code> to customize the physical/KVM early-boot environment on ZFS installations. It renders a branded 24-bit UEFI <code className="text-slate-200 font-mono">.splash</code> BMP image into the ZFSBootMenu v3.1.0 Unified Kernel Image (UKI), configures high-DPI Linux framebuffer console fonts (Terminus / Lat15), applies tactical 16-color ANSI kernel VT palettes, and automatically synchronizes the rebuilt EFI binary across mirrored EFI System Partitions (<code className="text-slate-200 font-mono">/boot/efi</code> and <code className="text-slate-200 font-mono">/boot/efi-mirror</code>).
+          Beyond the browser-based Web Console, Axonwall v0.11.68 ships <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code> to customize the physical/KVM early-boot environment on ZFS installations. It renders a branded 24-bit UEFI <code className="text-slate-200 font-mono">.splash</code> BMP image into the ZFSBootMenu v3.1.0 Unified Kernel Image (UKI), configures high-DPI Linux framebuffer console fonts (Terminus / Lat15), applies tactical 16-color ANSI kernel VT palettes, and automatically synchronizes the rebuilt EFI binary across mirrored EFI System Partitions (<code className="text-slate-200 font-mono">/boot/efi</code> and <code className="text-slate-200 font-mono">/boot/efi-mirror</code>).
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">

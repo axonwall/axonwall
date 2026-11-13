@@ -2641,6 +2641,7 @@ func main() {
 	pcapManager := engine.NewPacketCaptureManager()
 	packetStreamMgr := engine.NewPacketStreamManager(pcapManager)
 	hardwareMgr := engine.NewHardwareManager()
+	kernelStudioMgr := engine.NewKernelStudioManager()
 	terminalMgr := engine.NewTerminalManager()
 	taskManager := engine.NewTaskManager()
 	virtManager := engine.NewVirtManager(taskManager, nasManager)
@@ -3177,6 +3178,65 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(telem)
+		})
+		mux.HandleFunc("/v1/system/kernel/studio", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			upid := strings.TrimSpace(r.URL.Query().Get("upid"))
+			state := kernelStudioMgr.InspectStudioState(watchdog, taskManager, upid)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(state)
+		})
+		mux.HandleFunc("/v1/system/kernel/build", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.KernelBuildRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			upid, buildID, err := kernelStudioMgr.StartBuild(taskManager, req, "api@axonwall")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"upid":    upid,
+				"buildId": buildID,
+				"message": "Kernel build task started",
+			})
+		})
+		mux.HandleFunc("/v1/system/kernel/install", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ArtifactName string `json:"artifactName"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			upid, installMode, safetyNote, err := kernelStudioMgr.InstallArtifactSafely(taskManager, watchdog, req.ArtifactName, "api@axonwall")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":     true,
+				"upid":        upid,
+				"installMode": installMode,
+				"safetyNote":  safetyNote,
+				"message":     fmt.Sprintf("Safe kernel install staged (%s)", installMode),
+			})
 		})
 		mux.HandleFunc("/v1/terminal/exec", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {

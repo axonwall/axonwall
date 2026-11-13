@@ -109,7 +109,7 @@ export async function GET() {
                     config: { type: 'string', description: 'Raw firewall configuration text' },
                     vendor: {
                       type: 'string',
-                      enum: ['auto', 'pfsense', 'opnsense', 'cisco', 'vyos', 'mikrotik', 'iptables', 'firewalld'],
+                      enum: ['auto', 'pfsense', 'opnsense', 'proxmox', 'truenas', 'cisco', 'vyos', 'mikrotik', 'iptables', 'firewalld'],
                       default: 'auto',
                     },
                     apply: { type: 'boolean', default: false, description: 'Immediately apply to live firewall with safety rollback' },
@@ -229,6 +229,26 @@ export async function GET() {
             '200': { description: 'MCP JSON-RPC 2.0 response' },
             '401': { description: 'Missing or invalid MCP API key' },
             '403': { description: 'Insufficient MCP scope or subsystem disabled' },
+          },
+        },
+      },
+      '/system/kernel': {
+        get: {
+          summary: 'Inspect Custom Kernel Studio hardware inventory & running kernel posture',
+          description:
+            'Returns detected CPU flags, IOMMU/TPM2/watchdog/PCIe/NIC/storage hardware, loaded modules, compiled Kconfig fragment, and 24-check kernel hardening audit.',
+          responses: {
+            '200': { description: 'Kernel Studio payload' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+        post: {
+          summary: 'Build or safely stage a custom hardened Linux 6.12 LTS kernel',
+          description:
+            'Launches an asynchronous Universal or localmodconfig hardware-stripped kernel build via axonwalld, or safely stages built .deb packages via ZFSBootMenu clone / side-by-side GRUB.',
+          responses: {
+            '200': { description: 'Kernel Studio action accepted' },
+            '400': { description: 'Invalid request' },
           },
         },
       },

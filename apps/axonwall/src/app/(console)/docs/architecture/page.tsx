@@ -6,7 +6,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Architecture | Linux nftables, 12-Domain YAML & Boot Engines',
   description:
-    'Deep-dive into Axonwall v0.11.64 architecture: Linux nftables + eBPF XDP multi-core scaling, 12 declarative /etc/axonwall/*.yaml domains, Junos-style commit-confirm, A/B Dual-Root & ZFSBootMenu updates, and Go daemon IPC.',
+    'Deep-dive into Axonwall v0.11.68 architecture: Linux nftables + eBPF XDP multi-core scaling, 12 declarative /etc/axonwall/*.yaml domains, Junos-style commit-confirm, A/B Dual-Root & ZFSBootMenu updates, and Go daemon IPC.',
 };
 
 export default function ArchitectureDocPage() {
@@ -16,7 +16,7 @@ export default function ArchitectureDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Core Subsystems • v0.11.64
+          Core Subsystems • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           System Architecture &amp; Engine

@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'REST API, Fleet/MCP, Agent Sockets & Terraform Reference | Axonwall Documentation',
   description:
-    'Complete REST/OpenAPI endpoints, Server-Sent Events (SSE) packet streams, Fleet & MCP security APIs, Go agent Unix socket IPC, and official Terraform / OpenTofu provider for Axonwall v0.11.64.',
+    'Complete REST/OpenAPI endpoints, Server-Sent Events (SSE) packet streams, Fleet & MCP security APIs, Go agent Unix socket IPC, and official Terraform / OpenTofu provider for Axonwall v0.11.68.',
 };
 
 export default function ApiReferenceDocPage() {
@@ -17,7 +17,7 @@ export default function ApiReferenceDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Developer, IaC &amp; Automation • v0.11.64
+          Developer, IaC &amp; Automation • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           REST, Fleet/MCP, Agent Socket &amp; Terraform Reference
@@ -71,7 +71,7 @@ export default function ApiReferenceDocPage() {
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET</td>
                 <td className="p-3 font-mono text-emerald-400">/api/v1/status</td>
-                <td className="p-3">Appliance health, version (<code className="font-mono">0.11.64</code>), active boot slot/BE, and Commit-Confirm timer state.</td>
+                <td className="p-3">Appliance health, version (<code className="font-mono">0.11.68</code>), active boot slot/BE, and Commit-Confirm timer state.</td>
               </tr>
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / PUT</td>
@@ -96,7 +96,7 @@ export default function ApiReferenceDocPage() {
               <tr>
                 <td className="p-3 font-mono text-emerald-400 font-bold">POST</td>
                 <td className="p-3 font-mono text-emerald-400">/api/v1/import</td>
-                <td className="p-3">Parse &amp; analyze legacy configs (<code className="font-mono">vendor</code>: <code className="font-mono">pfsense</code>, <code className="font-mono">opnsense</code>, <code className="font-mono">cisco-asa</code>, <code className="font-mono">vyos</code>, <code className="font-mono">mikrotik</code>, <code className="font-mono">iptables</code>, <code className="font-mono">firewalld</code>).</td>
+                <td className="p-3">Parse &amp; analyze legacy configs (<code className="font-mono">vendor</code>: <code className="font-mono">pfsense</code>, <code className="font-mono">opnsense</code>, <code className="font-mono">proxmox</code>, <code className="font-mono">truenas</code>, <code className="font-mono">cisco-asa</code>, <code className="font-mono">vyos</code>, <code className="font-mono">mikrotik</code>, <code className="font-mono">iptables</code>, <code className="font-mono">firewalld</code>).</td>
               </tr>
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
@@ -122,6 +122,11 @@ export default function ApiReferenceDocPage() {
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
                 <td className="p-3 font-mono text-emerald-400">/api/v1/system/etckeeper/*</td>
                 <td className="p-3">Inspect <code className="font-mono">/etc</code> Git status, initialize Etckeeper, update <code className="font-mono">.gitignore</code> / <code className="font-mono">autoCommitOnApply</code>, commit snapshots, and fetch unified commit diffs.</td>
+              </tr>
+              <tr>
+                <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
+                <td className="p-3 font-mono text-emerald-400">/api/system/kernel</td>
+                <td className="p-3">Custom Kernel Studio: detect host hardware &amp; active modules, audit kernel posture (24 checks), synthesize hardened Kconfig fragments, launch async builds, and safely stage/install built <code className="font-mono">.deb</code> kernels via ZBM or GRUB.</td>
               </tr>
             </tbody>
           </table>
@@ -239,6 +244,9 @@ sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
 //    POST /v1/terminal/exec              -> RBAC-gated Console Command Runner execution
 //    GET  /v1/virt/console/ws            -> WebSocket proxy for KVM guest HTML5 noVNC consoles
 //    GET  /v1/system/etckeeper/*         -> Host /etc Git status, init, config, commit, history & diff
+//    GET  /v1/system/kernel/studio       -> Live hardware inventory, lsmod, running kernel config & build jobs
+//    POST /v1/system/kernel/build        -> Start async Universal or localmodconfig stripped kernel build
+//    POST /v1/system/kernel/install      -> Safe stage/install via ZFS Boot Environment clone or dpkg + update-grub
 //    GET  /v1/ha/sync-trust              -> HA PKI enrollment, effective transport (mtls), SHA-256 fingerprints
 //    GET  /v1/system/telemetry/hardware  -> HWMON thermal/fan/voltage sensors & SFP+/QSFP optical DOM
 
@@ -263,7 +271,7 @@ sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
   required_providers {
     axonwall = {
       source  = "axonwall/axonwall"
-      version = "~> 0.11.64"
+      version = "~> 0.11.68"
     }
   }
 }

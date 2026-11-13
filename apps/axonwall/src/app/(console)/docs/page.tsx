@@ -27,7 +27,7 @@ import { CodeBlock } from './components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Documentation | Overview & Quickstart',
   description:
-    'Comprehensive documentation for Axonwall v0.11.64: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, ZFSBootMenu Root-on-ZFS, KVM/LXC Hypervisor, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
+    'Comprehensive documentation for Axonwall v0.11.68: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, ZFSBootMenu Root-on-ZFS, KVM/LXC Hypervisor, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
 };
 
 export default function DocsOverviewPage() {
@@ -37,7 +37,7 @@ export default function DocsOverviewPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Documentation Portal • v0.11.64
+          Documentation Portal • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Axonwall Documentation
@@ -69,6 +69,22 @@ export default function DocsOverviewPage() {
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
               Zero-surface perimeter UKI running axonwall-satellite as pure-Go PID 1 with CONFIG_MODULES=n, zero shell/userland, sub-1.2s RAM boot, pure-Go Cloud-Init, Dual-Stack IPv6, and Active-Standby Edge HA.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/custom-kernel"
+            className="p-5 rounded-xl bg-slate-900/60 border border-indigo-500/40 hover:border-indigo-500 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Lock className="w-4 h-4 text-indigo-400" />
+                <span>Custom Hardened Kernels &amp; Hardware Studio</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-indigo-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Universal Linux 6.12 LTS KSPP + k3s + OpenZFS + nftables + eBPF kernels, live host hardware inventory, 24-check kernel posture audit, hardware-locked localmodconfig stripped builds, and ZFSBootMenu / A-B safe staging.
             </p>
           </Link>
 
@@ -431,12 +447,15 @@ export default function DocsOverviewPage() {
           <Download className="w-6 h-6 text-emerald-400" /> Installation &amp; Deployment
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Axonwall can be installed as bare-metal appliance firmware via bootable UEFI ISO (available in both{' '}
-          <strong>Debian 13 Trixie</strong> and lightweight <strong>Alpine Linux</strong> flavors—with{' '}
-          <strong>Axonwall Vault Edition</strong> unified directly inside <code className="text-emerald-400 font-mono">axonwall-debian13-amd64.iso</code>{' '}
-          and selectable at install time as <code className="text-slate-200 font-mono">axonwall</code> vs.{' '}
-          <code className="text-slate-200 font-mono">vault</code> edition rather than a separate Vault ISO download), deployed inside virtualization platforms (Proxmox VE, KVM,
-          ESXi), or installed on existing Debian/Ubuntu systems via <code className="text-emerald-400 font-mono">.deb</code>.
+          Axonwall can be installed as bare-metal appliance firmware via bootable UEFI/BIOS ISO (available in both{' '}
+          <strong>Debian 13 Trixie</strong> and lightweight <strong>Alpine Linux</strong> flavors—with all{' '}
+          <strong>three appliance editions</strong> unified directly inside{' '}
+          <code className="text-emerald-400 font-mono">axonwall-debian13-amd64.iso</code> and selectable from the
+          bootloader menu or installer TUI as <code className="text-slate-200 font-mono">axonwall</code> (Converged NGFW),{' '}
+          <code className="text-slate-200 font-mono">vault</code> (Immutable S3 Backup), or{' '}
+          <code className="text-slate-200 font-mono">k3s-storage</code> (Barebones K3s + OpenZFS/OpenEBS Storage Host)),
+          deployed inside virtualization platforms (Proxmox VE, KVM, ESXi), or installed on existing Debian/Ubuntu systems via{' '}
+          <code className="text-emerald-400 font-mono">.deb</code>.
         </p>
 
         <div className="space-y-4">
@@ -448,18 +467,19 @@ export default function DocsOverviewPage() {
           <CodeBlock
             title="Flash ISO to USB Drive & Verify SHA-256"
             language="bash"
-            code={`# Download and verify the unified v0.11.64 Debian 13 Appliance & Vault ISO
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-debian13-amd64.iso.sha256
+            code={`# Download and verify the unified v0.11.68 Debian 13 (NGFW, Vault & K3s-Storage) ISO
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Replace /dev/sdX with your destination USB drive
 sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync`}
           />
-          <Callout type="tip" title="Three Partitioning & Boot Modes: A/B Dual-Root, ZFSBootMenu (ZBM), or Rolling Single-Root">
-            During installation (or via <code className="font-mono">--unattended</code> / <code className="font-mono">cloud-init</code> preseed), select either the standard{' '}
-            <code className="text-emerald-300 font-mono">axonwall</code> Converged NGFW edition or the{' '}
-            <code className="text-emerald-300 font-mono">vault</code> Immutable S3 Backup edition, and choose between three
+          <Callout type="tip" title="Three Editions & Three Partitioning Modes: A/B Dual-Root, ZFSBootMenu (ZBM), or Rolling Single-Root">
+            During installation (or via <code className="font-mono">--unattended</code> / <code className="font-mono">cloud-init</code> preseed / GRUB &amp; ISOLINUX boot menu), select the{' '}
+            <code className="text-emerald-300 font-mono">axonwall</code> Converged NGFW edition, the{' '}
+            <code className="text-emerald-300 font-mono">vault</code> Immutable S3 Backup edition, or the{' '}
+            <code className="text-cyan-300 font-mono">k3s-storage</code> Barebones K3s + OpenZFS/OpenEBS Storage Host edition, and choose between three
             partitioning layouts:
             <ul className="list-disc list-inside mt-2 space-y-1 text-slate-300">
               <li>
@@ -490,7 +510,7 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
           <CodeBlock
             title="Proxmox VE Cloud-Init QCOW2 Import"
             language="bash"
-            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-debian13-amd64-cloud.qcow2
+            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-debian13-amd64-cloud.qcow2
 qm create 9000 --name axonwall-ngfw --memory 4096 --cores 4 --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1
 qm importdisk 9000 axonwall-debian13-amd64-cloud.qcow2 local-zfs
 qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard=on --ide2 local-zfs:cloudinit --boot c --bootdisk scsi0`}
@@ -505,13 +525,13 @@ qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard
             title="Install Debian Package"
             language="bash"
             code={`# Download the latest .deb release artifact from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall_0.11.64_amd64.deb
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall_0.11.64_amd64.deb.sha256
-sha256sum -c axonwall_0.11.64_amd64.deb.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall_0.11.68_amd64.deb
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall_0.11.68_amd64.deb.sha256
+sha256sum -c axonwall_0.11.68_amd64.deb.sha256
 
 # Install package with dependencies
 sudo apt-get update
-sudo apt-get install -y ./axonwall_0.11.64_amd64.deb
+sudo apt-get install -y ./axonwall_0.11.68_amd64.deb
 
 # Verify running services
 sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
@@ -523,7 +543,7 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
             language="yaml"
             code={`services:
   axonwall:
-    image: ghcr.io/axonwall/axonwall:v0.11.64
+    image: ghcr.io/axonwall/axonwall:v0.11.68
     cap_add:
       - NET_ADMIN
       - NET_RAW

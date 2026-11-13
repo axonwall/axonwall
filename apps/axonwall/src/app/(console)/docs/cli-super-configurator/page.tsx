@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Neovim Super Configurator, axonwall-tui, axonwallctl & ZSH Workstation | Axonwall Documentation',
   description:
-    'Configure every Axonwall v0.11.64 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone 11-tab axonwall-tui + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
+    'Configure every Axonwall v0.11.68 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone 11-tab axonwall-tui + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
 };
 
 export default function CliSuperConfiguratorDocPage() {
@@ -15,7 +15,7 @@ export default function CliSuperConfiguratorDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.11.64
+          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Neovim Super Configurator, axonwall-tui &amp; CLI Reference
@@ -154,6 +154,9 @@ sudo axonwallctl apply --no-confirm        # Apply and commit immediately (autom
 sudo axonwallctl confirm                   # Confirm pending Commit-Confirm transaction before timeout
 sudo axonwallctl rollback [revision]       # Roll back to previous or specific GitOps SHA revision
 axonwallctl zbm <list|snapshot|clone|activate|delete|delete-snapshot>
+axonwallctl kernel detect [--json]         # Inventory CPU flags, IOMMU, TPM2, NVMe, NICs & lsmod
+axonwallctl kernel audit [--json]          # Run 24-check KSPP + k3s + OpenZFS + nftables + eBPF audit
+axonwallctl kernel config [--mode universal|stripped] [--output-dir <dir>]
 sudo axonwallctl update [--apt] [--version <ver>] [--slot <A|B>]
 sudo axonwallctl plugin <list|enable|disable|install|remove|re-sync> <id>
 axonwallctl kubeconfig [--vip]             # Export local or VRRP VIP-bound K3s ~/.kube/config
@@ -168,7 +171,7 @@ axonwallctl nas <status|snapshot|rollback|scrub|trim|checkpoint|unlock|lock> ...
 axonwallctl virt <list|start|stop|reboot|snapshot|rollback|clone|migrate|xml> ...
 axonwallctl k3s <status|etcd-snapshots|etcd-save|etcd-restore> ...
 axonwallctl import <file> [--type auto|pfsense|opnsense|proxmox|truenas|...] [--merge] [--stage] [--apply]
-axonwallctl mcp                            # Start stdio Model Context Protocol (MCP) 24-tool security server
+axonwallctl mcp                            # Start stdio Model Context Protocol (MCP) 25-tool security server
 axonwallctl cloudinit export --iso -o cidata.iso
 axonwallctl config [domain]                # Launch Neovim Super Configurator on optional domain
 axonwallctl edit <domain>                  # Edit raw /etc/axonwall/<domain>.yaml with schema check

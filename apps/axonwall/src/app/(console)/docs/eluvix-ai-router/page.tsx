@@ -24,7 +24,7 @@ export default function EluvixAiRouterDocPage() {
       {/* Header */}
       <div className="space-y-4 border-b border-slate-800 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-950/60 border border-purple-500/30 text-purple-300 text-xs font-semibold">
-          <Sparkles className="w-3.5 h-3.5" /> Sovereign AI Gateway • DLP &amp; Tokenomics • v0.11.64
+          <Sparkles className="w-3.5 h-3.5" /> Sovereign AI Gateway • DLP &amp; Tokenomics • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
           Eluvix Sovereign AI Router &amp; Prompt/PII DLP Guard

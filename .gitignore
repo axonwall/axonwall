@@ -57,8 +57,10 @@ packaging/edge-uki/.cache/
 *.iso
 *.iso.sha256
 
-# Debian package build artifacts
+# Debian package & custom kernel build artifacts
 packaging/debian/output/
 packaging/debian/build/
+packaging/kernel/output/
+packaging/kernel/build/
 *.deb
 *.deb.sha256

@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Modular Appliance Architecture: 5 Core Roles & 14 Plugins | Axonwall Documentation',
   description:
-    'Comprehensive documentation for Axonwall v0.11.64 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 14 built-in systemd sandboxed extension plugins.',
+    'Comprehensive documentation for Axonwall v0.11.68 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 14 built-in systemd sandboxed extension plugins.',
 };
 
 export default function ModularArchitectureDocPage() {
@@ -17,7 +17,7 @@ export default function ModularArchitectureDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Core Appliance System Architecture • v0.11.64
+          Core Appliance System Architecture • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Modular Core Roles: Firewall, ZFS NAS, K3s, Hypervisor &amp; Vigilante SOC

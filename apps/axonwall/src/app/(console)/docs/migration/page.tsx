@@ -6,7 +6,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Unified Appliance Migration Studio & 9-Vendor Importer | Axonwall Documentation',
   description:
-    'Complete guide to migrating from pfSense, OPNsense, Proxmox VE 8.x, TrueNAS SCALE, Cisco IOS/ASA/FTD, VyOS, MikroTik RouterOS, iptables-save, and firewalld XML to Axonwall v0.11.64: KVM/LXC workload conversion, ZFS pool & dataset import, rule shadowing detection, and non-destructive merge.',
+    'Complete guide to migrating from pfSense, OPNsense, Proxmox VE 8.x, TrueNAS SCALE, Cisco IOS/ASA/FTD, VyOS, MikroTik RouterOS, iptables-save, and firewalld XML to Axonwall v0.11.68: KVM/LXC workload conversion, ZFS pool & dataset import, rule shadowing detection, and non-destructive merge.',
 };
 
 export default function MigrationDocPage() {
@@ -16,7 +16,7 @@ export default function MigrationDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Enterprise Tooling • 9-Vendor Unified Appliance Importer • v0.11.64
+          Enterprise Tooling • 9-Vendor Unified Appliance Importer • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Migration Studio &amp; 9-Vendor Importer
