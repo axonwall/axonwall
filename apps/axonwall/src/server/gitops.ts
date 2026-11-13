@@ -179,6 +179,12 @@ export async function getEtckeeperDiff(commitHash?: string): Promise<string> {
     `/v1/system/etckeeper/diff${q}`,
     'GET'
   );
+  // C-M5: a null response means the daemon did not answer. Returning the
+  // "no changes" string here told the operator /etc was clean when its
+  // state was simply unknown. Throw so callers show a load failure.
+  if (!resp) {
+    throw new Error('Daemon unavailable: could not load etckeeper diff from axonwalld.');
+  }
   if (resp?.error) {
     return `Error loading diff: ${resp.error}`;
   }

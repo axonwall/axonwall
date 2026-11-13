@@ -27,8 +27,13 @@ import {
   type ContainerStatusItem,
 } from '@/server/virt';
 import type { LxcContainer } from '@axonwall/lib/schemas';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function LxcContainersPage() {
+  // C-M8: the save/delete actions take the fingerprint this page loaded
+  // with, so a concurrent save in another tab cannot be silently
+  // reverted by this page's apply.
+  const { getFingerprint } = useDesiredStateApply();
   const [containers, setContainers] = useState<ContainerStatusItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
@@ -104,7 +109,8 @@ export default function LxcContainersPage() {
     if (!confirm(`Are you sure you want to delete container ${targetCtid}? This will destroy its rootfs.`)) return;
     setStatusBanner(null);
     try {
-      const res = await deleteContainerAction(targetCtid);
+      const fingerprint = getFingerprint();
+      const res = await deleteContainerAction(targetCtid, fingerprint ? { expectedFingerprint: fingerprint } : undefined);
       setStatusBanner({ type: 'success', message: res.message });
       await loadData();
     } catch (err: any) {
@@ -154,7 +160,8 @@ export default function LxcContainersPage() {
     };
 
     try {
-      const res = await saveContainerAction(newCt);
+      const fingerprint = getFingerprint();
+      const res = await saveContainerAction(newCt, fingerprint ? { expectedFingerprint: fingerprint } : undefined);
       if (!res.success) {
         setStatusBanner({ type: 'error', message: res.message });
         return;

@@ -216,36 +216,68 @@ export default function McpControlPlanePage() {
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatusMsg(null);
-    const res = await createMcpApiKeyAction({
-      name: keyName,
-      agentType,
-      scopes: selectedScopes,
-      allowedSourceCidrs: allowedSourceCidrs
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-      mtlsCertFingerprintSha256: mtlsFingerprint.trim() || undefined,
-      expiresInDays,
-      policyLimits: {
-        maxIpv4PrefixLen: Number(maxIpv4PrefixLen) || 24,
-        maxIpv6PrefixLen: Number(maxIpv6PrefixLen) || 64,
-        maxTtlSeconds: Number(maxTtlSeconds) || 86400,
-        rateLimitPerMinute: Number(rateLimitPerMinute) || 120,
-        allowedRedirectTargets: allowedRedirectTargets
+    // C-L8: the number inputs accept out-of-range values (min/max are not
+    // enforced on typed input) and the server schema throws on them.
+    // Validate here so the modal reports the problem instead of hanging
+    // open with no key and no message. 0/NaN are rejected, not silently
+    // clamped to defaults, and a negative expiry is rejected, not silently
+    // turned into never-expires.
+    const limits = {
+      maxIpv4PrefixLen: Number(maxIpv4PrefixLen),
+      maxIpv6PrefixLen: Number(maxIpv6PrefixLen),
+      maxTtlSeconds: Number(maxTtlSeconds),
+      rateLimitPerMinute: Number(rateLimitPerMinute),
+    };
+    const rangeError =
+      !Number.isFinite(limits.maxIpv4PrefixLen) || limits.maxIpv4PrefixLen < 8 || limits.maxIpv4PrefixLen > 32
+        ? 'Max IPv4 prefix must be between /8 and /32.'
+        : !Number.isFinite(limits.maxIpv6PrefixLen) || limits.maxIpv6PrefixLen < 32 || limits.maxIpv6PrefixLen > 128
+          ? 'Max IPv6 prefix must be between /32 and /128.'
+          : !Number.isFinite(limits.maxTtlSeconds) || limits.maxTtlSeconds < 10 || limits.maxTtlSeconds > 604800
+            ? 'Max lease TTL must be between 10 and 604800 seconds.'
+            : !Number.isFinite(limits.rateLimitPerMinute) || limits.rateLimitPerMinute < 1 || limits.rateLimitPerMinute > 6000
+              ? 'Rate limit must be between 1 and 6000 per minute.'
+              : !Number.isFinite(expiresInDays) || expiresInDays < 0
+                ? 'Key expiration must be 0 (never expires) or a positive number of days.'
+                : null;
+    if (rangeError) {
+      setStatusMsg({ type: 'error', text: rangeError });
+      return;
+    }
+    try {
+      const res = await createMcpApiKeyAction({
+        name: keyName,
+        agentType,
+        scopes: selectedScopes,
+        allowedSourceCidrs: allowedSourceCidrs
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
-      },
-    });
+        mtlsCertFingerprintSha256: mtlsFingerprint.trim() || undefined,
+        expiresInDays,
+        policyLimits: {
+          maxIpv4PrefixLen: limits.maxIpv4PrefixLen,
+          maxIpv6PrefixLen: limits.maxIpv6PrefixLen,
+          maxTtlSeconds: limits.maxTtlSeconds,
+          rateLimitPerMinute: limits.rateLimitPerMinute,
+          allowedRedirectTargets: allowedRedirectTargets
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+        },
+      });
 
-    if (!res.success || !res.rawToken) {
-      setStatusMsg({ type: 'error', text: res.error || 'Failed to create MCP API key' });
-      return;
+      if (!res.success || !res.rawToken) {
+        setStatusMsg({ type: 'error', text: res.error || 'Failed to create MCP API key' });
+        return;
+      }
+
+      setCreatedToken({ name: keyName, rawToken: res.rawToken });
+      setShowCreateModal(false);
+      await refreshData();
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err?.message || 'Failed to create MCP API key' });
     }
-
-    setCreatedToken({ name: keyName, rawToken: res.rawToken });
-    setShowCreateModal(false);
-    await refreshData();
   };
 
   const handleRevokeKey = async (id: string, name: string) => {
@@ -262,7 +294,15 @@ export default function McpControlPlanePage() {
   };
 
   const handleToggleKey = async (id: string, enabled: boolean) => {
-    await toggleMcpApiKeyAction(id, enabled);
+    const res = await toggleMcpApiKeyAction(id, enabled);
+    if (!res.success) {
+      // C-L7: the toggle visually flips back on refresh — say why instead
+      // of failing silently.
+      setStatusMsg({
+        type: 'error',
+        text: res.error || `Failed to ${enabled ? 'enable' : 'disable'} MCP API key`,
+      });
+    }
     await refreshData();
   };
 
@@ -552,13 +592,17 @@ export default function McpControlPlanePage() {
           <p className="text-xs text-slate-400">
             Protected Appliance IPs:{' '}
             <span className="text-slate-200 font-mono">
-              {data?.protectedPosture.applianceIps.join(', ') || '192.168.1.1'}
+              {data?.daemonDown
+                ? 'Unknown — daemon unreachable'
+                : data?.protectedPosture.applianceIps.join(', ') || '—'}
             </span>
           </p>
           <p className="text-xs text-slate-400 mt-1">
             Protected Management Ports:{' '}
             <span className="text-slate-200 font-mono">
-              {data?.protectedPosture.antiLockoutPorts.join(', ') || '2966, 22, 9876'}
+              {data?.daemonDown
+                ? 'Unknown — daemon unreachable'
+                : data?.protectedPosture.antiLockoutPorts.join(', ') || '—'}
             </span>
           </p>
         </div>
@@ -582,19 +626,27 @@ export default function McpControlPlanePage() {
           <div className="flex items-center gap-2">
             <span
               className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                data?.auditIntegrity.valid !== false
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                // C-L6: an empty or unloaded audit log verifies vacuously —
+                // "NOT VERIFIED", not "CHAIN INTEGRITY VERIFIED".
+                !data || data.auditIntegrity.totalEntries === 0
+                  ? 'bg-slate-500/20 text-slate-300 border border-slate-500/30'
+                  : data.auditIntegrity.valid
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
               }`}
             >
-              {data?.auditIntegrity.valid !== false ? 'CHAIN INTEGRITY VERIFIED' : 'TAMPER DETECTED'}
+              {!data || data.auditIntegrity.totalEntries === 0
+                ? 'NOT VERIFIED'
+                : data.auditIntegrity.valid
+                  ? 'CHAIN INTEGRITY VERIFIED'
+                  : 'TAMPER DETECTED'}
             </span>
             <span className="text-xs text-slate-400">
               {data?.auditIntegrity.totalEntries ?? 0} signed events
             </span>
           </div>
           <p className="text-[11px] text-slate-500 font-mono mt-1.5 truncate">
-            Head: {data?.auditIntegrity.headHash || '0000000000000000'}
+            Head: {data && data.auditIntegrity.totalEntries > 0 ? data.auditIntegrity.headHash : '—'}
           </p>
         </div>
       </div>
@@ -605,7 +657,7 @@ export default function McpControlPlanePage() {
           <div>
             <h2 className="text-base font-semibold text-slate-100 flex items-center gap-2">
               <Flame className="w-4 h-4 text-amber-400" />
-              Active AI Tactical Traffic Control Leases ({data?.leases.length ?? 0})
+              Active AI Tactical Traffic Control Leases ({data?.daemonDown ? '?' : data?.leases.length ?? 0})
             </h2>
             <p className="text-xs text-slate-400">
               Live kernel blackholes, <code>tc</code> bandwidth throttles/tarpits, attacker-scoped DNAT honeypot
@@ -614,7 +666,11 @@ export default function McpControlPlanePage() {
           </div>
         </div>
 
-        {!data?.leases.length ? (
+        {data?.daemonDown ? (
+          <div className="p-8 text-center text-sm text-amber-300">
+            Lease state unknown — daemon unreachable. Leases may still be enforced in the kernel.
+          </div>
+        ) : !data?.leases.length ? (
           <div className="p-8 text-center text-sm text-slate-500">
             No active AI tactical traffic control leases in kernel.
           </div>
