@@ -216,7 +216,7 @@ sync_static_etc_axonwall() {
   dst_etc="$2"
   [ -d "$src_etc" ] || return 0
   mkdir -p "$dst_etc" 2>/dev/null || true
-  for item in nvim yara branding starship.toml release-signing.pub; do
+  for item in nvim yara branding starship.toml release-signing.pub release-signing.d; do
     if [ -e "${src_etc}/${item}" ]; then
       cp -af "${src_etc}/${item}" "${dst_etc}/" 2>/dev/null || true
     fi
@@ -479,22 +479,47 @@ if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
       if [ -z "$EXPECTED_HASH" ] || [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
         echo "[-] Warning: SHA-256 mismatch for downloaded package, falling back to local image sync."
         rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256"
-      elif [ -s "$RELEASE_PUBKEY" ]; then
-        # A release signing key is provisioned: the checksum itself
-        # must carry a valid detached signature (${SHA_URL}.sig, made
-        # by the release workflow) before the package is accepted.
-        if curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null \
-          && openssl dgst -sha256 -verify "$RELEASE_PUBKEY" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
-          echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
-          DEB_TMP="${CANDIDATE_DEB}"
-        else
-          echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download."
-          rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
-        fi
       else
-        echo "[!] Warning: no release signing key at ${RELEASE_PUBKEY}; relying on SHA-256 + TLS only."
-        echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
-        DEB_TMP="${CANDIDATE_DEB}"
+        # E-M2 (round-3): verify the detached signature against the
+        # release-signing keyring — the legacy single pubkey plus any
+        # additional anchors in /etc/axonwall/release-signing.d/. The
+        # old code trusted exactly one key, so a release signed with a
+        # new key could never be downloaded (the new anchor ships
+        # inside the package the old key cannot verify) and rotation
+        # bricked updates fleet-wide until the pubkey was replaced out
+        # of band on every box. With a keyring, a transition release
+        # signed by the OLD key delivers the NEW anchor into the
+        # keyring, and the following release can be signed by the new
+        # key. See release-signing.d/README.md for the procedure.
+        # (Unmatched globs stay literal under /bin/sh; the -s test
+        # below skips them, so an empty keyring dir is safe.)
+        _sig_ok=0
+        _have_key=0
+        for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub; do
+          [ -s "$_pubkey" ] && _have_key=1 && break
+        done
+        if [ "$_have_key" = "1" ]; then
+          if curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null; then
+            for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub; do
+              [ -s "$_pubkey" ] || continue
+              if openssl dgst -sha256 -verify "$_pubkey" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
+                _sig_ok=1
+                break
+              fi
+            done
+          fi
+          if [ "$_sig_ok" = "1" ]; then
+            echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
+            DEB_TMP="${CANDIDATE_DEB}"
+          else
+            echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download."
+            rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
+          fi
+        else
+          echo "[!] Warning: no release signing key at ${RELEASE_PUBKEY}; relying on SHA-256 + TLS only."
+          echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
+          DEB_TMP="${CANDIDATE_DEB}"
+        fi
       fi
     fi
   fi
@@ -513,7 +538,14 @@ if [ -f /etc/axonwall/version ]; then
   RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
 fi
 
-if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ -f /etc/axonwall/version ] && [ "$CLEAN_VER" != "$RUNNING_VER" ]; then
+# E-M1 (round-3): a missing /etc/axonwall/version must fail closed, not
+# proceed. The old condition required the file to exist before aborting
+# on a failed download / bad signature, so a box without the file silently
+# staged the running tree and armed it as the requested new version.
+# RUNNING_VER already defaults to 0.8.13 when the file is missing, so
+# dropping the file-existence conjunct aborts whenever a different
+# version was requested but no verified package was obtained.
+if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ "$CLEAN_VER" != "$RUNNING_VER" ]; then
   echo "[-] ERROR: Could not download or verify release package for v${CLEAN_VER} (currently running v${RUNNING_VER}). Aborting firmware update." >&2
   exit 1
 fi
@@ -643,10 +675,24 @@ if [ "$ZBM_MODE" = "1" ]; then
       ensure_cli_symlinks "/"
     elif [ -d /opt/axonwall ]; then
       mkdir -p "${ZBM_STAGE_MNT}/opt/axonwall" 2>/dev/null || true
+      # E-H3 (round-3): a failed local sync must fail the update, not
+      # arm a BE whose /opt/axonwall was never copied. The old code
+      # swallowed rsync/cp failures with `|| true` and the ZBM path has
+      # no staging gate, so a disk-full copy still wrote the new version
+      # and armed the BE as success. Mirror the .deb path above: abort
+      # and destroy the temp BE on failure.
+      ZBM_SYNC_OK=1
       if command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete /opt/axonwall/ "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || true
+        rsync -a --delete /opt/axonwall/ "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || ZBM_SYNC_OK=0
       else
-        cp -a /opt/axonwall/. "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || true
+        cp -a /opt/axonwall/. "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || ZBM_SYNC_OK=0
+      fi
+      if [ "$ZBM_SYNC_OK" != "1" ]; then
+        echo "[-] ERROR: Failed to sync /opt/axonwall into ${TARGET_BE_DS} (local sync failed); the Boot Environment is NOT armed." >&2
+        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+        exit 1
       fi
     fi
 
@@ -800,7 +846,11 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
         # and /var (including live /var/lib/axonwall state) verbatim.
         for sys_dir in bin etc lib lib64 opt root sbin usr var; do
           if [ -d "/${sys_dir}" ]; then
-            cp -a "/${sys_dir}" "${STAGE_DIR}/" 2>/dev/null || true
+            # E-M5 (round-3): a failed cp fallback must feed the E1
+            # staging gate exactly like the rsync branch above; the
+            # old `|| true` left STAGING_RSYNCS_FAILED clear and a
+            # partial clone could still pass the gate on markers alone.
+            cp -a "/${sys_dir}" "${STAGE_DIR}/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
           fi
         done
       fi
@@ -899,7 +949,10 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       if command -v rsync >/dev/null 2>&1; then
         rsync -a --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       else
-        cp -a /opt/axonwall/. "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+        # E-M5 (round-3): same as the base-rootfs clone above — a
+        # failed cp fallback must set the staging-failure flag, or the
+        # E1 gate arms a half-staged slot on markers alone.
+        cp -a /opt/axonwall/. "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       fi
     fi
 

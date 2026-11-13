@@ -542,6 +542,26 @@ else
 fi
 
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update" "${OVL}/usr/local/bin/"
+# E-M3 (round-3): ship the release-signing trust anchor so an Alpine
+# box's first .deb update verifies the detached signature instead of
+# falling back to SHA-256 + TLS only. Debian installs get the anchor
+# from the ISO chroot and .deb-maintained systems from the package;
+# Alpine got neither, so the signature the release workflow produces
+# was never checked on the update most likely to carry a waited-for
+# fix. Mirror the keyring directory too (E-M2).
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.pub" ]]; then
+  mkdir -p "${OVL}/etc/axonwall"
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.pub" "${OVL}/etc/axonwall/release-signing.pub"
+  chmod 644 "${OVL}/etc/axonwall/release-signing.pub"
+fi
+if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.d" ]]; then
+  mkdir -p "${OVL}/etc/axonwall/release-signing.d"
+  for _keyring_pub in "${REPO_ROOT}"/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.d/*.pub; do
+    [[ -f "$_keyring_pub" ]] || continue
+    cp "$_keyring_pub" "${OVL}/etc/axonwall/release-signing.d/"
+    chmod 644 "${OVL}/etc/axonwall/release-signing.d/$(basename "$_keyring_pub")"
+  done
+fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" "${OVL}/usr/local/bin/"
 fi

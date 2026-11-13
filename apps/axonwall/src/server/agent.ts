@@ -3905,6 +3905,16 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
     const runningHealthKnown =
       daemonData.healthVerified !== undefined && daemonData.healthVerified !== null;
     const runningHealthy = Boolean(daemonData.healthVerified);
+    // E-L5 (round-3): derive the standby BE's device from the daemon's
+    // bootEnvironments list instead of synthesising it from the version
+    // string. The old code assumed every BE is named axonwall-<version>
+    // and produced the literal "zroot/ROOT/axonwall-Standby BE" when no
+    // BE was known. Prefer the armed (ActiveNext) BE, else the last
+    // non-running entry in list order; with no BE known, fall back to
+    // the parent dataset label rather than inventing a dataset.
+    const standbyBe =
+      (daemonData.bootEnvironments || []).find((be: any) => be.activeNext) ||
+      [...(daemonData.bootEnvironments || [])].reverse().find((be: any) => !be.activeNow);
     return {
       installMode,
       zbmPoolName: daemonData.zbmPoolName || 'zroot',
@@ -3959,7 +3969,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                   healthKnown: false,
                   version: slotBVer,
                   kernel: daemonData.kernelVersion || kernel,
-                  device: `zroot/ROOT/axonwall-${slotBVer}`,
+                  device: standbyBe ? standbyBe.dataset : 'zroot/ROOT',
                   label: 'zroot/ROOT',
                   size: 'Root-on-ZFS (Copy-on-Write)',
                   lastUpdated: 'Standby Boot Environment',
@@ -4145,7 +4155,24 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
       };
     }
 
-    // 2. Direct grub-editenv execution if running as root or with sudo
+    // 2. Direct grub-editenv execution if running as root or with sudo.
+    // E-L6 (round-3): this grubenv fallback only arms dual-root A/B
+    // installs. On rolling installs there are no slots to arm, and on
+    // ZBM installs GRUB's grubenv is not the boot mechanism at all
+    // (bootfs is) — neither installer creates /boot/grub/grubenv on
+    // those modes, so a write there would report an arming that never
+    // happens (grub-editenv creates the file if it does not exist).
+    // Refuse instead of reporting success.
+    const localInstallMode = detectLocalInstallMode();
+    if (localInstallMode !== 'ab') {
+      return {
+        success: false,
+        message:
+          localInstallMode === 'zbm'
+            ? `Cannot arm Slot ${cleanSlot} via the GRUB environment: this is a ZFSBootMenu install, where the boot target is the pool's bootfs property, not grubenv. The daemon is unreachable, so the slot was NOT armed; do not reboot on the basis of this result.`
+            : `Cannot arm Slot ${cleanSlot}: this is a Rolling Single-Root install with no A/B slots. The slot was NOT armed.`,
+      };
+    }
     try {
       execFileSync('grub-editenv', ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0'], {
         stdio: 'ignore',
