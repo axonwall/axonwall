@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,6 +162,13 @@ func TestBundleValidatorsParityPlusSecurityInvariants(t *testing.T) {
 }
 
 func TestVirtManagerCloneLibvirtXmlAndGfsPrune(t *testing.T) {
+	// Isolate persisted specs: without this the test reads/writes the
+	// live /var/lib/axonwall/virt-specs.json, so a previous run's
+	// cloned VM 200 makes CloneVM fail with "already exists".
+	oldSpecsPath := VirtSpecsPath
+	VirtSpecsPath = filepath.Join(t.TempDir(), "virt-specs.json")
+	defer func() { VirtSpecsPath = oldSpecsPath }()
+
 	tm := NewTaskManager()
 	nm := NewNasManager()
 	vm := NewVirtManager(tm, nm)
@@ -186,23 +194,34 @@ func TestVirtManagerCloneLibvirtXmlAndGfsPrune(t *testing.T) {
 		t.Fatalf("ApplyVirtBundleJSON failed: %v", err)
 	}
 
-	cloned, err := vm.CloneVM(100, 200, "win11-clone", true)
-	if err != nil {
-		t.Fatalf("CloneVM failed: %v", err)
-	}
-	if cloned.VMID != 200 || cloned.Name != "win11-clone" {
-		t.Fatalf("unexpected cloned VM spec: %+v", cloned)
-	}
-	if cloned.Disks[0].Zvol != "tank/vms/vm-200-disk-0" {
-		t.Fatalf("expected rewritten zvol path, got %s", cloned.Disks[0].Zvol)
-	}
+	// A-M2 (round 3): CloneVM must fail loudly when zfs is missing
+	// (or a source zvol is absent) instead of registering a clone
+	// whose disks were never copied. Without zfs there is no clone
+	// to assert on, so the success path below only runs where zfs
+	// exists; the guard tests after it run in both cases.
+	if _, err := exec.LookPath("zfs"); err != nil {
+		if _, err := vm.CloneVM(100, 200, "win11-clone", true); err == nil {
+			t.Fatalf("expected CloneVM without zfs to fail loudly, got nil")
+		}
+	} else {
+		cloned, err := vm.CloneVM(100, 200, "win11-clone", true)
+		if err != nil {
+			t.Fatalf("CloneVM failed: %v", err)
+		}
+		if cloned.VMID != 200 || cloned.Name != "win11-clone" {
+			t.Fatalf("unexpected cloned VM spec: %+v", cloned)
+		}
+		if cloned.Disks[0].Zvol != "tank/vms/vm-200-disk-0" {
+			t.Fatalf("expected rewritten zvol path, got %s", cloned.Disks[0].Zvol)
+		}
 
-	xmlStr, err := vm.ExportLibvirtXML(200)
-	if err != nil {
-		t.Fatalf("ExportLibvirtXML failed: %v", err)
-	}
-	if !strings.Contains(xmlStr, "<domain type='kvm'>") || !strings.Contains(xmlStr, "<name>win11-clone</name>") {
-		t.Fatalf("unexpected Libvirt XML: %s", xmlStr)
+		xmlStr, err := vm.ExportLibvirtXML(200)
+		if err != nil {
+			t.Fatalf("ExportLibvirtXML failed: %v", err)
+		}
+		if !strings.Contains(xmlStr, "<domain type='kvm'>") || !strings.Contains(xmlStr, "<name>win11-clone</name>") {
+			t.Fatalf("unexpected Libvirt XML: %s", xmlStr)
+		}
 	}
 
 	// Test GFS backup pruning logic via temp directory under /mnt if writable or verify input guard
