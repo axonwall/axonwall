@@ -150,6 +150,10 @@ case "$1" in
                 echo "Error: hub certificate pair missing but an appliance CA exists; refusing to mint a non-chaining certificate. Fix the PKI and re-run dpkg --configure." >&2
                 exit 1
             fi
+            # D-L4: a failed generation used to be swallowed (`|| true`)
+            # and dpkg reported success with no hub pair. Fail the
+            # configure step loudly instead, so the operator fixes it
+            # and re-runs dpkg --configure.
             if command -v openssl >/dev/null 2>&1; then
                 SAN="DNS:$(hostname 2>/dev/null || echo axonwall),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
                 openssl req -x509 -newkey rsa:2048 -nodes \
@@ -157,7 +161,10 @@ case "$1" in
                     -out /etc/axonwall/certs/hub.crt \
                     -days 3650 \
                     -subj "/O=Axonwall/OU=Appliance/CN=$(hostname 2>/dev/null || echo axonwall)" \
-                    -addext "subjectAltName=${SAN}" >/dev/null 2>&1 || true
+                    -addext "subjectAltName=${SAN}" || { echo "Error: TLS certificate generation failed; fix the PKI and re-run dpkg --configure." >&2; exit 1; }
+            else
+                echo "Error: openssl is required to generate the hub TLS certificate pair but is not installed; fix the install and re-run dpkg --configure." >&2
+                exit 1
             fi
         fi
 

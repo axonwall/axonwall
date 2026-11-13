@@ -539,12 +539,16 @@ if [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; t
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
   for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
+  # D-L4: a failed generation used to be swallowed (`|| true`) and the
+  # firstboot marker consumed anyway, leaving the box with no hub pair
+  # and no retry. Fail loudly instead; the marker survives and the
+  # next boot retries, exactly like the k3s firstboot (`|| die`).
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout /etc/axonwall/certs/hub.key \
     -out /etc/axonwall/certs/hub.crt \
     -days 3650 \
     -subj "/O=Axonwall/OU=Appliance/CN=$(hostname)" \
-    -addext "subjectAltName=${SAN}" || true
+    -addext "subjectAltName=${SAN}" || { echo "[Axonwall Firstboot] ERROR: TLS certificate generation failed; keeping the firstboot marker so the next boot retries." >&2; exit 1; }
 fi
 # Always fix ownership: the controller (its own user since B-12) reads the key
 chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true

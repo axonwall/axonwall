@@ -110,12 +110,14 @@ if [ -f /etc/axonwall/.k3s-edition ]; then
     for _ip in $(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}' || true); do
       _san="${_san},IP:${_ip}"
     done
+    # D-L4: fail loudly on generation failure (markers are removed
+    # only at the end of this branch, so the next boot retries).
     openssl req -x509 -newkey rsa:2048 -nodes \
       -keyout /etc/axonwall/certs/hub.key \
       -out /etc/axonwall/certs/hub.crt \
       -days 825 \
       -subj "/O=Axonwall/OU=K3sStorage/CN=${_hn}" \
-      -addext "subjectAltName=${_san}" >/dev/null 2>&1 || true
+      -addext "subjectAltName=${_san}" || { echo "[Axonwall K3s Firstboot] ERROR: TLS certificate generation failed; keeping the firstboot markers so the next boot retries." >&2; exit 1; }
   fi
   chmod 0750 /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
   chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
@@ -529,12 +531,14 @@ if [ ! -s /etc/axonwall/certs/hub.crt ] || [ ! -s /etc/axonwall/certs/hub.key ];
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   HN="$(hostname 2>/dev/null || echo axonwall)"
   SAN="DNS:${HN},DNS:axonwall.local,DNS:localhost,IP:127.0.0.1,IP:192.168.1.1"
+  # D-L4: fail loudly on generation failure (the marker is removed
+  # only at the end of this script, so the next boot retries).
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout /etc/axonwall/certs/hub.key \
     -out /etc/axonwall/certs/hub.crt \
     -days 3650 \
     -subj "/O=Axonwall/OU=Appliance/CN=${HN}" \
-    -addext "subjectAltName=${SAN}" >/dev/null 2>&1 || true
+    -addext "subjectAltName=${SAN}" || { echo "[Axonwall Firstboot] ERROR: TLS certificate generation failed; keeping the firstboot marker so the next boot retries." >&2; exit 1; }
 fi
 
 chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
