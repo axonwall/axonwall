@@ -349,8 +349,13 @@ if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
 fi
 
 # 7b. Declare all packaged /etc files in DEBIAN/conffiles so dpkg preserves operator edits
+# D-L7: exclude generated state -- /etc/axonwall/version and
+# /etc/axonwall/release-signing.pub are written by the build, not by the
+# operator. Listing them as conffiles lets an upgrade with
+# --force-confold (as the updater's apt path uses) keep a stale version
+# string / stale trust anchor instead of the shipped ones.
 if [[ -d "${WORK_DIR}/etc" ]]; then
-  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | LC_ALL=C sort) > "${WORK_DIR}/DEBIAN/conffiles"
+  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | LC_ALL=C sort | grep -v -e '^/etc/axonwall/version$' -e '^/etc/axonwall/release-signing.pub$') > "${WORK_DIR}/DEBIAN/conffiles"
   chmod 0644 "${WORK_DIR}/DEBIAN/conffiles"
 fi
 
