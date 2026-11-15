@@ -260,3 +260,13 @@ Description: Enroll TPM2 device for automated, secure unattended unlock?
  If this hardware has a TPM 2.0 cryptoprocessor, Axonwall can bind volume keys
  to PCR policies via systemd-cryptenroll, permitting automated boot without
  interactive console passphrases while keeping disks locked if removed from the chassis.
+
+Template: axonwall/confirm_overwrite_disk
+Type: boolean
+Default: false
+Description: Overwrite existing operating system or data on target disk(s)?
+ ${DETECTED_SUMMARY}
+ .
+ Continuing will repartition and permanently erase existing data on the
+ selected target storage device(s). Select "Yes" only if you are certain
+ you want to overwrite these disk(s).

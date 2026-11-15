@@ -1294,6 +1294,156 @@ DATA_BLOCK
 	db_set partman-basicfilesystems/no_mount_point false 2>/dev/null || true
 	db_fset partman-basicfilesystems/no_mount_point seen true 2>/dev/null || true
 
+	# Inspect target disks and warn before touching partitions when non-empty in interactive auto/guided/zbm/rolling modes
+	if [ "${ci_unattended_storage:-0}" = "0" ] && [ "$partition_mode" != "manual" ]; then
+		_chk_disks="${system_raid_disks:-} ${zfs_extra_disks:-}"
+		if [ -z "$(echo "$_chk_disks" | tr -d ' ')" ] && [ -n "${dev_name:-}" ]; then
+			_chk_disks="$dev_name"
+		fi
+		_seen_di=" "
+		_di_non_empty=0
+		_di_axon=0
+		_di_other_os=0
+		_di_items=""
+		_blkid_di="$(blkid 2>/dev/null || true)"
+		for _td in $_chk_disks; do
+			[ -b "$_td" ] || continue
+			case "$_seen_di" in
+				*" ${_td} "*) continue ;;
+			esac
+			_seen_di="${_seen_di}${_td} "
+			_base="$(basename "$_td")"
+			_devs="$_td"
+			_pcnt=0
+			for _sp in "/sys/block/${_base}/${_base}"*; do
+				[ -e "$_sp" ] || continue
+				_sn="$(basename "$_sp")"
+				case "${_sn#"${_base}"}" in
+					[0-9]*|p[0-9]*)
+						_devs="${_devs} /dev/${_sn}"
+						_pcnt=$(( _pcnt + 1 ))
+						;;
+				esac
+			done
+			_lbls=""
+			_fst=""
+			_ptp=""
+			_ptt=""
+			for _dn in $_devs; do
+				_bl="$(printf '%s\n' "$_blkid_di" | awk -v d="${_dn}:" 'index($0, d) == 1 {print; exit}' || true)"
+				[ -z "$_bl" ] && _bl="$(blkid "$_dn" 2>/dev/null || true)"
+				if [ -n "$_bl" ]; then
+					_t="$(printf '%s\n' "$_bl" | sed -nE 's/.*[[:space:]]TYPE="([^"]+)".*/\1/p' || true)"
+					_l="$(printf '%s\n' "$_bl" | sed -nE 's/.*[[:space:]]LABEL="([^"]+)".*/\1/p' || true)"
+					_pl="$(printf '%s\n' "$_bl" | sed -nE 's/.*[[:space:]]PARTLABEL="([^"]+)".*/\1/p' || true)"
+					_pt="$(printf '%s\n' "$_bl" | sed -nE 's/.*[[:space:]]PARTTYPE="([^"]+)".*/\1/p' || true)"
+					_ptt_v="$(printf '%s\n' "$_bl" | sed -nE 's/.*[[:space:]]PTTYPE="([^"]+)".*/\1/p' || true)"
+					[ -n "$_t" ] && _fst="${_fst} $(echo "$_t" | tr '[:upper:]' '[:lower:]')"
+					[ -n "$_l" ] && _lbls="${_lbls} $(echo "$_l" | tr '[:upper:]' '[:lower:]')"
+					[ -n "$_pl" ] && _lbls="${_lbls} $(echo "$_pl" | tr '[:upper:]' '[:lower:]')"
+					[ -n "$_pt" ] && _ptp="${_ptp} $(echo "$_pt" | tr '[:upper:]' '[:lower:]')"
+					[ -n "$_ptt_v" ] && _ptt="$(echo "$_ptt_v" | tr '[:upper:]' '[:lower:]')"
+				fi
+			done
+			for _ld in /dev/disk/by-label /dev/disk/by-partlabel; do
+				[ -d "$_ld" ] || continue
+				for _lp in "$_ld"/*; do
+					[ -e "$_lp" ] || continue
+					_res="$(readlink -f "$_lp" 2>/dev/null || true)"
+					case "$_res" in
+						"$_td"|"$_td"[0-9]*|"$_td"p[0-9]*)
+							_ln="$(basename "$_lp" | sed 's/\\x20/ /g' | tr '[:upper:]' '[:lower:]' || true)"
+							[ -n "$_ln" ] && _lbls="${_lbls} ${_ln}"
+							;;
+					esac
+				done
+			done
+			if command -v parted >/dev/null 2>&1; then
+				_pa="$(parted -s "$_td" print 2>/dev/null || true)"
+				_pa_pt="$(printf '%s\n' "$_pa" | sed -nE 's/^Partition Table:[[:space:]]*([a-zA-Z0-9]+).*/\1/p' | head -n1 | tr '[:upper:]' '[:lower:]' || true)"
+				if [ -n "$_pa_pt" ] && [ "$_pa_pt" != "unknown" ]; then
+					[ -z "$_ptt" ] && _ptt="$_pa_pt"
+					_pa_c="$(printf '%s\n' "$_pa" | awk '$1 ~ /^[0-9]+$/ {c++} END {print c+0}' || echo 0)"
+					[ "${_pa_c:-0}" -gt "$_pcnt" ] && _pcnt="$_pa_c"
+				fi
+			fi
+			_nz="$(dd if="$_td" bs=512 count=64 2>/dev/null | tr -d '\0' | wc -c | tr -d ' ' || echo 0)"
+			_fs_p=" ${_fst} "
+			_pt_p=" ${_ptp} "
+			_lbl_lines="$(printf '%s\n' $_lbls)"
+			_sum=""
+			if printf '%s\n' "$_lbl_lines" | grep -qE '^(axon_|zbm_esp)' 2>/dev/null; then
+				_di_non_empty=1
+				_di_axon=1
+				_arch="Axonwall Layout"
+				if printf '%s\n' "$_lbl_lines" | grep -qE '^axon_root_(a|b)' 2>/dev/null; then
+					_arch="Dual-Root A/B"
+				elif printf '%s\n' "$_lbl_lines" | grep -qE '^(zbm_esp|zroot)$' 2>/dev/null; then
+					_arch="ZFSBootMenu Root-on-ZFS"
+				elif printf '%s\n' "$_lbl_lines" | grep -qE '^axon_root($|_[0-9]+$)' 2>/dev/null; then
+					_arch="Rolling Single-Root"
+				fi
+				_sum="Axonwall Installation (${_arch})"
+			elif case "$_fs_p $_pt_p" in *" bitlocker "*|*" e3c9e316-0b5c-4db8-817d-f92df00215ae "*|*" de94bba4-06d1-4d40-a16a-bfd50179d6ac "*) true ;; *) false ;; esac || \
+			     ( case "$_fs_p" in *" ntfs "*) true ;; *) false ;; esac && { case "$_fs_p $_pt_p" in *" vfat "*|*" c12a7328-f81f-11d2-ba4b-00a0c93ec93b "*|*" 0xef "*|*" 0x07 "*) true ;; *) false ;; esac || [ "$_ptt" = "dos" ] || printf '%s\n' "$_lbl_lines" | grep -qE 'windows|microsoft|winre|system|recovery' 2>/dev/null; } ); then
+				_di_non_empty=1
+				_di_other_os=1
+				_sum="Windows OS"
+			elif case "$_fs_p $_pt_p" in *" apfs "*|*" hfsplus "*|*" hfs+ "*|*" 7c3457ef-0000-11aa-aa11-00306543ecac "*) true ;; *) false ;; esac; then
+				_di_non_empty=1
+				_di_other_os=1
+				_sum="macOS Installation"
+			elif case "$_fs_p $_pt_p" in *" ufs "*|*" 516e7cb4-6ecf-11d6-8ff8-00022d09712b "*|*" 516e7cb6-6ecf-11d6-8ff8-00022d09712b "*) true ;; *) false ;; esac || printf '%s\n' "$_lbl_lines" | grep -qE 'freebsd|pfsense|opnsense|truenas|^boot-pool$' 2>/dev/null; then
+				_di_non_empty=1
+				_di_other_os=1
+				_sum="BSD / TrueNAS OS"
+			elif case "$_fs_p $_pt_p" in *" vmfs_volume_member "*|*" aa31e02a-400f-11db-9590-000c2911d1b8 "*) true ;; *) false ;; esac; then
+				_di_non_empty=1
+				_di_other_os=1
+				_sum="VMware ESXi (VMFS)"
+			elif case "$_fs_p" in *" zfs_member "*) true ;; *) false ;; esac && printf '%s\n' "$_lbl_lines" | grep -qE '^(rpool|bpool|zroot)$' 2>/dev/null; then
+				_di_non_empty=1
+				_di_other_os=1
+				_sum="ZFS Root OS"
+			elif case "$_fs_p $_pt_p" in *" vfat "*|*" swap "*|*" c12a7328-f81f-11d2-ba4b-00a0c93ec93b "*|*" 21686148-6449-6e6f-744e-656564454649 "*|*" bc13c2ff-59e6-4262-a352-b275fd6f7172 "*|*" 4f68bce3-e8cd-4db1-96e7-fbcaf984b709 "*|*" b921b045-1df0-41c3-af44-4c6f280d3fae "*|*" 0xef "*|*" 0x83 "*) true ;; *) false ;; esac && \
+			     case "$_fs_p $_pt_p" in *" ext4 "*|*" ext3 "*|*" xfs "*|*" btrfs "*|*" lvm2_member "*|*" crypto_luks "*|*" linux_raid_member "*|*" 4f68bce3-e8cd-4db1-96e7-fbcaf984b709 "*|*" b921b045-1df0-41c3-af44-4c6f280d3fae "*) true ;; *) false ;; esac; then
+				_di_non_empty=1
+				_di_other_os=1
+				_sum="Linux OS Installation"
+			elif [ "$_pcnt" -gt 0 ] || [ -n "$_fst" ] || [ -n "$_ptt" ] || [ "${_nz:-0}" -gt 0 ]; then
+				_di_non_empty=1
+				if [ "$_pcnt" -gt 0 ]; then
+					_sum="Existing Partitions/Data (${_pcnt} partition(s))"
+				elif [ -n "$_ptt" ]; then
+					_sum="Existing Partition Table (${_ptt})"
+				else
+					_sum="Non-Empty Disk (Existing Data)"
+				fi
+			fi
+			if [ -n "$_sum" ]; then
+				_di_items="${_di_items:+${_di_items}; }${_td} [${_sum}]"
+			fi
+		done
+
+		if [ "$_di_non_empty" -eq 1 ]; then
+			if [ "$_di_axon" -eq 1 ]; then
+				detected_summary="WARNING - Existing Axonwall installation detected! Target disk contents: ${_di_items}."
+			elif [ "$_di_other_os" -eq 1 ]; then
+				detected_summary="WARNING - Existing operating system detected! Target disk contents: ${_di_items}."
+			else
+				detected_summary="WARNING - Target storage disk(s) are not empty! Detected contents: ${_di_items}."
+			fi
+			db_set axonwall/confirm_overwrite_disk false 2>/dev/null || true
+			db_subst axonwall/confirm_overwrite_disk DETECTED_SUMMARY "$detected_summary" 2>/dev/null || true
+			ask_critical axonwall/confirm_overwrite_disk
+			db_get axonwall/confirm_overwrite_disk || true
+			if [ "$RET" != "true" ]; then
+				rm -f /var/lib/partman/initial_auto
+				exit 1
+			fi
+		fi
+	fi
+
 	# Make sure swap, mdadm, and device-mapper locks on target disks are completely released before autopartition writes
 	swapoff -a 2>/dev/null || true
 	if command -v mdadm >/dev/null 2>&1; then

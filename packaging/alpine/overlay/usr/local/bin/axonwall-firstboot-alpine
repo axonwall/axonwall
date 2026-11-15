@@ -592,7 +592,7 @@ fi
 if [ ! -s /etc/axonwall/axonwall.env ]; then
   JWT_SECRET="$(openssl rand -hex 32)"
   ADMIN_PASS="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
-  if [ ! -f /etc/axonwall/install-mode ] && ! grep -qE 'slot=A|slot=B|root=LABEL=axon_root' /proc/cmdline 2>/dev/null; then
+  if [ ! -f /etc/axonwall/install-mode ] && [ ! -f /var/lib/axonwall/install-mode ] && ! grep -qE 'slot=A|slot=B|root=LABEL=axon_root|root=ZFS=' /proc/cmdline 2>/dev/null; then
     ADMIN_PASS="axonwall"
   fi
   if [ -f /etc/axonwall/admin.env ]; then
@@ -666,7 +666,8 @@ for _cand_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF" "$WAN_IF"; do
 done
 [ -z "$PRIMARY_IP" ] && PRIMARY_IP="192.168.1.1"
 
-cat << ISSUE_EOF > /etc/issue
+if [ ! -f /etc/axonwall/install-mode ] && [ ! -f /var/lib/axonwall/install-mode ] && ! grep -qE 'slot=A|slot=B|root=LABEL=axon_root|root=ZFS=' /proc/cmdline 2>/dev/null; then
+  cat << ISSUE_EOF > /etc/issue
 ================================================================================
 Axonwall Appliance (Alpine Linux Edition)
 Web Console (LAN): https://${PRIMARY_IP}:2966
@@ -677,5 +678,17 @@ Install to Disk  : Run 'axonwall-install' from shell or Console TUI
 \n (\l)
 
 ISSUE_EOF
+else
+  cat << ISSUE_EOF > /etc/issue
+================================================================================
+Axonwall Appliance (Alpine Linux Edition)
+Web Console (LAN): https://${PRIMARY_IP}:2966
+WAN Inbound      : Blocked by default (Anti-Lockout enabled on LAN only)
+Appliance Console: Login with administrator credentials
+================================================================================
+\n (\l)
+
+ISSUE_EOF
+fi
 
 echo "[Axonwall Firstboot] Provisioning complete."

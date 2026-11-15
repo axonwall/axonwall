@@ -1720,26 +1720,57 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	return "", false
 }
 
-func isLiveMode() bool {
-	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
-		cmd := string(data)
-		if strings.Contains(cmd, "slot=A") || strings.Contains(cmd, "slot=B") || strings.Contains(cmd, "root=LABEL=axon_root") {
-			return false
-		}
-		if strings.Contains(cmd, "boot=live") || strings.Contains(cmd, "axonwall_install=1") || strings.Contains(cmd, "axonwall.install=1") || strings.Contains(cmd, "axonwall.unattended=1") {
-			return true
-		}
+func detectLiveMode(cmdline string, statExists func(string) bool) bool {
+	if strings.Contains(cmdline, "slot=A") || strings.Contains(cmdline, "slot=B") || strings.Contains(cmdline, "root=LABEL=axon_root") || strings.Contains(cmdline, "root=ZFS=") {
+		return false
 	}
-	if _, err := os.Stat("/run/live/medium"); err == nil {
+	if strings.Contains(cmdline, "boot=live") || strings.Contains(cmdline, "axonwall_install=1") || strings.Contains(cmdline, "axonwall.install=1") || strings.Contains(cmdline, "axonwall.unattended=1") {
 		return true
 	}
-	if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
-		if _, errMode := os.Stat("/etc/axonwall/install-mode"); errMode == nil {
-			return false
-		}
+	if statExists("/run/live/medium") {
+		return true
+	}
+	if statExists("/etc/axonwall/install-mode") || statExists("/var/lib/axonwall/install-mode") {
+		return false
+	}
+	if statExists("/usr/local/bin/axonwall-install") {
 		return true
 	}
 	return false
+}
+
+func isLiveMode() bool {
+	cmdline := ""
+	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+		cmdline = string(data)
+	}
+	return detectLiveMode(cmdline, func(path string) bool {
+		_, err := os.Stat(path)
+		return err == nil
+	})
+}
+
+func readInstalledMode() string {
+	for _, path := range []string{"/etc/axonwall/install-mode", "/var/lib/axonwall/install-mode"} {
+		if data, err := os.ReadFile(path); err == nil {
+			mode := strings.TrimSpace(string(data))
+			if mode != "" {
+				return mode
+			}
+		}
+	}
+	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+		cmd := string(data)
+		switch {
+		case strings.Contains(cmd, "slot=A") || strings.Contains(cmd, "slot=B"):
+			return "ab"
+		case strings.Contains(cmd, "root=ZFS="):
+			return "zbm"
+		case strings.Contains(cmd, "root=LABEL=axon_root"):
+			return "rolling"
+		}
+	}
+	return "installed"
 }
 
 func printHeader() {
@@ -1877,8 +1908,8 @@ func printHeader() {
 	fmt.Println(" 11) Power Off System")
 	if isLiveMode() {
 		fmt.Printf(" %s12) Install Axonwall OS to Storage Disk (A/B + RAID + OpenZFS) [Press I]%s\n", colorGreen+colorBold, colorReset)
-	} else if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
-		fmt.Println(" 12) Run Axonwall Disk Installer Utility")
+	} else {
+		fmt.Println(" 12) Advanced & Recovery Menu")
 	}
 	switch edition {
 	case "k3s-storage":
@@ -1897,14 +1928,73 @@ func printHeader() {
 	if isLiveMode() {
 		fmt.Print(" Enter option [0-12, T, N, A, E, or I]: ")
 	} else if edition == "k3s-storage" || edition == "vault" {
-		fmt.Print(" Enter option [0-11, S, or E]: ")
+		fmt.Print(" Enter option [0-12, S, or E]: ")
 	} else {
-		fmt.Print(" Enter option [0-11, T, N, A, or E]: ")
+		fmt.Print(" Enter option [0-12, T, N, A, or E]: ")
 	}
 }
 
 func actionInstallToDisk(reader *bufio.Reader) {
 	RunNextGenInstallerTUI(reader)
+}
+
+func actionAdvancedMenu(reader *bufio.Reader) {
+	for {
+		clearScreen()
+		hostname, _, _, _, _, _ := getSystemInfo()
+		edition := detectInstalledEdition()
+		mode := readInstalledMode()
+		_, instErr := os.Stat("/usr/local/bin/axonwall-install")
+		hasInstaller := instErr == nil
+
+		fmt.Println("================================================================================")
+		fmt.Printf("  %s=== Advanced & Recovery Menu ===%s\n", colorBold, colorReset)
+		fmt.Printf("  Host: %s | Edition: %s | Mode: %s\n", hostname, edition, mode)
+		fmt.Println("================================================================================")
+		if hasInstaller {
+			fmt.Printf("  %s1) Run Axonwall Disk Installer Utility (WARNING: Active Installed System)%s\n", colorYellow+colorBold, colorReset)
+		}
+		fmt.Println("  2) View Last Installation Log (/var/log/axonwall-install.log)")
+		fmt.Println("  0) Return to Main Console Menu")
+		fmt.Println("--------------------------------------------------------------------------------")
+		fmt.Print(" Enter option [0-2]: ")
+
+		choice, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		switch strings.ToUpper(strings.TrimSpace(choice)) {
+		case "1", "I", "INSTALL":
+			if hasInstaller {
+				actionInstallToDisk(reader)
+			} else {
+				fmt.Printf("\n%s[!] Installer utility '/usr/local/bin/axonwall-install' is not present on this system.%s\n", colorRed, colorReset)
+				pause(reader)
+			}
+		case "2", "L", "LOG":
+			clearScreen()
+			fmt.Println("=== Last Installation Log (/var/log/axonwall-install.log) ===")
+			if data, readErr := os.ReadFile("/var/log/axonwall-install.log"); readErr != nil {
+				fmt.Printf("\n%sNo installation log found at /var/log/axonwall-install.log (%v).%s\n", colorYellow, readErr, colorReset)
+			} else {
+				lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+				start := 0
+				if len(lines) > 60 {
+					start = len(lines) - 60
+					fmt.Printf("%s(Showing last 60 of %d lines)%s\n\n", colorDim, len(lines), colorReset)
+				}
+				for _, line := range lines[start:] {
+					fmt.Println(line)
+				}
+			}
+			pause(reader)
+		case "0", "B", "Q", "":
+			return
+		default:
+			fmt.Println("Invalid selection. Press [Enter] to continue...")
+			_, _ = reader.ReadString('\n')
+		}
+	}
 }
 
 func pause(reader *bufio.Reader) {
@@ -3421,8 +3511,27 @@ func main() {
 						time.Sleep(1 * time.Second)
 					}
 				}
-			case "12", "I", "INSTALL":
-				actionInstallToDisk(reader)
+			case "12":
+				if isLiveMode() {
+					actionInstallToDisk(reader)
+				} else {
+					actionAdvancedMenu(reader)
+				}
+			case "X", "ADV", "ADVANCED":
+				if !isLiveMode() {
+					actionAdvancedMenu(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
+			case "I", "INSTALL":
+				if isLiveMode() {
+					actionInstallToDisk(reader)
+				} else {
+					fmt.Printf("\n%s[!] This system is currently booted into an installed Axonwall instance.%s\n", colorYellow+colorBold, colorReset)
+					fmt.Printf("    To access the Disk Installer Utility, open %s[12] Advanced & Recovery Menu%s.\n", colorBold, colorReset)
+					pause(reader)
+				}
 			case "S", "STATUS":
 				actionApplianceEditionStatus(reader)
 			case "T", "TUI":

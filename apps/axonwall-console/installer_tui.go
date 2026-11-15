@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 )
 
@@ -28,20 +30,53 @@ const (
 	colorBgDark    = "\033[48;5;235m"
 )
 
+// DiskContentKind classifies the detected contents of a candidate storage disk.
+type DiskContentKind string
+
+const (
+	DiskContentEmpty    DiskContentKind = "empty"
+	DiskContentAxonwall DiskContentKind = "axonwall"
+	DiskContentOtherOS  DiskContentKind = "other_os"
+	DiskContentData     DiskContentKind = "data"
+)
+
 // DiskDevice represents a candidate block storage device discovered on the host.
 type DiskDevice struct {
-	Name       string // e.g. "nvme0n1", "vda", "sda"
-	Path       string // e.g. "/dev/nvme0n1"
-	Model      string
-	Transport  string // "NVMe", "VirtIO", "SATA/SAS"
-	SizeBytes  uint64
-	SizeMB     int
-	SizeGB     float64
-	Removable  bool
-	Mounted    bool
-	Role       string // "system", "zfs-data", "zfs-slog", "zfs-l2arc", "zfs-spare", "none"
-	SystemDisk bool
-	ZfsExtra   bool
+	Name           string // e.g. "nvme0n1", "vda", "sda"
+	Path           string // e.g. "/dev/nvme0n1"
+	Model          string
+	Transport      string // "NVMe", "VirtIO", "SATA/SAS"
+	SizeBytes      uint64
+	SizeMB         int
+	SizeGB         float64
+	Removable      bool
+	Mounted        bool
+	Role           string // "system", "zfs-data", "zfs-slog", "zfs-l2arc", "zfs-spare", "none"
+	SystemDisk     bool
+	ZfsExtra       bool
+	ContentKind    DiskContentKind // "empty", "axonwall", "other_os", "data"
+	ContentSummary string          // Human-readable summary of detected OS / Axonwall / data / empty
+	ContentDetails []string        // Per-partition / signature diagnostic lines
+}
+
+// PartitionProbe captures filesystem and partition table metadata for one partition or signature.
+type PartitionProbe struct {
+	Name      string
+	Path      string
+	FSType    string
+	Label     string
+	PartLabel string
+	PartType  string // lowercase GPT Partition Type GUID or MBR hex type (e.g. "0x83")
+}
+
+// DiskProbeInput holds all raw and OS-reported metadata collected from a block device.
+type DiskProbeInput struct {
+	DiskPath      string
+	PTType        string // "gpt", "dos", or ""
+	HasBootSector bool
+	WholeFSType   string
+	WholeLabel    string
+	Partitions    []PartitionProbe
 }
 
 // InstallerConfig holds all user choices for the Next-Gen Appliance Installer.
@@ -313,7 +348,7 @@ func detectCloudInitSeed() string {
 	return ""
 }
 
-// DiscoverDisks scans /sys/block and returns candidate block storage devices.
+// DiscoverDisks scans /sys/block and returns candidate block storage devices with content metadata.
 func DiscoverDisks() []DiskDevice {
 	entries, err := os.ReadDir("/sys/block")
 	if err != nil {
@@ -389,7 +424,700 @@ func DiscoverDisks() []DiskDevice {
 		})
 	}
 
-	return FilterCandidateDisks(raw)
+	candidates := FilterCandidateDisks(raw)
+	if len(candidates) > 0 {
+		blkidMap := collectBlkidMap()
+		byLabelMap := collectSymlinkLabelMap("/dev/disk/by-label")
+		byPartLabelMap := collectSymlinkLabelMap("/dev/disk/by-partlabel")
+		for i := range candidates {
+			kind, summary, details := probeDiskContentWithMaps(candidates[i].Path, blkidMap, byLabelMap, byPartLabelMap)
+			candidates[i].ContentKind = kind
+			candidates[i].ContentSummary = summary
+			candidates[i].ContentDetails = details
+		}
+	}
+	return candidates
+}
+
+// ProbeDiskContent inspects a block device and classifies its existing OS, Axonwall, data, or empty status.
+func ProbeDiskContent(devPath string) (DiskContentKind, string, []string) {
+	return probeDiskContentWithMaps(devPath, collectBlkidMap(), collectSymlinkLabelMap("/dev/disk/by-label"), collectSymlinkLabelMap("/dev/disk/by-partlabel"))
+}
+
+func probeDiskContentWithMaps(devPath string, blkidMap map[string]map[string]string, byLabelMap, byPartLabelMap map[string]string) (DiskContentKind, string, []string) {
+	in := DiskProbeInput{
+		DiskPath: devPath,
+	}
+
+	rawHeader := readRawDiskHeader(devPath)
+	rawProbe := inspectRawDiskHeader(devPath, rawHeader)
+	in.PTType = rawProbe.PTType
+	in.HasBootSector = rawProbe.HasBootSector
+	in.WholeFSType = rawProbe.WholeFSType
+	in.WholeLabel = rawProbe.WholeLabel
+
+	partMap := make(map[string]PartitionProbe)
+	var partOrder []string
+	addOrMergePart := func(p PartitionProbe) {
+		if p.Path == "" {
+			return
+		}
+		if p.Name == "" {
+			p.Name = filepath.Base(p.Path)
+		}
+		existing, exists := partMap[p.Path]
+		if !exists {
+			partOrder = append(partOrder, p.Path)
+			partMap[p.Path] = p
+			return
+		}
+		if existing.FSType == "" {
+			existing.FSType = p.FSType
+		}
+		if existing.Label == "" {
+			existing.Label = p.Label
+		}
+		if existing.PartLabel == "" {
+			existing.PartLabel = p.PartLabel
+		}
+		if existing.PartType == "" {
+			existing.PartType = p.PartType
+		}
+		partMap[p.Path] = existing
+	}
+
+	for _, rp := range rawProbe.Partitions {
+		addOrMergePart(rp)
+	}
+
+	// Enumerate kernel-recognized child partitions from /sys/block/<base>/
+	base := filepath.Base(devPath)
+	if sysEntries, err := os.ReadDir(filepath.Join("/sys/block", base)); err == nil {
+		for _, se := range sysEntries {
+			pName := se.Name()
+			if !strings.HasPrefix(pName, base) {
+				continue
+			}
+			pPath := "/dev/" + pName
+			if isPartitionOfDisk(pPath, devPath) {
+				addOrMergePart(PartitionProbe{Name: pName, Path: pPath})
+			}
+		}
+	}
+
+	// Merge whole-disk and partition metadata from blkid output
+	if wholeMeta, ok := blkidMap[devPath]; ok {
+		if in.WholeFSType == "" {
+			in.WholeFSType = wholeMeta["TYPE"]
+		}
+		if in.WholeLabel == "" {
+			in.WholeLabel = wholeMeta["LABEL"]
+		}
+		if in.PTType == "" {
+			in.PTType = strings.ToLower(wholeMeta["PTTYPE"])
+		}
+	}
+	if in.WholeLabel == "" {
+		if lbl, ok := byLabelMap[devPath]; ok {
+			in.WholeLabel = lbl
+		}
+	}
+
+	for bDev, meta := range blkidMap {
+		if !isPartitionOfDisk(bDev, devPath) {
+			continue
+		}
+		addOrMergePart(PartitionProbe{
+			Name:      filepath.Base(bDev),
+			Path:      bDev,
+			FSType:    meta["TYPE"],
+			Label:     meta["LABEL"],
+			PartLabel: meta["PARTLABEL"],
+			PartType:  strings.ToLower(meta["PARTTYPE"]),
+		})
+	}
+
+	for devNode, lbl := range byLabelMap {
+		if isPartitionOfDisk(devNode, devPath) {
+			addOrMergePart(PartitionProbe{Name: filepath.Base(devNode), Path: devNode, Label: lbl})
+		}
+	}
+	for devNode, plbl := range byPartLabelMap {
+		if isPartitionOfDisk(devNode, devPath) {
+			addOrMergePart(PartitionProbe{Name: filepath.Base(devNode), Path: devNode, PartLabel: plbl})
+		}
+	}
+
+	sort.Strings(partOrder)
+	for _, pPath := range partOrder {
+		in.Partitions = append(in.Partitions, partMap[pPath])
+	}
+
+	return ClassifyDiskContent(in)
+}
+
+func readRawDiskHeader(devPath string) []byte {
+	f, err := os.Open(devPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	buf := make([]byte, 32768)
+	n, _ := io.ReadFull(f, buf)
+	if n <= 0 {
+		return nil
+	}
+	return buf[:n]
+}
+
+func partPathForIndex(diskPath string, idx int) string {
+	if diskPath == "" {
+		return fmt.Sprintf("p%d", idx)
+	}
+	last := diskPath[len(diskPath)-1]
+	if last >= '0' && last <= '9' {
+		return fmt.Sprintf("%sp%d", diskPath, idx)
+	}
+	return fmt.Sprintf("%s%d", diskPath, idx)
+}
+
+func formatGPTGUID(b []byte) string {
+	if len(b) < 16 {
+		return ""
+	}
+	d1 := binary.LittleEndian.Uint32(b[0:4])
+	d2 := binary.LittleEndian.Uint16(b[4:6])
+	d3 := binary.LittleEndian.Uint16(b[6:8])
+	return fmt.Sprintf("%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		d1, d2, d3, b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+}
+
+func decodeUTF16LELabel(b []byte) string {
+	if len(b) < 2 {
+		return ""
+	}
+	var units []uint16
+	for i := 0; i+1 < len(b); i += 2 {
+		u := binary.LittleEndian.Uint16(b[i : i+2])
+		if u == 0 {
+			break
+		}
+		units = append(units, u)
+	}
+	return strings.TrimSpace(string(utf16.Decode(units)))
+}
+
+// inspectRawDiskHeader extracts partition tables, GPT type GUIDs/labels, MBR entries, and raw whole-disk signatures from up to 32 KiB.
+func inspectRawDiskHeader(diskPath string, buf []byte) DiskProbeInput {
+	res := DiskProbeInput{DiskPath: diskPath}
+	if len(buf) == 0 {
+		return res
+	}
+
+	if len(buf) >= 6 && string(buf[0:6]) == "LUKS\xba\xbe" {
+		res.WholeFSType = "crypto_luks"
+	} else if len(buf) >= 4 && string(buf[0:4]) == "XFSB" {
+		res.WholeFSType = "xfs"
+	} else if len(buf) >= 1082 && binary.LittleEndian.Uint16(buf[1080:1082]) == 0xEF53 {
+		res.WholeFSType = "ext4"
+	} else if len(buf) >= 520 && string(buf[512:520]) == "LABELONE" {
+		res.WholeFSType = "LVM2_member"
+	}
+
+	// Check GPT header at LBA 1 (byte offset 512)
+	if len(buf) >= 512+92 && string(buf[512:520]) == "EFI PART" {
+		res.PTType = "gpt"
+		partEntryLBA := binary.LittleEndian.Uint64(buf[512+72 : 512+80])
+		numEntries := binary.LittleEndian.Uint32(buf[512+80 : 512+84])
+		entrySize := binary.LittleEndian.Uint32(buf[512+84 : 512+88])
+		if partEntryLBA >= 2 && partEntryLBA < 64 && entrySize >= 128 && entrySize <= 512 {
+			tableStart := int(partEntryLBA) * 512
+			for idx := uint32(0); idx < numEntries; idx++ {
+				off := tableStart + int(idx)*int(entrySize)
+				if off+int(entrySize) > len(buf) {
+					break
+				}
+				entry := buf[off : off+int(entrySize)]
+				allZero := true
+				for j := 0; j < 16; j++ {
+					if entry[j] != 0 {
+						allZero = false
+						break
+					}
+				}
+				if allZero {
+					continue
+				}
+				pPath := partPathForIndex(diskPath, int(idx)+1)
+				res.Partitions = append(res.Partitions, PartitionProbe{
+					Name:      filepath.Base(pPath),
+					Path:      pPath,
+					PartType:  formatGPTGUID(entry[0:16]),
+					PartLabel: decodeUTF16LELabel(entry[56:128]),
+				})
+			}
+		}
+		return res
+	}
+
+	// Check MBR signature at bytes 510..511
+	if len(buf) >= 512 && buf[510] == 0x55 && buf[511] == 0xAA {
+		hasMBRParts := false
+		for i := 0; i < 4; i++ {
+			off := 446 + i*16
+			partType := buf[off+4]
+			if partType != 0 && partType != 0xEE {
+				hasMBRParts = true
+				pPath := partPathForIndex(diskPath, i+1)
+				res.Partitions = append(res.Partitions, PartitionProbe{
+					Name:     filepath.Base(pPath),
+					Path:     pPath,
+					PartType: fmt.Sprintf("0x%02x", partType),
+				})
+			}
+		}
+		if hasMBRParts {
+			res.PTType = "dos"
+		} else {
+			res.HasBootSector = true
+		}
+		return res
+	}
+
+	limit := len(buf)
+	if limit > 4096 {
+		limit = 4096
+	}
+	for i := 0; i < limit; i++ {
+		if buf[i] != 0 {
+			res.HasBootSector = true
+			break
+		}
+	}
+	return res
+}
+
+func collectBlkidMap() map[string]map[string]string {
+	out, err := exec.Command("blkid").Output()
+	if err != nil {
+		return nil
+	}
+	return parseBlkidOutput(string(out))
+}
+
+// parseBlkidOutput parses plain BusyBox or util-linux blkid output lines into a device -> key/value map.
+func parseBlkidOutput(out string) map[string]map[string]string {
+	result := make(map[string]map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		colonIdx := strings.IndexByte(line, ':')
+		if colonIdx <= 0 {
+			continue
+		}
+		dev := strings.TrimSpace(line[:colonIdx])
+		rest := strings.TrimSpace(line[colonIdx+1:])
+		if dev == "" || rest == "" {
+			continue
+		}
+		kv := make(map[string]string)
+		i := 0
+		for i < len(rest) {
+			for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+				i++
+			}
+			if i >= len(rest) {
+				break
+			}
+			eqIdx := strings.IndexByte(rest[i:], '=')
+			if eqIdx < 0 {
+				break
+			}
+			key := strings.ToUpper(strings.TrimSpace(rest[i : i+eqIdx]))
+			i += eqIdx + 1
+			if i >= len(rest) {
+				break
+			}
+			var val string
+			if rest[i] == '"' {
+				i++
+				start := i
+				for i < len(rest) {
+					if rest[i] == '\\' && i+1 < len(rest) {
+						i += 2
+						continue
+					}
+					if rest[i] == '"' {
+						break
+					}
+					i++
+				}
+				val = strings.ReplaceAll(rest[start:i], `\"`, `"`)
+				if i < len(rest) && rest[i] == '"' {
+					i++
+				}
+			} else {
+				start := i
+				for i < len(rest) && rest[i] != ' ' && rest[i] != '\t' {
+					i++
+				}
+				val = rest[start:i]
+			}
+			if key != "" && val != "" {
+				kv[key] = val
+			}
+		}
+		if len(kv) > 0 {
+			result[dev] = kv
+		}
+	}
+	return result
+}
+
+func decodeUdevEscapedLabel(s string) string {
+	return strings.ReplaceAll(s, `\x20`, " ")
+}
+
+func collectSymlinkLabelMap(dir string) map[string]string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	res := make(map[string]string)
+	for _, e := range entries {
+		full := filepath.Join(dir, e.Name())
+		target, err := filepath.EvalSymlinks(full)
+		if err != nil || target == "" {
+			continue
+		}
+		if _, exists := res[target]; !exists {
+			res[target] = decodeUdevEscapedLabel(e.Name())
+		}
+	}
+	return res
+}
+
+func isAxonwallDiskLabel(lbl string) bool {
+	low := strings.ToLower(strings.TrimSpace(lbl))
+	return strings.HasPrefix(low, "axon_") || low == "zbm_esp" || low == "axon_efi"
+}
+
+func hasAxonwallRaidMemberLabel(lbl string) bool {
+	low := strings.ToLower(strings.TrimSpace(lbl))
+	for _, prefix := range []string{"axon_root_a_", "axon_root_b_", "axon_root_", "axon_data_", "axon_logs_"} {
+		if strings.HasPrefix(low, prefix) {
+			suffix := low[len(prefix):]
+			if _, err := strconv.Atoi(suffix); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ClassifyDiskContent classifies probed block device metadata into Empty, Existing Axonwall, Other OS, or Non-Empty Data.
+func ClassifyDiskContent(in DiskProbeInput) (DiskContentKind, string, []string) {
+	var details []string
+	var allLabels []string
+	fsSet := make(map[string]bool)
+	partTypeSet := make(map[string]bool)
+	zfsPools := make(map[string]bool)
+
+	addFS := func(fs string) {
+		low := strings.ToLower(strings.TrimSpace(fs))
+		if low != "" {
+			fsSet[low] = true
+		}
+	}
+
+	if in.WholeFSType != "" || in.WholeLabel != "" {
+		addFS(in.WholeFSType)
+		if in.WholeLabel != "" {
+			allLabels = append(allLabels, in.WholeLabel)
+			if strings.EqualFold(in.WholeFSType, "zfs_member") {
+				zfsPools[strings.ToLower(strings.TrimSpace(in.WholeLabel))] = true
+			}
+		}
+		var sigParts []string
+		if in.WholeFSType != "" {
+			sigParts = append(sigParts, in.WholeFSType)
+		}
+		if in.WholeLabel != "" {
+			sigParts = append(sigParts, fmt.Sprintf("label=%q", in.WholeLabel))
+		}
+		details = append(details, fmt.Sprintf("%s (whole disk): %s", filepath.Base(in.DiskPath), strings.Join(sigParts, " ")))
+	}
+
+	for _, p := range in.Partitions {
+		addFS(p.FSType)
+		if p.PartType != "" {
+			partTypeSet[strings.ToLower(strings.TrimSpace(p.PartType))] = true
+		}
+		if p.Label != "" {
+			allLabels = append(allLabels, p.Label)
+			if strings.EqualFold(p.FSType, "zfs_member") {
+				zfsPools[strings.ToLower(strings.TrimSpace(p.Label))] = true
+			}
+		}
+		if p.PartLabel != "" {
+			allLabels = append(allLabels, p.PartLabel)
+		}
+		pName := p.Name
+		if pName == "" {
+			pName = filepath.Base(p.Path)
+		}
+		if pName == "" {
+			pName = "part"
+		}
+		var desc []string
+		if p.FSType != "" {
+			desc = append(desc, p.FSType)
+		}
+		if p.Label != "" {
+			desc = append(desc, fmt.Sprintf("label=%q", p.Label))
+		}
+		if p.PartLabel != "" && !strings.EqualFold(p.PartLabel, p.Label) {
+			desc = append(desc, fmt.Sprintf("part=%q", p.PartLabel))
+		}
+		if p.PartType != "" && len(desc) == 0 {
+			desc = append(desc, "type="+p.PartType)
+		}
+		if len(desc) > 0 {
+			details = append(details, fmt.Sprintf("%s: %s", pName, strings.Join(desc, " ")))
+		} else {
+			details = append(details, fmt.Sprintf("%s: unformatted partition", pName))
+		}
+	}
+
+	if in.PTType != "" {
+		details = append([]string{fmt.Sprintf("partition table: %s (%d partition(s))", strings.ToUpper(in.PTType), len(in.Partitions))}, details...)
+	} else if in.HasBootSector {
+		details = append(details, "raw boot sector or non-zero header data present")
+	}
+
+	// Priority 1: Existing Axonwall Installation
+	axonMatch := false
+	hasRootAB := false
+	hasZbmEsp := false
+	hasRollingRoot := false
+	hasRaidLabel := false
+	hasAxonCrypt := false
+	hasAxonZfs := false
+	for _, lbl := range allLabels {
+		low := strings.ToLower(strings.TrimSpace(lbl))
+		if isAxonwallDiskLabel(low) {
+			axonMatch = true
+		}
+		switch {
+		case strings.HasPrefix(low, "axon_root_a") || strings.HasPrefix(low, "axon_root_b"):
+			hasRootAB = true
+		case low == "zbm_esp":
+			hasZbmEsp = true
+		case low == "axon_root" || hasAxonwallRaidMemberLabel(low) && strings.HasPrefix(low, "axon_root_"):
+			hasRollingRoot = true
+		case strings.HasPrefix(low, "axon_crypt"):
+			hasAxonCrypt = true
+		case strings.HasPrefix(low, "axon_zfs"):
+			hasAxonZfs = true
+		}
+		if hasAxonwallRaidMemberLabel(low) {
+			hasRaidLabel = true
+		}
+	}
+	if zfsPools["zroot"] && (hasAxonZfs || hasZbmEsp || axonMatch) {
+		axonMatch = true
+	}
+
+	if axonMatch {
+		arch := "Axonwall Storage/Data Layout"
+		switch {
+		case hasRootAB:
+			arch = "Dual-Root A/B"
+		case hasZbmEsp || zfsPools["zroot"]:
+			arch = "ZFSBootMenu Root-on-ZFS"
+		case hasRollingRoot:
+			arch = "Rolling Single-Root"
+		}
+		var mods []string
+		if fsSet["linux_raid_member"] || partTypeSet["a19d880f-05fc-4d3b-a006-743f0f84911e"] || partTypeSet["0xfd"] || hasRaidLabel {
+			mods = append(mods, "RAID-1")
+		}
+		if fsSet["crypto_luks"] || hasAxonCrypt || partTypeSet["ca7d7ccb-63ed-4c53-861c-1742536059cc"] {
+			mods = append(mods, "LUKS2")
+		}
+		if len(mods) > 0 {
+			arch += " + " + strings.Join(mods, " + ")
+		}
+		return DiskContentAxonwall, fmt.Sprintf("Axonwall Installation (%s)", arch), details
+	}
+
+	// Priority 2: Other Operating Systems (Windows, macOS, BSD/TrueNAS, ESXi, ZFS Root, Linux)
+	hasLabelSubstr := func(subs ...string) bool {
+		for _, lbl := range allLabels {
+			low := strings.ToLower(lbl)
+			for _, sub := range subs {
+				if strings.Contains(low, sub) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	hasESP := partTypeSet["c12a7328-f81f-11d2-ba4b-00a0c93ec93b"] || partTypeSet["0xef"] || fsSet["vfat"]
+	hasMSR := partTypeSet["e3c9e316-0b5c-4db8-817d-f92df00215ae"]
+	hasWinRE := partTypeSet["de94bba4-06d1-4d40-a16a-bfd50179d6ac"]
+
+	if fsSet["bitlocker"] {
+		return DiskContentOtherOS, "Windows OS (BitLocker)", details
+	}
+	if hasMSR || hasWinRE || (fsSet["ntfs"] && (hasESP || strings.EqualFold(in.PTType, "dos") || partTypeSet["0x07"] || hasLabelSubstr("windows", "microsoft", "winre", "system reserved", "recovery"))) {
+		return DiskContentOtherOS, "Windows OS (NTFS/Boot)", details
+	}
+
+	if fsSet["apfs"] || fsSet["hfsplus"] || fsSet["hfs+"] || partTypeSet["7c3457ef-0000-11aa-aa11-00306543ecac"] || partTypeSet["48465300-0000-11aa-aa11-00306543ecac"] {
+		return DiskContentOtherOS, "macOS Installation (APFS/HFS+)", details
+	}
+
+	if fsSet["ufs"] || partTypeSet["516e7cb4-6ecf-11d6-8ff8-00022d09712b"] || partTypeSet["516e7cb6-6ecf-11d6-8ff8-00022d09712b"] || partTypeSet["516e7cba-6ecf-11d6-8ff8-00022d09712b"] || zfsPools["boot-pool"] || hasLabelSubstr("freebsd", "pfsense", "opnsense", "truenas") {
+		return DiskContentOtherOS, "BSD / TrueNAS OS", details
+	}
+
+	if fsSet["vmfs_volume_member"] || partTypeSet["aa31e02a-400f-11db-9590-000c2911d1b8"] {
+		return DiskContentOtherOS, "VMware ESXi (VMFS)", details
+	}
+
+	for _, rootPool := range []string{"rpool", "bpool", "zroot"} {
+		if zfsPools[rootPool] {
+			return DiskContentOtherOS, fmt.Sprintf("ZFS Root OS (%s)", rootPool), details
+		}
+	}
+
+	hasLinuxBoot := hasESP ||
+		partTypeSet["21686148-6449-6e6f-744e-656564454649"] || // BIOS boot
+		partTypeSet["bc13c2ff-59e6-4262-a352-b275fd6f7172"] || // Linux extended boot /boot
+		partTypeSet["4f68bce3-e8cd-4db1-96e7-fbcaf984b709"] || // Linux root x86_64
+		partTypeSet["b921b045-1df0-41c3-af44-4c6f280d3fae"] || // Linux root arm64
+		partTypeSet["0x83"] ||
+		fsSet["swap"] ||
+		hasLabelSubstr("boot", "ubuntu", "debian", "fedora", "proxmox", "alpine", "rocky", "alma")
+
+	var linuxRootFS []string
+	for _, cand := range []string{"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs", "lvm2_member", "crypto_luks", "linux_raid_member", "squashfs"} {
+		if fsSet[cand] {
+			linuxRootFS = append(linuxRootFS, cand)
+		}
+	}
+	if hasLinuxBoot && (len(linuxRootFS) > 0 || partTypeSet["4f68bce3-e8cd-4db1-96e7-fbcaf984b709"] || partTypeSet["b921b045-1df0-41c3-af44-4c6f280d3fae"]) {
+		fsDesc := strings.Join(linuxRootFS, "/")
+		if fsDesc == "" {
+			fsDesc = "GPT Linux Root"
+		}
+		return DiskContentOtherOS, fmt.Sprintf("Linux OS Installation (%s)", fsDesc), details
+	}
+
+	// Priority 3: Any other non-empty disk (existing ZFS data pool, RAID, LVM, LUKS, filesystems, or partition table)
+	if len(in.Partitions) > 0 || in.WholeFSType != "" || in.WholeLabel != "" || in.PTType != "" || in.HasBootSector {
+		if fsSet["zfs_member"] && len(zfsPools) > 0 {
+			var poolNames []string
+			for k := range zfsPools {
+				poolNames = append(poolNames, k)
+			}
+			sort.Strings(poolNames)
+			return DiskContentData, fmt.Sprintf("Existing ZFS Pool (%s)", strings.Join(poolNames, ", ")), details
+		}
+		if len(fsSet) == 1 && fsSet["crypto_luks"] {
+			return DiskContentData, "Existing LUKS2 Encrypted Volume", details
+		}
+		var fsNames []string
+		for k := range fsSet {
+			fsNames = append(fsNames, k)
+		}
+		sort.Strings(fsNames)
+		if len(in.Partitions) > 0 {
+			if len(fsNames) > 0 {
+				return DiskContentData, fmt.Sprintf("Existing Partitions / Data (%d partition(s), %s)", len(in.Partitions), strings.Join(fsNames, "/")), details
+			}
+			return DiskContentData, fmt.Sprintf("Existing Partitions (%d partition(s))", len(in.Partitions)), details
+		}
+		if in.WholeFSType != "" {
+			return DiskContentData, fmt.Sprintf("Existing Filesystem (%s)", in.WholeFSType), details
+		}
+		if in.PTType != "" {
+			return DiskContentData, fmt.Sprintf("Existing Partition Table (%s)", strings.ToUpper(in.PTType)), details
+		}
+		return DiskContentData, "Non-Empty Disk (Raw Data / Boot Sector)", details
+	}
+
+	return DiskContentEmpty, "Empty Disk", nil
+}
+
+// SummarizeTargetDiskWarnings inspects all assigned target disks in cfg and reports any non-empty disks.
+func SummarizeTargetDiskWarnings(disks []DiskDevice, cfg InstallerConfig) (hasNonEmpty, hasAxonwall, hasOtherOS bool, warnings []string) {
+	byPath := make(map[string]DiskDevice, len(disks))
+	for _, d := range disks {
+		byPath[d.Path] = d
+	}
+	seen := make(map[string]bool)
+	var orderedTargets []string
+	for _, group := range [][]string{cfg.SystemDisks, cfg.ZfsExtraDisks, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks} {
+		for _, p := range group {
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			orderedTargets = append(orderedTargets, p)
+		}
+	}
+	for _, p := range orderedTargets {
+		d, ok := byPath[p]
+		if !ok {
+			continue
+		}
+		if d.ContentKind == "" || d.ContentKind == DiskContentEmpty {
+			continue
+		}
+		hasNonEmpty = true
+		switch d.ContentKind {
+		case DiskContentAxonwall:
+			hasAxonwall = true
+		case DiskContentOtherOS:
+			hasOtherOS = true
+		}
+		summary := d.ContentSummary
+		if summary == "" {
+			summary = "Existing Data"
+		}
+		warnings = append(warnings, fmt.Sprintf("%s: %s", d.Path, summary))
+	}
+	return hasNonEmpty, hasAxonwall, hasOtherOS, warnings
+}
+
+func formatDiskContentBadge(d DiskDevice) string {
+	switch d.ContentKind {
+	case DiskContentAxonwall:
+		summary := d.ContentSummary
+		if summary == "" {
+			summary = "Axonwall Installation"
+		}
+		return colorYellow + colorBold + "[" + summary + "]" + colorReset
+	case DiskContentOtherOS:
+		summary := d.ContentSummary
+		if summary == "" {
+			summary = "Other OS"
+		}
+		return colorRed + colorBold + "[" + summary + "]" + colorReset
+	case DiskContentData:
+		summary := d.ContentSummary
+		if summary == "" {
+			summary = "Existing Data"
+		}
+		return colorYellow + "[" + summary + "]" + colorReset
+	default:
+		return colorDim + "[Empty]" + colorReset
+	}
 }
 
 // FilterCandidateDisks filters out pseudo-devices, optical drives, tiny disks (<2 GiB), and mounted live media.
@@ -736,6 +1464,17 @@ func RefreshHardwareEval(disks []DiskDevice, cfg *InstallerConfig) HardwareEvalu
 	}
 	if len(cfg.SystemDisks) > 0 && diskHasPrecreatedAxonwallPartitions(cfg.SystemDisks[0]) {
 		notes = append(notes, fmt.Sprintf("Pre-partitioned Axonwall layout detected on %s (press [X] to preserve existing partitions)", cfg.SystemDisks[0]))
+	}
+	if hasNonEmpty, hasAxonwall, hasOtherOS, diskWarnings := SummarizeTargetDiskWarnings(disks, *cfg); hasNonEmpty {
+		prefix := "NON-EMPTY DISK"
+		if hasAxonwall {
+			prefix = "EXISTING AXONWALL DETECTED"
+		} else if hasOtherOS {
+			prefix = "EXISTING OS DETECTED"
+		}
+		for _, w := range diskWarnings {
+			notes = append(notes, fmt.Sprintf("%s: %s", prefix, w))
+		}
 	}
 	if cfg.Edition == "k3s-storage" {
 		effArc := cfg.ZfsArcMaxMB
@@ -1879,6 +2618,126 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 	fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 }
 
+func renderTargetDiskWarningsLine(disks []DiskDevice, cfg InstallerConfig) string {
+	hasNonEmpty, hasAxonwall, hasOtherOS, warnings := SummarizeTargetDiskWarnings(disks, cfg)
+	if !hasNonEmpty || len(warnings) == 0 {
+		return ""
+	}
+	joined := strings.Join(warnings, " | ")
+	switch {
+	case hasAxonwall:
+		return fmt.Sprintf(" %s⚠️  EXISTING AXONWALL INSTALLATION DETECTED: %s%s\n", colorYellow+colorBold, joined, colorReset)
+	case hasOtherOS:
+		return fmt.Sprintf(" %s⚠️  EXISTING OPERATING SYSTEM DETECTED: %s%s\n", colorRed+colorBold, joined, colorReset)
+	default:
+		return fmt.Sprintf(" %s⚠️  NON-EMPTY TARGET DISK(S) DETECTED: %s%s\n", colorYellow+colorBold, joined, colorReset)
+	}
+}
+
+func confirmReinstallFromInstalledSystem(reader *bufio.Reader, out io.Writer) bool {
+	if out == nil {
+		out = os.Stdout
+	}
+	hostname, _, _, _, _, _ := getSystemInfo()
+	edition := detectInstalledEdition()
+	mode := readInstalledMode()
+
+	fmt.Fprintf(out, "%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", colorRed, colorBold, colorReset)
+	fmt.Fprintf(out, "%s%s║  ⚠️   WARNING: SYSTEM IS BOOTED INTO AN ACTIVE AXONWALL INSTALLATION         ║%s\n", colorRed, colorBold, colorReset)
+	fmt.Fprintf(out, "%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n\n", colorRed, colorBold, colorReset)
+	fmt.Fprintf(out, "  Host: %s%s%s | Edition: %s%s%s | Active Mode: %s%s%s\n\n",
+		colorBold, hostname, colorReset,
+		colorCyan+colorBold, edition, colorReset,
+		colorYellow+colorBold, mode, colorReset)
+	fmt.Fprintf(out, "  You are launching the Disk Installer Utility from a running, installed system.\n")
+	fmt.Fprintf(out, "  Installing onto active or previously configured disks can overwrite live\n")
+	fmt.Fprintf(out, "  partitions, keys, and ZFS pools. Only proceed for recovery or dedicated\n")
+	fmt.Fprintf(out, "  secondary-disk imaging.\n\n")
+	fmt.Fprintf(out, "  %sType 'yes' to enter the Disk Installer Utility (or press [Enter] to cancel): %s", colorYellow+colorBold, colorReset)
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(line), "yes")
+}
+
+func confirmTargetDiskOverwrite(disks []DiskDevice, cfg InstallerConfig, reader *bufio.Reader, out io.Writer) bool {
+	hasNonEmpty, hasAxonwall, hasOtherOS, _ := SummarizeTargetDiskWarnings(disks, cfg)
+	if !hasNonEmpty {
+		return true
+	}
+	if out == nil {
+		out = os.Stdout
+	}
+
+	byPath := make(map[string]DiskDevice, len(disks))
+	for _, d := range disks {
+		byPath[d.Path] = d
+	}
+	seen := make(map[string]bool)
+	var nonEmptyTargets []DiskDevice
+	for _, group := range [][]string{cfg.SystemDisks, cfg.ZfsExtraDisks, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks} {
+		for _, p := range group {
+			if p == "" || seen[p] {
+				continue
+			}
+			seen[p] = true
+			if d, ok := byPath[p]; ok && d.ContentKind != "" && d.ContentKind != DiskContentEmpty {
+				nonEmptyTargets = append(nonEmptyTargets, d)
+			}
+		}
+	}
+
+	hdrColor := colorYellow
+	hdrTitle := "⚠️   WARNING: TARGET STORAGE DISK(S) ARE NOT EMPTY"
+	leadText := "Existing partitions, filesystems, or volume headers were detected on target storage:"
+	switch {
+	case hasAxonwall:
+		hdrColor = colorYellow
+		hdrTitle = "⚠️   EXISTING AXONWALL INSTALLATION DETECTED ON TARGET STORAGE"
+		leadText = "We detected an existing Axonwall installation on the target disk(s). Continuing will overwrite it:"
+	case hasOtherOS:
+		hdrColor = colorRed
+		hdrTitle = "⚠️   EXISTING OPERATING SYSTEM DETECTED ON TARGET STORAGE"
+		leadText = "An existing non-Axonwall operating system was detected on the target disk(s). Continuing will erase it:"
+	}
+
+	fmt.Fprintf(out, "%s%s╔══════════════════════════════════════════════════════════════════════════════╗%s\n", hdrColor, colorBold, colorReset)
+	fmt.Fprintf(out, "%s%s║  %-74s  ║%s\n", hdrColor, colorBold, hdrTitle, colorReset)
+	fmt.Fprintf(out, "%s%s╚══════════════════════════════════════════════════════════════════════════════╝%s\n\n", hdrColor, colorBold, colorReset)
+	fmt.Fprintf(out, "  %s\n\n", leadText)
+
+	for _, d := range nonEmptyTargets {
+		fmt.Fprintf(out, "   • %s%s%s (%.1f GB) — %s%s%s\n",
+			colorBold, d.Path, colorReset, d.SizeGB, hdrColor+colorBold, d.ContentSummary, colorReset)
+		limit := len(d.ContentDetails)
+		if limit > 4 {
+			limit = 4
+		}
+		for i := 0; i < limit; i++ {
+			fmt.Fprintf(out, "       - %s\n", d.ContentDetails[i])
+		}
+		if len(d.ContentDetails) > 4 {
+			fmt.Fprintf(out, "       - ... (%d more)\n", len(d.ContentDetails)-4)
+		}
+	}
+
+	fmt.Fprintln(out)
+	if cfg.KeepPartitions {
+		fmt.Fprintf(out, "  %sMode:%s KeepPartitions=true (existing GPT table preserved; target filesystems formatted).\n", colorYellow+colorBold, colorReset)
+	} else {
+		fmt.Fprintf(out, "  %sAction:%s Target partition tables, bootloaders, and existing data will be PERMANENTLY ERASED.\n", colorRed+colorBold, colorReset)
+	}
+	fmt.Fprintf(out, "\n  %sType 'yes' to confirm overwriting target disk(s) (or press [Enter] to go back): %s", colorYellow+colorBold, colorReset)
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(line), "yes")
+}
+
 // RunNextGenInstallerTUI launches the interactive multi-step Axonwall Next-Gen Installer TUI.
 func RunNextGenInstallerTUI(reader *bufio.Reader) {
 	suppressConsoleNoise()
@@ -1888,6 +2747,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 		fmt.Printf("%s[!] Installer utility '%s' not found on this system.%s\n", colorRed, installerPath, colorReset)
 		pause(reader)
 		return
+	}
+
+	if !isLiveMode() {
+		clearScreen()
+		if !confirmReinstallFromInstalledSystem(reader, os.Stdout) {
+			return
+		}
 	}
 
 	cfg := DefaultInstallerConfig()
@@ -2007,6 +2873,9 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			allTargetDisks = append(allTargetDisks, cfg.SystemDisks...)
 			allTargetDisks = append(allTargetDisks, cfg.ZfsExtraDisks...)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+			if wLine := renderTargetDiskWarningsLine(disks, cfg); wLine != "" {
+				fmt.Print(wLine)
+			}
 			if len(allTargetDisks) > 0 {
 				if cfg.KeepPartitions {
 					fmt.Printf(" %sReady to install onto pre-partitioned [%s] (preserving existing partition table).%s\n",
@@ -2115,6 +2984,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				step = 1
 			case "I", "ENTER":
 				if len(cfg.SystemDisks) > 0 {
+					clearScreen()
+					if !confirmTargetDiskOverwrite(disks, cfg, reader, os.Stdout) {
+						continue
+					}
 					executeLiveInstallation(cfg, eval, installerPath, reader)
 					return
 				}
@@ -2286,12 +3159,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 						cursor = colorEmerald + colorBold + "➜ " + colorReset
 					}
 					badge := formatDiskRoleBadge(d)
+					contentBadge := formatDiskContentBadge(d)
 					remTag := ""
 					if d.Removable {
 						remTag = colorYellow + " [Removable]" + colorReset
 					}
-					fmt.Printf(" %s%s  %s%-12s%s  %8.1f GB  %-8s  %s%s\n",
-						cursor, badge, colorBold, d.Path, colorReset, d.SizeGB, d.Transport, d.Model, remTag)
+					fmt.Printf(" %s%s  %s%-12s%s  %8.1f GB  %-8s  %s%s  %s\n",
+						cursor, badge, colorBold, d.Path, colorReset, d.SizeGB, d.Transport, d.Model, remTag, contentBadge)
 				}
 			}
 
@@ -2440,6 +3314,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "W":
 				clearScreen()
 				cmd := exec.Command("/bin/sh", installerPath, "--shell-wizard")
+				cmd.Env = append(os.Environ(), "AXONWALL_REINSTALL_CONFIRMED=1")
 				cmd.Stdin = os.Stdin
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
@@ -2908,6 +3783,9 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			allTargetDisks = append(allTargetDisks, cfg.ZfsSpareDisks...)
 
 			fmt.Println("\n────────────────────────────────────────────────────────────────────────────────")
+			if wLine := renderTargetDiskWarningsLine(disks, cfg); wLine != "" {
+				fmt.Print(wLine)
+			}
 			if cfg.KeepPartitions {
 				fmt.Printf(" %sNOTE: Existing partition table on [%s] will be PRESERVED (formatting target filesystems only).%s\n",
 					colorYellow+colorBold, strings.Join(allTargetDisks, ", "), colorReset)
@@ -2927,6 +3805,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "W":
 				clearScreen()
 				cmd := exec.Command("/bin/sh", installerPath, "--shell-wizard")
+				cmd.Env = append(os.Environ(), "AXONWALL_REINSTALL_CONFIRMED=1")
 				cmd.Stdin = os.Stdin
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
@@ -2934,6 +3813,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				pause(reader)
 				return
 			case "I", "ENTER":
+				clearScreen()
+				if !confirmTargetDiskOverwrite(disks, cfg, reader, os.Stdout) {
+					continue
+				}
 				executeLiveInstallation(cfg, eval, installerPath, reader)
 				return
 			case "Q", "ESC":
