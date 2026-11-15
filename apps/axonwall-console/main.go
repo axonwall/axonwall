@@ -68,7 +68,7 @@ func getSystemInfo() (hostname, osName, kernel, uptime, loadAvg, memStr string) 
 		}
 	}
 	if osName == "" {
-		osName = "Debian GNU/Linux 13 (Trixie)"
+		osName = "Linux"
 	}
 
 	// Kernel version
@@ -79,7 +79,7 @@ func getSystemInfo() (hostname, osName, kernel, uptime, loadAvg, memStr string) 
 		}
 	}
 	if kernel == "" {
-		kernel = "Linux 6.12"
+		kernel = "Linux"
 	}
 
 	// Uptime
@@ -2709,7 +2709,7 @@ func flushSSSDCache() {
 	}
 	_ = exec.Command(sssCacheBin, "-u", "admin").Run()
 	_ = exec.Command(sssCacheBin, "-E").Run()
-	_ = exec.Command("systemctl", "try-restart", "sssd").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "try-restart", "sssd").Run()
 }
 
 func updateSambaUser(username, password string) bool {
@@ -2863,7 +2863,7 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 
 	// 6. Restart Web UI to apply new credentials
 	fmt.Println("Restarting Web UI to apply new credentials...")
-	_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "restart", "axonwall-ui").Run()
 	fmt.Printf("%s[✓] Web UI reloaded.%s\n", colorGreen, colorReset)
 
 	pause(reader)
@@ -2911,7 +2911,7 @@ func actionResetMFA(reader *bufio.Reader) {
 		stripMfaFromEnv("/etc/axonwall/axonwall.env", false)
 
 		fmt.Printf("\n%s[✓] MFA enforcement removed. Admin login will now only require username/password.%s\n", colorGreen, colorReset)
-		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "restart", "axonwall-ui").Run()
 	} else {
 		fmt.Println("Cancelled.")
 	}
@@ -3191,13 +3191,12 @@ func actionRestartServices(reader *bufio.Reader) {
 	case "k3s-storage":
 		fmt.Println("Restarting K3s + OpenZFS Storage Host services...")
 		k3sUnit := "k3s"
-		if data, err := os.ReadFile("/etc/axonwall/.k3s-edition"); err == nil && strings.Contains(string(data), "K3S_ROLE=agent") ||
-			strings.Contains(func() string { b, _ := os.ReadFile("/etc/axonwall/.k3s-edition"); return string(b) }(), "K3S_ROLE='agent'") {
+		if data, err := os.ReadFile("/etc/axonwall/.k3s-edition"); err == nil &&
+			(strings.Contains(string(data), "K3S_ROLE=agent") || strings.Contains(string(data), "K3S_ROLE='agent'")) {
 			k3sUnit = "k3s-agent"
-		} else if _, err := os.Stat("/etc/systemd/system/k3s-agent.service"); err == nil {
-			if _, srvErr := os.Stat("/etc/systemd/system/k3s.service"); srvErr != nil {
-				k3sUnit = "k3s-agent"
-			}
+		} else if unitExistsAny([]string{"/etc/systemd/system/k3s-agent.service", "/usr/lib/systemd/system/k3s-agent.service"}) &&
+			!unitExistsAny([]string{"/etc/systemd/system/k3s.service", "/usr/lib/systemd/system/k3s.service"}) {
+			k3sUnit = "k3s-agent"
 		}
 		services = []string{"axonwalld", k3sUnit}
 	case "vault":
@@ -3210,7 +3209,7 @@ func actionRestartServices(reader *bufio.Reader) {
 
 	for _, s := range services {
 		fmt.Printf("Restarting %s... ", s)
-		cmd := exec.Command("systemctl", "restart", s)
+		cmd := exec.Command("systemctl", "--no-ask-password", "restart", s)
 		if err := cmd.Run(); err == nil {
 			fmt.Printf("%s[OK]%s\n", colorGreen, colorReset)
 		} else {
@@ -3487,7 +3486,7 @@ func main() {
 				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 					fmt.Println("Rebooting appliance...")
 					// Try OpenRC / systemctl / standard reboot
-					_ = exec.Command("systemctl", "reboot").Run()
+					_ = exec.Command("systemctl", "--no-ask-password", "reboot").Run()
 					_ = exec.Command("/sbin/reboot").Run()
 					_ = exec.Command("reboot").Run()
 					// Block while system shuts down
@@ -3501,7 +3500,7 @@ func main() {
 				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 					fmt.Println("Powering off...")
 					// Try OpenRC / systemctl / poweroff
-					_ = exec.Command("systemctl", "poweroff").Run()
+					_ = exec.Command("systemctl", "--no-ask-password", "poweroff").Run()
 					_ = exec.Command("/sbin/poweroff").Run()
 					_ = exec.Command("poweroff").Run()
 					_ = exec.Command("/sbin/halt", "-p").Run()
@@ -3562,4 +3561,13 @@ func main() {
 			}
 		}
 	}
+}
+
+func unitExistsAny(paths []string) bool {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }

@@ -202,10 +202,27 @@
     "./kernel": {
       "types": "./dist/kernel/index.d.ts",
       "default": "./dist/kernel/index.js"
+    },
+    "./os": {
+      "types": "./dist/os/index.d.ts",
+      "default": "./dist/os/index.js"
+    },
+    "./compile/sdwan": {
+      "types": "./dist/compile/sdwan/index.d.ts",
+      "default": "./dist/compile/sdwan/index.js"
+    },
+    "./import/proxmox": {
+      "types": "./dist/import/proxmox/index.d.ts",
+      "default": "./dist/import/proxmox/index.js"
+    },
+    "./import/truenas": {
+      "types": "./dist/import/truenas/index.d.ts",
+      "default": "./dist/import/truenas/index.js"
     }
   },
   "scripts": {
     "build": "tsc --build",
+    "dev": "tsc --build --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"

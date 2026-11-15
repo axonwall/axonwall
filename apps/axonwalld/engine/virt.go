@@ -742,7 +742,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			if metaYaml == "" {
 				metaYaml = fmt.Sprintf("instance-id: vm-%d\nlocal-hostname: %s\n", vmid, sanitizeCloudInitScalar(spec.Name))
 			}
-			_ = os.WriteFile(filepath.Join(ciDir, "meta-data"), []byte(metaYaml), 0644)
+			_ = os.WriteFile(filepath.Join(ciDir, "meta-data"), []byte(metaYaml), 0600)
 
 			var userYaml string
 			if spec.CloudInit.UserData != "" {
@@ -769,7 +769,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					userYaml += "\n" + spec.CloudInit.CustomPayload + "\n"
 				}
 			}
-			_ = os.WriteFile(filepath.Join(ciDir, "user-data"), []byte(userYaml), 0644)
+			_ = os.WriteFile(filepath.Join(ciDir, "user-data"), []byte(userYaml), 0600)
 
 			netYaml := spec.CloudInit.NetworkConfig
 			if netYaml == "" {
@@ -781,7 +781,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					}
 				}
 			}
-			_ = os.WriteFile(filepath.Join(ciDir, "network-config"), []byte(netYaml), 0644)
+			_ = os.WriteFile(filepath.Join(ciDir, "network-config"), []byte(netYaml), 0600)
 
 			isoPath := fmt.Sprintf("/var/lib/axonwall/cloudinit/vm-%d-cidata.iso", vmid)
 			logger("Generating Cloud-Init NoCloud ISO %s...", isoPath)
@@ -793,7 +793,11 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					filepath.Join(ciDir, "meta-data"), filepath.Join(ciDir, "user-data"), filepath.Join(ciDir, "network-config"))
 				if outX, errX := cmdXorriso.CombinedOutput(); errX != nil {
 					logger("Warning: ISO generator unavailable (genisoimage/xorriso): %s / %s", string(out), string(outX))
+				} else {
+					_ = os.Chmod(isoPath, 0600)
 				}
+			} else {
+				_ = os.Chmod(isoPath, 0600)
 			}
 		}
 
@@ -846,7 +850,9 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					vfsSock := fmt.Sprintf("/run/axonwall/virtiofs/vm-%d-%s.sock", vmid, safeTag)
 					_ = os.Remove(vfsSock)
 					vfsCmd := exec.Command(vfsBin, "--socket-path="+vfsSock, "--shared-dir="+cleanHost, "--sandbox=namespace")
-					_ = vfsCmd.Start()
+					if startErr := vfsCmd.Start(); startErr == nil {
+						go func(c *exec.Cmd) { _ = c.Wait() }(vfsCmd)
+					}
 				}
 			}
 		}
@@ -1764,6 +1770,9 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 			srcZvol = fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, sourceVMID, idx)
 		}
 		dstZvol := fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, newVMID, idx)
+		if !validZfsPath(srcZvol, true) {
+			return CompiledVmSpec{}, fmt.Errorf("invalid source ZFS zvol path %q", srcZvol)
+		}
 		if hasZfs == nil && exec.Command("zfs", "list", "-H", srcZvol).Run() == nil {
 			snap := fmt.Sprintf("%s@clone-%d-%s", srcZvol, newVMID, stamp)
 			if out, err := exec.Command("zfs", "snapshot", snap).CombinedOutput(); err != nil {
@@ -1815,6 +1824,9 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 
 // RestoreBackup streams a compressed `.vma.zst` ZFS archive back into the target VM or LXC dataset.
 func (m *VirtManager) RestoreBackup(archiveName string, targetType string, targetID int, pool string, user string) (string, error) {
+	if targetID <= 0 {
+		return "", fmt.Errorf("invalid targetID %d: must be positive", targetID)
+	}
 	if pool == "" {
 		pool = m.defaultPool
 	}

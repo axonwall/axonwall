@@ -161,11 +161,11 @@ func NewKernelStudioManager() *KernelStudioManager {
 }
 
 var (
-	kernelVersionRe    = regexp.MustCompile(`^6\.[0-9]+\.[0-9]+$`)
+	kernelVersionRe    = regexp.MustCompile(`^(6|7)\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._+-]+)?$`)
 	kconfigSetLineRe   = regexp.MustCompile(`^CONFIG_[A-Z0-9_]{2,64}=(y|m|n|"[a-zA-Z0-9_,.-]*")$`)
 	kconfigUnsetLineRe = regexp.MustCompile(`^# CONFIG_[A-Z0-9_]{2,64} is not set$`)
 	kconfigCommentRe   = regexp.MustCompile(`^#[ a-zA-Z0-9._:,/()=+-]*$`)
-	artifactDebRe      = regexp.MustCompile(`^linux-image-[a-zA-Z0-9._+-]+\.deb$`)
+	artifactDebRe      = regexp.MustCompile(`^linux-(image-[a-zA-Z0-9._+-]+\.deb|[a-zA-Z0-9._+-]+\.pkg\.tar\.(zst|xz))$`)
 )
 
 var allowedKernelCapabilities = map[string]bool{
@@ -548,7 +548,12 @@ func (m *KernelStudioManager) resolveBuilderScript() string {
 }
 
 func (m *KernelStudioManager) inspectToolchain() KernelBuildToolchain {
-	required := []string{"gcc", "make", "flex", "bison", "bc", "pahole", "dpkg-deb"}
+	required := []string{"gcc", "make", "flex", "bison", "bc", "pahole"}
+	if DetectOSFamily() == "arch" {
+		required = append(required, "makepkg", "pacman", "mkinitcpio")
+	} else {
+		required = append(required, "dpkg-deb")
+	}
 	var missing, available []string
 	for _, tool := range required {
 		if _, err := exec.LookPath(tool); err == nil {
@@ -607,6 +612,12 @@ func (m *KernelStudioManager) listArtifacts() []KernelBuiltArtifact {
 		switch {
 		case strings.HasPrefix(name, "linux-image-") && strings.HasSuffix(name, ".deb"):
 			kind = "image-deb"
+		case strings.HasPrefix(name, "linux-") && (strings.HasSuffix(name, ".pkg.tar.zst") || strings.HasSuffix(name, ".pkg.tar.xz")):
+			if strings.Contains(name, "-headers-") {
+				kind = "headers-pkg"
+			} else {
+				kind = "image-pkg"
+			}
 		case strings.HasPrefix(name, "linux-headers-") && strings.HasSuffix(name, ".deb"):
 			kind = "headers-deb"
 		case strings.HasSuffix(name, ".config"):
@@ -782,7 +793,7 @@ func (m *KernelStudioManager) StartBuild(taskMgr *TaskManager, req KernelBuildRe
 		kver = "6.12.15"
 	}
 	if !kernelVersionRe.MatchString(kver) {
-		return "", "", fmt.Errorf("invalid kernel version %q (expected 6.x.y)", kver)
+		return "", "", fmt.Errorf("invalid kernel version %q (expected 6.x.y or 7.x.y)", kver)
 	}
 
 	arch := strings.TrimSpace(req.Arch)
@@ -1001,24 +1012,37 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			}
 			defer os.Remove(tmpDeb)
 
-			if out, err := exec.Command("chroot", mntDir, "dpkg", "-i", "/tmp/"+cleanName).CombinedOutput(); err != nil {
-				return fmt.Errorf("installing %s inside ZFS BE %s: %v (%s)", cleanName, newBeName, err, strings.TrimSpace(string(out)))
+			if strings.HasSuffix(cleanName, ".deb") {
+				if out, err := exec.Command("chroot", mntDir, "dpkg", "-i", "/tmp/"+cleanName).CombinedOutput(); err != nil {
+					return fmt.Errorf("installing %s inside ZFS BE %s: %v (%s)", cleanName, newBeName, err, strings.TrimSpace(string(out)))
+				}
+			} else {
+				if out, err := exec.Command("chroot", mntDir, "pacman", "-U", "--noconfirm", "/tmp/"+cleanName).CombinedOutput(); err != nil {
+					return fmt.Errorf("installing %s inside ZFS BE %s: %v (%s)", cleanName, newBeName, err, strings.TrimSpace(string(out)))
+				}
 			}
 			logfn("Installed %s inside standby ZFS Boot Environment %s", cleanName, newBeName)
 			return nil
 		}
 
-		// Standard A/B or rolling Debian root: install side-by-side (dpkg -i never removes running kernel)
-		if out, err := exec.Command("dpkg", "-i", debPath).CombinedOutput(); err != nil {
-			return fmt.Errorf("dpkg -i %s failed: %v (%s)", cleanName, err, strings.TrimSpace(string(out)))
-		}
-		logfn("Installed %s alongside running kernel.", cleanName)
-		if _, err := exec.LookPath("update-grub"); err == nil {
-			if out, err := exec.Command("update-grub").CombinedOutput(); err != nil {
-				logfn("Warning: update-grub returned error: %v (%s)", err, strings.TrimSpace(string(out)))
-			} else {
-				logfn("Updated GRUB menu entries.")
+		// Standard A/B or rolling root: install side-by-side without removing running kernel
+		if strings.HasSuffix(cleanName, ".deb") {
+			if out, err := exec.Command("dpkg", "-i", debPath).CombinedOutput(); err != nil {
+				return fmt.Errorf("dpkg -i %s failed: %v (%s)", cleanName, err, strings.TrimSpace(string(out)))
 			}
+			logfn("Installed %s alongside running kernel.", cleanName)
+			if _, err := exec.LookPath("update-grub"); err == nil {
+				if out, err := exec.Command("update-grub").CombinedOutput(); err != nil {
+					logfn("Warning: update-grub returned error: %v (%s)", err, strings.TrimSpace(string(out)))
+				} else {
+					logfn("Updated GRUB menu entries.")
+				}
+			}
+		} else {
+			if out, err := exec.Command("pacman", "-U", "--noconfirm", debPath).CombinedOutput(); err != nil {
+				return fmt.Errorf("pacman -U %s failed: %v (%s)", cleanName, err, strings.TrimSpace(string(out)))
+			}
+			logfn("Installed Arch kernel package %s via pacman -U.", cleanName)
 		}
 		return nil
 	})

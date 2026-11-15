@@ -594,6 +594,7 @@ func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.R
 	_, _ = logFile.Seek(0, os.SEEK_END)
 	reader := bufio.NewReader(logFile)
 	var pendingLine string
+	const maxPendingTelemetryLine = 256 * 1024
 
 	for {
 		select {
@@ -602,7 +603,12 @@ func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.R
 		default:
 			chunk, err := reader.ReadString('\n')
 			if len(chunk) > 0 {
-				pendingLine += chunk
+				if len(pendingLine)+len(chunk) > maxPendingTelemetryLine {
+					log.Printf("[VigilanteManager] discarding oversized telemetry log line (>%d bytes)", maxPendingTelemetryLine)
+					pendingLine = ""
+				} else {
+					pendingLine += chunk
+				}
 			}
 			if err == nil {
 				line := strings.TrimSpace(pendingLine)

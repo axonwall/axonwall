@@ -6,7 +6,9 @@
   "packageManager": "pnpm@12.9.1",
   "scripts": {
     "build": "turbo run build",
-    "dev": "turbo run dev --parallel",
+    "dev": "turbo run dev",
+    "dev:ui": "turbo run dev --filter=axonwall-ui",
+    "dev:daemon": "cd apps/axonwalld && mkdir -p bin && go build -o bin/axonwalld . && sudo --preserve-env=SUDO_UID,SUDO_GID,SUDO_USER,AXONWALL_AGENT_TOKEN,AXONWALL_DEV_MODE ./bin/axonwalld --dev",
     "lint": "turbo run lint",
     "format": "biome format --write .",
     "typecheck": "turbo run typecheck",

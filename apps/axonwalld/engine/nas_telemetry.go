@@ -191,10 +191,12 @@ func (m *NasManager) GetDeepTelemetry() NasDeepTelemetry {
 		}
 	}
 
-	smbActive := exec.Command("systemctl", "is-active", "--quiet", "smbd").Run() == nil
+	smbActive := exec.Command("systemctl", "is-active", "--quiet", "smbd").Run() == nil ||
+		exec.Command("systemctl", "is-active", "--quiet", "smb").Run() == nil
 	nfsActive := exec.Command("systemctl", "is-active", "--quiet", "nfs-server").Run() == nil
 	iscsiActive := exec.Command("systemctl", "is-active", "--quiet", "rtslib-fb-targetctl").Run() == nil ||
-		exec.Command("systemctl", "is-active", "--quiet", "tgt").Run() == nil
+		exec.Command("systemctl", "is-active", "--quiet", "tgt").Run() == nil ||
+		exec.Command("systemctl", "is-active", "--quiet", "target").Run() == nil
 
 	nfsExports := 0
 	if expBytes, err := os.ReadFile("/etc/exports"); err == nil {

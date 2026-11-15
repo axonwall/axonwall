@@ -25,27 +25,39 @@ export function compileCaptivePortal(config?: CaptivePortalConfig): CompiledCapt
     return { nftRules: [] };
   }
 
+  const SAFE_IFACE = /^[a-zA-Z0-9_.:-]+$/;
+  const SAFE_MAC = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+  const SAFE_IP_OR_CIDR = /^[0-9a-fA-F:.]+(\/\d{1,3})?$/;
   const nftRules: string[] = [];
 
   for (const zone of config.zones) {
     if (!zone.enabled) continue;
-    const iface = zone.interface;
-    const port = zone.listenPort || 8999;
+    const iface = String(zone.interface || '').trim();
+    if (!SAFE_IFACE.test(iface)) {
+      throw new Error(`Invalid captive portal interface: ${zone.interface}`);
+    }
+    const safeZoneName = String(zone.name || 'portal').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const port = Math.max(1, Math.min(65535, Math.trunc(Number(zone.listenPort) || 8999)));
 
     // Skip passthrough MACs
-    for (const mac of zone.passThroughMacs) {
+    for (const rawMac of zone.passThroughMacs) {
+      const mac = String(rawMac).trim();
+      if (!SAFE_MAC.test(mac)) continue;
       nftRules.push(`iifname "${iface}" ether saddr ${mac} accept comment "captive-passthrough-mac"`);
     }
 
     // Skip passthrough IPs
-    for (const ip of zone.passThroughIps) {
-      nftRules.push(`iifname "${iface}" ip saddr ${ip} accept comment "captive-passthrough-ip"`);
+    for (const rawIp of zone.passThroughIps) {
+      const ip = String(rawIp).trim();
+      if (!SAFE_IP_OR_CIDR.test(ip)) continue;
+      const family = ip.includes(':') ? 'ip6' : 'ip';
+      nftRules.push(`iifname "${iface}" ${family} saddr ${ip} accept comment "captive-passthrough-ip"`);
     }
 
     // HTTP redirection to captive portal portal
     nftRules.push(
-      `iifname "${iface}" tcp dport 80 redirect to :${port} comment "captive-${zone.name}-http"`,
-      `iifname "${iface}" tcp dport 443 redirect to :${port} comment "captive-${zone.name}-https"`
+      `iifname "${iface}" tcp dport 80 redirect to :${port} comment "captive-${safeZoneName}-http"`,
+      `iifname "${iface}" tcp dport 443 redirect to :${port} comment "captive-${safeZoneName}-https"`
     );
   }
 

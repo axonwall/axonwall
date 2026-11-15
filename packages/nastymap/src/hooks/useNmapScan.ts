@@ -1,3 +1,5 @@
+'use client';
+
 import { useState, useCallback, useMemo } from 'react';
 import type { NmapHost, NmapRun, TopologyGraph, TopologyLayoutType } from '../types/nmap';
 import { parseNmapXml } from '../parser/nmap-xml-parser';

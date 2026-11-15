@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useMemo } from 'react';
 import type { NmapHost, NmapRun, HostAction } from '../types/nmap';
 import { getHostIcon } from '../icons/index';

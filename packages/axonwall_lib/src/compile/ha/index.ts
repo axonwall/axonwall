@@ -1,4 +1,5 @@
 import type { HighAvailabilityConfig, DesiredState, HaSyncSections } from '../../schemas/index.js';
+import { resolveKeaHaHookPathPure as resolveKeaHaHookPath, type OsFamily } from '../../os/pure.js';
 
 /**
  * Compiles keepalived VRRP configuration (/etc/keepalived/keepalived.conf).
@@ -67,9 +68,9 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
     lines.push('        chk_axonwalld');
     lines.push('    }');
 
-    lines.push('    notify_master "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER"');
-    lines.push('    notify_backup "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP"');
-    lines.push('    notify_fault  "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT"');
+    lines.push('    notify_master "/usr/local/bin/axonwall-ha-notify MASTER"');
+    lines.push('    notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"');
+    lines.push('    notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"');
     lines.push('}');
     lines.push('');
   }
@@ -228,7 +229,17 @@ export function filterHaSyncState(state: DesiredState, sync: HaSyncSections): Pa
 /**
  * Compiles ISC Kea DHCPv4 HA hook configuration block.
  */
-export function compileKeaHaHook(ha: HighAvailabilityConfig, localIp: string): Record<string, any> | null {
+export function compileKeaHaHook(
+  ha: HighAvailabilityConfig,
+  localIp: string,
+  opts?: {
+    osFamily?: OsFamily;
+    arch?: string;
+    hookPath?: string;
+    probeHost?: boolean;
+    existsFn?: (p: string) => boolean;
+  },
+): Record<string, any> | null {
   if (!ha.enabled) return null;
 
   const effectiveRole = ha.role || ha.nodeRole || 'master';
@@ -244,8 +255,16 @@ export function compileKeaHaHook(ha: HighAvailabilityConfig, localIp: string): R
   }
 
   const isPrimary = effectiveRole === 'master';
+  const library =
+    opts?.hookPath ||
+    resolveKeaHaHookPath({
+      osFamily: opts?.osFamily,
+      arch: opts?.arch,
+      probeHost: opts?.probeHost,
+      existsFn: opts?.existsFn,
+    });
   return {
-    library: '/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_ha.so',
+    library,
     parameters: {
       'high-availability': [
         {

@@ -208,7 +208,7 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 		if autoPromote {
 			slog.Info("Promoting local Headscale service to Active Master...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
-				_ = exec.Command("systemctl", "try-reload-or-restart", "headscale").Run()
+				_ = exec.Command("systemctl", "--no-ask-password", "try-reload-or-restart", "headscale").Run()
 			}
 		}
 
@@ -231,7 +231,7 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 		if autoPromote {
 			slog.Info("Demoting local node to Standby: stopping Headscale to prevent split-brain writes...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
-				_ = exec.Command("systemctl", "stop", "headscale").Run()
+				_ = exec.Command("systemctl", "--no-ask-password", "stop", "headscale").Run()
 			}
 		}
 
@@ -422,10 +422,11 @@ func (m *SqliteSyncManager) startMasterServer() error {
 	}
 
 	m.server = &http.Server{
-		Addr:         listenAddr,
-		Handler:      m.syncMux(),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 300 * time.Second,
+		Addr:              listenAddr,
+		Handler:           m.syncMux(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      300 * time.Second,
 	}
 
 	if m.cfg.AuthToken == "" {
@@ -905,7 +906,7 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 				}
 				_, cfgErr := os.Stat("/etc/rancher/k3s/config.yaml")
 				if (km != nil && km.IsEnabled()) || cfgErr == nil {
-					if err := exec.Command("systemctl", "reload-or-restart", "k3s").Run(); err != nil {
+					if err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "k3s").Run(); err != nil {
 						slog.Error("HA Backup Poller: Failed to reload k3s after retrieving join token", "error", err)
 					}
 				}
@@ -973,6 +974,30 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 	}
 	if fromSnap != "" && (!validZfsSnapshotName(fromSnap) || !strings.HasPrefix(fromSnap, dataset+"@")) {
 		http.Error(w, "Invalid from snapshot parameter", http.StatusBadRequest)
+		return
+	}
+
+	if strings.HasPrefix(dataset, "zroot/ROOT") || strings.Contains(dataset, "/ROOT/") {
+		http.Error(w, "Access to root boot environment dataset denied", http.StatusForbidden)
+		return
+	}
+
+	m.mu.Lock()
+	nm := m.nasManager
+	m.mu.Unlock()
+	var allowedDatasets []string
+	if nm != nil {
+		allowedDatasets = nm.GetReplicatedDatasets()
+	}
+	allowed := false
+	for _, ds := range allowedDatasets {
+		if ds == dataset {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		http.Error(w, "Access to requested ZFS dataset denied", http.StatusForbidden)
 		return
 	}
 
@@ -1450,7 +1475,7 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 	}
 	if headscaleWasActive {
 		defer func() {
-			if err := exec.Command("systemctl", "start", "headscale").Run(); err != nil {
+			if err := exec.Command("systemctl", "--no-ask-password", "start", "headscale").Run(); err != nil {
 				slog.Error("HA sync: FAILED to restart headscale after database replace; service is down", "error", err)
 			}
 		}()
@@ -1515,7 +1540,7 @@ func stopServiceIfActive(unit string) bool {
 	if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err != nil {
 		return false
 	}
-	if err := exec.Command("systemctl", "stop", unit).Run(); err != nil {
+	if err := exec.Command("systemctl", "--no-ask-password", "stop", unit).Run(); err != nil {
 		slog.Warn("HA sync: failed to stop service before database replace", "service", unit, "error", err)
 		return false
 	}

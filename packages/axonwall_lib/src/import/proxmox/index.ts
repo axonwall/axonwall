@@ -369,7 +369,7 @@ function parseProxmoxLxc(ctid: number, lines: string[], defaultPool: string): Lx
         mac: kv.hwaddr && /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(kv.hwaddr) ? kv.hwaddr.toLowerCase() : '',
         bridge: kv.bridge || 'vmbr0',
         vlanTag: kv.tag ? Number.parseInt(kv.tag, 10) : undefined,
-        vnet: kv.ip && kv.ip !== 'dhcp' ? kv.ip : undefined,
+        vnet: kv.name && /^[a-zA-Z0-9_.:-]+$/.test(kv.name) ? kv.name : undefined,
         model: 'virtio',
         firewall: kv.firewall !== '0',
         rateLimitMbps: 0,

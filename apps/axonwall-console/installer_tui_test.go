@@ -765,3 +765,62 @@ func TestConfirmReinstallFromInstalledSystem(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectInstallerOSFamilyAndConsoleTTYGuard(t *testing.T) {
+	if got := DetectInstallerOSFamily("ID=omarchy\nID_LIKE=arch\nPRETTY_NAME=\"Omarchy 4.5.0\"\n"); got != "arch" {
+		t.Errorf("Omarchy os-release = %q, want arch", got)
+	}
+	if got := DetectInstallerOSFamily("ID=arch\n"); got != "arch" {
+		t.Errorf("Arch os-release = %q, want arch", got)
+	}
+	if got := DetectInstallerOSFamily("ID=alpine\n"); got != "alpine" {
+		t.Errorf("Alpine os-release = %q, want alpine", got)
+	}
+	if got := DetectInstallerOSFamily("ID=debian\n"); got != "debian" {
+		t.Errorf("Debian os-release = %q, want debian", got)
+	}
+
+	if !isPhysicalConsoleTTYPath("/dev/tty1") || !isPhysicalConsoleTTYPath("/dev/ttyS0") || !isPhysicalConsoleTTYPath("/dev/console") {
+		t.Errorf("expected physical console TTY paths to return true")
+	}
+	if isPhysicalConsoleTTYPath("/dev/pts/0") || isPhysicalConsoleTTYPath("/dev/null") || isPhysicalConsoleTTYPath("") {
+		t.Errorf("expected pts/non-physical paths to return false")
+	}
+}
+
+func TestSummarizeTargetDiskWarningsFallbackUnsyncedPrimary(t *testing.T) {
+	disks := []DiskDevice{
+		{
+			Path:           "/dev/nvme0n1",
+			SizeGB:         512,
+			SystemDisk:     true,
+			ContentKind:    DiskContentOtherOS,
+			ContentSummary: "Arch Linux / Omarchy",
+		},
+	}
+	cfg := DefaultInstallerConfig() // SystemDisks not yet synced
+	hasNonEmpty, hasAxonwall, hasOtherOS, warnings := SummarizeTargetDiskWarnings(disks, cfg)
+	if !hasNonEmpty || hasAxonwall || !hasOtherOS || len(warnings) != 1 {
+		t.Fatalf("unexpected summary for unsynced primary disk: nonEmpty=%v axonwall=%v otherOS=%v warnings=%v",
+			hasNonEmpty, hasAxonwall, hasOtherOS, warnings)
+	}
+	var out bytes.Buffer
+	if confirmTargetDiskOverwrite(disks, cfg, bufio.NewReader(strings.NewReader("n\n")), &out) {
+		t.Fatal("expected unsynced primary disk with other OS to require explicit 'yes'")
+	}
+	if !strings.Contains(out.String(), "/dev/nvme0n1") {
+		t.Fatalf("expected warning output to name /dev/nvme0n1, got:\n%s", out.String())
+	}
+
+	axonDisks := []DiskDevice{
+		{
+			Path:           "/dev/sda",
+			SizeGB:         128,
+			ContentKind:    DiskContentAxonwall,
+			ContentSummary: "Axonwall OS v0.11.67",
+		},
+	}
+	if confirmTargetDiskOverwrite(axonDisks, cfg, bufio.NewReader(strings.NewReader("\n")), &out) {
+		t.Fatal("expected single unassigned disk with existing Axonwall install to prompt warning")
+	}
+}

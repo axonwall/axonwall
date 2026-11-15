@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useRef } from 'react';
 import type { NmapRun } from '../types/nmap';
 import { parseNmapXml } from '../parser/nmap-xml-parser';

@@ -293,7 +293,11 @@ func issueNodeCertWithIPs(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hos
 func fixHAPKIPermissions() {
 	_ = os.Chmod("/var/lib/axonwall/secrets", 0750)
 	_ = os.Chmod(HAPKIDir, 0750)
-	if u, err := user.Lookup("openldap"); err == nil {
+	u, err := user.Lookup("openldap")
+	if err != nil {
+		u, err = user.Lookup("ldap")
+	}
+	if err == nil {
 		gid, _ := strconv.Atoi(u.Gid)
 		_ = os.Chown("/var/lib/axonwall/secrets", 0, gid)
 		_ = os.Chown(HAPKIDir, 0, gid)

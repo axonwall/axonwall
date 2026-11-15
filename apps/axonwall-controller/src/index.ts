@@ -49,6 +49,7 @@ import * as https from 'node:https';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
+import { resolveControllerDirs } from './dev-paths.js';
 import * as os from 'node:os';
 import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -255,9 +256,9 @@ function mintEmergencyTlsCert(caPath: string, caKeyPath: string): { cert: Buffer
 }
 
 export function ensureControllerTls(
-  certPath: string = '/etc/axonwall/certs/hub.crt',
-  keyPath: string = '/etc/axonwall/certs/hub.key',
-  caPath: string = '/etc/axonwall/certs/ca.crt',
+  certPath: string = resolveControllerDirs().certPath,
+  keyPath: string = resolveControllerDirs().keyPath,
+  caPath: string = resolveControllerDirs().caPath,
   caKeyPath: string = path.join(path.dirname(caPath), 'ca.key')
 ): ControllerTlsConfig | null {
   // If explicit insecure HTTP is requested for testing/mocking
@@ -567,10 +568,10 @@ export interface PersistedHaState {
   lanVip?: string;
 }
 
-const HA_STATE_PATHS = ['/var/lib/axonwall/active-ha-edge.json', '/etc/axonwall/active-ha-edge.json'];
-
 export function loadPersistedHaState(): PersistedHaState | null {
-  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  const paths = process.env.AXONWALL_HA_STATE_PATH
+    ? [process.env.AXONWALL_HA_STATE_PATH]
+    : resolveControllerDirs().haStatePaths;
   for (const p of paths) {
     try {
       if (fs.existsSync(p)) {
@@ -591,7 +592,9 @@ export function loadPersistedHaState(): PersistedHaState | null {
 }
 
 export function persistHaState(state: PersistedHaState): void {
-  const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : HA_STATE_PATHS;
+  const paths = process.env.AXONWALL_HA_STATE_PATH
+    ? [process.env.AXONWALL_HA_STATE_PATH]
+    : resolveControllerDirs().haStatePaths;
   const payload = JSON.stringify(state, null, 2);
   for (const p of paths) {
     try {
@@ -672,10 +675,10 @@ export function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRo
 // deletions; the file is bounded by fleet size in practice.
 export type PersistedSyncedRoutes = Record<string, SyncedRoute[]>;
 
-const SYNCED_ROUTES_STATE_PATHS = ['/var/lib/axonwall/synced-routes.json', '/etc/axonwall/synced-routes.json'];
-
 export function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null {
-  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH
+    ? [process.env.AXONWALL_SYNCED_ROUTES_PATH]
+    : resolveControllerDirs().syncedRoutesStatePaths;
   for (const p of paths) {
     try {
       if (fs.existsSync(p)) {
@@ -707,7 +710,9 @@ export function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null {
 }
 
 export function persistSyncedRoutes(routes: PersistedSyncedRoutes): void {
-  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : SYNCED_ROUTES_STATE_PATHS;
+  const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH
+    ? [process.env.AXONWALL_SYNCED_ROUTES_PATH]
+    : resolveControllerDirs().syncedRoutesStatePaths;
   const payload = JSON.stringify(routes, null, 2);
   for (const p of paths) {
     try {
@@ -1170,7 +1175,7 @@ async function main() {
   };
 
   function loadLocalDesiredState(): DesiredState | null {
-    const candidates = ['/etc/axonwall/state.json', '/var/lib/axonwall/state.json'];
+    const candidates = resolveControllerDirs().desiredStateCandidates;
     for (const p of candidates) {
       try {
         if (fs.existsSync(p)) {
@@ -1393,9 +1398,10 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
   // Set up an HTTP server for WebSocket upgrades and REST queries
   
   
-  const certPath = '/etc/axonwall/certs/hub.crt';
-  const keyPath = '/etc/axonwall/certs/hub.key';
-  const caPath = '/etc/axonwall/certs/ca.crt';
+  const controllerDirs = resolveControllerDirs();
+  const certPath = controllerDirs.certPath;
+  const keyPath = controllerDirs.keyPath;
+  const caPath = controllerDirs.caPath;
 
   const uiPort = parseInt(process.env.UI_PORT || '3000', 10);
   const port = parseInt(process.env.CONTROLLER_PORT || '2966', 10);

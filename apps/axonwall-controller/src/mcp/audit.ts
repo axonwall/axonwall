@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { McpAuditLogEntry, McpAuditMetadata } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile } from './lockfile.js';
+import { resolveControllerDirs } from '../dev-paths.js';
 
 const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 
@@ -10,7 +11,8 @@ export function resolveMcpAuditPath(): string {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) {
     return process.env.AXONWALL_MCP_AUDIT_PATH;
   }
-  for (const dir of ['/var/lib/axonwall', '/var/log/axonwall']) {
+  const dirs = resolveControllerDirs();
+  for (const dir of Array.from(new Set([dirs.varDir, dirs.logDir]))) {
     const file = path.join(dir, 'mcp-audit.jsonl');
     try {
       if (fs.existsSync(file)) {
@@ -24,7 +26,7 @@ export function resolveMcpAuditPath(): string {
       // try next candidate
     }
   }
-  const fallbackDir = '/tmp/axonwall';
+  const fallbackDir = dirs.devMode ? path.join(dirs.varDir, 'tmp') : '/tmp/axonwall';
   fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o775 });
   return path.join(fallbackDir, 'mcp-audit.jsonl');
 }

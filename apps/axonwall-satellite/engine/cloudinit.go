@@ -1159,12 +1159,56 @@ func writeCloudInitFile(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir stri
 		}
 	}
 
-	destPath := filepath.Join(rootDir, strings.TrimPrefix(cleanRel, "/"))
-	if err := os.MkdirAll(filepath.Dir(destPath), 0700); err != nil {
+	rootClean := filepath.Clean(rootDir)
+	if _, err := os.Stat(rootClean); os.IsNotExist(err) {
+		if err := os.MkdirAll(rootClean, 0755); err != nil {
+			return err
+		}
+	}
+	relParts := strings.Split(strings.TrimPrefix(cleanRel, "/"), "/")
+	curDir := rootClean
+	for i := 0; i < len(relParts)-1; i++ {
+		part := relParts[i]
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			return fmt.Errorf("invalid path traversal in write_files path %q", cleanRel)
+		}
+		curDir = filepath.Join(curDir, part)
+		if fi, lerr := os.Lstat(curDir); lerr == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("refusing symlink directory %q during cloud-init write_files", curDir)
+			}
+			if !fi.IsDir() {
+				return fmt.Errorf("expected directory at %q, found non-directory", curDir)
+			}
+		} else if os.IsNotExist(lerr) {
+			if merr := os.Mkdir(curDir, 0700); merr != nil {
+				return merr
+			}
+		} else {
+			return lerr
+		}
+	}
+
+	destPath := filepath.Join(rootClean, strings.TrimPrefix(cleanRel, "/"))
+	if fi, lerr := os.Lstat(destPath); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing symlink target %q during cloud-init write_files", destPath)
+	}
+	f, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, perm)
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(destPath, rawBytes, perm); err != nil {
-		return err
+	_, werr := f.Write(rawBytes)
+	if cerr := f.Chmod(perm); werr == nil && cerr != nil {
+		werr = cerr
+	}
+	if clErr := f.Close(); werr == nil && clErr != nil {
+		werr = clErr
+	}
+	if werr != nil {
+		return werr
 	}
 
 	// If the written file is an Axonwall environment file, also parse its key=value lines

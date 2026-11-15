@@ -281,13 +281,22 @@ export async function syncHosts({
   // this domain's slice. Previously a sync rebuilt the block from the
   // current domain alone, evicting every other instance's mappings.
   const preserved = extractManagedEntries(currentContent)
-    .filter(e => !hostnameBelongsToDomain(e.hostname, domain) && !targetHosts.includes(e.hostname));
-  const newBlock = [
-    BLOCK_START,
-    ...targetHosts.map(h => `${ip} ${h}`),
-    ...preserved.map(e => `${e.ip} ${e.hostname}`),
-    BLOCK_END
-  ].join('\n');
+    .filter(
+      (e) =>
+        !hostnameBelongsToDomain(e.hostname, domain) &&
+        !targetHosts.includes(e.hostname) &&
+        net.isIP(e.ip) &&
+        isValidHostname(e.hostname)
+    );
+  const validatedBlock = generateManagedBlock(targetHosts, ip);
+  const validatedLines = validatedBlock.split('\n');
+  const newBlockLines = [
+    validatedLines[0],
+    ...validatedLines.slice(1, -1),
+    ...preserved.map((e) => `${e.ip} ${e.hostname}`),
+    validatedLines[validatedLines.length - 1],
+  ];
+  const newBlock = newBlockLines.join('\n');
 
   // Replace every well-formed managed block with one fresh block at the
   // first block's location. Malformed markers are repaired without deleting

@@ -23,7 +23,7 @@ const (
 )
 
 var validRosenpassPeerNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
-var validWgDevNameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
+var validWgDevNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,14}$`)
 
 type RosenpassPeerKeyFile struct {
 	Name      string `json:"name"`
@@ -243,10 +243,10 @@ func startAndVerifyService(unit string) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return fmt.Errorf("systemd not available; %s daemon was provisioned but not started (no supported init)", unit)
 	}
-	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "daemon-reload").CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl daemon-reload failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
-	if out, err := exec.Command("systemctl", "enable", "--now", unit+".service").CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "enable", "--now", unit+".service").CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl enable --now %s failed: %s (%w)", unit, strings.TrimSpace(string(out)), err)
 	}
 	if out, err := exec.Command("systemctl", "is-active", "--quiet", unit).Output(); err != nil {

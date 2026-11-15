@@ -50,7 +50,9 @@ export default async function LobbyPage() {
             <span className="text-lg font-bold text-white mt-1 block">
               {Math.floor(status.uptimeSeconds / 3600)}h {Math.floor((status.uptimeSeconds % 3600) / 60)}m
             </span>
-            <span className="text-[11px] text-slate-400 mt-1 block font-mono">Debian 13 Linux ({arch})</span>
+            <span className="text-[11px] text-slate-400 mt-1 block font-mono">
+              {status.osName || 'Linux'} ({arch}){status.runtimeMode === 'dev' ? ' · dev' : ''}
+            </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
             <Activity className="w-5 h-5" />

@@ -701,7 +701,7 @@ func (d *DirectoryManager) listLDAPGroupsInternal() ([]LocalGroup, map[int]strin
 		for _, m := range members {
 			userGroups[m] = append(userGroups[m], name)
 		}
-		protected := name == "axonwall-admin" || name == "axonwall-operator" || name == "axonwall-readonly" || name == "sudo" || name == "adm"
+		protected := name == "axonwall-admin" || name == "axonwall-operator" || name == "axonwall-readonly" || name == "sudo" || name == "adm" || name == "wheel"
 		groups = append(groups, LocalGroup{
 			Name:      name,
 			GID:       gid,
@@ -1065,8 +1065,8 @@ loginShell: %s
 			groupErrs = append(groupErrs, fmt.Sprintf("group %s: attach failed: %v", g, err))
 			continue
 		}
-		// Also mirror membership in /etc/group for local groups like sudo/adm so OS tools work even if nsswitch caches
-		if g == "sudo" || g == "adm" {
+		// Also mirror membership in /etc/group for local admin groups (sudo/adm on Debian, wheel on Arch) when that local group exists.
+		if (g == "sudo" || g == "adm" || g == "wheel") && localEtcGroupExists("/etc/group", g) {
 			if err := exec.Command("usermod", "-a", "-G", g, username).Run(); err != nil {
 				groupErrs = append(groupErrs, fmt.Sprintf("group %s: local mirror failed: %v", g, err))
 			}
@@ -1200,7 +1200,7 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 			}
 		} else {
 			for _, g := range target.Groups {
-				if g != "axonwall-admin" && g != "axonwall-operator" && g != "axonwall-readonly" && g != "sudo" {
+				if g != "axonwall-admin" && g != "axonwall-operator" && g != "axonwall-readonly" && g != "sudo" && g != "wheel" {
 					desired[g] = true
 				}
 			}
@@ -1570,6 +1570,79 @@ func isValidNSSIdent(s string) bool {
 	return true
 }
 
+var (
+	mirroredNSSStatePath = "/var/lib/axonwall/ldap/mirrored-nss.json"
+	etcPasswdPath        = "/etc/passwd"
+	etcGroupPath         = "/etc/group"
+	etcShadowPath        = "/etc/shadow"
+)
+
+type mirroredNSSState struct {
+	Users  []string `json:"users"`
+	Groups []string `json:"groups"`
+}
+
+func loadMirroredNSSState(path string) (map[string]bool, map[string]bool) {
+	users := make(map[string]bool)
+	groups := make(map[string]bool)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return users, groups
+	}
+	var st mirroredNSSState
+	if json.Unmarshal(raw, &st) != nil {
+		return users, groups
+	}
+	for _, u := range st.Users {
+		if u != "" {
+			users[u] = true
+		}
+	}
+	for _, g := range st.Groups {
+		if g != "" {
+			groups[g] = true
+		}
+	}
+	return users, groups
+}
+
+func saveMirroredNSSState(path string, users, groups []string) {
+	if path == "" {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0750)
+	b, err := json.MarshalIndent(mirroredNSSState{Users: users, Groups: groups}, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = writeAtomicNSSFile(path, append(b, '\n'), 0640)
+}
+
+func localEtcGroupExists(groupFilePath, groupName string) bool {
+	b, err := os.ReadFile(groupFilePath)
+	if err != nil {
+		return false
+	}
+	prefix := groupName + ":"
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendAxonwallLDAPTag(gecos string) string {
+	gecos = strings.TrimSpace(gecos)
+	if strings.Contains(gecos, "[axonwall-ldap]") {
+		return gecos
+	}
+	if gecos == "" {
+		return "[axonwall-ldap]"
+	}
+	return gecos + " [axonwall-ldap]"
+}
+
 func writeAtomicNSSFile(targetPath string, data []byte, perm os.FileMode) error {
 	tmpPath := targetPath + ".axon_tmp"
 	if err := os.WriteFile(tmpPath, data, perm); err != nil {
@@ -1590,14 +1663,23 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 		return
 	}
 	ldapGroups, _, _, _ := d.listLDAPGroupsInternal()
+	d.applyLocalNSSMirror(deletedUser, ldapUsers, ldapGroups)
+}
+
+func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []LocalUser, ldapGroups []LocalGroup) {
+	mirroredUsers, mirroredGroups := loadMirroredNSSState(mirroredNSSStatePath)
 
 	ldapUserByName := make(map[string]LocalUser, len(ldapUsers))
+	var activeUsers []string
 	for _, u := range ldapUsers {
 		cleanU := cleanNSSField(u.Username)
 		if !isValidNSSIdent(cleanU) {
 			continue
 		}
 		ldapUserByName[cleanU] = u
+		if cleanU != "root" && cleanU != deletedUser {
+			activeUsers = append(activeUsers, cleanU)
+		}
 		if u.HomeDir != "" && u.UID >= 1000 {
 			seedUserZshrc(u.HomeDir, u.UID, u.GID)
 		}
@@ -1605,13 +1687,17 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 
 	// 1. Synchronize /etc/group
 	ldapGroupByName := make(map[string]LocalGroup, len(ldapGroups))
+	var activeGroups []string
 	for _, g := range ldapGroups {
 		cleanG := cleanNSSField(g.Name)
 		if isValidNSSIdent(cleanG) {
 			ldapGroupByName[cleanG] = g
+			if cleanG != deletedUser {
+				activeGroups = append(activeGroups, cleanG)
+			}
 		}
 	}
-	if groupBytes, err := os.ReadFile("/etc/group"); err == nil {
+	if groupBytes, err := os.ReadFile(etcGroupPath); err == nil {
 		var newGroupLines []string
 		seenGroups := make(map[string]bool)
 		for _, line := range strings.Split(string(groupBytes), "\n") {
@@ -1629,7 +1715,7 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 			}
 			gName := parts[0]
 			gGID, _ := strconv.Atoi(parts[2])
-			if deletedUser != "" && gName == deletedUser {
+			if deletedUser != "" && gName == deletedUser && mirroredGroups[gName] {
 				continue
 			}
 			if lg, ok := ldapGroupByName[gName]; ok {
@@ -1658,8 +1744,8 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 					}
 				}
 				newGroupLines = append(newGroupLines, fmt.Sprintf("%s:%s:%s:%s", cleanNSSField(gName), parts[1], parts[2], strings.Join(mergedMembers, ",")))
-			} else if gGID >= 10000 && gGID < 60000 {
-				// Stale LDAP group that was deleted from directory
+			} else if gGID >= 10000 && gGID < 60000 && mirroredGroups[gName] {
+				// Stale LDAP-mirrored group removed from directory (pre-existing local GIDs are preserved)
 				continue
 			} else {
 				newGroupLines = append(newGroupLines, line)
@@ -1681,13 +1767,13 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 		}
 		newGroupContent := strings.Join(newGroupLines, "\n") + "\n"
 		if newGroupContent != string(groupBytes) {
-			_ = writeAtomicNSSFile("/etc/group", []byte(newGroupContent), 0644)
+			_ = writeAtomicNSSFile(etcGroupPath, []byte(newGroupContent), 0644)
 		}
 	}
 
 	// 2. Synchronize /etc/passwd
 	validUsers := make(map[string]bool)
-	if passwdBytes, err := os.ReadFile("/etc/passwd"); err == nil {
+	if passwdBytes, err := os.ReadFile(etcPasswdPath); err == nil {
 		var newPasswdLines []string
 		seenUsers := make(map[string]bool)
 		for _, line := range strings.Split(string(passwdBytes), "\n") {
@@ -1705,13 +1791,14 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 			}
 			uName := parts[0]
 			uUID, _ := strconv.Atoi(parts[2])
-			if deletedUser != "" && uName == deletedUser {
+			isTrackedMirror := mirroredUsers[uName] || strings.Contains(parts[4], "[axonwall-ldap]")
+			if deletedUser != "" && uName == deletedUser && isTrackedMirror {
 				continue
 			}
 			if lu, ok := ldapUserByName[uName]; ok && uName != "root" {
 				seenUsers[uName] = true
 				validUsers[uName] = true
-				gecos := cleanNSSField(strings.ReplaceAll(lu.Comment, ":", " "))
+				gecos := appendAxonwallLDAPTag(cleanNSSField(strings.ReplaceAll(lu.Comment, ":", " ")))
 				home := cleanNSSField(lu.HomeDir)
 				if home == "" {
 					home = "/home/" + cleanNSSField(lu.Username)
@@ -1721,8 +1808,8 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 					sh = DefaultShellForRole(lu.ApplianceRole)
 				}
 				newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", cleanNSSField(lu.Username), lu.UID, lu.GID, gecos, home, sh))
-			} else if uUID >= 10000 && uUID < 60000 {
-				// Stale LDAP user removed from directory
+			} else if uUID >= 10000 && uUID < 60000 && isTrackedMirror {
+				// Stale LDAP-mirrored user removed from directory (local UIDs in 10000-59999 are preserved)
 				continue
 			} else {
 				validUsers[uName] = true
@@ -1735,7 +1822,7 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 				continue
 			}
 			validUsers[cleanU] = true
-			gecos := cleanNSSField(strings.ReplaceAll(lu.Comment, ":", " "))
+			gecos := appendAxonwallLDAPTag(cleanNSSField(strings.ReplaceAll(lu.Comment, ":", " ")))
 			home := cleanNSSField(lu.HomeDir)
 			if home == "" {
 				home = "/home/" + cleanU
@@ -1748,12 +1835,12 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 		}
 		newPasswdContent := strings.Join(newPasswdLines, "\n") + "\n"
 		if newPasswdContent != string(passwdBytes) {
-			_ = writeAtomicNSSFile("/etc/passwd", []byte(newPasswdContent), 0644)
+			_ = writeAtomicNSSFile(etcPasswdPath, []byte(newPasswdContent), 0644)
 		}
 	}
 
 	// 3. Synchronize /etc/shadow (use '*' for unlocked LDAP accounts so OpenSSH without PAM permits publickey auth)
-	if shadowBytes, err := os.ReadFile("/etc/shadow"); err == nil {
+	if shadowBytes, err := os.ReadFile(etcShadowPath); err == nil {
 		var newShadowLines []string
 		seenShadow := make(map[string]bool)
 		for _, line := range strings.Split(string(shadowBytes), "\n") {
@@ -1770,8 +1857,10 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 				continue
 			}
 			uName := parts[0]
-			if !validUsers[uName] || (deletedUser != "" && uName == deletedUser) {
-				continue
+			if !validUsers[uName] || (deletedUser != "" && uName == deletedUser && (mirroredUsers[uName] || len(ldapUserByName) > 0)) {
+				if !validUsers[uName] {
+					continue
+				}
 			}
 			if lu, ok := ldapUserByName[uName]; ok && uName != "root" {
 				seenShadow[uName] = true
@@ -1798,9 +1887,11 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 		}
 		newShadowContent := strings.Join(newShadowLines, "\n") + "\n"
 		if newShadowContent != string(shadowBytes) {
-			_ = writeAtomicNSSFile("/etc/shadow", []byte(newShadowContent), 0640)
+			_ = writeAtomicNSSFile(etcShadowPath, []byte(newShadowContent), 0640)
 		}
 	}
+
+	saveMirroredNSSState(mirroredNSSStatePath, activeUsers, activeGroups)
 }
 
 // axonwallSshdConfPath is the sshd drop-in written by SyncRootSshPolicy.
@@ -1860,8 +1951,8 @@ MaxAuthTries 3
 		if err := os.WriteFile(confPath, []byte(sshdConf), 0644); err != nil {
 			return fmt.Errorf("failed to write sshd config %s: %w", confPath, err)
 		}
-		if exec.Command("systemctl", "reload", "ssh").Run() != nil {
-			if exec.Command("systemctl", "reload", "sshd").Run() != nil {
+		if exec.Command("systemctl", "--no-ask-password", "reload", "ssh").Run() != nil {
+			if exec.Command("systemctl", "--no-ask-password", "reload", "sshd").Run() != nil {
 				if err := exec.Command("rc-service", "sshd", "reload").Run(); err != nil {
 					return fmt.Errorf("failed to reload sshd after updating %s (tried systemctl reload ssh, systemctl reload sshd, rc-service sshd reload): %w", confPath, err)
 				}
@@ -2087,10 +2178,45 @@ var (
 	ldapPluginSecretsDir = LDAPPluginSecretsDir
 )
 
+func isValidPluginLDAPID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		isLower := c >= 'a' && c <= 'z'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 && !isLower && !isDigit {
+			return false
+		}
+		if !isLower && !isDigit && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidPluginServiceCN(cn string) bool {
+	if len(cn) == 0 || len(cn) > 64 || strings.Contains(cn, "..") {
+		return false
+	}
+	for i := 0; i < len(cn); i++ {
+		c := cn[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // EnsurePluginLDAPIntegration idempotently provisions a dedicated least-privilege LDAP
 // service bind account in ou=services,<baseDN>, creates plugin POSIX groups in ou=groups,<baseDN>,
 // and writes standard credentials to /etc/axonwall/ldap-plugins/<pluginId>.json and .env.
 func (d *DirectoryManager) EnsurePluginLDAPIntegration(pluginID string, spec PluginLDAPSpec) (*PluginLDAPBinding, error) {
+	if !isValidPluginLDAPID(pluginID) {
+		return nil, fmt.Errorf("invalid plugin LDAP identifier %q: must match ^[a-z0-9][a-z0-9-]{0,63}$", pluginID)
+	}
 	d.mu.RLock()
 	baseDN := d.baseDN
 	d.mu.RUnlock()
@@ -2118,6 +2244,9 @@ func (d *DirectoryManager) EnsurePluginLDAPIntegration(pluginID string, spec Plu
 	svcCN := spec.ServiceAccountCN
 	if svcCN == "" {
 		svcCN = "svc-" + pluginID
+	}
+	if !isValidPluginServiceCN(svcCN) {
+		return nil, fmt.Errorf("invalid plugin LDAP service account CN %q", svcCN)
 	}
 	svcDN := fmt.Sprintf("cn=%s,ou=services,%s", svcCN, baseDN)
 

@@ -1068,7 +1068,9 @@ func (m *EBPFManager) Stop() {
 		l.Close()
 	}
 	m.links = nil
+	m.blockMu.Lock()
 	m.objs.Close()
+	m.blockMu.Unlock()
 	if m.ch != nil {
 		_ = m.ch.Close()
 	}

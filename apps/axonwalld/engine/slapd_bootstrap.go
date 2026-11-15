@@ -157,9 +157,11 @@ func ConfigureSlapdSystemPaths() error {
 			_ = os.Symlink("/etc/openldap/schema", "/etc/ldap/schema")
 		}
 	}
-	if _, err := os.Stat("/usr/lib/openldap"); err == nil {
-		if _, err := os.Stat("/usr/lib/ldap"); os.IsNotExist(err) {
-			_ = os.Symlink("/usr/lib/openldap", "/usr/lib/ldap")
+	if (DetectOSFamily() != "arch" || HasAxonwallMarker("/")) {
+		if _, err := os.Stat("/usr/lib/openldap"); err == nil {
+			if _, err := os.Stat("/usr/lib/ldap"); os.IsNotExist(err) {
+				_ = os.Symlink("/usr/lib/openldap", "/usr/lib/ldap")
+			}
 		}
 	}
 
@@ -217,11 +219,36 @@ listen_uris="ldap://127.0.0.1:389/ ldaps:/// ldapi:///"
 	return nil
 }
 
+func resolveSlapdModuleConfig() (string, string) {
+	modulePath := "/usr/lib/ldap"
+	if _, err := os.Stat(modulePath); err != nil {
+		if _, err2 := os.Stat("/usr/lib/openldap"); err2 == nil {
+			modulePath = "/usr/lib/openldap"
+		}
+	}
+	loadBackMDB := true
+	if info, err := os.Stat(modulePath); err == nil && info.IsDir() {
+		_, soErr := os.Stat(filepath.Join(modulePath, "back_mdb.so"))
+		_, laErr := os.Stat(filepath.Join(modulePath, "back_mdb.la"))
+		loadBackMDB = soErr == nil || laErr == nil
+	}
+	modules := []string{"syncprov", "ppolicy", "unique", "accesslog"}
+	if loadBackMDB {
+		modules = append([]string{"back_mdb"}, modules...)
+	}
+	var lines []string
+	for i, mod := range modules {
+		lines = append(lines, fmt.Sprintf("olcModuleLoad: {%d}%s", i, mod))
+	}
+	return modulePath, strings.Join(lines, "\n")
+}
+
 // BuildSlapdBootstrapConfigLDIF generates the initial cn=config LDIF for slapadd -n 0.
 func BuildSlapdBootstrapConfigLDIF(baseDN string, serverID int, adminHash string) string {
 	if serverID < 1 {
 		serverID = 1
 	}
+	modulePath, moduleLoads := resolveSlapdModuleConfig()
 	return fmt.Sprintf(`dn: cn=config
 objectClass: olcGlobal
 cn: config
@@ -234,12 +261,8 @@ olcLogLevel: stats sync
 dn: cn=module{0},cn=config
 objectClass: olcModuleList
 cn: module{0}
-olcModulePath: /usr/lib/ldap
-olcModuleLoad: {0}back_mdb
-olcModuleLoad: {1}syncprov
-olcModuleLoad: {2}ppolicy
-olcModuleLoad: {3}unique
-olcModuleLoad: {4}accesslog
+olcModulePath: %s
+%s
 
 dn: cn=schema,cn=config
 objectClass: olcSchemaConfig
@@ -307,7 +330,7 @@ olcOverlay: {2}ppolicy
 olcPPolicyDefault: cn=default,ou=policies,%s
 olcPPolicyHashCleartext: TRUE
 olcPPolicyUseLockout: TRUE
-`, serverID, LDAPDataDir, baseDN, baseDN, adminHash, baseDN, baseDN, baseDN)
+`, serverID, modulePath, moduleLoads, LDAPDataDir, baseDN, baseDN, adminHash, baseDN, baseDN, baseDN)
 }
 
 // BuildSlapdSeedDITLDIF generates the initial base tree LDIF (organizational units,
@@ -507,7 +530,7 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 
 	if needConfigBootstrap {
 		log.Printf("[Directory] Bootstrapping OpenLDAP cn=config in %s (baseDN=%s, serverID=%d)...", LDAPConfigDir, baseDN, serverID)
-		_ = exec.Command("systemctl", "stop", "slapd").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "stop", "slapd").Run()
 
 		adminHash, err := HashSSHA(adminPass)
 		if err != nil {
@@ -536,7 +559,7 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 	}
 
 	// Ensure slapd is enabled and running
-	_ = exec.Command("systemctl", "enable", "slapd").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "enable", "slapd").Run()
 	if !waitForSlapdReady(2 * time.Second) {
 		// A-L23: the old code waited only 200ms after a restart and
 		// then assumed systemd was unavailable, killed the
@@ -546,7 +569,7 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 		// fall back to a manual slapd when systemd is not PID 1:
 		// under systemd a failed restart or an unanswering daemon
 		// is a real error, not a cue to pkill it.
-		out, err := exec.Command("systemctl", "restart", "slapd").CombinedOutput()
+		out, err := exec.Command("systemctl", "--no-ask-password", "restart", "slapd").CombinedOutput()
 		if err == nil && waitForSlapdReady(10*time.Second) {
 			// Restarted and answering.
 		} else if isSystemdPID1() {

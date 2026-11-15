@@ -721,8 +721,8 @@ export type SuricataConfig = z.infer<typeof SuricataConfigSchema>;
 
 export const CaptivePortalZoneSchema = z.object({
   id: z.string().uuid().optional(),
-  name: z.string().min(1),
-  interface: z.string().min(1),
+  name: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/),
+  interface: z.string().min(1).regex(/^[a-zA-Z0-9_.:-]+$/),
   listenPort: z.number().int().default(8999),
   authServers: z.array(z.string()).default(['ldap_internal']),
   radiusSecret: z.string().optional(),
@@ -1066,6 +1066,7 @@ export const PluginManifestSchema = z.object({
   packages: z.object({
     debian: z.array(z.string()).default([]),
     alpine: z.array(z.string()).default([]),
+    arch: z.array(z.string()).default([]),
   }).optional(),
   cliBinaries: z.array(z.string()).optional(),
 });
@@ -1919,8 +1920,8 @@ export type IsoImage = z.infer<typeof IsoImageSchema>;
 export const PciPassthroughDeviceSchema = z.object({
   id: z.string().optional(),
   bdf: z.string().regex(/^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/),
-  vendorId: z.string().optional(),
-  deviceId: z.string().optional(),
+  vendorId: z.string().regex(/^[0-9a-fA-F]{4}$/).optional(),
+  deviceId: z.string().regex(/^[0-9a-fA-F]{4}$/).optional(),
   deviceClass: z.string().optional(),
   iommuGroup: z.number().int().min(0).default(0),
   driver: z.enum(['vfio-pci', 'host', 'other']).default('vfio-pci'),
@@ -2014,7 +2015,7 @@ export const VigilanteModuleConfigSchema = z.object({
   namespace: z.string().default('vigilante-soc'),
   storageClass: z.enum(['axonwall-replicated-ha', 'axonwall-zfs-local', 'default']).default('axonwall-zfs-local'),
   storageSizeGb: z.number().int().min(1).default(10),
-  ingressHostname: z.string().optional(),
+  ingressHostname: z.string().regex(/^[a-zA-Z0-9.-]+$/).optional(),
   customValuesYaml: z.string().default(''),
 });
 export type VigilanteModuleConfig = z.infer<typeof VigilanteModuleConfigSchema>;
@@ -2069,13 +2070,16 @@ export const HostMalwareDefenseConfigSchema = z.object({
     z.string().regex(/^\/[a-zA-Z0-9._/-]+$/, 'Trusted BPF loader path must be a safe absolute path'),
   ).default([
     '/usr/sbin/bpftool',
+    '/usr/bin/bpftool',
     '/usr/local/bin/axonwalld',
+    '/usr/bin/axonwalld',
   ]),
   blockAfAlgAeadCopyfail: z.boolean().default(true),
   trustedAfAlgPaths: z.array(
     z.string().regex(/^\/[a-zA-Z0-9._/-]+$/, 'Trusted AF_ALG path must be a safe absolute path'),
   ).default([
     '/usr/sbin/cryptsetup',
+    '/usr/bin/cryptsetup',
   ]),
   progIdrKcoreDiffEnabled: z.boolean().default(true),
   pmuLbrBranchTracingEnabled: z.boolean().default(true),
@@ -2122,7 +2126,7 @@ export type VigilanteLdapAuthConfig = z.infer<typeof VigilanteLdapAuthSchema>;
 export const VigilanteConfigSchema = z.object({
   enabled: z.boolean().default(false),
   posture: z.enum(['monitoring', 'hybrid', 'enforcing']).default('hybrid'),
-  domain: z.string().default('vigilante.local'),
+  domain: z.string().regex(/^[a-zA-Z0-9.-]+$/).default('vigilante.local'),
   modules: z.array(VigilanteModuleConfigSchema).default([
     { id: 'vigil-soc', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 20, customValuesYaml: '' },
     { id: 'opensearch', enabled: false, namespace: 'vigilante-soc', storageClass: 'axonwall-zfs-local', storageSizeGb: 50, customValuesYaml: '' },
@@ -2347,7 +2351,7 @@ export const EluvixConfigSchema = z.object({
   deploymentMode: z.enum(['systemd', 'docker', 'k3s-helm']).default('systemd'),
   listenPort: z.number().int().min(1).max(65535).default(3588),
   switchyardPort: z.number().int().min(1).max(65535).default(8080),
-  domain: z.string().default('eluvix.axonwall.local'),
+  domain: z.string().regex(/^[a-zA-Z0-9.-]+$/).default('eluvix.axonwall.local'),
   gitRepoUrl: z.string().default('git@github.com:Eluvixrouter/eluvix.git'),
   samePortTlsAutoUpgrade: z.boolean().default(true),
   syncUnboundDns: z.boolean().default(true),

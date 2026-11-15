@@ -275,7 +275,7 @@ func main() {
 		// falling back to the fail-closed emergency lockdown ruleset before connecting to Hub.
 		// Forwarding stays disabled (fail-closed) unless a filtering ruleset loads.
 		initialScript := engine.BuildEmergencyLockdownNft(*coreURL)
-		if ciNftBytes, err := os.ReadFile("/etc/nftables.conf"); err == nil && strings.Contains(string(ciNftBytes), "chain forward") {
+		if ciNftBytes, err := os.ReadFile("/etc/nftables.conf"); err == nil && hasNonCommentForwardChain(string(ciNftBytes)) {
 			initialScript = string(ciNftBytes)
 			slog.Info("Loading Cloud-Init baseline router nftables ruleset from /etc/nftables.conf")
 		}
@@ -794,4 +794,16 @@ func main() {
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+func hasNonCommentForwardChain(nftContent string) bool {
+	for _, rawLine := range strings.Split(nftContent, "\n") {
+		if idx := strings.IndexByte(rawLine, '#'); idx >= 0 {
+			rawLine = rawLine[:idx]
+		}
+		if strings.Contains(rawLine, "chain forward") {
+			return true
+		}
+	}
+	return false
 }

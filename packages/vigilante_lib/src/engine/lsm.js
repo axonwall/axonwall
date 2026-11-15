@@ -58,13 +58,25 @@ export function compileLsmRuleToFilter(rule = {}) {
 
   if (rule.comm) {
     const comms = Array.isArray(rule.comm) ? rule.comm : [rule.comm];
-    const commChecks = comms.map(c => `!bpf_strncmp(current_comm, ${String(c).length}, "${escapeCString(c)}")`).join(' || ');
+    const commChecks = comms
+      .map((c) => {
+        const raw = String(c);
+        const cmpLen = Math.min(Buffer.byteLength(raw, 'utf8'), 16);
+        return `!bpf_strncmp(current_comm, ${cmpLen}, "${escapeCString(raw.slice(0, 16))}")`;
+      })
+      .join(' || ');
     conditions.push(`(${commChecks})`);
   }
 
   if (rule.parentComm) {
     const pcomms = Array.isArray(rule.parentComm) ? rule.parentComm : [rule.parentComm];
-    const pChecks = pcomms.map(p => `!bpf_strncmp(parent_comm, ${String(p).length}, "${escapeCString(p)}")`).join(' || ');
+    const pChecks = pcomms
+      .map((p) => {
+        const raw = String(p);
+        const cmpLen = Math.min(Buffer.byteLength(raw, 'utf8'), 16);
+        return `!bpf_strncmp(parent_comm, ${cmpLen}, "${escapeCString(raw.slice(0, 16))}")`;
+      })
+      .join(' || ');
     conditions.push(`(${pChecks})`);
   }
 
@@ -311,8 +323,9 @@ int BPF_PROG(lsm_bprm_check_security, struct linux_binprm *bprm, int ret)
 
 ${commonDecls}
 
-    char target_path[256];
-    bpf_probe_read_kernel_str(target_path, sizeof(target_path), bprm->filename);
+    char target_path[256] = {};
+    if (bpf_probe_read_kernel_str(target_path, sizeof(target_path), bprm->filename) < 0)
+        return 0;
 
 ${bprmRules.map(r => ruleBlock(r, 'execve: %s')).join('\n\n')}
 
@@ -327,8 +340,9 @@ int BPF_PROG(lsm_file_open, struct file *file, int ret)
 
 ${commonDecls}
 
-    char target_path[256];
-    bpf_d_path(&file->f_path, target_path, sizeof(target_path));
+    char target_path[256] = {};
+    if (bpf_d_path(&file->f_path, target_path, sizeof(target_path)) < 0)
+        return 0;
 
 ${fileRules.map(r => ruleBlock(r, 'file_open: %s')).join('\n\n')}
 

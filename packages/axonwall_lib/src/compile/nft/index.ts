@@ -426,7 +426,9 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Compile IPsec & Traffic Shaper early so XFRM/TC commands are included in netdev reconciliation
   const ipsecCompiled = state.ipsec?.enabled ? compileIpsec(state.ipsec) : undefined;
-  const tcCompiled = state.trafficShaper?.enabled ? compileTrafficShaper(state.trafficShaper) : undefined;
+  const tcCompiled = state.trafficShaper?.enabled
+    ? compileTrafficShaper(state.trafficShaper, state.interfaces)
+    : undefined;
 
   if (
     (state.vlans?.length ?? 0) > 0 ||
@@ -524,7 +526,11 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   // Emit Vigilant Octo Waffle (VOW) K3s GitOps & App Platform configuration
-  if (state.vow?.enabled || state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled)) {
+  const vowRequested =
+    state.vow?.enabled !== undefined
+      ? state.vow.enabled
+      : Boolean(state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled));
+  if (vowRequested) {
     const vowCompiled = compileVowBundle(state);
     files.push({
       path: '/etc/axonwall/managed/vow_config.json',
@@ -613,7 +619,7 @@ export function compileNftables(state: DesiredState): CompileResult {
         },
       };
     }
-    const frr = compileFrr(effectiveFrr);
+    const frr = compileFrr(effectiveFrr, state.interfaces);
     files.push({
       path: '/etc/frr/frr.conf',
       content: frr.frrConf,
@@ -1647,6 +1653,8 @@ export function compileNftables(state: DesiredState): CompileResult {
   for (const sg of virtSecGroups) {
     const sgChain = sanitizeIdentifier(sg.name);
     lines.push(`  chain virt_sg_${sgChain}_in {`);
+    lines.push('    ct state established,related accept');
+    lines.push('    ct state invalid drop');
     for (const rule of (sg.rules ?? []).filter((r) => r.direction === 'in')) {
       lines.push(`    ${formatSgRule(rule, 'saddr')}`);
     }
@@ -1654,6 +1662,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('');
 
     lines.push(`  chain virt_sg_${sgChain}_out {`);
+    lines.push('    ct state established,related accept');
+    lines.push('    ct state invalid drop');
     for (const rule of (sg.rules ?? []).filter((r) => r.direction === 'out')) {
       lines.push(`    ${formatSgRule(rule, 'daddr')}`);
     }

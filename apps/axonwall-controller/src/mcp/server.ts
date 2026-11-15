@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
+import { resolveControllerDirs } from '../dev-paths.js';
 import * as crypto from 'node:crypto';
 import {
   McpBlackholeRequestSchema,
@@ -38,12 +39,8 @@ import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
 export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 
-const AGENT_SOCKET_PATH = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
-const AGENT_TOKEN_PATHS = [
-  '/etc/axonwall/agent.token',
-  '/var/lib/axonwall/etc-axonwall/agent.token',
-  '/run/axonwall/agent.token',
-];
+const AGENT_SOCKET_PATH = resolveControllerDirs().agentSock;
+const AGENT_TOKEN_PATHS = resolveControllerDirs().agentTokenPaths;
 
 function readAgentToken(): string {
   if (process.env.AXONWALL_AGENT_TOKEN) {
@@ -169,12 +166,7 @@ export async function callAxonwalldApi<T = any>(
 }
 
 function loadLocalDesiredState(): DesiredState | null {
-  const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
-  const candidates = [
-    ...(customState ? [customState] : []),
-    '/etc/axonwall/state.json',
-    '/var/lib/axonwall/state.json',
-  ];
+  const candidates = resolveControllerDirs().desiredStateCandidates;
   for (const p of candidates) {
     try {
       if (fs.existsSync(p)) {
@@ -190,6 +182,7 @@ function loadLocalDesiredState(): DesiredState | null {
 }
 
 function persistDesiredStateToDisk(targetState: DesiredState): void {
+  const dirs = resolveControllerDirs();
   const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
   if (customState) {
     try {
@@ -205,20 +198,20 @@ function persistDesiredStateToDisk(targetState: DesiredState): void {
     }
     return;
   }
-  try {
-    fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-  } catch {
-    // Fallback if /etc/axonwall not writable in dev
+  for (const statePath of Array.from(new Set([path.join(dirs.etcDir, 'state.json'), dirs.stateFile]))) {
+    try {
+      fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o770 });
+      fs.writeFileSync(statePath, JSON.stringify(targetState, null, 2), { mode: 0o600 });
+    } catch {
+      // Fallback if target directory not writable
+    }
   }
   try {
-    fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-  } catch {}
-  try {
     const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
-    for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+    for (const dir of Array.from(new Set([dirs.etcDir, dirs.persistYamlDir]))) {
       if (fs.existsSync(dir)) {
         for (const [fn, content] of Object.entries(yamlFiles)) {
-          fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
+          fs.writeFileSync(path.join(dir, fn), content, { mode: 0o660 });
         }
       }
     }
@@ -2272,27 +2265,6 @@ export async function handleMcpCallTool(
         }
       }
 
-      const persistDesiredState = (targetState: DesiredState) => {
-        try {
-          fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-        } catch {
-          // Fallback if /etc/axonwall not writable in dev
-        }
-        try {
-          fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-        } catch {}
-        try {
-          const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
-          for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
-            if (fs.existsSync(dir)) {
-              for (const [fn, content] of Object.entries(yamlFiles)) {
-                fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
-              }
-            }
-          }
-        } catch {}
-      };
-
       // B2-M4: serialize the load -> mutate -> persist window with
       // the MCP lockfile. Two concurrent proposes (or a propose
       // racing a console/TUI save) used to load the same state,
@@ -2320,7 +2292,7 @@ export async function handleMcpCallTool(
           return deny('mcp:firewall:write', 'DesiredState file (/etc/axonwall/state.json) not found on appliance', req.audit);
         }
         insertMcpRuleIntoState(fresh, req.rule);
-        persistDesiredState(fresh);
+        persistDesiredStateToDisk(fresh);
         liveState = fresh;
       } finally {
         releaseStateLock?.();
@@ -2376,7 +2348,7 @@ export async function handleMcpCallTool(
                 const idx = fresh.rules.findIndex((r) => JSON.stringify(r) === stagedRuleJson);
                 if (idx !== -1) {
                   fresh.rules.splice(idx, 1);
-                  persistDesiredState(fresh);
+                  persistDesiredStateToDisk(fresh);
                 }
               }
             }

@@ -259,9 +259,9 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	if !bundle.Enabled {
 		slog.Info("K3s plugin is disabled; stopping k3s service")
 		_ = removeFileIfExists(filepath.Join(k3sEtcDir, "config.yaml"))
-		_ = exec.Command("systemctl", "stop", "k3s").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s").Run()
 		if hasK3sAgentServiceUnit() || isK3sEditionAgent() {
-			_ = exec.Command("systemctl", "stop", "k3s-agent").Run()
+			_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s-agent").Run()
 		}
 		return nil
 	}
@@ -374,7 +374,7 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	// A-M15: a failed k3s restart fails the apply instead of being
 	// discarded while the bundle reports success and the cluster runs
 	// the old manifests or no k3s at all.
-	if out, err := exec.Command("systemctl", "reload-or-restart", k3sServiceUnit).CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", k3sServiceUnit).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s: %v (%s)", k3sServiceUnit, err, strings.TrimSpace(string(out)))
 	}
 
@@ -484,7 +484,7 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	curConfigYaml := m.cfg.K3sConfigYaml
 	m.mu.Unlock()
 	k3sUnit := resolveK3sSystemdUnit(curConfigYaml)
-	if out, err := exec.Command("systemctl", "reload-or-restart", k3sUnit).CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", k3sUnit).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s after auto-join: %v (%s)", k3sUnit, err, strings.TrimSpace(string(out)))
 	}
 	m.mu.Lock()
@@ -706,15 +706,15 @@ func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
 	if err != nil {
 		return fmt.Errorf("k3s binary not found on system")
 	}
-	_ = exec.Command("systemctl", "stop", "k3s").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s").Run()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, k3sBin, "server", "--cluster-reset", "--cluster-reset-restore-path="+fullPath).CombinedOutput()
 	if err != nil {
-		_ = exec.Command("systemctl", "start", "k3s").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "start", "k3s").Run()
 		return fmt.Errorf("k3s cluster-reset restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
-	if startOut, startErr := exec.Command("systemctl", "start", "k3s").CombinedOutput(); startErr != nil {
+	if startOut, startErr := exec.Command("systemctl", "--no-ask-password", "start", "k3s").CombinedOutput(); startErr != nil {
 		return fmt.Errorf("etcd restored, but failed to restart k3s: %s (%w)", strings.TrimSpace(string(startOut)), startErr)
 	}
 	return nil
@@ -761,8 +761,8 @@ func ensureK3sServiceUnit() {
 		slog.Warn("Could not write /etc/systemd/system/k3s.service", "error", err)
 		return
 	}
-	_ = exec.Command("systemctl", "daemon-reload").Run()
-	_ = exec.Command("systemctl", "enable", "k3s.service").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "daemon-reload").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "enable", "k3s.service").Run()
 }
 
 func ensureOpenEbsZfsDataset(replicatedPool string) {

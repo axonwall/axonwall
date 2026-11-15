@@ -335,6 +335,20 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
       );
     }
 
+    const volumeMountLines: string[] = [];
+    const volumeLines: string[] = [];
+    if (wl.storageClass !== 'none') {
+      volumeMountLines.push(
+        `            - name: data`,
+        `              mountPath: ${safeMount}`,
+      );
+      volumeLines.push(
+        '        - name: data',
+        '          persistentVolumeClaim:',
+        `            claimName: ${safeName}-pvc`,
+      );
+    }
+
     const deployLines = [
       'apiVersion: apps/v1',
       'kind: Deployment',
@@ -351,35 +365,27 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
       '      labels:',
       `        app: ${safeName}`,
       '    spec:',
-      '      containers:',
-      `        - name: ${safeName}`,
-      `          image: ${safeImage}`,
-      '          ports:',
-      `            - containerPort: ${wl.port}`,
     ];
 
-    if (wl.storageClass !== 'none') {
-      deployLines.push(
-        '          volumeMounts:',
-        `            - name: data`,
-        `              mountPath: ${safeMount}`,
-        '      volumes:',
-        '        - name: data',
-        '          persistentVolumeClaim:',
-        `            claimName: ${safeName}-pvc`,
-      );
-    }
-
     if (wl.bpfTokenProfileId) {
-      const safeProfId = sanitizeK8sId(wl.bpfTokenProfileId);
-      deployLines.splice(
-        deployLines.indexOf('      containers:'),
-        0,
+      deployLines.push(
         '      hostUsers: false',
         '      securityContext:',
         '        seccompProfile:',
         '          type: RuntimeDefault',
       );
+    }
+
+    deployLines.push(
+      '      containers:',
+      `        - name: ${safeName}`,
+      `          image: ${safeImage}`,
+      '          ports:',
+      `            - containerPort: ${wl.port}`,
+    );
+
+    if (wl.bpfTokenProfileId) {
+      const safeProfId = sanitizeK8sId(wl.bpfTokenProfileId);
       deployLines.push(
         '          env:',
         '            - name: LIBBPF_BPF_TOKEN_PATH',
@@ -390,19 +396,24 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
         '              drop: ["ALL"]',
         '              add: ["BPF", "NET_ADMIN"]',
       );
-      if (wl.storageClass === 'none') {
-        deployLines.push(
-          '          volumeMounts:',
-          '            - name: bpf-token-bpffs',
-          '              mountPath: /sys/fs/bpf',
-          '              readOnly: true',
-          '      volumes:',
-          '        - name: bpf-token-bpffs',
-          '          hostPath:',
-          `            path: /run/axonwall/bpf-tokens/${safeProfId}`,
-          '            type: Directory',
-        );
-      }
+      volumeMountLines.push(
+        '            - name: bpf-token-bpffs',
+        '              mountPath: /sys/fs/bpf',
+        '              readOnly: true',
+      );
+      volumeLines.push(
+        '        - name: bpf-token-bpffs',
+        '          hostPath:',
+        `            path: /run/axonwall/bpf-tokens/${safeProfId}`,
+        '            type: Directory',
+      );
+    }
+
+    if (volumeMountLines.length > 0) {
+      deployLines.push('          volumeMounts:', ...volumeMountLines);
+    }
+    if (volumeLines.length > 0) {
+      deployLines.push('      volumes:', ...volumeLines);
     }
 
     workloadDocs.push(deployLines.join('\n'));

@@ -1,5 +1,6 @@
 import type {
   DesiredState,
+  Interface,
   VirtualMachine,
   LxcContainer,
   PciPassthroughDevice,
@@ -11,6 +12,7 @@ import type {
   VmNic,
 } from '../../schemas/index.js';
 import { HostedEdgeConfigSchema, FORBIDDEN_RING0_BPF_PROGS } from '../../schemas/index.js';
+import { resolveOvmfFirmwarePure as resolveOvmfFirmware, type OsFamily } from '../../os/pure.js';
 import { compileSatelliteNftables } from '../nft/index.js';
 
 export interface CompiledVmProcess {
@@ -127,7 +129,12 @@ export function generateDeterministicMac(vmid: number, nicIdx: number): string {
   return `bc:24:11:${b1}:${b2}:${b3}`;
 }
 
-export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
+export interface VirtCompileOptions {
+  osFamily?: OsFamily;
+  existsFn?: (p: string) => boolean;
+}
+
+export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions): CompiledVmProcess {
   const qemuBinary = 'qemu-system-x86_64';
   const qmpSocket = `/run/axonwall/qmp/vm-${vm.vmid}.sock`;
   const vncSocket = `/run/axonwall/vnc/vm-${vm.vmid}.sock`;
@@ -166,19 +173,24 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
   ];
 
   if (vm.bios === 'ovmf' && !vm.kernelPath) {
+    const ovmf = resolveOvmfFirmware({
+      secureBoot: useSecBoot,
+      osFamily: opts?.osFamily,
+      existsFn: opts?.existsFn,
+    });
     if (useSecBoot) {
       args.push(
         '-global',
         'driver=cfi.pflash01,property=secure,value=on',
         '-drive',
-        'if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd',
+        `if=pflash,format=raw,unit=0,readonly=on,file=${ovmf.code}`,
         '-drive',
         `if=pflash,format=raw,unit=1,file=/var/lib/axonwall/nvram/vm-${vm.vmid}.fd`,
       );
     } else {
       args.push(
         '-drive',
-        'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd',
+        `if=pflash,format=raw,readonly=on,file=${ovmf.code}`,
         '-drive',
         `if=pflash,format=raw,file=/var/lib/axonwall/nvram/vm-${vm.vmid}.fd`,
       );
@@ -481,11 +493,11 @@ export function compileVmProcess(vm: VirtualMachine): CompiledVmProcess {
     virtioFsShares: vm.virtioFsShares ?? [],
     disks: resolvedDisks,
     nics: resolvedNics,
-    libvirtXml: compileLibvirtDomainXml(vm),
+    libvirtXml: compileLibvirtDomainXml(vm, opts),
   };
 }
 
-export function compileLibvirtDomainXml(vm: VirtualMachine): string {
+export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOptions): string {
   const safeName = sanitizeIdentifier(vm.name);
   const vcpus = (vm.cores || 1) * (vm.sockets || 1);
   const memKib = (vm.memoryMb || 2048) * 1024;
@@ -519,7 +531,11 @@ export function compileLibvirtDomainXml(vm: VirtualMachine): string {
   xml.push(`  <os>`);
   xml.push(`    <type arch='x86_64' machine='pc-q35-8.2'>hvm</type>`);
   if (vm.bios === 'ovmf' && !vm.kernelPath) {
-    const loaderPath = secBoot ? '/usr/share/OVMF/OVMF_CODE_4M.secboot.fd' : '/usr/share/OVMF/OVMF_CODE.fd';
+    const loaderPath = resolveOvmfFirmware({
+      secureBoot: secBoot,
+      osFamily: opts?.osFamily,
+      existsFn: opts?.existsFn,
+    }).code;
     xml.push(`    <loader readonly='yes' secure='${secBoot ? 'yes' : 'no'}' type='pflash'>${loaderPath}</loader>`);
     xml.push(`    <nvram>/var/lib/axonwall/nvram/vm-${vm.vmid}.fd</nvram>`);
   }
@@ -659,7 +675,7 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
   };
 }
 
-export function compileLxcContainer(ct: LxcContainer): CompiledLxcContainer {
+export function compileLxcContainer(ct: LxcContainer, opts?: VirtCompileOptions): CompiledLxcContainer {
   const pool = ct.rootfsPool || 'tank';
   if (!SAFE_POOL_REGEX.test(pool) || pool.includes('..')) {
     throw new Error(`Invalid LXC rootfs pool: ${pool}`);
@@ -691,7 +707,13 @@ export function compileLxcContainer(ct: LxcContainer): CompiledLxcContainer {
   }
 
   if (ct.features && ct.features.includes('nesting')) {
-    lines.push('lxc.include = /usr/share/lxc/config/nesting.common.conf');
+    const nestingPath =
+      opts?.osFamily === 'arch'
+        ? '/usr/share/lxc/config/nesting.conf'
+        : opts?.existsFn && !opts.existsFn('/usr/share/lxc/config/nesting.common.conf') && opts.existsFn('/usr/share/lxc/config/nesting.conf')
+          ? '/usr/share/lxc/config/nesting.conf'
+          : '/usr/share/lxc/config/nesting.common.conf';
+    lines.push(`lxc.include = ${nestingPath}`);
   }
 
   // Network Interfaces
@@ -809,12 +831,18 @@ export function compileLxcContainer(ct: LxcContainer): CompiledLxcContainer {
 }
 
 export function compileVfio(devices: PciPassthroughDevice[]): CompiledVfio {
-  const vfioDevices = devices.filter(
-    (d) => d.driver === 'vfio-pci' && d.vendorId && d.deviceId
-  );
+  const safeHexId = /^[0-9a-fA-F]{4}$/;
+  const vfioDevices = devices.filter((d) => {
+    if (d.driver !== 'vfio-pci') return false;
+    if (!d.vendorId && !d.deviceId) return false;
+    if (!d.vendorId || !d.deviceId || !safeHexId.test(d.vendorId) || !safeHexId.test(d.deviceId)) {
+      throw new Error(`Invalid PCI vendor:device ID for ${d.bdf}: ${d.vendorId}:${d.deviceId}`);
+    }
+    return true;
+  });
 
   const ids = Array.from(
-    new Set(vfioDevices.map((d) => `${d.vendorId}:${d.deviceId}`))
+    new Set(vfioDevices.map((d) => `${d.vendorId!.toLowerCase()}:${d.deviceId!.toLowerCase()}`))
   ).join(',');
 
   const modprobeConf = [
@@ -831,10 +859,14 @@ export function compileVfio(devices: PciPassthroughDevice[]): CompiledVfio {
 
   const sriovLines: string[] = ['#!/bin/bash', 'set -e', '# Axonwall SR-IOV Initialization'];
   devices.forEach((d) => {
+    if (!SAFE_PCI_BDF_REGEX.test(d.bdf)) {
+      throw new Error(`Invalid PCI BDF address: ${d.bdf}`);
+    }
     if (d.sriovNumVfs && d.sriovNumVfs > 0) {
+      const vfs = Math.max(0, Math.min(256, Math.trunc(d.sriovNumVfs)));
       sriovLines.push(
         `if [ -f /sys/bus/pci/devices/${d.bdf}/sriov_numvfs ]; then`,
-        `  echo ${d.sriovNumVfs} > /sys/bus/pci/devices/${d.bdf}/sriov_numvfs`,
+        `  echo ${vfs} > /sys/bus/pci/devices/${d.bdf}/sriov_numvfs`,
         `fi`
       );
     }
@@ -848,14 +880,21 @@ export function compileVfio(devices: PciPassthroughDevice[]): CompiledVfio {
   };
 }
 
-export function compileVxlan(zones: VxlanZone[]): CompiledVxlan {
+export function compileVxlan(zones: VxlanZone[], interfaces: Interface[] = []): CompiledVxlan {
   const ipCommands: string[] = [];
+  const ifDeviceMap = new Map<string, string>();
+  for (const iface of interfaces) {
+    if (iface.name && iface.device) {
+      ifDeviceMap.set(iface.name, iface.device);
+    }
+  }
 
   for (const zone of zones) {
     if (!zone.enabled) continue;
     const name = sanitizeIdentifier(zone.name);
     const port = zone.port || 4789;
-    const dev = zone.underlayInterface || 'lan';
+    const rawDev = zone.underlayInterface || 'lan';
+    const dev = ifDeviceMap.get(rawDev) || rawDev;
     if (!SAFE_IFACE_REGEX.test(dev)) {
       throw new Error(`Invalid VXLAN underlay interface: ${dev}`);
     }
@@ -1083,7 +1122,7 @@ export function compileHostedEdge(
   };
 }
 
-export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {
+export function compileVirtBundle(state: DesiredState, opts?: VirtCompileOptions): CompiledVirtBundle {
   const virt: VirtConfig = state.virt ?? {
     enabled: false,
     defaultPool: 'tank',
@@ -1103,7 +1142,7 @@ export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {
 
   for (const vm of virt.vms) {
     if (!vm.enabled) continue;
-    const compiledVm = compileVmProcess(vm);
+    const compiledVm = compileVmProcess(vm, opts);
     vms.push(compiledVm);
     if (virt.exportLibvirtXml !== false && compiledVm.libvirtXml) {
       libvirtDomainsXml[vm.vmid] = compiledVm.libvirtXml;
@@ -1116,7 +1155,7 @@ export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {
 
   for (const ct of virt.containers) {
     if (!ct.enabled) continue;
-    const compiledCt = compileLxcContainer(ct);
+    const compiledCt = compileLxcContainer(ct, opts);
     containers.push({
       ...compiledCt,
       hostname: ct.hostname,
@@ -1133,7 +1172,7 @@ export function compileVirtBundle(state: DesiredState): CompiledVirtBundle {
   }
 
   const vfio = compileVfio(virt.pciDevices);
-  const vxlan = compileVxlan(virt.vxlanZones);
+  const vxlan = compileVxlan(virt.vxlanZones, state.interfaces ?? []);
 
   return {
     vms,

@@ -61,9 +61,9 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     expect(conf).toContain('router_id axon-node-1');
     expect(conf).toContain('vrrp_instance VI_LAN');
     expect(conf).toContain('state MASTER');
-    expect(conf).toContain('notify_master "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -c; /usr/local/bin/axonwall-ha-notify MASTER"');
-    expect(conf).toContain('notify_backup "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -f; /usr/local/bin/axonwall-ha-notify BACKUP"');
-    expect(conf).toContain('notify_fault  "/usr/sbin/conntrackd -C /etc/conntrackd/conntrackd.conf -t; /usr/local/bin/axonwall-ha-notify FAULT"');
+    expect(conf).toContain('notify_master "/usr/local/bin/axonwall-ha-notify MASTER"');
+    expect(conf).toContain('notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"');
+    expect(conf).toContain('notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"');
   });
 
   it('compiles native Go SQLite sync daemon config', () => {

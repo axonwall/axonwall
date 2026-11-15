@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import { getEtcConfigDir, getStateDir } from './dev-paths';
 
 import type { UserSession } from '@axonwall/lib/rbac';
 
@@ -25,8 +27,12 @@ import type { UserSession } from '@axonwall/lib/rbac';
  * (e.g. the OIDC callback) also need.
  */
 
-const EPOCH_PATHS = ['/var/lib/axonwall/session-epoch', '/etc/axonwall/session-epoch'];
-const REVOKED_PATHS = ['/var/lib/axonwall/revoked-jtis', '/etc/axonwall/revoked-jtis'];
+const EPOCH_PATHS = Array.from(
+  new Set([path.join(getStateDir(), 'session-epoch'), path.join(getEtcConfigDir(), 'session-epoch')])
+);
+const REVOKED_PATHS = Array.from(
+  new Set([path.join(getStateDir(), 'revoked-jtis'), path.join(getEtcConfigDir(), 'revoked-jtis')])
+);
 const MAX_REVOKED_ENTRIES = 500;
 
 let memoryEpoch = 0;

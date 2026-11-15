@@ -1,24 +1,31 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import { getAgentApiSocketPath, getAgentTokenCandidatePaths } from './dev-paths';
 
-export const AGENT_API_SOCKET = process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
+export const AGENT_API_SOCKET = getAgentApiSocketPath();
 
-let cachedAgentToken: string | null | undefined;
+let cachedAgentToken: string | undefined;
 
 export function getAgentToken(): string | undefined {
-  if (cachedAgentToken !== undefined) {
-    return cachedAgentToken ?? undefined;
+  if (cachedAgentToken) {
+    return cachedAgentToken;
   }
-  let tok = process.env.AXONWALL_AGENT_TOKEN;
-  if (!tok) {
+  const envTok = process.env.AXONWALL_AGENT_TOKEN?.trim();
+  if (envTok) {
+    cachedAgentToken = envTok;
+    return envTok;
+  }
+  for (const tokenPath of getAgentTokenCandidatePaths()) {
     try {
-      tok = fs
-        .readFileSync(process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token', 'utf8')
-        .trim();
+      if (!fs.existsSync(tokenPath)) continue;
+      const tok = fs.readFileSync(tokenPath, 'utf8').trim();
+      if (tok) {
+        cachedAgentToken = tok;
+        return tok;
+      }
     } catch {}
   }
-  cachedAgentToken = tok || null;
-  return tok || undefined;
+  return undefined;
 }
 
 export async function callAgentApi<T>(
@@ -30,9 +37,10 @@ export async function callAgentApi<T>(
   return new Promise((resolve) => {
     const postData = body ? JSON.stringify(body) : undefined;
     const agentToken = getAgentToken();
+    const socketPath = getAgentApiSocketPath();
     const req = http.request(
       {
-        socketPath: AGENT_API_SOCKET,
+        socketPath,
         path,
         method,
         headers: {

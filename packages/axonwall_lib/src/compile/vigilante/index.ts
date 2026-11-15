@@ -61,12 +61,21 @@ export function compileVigilanteUnboundOverrides(state: DesiredState): string {
     return '# Vigilante DNS integration disabled\n';
   }
 
-  const domain = vigilante.domain || 'vigilante.local';
+  const sanitizeDomain = (raw: string | undefined, fallback: string): string => {
+    const cleaned = String(raw || '')
+      .split(/[\r\n]/)[0]
+      .trim()
+      .replace(/[^a-zA-Z0-9.-]/g, '')
+      .replace(/^\.+|\.+$/g, '');
+    return cleaned || fallback;
+  };
+
+  const domain = sanitizeDomain(vigilante.domain, 'vigilante.local');
   const lanIface =
     state.interfaces.find((i) => i.enabled && i.name.toLowerCase() === 'lan' && i.ipv4Address) ||
     state.interfaces.find((i) => i.enabled && inferInterfaceRole(i) === 'lan' && i.ipv4Address) ||
     state.interfaces.find((i) => i.name.toLowerCase() === 'lan');
-  const lanIp = lanIface?.ipv4Address?.split('/')[0] || '192.168.1.1';
+  const lanIp = (lanIface?.ipv4Address?.split('/')[0] || '192.168.1.1').replace(/[^0-9a-fA-F:.]/g, '') || '192.168.1.1';
 
   const defaultSubdomains: Record<string, string> = {
     'vigil-soc': 'vigil',
@@ -88,8 +97,8 @@ export function compileVigilanteUnboundOverrides(state: DesiredState): string {
 
   for (const mod of vigilante.modules ?? []) {
     if (!mod.enabled) continue;
-    const sub = defaultSubdomains[mod.id] || mod.id;
-    const host = mod.ingressHostname || `${sub}.${domain}`;
+    const sub = defaultSubdomains[mod.id] || sanitizeDomain(mod.id, 'module');
+    const host = sanitizeDomain(mod.ingressHostname, `${sub}.${domain}`);
     lines.push(`  local-data: "${host}. IN A ${lanIp}"`);
   }
 

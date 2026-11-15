@@ -3,7 +3,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
+import * as zlib from 'node:zlib';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { detectHostOSFamily, readAgentToken, resolveControllerDirs } from './dev-paths.js';
 import {
   AXONWALL_YAML_DOMAINS,
   AXONWALL_YAML_FILENAMES,
@@ -47,11 +49,12 @@ import {
   type LiveAuditPosture,
 } from '@axonwall/lib/kernel';
 
-const ETC_DIR = process.env.AXONWALL_ETC_DIR || process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
-const PERSIST_YAML_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
-const STATE_JSON_PATH = process.env.AXONWALL_STATE_FILE || '/var/lib/axonwall/state.json';
-const GITOPS_DIR = process.env.AXONWALL_GITOPS_DIR || '/var/lib/axonwall/gitops';
-const AGENT_API_SOCK = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
+const CONTROLLER_DIRS = resolveControllerDirs();
+const ETC_DIR = CONTROLLER_DIRS.etcDir;
+const PERSIST_YAML_DIR = CONTROLLER_DIRS.persistYamlDir;
+const STATE_JSON_PATH = CONTROLLER_DIRS.stateFile;
+const GITOPS_DIR = CONTROLLER_DIRS.gitopsDir;
+const AGENT_API_SOCK = CONTROLLER_DIRS.agentSock;
 
 const cReset = '\x1b[0m';
 const cBold = '\x1b[1m';
@@ -313,16 +316,7 @@ function ensureInitializedYamlFiles(): void {
 // The daemon provisions it at /etc/axonwall/agent.token (0640
 // root:axonwall); AXONWALL_AGENT_TOKEN overrides for dev setups.
 function getAgentToken(): string | undefined {
-  if (process.env.AXONWALL_AGENT_TOKEN) return process.env.AXONWALL_AGENT_TOKEN;
-  try {
-    return (
-      fs
-        .readFileSync(process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token', 'utf8')
-        .trim() || undefined
-    );
-  } catch {
-    return undefined;
-  }
+  return readAgentToken(CONTROLLER_DIRS);
 }
 
 function sendAgentSocketRequest<T>(
@@ -1395,14 +1389,17 @@ async function cmdCloudInit(userArgs: string[]) {
   }
 
   // 1. Locate candidate cloud-init user-data file
-  const candidatePaths = [
-    explicitFile,
-    process.env.CLOUD_INIT_USER_DATA,
-    '/var/lib/cloud/instance/user-data.txt',
-    '/var/lib/cloud/seed/nocloud-net/user-data',
-    '/var/lib/cloud/seed/nocloud/user-data',
-    '/etc/axonwall/cloud-config.yaml',
-  ].filter(Boolean) as string[];
+  const candidatePaths = Array.from(
+    new Set([
+      explicitFile,
+      process.env.CLOUD_INIT_USER_DATA,
+      '/var/lib/cloud/instance/user-data.txt',
+      '/var/lib/cloud/seed/nocloud-net/user-data',
+      '/var/lib/cloud/seed/nocloud/user-data',
+      path.join(ETC_DIR, 'cloud-config.yaml'),
+      '/etc/axonwall/cloud-config.yaml',
+    ].filter(Boolean) as string[]),
+  );
 
   let resolvedPath = '';
   for (const p of candidatePaths) {
@@ -1536,13 +1533,13 @@ async function cmdCloudInit(userArgs: string[]) {
           fs.writeFileSync(path.join(ETC_DIR, '.password_changed'), `${nowIso}\n`, { mode: 0o644 });
         } catch {}
 
-        // Mirror to persistent /var/lib/axonwall/etc-axonwall/admin.env for A/B slot survival
+        // Mirror to persistent etc-axonwall/admin.env for A/B slot survival
         try {
-          const persistDir = '/var/lib/axonwall/etc-axonwall';
+          const persistDir = PERSIST_YAML_DIR;
           fs.mkdirSync(persistDir, { recursive: true, mode: 0o775 });
           fs.writeFileSync(path.join(persistDir, 'admin.env'), envContent, { mode: 0o660 });
           fs.chmodSync(path.join(persistDir, 'admin.env'), 0o660);
-          fs.writeFileSync('/var/lib/axonwall/.password_changed', `${nowIso}\n`, { mode: 0o644 });
+          fs.writeFileSync(path.join(CONTROLLER_DIRS.varDir, '.password_changed'), `${nowIso}\n`, { mode: 0o644 });
         } catch {}
         fixSharedConfigOwnership();
       } catch (err: any) {
@@ -1567,7 +1564,7 @@ async function cmdCloudInit(userArgs: string[]) {
         fs.writeFileSync(ctrlEnvPath, content, { mode: 0o640 });
         try { fs.chmodSync(ctrlEnvPath, 0o640); } catch {}
         try {
-          const persistDir = '/var/lib/axonwall/etc-axonwall';
+          const persistDir = PERSIST_YAML_DIR;
           fs.mkdirSync(persistDir, { recursive: true, mode: 0o775 });
           fs.writeFileSync(path.join(persistDir, 'controller.env'), content, { mode: 0o640 });
           fs.chmodSync(path.join(persistDir, 'controller.env'), 0o640);
@@ -2352,7 +2349,7 @@ async function cmdZbm(args: string[]) {
 async function cmdUpdate(args: string[]) {
   let targetVersion = '';
   let targetSlot: 'A' | 'B' | undefined;
-  let aptUpgrade = false;
+  let requestedPkgMgr: 'auto' | 'apt' | 'pacman' | 'apk' | null = null;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -2363,13 +2360,19 @@ async function cmdUpdate(args: string[]) {
     } else if ((arg === '--slot' || arg === '-s') && args[i + 1]) {
       const s = args[++i]!.toUpperCase();
       if (s === 'A' || s === 'B') targetSlot = s;
+    } else if (arg === '--pkg-upgrade') {
+      requestedPkgMgr = 'auto';
+    } else if (arg === '--pacman') {
+      requestedPkgMgr = 'pacman';
+    } else if (arg === '--apk') {
+      requestedPkgMgr = 'apk';
     } else if (arg === '--apt' || arg === '--apt-upgrade') {
-      aptUpgrade = true;
+      requestedPkgMgr = 'apt';
     }
   }
 
   let installMode: 'zbm' | 'ab' | 'rolling' = 'ab';
-  for (const modePath of [path.join(ETC_DIR, 'install-mode'), '/var/lib/axonwall/install-mode']) {
+  for (const modePath of [path.join(ETC_DIR, 'install-mode'), path.join(CONTROLLER_DIRS.varDir, 'install-mode')]) {
     try {
       if (fs.existsSync(modePath)) {
         const raw = fs.readFileSync(modePath, 'utf8').toLowerCase();
@@ -2400,21 +2403,38 @@ async function cmdUpdate(args: string[]) {
     console.log(`${cCyan}${cBold}=== Axonwall Dual-Root A/B Firmware Updater ===${cReset}`);
   }
 
-  if (aptUpgrade) {
-    console.log(`[+] Running Debian APT package upgrade (apt-get update && apt-get upgrade -y)...`);
-    const updateRes = spawnSync('apt-get', ['update', '-y'], {
-      stdio: 'inherit',
-      env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
-    });
-    if (updateRes.status === 0) {
-      spawnSync(
-        'apt-get',
-        ['-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'upgrade', '-y'],
-        {
-          stdio: 'inherit',
-          env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
-        }
-      );
+  if (requestedPkgMgr) {
+    const family = detectHostOSFamily();
+    const pkgMgr =
+      requestedPkgMgr === 'auto'
+        ? family === 'arch'
+          ? 'pacman'
+          : family === 'alpine'
+            ? 'apk'
+            : 'apt'
+        : requestedPkgMgr;
+    if (pkgMgr === 'pacman') {
+      console.log(`[+] Running Arch Linux package upgrade (pacman -Syu --noconfirm)...`);
+      spawnSync('pacman', ['-Syu', '--noconfirm'], { stdio: 'inherit' });
+    } else if (pkgMgr === 'apk') {
+      console.log(`[+] Running Alpine Linux package upgrade (apk upgrade)...`);
+      spawnSync('apk', ['upgrade'], { stdio: 'inherit' });
+    } else {
+      console.log(`[+] Running Debian APT package upgrade (apt-get update && apt-get dist-upgrade -y)...`);
+      const updateRes = spawnSync('apt-get', ['update', '-y'], {
+        stdio: 'inherit',
+        env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+      });
+      if (updateRes.status === 0) {
+        spawnSync(
+          'apt-get',
+          ['-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'dist-upgrade', '-y'],
+          {
+            stdio: 'inherit',
+            env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+          }
+        );
+      }
     }
   }
 
@@ -2480,9 +2500,9 @@ function persistMcpSettings(enabled: boolean, reason?: string): void {
     : Array.from(
         new Set([
           resolveMcpSettingsPath(),
-          '/var/lib/axonwall/mcp-settings.json',
-          '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
-          '/etc/axonwall/mcp-settings.json',
+          path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
+          path.join(PERSIST_YAML_DIR, 'mcp-settings.json'),
+          path.join(ETC_DIR, 'mcp-settings.json'),
         ])
       );
   for (const target of targets) {
@@ -3264,6 +3284,12 @@ function collectLocalKernelStudioFallback(): {
       runningConfig = parseKernelConfigLines(fs.readFileSync(bootCfg, 'utf-8'));
       configSource = bootCfg;
     } catch {}
+  } else if (fs.existsSync('/proc/config.gz')) {
+    try {
+      const gunzipped = zlib.gunzipSync(fs.readFileSync('/proc/config.gz')).toString('utf-8');
+      runningConfig = parseKernelConfigLines(gunzipped);
+      configSource = '/proc/config.gz';
+    } catch {}
   }
 
   const iommuGroups = fs.existsSync('/sys/kernel/iommu_groups') ? fs.readdirSync('/sys/kernel/iommu_groups').length : 0;
@@ -3411,7 +3437,7 @@ ${cBold}COMMANDS:${cReset}
   reload              Alias for 'apply' — reload all services and Web GUI state from /etc/axonwall/*.yaml
   zbm <cmd> [args]    Manage ZFSBootMenu Boot Environments & Snapshots (list, snapshot, clone, activate, delete, delete-snapshot)
   update [options]    Update Axonwall packages in-place (ZBM / Rolling) or flash standby slot (A/B mode)
-                      Options: [--apt] [--version <ver>] [--slot <A|B>]
+                      Options: [--pkg-upgrade|--apt|--pacman|--apk] [--version <ver>] [--slot <A|B>]
   kernel <cmd> [args] Detect hardware/modules, audit running kernel KSPP posture, or export stripped .config (detect, audit, config)
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
   ebpf <cmd> [args]   Inspect Ring-0 XDP dataplane, LPM CIDR blocks, SYN-flood PPS & Linux 6.9+ BPF_TOKEN delegation

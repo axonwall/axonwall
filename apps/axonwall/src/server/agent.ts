@@ -57,6 +57,17 @@ import { headers } from 'next/headers';
 const execFileAsync = promisify(execFile);
 
 import { callAgentApi } from './agent-client';
+import {
+  discoverHostPrimaryDevices,
+  getEtcConfigDir,
+  getPersistConfigDir,
+  getStateDir,
+  getStateJsonPath,
+  isApplianceRuntime,
+  isDevRuntime,
+  isVirtualOrLoopbackInterface,
+  readHostOSRelease,
+} from './dev-paths';
 
 export interface AgentStatus {
   nodeId: string;
@@ -65,6 +76,11 @@ export interface AgentStatus {
   activeBundleHash: string;
   pendingConfirm: boolean;
   confirmDeadlineUnix: number;
+  osName?: string;
+  osId?: string;
+  osFamily?: string;
+  kernelVersion?: string;
+  runtimeMode?: string;
   interfaces: Array<{
     name: string;
     device: string;
@@ -140,6 +156,9 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   const session = await getSession();
   assertActionPermitted(session);
 
+  const hostOs = readHostOSRelease();
+  const fallbackMode = isApplianceRuntime() ? 'appliance' : isDevRuntime() ? 'dev' : 'host';
+
   // Try live communication with root daemon over Unix socket first
   const daemonStatus = await callAgentApi<any>('/v1/status');
   if (daemonStatus) {
@@ -150,6 +169,11 @@ export async function getAgentStatus(): Promise<AgentStatus> {
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
       confirmDeadlineUnix: Number(daemonStatus.confirm_deadline_unix || daemonStatus.confirmDeadlineUnix || 0),
+      osName: daemonStatus.os_name || hostOs.prettyName,
+      osId: daemonStatus.os_id || hostOs.id,
+      osFamily: daemonStatus.os_family || hostOs.family,
+      kernelVersion: daemonStatus.kernel_version || hostOs.kernelVersion,
+      runtimeMode: daemonStatus.runtime_mode || fallbackMode,
       interfaces: (daemonStatus.interfaces || []).map((iface: any) => ({
         name: iface.name || iface.device,
         device: iface.device || iface.name,
@@ -170,6 +194,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   for (const [name, addrs] of Object.entries(ifaces)) {
     if (!addrs) continue;
+    if (!isApplianceRuntime() && name === 'lo') continue;
     const ipAddresses = addrs.map((a) => a.cidr || `${a.address}/${a.family === 'IPv4' ? '24' : '64'}`);
     interfaceList.push({
       name,
@@ -186,16 +211,22 @@ export async function getAgentStatus(): Promise<AgentStatus> {
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
     confirmDeadlineUnix: mockDeadline,
+    osName: hostOs.prettyName,
+    osId: hostOs.id,
+    osFamily: hostOs.family,
+    kernelVersion: hostOs.kernelVersion,
+    runtimeMode: fallbackMode,
     interfaces: interfaceList,
   };
 }
 
 function buildBaselineState(): DesiredState {
-  let wanDev = 'eth0';
+  const hostDevices = !isApplianceRuntime() ? discoverHostPrimaryDevices() : [];
+  let wanDev = hostDevices[0] || 'eth0';
   let wanMode: 'dhcp' | 'static' = 'dhcp';
   let wanIp: string | undefined;
   let wanGw: string | undefined;
-  let lanDev = 'eth1';
+  let lanDev = hostDevices.length >= 2 ? hostDevices[1] : isApplianceRuntime() || hostDevices.length === 0 ? 'eth1' : '';
   let lanMode: 'dhcp' | 'static' = 'static';
   let lanIp = '192.168.1.1/24';
   let opt1Dev = '';
@@ -206,8 +237,9 @@ function buildBaselineState(): DesiredState {
   let opt2Ip: string | undefined;
 
   try {
-    if (fs.existsSync('/etc/axonwall/interfaces.conf')) {
-      const conf = fs.readFileSync('/etc/axonwall/interfaces.conf', 'utf8');
+    const confPath = path.join(getEtcConfigDir(), 'interfaces.conf');
+    if (fs.existsSync(confPath)) {
+      const conf = fs.readFileSync(confPath, 'utf8');
       for (const rawLine of conf.split('\n')) {
         const line = rawLine.trim();
         if (!line || line.startsWith('#') || !line.includes('=')) continue;
@@ -323,9 +355,9 @@ function buildBaselineState(): DesiredState {
 
 const BASELINE_STATE: DesiredState = buildBaselineState();
 
-const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR || '/etc/axonwall';
-const PERSIST_CONFIG_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
-const YAML_CONFIG_DIRS = [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR];
+const ETC_CONFIG_DIR = getEtcConfigDir();
+const PERSIST_CONFIG_DIR = getPersistConfigDir();
+const YAML_CONFIG_DIRS = Array.from(new Set([PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]));
 
 let cachedDesiredState: DesiredState | null = null;
 let lastLoadedFingerprint = '';
@@ -454,11 +486,13 @@ function persistDesiredStateToDisk(state: DesiredState): Record<string, string> 
   }
 
   const jsonSerialized = JSON.stringify(normalized, null, 2);
-  for (const jsonPath of [
-    '/var/lib/axonwall/state.json',
-    '/var/lib/axonwall/etc-axonwall/state.json',
-    '/etc/axonwall/state.json',
-  ]) {
+  for (const jsonPath of Array.from(
+    new Set([
+      getStateJsonPath(),
+      path.join(PERSIST_CONFIG_DIR, 'state.json'),
+      path.join(ETC_CONFIG_DIR, 'state.json'),
+    ])
+  )) {
     writeConfigFileSafe(jsonPath, jsonSerialized, 0o660);
   }
 
@@ -527,7 +561,7 @@ function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: strin
 
   const confContent = confLines.join('\n') + '\n';
 
-  for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+  for (const dir of YAML_CONFIG_DIRS) {
     writeConfigFileSafe(path.join(dir, 'interfaces.conf'), confContent, 0o664);
   }
 
@@ -605,17 +639,19 @@ function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: strin
     }
   }
 
-  try {
-    if (!fs.existsSync('/etc/network')) {
-      fs.mkdirSync('/etc/network', { recursive: true });
-    }
-    fs.writeFileSync('/etc/network/interfaces', ifaces, 'utf8');
-    if (fs.existsSync('/etc/network/interfaces.d/axonwall')) {
-      try {
-        fs.unlinkSync('/etc/network/interfaces.d/axonwall');
-      } catch {}
-    }
-  } catch {}
+  if (isApplianceRuntime() && readHostOSRelease().family === 'debian') {
+    try {
+      if (!fs.existsSync('/etc/network')) {
+        fs.mkdirSync('/etc/network', { recursive: true });
+      }
+      fs.writeFileSync('/etc/network/interfaces', ifaces, 'utf8');
+      if (fs.existsSync('/etc/network/interfaces.d/axonwall')) {
+        try {
+          fs.unlinkSync('/etc/network/interfaces.d/axonwall');
+        } catch {}
+      }
+    } catch {}
+  }
 
   return { ifacesContent: ifaces, confContent };
 }
@@ -623,7 +659,9 @@ function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: strin
 function reconcileStateWithInterfacesConf(state: DesiredState): boolean {
   let rawConf = '';
   let activeConfPath = '';
-  for (const confPath of ['/var/lib/axonwall/etc-axonwall/interfaces.conf', '/etc/axonwall/interfaces.conf']) {
+  for (const confPath of Array.from(
+    new Set([path.join(PERSIST_CONFIG_DIR, 'interfaces.conf'), path.join(ETC_CONFIG_DIR, 'interfaces.conf')])
+  )) {
     try {
       if (fs.existsSync(confPath)) {
         const text = fs.readFileSync(confPath, 'utf8');
@@ -646,7 +684,9 @@ function reconcileStateWithInterfacesConf(state: DesiredState): boolean {
   try {
     if (activeConfPath && fs.existsSync(activeConfPath) && Array.isArray(state.interfaces) && state.interfaces.length > 0) {
       const confMtimeMs = fs.statSync(activeConfPath).mtimeMs;
-      for (const yamlPath of ['/etc/axonwall/interfaces.yaml', '/var/lib/axonwall/etc-axonwall/interfaces.yaml']) {
+      for (const yamlPath of Array.from(
+        new Set([path.join(ETC_CONFIG_DIR, 'interfaces.yaml'), path.join(PERSIST_CONFIG_DIR, 'interfaces.yaml')])
+      )) {
         if (fs.existsSync(yamlPath)) {
           const yamlMtimeMs = fs.statSync(yamlPath).mtimeMs;
           if (yamlMtimeMs > confMtimeMs + 2000) {
@@ -805,8 +845,10 @@ async function getDesiredStateInternal(): Promise<DesiredState> {
     return structuredClone(cachedDesiredState);
   }
 
-  // 2. Fallback/migration from legacy state.json if /etc/axonwall/*.yaml was not initialized yet
-  for (const jsonPath of ['/var/lib/axonwall/state.json', '/etc/axonwall/state.json', './state.json']) {
+  // 2. Fallback/migration from legacy state.json if *.yaml was not initialized yet
+  for (const jsonPath of Array.from(
+    new Set([getStateJsonPath(), path.join(ETC_CONFIG_DIR, 'state.json'), './state.json'])
+  )) {
     try {
       if (fs.existsSync(jsonPath)) {
         const raw = fs.readFileSync(jsonPath, 'utf8');
@@ -1225,7 +1267,14 @@ async function collectHostIntrospectionData(): Promise<HostIntrospectionData> {
   // 2. Admin credentials & ZTP metadata
   let adminUsername = 'admin';
   let adminPassword: string | undefined;
-  for (const envPath of ['/etc/axonwall/admin.env', '/var/lib/axonwall/etc-axonwall/admin.env']) {
+  for (const envPath of Array.from(
+    new Set([
+      path.join(ETC_CONFIG_DIR, 'admin.env'),
+      path.join(PERSIST_CONFIG_DIR, 'admin.env'),
+      '/etc/axonwall/admin.env',
+      '/var/lib/axonwall/etc-axonwall/admin.env',
+    ]),
+  )) {
     try {
       if (fs.existsSync(envPath)) {
         const raw = fs.readFileSync(envPath, 'utf8');
@@ -1244,8 +1293,15 @@ async function collectHostIntrospectionData(): Promise<HostIntrospectionData> {
   let controllerUrl: string | undefined;
   let enrollmentToken: string | undefined;
   try {
-    if (fs.existsSync('/etc/axonwall/controller.env')) {
-      const raw = fs.readFileSync('/etc/axonwall/controller.env', 'utf8');
+    const controllerEnvPath = Array.from(
+      new Set([
+        path.join(ETC_CONFIG_DIR, 'controller.env'),
+        path.join(PERSIST_CONFIG_DIR, 'controller.env'),
+        '/etc/axonwall/controller.env',
+      ]),
+    ).find((p) => fs.existsSync(p));
+    if (controllerEnvPath) {
+      const raw = fs.readFileSync(controllerEnvPath, 'utf8');
       for (const line of raw.split('\n')) {
         const [k, ...vParts] = line.trim().split('=');
         const v = vParts.join('=').trim();
@@ -1395,17 +1451,17 @@ type OnDiskConfigSnapshotEntry = {
 // leaving disk ahead of the live daemon ruleset.
 function snapshotDesiredStateOnDisk(): OnDiskConfigSnapshotEntry[] {
   const paths = new Set<string>();
-  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR, '/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+  for (const dir of YAML_CONFIG_DIRS) {
     for (const filename of AXONWALL_YAML_FILENAMES) {
       paths.add(path.join(dir, filename));
     }
     paths.add(path.join(dir, 'interfaces.conf'));
   }
   for (const jsonPath of [
-    '/var/lib/axonwall/state.json',
-    '/var/lib/axonwall/etc-axonwall/state.json',
-    '/etc/axonwall/state.json',
-    '/etc/network/interfaces',
+    getStateJsonPath(),
+    path.join(PERSIST_CONFIG_DIR, 'state.json'),
+    path.join(ETC_CONFIG_DIR, 'state.json'),
+    ...(isApplianceRuntime() && readHostOSRelease().family === 'debian' ? ['/etc/network/interfaces'] : []),
   ]) {
     paths.add(jsonPath);
   }
@@ -1505,12 +1561,16 @@ export async function applyDesiredState(
       fileMode: 0o664,
       file_mode: 0o664,
     },
-    {
-      path: '/etc/network/interfaces',
-      content: ifacesContent,
-      fileMode: 0o644,
-      file_mode: 0o644,
-    },
+    ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
+      ? [
+          {
+            path: '/etc/network/interfaces',
+            content: ifacesContent,
+            fileMode: 0o644,
+            file_mode: 0o644,
+          },
+        ]
+      : []),
     {
       path: '/etc/axonwall/state.json',
       content: JSON.stringify(normalizedState, null, 2),
@@ -2035,7 +2095,7 @@ export type LiveServiceInfo = SystemServiceInfo;
 // as "not installed".
 function isSystemdUnitFilePresent(unit: string): boolean | null {
   try {
-    const out = execFileSync('systemctl', ['list-unit-files', unit, '--no-legend', '--no-pager'], {
+    const out = execFileSync('systemctl', ['--no-ask-password', 'list-unit-files', unit, '--no-legend', '--no-pager'], {
       encoding: 'utf8',
       timeout: 1000,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -2044,6 +2104,75 @@ function isSystemdUnitFilePresent(unit: string): boolean | null {
   } catch (err: any) {
     if (err?.status === 1) return false;
     return null;
+  }
+}
+
+const SERVICE_UNIT_ALIASES: Record<string, string[]> = {
+  'kea-dhcp4-server.service': ['kea-dhcp4-server.service', 'kea-dhcp4.service'],
+  'kea-dhcp6-server.service': ['kea-dhcp6-server.service', 'kea-dhcp6.service'],
+  'nut-server.service': ['nut-server.service', 'upsd.service'],
+  'chrony.service': ['chrony.service', 'chronyd.service'],
+  'smbd.service': ['smbd.service', 'smb.service'],
+  'ssh.service': ['ssh.service', 'sshd.service'],
+  'freeradius.service': ['freeradius.service', 'radiusd.service'],
+  'rtslib-fb-targetctl.service': ['rtslib-fb-targetctl.service', 'target.service'],
+};
+
+function querySingleSystemdUnit(unit: string): {
+  unit: string;
+  loadState?: string;
+  status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown';
+  pid: number | null;
+  memory: string | null;
+  uptime: string | null;
+} {
+  try {
+    const showOut = execFileSync(
+      'systemctl',
+      ['--no-ask-password', 'show', unit, '--property=LoadState,ActiveState,SubState,MainPID,MemoryCurrent'],
+      { encoding: 'utf8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] }
+    );
+    const props: Record<string, string> = {};
+    for (const line of showOut.split('\n')) {
+      const idx = line.indexOf('=');
+      if (idx > 0) {
+        props[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+      }
+    }
+
+    const activeState = props['ActiveState'];
+    let status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown' = 'inactive';
+    if (props['LoadState'] === 'not-found') status = 'not-installed';
+    else if (activeState === 'active') status = 'active';
+    else if (activeState === 'failed') status = 'failed';
+    else status = 'inactive';
+
+    let pid: number | null = null;
+    const parsedPid = parseInt(props['MainPID'] || '0', 10);
+    if (parsedPid > 0) pid = parsedPid;
+
+    let memory: string | null = null;
+    const memBytes = parseInt(props['MemoryCurrent'] || '0', 10);
+    if (memBytes > 0 && memBytes < 1e15) {
+      memory = `${(memBytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    return {
+      unit,
+      loadState: props['LoadState'],
+      status,
+      pid,
+      memory,
+      uptime: status === 'active' && pid ? 'Active' : null,
+    };
+  } catch {
+    return {
+      unit,
+      status: isSystemdUnitFilePresent(unit) === false ? 'not-installed' : 'unknown',
+      pid: null,
+      memory: null,
+      uptime: null,
+    };
   }
 }
 
@@ -2069,57 +2198,25 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   const results: SystemServiceInfo[] = [];
 
   for (const u of units) {
-    let status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown' = 'inactive';
-    let pid: number | null = null;
-    let memory: string | null = null;
-    let uptime: string | null = null;
-
-    try {
-      const showOut = execFileSync(
-        'systemctl',
-        ['show', u.unit, '--property=ActiveState,SubState,MainPID,MemoryCurrent'],
-        { encoding: 'utf8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] }
-      );
-      const props: Record<string, string> = {};
-      for (const line of showOut.split('\n')) {
-        const [k, v] = line.split('=');
-        if (k && v) props[k.trim()] = v.trim();
+    const candidates = SERVICE_UNIT_ALIASES[u.unit] || [u.unit];
+    let probe = querySingleSystemdUnit(candidates[0]);
+    if (probe.status === 'not-installed' && candidates.length > 1) {
+      for (const altUnit of candidates.slice(1)) {
+        const altProbe = querySingleSystemdUnit(altUnit);
+        if (altProbe.status !== 'not-installed') {
+          probe = altProbe;
+          break;
+        }
       }
-
-      const activeState = props['ActiveState'];
-      // C-B15: `systemctl show` exits 0 for a unit with no unit file
-      // (LoadState=not-found, ActiveState=inactive) — without this
-      // check a missing unit rendered as "Inactive (stopped)".
-      if (props['LoadState'] === 'not-found') status = 'not-installed';
-      else if (activeState === 'active') status = 'active';
-      else if (activeState === 'failed') status = 'failed';
-      else status = 'inactive';
-
-      const parsedPid = parseInt(props['MainPID'] || '0', 10);
-      if (parsedPid > 0) pid = parsedPid;
-
-      const memBytes = parseInt(props['MemoryCurrent'] || '0', 10);
-      if (memBytes > 0 && memBytes < 1e15) {
-        memory = `${(memBytes / (1024 * 1024)).toFixed(1)} MB`;
-      }
-
-      if (status === 'active' && pid) {
-        uptime = 'Active';
-      }
-    } catch {
-      // C-B15: any `systemctl show` failure used to mark the unit "Not
-      // Installed" — so a systemd/dbus outage rendered all 12 services
-      // as not installed. A failed probe means the state is unknown;
-      // only a unit file provably absent is not-installed.
-      status = isSystemdUnitFilePresent(u.unit) === false ? 'not-installed' : 'unknown';
     }
 
     results.push({
       ...u,
-      status,
-      pid,
-      memory: memory || (status === 'active' ? 'Running' : '-'),
-      uptime: uptime || (status === 'active' ? 'Active' : '-'),
+      unit: probe.unit,
+      status: probe.status,
+      pid: probe.pid,
+      memory: probe.memory || (probe.status === 'active' ? 'Running' : '-'),
+      uptime: probe.uptime || (probe.status === 'active' ? 'Active' : '-'),
     });
   }
 
@@ -2186,10 +2283,24 @@ const CONTROLLABLE_SERVICE_UNITS = [
   'suricata.service',
   'unbound.service',
   'kea-dhcp4-server.service',
+  'kea-dhcp4.service',
+  'kea-dhcp6-server.service',
+  'kea-dhcp6.service',
   'frr.service',
   'crowdsec.service',
   'headscale.service',
   'nut-server.service',
+  'upsd.service',
+  'chrony.service',
+  'chronyd.service',
+  'smbd.service',
+  'smb.service',
+  'ssh.service',
+  'sshd.service',
+  'freeradius.service',
+  'radiusd.service',
+  'rtslib-fb-targetctl.service',
+  'target.service',
 ];
 
 export async function controlSystemService(
@@ -2207,18 +2318,32 @@ export async function controlSystemService(
     return { success: false, message: `Invalid service action '${action}'.` };
   }
 
+  let resolvedUnit = cleanUnit;
+  const aliases = SERVICE_UNIT_ALIASES[cleanUnit];
+  if (aliases && aliases.length > 1) {
+    const primary = querySingleSystemdUnit(aliases[0]);
+    if (primary.status === 'not-installed') {
+      for (const alt of aliases.slice(1)) {
+        if (querySingleSystemdUnit(alt).status !== 'not-installed') {
+          resolvedUnit = alt;
+          break;
+        }
+      }
+    }
+  }
+
   try {
-    execFileSync('systemctl', [action, cleanUnit], {
+    execFileSync('systemctl', ['--no-ask-password', action, resolvedUnit], {
       encoding: 'utf8',
       timeout: 30000,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return { success: true, message: `systemctl ${action} ${cleanUnit} completed.` };
+    return { success: true, message: `systemctl ${action} ${resolvedUnit} completed.` };
   } catch (err: any) {
     const detail = (err?.stderr || err?.stdout || err?.message || 'command failed').toString().trim();
     return {
       success: false,
-      message: `systemctl ${action} ${cleanUnit} failed: ${detail.slice(0, 300)}`,
+      message: `systemctl ${action} ${resolvedUnit} failed: ${detail.slice(0, 300)}`,
     };
   }
 }
@@ -2311,8 +2436,9 @@ export interface LiveInterfaceInfo {
 function getLogicalInterfaceMappings(): Record<string, string> {
   const mapping: Record<string, string> = {};
   try {
-    if (fs.existsSync('/etc/axonwall/interfaces.conf')) {
-      const content = fs.readFileSync('/etc/axonwall/interfaces.conf', 'utf8');
+    const confPath = path.join(getEtcConfigDir(), 'interfaces.conf');
+    if (fs.existsSync(confPath)) {
+      const content = fs.readFileSync(confPath, 'utf8');
       const rawKv: Record<string, string> = {};
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
@@ -3027,12 +3153,16 @@ export async function saveInterfaceAssignment(data: {
         fileMode: 0o664,
         file_mode: 0o664,
       },
-      {
-        path: '/etc/network/interfaces',
-        content: ifacesContent,
-        fileMode: 0o644,
-        file_mode: 0o644,
-      },
+      ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
+        ? [
+            {
+              path: '/etc/network/interfaces',
+              content: ifacesContent,
+              fileMode: 0o644,
+              file_mode: 0o644,
+            },
+          ]
+        : []),
       {
         path: '/etc/axonwall/state.json',
         content: JSON.stringify(normalizedState, null, 2),
@@ -3294,12 +3424,16 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
         fileMode: 0o664,
         file_mode: 0o664,
       },
-      {
-        path: '/etc/network/interfaces',
-        content: ifacesContent,
-        fileMode: 0o644,
-        file_mode: 0o644,
-      },
+      ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
+        ? [
+            {
+              path: '/etc/network/interfaces',
+              content: ifacesContent,
+              fileMode: 0o644,
+              file_mode: 0o644,
+            },
+          ]
+        : []),
       {
         path: '/etc/axonwall/state.json',
         content: JSON.stringify(normalizedState, null, 2),
@@ -3876,7 +4010,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   if (!session) throw new Error('Unauthorized');
   if (session.passwordChangeRequired) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
-  const kernel = os.release() || 'Linux 6.12.111+deb13-amd64';
+  const kernel = os.release() || '6.12.0';
   const localInstallMode = detectLocalInstallMode();
 
   // 1. Check daemon API if available
@@ -5878,7 +6012,7 @@ const MCP_GENESIS_HASH = '000000000000000000000000000000000000000000000000000000
 
 function getMcpKeysStoragePath(): string {
   if (process.env.AXONWALL_MCP_KEYS_PATH) return process.env.AXONWALL_MCP_KEYS_PATH;
-  const primary = '/var/lib/axonwall';
+  const primary = getStateDir();
   const primaryFile = path.join(primary, 'mcp-keys.json');
   try {
     if (fs.existsSync(primaryFile)) {
@@ -5889,10 +6023,13 @@ function getMcpKeysStoragePath(): string {
     fs.accessSync(primary, fs.constants.W_OK);
     return primaryFile;
   } catch {
-    for (const candidate of ['/var/lib/axonwall/etc-axonwall/mcp-keys.json', '/etc/axonwall/mcp-keys.json']) {
+    for (const candidate of [
+      path.join(PERSIST_CONFIG_DIR, 'mcp-keys.json'),
+      path.join(ETC_CONFIG_DIR, 'mcp-keys.json'),
+    ]) {
       if (fs.existsSync(candidate)) return candidate;
     }
-    const fallback = '/tmp/axonwall';
+    const fallback = isDevRuntime() ? path.join(getStateDir(), 'tmp') : '/tmp/axonwall';
     fs.mkdirSync(fallback, { recursive: true, mode: 0o775 });
     return path.join(fallback, 'mcp-keys.json');
   }
@@ -5900,7 +6037,10 @@ function getMcpKeysStoragePath(): string {
 
 function getMcpAuditStoragePath(): string {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) return process.env.AXONWALL_MCP_AUDIT_PATH;
-  for (const dir of ['/var/lib/axonwall', '/var/log/axonwall']) {
+  const dirs = isDevRuntime()
+    ? [getStateDir(), path.join(getStateDir(), 'log')]
+    : [getStateDir(), '/var/log/axonwall'];
+  for (const dir of dirs) {
     const file = path.join(dir, 'mcp-audit.jsonl');
     try {
       if (fs.existsSync(file)) {
@@ -5912,7 +6052,7 @@ function getMcpAuditStoragePath(): string {
       return file;
     } catch {}
   }
-  const fallback = '/tmp/axonwall';
+  const fallback = isDevRuntime() ? path.join(getStateDir(), 'tmp') : '/tmp/axonwall';
   fs.mkdirSync(fallback, { recursive: true, mode: 0o775 });
   return path.join(fallback, 'mcp-audit.jsonl');
 }
@@ -5923,9 +6063,9 @@ function readStoredMcpKeys(): McpApiKey[] {
     : Array.from(
         new Set([
           getMcpKeysStoragePath(),
-          '/var/lib/axonwall/mcp-keys.json',
-          '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
-          '/etc/axonwall/mcp-keys.json',
+          path.join(getStateDir(), 'mcp-keys.json'),
+          path.join(PERSIST_CONFIG_DIR, 'mcp-keys.json'),
+          path.join(ETC_CONFIG_DIR, 'mcp-keys.json'),
         ]),
       );
   for (const filePath of candidates) {
@@ -5950,8 +6090,8 @@ function writeStoredMcpKeys(keys: McpApiKey[]): void {
     ? [process.env.AXONWALL_MCP_KEYS_PATH]
     : [
         getMcpKeysStoragePath(),
-        '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
-        '/etc/axonwall/mcp-keys.json',
+        path.join(PERSIST_CONFIG_DIR, 'mcp-keys.json'),
+        path.join(ETC_CONFIG_DIR, 'mcp-keys.json'),
       ];
   for (const filePath of Array.from(new Set(targets))) {
     writeConfigFileSafe(filePath, serialized, 0o660);
@@ -6263,8 +6403,8 @@ export async function toggleMcpServerMasterSwitchAction(
       ? [process.env.AXONWALL_MCP_SETTINGS_PATH]
       : [
           settingsPath,
-          '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
-          '/etc/axonwall/mcp-settings.json',
+          path.join(PERSIST_CONFIG_DIR, 'mcp-settings.json'),
+          path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
         ];
     for (const target of Array.from(new Set(targets))) {
       writeConfigFileSafe(target, serialized, 0o660);
@@ -6736,7 +6876,7 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
     return res;
   }
 
-  const rel = os.release() || '6.12.11+deb13-amd64';
+  const rel = os.release() || '6.12.0';
   const m = rel.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
   const major = m ? parseInt(m[1], 10) : 6;
   const minor = m ? parseInt(m[2], 10) : 12;

@@ -49,8 +49,8 @@ config_file_version = 2
 domains = axonwall
 
 [nss]
-filter_users = root,axonwall,axonwall-controller,openldap,sshd,nobody
-filter_groups = root,axonwall,axonwall-api,axonwall-controller,openldap,sshd,nogroup
+filter_users = root,axonwall,axonwall-controller,openldap,ldap,sshd,nobody
+filter_groups = root,axonwall,axonwall-api,axonwall-controller,openldap,ldap,sshd,nobody,nogroup
 default_shell = /usr/bin/zsh
 entry_negative_timeout = 5
 
@@ -111,9 +111,11 @@ fi
 	if err := os.WriteFile(helperPath, []byte(helperScript), 0755); err == nil {
 		_ = os.Chmod(helperPath, 0755)
 	}
-	if _, err := os.Stat("/usr/bin/sss_ssh_authorizedkeys"); os.IsNotExist(err) {
-		_ = os.MkdirAll("/usr/bin", 0755)
-		_ = os.Symlink(helperPath, "/usr/bin/sss_ssh_authorizedkeys")
+	if DetectOSFamily() == "alpine" || HasAxonwallMarker("/") {
+		if _, err := os.Stat("/usr/bin/sss_ssh_authorizedkeys"); os.IsNotExist(err) {
+			_ = os.MkdirAll("/usr/bin", 0755)
+			_ = os.Symlink(helperPath, "/usr/bin/sss_ssh_authorizedkeys")
+		}
 	}
 }
 
@@ -126,16 +128,17 @@ func EnsureSSSDConfigured(baseDN string) error {
 
 // EnsureSSSDConfiguredWithPeer configures SSSD with optional HA peer LDAPS failover.
 func EnsureSSSDConfiguredWithPeer(baseDN string, peerLDAPURI string) error {
-	// 0. On minimal appliances (e.g., Alpine MINIMAL=1) where /usr/bin/zsh is not installed,
-	// symlink /usr/bin/zsh -> /bin/ash (or /bin/sh) so LDAP users with loginShell=/usr/bin/zsh
-	// (including users replicated from a Debian HA node) can log in over SSH cleanly.
-	if _, err := os.Stat("/usr/bin/zsh"); os.IsNotExist(err) {
-		if _, err := os.Stat("/bin/zsh"); err == nil {
-			_ = os.Symlink("/bin/zsh", "/usr/bin/zsh")
-		} else if _, err := os.Stat("/bin/ash"); err == nil {
-			_ = os.Symlink("/bin/ash", "/usr/bin/zsh")
-		} else {
-			_ = os.Symlink("/bin/sh", "/usr/bin/zsh")
+	// 0. On minimal Alpine appliances (where /usr/bin/zsh is absent), symlink
+	// /usr/bin/zsh -> /bin/ash or /bin/sh so LDAP users can log in over SSH cleanly.
+	if DetectOSFamily() == "alpine" {
+		if _, err := os.Stat("/usr/bin/zsh"); os.IsNotExist(err) {
+			if _, err := os.Stat("/bin/zsh"); err == nil {
+				_ = os.Symlink("/bin/zsh", "/usr/bin/zsh")
+			} else if _, err := os.Stat("/bin/ash"); err == nil {
+				_ = os.Symlink("/bin/ash", "/usr/bin/zsh")
+			} else {
+				_ = os.Symlink("/bin/sh", "/usr/bin/zsh")
+			}
 		}
 	}
 
@@ -178,25 +181,11 @@ Cmnd_Alias AXONWALL_OP_CMDS = /usr/local/bin/axonwall-tui --readonly, /usr/local
 		return nil
 	}
 
-	// 3. Ensure /etc/nsswitch.conf resolves passwd, group, shadow via "files sss"
+	// 3. Ensure /etc/nsswitch.conf includes "sss" for passwd, group, shadow
+	// while preserving distro modules such as systemd/mymachines/[SUCCESS=merge].
 	if nssData, err := os.ReadFile("/etc/nsswitch.conf"); err == nil {
-		lines := strings.Split(string(nssData), "\n")
-		changed := false
-		for i, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "passwd:") && !strings.Contains(trimmed, "sss") {
-				lines[i] = "passwd:         files sss"
-				changed = true
-			} else if strings.HasPrefix(trimmed, "group:") && !strings.Contains(trimmed, "sss") {
-				lines[i] = "group:          files sss"
-				changed = true
-			} else if strings.HasPrefix(trimmed, "shadow:") && !strings.Contains(trimmed, "sss") {
-				lines[i] = "shadow:         files sss"
-				changed = true
-			}
-		}
-		if changed {
-			_ = os.WriteFile("/etc/nsswitch.conf", []byte(strings.Join(lines, "\n")), 0644)
+		if updated, changed := configureNSSwitchContent(string(nssData)); changed {
+			_ = os.WriteFile("/etc/nsswitch.conf", []byte(updated), 0644)
 		}
 	}
 
@@ -251,8 +240,8 @@ func sssdRunning() bool {
 // returned nil, so a dead sssd was invisible to Bootstrap (which only
 // warns on a returned error) while LDAP logins via SSSD failed.
 func restartSSSD() error {
-	_ = exec.Command("systemctl", "enable", "sssd").Run()
-	if err := exec.Command("systemctl", "restart", "sssd").Run(); err != nil {
+	_ = exec.Command("systemctl", "--no-ask-password", "enable", "sssd").Run()
+	if err := exec.Command("systemctl", "--no-ask-password", "restart", "sssd").Run(); err != nil {
 		_ = exec.Command("pkill", "-x", "sssd").Run()
 		if err := exec.Command("/usr/sbin/sssd", "-D").Run(); err != nil {
 			return fmt.Errorf("failed to start sssd: %w", err)
@@ -272,4 +261,51 @@ func InvalidateSSSDCache(username string) {
 		}
 		_ = exec.Command(path, "-E").Run()
 	}
+}
+
+func configureNSSwitchContent(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		colonIdx := strings.IndexByte(trimmed, ':')
+		if colonIdx < 0 {
+			continue
+		}
+		db := strings.TrimSpace(trimmed[:colonIdx])
+		if db != "passwd" && db != "group" && db != "shadow" {
+			continue
+		}
+		rest := trimmed[colonIdx+1:]
+		if hashIdx := strings.IndexByte(rest, '#'); hashIdx >= 0 {
+			rest = rest[:hashIdx]
+		}
+		tokens := strings.Fields(rest)
+		hasSSS := false
+		for _, tok := range tokens {
+			if tok == "sss" {
+				hasSSS = true
+				break
+			}
+		}
+		if hasSSS {
+			continue
+		}
+		origColon := strings.IndexByte(line, ':')
+		prefix := line[:origColon+1]
+		body := strings.TrimRight(line[origColon+1:], " \t")
+		if rawHash := strings.IndexByte(body, '#'); rawHash >= 0 {
+			beforeHash := strings.TrimRight(body[:rawHash], " \t")
+			lines[i] = prefix + beforeHash + " sss " + strings.TrimSpace(body[rawHash:])
+		} else if strings.TrimSpace(body) == "" {
+			lines[i] = prefix + " sss"
+		} else {
+			lines[i] = prefix + body + " sss"
+		}
+		changed = true
+	}
+	return strings.Join(lines, "\n"), changed
 }

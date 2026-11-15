@@ -40,3 +40,4 @@ export * from './yaml/index.js';
 export * from './cloudinit/index.js';
 export * from './mcp/index.js';
 export * from './kernel/index.js';
+export * from './os/index.js';

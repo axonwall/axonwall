@@ -166,6 +166,8 @@ func DefaultInstallerConfig() InstallerConfig {
 	osFamily := "debian"
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		osFamily = "alpine"
+	} else if data, err := os.ReadFile("/etc/os-release"); err == nil {
+		osFamily = DetectInstallerOSFamily(string(data))
 	}
 	tpmPresent := hasTPM2Device()
 	adminPass := ""
@@ -1054,29 +1056,78 @@ func ClassifyDiskContent(in DiskProbeInput) (DiskContentKind, string, []string) 
 	return DiskContentEmpty, "Empty Disk", nil
 }
 
+// DetectInstallerOSFamily maps /etc/os-release content to "arch", "alpine", or "debian".
+func DetectInstallerOSFamily(osReleaseContent string) string {
+	var idVal, idLikeVal string
+	for _, rawLine := range strings.Split(osReleaseContent, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "ID=") {
+			idVal = strings.ToLower(strings.Trim(strings.TrimPrefix(line, "ID="), "\"'"))
+		} else if strings.HasPrefix(line, "ID_LIKE=") {
+			idLikeVal = strings.ToLower(strings.Trim(strings.TrimPrefix(line, "ID_LIKE="), "\"'"))
+		}
+	}
+	tokens := append([]string{idVal}, strings.Fields(idLikeVal)...)
+	for _, tok := range tokens {
+		switch tok {
+		case "arch", "omarchy", "manjaro", "endeavouros", "cachyos":
+			return "arch"
+		case "alpine":
+			return "alpine"
+		case "debian", "ubuntu":
+			return "debian"
+		}
+	}
+	return "debian"
+}
+
+func isDiskNonEmpty(d DiskDevice) bool {
+	if d.ContentKind == DiskContentEmpty {
+		return false
+	}
+	return d.ContentKind != "" ||
+		strings.TrimSpace(d.ContentSummary) != "" ||
+		len(d.ContentDetails) > 0
+}
+
+func collectTargetDiskPaths(disks []DiskDevice, cfg InstallerConfig) []string {
+	seen := make(map[string]bool)
+	var ordered []string
+	addPath := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		ordered = append(ordered, p)
+	}
+	for _, group := range [][]string{cfg.SystemDisks, cfg.ZfsExtraDisks, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks} {
+		for _, p := range group {
+			addPath(p)
+		}
+	}
+	if len(cfg.SystemDisks) == 0 {
+		for _, d := range disks {
+			if d.SystemDisk || d.Role == "system" || d.ZfsExtra || strings.HasPrefix(d.Role, "zfs-") {
+				addPath(d.Path)
+			}
+		}
+		if len(ordered) == 0 && len(disks) == 1 && (disks[0].Role == "" || disks[0].Role == "none") {
+			addPath(disks[0].Path)
+		}
+	}
+	return ordered
+}
+
 // SummarizeTargetDiskWarnings inspects all assigned target disks in cfg and reports any non-empty disks.
 func SummarizeTargetDiskWarnings(disks []DiskDevice, cfg InstallerConfig) (hasNonEmpty, hasAxonwall, hasOtherOS bool, warnings []string) {
 	byPath := make(map[string]DiskDevice, len(disks))
 	for _, d := range disks {
 		byPath[d.Path] = d
 	}
-	seen := make(map[string]bool)
-	var orderedTargets []string
-	for _, group := range [][]string{cfg.SystemDisks, cfg.ZfsExtraDisks, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks} {
-		for _, p := range group {
-			if p == "" || seen[p] {
-				continue
-			}
-			seen[p] = true
-			orderedTargets = append(orderedTargets, p)
-		}
-	}
+	orderedTargets := collectTargetDiskPaths(disks, cfg)
 	for _, p := range orderedTargets {
 		d, ok := byPath[p]
-		if !ok {
-			continue
-		}
-		if d.ContentKind == "" || d.ContentKind == DiskContentEmpty {
+		if !ok || !isDiskNonEmpty(d) {
 			continue
 		}
 		hasNonEmpty = true
@@ -1958,7 +2009,43 @@ func openLinuxPTY() (*os.File, *os.File, error) {
 // background systemd services, udev, and kernel printk) via the Linux TIOCCONS ioctl
 // onto a hidden capture PTY, and drains every byte into /var/log/axonwall-console-capture.log.
 // This guarantees zero raw garbage output ever bleeds onto /dev/tty1 while the TUI runs.
+func isPhysicalConsoleTTYPath(ttyPath string) bool {
+	ttyPath = strings.TrimSpace(ttyPath)
+	if ttyPath == "/dev/console" {
+		return true
+	}
+	for _, pfx := range []string{"/dev/ttyS", "/dev/ttyAMA", "/dev/ttyUSB"} {
+		if strings.HasPrefix(ttyPath, pfx) && len(ttyPath) > len(pfx) {
+			return true
+		}
+	}
+	if strings.HasPrefix(ttyPath, "/dev/tty") {
+		rest := strings.TrimPrefix(ttyPath, "/dev/tty")
+		if rest == "" {
+			return false
+		}
+		for i := 0; i < len(rest); i++ {
+			if rest[i] < '0' || rest[i] > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isPhysicalConsoleTTY() bool {
+	ttyPath, err := os.Readlink("/proc/self/fd/0")
+	if err != nil {
+		return false
+	}
+	return isPhysicalConsoleTTYPath(ttyPath)
+}
+
 func suppressConsoleNoise() {
+	if !isPhysicalConsoleTTY() {
+		return
+	}
 	_ = os.WriteFile("/proc/sys/kernel/printk", []byte("1\t4\t1\t7\n"), 0644)
 	_ = exec.Command("dmesg", "-n", "1").Run()
 	if os.Geteuid() == 0 {
@@ -2524,7 +2611,7 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 				statusBanner = fmt.Sprintf("%s[✓] Shipped diagnostics bundle via %s%s", colorEmerald+colorBold, shippedTo, colorReset)
 			}
 		case "C":
-			_ = exec.Command("systemctl", "reset-failed").Run()
+			_ = exec.Command("systemctl", "--no-ask-password", "reset-failed").Run()
 			suppressConsoleNoise()
 			statusBanner = fmt.Sprintf("%s[✓] Cleared failed systemd unit states and refreshed console capture.%s", colorEmerald+colorBold, colorReset)
 		case "R", "REDRAW":
@@ -2675,17 +2762,10 @@ func confirmTargetDiskOverwrite(disks []DiskDevice, cfg InstallerConfig, reader 
 	for _, d := range disks {
 		byPath[d.Path] = d
 	}
-	seen := make(map[string]bool)
 	var nonEmptyTargets []DiskDevice
-	for _, group := range [][]string{cfg.SystemDisks, cfg.ZfsExtraDisks, cfg.ZfsSlogDisks, cfg.ZfsL2arcDisks, cfg.ZfsSpareDisks} {
-		for _, p := range group {
-			if p == "" || seen[p] {
-				continue
-			}
-			seen[p] = true
-			if d, ok := byPath[p]; ok && d.ContentKind != "" && d.ContentKind != DiskContentEmpty {
-				nonEmptyTargets = append(nonEmptyTargets, d)
-			}
+	for _, p := range collectTargetDiskPaths(disks, cfg) {
+		if d, ok := byPath[p]; ok && isDiskNonEmpty(d) {
+			nonEmptyTargets = append(nonEmptyTargets, d)
 		}
 	}
 
@@ -2983,6 +3063,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "C":
 				step = 1
 			case "I", "ENTER":
+				syncDiskRolesAndConfig(disks, &cfg)
 				if len(cfg.SystemDisks) > 0 {
 					clearScreen()
 					if !confirmTargetDiskOverwrite(disks, cfg, reader, os.Stdout) {
@@ -4034,7 +4115,7 @@ func executeLiveInstallation(cfg InstallerConfig, eval HardwareEvaluation, insta
 		}
 		if key == "R" {
 			fmt.Println("\n  Rebooting appliance...")
-			_ = exec.Command("systemctl", "reboot").Run()
+			_ = exec.Command("systemctl", "--no-ask-password", "reboot").Run()
 			_ = exec.Command("/sbin/reboot").Run()
 			_ = exec.Command("reboot").Run()
 			for {

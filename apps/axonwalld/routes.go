@@ -17,7 +17,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var validNetdevRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+var validNetdevRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,14}$`)
+
+func isValidNetdev(dev string) bool {
+	return validNetdevRegex.MatchString(dev) && !strings.Contains(dev, "..")
+}
 
 type StaticRouteConfig struct {
 	ID          string `yaml:"id" json:"id,omitempty"`
@@ -273,12 +277,12 @@ func resolveInterfaceDevice(ifaceName string, devMap map[string]string) string {
 		if _, err := net.InterfaceByName(mapped); err == nil {
 			return mapped
 		}
-		if validNetdevRegex.MatchString(mapped) {
+		if isValidNetdev(mapped) {
 			return mapped
 		}
 	}
 
-	if validNetdevRegex.MatchString(ifaceName) {
+	if isValidNetdev(ifaceName) {
 		return ifaceName
 	}
 	return ""

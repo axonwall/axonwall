@@ -108,14 +108,17 @@ rule-files:
 `;
 
   // nftables NFQUEUE rules
+  // In IDS (repeat) mode Suricata re-injects packets with mark 0x1/0x1; skip already-marked packets to prevent infinite queueing loops.
   const nftRules: string[] = [];
+  const loopGuard = isIps ? '' : 'meta mark & 0x1 == 0 ';
+  const modeTag = isIps ? 'ips' : 'ids';
   for (const rawIface of config.interfaces) {
     const iface = rawIface.split(/[\r\n\s";]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');
     if (!iface) continue;
     const queueAction = config.nfqueueBypass ? 'queue num 0-3 bypass' : 'queue num 0-3';
     nftRules.push(
-      `iifname "${iface}" ${queueAction} comment "suricata-ips-inbound"`,
-      `oifname "${iface}" ${queueAction} comment "suricata-ips-outbound"`
+      `${loopGuard}iifname "${iface}" ${queueAction} comment "suricata-${modeTag}-inbound"`,
+      `${loopGuard}oifname "${iface}" ${queueAction} comment "suricata-${modeTag}-outbound"`
     );
   }
 

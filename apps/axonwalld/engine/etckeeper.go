@@ -319,15 +319,27 @@ func (m *EtckeeperManager) syncCustomIgnoreLocked(patterns []string) error {
 	return nil
 }
 
+func defaultEtckeeperPkgManagers() (string, string) {
+	switch DetectOSFamily() {
+	case "arch":
+		return "pacman", "pacman"
+	case "alpine":
+		return "apk", "apk"
+	default:
+		return "apt", "dpkg"
+	}
+}
+
 func (m *EtckeeperManager) readConfigLocked() EtckeeperConfig {
 	confPath := m.confFilePath()
+	defaultHigh, defaultLow := defaultEtckeeperPkgManagers()
 	cfg := EtckeeperConfig{
 		VCS:                      "git",
 		DailyAutocommit:          true,
 		AvoidSpecialFileWarning:  true,
 		AvoidCommitBeforeInstall: false,
-		HighlevelPackageManager:  "apt",
-		LowlevelPackageManager:   "dpkg",
+		HighlevelPackageManager:  defaultHigh,
+		LowlevelPackageManager:   defaultLow,
 		PushRemote:               "",
 		GitCommitOptions:         "",
 		AutoCommitOnApply:        true,
@@ -410,9 +422,10 @@ func (m *EtckeeperManager) UpdateConfig(input EtckeeperConfig) (EtckeeperConfig,
 		return EtckeeperConfig{}, fmt.Errorf("unsupported VCS %q: must be git, hg, bzr, or darcs", vcs)
 	}
 
+	defaultHigh, defaultLow := defaultEtckeeperPkgManagers()
 	highPkg := strings.TrimSpace(input.HighlevelPackageManager)
 	if highPkg == "" {
-		highPkg = "apt"
+		highPkg = defaultHigh
 	}
 	if !safeEtckeeperPkgMgrRe.MatchString(highPkg) {
 		return EtckeeperConfig{}, fmt.Errorf("invalid highlevelPackageManager %q", highPkg)
@@ -420,7 +433,7 @@ func (m *EtckeeperManager) UpdateConfig(input EtckeeperConfig) (EtckeeperConfig,
 
 	lowPkg := strings.TrimSpace(input.LowlevelPackageManager)
 	if lowPkg == "" {
-		lowPkg = "dpkg"
+		lowPkg = defaultLow
 	}
 	if !safeEtckeeperPkgMgrRe.MatchString(lowPkg) {
 		return EtckeeperConfig{}, fmt.Errorf("invalid lowlevelPackageManager %q", lowPkg)
@@ -493,9 +506,9 @@ func (m *EtckeeperManager) UpdateConfig(input EtckeeperConfig) (EtckeeperConfig,
 	// Reconcile systemd etckeeper.timer when managing host /etc
 	if m.etcDir == "/etc" {
 		if input.DailyAutocommit {
-			_ = m.execCmd("systemctl", "enable", "--now", "etckeeper.timer").Run()
+			_ = m.execCmd("systemctl", "--no-ask-password", "enable", "--now", "etckeeper.timer").Run()
 		} else {
-			_ = m.execCmd("systemctl", "disable", "--now", "etckeeper.timer").Run()
+			_ = m.execCmd("systemctl", "--no-ask-password", "disable", "--now", "etckeeper.timer").Run()
 		}
 	}
 

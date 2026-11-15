@@ -3,6 +3,7 @@ import {
   type DesiredState,
   type HostMalwareDefenseConfig,
 } from '../../schemas/index.js';
+import type { OsFamily } from '../../os/pure.js';
 
 export interface HostMalwareScannerSpec {
   id: string;
@@ -633,7 +634,10 @@ rule Linux_Stealth_Backdoor_BPFDoor_Symbiote {
 /**
  * Generates /etc/rkhunter.conf.local and the unified /usr/local/bin/axonwall-hunt-rootkits CLI runner.
  */
-export function compileRkhunterConfig(state?: Partial<DesiredState> | null): {
+export function compileRkhunterConfig(
+  state?: Partial<DesiredState> | null,
+  opts?: { osFamily?: OsFamily },
+): {
   rkhunterConfLocal: string;
   cronScheduleFile: string;
   unifiedRunnerScript: string;
@@ -642,6 +646,8 @@ export function compileRkhunterConfig(state?: Partial<DesiredState> | null): {
   if (!/^[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+$/.test(cfg.scheduledScanCron)) {
     throw new Error(`Invalid scheduledScanCron expression: ${cfg.scheduledScanCron}`);
   }
+
+  const pkgMgr = opts?.osFamily === 'arch' ? 'PACMAN' : 'DPKG';
 
   const rkhunterConfLocal = [
     '# =============================================================================',
@@ -657,7 +663,7 @@ export function compileRkhunterConfig(state?: Partial<DesiredState> | null): {
     'ENABLE_TESTS=ALL',
     'DISABLE_TESTS=suspscan,deleted_files',
     'HASH_CMD=SHA256',
-    'PKGMGR=DPKG',
+    `PKGMGR=${pkgMgr}`,
     'ALLOWDEVFILE=/dev/shm/axonwall-*',
     'SYSLOG_ON_WARNING=1',
     '',
@@ -707,9 +713,27 @@ if [[ "${cfg.yaraEnabled}" == "true" ]] && command -v yara >/dev/null 2>&1 && [[
   yara -r /etc/axonwall/yara/ghost_in_the_ring.yar /tmp /dev/shm /var/tmp 2>/dev/null || true
 fi
 
-if [[ "${cfg.aideEnabled}" == "true" ]] && command -v aide >/dev/null 2>&1 && [[ -f /var/lib/aide/aide.db ]]; then
+if [[ "${cfg.aideEnabled}" == "true" ]] && command -v aide >/dev/null 2>&1 && [[ -f /var/lib/aide/aide.db || -f /var/lib/aide/aide.db.gz ]]; then
   echo -e "\\n>>> [5/9] Running AIDE Cryptographic File Integrity Check..."
-  aide --check --config=/etc/aide/aide.conf || true
+  AIDE_CONF=""
+  if [[ -f /etc/aide/aide.conf ]]; then
+    AIDE_CONF="/etc/aide/aide.conf"
+  elif [[ -f /etc/aide.conf ]]; then
+    AIDE_CONF="/etc/aide.conf"
+  fi
+  if [[ -n "\$AIDE_CONF" ]]; then
+    aide --check --config="\$AIDE_CONF" || true
+  fi
+fi
+
+if [[ "${cfg.debsumsEnabled}" == "true" ]]; then
+  if command -v debsums >/dev/null 2>&1; then
+    echo -e "\\n>>> [5b/9] Verifying Debian Package Checksums (debsums)..."
+    debsums -s || true
+  elif command -v pacman >/dev/null 2>&1; then
+    echo -e "\\n>>> [5b/9] Verifying Arch Package Checksums (pacman -Qkk)..."
+    pacman -Qkk 2>&1 | grep -v ': 0 altered' || true
+  fi
 fi
 
 if [[ "${cfg.lynisEnabled}" == "true" ]] && command -v lynis >/dev/null 2>&1; then
@@ -933,7 +957,10 @@ export function analyzePmuLbrBranchStack(perfScriptOutput: string): PmuLbrTrampo
   return hits;
 }
 
-export function compileHostDefenseBundle(state?: Partial<DesiredState> | null) {
+export function compileHostDefenseBundle(
+  state?: Partial<DesiredState> | null,
+  opts?: { osFamily?: OsFamily },
+) {
   const config = resolveHostDefenseConfig(state);
   const sysctlConf = compileKernelHardeningSysctl(state);
   const bpfLsmGuardC = compileBpfLsmGuardC(state);
@@ -941,7 +968,7 @@ export function compileHostDefenseBundle(state?: Partial<DesiredState> | null) {
   const ioUringHuntScript = compileIoUringHuntScript();
   const ebpfRootkitHuntScript = compileEbpfRootkitHuntScript();
   const yaraRules = compileYaraGhostInTheRingRules();
-  const rkhunterBundle = compileRkhunterConfig(state);
+  const rkhunterBundle = compileRkhunterConfig(state, opts);
 
   return {
     config,

@@ -1,5 +1,28 @@
 import type { NmapHost, NmapPort, NmapRun } from '../types/nmap';
 
+function buildUpdatedRunstats(
+  prevRunstats: NmapRun['runstats'] | undefined,
+  hosts: NmapHost[]
+): NmapRun['runstats'] {
+  const finished = prevRunstats?.finished ?? {
+    time: Math.floor(Date.now() / 1000),
+    timestr: new Date().toUTCString(),
+    elapsed: 0,
+    summary: `Nmap scan: ${hosts.length} hosts`,
+    exit: 'success',
+  };
+  return {
+    ...prevRunstats,
+    finished,
+    hosts: {
+      ...prevRunstats?.hosts,
+      up: hosts.filter((h) => h.status.state === 'up').length,
+      down: hosts.filter((h) => h.status.state === 'down').length,
+      total: hosts.length,
+    },
+  };
+}
+
 /**
  * Immutably updates a specific host in an NmapRun object using an updater callback.
  * Can return either a full NmapHost or a partial patch object.
@@ -45,15 +68,7 @@ export function updateHostInScan(
   return {
     ...scan,
     hosts: updatedHosts,
-    runstats: {
-      ...scan.runstats,
-      hosts: {
-        ...scan.runstats?.hosts,
-        up: updatedHosts.filter((h) => h.status.state === 'up').length,
-        down: updatedHosts.filter((h) => h.status.state === 'down').length,
-        total: updatedHosts.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(scan.runstats, updatedHosts),
   };
 }
 
@@ -115,14 +130,7 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
   return {
     ...baseScan,
     hosts: mergedHostsList,
-    runstats: {
-      ...baseScan.runstats,
-      hosts: {
-        up: mergedHostsList.filter((h) => h.status.state === 'up').length,
-        down: mergedHostsList.filter((h) => h.status.state === 'down').length,
-        total: mergedHostsList.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(baseScan.runstats, mergedHostsList),
   };
 }
 
@@ -134,15 +142,7 @@ export function addHostToScan(scan: NmapRun, host: NmapHost): NmapRun {
   return {
     ...scan,
     hosts: nextHosts,
-    runstats: {
-      ...scan.runstats,
-      hosts: {
-        ...scan.runstats?.hosts,
-        up: nextHosts.filter((h) => h.status.state === 'up').length,
-        down: nextHosts.filter((h) => h.status.state === 'down').length,
-        total: nextHosts.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(scan.runstats, nextHosts),
   };
 }
 
@@ -161,14 +161,6 @@ export function removeHostFromScan(scan: NmapRun, hostIdOrIp: string): NmapRun {
   return {
     ...scan,
     hosts: filtered,
-    runstats: {
-      ...scan.runstats,
-      hosts: {
-        ...scan.runstats?.hosts,
-        up: filtered.filter((h) => h.status.state === 'up').length,
-        down: filtered.filter((h) => h.status.state === 'down').length,
-        total: filtered.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(scan.runstats, filtered),
   };
 }

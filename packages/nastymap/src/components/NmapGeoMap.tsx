@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useRef, useEffect } from 'react';
 import type { NmapHost, NmapRun, TopologyNode } from '../types/nmap';
 import { geocodeIp } from '../geoip/geocoder';

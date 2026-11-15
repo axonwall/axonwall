@@ -159,7 +159,7 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 
 	// Restart or start hostapd for this interface
 	slog.Info("Restarting hostapd service for radio", "radio", cfg.Radio)
-	cmd := exec.Command("systemctl", "restart", fmt.Sprintf("hostapd@%s", cfg.Radio))
+	cmd := exec.Command("systemctl", "--no-ask-password", "restart", fmt.Sprintf("hostapd@%s", cfg.Radio))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		slog.Warn("Failed to restart hostapd via systemd, trying direct execution", "error", err, "output", string(out))
 		// Fallback for non-systemd environments (like OpenWrt)
@@ -213,7 +213,7 @@ func (e *WiFiEngine) Teardown(radio string) error {
 	}
 	confPath := filepath.Join(e.ConfigDir, fmt.Sprintf("hostapd-%s.conf", radio))
 
-	cmd := exec.Command("systemctl", "stop", fmt.Sprintf("hostapd@%s", radio))
+	cmd := exec.Command("systemctl", "--no-ask-password", "stop", fmt.Sprintf("hostapd@%s", radio))
 	if err := cmd.Run(); err != nil {
 		_ = exec.Command("pkill", "-f", hostapdPattern(confPath)).Run()
 	}

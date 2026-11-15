@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useEffect } from 'react';
 import type { NmapHost, TopologyNode, HostAction, CustomDrawerTab, HostActionContext } from '../types/nmap';
 import { getHostIcon } from '../icons/index';

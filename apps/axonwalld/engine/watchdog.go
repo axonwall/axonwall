@@ -426,6 +426,11 @@ func detectInstallModeCustom(cmdlinePath string) string {
 		if strings.Contains(cmdline, "rolling") {
 			return "rolling"
 		}
+		if strings.Contains(cmdline, "slot=A") || strings.Contains(cmdline, "slot=B") ||
+			strings.Contains(cmdline, "axon_root_a") || strings.Contains(cmdline, "axon_root_b") ||
+			cmdlineHasToken(cmdline, "rootfsA=1") || cmdlineHasToken(cmdline, "rootfsB=1") {
+			return "ab"
+		}
 	}
 	if mountsData, err := os.ReadFile("/proc/mounts"); err == nil {
 		scanner := bufio.NewScanner(bytes.NewReader(mountsData))
@@ -438,6 +443,9 @@ func detectInstallModeCustom(cmdlinePath string) string {
 				break
 			}
 		}
+	}
+	if !HasAxonwallMarker("/") && !fileExists("/boot/grub/grubenv") {
+		return "host"
 	}
 	return "ab"
 }
@@ -686,7 +694,19 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 	}
 
 	appVer := we.getInstalledVersion()
-	if we.status.InstallMode == "rolling" {
+	if we.status.InstallMode == "host" {
+		osInfo := DetectOSInfo("/")
+		pretty := strings.TrimSpace(osInfo.PrettyName)
+		if pretty == "" {
+			pretty = string(osInfo.Family)
+		}
+		we.status.ActiveSlot = "host"
+		we.status.InactiveSlot = "host"
+		we.status.SlotAVersion = appVer
+		we.status.SlotBVersion = "Host Managed"
+		we.status.OsVersion = pretty
+		return we.status
+	} else if we.status.InstallMode == "rolling" {
 		we.status.ActiveSlot = "A"
 		we.status.InactiveSlot = "A"
 		we.status.SlotAVersion = appVer

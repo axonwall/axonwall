@@ -389,20 +389,15 @@ export function createVigilanteMcpServer() {
       const xmlScans = await listSavedXmlScans();
       const hostMap = new Map();
 
-      for (const scan of xmlScans) {
-        try {
-          const report = await readXmlScan(scan.filePath);
-          for (const host of report.hosts) {
-            if (!hostMap.has(host.ip) || (host.ports && host.ports.length > 0)) {
-              hostMap.set(host.ip, {
-                ...host,
-                lastSeenScan: scan.filename,
-                scanTime: report.summary?.finishedTime || scan.time
-              });
-            }
+      for (const report of xmlScans) {
+        for (const host of report.hosts || []) {
+          if (!hostMap.has(host.ip) || (host.ports && host.ports.length > 0)) {
+            hostMap.set(host.ip, {
+              ...host,
+              lastSeenScan: report.filename,
+              scanTime: report.runStats?.finished?.timestr || report.mtime
+            });
           }
-        } catch {
-          // Ignore unreadable individual scans
         }
       }
 
@@ -423,22 +418,17 @@ export function createVigilanteMcpServer() {
       const xmlScans = await listSavedXmlScans();
       const subnets = {};
 
-      for (const scan of xmlScans) {
-        try {
-          const report = await readXmlScan(scan.filePath);
-          const netTarget = report.summary?.target || 'unknown';
-          if (!subnets[netTarget]) {
-            subnets[netTarget] = {
-              target: netTarget,
-              scanFile: scan.filename,
-              scanTime: report.summary?.finishedTime || scan.time,
-              hostsCount: report.hosts.length,
-              totalOpenPorts: report.hosts.reduce((acc, h) => acc + (h.ports?.length || 0), 0),
-              hosts: report.hosts
-            };
-          }
-        } catch {
-          // Ignore
+      for (const report of xmlScans) {
+        const netTarget = report.target || 'unknown';
+        if (!subnets[netTarget]) {
+          subnets[netTarget] = {
+            target: netTarget,
+            scanFile: report.filename,
+            scanTime: report.runStats?.finished?.timestr || report.mtime,
+            hostsCount: (report.hosts || []).length,
+            totalOpenPorts: (report.hosts || []).reduce((acc, h) => acc + (h.ports?.length || 0), 0),
+            hosts: report.hosts || []
+          };
         }
       }
 
@@ -701,20 +691,23 @@ export function createVigilanteMcpServer() {
       const xmlScans = await listSavedXmlScans();
       let matchedHost = null;
 
-      for (const scan of xmlScans) {
-        try {
-          const report = await readXmlScan(scan.filePath);
-          const found = report.hosts.find(h => h.ip === targetIp || (h.hostnames && h.hostnames.includes(targetIp)));
-          if (found) {
-            matchedHost = {
-              ...found,
-              scanReport: scan.filename,
-              networkTarget: report.summary?.target
-            };
-            break;
+      for (const report of xmlScans) {
+        const found = (report.hosts || []).find((h) => {
+          if (h.ip === targetIp || h.id === targetIp) return true;
+          if (Array.isArray(h.hostnames)) {
+            return h.hostnames.some((hn) =>
+              typeof hn === 'string' ? hn === targetIp : hn?.name === targetIp
+            );
           }
-        } catch {
-          // Ignore
+          return false;
+        });
+        if (found) {
+          matchedHost = {
+            ...found,
+            scanReport: report.filename,
+            networkTarget: report.target
+          };
+          break;
         }
       }
 

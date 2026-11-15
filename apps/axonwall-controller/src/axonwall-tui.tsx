@@ -23,15 +23,16 @@ import {
 } from '@axonwall/lib';
 import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
+import { readAgentToken, resolveControllerDirs } from './dev-paths.js';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { App as NastyMapApp } from './tui/nastymap/App.js';
 
-const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
-const VAR_ETC_CONFIG_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
-const STATE_JSON_PATH = process.env.AXONWALL_STATE_FILE || '/var/lib/axonwall/state.json';
-const AGENT_API_SOCKET =
-  process.env.AXONWALL_AGENT_API_SOCK || process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
-const AGENT_TOKEN_PATH = process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token';
+const CONTROLLER_DIRS = resolveControllerDirs();
+const ETC_CONFIG_DIR = CONTROLLER_DIRS.etcDir;
+const VAR_ETC_CONFIG_DIR = CONTROLLER_DIRS.persistYamlDir;
+const STATE_JSON_PATH = CONTROLLER_DIRS.stateFile;
+const AGENT_API_SOCKET = CONTROLLER_DIRS.agentSock;
+const AGENT_TOKEN_PATH = CONTROLLER_DIRS.agentTokenPaths[0] || path.join(ETC_CONFIG_DIR, 'agent.token');
 
 export type TopTab =
   | 'dashboard'
@@ -47,7 +48,7 @@ export type TopTab =
   | 'cli_ops';
 
 function detectLocalInstallMode(): 'zbm' | 'rolling' | 'ab' {
-  for (const p of [path.join(ETC_CONFIG_DIR, 'install-mode'), '/var/lib/axonwall/install-mode']) {
+  for (const p of [path.join(ETC_CONFIG_DIR, 'install-mode'), path.join(CONTROLLER_DIRS.varDir, 'install-mode')]) {
     try {
       if (fs.existsSync(p)) {
         const raw = fs.readFileSync(p, 'utf-8').trim().toLowerCase();
@@ -348,11 +349,7 @@ function callDaemon(
     const body = payload ? JSON.stringify(payload) : '';
     let token = process.env.AXONWALL_AGENT_TOKEN || '';
     if (!token) {
-      for (const candidate of [
-        AGENT_TOKEN_PATH,
-        '/var/lib/axonwall/etc-axonwall/agent.token',
-        '/run/axonwall/agent.token',
-      ]) {
+      for (const candidate of Array.from(new Set([AGENT_TOKEN_PATH, ...CONTROLLER_DIRS.agentTokenPaths]))) {
         try {
           if (fs.existsSync(candidate)) {
             token = fs.readFileSync(candidate, 'utf-8').trim();
@@ -1756,9 +1753,9 @@ export function AxonwallTuiApp({
           for (const p of Array.from(
             new Set([
               resolveMcpSettingsPath(),
-              '/var/lib/axonwall/mcp-settings.json',
-              '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
-              '/etc/axonwall/mcp-settings.json',
+              path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
+              path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
+              path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
             ])
           )) {
             try {
