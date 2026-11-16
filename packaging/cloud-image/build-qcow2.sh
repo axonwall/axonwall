@@ -92,7 +92,22 @@ echo "    Assigned loop device: ${LOOP_DEV}"
 cleanup() {
   set +e
   echo "[*] Cleaning up mounts and loop devices..."
-  umount -R "${WORK_DIR}/mnt" 2>/dev/null || true
+  if [[ -d "${WORK_DIR}/mnt" ]]; then
+    # Kill any runaway processes still accessing the chroot mount tree
+    fuser -km "${WORK_DIR}/mnt" 2>/dev/null || true
+    sleep 1
+
+    # Unmount bind mounts specifically first if still mounted
+    for submount in dev/pts dev sys proc boot/efi var/lib/axonwall; do
+      if mountpoint -q "${WORK_DIR}/mnt/${submount}" 2>/dev/null; then
+        umount -l "${WORK_DIR}/mnt/${submount}" 2>/dev/null || true
+      fi
+    done
+
+    # Unmount target root recursively with lazy fallback
+    umount -R "${WORK_DIR}/mnt" 2>/dev/null || umount -l "${WORK_DIR}/mnt" 2>/dev/null || true
+  fi
+
   if [[ -n "${LOOP_DEV:-}" && -b "${LOOP_DEV}" ]]; then
     losetup -d "${LOOP_DEV}" 2>/dev/null || true
   fi
@@ -232,23 +247,20 @@ rm -f "${TARGET}/etc/ssh/ssh_host_"*
 rm -rf "${TARGET}/var/lib/cloud/data" "${TARGET}/var/lib/cloud/instance" "${TARGET}/var/lib/cloud/instances"
 rm -rf "${TARGET}/tmp/"* "${TARGET}/var/tmp/"*
 
-# Unmount target mounts
-umount "${TARGET}/sys" "${TARGET}/proc" "${TARGET}/dev/pts" "${TARGET}/dev"
+# Unmount target mounts in reverse hierarchical order
+sync
+# Ensure no background chroot daemon or process holds mounts open
+fuser -km "${TARGET}" 2>/dev/null || true
+sleep 1
 
-# Slot B ships EMPTY: it is formatted above (mkfs.ext4, label axon_root_b)
-# and left unpopulated. The batch-3 fix cloned Slot A to Slot B here so a
-# watchdog fallback would find a bootable standby, but that doubled the
-# image (1.17 GB -> 2.34 GB) and pushed it past GitHub's 2 GiB release
-# asset limit. The clone now happens on the appliance itself: firstboot
-# (axonwall-firstboot, step 1.1) replicates the booted slot to the
-# standby slot once, gated by the .ab-clone-pending marker written above,
-# mirroring the d-i path (10axonwall-ab-setup) which replicates A to B at
-# install time. Until that first-boot clone completes, a watchdog fallback
-# to B finds an empty root -- the same window the d-i path already accepts
-# between install and first boot, and far narrower than shipping B empty
-# with no clone at all.
-umount "${TARGET}/boot/efi" "${TARGET}/var/lib/axonwall" "${TARGET}"
-losetup -d "${LOOP_DEV}"
+for sub in dev/pts dev sys proc boot/efi var/lib/axonwall; do
+  if mountpoint -q "${TARGET}/${sub}" 2>/dev/null; then
+    umount "${TARGET}/${sub}" 2>/dev/null || umount -l "${TARGET}/${sub}" 2>/dev/null || true
+  fi
+done
+
+umount "${TARGET}" 2>/dev/null || umount -l "${TARGET}" 2>/dev/null || true
+losetup -d "${LOOP_DEV}" 2>/dev/null || true
 LOOP_DEV=""
 
 # 7. Convert sparse raw image to compressed QCOW2
