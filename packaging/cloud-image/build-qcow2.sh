@@ -214,10 +214,12 @@ done
 
 # Install GRUB bootloader for both BIOS and UEFI
 echo "[+] Installing GRUB bootloader (UEFI + BIOS)..."
-mount --bind /dev "${TARGET}/dev"
-mount --bind /dev/pts "${TARGET}/dev/pts"
-mount --bind /proc "${TARGET}/proc"
-mount --bind /sys "${TARGET}/sys"
+mount -t devtmpfs dev "${TARGET}/dev" 2>/dev/null || mount --bind /dev "${TARGET}/dev"
+mount --make-rslave "${TARGET}/dev" 2>/dev/null || true
+mkdir -p "${TARGET}/dev/pts"
+mount -t devpts devpts "${TARGET}/dev/pts" -o gid=5,mode=620 2>/dev/null || mount --bind /dev/pts "${TARGET}/dev/pts"
+mount -t proc proc "${TARGET}/proc" 2>/dev/null || mount --bind /proc "${TARGET}/proc"
+mount -t sysfs sys "${TARGET}/sys" 2>/dev/null || mount --bind /sys "${TARGET}/sys"
 
 # Install GRUB for EFI (removable media target ensures boot on all UEFI firmware)
 chroot "${TARGET}" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=axonwall --recheck --no-nvram --removable 2>/dev/null || true
@@ -232,9 +234,8 @@ if [[ -f "${TARGET}/usr/share/grub/unicode.pf2" ]]; then
   cp -n "${TARGET}/usr/share/grub/unicode.pf2" "${TARGET}/boot/grub/themes/axonwall/unicode.pf2" 2>/dev/null || true
 fi
 
-# Configure Axonwall Plymouth boot splash theme & regenerate initramfs
+# Configure Axonwall Plymouth boot splash theme
 chroot "${TARGET}" /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
-chroot "${TARGET}" update-initramfs -u -k all 2>/dev/null || true
 
 # Update GRUB configuration
 chroot "${TARGET}" update-grub 2>/dev/null || true
