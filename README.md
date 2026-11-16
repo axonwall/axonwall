@@ -14,7 +14,7 @@
 [![Control Plane](https://img.shields.io/badge/Daemon-Go_1.26+%20%26%20TypeScript-00ADD8.svg)](https://golang.org/)
 [![Appliance](https://img.shields.io/badge/Appliance-Debian_13_Trixie_%7C_ZFSBootMenu_v3.1-A80030.svg)](https://www.debian.org/)
 
-[Website](https://axonwall.com) • [Documentation (26 Guides)](https://axonwall.com/docs) • [Releases & Checksums](https://axonwall.com/releases) • [Release Notes](RELEASE_NOTES.md) • [2-Host HA Setup Guide](docs/HIGH_AVAILABILITY_SETUP.md) • [Terraform Provider](apps/terraform-provider-axonwall/README.md) • [Business Plan](business-plan.md)
+[Website](https://axonwall.com) • [Documentation (26 Guides)](https://axonwall.com/docs) • [Releases & Checksums](https://axonwall.com/releases) • [Release Notes](RELEASE_NOTES.md) • [2-Host HA Setup Guide](docs/HIGH_AVAILABILITY_SETUP.md) • [Proxmox Mini EFI Edge Guide](docs/PROXMOX_MINI_EDGE.md) • [Terraform Provider](apps/terraform-provider-axonwall/README.md) • [Business Plan](business-plan.md)
 
 </div>
 
@@ -128,7 +128,7 @@ axonwall/
 │   ├── vault/                        # Axonwall Vault Edition immutable SeaweedFS S3 Object-Lock appliance
 │   └── debian/                       # Standalone axonwall_<ver>_amd64.deb packager
 ├── scripts/                          # Operational helpers (release-tagger.sh, update-kubeconfig.sh)
-├── docs/                             # Standalone operational guides (HIGH_AVAILABILITY_SETUP.md)
+├── docs/                             # Standalone operational guides (HIGH_AVAILABILITY_SETUP.md, PROXMOX_MINI_EDGE.md)
 ├── RELEASE_NOTES.md                  # Full changelog & SHA-256 build artifact release notes
 ├── axonwall.com/                     # Public website, releases portal, 25-guide docs & interactive demo
 ├── LICENSE                           # GNU General Public License v2.0 (GPL-2.0-or-later)

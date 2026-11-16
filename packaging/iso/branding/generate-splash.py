@@ -200,78 +200,206 @@ def draw_text(
     return cur_x
 
 
-def draw_shield_emblem(buf: bytearray, cx: float, cy: float, scale: float, accent_primary: tuple[int, int, int], accent_secondary: tuple[int, int, int]) -> None:
-    # Ambient radial glow behind shield
-    glow_r = 26.0 * scale
-    for py in range(max(0, int(cy - glow_r)), min(HEIGHT, int(cy + glow_r))):
-        for px in range(max(0, int(cx - glow_r)), min(WIDTH, int(cx + glow_r))):
-            d = math.hypot(px - cx, py - cy)
-            if d < glow_r:
-                t = 1.0 - (d / glow_r)
-                blend_pixel(buf, px, py, accent_primary, (t * t) * 0.25)
+def draw_polygon_aa(
+    buf: bytearray,
+    points: list[tuple[float, float]],
+    fill_color: tuple[int, int, int] | None,
+    stroke_color: tuple[int, int, int] | None = None,
+    stroke_width: float = 1.4,
+    alpha: float = 1.0,
+) -> None:
+    if len(points) < 3:
+        return
+    if fill_color is not None:
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        min_x = max(0, int(min(xs) - 1))
+        max_x = min(WIDTH - 1, int(max(xs) + 1))
+        min_y = max(0, int(min(ys) - 1))
+        max_y = min(HEIGHT - 1, int(max(ys) + 1))
+        n = len(points)
+        for py in range(min_y, max_y + 1):
+            cy = py + 0.5
+            intersections: list[float] = []
+            for i in range(n):
+                x0, y0 = points[i]
+                x1, y1 = points[(i + 1) % n]
+                if (y0 <= cy < y1) or (y1 <= cy < y0):
+                    t = (cy - y0) / (y1 - y0)
+                    intersections.append(x0 + t * (x1 - x0))
+            intersections.sort()
+            for i in range(0, len(intersections) - 1, 2):
+                lx = max(min_x, int(math.ceil(intersections[i] - 0.5)))
+                rx = min(max_x, int(math.floor(intersections[i + 1] - 0.5)))
+                for px in range(lx, rx + 1):
+                    blend_pixel(buf, px, py, fill_color, alpha)
+    if stroke_color is not None:
+        n = len(points)
+        for i in range(n):
+            x0, y0 = points[i]
+            x1, y1 = points[(i + 1) % n]
+            draw_line_aa(buf, x0, y0, x1, y1, stroke_color, thickness=stroke_width, alpha=alpha)
 
-    # Shield polygon outline points (normalized around 24,24 in 48x48 space)
+
+def draw_brick_wall_pattern(
+    buf: bytearray,
+    primary: tuple[int, int, int],
+    secondary: tuple[int, int, int],
+) -> None:
+    """Render subtle fortified dark basalt masonry brick courses across the backdrop."""
+    brick_w = 48
+    brick_h = 24
+    for row in range((HEIGHT // brick_h) + 1):
+        y0 = row * brick_h
+        offset_x = (brick_w // 2) if (row % 2 == 1) else 0
+        # Horizontal mortar joint
+        if y0 > 0:
+            for x in range(WIDTH):
+                c = lerp_color((14, 24, 38), primary, 0.14 if x < WIDTH // 2 else 0.06)
+                blend_pixel(buf, x, y0, c, 0.42)
+                if y0 + 1 < HEIGHT:
+                    blend_pixel(buf, x, y0 + 1, (6, 10, 18), 0.55)
+        for col in range(-1, (WIDTH // brick_w) + 2):
+            x0 = col * brick_w + offset_x
+            # Subtle alternating brick shading
+            shade_color = (16, 28, 44) if ((row + col) % 2 == 0) else (12, 20, 34)
+            bx_start = max(0, x0 + 2)
+            bx_end = min(WIDTH, x0 + brick_w - 1)
+            by_start = max(0, y0 + 2)
+            by_end = min(HEIGHT, y0 + brick_h)
+            for py in range(by_start, by_end):
+                for px in range(bx_start, bx_end):
+                    blend_pixel(buf, px, py, shade_color, 0.22)
+            # Vertical mortar joint
+            if 0 <= x0 < WIDTH:
+                c = lerp_color((14, 24, 38), secondary, 0.12)
+                for py in range(max(0, y0 + 1), min(HEIGHT, y0 + brick_h)):
+                    blend_pixel(buf, x0, py, c, 0.40)
+
+
+def draw_shield_emblem(buf: bytearray, cx: float, cy: float, scale: float, accent_primary: tuple[int, int, int], accent_secondary: tuple[int, int, int]) -> None:
     def pt(nx: float, ny: float) -> tuple[float, float]:
         return (cx + (nx - 24.0) * scale, cy + (ny - 24.0) * scale)
 
-    # Fill shield interior
-    top_y = int(cy + (5.0 - 24.0) * scale)
-    bot_y = int(cy + (43.5 - 24.0) * scale)
+    # 1. Back Layer: Fortified dark masonry brick crest patch & emerald/cyan radial backlight
+    patch_r = 25.0 * scale
+    for py in range(max(0, int(cy - patch_r)), min(HEIGHT, int(cy + patch_r))):
+        for px in range(max(0, int(cx - patch_r)), min(WIDTH, int(cx + patch_r))):
+            d = math.hypot(px - cx, py - cy)
+            if d < patch_r:
+                # Radial glow onto brick wall behind shield
+                t = 1.0 - (d / patch_r)
+                glow_col = accent_primary if px <= cx else accent_secondary
+                blend_pixel(buf, px, py, glow_col, (t * t) * 0.34)
+                # Highlight local miniature masonry mortar lines inside crest zone
+                nx = (px - cx) / scale + 24.0
+                ny = (py - cy) / scale + 24.0
+                row_y = int(ny) % 7
+                col_offset = 6 if (int(ny // 7) % 2 == 1) else 0
+                col_x = int(nx + col_offset) % 12
+                if row_y == 0 or col_x == 0:
+                    blend_pixel(buf, px, py, glow_col, (t * 0.45) + 0.10)
+
+    # 2. Middle Layer: Fill shield interior
+    top_y = int(cy + (5.5 - 24.0) * scale)
+    bot_y = int(cy + (42.5 - 24.0) * scale)
     for py in range(max(0, top_y), min(HEIGHT, bot_y + 1)):
         ny = (py - cy) / scale + 24.0
-        if ny < 5.0 or ny > 43.5:
+        if ny < 5.5 or ny > 42.5:
             continue
-        if ny <= 10.0:
-            half_w = ((ny - 5.0) / 5.0) * 15.5
+        if ny <= 10.2:
+            half_w = ((ny - 5.5) / 4.7) * 14.5
         else:
-            u = (ny - 10.0) / 33.5
-            half_w = 15.5 * (1.0 - u * u * 0.96)
+            u = (ny - 10.2) / 32.3
+            half_w = 14.5 * (1.0 - u * u * 0.96)
         lx = int(cx - half_w * scale)
         rx = int(cx + half_w * scale)
-        row_color = lerp_color((15, 23, 42), (2, 44, 34), (ny - 5.0) / 38.5)
+        row_color = lerp_color((15, 23, 42), (2, 44, 34), (ny - 5.5) / 37.0)
         for px in range(max(0, lx), min(WIDTH, rx + 1)):
-            blend_pixel(buf, px, py, row_color, 0.95)
+            blend_pixel(buf, px, py, row_color, 0.96)
 
     # Shield border segments
     shield_pts = [
-        pt(24, 5),
-        pt(39.5, 10),
-        pt(38.5, 21),
-        pt(33.5, 32),
-        pt(24, 43.5),
-        pt(14.5, 32),
-        pt(9.5, 21),
-        pt(8.5, 10),
-        pt(24, 5),
+        pt(24, 5.5),
+        pt(38.5, 10.2),
+        pt(37.5, 20.5),
+        pt(32.5, 31.5),
+        pt(24, 42.5),
+        pt(15.5, 31.5),
+        pt(10.5, 20.5),
+        pt(9.5, 10.2),
+        pt(24, 5.5),
     ]
     for i in range(len(shield_pts) - 1):
         x0, y0 = shield_pts[i]
         x1, y1 = shield_pts[i + 1]
         c = lerp_color(accent_primary, accent_secondary, i / (len(shield_pts) - 1))
-        draw_line_aa(buf, x0, y0, x1, y1, c, thickness=2.2 * scale)
+        draw_line_aa(buf, x0, y0, x1, y1, c, thickness=2.0 * scale)
 
-    # Synaptic pathways inside shield
-    center = pt(24, 23)
+    # Synaptic pathways inside shield (core lifted to y=21.5 above crossed axes)
+    center = pt(24, 21.5)
     nodes = [
-        (pt(24, 13), accent_primary),
-        (pt(16, 18), accent_secondary),
-        (pt(32, 18), accent_secondary),
-        (pt(17, 31), accent_primary),
-        (pt(31, 31), accent_primary),
+        (pt(24, 12.5), accent_primary),
+        (pt(16.5, 17), accent_secondary),
+        (pt(31.5, 17), accent_secondary),
+        (pt(17.5, 28), accent_primary),
+        (pt(30.5, 28), accent_primary),
     ]
     for n_pos, n_col in nodes:
-        draw_line_aa(buf, center[0], center[1], n_pos[0], n_pos[1], n_col, thickness=1.6 * scale)
-        draw_circle_aa(buf, n_pos[0], n_pos[1], 2.2 * scale, n_col)
+        draw_line_aa(buf, center[0], center[1], n_pos[0], n_pos[1], n_col, thickness=1.5 * scale)
+        draw_circle_aa(buf, n_pos[0], n_pos[1], 2.0 * scale, n_col)
 
     # Sub-branches
-    b1_start, b1_end = pt(16, 18), pt(12.5, 21.5)
-    b2_start, b2_end = pt(32, 18), pt(35.5, 21.5)
-    draw_line_aa(buf, b1_start[0], b1_start[1], b1_end[0], b1_end[1], accent_secondary, thickness=1.2 * scale)
-    draw_line_aa(buf, b2_start[0], b2_start[1], b2_end[0], b2_end[1], accent_secondary, thickness=1.2 * scale)
+    b1_start, b1_end = pt(16.5, 17), pt(13.5, 19.5)
+    b2_start, b2_end = pt(31.5, 17), pt(34.5, 19.5)
+    draw_line_aa(buf, b1_start[0], b1_start[1], b1_end[0], b1_end[1], accent_secondary, thickness=1.1 * scale)
+    draw_line_aa(buf, b2_start[0], b2_start[1], b2_end[0], b2_end[1], accent_secondary, thickness=1.1 * scale)
 
     # Core nerve center
-    draw_circle_aa(buf, center[0], center[1], 3.6 * scale, (4, 47, 46), stroke_color=accent_primary, stroke_width=1.8 * scale)
-    draw_circle_aa(buf, center[0], center[1], 1.4 * scale, (255, 255, 255))
+    draw_circle_aa(buf, center[0], center[1], 3.2 * scale, (4, 47, 46), stroke_color=accent_primary, stroke_width=1.7 * scale)
+    draw_circle_aa(buf, center[0], center[1], 1.3 * scale, (255, 255, 255))
+
+    # 3. Front Layer: Two Forged Battle Axes Crossing IN FRONT of the Shield
+    l_start, l_end = pt(10.2, 12.6), pt(35.2, 41.2)
+    r_start, r_end = pt(37.8, 12.6), pt(12.8, 41.2)
+
+    # Shadow separation over shield face so foreground layering is unmistakable
+    draw_line_aa(buf, l_start[0], l_start[1], l_end[0], l_end[1], (2, 6, 23), thickness=4.0 * scale, alpha=0.88)
+    draw_line_aa(buf, r_start[0], r_start[1], r_end[0], r_end[1], (2, 6, 23), thickness=4.0 * scale, alpha=0.88)
+
+    # Metallic titanium/slate axe hafts
+    draw_line_aa(buf, l_start[0], l_start[1], l_end[0], l_end[1], (176, 194, 214), thickness=2.1 * scale, alpha=0.98)
+    draw_line_aa(buf, r_start[0], r_start[1], r_end[0], r_end[1], (176, 194, 214), thickness=2.1 * scale, alpha=0.98)
+
+    # Left curved bearded axe blade (flaring outward upper-left past shield rim)
+    left_blade = [
+        pt(11.4, 11.4),
+        pt(6.2, 11.4),
+        pt(2.6, 10.2),
+        pt(2.0, 15.4),
+        pt(6.4, 21.6),
+        pt(9.8, 17.6),
+        pt(12.2, 15.6),
+    ]
+    draw_polygon_aa(buf, left_blade, fill_color=(45, 58, 78), stroke_color=accent_primary, stroke_width=1.3 * scale, alpha=0.96)
+    # Bright cutting edge arc highlighting outer left blade
+    draw_line_aa(buf, *pt(2.6, 10.2), *pt(2.0, 15.4), accent_primary, thickness=1.6 * scale)
+    draw_line_aa(buf, *pt(2.0, 15.4), *pt(6.4, 21.6), accent_primary, thickness=1.6 * scale)
+
+    # Right curved bearded axe blade (flaring outward upper-right past shield rim)
+    right_blade = [
+        pt(36.6, 11.4),
+        pt(41.8, 11.4),
+        pt(45.4, 10.2),
+        pt(46.0, 15.4),
+        pt(41.6, 21.6),
+        pt(38.2, 17.6),
+        pt(35.8, 15.6),
+    ]
+    draw_polygon_aa(buf, right_blade, fill_color=(45, 58, 78), stroke_color=accent_secondary, stroke_width=1.3 * scale, alpha=0.96)
+    # Bright cutting edge arc highlighting outer right blade
+    draw_line_aa(buf, *pt(45.4, 10.2), *pt(46.0, 15.4), accent_secondary, thickness=1.6 * scale)
+    draw_line_aa(buf, *pt(46.0, 15.4), *pt(41.6, 21.6), accent_secondary, thickness=1.6 * scale)
 
 
 def encode_bmp(buf: bytearray, width: int, height: int) -> bytes:
@@ -356,14 +484,8 @@ def render_splash_buffer(subtitle: str, badge_text: str, primary: tuple[int, int
             buf[row_idx + x * 3 + 1] = base[1]
             buf[row_idx + x * 3 + 2] = base[2]
 
-    # 2. Subtle Perspective Cyber Grid
-    grid_color = (20, 58, 56)
-    for gx in range(0, WIDTH, 32):
-        for y in range(0, HEIGHT):
-            blend_pixel(buf, gx, y, grid_color, 0.16)
-    for gy in range(0, HEIGHT, 32):
-        for x in range(0, WIDTH):
-            blend_pixel(buf, x, gy, grid_color, 0.16)
+    # 2. Fortified Brick Masonry Wall Pattern Behind UI Cards
+    draw_brick_wall_pattern(buf, primary, secondary)
 
     # 3. Top Accent Bar (Emerald -> Cyan gradient)
     for y in range(4):

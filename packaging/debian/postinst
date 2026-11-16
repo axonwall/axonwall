@@ -319,6 +319,14 @@ ENV_EOF
             fi
         done
 
+        # 5d. Configure Axonwall Plymouth graphical boot theme when plymouth is installed
+        if [ -x /usr/sbin/plymouth-set-default-theme ] && [ -f /usr/share/plymouth/themes/axonwall/axonwall.plymouth ]; then
+            /usr/sbin/plymouth-set-default-theme axonwall >/dev/null 2>&1 || true
+            if [ -d /run/systemd/system ] && command -v update-initramfs >/dev/null 2>&1; then
+                update-initramfs -u >/dev/null 2>&1 || true
+            fi
+        fi
+
         # 6. Reload systemd daemon and enable services if systemd is running
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true

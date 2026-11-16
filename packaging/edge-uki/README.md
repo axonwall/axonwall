@@ -3,6 +3,8 @@
 ## 1. Overview
 `packaging/edge-uki` builds a **Zero-Surface, Stateless Edge NGFW** designed to sit on the untrusted WAN perimeter while managed by a **Full Axonwall Host** running behind the firewall on the internal LAN.
 
+> **Step-by-Step Proxmox Guide:** See [Proxmox Mini EFI Edge Guide](../../docs/PROXMOX_MINI_EDGE.md) for complete instructions on running the `sku-vm-virtio` Mini EFI VM at the WAN edge alongside an internal LAN-only Full Axonwall Hub VM on Proxmox VE.
+
 Instead of shipping a traditional Linux distribution (Debian, Alpine, or OpenWrt) with shells, package managers, and thousands of loadable kernel modules, the Super-Slim Edge NGFW consists of:
 1. **A Hardware-Specific Monolithic Linux Kernel (`CONFIG_MODULES=n`)**: Compiled specifically for the target hardware SKU with only the exact NIC, crypto, and netfilter drivers built-in.
 2. **Our Static Go Binary as PID 1 (`/init`)**: Compiled with `CGO_ENABLED=0` and CPU microarchitecture optimizations (`GOAMD64=v3`), embedded directly inside the kernel via `CONFIG_INITRAMFS_SOURCE`.

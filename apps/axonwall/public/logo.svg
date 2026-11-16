@@ -1,11 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 52" fill="none" width="100%" height="100%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 248 52" fill="none" width="100%" height="100%">
   <defs>
-    <linearGradient id="shieldGradFull" x1="6" y1="4" x2="44" y2="46" gradientUnits="userSpaceOnUse">
+    <clipPath id="brickClipFull">
+      <rect x="2" y="2" width="46" height="48" rx="9" />
+    </clipPath>
+    <linearGradient id="shieldGradFull" x1="8" y1="4" x2="42" y2="46" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#0f172a" />
       <stop offset="50%" stop-color="#061c18" />
       <stop offset="100%" stop-color="#022c22" />
     </linearGradient>
-    <linearGradient id="shieldBorderFull" x1="6" y1="4" x2="44" y2="46" gradientUnits="userSpaceOnUse">
+    <linearGradient id="shieldBorderFull" x1="8" y1="4" x2="42" y2="46" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#34d399" />
       <stop offset="50%" stop-color="#10b981" />
       <stop offset="100%" stop-color="#06b6d4" />
@@ -14,67 +17,126 @@
       <stop offset="0%" stop-color="#34d399" />
       <stop offset="100%" stop-color="#38bdf8" />
     </linearGradient>
+    <linearGradient id="axeHaftFull" x1="10" y1="12" x2="40" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#cbd5e1" />
+      <stop offset="50%" stop-color="#64748b" />
+      <stop offset="100%" stop-color="#334155" />
+    </linearGradient>
+    <linearGradient id="axeBladeLeftFull" x1="4" y1="10" x2="15" y2="23" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="55%" stop-color="#94a3b8" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+    <linearGradient id="axeBladeRightFull" x1="46" y1="10" x2="35" y2="23" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="55%" stop-color="#94a3b8" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
     <linearGradient id="textGrad" x1="120" y1="16" x2="210" y2="38" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#34d399" />
       <stop offset="100%" stop-color="#06b6d4" />
     </linearGradient>
-    <radialGradient id="centerGlowFull" cx="24" cy="25" r="14" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#10b981" stop-opacity="0.5" />
+    <radialGradient id="centerGlowFull" cx="25" cy="26" r="18" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.55" />
       <stop offset="100%" stop-color="#10b981" stop-opacity="0" />
     </radialGradient>
   </defs>
 
+  <!-- Back Layer: Fortified Brick Wall Crest Backdrop -->
+  <g clip-path="url(#brickClipFull)">
+    <rect x="2" y="2" width="46" height="48" rx="9" fill="#070b12" />
+    <g stroke="#10b981" stroke-opacity="0.22" stroke-width="0.65">
+      <rect x="2.5" y="3" width="13" height="6.5" rx="0.8" fill="#0f172a" />
+      <rect x="16.5" y="3" width="16" height="6.5" rx="0.8" fill="#111c2d" />
+      <rect x="33.5" y="3" width="14" height="6.5" rx="0.8" fill="#0f172a" />
+
+      <rect x="2.5" y="10.5" width="7.5" height="6.5" rx="0.8" fill="#111c2d" />
+      <rect x="11" y="10.5" width="13.5" height="6.5" rx="0.8" fill="#0f172a" />
+      <rect x="25.5" y="10.5" width="13.5" height="6.5" rx="0.8" fill="#111c2d" />
+      <rect x="40" y="10.5" width="7.5" height="6.5" rx="0.8" fill="#0f172a" />
+
+      <rect x="2.5" y="18" width="13.5" height="6.5" rx="0.8" fill="#0f172a" />
+      <rect x="17" y="18" width="16" height="6.5" rx="0.8" fill="#0b1524" />
+      <rect x="34" y="18" width="13.5" height="6.5" rx="0.8" fill="#0f172a" />
+
+      <rect x="2.5" y="25.5" width="8" height="6.5" rx="0.8" fill="#111c2d" />
+      <rect x="11.5" y="25.5" width="13" height="6.5" rx="0.8" fill="#0f172a" />
+      <rect x="25.5" y="25.5" width="13" height="6.5" rx="0.8" fill="#111c2d" />
+      <rect x="39.5" y="25.5" width="8" height="6.5" rx="0.8" fill="#0f172a" />
+
+      <rect x="2.5" y="33" width="13.5" height="6.5" rx="0.8" fill="#0f172a" />
+      <rect x="17" y="33" width="16" height="6.5" rx="0.8" fill="#111c2d" />
+      <rect x="34" y="33" width="13.5" height="6.5" rx="0.8" fill="#0f172a" />
+
+      <rect x="2.5" y="40.5" width="8.5" height="8" rx="0.8" fill="#111c2d" />
+      <rect x="12" y="40.5" width="12.5" height="8" rx="0.8" fill="#0f172a" />
+      <rect x="25.5" y="40.5" width="12.5" height="8" rx="0.8" fill="#111c2d" />
+      <rect x="39" y="40.5" width="8.5" height="8" rx="0.8" fill="#0f172a" />
+    </g>
+    <rect x="2" y="2" width="46" height="48" rx="9" stroke="#10b981" stroke-opacity="0.32" stroke-width="1" fill="none" />
+  </g>
+
   <!-- Ambient Glow Behind Shield -->
   <circle cx="25" cy="26" r="18" fill="url(#centerGlowFull)" />
 
-  <!-- Outer Cyber Shield Body -->
+  <!-- Middle Layer: Outer Cyber Shield Body -->
   <path
-    d="M25 6 L42 11.5 C42 11.5 42.5 27.5 25 47 C7.5 27.5 8 11.5 8 11.5 L25 6 Z"
+    d="M25 6.5 L40.5 11.5 C40.5 11.5 41 26.5 25 46 C9 26.5 9.5 11.5 9.5 11.5 L25 6.5 Z"
     fill="url(#shieldGradFull)"
     stroke="url(#shieldBorderFull)"
-    stroke-width="2"
+    stroke-width="1.9"
     stroke-linejoin="round"
   />
 
   <!-- Inner Inset Shield Border -->
   <path
-    d="M25 10.5 L38.5 14.5 C38.5 14.5 39 26.5 25 41.5 C11 26.5 11.5 14.5 11.5 14.5 L25 10.5 Z"
+    d="M25 10.5 L37 14.5 C37 14.5 37.5 25.5 25 41 C12.5 25.5 13 14.5 13 14.5 L25 10.5 Z"
     stroke="#10b981"
-    stroke-opacity="0.25"
-    stroke-width="1.2"
+    stroke-opacity="0.28"
+    stroke-width="1"
     fill="none"
   />
 
   <!-- Axon Synaptic Pathways -->
   <g>
-    <!-- Circuit Lines -->
-    <path d="M25 15 L25 26" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
-    <path d="M25 26 L16 20.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
-    <path d="M25 26 L34 20.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
-    <path d="M25 26 L17.5 34.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
-    <path d="M25 26 L32.5 34.5" stroke="url(#axonLineFull)" stroke-width="1.6" stroke-linecap="round" />
+    <path d="M25 14 L25 24" stroke="url(#axonLineFull)" stroke-width="1.5" stroke-linecap="round" />
+    <path d="M25 24 L17 19" stroke="url(#axonLineFull)" stroke-width="1.5" stroke-linecap="round" />
+    <path d="M25 24 L33 19" stroke="url(#axonLineFull)" stroke-width="1.5" stroke-linecap="round" />
+    <path d="M25 24 L18 31" stroke="url(#axonLineFull)" stroke-width="1.5" stroke-linecap="round" />
+    <path d="M25 24 L32 31" stroke="url(#axonLineFull)" stroke-width="1.5" stroke-linecap="round" />
 
-    <!-- Branching Sub-circuits -->
-    <path d="M16 20.5 L12 24" stroke="url(#axonLineFull)" stroke-width="1.2" stroke-linecap="round" />
-    <path d="M34 20.5 L38 24" stroke="url(#axonLineFull)" stroke-width="1.2" stroke-linecap="round" />
+    <path d="M17 19 L14 21.5" stroke="url(#axonLineFull)" stroke-width="1.1" stroke-linecap="round" />
+    <path d="M33 19 L36 21.5" stroke="url(#axonLineFull)" stroke-width="1.1" stroke-linecap="round" />
 
-    <!-- Synapse Nodes -->
-    <circle cx="25" cy="15" r="2.4" fill="#34d399" />
-    <circle cx="16" cy="20.5" r="2.2" fill="#38bdf8" />
-    <circle cx="34" cy="20.5" r="2.2" fill="#38bdf8" />
-    <circle cx="17.5" cy="34.5" r="2.2" fill="#10b981" />
-    <circle cx="32.5" cy="34.5" r="2.2" fill="#10b981" />
+    <circle cx="25" cy="14" r="2.1" fill="#34d399" />
+    <circle cx="17" cy="19" r="1.9" fill="#38bdf8" />
+    <circle cx="33" cy="19" r="1.9" fill="#38bdf8" />
+    <circle cx="18" cy="31" r="1.9" fill="#10b981" />
+    <circle cx="32" cy="31" r="1.9" fill="#10b981" />
 
-    <!-- Core Nerve Center (nftables processor) -->
-    <circle cx="25" cy="26" r="3.5" fill="#042f2e" stroke="#34d399" stroke-width="2" />
-    <circle cx="25" cy="26" r="1.5" fill="#ffffff" />
+    <circle cx="25" cy="24" r="3.3" fill="#042f2e" stroke="#34d399" stroke-width="1.8" />
+    <circle cx="25" cy="24" r="1.4" fill="#ffffff" />
+  </g>
+
+  <!-- Front Layer: Twin Battle Axes Crossing in Front of the Shield -->
+  <g>
+    <path d="M11 14 L36.5 44" stroke="#020617" stroke-opacity="0.85" stroke-width="4" stroke-linecap="round" />
+    <path d="M39 14 L13.5 44" stroke="#020617" stroke-opacity="0.85" stroke-width="4" stroke-linecap="round" />
+
+    <path d="M11 14 L36.5 44" stroke="url(#axeHaftFull)" stroke-width="2.2" stroke-linecap="round" />
+    <path d="M12.4 11.4 L7.2 11.4 L3.6 10.2 C2.8 14 4.2 18.2 7.4 21.6 L10.8 17.6 L13.2 15.6 Z" fill="url(#axeBladeLeftFull)" stroke="#34d399" stroke-width="1.15" stroke-linejoin="round" />
+    <path d="M12.4 12.6 L14.4 11.4 L13.7 14.8" stroke="#94a3b8" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+
+    <path d="M39 14 L13.5 44" stroke="url(#axeHaftFull)" stroke-width="2.2" stroke-linecap="round" />
+    <path d="M37.6 11.4 L42.8 11.4 L46.4 10.2 C47.2 14 45.8 18.2 42.6 21.6 L39.2 17.6 L36.8 15.6 Z" fill="url(#axeBladeRightFull)" stroke="#38bdf8" stroke-width="1.15" stroke-linejoin="round" />
+    <path d="M37.6 12.6 L35.6 11.4 L36.3 14.8" stroke="#94a3b8" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
   </g>
 
   <!-- Typography -->
-  <text x="56" y="32" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="26" fill="#ffffff" letter-spacing="-0.03em">
+  <text x="58" y="32" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="26" fill="#ffffff" letter-spacing="-0.03em">
     Axon<tspan fill="url(#textGrad)">wall</tspan>
   </text>
-  <text x="57" y="44" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="700" font-size="8.5" fill="#10b981" letter-spacing="0.16em">
+  <text x="59" y="44" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="700" font-size="8.5" fill="#10b981" letter-spacing="0.16em">
     ENTERPRISE LINUX FIREWALL
   </text>
 </svg>

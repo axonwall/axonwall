@@ -111,7 +111,9 @@ Recommends:
  debsums,
  bpftool,
  python3-drgn,
- linux-perf
+ linux-perf,
+ plymouth,
+ plymouth-label
 Description: Modern Linux Router & Next-Gen Firewall
  Axonwall replaces legacy BSD/PHP firewalls with a
  modern reactive architecture built on Linux nftables, Next.js, Supabase,

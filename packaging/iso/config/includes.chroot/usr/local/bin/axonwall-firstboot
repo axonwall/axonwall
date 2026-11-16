@@ -11,6 +11,9 @@ if [[ ! -f "$MARKER" ]]; then
 fi
 
 echo "[Axonwall Firstboot] Initializing network appliance..."
+if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
+  plymouth display-message --text="Provisioning Axonwall Security Appliance..." 2>/dev/null || true
+fi
 
 # Suppress kernel printk and systemd console status broadcasts so background
 # provisioning on Live media or firstboot never corrupts the TUI on /dev/tty1.
