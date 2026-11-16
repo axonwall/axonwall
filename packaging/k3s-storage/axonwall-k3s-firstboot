@@ -25,6 +25,10 @@ die() { echo "[axonwall-k3s-firstboot] ERROR: $*" >&2; exit 1; }
 
 mkdir -p "$CONF_DIR" /var/lib/axonwall/etc-axonwall
 
+if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
+    plymouth display-message --text="Provisioning Axonwall K3s Storage Host..." 2>/dev/null || true
+fi
+
 # --- 0. Appliance credentials verification ---
 if [ ! -s "${CONF_DIR}/admin.env" ] && [ ! -s "${CONF_DIR}/initial-admin-password" ]; then
     if [ -s "/var/lib/axonwall/etc-axonwall/initial-admin-password" ]; then

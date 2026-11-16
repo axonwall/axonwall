@@ -33,7 +33,7 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
 Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert
-Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf
+Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf, plymouth, plymouth-label
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
  Axonwall replaces legacy BSD/PHP firewalls with a
@@ -307,6 +307,19 @@ cp "${SCRIPT_DIR}/headscale.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/k3s.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-hub-cert-renew.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-hub-cert-renew.timer" "${WORK_DIR}/lib/systemd/system/"
+
+if [[ -d "${CHROOT_SRC}/usr/share/plymouth/themes/axonwall" ]]; then
+  mkdir -p "${WORK_DIR}/usr/share/plymouth/themes/axonwall"
+  cp -a "${CHROOT_SRC}/usr/share/plymouth/themes/axonwall/." "${WORK_DIR}/usr/share/plymouth/themes/axonwall/"
+  chmod -R a+rX "${WORK_DIR}/usr/share/plymouth/themes/axonwall"
+fi
+for dropin_dir in plymouth-quit.service.d plymouth-quit-wait.service.d; do
+  if [[ -d "${CHROOT_SRC}/etc/systemd/system/${dropin_dir}" ]]; then
+    mkdir -p "${WORK_DIR}/lib/systemd/system/${dropin_dir}"
+    cp -a "${CHROOT_SRC}/etc/systemd/system/${dropin_dir}/." "${WORK_DIR}/lib/systemd/system/${dropin_dir}/"
+    chmod -R a+rX "${WORK_DIR}/lib/systemd/system/${dropin_dir}"
+  fi
+done
 
 if [[ -f "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" ]]; then
   cp "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" "${WORK_DIR}/usr/lib/sysusers.d/"

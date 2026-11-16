@@ -217,6 +217,10 @@ if [[ -f "${TARGET}/usr/share/grub/unicode.pf2" ]]; then
   cp -n "${TARGET}/usr/share/grub/unicode.pf2" "${TARGET}/boot/grub/themes/axonwall/unicode.pf2" 2>/dev/null || true
 fi
 
+# Configure Axonwall Plymouth boot splash theme & regenerate initramfs
+chroot "${TARGET}" /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
+chroot "${TARGET}" update-initramfs -u -k all 2>/dev/null || true
+
 # Update GRUB configuration
 chroot "${TARGET}" update-grub 2>/dev/null || true
 

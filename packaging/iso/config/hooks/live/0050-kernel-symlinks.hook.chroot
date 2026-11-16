@@ -6,6 +6,11 @@ if [ ! -f /etc/hostid ]; then
   zgenhostid -f 0x00bab10c 2>/dev/null || printf '\x0c\xb1\xba\x00' > /etc/hostid
 fi
 
+if [ -x /usr/sbin/plymouth-set-default-theme ] && [ -f /usr/share/plymouth/themes/axonwall/axonwall.plymouth ]; then
+  echo "[Hook] Setting default Plymouth boot splash theme to 'axonwall'..."
+  /usr/sbin/plymouth-set-default-theme axonwall || true
+fi
+
 for kdir in /lib/modules/*; do
   if [ -d "$kdir" ]; then
     kver="$(basename "$kdir")"

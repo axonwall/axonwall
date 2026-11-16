@@ -58,7 +58,7 @@ if [ -d "${BIN_DIR}/live" ]; then
   fi
 fi
 
-COMMON_LIVE_ARGS="boot=live components quiet loglevel=3 systemd.show_status=0 hostname=${LIVE_HOST} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0"
+COMMON_LIVE_ARGS="boot=live components quiet splash plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 lsm=landlock,lockdown,yama,integrity,apparmor,bpf hostname=${LIVE_HOST} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0"
 
 # 1. Install Splash PNG into GRUB and ISOLINUX
 if [ -n "$SPLASH_SRC" ] && [ -f "$SPLASH_SRC" ]; then
@@ -193,7 +193,7 @@ INSTALL_START_EOF
 
   cat > "${BIN_DIR}/boot/grub/install.cfg" << INSTALL_SUB_EOF
 menuentry "Install ${FLAVOR_TITLE} via Serial Console (ttyS0 115200)" --hotkey=s {
-	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 console=ttyS0,115200n8 findiso=\${iso_path}
+	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 nosplash plymouth.enable=0 console=ttyS0,115200n8 findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
 }
 menuentry "Legacy Debian Installer (d-i Preseed Dark Theme)" --hotkey=d {
@@ -320,7 +320,7 @@ menu begin legacy-install
 		menu label Install ${FLAVOR_TITLE} via ^Serial Console (ttyS0 115200)
 		linux ${LIVE_KERN}
 		initrd ${LIVE_INITRD}
-		append ${COMMON_LIVE_ARGS} axonwall_install=1 console=ttyS0,115200n8
+		append ${COMMON_LIVE_ARGS} axonwall_install=1 nosplash plymouth.enable=0 console=ttyS0,115200n8
 
 	label darkinstall
 		menu label Legacy ^Debian Installer (d-i Preseed Dark Theme)

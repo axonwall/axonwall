@@ -252,7 +252,7 @@ apply_staged_tree() {
     done
   fi
 
-  for sub in usr/lib/axonwall usr/lib/sysusers.d usr/lib/tmpfiles.d usr/share/oh-my-zsh usr/share/axonwall etc/zsh etc/zfsbootmenu etc/modprobe.d etc/sysctl.d etc/vim; do
+  for sub in usr/lib/axonwall usr/lib/sysusers.d usr/lib/tmpfiles.d usr/share/oh-my-zsh usr/share/axonwall usr/share/plymouth/themes/axonwall lib/systemd/system/plymouth-quit.service.d lib/systemd/system/plymouth-quit-wait.service.d etc/zsh etc/zfsbootmenu etc/modprobe.d etc/sysctl.d etc/vim; do
     if [ -d "${pkg_stage}/${sub}" ]; then
       mkdir -p "${dest_root}/${sub}" 2>/dev/null || true
       cp -af "${pkg_stage}/${sub}/." "${dest_root}/${sub}/" 2>/dev/null || _apply_failed=1

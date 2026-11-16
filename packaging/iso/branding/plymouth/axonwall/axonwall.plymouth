@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Axonwall Fortress Boot Splash
+Description=Axonwall Cyber-Shield on Fortified Brick Wall with Crossed Axes
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/axonwall
+ScriptFile=/usr/share/plymouth/themes/axonwall/axonwall.script

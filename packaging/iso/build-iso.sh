@@ -92,7 +92,7 @@ lb config \
   --chroot-squashfs-compression-type xz \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
-  --bootappend-live "boot=live components quiet loglevel=3 systemd.show_status=0 lsm=landlock,lockdown,yama,integrity,apparmor,bpf hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0" \
+  --bootappend-live "boot=live components quiet splash plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 lsm=landlock,lockdown,yama,integrity,apparmor,bpf hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0" \
   --bootappend-install "auto=true priority=critical preseed/file=/preseed.cfg" \
   --debian-installer live \
   --debian-installer-distribution trixie \
@@ -155,6 +155,10 @@ fi
 if [[ -f "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" ]]; then
   cp "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" config/includes.chroot/boot/grub/themes/axonwall/theme.txt
   cp "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" config/includes.chroot/etc/axonwall/branding/theme.txt
+fi
+if [[ -d "${SCRIPT_DIR}/branding/plymouth/axonwall" ]]; then
+  mkdir -p config/includes.chroot/usr/share/plymouth/themes/axonwall
+  cp -a "${SCRIPT_DIR}/branding/plymouth/axonwall/." config/includes.chroot/usr/share/plymouth/themes/axonwall/
 fi
 
 # Stage detect-cloudinit into Live chroot so unattended/live installer can discover NoCloud seeds
@@ -692,6 +696,11 @@ intel-microcode
 amd64-microcode
 systemd
 systemd-sysv
+plymouth
+plymouth-label
+fontconfig
+fontconfig-config
+fonts-dejavu-core
 grub-pc
 grub-pc-bin
 grub-efi-amd64-bin
@@ -803,6 +812,11 @@ intel-microcode
 amd64-microcode
 systemd
 systemd-sysv
+plymouth
+plymouth-label
+fontconfig
+fontconfig-config
+fonts-dejavu-core
 grub-pc
 grub-pc-bin
 grub-efi-amd64-bin
@@ -917,6 +931,11 @@ intel-microcode
 amd64-microcode
 systemd
 systemd-sysv
+plymouth
+plymouth-label
+fontconfig
+fontconfig-config
+fonts-dejavu-core
 grub-pc
 grub-pc-bin
 grub-efi-amd64-bin

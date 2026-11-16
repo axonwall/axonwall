@@ -1606,7 +1606,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   if [ "$OS_FAMILY" = "alpine" ]; then
     ZBM_CMDLINE="ro rootfstype=zfs modules=sd-mod,usb-storage,virtio_blk,nvme,zfs quiet console=tty0 console=ttyS0,115200"
   else
-    ZBM_CMDLINE="ro quiet console=tty0 console=ttyS0,115200"
+    ZBM_CMDLINE="ro quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
   fi
   zfs set "org.zfsbootmenu:commandline=${ZBM_CMDLINE}" zroot/ROOT
   zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT
@@ -2520,6 +2520,7 @@ ZBM_SYSLINUX_EOF
     mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
   done
   if [ "$OS_FAMILY" = "debian" ]; then
+    chroot /mnt/slot_a /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
     chroot /mnt/slot_a update-initramfs -u -k all 2>/dev/null || true
   elif [ "$OS_FAMILY" = "alpine" ] && [ -x /mnt/slot_a/sbin/mkinitfs ]; then
     if [ -f /mnt/slot_a/etc/mkinitfs/mkinitfs.conf ] && ! grep -q 'zfs' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null; then
@@ -2664,8 +2665,10 @@ THEME_EOF
 
   if [ "$OS_FAMILY" = "alpine" ]; then
     EXTRA_KARGS="modules=sd-mod,usb-storage,ext4,xfs,virtio_blk,nvme,raid1,md-mod"
+    CONSOLE_KARGS="quiet console=tty0 console=ttyS0,115200"
   else
     EXTRA_KARGS=""
+    CONSOLE_KARGS="quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
   fi
 
   cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
@@ -2760,29 +2763,30 @@ if [ "${INSTALL_MODE}" = "ab" ]; then
 
   menuentry "Axonwall OS (Slot A - Primary)" {
     search --no-floppy --label --set=root axon_root_a
-    linux /boot/vmlinuz root=LABEL=axon_root_a ro rootfstype=${ROOT_FSTYPE} slot=A ${EXTRA_KARGS} quiet console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz root=LABEL=axon_root_a ro rootfstype=${ROOT_FSTYPE} slot=A ${EXTRA_KARGS} ${CONSOLE_KARGS}
     initrd /boot/initrd.img
   }
 
   menuentry "Axonwall OS (Slot B - Standby)" {
     search --no-floppy --label --set=root axon_root_b
-    linux /boot/vmlinuz root=LABEL=axon_root_b ro rootfstype=${ROOT_FSTYPE} slot=B ${EXTRA_KARGS} quiet console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz root=LABEL=axon_root_b ro rootfstype=${ROOT_FSTYPE} slot=B ${EXTRA_KARGS} ${CONSOLE_KARGS}
     initrd /boot/initrd.img
   }
 else
   menuentry "${EDITION_LABEL} (${INSTALL_MODE})" {
     search --no-floppy --label --set=root ${ROOT_A_LABEL}
-    linux /boot/vmlinuz root=LABEL=${ROOT_A_LABEL} ro rootfstype=${ROOT_FSTYPE} ${EXTRA_KARGS} quiet console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz root=LABEL=${ROOT_A_LABEL} ro rootfstype=${ROOT_FSTYPE} ${EXTRA_KARGS} ${CONSOLE_KARGS}
     initrd /boot/initrd.img
   }
 fi
 GRUB_EOF
 
-  # On Debian or Alpine, if initramfs refresh is needed for mdadm RAID-1 or LUKS2, rebuild inside chroot
-  if [ "$OS_FAMILY" = "debian" ] && { [ "$SYSTEM_RAID_MODE" = "mirror" ] || [ "${LUKS_ENABLED:-0}" = "1" ]; }; then
+  # On Debian, ensure axonwall Plymouth splash theme + mdadm/LUKS2 hooks are embedded in initramfs; on Alpine, refresh mkinitfs when RAID/LUKS2 is enabled
+  if [ "$OS_FAMILY" = "debian" ]; then
     for m in dev proc sys run; do
       mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
     done
+    chroot /mnt/slot_a /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
     chroot /mnt/slot_a update-initramfs -u -k all 2>/dev/null || true
     for m in run sys proc dev; do
       umount "/mnt/slot_a/$m" 2>/dev/null || true

@@ -555,6 +555,10 @@ deb https://deb.debian.org/debian-security trixie-security main contrib non-free
 deb https://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware
 APT_EOF
 
+# Ensure Axonwall Plymouth graphical boot theme is active in /target initramfs before Slot B / ZBM BE replication
+in-target /usr/sbin/plymouth-set-default-theme axonwall >/dev/null 2>&1 || true
+in-target update-initramfs -u -k all >/dev/null 2>&1 || true
+
 # Ensure stable /boot/vmlinuz and /boot/initrd.img symlinks exist on Slot A before replication
 if [ -d /target/boot ]; then
   LATEST_A_KERN=$(ls -1t /target/boot/vmlinuz-* 2>/dev/null | head -n1 || true)
@@ -962,6 +966,7 @@ ZFS_JSON_EOF
         exit 1
       fi
       in-target zpool set bootfs="$INIT_BE" zroot 2>/dev/null || true
+      in-target zfs set "org.zfsbootmenu:commandline=ro quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:fallback_be=${INIT_BE}" zroot/ROOT 2>/dev/null || true
       in-target zfs set "org.axonwall:bootcount=0" zroot/ROOT 2>/dev/null || true
