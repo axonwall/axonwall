@@ -5,9 +5,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Modular Appliance Architecture: 5 Core Roles & 14 Plugins | Axonwall Documentation',
+  title: 'Modular Appliance Architecture: 5 Core Roles & 15 Plugins | Axonwall Documentation',
   description:
-    'Comprehensive documentation for Axonwall v0.11.68 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 14 built-in systemd sandboxed extension plugins.',
+    'Comprehensive documentation for Axonwall v0.11.71 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 15 built-in systemd sandboxed extension plugins.',
 };
 
 export default function ModularArchitectureDocPage() {
@@ -17,14 +17,14 @@ export default function ModularArchitectureDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Core Appliance System Architecture • v0.11.68
+          Core Appliance System Architecture • v0.11.71
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Modular Core Roles: Firewall, ZFS NAS, K3s, Hypervisor &amp; Vigilante SOC
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
           Axonwall is a hyper-converged, role-modular operating system governed by <strong>5 Core Roles</strong> and{' '}
-          <strong>14 built-in sandboxed extension plugins</strong>. Disable <code className="text-emerald-400 font-mono">core-firewall</code> to run as a dedicated Host-Mode ZFS NAS or KVM hypervisor, run as a wire-speed Next-Gen Firewall, or converge all five roles—Firewall, OpenZFS NAS, Kubernetes (K3s), KVM/LXC Virtualization, and Vigilante Autonomous SOC—on high-availability bare-metal clusters.
+          <strong>15 built-in sandboxed extension plugins</strong>. Disable <code className="text-emerald-400 font-mono">core-firewall</code> to run as a dedicated Host-Mode ZFS NAS or KVM hypervisor, run as a wire-speed Next-Gen Firewall, or converge all five roles—Firewall, OpenZFS NAS, Kubernetes (K3s), KVM/LXC Virtualization, and Vigilante Autonomous SOC—on high-availability bare-metal clusters.
         </p>
       </div>
 
@@ -229,6 +229,12 @@ export default function ModularArchitectureDocPage() {
                 <td className="p-2.5">Zero-instrumentation Ring-0 eBPF service map, TLS uprobes, 99 Hz FlameGraphs, automated RCA, and OpenZFS ARC/ZIL correlation (<code className="font-mono">observability.ebpfApm</code>)</td>
               </tr>
               <tr>
+                <td className="p-2.5 font-mono text-cyan-400 font-semibold">ebpf-threat-harvester</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">security.yaml</td>
+                <td className="p-2.5">Axonwall Blackbox Ring-0 TCX/tracepoint/uprobe flight recorder &amp; Dual-Track SFT/RLVR JSONL + Apache Parquet Threat-LLM dataset harvester (<code className="font-mono">threatHarvester:</code>)</td>
+              </tr>
+              <tr>
                 <td className="p-2.5 font-mono text-sky-400 font-semibold">rosenpass</td>
                 <td className="p-2.5 text-slate-400">Opt-In</td>
                 <td className="p-2.5 font-mono text-slate-400">vpn.yaml</td>
@@ -337,7 +343,7 @@ plugins:
         <CodeBlock
           title="CLI Plugin Lifecycle Management (axonwallctl plugin)"
           language="bash"
-          code={`# List all 5 Core Roles & 14 extension plugins with live systemd state
+          code={`# List all 5 Core Roles & 15 extension plugins with live systemd state
 axonwallctl plugin list
 
 # Enable or disable built-in plugins (updates /etc/axonwall/system.yaml & reconciles)

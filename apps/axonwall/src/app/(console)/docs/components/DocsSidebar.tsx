@@ -85,6 +85,8 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Bug,
     items: [
       { title: 'Ghost-in-the-Ring & rkhunter', href: '/docs/ghost-in-the-ring-rootkits', badge: 'Ring-0' },
+      { title: 'Blackbox Threat-LLM Harvester', href: '/docs/threat-harvester', badge: 'eBPF+LLM' },
+      { title: 'Dual-Track SFT & Parquet Export', href: '/docs/threat-harvester#dataset-format' },
       { title: 'Host Malware & Integrity Suite', href: '/docs/ghost-in-the-ring-rootkits#host-scanners' },
       { title: 'io_uring Syscall-Less Implants', href: '/docs/ghost-in-the-ring-rootkits#io-uring' },
       { title: 'eBPF Rootkits & /proc/kcore Audit', href: '/docs/ghost-in-the-ring-rootkits#ebpf-pmu' },
@@ -357,8 +359,8 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.11.68</span>
-        <span className="text-emerald-400 font-medium">25 Guides</span>
+        <span className="font-mono">Axonwall v0.11.71</span>
+        <span className="text-emerald-400 font-medium">26 Guides</span>
       </div>
     </aside>
   );

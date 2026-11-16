@@ -99,3 +99,60 @@ export async function callAgentApi<T>(
     req.end();
   });
 }
+
+export async function callAgentApiBinary(
+  path: string,
+  method = 'GET',
+  timeoutMs = 30000
+): Promise<{ ok: boolean; status: number; buffer?: Buffer; error?: string }> {
+  return new Promise((resolve) => {
+    const agentToken = getAgentToken();
+    const socketPath = getAgentApiSocketPath();
+    const req = http.request(
+      {
+        socketPath,
+        path,
+        method,
+        headers: {
+          ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {}),
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          const status = res.statusCode || 500;
+          if (status >= 200 && status < 300) {
+            resolve({ ok: true, status, buffer: buf });
+            return;
+          }
+          let errorMsg = buf.toString('utf8').trim();
+          try {
+            const parsed = JSON.parse(errorMsg);
+            errorMsg = parsed.message || parsed.error || errorMsg;
+          } catch {}
+          resolve({
+            ok: false,
+            status,
+            error: errorMsg || `Daemon API error (${status})`,
+          });
+        });
+      }
+    );
+
+    req.on('error', (err) => {
+      resolve({ ok: false, status: 503, error: err?.message || 'Daemon unreachable' });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ ok: false, status: 504, error: `Daemon request timed out (${Math.round(timeoutMs / 1000)}s)` });
+    });
+
+    req.end();
+  });
+}

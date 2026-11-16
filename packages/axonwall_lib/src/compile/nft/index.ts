@@ -6,6 +6,7 @@ import {
   type Interface,
   type MdnsReflectorConfig,
   type UpnpConfig,
+  ThreatHarvesterConfigSchema,
   normalizeAntiLockoutInterfaces,
   inferInterfaceRole,
   isValidFirewallEndpoint,
@@ -544,6 +545,20 @@ export function compileNftables(state: DesiredState): CompileResult {
         fileMode: 0o644,
       });
     }
+  }
+
+  // Emit Axonwall Blackbox (ebpf-threat-harvester) configuration when opted-in
+  const threatHarvesterPlugin = state.plugins?.find((p) => p.id === 'ebpf-threat-harvester');
+  if (state.threatHarvester || threatHarvesterPlugin?.enabled) {
+    const parsedHarvester = ThreatHarvesterConfigSchema.parse({
+      ...(state.threatHarvester ?? {}),
+      enabled: state.threatHarvester?.enabled ?? Boolean(threatHarvesterPlugin?.enabled),
+    });
+    files.push({
+      path: '/etc/axonwall/managed/threat_harvester_config.json',
+      content: JSON.stringify(parsedHarvester, null, 2),
+      fileMode: 0o600,
+    });
   }
 
   // Emit Kea DHCPv4 + DHCPv6 + radvd configurations only when core-firewall is enabled

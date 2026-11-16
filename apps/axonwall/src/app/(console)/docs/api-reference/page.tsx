@@ -126,7 +126,12 @@ export default function ApiReferenceDocPage() {
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
                 <td className="p-3 font-mono text-emerald-400">/api/system/kernel</td>
-                <td className="p-3">Custom Kernel Studio: detect host hardware &amp; active modules, audit kernel posture (24 checks), synthesize hardened Kconfig fragments, launch async builds, and safely stage/install built <code className="font-mono">.deb</code> kernels via ZBM or GRUB.</td>
+                <td className="p-3">Custom Kernel Studio: detect host hardware &amp; active modules, audit kernel posture (25 checks including <code className="font-mono">/proc/config.gz</code> fallback), synthesize hardened Kconfig fragments, launch async builds, and safely stage/install built <code className="font-mono">.deb</code> kernels via ZBM or GRUB.</td>
+              </tr>
+              <tr>
+                <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
+                <td className="p-3 font-mono text-cyan-400">/api/v1/security/threat-harvester/*</td>
+                <td className="p-3">Axonwall Blackbox Threat-LLM Harvester: inspect TCX/tracepoint/uprobe telemetry (<code className="font-mono">status</code>), filter/review/Teacher-LLM-annotate/simulate episodes (<code className="font-mono">episodes</code>), stream Crypto-PAn anonymized Dual-Track <code className="font-mono">.tar.zst</code> bundles (<code className="font-mono">export</code>), and upload via AWS SigV4 (<code className="font-mono">ship</code>).</td>
               </tr>
             </tbody>
           </table>
@@ -247,6 +252,12 @@ sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
 //    GET  /v1/system/kernel/studio       -> Live hardware inventory, lsmod, running kernel config & build jobs
 //    POST /v1/system/kernel/build        -> Start async Universal or localmodconfig stripped kernel build
 //    POST /v1/system/kernel/install      -> Safe stage/install via ZFS Boot Environment clone or dpkg + update-grub
+//    GET  /v1/security/threat-harvester/status   -> Blackbox TCX/tracepoint/uprobe status, redactions & ZFS spool quota
+//    POST /v1/security/threat-harvester/config   -> Apply live ThreatHarvesterConfig updates to Ring-0 collector
+//    GET  /v1/security/threat-harvester/episodes -> Filter captured Causal Threat Episodes by tier & reviewStatus
+//    POST /v1/security/threat-harvester/episodes/{review,annotate,simulate} -> Curate, Teacher-LLM annotate, or synthesize episodes
+//    GET  /v1/security/threat-harvester/export   -> Stream Dual-Track SFT/RLVR JSONL + Apache Parquet .tar.zst bundle
+//    POST /v1/security/threat-harvester/ship     -> Ship Crypto-PAn anonymized bundle to S3 / Vault via AWS SigV4
 //    GET  /v1/ha/sync-trust              -> HA PKI enrollment, effective transport (mtls), SHA-256 fingerprints
 //    GET  /v1/system/telemetry/hardware  -> HWMON thermal/fan/voltage sensors & SFP+/QSFP optical DOM
 

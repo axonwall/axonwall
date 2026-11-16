@@ -18,6 +18,7 @@ import {
   Lock,
   KeyRound,
   Bug,
+  Binary,
   Sparkles,
   Palette,
 } from 'lucide-react';
@@ -27,7 +28,7 @@ import { CodeBlock } from './components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Documentation | Overview & Quickstart',
   description:
-    'Comprehensive documentation for Axonwall v0.11.68: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, ZFSBootMenu Root-on-ZFS, KVM/LXC Hypervisor, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
+    'Comprehensive documentation for Axonwall v0.11.71: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, Blackbox eBPF Threat-LLM Harvester, Custom Hardened Kernels, ZFSBootMenu Root-on-ZFS, KVM/LXC Hypervisor, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
 };
 
 export default function DocsOverviewPage() {
@@ -37,7 +38,7 @@ export default function DocsOverviewPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Documentation Portal • v0.11.68
+          Documentation Portal • v0.11.71
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Axonwall Documentation
@@ -84,7 +85,7 @@ export default function DocsOverviewPage() {
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-indigo-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Universal Linux 6.12 LTS KSPP + k3s + OpenZFS + nftables + eBPF kernels, live host hardware inventory, 24-check kernel posture audit, hardware-locked localmodconfig stripped builds, and ZFSBootMenu / A-B safe staging.
+              Universal Linux 6.12 LTS KSPP + k3s + OpenZFS + nftables + eBPF kernels, live host hardware inventory, 25-check kernel posture audit (/boot/config-* &amp; /proc/config.gz), hardware-locked localmodconfig stripped builds, and ZFSBootMenu / A-B safe staging.
             </p>
           </Link>
 
@@ -132,6 +133,22 @@ export default function DocsOverviewPage() {
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
               8-engine malware suite (rkhunter, chkrootkit, ClamAV, AIDE, YARA, Lynis, unhide, debsums) paired with 5-hook CO-RE BPF-LSM Ring-0 containment, Linux 6.9+ BPF_TOKEN UserNS mediation, /proc/kcore prog_idr diffing, and Silicon PMU LBR.
+            </p>
+          </Link>
+
+          <Link
+            href="/docs/threat-harvester"
+            className="p-5 rounded-xl bg-slate-900/60 border border-cyan-500/40 hover:border-cyan-500 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Binary className="w-4 h-4 text-cyan-400" />
+                <span>Axonwall Blackbox: eBPF Threat-LLM Harvester</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-cyan-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Opt-in Ring-0 TCX flow sketches, sched_process_exec / memfd_create lineage, guarded TLS uprobes, mandatory pre-disk DLP redaction, Crypto-PAn anonymization, and Dual-Track SFT/RLVR ChatML JSONL + Apache Parquet corpus export.
             </p>
           </Link>
 
@@ -222,12 +239,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Cpu className="w-4 h-4 text-emerald-400" />
-                <span>Modular Core Roles (5 Core Roles + 14 Plugins)</span>
+                <span>Modular Core Roles (5 Core Roles + 15 Plugins)</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Compose all 5 Core Roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 14 sandboxed extension plugins—from pure Host-Mode ZFS NAS to hyper-converged bare metal.
+              Compose all 5 Core Roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 15 sandboxed extension plugins—from pure Host-Mode ZFS NAS to hyper-converged bare metal.
             </p>
           </Link>
 

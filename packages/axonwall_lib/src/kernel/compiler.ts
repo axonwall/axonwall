@@ -569,6 +569,33 @@ const AUDIT_RULES: AuditRuleSpec[] = [
     },
     rationale: 'Enables Ghost-in-the-Ring Ring-0 BPF-LSM guards (io_uring SQPOLL, BPF token policy, AF_ALG).',
   },
+  {
+    id: 'ebpf-tcx-uprobe-harvester',
+    pillar: 'nftables_ebpf',
+    label: 'TCX Ingress/Egress & Uprobe Event Capture',
+    symbol: 'CONFIG_NET_CLS_ACT',
+    expected: 'y',
+    severityOnFail: 'WARN',
+    check: (cfg) => {
+      const missing: string[] = [];
+      for (const sym of [
+        'CONFIG_NET_CLS_ACT',
+        'CONFIG_NET_SCH_INGRESS',
+        'CONFIG_UPROBE_EVENTS',
+        'CONFIG_TRACEPOINTS',
+        'CONFIG_FTRACE_SYSCALLS',
+      ] as const) {
+        if (cfg[sym] !== 'y' && cfg[sym] !== 'm') {
+          missing.push(sym);
+        }
+      }
+      return {
+        ok: missing.length === 0,
+        actual: missing.length === 0 ? 'y' : `missing: ${missing.join(', ')}`,
+      };
+    },
+    rationale: 'Required by Axonwall Blackbox (ebpf-threat-harvester) for TCX multi-plane wire capture, tracepoints, and optional TLS uprobes.',
+  },
 ];
 
 export function auditKernelPostureAndConfig(
@@ -867,6 +894,11 @@ export function compileCustomKernelArtifacts(
       CONFIG_DYNAMIC_FTRACE: 'y',
       CONFIG_FPROBE: 'y',
       CONFIG_KPROBES: 'y',
+      CONFIG_NET_CLS_ACT: 'y',
+      CONFIG_NET_SCH_INGRESS: 'y',
+      CONFIG_UPROBE_EVENTS: 'y',
+      CONFIG_TRACEPOINTS: 'y',
+      CONFIG_FTRACE_SYSCALLS: 'y',
     });
   }
 

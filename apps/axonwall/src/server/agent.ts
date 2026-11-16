@@ -5,10 +5,12 @@ import { lintRuleset } from '@axonwall/lib/lint';
 import {
   DesiredStateSchema,
   InterfaceSchema,
+  ThreatHarvesterConfigSchema,
   inferInterfaceRole,
   isInterfaceAuthoritativeDhcp,
   type DesiredState,
   type InterfaceRole,
+  type ThreatHarvesterConfig,
 } from '@axonwall/lib/schemas';
 import { isValidDevice } from '@axonwall/lib/util';
 import {
@@ -7226,6 +7228,295 @@ export async function renderK3sBpfTokenManifestAction(input: {
         ].join('\n');
 
   return { success: true, manifestYaml };
+}
+
+// =============================================================================
+// Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester
+// =============================================================================
+
+export interface ThreatEpisode {
+  id: string;
+  createdAt: string;
+  timestampUnixMs: number;
+  labelTier: 'gold_malicious' | 'silver_malicious' | 'benign_sampled' | 'unlabeled_anomaly' | string;
+  reviewStatus: 'pending' | 'approved_malicious' | 'marked_benign' | 'pinned_gold' | string;
+  pinned: boolean;
+  verdictScore: number;
+  oracleSources: string[];
+  mitreAttack: string[];
+  srcIp: string;
+  dstIp: string;
+  srcPort: number;
+  dstPort: number;
+  proto: number;
+  protoName: string;
+  pktCount: number;
+  byteCount: number;
+  durationMs: number;
+  dnsEntropy: number;
+  ja4t: string;
+  sni?: string;
+  cgroupId: number;
+  procComm?: string;
+  procPid?: number;
+  memfdExec: boolean;
+  redactionCount: number;
+  pktSizes: number[];
+  iatUs: number[];
+  scrubbedPayload?: string;
+  causalDsl: string;
+  reasoningTrace: string;
+  recommendedMcpTool?: string;
+  spoolBytes: number;
+}
+
+export interface ThreatHarvesterStats {
+  packetsSeen: number;
+  tier0Events: number;
+  tier1PayloadEvents: number;
+  ringbufDrops: number;
+  darkPortHits: number;
+  memfdAlerts: number;
+  tlsUprobeEvents: number;
+  totalEpisodes: number;
+  goldEpisodes: number;
+  silverEpisodes: number;
+  benignEpisodes: number;
+  pinnedEpisodes: number;
+  pendingReview: number;
+  redactedSecrets: number;
+  spoolUsedBytes: number;
+  spoolQuotaBytes: number;
+  zfsBacked: boolean;
+  backpressureTripped: boolean;
+}
+
+export interface ThreatHarvesterStatusSnapshot {
+  daemonDown?: boolean;
+  config: ThreatHarvesterConfig;
+  bpfAttached: boolean;
+  attachedInterfaces: string[];
+  activeHooks: string[];
+  excludedUprobeDaemons: string[];
+  bpfLoadError?: string;
+  stats: ThreatHarvesterStats;
+  timestamp: string;
+}
+
+export async function getThreatHarvesterStatus(): Promise<ThreatHarvesterStatusSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  await enforceRateLimit(60, 60000, 'threat-harvester-status');
+
+  const res = await callAgentApi<ThreatHarvesterStatusSnapshot>(
+    '/v1/security/threat-harvester/status',
+    'GET',
+    undefined,
+    8000
+  );
+  if (res && res.config && res.stats) {
+    return res;
+  }
+
+  const state = await getCurrentDesiredState().catch(() => null);
+  const cfg = ThreatHarvesterConfigSchema.parse(state?.threatHarvester ?? {});
+  return {
+    daemonDown: true,
+    config: cfg,
+    bpfAttached: false,
+    attachedInterfaces: [],
+    activeHooks: [],
+    excludedUprobeDaemons: [
+      'axonwalld',
+      'sshd',
+      'eluvix',
+      'slapd',
+      'vault',
+      'minio',
+      'k3s',
+      'containerd',
+      'systemd',
+      'postgres',
+    ],
+    stats: {
+      packetsSeen: 0,
+      tier0Events: 0,
+      tier1PayloadEvents: 0,
+      ringbufDrops: 0,
+      darkPortHits: 0,
+      memfdAlerts: 0,
+      tlsUprobeEvents: 0,
+      totalEpisodes: 0,
+      goldEpisodes: 0,
+      silverEpisodes: 0,
+      benignEpisodes: 0,
+      pinnedEpisodes: 0,
+      pendingReview: 0,
+      redactedSecrets: 0,
+      spoolUsedBytes: 0,
+      spoolQuotaBytes: (cfg.maxSpoolGb || 10) * 1024 * 1024 * 1024,
+      zfsBacked: false,
+      backpressureTripped: false,
+    },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+export async function listThreatHarvesterEpisodes(params?: {
+  tier?: string;
+  reviewStatus?: string;
+  limit?: number;
+}): Promise<{ episodes: ThreatEpisode[]; total: number }> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  await enforceRateLimit(60, 60000, 'threat-harvester-episodes');
+
+  const qs = new URLSearchParams();
+  if (params?.tier && params.tier !== 'all') qs.set('tier', params.tier);
+  if (params?.reviewStatus && params.reviewStatus !== 'all') qs.set('reviewStatus', params.reviewStatus);
+  qs.set('limit', String(params?.limit && params.limit > 0 ? params.limit : 100));
+
+  const res = await callAgentApi<{ episodes?: ThreatEpisode[]; total?: number }>(
+    `/v1/security/threat-harvester/episodes?${qs.toString()}`,
+    'GET',
+    undefined,
+    8000
+  );
+  if (!res || !Array.isArray(res.episodes)) {
+    return { episodes: [], total: 0 };
+  }
+  return {
+    episodes: res.episodes,
+    total: typeof res.total === 'number' ? res.total : res.episodes.length,
+  };
+}
+
+export async function updateThreatHarvesterLiveConfigAction(
+  cfg: Partial<ThreatHarvesterConfig>
+): Promise<{ success: boolean; status?: ThreatHarvesterStatusSnapshot; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(20, 60000, 'threat-harvester-config');
+
+  const validated = ThreatHarvesterConfigSchema.parse(cfg);
+  const res = await callAgentApi<{ success?: boolean; status?: ThreatHarvesterStatusSnapshot; error?: string; message?: string }>(
+    '/v1/security/threat-harvester/config',
+    'POST',
+    validated,
+    10000
+  );
+  if (!res) {
+    return { success: false, error: 'axonwalld threat-harvester config endpoint unreachable' };
+  }
+  if (res.success === false) {
+    return { success: false, error: res.error || res.message || 'Failed to update live harvester config' };
+  }
+  return { success: true, status: res.status };
+}
+
+export async function reviewThreatHarvesterEpisodeAction(input: {
+  id: string;
+  action: 'pinned_gold' | 'approved_malicious' | 'marked_benign' | 'delete';
+}): Promise<{ success: boolean; episode?: ThreatEpisode; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'operator');
+  await enforceRateLimit(60, 60000, 'threat-harvester-review');
+
+  const cleanId = String(input?.id || '').trim();
+  if (!cleanId) {
+    return { success: false, error: 'Episode ID is required' };
+  }
+
+  const res = await callAgentApi<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
+    '/v1/security/threat-harvester/episodes/review',
+    'POST',
+    { id: cleanId, action: input.action },
+    8000
+  );
+  if (!res) {
+    return { success: false, error: 'axonwalld threat-harvester review endpoint unreachable' };
+  }
+  if (res.success === false) {
+    return { success: false, error: res.error || res.message || 'Failed to review episode' };
+  }
+  return { success: true, episode: res.episode };
+}
+
+export async function annotateThreatHarvesterEpisodeAction(
+  id: string
+): Promise<{ success: boolean; episode?: ThreatEpisode; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'operator');
+  await enforceRateLimit(30, 60000, 'threat-harvester-annotate');
+
+  const cleanId = String(id || '').trim();
+  if (!cleanId) {
+    return { success: false, error: 'Episode ID is required' };
+  }
+
+  const res = await callAgentApi<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
+    '/v1/security/threat-harvester/episodes/annotate',
+    'POST',
+    { id: cleanId },
+    25000
+  );
+  if (!res) {
+    return { success: false, error: 'axonwalld threat-harvester annotate endpoint unreachable' };
+  }
+  if (res.success === false) {
+    return { success: false, error: res.error || res.message || 'Failed to annotate episode' };
+  }
+  return { success: true, episode: res.episode };
+}
+
+export async function simulateThreatHarvesterEpisodeAction(
+  scenario:
+    | 'honeypot_rce_memfd'
+    | 'dns_c2_exfil'
+    | 'credential_stuffing_redacted'
+    | 'benign_k3s_egress'
+): Promise<{ success: boolean; episode?: ThreatEpisode; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(30, 60000, 'threat-harvester-simulate');
+
+  const res = await callAgentApi<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
+    '/v1/security/threat-harvester/simulate',
+    'POST',
+    { scenario },
+    10000
+  );
+  if (!res) {
+    return { success: false, error: 'axonwalld threat-harvester simulate endpoint unreachable' };
+  }
+  if (res.success === false) {
+    return { success: false, error: res.error || res.message || 'Failed to simulate threat episode' };
+  }
+  return { success: true, episode: res.episode };
+}
+
+export async function shipThreatHarvesterCorpusAction(): Promise<{
+  success: boolean;
+  objectKey?: string;
+  error?: string;
+}> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(10, 60000, 'threat-harvester-ship');
+
+  const res = await callAgentApi<{ success?: boolean; objectKey?: string; error?: string; message?: string }>(
+    '/v1/security/threat-harvester/ship',
+    'POST',
+    {},
+    45000
+  );
+  if (!res) {
+    return { success: false, error: 'axonwalld threat-harvester ship endpoint unreachable' };
+  }
+  if (res.success === false) {
+    return { success: false, error: res.error || res.message || 'Failed to ship corpus to S3' };
+  }
+  return { success: true, objectKey: res.objectKey };
 }
 
 

@@ -377,6 +377,55 @@ function sendAgentSocketRequest<T>(
   });
 }
 
+function sendAgentSocketBuffer(
+  reqPath: string,
+  method: 'GET' | 'POST' = 'GET',
+  timeoutMs = 30000,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(AGENT_API_SOCK)) {
+      reject(new Error(`Socket not found at ${AGENT_API_SOCK}`));
+      return;
+    }
+    const req = http.request(
+      {
+        socketPath: AGENT_API_SOCK,
+        path: reqPath,
+        method,
+        timeout: timeoutMs,
+        headers: {
+          ...(getAgentToken() ? { 'X-Axonwall-Agent-Token': getAgentToken() } : {}),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(buf);
+          } else {
+            let errMsg = buf.toString('utf8') || `HTTP ${res.statusCode}`;
+            try {
+              const parsed = JSON.parse(errMsg);
+              if (parsed?.error || parsed?.message) {
+                errMsg = String(parsed.error || parsed.message);
+              }
+            } catch {}
+            reject(new Error(errMsg));
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Daemon socket request timed out after ${Math.round(timeoutMs / 1000)}s`));
+    });
+    req.end();
+  });
+}
+
 function commitToGitOps(state: DesiredState, message: string): string | null {
   try {
     fs.mkdirSync(GITOPS_DIR, { recursive: true, mode: 0o775 });
@@ -2730,6 +2779,136 @@ async function cmdEbpf(args: string[]) {
   }
 }
 
+async function cmdHarvester(args: string[]) {
+  const sub = (args[0] || 'status').toLowerCase();
+  const asJson = args.includes('--json');
+
+  switch (sub) {
+    case 'status': {
+      const snap = await sendAgentSocketRequest<any>('/v1/security/threat-harvester/status', 'GET');
+      if (asJson) {
+        console.log(JSON.stringify(snap, null, 2));
+        return;
+      }
+      const cfg = snap?.config || {};
+      const stats = snap?.stats || {};
+      console.log(`${cCyan}${cBold}Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester${cReset}`);
+      console.log(
+        `  Opt-In State:       ${cfg.enabled ? `${cGreen}${cBold}ENABLED${cReset}` : `${cYellow}DISABLED${cReset}`} (mode=${cfg.captureMode || 'adaptive'})`,
+      );
+      console.log(
+        `  Ring-0 eBPF Hooks:  ${snap?.bpfAttached ? `${cGreen}ATTACHED${cReset}` : `${cYellow}DETACHED${cReset}`} (${(snap?.activeHooks || []).join(', ') || 'none'})`,
+      );
+      console.log(
+        `  Watched Ifaces:     ${(snap?.attachedInterfaces || []).join(', ') || '(none)'}`,
+      );
+      console.log(
+        `  Capture Counters:   pkts=${stats.packetsSeen ?? 0} | tier0=${stats.tier0Events ?? 0} | tier1=${stats.tier1PayloadEvents ?? 0} | darkPorts=${stats.darkPortHits ?? 0} | memfd=${stats.memfdAlerts ?? 0} | drops=${stats.ringbufDrops ?? 0}`,
+      );
+      console.log(
+        `  Episode Corpus:     total=${stats.totalEpisodes ?? 0} (gold=${stats.goldEpisodes ?? 0}, silver=${stats.silverEpisodes ?? 0}, benign=${stats.benignEpisodes ?? 0}, pinned=${stats.pinnedEpisodes ?? 0}, pending=${stats.pendingReview ?? 0})`,
+      );
+      console.log(
+        `  Redaction & Spool:  redactedSecrets=${stats.redactedSecrets ?? 0} | spool=${Math.round((stats.spoolUsedBytes ?? 0) / (1024 * 1024))} MiB / ${cfg.maxSpoolGb ?? 10} GiB (${stats.zfsBacked ? 'OpenZFS zstd dataset' : 'local spool'})${stats.backpressureTripped ? ` ${cRed}[BACKPRESSURE TRIPPED]${cReset}` : ''}`,
+      );
+      if (snap?.bpfLoadError) {
+        console.log(`  eBPF Load Notice:   ${cYellow}${snap.bpfLoadError}${cReset}`);
+      }
+      return;
+    }
+
+    case 'episodes': {
+      const limitFlag = args.find((a) => a.startsWith('--limit='));
+      const tierFlag = args.find((a) => a.startsWith('--tier='));
+      const statusFlag = args.find((a) => a.startsWith('--review='));
+      const qs = new URLSearchParams();
+      qs.set('limit', limitFlag ? limitFlag.split('=')[1] : '25');
+      if (tierFlag) qs.set('tier', tierFlag.split('=')[1]);
+      if (statusFlag) qs.set('reviewStatus', statusFlag.split('=')[1]);
+
+      const data = await sendAgentSocketRequest<any>(`/v1/security/threat-harvester/episodes?${qs.toString()}`, 'GET');
+      if (asJson) {
+        console.log(JSON.stringify(data, null, 2));
+        return;
+      }
+      const episodes: any[] = data?.episodes || [];
+      console.log(`${cCyan}${cBold}Captured Causal Threat Episodes (${episodes.length} / ${data?.total ?? episodes.length})${cReset}`);
+      if (episodes.length === 0) {
+        console.log('  (no episodes recorded yet; run `axonwallctl harvester simulate honeypot_rce_memfd` to seed one)');
+        return;
+      }
+      for (const ep of episodes) {
+        const tierColor =
+          ep.labelTier === 'gold_malicious'
+            ? cRed
+            : ep.labelTier === 'silver_malicious'
+              ? cYellow
+              : cGreen;
+        console.log(
+          `  ${cBold}${ep.id}${cReset} | ${tierColor}${ep.labelTier}${cReset} (${ep.reviewStatus}${ep.pinned ? ', PINNED' : ''}) | ${ep.srcIp}:${ep.srcPort} -> ${ep.dstIp}:${ep.dstPort} (${ep.protoName}) | score=${Number(ep.verdictScore ?? 0).toFixed(2)} | mitre=${(ep.mitreAttack || []).join(',') || '-'}${ep.memfdExec ? ' [MEMFD]' : ''}`,
+        );
+      }
+      return;
+    }
+
+    case 'simulate': {
+      const scenario = args[1] && !args[1].startsWith('--') ? args[1] : 'honeypot_rce_memfd';
+      const validScenarios = [
+        'honeypot_rce_memfd',
+        'dns_c2_exfil',
+        'credential_stuffing_redacted',
+        'benign_k3s_egress',
+      ];
+      if (!validScenarios.includes(scenario)) {
+        console.error(`${cRed}Invalid scenario "${scenario}". Choose one of: ${validScenarios.join(', ')}${cReset}`);
+        process.exit(1);
+      }
+      const res = await sendAgentSocketRequest<any>('/v1/security/threat-harvester/simulate', 'POST', { scenario });
+      if (asJson) {
+        console.log(JSON.stringify(res, null, 2));
+        return;
+      }
+      console.log(`${cGreen}✓ Synthesized threat episode ${res?.episode?.id || ''} (${scenario})${cReset}`);
+      if (res?.episode?.labelTier) {
+        console.log(`  Label Tier: ${res.episode.labelTier} | MITRE: ${(res.episode.mitreAttack || []).join(', ') || 'none'} | Redactions: ${res.episode.redactionCount ?? 0}`);
+      }
+      return;
+    }
+
+    case 'export': {
+      const raw = args.includes('--raw');
+      const positional = args.slice(1).find((a) => !a.startsWith('--'));
+      const outPath = positional || 'axonwall-threat-corpus.tar.zst';
+      const bundle = await sendAgentSocketBuffer(
+        `/v1/security/threat-harvester/export?anonymize=${raw ? 'false' : 'true'}`,
+        'GET',
+        60000,
+      );
+      fs.writeFileSync(outPath, bundle);
+      console.log(
+        `${cGreen}✓ Exported ${bundle.byteLength} bytes (${raw ? 'raw un-anonymized' : 'Crypto-PAn + HMAC anonymized'}) to ${outPath}${cReset}`,
+      );
+      return;
+    }
+
+    case 'ship': {
+      const res = await sendAgentSocketRequest<any>('/v1/security/threat-harvester/ship', 'POST', {}, 60000);
+      if (asJson) {
+        console.log(JSON.stringify(res, null, 2));
+        return;
+      }
+      console.log(`${cGreen}✓ Shipped threat corpus to S3/Vault key: ${res?.objectKey || '(uploaded)'}${cReset}`);
+      return;
+    }
+
+    default:
+      console.log(
+        `Usage: axonwallctl harvester <status|episodes [--limit=N] [--tier=T] [--review=S]|simulate [honeypot_rce_memfd|dns_c2_exfil|credential_stuffing_redacted|benign_k3s_egress]|export [out.tar.zst] [--raw]|ship> [--json]`,
+      );
+      process.exit(1);
+  }
+}
+
 async function cmdNas(args: string[]) {
   const sub = (args[0] || 'pools').toLowerCase();
   switch (sub) {
@@ -3440,7 +3619,8 @@ ${cBold}COMMANDS:${cReset}
                       Options: [--pkg-upgrade|--apt|--pacman|--apk] [--version <ver>] [--slot <A|B>]
   kernel <cmd> [args] Detect hardware/modules, audit running kernel KSPP posture, or export stripped .config (detect, audit, config)
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
-  ebpf <cmd> [args]   Inspect Ring-0 XDP dataplane, LPM CIDR blocks, SYN-flood PPS & Linux 6.9+ BPF_TOKEN delegation
+  ebpf <cmd> [args]      Inspect Ring-0 XDP dataplane, LPM CIDR blocks, SYN-flood PPS & Linux 6.9+ BPF_TOKEN delegation
+  harvester <cmd> [args] Manage Blackbox eBPF Threat-LLM Harvester (status, episodes, simulate, export, ship)
   nas <cmd> [args]    Manage OpenZFS pools, Special VDEVs, snapshots, rollback, scrub, TRIM, checkpoints, AES-256-GCM keys & SMART
   virt <cmd> [args]   Manage KVM VMs, LXC containers, ZFS clones, snapshots, QGA IPs, live migration & Libvirt XML export
   k3s <cmd> [args]    Inspect K3s HA cluster status & manage embedded etcd disaster-recovery snapshots
@@ -3506,6 +3686,11 @@ async function main() {
     case 'ebpf':
     case 'bpf':
       await cmdEbpf(args.slice(1));
+      break;
+    case 'harvester':
+    case 'threat-harvester':
+    case 'blackbox':
+      await cmdHarvester(args.slice(1));
       break;
     case 'nas':
     case 'zfs':

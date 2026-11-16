@@ -105,9 +105,10 @@ describe('Axonwall Custom Kernel Schema, Hardware Resolver & Auditor', () => {
     expect(bundle.kconfigFragment).toContain('CONFIG_NF_TABLES=y');
     expect(bundle.kconfigFragment).toContain('# CONFIG_TRIM_UNUSED_KSYMS is not set');
     expect(bundle.sysctlConfig).toContain('-kernel.unprivileged_userns_clone = 1');
-    expect(bundle.simulatedAudit.totalCount).toBe(24);
+    expect(bundle.simulatedAudit.totalCount).toBe(25);
     expect(bundle.simulatedAudit.score).toBe(100);
     expect(bundle.simulatedAudit.failCount).toBe(0);
+    expect(bundle.simulatedAudit.checks.find((c) => c.id === 'ebpf-tcx-uprobe-harvester')?.status).toBe('PASS');
   });
 
   it('compiles hardware-stripped kernel with >90% module attack surface reduction', () => {
@@ -159,7 +160,7 @@ describe('Axonwall Custom Kernel Schema, Hardware Resolver & Auditor', () => {
       CONFIG_DEBUG_INFO_BTF: 'n',
     });
 
-    expect(report.totalCount).toBe(24);
+    expect(report.totalCount).toBe(25);
     expect(report.failCount).toBeGreaterThan(0);
     expect(report.score).toBeLessThan(50);
     expect(report.checks.find((c) => c.id === 'storage-no-trim-ksyms')?.status).toBe('FAIL');
