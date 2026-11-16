@@ -135,6 +135,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'TLS Decryption', href: '/security/tls-decryption', icon: Eye },
       { name: 'Identity-Aware Proxy', href: '/security/iap', icon: Lock },
       { name: 'Rootkit & Kernel Hunter', href: '/security/rootkit-hunter', icon: ShieldAlert, badge: 'Ring-0', pluginId: 'host-malware-rootkit' },
+      { name: 'Blackbox Threat Harvester', href: '/security/threat-harvester', icon: Binary, badge: 'eBPF+LLM', pluginId: 'ebpf-threat-harvester' },
     ],
   },
   {

@@ -156,6 +156,7 @@ export default function CustomKernelDocPage() {
               <li><code className="font-mono text-slate-200">WIREGUARD</code>, <code className="font-mono">XFRM_USER</code>/<code className="font-mono">INET_ESP</code>, <code className="font-mono">CAKE</code>, <code className="font-mono">FQ_CODEL</code>, <code className="font-mono">BBR</code></li>
               <li><code className="font-mono text-slate-200">BPF_SYSCALL=y</code>, <code className="font-mono">BPF_JIT_ALWAYS_ON=y</code>, <code className="font-mono">BPF_UNPRIV_DEFAULT_OFF=y</code></li>
               <li><code className="font-mono text-slate-200">DEBUG_INFO_BTF=y</code>, <code className="font-mono">DEBUG_INFO_BTF_MODULES=y</code>, <code className="font-mono">XDP_SOCKETS=y</code>, <code className="font-mono">FPROBE=y</code></li>
+              <li><code className="font-mono text-slate-200">NET_CLS_ACT=y</code>, <code className="font-mono">NET_SCH_INGRESS=y</code>, <code className="font-mono">UPROBE_EVENTS=y</code>, <code className="font-mono">TRACEPOINTS=y</code>, <code className="font-mono">FTRACE_SYSCALLS=y</code> (<code className="font-mono">ebpf-tcx-uprobe-harvester</code>)</li>
             </ul>
           </div>
         </div>
@@ -200,7 +201,7 @@ export default function CustomKernelDocPage() {
           code={`# Inventory CPU flags, IOMMU, TPM2, PCIe devices, NICs, NVMe, and loaded modules
 axonwallctl kernel detect
 
-# Run the 24-check Axonwall KSPP + k3s + ZFS + nftables + eBPF posture audit
+# Run the 25-check Axonwall KSPP + k3s + ZFS + nftables + eBPF posture audit (/boot/config-* or /proc/config.gz)
 axonwallctl kernel audit
 
 # Generate a hardware-locked localmodconfig bundle + hardened sysctl drop-in

@@ -77,17 +77,24 @@ type AgentServer struct {
 	watchdog         *engine.WatchdogEngine
 	nasManager       *engine.NasManager
 	k3sManager       *engine.K3sManager
-	virtManager      *engine.VirtManager
-	vigilanteManager *engine.VigilanteManager
-	etckeeperManager *engine.EtckeeperManager
-	directoryManager *engine.DirectoryManager
-	ddnsManager      *engine.DdnsManager
+	virtManager            *engine.VirtManager
+	vigilanteManager       *engine.VigilanteManager
+	threatHarvesterManager *engine.ThreatHarvesterManager
+	etckeeperManager       *engine.EtckeeperManager
+	directoryManager       *engine.DirectoryManager
+	ddnsManager            *engine.DdnsManager
 }
 
 func (s *AgentServer) SetVirtManager(vm *engine.VirtManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.virtManager = vm
+}
+
+func (s *AgentServer) SetThreatHarvesterManager(thm *engine.ThreatHarvesterManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.threatHarvesterManager = thm
 }
 
 // isSnapshotEligibleName reports whether a config file name is covered
@@ -1050,6 +1057,14 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			})
 		}
 
+		if filepath.Base(cleanPath) == "threat_harvester_config.json" && s.threatHarvesterManager != nil {
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "eBPF Threat Harvester config",
+				apply: func() error { return s.threatHarvesterManager.ApplyConfig(content) },
+			})
+		}
+
 		if filepath.Base(cleanPath) == "vow_config.json" && s.k3sManager != nil {
 			content := []byte(f.Content)
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
@@ -1483,6 +1498,9 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 	}
 	if s.vigilanteManager != nil {
 		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
+	}
+	if s.threatHarvesterManager != nil {
+		apply("threat_harvester_config.json", func(b []byte) error { return s.threatHarvesterManager.ApplyConfig(b) })
 	}
 	if s.ddnsManager != nil {
 		apply("ddns_config.json", func(b []byte) error { return s.ddnsManager.ApplyConfigJSON(b) })
@@ -2997,6 +3015,22 @@ func main() {
 	} else {
 		log.Printf("[Agent] Mode %s: skipping BPF-LSM enforcing attachment (set AXONWALL_LSM_ENFORCE=1 to enable)", runtimeMode)
 	}
+
+	threatHarvesterManager := engine.NewThreatHarvesterManager(ebpfManager, lsmGuardManager, vigilanteManager, mcpTrafficManager)
+	agentServer.SetThreatHarvesterManager(threatHarvesterManager)
+	go func() {
+		for _, cand := range []string{
+			filepath.Join(etcDir, "managed", "threat_harvester_config.json"),
+			filepath.Join(etcDir, "threat_harvester_config.json"),
+		} {
+			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
+				if err := threatHarvesterManager.ApplyConfig(data); err != nil {
+					log.Printf("[Agent] Startup Threat Harvester config warning (%s): %v", cand, err)
+				}
+				break
+			}
+		}
+	}()
 
 	// Start HTTP REST listener over Unix socket for local UI and management tooling
 	apiSocketPath := filepath.Join(sockDir, "agent-api.sock")
@@ -5156,10 +5190,172 @@ func main() {
 					"profiles":     tokMgr.ListProfiles(),
 					"activeMounts": engine.DiscoverDelegatedBpffsMounts(),
 				},
-				"virt": virtManager.GetEbpfTelemetry(),
-				"k3s":  k3sManager.GetEbpfTelemetry(),
-				"nas":  nasManager.GetDeepTelemetry(),
+				"virt":            virtManager.GetEbpfTelemetry(),
+				"k3s":             k3sManager.GetEbpfTelemetry(),
+				"nas":             nasManager.GetDeepTelemetry(),
+				"threatHarvester": threatHarvesterManager.GetCompactSummary(),
 			})
+		})
+
+		// =====================================================================
+		// Axonwall Blackbox: eBPF Threat-LLM Harvester REST APIs
+		// =====================================================================
+		mux.HandleFunc("/v1/security/threat-harvester/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(threatHarvesterManager.SnapshotStatus())
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/config", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+			if err != nil {
+				http.Error(w, "Failed to read config body", http.StatusBadRequest)
+				return
+			}
+			if err := threatHarvesterManager.ApplyConfig(bodyBytes); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"status":  threatHarvesterManager.SnapshotStatus(),
+			})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/episodes", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			tier := r.URL.Query().Get("tier")
+			reviewStatus := r.URL.Query().Get("reviewStatus")
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			eps := threatHarvesterManager.ListEpisodes(tier, reviewStatus, limit)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"episodes": eps,
+				"total":    len(eps),
+			})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/episodes/review", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ID           string `json:"id"`
+				Action       string `json:"action"`
+				ReviewStatus string `json:"reviewStatus"`
+				Delete       bool   `json:"delete"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 16384)).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			act := strings.TrimSpace(req.Action)
+			if req.Delete {
+				act = "delete"
+			} else if act == "" {
+				act = strings.TrimSpace(req.ReviewStatus)
+			}
+			ep, err := threatHarvesterManager.ReviewEpisode(req.ID, act)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "episode": ep})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/episodes/annotate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ID string `json:"id"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			ep, err := threatHarvesterManager.AnnotateEpisodeWithTeacherLLM(r.Context(), req.ID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "episode": ep})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/simulate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Scenario string `json:"scenario"`
+			}
+			_ = json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req)
+			ep, err := threatHarvesterManager.InjectSimulatedEpisode(req.Scenario)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "episode": ep})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/export", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			anonParam := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("anonymize")))
+			anonymize := threatHarvesterManager.SnapshotStatus().Config.AnonymizeOnExport
+			if anonParam == "false" || anonParam == "0" {
+				anonymize = false
+			} else if anonParam == "true" || anonParam == "1" {
+				anonymize = true
+			}
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Header().Set("Content-Disposition", `attachment; filename="axonwall-threat-corpus.tar.zst"`)
+			if err := threatHarvesterManager.ExportCorpusTarZst(w, anonymize); err != nil {
+				log.Printf("[ThreatHarvester] Export stream error: %v", err)
+			}
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/ship", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			keyName, err := threatHarvesterManager.ShipCorpusToS3(r.Context())
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "objectKey": keyName})
 		})
 
 		mux.HandleFunc("/v1/ebpf/xdp/block", func(w http.ResponseWriter, r *http.Request) {

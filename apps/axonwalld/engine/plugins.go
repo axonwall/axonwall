@@ -465,6 +465,21 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				},
 			},
 		},
+		{
+			ID:               "ebpf-threat-harvester",
+			Name:             "eBPF Threat-LLM Harvester (Blackbox)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Description:      "Extreme multi-plane CO-RE eBPF flight recorder (tcx ingress/egress, socket_cookie + cgroup_id process/memfd lineage, and guarded TLS uprobes) that correlates Gold honeypot/LSM and Silver IDS/XDP oracles into scrubbed SFT/RLVR Causal Episode JSONL and Apache Parquet datasets for custom Threat Detection LLMs.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"security.forensics", "system.monitoring", "system.ai"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
 	}
 }
 
@@ -983,6 +998,9 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	if pluginID == "eluvix" {
 		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
 	}
+	if pluginID == "ebpf-threat-harvester" {
+		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
+	}
 
 	pm.mu.Lock()
 	delete(pm.disabledMap, pluginID)
@@ -1214,6 +1232,20 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard enabled; configuration provisioned.",
+		}
+	}
+	if pluginID == "ebpf-threat-harvester" {
+		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "eBPF Threat-LLM Harvester (Blackbox) CO-RE telemetry spool configured.",
 		}
 	}
 	pm.ensurePluginLDAP(pluginID)

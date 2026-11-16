@@ -155,7 +155,7 @@ sudo axonwallctl confirm                   # Confirm pending Commit-Confirm tran
 sudo axonwallctl rollback [revision]       # Roll back to previous or specific GitOps SHA revision
 axonwallctl zbm <list|snapshot|clone|activate|delete|delete-snapshot>
 axonwallctl kernel detect [--json]         # Inventory CPU flags, IOMMU, TPM2, NVMe, NICs & lsmod
-axonwallctl kernel audit [--json]          # Run 24-check KSPP + k3s + OpenZFS + nftables + eBPF audit
+axonwallctl kernel audit [--json]          # Run 25-check KSPP + k3s + OpenZFS + nftables + eBPF audit
 axonwallctl kernel config [--mode universal|stripped] [--output-dir <dir>]
 sudo axonwallctl update [--apt] [--version <ver>] [--slot <A|B>]
 sudo axonwallctl plugin <list|enable|disable|install|remove|re-sync> <id>
@@ -167,6 +167,7 @@ sudo axonwallctl ebpf xdp-drop <ip|cidr> [--ttl <sec>] [--reason <text>]
 sudo axonwallctl ebpf xdp-unblock <ip|cidr>
 sudo axonwallctl ebpf syn-limit [pps|off]  # Inspect or set Ring-0 TCP SYN-flood PPS rate limit (>= 100 PPS)
 axonwallctl ebpf render-k3s [--profile networking-safe] [--namespace default] [--name <pod>]
+axonwallctl harvester <status|episodes|simulate|export|ship> [--json]  # Blackbox Threat-LLM Harvester CLI
 axonwallctl nas <status|snapshot|rollback|scrub|trim|checkpoint|unlock|lock> ...
 axonwallctl virt <list|start|stop|reboot|snapshot|rollback|clone|migrate|xml> ...
 axonwallctl k3s <status|etcd-snapshots|etcd-save|etcd-restore> ...

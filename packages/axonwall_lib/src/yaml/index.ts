@@ -70,7 +70,7 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     title: 'Axonwall Threat Defense & Zero-Trust Security',
     description:
       'Controls Suricata IDS/IPS, CrowdSec Threat Intelligence, GeoIP filtering, Zero-Trust Identity-Aware Proxy (IAP), Enterprise SSO (OIDC/SAML/LDAP), TLS Decryption, and Host Malware / Rootkit / Ghost-in-the-Ring Kernel Defense.',
-    keys: ['suricata', 'crowdsec', 'geoip', 'zeroTrust', 'sso', 'tlsDecryption', 'hostDefense'],
+    keys: ['suricata', 'crowdsec', 'geoip', 'zeroTrust', 'sso', 'tlsDecryption', 'hostDefense', 'threatHarvester'],
   },
   {
     filename: 'ha.yaml',

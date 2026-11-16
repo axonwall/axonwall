@@ -37334,6 +37334,47 @@ var HostMalwareDefenseConfigSchema = external_exports.object({
   pmuLbrBranchTracingEnabled: external_exports.boolean().default(true),
   autoQuarantineOnCritical: external_exports.boolean().default(true)
 });
+var ThreatTeacherLlmConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  endpoint: external_exports.string().default("http://127.0.0.1:4100/v1/chat/completions"),
+  model: external_exports.string().default("qwen2.5-14b-instruct"),
+  apiKey: external_exports.string().optional(),
+  maxCallsPerHour: external_exports.number().int().min(1).max(1e4).default(30)
+});
+var ThreatFleetShipperConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  endpoint: external_exports.string().default(""),
+  region: external_exports.string().default("us-east-1"),
+  bucket: external_exports.string().default("axonwall-threat-corpus"),
+  prefix: external_exports.string().default("nodes/"),
+  accessKey: external_exports.string().optional(),
+  secretKey: external_exports.string().optional(),
+  usePathStyle: external_exports.boolean().default(true),
+  lastShippedAt: external_exports.string().optional(),
+  lastShippedKey: external_exports.string().optional(),
+  lastError: external_exports.string().optional()
+});
+var ThreatHarvesterConfigSchema = external_exports.object({
+  enabled: external_exports.boolean().default(false),
+  captureMode: external_exports.enum(["adaptive", "firehose", "honeypot_only"]).default("adaptive"),
+  watchedInterfaces: external_exports.array(external_exports.string()).default([]),
+  firehoseInterfaces: external_exports.array(external_exports.string()).default([]),
+  firehoseNamespaces: external_exports.array(external_exports.string()).default([]),
+  canaryPorts: external_exports.array(external_exports.number().int().min(1).max(65535)).default([23, 2323, 3389, 4444, 5900, 6379, 9200, 27017]),
+  maxPayloadBytes: external_exports.number().int().min(256).max(65536).default(4096),
+  correlationWindowSec: external_exports.number().int().min(5).max(300).default(45),
+  benignSampleRate: external_exports.number().min(0).max(1).default(5e-3),
+  spoolDir: external_exports.string().default("/var/lib/axonwall/threat-corpus"),
+  maxSpoolGb: external_exports.number().int().min(1).max(1e4).default(10),
+  pinGoldEpisodes: external_exports.boolean().default(true),
+  enableTlsUprobes: external_exports.boolean().default(false),
+  autoHoneypotTlsUprobes: external_exports.boolean().default(true),
+  tlsUprobeAllowlist: external_exports.array(external_exports.string()).default([]),
+  anonymizeOnExport: external_exports.boolean().default(true),
+  anonymizationSalt: external_exports.string().optional(),
+  teacherLlm: ThreatTeacherLlmConfigSchema.prefault({}),
+  fleetShipper: ThreatFleetShipperConfigSchema.prefault({})
+});
 var VigilanteDeceptionConfigSchema = external_exports.object({
   enabled: external_exports.boolean().default(true),
   canaryServiceAccounts: external_exports.array(external_exports.string()).default(["cluster-admin-backup", "vault-sync-sa"]),
@@ -37717,6 +37758,7 @@ var DesiredStateSchema = external_exports.object({
   hostedEdge: HostedEdgeConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
   hostDefense: HostMalwareDefenseConfigSchema.optional(),
+  threatHarvester: ThreatHarvesterConfigSchema.optional(),
   eluvix: EluvixConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional()
 });
@@ -38321,6 +38363,31 @@ var BUILTIN_PLUGINS = [
       path: "/reporting/ebpf",
       icon: "Cpu"
     }
+  },
+  {
+    id: "ebpf-threat-harvester",
+    name: "Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester",
+    version: "0.3.1",
+    category: "extension",
+    defaultEnabled: false,
+    description: "Opt-in Ring-0 eBPF flight recorder & dataset harvester capturing correlated wire flows (TCX), execve/memfd_create process lineage, and guarded TLS uprobes into Causal Episode SFT/RLVR JSONL + Apache Parquet corpora for training threat-detection LLMs.",
+    author: "Axonwall Core",
+    systemdUnits: [],
+    privileges: ["firewall.rules", "system.monitoring", "reporting.flows"],
+    nftHooks: [
+      { table: "inet axonwall", chain: "forward", priority: 0 }
+    ],
+    menuEntry: {
+      title: "Blackbox Harvester",
+      path: "/security/threat-harvester",
+      icon: "Binary"
+    },
+    packages: {
+      debian: ["bpftool", "zstd"],
+      alpine: ["bpftool", "zstd"],
+      arch: ["bpf", "zstd"]
+    },
+    cliBinaries: ["axonwallctl"]
   }
 ];
 function resolveCapabilities(state) {
@@ -38385,6 +38452,12 @@ function isPluginEnabled(pluginId, state) {
     }
     const entry = state.plugins?.find((p) => p.id === "host-malware-rootkit");
     return entry ? entry.enabled !== false : true;
+  }
+  if (pluginId === "ebpf-threat-harvester") {
+    if (state.threatHarvester?.enabled !== void 0) {
+      return state.threatHarvester.enabled;
+    }
+    return Boolean(state.plugins?.some((p) => p.id === "ebpf-threat-harvester" && p.enabled));
   }
   if (pluginId === "vigilant-octo-waffle") {
     if (state.vow?.enabled !== void 0) {
@@ -43387,6 +43460,18 @@ function compileNftables(state) {
         fileMode: 420
       });
     }
+  }
+  const threatHarvesterPlugin = state.plugins?.find((p) => p.id === "ebpf-threat-harvester");
+  if (state.threatHarvester || threatHarvesterPlugin?.enabled) {
+    const parsedHarvester = ThreatHarvesterConfigSchema.parse({
+      ...state.threatHarvester ?? {},
+      enabled: state.threatHarvester?.enabled ?? Boolean(threatHarvesterPlugin?.enabled)
+    });
+    files.push({
+      path: "/etc/axonwall/managed/threat_harvester_config.json",
+      content: JSON.stringify(parsedHarvester, null, 2),
+      fileMode: 384
+    });
   }
   if (capabilities.firewallEnabled && state.dhcp) {
     const kea = compileKeaDhcp4(state.dhcp, state.interfaces);
@@ -53724,7 +53809,7 @@ var AXONWALL_YAML_DOMAINS = [
     filename: "security.yaml",
     title: "Axonwall Threat Defense & Zero-Trust Security",
     description: "Controls Suricata IDS/IPS, CrowdSec Threat Intelligence, GeoIP filtering, Zero-Trust Identity-Aware Proxy (IAP), Enterprise SSO (OIDC/SAML/LDAP), TLS Decryption, and Host Malware / Rootkit / Ghost-in-the-Ring Kernel Defense.",
-    keys: ["suricata", "crowdsec", "geoip", "zeroTrust", "sso", "tlsDecryption", "hostDefense"]
+    keys: ["suricata", "crowdsec", "geoip", "zeroTrust", "sso", "tlsDecryption", "hostDefense", "threatHarvester"]
   },
   {
     filename: "ha.yaml",

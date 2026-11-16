@@ -6,17 +6,44 @@ Official build artifacts, SHA-256 checksums, and detached Ed25519 signatures (`.
 
 ---
 
-## Unreleased (`main`) — Custom Hardened Linux 6.12 LTS Kernels & Interactive Hardware Studio
+## Unreleased (`main`) — Axonwall Blackbox Threat-LLM Harvester & Custom Hardened Linux 6.12 LTS Kernels
 
 ### Highlights
+- **Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester (`ebpf-threat-harvester`)**:
+  - **Multi-Plane CO-RE eBPF Capture**: `tc_harvester_ingress` and `tc_harvester_egress` (attached via Linux 6.6+ TCX) capture first-16 signed packet size/microsecond IAT flow sketches, TCP `JA4T` options, TLS SNI, DNS label Shannon entropy, and triggered Tier-1 L7 slices (`4096 B` default), joined in-kernel by `socket_cookie` / `cgroup_id` / `pid` with `tp_harvester_exec` (`sched_process_exec`), `tp_harvester_memfd` (`sys_enter_memfd_create`), and guarded `uprobe_harvester_ssl_write` (`uprobe/SSL_write`).
+  - **Two-Tier Adaptive Flight Recorder & Firehose Modes**: Configurable `adaptive`, `firehose`, and `honeypot_only` modes with canary dark-ports (`23, 2323, 3389, 4444, 5900, 6379, 9200, 27017`), `memfd`/DNS-entropy escalation, stratified benign negative sampling, and a ring-buffer backpressure circuit breaker.
+  - **Strict Opt-In & Pre-Disk Privacy Guardrails**: Disabled by default (`defaultEnabled: false`), enforces mandatory pre-disk `ScrubThreatPayload` structural secret/token redaction before writing to `/var/lib/axonwall/threat-corpus`, applies prefix-preserving AES-128 Crypto-PAn IPv4/IPv6 + HMAC-SHA256 hostname anonymization on export/ship, and hardcodes control-plane TLS uprobe exclusions (`axonwalld`, `sshd`, `eluvix`, `slapd`, `vault`, `minio`, `k3s`, `containerd`, `systemd`, `postgres`, plus `*` wildcard rejection).
+  - **45s Multi-Oracle Correlator, Teacher-LLM Distiller & Dual-Track Dataset Lake**: Joins Gold oracles (dark-port hits, MCP `dnat_honeypot` leases, `lsm_guard` `-EPERM`) and Silver oracles (Suricata `eve.json`, XDP/Vigilante blocks, `memfd_create`, DNS entropy) with an OpenAI-compatible Teacher-LLM annotator, OpenZFS `zstd` + `refquota` spooling (preserving `Pinned` Gold episodes), `.tar.zst` exports (`manifest.json`, ChatML SFT/RLVR `train.jsonl` / `val.jsonl`, Apache Parquet 1.0 `features.parquet`), stdlib AWS SigV4 S3/Vault shipping, `/security/threat-harvester` 4-tab console UI, and `axonwallctl harvester <status|episodes|simulate|export|ship>`.
 - **Universal & Hardware-Stripped Hardened Linux 6.12 LTS Kernel Pipeline (`packaging/kernel/`)**:
-  - Seven composable Kconfig fragments (`00-universal-hardware-base.config` through `06-strip-desktop-bloat.config`) plus `95-axonwall-kernel-hardening.sysctl.conf` delivering Debian-13-equivalent server/cloud hardware compatibility layered with KSPP memory/slab/stack hardening, `integrity`-mode Lockdown LSM, `BPF_LSM`, `MODULE_SIG` (`sha512`), rootless Kubernetes `USER_NS` + cgroups v2, `# CONFIG_TRIM_UNUSED_KSYMS is not set` + `KALLSYMS=y` (preserving OpenZFS DKMS symbols), `nftables` flowtables + WireGuard, and eBPF CO-RE BTF + `BPF_UNPRIV_DEFAULT_OFF`.
+  - Seven composable Kconfig fragments (`00-universal-hardware-base.config` through `06-strip-desktop-bloat.config`, now including `CONFIG_NET_CLS_ACT`, `CONFIG_NET_SCH_INGRESS`, `CONFIG_UPROBE_EVENTS`, and `CONFIG_FTRACE_SYSCALLS` for TCX/Uprobe harvesting) plus `95-axonwall-kernel-hardening.sysctl.conf` delivering Debian-13-equivalent server/cloud hardware compatibility layered with KSPP memory/slab/stack hardening, `integrity`-mode Lockdown LSM, `BPF_LSM`, `MODULE_SIG` (`sha512`), rootless Kubernetes `USER_NS` + cgroups v2, `# CONFIG_TRIM_UNUSED_KSYMS is not set` + `KALLSYMS=y` (preserving OpenZFS DKMS symbols), `nftables` flowtables + WireGuard, and eBPF CO-RE BTF + `BPF_UNPRIV_DEFAULT_OFF`.
   - Strips desktop bloat (`SOUND`, `DRM`, `WIRELESS`, `WLAN`, `BT`, `MEDIA_SUPPORT`, `INFINIBAND`) and legacy attack surfaces (`KEXEC`, `HIBERNATION`, `DCCP`, `RDS`, `TIPC`) without desktop `linux-hardened` regressions.
   - Reproducible `./packaging/kernel/build-kernel.sh` supporting `--mode universal`, `--mode stripped` (`localmodconfig` + `--march` ISA tuning), and `--mode config-only`; stages offline kernel tooling into `/usr/share/axonwall/kernel-builder/` on unified ISO builds.
-- **Interactive Hardware Detection, 24-Check Audit & Custom Kernel Studio**:
-  - **Shared Engine (`@axonwall/lib/kernel`)**: Synthesizes deterministic fragments & sysctl drops, infers optimal `-march` (`x86-64-v2`/`v3`/`v4`/`native`), and scores live `/boot/config-*` / `/proc/config.gz` + runtime LSM/sysctl posture against **24 hardened checks**.
+- **Interactive Hardware Detection, 25-Check Audit & Custom Kernel Studio**:
+  - **Shared Engine (`@axonwall/lib/kernel`)**: Synthesizes deterministic fragments & sysctl drops, infers optimal `-march` (`x86-64-v2`/`v3`/`v4`/`native`), and scores live `/boot/config-*` / `/proc/config.gz` + runtime LSM/sysctl posture against **25 hardened checks** (including `ebpf-tcx-uprobe-harvester`).
   - **Daemon (`axonwalld`)**: `KernelStudioManager` (`/v1/system/kernel/studio`, `/v1/system/kernel/build`, `/v1/system/kernel/install`) inventories live CPU flags, IOMMU, UEFI Secure Boot, TPM 2.0, hardware watchdogs, PCIe/NIC/NVMe hardware, and `lsmod`, compiles `.deb` packages asynchronously, and stages installs safely via cloned **ZFSBootMenu Boot Environments** (`zbm` mode) or side-by-side `dpkg -i` + `update-grub` (`ab` / `rolling`).
-  - **Web Console & CLI**: New **System → Custom Kernel Studio** (`/system/kernel`), documentation guide (`/docs/custom-kernel`), and `axonwallctl kernel <detect|audit|config>` commands.
+  - **Web Console & CLI**: **System → Custom Kernel Studio** (`/system/kernel`), documentation guide (`/docs/custom-kernel`), and `axonwallctl kernel <detect|audit|config>` commands.
+
+---
+
+## `v0.11.71` (2026-11-15) — Arch Linux Parity & Zero-Config Rootless Dev Sandbox
+
+### Highlights
+- **Zero-Config Rootless Dev Sandbox (`.axonwall-dev/`)**: Workspace-local runtime state, daemon sockets, and tokens allow running and developing `axonwalld`, `axonwall`, and `axonwallctl` locally without root privileges or host `/etc/axonwall` contamination.
+- **Arch & Omarchy Linux Parity**: Added Arch distro detection, service unit aliases, `pacman` package upgrade support, `/proc/config.gz` live kernel configuration fallback in Kernel Studio, Debian-specific network writer guards on non-Debian runtimes, Cloud-Init symlink traversal protections, and CSRF/dev auth cookie hardening.
+
+---
+
+## `v0.11.70` (2026-11-13) — Installer OS/Disk Detection & Reinstall Safety Guards
+
+### Highlights
+- **Booted-System & Disk Reinstall Guards**: Automatically hides installer menu entries on already-installed booted systems, detects existing OS installations and OpenZFS pools across candidate target disks, and requires explicit operator confirmation before wiping existing appliance drives.
+
+---
+
+## `v0.11.69` (2026-11-13) — First-Boot Password Recovery & Cross-Edition Credential Guarantees
+
+### Highlights
+- **Unprovisioned Password Setter Fix**: Resolved console login glitch loops when booting without a preconfigured admin password and guaranteed deterministic default credential initialization across `axonwall`, `vault`, and `k3s-storage` first-boot workflows.
 
 ---
 

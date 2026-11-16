@@ -2087,6 +2087,59 @@ export const HostMalwareDefenseConfigSchema = z.object({
 });
 export type HostMalwareDefenseConfig = z.infer<typeof HostMalwareDefenseConfigSchema>;
 
+// =============================================================================
+// Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester (Opt-In Dataset Engine)
+// =============================================================================
+
+export const ThreatTeacherLlmConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  endpoint: z.string().default('http://127.0.0.1:4100/v1/chat/completions'),
+  model: z.string().default('qwen2.5-14b-instruct'),
+  apiKey: z.string().optional(),
+  maxCallsPerHour: z.number().int().min(1).max(10000).default(30),
+});
+export type ThreatTeacherLlmConfig = z.infer<typeof ThreatTeacherLlmConfigSchema>;
+
+export const ThreatFleetShipperConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  endpoint: z.string().default(''),
+  region: z.string().default('us-east-1'),
+  bucket: z.string().default('axonwall-threat-corpus'),
+  prefix: z.string().default('nodes/'),
+  accessKey: z.string().optional(),
+  secretKey: z.string().optional(),
+  usePathStyle: z.boolean().default(true),
+  lastShippedAt: z.string().optional(),
+  lastShippedKey: z.string().optional(),
+  lastError: z.string().optional(),
+});
+export type ThreatFleetShipperConfig = z.infer<typeof ThreatFleetShipperConfigSchema>;
+
+export const ThreatHarvesterConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  captureMode: z.enum(['adaptive', 'firehose', 'honeypot_only']).default('adaptive'),
+  watchedInterfaces: z.array(z.string()).default([]),
+  firehoseInterfaces: z.array(z.string()).default([]),
+  firehoseNamespaces: z.array(z.string()).default([]),
+  canaryPorts: z
+    .array(z.number().int().min(1).max(65535))
+    .default([23, 2323, 3389, 4444, 5900, 6379, 9200, 27017]),
+  maxPayloadBytes: z.number().int().min(256).max(65536).default(4096),
+  correlationWindowSec: z.number().int().min(5).max(300).default(45),
+  benignSampleRate: z.number().min(0).max(1).default(0.005),
+  spoolDir: z.string().default('/var/lib/axonwall/threat-corpus'),
+  maxSpoolGb: z.number().int().min(1).max(10000).default(10),
+  pinGoldEpisodes: z.boolean().default(true),
+  enableTlsUprobes: z.boolean().default(false),
+  autoHoneypotTlsUprobes: z.boolean().default(true),
+  tlsUprobeAllowlist: z.array(z.string()).default([]),
+  anonymizeOnExport: z.boolean().default(true),
+  anonymizationSalt: z.string().optional(),
+  teacherLlm: ThreatTeacherLlmConfigSchema.prefault({}),
+  fleetShipper: ThreatFleetShipperConfigSchema.prefault({}),
+});
+export type ThreatHarvesterConfig = z.infer<typeof ThreatHarvesterConfigSchema>;
+
 export const VigilanteDeceptionConfigSchema = z.object({
   enabled: z.boolean().default(true),
   canaryServiceAccounts: z.array(z.string()).default(['cluster-admin-backup', 'vault-sync-sa']),
@@ -2516,6 +2569,7 @@ export const DesiredStateSchema = z.object({
   hostedEdge: HostedEdgeConfigSchema.optional(),
   vigilante: VigilanteConfigSchema.optional(),
   hostDefense: HostMalwareDefenseConfigSchema.optional(),
+  threatHarvester: ThreatHarvesterConfigSchema.optional(),
   eluvix: EluvixConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional(),
 });

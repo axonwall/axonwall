@@ -1,4 +1,4 @@
-import { PluginManifestSchema, VowConfigSchema, VigilanteConfigSchema, HostMalwareDefenseConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
+import { PluginManifestSchema, VowConfigSchema, VigilanteConfigSchema, HostMalwareDefenseConfigSchema, ThreatHarvesterConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
 export type { PluginManifest };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
@@ -615,6 +615,32 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       icon: 'Cpu',
     },
   },
+  {
+    id: 'ebpf-threat-harvester',
+    name: 'Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester',
+    version: '0.3.1',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Opt-in Ring-0 eBPF flight recorder & dataset harvester capturing correlated wire flows (TCX), execve/memfd_create process lineage, and guarded TLS uprobes into Causal Episode SFT/RLVR JSONL + Apache Parquet corpora for training threat-detection LLMs.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['firewall.rules', 'system.monitoring', 'reporting.flows'],
+    nftHooks: [
+      { table: 'inet axonwall', chain: 'forward', priority: 0 },
+    ],
+    menuEntry: {
+      title: 'Blackbox Harvester',
+      path: '/security/threat-harvester',
+      icon: 'Binary',
+    },
+    packages: {
+      debian: ['bpftool', 'zstd'],
+      alpine: ['bpftool', 'zstd'],
+      arch: ['bpf', 'zstd'],
+    },
+    cliBinaries: ['axonwallctl'],
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -777,6 +803,14 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
     return entry ? entry.enabled !== false : true;
   }
 
+  // Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester is strictly opt-in
+  if (pluginId === 'ebpf-threat-harvester') {
+    if (state.threatHarvester?.enabled !== undefined) {
+      return state.threatHarvester.enabled;
+    }
+    return Boolean(state.plugins?.some((p) => p.id === 'ebpf-threat-harvester' && p.enabled));
+  }
+
   // Check specific service/extension plugins
   if (pluginId === 'vigilant-octo-waffle') {
     if (state.vow?.enabled !== undefined) {
@@ -879,6 +913,10 @@ export function enablePluginWithDependencies(
       next.hostDefense = next.hostDefense
         ? { ...next.hostDefense, enabled: true }
         : HostMalwareDefenseConfigSchema.parse({ enabled: true });
+    } else if (id === 'ebpf-threat-harvester') {
+      next.threatHarvester = next.threatHarvester
+        ? { ...next.threatHarvester, enabled: true }
+        : ThreatHarvesterConfigSchema.parse({ enabled: true });
     } else if (id === 'eluvix') {
       next.eluvix = next.eluvix
         ? { ...next.eluvix, enabled: true }
@@ -946,6 +984,10 @@ export function disablePluginWithDependents(
     } else if (id === 'host-malware-rootkit') {
       if (next.hostDefense) {
         next.hostDefense.enabled = false;
+      }
+    } else if (id === 'ebpf-threat-harvester') {
+      if (next.threatHarvester) {
+        next.threatHarvester.enabled = false;
       }
     } else if (id === 'eluvix') {
       if (next.eluvix) {
