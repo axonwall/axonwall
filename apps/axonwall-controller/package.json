@@ -1,6 +1,6 @@
 {
   "name": "axonwall-controller",
-  "version": "0.11.77",
+  "version": "0.12.0",
   "private": true,
   "license": "GPL-2.0-or-later",
   "type": "module",
