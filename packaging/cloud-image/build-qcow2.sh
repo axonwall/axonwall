@@ -93,19 +93,17 @@ cleanup() {
   set +e
   echo "[*] Cleaning up mounts and loop devices..."
   if [[ -d "${WORK_DIR}/mnt" ]]; then
-    # Kill any runaway processes still accessing the chroot mount tree
-    fuser -km "${WORK_DIR}/mnt" 2>/dev/null || true
-    sleep 1
-
     # Unmount bind mounts specifically first if still mounted
     for submount in dev/pts dev sys proc boot/efi var/lib/axonwall; do
       if mountpoint -q "${WORK_DIR}/mnt/${submount}" 2>/dev/null; then
-        umount -l "${WORK_DIR}/mnt/${submount}" 2>/dev/null || true
+        umount "${WORK_DIR}/mnt/${submount}" 2>/dev/null || umount -l "${WORK_DIR}/mnt/${submount}" 2>/dev/null || true
       fi
     done
 
-    # Unmount target root recursively with lazy fallback
-    umount -R "${WORK_DIR}/mnt" 2>/dev/null || umount -l "${WORK_DIR}/mnt" 2>/dev/null || true
+    # Unmount target root if mounted
+    if mountpoint -q "${WORK_DIR}/mnt" 2>/dev/null; then
+      umount "${WORK_DIR}/mnt" 2>/dev/null || umount -l "${WORK_DIR}/mnt" 2>/dev/null || true
+    fi
   fi
 
   if [[ -n "${LOOP_DEV:-}" && -b "${LOOP_DEV}" ]]; then
@@ -250,9 +248,6 @@ rm -rf "${TARGET}/tmp/"* "${TARGET}/var/tmp/"*
 
 # Unmount target mounts in reverse hierarchical order
 sync
-# Ensure no background chroot daemon or process holds mounts open
-fuser -km "${TARGET}" 2>/dev/null || true
-sleep 1
 
 for sub in dev/pts dev sys proc boot/efi var/lib/axonwall; do
   if mountpoint -q "${TARGET}/${sub}" 2>/dev/null; then
@@ -260,7 +255,9 @@ for sub in dev/pts dev sys proc boot/efi var/lib/axonwall; do
   fi
 done
 
-umount "${TARGET}" 2>/dev/null || umount -l "${TARGET}" 2>/dev/null || true
+if mountpoint -q "${TARGET}" 2>/dev/null; then
+  umount "${TARGET}" 2>/dev/null || umount -l "${TARGET}" 2>/dev/null || true
+fi
 losetup -d "${LOOP_DEV}" 2>/dev/null || true
 LOOP_DEV=""
 
