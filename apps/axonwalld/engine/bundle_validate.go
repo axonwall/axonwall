@@ -326,11 +326,17 @@ func walkManifest(node any) error {
 				if kStr, ok := val.(string); ok {
 					kLower := strings.ToLower(strings.TrimSpace(kStr))
 					if kLower == "helmchart" {
-						// Permit ONLY the Axonwall-compiled Cilium eBPF CNI HelmChart from https://helm.cilium.io/
+						// Permit ONLY Axonwall-compiled HelmCharts:
+						// 1. Cilium eBPF CNI HelmChart from https://helm.cilium.io/
+						// 2. In-house Vigilante modular SOC HelmCharts from https://charts.vigilante.local
 						specMap, _ := v["spec"].(map[string]any)
-						repo, _ := specMap["repo"].(string)
-						chart, _ := specMap["chart"].(string)
-						if strings.TrimSpace(repo) != "https://helm.cilium.io/" || strings.TrimSpace(chart) != "cilium" {
+						repo := strings.TrimSpace(fmt.Sprintf("%v", specMap["repo"]))
+						chart := strings.TrimSpace(fmt.Sprintf("%v", specMap["chart"]))
+
+						isCilium := repo == "https://helm.cilium.io/" && chart == "cilium"
+						isVigilante := repo == "https://charts.vigilante.local" && chart != ""
+
+						if !isCilium && !isVigilante {
 							return fmt.Errorf("k3s manifest: untrusted HelmChart (%s / %s) is not permitted in a bundle", repo, chart)
 						}
 					} else if k3sDeniedManifestKinds[kLower] {

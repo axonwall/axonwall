@@ -305,6 +305,47 @@ export async function listSecurityModulesAction(): Promise<SecurityModuleStatus[
   });
 }
 
+export async function updateVigilanteDomainAction(
+  domain: string,
+  options?: { expectedFingerprint?: string }
+): Promise<{ success: boolean; message: string; domain?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const trimmed = (domain || '').trim().toLowerCase();
+  if (!trimmed || trimmed.length > 253 || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(trimmed)) {
+    return { success: false, message: 'Invalid domain name (e.g. vigilante.local or soc.example.com)' };
+  }
+
+  let state = await getCurrentDesiredState();
+  if (!state.vigilante) {
+    state.vigilante = VigilanteConfigSchema.parse({ enabled: true, domain: trimmed });
+  } else {
+    state.vigilante.domain = trimmed;
+  }
+
+  try {
+    const result = await applyDesiredState(
+      state,
+      120,
+      options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+    );
+    return {
+      success: result.success,
+      message: result.message,
+      domain: trimmed,
+    };
+  } catch (err: any) {
+    if (
+      err?.message?.includes('Configuration changed since it was loaded') ||
+      err?.message?.includes('axonwalld is unreachable')
+    ) {
+      return { success: false, message: err.message };
+    }
+    return { success: false, message: err?.message || 'Failed to update Vigilante domain' };
+  }
+}
+
 export async function toggleSecurityModuleAction(
   moduleId: string,
   enabled: boolean,
