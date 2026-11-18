@@ -1562,6 +1562,47 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} spare ${SPARE_VDEVS}"
   fi
 
+resolve_zfs_topology() {
+  _req="$1"
+  _cnt="$2"
+  case "${_cnt:-0}" in
+    ''|*[!0-9]*) _cnt=1 ;;
+  esac
+  if [ "$_cnt" -le 1 ]; then
+    echo "stripe"
+    return 0
+  fi
+  if [ "$_req" = "auto" ] || [ -z "$_req" ]; then
+    if [ "$_cnt" -eq 2 ]; then
+      echo "mirror"
+    elif [ "$_cnt" -le 4 ]; then
+      echo "raidz1"
+    else
+      echo "raidz2"
+    fi
+    return 0
+  fi
+  case "$_req" in
+    stripe) echo "stripe" ;;
+    mirror) echo "mirror" ;;
+    raidz1)
+      if [ "$_cnt" -ge 3 ]; then echo "raidz1"; else echo "mirror"; fi
+      ;;
+    raidz2)
+      if [ "$_cnt" -ge 4 ]; then echo "raidz2"
+      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
+      else echo "mirror"; fi
+      ;;
+    raidz3)
+      if [ "$_cnt" -ge 5 ]; then echo "raidz3"
+      elif [ "$_cnt" -eq 4 ]; then echo "raidz2"
+      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
+      else echo "mirror"; fi
+      ;;
+    *) echo "$_req" ;;
+  esac
+}
+
   ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
   ZROOT_TOPO=$(resolve_zfs_topology "${ZFS_RAID_TOPOLOGY:-auto}" "$ZROOT_CNT")
   ZROOT_ARGS=""
@@ -2895,47 +2936,6 @@ to_json_array() {
     fi
   done
   echo "$_out"
-}
-
-resolve_zfs_topology() {
-  _req="$1"
-  _cnt="$2"
-  case "${_cnt:-0}" in
-    ''|*[!0-9]*) _cnt=1 ;;
-  esac
-  if [ "$_cnt" -le 1 ]; then
-    echo "stripe"
-    return 0
-  fi
-  if [ "$_req" = "auto" ] || [ -z "$_req" ]; then
-    if [ "$_cnt" -eq 2 ]; then
-      echo "mirror"
-    elif [ "$_cnt" -le 4 ]; then
-      echo "raidz1"
-    else
-      echo "raidz2"
-    fi
-    return 0
-  fi
-  case "$_req" in
-    stripe) echo "stripe" ;;
-    mirror) echo "mirror" ;;
-    raidz1)
-      if [ "$_cnt" -ge 3 ]; then echo "raidz1"; else echo "mirror"; fi
-      ;;
-    raidz2)
-      if [ "$_cnt" -ge 4 ]; then echo "raidz2"
-      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
-      else echo "mirror"; fi
-      ;;
-    raidz3)
-      if [ "$_cnt" -ge 5 ]; then echo "raidz3"
-      elif [ "$_cnt" -eq 4 ]; then echo "raidz2"
-      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
-      else echo "mirror"; fi
-      ;;
-    *) echo "$_req" ;;
-  esac
 }
 
 if [ "$INSTALL_MODE" = "zbm" ]; then

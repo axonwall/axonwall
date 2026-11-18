@@ -507,7 +507,13 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 	for _, name := range groupInstances {
 		conf.WriteString(fmt.Sprintf("        %s\n", name))
 	}
-	conf.WriteString("    }\n}\n\n")
+	conf.WriteString(`    }
+    notify_master "/usr/local/bin/axonwall-ha-notify MASTER"
+    notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"
+    notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"
+}
+
+`)
 
 	for i, inst := range instances {
 		instName := groupInstances[i]
@@ -590,13 +596,7 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 			conf.WriteString("    }\n")
 		}
 
-		conf.WriteString(`
-    notify_master "/usr/local/bin/axonwall-ha-notify MASTER"
-    notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"
-    notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"
-}
-
-`)
+		conf.WriteString("}\n\n")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(keepalivedConfPath), 0755); err != nil {
