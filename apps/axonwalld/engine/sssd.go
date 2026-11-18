@@ -8,8 +8,22 @@ import (
 )
 
 // BuildSSSDConfig generates /etc/sssd/sssd.conf connecting to the local OpenLDAP
-// daemon (and optional HA peer failover URI) with RFC 2307 schema and SSH public key support.
+// daemon (and optional HA peer failover URI) with RFC 2307 schema, SSH public
+// key support, and authenticated SSSD bind credentials when LDAPReplPassFile exists.
 func BuildSSSDConfig(baseDN string, peerLDAPURI string) string {
+	bindDN := ""
+	bindPassword := ""
+	if data, err := os.ReadFile(LDAPReplPassFile); err == nil {
+		if replPass := strings.TrimSpace(string(data)); replPass != "" {
+			bindDN = fmt.Sprintf("cn=svc-sssd,ou=services,%s", baseDN)
+			bindPassword = DeriveSSSDBindPassword(replPass)
+		}
+	}
+	return BuildSSSDConfigWithBind(baseDN, peerLDAPURI, bindDN, bindPassword)
+}
+
+// BuildSSSDConfigWithBind generates /etc/sssd/sssd.conf with explicit optional bind credentials.
+func BuildSSSDConfigWithBind(baseDN, peerLDAPURI, bindDN, bindPassword string) string {
 	ldapURI := "ldap://127.0.0.1:389"
 	caCertPath := ""
 	if _, err := os.Stat("/etc/axonwall/pki/ca.crt"); err == nil {
@@ -43,6 +57,12 @@ ldap_tls_cacert = %s`, caCertPath)
 		tlsBlock = `ldap_id_use_start_tls = False
 ldap_tls_reqcert = never`
 	}
+
+	bindBlock := ""
+	if bindDN != "" && bindPassword != "" {
+		bindBlock = fmt.Sprintf("ldap_default_bind_dn = %s\nldap_default_authtok_type = password\nldap_default_authtok = %s\n", bindDN, bindPassword)
+	}
+
 	return fmt.Sprintf(`[sssd]
 services = nss, pam, ssh
 config_file_version = 2
@@ -69,11 +89,11 @@ ldap_schema = rfc2307
 ldap_user_search_base = ou=users,%s
 ldap_group_search_base = ou=groups,%s
 ldap_user_ssh_public_key = sshPublicKey
-%s
+%s%s
 cache_credentials = True
 enumerate = False
 entry_cache_timeout = 30
-`, ldapURI, baseDN, baseDN, baseDN, tlsBlock)
+`, ldapURI, baseDN, baseDN, baseDN, bindBlock, tlsBlock)
 }
 
 // hasSSSD returns true if the SSSD daemon binary is installed on the host OS (Debian/glibc).
@@ -211,10 +231,12 @@ Cmnd_Alias AXONWALL_OP_CMDS = /usr/local/bin/axonwall-tui --readonly, /usr/local
 		if err := restartSSSD(); err != nil {
 			return err
 		}
+		InvalidateSSSDCache("")
 	} else if !sssdRunning() {
 		if err := restartSSSD(); err != nil {
 			return err
 		}
+		InvalidateSSSDCache("")
 	}
 
 	return nil

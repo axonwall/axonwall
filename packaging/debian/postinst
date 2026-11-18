@@ -90,6 +90,21 @@ case "$1" in
             chmod 0750 /var/lib/axonwall/ldap /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
         fi
 
+        if getent group openldap >/dev/null 2>&1 && [ -d /var/lib/axonwall/secrets/ha-pki ]; then
+            chown root:openldap /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ha-pki
+            chmod 0750 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ha-pki
+            for pki_f in ca.crt node.crt; do
+                if [ -f "/var/lib/axonwall/secrets/ha-pki/$pki_f" ]; then
+                    chown root:openldap "/var/lib/axonwall/secrets/ha-pki/$pki_f"
+                    chmod 0644 "/var/lib/axonwall/secrets/ha-pki/$pki_f"
+                fi
+            done
+            if [ -f /var/lib/axonwall/secrets/ha-pki/node.key ]; then
+                chown root:openldap /var/lib/axonwall/secrets/ha-pki/node.key
+                chmod 0640 /var/lib/axonwall/secrets/ha-pki/node.key
+            fi
+        fi
+
         # Register /usr/local/bin/axonwall-opshell in /etc/shells
         if [ -f /etc/shells ] && ! grep -qxF '/usr/local/bin/axonwall-opshell' /etc/shells; then
             echo '/usr/local/bin/axonwall-opshell' >> /etc/shells

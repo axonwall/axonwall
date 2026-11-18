@@ -3905,6 +3905,41 @@ func main() {
 				"snapshots": k3sManager.ListEtcdSnapshots(),
 			})
 		})
+		mux.HandleFunc("/v1/k3s/nodes/scheduling", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   "Method not allowed: expected POST",
+				})
+				return
+			}
+			var req engine.K3sNodeUpdateRequest
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
+			if err := dec.Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   fmt.Sprintf("Invalid JSON request body: %v", err),
+				})
+				return
+			}
+			node, err := k3sManager.UpdateNodeScheduling(req)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   err.Error(),
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Updated scheduling roles and taints on node %s", req.NodeName),
+				"node":    node,
+			})
+		})
 		mux.HandleFunc("/v1/ha/sync-trust", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			if haEngine == nil {

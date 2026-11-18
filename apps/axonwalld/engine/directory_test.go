@@ -377,3 +377,61 @@ func TestCoreVigilantePluginLDAPIntegrationSpec(t *testing.T) {
 		}
 	}
 }
+
+func TestDeriveSSSDBindPassword(t *testing.T) {
+	repl := "deadbeef0123456789abcdef0123456789abcdef01234567"
+	p1 := DeriveSSSDBindPassword(repl)
+	p2 := DeriveSSSDBindPassword("  " + repl + "\n")
+	if p1 != p2 {
+		t.Fatalf("expected deterministic password across whitespace trim, got %q != %q", p1, p2)
+	}
+	if len(p1) != 64 {
+		t.Fatalf("expected 64-char hex password, got len=%d (%q)", len(p1), p1)
+	}
+	for i := 0; i < len(p1); i++ {
+		c := p1[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("expected lowercase hex character at index %d, got %q", i, c)
+		}
+	}
+	if p1 == repl {
+		t.Fatalf("derived SSSD bind password must differ from replication secret")
+	}
+}
+
+func TestBuildSSSDConfigWithBind(t *testing.T) {
+	withBind := BuildSSSDConfigWithBind("dc=axonwall,dc=local", "", "cn=svc-sssd,ou=services,dc=axonwall,dc=local", "secret123")
+	for _, want := range []string{
+		"ldap_default_bind_dn = cn=svc-sssd,ou=services,dc=axonwall,dc=local",
+		"ldap_default_authtok_type = password",
+		"ldap_default_authtok = secret123",
+	} {
+		if !strings.Contains(withBind, want) {
+			t.Fatalf("expected %q in SSSD config:\n%s", want, withBind)
+		}
+	}
+
+	withoutBind := BuildSSSDConfigWithBind("dc=axonwall,dc=local", "", "", "")
+	for _, unwanted := range []string{
+		"ldap_default_bind_dn",
+		"ldap_default_authtok_type",
+		"ldap_default_authtok",
+	} {
+		if strings.Contains(withoutBind, unwanted) {
+			t.Fatalf("unexpected %q in bindless SSSD config:\n%s", unwanted, withoutBind)
+		}
+	}
+}
+
+func TestBuildSlapdBootstrapConfigLDIF_ACLs(t *testing.T) {
+	ldif := BuildSlapdBootstrapConfigLDIF("dc=axonwall,dc=local", 1, "{SSHA}dummy")
+	for _, want := range []string{
+		`olcAccess: {0}to attrs=userPassword,shadowLastChange by self write by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,dc=axonwall,dc=local" read by anonymous auth by * none`,
+		`olcAccess: {1}to dn.subtree="ou=users,dc=axonwall,dc=local" attrs=entry,objectClass,ou,uid,sshPublicKey by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,dc=axonwall,dc=local" read by users read by peername.ip="127.0.0.1" read by sockurl.regex="^ldapi://" read by * none`,
+		`olcAccess: {2}to * by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,dc=axonwall,dc=local" read by users read by * none`,
+	} {
+		if !strings.Contains(ldif, want) {
+			t.Fatalf("missing expected ACL rule %q in LDIF:\n%s", want, ldif)
+		}
+	}
+}

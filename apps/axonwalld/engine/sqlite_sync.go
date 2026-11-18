@@ -1253,6 +1253,156 @@ func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Reques
 // preserved. A missing replica is not an error — it only means the
 // poller never fetched peer state — and the replica file itself is
 // kept as the backup copy.
+// mergePeerReplicaPreservingLocalIdentity overlays the verified peer state
+// replica onto the local node while preserving node-local identity fields
+// (system.hostname, interface device/IPs/gateway/MACs, and HA role/peer/VRRP
+// priorities) so promoting a peer replica on failover never overwrites the
+// node's own LAN/WAN/keepalivenet IPs or creates an IP/VRRP split-brain.
+func mergePeerReplicaPreservingLocalIdentity(localBytes, replicaBytes []byte) ([]byte, error) {
+	if len(replicaBytes) == 0 || !json.Valid(replicaBytes) {
+		return nil, fmt.Errorf("peer state replica is empty or not valid JSON")
+	}
+	var replicaMap map[string]any
+	if err := json.Unmarshal(replicaBytes, &replicaMap); err != nil {
+		return nil, fmt.Errorf("failed to parse peer state replica JSON: %w", err)
+	}
+
+	preserved := false
+	if len(localBytes) > 0 {
+		var localMap map[string]any
+		if err := json.Unmarshal(localBytes, &localMap); err == nil {
+			// 1. Preserve system.hostname
+			if localSys, ok := localMap["system"].(map[string]any); ok {
+				if localHost, ok := localSys["hostname"].(string); ok && strings.TrimSpace(localHost) != "" {
+					repSys, ok := replicaMap["system"].(map[string]any)
+					if !ok || repSys == nil {
+						repSys = make(map[string]any)
+						replicaMap["system"] = repSys
+					}
+					repSys["hostname"] = localHost
+					preserved = true
+				}
+			}
+
+			// 2. Preserve per-interface node-local fields (device, IPs, gateways, MAC)
+			if localIfaces, ok := localMap["interfaces"].([]any); ok {
+				localByName := make(map[string]map[string]any)
+				localByDev := make(map[string]map[string]any)
+				for _, item := range localIfaces {
+					m, ok := item.(map[string]any)
+					if !ok {
+						continue
+					}
+					if n, _ := m["name"].(string); n != "" {
+						localByName[n] = m
+					}
+					if d, _ := m["device"].(string); d != "" {
+						localByDev[d] = m
+					}
+				}
+				if repIfaces, ok := replicaMap["interfaces"].([]any); ok {
+					preservedKeys := []string{"device", "ipv4Address", "ipv6Address", "address", "gateway", "ipv6Gateway", "macAddress"}
+					for _, item := range repIfaces {
+						rm, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						var lm map[string]any
+						if n, _ := rm["name"].(string); n != "" {
+							lm = localByName[n]
+						}
+						if lm == nil {
+							if d, _ := rm["device"].(string); d != "" {
+								lm = localByDev[d]
+							}
+						}
+						if lm == nil {
+							continue
+						}
+						for _, k := range preservedKeys {
+							if v, exists := lm[k]; exists {
+								rm[k] = v
+							} else {
+								delete(rm, k)
+							}
+						}
+						preserved = true
+					}
+				}
+			}
+
+			// 3. Preserve local HA role, peer address, syncInterface, and VRRP instance priorities/interfaces
+			if localHA, ok := localMap["ha"].(map[string]any); ok {
+				repHA, ok := replicaMap["ha"].(map[string]any)
+				if !ok || repHA == nil {
+					repHA = make(map[string]any)
+					replicaMap["ha"] = repHA
+				}
+				for _, k := range []string{"role", "nodeRole", "peerIp", "peerAddress", "syncInterface"} {
+					if v, exists := localHA[k]; exists {
+						repHA[k] = v
+						preserved = true
+					}
+				}
+				if localVrrp, ok := localHA["vrrpInstances"].([]any); ok {
+					localVrrpByName := make(map[string]map[string]any)
+					localVrrpByVrid := make(map[string]map[string]any)
+					for _, item := range localVrrp {
+						vm, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						if n, _ := vm["name"].(string); n != "" {
+							localVrrpByName[n] = vm
+						}
+						if vrid, exists := vm["vrid"]; exists && vrid != nil {
+							localVrrpByVrid[fmt.Sprintf("%v", vrid)] = vm
+						}
+					}
+					if repVrrp, ok := repHA["vrrpInstances"].([]any); ok {
+						for _, item := range repVrrp {
+							rvm, ok := item.(map[string]any)
+							if !ok {
+								continue
+							}
+							var lvm map[string]any
+							if n, _ := rvm["name"].(string); n != "" {
+								lvm = localVrrpByName[n]
+							}
+							if lvm == nil {
+								if vrid, exists := rvm["vrid"]; exists && vrid != nil {
+									lvm = localVrrpByVrid[fmt.Sprintf("%v", vrid)]
+								}
+							}
+							if lvm == nil {
+								continue
+							}
+							if p, exists := lvm["priority"]; exists {
+								rvm["priority"] = p
+								preserved = true
+							}
+							if iface, exists := lvm["interface"]; exists {
+								rvm["interface"] = iface
+								preserved = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if !preserved {
+		return replicaBytes, nil
+	}
+
+	out, err := json.MarshalIndent(replicaMap, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
+}
+
 func promoteStateReplicaFile(livePath, replicaPath string) (bool, error) {
 	data, err := os.ReadFile(replicaPath)
 	if err != nil {
@@ -1260,6 +1410,11 @@ func promoteStateReplicaFile(livePath, replicaPath string) (bool, error) {
 	}
 	if len(data) == 0 || !json.Valid(data) {
 		return false, fmt.Errorf("peer state replica %s is empty or not valid JSON; refusing to promote", replicaPath)
+	}
+	localBytes, _ := os.ReadFile(livePath)
+	mergedData, err := mergePeerReplicaPreservingLocalIdentity(localBytes, data)
+	if err != nil {
+		return false, fmt.Errorf("failed to merge peer state replica %s safely: %w", replicaPath, err)
 	}
 	dir := filepath.Dir(livePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -1271,7 +1426,7 @@ func promoteStateReplicaFile(livePath, replicaPath string) (bool, error) {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := tmp.Write(mergedData); err != nil {
 		_ = tmp.Close()
 		return false, err
 	}

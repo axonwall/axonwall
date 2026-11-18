@@ -2,8 +2,10 @@ package engine
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -118,6 +120,78 @@ func ensureRandomSecretFile(path string) (string, error) {
 }
 
 // resolveSlapdUserGroup detects the OS service account for OpenLDAP ("openldap" on Debian, "ldap" on Alpine).
+// DeriveSSSDBindPassword deterministically derives the SSSD read-only bind
+// password from the shared HA LDAP replication secret so MASTER and BACKUP
+// agree without syncrepl password conflicts.
+func DeriveSSSDBindPassword(replPass string) string {
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(replPass)))
+	mac.Write([]byte("axonwall-sssd-readonly-bind-v1"))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// EnsureSSSDBindAccount idempotently ensures cn=svc-sssd,ou=services,<baseDN>
+// exists with the password derived from replPass.
+func EnsureSSSDBindAccount(baseDN, replPass string) error {
+	sssdPass := DeriveSSSDBindPassword(replPass)
+
+	ouLdif := fmt.Sprintf("dn: ou=services,%s\nobjectClass: top\nobjectClass: organizationalUnit\nou: services\n", baseDN)
+	ouCmd := exec.Command("ldapadd", "-c", "-Y", "EXTERNAL", "-H", "ldapi:///")
+	ouCmd.Stdin = strings.NewReader(ouLdif)
+	if out, err := ouCmd.CombinedOutput(); err != nil && !strings.Contains(string(out), "Already exists") {
+		return fmt.Errorf("failed to ensure ou=services: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+
+	svcDN := fmt.Sprintf("cn=svc-sssd,ou=services,%s", baseDN)
+	checkCmd := exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", svcDN, "-s", "base", "(objectClass=*)", "userPassword")
+	if out, err := checkCmd.CombinedOutput(); err == nil {
+		entries := ParseLDIFEntries(string(out))
+		if len(entries) > 0 && VerifySSHA(sssdPass, firstAttr(entries[0], "userPassword")) {
+			return nil
+		}
+	}
+
+	sshaHash, err := HashSSHA(sssdPass)
+	if err != nil {
+		return fmt.Errorf("failed to hash SSSD bind password: %w", err)
+	}
+
+	addLdif := fmt.Sprintf(`dn: %s
+objectClass: top
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: svc-sssd
+description: Axonwall SSSD Read-Only NSS/SSH Bind Account
+userPassword: %s
+`, svcDN, sshaHash)
+	addCmd := exec.Command("ldapadd", "-c", "-Y", "EXTERNAL", "-H", "ldapi:///")
+	addCmd.Stdin = strings.NewReader(addLdif)
+	out, addErr := addCmd.CombinedOutput()
+	if addErr == nil {
+		return nil
+	}
+	if !strings.Contains(string(out), "Already exists") {
+		return fmt.Errorf("failed to create %s: %s (%w)", svcDN, strings.TrimSpace(string(out)), addErr)
+	}
+
+	modifyPassword := func(action string) (string, error) {
+		modLdif := fmt.Sprintf("dn: %s\nchangetype: modify\n%s: userPassword\nuserPassword: %s\n", svcDN, action, sshaHash)
+		cmd := exec.Command("ldapmodify", "-Y", "EXTERNAL", "-H", "ldapi:///")
+		cmd.Stdin = strings.NewReader(modLdif)
+		modOut, modErr := cmd.CombinedOutput()
+		return string(modOut), modErr
+	}
+	if modOut, modErr := modifyPassword("replace"); modErr != nil {
+		if strings.Contains(modOut, "No such attribute") {
+			if modOut2, modErr2 := modifyPassword("add"); modErr2 != nil {
+				return fmt.Errorf("failed to set %s password (add fallback): %s (%w)", svcDN, strings.TrimSpace(modOut2), modErr2)
+			}
+		} else {
+			return fmt.Errorf("failed to set %s password: %s (%w)", svcDN, strings.TrimSpace(modOut), modErr)
+		}
+	}
+	return nil
+}
+
 func resolveSlapdUserGroup() (string, string) {
 	if _, err := user.Lookup("openldap"); err == nil {
 		return "openldap", "openldap"
@@ -307,7 +381,8 @@ olcDbIndex: uidNumber,gidNumber eq
 olcDbIndex: member,memberUid eq
 olcDbIndex: entryCSN,entryUUID eq
 olcAccess: {0}to attrs=userPassword,shadowLastChange by self write by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,%s" read by anonymous auth by * none
-olcAccess: {1}to * by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,%s" read by users read by * none
+olcAccess: {1}to dn.subtree="ou=users,%s" attrs=entry,objectClass,ou,uid,sshPublicKey by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,%s" read by users read by peername.ip="127.0.0.1" read by sockurl.regex="^ldapi://" read by * none
+olcAccess: {2}to * by dn.regex=".*uidNumber=0,cn=peercred,cn=external,cn=auth$" manage by dn.exact="cn=replicator,%s" read by users read by * none
 
 dn: olcOverlay={0}syncprov,olcDatabase={1}mdb,cn=config
 objectClass: olcOverlayConfig
@@ -330,7 +405,7 @@ olcOverlay: {2}ppolicy
 olcPPolicyDefault: cn=default,ou=policies,%s
 olcPPolicyHashCleartext: TRUE
 olcPPolicyUseLockout: TRUE
-`, serverID, modulePath, moduleLoads, LDAPDataDir, baseDN, baseDN, adminHash, baseDN, baseDN, baseDN)
+`, serverID, modulePath, moduleLoads, LDAPDataDir, baseDN, baseDN, adminHash, baseDN, baseDN, baseDN, baseDN, baseDN)
 }
 
 // BuildSlapdSeedDITLDIF generates the initial base tree LDIF (organizational units,
@@ -486,6 +561,16 @@ func waitForSlapdReady(timeout time.Duration) bool {
 	}
 }
 
+func hasRequiredDITOUs(baseDN string) bool {
+	for _, ou := range []string{"users", "groups", "services", "policies", "sudoers"} {
+		out, err := exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", "ou="+ou+","+baseDN, "-s", "base", "(objectClass=organizationalUnit)", "dn").CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "dn:") {
+			return false
+		}
+	}
+	return true
+}
+
 func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPolicyConfig) (string, error) {
 	if _, err := exec.LookPath("slapd"); err != nil {
 		return "", fmt.Errorf("slapd binary not installed: %w", err)
@@ -558,6 +643,11 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 		chownOpenLDAPRecursive(rdir)
 	}
 
+	// Ensure openldap can read HA-PKI TLS material before starting slapd
+	if _, err := os.Stat(HAPKIDir); err == nil {
+		fixHAPKIPermissions()
+	}
+
 	// Ensure slapd is enabled and running
 	_ = exec.Command("systemctl", "--no-ask-password", "enable", "slapd").Run()
 	if !waitForSlapdReady(2 * time.Second) {
@@ -592,9 +682,8 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 		}
 	}
 
-	// Check if base DIT entry exists; if not, seed the base DIT
-	checkCmd := exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", baseDN, "-s", "base", "dn")
-	if err := checkCmd.Run(); err != nil {
+	// Check if required DIT OUs exist; if not, seed the base DIT
+	if !hasRequiredDITOUs(baseDN) {
 		log.Printf("[Directory] Seeding base DIT for %s...", baseDN)
 		replHash, err := HashSSHA(replPass)
 		if err != nil {
@@ -607,6 +696,16 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 		if addErr != nil && !strings.Contains(string(out), "Already exists") {
 			return "", fmt.Errorf("failed to seed LDAP DIT: %s (%w)", string(out), addErr)
 		}
+		for _, reqOU := range []string{"users", "groups"} {
+			verifyOut, verifyErr := exec.Command("ldapsearch", "-LLL", "-Y", "EXTERNAL", "-H", "ldapi:///", "-b", "ou="+reqOU+","+baseDN, "-s", "base", "(objectClass=organizationalUnit)", "dn").CombinedOutput()
+			if verifyErr != nil || !strings.Contains(string(verifyOut), "dn:") {
+				return "", fmt.Errorf("failed to verify seeded OU ou=%s,%s: %s (%v)", reqOU, baseDN, strings.TrimSpace(string(verifyOut)), verifyErr)
+			}
+		}
+	}
+
+	if err := EnsureSSSDBindAccount(baseDN, replPass); err != nil {
+		return "", fmt.Errorf("failed to provision SSSD bind account: %w", err)
 	}
 
 	return baseDN, nil

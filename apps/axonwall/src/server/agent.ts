@@ -4358,6 +4358,21 @@ export interface NasSnapshotItem {
   createdAt: string;
 }
 
+export interface K3sNodeTaintItem {
+  key: string;
+  value?: string;
+  effect: 'NoSchedule' | 'PreferNoSchedule' | 'NoExecute';
+}
+
+export interface K3sNodeUpdatePayload {
+  nodeName: string;
+  roles: string[];
+  customLabels?: Record<string, string>;
+  removeLabels?: string[];
+  taints: K3sNodeTaintItem[];
+  unschedulable?: boolean;
+}
+
 export interface K3sRuntimeStatus {
   enabled: boolean;
   installed: boolean;
@@ -4370,6 +4385,9 @@ export interface K3sRuntimeStatus {
     roles: string;
     version: string;
     internalIp: string;
+    unschedulable?: boolean;
+    labels?: Record<string, string>;
+    taints?: K3sNodeTaintItem[];
   }>;
   storageClasses: string[];
   podsRunning: number;
@@ -4869,6 +4887,9 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
         roles: n.roles || n.role || '',
         version: n.version || '',
         internalIp: n.internal_ip || n.internalIp || '',
+        unschedulable: Boolean(n.unschedulable),
+        labels: n.labels && typeof n.labels === 'object' ? n.labels : {},
+        taints: Array.isArray(n.taints) ? n.taints : [],
       })),
       storageClasses: daemonResp.storage_classes || daemonResp.storageClasses || [],
       podsRunning: Number(daemonResp.pods_running ?? daemonResp.podsRunning ?? 0),
@@ -4908,6 +4929,41 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
     podsRunning: k3sEnabled ? 8 + (state.k3s?.workloads?.filter((w) => w.enabled).length ?? 0) : 0,
     podsTotal: k3sEnabled ? 8 + (state.k3s?.workloads?.filter((w) => w.enabled).length ?? 0) : 0,
     openEbsHealthy: k3sEnabled,
+  };
+}
+
+export async function updateK3sNodeSchedulingAction(
+  payload: K3sNodeUpdatePayload
+): Promise<{ success: boolean; message: string }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    throw new Error('Unauthorized: Admin privileges required');
+  }
+  const nodeName = (payload.nodeName || '').trim();
+  if (!/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(nodeName)) {
+    throw new Error(`Invalid Kubernetes node name: ${payload.nodeName}`);
+  }
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/k3s/nodes/scheduling',
+    'POST',
+    {
+      ...payload,
+      nodeName,
+    },
+    30_000
+  );
+  if (!daemonResp) {
+    return {
+      success: false,
+      message: `Daemon unavailable: could not update scheduling on node '${nodeName}'.`,
+    };
+  }
+  return {
+    success: Boolean(daemonResp.success),
+    message:
+      daemonResp.message ||
+      daemonResp.error ||
+      `Updated roles and taints on node ${nodeName}.`,
   };
 }
 
